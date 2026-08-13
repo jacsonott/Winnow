@@ -114,6 +114,40 @@ JOIN src_1 s ON s.rid = rt.rid
 GROUP BY 1, 2 ORDER BY n DESC;
 ```
 
+## Plugins
+
+Winnow can be extended without touching its source, Notepad++-style: drop
+a plugin (a `.py` file, or a folder with an `__init__.py`) into `plugins/`
+and restart the server. Plugins register **ingest formats** — parsers for
+file formats the app doesn't natively read — which then behave like
+built-ins everywhere: drag-and-drop, Import files…, folder import, and a
+per-format picker under ≡ → Plugins…, with rows flowing into the same
+read-only `src_` tables as any CSV (so tagging, views, FTS, sessions and
+the SQL pane all just work).
+
+A worked example ships in `examples/plugins/mft_usn/`: raw NTFS `$MFT`
+and USN-journal (`$J`) parsing in pure stdlib Python — no MFTECmd/EZTools
+and no .NET runtime, so it runs on the same airgapped box Winnow does.
+Full paths reconstructed from parent references, `$SI`/`$FN` timestamps
+side by side with an `SI<FN Created` timestomp flag, USN reason flags
+decoded, and MFT entry/sequence numbers that let the two tables join in
+the SQL pane:
+
+```bash
+cp -r examples/plugins/mft_usn plugins/
+```
+
+The authoring contract — `register(api)`, `register_ingest_format`, the
+streaming `parse` shape, per-format options — is documented at the top of
+[`plugin_api.py`](plugin_api.py); a minimal format is ~30 lines. Extra
+plugin directories: `--plugins-dir DIR` or `$WINNOW_PLUGINS_DIR`. A
+plugin that fails to load is listed with its error (≡ → Plugins… and the
+startup output) and skipped, never fatal.
+
+A plugin is arbitrary local Python running with Winnow's own privileges —
+the analyst placing it in `plugins/` is the consent step, and nothing is
+ever fetched from a network. Only install plugins you have read or trust.
+
 ## Known limits
 
 - Import is single-threaded Python `csv`. Fine to ~200k rows/s; if you routinely

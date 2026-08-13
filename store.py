@@ -1373,6 +1373,108 @@ class Store:
         rec["rows_per_sec"] = int(total / elapsed) if elapsed > 0 else 0
         return rec
 
+    def ingest_rows(
+        self,
+        columns: list[str],
+        rows: Iterable,
+        *,
+        name: str,
+        path: str | None = None,
+        build_fts: bool = True,
+        column_types: list[str] | None = None,
+        progress=None,
+    ) -> dict:
+        """Generic ingest for rows produced in-process — the path plugin
+        ingest formats feed (see plugin_api.py), and the natural seam for
+        any future non-file producer. Same conventions as ingest_csv, on
+        purpose: all-TEXT columns through sanitize_columns, contiguous rid
+        from 1 (invariant #2's root_virtual carve-out depends on it),
+        self.lock held per BATCH-sized chunk rather than for the whole
+        iterable, ragged rows padded/trimmed and counted rather than
+        dropped, types inferred from a SAMPLE_ROWS sample (overridable via
+        column_types — a parser that *knows* a column is a datetime
+        shouldn't be at the mercy of a 500-row sample), and the FTS build
+        kicked off in the background.
+
+        `rows` is any iterable of sequences aligned to `columns` — a
+        generator keeps memory flat on multi-GB inputs. Cells may be
+        str/int/None; everything is stringified (None -> "") because source
+        tables are TEXT and evidence fidelity beats type elegance
+        (CLAUDE.md). A mid-iteration parser exception is re-raised after
+        the column metadata is written, same partial-import behavior as a
+        malformed line late in a CSV: whatever committed stays, with an
+        accurate row_count, and the caller sees the error."""
+        if not columns:
+            raise ValueError("No columns")
+        cols = sanitize_columns(list(columns))
+        ncols = len(cols)
+        file_hash = self._quick_hash(path) if path and os.path.isfile(path) else None
+
+        with self.lock, self.db:
+            cur = self.db.execute(
+                "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at)"
+                " VALUES (?,?,?,?,?,?)",
+                (name, os.path.abspath(path) if path else None, "", "[]", file_hash,
+                 time.strftime("%Y-%m-%dT%H:%M:%S")),
+            )
+            source_id = cur.lastrowid
+            self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
+            table = f"src_{source_id}"
+            coldefs = ", ".join(f"{q(c)} TEXT" for c in cols)
+            self.db.execute(f"CREATE TABLE {q(table)} (rid INTEGER PRIMARY KEY, {coldefs})")
+            self.db.execute("UPDATE sources SET table_name=? WHERE id=?", (table, source_id))
+
+        placeholders = ",".join("?" * ncols)
+        insert = f"INSERT INTO {q(table)} ({','.join(q(c) for c in cols)}) VALUES ({placeholders})"
+
+        sample: list[list[str]] = []
+        batch: list[tuple] = []
+        total = 0
+        ragged = 0
+        t0 = time.time()
+        error: Exception | None = None
+        with self._ingest_synchronous_off():
+            try:
+                for raw in rows:
+                    row = ["" if v is None else v if isinstance(v, str) else str(v) for v in raw]
+                    if len(row) != ncols:
+                        ragged += 1
+                        row = (row + [""] * ncols)[:ncols]
+                    batch.append(tuple(row))
+                    if len(sample) < SAMPLE_ROWS:
+                        sample.append(row)
+                    if len(batch) >= BATCH:
+                        total = self._commit_ingest_batch(insert, batch, source_id, total)
+                        batch.clear()
+                        if progress:
+                            progress(total, 0, 0)
+                if batch:
+                    total = self._commit_ingest_batch(insert, batch, source_id, total)
+                    batch.clear()
+            except Exception as e:
+                error = e
+
+        types = [infer_type([r[i] for r in sample]) for i in range(ncols)] if sample else ["text"] * ncols
+        if column_types:
+            types = [(column_types[i] if i < len(column_types) and column_types[i] in ("text", "number", "datetime") else t)
+                     for i, t in enumerate(types)]
+        colmeta = [{"name": c, "type": t} for c, t in zip(cols, types)]
+        with self.lock, self.db:
+            self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
+
+        if error is not None:
+            raise error
+
+        if build_fts and total:
+            self._ensure_fts_building(source_id)
+
+        elapsed = time.time() - t0
+        rec = self.get_source(source_id)
+        rec["elapsed_sec"] = round(elapsed, 2)
+        rec["rows_per_sec"] = int(total / elapsed) if elapsed > 0 else 0
+        rec["ragged_rows"] = ragged
+        return rec
+
     @staticmethod
     def _import_pattern_matches(pattern: str, filename: str, rel_path: str) -> bool:
         """A pattern containing '/' matches against the file's path relative
@@ -1393,6 +1495,7 @@ class Store:
         extensions: list[str] | None = None,
         include_patterns: list[str] | None = None,
         exclude_patterns: list[str] | None = None,
+        filename_patterns: list[str] | None = None,
     ) -> dict:
         """Preview for directory import (server.py's /api/ingest/dir/scan):
         walks `root`, buckets every file it finds into "would import" or
@@ -1414,7 +1517,17 @@ class Store:
         workspace.CaseRegistry.find_by_path already uses, no extra
         normalization added. This never blocks re-import (no hard skip
         here); it's the frontend's default-uncheck signal so re-running the
-        same import doesn't silently duplicate every table."""
+        same import doesn't silently duplicate every table.
+
+        `filename_patterns` (from plugin-registered ingest formats — see
+        plugin_api.py) is a second way past the extension gate, not a
+        second include filter: a file whose extension isn't recognized
+        still matches when its bare name fnmatches one of these. It exists
+        because the files plugins are built for are exactly the ones an
+        extension list can never name — "$MFT", "$J" — and it deliberately
+        reuses the bare-filename half of _import_pattern_matches' rules so
+        "matches" means one thing in this scan. include/exclude patterns
+        still apply to these files afterward, unchanged."""
         root_abs = os.path.abspath(root)
         exts = {
             (e if e.startswith(".") else "." + e).lower()
@@ -1422,6 +1535,7 @@ class Store:
         }
         includes = [p for p in (include_patterns or []) if p.strip()]
         excludes = [p for p in (exclude_patterns or []) if p.strip()]
+        fname_pats = [p for p in (filename_patterns or []) if p.strip()]
 
         with self.lock:
             existing_paths = {
@@ -1446,7 +1560,8 @@ class Store:
                     continue
                 entry = {"path": fpath, "rel_path": rel, "size_bytes": size}
                 ext = os.path.splitext(fname)[1].lower()
-                if ext not in exts:
+                by_filename_pattern = any(fnmatch.fnmatch(fname.lower(), p.lower()) for p in fname_pats)
+                if ext not in exts and not by_filename_pattern:
                     excluded.append({**entry, "reason": "extension"})
                     continue
                 if includes and not any(self._import_pattern_matches(p, fname, rel) for p in includes):
@@ -1456,9 +1571,20 @@ class Store:
                 if hit:
                     excluded.append({**entry, "reason": f"excluded by pattern: {hit}"})
                     continue
+                # kind routes the frontend's per-file import call: the two
+                # built-in parsers by their own extensions, everything else
+                # ("plugin") resolved client-side against the loaded plugin
+                # formats — the scan doesn't know which format claimed an
+                # extension/pattern, and doesn't need to.
+                if ext in (".json", ".jsonl", ".ndjson"):
+                    kind = "json"
+                elif ext in DEFAULT_IMPORT_EXTENSIONS:
+                    kind = "csv"
+                else:
+                    kind = "plugin"
                 matched.append({
                     **entry,
-                    "kind": "json" if ext in (".json", ".jsonl", ".ndjson") else "csv",
+                    "kind": kind,
                     "already_imported": fpath in existing_paths,
                 })
             if truncated:

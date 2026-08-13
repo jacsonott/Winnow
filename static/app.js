@@ -72,6 +72,9 @@ const S = {
   timeRange: { enabled: false, column: null, start: '', end: '' }, // survives filter/preset/tab changes on purpose — see toggleTimeRange
   timelineTemplates: [], // [{id, col_names, type_label, timestamp_column, body_columns}] — workspace/timeline_templates.json
   importProfiles: [],    // [{id, name, extensions, include_patterns, exclude_patterns, recursive}] — workspace/import_profiles.json
+  plugins: [],           // loaded plugin records from GET /api/plugins — name/version/error, for the Plugins modal
+  pluginFormats: [],     // plugin-registered ingest formats (extensions/patterns/options) — routes files to plugin parsers
+  pluginDirs: [],        // where the server loads plugins from — shown in the Plugins modal so "drop it where?" has an answer
   sidebarFilter: '',      // substring filter typed into the sidebar's own search box
   timeline: {
     view: null, pages: new Map(), pending: new Set(), reqId: 0,
@@ -3246,6 +3249,72 @@ function importKindFor(filename) {
   return ext === 'json' || ext === 'jsonl' || ext === 'ndjson' ? 'json' : 'csv';
 }
 
+/* ------------------------------------------------------------- plugins */
+
+/* Loaded once at boot — plugins are app-level (loaded by the server at its
+   own startup), not per-case. Failing the fetch just means no plugin
+   routing; every built-in import path works without it. */
+async function loadPlugins() {
+  try {
+    const r = await api('/api/plugins');
+    S.plugins = r.plugins || [];
+    S.pluginFormats = r.formats || [];
+    S.pluginDirs = r.dirs || [];
+  } catch { S.plugins = []; S.pluginFormats = []; S.pluginDirs = []; }
+}
+
+/* fnmatch-lite for plugin filename_patterns ($MFT, *$UsnJrnl*) — the same
+   case-insensitive bare-filename semantics plugin_api.IngestFormat.matches
+   applies server-side, so a file routes the same way whichever side asks. */
+function globMatches(pattern, name) {
+  const rx = pattern.toLowerCase().replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*/g, '.*').replace(/\?/g, '.');
+  return new RegExp(`^${rx}$`).test(name.toLowerCase());
+}
+
+/* The plugin format claiming this filename, or null. Built-in extensions
+   win outright — a plugin claiming .csv doesn't hijack default routing; it
+   stays reachable through the Plugins modal's explicit per-format picker. */
+function pluginFormatFor(filename) {
+  const base = filename.split(/[\\/]/).pop();
+  const ext = extOf(base);
+  if (RECOGNIZED_IMPORT_EXTENSIONS.includes(ext) || SQLITE_IMPORT_EXTENSIONS.includes(ext)) return null;
+  return S.pluginFormats.find((f) =>
+    (ext && (f.extensions || []).includes(ext))
+    || (f.filename_patterns || []).some((p) => globMatches(p, base))) || null;
+}
+
+const pluginFormatById = (id) => S.pluginFormats.find((f) => f.id === id) || null;
+
+/* Extensions plugins add beyond the built-in list — merged into the import
+   pickers' accept attributes and the directory-import chips. Extension-less
+   plugin targets ($MFT, $J) can't ride an accept attribute at all; they
+   arrive by drag-drop, folder import (filename_patterns), or the Plugins
+   modal's own unrestricted picker. */
+function pluginExtensions() {
+  const out = [];
+  for (const f of S.pluginFormats) {
+    for (const e of f.extensions || []) {
+      if (!RECOGNIZED_IMPORT_EXTENSIONS.includes(e) && !out.includes(e)) out.push(e);
+    }
+  }
+  return out;
+}
+
+function pluginFilenamePatterns() {
+  const out = [];
+  for (const f of S.pluginFormats) {
+    for (const p of f.filename_patterns || []) if (!out.includes(p)) out.push(p);
+  }
+  return out;
+}
+
+function defaultPluginOptions(fmt) {
+  const out = {};
+  for (const o of fmt.options || []) out[o.name] = o.default ?? (o.type === 'bool' ? false : '');
+  return out;
+}
+
 /* Appends File objects to S.importQueue with each one's default settings —
    shared by openImportModal's own file-picker (addInput.onchange) and
    wireFileDrop, so a dropped file and a picked one queue identically. Not
@@ -3254,10 +3323,28 @@ function importKindFor(filename) {
    the modal even exists yet and it'll show up correctly whenever it opens. */
 function queueFiles(files) {
   for (const f of files) {
+    const fmt = pluginFormatFor(f.name);
+    if (fmt) {
+      queueFilesForFormat(fmt, [f]);
+      continue;
+    }
     const kind = importKindFor(f.name);
     S.importQueue.push(kind === 'json'
       ? { file: f, kind, flatten_mode: 'none', flatten_depth: 1, configured: false }
       : { file: f, kind, delimiter: null, has_header: true, column_types: null, configured: false });
+  }
+}
+
+/* Queue files against one plugin format explicitly — bypasses filename
+   routing entirely, for the Plugins modal's per-format picker (the only
+   picker that can reach a file the format matches by pattern rather than
+   extension, since accept attributes can't express "$MFT"). */
+function queueFilesForFormat(fmt, files) {
+  for (const f of files) {
+    S.importQueue.push({
+      file: f, kind: 'plugin', format_id: fmt.id,
+      options: defaultPluginOptions(fmt), configured: false,
+    });
   }
 }
 
@@ -3284,12 +3371,30 @@ function openImportModal() {
       if (!S.importQueue.length) { queueList.append(el('div', 'note-status', 'No files queued.')); return; }
       S.importQueue.forEach((item, i) => {
         const row = el('div', 'row-actions session-row');
+        const kindLabel = item.kind === 'plugin'
+          ? (pluginFormatById(item.format_id)?.label || item.format_id)
+          : item.kind;
         row.append(
           el('span', 'session-name', item.file.name),
-          el('span', 'count', (item.configured ? 'configured' : 'default settings') + ` · ${item.kind}`),
+          el('span', 'count', (item.configured ? 'configured' : 'default settings') + ` · ${kindLabel}`),
         );
-        const cfg = el('button', 'btn ghost', 'Preview & configure');
+        const cfg = el('button', 'btn ghost', item.kind === 'plugin' ? 'Options' : 'Preview & configure');
+        if (item.kind === 'plugin' && !(pluginFormatById(item.format_id)?.options || []).length) {
+          // Nothing to configure — the format declared no options.
+          cfg.disabled = true;
+          cfg.title = 'This plugin format has no options';
+        }
         cfg.onclick = () => {
+          if (item.kind === 'plugin') {
+            openPluginOptionsForm(item, {
+              onConfirm: (options) => {
+                Object.assign(item, { options, configured: true });
+                openImportModal();
+              },
+              onCancel: () => openImportModal(),
+            });
+            return;
+          }
           const openPreview = item.kind === 'json' ? openJsonImportPreview : openImportPreview;
           openPreview(item.file, {
             initial: item,
@@ -3313,7 +3418,7 @@ function openImportModal() {
     const addLabel = el('label', 'btn ghost', 'Choose files…');
     const addInput = el('input');
     addInput.type = 'file';
-    addInput.accept = RECOGNIZED_IMPORT_EXTENSIONS.join(',');
+    addInput.accept = RECOGNIZED_IMPORT_EXTENSIONS.concat(pluginExtensions()).join(',');
     addInput.multiple = true;
     addInput.hidden = true;
     addInput.onchange = () => {
@@ -3340,6 +3445,11 @@ function openImportModal() {
               fd.append('flatten_depth', String(item.flatten_depth || 1));
               const rec = await api('/api/ingest/json/upload', { method: 'POST', body: fd });
               toast(`${rec.name}: ${rec.row_count.toLocaleString()} rows in ${rec.elapsed_sec}s`, 2600);
+            } else if (item.kind === 'plugin') {
+              fd.append('format_id', item.format_id);
+              fd.append('options', JSON.stringify(item.options || {}));
+              const rec = await api('/api/ingest/plugin/upload', { method: 'POST', body: fd });
+              toast(`${rec.name}: ${rec.row_count.toLocaleString()} rows in ${rec.elapsed_sec}s${raggedNote(rec)}`, rec.ragged_rows ? 6000 : 2600);
             } else {
               if (item.delimiter) fd.append('delimiter', item.delimiter);
               fd.append('has_header', item.has_header ? 'true' : 'false');
@@ -3584,8 +3694,8 @@ function handleDroppedFiles(files) {
     openSqliteImportModal(files[0]);
     return;
   }
-  const recognized = files.filter((f) => RECOGNIZED_IMPORT_EXTENSIONS.includes(extOf(f.name)));
-  const skipped = files.filter((f) => !RECOGNIZED_IMPORT_EXTENSIONS.includes(extOf(f.name)));
+  const recognized = files.filter((f) => RECOGNIZED_IMPORT_EXTENSIONS.includes(extOf(f.name)) || pluginFormatFor(f.name));
+  const skipped = files.filter((f) => !recognized.includes(f));
   if (!recognized.length) {
     toast(`No recognized files in the drop (${skipped.map((f) => f.name).join(', ')})`, 5000);
     return;
@@ -3631,7 +3741,7 @@ async function openDirectoryImportModal(state = {}) {
     root: state.root || null,
     profileId: state.profileId || null,
     recursive: state.recursive ?? true,
-    extensions: state.extensions || RECOGNIZED_IMPORT_EXTENSIONS.slice(),
+    extensions: state.extensions || RECOGNIZED_IMPORT_EXTENSIONS.concat(pluginExtensions()),
     includeText: state.includeText || '',
     excludeText: state.excludeText || '',
   };
@@ -3660,6 +3770,9 @@ async function openDirectoryImportModal(state = {}) {
         r = await post('/api/ingest/dir/scan', {
           root: st.root, recursive: st.recursive, extensions: st.extensions,
           include_patterns: patternLines(st.includeText), exclude_patterns: patternLines(st.excludeText),
+          // Lets extension-less plugin targets ($MFT, $J) past the scan's
+          // extension gate — see scan_import_directory.
+          filename_patterns: pluginFilenamePatterns(),
         });
       } catch (e) {
         if (seq !== scanSeq) return; // a newer scan already started; don't clobber it with a stale error
@@ -3751,7 +3864,7 @@ async function openDirectoryImportModal(state = {}) {
         ...st,
         profileId: id,
         recursive: p ? p.recursive : true,
-        extensions: p ? (p.extensions || RECOGNIZED_IMPORT_EXTENSIONS.slice()) : RECOGNIZED_IMPORT_EXTENSIONS.slice(),
+        extensions: (p && p.extensions) || RECOGNIZED_IMPORT_EXTENSIONS.concat(pluginExtensions()),
         includeText: p ? (p.include_patterns || []).join('\n') : '',
         excludeText: p ? (p.exclude_patterns || []).join('\n') : '',
       });
@@ -3783,7 +3896,7 @@ async function openDirectoryImportModal(state = {}) {
     b.append(el('label', null, 'File types'));
     const extRow = el('div', 'row-actions');
     extRow.style.flexWrap = 'wrap';
-    for (const ext of RECOGNIZED_IMPORT_EXTENSIONS) {
+    for (const ext of RECOGNIZED_IMPORT_EXTENSIONS.concat(pluginExtensions())) {
       const chip = el('button', 'btn ghost', ext);
       chip.setAttribute('aria-pressed', String(st.extensions.includes(ext)));
       chip.onclick = () => {
@@ -3862,10 +3975,19 @@ async function openDirectoryImportModal(state = {}) {
         for (const m of toImport) {
           toast(`Importing ${m.rel_path}…`, 60000);
           try {
+            const fmt = m.kind === 'plugin' ? pluginFormatFor(m.path) : null;
             if (m.kind === 'json') {
               const rec = await post('/api/ingest/json/path', { path: m.path, name: m.rel_path });
               toast(`${rec.name}: ${rec.row_count.toLocaleString()} rows in ${rec.elapsed_sec}s`, 2600);
+            } else if (fmt) {
+              const rec = await post('/api/ingest/plugin/path', {
+                path: m.path, name: m.rel_path, format_id: fmt.id, options: defaultPluginOptions(fmt),
+              });
+              toast(`${rec.name}: ${rec.row_count.toLocaleString()} rows in ${rec.elapsed_sec}s${raggedNote(rec)}`, rec.ragged_rows ? 6000 : 2600);
             } else {
+              // kind "csv", or a scan-matched extension no loaded plugin
+              // actually claims — the delimited parser is the pre-plugin
+              // behavior for any analyst-added extension.
               const rec = await post('/api/ingest/path', { path: m.path, name: m.rel_path });
               toast(`${rec.name}: ${rec.row_count.toLocaleString()} rows in ${rec.elapsed_sec}s${raggedNote(rec)}`, rec.ragged_rows ? 6000 : 2600);
             }
@@ -3887,6 +4009,129 @@ async function openDirectoryImportModal(state = {}) {
 
     renderResults();
     if (st.root) runScan();
+  }, { wide: true });
+}
+
+/* Options form for one queued plugin-format file, rendered generically
+   from the format's declared option specs (bool/text/choice — see
+   plugin_api.PluginAPI.register_ingest_format). Same {onConfirm, onCancel}
+   shape as openImportPreview/openJsonImportPreview so openImportModal's
+   one "configure" button can sit in front of any of the three. */
+function openPluginOptionsForm(item, { onConfirm, onCancel }) {
+  const fmt = pluginFormatById(item.format_id);
+  const values = { ...defaultPluginOptions(fmt), ...(item.options || {}) };
+  modal(fmt.label, (b) => {
+    if (fmt.description) b.append(el('p', null, fmt.description));
+    for (const o of fmt.options || []) {
+      if (o.type === 'bool') {
+        const label = el('label');
+        label.style.cssText = 'display:block;margin-bottom:10px';
+        const cb = el('input');
+        cb.type = 'checkbox';
+        cb.checked = !!values[o.name];
+        cb.onchange = () => { values[o.name] = cb.checked; };
+        label.append(cb, document.createTextNode(' ' + (o.label || o.name)));
+        b.append(label);
+      } else if (o.type === 'choice') {
+        b.append(el('label', null, o.label || o.name));
+        const sel = el('select');
+        sel.style.cssText = 'display:block;margin-bottom:10px;background:var(--ink);color:var(--text);border:1px solid var(--line-2);padding:6px 8px;font:inherit';
+        for (const c of o.choices || []) {
+          const opt = document.createElement('option');
+          opt.value = c;
+          opt.textContent = c;
+          sel.append(opt);
+        }
+        sel.value = values[o.name] ?? o.default ?? '';
+        sel.onchange = () => { values[o.name] = sel.value; };
+        b.append(sel);
+      } else {
+        b.append(el('label', null, o.label || o.name));
+        const inp = el('input');
+        inp.type = 'text';
+        inp.value = values[o.name] ?? '';
+        inp.oninput = () => { values[o.name] = inp.value; };
+        b.append(inp);
+      }
+    }
+    const acts = el('div', 'row-actions');
+    const ok = el('button', 'btn', 'Use these options');
+    ok.onclick = () => onConfirm(values);
+    const cancel = el('button', 'btn ghost', 'Cancel');
+    cancel.onclick = onCancel;
+    acts.append(ok, cancel);
+    b.append(acts);
+  });
+}
+
+/* What's plugged in: every loaded plugin (or the error that kept it from
+   loading), each plugin's ingest formats, and a per-format picker with NO
+   accept restriction — the one file-picking path that can reach a target
+   the format matches by bare-name pattern ("$MFT" has no extension for an
+   accept attribute to allow). Plugins load at server startup, so the note
+   about restarting is doing real work here. */
+function openPluginsModal() {
+  modal('Plugins', (b) => {
+    b.append(el('p', null,
+      'Drop-in extensions, Notepad++-style: put a plugin in the folder below and restart the server. '
+      + 'A plugin runs with the same privileges as Winnow itself — only install plugins you trust.'));
+    for (const d of S.pluginDirs) {
+      const dir = el('div', 'note-status', d);
+      dir.style.cssText = 'font-family:var(--mono)';
+      b.append(dir);
+    }
+    if (!S.plugins.length) {
+      b.append(el('p', 'note-status', 'No plugins installed. A ready-made example (raw NTFS $MFT / USN journal parsing) ships in examples/plugins/ — see plugins/README.md.'));
+      return;
+    }
+    for (const p of S.plugins) {
+      const row = el('div', 'row-actions session-row');
+      row.append(
+        el('span', 'session-name', p.name + (p.version ? ` v${p.version}` : '')),
+        el('span', 'count', p.error ? 'failed to load' : `${(p.formats || []).length} format${(p.formats || []).length === 1 ? '' : 's'}`),
+      );
+      b.append(row);
+      if (p.error) {
+        const err = el('div', 'note-status', p.error);
+        err.style.cssText = 'color:var(--bad, #c0392b);margin:0 0 10px 12px';
+        b.append(err);
+        continue;
+      }
+      if (p.description) {
+        const desc = el('div', 'note-status', p.description);
+        desc.style.cssText = 'margin:0 0 6px 12px';
+        b.append(desc);
+      }
+      for (const fid of p.formats || []) {
+        const f = pluginFormatById(fid);
+        if (!f) continue;
+        const frow = el('div', 'row-actions session-row');
+        frow.style.marginLeft = '12px';
+        const matches = (f.extensions || []).concat(f.filename_patterns || []).join(', ');
+        frow.append(
+          el('span', 'session-name', f.label),
+          el('span', 'count', matches || 'no automatic matching'),
+        );
+        const pickLabel = el('label', 'btn ghost', 'Import files…');
+        const inp = el('input');
+        inp.type = 'file';
+        inp.multiple = true;
+        inp.hidden = true; // no accept attribute on purpose — see the function comment
+        inp.onchange = () => {
+          if (!inp.files.length) return;
+          queueFilesForFormat(f, [...inp.files]);
+          openImportModal();
+        };
+        pickLabel.append(inp);
+        frow.append(pickLabel);
+        b.append(frow);
+        if (f.description) {
+          const fdesc = el('div', 'note-status', f.description);
+          fdesc.style.cssText = 'margin:0 0 8px 24px';
+          b.append(fdesc);
+        }
+      }
+    }
   }, { wide: true });
 }
 
@@ -5606,6 +5851,7 @@ $('btnSession').onclick = () => dropdownMenu($('btnSession'), [
   { label: 'Import a folder…', onclick: openDirectoryImportModal },
   { label: 'Merge sources…', onclick: openMergeBuilder },
   { label: 'Tables…', onclick: openTablesManager },
+  { label: 'Plugins…', onclick: openPluginsModal },
   '-',
   { label: 'Export…', onclick: openExportModal },
   { label: 'Session (save/load)…', onclick: openSessionManager },
@@ -6710,7 +6956,7 @@ async function refreshCases() {
 $('btnHome').onclick = () => { showHome(); refreshCases(); };
 
 async function boot() {
-  await Promise.all([loadSavedFilters(), loadHeaderNicknames(), loadTimelineTemplates()]);
+  await Promise.all([loadSavedFilters(), loadHeaderNicknames(), loadTimelineTemplates(), loadPlugins()]);
   const cur = await api('/api/case/current').catch(() => ({ open: false }));
   if (cur.open) {
     setBrandLabel(cur.name);

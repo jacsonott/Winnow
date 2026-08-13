@@ -26,3 +26,9 @@ sessions/
 # machine's numbers tracked over time.
 bench/.cache/
 bench/baselines/
+
+# Installed plugins are per-machine, like workspace/ — the folder itself
+# (with its README) is source; what an analyst drops into it is not.
+# examples/plugins/ IS committed — copy one in here to enable it.
+plugins/*
+!plugins/README.md

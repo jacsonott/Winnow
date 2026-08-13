@@ -22,12 +22,37 @@ from fastapi.responses import StreamingResponse, FileResponse, JSONResponse, Pla
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import plugin_api
 import workspace as WS
 from store import Store
 
 HERE = Path(__file__).parent
 app = FastAPI(title="Winnow")
 STORE: Store | None = None
+
+# ---------------------------------------------------------------- plugins
+
+# Loaded once at import (so `uvicorn server:app` gets them too, not just
+# `python server.py`) from plugins/ next to server.py plus an optional
+# WINNOW_PLUGINS_DIR env var; main() adds any --plugins-dir flags on top.
+# A plugin that fails to load is recorded with its error and skipped — it
+# shows up in GET /api/plugins with the reason, and never takes the server
+# down. See plugin_api.py for the whole model (and its security note: a
+# plugin is arbitrary local Python, same trust model as a Notepad++
+# plugin — the analyst putting it in plugins/ is the consent step).
+PLUGINS = plugin_api.PluginRegistry()
+
+
+def _plugin_dirs(extra: list[str] | None = None) -> list[Path]:
+    dirs = [HERE / "plugins"]
+    env = os.environ.get("WINNOW_PLUGINS_DIR")
+    if env:
+        dirs.append(Path(env))
+    dirs.extend(Path(p) for p in (extra or []))
+    return dirs
+
+
+PLUGINS.load(_plugin_dirs())
 
 # ---------------------------------------------------------------------- csrf
 
@@ -185,12 +210,21 @@ class IngestJsonPath(BaseModel):
     build_fts: bool = True
 
 
+class IngestPluginPath(BaseModel):
+    path: str
+    format_id: str          # namespaced "<plugin>.<format>" — see GET /api/plugins
+    name: str | None = None
+    options: dict = {}      # values for the format's declared options
+    build_fts: bool = True
+
+
 class DirectoryScan(BaseModel):
     root: str
     recursive: bool = True
     extensions: list[str] | None = None
     include_patterns: list[str] = []
     exclude_patterns: list[str] = []
+    filename_patterns: list[str] = []  # plugin formats' bare-name patterns ($MFT, $J) — see scan_import_directory
 
 
 class ImportProfileWrite(BaseModel):
@@ -410,6 +444,7 @@ def api_ingest_dir_scan(body: DirectoryScan):
     return store().scan_import_directory(
         body.root, recursive=body.recursive, extensions=body.extensions,
         include_patterns=body.include_patterns, exclude_patterns=body.exclude_patterns,
+        filename_patterns=body.filename_patterns,
     )
 
 
@@ -553,6 +588,75 @@ async def api_ingest_json_upload(
             tmp, name=name or file.filename, flatten_mode=flatten_mode, flatten_depth=flatten_depth,
             build_fts=build_fts,
         )
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/plugins")
+def api_plugins():
+    """Everything the frontend needs to surface plugins: which loaded (and
+    why any didn't), every registered ingest format (extensions/patterns/
+    options — what routes a dropped or scanned file to a plugin parser),
+    and where plugins load from so the modal can tell the analyst which
+    folder to drop one into. Case-independent, loaded once at boot."""
+    return {
+        "api_version": plugin_api.PLUGIN_API_VERSION,
+        "dirs": [str(d) for d in _plugin_dirs()],
+        "plugins": PLUGINS.describe(),
+        "formats": PLUGINS.list_formats(),
+    }
+
+
+def _ingest_via_plugin(path: str, format_id: str, name: str | None,
+                       options: dict, build_fts: bool) -> dict:
+    """Shared by the path and upload plugin-ingest routes: resolve the
+    format, run its parse, feed the result through Store.ingest_rows. The
+    parse call itself runs outside Store.lock (it's pure file reading —
+    only the row batches inside ingest_rows ever hold the lock), so a slow
+    multi-GB parse doesn't freeze other requests any more than a big CSV
+    import does."""
+    fmt = PLUGINS.get_format(format_id)  # KeyError -> 400 at the route
+    opts = fmt.resolve_options(options)
+    result = fmt.parse(path, opts)
+    if not isinstance(result, dict) or "columns" not in result or "rows" not in result:
+        raise ValueError(f"Plugin format {format_id} returned no columns/rows")
+    return store().ingest_rows(
+        result["columns"], result["rows"],
+        name=name or result.get("name") or os.path.basename(path),
+        path=path, build_fts=build_fts,
+        column_types=result.get("column_types"),
+    )
+
+
+@app.post("/api/ingest/plugin/path")
+def api_ingest_plugin_path(body: IngestPluginPath):
+    """Plugin sibling of api_ingest_path / api_ingest_json_path — same
+    by-server-path ingest for directory import and scripted use, with the
+    parsing done by a plugin-registered format instead of a built-in."""
+    if not os.path.isfile(body.path):
+        raise HTTPException(400, f"No file at {body.path}")
+    try:
+        return _ingest_via_plugin(body.path, body.format_id, body.name, body.options, body.build_fts)
+    except Exception as e:  # surface the real parser error to the UI, same as the other ingest routes
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/ingest/plugin/upload")
+async def api_ingest_plugin_upload(
+    file: UploadFile = File(...),
+    format_id: str = Form(...),
+    name: str | None = Form(None),
+    options: str | None = Form(None),  # JSON-encoded dict, since multipart forms are flat
+    build_fts: bool = Form(True),
+):
+    suffix = Path(file.filename or "upload.bin").suffix or ".bin"
+    fd, tmp = tempfile.mkstemp(suffix=suffix)
+    try:
+        with os.fdopen(fd, "wb") as out:
+            while chunk := await file.read(4 << 20):
+                out.write(chunk)
+        opts = json.loads(options) if options else {}
+        return _ingest_via_plugin(tmp, format_id, name or file.filename, opts, build_fts)
     except Exception as e:
         raise HTTPException(400, str(e))
 
@@ -1186,7 +1290,18 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=8777)
     ap.add_argument("--no-fts", action="store_true", help="Skip full-text index (faster import)")
     ap.add_argument("--no-browser", action="store_true")
+    ap.add_argument("--plugins-dir", action="append", default=[], metavar="DIR",
+                    help="Extra plugin directory (plugins/ next to server.py and $WINNOW_PLUGINS_DIR are always scanned; repeatable)")
     args = ap.parse_args()
+
+    if args.plugins_dir:
+        PLUGINS.load(_plugin_dirs(args.plugins_dir))
+    for p in PLUGINS.describe():
+        if p["error"]:
+            print(f"Plugin FAILED: {p['name']} ({p['path']}): {p['error']}", file=sys.stderr)
+        else:
+            fmts = ", ".join(p["formats"]) or "no formats"
+            print(f"Plugin loaded: {p['name']}" + (f" v{p['version']}" if p["version"] else "") + f" ({fmts})")
 
     if args.host not in ("127.0.0.1", "localhost", "::1"):
         print(

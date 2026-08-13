@@ -16,6 +16,16 @@ store.py           All SQLite: ingest, view materialisation, tags, sessions, exp
 workspace.py       Cross-case JSON state (case registry, saved filters, default
                     tag template) — human-readable files in workspace/, outside
                     any single case.db so they survive switching cases.
+plugin_api.py      Plugin host: discovery/loading from plugins/, PluginAPI
+                    (register_ingest_format), the format registry server.py's
+                    /api/plugins and /api/ingest/plugin/* routes read. The
+                    authoring contract lives in its module docstring.
+plugins/           Analyst-installed plugins (gitignored except its README) —
+                    dropping a folder/.py here and restarting is the install.
+examples/plugins/  Committed example plugins. mft_usn parses raw NTFS $MFT and
+                    USN-journal ($J) files in pure stdlib Python; copy it into
+                    plugins/ to enable, and treat it as the reference for
+                    writing new ones.
 static/index.html  App shell. No framework. #home and #app are siblings; only
                     one is ever visible.
 static/app.js      Virtualized grid, filters, tagging, detail pane, SQL pane,
@@ -636,6 +646,39 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
     (file-backed, shared with the OS page cache; costs address space,
     not RAM; SQLite clamps it to its compile-time max on old builds).
 
+- **Plugins** (plugin_api.py, `plugins/`, ≡ → Plugins…) are Notepad++-style
+  drop-in extensions, loaded once at server *import* (so `uvicorn
+  server:app` gets them, not just `python server.py`; `--plugins-dir` /
+  `$WINNOW_PLUGINS_DIR` add directories). The one extension point is
+  `register_ingest_format`: parse a file into columns + a row iterable
+  that feeds `Store.ingest_rows` — the generic sibling of `ingest_csv`
+  with every one of its conventions (all-TEXT via `sanitize_columns`,
+  contiguous rid from 1, per-BATCH lock/commit, ragged pad-and-count,
+  sampled types with an explicit `column_types` override, background FTS)
+  — so invariants #1/#2 hold for plugin sources with no extra work, and a
+  plugin source is a completely normal source afterward. A plugin that
+  fails to import/register is recorded with its error and skipped, never
+  fatal; `GET /api/plugins` carries the reason to the Plugins modal.
+  Format matching is extension OR bare-filename fnmatch — the latter
+  because the files plugins exist for ("$MFT", "$J") *have* no extension;
+  that's also why `scan_import_directory` grew `filename_patterns` (a
+  second way past its extension gate, marked kind `"plugin"`; kinds the
+  frontend can't resolve to a loaded format fall back to the CSV path,
+  the pre-plugin behavior for analyst-added extensions) and why the
+  Plugins modal's per-format picker sets no `accept` attribute. Routing
+  precedence in app.js (`pluginFormatFor`): a built-in extension always
+  wins over a plugin claiming the same one. Parse errors are 400s like
+  every other ingest route. Security model is Notepad++'s: a plugin is
+  arbitrary local Python with the app's privileges, installed by the
+  analyst physically placing it — never fetched, so the airgap rule holds.
+- The example mft_usn plugin's fixup handling encodes a real-world trap:
+  extraction tools disagree about whether $MFT records arrive with NTFS's
+  multi-sector fixups still stamped (KAPE/icat/RawCopy: yes; ntfscat:
+  already un-applied — verified against a real mkntfs volume, where the
+  strict all-stamped check silently produced 0 rows). `_apply_fixups`
+  therefore distinguishes all-stamped (un-stamp), none-stamped (parse
+  as-is), and mixed (genuinely torn → skip the record).
+
 ## Backlog, roughly in order
 
 1. **DuckDB ingest path.** Current import is single-threaded Python `csv` at
@@ -688,7 +731,12 @@ layer itself (the CSRF header gate, request parsing, 400-vs-500) rather
 than re-testing logic the `Store`-level tests already cover directly.
 `test_maintenance.py` covers the things that only exist because the case
 file otherwise only ever grows: the auto-created column indexes
-(listing/dropping) and `compact()`. `test_sql_tabs.py` covers the SQL
+(listing/dropping) and `compact()`. `test_plugins.py` covers the plugin
+system end to end — loader isolation (a broken plugin never takes the
+rest down), `ingest_rows`' conventions, the HTTP routes, directory-scan
+routing, and the mft_usn example parsed against synthetic NTFS fixtures
+built byte-by-byte in the test file (both fixup states; no real evidence
+files in the repo). `test_sql_tabs.py` covers the SQL
 pane's sub-tabs, including that they actually survive closing and
 reopening the case file (the whole reason they live there rather than in
 `localStorage`) and that `reorder` keeps tabs it wasn't given.
