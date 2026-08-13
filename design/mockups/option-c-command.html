@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Option C — Command-First, Minimal Chrome · Winnow redesign</title>
+<style>
+:root {
+  --accent: #d2a04a;
+  --accent-fg: #14181d;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  --ui: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+html[data-theme="dark"] {
+  --bg: #13161a; --panel: #191d23; --panel-2: #20252c; --panel-3: #262b33;
+  --line: #2b323b; --line-2: #39424e; --text: #d6dbe2; --dim: #808b99;
+}
+html[data-theme="light"] {
+  --bg: #f3f4f6; --panel: #ffffff; --panel-2: #eef0f3; --panel-3: #e4e7ec;
+  --line: #dde1e6; --line-2: #c7cdd6; --text: #1b222b; --dim: #626c7a;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--text); font-family: var(--ui); font-size: 13px; }
+.intro { max-width: 900px; margin: 0 auto; padding: 22px 20px 8px; }
+.intro .back { color: var(--dim); text-decoration: none; font-size: 12px; }
+.intro .back:hover { color: var(--text); }
+.intro h1 { font-size: 18px; margin: 10px 0 4px; }
+.intro p { color: var(--dim); line-height: 1.5; margin: 0 0 16px; max-width: 720px; }
+
+.stage { max-width: 1240px; margin: 0 auto 40px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,.25); }
+.app { height: 640px; display: grid; grid-template-rows: auto 1fr auto; position: relative; background: var(--bg); }
+
+/* ---------------------------------------------------------------- chrome */
+.bar.slim { display: flex; align-items: center; gap: 12px; background: var(--panel); border-bottom: 1px solid var(--line); padding: 0 12px; height: 40px; }
+.brand { display: flex; align-items: center; gap: 6px; font-size: 11px; letter-spacing: .14em; color: var(--dim); white-space: nowrap; }
+.mark { width: 3px; height: 15px; background: var(--accent); }
+
+.tabs.compact { display: flex; align-items: center; gap: 2px; }
+.tab { border: 0; background: transparent; color: var(--dim); font: inherit; font-size: 11px; padding: 5px 10px; border-radius: 5px; cursor: pointer; white-space: nowrap; }
+.tab:hover { color: var(--text); background: var(--panel-2); }
+.tab[aria-selected="true"] { color: var(--accent-fg); background: var(--accent); }
+.tab-more { border: 0; background: transparent; color: var(--dim); font: inherit; font-size: 11px; padding: 5px 8px; cursor: pointer; }
+.tab-more:hover { color: var(--text); }
+
+.command-bar {
+  flex: 1; max-width: 560px; margin: 0 auto; display: flex; align-items: center; gap: 8px;
+  background: var(--panel-2); border: 1px solid var(--line-2); border-radius: 7px; padding: 6px 10px; cursor: text; color: var(--dim);
+}
+.command-bar:hover { border-color: var(--accent); }
+.cmd-icon { font-size: 12px; }
+.cmd-placeholder { flex: 1; font-size: 12px; text-align: left; }
+.command-bar kbd { font-family: var(--mono); background: var(--panel-3); border: 1px solid var(--line-2); border-radius: 3px; padding: 1px 5px; font-size: 10px; color: var(--dim); }
+
+.bar-actions { display: flex; align-items: center; gap: 8px; }
+.chip-btn { display: flex; align-items: center; gap: 6px; background: var(--panel-2); border: 1px solid var(--line-2); border-radius: 5px; color: var(--text); padding: 5px 10px; font: inherit; font-size: 12px; cursor: pointer; }
+.chip-btn:hover { border-color: var(--accent); }
+.chip-btn .chip { background: var(--accent); color: var(--accent-fg); border-radius: 999px; padding: 0 6px; font-size: 10px; }
+.icon-btn { width: 26px; height: 26px; display: grid; place-items: center; border-radius: 5px; background: var(--panel-2); border: 1px solid var(--line-2); color: var(--text); cursor: pointer; font-size: 13px; }
+.icon-btn:hover { border-color: var(--accent); }
+.accent-picker { display: flex; align-items: center; gap: 5px; }
+.accent-swatch { width: 15px; height: 15px; border-radius: 50%; border: 1px solid var(--line-2); background: var(--sw); cursor: pointer; padding: 0; }
+.accent-swatch[aria-pressed="true"] { box-shadow: 0 0 0 2px var(--panel), 0 0 0 3px var(--sw); }
+#accentCustom { width: 18px; height: 18px; border: 1px solid var(--line-2); border-radius: 4px; background: none; padding: 0; cursor: pointer; }
+
+/* ------------------------------------------------------------------ grid */
+.grid.full { overflow: auto; background: var(--bg); position: relative; }
+.grid-head { display: flex; position: sticky; top: 0; background: var(--panel); border-bottom: 1px solid var(--line-2); z-index: 2; }
+.hcell { padding: 6px 10px; font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .04em; border-right: 1px solid var(--line); white-space: nowrap; flex: 1 0 140px; }
+.hcell.gutter { flex: 0 0 56px; }
+.hcell.w-time { flex: 0 0 160px; }
+.hcell.w-proc { flex: 0 0 120px; }
+.hcell.w-user { flex: 0 0 140px; }
+.hcell.w-cmd { flex: 1 0 320px; }
+
+.row { display: flex; border-bottom: 1px solid var(--line); cursor: pointer; font-family: var(--mono); font-size: 12px; }
+.row:hover { background: var(--panel-2); }
+.row.selected { background: color-mix(in srgb, var(--accent) 14%, var(--bg)); border-left: 3px solid var(--accent); }
+.cell { padding: 5px 10px; border-right: 1px solid var(--line); flex: 1 0 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.cell.gutter { flex: 0 0 56px; display: flex; align-items: center; gap: 5px; color: var(--dim); justify-content: flex-end; }
+.cell.gutter .dot { width: 6px; height: 6px; border-radius: 50%; }
+.cell.gutter .note { color: var(--accent); }
+.cell.w-time { flex: 0 0 160px; color: var(--dim); }
+.cell.w-proc { flex: 0 0 120px; }
+.cell.w-user { flex: 0 0 140px; color: var(--dim); }
+.cell.w-cmd { flex: 1 0 320px; }
+
+/* ---------------------------------------------------------------- status */
+.status.slim { display: flex; align-items: center; gap: 10px; background: var(--panel); border-top: 1px solid var(--line); padding: 4px 12px; font-size: 11px; color: var(--dim); font-family: var(--mono); }
+.status kbd { font-family: var(--mono); background: var(--panel-2); border: 1px solid var(--line-2); border-radius: 3px; padding: 1px 5px; font-size: 10px; }
+
+/* --------------------------------------------------------- bottom drawer */
+.drawer {
+  position: absolute; left: 0; right: 0; bottom: 0; height: 220px; background: var(--panel);
+  border-top: 1px solid var(--line-2); box-shadow: 0 -12px 30px rgba(0,0,0,.25);
+  transform: translateY(100%); transition: transform .18s ease; display: flex; flex-direction: column; z-index: 15;
+}
+.drawer.open { transform: translateY(0); }
+.drawer-head { display: flex; align-items: center; justify-content: space-between; padding: 8px 14px; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--dim); }
+.drawer-head button { background: none; border: 0; color: var(--dim); cursor: pointer; font-size: 13px; }
+.drawer-head button:hover { color: var(--text); }
+.drawer-body { flex: 1; display: flex; overflow: auto; }
+.drawer-fields { flex: 1; display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px 20px; padding: 10px 14px; font-size: 12px; align-content: start; }
+.drawer-fields .f dt { color: var(--dim); font-size: 10px; text-transform: uppercase; letter-spacing: .05em; }
+.drawer-fields .f dd { margin: 1px 0 6px; color: var(--text); font-family: var(--mono); word-break: break-word; }
+.note-box { width: 260px; flex: 0 0 auto; border-left: 1px solid var(--line); padding: 10px 14px; }
+.note-box label { display: block; font-size: 10px; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 6px; }
+.note-box textarea { width: 100%; height: 130px; background: var(--bg); border: 1px solid var(--line-2); border-radius: 4px; color: var(--text); font: inherit; font-size: 12px; padding: 6px; resize: none; }
+
+/* ------------------------------------------------------------ command palette */
+.palette-scrim { position: absolute; inset: 0; background: rgba(0,0,0,.45); z-index: 30; display: flex; justify-content: center; padding-top: 90px; }
+.palette { width: 480px; max-height: 340px; background: var(--panel); border: 1px solid var(--line-2); border-radius: 8px; box-shadow: 0 20px 60px rgba(0,0,0,.4); overflow: hidden; display: flex; flex-direction: column; }
+.palette input { border: 0; border-bottom: 1px solid var(--line); background: var(--panel-2); color: var(--text); padding: 12px 14px; font: inherit; font-size: 13px; }
+.palette input:focus { outline: none; }
+.palette-list { overflow: auto; padding: 6px; }
+.palette-item { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 5px; cursor: pointer; font-size: 12px; }
+.palette-item:hover, .palette-item.hi { background: var(--panel-2); color: var(--accent); }
+.palette-item span:first-child { width: 18px; text-align: center; color: var(--dim); font-family: var(--mono); }
+
+/* ----------------------------------------------------------- filters popover */
+.filters-popover { position: absolute; top: 44px; right: 100px; width: 300px; background: var(--panel); border: 1px solid var(--line-2); border-radius: 7px; box-shadow: 0 12px 30px rgba(0,0,0,.3); padding: 12px; z-index: 25; }
+.fp-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.fp-row span { width: 90px; color: var(--dim); font-size: 11px; }
+.fp-row input { flex: 1; background: var(--bg); border: 1px solid var(--line-2); border-radius: 4px; color: var(--text); padding: 4px 7px; font: inherit; font-size: 11px; }
+</style>
+</head>
+<body>
+
+<div class="intro">
+  <a class="back" href="index.html">← All options</a>
+  <h1>Option C — Command-First, Minimal Chrome</h1>
+  <p>The most opinionated direction: almost no persistent chrome, maximum vertical space for data. Everything that isn't the grid itself — filters, columns, SQL, export, table switching — lives behind a single command bar (⌘K) or small collapsing popovers. Best for a power user living in this tool all day; costs some discoverability for a first-time user. Try the command bar and the "Filters" chip.</p>
+</div>
+
+<div class="stage">
+<div class="app" id="app">
+  <header class="bar slim">
+    <div class="brand"><span class="mark"></span>TL</div>
+    <nav class="tabs compact" id="tabs">
+      <button class="tab" aria-selected="true">auth_logs.csv</button>
+      <button class="tab" aria-selected="false">process_events.csv</button>
+      <button class="tab-more">+3</button>
+    </nav>
+    <button class="command-bar" id="openCommand">
+      <span class="cmd-icon">⌕</span>
+      <span class="cmd-placeholder">Search rows, tables, tags — or run a command…</span>
+      <kbd>⌘K</kbd>
+    </button>
+    <div class="bar-actions">
+      <button class="chip-btn" id="filtersChip">Filters <span class="chip">2</span></button>
+      <button class="icon-btn" id="themeToggle" aria-pressed="false" title="Switch to light mode">◐</button>
+      <div class="accent-picker">
+        <button class="accent-swatch" data-accent="#d2a04a" style="--sw:#d2a04a" title="Brass"></button>
+        <button class="accent-swatch" data-accent="#4a90d9" style="--sw:#4a90d9" title="Blue"></button>
+        <button class="accent-swatch" data-accent="#4caf7d" style="--sw:#4caf7d" title="Green"></button>
+        <button class="accent-swatch" data-accent="#b768d1" style="--sw:#b768d1" title="Violet"></button>
+        <button class="accent-swatch" data-accent="#d9534f" style="--sw:#d9534f" title="Red"></button>
+        <input type="color" id="accentCustom" title="Custom accent" value="#d2a04a">
+      </div>
+    </div>
+  </header>
+
+  <main class="grid full">
+    <div class="grid-head">
+      <div class="hcell gutter">●</div>
+      <div class="hcell w-time">Timestamp</div>
+      <div class="hcell w-proc">Process</div>
+      <div class="hcell w-user">User</div>
+      <div class="hcell w-user">Computer</div>
+      <div class="hcell w-cmd">CommandLine</div>
+      <div class="hcell">Details</div>
+    </div>
+    <div class="rows" id="rows"></div>
+  </main>
+
+  <footer class="status slim">
+    <span>2,000 rows · 4 ms</span>
+    <span id="statusSel" style="margin-left:auto;">Press <kbd>⌘K</kbd> for commands, <kbd>/</kbd> to search, click a row to inspect</span>
+  </footer>
+
+  <div class="drawer" id="detail">
+    <div class="drawer-head"><span id="detailTitle">Line —</span><button id="detailClose">✕</button></div>
+    <div class="drawer-body">
+      <div class="drawer-fields" id="detailFields"></div>
+      <div class="note-box"><label>Note</label><textarea placeholder="Why does this row matter?"></textarea></div>
+    </div>
+  </div>
+
+  <div class="filters-popover" id="filtersPopover" hidden>
+    <div class="fp-row"><span>Process</span><input value="powershell.exe"></div>
+    <div class="fp-row"><span>Channel</span><input value="Sysmon"></div>
+  </div>
+
+  <div class="palette-scrim" id="paletteScrim" hidden>
+    <div class="palette" role="dialog" aria-label="Command palette">
+      <input type="text" id="paletteInput" placeholder="Type a command or search…">
+      <div class="palette-list">
+        <div class="palette-item"><span>⌕</span> Search all tables for…</div>
+        <div class="palette-item"><span>▤</span> Open table: process_events.csv</div>
+        <div class="palette-item"><span>⌘⏎</span> Run SQL query…</div>
+        <div class="palette-item"><span>↓</span> Export tagged rows (.xlsx)</div>
+        <div class="palette-item"><span>⌗</span> Tag selection as…</div>
+        <div class="palette-item"><span>⚙</span> Manage tables…</div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<script src="theme.js"></script>
+<script>
+const ROWS = [
+  { rid:1, ts:'08:00:00', ev:'4688', ch:'Security', comp:'WKSTN-014', user:'ACME\\jsmith', proc:'svchost.exe', cmd:'C:\\Windows\\System32\\svchost.exe -k netsvcs', ip:'10.0.2.14', bytes:'8123', details:'Routine', tag:null, note:null },
+  { rid:2, ts:'08:00:04', ev:'4688', ch:'Sysmon',   comp:'WKSTN-014', user:'ACME\\jsmith', proc:'explorer.exe', cmd:'C:\\Windows\\explorer.exe', ip:'10.0.2.14', bytes:'2044', details:'Routine', tag:null, note:null },
+  { rid:3, ts:'08:00:07', ev:'4104', ch:'Sysmon',   comp:'WKSTN-014', user:'ACME\\jsmith', proc:'powershell.exe', cmd:'powershell -enc JABzAD0ATgBlAHcALQBP…', ip:'10.0.2.14', bytes:'512', details:'encoded command detected — base64 IEX', tag:{n:'Confirmed evil',c:'#c8384f'}, note:'Matches known dropper pattern from prior IR' },
+  { rid:4, ts:'08:00:11', ev:'4625', ch:'Security', comp:'SRV-DC01',  user:'ACME\\admin',  proc:'lsass.exe', cmd:'C:\\Windows\\System32\\lsass.exe',  ip:'10.0.0.4', bytes:'992',  details:'Failed logon', tag:{n:'Suspicious',c:'#e0603a'}, note:null },
+  { rid:5, ts:'08:00:15', ev:'1',    ch:'Sysmon',   comp:'SRV-DC01',  user:'NT AUTHORITY\\SYSTEM', proc:'rundll32.exe', cmd:'rundll32.exe C:\\Users\\Public\\a.dll,Entry', ip:'10.0.0.4', bytes:'12044', details:'Suspicious DLL path', tag:{n:'Suspicious',c:'#e0603a'}, note:null },
+  { rid:6, ts:'08:00:19', ev:'4688', ch:'Security', comp:'SRV-FS02',  user:'ACME\\bkupsvc', proc:'wmiprvse.exe', cmd:'C:\\Windows\\System32\\wbem\\wmiprvse.exe', ip:'10.0.1.9', bytes:'1023', details:'Routine', tag:null, note:null },
+  { rid:7, ts:'08:00:23', ev:'4688', ch:'Security', comp:'WKSTN-002', user:'ACME\\jdoe',   proc:'chrome.exe', cmd:'C:\\Program Files\\Google\\Chrome\\chrome.exe', ip:'10.0.2.31', bytes:'40213', details:'Routine', tag:null, note:null },
+  { rid:8, ts:'08:00:27', ev:'4104', ch:'Sysmon',   comp:'WKSTN-002', user:'ACME\\jdoe',   proc:'powershell.exe', cmd:'powershell -nop -w hidden -enc SQBFAFgA…', ip:'10.0.2.31', bytes:'488', details:'encoded command detected — base64 IEX', tag:{n:'Pivot point',c:'#4a7fa5'}, note:null },
+  { rid:9, ts:'08:00:31', ev:'4688', ch:'Security', comp:'WKSTN-002', user:'ACME\\jdoe',   proc:'cmd.exe', cmd:'C:\\Windows\\System32\\cmd.exe /c whoami', ip:'10.0.2.31', bytes:'201', details:'Routine', tag:null, note:null },
+  { rid:10, ts:'08:00:36', ev:'7045', ch:'System',  comp:'SRV-DC01',  user:'ACME\\admin',  proc:'svchost.exe', cmd:'C:\\Windows\\System32\\svchost.exe -k netsvcs', ip:'10.0.0.4', bytes:'1877', details:'New service installed', tag:null, note:null },
+  { rid:11, ts:'08:00:40', ev:'4688', ch:'Security', comp:'SRV-DC01', user:'ACME\\admin',  proc:'cmd.exe', cmd:'C:\\Windows\\System32\\cmd.exe /c net user', ip:'10.0.0.4', bytes:'322', details:'Routine', tag:null, note:null },
+  { rid:12, ts:'08:00:44', ev:'4625', ch:'Security', comp:'SRV-DC01', user:'ACME\\svc-sql', proc:'lsass.exe', cmd:'C:\\Windows\\System32\\lsass.exe', ip:'10.0.0.4', bytes:'992', details:'Failed logon x3', tag:null, note:null },
+];
+
+const rowsEl = document.getElementById('rows');
+ROWS.forEach((r) => {
+  const div = document.createElement('div');
+  div.className = 'row';
+  div.dataset.rid = r.rid;
+  div.innerHTML = `
+    <div class="cell gutter">${r.note ? '<span class="note">✎</span>' : ''}${r.tag ? `<span class="dot" style="background:${r.tag.c}"></span>` : ''}</div>
+    <div class="cell w-time">${r.ts}</div>
+    <div class="cell w-proc">${r.proc}</div>
+    <div class="cell w-user">${r.user}</div>
+    <div class="cell w-user">${r.comp}</div>
+    <div class="cell w-cmd">${r.cmd}</div>
+    <div class="cell">${r.details}</div>`;
+  rowsEl.appendChild(div);
+});
+
+const detail = document.getElementById('detail');
+function openDetail(r) {
+  document.querySelectorAll('.row').forEach((el) => el.classList.toggle('selected', Number(el.dataset.rid) === r.rid));
+  document.getElementById('detailTitle').textContent = 'Line ' + r.rid;
+  const fields = document.getElementById('detailFields');
+  const rows = [['Timestamp','2026-03-14 '+r.ts],['EventId',r.ev],['Channel',r.ch],['Computer',r.comp],['User',r.user],['Process',r.proc],['CommandLine',r.cmd],['SourceIp',r.ip],['Bytes',r.bytes],['Details',r.details]];
+  fields.innerHTML = rows.map(([k,v]) => `<div class="f"><dt>${k}</dt><dd>${v}</dd></div>`).join('');
+  detail.querySelector('textarea').value = r.note || '';
+  detail.classList.add('open');
+}
+document.querySelectorAll('.row').forEach((el) => el.addEventListener('click', () => openDetail(ROWS.find((r) => r.rid === Number(el.dataset.rid)))));
+document.getElementById('detailClose').addEventListener('click', () => detail.classList.remove('open'));
+
+document.querySelectorAll('#tabs .tab').forEach((t) => t.addEventListener('click', () => {
+  document.querySelectorAll('#tabs .tab').forEach((o) => o.setAttribute('aria-selected', 'false'));
+  t.setAttribute('aria-selected', 'true');
+}));
+
+const filtersChip = document.getElementById('filtersChip');
+const filtersPopover = document.getElementById('filtersPopover');
+filtersChip.addEventListener('click', (e) => { e.stopPropagation(); filtersPopover.hidden = !filtersPopover.hidden; });
+document.addEventListener('click', (e) => { if (!filtersPopover.contains(e.target)) filtersPopover.hidden = true; });
+
+const paletteScrim = document.getElementById('paletteScrim');
+const paletteInput = document.getElementById('paletteInput');
+function openPalette() { paletteScrim.hidden = false; paletteInput.value = ''; paletteInput.focus(); }
+function closePalette() { paletteScrim.hidden = true; }
+document.getElementById('openCommand').addEventListener('click', openPalette);
+paletteScrim.addEventListener('click', (e) => { if (e.target === paletteScrim) closePalette(); });
+document.addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openPalette(); }
+  if (e.key === 'Escape') closePalette();
+});
+document.querySelectorAll('.palette-item').forEach((el) => el.addEventListener('click', closePalette));
+</script>
+</body>
+</html>

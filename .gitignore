@@ -1,0 +1,28 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Case files and evidence — never commit these
+*.db
+*.db-wal
+*.db-shm
+*.csv
+*.tsv
+*.winnow_case.json
+
+# Machine-local workflow state (case registry, saved filters, tag template) —
+# see CLAUDE.md: human-readable, but not source and not portable across machines
+workspace/
+
+# Named session exports (Store.save_named_session) — a per-installation
+# artifact next to whatever case file made them, not source.
+sessions/
+
+# Benchmark fixture inputs (regenerated from a fixed seed on demand) and
+# recorded baselines (per machine — a baseline from another CPU is worse
+# than none). Commit a baselines/*.json deliberately if you want one
+# machine's numbers tracked over time.
+bench/.cache/
+bench/baselines/

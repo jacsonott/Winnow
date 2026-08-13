@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html data-theme="dark" data-density="comfortable">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Style 3 — Studio Soft · Winnow redesign</title>
+<script>window.TL_MOCK_ID = 'studio'; window.TL_DEFAULT_ACCENT = '#7c6cf6'; window.TL_DEFAULT_THEME = 'dark';</script>
+<style>
+:root {
+  --accent: #7c6cf6;
+  --accent-fg: #ffffff;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  --ui: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --ease: cubic-bezier(.2,.8,.2,1);
+}
+html[data-theme="dark"] {
+  --bg: #111219; --panel: #16171f; --panel-2: #1c1e28; --panel-3: #232532;
+  --line: #2a2c38; --line-2: #383a4a; --text: #e7e8ee; --dim: #8b8da0;
+  --shadow: 0 10px 30px rgba(0,0,0,.35);
+  --shadow-sm: 0 2px 8px rgba(0,0,0,.25);
+}
+html[data-theme="light"] {
+  --bg: #f6f6fb; --panel: #ffffff; --panel-2: #f0f0f7; --panel-3: #e9e9f3;
+  --line: #e2e2ee; --line-2: #d1d1e2; --text: #1d1e2a; --dim: #6f7288;
+  --shadow: 0 16px 40px rgba(40,40,80,.12);
+  --shadow-sm: 0 2px 10px rgba(40,40,80,.08);
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--text); font-family: var(--ui); font-size: 13px; -webkit-font-smoothing: antialiased; }
+
+.intro { max-width: 900px; margin: 0 auto; padding: 22px 20px 8px; }
+.intro .back { color: var(--dim); text-decoration: none; font-size: 12px; }
+.intro .back:hover { color: var(--accent); }
+.intro h1 { font-size: 19px; margin: 10px 0 4px; font-weight: 650; letter-spacing: -.01em; }
+.intro p { color: var(--dim); line-height: 1.6; margin: 0 0 16px; max-width: 720px; }
+
+.stage { max-width: 1240px; margin: 0 auto 40px; border: 1px solid var(--line); border-radius: 16px; overflow: hidden; box-shadow: var(--shadow); }
+.app { height: 640px; display: grid; grid-template-rows: auto auto 1fr auto; position: relative; background: var(--bg); }
+
+/* ---------------------------------------------------------------- chrome */
+.bar { display: flex; align-items: center; gap: 12px; background: var(--panel); border-bottom: 1px solid var(--line); padding: 0 16px; height: 46px; }
+.brand { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 650; color: var(--text); white-space: nowrap; }
+.mark { width: 16px; height: 16px; border-radius: 6px; background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 40%, #ff9de0)); }
+.case-name { display: flex; align-items: center; color: var(--dim); font-size: 12px; padding-right: 10px; margin-right: 2px; border-right: 1px solid var(--line); white-space: nowrap; }
+
+.tabs { display: flex; align-items: center; gap: 4px; overflow-x: auto; flex: 1; min-width: 0; padding: 7px 0; }
+.tab { display: flex; align-items: center; gap: 7px; padding: 6px 14px; border: 1px solid transparent; border-radius: 999px; background: transparent; color: var(--dim); font: inherit; font-size: 12.5px; cursor: pointer; white-space: nowrap; transition: all .15s var(--ease); }
+.tab:hover { color: var(--text); background: var(--panel-2); }
+.tab[aria-selected="true"] { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, var(--panel)); font-weight: 600; }
+.tab .count { color: var(--dim); font-size: 11px; }
+.tab.merge::before { content: "⛓ "; opacity: .7; }
+.tab-more { border: 0; background: transparent; color: var(--dim); font: inherit; font-size: 12px; padding: 6px 10px; cursor: pointer; border-radius: 999px; }
+.tab-more:hover { color: var(--text); background: var(--panel-2); }
+
+.bar-actions { display: flex; align-items: center; gap: 6px; position: relative; }
+.icon-btn { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 10px; background: transparent; border: 1px solid transparent; color: var(--dim); cursor: pointer; font-size: 14px; transition: all .15s var(--ease); }
+.icon-btn:hover { background: var(--panel-2); color: var(--text); transform: translateY(-1px); }
+.menu { position: absolute; top: 38px; right: 0; background: var(--panel-3); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); display: flex; flex-direction: column; min-width: 190px; z-index: 20; padding: 6px; }
+.menu button { text-align: left; background: none; border: 0; border-radius: 8px; color: var(--text); font: inherit; font-size: 12.5px; padding: 8px 10px; cursor: pointer; }
+.menu button:hover { background: var(--panel-2); color: var(--accent); }
+
+/* -------------------------------------------------------------- toolbar */
+.toolbar { display: flex; align-items: center; gap: 12px; background: var(--panel); border-bottom: 1px solid var(--line); padding: 10px 16px; flex-wrap: wrap; }
+.group { display: flex; align-items: center; gap: 8px; }
+.search-group { flex: 0 0 320px; position: relative; }
+.search-group input { width: 100%; background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; color: var(--text); padding: 7px 60px 7px 12px; font: inherit; font-size: 12.5px; transition: all .15s var(--ease); }
+.search-group input:focus { outline: none; border-color: var(--accent); background: var(--panel); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+.search-group .hint { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); color: var(--dim); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
+
+.tag-ribbon { display: flex; gap: 6px; flex-wrap: wrap; }
+.tag-chip { display: flex; align-items: center; gap: 6px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text); border-radius: 999px; padding: 5px 12px 5px 9px; font: inherit; font-size: 11.5px; cursor: pointer; transition: all .15s var(--ease); }
+.tag-chip::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--c); }
+.tag-chip span { color: var(--dim); }
+.tag-chip:hover { border-color: var(--c); transform: translateY(-1px); box-shadow: var(--shadow-sm); }
+
+.spacer { flex: 1; }
+.view-group { display: flex; align-items: center; gap: 4px; background: var(--panel-2); border-radius: 12px; padding: 4px; }
+.btn { background: transparent; color: var(--text); border: 0; border-radius: 8px; padding: 6px 12px; font: inherit; font-size: 12.5px; cursor: pointer; transition: all .15s var(--ease); }
+.btn.ghost:hover { background: var(--panel); box-shadow: var(--shadow-sm); }
+.sep { width: 1px; align-self: stretch; background: var(--line); margin: 3px 1px; }
+.group-by { background: transparent; color: var(--dim); border: 0; font: inherit; font-size: 12.5px; }
+
+/* ------------------------------------------------------------------ grid */
+.grid-wrap { position: relative; min-height: 0; overflow: hidden; }
+.grid { position: absolute; inset: 0; overflow: auto; background: var(--bg); }
+.grid-head { display: flex; position: sticky; top: 0; background: var(--panel); border-bottom: 1px solid var(--line); z-index: 2; }
+.hcell { padding: 9px 12px; font-size: 11px; color: var(--dim); font-weight: 600; text-transform: uppercase; letter-spacing: .03em; border-right: 1px solid transparent; white-space: nowrap; flex: 1 0 140px; }
+.hcell.gutter { flex: 0 0 84px; }
+.hcell.w-time { flex: 0 0 160px; }
+.hcell.w-proc { flex: 0 0 120px; }
+.hcell.w-user { flex: 0 0 140px; }
+.hcell.w-cmd { flex: 1 0 320px; }
+[data-density="compact"] .hcell { padding: 5px 10px; }
+
+.row { display: flex; border-bottom: 1px solid var(--line); cursor: pointer; font-family: var(--mono); font-size: 12px; border-radius: 8px; margin: 0 6px; width: calc(100% - 12px); transition: background .1s var(--ease); }
+[data-density="compact"] .cell { padding: 3px 12px; }
+.row:hover { background: var(--panel-2); }
+.row.selected { background: color-mix(in srgb, var(--accent) 12%, var(--panel)); box-shadow: inset 3px 0 0 0 var(--accent); border-radius: 8px; }
+.cell { padding: 7px 12px; border-right: 1px solid transparent; flex: 1 0 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.cell.gutter { flex: 0 0 84px; display: flex; align-items: center; gap: 6px; color: var(--dim); }
+.cell.gutter .stripe { width: 6px; height: 6px; border-radius: 50%; }
+.cell.gutter .note { color: var(--accent); }
+.cell.w-time { flex: 0 0 160px; color: var(--dim); }
+.cell.w-proc { flex: 0 0 120px; }
+.cell.w-user { flex: 0 0 140px; color: var(--dim); }
+.cell.w-cmd { flex: 1 0 320px; }
+
+/* ---------------------------------------------------------------- status */
+.status { display: flex; align-items: center; gap: 10px; background: var(--panel); border-top: 1px solid var(--line); padding: 6px 16px; font-size: 11.5px; color: var(--dim); }
+.status .sep { color: var(--line-2); }
+.status .accent-text { color: var(--accent); font-weight: 600; }
+
+/* ------------------------------------------------------------- detail */
+.detail { position: absolute; top: 10px; right: 10px; bottom: 10px; width: 320px; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); transform: translateX(calc(100% + 20px)); transition: transform .22s var(--ease); display: flex; flex-direction: column; z-index: 15; }
+.detail.open { transform: translateX(0); }
+.detail-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid var(--line); font-size: 12.5px; font-weight: 600; }
+.detail-head button { background: var(--panel-2); border: 0; border-radius: 8px; width: 26px; height: 26px; color: var(--dim); cursor: pointer; font-size: 12px; }
+.detail-head button:hover { color: var(--text); background: var(--panel-3); }
+.detail dl { padding: 12px 16px; margin: 0; overflow: auto; flex: 1; font-size: 12.5px; }
+.detail dt { color: var(--dim); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; margin-top: 12px; font-weight: 600; }
+.detail dd { margin: 3px 0 0; color: var(--text); font-family: var(--mono); word-break: break-word; }
+.note-box { padding: 12px 16px; border-top: 1px solid var(--line); }
+.note-box label { display: block; font-size: 10px; color: var(--dim); text-transform: uppercase; letter-spacing: .04em; font-weight: 600; margin-bottom: 8px; }
+.note-box textarea { width: 100%; background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; color: var(--text); font: inherit; font-size: 12.5px; padding: 8px; resize: vertical; transition: all .15s var(--ease); }
+.note-box textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+
+/* ------------------------------------------------------------- settings modal */
+.modal-scrim { position: absolute; inset: 0; background: rgba(20,20,30,.45); backdrop-filter: blur(3px); z-index: 50; display: flex; align-items: center; justify-content: center; }
+.modal { width: 360px; background: var(--panel); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); }
+.modal-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid var(--line); font-size: 13.5px; font-weight: 650; }
+.modal-head button { background: var(--panel-2); border: 0; border-radius: 8px; width: 26px; height: 26px; color: var(--dim); cursor: pointer; font-size: 12px; }
+.modal-head button:hover { color: var(--text); background: var(--panel-3); }
+.modal-body { padding: 18px; display: flex; flex-direction: column; gap: 18px; }
+.setting-row label { display: block; font-size: 11px; font-weight: 600; letter-spacing: .02em; color: var(--dim); margin-bottom: 9px; }
+.segmented { display: flex; background: var(--panel-2); border-radius: 10px; padding: 3px; gap: 2px; }
+.segmented button { flex: 1; background: transparent; border: 0; border-radius: 7px; color: var(--dim); padding: 7px; font: inherit; font-size: 12px; cursor: pointer; transition: all .15s var(--ease); }
+.segmented button[aria-pressed="true"] { background: var(--panel); color: var(--text); box-shadow: var(--shadow-sm); font-weight: 600; }
+.accent-picker { display: flex; align-items: center; gap: 9px; }
+.accent-swatch { width: 22px; height: 22px; border-radius: 50%; border: 1px solid var(--line); background: var(--sw); cursor: pointer; padding: 0; transition: transform .15s var(--ease); }
+.accent-swatch:hover { transform: scale(1.12); }
+.accent-swatch[aria-pressed="true"] { box-shadow: 0 0 0 2px var(--panel), 0 0 0 4px var(--sw); }
+#accentCustom { width: 26px; height: 26px; border-radius: 50%; border: 1px solid var(--line); background: none; padding: 0; cursor: pointer; overflow: hidden; }
+</style>
+</head>
+<body>
+
+<div class="intro">
+  <a class="back" href="index.html">&larr; All options</a>
+  <h1>Style 3 — Studio Soft</h1>
+  <p>Same skeleton, calm-and-premium personality: rounded corners throughout, soft ambient shadows, pill-shaped tabs and tags, gentle hover motion on nearly everything. Closer to Linear/Notion/Raycast than an instrument panel — the goal is a tool that feels good to sit in for eight hours, not just functional. Settings live behind the gear icon; try the segmented Theme control there.</p>
+</div>
+
+<div class="stage">
+<div class="app" id="app">
+  <header class="bar">
+    <div class="brand"><span class="mark"></span>Winnow</div>
+    <div class="case-name">acme_incident_0311.db</div>
+    <nav class="tabs" id="tabs">
+      <button class="tab" aria-selected="true">auth_logs.csv <span class="count">2,000</span></button>
+      <button class="tab" aria-selected="false">process_events.csv <span class="count">1,500</span></button>
+      <button class="tab merge" aria-selected="false">Combined timeline <span class="count">3,500</span></button>
+      <button class="tab-more">+2 more</button>
+    </nav>
+    <div class="bar-actions">
+      <button class="icon-btn" id="settingsBtn" title="Settings">⚙</button>
+      <button class="icon-btn" id="moreMenuBtn" title="Case actions">⋯</button>
+      <div class="menu" id="moreMenu" hidden>
+        <button>Merge sources…</button>
+        <button>SQL</button>
+        <button>Tables</button>
+        <button>Search all</button>
+        <button>Session</button>
+        <button>Export</button>
+        <button>Help</button>
+      </div>
+    </div>
+  </header>
+
+  <section class="toolbar">
+    <div class="group search-group">
+      <input type="search" placeholder="Search all columns — press /">
+      <span class="hint">full-text</span>
+    </div>
+    <div class="group tag-ribbon">
+      <button class="tag-chip" style="--c:#e0603a">Suspicious <span>3</span></button>
+      <button class="tag-chip" style="--c:#c8384f">Confirmed evil <span>1</span></button>
+      <button class="tag-chip" style="--c:#4a7fa5">Pivot point <span>2</span></button>
+    </div>
+    <div class="spacer"></div>
+    <div class="group view-group">
+      <button class="btn ghost">Columns</button>
+      <button class="btn ghost">Filter builder</button>
+      <button class="btn ghost">Saved filters</button>
+      <span class="sep"></span>
+      <select class="group-by"><option>Group by…</option></select>
+      <span class="sep"></span>
+      <button class="btn ghost">Clear filters</button>
+    </div>
+  </section>
+
+  <div class="grid-wrap">
+    <main class="grid">
+      <div class="grid-head">
+        <div class="hcell gutter">Line</div>
+        <div class="hcell w-time">Timestamp</div>
+        <div class="hcell w-proc">Process</div>
+        <div class="hcell w-user">User</div>
+        <div class="hcell w-user">Computer</div>
+        <div class="hcell w-cmd">CommandLine</div>
+        <div class="hcell">Details</div>
+      </div>
+      <div class="rows" id="rows"></div>
+    </main>
+
+    <aside class="detail" id="detail">
+      <div class="detail-head"><span id="detailTitle">Line —</span><button id="detailClose">✕</button></div>
+      <dl id="detailFields"></dl>
+      <div class="note-box"><label>Note</label><textarea placeholder="Why does this row matter?"></textarea></div>
+    </aside>
+  </div>
+
+  <footer class="status">
+    <span><span class="accent-text">2,000</span> of 2,000 rows · 4 ms</span>
+    <span class="sep">·</span>
+    <span>3 tagged</span>
+    <span class="spacer"></span>
+    <span id="statusSel">Click a row to inspect it</span>
+  </footer>
+
+  <div class="modal-scrim" id="settingsScrim" hidden>
+    <div class="modal" role="dialog" aria-label="Settings">
+      <div class="modal-head"><span>Settings</span><button id="settingsClose">✕</button></div>
+      <div class="modal-body">
+        <div class="setting-row">
+          <label>Theme</label>
+          <div class="segmented" id="themeSegmented">
+            <button data-theme="dark">Dark</button>
+            <button data-theme="light">Light</button>
+            <button data-theme="auto">Auto</button>
+          </div>
+        </div>
+        <div class="setting-row">
+          <label>Accent color</label>
+          <div class="accent-picker">
+            <button class="accent-swatch" data-accent="#7c6cf6" style="--sw:#7c6cf6" title="Indigo"></button>
+            <button class="accent-swatch" data-accent="#ff8fab" style="--sw:#ff8fab" title="Coral"></button>
+            <button class="accent-swatch" data-accent="#4dd4ac" style="--sw:#4dd4ac" title="Mint"></button>
+            <button class="accent-swatch" data-accent="#ffb84d" style="--sw:#ffb84d" title="Amber"></button>
+            <button class="accent-swatch" data-accent="#5aa9ff" style="--sw:#5aa9ff" title="Sky"></button>
+            <input type="color" id="accentCustom" title="Custom accent" value="#7c6cf6">
+          </div>
+        </div>
+        <div class="setting-row">
+          <label>Density</label>
+          <div class="segmented" id="densitySegmented">
+            <button data-density="comfortable">Comfortable</button>
+            <button data-density="compact">Compact</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<script src="theme2.js"></script>
+<script>
+const ROWS = [
+  { rid:1, ts:'08:00:00', ev:'4688', ch:'Security', comp:'WKSTN-014', user:'ACME\\jsmith', proc:'svchost.exe', cmd:'C:\\Windows\\System32\\svchost.exe -k netsvcs', ip:'10.0.2.14', bytes:'8123', details:'Routine', tag:null, note:null },
+  { rid:2, ts:'08:00:04', ev:'4688', ch:'Sysmon',   comp:'WKSTN-014', user:'ACME\\jsmith', proc:'explorer.exe', cmd:'C:\\Windows\\explorer.exe', ip:'10.0.2.14', bytes:'2044', details:'Routine', tag:null, note:null },
+  { rid:3, ts:'08:00:07', ev:'4104', ch:'Sysmon',   comp:'WKSTN-014', user:'ACME\\jsmith', proc:'powershell.exe', cmd:'powershell -enc JABzAD0ATgBlAHcALQBP…', ip:'10.0.2.14', bytes:'512', details:'encoded command detected — base64 IEX', tag:{n:'Confirmed evil',c:'#c8384f'}, note:'Matches known dropper pattern from prior IR' },
+  { rid:4, ts:'08:00:11', ev:'4625', ch:'Security', comp:'SRV-DC01',  user:'ACME\\admin',  proc:'lsass.exe', cmd:'C:\\Windows\\System32\\lsass.exe',  ip:'10.0.0.4', bytes:'992',  details:'Failed logon', tag:{n:'Suspicious',c:'#e0603a'}, note:null },
+  { rid:5, ts:'08:00:15', ev:'1',    ch:'Sysmon',   comp:'SRV-DC01',  user:'NT AUTHORITY\\SYSTEM', proc:'rundll32.exe', cmd:'rundll32.exe C:\\Users\\Public\\a.dll,Entry', ip:'10.0.0.4', bytes:'12044', details:'Suspicious DLL path', tag:{n:'Suspicious',c:'#e0603a'}, note:null },
+  { rid:6, ts:'08:00:19', ev:'4688', ch:'Security', comp:'SRV-FS02',  user:'ACME\\bkupsvc', proc:'wmiprvse.exe', cmd:'C:\\Windows\\System32\\wbem\\wmiprvse.exe', ip:'10.0.1.9', bytes:'1023', details:'Routine', tag:null, note:null },
+  { rid:7, ts:'08:00:23', ev:'4688', ch:'Security', comp:'WKSTN-002', user:'ACME\\jdoe',   proc:'chrome.exe', cmd:'C:\\Program Files\\Google\\Chrome\\chrome.exe', ip:'10.0.2.31', bytes:'40213', details:'Routine', tag:null, note:null },
+  { rid:8, ts:'08:00:27', ev:'4104', ch:'Sysmon',   comp:'WKSTN-002', user:'ACME\\jdoe',   proc:'powershell.exe', cmd:'powershell -nop -w hidden -enc SQBFAFgA…', ip:'10.0.2.31', bytes:'488', details:'encoded command detected — base64 IEX', tag:{n:'Pivot point',c:'#4a7fa5'}, note:null },
+  { rid:9, ts:'08:00:31', ev:'4688', ch:'Security', comp:'WKSTN-002', user:'ACME\\jdoe',   proc:'cmd.exe', cmd:'C:\\Windows\\System32\\cmd.exe /c whoami', ip:'10.0.2.31', bytes:'201', details:'Routine', tag:null, note:null },
+  { rid:10, ts:'08:00:36', ev:'7045', ch:'System',  comp:'SRV-DC01',  user:'ACME\\admin',  proc:'svchost.exe', cmd:'C:\\Windows\\System32\\svchost.exe -k netsvcs', ip:'10.0.0.4', bytes:'1877', details:'New service installed', tag:null, note:null },
+  { rid:11, ts:'08:00:40', ev:'4688', ch:'Security', comp:'SRV-DC01', user:'ACME\\admin',  proc:'cmd.exe', cmd:'C:\\Windows\\System32\\cmd.exe /c net user', ip:'10.0.0.4', bytes:'322', details:'Routine', tag:null, note:null },
+  { rid:12, ts:'08:00:44', ev:'4625', ch:'Security', comp:'SRV-DC01', user:'ACME\\svc-sql', proc:'lsass.exe', cmd:'C:\\Windows\\System32\\lsass.exe', ip:'10.0.0.4', bytes:'992', details:'Failed logon x3', tag:null, note:null },
+];
+
+const rowsEl = document.getElementById('rows');
+ROWS.forEach((r) => {
+  const div = document.createElement('div');
+  div.className = 'row';
+  div.dataset.rid = r.rid;
+  div.innerHTML = `
+    <div class="cell gutter">${r.tag ? `<span class="stripe" style="background:${r.tag.c}"></span>` : ''}${r.note ? '<span class="note">✎</span>' : ''}<span>${r.rid}</span></div>
+    <div class="cell w-time">${r.ts}</div>
+    <div class="cell w-proc">${r.proc}</div>
+    <div class="cell w-user">${r.user}</div>
+    <div class="cell w-user">${r.comp}</div>
+    <div class="cell w-cmd">${r.cmd}</div>
+    <div class="cell">${r.details}</div>`;
+  rowsEl.appendChild(div);
+});
+
+const detail = document.getElementById('detail');
+function openDetail(r) {
+  document.querySelectorAll('.row').forEach((el) => el.classList.toggle('selected', Number(el.dataset.rid) === r.rid));
+  document.getElementById('detailTitle').textContent = 'Line ' + r.rid;
+  document.getElementById('statusSel').textContent = `Selected row ${r.rid} of 2,000`;
+  const fields = document.getElementById('detailFields');
+  const rows = [['Timestamp','2026-03-14 '+r.ts],['EventId',r.ev],['Channel',r.ch],['Computer',r.comp],['User',r.user],['Process',r.proc],['CommandLine',r.cmd],['SourceIp',r.ip],['Bytes',r.bytes],['Details',r.details]];
+  fields.innerHTML = rows.map(([k,v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+  detail.querySelector('textarea').value = r.note || '';
+  detail.classList.add('open');
+}
+document.querySelectorAll('.row').forEach((el) => el.addEventListener('click', () => openDetail(ROWS.find((r) => r.rid === Number(el.dataset.rid)))));
+document.getElementById('detailClose').addEventListener('click', () => detail.classList.remove('open'));
+
+document.querySelectorAll('#tabs .tab').forEach((t) => t.addEventListener('click', () => {
+  document.querySelectorAll('#tabs .tab').forEach((o) => o.setAttribute('aria-selected', 'false'));
+  t.setAttribute('aria-selected', 'true');
+}));
+
+const moreBtn = document.getElementById('moreMenuBtn');
+const moreMenu = document.getElementById('moreMenu');
+moreBtn.addEventListener('click', (e) => { e.stopPropagation(); moreMenu.hidden = !moreMenu.hidden; });
+document.addEventListener('click', () => { moreMenu.hidden = true; });
+</script>
+</body>
+</html>

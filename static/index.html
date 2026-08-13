@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en" data-style="panel" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Winnow</title>
+<link rel="stylesheet" href="/static/style.css">
+<script>
+/* Blocking, deliberately tiny: paints the saved style/theme/accent before
+   first paint so a returning user doesn't see a flash of the default look.
+   app.js's initAppearance() re-applies the same values once it loads (from
+   the same localStorage key) — this is just the part that can't wait for a
+   script at the end of body. Never throws past this block: a corrupt or
+   missing localStorage value should fall back to the default look, not
+   break page load. */
+try {
+  var a = JSON.parse(localStorage.getItem('winnow.appearance') || '{}');
+  var style = a.style || 'panel';
+  var mode = a.themeMode || 'dark';
+  var theme = mode === 'auto'
+    ? (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+    : mode;
+  document.documentElement.setAttribute('data-style', style);
+  document.documentElement.setAttribute('data-theme', theme);
+  if (a.accent) {
+    document.documentElement.style.setProperty('--accent', a.accent);
+    var c = a.accent.replace('#', '');
+    var r = parseInt(c.substr(0, 2), 16), g = parseInt(c.substr(2, 2), 16), bch = parseInt(c.substr(4, 2), 16);
+    var lum = (0.299 * r + 0.587 * g + 0.114 * bch) / 255;
+    document.documentElement.style.setProperty('--accent-fg', lum > 0.6 ? '#14181d' : '#ffffff');
+  }
+} catch (e) {}
+</script>
+</head>
+<body>
+
+<div id="busyBar" class="busy-bar" hidden aria-hidden="true"></div>
+
+<div id="home" class="home" hidden></div>
+
+<div id="app" hidden>
+
+<aside id="sidebar" class="sidebar">
+  <div class="sidebar-head">
+    <input id="sidebarFilter" type="search" placeholder="Filter tables…" autocomplete="off" spellcheck="false">
+  </div>
+  <div id="sidebarList" class="sidebar-list"></div>
+</aside>
+
+<header class="bar">
+  <button class="brand" id="btnHome" title="Back to home screen"><span class="mark"></span><span id="brandLabel">Winnow</span></button>
+
+  <button class="tab-jump" id="btnTabJump" title="Show every table in the case" aria-pressed="true">◀</button>
+  <nav id="sourceTabs" class="tabs" aria-label="Open files"></nav>
+  <button class="tab tab-sql" id="tabSql" aria-selected="false" title="Read-only SQL against the case file">SQL</button>
+  <button class="tab tab-sql" id="tabTimeline" aria-selected="false" title="Unified timeline of every tagged row across the case">Timeline</button>
+
+  <div class="bar-actions">
+    <button class="btn ghost" id="btnSearchAll" title="Search every table in this case">Search all</button>
+    <button class="btn" id="btnSession" aria-haspopup="true" aria-expanded="false">Session ▾</button>
+    <button class="btn" id="btnSettings" title="Settings — also has keyboard shortcuts and filter syntax help">⚙</button>
+  </div>
+</header>
+
+<section class="toolbar">
+  <div id="groupStrip" class="group-strip"></div>
+  <div id="tagRibbon" class="tag-ribbon" aria-label="Tags"></div>
+  <div class="spacer"></div>
+  <div id="viewStats" class="stats"></div>
+  <button class="btn ghost" id="btnTimeRange" aria-pressed="false">⏱ Timeframe</button>
+  <button class="btn ghost" id="btnFilters" aria-haspopup="true" aria-expanded="false" aria-pressed="false">Filters ▾</button>
+  <button class="btn ghost" id="btnReset">Clear filters</button>
+  <button class="btn ghost search-icon-btn" id="btnSearchToggle" title="Search  —  press /">🔍</button>
+  <div class="search-wrap" id="searchWrap" hidden>
+    <input id="search" type="search" placeholder="Search all columns  —  press /" autocomplete="off" spellcheck="false">
+    <span class="hint" id="searchMode">substring</span>
+  </div>
+  <div class="search-mode-toggle" id="searchModeToggle" hidden>
+    <button class="btn ghost" data-mode="contains" aria-pressed="true">Contains</button>
+    <button class="btn ghost" data-mode="regex">Regex</button>
+    <button class="btn ghost" data-mode="advanced">Advanced</button>
+  </div>
+  <div id="advancedSearchBar" class="advanced-search-bar" hidden></div>
+</section>
+
+<div id="presetBanner" class="preset-banner" hidden></div>
+
+<div class="main-area" id="mainArea" data-dock="bottom">
+  <div class="main-content">
+    <main class="grid" id="grid">
+      <div class="grid-head">
+        <div class="head-row" id="headRow"></div>
+        <div class="filter-row" id="filterRow"></div>
+      </div>
+      <div class="grid-body" id="body" tabindex="0" role="grid" aria-label="Rows">
+        <div class="spacer-y" id="spacerY"></div>
+        <div class="rows" id="rows"></div>
+      </div>
+      <canvas class="rail" id="rail" width="14" title="Tagged rows in this view"></canvas>
+      <div class="empty" id="empty">
+        <p class="empty-title">No file open</p>
+        <p>Import a CSV, or start the server with <code>--open timeline.csv</code>.</p>
+      </div>
+    </main>
+
+    <section class="sqlview" id="sqlview" hidden>
+      <nav id="sqlTabs" class="sql-tabs" aria-label="SQL queries"></nav>
+      <div class="sql-head">
+        <span>Read-only query against the case file</span>
+        <div>
+          <button class="btn" id="btnRunSql">Run  ⌘⏎</button>
+        </div>
+      </div>
+      <textarea id="sqlText" spellcheck="false" rows="5"></textarea>
+      <div class="sql-result" id="sqlResult"></div>
+    </section>
+
+    <section class="timelineview" id="timelineview" hidden>
+      <div class="timeline-head">
+        <span class="timeline-head-label">Tags</span>
+        <div id="timelineTagFilter" class="timeline-tagfilter"></div>
+        <div class="spacer"></div>
+        <span class="stats" id="timelineStats"></span>
+        <button class="btn ghost" id="btnTimelineConfig">Configure sources…</button>
+      </div>
+      <div class="timeline-cols">
+        <div class="tl-col-ts">Timestamp</div>
+        <div class="tl-col-type">Source type</div>
+        <div class="tl-col-body">Body</div>
+      </div>
+      <div class="timeline-body" id="timelineBody" tabindex="0">
+        <div class="timeline-spacer-y" id="timelineSpacerY"></div>
+        <div class="timeline-rows" id="timelineRows"></div>
+      </div>
+      <div class="timeline-empty" id="timelineEmpty" hidden>
+        No tagged rows yet — tag some rows in any table, then come back here.
+      </div>
+    </section>
+  </div>
+
+  <div class="detail-resize" id="detailResize" hidden title="Drag to resize"></div>
+  <section class="detail" id="detail" hidden>
+    <div class="detail-head">
+      <span id="detailTitle">Row</span>
+      <div class="detail-actions">
+        <button class="btn ghost" id="btnDetailDock" title="Dock to the right">⬒</button>
+        <button class="btn ghost" id="btnCopyRow">Copy row</button>
+        <button class="btn ghost" id="btnCloseDetail">Close</button>
+      </div>
+    </div>
+    <div class="detail-body">
+      <dl id="detailFields"></dl>
+      <div class="note-box">
+        <label for="noteInput">Note</label>
+        <textarea id="noteInput" rows="4" placeholder="Why does this row matter?"></textarea>
+        <div class="note-status" id="noteStatus"></div>
+      </div>
+    </div>
+  </section>
+</div>
+
+</div><!-- #app -->
+
+<div class="modal" id="modal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true">
+    <div class="modal-head"><span id="modalTitle"></span><button class="btn ghost" id="modalClose">Close</button></div>
+    <div class="modal-body" id="modalBody"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+<div class="tag-toolbar" id="tagToolbar" hidden></div>
+<div class="drop-overlay" id="dropOverlay" hidden aria-hidden="true">
+  <div class="drop-overlay-card">Drop to import — CSV/TSV/JSON, or a single SQLite file</div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,3981 @@
+"""SQLite storage layer for Winnow.
+
+Design notes
+------------
+* One case = one SQLite file. Each imported CSV becomes its own `src_<id>` table
+  with an explicit `rid INTEGER PRIMARY KEY` so row identity is stable forever.
+* Source tables are never mutated. Tags, notes and layouts live in sidecar tables
+  keyed by (source_id, rid), so re-importing the same file keeps your work.
+* Filtering/sorting is materialised once into a temp-attached `v.view_N` table of
+  (pos, rid). The grid then pages with `WHERE pos BETWEEN ? AND ?`, which stays
+  O(window) no matter how deep you scroll. Naive LIMIT/OFFSET does not.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import csv
+import datetime
+import fnmatch
+import hashlib
+import io
+import itertools
+import json
+import os
+import re
+import shutil
+import sqlite3
+import threading
+import time
+from typing import Any, Iterable, Iterator
+
+from openpyxl import Workbook
+
+BATCH = 20_000
+SAMPLE_ROWS = 500
+TRIGRAM_MIN_LEN = 3  # the trigram FTS5 tokenizer can't index anything shorter — see _fts_like_pattern
+SARGABLE_OPS = {"equals", "in"}  # ops a plain single-column B-tree index actually accelerates (see _ensure_column_index_building)
+# SQLite gained LIKE/GLOB pushdown onto fts5 trigram tables in 3.45.0 —
+# the query form build_fts's detail=none index depends on. On an older
+# runtime the same LIKE still returns correct rows (SQLite just evaluates
+# it by scanning the fts table's docs — fallback speed), so nothing breaks;
+# building an index that can't accelerate anything is just wasted disk,
+# hence _ensure_fts_building gates on this.
+TRIGRAM_LIKE_MIN_SQLITE = (3, 45, 0)
+# search_all_sources stops counting a source's matches here and reports
+# `capped` instead of an exact number. The modal it feeds only ranks
+# "which tables hit, and roughly how hard" before you open one — an exact
+# 480,113 is no more useful than "1,000+", and getting it costs a full
+# count over every matching row on a source whose index isn't built yet.
+SEARCH_ALL_COUNT_CAP = 1000
+
+# The extensions a directory import (scan_import_directory) recognizes by
+# default — every format ingest_csv/ingest_json already know how to read.
+# Deliberately mirrors app.js's file-picker <input accept> list rather than
+# inventing a separate notion of "supported" — one format list, two places
+# it has to be spelled out (a browser <input> can't read a Python constant).
+DEFAULT_IMPORT_EXTENSIONS = {".csv", ".tsv", ".txt", ".psv", ".json", ".jsonl", ".ndjson"}
+# scan_import_directory stops walking once matched+excluded together hit
+# this many entries — same "cap and say so" reasoning as
+# SEARCH_ALL_COUNT_CAP, guarding against an analyst accidentally pointing
+# the scan at a triage source volume instead of its (much smaller) output
+# folder.
+MAX_SCAN_RESULTS = 5000
+
+DEFAULT_TAGS = [
+    ("Benign", "#5d8a66", "1"),
+    ("Suspicious", "#d68a2e", "2"),
+    ("TA", "#c0392b", "3"),
+]
+
+META_SCHEMA = """
+CREATE TABLE IF NOT EXISTS sources (
+    id          INTEGER PRIMARY KEY,
+    name        TEXT NOT NULL,
+    path        TEXT,
+    table_name  TEXT NOT NULL,
+    row_count   INTEGER NOT NULL DEFAULT 0,
+    columns     TEXT NOT NULL,          -- json: [{name, type}]
+    file_hash   TEXT,
+    imported_at TEXT,
+    has_fts     INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS tag_defs (
+    id     INTEGER PRIMARY KEY,
+    name   TEXT NOT NULL,
+    color  TEXT NOT NULL,
+    hotkey TEXT
+);
+CREATE TABLE IF NOT EXISTS row_tags (
+    source_id INTEGER NOT NULL,
+    rid       INTEGER NOT NULL,
+    tag_id    INTEGER NOT NULL,
+    PRIMARY KEY (source_id, rid, tag_id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS ix_row_tags_tag ON row_tags(source_id, tag_id);
+CREATE TABLE IF NOT EXISTS row_notes (
+    source_id INTEGER NOT NULL,
+    rid       INTEGER NOT NULL,
+    note      TEXT NOT NULL,
+    PRIMARY KEY (source_id, rid)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS layouts (
+    source_id INTEGER PRIMARY KEY,
+    payload   TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS saved_views (
+    id        INTEGER PRIMARY KEY,
+    source_id INTEGER NOT NULL,
+    name      TEXT NOT NULL,
+    payload   TEXT NOT NULL,
+    saved_at  TEXT
+);
+-- Legacy — presets are saved filters now (workspace-level, cross-case; see
+-- Store.pop_legacy_presets and CLAUDE.md). Table kept only so a case file
+-- from before that change has somewhere for its old presets to still be
+-- read from and migrated out of on next open; nothing writes here anymore.
+CREATE TABLE IF NOT EXISTS filter_presets (
+    id         INTEGER PRIMARY KEY,
+    name       TEXT NOT NULL,
+    col_sig    TEXT NOT NULL,          -- sha256 of sorted, lowercased column names
+    col_names  TEXT NOT NULL,          -- json array, original casing, for display/diffing
+    payload    TEXT NOT NULL,          -- json: {filter_tree, sort, search, search_mode, search_terms}
+    created_at TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_filter_presets_sig ON filter_presets(col_sig);
+CREATE TABLE IF NOT EXISTS merges (
+    id         INTEGER PRIMARY KEY,
+    name       TEXT NOT NULL,
+    source_ids TEXT NOT NULL,          -- json array of real source ids, creation order
+    created_at TEXT
+);
+CREATE TABLE IF NOT EXISTS open_tabs (
+    source_id INTEGER PRIMARY KEY      -- signed, same convention as elsewhere: negative = merge id
+);
+-- The SQL pane's named sub-tabs. In the case file rather than workspace/ or
+-- localStorage because a worked-out query is analysis *about this evidence*
+-- ("the join that pulls 4624s against the RDP source"), not a UI preference
+-- like tl.sidebar and not cross-case reusable like a saved filter — it
+-- should travel with the case when it's handed to another analyst. Still
+-- only ever SELECTs the analyst typed, so this stays within invariant #1:
+-- no source table is touched.
+CREATE TABLE IF NOT EXISTS sql_tabs (
+    id   INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    sql  TEXT NOT NULL DEFAULT '',
+    pos  INTEGER NOT NULL DEFAULT 0     -- left-to-right strip order; ties break by id
+);
+"""
+
+IDENT_OK = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+NUM_RE = re.compile(r"^-?\d+(\.\d+)?$")
+# Anything that looks like a leading ISO-ish or US date; used only to pick a
+# default sort column and to hint the UI, never to rewrite the stored value.
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[ T]|^\d{1,2}/\d{1,2}/\d{4}")
+
+
+def q(ident: str) -> str:
+    """Quote an identifier for interpolation into SQL."""
+    return '"' + ident.replace('"', '""') + '"'
+
+
+def _blob_expr(cols: list[str]) -> str:
+    """Every column concatenated into one search target — the same
+    expression backs both sides of substring search: the src_<id>_doc view
+    the trigram index is built over (build_fts), and every LIKE-scan
+    fallback (Contains mode when no index is ready yet or never got one,
+    Advanced mode's whole-query LIKE fallback, and a single Advanced-mode
+    term _fts_like_pattern can't route through the index). Keeping them
+    the same expression is what makes the indexed and fallback paths
+    return identical results."""
+    return " || ' ' || ".join(f"COALESCE({q(c)},'')" for c in cols)
+
+
+def _fts_like_pattern(term: str) -> str | None:
+    """The bare-LIKE pattern that routes a Contains/Advanced term through
+    the trigram index (`doc LIKE ?` on the fts table), or None when this
+    term has to take the blob-LIKE fallback scan instead. Two reasons a
+    term can't use the index, both verified empirically:
+
+    - Under TRIGRAM_MIN_LEN (3 chars) the trigram tokenizer has nothing to
+      look up, so the "index-assisted" form degrades to scanning anyway.
+    - SQLite only pushes a *bare* `LIKE ?` down onto a trigram table —
+      adding an ESCAPE clause turns the plan back into a full scan. So the
+      pattern here is deliberately unescaped, which is only safe when the
+      term contains no LIKE wildcards: a `%`/`_` in the term would match
+      as a wildcard instead of literally (a superset of right answers —
+      silently wrong). Those terms go to the fallback, which escapes them.
+      A backslash is fine unescaped — LIKE has no escape character at all
+      unless an ESCAPE clause says so — which matters here because
+      Windows paths make `\\` the single most-searched special character
+      in this tool."""
+    if len(term) < TRIGRAM_MIN_LEN or "%" in term or "_" in term:
+        return None
+    return f"%{term}%"
+
+
+def _numeric_expr(sql_expr: str) -> str:
+    """A REAL-valued SQL expression for a 'number'-typed column that is NULL
+    for anything that doesn't actually look numeric (same pattern as
+    infer_type/NUM_RE), instead of using bare CAST(... AS REAL).
+
+    Columns are stored as TEXT (see CLAUDE.md — evidence fidelity beats sort
+    elegance). SQLite's own CAST(text AS REAL) silently returns 0.0 for
+    non-numeric text, so a stray "N/A"/blank/typo in an otherwise-numeric
+    column is indistinguishable from a genuine 0 in a numeric sort or a
+    `>`/`<` filter. Gating the cast behind the same regex ingest-time type
+    inference uses means bad values come out NULL instead — SQLite sorts
+    NULL to one edge rather than scattering it through real data, and a NULL
+    comparison is never true, so garbage is visibly excluded rather than
+    silently masquerading as zero."""
+    return f"(CASE WHEN {sql_expr} REGEXP '{NUM_RE.pattern}' THEN CAST({sql_expr} AS REAL) ELSE NULL END)"
+
+
+def _regexp(pattern: str, value: Any) -> bool:
+    if value is None:
+        return False
+    try:
+        return re.search(pattern, str(value), re.IGNORECASE) is not None
+    except re.error:
+        return False
+
+
+# Same two shapes DATE_RE recognizes at ingest, capturing time-of-day too
+# (all optional groups — a bare date still matches). Kept in sync with
+# app.js's TS_ISO_RE/TS_US_RE (parseTimestamp) by hand — there's no shared
+# module between the two, just the same two format families.
+_TS_ISO_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?")
+_TS_US_RE = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4})(?:[ ,]+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM|am|pm)?)?")
+
+
+def _day_bucket(raw: Any) -> str | None:
+    """Registered as the SQL function DAY_BUCKET(x) — collapses a
+    'datetime'-typed value to its calendar day ("YYYY-MM-DD"), so grouping
+    by a timestamp column buckets by day instead of by exact timestamp
+    (which, at second/millisecond precision, would put nearly every row in
+    its own group of one). None for anything that doesn't match either
+    recognized shape, same "leave it alone rather than guess" rule
+    parseTimestamp follows client-side — those rows bucket together under
+    a NULL group instead of being silently mis-grouped."""
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    m = _TS_ISO_RE.match(s)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    m = _TS_US_RE.match(s)
+    if m:
+        return f"{int(m.group(3)):04d}-{int(m.group(1)):02d}-{int(m.group(2)):02d}"
+    return None
+
+
+def _ts_normalize(raw: Any) -> str | None:
+    """Registered as the SQL function TS_NORMALIZE(x) — a zero-padded,
+    lexicographically-sortable "YYYY-MM-DD HH:MM:SS" for a value in either
+    shape _TS_ISO_RE/_TS_US_RE recognize, missing time-of-day treated as
+    midnight. Powers the timeframe filter's range check (TS_NORMALIZE(col)
+    BETWEEN ? AND ?, both bounds run through this same function) — a bare
+    text/numeric comparison on the raw stored value would sort the US
+    "M/D/YYYY" shape wrong (lexicographic order isn't chronological order
+    for it) and mismatch on missing leading zeros either way. None for
+    anything unparseable, same "leave it alone" rule as DAY_BUCKET/
+    parseTimestamp — an unparseable value can't be judged in-range or not,
+    so it's excluded rather than guessed at."""
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    m = _TS_ISO_RE.match(s)
+    if m:
+        y, mo, d, h, mi, sec = m.groups()
+        return f"{y}-{mo}-{d} {h or '00'}:{mi or '00'}:{sec or '00'}"
+    m = _TS_US_RE.match(s)
+    if m:
+        mo, d, y, h, mi, sec, ampm = m.groups()
+        hh = int(h) if h else 0
+        if ampm:
+            if ampm.lower() == "pm" and hh < 12:
+                hh += 12
+            if ampm.lower() == "am" and hh == 12:
+                hh = 0
+        return f"{int(y):04d}-{int(mo):02d}-{int(d):02d} {hh:02d}:{int(mi or 0):02d}:{int(sec or 0):02d}"
+    return None
+
+
+# Microseconds between 1601-01-01 (the Windows/WebKit epoch) and 1970-01-01
+# (the Unix epoch) — Chromium stores every *_time/*_utc column (History's
+# urls.last_visit_time, visits.visit_time, Cookies' creation_utc/expires_utc,
+# downloads' start_time/end_time, ...) as microseconds since 1601-01-01.
+WEBKIT_EPOCH_OFFSET_US = 11_644_473_600_000_000
+
+
+def _webkit_to_iso(value: Any) -> str | None:
+    """Chrome/WebKit timestamp -> ISO 8601 UTC string, or None if `value`
+    doesn't actually look like one in that format. Used two ways: to
+    convert a column's values on SQLite-table ingest (opt-in, see
+    ingest_sqlite_table), and — the same function, not just the same idea
+    — to screen candidate columns for that option's default-checked state
+    in preview_sqlite_tables (a column counts as "likely a WebKit
+    timestamp" if most of its sampled values round-trip through here to a
+    plausible date)."""
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        return None
+    unix_us = v - WEBKIT_EPOCH_OFFSET_US
+    try:
+        dt = datetime.datetime.fromtimestamp(unix_us / 1_000_000, tz=datetime.timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+    if dt.year < 1990 or dt.year > 2100:  # in range arithmetically but not a plausible date
+        return None
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+
+# Column names that can't be used as-is: "rid" collides with every src_<id>
+# table's own primary-key column, and "rank"/"rowid" are FTS5-reserved \u2014
+# CREATE VIRTUAL TABLE ... USING fts5(...) rejects a column literally named
+# either of those (case-insensitive) with "reserved fts5 column name", which
+# previously surfaced as build_fts() raising well after the source table
+# and its rows were already committed \u2014 a CSV with a plausible header like
+# "Rank" (a real column name in e.g. some log formats) failed the *entire*
+# import with a confusing error, even though the data itself was fine.
+RESERVED_COLUMN_NAMES = {"rid", "rank", "rowid"}
+
+
+def sanitize_columns(raw: list[str]) -> list[str]:
+    """Make header names unique and safe to quote. Blank headers become col_N.
+
+    Dedups against every name actually emitted so far, not just first-seen
+    original names \u2014 a header that already contains the disambiguation
+    pattern (e.g. ["Name", "Name", "Name_1"], plausible for CSVs that have
+    already been through another tool's own dedup pass) used to collide:
+    the second "Name" became "Name_1", which then collided outright with the
+    third column's own literal "Name_1", and CREATE TABLE failed with
+    "duplicate column name" \u2014 aborting an otherwise perfectly valid import."""
+    out: list[str] = []
+    seen: dict[str, int] = {}
+    used: set[str] = set()
+    for i, name in enumerate(raw):
+        clean = (name or "").strip().lstrip("\ufeff") or f"col_{i + 1}"
+        if clean.lower() in RESERVED_COLUMN_NAMES:
+            clean = f"{clean}_1"
+        base = clean
+        while clean.lower() in used:
+            seen[base.lower()] = seen.get(base.lower(), 0) + 1
+            clean = f"{base}_{seen[base.lower()]}"
+        used.add(clean.lower())
+        out.append(clean)
+    return out
+
+
+def column_signature(cols: list[str]) -> str:
+    """Order/case-independent fingerprint of a column-name set — used to
+    check two sources have "the same" columns for merge eligibility."""
+    return hashlib.sha256("\x1f".join(sorted(c.strip().lower() for c in cols)).encode()).hexdigest()
+
+
+def infer_type(values: Iterable[str]) -> str:
+    vals = [v for v in values if v not in (None, "")]
+    if not vals:
+        return "text"
+    if all(NUM_RE.match(v) for v in vals):
+        return "number"
+    if sum(1 for v in vals if DATE_RE.match(v)) >= max(1, int(len(vals) * 0.8)):
+        return "datetime"
+    return "text"
+
+
+def _json_leaf_text(value: Any) -> str:
+    """A JSON value at a point flattening stops (see _flatten_json) ->
+    TEXT, same all-values-are-TEXT convention as CSV ingest. An object or
+    array is JSON-stringified whole rather than dropped or half-flattened —
+    evidence fidelity over tidiness, same reasoning CLAUDE.md gives for not
+    typing columns at ingest."""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+
+def _flatten_json(obj: dict, max_depth: int | None) -> dict[str, str]:
+    """Flattens nested OBJECTS into dot-notation keys — {"user": {"name":
+    "a"}} -> {"user.name": "a"} — but never arrays: a list value is always
+    JSON-stringified as one column's text, at whatever depth it's found,
+    per the ingest UI's own "flatten" explanation (an array's length can
+    vary record to record, so index-expanding it would make the column set
+    itself vary; a nested object's key set is comparatively stable).
+
+    max_depth=0 flattens nothing — one column per top-level key, "none"
+    mode, matching CSV's one-column-per-header shape exactly. max_depth=None
+    flattens without limit ("full"). Any other int is how many levels of
+    *object* nesting to unfold before stringifying whatever's left ("depth
+    N") — e.g. max_depth=1 unfolds `user.name` but leaves `user.address`
+    (a further-nested object) as one JSON-text column."""
+    out: dict[str, str] = {}
+
+    def walk(value: Any, key_path: str, depth: int) -> None:
+        if isinstance(value, dict) and (max_depth is None or depth < max_depth):
+            if not value:
+                out[key_path] = "{}"
+                return
+            for k, v in value.items():
+                walk(v, f"{key_path}.{k}" if key_path else str(k), depth + 1)
+        else:
+            out[key_path] = _json_leaf_text(value)
+
+    for k, v in obj.items():
+        walk(v, str(k), 0)
+    return out
+
+
+def _iter_json_records(path: str) -> Iterable[dict]:
+    """Yields one dict per record. `.jsonl`/`.ndjson` (one JSON value per
+    line — the genuinely streamable shape, never loaded fully into memory)
+    vs a single `.json` document (a JSON array of records, a single record
+    object, or — tolerated rather than rejected — a bare scalar/array of
+    scalars, wrapped as {"value": ...} so it still lands as one column
+    instead of erroring out). A whole `.json` document has to be parsed in
+    one shot (no generic streaming parser in the standard library), so
+    unlike CSV/JSONL ingest, memory use scales with file size for that
+    shape — acceptable at the scale this tool already targets (CLAUDE.md's
+    "Known limits" already documents ingest as not built for huge files
+    without extra tooling)."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext in (".jsonl", ".ndjson"):
+        with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                obj = json.loads(line)
+                yield obj if isinstance(obj, dict) else {"value": obj}
+        return
+    with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
+        data = json.load(f)
+    if isinstance(data, list):
+        for obj in data:
+            yield obj if isinstance(obj, dict) else {"value": obj}
+    elif isinstance(data, dict):
+        yield data
+    else:
+        yield {"value": data}
+
+
+class Store:
+    def __init__(self, path: str, default_tags: list[tuple] | None = None):
+        self.path = path
+        self._default_tags = default_tags or DEFAULT_TAGS
+        self.lock = threading.RLock()
+        self.db = sqlite3.connect(path, check_same_thread=False)
+        self.db.row_factory = sqlite3.Row
+        self.db.create_function("REGEXP", 2, _regexp, deterministic=True)
+        self.db.create_function("DAY_BUCKET", 1, _day_bucket, deterministic=True)
+        self.db.create_function("TS_NORMALIZE", 1, _ts_normalize, deterministic=True)
+        self._tune(self.db)
+        # A temporary on-disk database that SQLite deletes when we disconnect.
+        # Materialised views live here so the case file stays clean.
+        self.db.execute("ATTACH DATABASE '' AS v")
+        with self.db:
+            # Detect *before* CREATE TABLE IF NOT EXISTS runs, so a case file
+            # that predates open_tabs gets every existing source/merge
+            # backfilled as open (matching today's "everything's a tab"
+            # behavior) exactly once. A case that already has the table —
+            # even with zero rows, e.g. the analyst closed every tab on
+            # purpose — is left alone; an empty table isn't ambiguous with
+            # "never migrated" once we've checked this early.
+            open_tabs_existed = self.db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='open_tabs'"
+            ).fetchone() is not None
+            self.db.executescript(META_SCHEMA)
+            if not open_tabs_existed:
+                ids = [r[0] for r in self.db.execute("SELECT id FROM sources")]
+                ids += [-r[0] for r in self.db.execute("SELECT id FROM merges")]
+                if ids:
+                    self.db.executemany(
+                        "INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", [(i,) for i in ids]
+                    )
+        self._seed_tags()
+        self._view_seq = 0
+        self._views: dict[str, dict] = {}
+        self._maxlen_cache: dict[int, tuple[int, dict[str, int]]] = {}
+        self._fts_threads: dict[int, threading.Thread] = {}
+        self._index_threads: dict[tuple[int, str], threading.Thread] = {}
+        self._fts_janitor: threading.Thread | None = None
+        # Search-all job state. Its own lock, not self.lock: the worker
+        # mutates the job record between per-source counts, and making that
+        # wait on the connection lock would reintroduce exactly the
+        # contention the per-source lock scoping exists to avoid.
+        self._search_job_lock = threading.Lock()
+        self._search_job: dict | None = None
+        self._search_job_thread: threading.Thread | None = None
+        self._search_job_seq = 0
+        self._downgrade_legacy_fts()
+
+    def _downgrade_legacy_fts(self) -> None:
+        """Sources whose fts_<id> predates the current index shape still
+        have has_fts=1 pointing at a table the query code can't use — the
+        original word-tokenized table (can't do substring search at all),
+        or the first-generation trigram table (multi-column, detail=full:
+        the new `doc LIKE ?` query form would be a SQL error against it,
+        and it's ~6x the size the index needs to be — the reason the shape
+        changed). Either way: treat it as not-ready (the lazy background
+        rebuild in _ensure_fts_building kicks in on next use) rather than
+        erroring or serving wrong results under a stale flag. No schema
+        migration needed: the shape is read straight back out of
+        sqlite_master's own CREATE VIRTUAL TABLE text ('detail=none' only
+        appears in current-shape DDL), so this is a one-time, idempotent
+        correction.
+
+        The stale tables themselves get dropped on a background thread,
+        one per transaction — for a fat-trigram case file that's most of
+        the file's bulk (measured 892MB per 285MB source), and freeing it
+        shouldn't block Store construction. Freed pages go to SQLite's
+        freelist for reuse by this case file; the file itself only shrinks
+        under a VACUUM, which nothing here runs automatically."""
+        stale: list[int] = []
+        with self.lock, self.db:
+            rows = self.db.execute("SELECT id FROM sources WHERE has_fts=1").fetchall()
+            for (source_id,) in rows:
+                row = self.db.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                    (f"fts_{source_id}",),
+                ).fetchone()
+                if not row or "detail=none" not in row[0]:
+                    self.db.execute("UPDATE sources SET has_fts=0 WHERE id=?", (source_id,))
+                    if row:
+                        stale.append(source_id)
+        if stale:
+            t = threading.Thread(target=self._drop_stale_fts_worker, args=(stale,), daemon=True)
+            self._fts_janitor = t
+            t.start()
+
+    def _drop_stale_fts_worker(self, source_ids: list[int]) -> None:
+        for source_id in source_ids:
+            name = f"fts_{source_id}"
+            try:
+                with self.lock, self.db:
+                    # Re-check under the lock: a search may have triggered a
+                    # rebuild since startup, and this name would now be the
+                    # fresh index — only drop it if it's still the old shape.
+                    row = self.db.execute(
+                        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (name,)
+                    ).fetchone()
+                    if row and "detail=none" not in row[0]:
+                        self.db.execute(f"DROP TABLE IF EXISTS {q(name)}")
+            except Exception:
+                pass  # best-effort space reclamation — a survivor is dropped by its own rebuild
+            time.sleep(0.02)
+
+    def wait_for_fts_maintenance(self, timeout: float | None = None) -> None:
+        """Blocks until the startup stale-index janitor finishes (or
+        `timeout` elapses). Used by tests."""
+        t = self._fts_janitor
+        if t:
+            t.join(timeout)
+
+    def _ensure_fts_building(self, source_id: int) -> None:
+        """Fire-and-forget: kicks off a background trigram-index build for
+        this source if it doesn't already have one ready and isn't already
+        building one. Callers (Contains/Advanced-mode search) call this and
+        then immediately fall back to the LIKE-based path for the query
+        they're already compiling — the next search against this source,
+        once the build finishes, gets the fast indexed path instead.
+
+        No-ops entirely on a pre-3.45 SQLite: the index is only ever
+        queried through the trigram LIKE pushdown that version introduced,
+        so on an older runtime it would cost disk and build time while
+        every search still ran at fallback speed."""
+        if sqlite3.sqlite_version_info < TRIGRAM_LIKE_MIN_SQLITE:
+            return
+        with self.lock:
+            existing = self._fts_threads.get(source_id)
+            if existing and existing.is_alive():
+                return
+        if self.get_source(source_id).get("has_fts"):
+            return
+        with self.lock:
+            existing = self._fts_threads.get(source_id)
+            if existing and existing.is_alive():
+                return
+            t = threading.Thread(target=self._build_fts_worker, args=(source_id,), daemon=True)
+            self._fts_threads[source_id] = t
+        t.start()
+
+    def _build_fts_worker(self, source_id: int) -> None:
+        try:
+            self.build_fts(source_id)
+        except Exception:
+            pass  # best-effort background upgrade — the next search attempt retries
+
+    def _is_fts_building(self, source_id: int) -> bool:
+        with self.lock:
+            t = self._fts_threads.get(source_id)
+        return bool(t and t.is_alive())
+
+    def wait_for_fts(self, source_id: int, timeout: float | None = None) -> bool:
+        """Blocks until a background index build for this source finishes
+        (or `timeout` elapses). Used by tests, and available for any caller
+        that genuinely needs up-to-date has_fts before proceeding. Returns
+        whether the index is ready by the time it returns."""
+        with self.lock:
+            t = self._fts_threads.get(source_id)
+        if t:
+            t.join(timeout)
+        return bool(self.get_source(source_id).get("has_fts"))
+
+    @staticmethod
+    def _column_index_name(table_name: str, column: str, purpose: str = "filter") -> str:
+        # Column names are arbitrary user data (CSV headers) — hash rather
+        # than interpolate one into the index name, so this never has to
+        # worry about identifier-safety beyond what q() already guarantees
+        # for the CREATE INDEX statement itself. purpose="filter" hashes
+        # just the column, unchanged from before this had a purpose
+        # argument, so index names already on disk in an existing case file
+        # stay recognized; a distinct purpose (currently only "sort") salts
+        # the hash so it never collides with the filter index's name — see
+        # _ensure_sort_index_building for why they have to be two different
+        # physical indexes.
+        key = column if purpose == "filter" else f"{column}\x00{purpose}"
+        h = hashlib.md5(key.encode()).hexdigest()[:12]
+        return f"idx_{table_name}_{h}"
+
+    def _column_index_exists(self, table_name: str, column: str, purpose: str = "filter") -> bool:
+        name = self._column_index_name(table_name, column, purpose)
+        with self.lock:
+            row = self.db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='index' AND name=?", (name,)
+            ).fetchone()
+        return row is not None
+
+    def _ensure_column_index_building(self, source_id: int, column: str, table_name: str | None = None) -> None:
+        """Fire-and-forget: kicks off a background plain B-tree index build
+        for (source_id, column) if one doesn't already exist and isn't
+        already building — same pattern as _ensure_fts_building. Only
+        called for SARGABLE_OPS ('equals'/'in'): those are the filter shapes
+        a plain single-column index actually accelerates. 'contains'/
+        'starts' are LIKE patterns (trigram FTS already covers substring
+        search); numeric comparisons go through _numeric_expr, a functional
+        expression a plain index on the raw column wouldn't match anyway.
+        Callers keep using today's scan for the filter they're already
+        compiling — the next application of this same filter, once the
+        build finishes, gets the indexed path instead. Verified on a
+        42 GB/11-member merged case: an EventId-equals filter went from
+        6-8s per application (disk-bound full scan of every member, never
+        staying cached — the working set is bigger than available RAM) to
+        ~50ms once indexed.
+
+        `table_name` lets a caller that already resolved it skip the
+        get_source lookup. That isn't micro-optimisation: get_source runs a
+        COUNT(DISTINCT rid) over row_tags, ~12ms on a heavily tagged source,
+        and this is called on every filter compile and every group-by — once
+        per member, so a merge multiplies it."""
+        self._ensure_purpose_index_building(source_id, column, "filter", table_name)
+
+    def _ensure_sort_index_building(self, source_id: int, column: str, table_name: str | None = None) -> None:
+        """Same fire-and-forget background build as
+        _ensure_column_index_building, but for an ORDER BY column instead of
+        a sargable filter — triggered from build_view for every non-numeric
+        sort column, once per member for a merge.
+
+        This can't reuse the filter index: _compile_order emits
+        `col COLLATE NOCASE` for a non-numeric column, and SQLite will only
+        use an index to serve a comparison whose collating sequence matches
+        the index's own declared collation — verified with EXPLAIN QUERY
+        PLAN both ways: a plain (BINARY) index does not serve a NOCASE
+        ORDER BY (the temp B-tree stays), and a NOCASE index does not serve
+        a bare `=` filter (which compares BINARY, the column's default
+        collation) either. So a column that's both filtered-on and
+        sorted-on ends up with two small physical indexes, not one — still
+        far cheaper than unconditionally indexing every column both ways.
+
+        Numeric columns are skipped entirely: a numeric sort goes through
+        _numeric_expr, a functional expression no plain index (of either
+        collation) can match — same exclusion the filter index already
+        documents, enforced by build_view filtering sort_cols to
+        colnames[col] != 'number' before calling this."""
+        self._ensure_purpose_index_building(source_id, column, "sort", table_name)
+
+    def _ensure_purpose_index_building(self, source_id: int, column: str, purpose: str,
+                                        table_name: str | None = None) -> None:
+        key = (source_id, column, purpose)
+        with self.lock:
+            existing = self._index_threads.get(key)
+            if existing and existing.is_alive():
+                return
+        table_name = table_name or self.get_source(source_id)["table_name"]
+        if self._column_index_exists(table_name, column, purpose):
+            return
+        with self.lock:
+            existing = self._index_threads.get(key)
+            if existing and existing.is_alive():
+                return
+            t = threading.Thread(target=self._build_column_index_worker,
+                                 args=(column, table_name, purpose), daemon=True)
+            self._index_threads[key] = t
+        t.start()
+
+    def _build_column_index_worker(self, column: str, table_name: str, purpose: str = "filter") -> None:
+        try:
+            name = self._column_index_name(table_name, column, purpose)
+            collate = " COLLATE NOCASE" if purpose == "sort" else ""
+            with self.lock, self.db:
+                self.db.execute(f"CREATE INDEX IF NOT EXISTS {q(name)} ON {q(table_name)}({q(column)}{collate})")
+        except Exception:
+            pass  # best-effort background upgrade — the next filter/sort application retries
+
+    def wait_for_column_index(self, source_id: int, column: str, timeout: float | None = None,
+                               purpose: str = "filter") -> bool:
+        """Blocks until a background index build for (source_id, column,
+        purpose) finishes (or `timeout` elapses). Used by tests. Returns
+        whether the index exists by the time it returns."""
+        with self.lock:
+            t = self._index_threads.get((source_id, column, purpose))
+        if t:
+            t.join(timeout)
+        src = self.get_source(source_id)
+        return self._column_index_exists(src["table_name"], column, purpose)
+
+    def list_column_indexes(self, source_id: int) -> list[dict]:
+        """Which of this source's columns currently have one of the
+        auto-created indexes (filter or sort — the Tables modal doesn't
+        distinguish, both are "just an index" from the analyst's side), and
+        whether one is being built right now.
+
+        These get created behind the analyst's back (a sargable filter, a
+        value dropdown, a group-by, or now a sort all trigger one) and never
+        expire, so on a case where the same headers get imported and
+        filtered/sorted over and over they accumulate silently and take
+        real disk. This is what lets the Tables modal show them and offer a
+        drop.
+
+        The index *name* carries only an md5 of the column (see
+        _column_index_name — a column name is arbitrary CSV-header text, so
+        it's deliberately never interpolated into an identifier), which means
+        there's no way to read a column back out of a name. Going the other
+        direction works fine: hash each of the source's known columns (both
+        purposes) and look for that name, which is what this does."""
+        if source_id < 0:
+            return []  # a merge has no table of its own; its members carry the indexes
+        src = self.get_source(source_id)
+        table = src["table_name"]
+        with self.lock:
+            existing = {
+                r[0] for r in self.db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name=?", (table,)
+                )
+            }
+            building = {col for (sid, col, _purpose), t in self._index_threads.items()
+                        if sid == source_id and t.is_alive()}
+        out = []
+        for c in src["columns"]:
+            name = self._column_index_name(table, c["name"])
+            sort_name = self._column_index_name(table, c["name"], "sort")
+            if name in existing or sort_name in existing:
+                out.append({"column": c["name"], "index_name": name if name in existing else sort_name, "building": False})
+            elif c["name"] in building:
+                out.append({"column": c["name"], "index_name": name, "building": True})
+        return out
+
+    def drop_column_index(self, source_id: int, column: str) -> None:
+        """Drops every auto-created index (filter and/or sort — see
+        _ensure_sort_index_building for why a column can have both) on this
+        column. The pages go to the case file's freelist, not back to the
+        OS — `compact()` is what returns them. Nothing breaks without the
+        index: every query it accelerates still returns the same rows by
+        scanning, and the next filter/sort/group-by on this column just
+        builds it again."""
+        src = self.get_source(source_id)
+        names = {c["name"] for c in src["columns"]}
+        if column not in names:
+            raise KeyError(column)
+        with self.lock, self.db:
+            for purpose in ("filter", "sort"):
+                name = self._column_index_name(src["table_name"], column, purpose)
+                self.db.execute(f"DROP INDEX IF EXISTS {q(name)}")
+
+    # Slack VACUUM needs beyond a full second copy of the file, for the
+    # journal/WAL it writes alongside. Deliberately generous — running out
+    # of disk part-way through is the one failure mode worth refusing to
+    # risk, and the analyst can always free space and retry.
+    VACUUM_HEADROOM = 256 * 1024 * 1024
+
+    def compact(self) -> dict:
+        """VACUUM the case file, returning it to the size its live data
+        actually needs.
+
+        Nothing in normal operation shrinks a case file. Dropping a source,
+        dropping a stale FTS index (the startup janitor frees whole
+        hundreds of MB doing this), dropping a column index — all of it
+        goes to SQLite's freelist for reuse by this same file, which is
+        the right default (reuse is free, rewriting the file is not). But
+        after a big cleanup that can be a large, permanently-parked chunk
+        of disk, and VACUUM is the only thing that gives it back. It stays
+        an explicit, confirmed action rather than anything automatic: it
+        rewrites the entire file, so on a multi-GB case it's minutes of
+        held lock, and it needs a full second copy of the file free on
+        disk while it runs — checked up front here, because running out
+        of space mid-VACUUM is a far worse outcome than declining.
+
+        temp_store is forced back to FILE for the duration. _tune sets it
+        to MEMORY, which is right for the sorts and temp b-trees ordinary
+        queries build — but VACUUM's scratch copy of the whole database
+        obeys the same pragma, and materialising a 42 GB case in RAM is
+        not a thing to find out about the hard way.
+
+        The WAL is checkpointed and truncated on both sides of the VACUUM.
+        Afterwards so the reclaimed bytes don't just move into a -wal file;
+        *before* so the two sizes are comparable at all — in WAL mode
+        recently written pages live in the -wal until a checkpoint, so a
+        case whose data has never been checkpointed reports a main-file
+        size of one page and would show a nonsense negative reclaim."""
+        with self.lock:
+            self.db.commit()
+            self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            before = os.path.getsize(self.path)
+            directory = os.path.dirname(os.path.abspath(self.path)) or "."
+            free = shutil.disk_usage(directory).free
+            needed = before + self.VACUUM_HEADROOM
+            if free < needed:
+                raise ValueError(
+                    f"Not enough free disk space to compact: VACUUM rewrites the whole file, "
+                    f"so it needs about {needed // (1024 * 1024)} MB free and "
+                    f"{free // (1024 * 1024)} MB is available"
+                )
+            self.db.execute("PRAGMA temp_store=FILE")
+            try:
+                self.db.execute("VACUUM")
+                self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            finally:
+                self.db.execute("PRAGMA temp_store=MEMORY")
+            after = os.path.getsize(self.path)
+        return {"before_bytes": before, "after_bytes": after, "reclaimed_bytes": max(0, before - after)}
+
+    @staticmethod
+    def _tune(conn: sqlite3.Connection) -> None:
+        # page_size only takes effect on a database with no tables yet, and
+        # only if set before the first write of any kind — including the
+        # journal_mode=WAL switch below, which itself allocates page 1 and
+        # silently locks in whatever page size was already in force
+        # (verified: page_size after journal_mode=WAL is a no-op). On an
+        # existing case file this pragma is a no-op regardless of order —
+        # changing an established file's page size needs a VACUUM.
+        conn.execute("PRAGMA page_size=65536")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA temp_store=MEMORY")
+        conn.execute("PRAGMA cache_size=-262144")  # ~256 MB page cache
+        conn.execute("PRAGMA mmap_size=268435456")
+
+    def _seed_tags(self) -> None:
+        with self.lock, self.db:
+            n = self.db.execute("SELECT count(*) FROM tag_defs").fetchone()[0]
+            if not n:
+                self.db.executemany(
+                    "INSERT INTO tag_defs(name, color, hotkey) VALUES (?,?,?)",
+                    self._default_tags,
+                )
+
+    def close(self) -> None:
+        with self.lock:
+            self.db.close()
+
+    # ------------------------------------------------------------------ ingest
+
+    @contextlib.contextmanager
+    def _ingest_synchronous_off(self):
+        """synchronous=OFF for the duration of one import's batch-commit
+        loop, restored to NORMAL (the steady-state setting from _tune)
+        whether the import finished, raised, or was interrupted. WAL stays
+        on — only the fsync-on-commit behavior is relaxed.
+
+        This is the shared connection (invariant #4), so the relaxed
+        setting is in force for any other write that happens to land in the
+        same window, not just this import's own — the risk that bounds is
+        the same one ingest already accepts: a crash mid-import costs the
+        in-flight import (and, in this narrow window, an unlucky concurrent
+        write), and every batch before the crash is already durably
+        committed to the WAL up to the last synchronous=NORMAL checkpoint.
+        Never combine with journal_mode=OFF (that would risk case-file
+        corruption, not just losing the in-flight write) — this case file
+        is the durable artifact and holds tags/notes/sessions that aren't
+        re-derivable from the source, unlike a throwaway temp database
+        where that risk would be easy to accept."""
+        with self.lock, self.db:
+            self.db.execute("PRAGMA synchronous=OFF")
+        try:
+            yield
+        finally:
+            with self.lock, self.db:
+                self.db.execute("PRAGMA synchronous=NORMAL")
+
+    def ingest_csv(
+        self,
+        path: str,
+        name: str | None = None,
+        delimiter: str | None = None,
+        build_fts: bool = True,
+        has_header: bool = True,
+        column_types: list[str] | None = None,
+        progress=None,
+    ) -> dict:
+        """Stream a delimited file into its own table. Returns the source record.
+
+        Commits in BATCH-sized chunks instead of one giant transaction, and
+        only holds self.lock for the duration of each chunk's insert — not
+        for the whole file. self.lock guards every Store method (it's the
+        one thing serializing all access to the shared connection), so on a
+        huge import (minutes, at the scale this tool targets) the old
+        one-transaction-for-the-whole-file approach froze every other
+        request — fetching rows, tagging, opening another already-loaded
+        source — for the entire duration. It also meant one bad row near the
+        end (a malformed line, a full disk) rolled back everything already
+        inserted, discarding all of it.
+
+        sources.row_count is updated after every chunk, so if something does
+        go wrong partway through, whatever was already committed stays
+        (and stays visible/queryable with an accurate count) instead of the
+        whole import vanishing — the caller still sees the error and knows
+        the source is incomplete, but doesn't lose everything that
+        succeeded before it.
+        """
+        name = name or os.path.basename(path)
+        size = os.path.getsize(path)
+        file_hash = self._quick_hash(path)
+
+        fh = open(path, "r", encoding="utf-8-sig", errors="replace", newline="")
+        head = fh.read(64 * 1024)
+        fh.seek(0)
+        if delimiter is None:
+            delimiter = self._sniff(head)
+        reader = csv.reader(fh, delimiter=delimiter)
+
+        try:
+            first_row = next(reader)
+        except StopIteration:
+            fh.close()
+            raise ValueError("File is empty")
+        if has_header:
+            cols = sanitize_columns(first_row)
+            ncols = len(cols)
+            leftover_row = None
+        else:
+            ncols = len(first_row)
+            cols = sanitize_columns([None] * ncols)
+            leftover_row = first_row  # not a header — it's the first data row
+
+        with self.lock, self.db:
+            cur = self.db.execute(
+                "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at)"
+                " VALUES (?,?,?,?,?,?)",
+                (name, os.path.abspath(path), "", "[]", file_hash,
+                 time.strftime("%Y-%m-%dT%H:%M:%S")),
+            )
+            source_id = cur.lastrowid
+            self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
+            table = f"src_{source_id}"
+            coldefs = ", ".join(f"{q(c)} TEXT" for c in cols)
+            self.db.execute(f"CREATE TABLE {q(table)} (rid INTEGER PRIMARY KEY, {coldefs})")
+            self.db.execute("UPDATE sources SET table_name=? WHERE id=?", (table, source_id))
+
+        placeholders = ",".join("?" * ncols)
+        insert = f"INSERT INTO {q(table)} ({','.join(q(c) for c in cols)}) VALUES ({placeholders})"
+
+        sample: list[list[str]] = []
+        batch: list[tuple] = []
+        total = 0
+        ragged = 0
+        t0 = time.time()
+        error: Exception | None = None
+
+        rows_iter = ([leftover_row] if leftover_row is not None else [])
+        with self._ingest_synchronous_off():
+            try:
+                for row in itertools.chain(rows_iter, reader):
+                    if len(row) != ncols:
+                        # Ragged row: pad or trim rather than dropping evidence.
+                        ragged += 1
+                        row = (row + [""] * ncols)[:ncols]
+                    batch.append(tuple(row))
+                    if len(sample) < SAMPLE_ROWS:
+                        sample.append(row)
+                    if len(batch) >= BATCH:
+                        total = self._commit_ingest_batch(insert, batch, source_id, total)
+                        batch.clear()
+                        if progress:
+                            progress(total, fh.tell(), size)
+                if batch:
+                    total = self._commit_ingest_batch(insert, batch, source_id, total)
+                    batch.clear()
+            except Exception as e:
+                error = e
+            finally:
+                fh.close()
+
+        # Best-effort even on failure: whatever's in `sample` (up to
+        # SAMPLE_ROWS, collected during parsing regardless of whether the
+        # batch it was in ever committed) is enough to type the columns, so a
+        # partial import is still typed/browsable rather than left with the
+        # placeholder columns=[] forever.
+        types = [infer_type([r[i] for r in sample]) for i in range(ncols)] if sample else ["text"] * ncols
+        if column_types:
+            types = [(column_types[i] if i < len(column_types) and column_types[i] in ("text", "number", "datetime") else t)
+                     for i, t in enumerate(types)]
+        colmeta = [{"name": c, "type": t} for c, t in zip(cols, types)]
+        with self.lock, self.db:
+            self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
+
+        if error is not None:
+            raise error
+
+        if build_fts and total:
+            # Backgrounded, not built inline: the trigram index takes real
+            # time to build (see build_fts) and ingest_csv should return as
+            # soon as rows are typed/committed so the analyst can start
+            # browsing immediately — has_fts is 0 in the returned record
+            # until the background build finishes.
+            self._ensure_fts_building(source_id)
+
+        elapsed = time.time() - t0
+        rec = self.get_source(source_id)
+        rec["elapsed_sec"] = round(elapsed, 2)
+        rec["rows_per_sec"] = int(total / elapsed) if elapsed > 0 else 0
+        rec["ragged_rows"] = ragged
+        return rec
+
+    def _commit_ingest_batch(self, insert_sql: str, batch: list[tuple], source_id: int, total: int) -> int:
+        """Insert+commit one ingest batch in its own short transaction,
+        updating sources.row_count as we go. Only holds self.lock for this
+        one batch — see ingest_csv."""
+        with self.lock, self.db:
+            self.db.executemany(insert_sql, batch)
+            total += len(batch)
+            self.db.execute("UPDATE sources SET row_count=? WHERE id=?", (total, source_id))
+        return total
+
+    def preview_csv_text(
+        self, text: str, delimiter: str | None = None, has_header: bool = True, max_rows: int = 50
+    ) -> dict:
+        """Read-only sample of a delimited file's first rows, for the import
+        preview UI. Never touches the database — no source row, no table."""
+        if delimiter is None:
+            delimiter = self._sniff(text[:8192])
+        reader = csv.reader(io.StringIO(text), delimiter=delimiter)
+        try:
+            first_row = next(reader)
+        except StopIteration:
+            raise ValueError("File is empty")
+        if has_header:
+            cols = sanitize_columns(first_row)
+            ncols = len(cols)
+            leftover_row = None
+        else:
+            ncols = len(first_row)
+            cols = sanitize_columns([None] * ncols)
+            leftover_row = first_row
+
+        sample: list[list[str]] = []
+        for row in itertools.chain([leftover_row] if leftover_row is not None else [], reader):
+            if len(sample) >= max_rows:
+                break
+            if len(row) != ncols:
+                row = (row + [""] * ncols)[:ncols]
+            sample.append(row)
+
+        types = [infer_type([r[i] for r in sample]) for i in range(ncols)] if sample else ["text"] * ncols
+        return {"delimiter": delimiter, "columns": cols, "sample_rows": sample, "inferred_types": types}
+
+    def preview_sqlite_tables(self, path: str) -> dict:
+        """Read-only look at every table in an uploaded/pointed-to SQLite
+        file — Chromium's History/Cookies/Web Data/... or any other
+        .db/.sqlite — for the import UI's table picker: names, row counts,
+        columns, and which columns look like a WebKit/Chrome timestamp
+        (see _webkit_to_iso) so that option can default to checked without
+        the analyst needing to already know which columns are epoch-encoded.
+        Never writes to the case db — a completely separate connection to
+        a completely separate file."""
+        ro = sqlite3.connect(f"file:{path}?mode=ro", uri=True, check_same_thread=False)
+        ro.row_factory = sqlite3.Row
+        try:
+            table_names = [
+                r["name"] for r in ro.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+                )
+            ]
+            tables = []
+            for t in table_names:
+                cols = ro.execute(f"PRAGMA table_info({q(t)})").fetchall()
+                row_count = ro.execute(f"SELECT COUNT(*) FROM {q(t)}").fetchone()[0]
+                likely_ts = []
+                for c in cols:
+                    if not re.search(r"time|utc|date", c["name"], re.IGNORECASE):
+                        continue
+                    sample = [
+                        r[0] for r in ro.execute(
+                            f"SELECT {q(c['name'])} FROM {q(t)} WHERE {q(c['name'])} IS NOT NULL LIMIT 20"
+                        )
+                    ]
+                    if sample and sum(1 for v in sample if _webkit_to_iso(v)) >= max(1, int(len(sample) * 0.8)):
+                        likely_ts.append(c["name"])
+                tables.append({
+                    "name": t,
+                    "row_count": row_count,
+                    "columns": [{"name": c["name"], "type": c["type"] or "TEXT"} for c in cols],
+                    "likely_timestamp_columns": likely_ts,
+                })
+            return {"tables": tables}
+        finally:
+            ro.close()
+
+    def ingest_sqlite_table(
+        self,
+        path: str,
+        table_name: str,
+        name: str | None = None,
+        build_fts: bool = True,
+        timestamp_columns: list[str] | None = None,
+        progress=None,
+    ) -> dict:
+        """Imports one table from an external SQLite file as a new source —
+        same TEXT-column, batched-commit convention as ingest_csv (see its
+        docstring: self.lock held per BATCH-sized chunk, not for the whole
+        import, so a large table doesn't freeze every other request for
+        the whole read). `timestamp_columns` — a subset of the *source*
+        table's own column names, typically pre-populated from
+        preview_sqlite_tables' heuristic and confirmed/edited by the
+        analyst — get converted from WebKit/Chrome epoch microseconds to
+        an ISO datetime string as they're read, rather than importing the
+        opaque integer. That's an explicit, analyst-confirmed conversion,
+        not an automatic rewrite of the evidence: the source .db file
+        itself is opened read-only and never touched."""
+        name = name or f"{os.path.splitext(os.path.basename(path))[0]}.{table_name}"
+        timestamp_columns = set(timestamp_columns or [])
+        file_hash = self._quick_hash(path)
+
+        ro = sqlite3.connect(f"file:{path}?mode=ro", uri=True, check_same_thread=False)
+        ro.row_factory = sqlite3.Row
+        try:
+            src_cols_info = ro.execute(f"PRAGMA table_info({q(table_name)})").fetchall()
+            if not src_cols_info:
+                raise ValueError(f"No such table: {table_name}")
+            src_colnames = [c["name"] for c in src_cols_info]
+            cols = sanitize_columns(src_colnames)
+            ncols = len(cols)
+            ts_idx = {i for i, sc in enumerate(src_colnames) if sc in timestamp_columns}
+            total_rows = ro.execute(f"SELECT COUNT(*) FROM {q(table_name)}").fetchone()[0]
+
+            with self.lock, self.db:
+                cur = self.db.execute(
+                    "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at)"
+                    " VALUES (?,?,?,?,?,?)",
+                    (name, os.path.abspath(path), "", "[]", file_hash, time.strftime("%Y-%m-%dT%H:%M:%S")),
+                )
+                source_id = cur.lastrowid
+                self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
+                dest_table = f"src_{source_id}"
+                coldefs = ", ".join(f"{q(c)} TEXT" for c in cols)
+                self.db.execute(f"CREATE TABLE {q(dest_table)} (rid INTEGER PRIMARY KEY, {coldefs})")
+                self.db.execute("UPDATE sources SET table_name=? WHERE id=?", (dest_table, source_id))
+
+            placeholders = ",".join("?" * ncols)
+            insert = f"INSERT INTO {q(dest_table)} ({','.join(q(c) for c in cols)}) VALUES ({placeholders})"
+
+            def to_text(i, v):
+                if v is None:
+                    return ""
+                if i in ts_idx:
+                    iso = _webkit_to_iso(v)
+                    if iso:
+                        return iso
+                if isinstance(v, (bytes, bytearray)):
+                    return f"<{len(v)} bytes>"
+                return str(v)
+
+            select_cols = ",".join(q(c) for c in src_colnames)
+            src_cursor = ro.execute(f"SELECT {select_cols} FROM {q(table_name)}")
+
+            sample: list[list[str]] = []
+            total = 0
+            t0 = time.time()
+            error: Exception | None = None
+            with self._ingest_synchronous_off():
+                try:
+                    while True:
+                        rows = src_cursor.fetchmany(BATCH)
+                        if not rows:
+                            break
+                        batch = [tuple(to_text(i, v) for i, v in enumerate(r)) for r in rows]
+                        if len(sample) < SAMPLE_ROWS:
+                            sample.extend(batch[: SAMPLE_ROWS - len(sample)])
+                        total = self._commit_ingest_batch(insert, batch, source_id, total)
+                        if progress:
+                            progress(total, total, total_rows)
+                except Exception as e:
+                    error = e
+        finally:
+            ro.close()
+
+        types = [infer_type([r[i] for r in sample]) for i in range(ncols)] if sample else ["text"] * ncols
+        colmeta = [{"name": c, "type": t} for c, t in zip(cols, types)]
+        with self.lock, self.db:
+            self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
+
+        if error is not None:
+            raise error
+
+        if build_fts and total:
+            self._ensure_fts_building(source_id)
+
+        elapsed = time.time() - t0
+        rec = self.get_source(source_id)
+        rec["elapsed_sec"] = round(elapsed, 2)
+        rec["rows_per_sec"] = int(total / elapsed) if elapsed > 0 else 0
+        return rec
+
+    @staticmethod
+    def _json_flatten_depth(flatten_mode: str, flatten_depth: int) -> int | None:
+        if flatten_mode == "full":
+            return None
+        if flatten_mode == "depth":
+            return max(0, flatten_depth)
+        return 0  # "none"
+
+    def preview_json_file(
+        self, path: str, flatten_mode: str = "none", flatten_depth: int = 0, max_rows: int = 50
+    ) -> dict:
+        """Read-only sample for the import preview UI — same shape as
+        preview_csv_text (columns/sample_rows/inferred_types), plus
+        record_count so the UI can show how many rows the real ingest will
+        produce. Reads the whole file (see _iter_json_records — a .json
+        document can't be safely byte-truncated the way CSV's sniff-first-
+        chunk can) but writes nothing; column discovery here is the same
+        full pass ingest_json's own first pass does, recomputed on every
+        flatten-mode change in the UI since the two are independent calls."""
+        max_depth = self._json_flatten_depth(flatten_mode, flatten_depth)
+        seen_cols: list[str] = []
+        seen_set: set[str] = set()
+        sample_flat: list[dict[str, str]] = []
+        record_count = 0
+        for rec in _iter_json_records(path):
+            flat = _flatten_json(rec, max_depth)
+            for k in flat:
+                if k not in seen_set:
+                    seen_set.add(k)
+                    seen_cols.append(k)
+            if len(sample_flat) < max_rows:
+                sample_flat.append(flat)
+            record_count += 1
+        if record_count == 0:
+            raise ValueError("File has no records")
+        cols = sanitize_columns(seen_cols)
+        key_by_col = dict(zip(cols, seen_cols))
+        sample_rows = [[flat.get(key_by_col[c], "") for c in cols] for flat in sample_flat]
+        types = [infer_type([r[i] for r in sample_rows]) for i in range(len(cols))] if sample_rows else ["text"] * len(cols)
+        return {"columns": cols, "sample_rows": sample_rows, "inferred_types": types, "record_count": record_count}
+
+    def ingest_json(
+        self,
+        path: str,
+        name: str | None = None,
+        flatten_mode: str = "none",
+        flatten_depth: int = 0,
+        build_fts: bool = True,
+        progress=None,
+    ) -> dict:
+        """Streams a .json/.jsonl file into its own table — same TEXT-
+        column, batched-commit convention as ingest_csv (self.lock held per
+        BATCH-sized chunk, not the whole import).
+
+        Two full passes rather than one: JSON has no fixed header row the
+        way a CSV's first line is one, so which columns exist at all can
+        only be known by looking at every record first (same spirit as
+        CSV's ragged-row tolerance, just discovered up front here instead
+        of per-row) — pass 1 flattens every record only far enough to
+        collect the union of column keys, pass 2 re-reads and inserts
+        against that now-fixed column set, filling in "" for any key a
+        given record doesn't have (same convention as a short CSV row
+        getting padded)."""
+        name = name or os.path.basename(path)
+        file_hash = self._quick_hash(path)
+        max_depth = self._json_flatten_depth(flatten_mode, flatten_depth)
+
+        seen_cols: list[str] = []
+        seen_set: set[str] = set()
+        record_count = 0
+        for rec in _iter_json_records(path):
+            for k in _flatten_json(rec, max_depth):
+                if k not in seen_set:
+                    seen_set.add(k)
+                    seen_cols.append(k)
+            record_count += 1
+        if record_count == 0:
+            raise ValueError("File has no records")
+
+        cols = sanitize_columns(seen_cols)
+        ncols = len(cols)
+        key_by_col = dict(zip(cols, seen_cols))
+
+        with self.lock, self.db:
+            cur = self.db.execute(
+                "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at)"
+                " VALUES (?,?,?,?,?,?)",
+                (name, os.path.abspath(path), "", "[]", file_hash, time.strftime("%Y-%m-%dT%H:%M:%S")),
+            )
+            source_id = cur.lastrowid
+            self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
+            table = f"src_{source_id}"
+            coldefs = ", ".join(f"{q(c)} TEXT" for c in cols)
+            self.db.execute(f"CREATE TABLE {q(table)} (rid INTEGER PRIMARY KEY, {coldefs})")
+            self.db.execute("UPDATE sources SET table_name=? WHERE id=?", (table, source_id))
+
+        placeholders = ",".join("?" * ncols)
+        insert = f"INSERT INTO {q(table)} ({','.join(q(c) for c in cols)}) VALUES ({placeholders})"
+
+        sample: list[list[str]] = []
+        batch: list[tuple] = []
+        total = 0
+        t0 = time.time()
+        error: Exception | None = None
+        with self._ingest_synchronous_off():
+            try:
+                for rec in _iter_json_records(path):
+                    flat = _flatten_json(rec, max_depth)
+                    row = [flat.get(key_by_col[c], "") for c in cols]
+                    batch.append(tuple(row))
+                    if len(sample) < SAMPLE_ROWS:
+                        sample.append(row)
+                    if len(batch) >= BATCH:
+                        total = self._commit_ingest_batch(insert, batch, source_id, total)
+                        batch.clear()
+                        if progress:
+                            progress(total, total, record_count)
+                if batch:
+                    total = self._commit_ingest_batch(insert, batch, source_id, total)
+                    batch.clear()
+            except Exception as e:
+                error = e
+
+        types = [infer_type([r[i] for r in sample]) for i in range(ncols)] if sample else ["text"] * ncols
+        colmeta = [{"name": c, "type": t} for c, t in zip(cols, types)]
+        with self.lock, self.db:
+            self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
+
+        if error is not None:
+            raise error
+
+        if build_fts and total:
+            self._ensure_fts_building(source_id)
+
+        elapsed = time.time() - t0
+        rec = self.get_source(source_id)
+        rec["elapsed_sec"] = round(elapsed, 2)
+        rec["rows_per_sec"] = int(total / elapsed) if elapsed > 0 else 0
+        return rec
+
+    @staticmethod
+    def _import_pattern_matches(pattern: str, filename: str, rel_path: str) -> bool:
+        """A pattern containing '/' matches against the file's path relative
+        to the scan root (posix-separated, so a Windows-collected triage's
+        backslashes never matter); one without matches the bare filename
+        anywhere in the tree. Lets `*_Amcache_UnassociatedFileEntries.csv`
+        work as a simple filename glob while `RegistryHives/*` can still
+        exclude a whole subfolder. Case-insensitive — KAPE/EZTools output
+        casing isn't consistent enough to make analysts type it exactly."""
+        pat = pattern.strip().lower()
+        if not pat:
+            return False
+        target = rel_path.lower() if "/" in pat else filename.lower()
+        return fnmatch.fnmatch(target, pat)
+
+    def scan_import_directory(
+        self, root: str, *, recursive: bool = True,
+        extensions: list[str] | None = None,
+        include_patterns: list[str] | None = None,
+        exclude_patterns: list[str] | None = None,
+    ) -> dict:
+        """Preview for directory import (server.py's /api/ingest/dir/scan):
+        walks `root`, buckets every file it finds into "would import" or
+        "excluded, and why" — no ingestion happens here. Pure filesystem +
+        fnmatch, no self.lock held beyond one cheap read of already-imported
+        paths, so this is safe to call live as the analyst edits patterns.
+
+        A file is excluded for exactly one of: its extension isn't
+        recognized ("extension"), include_patterns is non-empty and nothing
+        in it matched ("no include pattern matched"), a pattern in
+        exclude_patterns matched ("excluded by pattern: <pattern>"), or it
+        couldn't be stat'd ("unreadable" — a broken symlink, a permission
+        error mid-walk). Surfacing the reason is the point: tuning a
+        profile's patterns is a visible feedback loop instead of guessing
+        whether "*Amcache*" actually matched anything.
+
+        `already_imported` flags a matched file whose absolute path already
+        equals some source's stored path — same abspath-equality convention
+        workspace.CaseRegistry.find_by_path already uses, no extra
+        normalization added. This never blocks re-import (no hard skip
+        here); it's the frontend's default-uncheck signal so re-running the
+        same import doesn't silently duplicate every table."""
+        root_abs = os.path.abspath(root)
+        exts = {
+            (e if e.startswith(".") else "." + e).lower()
+            for e in (extensions or DEFAULT_IMPORT_EXTENSIONS)
+        }
+        includes = [p for p in (include_patterns or []) if p.strip()]
+        excludes = [p for p in (exclude_patterns or []) if p.strip()]
+
+        with self.lock:
+            existing_paths = {
+                os.path.abspath(r[0]) for r in self.db.execute("SELECT path FROM sources WHERE path IS NOT NULL")
+            }
+
+        walker = os.walk(root_abs) if recursive else itertools.islice(os.walk(root_abs), 1)
+        matched: list[dict] = []
+        excluded: list[dict] = []
+        truncated = False
+        for dirpath, _dirnames, filenames in walker:
+            for fname in sorted(filenames):
+                if len(matched) + len(excluded) >= MAX_SCAN_RESULTS:
+                    truncated = True
+                    break
+                fpath = os.path.join(dirpath, fname)
+                rel = os.path.relpath(fpath, root_abs).replace(os.sep, "/")
+                try:
+                    size = os.path.getsize(fpath)
+                except OSError:
+                    excluded.append({"path": fpath, "rel_path": rel, "reason": "unreadable"})
+                    continue
+                entry = {"path": fpath, "rel_path": rel, "size_bytes": size}
+                ext = os.path.splitext(fname)[1].lower()
+                if ext not in exts:
+                    excluded.append({**entry, "reason": "extension"})
+                    continue
+                if includes and not any(self._import_pattern_matches(p, fname, rel) for p in includes):
+                    excluded.append({**entry, "reason": "no include pattern matched"})
+                    continue
+                hit = next((p for p in excludes if self._import_pattern_matches(p, fname, rel)), None)
+                if hit:
+                    excluded.append({**entry, "reason": f"excluded by pattern: {hit}"})
+                    continue
+                matched.append({
+                    **entry,
+                    "kind": "json" if ext in (".json", ".jsonl", ".ndjson") else "csv",
+                    "already_imported": fpath in existing_paths,
+                })
+            if truncated:
+                break
+
+        matched.sort(key=lambda e: e["rel_path"])
+        excluded.sort(key=lambda e: e["rel_path"])
+        return {"root": root_abs, "matched": matched, "excluded": excluded, "truncated": truncated}
+
+    def build_fts(self, source_id: int) -> None:
+        """(Re)builds the trigram substring index for a source: a single
+        `doc` column (every column concatenated, via a `src_<id>_doc` view
+        over `_blob_expr`) indexed with `tokenize='trigram', detail=none,
+        columnsize=0`, queried with a bare `doc LIKE ?` (never MATCH — see
+        below). Trigram indexing 3-character sequences is what makes
+        Contains-mode search both correct *and* fast for a fragment buried
+        mid-token (e.g. "jacso" inside `C:\\users\\jacso\\desktop\\file.txt`)
+        — a real index lookup instead of a full-table LIKE scan.
+
+        Why this exact shape — each of these was measured, not assumed
+        (332K-row/285MB EvtxECmd source):
+
+        - `detail=none, columnsize=0` drops the per-occurrence position
+          lists (which nothing here uses — no ranking, no highlighting),
+          cutting the index from 892MB to 143MB (–84%). The cost is that
+          FTS5 must verify each candidate against the real text, so query
+          time scales with *result count*: identical for rare/medium terms
+          (the IOC-hunting case), ~0.8s worst-case for a term matching 94%
+          of all rows — a degenerate result set anyway.
+        - Under detail=none a multi-trigram MATCH is a *phrase* query and
+          errors outright ("phrase queries are not supported"); the query
+          form is SQLite 3.45+'s LIKE pushdown instead. That pushdown is
+          per-column — a table-level `fts LIKE ?` runs against the hidden
+          table-name column (NULL outside MATCH) and silently returns 0
+          rows — which is why the index is one concatenated `doc` column
+          rather than mirroring the source's columns.
+        - content= points at the src_<id>_doc *view*, so candidate
+          verification recomputes the concat on demand — no second stored
+          copy of the data.
+
+        Batches its own commits (DROP/CREATE once, then BATCH-sized INSERT
+        chunks keyed by rid range) instead of one multi-second transaction,
+        so a build never freezes every other request for its duration —
+        same reasoning, and the same BATCH size, as ingest_csv's own
+        chunked commits. Called synchronously here; _ensure_fts_building is
+        what runs this on a background thread so ingest/search never block
+        waiting for it.
+
+        Each chunk also yields the thread briefly (time.sleep) right after
+        releasing the lock, not just released-and-immediately-reacquired:
+        measured directly, a tight release/reacquire loop with no yield
+        starves a foreground request waiting on the same lock for several
+        chunks in a row before the OS scheduler gives it a turn — one
+        request stalled >13s despite every individual chunk holding the
+        lock for under a second. A ~20ms yield dropped that worst case to
+        ~1.4s (one chunk's worth, as intended) for a ~5% longer total
+        build.
+
+        Deliberately *not* followed by an FTS5 'optimize' (or an incremental
+        'merge' loop), despite that being the usual advice after a chunked
+        build. Measured on a 400K-row index built in BATCH-sized chunks:
+        optimize does consolidate segments (the structure record shrank
+        51->24 bytes) but query time was unchanged on every shape tried —
+        rare term 4.6ms -> 4.0ms, a term matching every row 205ms -> 208ms,
+        a miss 0.1ms -> 0.0ms, all inside run-to-run noise — while the case
+        file grew ~7% (48.8MB -> 52.2MB), since the pre-merge pages are
+        freed to the freelist and nothing here VACUUMs. Two reasons it
+        doesn't pay: FTS5's own automerge already consolidates as the chunks
+        go in, and under detail=none query cost is dominated by verifying
+        candidates against the content view, not by walking segments."""
+        src = self.get_source(source_id)
+        table, cols = src["table_name"], [c["name"] for c in src["columns"]]
+        fts = f"fts_{source_id}"
+        doc_view = f"{table}_doc"
+        with self.lock, self.db:
+            self.db.execute(f"DROP TABLE IF EXISTS {q(fts)}")
+            self.db.execute(f"DROP VIEW IF EXISTS {q(doc_view)}")
+            self.db.execute(
+                f"CREATE VIEW {q(doc_view)} AS SELECT rid, {_blob_expr(cols)} AS doc FROM {q(table)}"
+            )
+            self.db.execute(
+                f"CREATE VIRTUAL TABLE {q(fts)} USING fts5(doc, "
+                f"content={q(doc_view)}, content_rowid='rid', tokenize='trigram', "
+                f"detail=none, columnsize=0)"
+            )
+            max_rid = self.db.execute(f"SELECT COALESCE(MAX(rid), 0) FROM {q(table)}").fetchone()[0]
+        for start in range(1, max_rid + 1, BATCH):
+            with self.lock, self.db:
+                self.db.execute(
+                    f"INSERT INTO {q(fts)}(rowid, doc) "
+                    f"SELECT rid, doc FROM {q(doc_view)} WHERE rid >= ? AND rid < ?",
+                    (start, start + BATCH),
+                )
+            time.sleep(0.02)
+        with self.lock, self.db:
+            self.db.execute("UPDATE sources SET has_fts=1 WHERE id=?", (source_id,))
+
+    @staticmethod
+    def _sniff(head: str) -> str:
+        try:
+            return csv.Sniffer().sniff(head[:8192], delimiters=",\t;|").delimiter
+        except csv.Error:
+            first = head.splitlines()[0] if head else ""
+            return max(",\t;|", key=first.count)
+
+    @staticmethod
+    def _quick_hash(path: str) -> str:
+        """Size + head/tail digest. Fast on multi-GB files and stable enough to
+        recognise the same evidence file across imports."""
+        h = hashlib.sha256()
+        size = os.path.getsize(path)
+        h.update(str(size).encode())
+        with open(path, "rb") as f:
+            h.update(f.read(1 << 20))
+            if size > (1 << 21):
+                f.seek(-(1 << 20), os.SEEK_END)
+                h.update(f.read())
+        return h.hexdigest()[:32]
+
+    # ----------------------------------------------------------------- sources
+
+    def list_sources(self) -> list[dict]:
+        """Bulk per-source annotation (is_open / tagged_row_count /
+        note_count) in one locked pass — a per-source query here would be an
+        N+1 against row_tags/row_notes/open_tabs on every case with several
+        tables open, which is exactly the "8+ tables" case this exists to
+        support."""
+        with self.lock:
+            rows = self.db.execute("SELECT * FROM sources ORDER BY id").fetchall()
+            open_ids = {r[0] for r in self.db.execute("SELECT source_id FROM open_tabs")}
+            tagged = dict(self.db.execute("SELECT source_id, COUNT(DISTINCT rid) FROM row_tags GROUP BY source_id"))
+            notes = dict(self.db.execute("SELECT source_id, COUNT(*) FROM row_notes GROUP BY source_id"))
+        out = []
+        for r in rows:
+            d = self._src_dict(r)
+            d["is_open"] = d["id"] in open_ids
+            d["tagged_row_count"] = tagged.get(d["id"], 0)
+            d["note_count"] = notes.get(d["id"], 0)
+            d["fts_building"] = self._is_fts_building(d["id"])
+            out.append(d)
+        return out
+
+    def _tab_meta(self, source_id: int) -> dict:
+        """is_open for a single signed source_id (real or merge). Not
+        tagged_row_count/note_count for merges — row_tags/row_notes are
+        never keyed by a negative id, so callers building a merge's dict
+        must sum its members' counts instead (see _merge_source_dict)."""
+        with self.lock:
+            is_open = self.db.execute("SELECT 1 FROM open_tabs WHERE source_id=?", (source_id,)).fetchone() is not None
+        return {"is_open": is_open}
+
+    def set_tab_open(self, source_id: int, open_: bool) -> None:
+        with self.lock, self.db:
+            if open_:
+                self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
+            else:
+                self.db.execute("DELETE FROM open_tabs WHERE source_id=?", (source_id,))
+
+    def get_source(self, source_id: int) -> dict:
+        """A merge is addressed as a negative source_id (merges.id=m ->
+        source_id=-m) so it can flow through every existing source_id: int
+        endpoint unchanged. Real sources.id is always >= 1, so this can't
+        collide."""
+        if source_id < 0:
+            return self._merge_source_dict(-source_id)
+        with self.lock:
+            row = self.db.execute("SELECT * FROM sources WHERE id=?", (source_id,)).fetchone()
+            if not row:
+                raise KeyError(f"No source {source_id}")
+            tagged = self.db.execute("SELECT COUNT(DISTINCT rid) FROM row_tags WHERE source_id=?", (source_id,)).fetchone()[0]
+            note_count = self.db.execute("SELECT COUNT(*) FROM row_notes WHERE source_id=?", (source_id,)).fetchone()[0]
+        d = self._src_dict(row)
+        d.update(self._tab_meta(source_id))
+        d["tagged_row_count"] = tagged
+        d["note_count"] = note_count
+        d["fts_building"] = self._is_fts_building(source_id)
+        return d
+
+    @staticmethod
+    def _src_dict(row: sqlite3.Row) -> dict:
+        d = dict(row)
+        d["columns"] = json.loads(d["columns"])
+        return d
+
+    def _merge_row(self, merge_id: int) -> sqlite3.Row:
+        with self.lock:
+            row = self.db.execute("SELECT * FROM merges WHERE id=?", (merge_id,)).fetchone()
+        if not row:
+            raise KeyError(f"No merge {merge_id}")
+        return row
+
+    def _merge_source_dict(self, merge_id: int) -> dict:
+        """Synthesizes a get_source()-shaped dict for a merge, computed live
+        from its members' CURRENT columns/row_count/has_fts each time it's
+        opened — a member dropped after the merge was created surfaces as a
+        clear KeyError here rather than a silently stale/broken merge."""
+        row = self._merge_row(merge_id)
+        member_ids = json.loads(row["source_ids"])
+        members = [self.get_source(sid) for sid in member_ids]
+        return {
+            "id": -merge_id,
+            "name": row["name"],
+            "path": None,
+            "table_name": None,
+            "row_count": sum(m["row_count"] for m in members),
+            "columns": members[0]["columns"],  # canonical — lowest-id (first-created) member
+            "file_hash": None,
+            "imported_at": row["created_at"],
+            "has_fts": 1 if all(m["has_fts"] for m in members) else 0,
+            "fts_building": any(m["fts_building"] for m in members),
+            "is_merge": True,
+            "member_source_ids": member_ids,
+            "is_open": self._tab_meta(-merge_id)["is_open"],
+            "tagged_row_count": sum(m["tagged_row_count"] for m in members),
+            "note_count": sum(m["note_count"] for m in members),
+        }
+
+    def _resolve_members(self, source_id: int) -> list[dict]:
+        """Real source -> single identity-mapped element. Merge -> one
+        element per member. SQLite resolves quoted identifiers
+        case-insensitively, so canonical column names work directly against
+        every member's table without needing per-member name translation —
+        the locked-in 'exact column match' rule already guarantees members
+        share the same names modulo case."""
+        if source_id > 0:
+            src = self.get_source(source_id)
+            return [{"source_id": source_id, "table_name": src["table_name"]}]
+        merge = self._merge_source_dict(-source_id)
+        return [
+            {"source_id": sid, "table_name": self.get_source(sid)["table_name"]}
+            for sid in merge["member_source_ids"]
+        ]
+
+    def create_merge(self, name: str, source_ids: list[int]) -> dict:
+        if len(source_ids) < 2:
+            raise ValueError("A merge needs at least 2 sources")
+        sources = [self.get_source(sid) for sid in source_ids]
+        sigs = {column_signature([c["name"] for c in s["columns"]]) for s in sources}
+        if len(sigs) > 1:
+            raise ValueError("Selected sources don't have matching columns")
+        with self.lock, self.db:
+            cur = self.db.execute(
+                "INSERT INTO merges(name, source_ids, created_at) VALUES (?,?,?)",
+                (name, json.dumps(source_ids), time.strftime("%Y-%m-%dT%H:%M:%S")),
+            )
+            merge_id = cur.lastrowid
+            self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (-merge_id,))
+        return self.get_source(-merge_id)
+
+    def list_merges(self) -> list[dict]:
+        with self.lock:
+            rows = self.db.execute("SELECT * FROM merges ORDER BY id").fetchall()
+        out = []
+        for r in rows:
+            try:
+                out.append(self.get_source(-r["id"]))
+            except KeyError as e:
+                # a member was dropped since the merge was created — surface
+                # it as a broken entry the UI can offer to delete, not a
+                # silent omission from the list.
+                out.append({
+                    "id": -r["id"], "name": r["name"], "is_merge": True,
+                    "error": str(e), "member_source_ids": json.loads(r["source_ids"]),
+                })
+        return out
+
+    def delete_merge(self, merge_id: int) -> None:
+        with self.lock, self.db:
+            self.db.execute("DELETE FROM merges WHERE id=?", (merge_id,))
+            self.db.execute("DELETE FROM open_tabs WHERE source_id=?", (-merge_id,))
+
+    def drop_source(self, source_id: int) -> None:
+        src = self.get_source(source_id)
+        with self.lock, self.db:
+            self.db.execute(f"DROP TABLE IF EXISTS {q(src['table_name'])}")
+            self.db.execute(f"DROP TABLE IF EXISTS {q('fts_' + str(source_id))}")
+            self.db.execute(f"DROP VIEW IF EXISTS {q(src['table_name'] + '_doc')}")
+            for t in ("row_tags", "row_notes"):
+                self.db.execute(f"DELETE FROM {t} WHERE source_id=?", (source_id,))
+            self.db.execute("DELETE FROM layouts WHERE source_id=?", (source_id,))
+            self.db.execute("DELETE FROM saved_views WHERE source_id=?", (source_id,))
+            self.db.execute("DELETE FROM open_tabs WHERE source_id=?", (source_id,))
+            self.db.execute("DELETE FROM sources WHERE id=?", (source_id,))
+        self._maxlen_cache.pop(source_id, None)
+
+    # ------------------------------------------------------------------- views
+
+    def build_view(self, source_id: int, spec: dict) -> dict:
+        """Materialise (pos, source_id, rid) for a filter+sort spec. Returns
+        view handle. source_id is a constant column here (every row comes
+        from the same source) — kept as a real column rather than a
+        handle-level constant so fetch_rows/tag_positions/tag_view/export
+        share one code path with merged views, whose rows carry their own
+        (differing) source_id per row.
+
+        CLAUDE.md invariant #2's carve-out: an unfiltered, unsorted view of
+        a single (non-merge) source needs no materialisation at all — its
+        "sort" is just rid order, which INTEGER PRIMARY KEY already gives
+        for free (verified: `EXPLAIN QUERY PLAN SELECT rid FROM t ORDER BY
+        rid ASC` is a bare `SCAN`, no temp b-tree). See
+        _build_virtual_root_view."""
+        src = self.get_source(source_id)
+        colnames = {c["name"]: c["type"] for c in src["columns"]}
+        order = self._compile_order(spec, colnames)
+        # Only non-numeric sort columns: _compile_order emits a plain
+        # `col COLLATE NOCASE` for those, which a background index can
+        # serve; a numeric sort goes through _numeric_expr, a functional
+        # expression a plain index can't match (see
+        # _ensure_sort_index_building).
+        sort_cols = [
+            s.get("column") for s in (spec.get("sort") or [])
+            if s.get("column") in colnames and colnames[s.get("column")] != "number"
+        ]
+        has_sort = any(s.get("column") in colnames for s in (spec.get("sort") or []))
+
+        if src.get("is_merge"):
+            if self._tree_has_raw(spec.get("filter_tree")):
+                raise ValueError(
+                    "Raw SQL filters aren't supported on merged sources yet — use the guided filter builder"
+                )
+            collist = ", ".join(q(c) for c in colnames)
+            branches = []
+            params: list[Any] = []
+            for m in self._resolve_members(source_id):
+                msrc = self.get_source(m["source_id"])
+                where, p = self._compile_where(m["source_id"], msrc, spec, colnames)
+                for col in sort_cols:
+                    self._ensure_sort_index_building(m["source_id"], col, msrc["table_name"])
+                branches.append(
+                    f"SELECT {int(m['source_id'])} AS source_id, rid, {collist} FROM {q(m['table_name'])}"
+                    + (f" WHERE {where}" if where else "")
+                )
+                params.extend(p)
+            union_sql = " UNION ALL ".join(branches)
+            self._view_seq += 1
+            vid = f"view_{self._view_seq}"
+            sql = (
+                f"INSERT INTO v.{q(vid)}(pos, source_id, rid) "
+                f"SELECT ROW_NUMBER() OVER ({order}), source_id, rid FROM ({union_sql})"
+            )
+        else:
+            table = src["table_name"]
+            where, params = self._compile_where(source_id, src, spec, colnames)
+            for col in sort_cols:
+                self._ensure_sort_index_building(source_id, col, table)
+            if not where and not has_sort:
+                return self._build_virtual_root_view(source_id, src)
+            self._view_seq += 1
+            vid = f"view_{self._view_seq}"
+            sql = (
+                f"INSERT INTO v.{q(vid)}(pos, source_id, rid) "
+                f"SELECT ROW_NUMBER() OVER ({order}), {int(source_id)}, rid FROM {q(table)}"
+                + (f" WHERE {where}" if where else "")
+            )
+        t0 = time.time()
+        with self.lock, self.db:
+            self._evict_root_views(source_id)
+            # pos declared INTEGER PRIMARY KEY makes it *be* the rowid, so
+            # this alone gives the same unique/indexed-by-pos lookup the old
+            # CTAS + separate CREATE UNIQUE INDEX did, for one less full
+            # sort-and-write of every row (see CLAUDE.md's "Performance"
+            # section, change 3).
+            self.db.execute(f"CREATE TABLE v.{q(vid)} (pos INTEGER PRIMARY KEY, source_id INTEGER, rid INTEGER)")
+            self.db.execute(sql, params)
+            n = self.db.execute(f"SELECT count(*) FROM v.{q(vid)}").fetchone()[0]
+
+        handle = {
+            "view_id": vid,
+            "source_id": source_id,
+            "row_count": n,
+            "kind": "root",
+            "elapsed_ms": int((time.time() - t0) * 1000),
+        }
+        self._views[vid] = handle
+        return handle
+
+    def _evict_root_views(self, source_id: int) -> None:
+        """Evicts every existing root (materialised or virtual) view for
+        this source, so opening a new one leaves only the new view live.
+        Caller must hold self.lock (and be inside a self.db transaction —
+        eviction of a materialised view drops its backing table).
+
+        Only root views for this source are eligible here. Group sub-views
+        (kind='group'/'group_virtual') are never evicted by this loop
+        directly — they cascade-drop with their parent via
+        _evict_view_and_children, so expanding one group never evicts a
+        sibling or the outer root view. `old` may already be gone by the
+        time we reach it (a previous iteration's cascade can remove a later
+        entry in this same snapshot) — .get() and skip, don't [ ]."""
+        for old in list(self._views):
+            handle = self._views.get(old)
+            if handle and handle.get("kind") in ("root", "root_virtual") and handle["source_id"] == source_id:
+                self._evict_view_and_children(old)
+
+    def _build_virtual_root_view(self, source_id: int, src: dict) -> dict:
+        """No filters, no sort: the view IS the source table in its natural
+        rid order, which INTEGER PRIMARY KEY already gives for free — no
+        v.view_N to build. row_count is read straight off `src` (already
+        the source's own row_count) rather than a fresh COUNT(*).
+
+        fetch_rows/tag_positions/find_position/tag_view/export all handle
+        kind='root_virtual' by paging or computing directly against the
+        source table instead of a backing view table — every one of them
+        can use the exact `pos = rid - 1` shortcut (never a stub) because
+        ingest assigns rid contiguously from 1 for every ingest path
+        (verified: CSV/SQLite-table/JSON ingest all create `rid INTEGER
+        PRIMARY KEY` without ever specifying a value, insert in sequential
+        BATCH-sized transactions that either fully commit or fully roll
+        back, and no source table is ever mutated after ingest —
+        invariant #1) and this view is, by construction, every row of the
+        source.
+
+        Deliberately narrower than "sort is absent OR served by an
+        existing index" — a virtual view with a sorted (even indexed)
+        order is not implemented: tag_positions would need each tagged
+        row's rank in that order, which isn't a `pos = rid - 1` shortcut
+        and would cost one query per tagged row (up to 20,000) rather than
+        one materialise. Change 2 already makes that case's materialise
+        cheap (index supplies the order, no temp b-tree); this virtual
+        path targets the single biggest and most common case instead:
+        opening a table."""
+        with self.lock, self.db:
+            self._evict_root_views(source_id)
+            self._view_seq += 1
+            vid = f"view_{self._view_seq}"
+            handle = {
+                "view_id": vid,
+                "source_id": source_id,
+                "row_count": src["row_count"],
+                "kind": "root_virtual",
+                "elapsed_ms": 0,
+            }
+            self._views[vid] = handle
+        return handle
+
+    def _evict_view_and_children(self, vid: str) -> None:
+        """Drops a view (and its backing table, unless it's a virtual
+        no-table handle) plus every group sub-view whose parent_view_id is
+        this one — recursively, so a chain of expansions cleans up fully.
+        Caller must hold self.lock (and be inside a self.db transaction if
+        dropping tables)."""
+        handle = self._views.pop(vid, None)
+        if not handle:
+            return
+        if handle.get("kind") not in ("group_virtual", "root_virtual"):
+            self.db.execute(f"DROP TABLE IF EXISTS v.{q(vid)}")
+        for child_vid, child in list(self._views.items()):
+            if child.get("parent_view_id") == vid:
+                self._evict_view_and_children(child_vid)
+
+    def close_view(self, view_id: str) -> None:
+        """Explicit free for a group sub-view (called on UI collapse) rather
+        than waiting for its parent root view to be rebuilt."""
+        with self.lock, self.db:
+            self._evict_view_and_children(view_id)
+
+    # -------------------------------------------------------------- timeline
+
+    def build_timeline(self, configs: dict[int, dict] | None = None, tag_ids: list[int] | None = None) -> dict:
+        """Materialises one row per *tagged* row across every real source in
+        the case (open or closed — this is "every finding in the case", not
+        "every finding in a currently-open tab"), each contributing its own
+        timestamp/body/type-label per `configs.get(source_id)`. `configs` is
+        resolved by the caller (server.py's _resolve_timeline_configs,
+        matching each source's header set against workspace.timeline_
+        templates) rather than looked up in here — store.py can't import
+        workspace.py (workspace.py already imports from store.py; see
+        pop_legacy_presets for the same constraint) — a source missing from
+        `configs`, or with an override that doesn't actually apply to it
+        (a timestamp_column that isn't one of its own columns), falls back
+        to its first datetime column, every column, and its own name.
+
+        `tag_ids` narrows to rows carrying at least one of those tags;
+        None/empty means every tagged row regardless of which tag(s).
+
+        Same materialize-into-v.-then-page-by-pos pattern as build_view
+        (CLAUDE.md invariant #2) — a heavily-tagged case can still be
+        thousands of rows, so this isn't exempt from the no-LIMIT/OFFSET
+        rule just because it's a cross-table view rather than a single-
+        source one. Only one timeline view is ever alive at a time (an
+        analyst has one Timeline tab, not several) — building a new one
+        evicts whatever timeline view existed before, same as build_view
+        evicts the previous root view for a source."""
+        configs = configs or {}
+        tag_clause = f" AND tag_id IN ({','.join('?' * len(tag_ids))})" if tag_ids else ""
+
+        branches = []
+        params: list[Any] = []
+        for src in self.list_sources():
+            if not src["tagged_row_count"]:
+                continue
+            source_id = src["id"]
+            col_names = {c["name"] for c in src["columns"]}
+            dt_cols = [c["name"] for c in src["columns"] if c["type"] == "datetime"]
+            cfg = configs.get(source_id, {})
+
+            ts_col = cfg.get("timestamp_column")
+            if ts_col not in col_names:
+                ts_col = dt_cols[0] if dt_cols else None
+            ts_expr = f"TS_NORMALIZE(s.{q(ts_col)})" if ts_col else "NULL"
+
+            body_cols = [c for c in (cfg.get("body_columns") or []) if c in col_names]
+            if not body_cols:
+                body_cols = [c["name"] for c in src["columns"]]
+            body_expr = " || ' | ' || ".join(f"COALESCE(s.{q(c)}, '')" for c in body_cols)
+
+            type_label = cfg.get("type_label") or src["name"]
+            table = src["table_name"]
+            branches.append(
+                f"SELECT {int(source_id)} AS source_id, s.rid AS rid, {ts_expr} AS ts, ({body_expr}) AS body, "
+                f"? AS type_label, ? AS source_name, "
+                f"(SELECT GROUP_CONCAT(tag_id) FROM row_tags WHERE source_id={int(source_id)} AND rid=s.rid) AS tag_ids "
+                f"FROM {q(table)} s "
+                f"WHERE s.rid IN (SELECT rid FROM row_tags WHERE source_id={int(source_id)}{tag_clause})"
+            )
+            params.append(type_label)
+            params.append(src["name"])
+            if tag_ids:
+                params.extend(tag_ids)
+
+        self._view_seq += 1
+        vid = f"view_{self._view_seq}"
+        with self.lock, self.db:
+            for old in list(self._views):
+                h = self._views.get(old)
+                if h and h.get("kind") == "timeline":
+                    self._evict_view_and_children(old)
+            self.db.execute(
+                f"CREATE TABLE v.{q(vid)} (pos INTEGER PRIMARY KEY, source_id INTEGER, rid INTEGER, "
+                f"ts TEXT, body TEXT, type_label TEXT, source_name TEXT, tag_ids TEXT)"
+            )
+            if branches:
+                union_sql = " UNION ALL ".join(branches)
+                self.db.execute(
+                    f"INSERT INTO v.{q(vid)}(pos, source_id, rid, ts, body, type_label, source_name, tag_ids) "
+                    f"SELECT ROW_NUMBER() OVER (ORDER BY (ts IS NULL) ASC, ts ASC, source_id, rid), "
+                    f"source_id, rid, ts, body, type_label, source_name, tag_ids FROM ({union_sql})",
+                    params,
+                )
+            n = self.db.execute(f"SELECT count(*) FROM v.{q(vid)}").fetchone()[0]
+
+        self._views[vid] = {"view_id": vid, "kind": "timeline", "row_count": n}
+        return {"view_id": vid, "row_count": n}
+
+    def fetch_timeline_rows(self, view_id: str, start: int, count: int) -> dict:
+        handle = self._views.get(view_id)
+        if not handle or handle.get("kind") != "timeline":
+            raise KeyError("View expired — rebuild it")
+        with self.lock:
+            rows = self.db.execute(
+                f"SELECT pos, source_id, rid, ts, body, type_label, source_name, tag_ids "
+                f"FROM v.{q(view_id)} WHERE pos >= ? AND pos < ? ORDER BY pos",
+                (start + 1, start + 1 + count),
+            ).fetchall()
+        out = [
+            {
+                "pos": r["pos"] - 1,
+                "source_id": r["source_id"],
+                "rid": r["rid"],
+                "ts": r["ts"],
+                "body": r["body"],
+                "type_label": r["type_label"],
+                "source_name": r["source_name"],
+                "tags": [int(x) for x in r["tag_ids"].split(",")] if r["tag_ids"] else [],
+            }
+            for r in rows
+        ]
+        return {"start": start, "rows": out}
+
+    # ---------------------------------------------------------------- group-by
+
+    GROUP_MATERIALIZE_THRESHOLD = 5000  # rows; above this (or for a merge) a group gets a real indexed sub-view
+
+    @staticmethod
+    def _eq_condition(col_ident: str, value: Any, is_datetime: bool = False) -> tuple[str, list]:
+        """`is_datetime` must match how group_summary grouped this column
+        (DAY_BUCKET'd or not) — otherwise a group's day-bucket value like
+        "2026-01-01" would get compared against the raw full-timestamp
+        column and never match any row, breaking expand/tag/export for
+        every datetime group."""
+        expr = f"DAY_BUCKET({col_ident})" if is_datetime else col_ident
+        if value is None:
+            return f"{expr} IS ?", [None]
+        return f"{expr} = ?", [value]
+
+    def _path_where(self, path: list[dict] | None, colnames: dict, alias: str = "") -> tuple[list[str], list]:
+        """Compile a group-by path (the outer levels' already-fixed values,
+        for nested multi-column grouping) into per-column condition
+        fragments. `alias` (e.g. "s"), when given, is baked into the
+        identifier _eq_condition builds on — NOT prefixed onto the
+        returned fragment by the caller afterward, since a datetime
+        column's fragment starts with DAY_BUCKET(...) and "s.DAY_BUCKET(...)"
+        isn't valid SQL the way "s.\"col\"" is."""
+        prefix = f"{alias}." if alias else ""
+        clauses: list[str] = []
+        params: list[Any] = []
+        for p in path or []:
+            col = p.get("column")
+            if col not in colnames:
+                raise KeyError(col)
+            c, v = self._eq_condition(f"{prefix}{q(col)}", p.get("value"), colnames[col] == "datetime")
+            clauses.append(c)
+            params.extend(v)
+        return clauses, params
+
+    @staticmethod
+    def _grouping_covers_whole_source(handle: dict, src: dict) -> bool:
+        """True when this view provably contains every row of every member
+        table, so an aggregate over the view and one over the tables
+        themselves are the same question.
+
+        Row counts are enough to prove it, not just a heuristic: a view's
+        rows are always distinct (source_id, rid) pairs drawn from its
+        members (build_view materialises one row per matching source row),
+        so a view holding as many rows as the source holds can only be all
+        of them. A filter that happens to match every row is
+        indistinguishable from no filter here — and that's fine, because the
+        answer is genuinely identical either way. `src` covers a merge
+        without special-casing: _merge_source_dict's row_count is already
+        the sum of its members'.
+
+        Takes the source dict the caller already has rather than looking it
+        up: get_source runs a COUNT(DISTINCT rid) over row_tags, which on a
+        heavily tagged source is ~12ms — enough that adding a lookup here
+        would have eaten the entire saving this check exists to unlock.
+
+        Restricted to root views: a 'group'/'group_virtual' sub-view is a
+        subset by construction, and its row_count comparison would be
+        meaningless anyway. A root_virtual view is always this case by
+        construction (build_view only goes virtual when unfiltered — see
+        _build_virtual_root_view) without needing the row_count comparison,
+        which matters because it has no v.view_N to have been counted from
+        in the first place."""
+        if handle.get("kind") == "root_virtual":
+            return True
+        if handle.get("kind", "root") != "root":
+            return False
+        return bool(src["row_count"]) and handle["row_count"] == src["row_count"]
+
+    def group_summary(self, view_id: str, column: str, order: str = "count", direction: str | None = None,
+                       limit: int = 1000, path: list[dict] | None = None) -> dict:
+        """One aggregate pass over the already-filtered view — SELECT val,
+        count(*) per member, unioned and re-summed. Not a paging operation,
+        so no O(window) concern here; capped at `limit` distinct groups.
+
+        `path` narrows to one nested group's rows before aggregating the
+        next column — [{"column": ..., "value": ...}, ...] for every outer
+        level already chosen, e.g. computing the User breakdown *within*
+        the Process="svchost.exe" group of a Process-then-User grouping.
+
+        A 'datetime' column groups by calendar day (DAY_BUCKET) rather than
+        exact timestamp — grouping by the raw value would put nearly every
+        row in a group of its own at second/millisecond precision, which
+        isn't useful for anything. `expand_group`/`_virtual_group_where`
+        match this same DAY_BUCKET'ing (via _eq_condition's is_datetime
+        flag) so a click on a day group's row actually finds its rows.
+
+        `direction` defaults per `order` if not given explicitly (matches
+        the behavior before either was ever configurable): "desc" for
+        count (most-common-first), "asc" for value (alphabetical / chrono
+        ascending) — both are swappable independent of that default.
+
+        An unfiltered root view skips the join and aggregates the member
+        tables directly — see _grouping_covers_whole_source. That's not a
+        micro-optimisation: the joined shape can't use a column index at
+        all (verified with EXPLAIN QUERY PLAN — adding one leaves the plan
+        byte-identical: SCAN vv, SEARCH s USING INTEGER PRIMARY KEY, USE
+        TEMP B-TREE FOR GROUP BY, because the plan is driven from the view
+        table and reaches the source by rid), whereas the direct shape gets
+        the same covering-index scan column_values does. Group-by-a-column
+        on a table you just opened is the common case, and on a big merge
+        it's the one that hurts."""
+        handle = self._views.get(view_id)
+        if not handle:
+            raise KeyError("View expired — rebuild it")
+        src = self.get_source(handle["source_id"])
+        colnames = {c["name"]: c["type"] for c in src["columns"]}
+        if column not in colnames:
+            raise KeyError(column)
+        is_datetime = colnames[column] == "datetime"
+        path_clauses, path_params = self._path_where(path, colnames, alias="s")
+        extra_where = "".join(f" AND {c}" for c in path_clauses)
+
+        val_expr = f"DAY_BUCKET(s.{q(column)})" if is_datetime else f"s.{q(column)}"
+        members = self._resolve_members(handle["source_id"])
+        whole_source = not path_clauses and self._grouping_covers_whole_source(handle, src)
+        # A root_virtual view has no v.view_N to join at all (it was never
+        # materialised — see _build_virtual_root_view), path or no path, so
+        # it always takes the direct-against-member-tables shape; a real
+        # 'root' view only gets to skip the join when it's provably
+        # unfiltered (whole_source, no path).
+        direct = whole_source or handle.get("kind") == "root_virtual"
+        if direct:
+            # A datetime column groups by DAY_BUCKET(col), a functional
+            # expression a plain index on the raw column can't serve — same
+            # exclusion _ensure_column_index_building already documents for
+            # _numeric_expr'd numeric comparisons. Only triggered for the
+            # true whole_source (unfiltered, no path) case, same scope as
+            # before this had to also cover root_virtual.
+            if whole_source and not is_datetime:
+                for m in members:
+                    self._ensure_column_index_building(m["source_id"], column, m["table_name"])
+            branches = [
+                f"SELECT {val_expr} AS val, count(*) AS n FROM {q(m['table_name'])} s WHERE 1=1{extra_where} GROUP BY 1"
+                for m in members
+            ]
+        else:
+            branches = [
+                f"SELECT {val_expr} AS val, count(*) AS n FROM v.{q(view_id)} vv "
+                f"JOIN {q(m['table_name'])} s ON s.rid = vv.rid AND vv.source_id = {int(m['source_id'])} "
+                f"WHERE 1=1{extra_where} GROUP BY 1"
+                for m in members
+            ]
+        union_sql = " UNION ALL ".join(branches)
+        params: list[Any] = []
+        for _ in members:
+            params.extend(path_params)
+        if direction is None:
+            direction = "asc" if order == "value" else "desc"
+        dir_sql = "DESC" if direction == "desc" else "ASC"
+        if order == "value":
+            order_sql = f"{_numeric_expr('val')} {dir_sql}" if colnames[column] == "number" else f"val COLLATE NOCASE {dir_sql}"
+        else:
+            order_sql = f"n {dir_sql}"
+        with self.lock:
+            rows = self.db.execute(
+                f"SELECT val, SUM(n) AS n FROM ({union_sql}) GROUP BY val ORDER BY {order_sql} LIMIT ?",
+                (*params, limit + 1),
+            ).fetchall()
+        truncated = len(rows) > limit
+        rows = rows[:limit]
+        return {"groups": [{"value": r["val"], "count": r["n"]} for r in rows], "truncated": truncated}
+
+    def expand_group(self, view_id: str, column: str, value: Any, path: list[dict] | None = None) -> dict:
+        """Measures the group's real size within the current filtered root
+        view (never trusts a client-cached count — the outer filter may have
+        changed), then picks a strategy: small single-source groups page
+        directly (no v.view_N churn); large groups, or any group on a
+        merge, get a real indexed sub-view so paging stays O(window) even
+        for a single dominant value across hundreds of thousands of rows.
+
+        A root_virtual parent (see _build_virtual_root_view) has no
+        v.view_N to join — it's always a single, unfiltered source, so
+        every query here goes straight at the member table instead, and a
+        materialised sub-view's root_pos is just the member table's own
+        rid (root_virtual's outer order is rid order by construction)."""
+        root = self._views.get(view_id)
+        if not root:
+            raise KeyError("View expired — rebuild it")
+        src = self.get_source(root["source_id"])
+        colnames = {c["name"]: c["type"] for c in src["columns"]}
+        if column not in colnames:
+            raise KeyError(column)
+
+        members = self._resolve_members(root["source_id"])
+        col_ident = f"s.{q(column)}"
+        cond_sql, cond_val = self._eq_condition(col_ident, value, colnames[column] == "datetime")
+        path_clauses, path_params = self._path_where(path, colnames, alias="s")
+        extra_where = "".join(f" AND {c}" for c in path_clauses)
+        is_root_virtual = root.get("kind") == "root_virtual"
+
+        with self.lock:
+            total = 0
+            for m in members:
+                if is_root_virtual:
+                    n = self.db.execute(
+                        f"SELECT count(*) FROM {q(m['table_name'])} s WHERE {cond_sql}{extra_where}",
+                        [*cond_val, *path_params],
+                    ).fetchone()[0]
+                else:
+                    n = self.db.execute(
+                        f"SELECT count(*) FROM v.{q(view_id)} vv JOIN {q(m['table_name'])} s "
+                        f"ON s.rid = vv.rid AND vv.source_id = ? WHERE {cond_sql}{extra_where}",
+                        [m["source_id"], *cond_val, *path_params],
+                    ).fetchone()[0]
+                total += n
+
+        is_merge = bool(src.get("is_merge"))
+        if is_merge or total > self.GROUP_MATERIALIZE_THRESHOLD:
+            self._view_seq += 1
+            vid = f"view_{self._view_seq}"
+            branches = []
+            params: list[Any] = []
+            for m in members:
+                if is_root_virtual:
+                    branches.append(
+                        f"SELECT s.rid AS root_pos, {int(m['source_id'])} AS source_id, s.rid AS rid "
+                        f"FROM {q(m['table_name'])} s WHERE {cond_sql}{extra_where}"
+                    )
+                    params.extend([*cond_val, *path_params])
+                else:
+                    branches.append(
+                        f"SELECT vv.pos AS root_pos, vv.source_id, vv.rid FROM v.{q(view_id)} vv "
+                        f"JOIN {q(m['table_name'])} s ON s.rid = vv.rid AND vv.source_id = ? WHERE {cond_sql}{extra_where}"
+                    )
+                    params.extend([m["source_id"], *cond_val, *path_params])
+            union_sql = " UNION ALL ".join(branches)
+            with self.lock, self.db:
+                self.db.execute(f"CREATE TABLE v.{q(vid)} (pos INTEGER PRIMARY KEY, source_id INTEGER, rid INTEGER)")
+                self.db.execute(
+                    f"INSERT INTO v.{q(vid)}(pos, source_id, rid) "
+                    f"SELECT ROW_NUMBER() OVER (ORDER BY root_pos), source_id, rid FROM ({union_sql})",
+                    params,
+                )
+                n = self.db.execute(f"SELECT count(*) FROM v.{q(vid)}").fetchone()[0]
+            self._views[vid] = {
+                "view_id": vid, "source_id": root["source_id"], "row_count": n,
+                "kind": "group", "parent_view_id": view_id,
+            }
+            return {"view_id": vid, "row_count": n, "elapsed_ms": 0}
+
+        self._view_seq += 1
+        vid = f"view_{self._view_seq}"
+        self._views[vid] = {
+            "view_id": vid, "source_id": root["source_id"], "row_count": total,
+            "kind": "group_virtual", "parent_view_id": view_id,
+            "column": column, "value": value, "members": members, "path": path,
+        }
+        return {"view_id": vid, "row_count": total, "elapsed_ms": 0}
+
+    def _virtual_group_where(self, handle: dict) -> tuple[str, list]:
+        """WHERE fragment (unqualified column names, against the member
+        table directly) for a group_virtual handle's own column=value plus
+        every outer path level already fixed by nested grouping — shared by
+        every place that reads straight off the backing member table for a
+        small, ungathered group."""
+        column, value = handle["column"], handle["value"]
+        src = self.get_source(handle["members"][0]["source_id"])
+        colnames = {c["name"]: c["type"] for c in src["columns"]}
+        cond_sql, cond_val = self._eq_condition(q(column), value, colnames[column] == "datetime")
+        path_clauses, path_params = self._path_where(handle.get("path"), colnames)
+        extra = "".join(f" AND {c}" for c in path_clauses)
+        return f"{cond_sql}{extra}", [*cond_val, *path_params]
+
+    @staticmethod
+    def _compile_condition(col: str, op: str, val: Any, colnames: dict) -> tuple[str, list]:
+        """Compile one column/op/value condition into a parameterized clause.
+        Shared by the flat quick-filter list and the guided filter-tree's
+        'cond' leaves. Returns ("", []) for an unknown column/op or an empty
+        value on ops that require one."""
+        if col not in colnames:
+            return "", []
+        c = q(col)
+        numeric = colnames[col] == "number"
+        if op == "contains":
+            if val == "":
+                return "", []
+            return f"{c} LIKE ? ESCAPE '\\'", [f"%{_esc_like(val)}%"]
+        if op == "not_contains":
+            if val == "":
+                return "", []
+            return f"({c} NOT LIKE ? ESCAPE '\\' OR {c} IS NULL)", [f"%{_esc_like(val)}%"]
+        if op == "equals":
+            if val == "":
+                return "", []
+            return f"{c} = ?", [val]
+        if op == "not_equals":
+            if val == "":
+                return "", []
+            return f"({c} <> ? OR {c} IS NULL)", [val]
+        if op == "starts":
+            if val == "":
+                return "", []
+            return f"{c} LIKE ? ESCAPE '\\'", [f"{_esc_like(val)}%"]
+        if op == "regex":
+            if val == "":
+                return "", []
+            return f"{c} REGEXP ?", [val]
+        if op in (">", ">=", "<", "<="):
+            if val == "":
+                return "", []
+            lhs = _numeric_expr(c) if numeric else c
+            return f"{lhs} {op} ?", [float(val) if numeric else val]
+        if op == "empty":
+            return f"({c} IS NULL OR {c} = '')", []
+        if op == "not_empty":
+            return f"({c} IS NOT NULL AND {c} <> '')", []
+        if op == "in":
+            items = [s for s in (val if isinstance(val, list) else str(val).split("\n")) if s != ""]
+            if not items:
+                return "", []
+            return f"{c} IN ({','.join('?' * len(items))})", items
+        return "", []
+
+    @staticmethod
+    def _tree_has_raw(node: dict | None) -> bool:
+        """True if any node in the filter tree is a raw-SQL fragment. Raw
+        nodes assume a single table_name for their EXPLAIN QUERY PLAN
+        validation, so they're rejected for merges rather than extended to
+        dry-run per member."""
+        if not node:
+            return False
+        if node.get("type") == "raw":
+            return True
+        if node.get("type") == "group":
+            return any(Store._tree_has_raw(c) for c in node.get("children", []))
+        return False
+
+    def _compile_tree(self, node: dict | None, colnames: dict, source_id: int, table_name: str) -> tuple[str, list]:
+        """Compile a guided filter-builder tree (group/cond/raw nodes) into a
+        parameterized WHERE fragment."""
+        if not node:
+            return "", []
+        kind = node.get("type")
+        if kind == "group":
+            parts: list[str] = []
+            params: list[Any] = []
+            for child in node.get("children", []):
+                c, p = self._compile_tree(child, colnames, source_id, table_name)
+                if c:
+                    parts.append(c)
+                    params.extend(p)
+            if not parts:
+                return "", []
+            joiner = " OR " if node.get("op") == "OR" else " AND "
+            return "(" + joiner.join(parts) + ")", params
+        if kind == "raw":
+            sql = node.get("sql", "")
+            # Re-validated on every compile, not just at authoring time — a
+            # stored preset may be replayed later against a different schema.
+            self.validate_where_fragment(source_id, sql)
+            return f"({sql})", []
+        if kind == "cond":
+            col, op = node.get("column"), node.get("op")
+            c, p = self._compile_condition(col, op, node.get("value", ""), colnames)
+            if c and op in SARGABLE_OPS and col in colnames:
+                self._ensure_column_index_building(source_id, col, table_name)
+            return c, p
+        return "", []
+
+    FORBIDDEN_SQL_RE = re.compile(
+        r"\b(select|insert|update|delete|drop|alter|create|replace|reindex|"
+        r"union|attach|detach|pragma|vacuum|exec)\b",
+        re.IGNORECASE,
+    )
+    ALLOWED_SQL_WORDS = {
+        "AND", "OR", "NOT", "IS", "NULL", "IN", "BETWEEN", "LIKE", "GLOB", "REGEXP", "ESCAPE",
+        "CAST", "REAL", "TEXT", "INTEGER", "COALESCE", "LENGTH", "LOWER", "UPPER", "SUBSTR",
+        "TRIM", "TRUE", "FALSE",
+    }
+
+    def validate_where_fragment(self, source_id: int, fragment: str) -> None:
+        """Raise ValueError with a human-readable reason for anything that is
+        not a safe, side-effect-free boolean expression over this source's
+        own columns.
+
+        The actual safety boundary is that this fragment is only ever spliced
+        into `WHERE (<fragment>)` against a FROM clause the caller cannot
+        influence (always this source's own table) — user text never
+        controls FROM/JOIN. Blacklisting SELECT closes the one way that
+        boundary could be defeated (a subquery reading row_tags,
+        sqlite_master, or another source's table). The identifier allowlist
+        and the EXPLAIN QUERY PLAN dry-run below are good defense-in-depth
+        and produce better error messages, but are not by themselves a
+        sufficient boundary — regex-based SQL sanitization has known edge
+        cases, so raw mode's blast radius is kept small by construction
+        (no SELECT at all, ever) rather than by trying to perfect this list.
+        """
+        frag = (fragment or "").strip()
+        if not frag:
+            raise ValueError("Empty expression")
+        if frag.count("(") != frag.count(")"):
+            raise ValueError("Unbalanced parentheses")
+        for qc in ("'", '"'):
+            if (frag.count(qc) - 2 * frag.count(qc * 2)) % 2 != 0:
+                raise ValueError("Unbalanced quotes")
+
+        # Blank out quoted-literal contents before keyword/identifier scanning
+        # so a forensic value like CommandLine = 'SELECT * FROM users' isn't
+        # mistaken for a SELECT statement, and a value like 'Sysmon' isn't
+        # mistaken for a bare identifier.
+        structural = _blank_string_literals(frag)
+        if ";" in structural or "--" in structural or "/*" in structural or "*/" in structural:
+            raise ValueError("Statement separators and comments are not allowed")
+        if self.FORBIDDEN_SQL_RE.search(structural):
+            raise ValueError("Only a boolean filter expression is allowed — no SELECT/PRAGMA/ATTACH/etc.")
+
+        src = self.get_source(source_id)
+        colnames = {c["name"] for c in src["columns"]}
+        for ident in re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\b", structural):
+            if ident.upper() in self.ALLOWED_SQL_WORDS or ident in colnames or NUM_RE.match(ident):
+                continue
+            raise ValueError(f"Unknown identifier: {ident}")
+
+        ro = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, check_same_thread=False)
+        ro.row_factory = sqlite3.Row
+        ro.create_function("REGEXP", 2, _regexp, deterministic=True)
+        try:
+            ro.execute(f"EXPLAIN QUERY PLAN SELECT 1 FROM {q(src['table_name'])} WHERE ({frag}) LIMIT 0")
+        except sqlite3.Error as e:
+            raise ValueError(f"Not a valid filter expression: {e}")
+        finally:
+            ro.close()
+
+    def _compile_where(self, source_id, src, spec, colnames) -> tuple[str, list]:
+        clauses: list[str] = []
+        params: list[Any] = []
+
+        for f in spec.get("filters", []):
+            col, op = f.get("column"), f.get("op", "contains")
+            c, p = self._compile_condition(col, op, f.get("value", ""), colnames)
+            if c:
+                clauses.append(c)
+                params.extend(p)
+                if op in SARGABLE_OPS and col in colnames:
+                    self._ensure_column_index_building(source_id, col, src["table_name"])
+
+        tree = spec.get("filter_tree")
+        if tree:
+            c, p = self._compile_tree(tree, colnames, source_id, src["table_name"])
+            if c:
+                clauses.append(c)
+                params.extend(p)
+
+        search_mode = spec.get("search_mode", "contains")
+        search = (spec.get("search") or "").strip()
+        if search_mode == "regex" and search:
+            blob = _blob_expr([c["name"] for c in src["columns"]])
+            clauses.append(f"({blob}) REGEXP ?")
+            params.append(search)
+        elif search_mode == "advanced":
+            terms = spec.get("search_terms") or []
+            if terms:
+                cols = [c["name"] for c in src["columns"]]
+                if not src["has_fts"]:
+                    self._ensure_fts_building(source_id)
+                if src["has_fts"]:
+                    clause, p = _advanced_fts_clause(q("fts_" + str(source_id)), _blob_expr(cols), terms)
+                else:
+                    clause, p = _advanced_like_clause(cols, terms)
+                if clause:
+                    clauses.append(clause)
+                    params.extend(p)
+        elif search:
+            # A true substring match either way — the trigram index (a bare
+            # `doc LIKE ?` against the fts table, pushed down onto the
+            # trigram tokenizer; see build_fts/_fts_like_pattern for why
+            # not MATCH) makes it fast once built. Falls back to a blob
+            # LIKE scan — same results, just slower — when the index isn't
+            # ready yet (kicked off here in the background) or the term
+            # can't route through it (under 3 chars, or contains a LIKE
+            # wildcard the unescaped pushdown form would misinterpret).
+            if not src["has_fts"]:
+                self._ensure_fts_building(source_id)
+            pattern = _fts_like_pattern(search)
+            if src["has_fts"] and pattern is not None:
+                fts_ident = q("fts_" + str(source_id))
+                clauses.append(f"rid IN (SELECT rowid FROM {fts_ident} WHERE doc LIKE ?)")
+                params.append(pattern)
+            else:
+                blob = _blob_expr([c["name"] for c in src["columns"]])
+                clauses.append(f"({blob}) LIKE ? ESCAPE '\\'")
+                params.append(f"%{_esc_like(search)}%")
+
+        tag_filter = spec.get("tags") or []
+        if tag_filter:
+            if tag_filter == ["__any__"]:
+                clauses.append("rid IN (SELECT rid FROM row_tags WHERE source_id=?)")
+                params.append(source_id)
+            elif tag_filter == ["__none__"]:
+                clauses.append("rid NOT IN (SELECT rid FROM row_tags WHERE source_id=?)")
+                params.append(source_id)
+            else:
+                ids = [int(t) for t in tag_filter if str(t).isdigit()]
+                if ids:
+                    clauses.append(
+                        f"rid IN (SELECT rid FROM row_tags WHERE source_id=? AND tag_id IN ({','.join('?' * len(ids))}))"
+                    )
+                    params.append(source_id)
+                    params.extend(ids)
+
+        time_range = spec.get("time_range")
+        if time_range and time_range.get("enabled") and (time_range.get("start") or time_range.get("end")):
+            start_norm = _ts_normalize(time_range["start"]) if time_range.get("start") else None
+            end_norm = _ts_normalize(time_range["end"]) if time_range.get("end") else None
+            col = time_range.get("column")
+            # An explicit column only applies here if this member actually
+            # has it as a datetime column — otherwise (blank/"all columns"
+            # mode, or a merge member that doesn't share this column) fall
+            # back to every datetime column on this table, OR'd together:
+            # a row counts as in-range if *any* of its timestamps is —
+            # the "timestomped creation date, but a real modified date"
+            # case the timeframe filter exists for in the first place.
+            if col and colnames.get(col) == "datetime":
+                ts_cols = [col]
+            else:
+                ts_cols = [c for c, t in colnames.items() if t == "datetime"]
+            if ts_cols and (start_norm or end_norm):
+                parts = []
+                for c in ts_cols:
+                    expr = f"TS_NORMALIZE({q(c)})"
+                    if start_norm is not None and end_norm is not None:
+                        parts.append(f"{expr} BETWEEN ? AND ?")
+                        params.extend([start_norm, end_norm])
+                    elif start_norm is not None:
+                        parts.append(f"{expr} >= ?")
+                        params.append(start_norm)
+                    else:
+                        parts.append(f"{expr} <= ?")
+                        params.append(end_norm)
+                clauses.append("(" + " OR ".join(parts) + ")")
+
+        return " AND ".join(clauses), params
+
+    @staticmethod
+    def _compile_order(spec, colnames) -> str:
+        sort = spec.get("sort") or []
+        parts = []
+        for s in sort:
+            col = s.get("column")
+            if col not in colnames:
+                continue
+            direction = "DESC" if str(s.get("dir", "asc")).lower() == "desc" else "ASC"
+            if colnames[col] == "number":
+                parts.append(f"{_numeric_expr(q(col))} {direction}")
+            else:
+                parts.append(f"{q(col)} COLLATE NOCASE {direction}")
+        parts.append("rid ASC")
+        return "ORDER BY " + ", ".join(parts)
+
+    def fetch_rows(self, view_id: str, start: int, count: int) -> dict:
+        """Pages v.view_N by pos, then resolves each row's cells/tags/notes
+        against ITS OWN source_id — not a single handle-level constant. For
+        an ordinary view every row shares one source_id (one query, same
+        cost as before); for a merged view rows are grouped by their real
+        distinct member source_id (bounded by window size × member count)
+        and resolved per member. Either way this stays O(window)."""
+        handle = self._views.get(view_id)
+        if not handle:
+            raise KeyError("View expired — rebuild it")
+        if handle.get("kind") == "group_virtual":
+            return self._fetch_virtual_group_rows(handle, start, count)
+        if handle.get("kind") == "root_virtual":
+            return self._fetch_virtual_root_rows(handle, start, count)
+        src = self.get_source(handle["source_id"])
+        cols = [c["name"] for c in src["columns"]]
+
+        with self.lock:
+            vrows = self.db.execute(
+                f"SELECT pos, source_id, rid FROM v.{q(view_id)} "
+                f"WHERE pos >= ? AND pos < ? ORDER BY pos",
+                (start + 1, start + 1 + count),
+            ).fetchall()
+
+            by_source: dict[int, list[int]] = {}
+            for r in vrows:
+                by_source.setdefault(r["source_id"], []).append(r["rid"])
+
+            cellmap: dict[tuple[int, int], tuple] = {}
+            tags: dict[tuple[int, int], list[int]] = {}
+            notes: dict[tuple[int, int], str] = {}
+            sel = ", ".join(q(c) for c in cols)
+            for sid, rids in by_source.items():
+                member_table = self.get_source(sid)["table_name"]
+                ph = ",".join("?" * len(rids))
+                for row in self.db.execute(f"SELECT rid, {sel} FROM {q(member_table)} WHERE rid IN ({ph})", rids):
+                    cellmap[(sid, row["rid"])] = tuple(row[c] for c in cols)
+                for rid, tid in self.db.execute(
+                    f"SELECT rid, tag_id FROM row_tags WHERE source_id=? AND rid IN ({ph})",
+                    [sid, *rids],
+                ):
+                    tags.setdefault((sid, rid), []).append(tid)
+                for rid, note in self.db.execute(
+                    f"SELECT rid, note FROM row_notes WHERE source_id=? AND rid IN ({ph})",
+                    [sid, *rids],
+                ):
+                    notes[(sid, rid)] = note
+
+        out = []
+        for r in vrows:
+            key = (r["source_id"], r["rid"])
+            out.append({
+                "pos": r["pos"] - 1,
+                "source_id": r["source_id"],
+                "rid": r["rid"],
+                "cells": list(cellmap.get(key, ("",) * len(cols))),
+                "tags": tags.get(key, []),
+                "note": notes.get(key),
+            })
+        return {"start": start, "rows": out}
+
+    def _fetch_virtual_group_rows(self, handle: dict, start: int, count: int) -> dict:
+        """Pages a small, ungathered group directly with LIMIT/OFFSET —
+        expand_group only chooses this path for a single-source (non-merge)
+        group under GROUP_MATERIALIZE_THRESHOLD, so `handle['members']`
+        always has exactly one entry here. Ordered by rid (stable insertion
+        order), not the outer view's actual sort — an accepted simplification
+        for this fast/small-group path; a group above the threshold (or on a
+        merge) always gets the materialized path instead, which does
+        preserve the outer sort via root_pos."""
+        member = handle["members"][0]
+        sid = member["source_id"]
+        src = self.get_source(sid)
+        cols = [c["name"] for c in src["columns"]]
+        where_sql, where_params = self._virtual_group_where(handle)
+        sel = ", ".join(q(c) for c in cols)
+
+        with self.lock:
+            rows = self.db.execute(
+                f"SELECT rid, {sel} FROM {q(member['table_name'])} WHERE {where_sql} "
+                f"ORDER BY rid LIMIT ? OFFSET ?",
+                [*where_params, count, start],
+            ).fetchall()
+            rids = [r["rid"] for r in rows]
+            tags: dict[int, list[int]] = {}
+            notes: dict[int, str] = {}
+            if rids:
+                ph = ",".join("?" * len(rids))
+                for rid, tid in self.db.execute(
+                    f"SELECT rid, tag_id FROM row_tags WHERE source_id=? AND rid IN ({ph})", [sid, *rids]
+                ):
+                    tags.setdefault(rid, []).append(tid)
+                for rid, note in self.db.execute(
+                    f"SELECT rid, note FROM row_notes WHERE source_id=? AND rid IN ({ph})", [sid, *rids]
+                ):
+                    notes[rid] = note
+
+        out = []
+        for i, r in enumerate(rows):
+            out.append({
+                "pos": start + i,
+                "source_id": sid,
+                "rid": r["rid"],
+                "cells": [r[c] for c in cols],
+                "tags": tags.get(r["rid"], []),
+                "note": notes.get(r["rid"]),
+            })
+        return {"start": start, "rows": out}
+
+    def _fetch_virtual_root_rows(self, handle: dict, start: int, count: int) -> dict:
+        """Pages the source table directly by rid — no v.view_N to build,
+        since an unfiltered/unsorted root_virtual view is, by construction,
+        every row of the source in its natural (already free) order. Same
+        LIMIT/OFFSET shape _fetch_virtual_group_rows uses for a small
+        ungathered group; here it's the invariant #2 carve-out (unfiltered,
+        rid-ordered), not a size threshold."""
+        sid = handle["source_id"]
+        src = self.get_source(sid)
+        cols = [c["name"] for c in src["columns"]]
+        sel = ", ".join(q(c) for c in cols)
+
+        with self.lock:
+            rows = self.db.execute(
+                f"SELECT rid, {sel} FROM {q(src['table_name'])} ORDER BY rid LIMIT ? OFFSET ?",
+                (count, start),
+            ).fetchall()
+            rids = [r["rid"] for r in rows]
+            tags: dict[int, list[int]] = {}
+            notes: dict[int, str] = {}
+            if rids:
+                ph = ",".join("?" * len(rids))
+                for rid, tid in self.db.execute(
+                    f"SELECT rid, tag_id FROM row_tags WHERE source_id=? AND rid IN ({ph})", [sid, *rids]
+                ):
+                    tags.setdefault(rid, []).append(tid)
+                for rid, note in self.db.execute(
+                    f"SELECT rid, note FROM row_notes WHERE source_id=? AND rid IN ({ph})", [sid, *rids]
+                ):
+                    notes[rid] = note
+
+        out = []
+        for i, r in enumerate(rows):
+            out.append({
+                "pos": start + i,
+                "source_id": sid,
+                "rid": r["rid"],
+                "cells": [r[c] for c in cols],
+                "tags": tags.get(r["rid"], []),
+                "note": notes.get(r["rid"]),
+            })
+        return {"start": start, "rows": out}
+
+    def tag_positions(self, view_id: str, limit: int = 20_000) -> list[list[int]]:
+        """Positions of tagged rows inside a view, for the scrollbar rail."""
+        handle = self._views.get(view_id)
+        if not handle:
+            raise KeyError("View expired — rebuild it")
+        if handle.get("kind") == "group_virtual":
+            return []  # no pos-ordered backing table for a small ungathered group — documented limitation
+        if handle.get("kind") == "root_virtual":
+            # pos = rid - 1 directly: an unfiltered root_virtual view is
+            # every row of the source in rid order, so a tagged row's rank
+            # IS its rid - no join against a backing view table needed, and
+            # (unlike group_virtual) never a stub — see _build_virtual_root_view.
+            with self.lock:
+                rows = self.db.execute(
+                    "SELECT rid - 1 AS p, tag_id FROM row_tags WHERE source_id=? ORDER BY rid LIMIT ?",
+                    (handle["source_id"], limit),
+                ).fetchall()
+            return [[r["p"], r["tag_id"]] for r in rows]
+        with self.lock:
+            rows = self.db.execute(
+                f"SELECT vv.pos - 1 AS p, rt.tag_id FROM v.{q(view_id)} vv "
+                f"JOIN row_tags rt ON rt.rid = vv.rid AND rt.source_id = vv.source_id "
+                f"ORDER BY vv.pos LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [[r["p"], r["tag_id"]] for r in rows]
+
+    def find_position(self, view_id: str, source_id: int, rid: int) -> int | None:
+        """0-indexed position of one (source_id, rid) row inside a view, or
+        None if it's not in this view. Positions are view-specific and get
+        wiped on every rebuild (see CLAUDE.md); this is how the frontend
+        re-centers the grid on a previously-selected row after its view is
+        rebuilt out from under it, e.g. clearing filters."""
+        handle = self._views.get(view_id)
+        if not handle:
+            raise KeyError("View expired — rebuild it")
+        if handle.get("kind") == "group_virtual":
+            return None  # no pos-ordered backing table for a small ungathered group
+        if handle.get("kind") == "root_virtual":
+            if source_id != handle["source_id"]:
+                return None
+            src = self.get_source(source_id)
+            with self.lock:
+                row = self.db.execute(
+                    f"SELECT 1 FROM {q(src['table_name'])} WHERE rid=?", (rid,)
+                ).fetchone()
+            return rid - 1 if row else None
+        with self.lock:
+            row = self.db.execute(
+                f"SELECT pos FROM v.{q(view_id)} WHERE source_id=? AND rid=?",
+                (source_id, rid),
+            ).fetchone()
+        return row["pos"] - 1 if row else None
+
+    def column_values(self, source_id: int, column: str, limit: int = 200) -> list[dict]:
+        """Distinct values + counts for one column — the filter box's
+        value-picker dropdown.
+
+        Kicks off the same lazy B-tree index _compile_where's sargable
+        filters do (see _ensure_column_index_building), because this exact
+        shape is what a plain single-column index is *best* at: verified
+        with EXPLAIN QUERY PLAN, `SELECT col, count(*) FROM src GROUP BY 1`
+        goes from `SCAN src` + `USE TEMP B-TREE FOR GROUP BY` to `SCAN src
+        USING COVERING INDEX` — never touching the table pages, and with the
+        grouping sort gone entirely. Fire-and-forget as everywhere else: this
+        call still runs today's scan, the next open of the dropdown gets the
+        index. It's also the same index an equals/in filter on this column
+        wants, which is the overwhelmingly likely next action after picking
+        a value out of this list."""
+        src = self.get_source(source_id)
+        names = {c["name"] for c in src["columns"]}
+        if column not in names:
+            raise KeyError(column)
+        members = self._resolve_members(source_id)
+        for m in members:
+            self._ensure_column_index_building(m["source_id"], column, m["table_name"])
+        union_sql = " UNION ALL ".join(f"SELECT {q(column)} AS val FROM {q(m['table_name'])}" for m in members)
+        with self.lock:
+            rows = self.db.execute(
+                f"SELECT val, count(*) AS n FROM ({union_sql}) GROUP BY 1 ORDER BY n DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [{"value": r["val"], "count": r["n"]} for r in rows]
+
+    def column_max_lengths(self, source_id: int) -> dict[str, int]:
+        """MAX(LENGTH(col)) per column, across all member tables — backs the
+        UI's autofit-column-width shortcut. One sequential scan per member
+        table, every column computed in a single pass.
+
+        Cached per source, invalidated by row_count changing — a full scan
+        over every column of a 10M-row source isn't cheap, and autofit is a
+        button a user can click repeatedly (once per column double-click,
+        plus a "fit all" action) without the underlying data changing at
+        all between clicks."""
+        src = self.get_source(source_id)
+        cached = self._maxlen_cache.get(source_id)
+        if cached and cached[0] == src["row_count"]:
+            return cached[1]
+        cols = [c["name"] for c in src["columns"]]
+        members = self._resolve_members(source_id)
+        sel = ", ".join(f"MAX(LENGTH({q(c)}))" for c in cols)
+        maxes = [0] * len(cols)
+        with self.lock:
+            for m in members:
+                row = self.db.execute(f"SELECT {sel} FROM {q(m['table_name'])}").fetchone()
+                for i, v in enumerate(row):
+                    if v and v > maxes[i]:
+                        maxes[i] = v
+        result = {c: maxes[i] for i, c in enumerate(cols)}
+        self._maxlen_cache[source_id] = (src["row_count"], result)
+        return result
+
+    # -------------------------------------------------------------------- tags
+
+    def list_tags(self) -> list[dict]:
+        with self.lock:
+            return [dict(r) for r in self.db.execute("SELECT * FROM tag_defs ORDER BY id")]
+
+    def upsert_tag(self, tag_id: int | None, name: str, color: str, hotkey: str | None) -> dict:
+        with self.lock, self.db:
+            if tag_id:
+                self.db.execute(
+                    "UPDATE tag_defs SET name=?, color=?, hotkey=? WHERE id=?",
+                    (name, color, hotkey, tag_id),
+                )
+            else:
+                cur = self.db.execute(
+                    "INSERT INTO tag_defs(name, color, hotkey) VALUES (?,?,?)",
+                    (name, color, hotkey),
+                )
+                tag_id = cur.lastrowid
+            row = self.db.execute("SELECT * FROM tag_defs WHERE id=?", (tag_id,)).fetchone()
+        return dict(row)
+
+    def delete_tag(self, tag_id: int) -> None:
+        with self.lock, self.db:
+            self.db.execute("DELETE FROM row_tags WHERE tag_id=?", (tag_id,))
+            self.db.execute("DELETE FROM tag_defs WHERE id=?", (tag_id,))
+
+    def set_tags(self, source_id: int, rids: list[int], tag_id: int, on: bool) -> dict:
+        with self.lock, self.db:
+            if on:
+                self.db.executemany(
+                    "INSERT OR IGNORE INTO row_tags(source_id, rid, tag_id) VALUES (?,?,?)",
+                    [(source_id, r, tag_id) for r in rids],
+                )
+            else:
+                self.db.executemany(
+                    "DELETE FROM row_tags WHERE source_id=? AND rid=? AND tag_id=?",
+                    [(source_id, r, tag_id) for r in rids],
+                )
+        return self.tag_counts(source_id)
+
+    def set_tags_pairs(self, pairs: list[list[int]], tag_id: int, on: bool) -> dict:
+        """Same as set_tags, but for a merged view where selected rows can
+        belong to different real source_ids — each pair is that row's own
+        (source_id, rid), never the merge's synthetic negative id."""
+        if not pairs:
+            return {"counts": {}}
+        with self.lock, self.db:
+            if on:
+                self.db.executemany(
+                    "INSERT OR IGNORE INTO row_tags(source_id, rid, tag_id) VALUES (?,?,?)",
+                    [(sid, rid, tag_id) for sid, rid in pairs],
+                )
+            else:
+                self.db.executemany(
+                    "DELETE FROM row_tags WHERE source_id=? AND rid=? AND tag_id=?",
+                    [(sid, rid, tag_id) for sid, rid in pairs],
+                )
+        member_ids = sorted({sid for sid, _ in pairs})
+        ph = ",".join("?" * len(member_ids))
+        with self.lock:
+            rows = self.db.execute(
+                f"SELECT tag_id, count(*) n FROM row_tags WHERE source_id IN ({ph}) GROUP BY 1",
+                member_ids,
+            ).fetchall()
+        return {"counts": {str(r["tag_id"]): r["n"] for r in rows}}
+
+    def tag_view(self, view_id: str, tag_id: int, on: bool, exclude: list[Iterable[int]] | None = None) -> dict:
+        """Tag every row in a materialised view — the 'filter to it, then mark
+        the lot' move that filtering exists for in the first place. Uses
+        each row's own source_id from the view now, so this works unchanged
+        for merged views (a single INSERT/DELETE, no per-member looping).
+
+        `exclude` is a list of (source_id, rid) pairs to leave alone. It's
+        what backs "select all, then uncheck a few, then tag": the frontend
+        models a select-all as a flag plus an exclusion set rather than a
+        materialised Set of every position, and without this it would have
+        to fall back to sending millions of individual rids (or, worse, tag
+        everything and then untag the exclusions — which would strip the tag
+        off an excluded row that legitimately already had it). Excluded
+        rows are by construction rows the analyst had on screen to uncheck,
+        so this list is small; `affected` accounts for them without a
+        second count, since they came out of this same view."""
+        handle = self._views.get(view_id)
+        if not handle:
+            raise KeyError("View expired — rebuild it")
+        if handle.get("kind") == "group_virtual":
+            return self._tag_virtual_group(handle, tag_id, on, exclude)
+        if handle.get("kind") == "root_virtual":
+            return self._tag_virtual_root(handle, tag_id, on, exclude)
+        skip_sql, skip_params = self._exclude_clause(exclude, "source_id", "rid")
+        with self.lock, self.db:
+            if on:
+                self.db.execute(
+                    f"INSERT OR IGNORE INTO row_tags(source_id, rid, tag_id) "
+                    f"SELECT source_id, rid, ? FROM v.{q(view_id)}{skip_sql}",
+                    (tag_id, *skip_params),
+                )
+            else:
+                self.db.execute(
+                    f"DELETE FROM row_tags WHERE tag_id=? "
+                    f"AND (source_id, rid) IN (SELECT source_id, rid FROM v.{q(view_id)}{skip_sql})",
+                    (tag_id, *skip_params),
+                )
+        out = self.tag_counts(handle["source_id"])
+        out["affected"] = max(0, handle["row_count"] - len(exclude or []))
+        return out
+
+    @staticmethod
+    def _exclude_clause(exclude: list[Iterable[int]] | None, sid_col: str, rid_col: str) -> tuple[str, list[int]]:
+        """` WHERE (sid, rid) NOT IN ((?,?), ...)` for a small exclusion list,
+        or ('', []) when there's nothing to exclude."""
+        pairs = [(int(sid), int(rid)) for sid, rid in (exclude or [])]
+        if not pairs:
+            return "", []
+        tuples = ",".join(["(?,?)"] * len(pairs))
+        params: list[int] = []
+        for sid, rid in pairs:
+            params.extend((sid, rid))
+        return f" WHERE ({sid_col}, {rid_col}) NOT IN ({tuples})", params
+
+    def _tag_virtual_group(self, handle: dict, tag_id: int, on: bool,
+                           exclude: list[Iterable[int]] | None = None) -> dict:
+        member = handle["members"][0]
+        sid = member["source_id"]
+        where_sql, where_params = self._virtual_group_where(handle)
+        # A virtual group is always one real source, so only that source's
+        # rids in the exclusion list can possibly be in it.
+        skip_rids = [int(rid) for s, rid in (exclude or []) if int(s) == sid]
+        if skip_rids:
+            where_sql += f" AND rid NOT IN ({','.join('?' * len(skip_rids))})"
+            where_params = [*where_params, *skip_rids]
+        with self.lock, self.db:
+            if on:
+                self.db.execute(
+                    f"INSERT OR IGNORE INTO row_tags(source_id, rid, tag_id) "
+                    f"SELECT ?, rid, ? FROM {q(member['table_name'])} WHERE {where_sql}",
+                    [sid, tag_id, *where_params],
+                )
+            else:
+                self.db.execute(
+                    f"DELETE FROM row_tags WHERE source_id=? AND tag_id=? "
+                    f"AND rid IN (SELECT rid FROM {q(member['table_name'])} WHERE {where_sql})",
+                    [sid, tag_id, *where_params],
+                )
+        out = self.tag_counts(sid)
+        out["affected"] = max(0, handle["row_count"] - len(skip_rids))
+        return out
+
+    def _tag_virtual_root(self, handle: dict, tag_id: int, on: bool,
+                          exclude: list[Iterable[int]] | None = None) -> dict:
+        """Tagging the whole view is tagging the whole (unfiltered) source
+        table directly — same shape as _tag_virtual_group, but with no
+        column=value condition at all since a root_virtual view is every
+        row. No materialise needed regardless of view size: ordering never
+        enters into "tag every row"."""
+        sid = handle["source_id"]
+        table = self.get_source(sid)["table_name"]
+        skip_rids = [int(rid) for s, rid in (exclude or []) if int(s) == sid]
+        skip_sql = f" WHERE rid NOT IN ({','.join('?' * len(skip_rids))})" if skip_rids else ""
+        with self.lock, self.db:
+            if on:
+                self.db.execute(
+                    f"INSERT OR IGNORE INTO row_tags(source_id, rid, tag_id) "
+                    f"SELECT ?, rid, ? FROM {q(table)}{skip_sql}",
+                    [sid, tag_id, *skip_rids],
+                )
+            else:
+                self.db.execute(
+                    f"DELETE FROM row_tags WHERE source_id=? AND tag_id=? "
+                    f"AND rid IN (SELECT rid FROM {q(table)}{skip_sql})",
+                    [sid, tag_id, *skip_rids],
+                )
+        out = self.tag_counts(sid)
+        out["affected"] = max(0, handle["row_count"] - len(skip_rids))
+        return out
+
+    def tag_counts(self, source_id: int) -> dict:
+        member_ids = [m["source_id"] for m in self._resolve_members(source_id)]
+        ph = ",".join("?" * len(member_ids))
+        with self.lock:
+            rows = self.db.execute(
+                f"SELECT tag_id, count(*) n FROM row_tags WHERE source_id IN ({ph}) GROUP BY 1",
+                member_ids,
+            ).fetchall()
+        return {"counts": {str(r["tag_id"]): r["n"] for r in rows}}
+
+    def set_note(self, source_id: int, rid: int, note: str) -> None:
+        with self.lock, self.db:
+            if note.strip():
+                self.db.execute(
+                    "INSERT INTO row_notes(source_id, rid, note) VALUES (?,?,?) "
+                    "ON CONFLICT(source_id, rid) DO UPDATE SET note=excluded.note",
+                    (source_id, rid, note),
+                )
+            else:
+                self.db.execute(
+                    "DELETE FROM row_notes WHERE source_id=? AND rid=?", (source_id, rid)
+                )
+
+    # ------------------------------------------------------------ layout/views
+
+    def save_layout(self, source_id: int, payload: dict) -> None:
+        with self.lock, self.db:
+            self.db.execute(
+                "INSERT INTO layouts(source_id, payload) VALUES (?,?) "
+                "ON CONFLICT(source_id) DO UPDATE SET payload=excluded.payload",
+                (source_id, json.dumps(payload)),
+            )
+
+    def get_layout(self, source_id: int) -> dict | None:
+        with self.lock:
+            row = self.db.execute(
+                "SELECT payload FROM layouts WHERE source_id=?", (source_id,)
+            ).fetchone()
+        return json.loads(row["payload"]) if row else None
+
+    def save_view(self, source_id: int, name: str, payload: dict) -> dict:
+        with self.lock, self.db:
+            cur = self.db.execute(
+                "INSERT INTO saved_views(source_id, name, payload, saved_at) VALUES (?,?,?,?)",
+                (source_id, name, json.dumps(payload), time.strftime("%Y-%m-%dT%H:%M:%S")),
+            )
+        return {"id": cur.lastrowid, "name": name, "payload": payload}
+
+    def list_saved_views(self, source_id: int) -> list[dict]:
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT * FROM saved_views WHERE source_id=? ORDER BY id DESC", (source_id,)
+            ).fetchall()
+        return [{"id": r["id"], "name": r["name"], "payload": json.loads(r["payload"])} for r in rows]
+
+    def delete_saved_view(self, view_id: int) -> None:
+        with self.lock, self.db:
+            self.db.execute("DELETE FROM saved_views WHERE id=?", (view_id,))
+
+    # ------------------------------------------------------- sql pane sub-tabs
+
+    def list_sql_tabs(self) -> list[dict]:
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT id, name, sql, pos FROM sql_tabs ORDER BY pos, id"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def create_sql_tab(self, name: str, sql: str = "") -> dict:
+        """New tab lands at the right end of the strip (max(pos)+1)."""
+        with self.lock, self.db:
+            pos = (self.db.execute("SELECT COALESCE(MAX(pos), -1) + 1 FROM sql_tabs").fetchone()[0])
+            cur = self.db.execute(
+                "INSERT INTO sql_tabs(name, sql, pos) VALUES (?,?,?)", (name, sql, pos),
+            )
+        return {"id": cur.lastrowid, "name": name, "sql": sql, "pos": pos}
+
+    def update_sql_tab(self, tab_id: int, *, name: str | None = None, sql: str | None = None) -> dict:
+        """Partial, same None-means-leave-alone convention as
+        workspace.SavedFilters.update — a rename sends name, the editor's
+        debounced autosave sends sql."""
+        with self.lock, self.db:
+            row = self.db.execute("SELECT id, name, sql, pos FROM sql_tabs WHERE id=?", (tab_id,)).fetchone()
+            if row is None:
+                raise KeyError(f"No SQL tab {tab_id}")
+            rec = dict(row)
+            if name is not None:
+                rec["name"] = name
+            if sql is not None:
+                rec["sql"] = sql
+            self.db.execute("UPDATE sql_tabs SET name=?, sql=? WHERE id=?", (rec["name"], rec["sql"], tab_id))
+        return rec
+
+    def delete_sql_tab(self, tab_id: int) -> None:
+        with self.lock, self.db:
+            self.db.execute("DELETE FROM sql_tabs WHERE id=?", (tab_id,))
+
+    def reorder_sql_tabs(self, ordered_ids: list[int]) -> list[dict]:
+        """Renumbers pos to match the given id order. Unlike
+        workspace.SavedFilters.reorder (which has to preserve the relative
+        order of filters *outside* the group being moved), there's only one
+        flat strip here, so any id not listed just sorts after the listed
+        ones, keeping its own relative order."""
+        with self.lock, self.db:
+            known = {r["id"] for r in self.db.execute("SELECT id FROM sql_tabs").fetchall()}
+            seq = [i for i in ordered_ids if i in known]
+            self.db.executemany(
+                "UPDATE sql_tabs SET pos=? WHERE id=?", [(p, i) for p, i in enumerate(seq)],
+            )
+            # Anything unlisted keeps its order but sits after the listed run.
+            rest = [i for i in sorted(known - set(seq))]
+            self.db.executemany(
+                "UPDATE sql_tabs SET pos=? WHERE id=?", [(len(seq) + p, i) for p, i in enumerate(rest)],
+            )
+        return self.list_sql_tabs()
+
+    # ------------------------------------------ legacy filter-preset migration
+
+    def pop_legacy_presets(self) -> list[dict]:
+        """filter_presets used to be this case's own SQLite-backed table of
+        saved filters, scoped to just this case file. Presets are saved
+        filters now — one workspace-level, cross-case mechanism (see
+        CLAUDE.md and workspace.SavedFilters) instead of two overlapping
+        ones. Reads out whatever's left in a case file created before this
+        change and clears the table, so this is a one-time migration on
+        first open rather than an ongoing read on every open (the table's
+        empty for good afterward — including for a case file that's always
+        been on the new scheme, where this is just a cheap empty SELECT).
+        The caller (server.py, on case open) folds the result into
+        workspace.filters."""
+        with self.lock, self.db:
+            rows = self.db.execute("SELECT * FROM filter_presets").fetchall()
+            if rows:
+                self.db.execute("DELETE FROM filter_presets")
+        return [
+            {
+                "name": r["name"],
+                "col_names": json.loads(r["col_names"]),
+                "payload": json.loads(r["payload"]),
+            }
+            for r in rows
+        ]
+
+    # ---------------------------------------------------------------- sessions
+
+    def export_session(self, source_id: int) -> dict:
+        src = self.get_source(source_id)
+        with self.lock:
+            tags = [dict(r) for r in self.db.execute("SELECT * FROM tag_defs ORDER BY id")]
+            rt = [
+                {"rid": r["rid"], "tag_id": r["tag_id"]}
+                for r in self.db.execute(
+                    "SELECT rid, tag_id FROM row_tags WHERE source_id=? ORDER BY rid", (source_id,)
+                )
+            ]
+            notes = [
+                {"rid": r["rid"], "note": r["note"]}
+                for r in self.db.execute(
+                    "SELECT rid, note FROM row_notes WHERE source_id=? ORDER BY rid", (source_id,)
+                )
+            ]
+        return {
+            "format": "winnow-session/1",
+            "exported_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "source": {
+                "name": src["name"],
+                "path": src["path"],
+                "file_hash": src["file_hash"],
+                "row_count": src["row_count"],
+                "columns": src["columns"],
+            },
+            "tag_defs": tags,
+            "row_tags": rt,
+            "row_notes": notes,
+            "layout": self.get_layout(source_id),
+            "saved_views": self.list_saved_views(source_id),
+        }
+
+    def import_session(self, source_id: int, session: dict, merge: bool = True) -> dict:
+        src = self.get_source(source_id)
+        warnings = []
+        s_src = session.get("source", {})
+        if s_src.get("file_hash") and s_src["file_hash"] != src["file_hash"]:
+            warnings.append(
+                "Session was recorded against a different file. Row numbers may not line up."
+            )
+        # Map session tag ids onto local tag ids by name, creating what's missing.
+        local = {t["name"].lower(): t["id"] for t in self.list_tags()}
+        idmap = {}
+        for t in session.get("tag_defs", []):
+            key = t["name"].lower()
+            if key not in local:
+                new = self.upsert_tag(None, t["name"], t.get("color", "#888888"), t.get("hotkey"))
+                local[key] = new["id"]
+            idmap[t["id"]] = local[key]
+
+        with self.lock, self.db:
+            if not merge:
+                self.db.execute("DELETE FROM row_tags WHERE source_id=?", (source_id,))
+                self.db.execute("DELETE FROM row_notes WHERE source_id=?", (source_id,))
+            self.db.executemany(
+                "INSERT OR IGNORE INTO row_tags(source_id, rid, tag_id) VALUES (?,?,?)",
+                [
+                    (source_id, r["rid"], idmap.get(r["tag_id"], r["tag_id"]))
+                    for r in session.get("row_tags", [])
+                ],
+            )
+            self.db.executemany(
+                "INSERT INTO row_notes(source_id, rid, note) VALUES (?,?,?) "
+                "ON CONFLICT(source_id, rid) DO UPDATE SET note=excluded.note",
+                [(source_id, r["rid"], r["note"]) for r in session.get("row_notes", [])],
+            )
+        if session.get("layout"):
+            self.save_layout(source_id, session["layout"])
+        for sv in session.get("saved_views", []):
+            self.save_view(source_id, sv["name"], sv["payload"])
+        return {"warnings": warnings, "tags_applied": len(session.get("row_tags", []))}
+
+    # ---------------------------------------------------------- case sessions
+
+    def export_case_session(self) -> dict:
+        """Whole-case session: every open source's tags/notes/layout, in one
+        file. Builds directly on export_session — no new per-source shape."""
+        return {
+            "format": "winnow-case-session/1",
+            "exported_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "sources": [self.export_session(s["id"]) for s in self.list_sources()],
+        }
+
+    def import_case_session(self, session: dict, merge: bool = True) -> dict:
+        """Reattaches each source session by file_hash to whatever's already
+        open; if a source isn't open but its original file still exists at
+        the recorded path, re-imports it first. Local single-user tool with
+        full filesystem access already (same trust level as --open), so this
+        is the one action that can fully reconstruct a case from a session."""
+        warnings: list[str] = []
+        tags_applied = 0
+        sources_restored = 0
+        sources_reimported = 0
+        by_hash = {s["file_hash"]: s["id"] for s in self.list_sources() if s.get("file_hash")}
+
+        for src_session in session.get("sources", []):
+            s_meta = src_session.get("source", {})
+            source_id = by_hash.get(s_meta.get("file_hash"))
+            if source_id is None:
+                path = s_meta.get("path")
+                if path and os.path.isfile(path):
+                    try:
+                        rec = self.ingest_csv(path, name=s_meta.get("name"))
+                        source_id = rec["id"]
+                        sources_reimported += 1
+                    except Exception as e:
+                        warnings.append(f"Could not re-import {s_meta.get('name', path)}: {e}")
+                        continue
+                else:
+                    warnings.append(
+                        f"'{s_meta.get('name', 'unknown')}' isn't open and its original file "
+                        f"wasn't found at {path or 'an unknown path'} — skipped"
+                    )
+                    continue
+            res = self.import_session(source_id, src_session, merge=merge)
+            warnings.extend(res["warnings"])
+            tags_applied += res["tags_applied"]
+            sources_restored += 1
+
+        return {
+            "warnings": warnings,
+            "tags_applied": tags_applied,
+            "sources_restored": sources_restored,
+            "sources_reimported": sources_reimported,
+        }
+
+    _SESSION_NAME_RE = re.compile(r"[^A-Za-z0-9_ -]")
+
+    def _sessions_dir(self) -> str:
+        d = os.path.join(os.path.dirname(os.path.abspath(self.path)), "sessions")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def _session_path(self, name: str) -> str:
+        safe = self._SESSION_NAME_RE.sub("_", name).strip() or "session"
+        return os.path.join(self._sessions_dir(), f"{safe}.winnow_case.json")
+
+    def save_named_session(self, name: str) -> dict:
+        data = self.export_case_session()
+        with open(self._session_path(name), "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        return {"name": name, "source_count": len(data["sources"]), "saved_at": data["exported_at"]}
+
+    def list_named_sessions(self) -> list[dict]:
+        out = []
+        d = self._sessions_dir()
+        for fn in os.listdir(d):
+            if not fn.endswith(".winnow_case.json"):
+                continue
+            try:
+                with open(os.path.join(d, fn), "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                out.append({
+                    "name": fn[: -len(".winnow_case.json")],
+                    "saved_at": data.get("exported_at"),
+                    "source_count": len(data.get("sources", [])),
+                })
+            except (OSError, json.JSONDecodeError):
+                continue
+        out.sort(key=lambda s: s.get("saved_at") or "", reverse=True)
+        return out
+
+    def load_named_session(self, name: str, merge: bool = True) -> dict:
+        path = self._session_path(name)
+        if not os.path.isfile(path):
+            raise KeyError(f"No saved session named {name!r}")
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return self.import_case_session(data, merge=merge)
+
+    def delete_named_session(self, name: str) -> None:
+        path = self._session_path(name)
+        if os.path.isfile(path):
+            os.remove(path)
+
+    # --------------------------------------------------------------- exporting
+
+    def export_view_csv(self, view_id: str, tagged_only: bool = False):
+        """Validates the view eagerly, then returns a generator for the CSV
+        body. Splitting this out matters: a generator function's body
+        (including a KeyError check) doesn't run until first iterated, which
+        would happen inside StreamingResponse — too late for the route's
+        try/except to turn it into a 409."""
+        handle = self._views.get(view_id)
+        if not handle:
+            raise KeyError("View expired — rebuild it")
+        if handle.get("kind") == "group_virtual":
+            return self._export_virtual_group_csv_rows(handle, tagged_only)
+        if handle.get("kind") == "root_virtual":
+            return self._export_virtual_root_csv_rows(handle, tagged_only)
+        return self._export_view_csv_rows(view_id, handle, tagged_only)
+
+    def _export_virtual_group_csv_rows(self, handle: dict, tagged_only: bool):
+        member = handle["members"][0]
+        sid = member["source_id"]
+        src = self.get_source(sid)
+        cols = [c["name"] for c in src["columns"]]
+        where_sql, where_params = self._virtual_group_where(handle)
+        sel = ", ".join(q(c) for c in cols)
+
+        tagnames = {t["id"]: t["name"] for t in self.list_tags()}
+        buf = io.StringIO()
+        w = csv.writer(buf, lineterminator="\n")
+        w.writerow(["Line", "Tags", "Note", *cols])
+        yield buf.getvalue()
+        buf.seek(0), buf.truncate(0)
+
+        with self.lock:
+            rows = self.db.execute(
+                f"SELECT rid, {sel} FROM {q(member['table_name'])} WHERE {where_sql} ORDER BY rid", where_params
+            ).fetchall()
+            rids = [r["rid"] for r in rows]
+            tmap: dict[int, list[str]] = {}
+            nmap: dict[int, str] = {}
+            if rids:
+                ph = ",".join("?" * len(rids))
+                for rid, tid in self.db.execute(
+                    f"SELECT rid, tag_id FROM row_tags WHERE source_id=? AND rid IN ({ph})", [sid, *rids]
+                ):
+                    tmap.setdefault(rid, []).append(tagnames.get(tid, str(tid)))
+                for rid, note in self.db.execute(
+                    f"SELECT rid, note FROM row_notes WHERE source_id=? AND rid IN ({ph})", [sid, *rids]
+                ):
+                    nmap[rid] = note
+
+        for r in rows:
+            if tagged_only and r["rid"] not in tmap:
+                continue
+            w.writerow([r["rid"], "; ".join(tmap.get(r["rid"], [])), _csv_safe(nmap.get(r["rid"], "")), *[_csv_safe(r[c]) for c in cols]])
+            yield buf.getvalue()
+            buf.seek(0), buf.truncate(0)
+
+    def _export_virtual_root_csv_rows(self, handle: dict, tagged_only: bool):
+        """Streams the whole source table in rid order, chunked the same
+        keyset way _export_view_csv_rows pages v.view_N (`rid > ?` here
+        instead of `pos > ?`) — a root_virtual view can be the entire
+        source, potentially millions of rows, unlike the small bounded
+        group _export_virtual_group_csv_rows fetches in one shot. Lock is
+        acquired fresh per chunk, never held across a yield, same reasoning
+        as _export_view_csv_rows."""
+        sid = handle["source_id"]
+        src = self.get_source(sid)
+        table = src["table_name"]
+        cols = [c["name"] for c in src["columns"]]
+        sel = ", ".join(q(c) for c in cols)
+
+        tagnames = {t["id"]: t["name"] for t in self.list_tags()}
+        buf = io.StringIO()
+        w = csv.writer(buf, lineterminator="\n")
+        w.writerow(["Line", "Tags", "Note", *cols])
+        yield buf.getvalue()
+        buf.seek(0), buf.truncate(0)
+
+        last_rid = 0
+        while True:
+            with self.lock:
+                chunk = self.db.execute(
+                    f"SELECT rid, {sel} FROM {q(table)} WHERE rid > ? ORDER BY rid LIMIT 5000",
+                    (last_rid,),
+                ).fetchall()
+                if not chunk:
+                    break
+                last_rid = chunk[-1]["rid"]
+                rids = [r["rid"] for r in chunk]
+                ph = ",".join("?" * len(rids))
+                tmap: dict[int, list[str]] = {}
+                nmap: dict[int, str] = {}
+                if tagged_only:
+                    tagged_set = {
+                        row[0] for row in self.db.execute(
+                            f"SELECT DISTINCT rid FROM row_tags WHERE source_id=? AND rid IN ({ph})", [sid, *rids]
+                        )
+                    }
+                else:
+                    tagged_set = None
+                for rid, tid in self.db.execute(
+                    f"SELECT rid, tag_id FROM row_tags WHERE source_id=? AND rid IN ({ph})", [sid, *rids]
+                ):
+                    tmap.setdefault(rid, []).append(tagnames.get(tid, str(tid)))
+                for rid, note in self.db.execute(
+                    f"SELECT rid, note FROM row_notes WHERE source_id=? AND rid IN ({ph})", [sid, *rids]
+                ):
+                    nmap[rid] = note
+
+            for r in chunk:
+                if tagged_only and r["rid"] not in tagged_set:
+                    continue
+                w.writerow([r["rid"], "; ".join(tmap.get(r["rid"], [])), _csv_safe(nmap.get(r["rid"], "")),
+                           *[_csv_safe(r[c]) for c in cols]])
+            yield buf.getvalue()
+            buf.seek(0), buf.truncate(0)
+
+    def _export_view_csv_rows(self, view_id: str, handle: dict, tagged_only: bool):
+        """Streams chunks of v.view_N grouped by each row's own source_id —
+        same per-member resolution pattern as fetch_rows, so this works for
+        merged views without a single cross-table JOIN.
+
+        Acquires self.lock freshly per chunk rather than once for the whole
+        generator, and never holds it across a `yield`. A generator paused
+        at a yield inside `with self.lock:` can be resumed — or abandoned
+        via GeneratorExit on early client disconnect — from a different
+        thread than the one that acquired it; releasing a threading.RLock
+        from the wrong thread raises "cannot release un-acquired lock" and
+        can leave the store's lock stuck for every other request. Keyset
+        pagination (`pos > ?`) over v.view_N's unique index avoids the
+        OFFSET-rescans-from-zero cost that would otherwise reintroduce.
+        """
+        src = self.get_source(handle["source_id"])
+        cols = [c["name"] for c in src["columns"]]
+        sel = ", ".join(q(c) for c in cols)
+
+        tagnames = {t["id"]: t["name"] for t in self.list_tags()}
+        buf = io.StringIO()
+        w = csv.writer(buf, lineterminator="\n")
+        w.writerow(["Line", "Tags", "Note", *cols])
+        yield buf.getvalue()
+        buf.seek(0), buf.truncate(0)
+
+        last_pos = 0
+        while True:
+            with self.lock:
+                chunk = self.db.execute(
+                    f"SELECT pos, source_id, rid FROM v.{q(view_id)} WHERE pos > ? ORDER BY pos LIMIT 5000",
+                    (last_pos,),
+                ).fetchall()
+                if not chunk:
+                    break
+                last_pos = chunk[-1]["pos"]
+
+                by_source: dict[int, list[int]] = {}
+                for r in chunk:
+                    by_source.setdefault(r["source_id"], []).append(r["rid"])
+
+                cellmap: dict[tuple[int, int], tuple] = {}
+                tmap: dict[tuple[int, int], list[str]] = {}
+                nmap: dict[tuple[int, int], str] = {}
+                for sid, rids in by_source.items():
+                    if tagged_only:
+                        ph0 = ",".join("?" * len(rids))
+                        tagged_set = {
+                            row[0] for row in self.db.execute(
+                                f"SELECT DISTINCT rid FROM row_tags WHERE source_id=? AND rid IN ({ph0})",
+                                [sid, *rids],
+                            )
+                        }
+                        rids = [r for r in rids if r in tagged_set]
+                        if not rids:
+                            continue
+                    member_table = self.get_source(sid)["table_name"]
+                    ph = ",".join("?" * len(rids))
+                    for row in self.db.execute(f"SELECT rid, {sel} FROM {q(member_table)} WHERE rid IN ({ph})", rids):
+                        cellmap[(sid, row["rid"])] = tuple(row[c] for c in cols)
+                    for rid, tid in self.db.execute(
+                        f"SELECT rid, tag_id FROM row_tags WHERE source_id=? AND rid IN ({ph})", [sid, *rids]
+                    ):
+                        tmap.setdefault((sid, rid), []).append(tagnames.get(tid, str(tid)))
+                    for rid, note in self.db.execute(
+                        f"SELECT rid, note FROM row_notes WHERE source_id=? AND rid IN ({ph})", [sid, *rids]
+                    ):
+                        nmap[(sid, rid)] = note
+
+            for r in chunk:
+                key = (r["source_id"], r["rid"])
+                if key not in cellmap:
+                    continue  # tagged_only filtered this row out
+                w.writerow([
+                    r["rid"],
+                    "; ".join(tmap.get(key, [])),
+                    _csv_safe(nmap.get(key, "")),
+                    *[_csv_safe(v) for v in cellmap[key]],
+                ])
+            yield buf.getvalue()
+            buf.seek(0), buf.truncate(0)
+
+    def export_tagged_xlsx(self) -> io.BytesIO:
+        """One worksheet per real source that has at least one tagged row —
+        merges are skipped since their rows already belong to a real source
+        sheet, and sources with zero tagged rows are skipped so the workbook
+        doesn't fill up with empty tabs. No view/filter/sort involved (only
+        "tagged or not"), so unlike _export_view_csv_rows this doesn't need
+        v.view_N at all — just row_tags per source_id. Lock is held once per
+        source, not for the whole multi-table loop, per CLAUDE.md's "hold
+        the lock for one unit of committed work" rule; openpyxl's in-memory
+        writes below don't touch the db and don't need it."""
+        tagnames = {t["id"]: t["name"] for t in self.list_tags()}
+        wb = Workbook()
+        wb.remove(wb.active)
+        used_names: set[str] = set()
+
+        for src in self.list_sources():
+            if not src.get("tagged_row_count"):
+                continue
+            source_id = src["id"]
+            cols = [c["name"] for c in src["columns"]]
+            sel = ", ".join(q(c) for c in cols)
+            with self.lock:
+                rids = [r[0] for r in self.db.execute(
+                    "SELECT DISTINCT rid FROM row_tags WHERE source_id=? ORDER BY rid", (source_id,)
+                )]
+                cellmap: dict[int, tuple] = {}
+                tmap: dict[int, list[str]] = {}
+                nmap: dict[int, str] = {}
+                if rids:
+                    ph = ",".join("?" * len(rids))
+                    for row in self.db.execute(
+                        f"SELECT rid, {sel} FROM {q(src['table_name'])} WHERE rid IN ({ph})", rids
+                    ):
+                        cellmap[row["rid"]] = tuple(row[c] for c in cols)
+                    for rid, tid in self.db.execute(
+                        f"SELECT rid, tag_id FROM row_tags WHERE source_id=? AND rid IN ({ph})", [source_id, *rids]
+                    ):
+                        tmap.setdefault(rid, []).append(tagnames.get(tid, str(tid)))
+                    for rid, note in self.db.execute(
+                        f"SELECT rid, note FROM row_notes WHERE source_id=? AND rid IN ({ph})", [source_id, *rids]
+                    ):
+                        nmap[rid] = note
+
+            ws = wb.create_sheet(_xlsx_sheet_name(src["name"], used_names))
+            ws.append(["Line", "Tags", "Note", *cols])
+            for rid in rids:
+                if rid not in cellmap:
+                    continue
+                ws.append([
+                    rid,
+                    "; ".join(tmap.get(rid, [])),
+                    _csv_safe(nmap.get(rid, "")),
+                    *[_csv_safe(v) for v in cellmap[rid]],
+                ])
+
+        if not wb.sheetnames:
+            wb.create_sheet("No tagged rows").append(["No rows are tagged in this case yet."])
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return buf
+
+    def search_all_sources(self, query: str = "", terms: list[dict] | None = None) -> list[dict]:
+        """Every source's match count, sorted heaviest-first — the whole
+        sweep, run to completion. See _iter_search_all_sources for the
+        actual scan and its lock discipline; this is the collect-it-all
+        wrapper, used by the synchronous endpoint and the tests.
+
+        start_search_all_job is the same sweep run on a background thread
+        with incremental results, which is what the UI uses."""
+        out = [hit for _, _, hit in self._iter_search_all_sources(query, terms) if hit]
+        out.sort(key=lambda d: -d["match_count"])
+        return out
+
+    def _iter_search_all_sources(
+        self, query: str = "", terms: list[dict] | None = None
+    ) -> Iterator[tuple[int, int, dict | None]]:
+        """Per-source match counts for a search across every real source in
+        the case (merges excluded — their rows already belong to a real
+        source), no filter/sort/view materialisation involved.
+
+        Yields `(scanned, total, hit_or_None)` after each source so a caller
+        can report progress and surface partial results while the sweep is
+        still running (start_search_all_job) — a source with no matches
+        yields a None hit rather than being skipped silently, so `scanned`
+        always advances. Unsorted, in source order: sorting is the
+        collecting caller's job, since a running sweep has nothing stable
+        to sort yet.
+
+        Same indexed-when-ready-else-LIKE reasoning as _compile_where's
+        Contains/Advanced branches for both `query` and `terms` — including
+        triggering a background index build for any source that doesn't
+        have one yet, and falling back to a blob LIKE for a term
+        _fts_like_pattern can't route through the trigram index.
+
+        Two things keep this from monopolising the case for its duration:
+
+        - The lock is taken per source's count, not once around the whole
+          loop. This is a read-only sweep over every table in the case, and
+          on a case whose indexes aren't built yet that's N full LIKE scans
+          back to back — minutes on a 42 GB merge. Holding self.lock across
+          all of them freezes every other request (paging, tagging, view
+          builds) for the entire sweep, which is exactly what ingest_csv and
+          build_fts already go out of their way to avoid: hold the lock for
+          one unit of work, not for a whole loop.
+        - Each count stops at SEARCH_ALL_COUNT_CAP rows rather than counting
+          every match, bounding the worst case per source (a term matching
+          most of a huge unindexed table). A capped result reports
+          match_count == SEARCH_ALL_COUNT_CAP with capped=True so the UI can
+          say "1,000+" rather than imply a precise number it didn't compute.
+        """
+        query = (query or "").strip()
+        terms = [t for t in (terms or []) if (t.get("term") or "").strip()]
+        if not query and not terms:
+            return
+        pattern = _fts_like_pattern(query) if query else None
+        # Snapshot the source list up front (list_sources takes the lock
+        # itself); the per-source work below re-acquires it one count at a
+        # time. A source removed mid-sweep just yields a SQL error we skip.
+        sources = [s for s in self.list_sources() if not s.get("error")]
+        total = len(sources)
+        scanned = 0
+        for src in sources:
+            source_id = src["id"]
+            table = src["table_name"]
+            cols = [c["name"] for c in src["columns"]]
+            if not src.get("has_fts"):
+                self._ensure_fts_building(source_id)
+            inner = None
+            params: tuple = ()
+            if terms:
+                if src.get("has_fts"):
+                    clause, params = _advanced_fts_clause(q("fts_" + str(source_id)), _blob_expr(cols), terms)
+                else:
+                    clause, params = _advanced_like_clause(cols, terms)
+                if clause:
+                    inner = f"SELECT 1 FROM {q(table)} WHERE {clause} LIMIT {SEARCH_ALL_COUNT_CAP + 1}"
+            elif src.get("has_fts") and pattern is not None:
+                fts_ident = q("fts_" + str(source_id))
+                params = (pattern,)
+                inner = (
+                    f"SELECT 1 FROM {q(table)} WHERE rid IN "
+                    f"(SELECT rowid FROM {fts_ident} WHERE doc LIKE ?) "
+                    f"LIMIT {SEARCH_ALL_COUNT_CAP + 1}"
+                )
+            else:
+                blob = _blob_expr(cols)
+                params = (f"%{_esc_like(query)}%",)
+                inner = (
+                    f"SELECT 1 FROM {q(table)} WHERE ({blob}) LIKE ? ESCAPE '\\' "
+                    f"LIMIT {SEARCH_ALL_COUNT_CAP + 1}"
+                )
+            n = 0
+            if inner is not None:
+                with self.lock:
+                    try:
+                        n = self.db.execute(f"SELECT COUNT(*) FROM ({inner})", params).fetchone()[0]
+                    except sqlite3.Error:
+                        n = 0  # source dropped (or its index swapped) mid-sweep
+            hit = None
+            if n:
+                hit = {
+                    "source_id": source_id,
+                    "name": src["name"],
+                    "match_count": min(n, SEARCH_ALL_COUNT_CAP),
+                    "capped": n > SEARCH_ALL_COUNT_CAP,
+                }
+            scanned += 1
+            # Every source yields, matches or not, so `scanned` tracks real
+            # progress through the sweep rather than only counting hits.
+            yield scanned, total, hit
+            # Same yield-after-release build_fts documents: a tight
+            # release/reacquire loop can starve a foreground request waiting
+            # on the same lock for several iterations before the scheduler
+            # hands it over.
+            time.sleep(0.02)
+
+    # ------------------------------------------------ search-all as a job
+
+    def start_search_all_job(self, query: str = "", terms: list[dict] | None = None) -> dict:
+        """Runs a search_all sweep on a background daemon thread and returns
+        its job record immediately, so the HTTP request that started it
+        doesn't sit open for the length of the sweep.
+
+        The sweep was already careful not to hold self.lock across the whole
+        loop, so other requests were never actually blocked at the *server* —
+        but the old single POST still took as long as the sweep did, which
+        meant the analyst had one open modal, no results until the very end,
+        and nothing to come back to if they closed it. Progress
+        (scanned/total) and hits accumulate into the record as each source
+        finishes, so a poller sees partial results while it's still running.
+
+        Only one job runs at a time: starting a new one marks any live job
+        cancelled (the worker checks between sources) and replaces it. There
+        is no queue — a second concurrent sweep would just contend for the
+        same lock with the first and make both slower.
+
+        Same fire-and-forget daemon-thread pattern as _ensure_fts_building.
+        Cancellation is cooperative and only checked between sources, so a
+        cancel during one huge table's count still waits out that count."""
+        with self._search_job_lock:
+            if self._search_job is not None:
+                self._search_job["cancelled"] = True
+            self._search_job_seq += 1
+            job = {
+                "job_id": self._search_job_seq,
+                "query": query,
+                "terms": terms or [],
+                "scanned": 0,
+                "total": 0,
+                "hits": [],
+                "done": False,
+                "error": None,
+                "cancelled": False,
+                "started_at": time.time(),
+            }
+            self._search_job = job
+        t = threading.Thread(target=self._search_all_worker, args=(job,), daemon=True)
+        with self._search_job_lock:
+            self._search_job_thread = t
+        t.start()
+        return self.get_search_all_job(job["job_id"])
+
+    def _search_all_worker(self, job: dict) -> None:
+        try:
+            for scanned, total, hit in self._iter_search_all_sources(job["query"], job["terms"]):
+                with self._search_job_lock:
+                    if job["cancelled"]:
+                        break
+                    job["scanned"] = scanned
+                    job["total"] = total
+                    if hit:
+                        job["hits"].append(hit)
+        except Exception as e:  # noqa: BLE001 — surfaced to the UI as job.error
+            with self._search_job_lock:
+                job["error"] = str(e)
+        finally:
+            with self._search_job_lock:
+                job["done"] = True
+
+    def get_search_all_job(self, job_id: int | None = None) -> dict | None:
+        """Snapshot of the current (or specifically requested) job. Hits come
+        back sorted heaviest-first the same way search_all_sources returns
+        them, re-sorted on each poll since the running sweep appends in
+        source order. Returns None when there's no such job — a poller whose
+        job got superseded should stop rather than keep asking."""
+        with self._search_job_lock:
+            job = self._search_job
+            if job is None or (job_id is not None and job["job_id"] != job_id):
+                return None
+            return {
+                "job_id": job["job_id"],
+                "scanned": job["scanned"],
+                "total": job["total"],
+                "hits": sorted(job["hits"], key=lambda d: -d["match_count"]),
+                "done": job["done"],
+                "error": job["error"],
+                "cancelled": job["cancelled"],
+            }
+
+    def cancel_search_all_job(self, job_id: int | None = None) -> bool:
+        with self._search_job_lock:
+            job = self._search_job
+            if job is None or (job_id is not None and job["job_id"] != job_id):
+                return False
+            job["cancelled"] = True
+            return True
+
+    def wait_for_search_all_job(self, timeout: float | None = None) -> dict | None:
+        """Blocks until the running sweep finishes. Used by tests; nothing in
+        the request path waits on a job."""
+        with self._search_job_lock:
+            t = self._search_job_thread
+        if t:
+            t.join(timeout)
+        return self.get_search_all_job()
+
+    # -------------------------------------------------------------- sql window
+
+    SQL_PANE_FORBIDDEN_RE = re.compile(r"\b(attach|detach|pragma|vacuum)\b", re.IGNORECASE)
+
+    def run_sql(self, sql: str, limit: int = 5000) -> dict:
+        """Read-only ad-hoc query against the case file.
+
+        This intentionally allows arbitrary SELECT/EXPLAIN — that's the
+        point of the pane — unlike validate_where_fragment's tight allowlist
+        for filter fragments. But ATTACH/DETACH/PRAGMA/VACUUM serve no
+        purpose for a read-only query pane and are worth blocking anyway as
+        defense-in-depth: the `mode=ro` connection only restricts writes to
+        *this* database file, and ATTACH opens a second, independent
+        connection to whatever path it's given (modern SQLite inherits the
+        read-only restriction onto attached databases too, but that's a
+        SQLite-version-dependent guarantee this code shouldn't have to lean
+        on). Stacked statements aren't a separate concern here: Python's
+        sqlite3 already refuses to execute more than one statement per call.
+        """
+        structural = _blank_string_literals(sql)
+        if self.SQL_PANE_FORBIDDEN_RE.search(structural):
+            raise ValueError("ATTACH, DETACH, PRAGMA and VACUUM aren't allowed in the SQL pane")
+        ro = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, check_same_thread=False)
+        ro.row_factory = sqlite3.Row
+        ro.create_function("REGEXP", 2, _regexp, deterministic=True)
+        try:
+            t0 = time.time()
+            cur = ro.execute(sql)
+            rows = cur.fetchmany(limit)
+            cols = [d[0] for d in cur.description] if cur.description else []
+            return {
+                "columns": cols,
+                "rows": [[r[i] for i in range(len(cols))] for r in rows],
+                "truncated": len(rows) == limit,
+                "elapsed_ms": int((time.time() - t0) * 1000),
+            }
+        finally:
+            ro.close()
+
+
+_CSV_FORMULA_LEAD = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_safe(v):
+    """OWASP CSV/formula-injection mitigation: a cell that opens with
+    =, +, -, @, tab or CR can execute as a formula when the export is later
+    opened in Excel/Sheets. Forensic values (command lines, filenames,
+    subject lines, notes) are attacker- or user-influenced text by
+    definition, and this export is explicitly meant to be handed to other
+    analysts/reports — exactly the CSV-injection threat model. Only the
+    exported *copy* is affected; the stored case-file value is never
+    touched, so evidence fidelity in the case itself is unchanged."""
+    if isinstance(v, str) and v and v[0] in _CSV_FORMULA_LEAD:
+        return "'" + v
+    return v
+
+
+def _esc_like(s: str) -> str:
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+_XLSX_SHEET_INVALID = re.compile(r"[\\/?*\[\]:]")
+
+
+def _xlsx_sheet_name(name: str, used: set[str]) -> str:
+    """Excel worksheet names: no \\/?*[]:, max 31 chars, can't be blank or
+    start/end with an apostrophe, and must be unique within the workbook.
+    Dedup mirrors sanitize_columns' approach (store.py:137) — append a
+    numeric suffix, truncating the base to make room for it."""
+    clean = _XLSX_SHEET_INVALID.sub("_", (name or "Sheet").strip()).strip("'") or "Sheet"
+    clean = clean[:31]
+    base = clean
+    n = 1
+    while clean.lower() in used:
+        suffix = f"_{n}"
+        clean = base[: 31 - len(suffix)] + suffix
+        n += 1
+    used.add(clean.lower())
+    return clean
+
+
+def _blank_string_literals(frag: str) -> str:
+    """Replace the contents of single/double-quoted literals with spaces,
+    preserving length and quote delimiters, so keyword/identifier scanning
+    over the result only sees SQL structure, never literal payload text."""
+    out: list[str] = []
+    i, n = 0, len(frag)
+    while i < n:
+        ch = frag[i]
+        if ch in ("'", '"'):
+            out.append(ch)
+            i += 1
+            while i < n:
+                if frag[i] == ch:
+                    if i + 1 < n and frag[i + 1] == ch:  # escaped '' or "" inside the literal
+                        out.append("  ")
+                        i += 2
+                        continue
+                    out.append(ch)
+                    i += 1
+                    break
+                out.append(" ")
+                i += 1
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
+def _advanced_fts_clause(fts_ident: str, blob_expr: str, terms: list[dict]) -> tuple[str, list]:
+    """Compile Advanced-mode term chips into a WHERE fragment against the
+    trigram FTS5 index — one `rid IN/NOT IN (SELECT rowid FROM fts WHERE
+    doc LIKE ?)` per term, combined with AND/OR at the SQL level.
+
+    The doc-LIKE form (not MATCH) is required by the index's detail=none
+    shape — a multi-trigram MATCH is a phrase query, which detail=none
+    refuses outright; see build_fts. Applying NOT as SQL-level `NOT IN`
+    (rather than any in-query negation) keeps NOT working in any position,
+    including as the first term — an earlier MATCH-string version silently
+    dropped a leading term's exclude flag because FTS5's NOT is a binary
+    "and not" with no unary form.
+
+    Per-term, not just per-query: a term _fts_like_pattern can't route
+    through the index (under 3 characters, or containing a LIKE wildcard
+    the unescaped pushdown form would misinterpret) gets its own escaped
+    `(blob_expr) LIKE ?` atom instead, joined into the exact same AND/OR
+    chain as every indexed term — such a term never silently drops out of
+    the query, and never changes meaning."""
+    fts_in = f"rid IN (SELECT rowid FROM {fts_ident} WHERE doc LIKE ?)"
+    fts_not_in = f"rid NOT IN (SELECT rowid FROM {fts_ident} WHERE doc LIKE ?)"
+    like_atom = f"({blob_expr}) LIKE ? ESCAPE '\\'"
+    parts: list[str] = []
+    params: list[Any] = []
+    for t in terms:
+        term = (t.get("term") or "").strip()
+        if not term:
+            continue
+        exclude = t.get("exclude")
+        pattern = _fts_like_pattern(term)
+        if pattern is not None:
+            atom = fts_not_in if exclude else fts_in
+            params.append(pattern)
+        else:
+            atom = f"NOT {like_atom}" if exclude else like_atom
+            params.append(f"%{_esc_like(term)}%")
+        if not parts:
+            parts.append(atom)
+        else:
+            connector = "OR" if str(t.get("connector", "AND")).upper() == "OR" else "AND"
+            parts.append(f"{connector} {atom}")
+    if not parts:
+        return "", []
+    return "(" + " ".join(parts) + ")", params
+
+
+def _advanced_like_clause(cols: list[str], terms: list[dict]) -> tuple[str, list]:
+    """LIKE-chain fallback for sources without an FTS index. Each term is its
+    own '(blob) LIKE ?' atom, optionally NOT-prefixed, joined by AND/OR per
+    its stated connector — standard SQL boolean precedence applies (NOT >
+    AND > OR), same as a hand-typed FTS AND/OR/NOT query would behave."""
+    blob = _blob_expr(cols)
+    parts: list[str] = []
+    params: list[str] = []
+    for t in terms:
+        term = (t.get("term") or "").strip()
+        if not term:
+            continue
+        atom = f"({blob}) LIKE ? ESCAPE '\\'"
+        if t.get("exclude"):
+            atom = f"NOT {atom}"
+        params.append(f"%{_esc_like(term)}%")
+        if not parts:
+            parts.append(atom)
+        else:
+            connector = "OR" if str(t.get("connector", "AND")).upper() == "OR" else "AND"
+            parts.append(f"{connector} {atom}")
+    if not parts:
+        return "", []
+    return "(" + " ".join(parts) + ")", params
