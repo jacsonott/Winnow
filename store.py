@@ -25,6 +25,7 @@ import os
 import re
 import shutil
 import sqlite3
+import tempfile
 import threading
 import time
 from typing import Any, Iterable, Iterator
@@ -456,9 +457,30 @@ class Store:
         self.db.create_function("DAY_BUCKET", 1, _day_bucket, deterministic=True)
         self.db.create_function("TS_NORMALIZE", 1, _ts_normalize, deterministic=True)
         self._tune(self.db)
-        # A temporary on-disk database that SQLite deletes when we disconnect.
-        # Materialised views live here so the case file stays clean.
-        self.db.execute("ATTACH DATABASE '' AS v")
+        # Materialised views live in their own on-disk database, named and
+        # WAL-journalled (not the anonymous `ATTACH DATABASE ''` this used
+        # to be) so that a second, read-only connection can attach it too.
+        # PROTOTYPE (see fetch_rows/_open_reader): this is what lets the
+        # hot page-read path run on a connection that never takes self.lock,
+        # so it isn't stalled behind a long build_view/ingest/search. Still
+        # deleted on close(), same lifecycle guarantee the anonymous temp
+        # attach gave for free.
+        #
+        # A *named* attach can't ride PRAGMA temp_store=MEMORY the way the
+        # old anonymous one did — that pragma only covers SQLite's own TEMP
+        # schema, not a file attached by path — so on plain disk this was
+        # measured 20-100% slower on every views/paging/timeline benchmark
+        # (bench --vs-ref). /dev/shm (tmpfs, Linux-only) recovers real-disk
+        # speed by keeping the file RAM-backed while still being a normal
+        # path a second connection can ATTACH; PROTOTYPE fallback to the
+        # platform tempdir elsewhere (macOS/Windows) still works, just
+        # without that recovery — a real implementation needs a non-Linux
+        # answer to this (see plan notes).
+        views_dir = "/dev/shm" if os.path.isdir("/dev/shm") and os.access("/dev/shm", os.W_OK) else None
+        fd, self._views_path = tempfile.mkstemp(suffix=".db", prefix="winnow-views-", dir=views_dir)
+        os.close(fd)
+        self.db.execute(f"ATTACH DATABASE '{self._views_path}' AS v")
+        self.db.execute("PRAGMA v.journal_mode=WAL")
         with self.db:
             # Detect *before* CREATE TABLE IF NOT EXISTS runs, so a case file
             # that predates open_tabs gets every existing source/merge
@@ -873,6 +895,32 @@ class Store:
     def close(self) -> None:
         with self.lock:
             self.db.close()
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                os.remove(self._views_path + suffix)
+            except OSError:
+                pass
+
+    def _open_reader(self) -> sqlite3.Connection:
+        """Short-lived read-only connection for the hot page-read path
+        (fetch_rows). Never takes self.lock: WAL mode (_tune, and the
+        `PRAGMA v.journal_mode=WAL` set on the writer at attach time) is
+        what makes concurrent, unlocked reads against both the case file
+        and the views database safe — a reader here sees the latest
+        *committed* data and is never blocked by, or blocks, a writer
+        holding self.lock for a long build_view/ingest/search sweep.
+
+        Opened and closed per call rather than pooled/reused, same as the
+        existing run_sql/validate_where_fragment/preview_sqlite_tables
+        read-only connections — a Python sqlite3.Connection isn't meant to
+        be hammered concurrently from multiple threads even with
+        check_same_thread=False, so "one per call" sidesteps that instead
+        of needing a lock that would just recreate the contention this
+        exists to avoid."""
+        ro = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, check_same_thread=False)
+        ro.row_factory = sqlite3.Row
+        ro.execute(f"ATTACH DATABASE 'file:{self._views_path}?mode=ro' AS v")
+        return ro
 
     # ------------------------------------------------------------------ ingest
 
@@ -1657,6 +1705,39 @@ class Store:
             return self._merge_source_lite(-source_id)
         with self.lock:
             row = self.db.execute("SELECT * FROM sources WHERE id=?", (source_id,)).fetchone()
+        if not row:
+            raise KeyError(f"No source {source_id}")
+        return self._src_dict(row)
+
+    def _source_lite_ro(self, ro: sqlite3.Connection, source_id: int) -> dict:
+        """Same shape/contract as _source_lite, but reads through a
+        caller-supplied read-only connection with no self.lock at all.
+        PROTOTYPE seam: duplicates _source_lite/_merge_source_lite's query
+        logic rather than parameterising them, to avoid touching their
+        other ~15 call sites for this prototype. A real version of this
+        change should collapse the two into one connection-parameterised
+        implementation instead of maintaining both."""
+        if source_id < 0:
+            merge_id = -source_id
+            row = ro.execute("SELECT * FROM merges WHERE id=?", (merge_id,)).fetchone()
+            if not row:
+                raise KeyError(f"No merge {merge_id}")
+            member_ids = json.loads(row["source_ids"])
+            members = [self._source_lite_ro(ro, sid) for sid in member_ids]
+            return {
+                "id": source_id,
+                "name": row["name"],
+                "path": None,
+                "table_name": None,
+                "row_count": sum(m["row_count"] for m in members),
+                "columns": members[0]["columns"],
+                "file_hash": None,
+                "imported_at": row["created_at"],
+                "has_fts": 1 if all(m["has_fts"] for m in members) else 0,
+                "is_merge": True,
+                "member_source_ids": member_ids,
+            }
+        row = ro.execute("SELECT * FROM sources WHERE id=?", (source_id,)).fetchone()
         if not row:
             raise KeyError(f"No source {source_id}")
         return self._src_dict(row)
@@ -2647,11 +2728,18 @@ class Store:
             return self._fetch_virtual_group_rows(handle, start, count)
         if handle.get("kind") == "root_virtual":
             return self._fetch_virtual_root_rows(handle, start, count)
-        src = self._source_lite(handle["source_id"])
-        cols = [c["name"] for c in src["columns"]]
 
-        with self.lock:
-            vrows = self.db.execute(
+        # PROTOTYPE: the common "root" materialized-view path reads through
+        # a short-lived, unlocked reader connection instead of self.lock —
+        # see _open_reader's docstring. group_virtual/root_virtual above,
+        # and every other v.view_N reader elsewhere in this file, are
+        # unchanged (out of scope for this prototype).
+        ro = self._open_reader()
+        try:
+            src = self._source_lite_ro(ro, handle["source_id"])
+            cols = [c["name"] for c in src["columns"]]
+
+            vrows = ro.execute(
                 f"SELECT pos, source_id, rid FROM v.{q(view_id)} "
                 f"WHERE pos >= ? AND pos < ? ORDER BY pos",
                 (start + 1, start + 1 + count),
@@ -2666,24 +2754,26 @@ class Store:
             notes: dict[tuple[int, int], str] = {}
             sel = ", ".join(q(c) for c in cols)
             for sid, rids in by_source.items():
-                member_table = self._source_lite(sid)["table_name"]
+                member_table = self._source_lite_ro(ro, sid)["table_name"]
                 ph = ",".join("?" * len(rids))
-                for row in self.db.execute(f"SELECT rid, {sel} FROM {q(member_table)} WHERE rid IN ({ph})", rids):
+                for row in ro.execute(f"SELECT rid, {sel} FROM {q(member_table)} WHERE rid IN ({ph})", rids):
                     # positional: the SELECT puts rid first, then cols in
                     # order — tuple(row) is one C-level copy, vs a
                     # per-cell name lookup for row[c]
                     t = tuple(row)
                     cellmap[(sid, t[0])] = t[1:]
-                for rid, tid in self.db.execute(
+                for rid, tid in ro.execute(
                     f"SELECT rid, tag_id FROM row_tags WHERE source_id=? AND rid IN ({ph})",
                     [sid, *rids],
                 ):
                     tags.setdefault((sid, rid), []).append(tid)
-                for rid, note in self.db.execute(
+                for rid, note in ro.execute(
                     f"SELECT rid, note FROM row_notes WHERE source_id=? AND rid IN ({ph})",
                     [sid, *rids],
                 ):
                     notes[(sid, rid)] = note
+        finally:
+            ro.close()
 
         out = []
         for r in vrows:
