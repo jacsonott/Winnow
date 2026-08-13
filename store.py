@@ -575,7 +575,7 @@ class Store:
             existing = self._fts_threads.get(source_id)
             if existing and existing.is_alive():
                 return
-        if self.get_source(source_id).get("has_fts"):
+        if self._source_lite(source_id).get("has_fts"):
             return
         with self.lock:
             existing = self._fts_threads.get(source_id)
@@ -686,7 +686,7 @@ class Store:
             existing = self._index_threads.get(key)
             if existing and existing.is_alive():
                 return
-        table_name = table_name or self.get_source(source_id)["table_name"]
+        table_name = table_name or self._source_lite(source_id)["table_name"]
         if self._column_index_exists(table_name, column, purpose):
             return
         with self.lock:
@@ -848,7 +848,18 @@ class Store:
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA temp_store=MEMORY")
         conn.execute("PRAGMA cache_size=-262144")  # ~256 MB page cache
-        conn.execute("PRAGMA mmap_size=268435456")
+        # 1 GB. mmap is file-backed and shared with the OS page cache, so
+        # this costs address space (fine on 64-bit), not RAM — and it lets
+        # the big sequential scans (view materialisation, LIKE fallback,
+        # FTS builds) skip a read() syscall + memcpy per page on the
+        # multi-GB cases this tool targets. SQLite silently clamps it to
+        # its compile-time max (typically ~2 GB) — asking for more than an
+        # old build allows degrades gracefully rather than erroring.
+        conn.execute("PRAGMA mmap_size=1073741824")
+        # Let the sorter use worker threads: a filtered/sorted view build
+        # over millions of rows is one big external sort, and this is the
+        # one knob that parallelises it (default is 0 = single-threaded).
+        conn.execute("PRAGMA threads=4")
 
     def _seed_tags(self) -> None:
         with self.lock, self.db:
@@ -926,7 +937,9 @@ class Store:
         size = os.path.getsize(path)
         file_hash = self._quick_hash(path)
 
-        fh = open(path, "r", encoding="utf-8-sig", errors="replace", newline="")
+        # 1 MB read buffer: the default 8 KB means a 20 GB file is ~2.5M
+        # read() syscalls before the csv layer even sees a byte.
+        fh = open(path, "r", encoding="utf-8-sig", errors="replace", newline="", buffering=1 << 20)
         head = fh.read(64 * 1024)
         fh.seek(0)
         if delimiter is None:
@@ -971,6 +984,11 @@ class Store:
         t0 = time.time()
         error: Exception | None = None
 
+        # This per-row append loop is deliberate: a chunked
+        # list(islice(reader, BATCH)) rewrite was measured *slower* (~7% on
+        # a 200k-row file) — islice's per-item indirection costs more than
+        # the tuple() copy it saves, and executemany binds tuples slightly
+        # faster than lists. Don't "optimise" it back.
         rows_iter = ([leftover_row] if leftover_row is not None else [])
         with self._ingest_synchronous_off():
             try:
@@ -1511,7 +1529,7 @@ class Store:
         doesn't pay: FTS5's own automerge already consolidates as the chunks
         go in, and under detail=none query cost is dominated by verifying
         candidates against the content view, not by walking segments."""
-        src = self.get_source(source_id)
+        src = self._source_lite(source_id)
         table, cols = src["table_name"], [c["name"] for c in src["columns"]]
         fts = f"fts_{source_id}"
         doc_view = f"{table}_doc"
@@ -1625,6 +1643,45 @@ class Store:
         d["columns"] = json.loads(d["columns"])
         return d
 
+    def _source_lite(self, source_id: int) -> dict:
+        """Cheap source metadata for internal hot paths: just the sources
+        row (columns parsed), or a merge synthesized from its members'
+        rows. None of get_source's per-call annotations — tagged_row_count
+        is a COUNT(DISTINCT rid) over row_tags (~12ms on a heavily tagged
+        source), note_count/is_open are two more locked queries — and
+        fetch_rows used to pay all of that at least twice per page, on
+        every scroll. Anything user-facing that actually shows those
+        counts keeps using get_source; everything that only needs
+        table_name/columns/row_count/has_fts to run a query uses this."""
+        if source_id < 0:
+            return self._merge_source_lite(-source_id)
+        with self.lock:
+            row = self.db.execute("SELECT * FROM sources WHERE id=?", (source_id,)).fetchone()
+        if not row:
+            raise KeyError(f"No source {source_id}")
+        return self._src_dict(row)
+
+    def _merge_source_lite(self, merge_id: int) -> dict:
+        """_merge_source_dict minus the per-member tag/note/tab counts —
+        same live-members contract (a dropped member is a KeyError, not a
+        stale merge)."""
+        row = self._merge_row(merge_id)
+        member_ids = json.loads(row["source_ids"])
+        members = [self._source_lite(sid) for sid in member_ids]
+        return {
+            "id": -merge_id,
+            "name": row["name"],
+            "path": None,
+            "table_name": None,
+            "row_count": sum(m["row_count"] for m in members),
+            "columns": members[0]["columns"],  # canonical — lowest-id (first-created) member
+            "file_hash": None,
+            "imported_at": row["created_at"],
+            "has_fts": 1 if all(m["has_fts"] for m in members) else 0,
+            "is_merge": True,
+            "member_source_ids": member_ids,
+        }
+
     def _merge_row(self, merge_id: int) -> sqlite3.Row:
         with self.lock:
             row = self.db.execute("SELECT * FROM merges WHERE id=?", (merge_id,)).fetchone()
@@ -1666,11 +1723,11 @@ class Store:
         the locked-in 'exact column match' rule already guarantees members
         share the same names modulo case."""
         if source_id > 0:
-            src = self.get_source(source_id)
+            src = self._source_lite(source_id)
             return [{"source_id": source_id, "table_name": src["table_name"]}]
-        merge = self._merge_source_dict(-source_id)
+        merge = self._merge_source_lite(-source_id)
         return [
-            {"source_id": sid, "table_name": self.get_source(sid)["table_name"]}
+            {"source_id": sid, "table_name": self._source_lite(sid)["table_name"]}
             for sid in merge["member_source_ids"]
         ]
 
@@ -1742,7 +1799,7 @@ class Store:
         for free (verified: `EXPLAIN QUERY PLAN SELECT rid FROM t ORDER BY
         rid ASC` is a bare `SCAN`, no temp b-tree). See
         _build_virtual_root_view."""
-        src = self.get_source(source_id)
+        src = self._source_lite(source_id)
         colnames = {c["name"]: c["type"] for c in src["columns"]}
         order = self._compile_order(spec, colnames)
         # Only non-numeric sort columns: _compile_order emits a plain
@@ -1765,7 +1822,7 @@ class Store:
             branches = []
             params: list[Any] = []
             for m in self._resolve_members(source_id):
-                msrc = self.get_source(m["source_id"])
+                msrc = self._source_lite(m["source_id"])
                 where, p = self._compile_where(m["source_id"], msrc, spec, colnames)
                 for col in sort_cols:
                     self._ensure_sort_index_building(m["source_id"], col, msrc["table_name"])
@@ -1778,8 +1835,8 @@ class Store:
             self._view_seq += 1
             vid = f"view_{self._view_seq}"
             sql = (
-                f"INSERT INTO v.{q(vid)}(pos, source_id, rid) "
-                f"SELECT ROW_NUMBER() OVER ({order}), source_id, rid FROM ({union_sql})"
+                f"INSERT INTO v.{q(vid)}(source_id, rid) "
+                f"SELECT source_id, rid FROM ({union_sql}) {order}"
             )
         else:
             table = src["table_name"]
@@ -1791,9 +1848,10 @@ class Store:
             self._view_seq += 1
             vid = f"view_{self._view_seq}"
             sql = (
-                f"INSERT INTO v.{q(vid)}(pos, source_id, rid) "
-                f"SELECT ROW_NUMBER() OVER ({order}), {int(source_id)}, rid FROM {q(table)}"
+                f"INSERT INTO v.{q(vid)}(source_id, rid) "
+                f"SELECT {int(source_id)}, rid FROM {q(table)}"
                 + (f" WHERE {where}" if where else "")
+                + f" {order}"
             )
         t0 = time.time()
         with self.lock, self.db:
@@ -1802,10 +1860,17 @@ class Store:
             # this alone gives the same unique/indexed-by-pos lookup the old
             # CTAS + separate CREATE UNIQUE INDEX did, for one less full
             # sort-and-write of every row (see CLAUDE.md's "Performance"
-            # section, change 3).
+            # section, change 3). pos is deliberately absent from the
+            # INSERT's column list: rowids are assigned 1..N in insertion
+            # order, and an INSERT..SELECT with ORDER BY inserts in sorted
+            # order — measured ~35% faster than numbering the same sort
+            # with ROW_NUMBER() OVER, for byte-identical view content.
+            # (The ORDER BY always ends in `rid ASC`, so the order — and
+            # therefore every pos — is fully determined, not sorter-
+            # dependent.) cursor.rowcount then gives the view's row count
+            # without re-scanning the table we just wrote.
             self.db.execute(f"CREATE TABLE v.{q(vid)} (pos INTEGER PRIMARY KEY, source_id INTEGER, rid INTEGER)")
-            self.db.execute(sql, params)
-            n = self.db.execute(f"SELECT count(*) FROM v.{q(vid)}").fetchone()[0]
+            n = self.db.execute(sql, params).rowcount
 
         handle = {
             "view_id": vid,
@@ -1972,15 +2037,18 @@ class Store:
                 f"CREATE TABLE v.{q(vid)} (pos INTEGER PRIMARY KEY, source_id INTEGER, rid INTEGER, "
                 f"ts TEXT, body TEXT, type_label TEXT, source_name TEXT, tag_ids TEXT)"
             )
+            n = 0
             if branches:
                 union_sql = " UNION ALL ".join(branches)
-                self.db.execute(
-                    f"INSERT INTO v.{q(vid)}(pos, source_id, rid, ts, body, type_label, source_name, tag_ids) "
-                    f"SELECT ROW_NUMBER() OVER (ORDER BY (ts IS NULL) ASC, ts ASC, source_id, rid), "
-                    f"source_id, rid, ts, body, type_label, source_name, tag_ids FROM ({union_sql})",
+                # ORDER BY-fed insert, same as build_view: pos auto-assigns
+                # in sorted order ((source_id, rid) makes the order fully
+                # determined), rowcount replaces a count(*) re-scan.
+                n = self.db.execute(
+                    f"INSERT INTO v.{q(vid)}(source_id, rid, ts, body, type_label, source_name, tag_ids) "
+                    f"SELECT source_id, rid, ts, body, type_label, source_name, tag_ids FROM ({union_sql}) "
+                    f"ORDER BY (ts IS NULL) ASC, ts ASC, source_id, rid",
                     params,
-                )
-            n = self.db.execute(f"SELECT count(*) FROM v.{q(vid)}").fetchone()[0]
+                ).rowcount
 
         self._views[vid] = {"view_id": vid, "kind": "timeline", "row_count": n}
         return {"view_id": vid, "row_count": n}
@@ -2116,7 +2184,7 @@ class Store:
         handle = self._views.get(view_id)
         if not handle:
             raise KeyError("View expired — rebuild it")
-        src = self.get_source(handle["source_id"])
+        src = self._source_lite(handle["source_id"])
         colnames = {c["name"]: c["type"] for c in src["columns"]}
         if column not in colnames:
             raise KeyError(column)
@@ -2190,7 +2258,7 @@ class Store:
         root = self._views.get(view_id)
         if not root:
             raise KeyError("View expired — rebuild it")
-        src = self.get_source(root["source_id"])
+        src = self._source_lite(root["source_id"])
         colnames = {c["name"]: c["type"] for c in src["columns"]}
         if column not in colnames:
             raise KeyError(column)
@@ -2239,13 +2307,17 @@ class Store:
                     params.extend([m["source_id"], *cond_val, *path_params])
             union_sql = " UNION ALL ".join(branches)
             with self.lock, self.db:
+                # Same ORDER BY-fed insert as build_view: pos auto-assigns
+                # 1..N in insertion (= sorted) order, rowcount replaces a
+                # count(*) re-scan. root_pos is unique across the union
+                # (vv.pos from one view, or s.rid from one member table),
+                # so the order is fully determined.
                 self.db.execute(f"CREATE TABLE v.{q(vid)} (pos INTEGER PRIMARY KEY, source_id INTEGER, rid INTEGER)")
-                self.db.execute(
-                    f"INSERT INTO v.{q(vid)}(pos, source_id, rid) "
-                    f"SELECT ROW_NUMBER() OVER (ORDER BY root_pos), source_id, rid FROM ({union_sql})",
+                n = self.db.execute(
+                    f"INSERT INTO v.{q(vid)}(source_id, rid) "
+                    f"SELECT source_id, rid FROM ({union_sql}) ORDER BY root_pos",
                     params,
-                )
-                n = self.db.execute(f"SELECT count(*) FROM v.{q(vid)}").fetchone()[0]
+                ).rowcount
             self._views[vid] = {
                 "view_id": vid, "source_id": root["source_id"], "row_count": n,
                 "kind": "group", "parent_view_id": view_id,
@@ -2268,7 +2340,7 @@ class Store:
         every place that reads straight off the backing member table for a
         small, ungathered group."""
         column, value = handle["column"], handle["value"]
-        src = self.get_source(handle["members"][0]["source_id"])
+        src = self._source_lite(handle["members"][0]["source_id"])
         colnames = {c["name"]: c["type"] for c in src["columns"]}
         cond_sql, cond_val = self._eq_condition(q(column), value, colnames[column] == "datetime")
         path_clauses, path_params = self._path_where(handle.get("path"), colnames)
@@ -2575,7 +2647,7 @@ class Store:
             return self._fetch_virtual_group_rows(handle, start, count)
         if handle.get("kind") == "root_virtual":
             return self._fetch_virtual_root_rows(handle, start, count)
-        src = self.get_source(handle["source_id"])
+        src = self._source_lite(handle["source_id"])
         cols = [c["name"] for c in src["columns"]]
 
         with self.lock:
@@ -2594,10 +2666,14 @@ class Store:
             notes: dict[tuple[int, int], str] = {}
             sel = ", ".join(q(c) for c in cols)
             for sid, rids in by_source.items():
-                member_table = self.get_source(sid)["table_name"]
+                member_table = self._source_lite(sid)["table_name"]
                 ph = ",".join("?" * len(rids))
                 for row in self.db.execute(f"SELECT rid, {sel} FROM {q(member_table)} WHERE rid IN ({ph})", rids):
-                    cellmap[(sid, row["rid"])] = tuple(row[c] for c in cols)
+                    # positional: the SELECT puts rid first, then cols in
+                    # order — tuple(row) is one C-level copy, vs a
+                    # per-cell name lookup for row[c]
+                    t = tuple(row)
+                    cellmap[(sid, t[0])] = t[1:]
                 for rid, tid in self.db.execute(
                     f"SELECT rid, tag_id FROM row_tags WHERE source_id=? AND rid IN ({ph})",
                     [sid, *rids],
@@ -2633,7 +2709,7 @@ class Store:
         preserve the outer sort via root_pos."""
         member = handle["members"][0]
         sid = member["source_id"]
-        src = self.get_source(sid)
+        src = self._source_lite(sid)
         cols = [c["name"] for c in src["columns"]]
         where_sql, where_params = self._virtual_group_where(handle)
         sel = ", ".join(q(c) for c in cols)
@@ -2660,32 +2736,37 @@ class Store:
 
         out = []
         for i, r in enumerate(rows):
+            t = tuple(r)
             out.append({
                 "pos": start + i,
                 "source_id": sid,
-                "rid": r["rid"],
-                "cells": [r[c] for c in cols],
-                "tags": tags.get(r["rid"], []),
-                "note": notes.get(r["rid"]),
+                "rid": t[0],
+                "cells": list(t[1:]),
+                "tags": tags.get(t[0], []),
+                "note": notes.get(t[0]),
             })
         return {"start": start, "rows": out}
 
     def _fetch_virtual_root_rows(self, handle: dict, start: int, count: int) -> dict:
-        """Pages the source table directly by rid — no v.view_N to build,
-        since an unfiltered/unsorted root_virtual view is, by construction,
-        every row of the source in its natural (already free) order. Same
-        LIMIT/OFFSET shape _fetch_virtual_group_rows uses for a small
-        ungathered group; here it's the invariant #2 carve-out (unfiltered,
-        rid-ordered), not a size threshold."""
+        """Pages the source table directly by rid *range* — no v.view_N to
+        build, since an unfiltered/unsorted root_virtual view is, by
+        construction, every row of the source in its natural (already
+        free) order, and rid is contiguous from 1 (see
+        _build_virtual_root_view), so the window at `start` is exactly
+        rids start+1 .. start+count. A rid-range seek is O(log n) at any
+        depth, where the LIMIT/OFFSET shape _fetch_virtual_group_rows
+        uses (fine for its ≤GROUP_MATERIALIZE_THRESHOLD rows) walks and
+        discards `start` rows first — measured 26ms vs 0.1ms at the far
+        end of 2M rows, and that gap grows linearly with depth."""
         sid = handle["source_id"]
-        src = self.get_source(sid)
+        src = self._source_lite(sid)
         cols = [c["name"] for c in src["columns"]]
         sel = ", ".join(q(c) for c in cols)
 
         with self.lock:
             rows = self.db.execute(
-                f"SELECT rid, {sel} FROM {q(src['table_name'])} ORDER BY rid LIMIT ? OFFSET ?",
-                (count, start),
+                f"SELECT rid, {sel} FROM {q(src['table_name'])} WHERE rid >= ? AND rid < ? ORDER BY rid",
+                (start + 1, start + 1 + count),
             ).fetchall()
             rids = [r["rid"] for r in rows]
             tags: dict[int, list[int]] = {}
@@ -2703,13 +2784,14 @@ class Store:
 
         out = []
         for i, r in enumerate(rows):
+            t = tuple(r)
             out.append({
-                "pos": start + i,
+                "pos": t[0] - 1,  # rid - 1: contiguous rids make this exact
                 "source_id": sid,
-                "rid": r["rid"],
-                "cells": [r[c] for c in cols],
-                "tags": tags.get(r["rid"], []),
-                "note": notes.get(r["rid"]),
+                "rid": t[0],
+                "cells": list(t[1:]),
+                "tags": tags.get(t[0], []),
+                "note": notes.get(t[0]),
             })
         return {"start": start, "rows": out}
 
@@ -2731,6 +2813,21 @@ class Store:
                     (handle["source_id"], limit),
                 ).fetchall()
             return [[r["p"], r["tag_id"]] for r in rows]
+        # The join below has no better plan than scanning the whole view
+        # probing row_tags per row (the view has no index on rid — measured
+        # ~115ms per 2M view rows even with row_tags empty). An untagged
+        # source is the common case and this runs after every view build,
+        # so check for any tag at all first — one indexed probe per member.
+        if "source_id" in handle:
+            with self.lock:
+                any_tags = any(
+                    self.db.execute(
+                        "SELECT 1 FROM row_tags WHERE source_id=? LIMIT 1", (m["source_id"],)
+                    ).fetchone()
+                    for m in self._resolve_members(handle["source_id"])
+                )
+            if not any_tags:
+                return []
         with self.lock:
             rows = self.db.execute(
                 f"SELECT vv.pos - 1 AS p, rt.tag_id FROM v.{q(view_id)} vv "
@@ -2754,7 +2851,7 @@ class Store:
         if handle.get("kind") == "root_virtual":
             if source_id != handle["source_id"]:
                 return None
-            src = self.get_source(source_id)
+            src = self._source_lite(source_id)
             with self.lock:
                 row = self.db.execute(
                     f"SELECT 1 FROM {q(src['table_name'])} WHERE rid=?", (rid,)
@@ -2782,7 +2879,7 @@ class Store:
         index. It's also the same index an equals/in filter on this column
         wants, which is the overwhelmingly likely next action after picking
         a value out of this list."""
-        src = self.get_source(source_id)
+        src = self._source_lite(source_id)
         names = {c["name"] for c in src["columns"]}
         if column not in names:
             raise KeyError(column)
@@ -2807,7 +2904,7 @@ class Store:
         button a user can click repeatedly (once per column double-click,
         plus a "fit all" action) without the underlying data changing at
         all between clicks."""
-        src = self.get_source(source_id)
+        src = self._source_lite(source_id)
         cached = self._maxlen_cache.get(source_id)
         if cached and cached[0] == src["row_count"]:
             return cached[1]
@@ -2982,7 +3079,7 @@ class Store:
         row. No materialise needed regardless of view size: ordering never
         enters into "tag every row"."""
         sid = handle["source_id"]
-        table = self.get_source(sid)["table_name"]
+        table = self._source_lite(sid)["table_name"]
         skip_rids = [int(rid) for s, rid in (exclude or []) if int(s) == sid]
         skip_sql = f" WHERE rid NOT IN ({','.join('?' * len(skip_rids))})" if skip_rids else ""
         with self.lock, self.db:
@@ -3343,7 +3440,7 @@ class Store:
     def _export_virtual_group_csv_rows(self, handle: dict, tagged_only: bool):
         member = handle["members"][0]
         sid = member["source_id"]
-        src = self.get_source(sid)
+        src = self._source_lite(sid)
         cols = [c["name"] for c in src["columns"]]
         where_sql, where_params = self._virtual_group_where(handle)
         sel = ", ".join(q(c) for c in cols)
@@ -3389,7 +3486,7 @@ class Store:
         acquired fresh per chunk, never held across a yield, same reasoning
         as _export_view_csv_rows."""
         sid = handle["source_id"]
-        src = self.get_source(sid)
+        src = self._source_lite(sid)
         table = src["table_name"]
         cols = [c["name"] for c in src["columns"]]
         sel = ", ".join(q(c) for c in cols)
@@ -3455,7 +3552,7 @@ class Store:
         pagination (`pos > ?`) over v.view_N's unique index avoids the
         OFFSET-rescans-from-zero cost that would otherwise reintroduce.
         """
-        src = self.get_source(handle["source_id"])
+        src = self._source_lite(handle["source_id"])
         cols = [c["name"] for c in src["columns"]]
         sel = ", ".join(q(c) for c in cols)
 
@@ -3496,7 +3593,7 @@ class Store:
                         rids = [r for r in rids if r in tagged_set]
                         if not rids:
                             continue
-                    member_table = self.get_source(sid)["table_name"]
+                    member_table = self._source_lite(sid)["table_name"]
                     ph = ",".join("?" * len(rids))
                     for row in self.db.execute(f"SELECT rid, {sel} FROM {q(member_table)} WHERE rid IN ({ph})", rids):
                         cellmap[(sid, row["rid"])] = tuple(row[c] for c in cols)

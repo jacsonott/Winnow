@@ -51,10 +51,13 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
    gives for free (verified: `EXPLAIN QUERY PLAN ... ORDER BY rid ASC` is a
    bare `SCAN`, no temp b-tree). `build_view` skips materialisation
    entirely for this one case (`kind: "root_virtual"`, no `v.view_N`
-   table), and `fetch_rows` pages the source table directly by
-   `rid`/`LIMIT`/`OFFSET` instead — still cheap at depth precisely because
-   there's no filter and no sort to redo, not because `LIMIT/OFFSET` is
-   safe in general. Never on a merge (no single source table to page).
+   table), and `fetch_rows` pages the source table directly by `rid`
+   *range* (`WHERE rid >= ? AND rid < ?` — an O(log n) seek; contiguous
+   rids make the window at `start` exactly rids start+1..start+count).
+   Not `LIMIT/OFFSET`, which walks and discards `start` rows first even
+   with no filter — measured 26ms vs 0.1ms for a window at the far end
+   of 2M rows, a gap that grows linearly with depth. Never on a merge
+   (no single source table to page).
    Deliberately narrower than "no filter, sort is absent or index-served":
    any sort at all — even one an index can serve — still materialises
    (see `Store._build_virtual_root_view`'s docstring for why extending it
@@ -589,6 +592,49 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
   opening any other modal supersedes it). Switching builder mode no longer
   auto-runs a search — with a real job that would abandon a sweep in
   progress just because you glanced at the other tab.
+- **The 2026-08 hot-path perf pass** (validated with `python3 -m bench
+  --vs-ref` at both the 200k and 1.2M tiers — 0 slower, footprint
+  unchanged), the shapes and their reasons:
+  - `Store._source_lite()` (and `_merge_source_lite`) is what internal
+    hot paths use instead of `get_source` — everything that only needs
+    `table_name`/`columns`/`row_count`/`has_fts` to run a query:
+    `fetch_rows` (was paying get_source's COUNT(DISTINCT rid) over
+    row_tags — ~12ms on a heavily tagged source — at least twice per
+    scroll page), `_resolve_members`, view builds, grouping, exports
+    (which paid it per 5000-row chunk), FTS/index ensure-helpers.
+    `get_source` stays for anything that actually surfaces
+    tagged_row_count/note_count/is_open/fts_building to the UI.
+  - View materialisation is an **ORDER BY-fed `INSERT ... SELECT`** with
+    `pos` absent from the column list (rowids assign 1..N in insertion =
+    sorted order), not `ROW_NUMBER() OVER` — measured ~35% faster for
+    byte-identical content, and every such ORDER BY ends in a unique key
+    (`rid ASC`/`root_pos`/`(source_id, rid)`) so pos is fully determined,
+    not sorter-dependent. Row counts come from `cursor.rowcount` (works
+    for INSERT..SELECT, 0 on empty) instead of a count(*) re-scan of the
+    table just written. Same shape in `build_view`, `expand_group`'s
+    materialised branch, and `build_timeline`. Net: view builds 21–84%
+    faster across every filter/sort shape in the suite.
+  - The hot, large-payload GET endpoints (`/api/rows`, timeline rows,
+    tag_positions, group_summary, column_values) return
+    `fastapi.JSONResponse` directly — returning a Response makes FastAPI
+    skip `jsonable_encoder`'s per-value walk over every cell (pure
+    overhead on payloads that are already plain str/int/None) and go
+    straight to json.dumps. `/api/rows` dropped ~62–77%. Anything these
+    endpoints return must stay JSON-native types.
+  - `tag_positions` fast-exits via one indexed `row_tags` probe per
+    member before the join — the join's only plan is a full scan of the
+    view probing row_tags per row (~115ms per 2M view rows even with
+    zero tags), it runs after every view build, and an untagged source
+    is the common case.
+  - `ingest_csv`'s per-row append loop is deliberate: a chunked
+    `list(islice(reader, BATCH))` rewrite measured ~7% *slower* (islice's
+    per-item indirection costs more than the tuple() copy it saves, and
+    executemany binds tuples slightly faster than lists). The 1 MB read
+    buffer on the file handle is the part that helps.
+  - `_tune`: `PRAGMA threads=4` (parallelises the sorter — the one knob
+    that helps a multi-million-row view-build sort), mmap_size at 1 GB
+    (file-backed, shared with the OS page cache; costs address space,
+    not RAM; SQLite clamps it to its compile-time max on old builds).
 
 ## Backlog, roughly in order
 

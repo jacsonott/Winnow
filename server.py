@@ -592,8 +592,8 @@ def api_group_summary(view_id: str, column: str, order: str = "count", direction
         # and this stays a GET (not POST) so it keeps the same cacheable,
         # side-effect-free shape as every other view-summary read.
         path_list = json.loads(path) if path else None
-        return store().group_summary(view_id, column, order=order, direction=direction,
-                                      limit=min(limit, 5000), path=path_list)
+        return JSONResponse(store().group_summary(view_id, column, order=order, direction=direction,
+                                                  limit=min(limit, 5000), path=path_list))
     except KeyError as e:
         raise HTTPException(409, str(e))
 
@@ -634,7 +634,14 @@ def api_rows(view_id: str, start: int = 0, count: int = 200):
         # to app.js's own PAGE (5000) except that it must stay comfortably
         # above it — a cap below PAGE would silently truncate every page
         # fetch, since ensurePage() trusts the response to have PAGE rows.
-        return store().fetch_rows(view_id, start, min(count, 10000))
+        #
+        # Wrapped in JSONResponse here (and on the other hot, large-payload
+        # reads below): returning a Response makes FastAPI skip
+        # jsonable_encoder's per-value walk over every cell of every row —
+        # pure overhead for payloads that are already plain
+        # str/int/None — and go straight to json.dumps. This endpoint is
+        # hit on every scroll, so the saving is felt continuously.
+        return JSONResponse(store().fetch_rows(view_id, start, min(count, 10000)))
     except KeyError as e:
         raise HTTPException(409, str(e))
 
@@ -642,7 +649,7 @@ def api_rows(view_id: str, start: int = 0, count: int = 200):
 @app.get("/api/tag_positions")
 def api_tag_positions(view_id: str):
     try:
-        return store().tag_positions(view_id)
+        return JSONResponse(store().tag_positions(view_id))
     except KeyError as e:
         raise HTTPException(409, str(e))
 
@@ -658,7 +665,7 @@ def api_row_position(view_id: str, source_id: int, rid: int):
 @app.get("/api/column_values")
 def api_column_values(source_id: int, column: str, limit: int = 200):
     try:
-        return store().column_values(source_id, column, min(limit, 2000))
+        return JSONResponse(store().column_values(source_id, column, min(limit, 2000)))
     except KeyError:
         raise HTTPException(404, "No such column")
 
@@ -856,7 +863,7 @@ def api_timeline_build(body: TimelineBuild):
 @app.get("/api/timeline_rows")
 def api_timeline_rows(view_id: str, start: int = 0, count: int = 200):
     try:
-        return store().fetch_timeline_rows(view_id, start, count)
+        return JSONResponse(store().fetch_timeline_rows(view_id, start, count))
     except KeyError as e:
         raise HTTPException(409, str(e))
 

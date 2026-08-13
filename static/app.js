@@ -4843,7 +4843,13 @@ async function jumpToTimelineRow(sourceId, rid) {
   await recenterOnRow({ source_id: sourceId, rid });
 }
 
-$('timelineBody').addEventListener('scroll', () => requestAnimationFrame(renderTimelineRows), { passive: true });
+// Guarded like #body's own scroll handler below: scroll can fire several
+// times per frame, and an unguarded rAF per event runs that many full
+// repaints in the same frame.
+let timelineScrollRaf = null;
+$('timelineBody').addEventListener('scroll', () => {
+  if (!timelineScrollRaf) timelineScrollRaf = requestAnimationFrame(() => { timelineScrollRaf = null; renderTimelineRows(); });
+}, { passive: true });
 
 /* Per-source "which column is the timestamp, which columns make up the
    body, what's this source called on the timeline" editor — writes to
