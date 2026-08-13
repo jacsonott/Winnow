@@ -395,3 +395,37 @@ def test_row_tags_view_route_passes_exclusions_through(client, ingested):
     tagged = {row[0] for row in store.db.execute(
         "SELECT rid FROM row_tags WHERE source_id=? AND tag_id=?", (source_id, tag["id"]))}
     assert tagged == {2, 3, 4}
+
+
+def test_request_against_closed_store_is_409_not_500(client, ingested):
+    """A request that reaches a Store whose connection was closed (a case
+    switch landed mid-flight — seen for real with several browsers on one
+    --host 0.0.0.0 server) must come back as a clean 409 'case closed'
+    rather than an unhandled sqlite3.ProgrammingError traceback. The
+    message deliberately avoids the word 'expired': app.js auto-rebuilds
+    on 409s that contain it, and a stale tab auto-rebuilding against a
+    newly opened case could show the wrong case's data."""
+    store, source_id = ingested
+    store.close()
+    r = client.post("/api/view", json={"source_id": source_id})
+    assert r.status_code == 409
+    detail = r.json()["detail"]
+    assert "closed" in detail
+    assert "expired" not in detail.lower()
+    # GET endpoints go through the same handler
+    r = client.get("/api/sources")
+    assert r.status_code == 409
+
+
+def test_case_open_failure_keeps_current_case_usable(client, ingested, tmp_path):
+    """Opening a bad case file must not tear down the one that's open:
+    the old close-then-open order left STORE pointing at a closed
+    connection whenever the open failed."""
+    bad = tmp_path / "not_a_case.db"
+    bad.write_text("this is not a sqlite database, not even close")
+    r = client.post("/api/case/open", json={"path": str(bad)})
+    assert r.status_code == 400
+    # the previously-open case must still answer
+    r = client.get("/api/sources")
+    assert r.status_code == 200
+    assert len(r.json()) == 1

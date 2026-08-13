@@ -529,9 +529,12 @@ async function rebuildView({ keepScroll = true } = {}) {
     try {
       v = await post('/api/view', spec);
     } catch (e) {
+      // 409 = the case/view this tab was talking to is gone (e.g. another
+      // client switched cases) — show the server's message as-is rather
+      // than mislabeling it a filter problem.
       toast(e.status >= 500
         ? `Couldn't build the view: ${e.message} — this is a bug, check the server console`
-        : 'Filter error: ' + e.message, 5000);
+        : (e.status === 409 ? e.message : 'Filter error: ' + e.message), 5000);
       return;
     }
     // Fetch the page(s) covering where the grid will land BEFORE swapping

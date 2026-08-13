@@ -49,6 +49,31 @@ STORE: Store | None = None
 CSRF_HEADER = "X-Timeline-Lite-Client"
 
 
+# A request that was already executing against the previous case's Store
+# when a case switch closed it can't be salvaged — sqlite3 raises
+# ProgrammingError("Cannot operate on a closed database") from whatever
+# query it runs next. That's not a server bug, it's "the case you were
+# talking to is gone": answer 409 with a message that says so, instead of
+# letting it explode into a full 500 traceback in the console (seen in the
+# wild with several browsers on one --host 0.0.0.0 server — one client
+# switching cases while another was mid-request). Deliberately worded
+# WITHOUT "expired": app.js's ensurePage auto-rebuilds on 409s whose
+# message contains "expired", and a stale tab auto-rebuilding against the
+# newly opened case could silently show the wrong case's data under the
+# old tab's name. Any other ProgrammingError is a genuine bug and stays a
+# 500.
+@app.exception_handler(sqlite3.ProgrammingError)
+async def closed_database_handler(request: Request, exc: sqlite3.ProgrammingError):
+    # JSONResponse with a `detail` key, matching HTTPException's shape —
+    # app.js's api() reads err.message from there.
+    if "closed database" in str(exc).lower():
+        return JSONResponse(
+            {"detail": "The case this request targeted has been closed or switched — reload the page."},
+            status_code=409,
+        )
+    return JSONResponse({"detail": f"Internal error: {exc}"}, status_code=500)
+
+
 @app.middleware("http")
 async def require_client_header(request: Request, call_next):
     if request.method not in ("GET", "HEAD", "OPTIONS") and request.url.path.startswith("/api/"):
@@ -217,13 +242,26 @@ def api_case_open(body: CaseOpen):
     global STORE
     if not os.path.isfile(body.path):
         raise HTTPException(400, f"No case file at {body.path}")
-    if STORE is not None:
-        STORE.close()
+    # Open the new store BEFORE closing/replacing the old one. The old
+    # order (close, then open) left a window where STORE pointed at a
+    # closed connection — any request landing in it (or, if the open
+    # failed, until the next successful open) died with "Cannot operate
+    # on a closed database". With several browsers pointed at one server
+    # (--host 0.0.0.0), one client switching cases while another browses
+    # makes that window a matter of when, not if. Requests already in
+    # flight against the old store when it closes are inherently
+    # unsalvageable — those get a clean 409 from the
+    # closed-database exception handler below instead of a 500 traceback.
+    old = STORE
     try:
         STORE = _open_store(body.path)
     except Exception as e:
-        STORE = None
         raise HTTPException(400, f"Could not open case: {e}")
+    if old is not None:
+        try:
+            old.close()
+        except Exception:
+            pass  # already closed / mid-request — nothing useful to do
     legacy_presets = STORE.pop_legacy_presets()
     if legacy_presets:
         WS.filters.import_all({"filters": legacy_presets}, merge=True)
