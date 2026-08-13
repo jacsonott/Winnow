@@ -88,11 +88,15 @@ try {
 <div class="main-area" id="mainArea" data-dock="bottom">
   <div class="main-content">
     <main class="grid" id="grid">
-      <div class="grid-head">
-        <div class="head-row" id="headRow"></div>
-        <div class="filter-row" id="filterRow"></div>
-      </div>
       <div class="grid-body" id="body" tabindex="0" role="grid" aria-label="Rows">
+        <!-- Inside the scroll container on purpose: position:sticky keeps
+             the header pinned vertically while it scrolls horizontally
+             with the columns natively — compositor-synced, so it can never
+             lag the rows the way the old JS translateX-on-scroll did. -->
+        <div class="grid-head" id="gridHead">
+          <div class="head-row" id="headRow"></div>
+          <div class="filter-row" id="filterRow"></div>
+        </div>
         <div class="spacer-y" id="spacerY"></div>
         <div class="rows" id="rows"></div>
       </div>

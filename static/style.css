@@ -404,11 +404,29 @@ html[data-style="studio"][data-theme="light"] {
 
 .grid {
   position: relative; min-height: 0; flex: 1 1 auto;
-  display: grid; grid-template-rows: auto minmax(0, 1fr);
+  display: grid; grid-template-rows: minmax(0, 1fr);
   background: var(--ink);
 }
 
-.grid-head { background: var(--panel); border-bottom: 1px solid var(--line-2); overflow: hidden; }
+/* Lives INSIDE .grid-body (see index.html): sticky top pins it while
+   vertical scrolling passes under it, and horizontal scrolling moves it
+   with the columns natively on the compositor thread — the old
+   separate-container + JS translateX sync ran a frame behind composited
+   scrolling, so the header visibly lagged the rows on a fast horizontal
+   fling. Sticky also puts .gutter-head/.gutter-filter's own
+   `position: sticky; left: 0` back in business — under the old transform
+   sync a transformed ancestor kept it from ever sticking. width:
+   max-content so it spans all columns (scrollWidth includes it);
+   min-width: 100% so its background still reaches the right edge when
+   the columns are narrower than the viewport. */
+/* z-index 3: above the rows' sticky gutters (2) it scrolls over, below
+   the .rail overlay (4). The .gutter-head/.gutter-filter z-index 3 inside
+   is scoped to the stacking context this z-index creates. */
+.grid-head {
+  background: var(--panel); border-bottom: 1px solid var(--line-2);
+  position: sticky; top: 0; z-index: 3;
+  width: max-content; min-width: 100%;
+}
 .head-row, .filter-row { display: flex; width: max-content; min-width: 100%; }
 
 .hcell {
@@ -447,19 +465,31 @@ html[data-style="studio"][data-theme="light"] {
 
 /* overscroll-behavior-x: none (not just contain) — contain only stops
    scroll from chaining to an ancestor at the boundary, it doesn't stop the
-   browser's own elastic bounce past the boundary on the element itself.
-   With the header/filter rows synced to #body's scrollLeft (see the
-   'scroll' listener below), that bounce visually pulled them past the
-   last column too. Y-axis keeps the original contain (that one's about
-   not chaining vertical scroll to the page, no bounce-past-column
-   equivalent to worry about there). */
+   browser's own elastic bounce past the boundary on the element itself,
+   which looks broken on a data grid. Y-axis keeps the original contain
+   (that one's about not chaining vertical scroll to the page). */
 .grid-body { position: relative; overflow: auto; outline: none; overscroll-behavior-x: none; overscroll-behavior-y: contain; }
 .spacer-y { width: 1px; }
-.rows { position: absolute; top: 0; left: 0; will-change: transform; }
+/* The row-width contract: render() sets an explicit pixel `width` on this
+   box — gutter + the sum of the visible columns' widths, floored at the
+   viewport via min-width — and every .row/.group-header-row (width: auto)
+   fills it exactly. Deliberately NOT width: max-content: intrinsic sizing
+   of the rows' flex content proved unreliable (an unbreakable multi-KB
+   Payload string's min-content, empty pending cells, mid-load
+   header/row width mismatches — each produced rows whose painted
+   background ended mid-screen while their cells kept going), and the
+   render pass already knows the exact total anyway. `top` is set from JS
+   to the sticky header's current height (see syncRowsTop in app.js) —
+   the header is in-flow, so the first rows would otherwise start
+   underneath it. */
+.rows { position: absolute; top: 0; left: 0; will-change: transform; min-width: 100%; }
 
 .row {
   display: flex; height: var(--row-h); align-items: stretch;
-  border-bottom: 1px solid var(--border-hairline); width: max-content; min-width: 100%;
+  border-bottom: 1px solid var(--border-hairline);
+  /* width stays auto: fills .rows, whose explicit width render() sets to
+     the exact column total (see .rows above) — so the stripe always
+     covers every cell and reaches at least the viewport edge. */
   background: var(--ink); /* opaque base so .gutter's sticky `background: inherit` never shows scrolled-under cells through odd rows */
 }
 .row:nth-child(even) { background: var(--row-even); }
@@ -548,6 +578,10 @@ html[data-style="studio"][data-theme="light"] {
 .empty {
   position: absolute; inset: 0; display: grid; place-content: center;
   gap: 6px; text-align: center; color: var(--dim); background: var(--ink);
+  /* Above the sticky .grid-head (3) and the .rail (4) — with the header
+     now inside #body, a z-indexed element would otherwise paint through
+     this whole-grid cover. */
+  z-index: 6;
 }
 .empty-title { color: var(--text); font-size: 15px; margin: 0; }
 .empty p { margin: 0; }

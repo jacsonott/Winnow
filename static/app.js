@@ -537,7 +537,7 @@ async function rebuildView({ keepScroll = true } = {}) {
   $('spacerY').style.height = v.row_count * ROW_H + 'px';
   $('viewStats').innerHTML =
     `<b>${v.row_count.toLocaleString()}</b> of ${src.row_count.toLocaleString()} rows · ${v.elapsed_ms} ms`;
-  $('body').scrollTop = Math.min(scroll, Math.max(0, v.row_count * ROW_H - $('body').clientHeight));
+  $('body').scrollTop = Math.min(scroll, Math.max(0, headH() + v.row_count * ROW_H - $('body').clientHeight));
   if (S.groupByCols.length) {
     // The old view_id (and any expanded groups' sub-views) is gone now —
     // re-summarize against the new one, keeping the chosen grouping columns.
@@ -979,10 +979,38 @@ function syncSelectAllCheckbox() {
   cb.indeterminate = n > 0 && n < S.view.row_count;
 }
 
+/* The sticky header is in-flow at the top of the scroll content, so the
+   virtualized .rows block has to start below it — its height isn't a
+   constant (the filter row, wrapping, zoom), so it's measured and applied
+   on every paint (a no-op write when unchanged). Also the term every
+   scroll-geometry calculation uses: row `pos` occupies content
+   y ∈ [headH() + pos*ROW_H, headH() + (pos+1)*ROW_H). The *top*-edge
+   visibility math is unchanged by the header (it overlays exactly the
+   space it occupies), but anything anchoring to the viewport bottom or
+   its height must subtract it. */
+function headH() { return $('gridHead').offsetHeight; }
+
+function syncRowsTop() {
+  const t = headH() + 'px';
+  const rowsEl = $('rows');
+  if (rowsEl.style.top !== t) rowsEl.style.top = t;
+}
+
+/* Explicit pixel width for #rows — the exact gutter + visible-column
+   total this render pass is about to lay cells out against. See the
+   .rows comment in style.css for why this isn't left to intrinsic
+   (max-content) sizing. */
+function syncRowsWidth(widths, cols) {
+  const w = GUTTER_W + cols.reduce((a, name) => a + widths[name], 0) + 'px';
+  const rowsEl = $('rows');
+  if (rowsEl.style.width !== w) rowsEl.style.width = w;
+}
+
 function render() {
   if (!S.view) return;
   syncSelectAllCheckbox();
   if (S.groupByCols.length) { renderGrouped(); return; }
+  syncRowsTop();
   const body = $('body');
   const rowsEl = $('rows');
   const total = S.view.row_count;
@@ -999,6 +1027,7 @@ function render() {
   const widths = Object.fromEntries(cols.map((name) => [name, colWidth(name)]));
   const needle = S.search.trim().toLowerCase();
 
+  syncRowsWidth(widths, cols);
   rowsEl.style.transform = `translateY(${first * ROW_H}px)`;
   const frag = document.createDocumentFragment();
 
@@ -1184,6 +1213,7 @@ function renderGroupDataRow(r, cols, colMeta, idx, widths) {
 }
 
 function renderGrouped() {
+  syncRowsTop();
   const body = $('body');
   const rowsEl = $('rows');
   rebuildGroupPrefix();
@@ -1200,6 +1230,7 @@ function renderGrouped() {
   const colMeta = Object.fromEntries(S.columns.map((c) => [c.name, c]));
   const idx = Object.fromEntries(S.columns.map((c, i) => [c.name, i]));
   const widths = Object.fromEntries(cols.map((name) => [name, colWidth(name)]));
+  syncRowsWidth(widths, cols);
 
   for (let vpos = first; vpos < last; vpos++) {
     if (!S.groups.length) break;
@@ -1788,8 +1819,13 @@ function moveCursor(to, extend) {
 
 function scrollIntoView(pos) {
   const body = $('body');
+  // Top-edge check needs no header term: the sticky header overlays
+  // exactly the content space it occupies, so "row top clears the header"
+  // is still pos*ROW_H >= scrollTop. The bottom edge does: the row's real
+  // content y is headH() further down, and without it the target row
+  // parks its last ~two-rows'-worth below the viewport.
   const top = pos * ROW_H;
-  const bottom = top + ROW_H;
+  const bottom = top + ROW_H + headH();
   if (top < body.scrollTop) body.scrollTop = top;
   else if (bottom > body.scrollTop + body.clientHeight) body.scrollTop = bottom - body.clientHeight;
 }
@@ -4935,14 +4971,11 @@ $('btnTimelineConfig').onclick = openTimelineSourceConfig;
 
 /* -------------------------------------------------------------- wire-up */
 
-/* Header/filter rows are kept in horizontal sync via transform, not by
-   setting .grid-head's own scrollLeft — .grid-body has a vertical
-   scrollbar eating into its clientWidth (.grid-head doesn't, since it
-   never scrolls vertically), so their scrollable ranges differ and
-   assigning scrollLeft directly clamps the header short right at the
-   end of a scroll, desyncing it from the body by exactly the scrollbar's
-   width. A transform has no such clamp — same technique already used for
-   vertical row virtualization (translateY), just on the X axis. */
+/* No horizontal header sync here anymore: .grid-head lives inside
+   .grid-body as a position:sticky element (see index.html/style.css), so
+   the compositor keeps it pinned vertically and moving horizontally with
+   the columns — the old translateX-on-scroll sync ran on the main thread
+   and lagged composited scrolling by a frame on every fast fling. */
 // A fast trackpad/wheel fling fires several 'scroll' events per animation
 // frame; without this guard each one queued its own rAF, so render() — a
 // full rebuild of the visible rows into a fresh DocumentFragment — ran
@@ -4951,9 +4984,6 @@ $('btnTimelineConfig').onclick = openTimelineSourceConfig;
 let bodyScrollRaf = null;
 $('body').addEventListener('scroll', () => {
   if (!bodyScrollRaf) bodyScrollRaf = requestAnimationFrame(() => { bodyScrollRaf = null; render(); });
-  const x = -$('body').scrollLeft;
-  $('headRow').style.transform = `translateX(${x}px)`;
-  $('filterRow').style.transform = `translateX(${x}px)`;
 }, { passive: true });
 
 /* Shared by the row-click path below and the cell mousedown handler further
@@ -5559,7 +5589,10 @@ async function recenterOnRow(anchor) {
   } catch { return; }
   if (pos == null) return;
   S.cursor = pos;
-  $('body').scrollTop = Math.max(0, pos * ROW_H - $('body').clientHeight / 2 + ROW_H / 2);
+  // Centers within the row band below the sticky header: the visible band
+  // is [scrollTop + headH(), scrollTop + clientHeight], hence the extra
+  // headH()/2 term.
+  $('body').scrollTop = Math.max(0, pos * ROW_H + ROW_H / 2 + headH() / 2 - $('body').clientHeight / 2);
   render();
 }
 
@@ -6190,7 +6223,7 @@ document.addEventListener('keydown', (e) => {
     return;
   }
 
-  const pageRows = Math.floor($('body').clientHeight / ROW_H) - 1;
+  const pageRows = Math.floor(($('body').clientHeight - headH()) / ROW_H) - 1;
   const action = matchAction(e);
   if (action && ACTION_HANDLERS[action]) {
     e.preventDefault();
