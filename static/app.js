@@ -510,25 +510,66 @@ async function openSource(id) {
 
 /* ----------------------------------------------------------------- view */
 
+/* Monotonic token so an older rebuild that resolves after a newer one
+   started can't swap its stale view/spec in over the newer one's — the
+   race was always possible (two POSTs can complete out of order), and
+   the pre-swap row prefetch below widens the in-flight window enough to
+   care. */
+let rebuildSeq = 0;
+
 async function rebuildView({ keepScroll = true } = {}) {
   if (!S.sourceId) return;
   const scroll = keepScroll ? $('body').scrollTop : 0;
   const spec = currentSpec();
+  const seq = ++rebuildSeq;
   let v;
+  let seeded = [];
   setBusy(true);
   try {
-    v = await post('/api/view', spec);
-  } catch (e) {
-    toast(e.status >= 500
-      ? `Couldn't build the view: ${e.message} — this is a bug, check the server console`
-      : 'Filter error: ' + e.message, 5000);
-    return;
+    try {
+      v = await post('/api/view', spec);
+    } catch (e) {
+      toast(e.status >= 500
+        ? `Couldn't build the view: ${e.message} — this is a bug, check the server console`
+        : 'Filter error: ' + e.message, 5000);
+      return;
+    }
+    // Fetch the page(s) covering where the grid will land BEFORE swapping
+    // any state. Swapping first meant clearPageCache() + render() painted
+    // every visible row as a '·' placeholder for the round-trip of the
+    // first page fetch — the whole table visibly vanished on every filter
+    // keystroke and sort click, which reads as sluggishness even when the
+    // rebuild itself is fast. With the seed fetched up front, the old rows
+    // stay on screen until the new view's rows replace them in one paint.
+    // A seed failure is not an error: we fall back to exactly the old
+    // pending-placeholder behaviour, and ensurePage recovers.
+    if (!S.groupByCols.length && v.row_count) {
+      const body = $('body');
+      const target = Math.min(scroll, Math.max(0, headH() + v.row_count * ROW_H - body.clientHeight));
+      const firstRow = Math.max(0, Math.floor(target / ROW_H) - OVERSCAN);
+      const lastRow = Math.min(v.row_count - 1,
+        firstRow + Math.ceil(body.clientHeight / ROW_H) + OVERSCAN * 2);
+      const pageIdxs = [...new Set([Math.floor(firstRow / PAGE), Math.floor(lastRow / PAGE)])];
+      try {
+        seeded = await Promise.all(pageIdxs.map(async (idx) => {
+          const data = await api(`/api/rows?view_id=${v.view_id}&start=${idx * PAGE}&count=${PAGE}`);
+          return [idx, data.rows];
+        }));
+      } catch { seeded = []; }
+    }
   } finally {
     setBusy(false);
   }
+  // A newer rebuild started while this one was in flight — its view has
+  // already evicted ours server-side; let it win.
+  if (seq !== rebuildSeq) return;
   S.view = v;
   S.viewCache.set(S.sourceId, { key: specKey(spec), view_id: v.view_id, row_count: v.row_count, elapsed_ms: v.elapsed_ms });
   clearPageCache();
+  for (const [idx, rows] of seeded) {
+    S.pages.set(idx, rows);
+    for (const r of rows) S.rowsByPos.set(r.pos, r);
+  }
   selClear();
   S.anchor = -1;
   S.cellRange = null;
