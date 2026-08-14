@@ -1,8 +1,8 @@
 """Standalone concurrency probe — NOT part of the `bench` package/harness.
 
-Proves (or disproves) the claim behind the reader-connection prototype:
-that a long build_view no longer stalls a concurrent fetch_rows on a
-*different* view. The `bench/` harness's `@benchmark` decorator times one
+Proves (or disproves) the claim behind the reader-pool split (CLAUDE.md
+invariant #4): that a long build_view no longer stalls a concurrent
+fetch_rows on a *different* view. The `bench/` harness's `@benchmark` decorator times one
 callable in isolation, repeated — it has no notion of "how long does B take
 while A is running," which is what this needs, so it's a separate script
 rather than a suite module.
@@ -94,9 +94,9 @@ def main() -> None:
         store, source_id, small_source_id = build_case(mod, tmpdir, args.rows)
 
         # A cheap view on the small, unrelated source to page from
-        # concurrently — unfiltered/unsorted would take the root_virtual
-        # fast path (out of scope for this prototype), so sort it to force
-        # real materialisation, same as any analyst clicking a column
+        # concurrently — sorted, to force real materialisation (the
+        # root_virtual fast path never touches v.view_N and would probe a
+        # different code path), same as any analyst clicking a column
         # header. Deliberately a different source_id than the contended
         # build_view below (see build_case's comment on view eviction).
         idle_view = store.build_view(small_source_id, {"sort": [{"column": "Host"}]})

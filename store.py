@@ -459,28 +459,44 @@ class Store:
         self._tune(self.db)
         # Materialised views live in their own on-disk database, named and
         # WAL-journalled (not the anonymous `ATTACH DATABASE ''` this used
-        # to be) so that a second, read-only connection can attach it too.
-        # PROTOTYPE (see fetch_rows/_open_reader): this is what lets the
-        # hot page-read path run on a connection that never takes self.lock,
-        # so it isn't stalled behind a long build_view/ingest/search. Still
-        # deleted on close(), same lifecycle guarantee the anonymous temp
-        # attach gave for free.
+        # to be) so that the read-only connections in _reader() can attach
+        # it too — the anonymous temp attach only ever existed on the one
+        # connection that ran it, which is what forced every read through
+        # self.lock (old invariant #4). Still deleted on close(), same
+        # lifecycle guarantee the anonymous attach gave for free.
         #
         # A *named* attach can't ride PRAGMA temp_store=MEMORY the way the
         # old anonymous one did — that pragma only covers SQLite's own TEMP
         # schema, not a file attached by path — so on plain disk this was
         # measured 20-100% slower on every views/paging/timeline benchmark
-        # (bench --vs-ref). /dev/shm (tmpfs, Linux-only) recovers real-disk
-        # speed by keeping the file RAM-backed while still being a normal
-        # path a second connection can ATTACH; PROTOTYPE fallback to the
-        # platform tempdir elsewhere (macOS/Windows) still works, just
-        # without that recovery — a real implementation needs a non-Linux
-        # answer to this (see plan notes).
+        # (bench --vs-ref). Two mitigations, both needed: /dev/shm (tmpfs,
+        # Linux-only) keeps the file RAM-backed while still being a normal
+        # path a second connection can ATTACH, and v.synchronous=OFF drops
+        # the remaining fsyncs — safe here and only here, because views are
+        # re-derivable scratch state that dies with the process anyway (a
+        # crash costs a rebuild the frontend already does on any 409), never
+        # evidence like the case file, where _ingest_synchronous_off
+        # documents why OFF is off-limits. On macOS/Windows there's no
+        # tmpfs path, so the tempdir file leans on synchronous=OFF plus the
+        # OS page cache alone.
         views_dir = "/dev/shm" if os.path.isdir("/dev/shm") and os.access("/dev/shm", os.W_OK) else None
         fd, self._views_path = tempfile.mkstemp(suffix=".db", prefix="winnow-views-", dir=views_dir)
         os.close(fd)
         self.db.execute(f"ATTACH DATABASE '{self._views_path}' AS v")
+        # WAL on the views db is what lets _reader() connections read a
+        # view concurrently with the writer materialising the next one.
         self.db.execute("PRAGMA v.journal_mode=WAL")
+        self.db.execute("PRAGMA v.synchronous=OFF")
+        # Read-only connection pool for the pure-read paths (paging,
+        # grouping, exports, search counts — everything that goes through
+        # _reader()). Guarded by its own small lock, never self.lock: the
+        # entire point is that checking a reader out must not contend with
+        # the writer. Connections are created lazily on first miss and
+        # returned up to the cap; a burst beyond the cap opens transient
+        # connections that close on return instead of pooling.
+        self._reader_pool: list[sqlite3.Connection] = []
+        self._reader_lock = threading.Lock()
+        self._readers_closed = False
         with self.db:
             # Detect *before* CREATE TABLE IF NOT EXISTS runs, so a case file
             # that predates open_tabs gets every existing source/merge
@@ -506,6 +522,13 @@ class Store:
         self._maxlen_cache: dict[int, tuple[int, dict[str, int]]] = {}
         self._fts_threads: dict[int, threading.Thread] = {}
         self._index_threads: dict[tuple[int, str], threading.Thread] = {}
+        # Guards the two thread registries above — its own lock, not
+        # self.lock, for the same reason as _search_job_lock: the ensure-*
+        # helpers are called from read paths (group_summary, column_values,
+        # the search sweep), and bookkeeping that waited on the connection
+        # lock would make a "pure read" stall behind a long build_view
+        # after all. Never held while acquiring any other lock.
+        self._threads_lock = threading.Lock()
         self._fts_janitor: threading.Thread | None = None
         # Search-all job state. Its own lock, not self.lock: the worker
         # mutates the job record between per-source counts, and making that
@@ -593,13 +616,18 @@ class Store:
         every search still ran at fallback speed."""
         if sqlite3.sqlite_version_info < TRIGRAM_LIKE_MIN_SQLITE:
             return
-        with self.lock:
+        with self._threads_lock:
             existing = self._fts_threads.get(source_id)
             if existing and existing.is_alive():
                 return
-        if self._source_lite(source_id).get("has_fts"):
-            return
-        with self.lock:
+        # A _reader() for the has_fts check, not _source_lite/self.lock:
+        # this helper is called from read paths mid-scan, and every call
+        # site runs outside any writer transaction (ingest fires it after
+        # its final commit), so committed state is exactly what to check.
+        with self._reader() as ro:
+            if self._source_lite_on(ro, source_id).get("has_fts"):
+                return
+        with self._threads_lock:
             existing = self._fts_threads.get(source_id)
             if existing and existing.is_alive():
                 return
@@ -614,7 +642,7 @@ class Store:
             pass  # best-effort background upgrade — the next search attempt retries
 
     def _is_fts_building(self, source_id: int) -> bool:
-        with self.lock:
+        with self._threads_lock:
             t = self._fts_threads.get(source_id)
         return bool(t and t.is_alive())
 
@@ -623,7 +651,7 @@ class Store:
         (or `timeout` elapses). Used by tests, and available for any caller
         that genuinely needs up-to-date has_fts before proceeding. Returns
         whether the index is ready by the time it returns."""
-        with self.lock:
+        with self._threads_lock:
             t = self._fts_threads.get(source_id)
         if t:
             t.join(timeout)
@@ -647,8 +675,11 @@ class Store:
 
     def _column_index_exists(self, table_name: str, column: str, purpose: str = "filter") -> bool:
         name = self._column_index_name(table_name, column, purpose)
-        with self.lock:
-            row = self.db.execute(
+        # A _reader(), same reasoning as _ensure_fts_building's has_fts
+        # check: called from read paths, always outside a writer
+        # transaction, and an index only "exists" once its CREATE commits.
+        with self._reader() as ro:
+            row = ro.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='index' AND name=?", (name,)
             ).fetchone()
         return row is not None
@@ -704,14 +735,14 @@ class Store:
     def _ensure_purpose_index_building(self, source_id: int, column: str, purpose: str,
                                         table_name: str | None = None) -> None:
         key = (source_id, column, purpose)
-        with self.lock:
+        with self._threads_lock:
             existing = self._index_threads.get(key)
             if existing and existing.is_alive():
                 return
         table_name = table_name or self._source_lite(source_id)["table_name"]
         if self._column_index_exists(table_name, column, purpose):
             return
-        with self.lock:
+        with self._threads_lock:
             existing = self._index_threads.get(key)
             if existing and existing.is_alive():
                 return
@@ -734,7 +765,7 @@ class Store:
         """Blocks until a background index build for (source_id, column,
         purpose) finishes (or `timeout` elapses). Used by tests. Returns
         whether the index exists by the time it returns."""
-        with self.lock:
+        with self._threads_lock:
             t = self._index_threads.get((source_id, column, purpose))
         if t:
             t.join(timeout)
@@ -770,6 +801,7 @@ class Store:
                     "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name=?", (table,)
                 )
             }
+        with self._threads_lock:
             building = {col for (sid, col, _purpose), t in self._index_threads.items()
                         if sid == source_id and t.is_alive()}
         out = []
@@ -893,34 +925,111 @@ class Store:
                 )
 
     def close(self) -> None:
+        with self._reader_lock:
+            self._readers_closed = True
+            idle, self._reader_pool = self._reader_pool, []
+        for conn in idle:
+            with contextlib.suppress(sqlite3.Error):
+                conn.close()
         with self.lock:
             self.db.close()
+        # A reader still checked out by an in-flight request holds the
+        # unlinked file open — fine on POSIX (the pages stay readable until
+        # its close), and on Windows the remove just fails and is skipped,
+        # leaving a stray temp file rather than an error.
         for suffix in ("", "-wal", "-shm"):
             try:
                 os.remove(self._views_path + suffix)
             except OSError:
                 pass
 
-    def _open_reader(self) -> sqlite3.Connection:
-        """Short-lived read-only connection for the hot page-read path
-        (fetch_rows). Never takes self.lock: WAL mode (_tune, and the
-        `PRAGMA v.journal_mode=WAL` set on the writer at attach time) is
-        what makes concurrent, unlocked reads against both the case file
-        and the views database safe — a reader here sees the latest
-        *committed* data and is never blocked by, or blocks, a writer
-        holding self.lock for a long build_view/ingest/search sweep.
+    READER_POOL_CAP = 6  # matches app.js's PAGE_FETCH_CONCURRENCY — the burstiest client
 
-        Opened and closed per call rather than pooled/reused, same as the
-        existing run_sql/validate_where_fragment/preview_sqlite_tables
-        read-only connections — a Python sqlite3.Connection isn't meant to
-        be hammered concurrently from multiple threads even with
-        check_same_thread=False, so "one per call" sidesteps that instead
-        of needing a lock that would just recreate the contention this
-        exists to avoid."""
+    def _open_reader(self) -> sqlite3.Connection:
+        """One read-only connection for _reader()'s pool. Never takes
+        self.lock: WAL mode (_tune, and the `PRAGMA v.journal_mode=WAL` set
+        on the writer at attach time) is what makes concurrent, unlocked
+        reads against both the case file and the views database safe — a
+        reader sees the latest *committed* data and is never blocked by, or
+        blocks, a writer holding self.lock for a long
+        build_view/ingest/search sweep. Same registered functions as the
+        writer (a group_virtual WHERE can contain DAY_BUCKET(...); a raw
+        filter fragment echoed into an export can contain REGEXP), so a
+        query compiled against one connection never fails on the other."""
         ro = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, check_same_thread=False)
         ro.row_factory = sqlite3.Row
+        ro.create_function("REGEXP", 2, _regexp, deterministic=True)
+        ro.create_function("DAY_BUCKET", 1, _day_bucket, deterministic=True)
+        ro.create_function("TS_NORMALIZE", 1, _ts_normalize, deterministic=True)
+        # Same mmap reasoning as _tune (address space, not RAM — and shared
+        # with the writer's mapping via the OS page cache). busy_timeout
+        # covers the rare WAL edge (recovery, checkpoint restart) where
+        # even a reader can see SQLITE_BUSY briefly.
+        ro.execute("PRAGMA mmap_size=1073741824")
+        ro.execute("PRAGMA busy_timeout=5000")
         ro.execute(f"ATTACH DATABASE 'file:{self._views_path}?mode=ro' AS v")
         return ro
+
+    @contextlib.contextmanager
+    def _reader(self) -> Iterator[sqlite3.Connection]:
+        """Checkout/return for the read-only pool. Every pure-read path
+        (fetch_rows, tag_positions, group_summary, exports, search counts,
+        ...) runs its queries on one of these instead of self.db, which is
+        what makes a slow build_view or ingest invisible to paging.
+
+        Two rules for using it:
+
+        - Never inside an open writer transaction. A reader sees committed
+          data only; code that has just INSERTed under `with self.db:` and
+          needs to read it back must stay on self.db (e.g. ingest's
+          get_source call). Every current _reader() caller is a top-level
+          read-only Store method — keep it that way.
+        - The connection is checked out by one thread at a time (that's
+          what the pool provides; a shared sqlite3 connection would
+          serialize its users at the C level and quietly reintroduce the
+          contention this removes). Holding one across a generator's yields
+          is fine — exports do — because the pool just opens another for
+          whoever else asks.
+
+        On any exception the connection is closed, not returned: the only
+        realistic errors here are a view/source table dropped mid-read or
+        the store closing, and a connection whose last statement died is
+        cheaper to replace than to prove clean. The pool refills lazily."""
+        with self._reader_lock:
+            conn = self._reader_pool.pop() if self._reader_pool else None
+        if conn is None:
+            conn = self._open_reader()
+        try:
+            yield conn
+        except BaseException:
+            with contextlib.suppress(sqlite3.Error):
+                conn.close()
+            raise
+        with self._reader_lock:
+            if not self._readers_closed and len(self._reader_pool) < self.READER_POOL_CAP:
+                self._reader_pool.append(conn)
+                conn = None
+        if conn is not None:
+            conn.close()
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _dropped_view_is_expired() -> Iterator[None]:
+        """Maps "no such table" during an unlocked view read to the same
+        KeyError contract a missing handle raises, so server.py's existing
+        KeyError → 409 mapping turns it into the "view expired" the
+        frontend already rebuilds on. This race is new with _reader():
+        under the old single-connection design the lock serialized a page
+        fetch against the eviction that drops its view table; now a reader
+        holding a handle can lose the table to _evict_root_views
+        mid-request. (A *source* table dropped mid-read lands here too —
+        same answer: the world changed under the request, rebuild.)"""
+        try:
+            yield
+        except sqlite3.OperationalError as e:
+            if "no such table" in str(e).lower():
+                raise KeyError("View expired — rebuild it") from None
+            raise
 
     # ------------------------------------------------------------------ ingest
 
@@ -1701,67 +1810,41 @@ class Store:
         every scroll. Anything user-facing that actually shows those
         counts keeps using get_source; everything that only needs
         table_name/columns/row_count/has_fts to run a query uses this."""
-        if source_id < 0:
-            return self._merge_source_lite(-source_id)
         with self.lock:
-            row = self.db.execute("SELECT * FROM sources WHERE id=?", (source_id,)).fetchone()
-        if not row:
-            raise KeyError(f"No source {source_id}")
-        return self._src_dict(row)
+            return self._source_lite_on(self.db, source_id)
 
-    def _source_lite_ro(self, ro: sqlite3.Connection, source_id: int) -> dict:
-        """Same shape/contract as _source_lite, but reads through a
-        caller-supplied read-only connection with no self.lock at all.
-        PROTOTYPE seam: duplicates _source_lite/_merge_source_lite's query
-        logic rather than parameterising them, to avoid touching their
-        other ~15 call sites for this prototype. A real version of this
-        change should collapse the two into one connection-parameterised
-        implementation instead of maintaining both."""
+    def _source_lite_on(self, conn: sqlite3.Connection, source_id: int) -> dict:
+        """The query logic behind _source_lite, parameterised on the
+        connection: writer-side callers hold self.lock and pass self.db,
+        _reader() paths pass their checked-out read-only connection and
+        never touch the lock at all. A merge (negative id) synthesizes the
+        same dict _merge_source_dict builds minus the per-member
+        tag/note/tab counts, with the same live-members contract (a dropped
+        member is a KeyError, not a stale merge)."""
         if source_id < 0:
             merge_id = -source_id
-            row = ro.execute("SELECT * FROM merges WHERE id=?", (merge_id,)).fetchone()
+            row = conn.execute("SELECT * FROM merges WHERE id=?", (merge_id,)).fetchone()
             if not row:
                 raise KeyError(f"No merge {merge_id}")
             member_ids = json.loads(row["source_ids"])
-            members = [self._source_lite_ro(ro, sid) for sid in member_ids]
+            members = [self._source_lite_on(conn, sid) for sid in member_ids]
             return {
                 "id": source_id,
                 "name": row["name"],
                 "path": None,
                 "table_name": None,
                 "row_count": sum(m["row_count"] for m in members),
-                "columns": members[0]["columns"],
+                "columns": members[0]["columns"],  # canonical — lowest-id (first-created) member
                 "file_hash": None,
                 "imported_at": row["created_at"],
                 "has_fts": 1 if all(m["has_fts"] for m in members) else 0,
                 "is_merge": True,
                 "member_source_ids": member_ids,
             }
-        row = ro.execute("SELECT * FROM sources WHERE id=?", (source_id,)).fetchone()
+        row = conn.execute("SELECT * FROM sources WHERE id=?", (source_id,)).fetchone()
         if not row:
             raise KeyError(f"No source {source_id}")
         return self._src_dict(row)
-
-    def _merge_source_lite(self, merge_id: int) -> dict:
-        """_merge_source_dict minus the per-member tag/note/tab counts —
-        same live-members contract (a dropped member is a KeyError, not a
-        stale merge)."""
-        row = self._merge_row(merge_id)
-        member_ids = json.loads(row["source_ids"])
-        members = [self._source_lite(sid) for sid in member_ids]
-        return {
-            "id": -merge_id,
-            "name": row["name"],
-            "path": None,
-            "table_name": None,
-            "row_count": sum(m["row_count"] for m in members),
-            "columns": members[0]["columns"],  # canonical — lowest-id (first-created) member
-            "file_hash": None,
-            "imported_at": row["created_at"],
-            "has_fts": 1 if all(m["has_fts"] for m in members) else 0,
-            "is_merge": True,
-            "member_source_ids": member_ids,
-        }
 
     def _merge_row(self, merge_id: int) -> sqlite3.Row:
         with self.lock:
@@ -1803,12 +1886,18 @@ class Store:
         every member's table without needing per-member name translation —
         the locked-in 'exact column match' rule already guarantees members
         share the same names modulo case."""
+        with self.lock:
+            return self._resolve_members_on(self.db, source_id)
+
+    def _resolve_members_on(self, conn: sqlite3.Connection, source_id: int) -> list[dict]:
+        """_resolve_members parameterised on the connection, same split as
+        _source_lite/_source_lite_on."""
         if source_id > 0:
-            src = self._source_lite(source_id)
+            src = self._source_lite_on(conn, source_id)
             return [{"source_id": source_id, "table_name": src["table_name"]}]
-        merge = self._merge_source_lite(-source_id)
+        merge = self._source_lite_on(conn, source_id)
         return [
-            {"source_id": sid, "table_name": self._source_lite(sid)["table_name"]}
+            {"source_id": sid, "table_name": self._source_lite_on(conn, sid)["table_name"]}
             for sid in merge["member_source_ids"]
         ]
 
@@ -2138,8 +2227,8 @@ class Store:
         handle = self._views.get(view_id)
         if not handle or handle.get("kind") != "timeline":
             raise KeyError("View expired — rebuild it")
-        with self.lock:
-            rows = self.db.execute(
+        with self._reader() as ro, self._dropped_view_is_expired():
+            rows = ro.execute(
                 f"SELECT pos, source_id, rid, ts, body, type_label, source_name, tag_ids "
                 f"FROM v.{q(view_id)} WHERE pos >= ? AND pos < ? ORDER BY pos",
                 (start + 1, start + 1 + count),
@@ -2265,7 +2354,9 @@ class Store:
         handle = self._views.get(view_id)
         if not handle:
             raise KeyError("View expired — rebuild it")
-        src = self._source_lite(handle["source_id"])
+        with self._reader() as ro:
+            src = self._source_lite_on(ro, handle["source_id"])
+            members = self._resolve_members_on(ro, handle["source_id"])
         colnames = {c["name"]: c["type"] for c in src["columns"]}
         if column not in colnames:
             raise KeyError(column)
@@ -2274,7 +2365,6 @@ class Store:
         extra_where = "".join(f" AND {c}" for c in path_clauses)
 
         val_expr = f"DAY_BUCKET(s.{q(column)})" if is_datetime else f"s.{q(column)}"
-        members = self._resolve_members(handle["source_id"])
         whole_source = not path_clauses and self._grouping_covers_whole_source(handle, src)
         # A root_virtual view has no v.view_N to join at all (it was never
         # materialised — see _build_virtual_root_view), path or no path, so
@@ -2314,8 +2404,8 @@ class Store:
             order_sql = f"{_numeric_expr('val')} {dir_sql}" if colnames[column] == "number" else f"val COLLATE NOCASE {dir_sql}"
         else:
             order_sql = f"n {dir_sql}"
-        with self.lock:
-            rows = self.db.execute(
+        with self._reader() as ro, self._dropped_view_is_expired():
+            rows = ro.execute(
                 f"SELECT val, SUM(n) AS n FROM ({union_sql}) GROUP BY val ORDER BY {order_sql} LIMIT ?",
                 (*params, limit + 1),
             ).fetchall()
@@ -2414,14 +2504,17 @@ class Store:
         }
         return {"view_id": vid, "row_count": total, "elapsed_ms": 0}
 
-    def _virtual_group_where(self, handle: dict) -> tuple[str, list]:
+    def _virtual_group_where(self, handle: dict, conn: sqlite3.Connection | None = None) -> tuple[str, list]:
         """WHERE fragment (unqualified column names, against the member
         table directly) for a group_virtual handle's own column=value plus
         every outer path level already fixed by nested grouping — shared by
         every place that reads straight off the backing member table for a
-        small, ungathered group."""
+        small, ungathered group. `conn` lets a _reader() caller resolve the
+        member's column types on its own connection; writer-side callers
+        (tag/export on a group) omit it and go through the lock as before."""
         column, value = handle["column"], handle["value"]
-        src = self._source_lite(handle["members"][0]["source_id"])
+        member_sid = handle["members"][0]["source_id"]
+        src = self._source_lite_on(conn, member_sid) if conn is not None else self._source_lite(member_sid)
         colnames = {c["name"]: c["type"] for c in src["columns"]}
         cond_sql, cond_val = self._eq_condition(q(column), value, colnames[column] == "datetime")
         path_clauses, path_params = self._path_where(handle.get("path"), colnames)
@@ -2729,14 +2822,8 @@ class Store:
         if handle.get("kind") == "root_virtual":
             return self._fetch_virtual_root_rows(handle, start, count)
 
-        # PROTOTYPE: the common "root" materialized-view path reads through
-        # a short-lived, unlocked reader connection instead of self.lock —
-        # see _open_reader's docstring. group_virtual/root_virtual above,
-        # and every other v.view_N reader elsewhere in this file, are
-        # unchanged (out of scope for this prototype).
-        ro = self._open_reader()
-        try:
-            src = self._source_lite_ro(ro, handle["source_id"])
+        with self._reader() as ro, self._dropped_view_is_expired():
+            src = self._source_lite_on(ro, handle["source_id"])
             cols = [c["name"] for c in src["columns"]]
 
             vrows = ro.execute(
@@ -2754,7 +2841,7 @@ class Store:
             notes: dict[tuple[int, int], str] = {}
             sel = ", ".join(q(c) for c in cols)
             for sid, rids in by_source.items():
-                member_table = self._source_lite_ro(ro, sid)["table_name"]
+                member_table = self._source_lite_on(ro, sid)["table_name"]
                 ph = ",".join("?" * len(rids))
                 for row in ro.execute(f"SELECT rid, {sel} FROM {q(member_table)} WHERE rid IN ({ph})", rids):
                     # positional: the SELECT puts rid first, then cols in
@@ -2772,8 +2859,6 @@ class Store:
                     [sid, *rids],
                 ):
                     notes[(sid, rid)] = note
-        finally:
-            ro.close()
 
         out = []
         for r in vrows:
@@ -2799,13 +2884,13 @@ class Store:
         preserve the outer sort via root_pos."""
         member = handle["members"][0]
         sid = member["source_id"]
-        src = self._source_lite(sid)
-        cols = [c["name"] for c in src["columns"]]
-        where_sql, where_params = self._virtual_group_where(handle)
-        sel = ", ".join(q(c) for c in cols)
+        with self._reader() as ro, self._dropped_view_is_expired():
+            src = self._source_lite_on(ro, sid)
+            cols = [c["name"] for c in src["columns"]]
+            where_sql, where_params = self._virtual_group_where(handle, ro)
+            sel = ", ".join(q(c) for c in cols)
 
-        with self.lock:
-            rows = self.db.execute(
+            rows = ro.execute(
                 f"SELECT rid, {sel} FROM {q(member['table_name'])} WHERE {where_sql} "
                 f"ORDER BY rid LIMIT ? OFFSET ?",
                 [*where_params, count, start],
@@ -2815,11 +2900,11 @@ class Store:
             notes: dict[int, str] = {}
             if rids:
                 ph = ",".join("?" * len(rids))
-                for rid, tid in self.db.execute(
+                for rid, tid in ro.execute(
                     f"SELECT rid, tag_id FROM row_tags WHERE source_id=? AND rid IN ({ph})", [sid, *rids]
                 ):
                     tags.setdefault(rid, []).append(tid)
-                for rid, note in self.db.execute(
+                for rid, note in ro.execute(
                     f"SELECT rid, note FROM row_notes WHERE source_id=? AND rid IN ({ph})", [sid, *rids]
                 ):
                     notes[rid] = note
@@ -2849,12 +2934,12 @@ class Store:
         discards `start` rows first — measured 26ms vs 0.1ms at the far
         end of 2M rows, and that gap grows linearly with depth."""
         sid = handle["source_id"]
-        src = self._source_lite(sid)
-        cols = [c["name"] for c in src["columns"]]
-        sel = ", ".join(q(c) for c in cols)
+        with self._reader() as ro, self._dropped_view_is_expired():
+            src = self._source_lite_on(ro, sid)
+            cols = [c["name"] for c in src["columns"]]
+            sel = ", ".join(q(c) for c in cols)
 
-        with self.lock:
-            rows = self.db.execute(
+            rows = ro.execute(
                 f"SELECT rid, {sel} FROM {q(src['table_name'])} WHERE rid >= ? AND rid < ? ORDER BY rid",
                 (start + 1, start + 1 + count),
             ).fetchall()
@@ -2863,11 +2948,11 @@ class Store:
             notes: dict[int, str] = {}
             if rids:
                 ph = ",".join("?" * len(rids))
-                for rid, tid in self.db.execute(
+                for rid, tid in ro.execute(
                     f"SELECT rid, tag_id FROM row_tags WHERE source_id=? AND rid IN ({ph})", [sid, *rids]
                 ):
                     tags.setdefault(rid, []).append(tid)
-                for rid, note in self.db.execute(
+                for rid, note in ro.execute(
                     f"SELECT rid, note FROM row_notes WHERE source_id=? AND rid IN ({ph})", [sid, *rids]
                 ):
                     notes[rid] = note
@@ -2892,34 +2977,32 @@ class Store:
             raise KeyError("View expired — rebuild it")
         if handle.get("kind") == "group_virtual":
             return []  # no pos-ordered backing table for a small ungathered group — documented limitation
-        if handle.get("kind") == "root_virtual":
-            # pos = rid - 1 directly: an unfiltered root_virtual view is
-            # every row of the source in rid order, so a tagged row's rank
-            # IS its rid - no join against a backing view table needed, and
-            # (unlike group_virtual) never a stub — see _build_virtual_root_view.
-            with self.lock:
-                rows = self.db.execute(
+        with self._reader() as ro, self._dropped_view_is_expired():
+            if handle.get("kind") == "root_virtual":
+                # pos = rid - 1 directly: an unfiltered root_virtual view is
+                # every row of the source in rid order, so a tagged row's rank
+                # IS its rid - no join against a backing view table needed, and
+                # (unlike group_virtual) never a stub — see _build_virtual_root_view.
+                rows = ro.execute(
                     "SELECT rid - 1 AS p, tag_id FROM row_tags WHERE source_id=? ORDER BY rid LIMIT ?",
                     (handle["source_id"], limit),
                 ).fetchall()
-            return [[r["p"], r["tag_id"]] for r in rows]
-        # The join below has no better plan than scanning the whole view
-        # probing row_tags per row (the view has no index on rid — measured
-        # ~115ms per 2M view rows even with row_tags empty). An untagged
-        # source is the common case and this runs after every view build,
-        # so check for any tag at all first — one indexed probe per member.
-        if "source_id" in handle:
-            with self.lock:
+                return [[r["p"], r["tag_id"]] for r in rows]
+            # The join below has no better plan than scanning the whole view
+            # probing row_tags per row (the view has no index on rid — measured
+            # ~115ms per 2M view rows even with row_tags empty). An untagged
+            # source is the common case and this runs after every view build,
+            # so check for any tag at all first — one indexed probe per member.
+            if "source_id" in handle:
                 any_tags = any(
-                    self.db.execute(
+                    ro.execute(
                         "SELECT 1 FROM row_tags WHERE source_id=? LIMIT 1", (m["source_id"],)
                     ).fetchone()
-                    for m in self._resolve_members(handle["source_id"])
+                    for m in self._resolve_members_on(ro, handle["source_id"])
                 )
-            if not any_tags:
-                return []
-        with self.lock:
-            rows = self.db.execute(
+                if not any_tags:
+                    return []
+            rows = ro.execute(
                 f"SELECT vv.pos - 1 AS p, rt.tag_id FROM v.{q(view_id)} vv "
                 f"JOIN row_tags rt ON rt.rid = vv.rid AND rt.source_id = vv.source_id "
                 f"ORDER BY vv.pos LIMIT ?",
@@ -2938,17 +3021,16 @@ class Store:
             raise KeyError("View expired — rebuild it")
         if handle.get("kind") == "group_virtual":
             return None  # no pos-ordered backing table for a small ungathered group
-        if handle.get("kind") == "root_virtual":
-            if source_id != handle["source_id"]:
-                return None
-            src = self._source_lite(source_id)
-            with self.lock:
-                row = self.db.execute(
+        with self._reader() as ro, self._dropped_view_is_expired():
+            if handle.get("kind") == "root_virtual":
+                if source_id != handle["source_id"]:
+                    return None
+                src = self._source_lite_on(ro, source_id)
+                row = ro.execute(
                     f"SELECT 1 FROM {q(src['table_name'])} WHERE rid=?", (rid,)
                 ).fetchone()
-            return rid - 1 if row else None
-        with self.lock:
-            row = self.db.execute(
+                return rid - 1 if row else None
+            row = ro.execute(
                 f"SELECT pos FROM v.{q(view_id)} WHERE source_id=? AND rid=?",
                 (source_id, rid),
             ).fetchone()
@@ -2969,16 +3051,16 @@ class Store:
         index. It's also the same index an equals/in filter on this column
         wants, which is the overwhelmingly likely next action after picking
         a value out of this list."""
-        src = self._source_lite(source_id)
-        names = {c["name"] for c in src["columns"]}
-        if column not in names:
-            raise KeyError(column)
-        members = self._resolve_members(source_id)
-        for m in members:
-            self._ensure_column_index_building(m["source_id"], column, m["table_name"])
-        union_sql = " UNION ALL ".join(f"SELECT {q(column)} AS val FROM {q(m['table_name'])}" for m in members)
-        with self.lock:
-            rows = self.db.execute(
+        with self._reader() as ro, self._dropped_view_is_expired():
+            src = self._source_lite_on(ro, source_id)
+            names = {c["name"] for c in src["columns"]}
+            if column not in names:
+                raise KeyError(column)
+            members = self._resolve_members_on(ro, source_id)
+            for m in members:
+                self._ensure_column_index_building(m["source_id"], column, m["table_name"])
+            union_sql = " UNION ALL ".join(f"SELECT {q(column)} AS val FROM {q(m['table_name'])}" for m in members)
+            rows = ro.execute(
                 f"SELECT val, count(*) AS n FROM ({union_sql}) GROUP BY 1 ORDER BY n DESC LIMIT ?",
                 (limit,),
             ).fetchall()
@@ -2994,17 +3076,17 @@ class Store:
         button a user can click repeatedly (once per column double-click,
         plus a "fit all" action) without the underlying data changing at
         all between clicks."""
-        src = self._source_lite(source_id)
-        cached = self._maxlen_cache.get(source_id)
-        if cached and cached[0] == src["row_count"]:
-            return cached[1]
-        cols = [c["name"] for c in src["columns"]]
-        members = self._resolve_members(source_id)
-        sel = ", ".join(f"MAX(LENGTH({q(c)}))" for c in cols)
-        maxes = [0] * len(cols)
-        with self.lock:
+        with self._reader() as ro, self._dropped_view_is_expired():
+            src = self._source_lite_on(ro, source_id)
+            cached = self._maxlen_cache.get(source_id)
+            if cached and cached[0] == src["row_count"]:
+                return cached[1]
+            cols = [c["name"] for c in src["columns"]]
+            members = self._resolve_members_on(ro, source_id)
+            sel = ", ".join(f"MAX(LENGTH({q(c)}))" for c in cols)
+            maxes = [0] * len(cols)
             for m in members:
-                row = self.db.execute(f"SELECT {sel} FROM {q(m['table_name'])}").fetchone()
+                row = ro.execute(f"SELECT {sel} FROM {q(m['table_name'])}").fetchone()
                 for i, v in enumerate(row):
                     if v and v > maxes[i]:
                         maxes[i] = v
@@ -3530,20 +3612,20 @@ class Store:
     def _export_virtual_group_csv_rows(self, handle: dict, tagged_only: bool):
         member = handle["members"][0]
         sid = member["source_id"]
-        src = self._source_lite(sid)
-        cols = [c["name"] for c in src["columns"]]
-        where_sql, where_params = self._virtual_group_where(handle)
-        sel = ", ".join(q(c) for c in cols)
+        with self._reader() as ro, self._dropped_view_is_expired():
+            src = self._source_lite_on(ro, sid)
+            cols = [c["name"] for c in src["columns"]]
+            where_sql, where_params = self._virtual_group_where(handle, ro)
+            sel = ", ".join(q(c) for c in cols)
 
-        tagnames = {t["id"]: t["name"] for t in self.list_tags()}
-        buf = io.StringIO()
-        w = csv.writer(buf, lineterminator="\n")
-        w.writerow(["Line", "Tags", "Note", *cols])
-        yield buf.getvalue()
-        buf.seek(0), buf.truncate(0)
+            tagnames = {r["id"]: r["name"] for r in ro.execute("SELECT id, name FROM tag_defs")}
+            buf = io.StringIO()
+            w = csv.writer(buf, lineterminator="\n")
+            w.writerow(["Line", "Tags", "Note", *cols])
+            yield buf.getvalue()
+            buf.seek(0), buf.truncate(0)
 
-        with self.lock:
-            rows = self.db.execute(
+            rows = ro.execute(
                 f"SELECT rid, {sel} FROM {q(member['table_name'])} WHERE {where_sql} ORDER BY rid", where_params
             ).fetchall()
             rids = [r["rid"] for r in rows]
@@ -3551,11 +3633,11 @@ class Store:
             nmap: dict[int, str] = {}
             if rids:
                 ph = ",".join("?" * len(rids))
-                for rid, tid in self.db.execute(
+                for rid, tid in ro.execute(
                     f"SELECT rid, tag_id FROM row_tags WHERE source_id=? AND rid IN ({ph})", [sid, *rids]
                 ):
                     tmap.setdefault(rid, []).append(tagnames.get(tid, str(tid)))
-                for rid, note in self.db.execute(
+                for rid, note in ro.execute(
                     f"SELECT rid, note FROM row_notes WHERE source_id=? AND rid IN ({ph})", [sid, *rids]
                 ):
                     nmap[rid] = note
@@ -3572,26 +3654,28 @@ class Store:
         keyset way _export_view_csv_rows pages v.view_N (`rid > ?` here
         instead of `pos > ?`) — a root_virtual view can be the entire
         source, potentially millions of rows, unlike the small bounded
-        group _export_virtual_group_csv_rows fetches in one shot. Lock is
-        acquired fresh per chunk, never held across a yield, same reasoning
-        as _export_view_csv_rows."""
+        group _export_virtual_group_csv_rows fetches in one shot. Runs
+        entirely on one checked-out _reader() connection, held across
+        yields (safe — see _reader's docstring; an abandoned generator's
+        GeneratorExit closes it), so a multi-minute export never touches
+        self.lock at all."""
         sid = handle["source_id"]
-        src = self._source_lite(sid)
-        table = src["table_name"]
-        cols = [c["name"] for c in src["columns"]]
-        sel = ", ".join(q(c) for c in cols)
+        with self._reader() as ro, self._dropped_view_is_expired():
+            src = self._source_lite_on(ro, sid)
+            table = src["table_name"]
+            cols = [c["name"] for c in src["columns"]]
+            sel = ", ".join(q(c) for c in cols)
 
-        tagnames = {t["id"]: t["name"] for t in self.list_tags()}
-        buf = io.StringIO()
-        w = csv.writer(buf, lineterminator="\n")
-        w.writerow(["Line", "Tags", "Note", *cols])
-        yield buf.getvalue()
-        buf.seek(0), buf.truncate(0)
+            tagnames = {r["id"]: r["name"] for r in ro.execute("SELECT id, name FROM tag_defs")}
+            buf = io.StringIO()
+            w = csv.writer(buf, lineterminator="\n")
+            w.writerow(["Line", "Tags", "Note", *cols])
+            yield buf.getvalue()
+            buf.seek(0), buf.truncate(0)
 
-        last_rid = 0
-        while True:
-            with self.lock:
-                chunk = self.db.execute(
+            last_rid = 0
+            while True:
+                chunk = ro.execute(
                     f"SELECT rid, {sel} FROM {q(table)} WHERE rid > ? ORDER BY rid LIMIT 5000",
                     (last_rid,),
                 ).fetchall()
@@ -3604,59 +3688,58 @@ class Store:
                 nmap: dict[int, str] = {}
                 if tagged_only:
                     tagged_set = {
-                        row[0] for row in self.db.execute(
+                        row[0] for row in ro.execute(
                             f"SELECT DISTINCT rid FROM row_tags WHERE source_id=? AND rid IN ({ph})", [sid, *rids]
                         )
                     }
                 else:
                     tagged_set = None
-                for rid, tid in self.db.execute(
+                for rid, tid in ro.execute(
                     f"SELECT rid, tag_id FROM row_tags WHERE source_id=? AND rid IN ({ph})", [sid, *rids]
                 ):
                     tmap.setdefault(rid, []).append(tagnames.get(tid, str(tid)))
-                for rid, note in self.db.execute(
+                for rid, note in ro.execute(
                     f"SELECT rid, note FROM row_notes WHERE source_id=? AND rid IN ({ph})", [sid, *rids]
                 ):
                     nmap[rid] = note
 
-            for r in chunk:
-                if tagged_only and r["rid"] not in tagged_set:
-                    continue
-                w.writerow([r["rid"], "; ".join(tmap.get(r["rid"], [])), _csv_safe(nmap.get(r["rid"], "")),
-                           *[_csv_safe(r[c]) for c in cols]])
-            yield buf.getvalue()
-            buf.seek(0), buf.truncate(0)
+                for r in chunk:
+                    if tagged_only and r["rid"] not in tagged_set:
+                        continue
+                    w.writerow([r["rid"], "; ".join(tmap.get(r["rid"], [])), _csv_safe(nmap.get(r["rid"], "")),
+                               *[_csv_safe(r[c]) for c in cols]])
+                yield buf.getvalue()
+                buf.seek(0), buf.truncate(0)
 
     def _export_view_csv_rows(self, view_id: str, handle: dict, tagged_only: bool):
         """Streams chunks of v.view_N grouped by each row's own source_id —
         same per-member resolution pattern as fetch_rows, so this works for
         merged views without a single cross-table JOIN.
 
-        Acquires self.lock freshly per chunk rather than once for the whole
-        generator, and never holds it across a `yield`. A generator paused
-        at a yield inside `with self.lock:` can be resumed — or abandoned
-        via GeneratorExit on early client disconnect — from a different
-        thread than the one that acquired it; releasing a threading.RLock
-        from the wrong thread raises "cannot release un-acquired lock" and
-        can leave the store's lock stuck for every other request. Keyset
-        pagination (`pos > ?`) over v.view_N's unique index avoids the
+        Runs entirely on one checked-out _reader() connection, held across
+        yields — safe, unlike the RLock this used to have to release before
+        every yield (a generator can be resumed or abandoned from a
+        different thread than the one that acquired the lock; a connection
+        is just an object, and GeneratorExit on early client disconnect
+        closes it via _reader's exception path). Keyset pagination
+        (`pos > ?`) over v.view_N's unique index avoids the
         OFFSET-rescans-from-zero cost that would otherwise reintroduce.
         """
-        src = self._source_lite(handle["source_id"])
-        cols = [c["name"] for c in src["columns"]]
-        sel = ", ".join(q(c) for c in cols)
+        with self._reader() as ro, self._dropped_view_is_expired():
+            src = self._source_lite_on(ro, handle["source_id"])
+            cols = [c["name"] for c in src["columns"]]
+            sel = ", ".join(q(c) for c in cols)
 
-        tagnames = {t["id"]: t["name"] for t in self.list_tags()}
-        buf = io.StringIO()
-        w = csv.writer(buf, lineterminator="\n")
-        w.writerow(["Line", "Tags", "Note", *cols])
-        yield buf.getvalue()
-        buf.seek(0), buf.truncate(0)
+            tagnames = {r["id"]: r["name"] for r in ro.execute("SELECT id, name FROM tag_defs")}
+            buf = io.StringIO()
+            w = csv.writer(buf, lineterminator="\n")
+            w.writerow(["Line", "Tags", "Note", *cols])
+            yield buf.getvalue()
+            buf.seek(0), buf.truncate(0)
 
-        last_pos = 0
-        while True:
-            with self.lock:
-                chunk = self.db.execute(
+            last_pos = 0
+            while True:
+                chunk = ro.execute(
                     f"SELECT pos, source_id, rid FROM v.{q(view_id)} WHERE pos > ? ORDER BY pos LIMIT 5000",
                     (last_pos,),
                 ).fetchall()
@@ -3675,7 +3758,7 @@ class Store:
                     if tagged_only:
                         ph0 = ",".join("?" * len(rids))
                         tagged_set = {
-                            row[0] for row in self.db.execute(
+                            row[0] for row in ro.execute(
                                 f"SELECT DISTINCT rid FROM row_tags WHERE source_id=? AND rid IN ({ph0})",
                                 [sid, *rids],
                             )
@@ -3683,31 +3766,31 @@ class Store:
                         rids = [r for r in rids if r in tagged_set]
                         if not rids:
                             continue
-                    member_table = self._source_lite(sid)["table_name"]
+                    member_table = self._source_lite_on(ro, sid)["table_name"]
                     ph = ",".join("?" * len(rids))
-                    for row in self.db.execute(f"SELECT rid, {sel} FROM {q(member_table)} WHERE rid IN ({ph})", rids):
+                    for row in ro.execute(f"SELECT rid, {sel} FROM {q(member_table)} WHERE rid IN ({ph})", rids):
                         cellmap[(sid, row["rid"])] = tuple(row[c] for c in cols)
-                    for rid, tid in self.db.execute(
+                    for rid, tid in ro.execute(
                         f"SELECT rid, tag_id FROM row_tags WHERE source_id=? AND rid IN ({ph})", [sid, *rids]
                     ):
                         tmap.setdefault((sid, rid), []).append(tagnames.get(tid, str(tid)))
-                    for rid, note in self.db.execute(
+                    for rid, note in ro.execute(
                         f"SELECT rid, note FROM row_notes WHERE source_id=? AND rid IN ({ph})", [sid, *rids]
                     ):
                         nmap[(sid, rid)] = note
 
-            for r in chunk:
-                key = (r["source_id"], r["rid"])
-                if key not in cellmap:
-                    continue  # tagged_only filtered this row out
-                w.writerow([
-                    r["rid"],
-                    "; ".join(tmap.get(key, [])),
-                    _csv_safe(nmap.get(key, "")),
-                    *[_csv_safe(v) for v in cellmap[key]],
-                ])
-            yield buf.getvalue()
-            buf.seek(0), buf.truncate(0)
+                for r in chunk:
+                    key = (r["source_id"], r["rid"])
+                    if key not in cellmap:
+                        continue  # tagged_only filtered this row out
+                    w.writerow([
+                        r["rid"],
+                        "; ".join(tmap.get(key, [])),
+                        _csv_safe(nmap.get(key, "")),
+                        *[_csv_safe(v) for v in cellmap[key]],
+                    ])
+                yield buf.getvalue()
+                buf.seek(0), buf.truncate(0)
 
     def export_tagged_xlsx(self) -> io.BytesIO:
         """One worksheet per real source that has at least one tagged row —
@@ -3715,10 +3798,10 @@ class Store:
         sheet, and sources with zero tagged rows are skipped so the workbook
         doesn't fill up with empty tabs. No view/filter/sort involved (only
         "tagged or not"), so unlike _export_view_csv_rows this doesn't need
-        v.view_N at all — just row_tags per source_id. Lock is held once per
-        source, not for the whole multi-table loop, per CLAUDE.md's "hold
-        the lock for one unit of committed work" rule; openpyxl's in-memory
-        writes below don't touch the db and don't need it."""
+        v.view_N at all — just row_tags per source_id. Reads run on a
+        _reader() connection checked out per source, so a big multi-sheet
+        export never touches self.lock; openpyxl's in-memory writes below
+        don't touch the db at all."""
         tagnames = {t["id"]: t["name"] for t in self.list_tags()}
         wb = Workbook()
         wb.remove(wb.active)
@@ -3730,8 +3813,8 @@ class Store:
             source_id = src["id"]
             cols = [c["name"] for c in src["columns"]]
             sel = ", ".join(q(c) for c in cols)
-            with self.lock:
-                rids = [r[0] for r in self.db.execute(
+            with self._reader() as ro, self._dropped_view_is_expired():
+                rids = [r[0] for r in ro.execute(
                     "SELECT DISTINCT rid FROM row_tags WHERE source_id=? ORDER BY rid", (source_id,)
                 )]
                 cellmap: dict[int, tuple] = {}
@@ -3739,15 +3822,15 @@ class Store:
                 nmap: dict[int, str] = {}
                 if rids:
                     ph = ",".join("?" * len(rids))
-                    for row in self.db.execute(
+                    for row in ro.execute(
                         f"SELECT rid, {sel} FROM {q(src['table_name'])} WHERE rid IN ({ph})", rids
                     ):
                         cellmap[row["rid"]] = tuple(row[c] for c in cols)
-                    for rid, tid in self.db.execute(
+                    for rid, tid in ro.execute(
                         f"SELECT rid, tag_id FROM row_tags WHERE source_id=? AND rid IN ({ph})", [source_id, *rids]
                     ):
                         tmap.setdefault(rid, []).append(tagnames.get(tid, str(tid)))
-                    for rid, note in self.db.execute(
+                    for rid, note in ro.execute(
                         f"SELECT rid, note FROM row_notes WHERE source_id=? AND rid IN ({ph})", [source_id, *rids]
                     ):
                         nmap[rid] = note
@@ -3864,11 +3947,17 @@ class Store:
                 )
             n = 0
             if inner is not None:
-                with self.lock:
-                    try:
-                        n = self.db.execute(f"SELECT COUNT(*) FROM ({inner})", params).fetchone()[0]
-                    except sqlite3.Error:
-                        n = 0  # source dropped (or its index swapped) mid-sweep
+                # One _reader() checkout per source's count — the sweep
+                # never touches self.lock at all now, so even its worst
+                # case (N full LIKE scans on an unindexed 42 GB merge)
+                # can't stall a single paging/tagging/view-build request.
+                # Checked out per count rather than once for the sweep so
+                # the connection goes back in the pool between sources.
+                try:
+                    with self._reader() as ro:
+                        n = ro.execute(f"SELECT COUNT(*) FROM ({inner})", params).fetchone()[0]
+                except sqlite3.Error:
+                    n = 0  # source dropped (or its index swapped) mid-sweep
             hit = None
             if n:
                 hit = {
@@ -3881,10 +3970,10 @@ class Store:
             # Every source yields, matches or not, so `scanned` tracks real
             # progress through the sweep rather than only counting hits.
             yield scanned, total, hit
-            # Same yield-after-release build_fts documents: a tight
-            # release/reacquire loop can starve a foreground request waiting
-            # on the same lock for several iterations before the scheduler
-            # hands it over.
+            # No lock to starve anyone on anymore — this is now just a
+            # scheduling courtesy so a long sweep's back-to-back scans
+            # don't pin a core against interactive requests, and the gap
+            # cancellation checks land in.
             time.sleep(0.02)
 
     # ------------------------------------------------ search-all as a job
