@@ -28,13 +28,15 @@ WHERE m.InUse = 'false' ORDER BY u.Timestamp;
 
 ## Install
 
+**Settings → Plugins → "Install a plugin folder…"** and pick this folder
+(takes effect immediately, no restart), or copy it in by hand:
+
 ```bash
 cp -r examples/plugins/mft_usn plugins/
-python server.py
 ```
 
 Then import a raw `$MFT`/`$J` by drag-and-drop, through **Import files…**,
-a folder import, or **Plugins…** in the ≡ menu.
+a folder import, or the per-format picker in Settings → Plugins.
 
 ## As a reference for writing your own plugin
 

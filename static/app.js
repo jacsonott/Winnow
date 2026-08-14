@@ -4064,49 +4064,105 @@ function openPluginOptionsForm(item, { onConfirm, onCancel }) {
   });
 }
 
-/* What's plugged in: every loaded plugin (or the error that kept it from
-   loading), each plugin's ingest formats, and a per-format picker with NO
-   accept restriction — the one file-picking path that can reach a target
-   the format matches by bare-name pattern ("$MFT" has no extension for an
-   accept attribute to allow). Plugins load at server startup, so the note
-   about restarting is doing real work here. */
-function openPluginsModal() {
-  modal('Plugins', (b) => {
-    b.append(el('p', null,
-      'Drop-in extensions, Notepad++-style: put a plugin in the folder below and restart the server. '
-      + 'A plugin runs with the same privileges as Winnow itself — only install plugins you trust.'));
+/* Settings → Plugins: everything about drop-in extensions in one place —
+   every plugin found in the plugins directory (enabled, disabled, or
+   failed-to-load with why), a checkbox per plugin that takes effect
+   immediately (the server rescans and reloads its registry on every
+   toggle; a disabled plugin's code is never even imported), and an
+   installer that copies a picked .py file or plugin folder from anywhere
+   on disk into the plugins directory — the same consent model as copying
+   it in by hand, minus the hand. Appends into the Settings modal body and
+   re-renders itself in place, same inline pattern as buildColumnsPanel.
+   Each enabled format keeps its own no-accept-attribute file picker — the
+   one file-picking path that can reach a target the format matches by
+   bare-name pattern ("$MFT" has no extension for an accept to allow). */
+function buildPluginsPanel(b) {
+  const box = el('div');
+  b.append(box);
+
+  function applyListing(r) {
+    S.plugins = r.plugins || [];
+    S.pluginFormats = r.formats || [];
+    S.pluginDirs = r.dirs || [];
+  }
+
+  async function installFiles(fileList, relPaths) {
+    const files = [...fileList];
+    if (!files.length) return;
+    const fd = new FormData();
+    for (const f of files) fd.append('files', f);
+    fd.append('paths', JSON.stringify(relPaths));
+    let r;
+    try {
+      r = await api('/api/plugins/install', { method: 'POST', body: fd });
+    } catch (e) {
+      if (e.status !== 409) { toast('Install failed: ' + e.message, 6000); return; }
+      // Name taken — the server won't clobber without being told to.
+      if (!(await confirmDialog(`${e.message}. Replace it?`, { danger: true, okLabel: 'Replace' }))) return;
+      fd.append('overwrite', 'true');
+      try {
+        r = await api('/api/plugins/install', { method: 'POST', body: fd });
+      } catch (e2) { toast('Install failed: ' + e2.message, 6000); return; }
+    }
+    applyListing(r);
+    renderPanel();
+    if (r.error) toast(`Installed ${r.installed}, but it failed to load: ${r.error}`, 8000);
+    else toast(`Installed ${r.installed}`);
+  }
+
+  function renderPanel() {
+    box.replaceChildren();
+    box.append(el('p', null,
+      'Drop-in extensions, Notepad++-style. Toggles and installs take effect immediately — no restart. '
+      + 'A plugin runs with the same privileges as Winnow itself, so only install plugins you trust.'));
     for (const d of S.pluginDirs) {
       const dir = el('div', 'note-status', d);
       dir.style.cssText = 'font-family:var(--mono)';
-      b.append(dir);
+      box.append(dir);
     }
+
     if (!S.plugins.length) {
-      b.append(el('p', 'note-status', 'No plugins installed. A ready-made example (raw NTFS $MFT / USN journal parsing) ships in examples/plugins/ — see plugins/README.md.'));
-      return;
+      box.append(el('p', 'note-status',
+        'No plugins installed. A ready-made example (raw NTFS $MFT / USN journal parsing) ships in '
+        + 'examples/plugins/mft_usn — install it below, or see plugins/README.md.'));
     }
     for (const p of S.plugins) {
       const row = el('div', 'row-actions session-row');
-      row.append(
-        el('span', 'session-name', p.name + (p.version ? ` v${p.version}` : '')),
-        el('span', 'count', p.error ? 'failed to load' : `${(p.formats || []).length} format${(p.formats || []).length === 1 ? '' : 's'}`),
-      );
-      b.append(row);
+      const cb = el('input');
+      cb.type = 'checkbox';
+      cb.checked = p.enabled;
+      cb.title = p.enabled ? 'Disable — its code will no longer be loaded' : 'Enable this plugin';
+      cb.onchange = async () => {
+        cb.disabled = true;
+        try {
+          applyListing(await post('/api/plugins/toggle', { fs_name: p.fs_name, enabled: cb.checked }));
+          toast(cb.checked ? `Enabled ${p.name}` : `Disabled ${p.name} — its code is no longer loaded`);
+        } catch (e) {
+          toast('Could not toggle plugin: ' + e.message, 5000);
+        }
+        renderPanel();
+      };
+      const status = p.error ? 'failed to load'
+        : !p.enabled ? 'disabled'
+        : `${(p.formats || []).length} format${(p.formats || []).length === 1 ? '' : 's'}`;
+      row.append(cb, el('span', 'session-name', p.name + (p.version ? ` v${p.version}` : '')), el('span', 'count', status));
+      box.append(row);
       if (p.error) {
         const err = el('div', 'note-status', p.error);
-        err.style.cssText = 'color:var(--bad, #c0392b);margin:0 0 10px 12px';
-        b.append(err);
+        err.style.cssText = 'color:var(--bad, #c0392b);margin:0 0 10px 24px';
+        box.append(err);
         continue;
       }
       if (p.description) {
         const desc = el('div', 'note-status', p.description);
-        desc.style.cssText = 'margin:0 0 6px 12px';
-        b.append(desc);
+        desc.style.cssText = 'margin:0 0 6px 24px';
+        box.append(desc);
       }
       for (const fid of p.formats || []) {
         const f = pluginFormatById(fid);
         if (!f) continue;
         const frow = el('div', 'row-actions session-row');
-        frow.style.marginLeft = '12px';
+        frow.style.marginLeft = '24px';
         const matches = (f.extensions || []).concat(f.filename_patterns || []).join(', ');
         frow.append(
           el('span', 'session-name', f.label),
@@ -4116,7 +4172,7 @@ function openPluginsModal() {
         const inp = el('input');
         inp.type = 'file';
         inp.multiple = true;
-        inp.hidden = true; // no accept attribute on purpose — see the function comment
+        inp.hidden = true; // no accept attribute on purpose — see the panel comment
         inp.onchange = () => {
           if (!inp.files.length) return;
           queueFilesForFormat(f, [...inp.files]);
@@ -4124,15 +4180,44 @@ function openPluginsModal() {
         };
         pickLabel.append(inp);
         frow.append(pickLabel);
-        b.append(frow);
-        if (f.description) {
-          const fdesc = el('div', 'note-status', f.description);
-          fdesc.style.cssText = 'margin:0 0 8px 24px';
-          b.append(fdesc);
-        }
+        box.append(frow);
       }
     }
-  }, { wide: true });
+
+    const acts = el('div', 'row-actions');
+    const fileLabel = el('label', 'btn ghost', 'Install a plugin file…');
+    const fileInput = el('input');
+    fileInput.type = 'file';
+    fileInput.accept = '.py';
+    fileInput.hidden = true;
+    fileInput.onchange = () => {
+      const files = [...fileInput.files];
+      fileInput.value = '';
+      installFiles(files, files.map((f) => f.name));
+    };
+    fileLabel.append(fileInput);
+    const folderLabel = el('label', 'btn ghost', 'Install a plugin folder…');
+    const folderInput = el('input');
+    folderInput.type = 'file';
+    // Folder picker: every file inside arrives with its path relative to
+    // the picked folder (webkitRelativePath), which is exactly what the
+    // install route's `paths` field wants.
+    folderInput.webkitdirectory = true;
+    folderInput.hidden = true;
+    folderInput.onchange = () => {
+      const files = [...folderInput.files];
+      folderInput.value = '';
+      installFiles(files, files.map((f) => f.webkitRelativePath || f.name));
+    };
+    folderLabel.append(folderInput);
+    acts.append(fileLabel, folderLabel);
+    box.append(acts);
+  }
+
+  renderPanel();
+  // Refresh from the server in the background — cheap, and catches a
+  // plugin someone dropped into the folder by hand since boot.
+  loadPlugins().then(renderPanel);
 }
 
 /* Real (non-merge) sources' schema, formatted as CREATE TABLE-ish SQL —
@@ -5851,7 +5936,6 @@ $('btnSession').onclick = () => dropdownMenu($('btnSession'), [
   { label: 'Import a folder…', onclick: openDirectoryImportModal },
   { label: 'Merge sources…', onclick: openMergeBuilder },
   { label: 'Tables…', onclick: openTablesManager },
-  { label: 'Plugins…', onclick: openPluginsModal },
   '-',
   { label: 'Export…', onclick: openExportModal },
   { label: 'Session (save/load)…', onclick: openSessionManager },
@@ -6495,6 +6579,9 @@ function openSettings() {
     impLabel.append(impInput);
     fActs.append(exp, impLabel);
     b.append(fActs);
+
+    b.append(el('h4', null, 'Plugins'));
+    buildPluginsPanel(b);
   });
 }
 

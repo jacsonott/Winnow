@@ -164,6 +164,23 @@ def test_resolve_options(registry):
         fmt.resolve_options({"mode": "nope"})
 
 
+def test_disabled_plugin_is_discovered_but_never_imported(plug_dir):
+    # A disabled plugin whose module body would blow up on import proves
+    # the point: discovery must not execute its code.
+    _write_plugin(plug_dir, "landmine", "raise RuntimeError('imported a disabled plugin')")
+    _write_plugin(plug_dir, "demo", GOOD_PLUGIN)
+    reg = PluginRegistry()
+    reg.load([plug_dir], disabled={"landmine"})
+    by_fs = {p["fs_name"]: p for p in reg.describe()}
+    mine = by_fs["landmine"]
+    assert mine["enabled"] is False and mine["error"] is None and mine["formats"] == []
+    assert by_fs["demo"]["enabled"] is True
+    # Re-enabling is just another load without the name in the set.
+    reg.load([plug_dir], disabled=set())
+    mine = next(p for p in reg.describe() if p["fs_name"] == "landmine")
+    assert "imported a disabled plugin" in mine["error"]  # now it ran, and failed loudly
+
+
 # ------------------------------------------------------------- ingest_rows
 
 def test_ingest_rows_basic(store):
@@ -236,10 +253,13 @@ def test_scan_filename_patterns_pass_the_extension_gate(store, tmp_path):
 # ------------------------------------------------------------- HTTP routes
 
 @pytest.fixture
-def plugin_client(client, registry, monkeypatch):
+def plugin_client(client, registry, plug_dir, monkeypatch):
     import server
 
     monkeypatch.setattr(server, "PLUGINS", registry)
+    # Toggle reloads from, and install writes into, PLUGIN_DIRS — pointing
+    # it at the test's tmp dir keeps the repo's real plugins/ untouched.
+    monkeypatch.setattr(server, "PLUGIN_DIRS", [plug_dir])
     return client
 
 
@@ -287,6 +307,130 @@ def test_ingest_plugin_errors_are_400s(plugin_client, tmp_path):
     assert r.status_code == 400
     r = plugin_client.post("/api/ingest/plugin/path", json={"path": str(tmp_path / "missing"), "format_id": "demo.lines"})
     assert r.status_code == 400
+
+
+def test_workspace_plugin_prefs_roundtrip():
+    import workspace as WS
+
+    assert WS.plugin_prefs.disabled() == set()
+    WS.plugin_prefs.set_enabled("x", False)
+    WS.plugin_prefs.set_enabled("y", False)
+    assert WS.plugin_prefs.disabled() == {"x", "y"}
+    WS.plugin_prefs.set_enabled("x", True)
+    assert WS.plugin_prefs.disabled() == {"y"}
+
+
+def test_toggle_route(plugin_client, tmp_path):
+    f = tmp_path / "notes.lines"
+    f.write_text("alpha\n")
+
+    r = plugin_client.post("/api/plugins/toggle", json={"fs_name": "demo", "enabled": False})
+    assert r.status_code == 200
+    out = r.json()
+    rec = next(p for p in out["plugins"] if p["fs_name"] == "demo")
+    assert rec["enabled"] is False and rec["formats"] == []
+    assert out["formats"] == []  # nothing registered => nothing routes
+
+    # A disabled plugin's formats no longer ingest — the format id is gone.
+    r = plugin_client.post("/api/ingest/plugin/path", json={"path": str(f), "format_id": "demo.lines"})
+    assert r.status_code == 400 and "demo.lines" in r.json()["detail"]
+
+    r = plugin_client.post("/api/plugins/toggle", json={"fs_name": "demo", "enabled": True})
+    out = r.json()
+    assert next(p for p in out["plugins"] if p["fs_name"] == "demo")["enabled"] is True
+    assert {fm["id"] for fm in out["formats"]} == {"demo.boom", "demo.lines"}
+    r = plugin_client.post("/api/ingest/plugin/path", json={"path": str(f), "format_id": "demo.lines"})
+    assert r.status_code == 200
+
+    assert plugin_client.post("/api/plugins/toggle", json={"fs_name": "nope", "enabled": False}).status_code == 404
+
+
+INSTALLABLE = textwrap.dedent("""
+    def register(api):
+        api.register_ingest_format(
+            id="k", label="K", extensions=[".k"],
+            parse=lambda path, options: {"columns": ["A"], "rows": [["1"]]},
+        )
+""")
+
+
+def test_install_single_py(plugin_client, plug_dir):
+    r = plugin_client.post("/api/plugins/install",
+                           files=[("files", ("kplug.py", INSTALLABLE.encode()))])
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["installed"] == "kplug" and out["error"] is None
+    assert (plug_dir / "kplug.py").is_file()
+    assert "kplug.k" in {fm["id"] for fm in out["formats"]}
+
+
+def test_install_folder_with_junk_filtered(plugin_client, plug_dir):
+    init = ('from . import helper\n\n'
+            'def register(api):\n'
+            '    api.register_ingest_format(id="p", label="P", extensions=[".p"], parse=helper.parse)\n')
+    helper = 'def parse(path, options):\n    return {"columns": ["A"], "rows": [["x"]]}\n'
+    r = plugin_client.post(
+        "/api/plugins/install",
+        files=[("files", ("__init__.py", init.encode())),
+               ("files", ("helper.py", helper.encode())),
+               ("files", ("junk.pyc", b"\x00"))],
+        data={"paths": json.dumps([
+            "folderplug/__init__.py", "folderplug/helper.py", "folderplug/__pycache__/junk.pyc",
+        ])},
+    )
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["installed"] == "folderplug" and out["error"] is None
+    assert (plug_dir / "folderplug" / "helper.py").is_file()
+    # The uploaded junk wasn't copied. (A __pycache__ dir may exist anyway —
+    # importing the installed package just created a fresh one.)
+    assert not (plug_dir / "folderplug" / "__pycache__" / "junk.pyc").exists()
+    assert "folderplug.p" in {fm["id"] for fm in out["formats"]}
+
+
+def test_install_rejects_traversal_and_absolute_paths(plugin_client, plug_dir):
+    r = plugin_client.post("/api/plugins/install",
+                           files=[("files", ("evil.py", b"x = 1"))],
+                           data={"paths": json.dumps(["../evil.py"])})
+    assert r.status_code == 400
+    assert not (plug_dir.parent / "evil.py").exists()
+    r = plugin_client.post("/api/plugins/install",
+                           files=[("files", ("evil.py", b"x = 1"))],
+                           data={"paths": json.dumps(["/tmp/evil.py"])})
+    assert r.status_code == 400
+
+
+def test_install_folder_requires_init(plugin_client):
+    r = plugin_client.post("/api/plugins/install",
+                           files=[("files", ("helper.py", b"x = 1"))],
+                           data={"paths": json.dumps(["someplug/helper.py"])})
+    assert r.status_code == 400 and "__init__.py" in r.json()["detail"]
+
+
+def test_install_overwrite_flow(plugin_client, plug_dir):
+    first = plugin_client.post("/api/plugins/install",
+                               files=[("files", ("kplug.py", INSTALLABLE.encode()))])
+    assert first.status_code == 200
+    again = plugin_client.post("/api/plugins/install",
+                               files=[("files", ("kplug.py", b"def register(api):\n    pass\n"))])
+    assert again.status_code == 409  # taken — needs explicit consent to replace
+    forced = plugin_client.post("/api/plugins/install",
+                                files=[("files", ("kplug.py", b"def register(api):\n    pass\n"))],
+                                data={"overwrite": "true"})
+    assert forced.status_code == 200
+    out = forced.json()
+    # The replacement registers nothing, so the format from the first
+    # install must be gone after the reload.
+    assert "kplug.k" not in {fm["id"] for fm in out["formats"]}
+
+
+def test_install_broken_plugin_reports_load_error(plugin_client, plug_dir):
+    r = plugin_client.post("/api/plugins/install",
+                           files=[("files", ("busted.py", b"def register(api:\n"))])
+    assert r.status_code == 200  # the *install* succeeded; the load didn't
+    out = r.json()
+    assert out["installed"] == "busted" and "SyntaxError" in out["error"]
+    assert (plug_dir / "busted.py").is_file()  # kept for the analyst to fix or remove
 
 
 # ============================================================ mft_usn plugin

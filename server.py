@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -52,7 +53,20 @@ def _plugin_dirs(extra: list[str] | None = None) -> list[Path]:
     return dirs
 
 
-PLUGINS.load(_plugin_dirs())
+# Module-level and mutable on purpose: main() swaps in a longer list when
+# --plugins-dir flags are given, and tests point it at a tmp dir. The first
+# entry is where /api/plugins/install copies new plugins to.
+PLUGIN_DIRS: list[Path] = _plugin_dirs()
+
+
+def _reload_plugins() -> None:
+    """Rescan PLUGIN_DIRS, honoring the Settings → Plugins disabled list.
+    Cheap enough (a directory listing plus importing whatever's enabled)
+    that toggles and installs just call it — no server restart involved."""
+    PLUGINS.load(PLUGIN_DIRS, disabled=WS.plugin_prefs.disabled())
+
+
+_reload_plugins()
 
 # ---------------------------------------------------------------------- csrf
 
@@ -594,17 +608,117 @@ async def api_ingest_json_upload(
 
 @app.get("/api/plugins")
 def api_plugins():
-    """Everything the frontend needs to surface plugins: which loaded (and
-    why any didn't), every registered ingest format (extensions/patterns/
-    options — what routes a dropped or scanned file to a plugin parser),
-    and where plugins load from so the modal can tell the analyst which
-    folder to drop one into. Case-independent, loaded once at boot."""
+    """Everything the frontend needs to surface plugins: every installed
+    plugin (enabled or not, loaded or failed-with-why), every registered
+    ingest format (extensions/patterns/options — what routes a dropped or
+    scanned file to a plugin parser), and where plugins load from so
+    Settings → Plugins can say which folder installs land in.
+    Case-independent; the toggle/install routes below return this same
+    shape so the panel re-renders from whichever response it just got."""
     return {
         "api_version": plugin_api.PLUGIN_API_VERSION,
-        "dirs": [str(d) for d in _plugin_dirs()],
+        "dirs": [str(d) for d in PLUGIN_DIRS],
         "plugins": PLUGINS.describe(),
         "formats": PLUGINS.list_formats(),
     }
+
+
+class PluginToggle(BaseModel):
+    fs_name: str   # the plugins/ entry's file/folder name — the identity that exists without importing
+    enabled: bool
+
+
+@app.post("/api/plugins/toggle")
+def api_plugins_toggle(body: PluginToggle):
+    """Settings → Plugins checkbox. Persists to workspace/plugins.json and
+    reloads the registry immediately — a disabled plugin's code is not
+    merely unrouted, it is never imported on any later load (see
+    PluginRegistry.load), which is the whole value of an off switch on
+    something that runs with the app's privileges."""
+    if not any(p["fs_name"] == body.fs_name for p in PLUGINS.describe()):
+        raise HTTPException(404, f"No installed plugin named {body.fs_name}")
+    WS.plugin_prefs.set_enabled(body.fs_name, body.enabled)
+    _reload_plugins()
+    return api_plugins()
+
+
+@app.post("/api/plugins/install")
+async def api_plugins_install(
+    files: list[UploadFile] = File(...),
+    paths: str | None = Form(None),  # JSON list of relative paths aligned with files — folder installs; omitted for a single .py
+    overwrite: bool = Form(False),
+):
+    """Install a plugin picked from the local disk (Settings → Plugins):
+    the browser uploads a single .py file, or a whole folder via a
+    webkitdirectory picker (every file inside, with its path relative to
+    the picked folder), and this copies it into PLUGIN_DIRS[0] and reloads.
+    The same consent model as dropping the file in plugins/ by hand — the
+    analyst explicitly picked it — with the copying done for them.
+
+    Every relative path is validated before anything is written: rejects
+    absolute paths and any '..' component, so an upload can't write
+    outside the plugins directory, and a folder install may only create
+    one top-level entry (the plugin folder itself). __pycache__/*.pyc
+    ride-alongs from a picked folder are dropped rather than copied.
+
+    A plugin that installs but then fails to load (syntax error, bad
+    register()) is still a *successful install* — the files are kept, the
+    response carries the load error, and the panel shows it exactly as it
+    would any other broken plugin; deleting or fixing it is the analyst's
+    call, same as a hand-copied broken plugin."""
+    try:
+        rel_paths = json.loads(paths) if paths else [f.filename or "" for f in files]
+    except json.JSONDecodeError:
+        raise HTTPException(400, "paths must be a JSON list")
+    if len(rel_paths) != len(files):
+        raise HTTPException(400, "paths and files must align")
+
+    keep: list[tuple[Path, UploadFile]] = []  # (relative path, upload)
+    for rel, f in zip(rel_paths, files):
+        p = Path(str(rel).replace("\\", "/"))
+        if not rel or p.is_absolute() or ".." in p.parts or not p.parts:
+            raise HTTPException(400, f"Unsafe path in upload: {rel!r}")
+        if "__pycache__" in p.parts or p.suffix == ".pyc":
+            continue
+        keep.append((p, f))
+    if not keep:
+        raise HTTPException(400, "Nothing installable in the upload")
+
+    if all(len(p.parts) == 1 for p, _ in keep):
+        if len(keep) != 1 or keep[0][0].suffix != ".py":
+            raise HTTPException(400, "A single-file plugin must be exactly one .py file")
+        fs_name = keep[0][0].stem
+        dest = PLUGIN_DIRS[0] / keep[0][0].name
+    else:
+        tops = {p.parts[0] for p, _ in keep}
+        if len(tops) != 1:
+            raise HTTPException(400, "A folder install must contain one top-level folder")
+        fs_name = tops.pop()
+        if not any(p.parts == (fs_name, "__init__.py") for p, _ in keep):
+            raise HTTPException(400, f"Not a plugin package: no {fs_name}/__init__.py in the folder")
+        dest = PLUGIN_DIRS[0] / fs_name
+
+    if dest.exists() and not overwrite:
+        # 409, not 400: the request is fine, the name is simply taken —
+        # the frontend confirms and retries with overwrite=true.
+        raise HTTPException(409, f"A plugin named {fs_name} is already installed")
+    if overwrite and dest.exists():
+        shutil.rmtree(dest) if dest.is_dir() else dest.unlink()
+
+    PLUGIN_DIRS[0].mkdir(parents=True, exist_ok=True)
+    for p, f in keep:
+        out_path = PLUGIN_DIRS[0] / p
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_path, "wb") as out:
+            while chunk := await f.read(4 << 20):
+                out.write(chunk)
+
+    # Installing something states intent to use it — clear any stale
+    # disabled mark left by an earlier install under the same name.
+    WS.plugin_prefs.set_enabled(fs_name, True)
+    _reload_plugins()
+    rec = next((p for p in PLUGINS.describe() if p["fs_name"] == fs_name), None)
+    return {"installed": fs_name, "error": rec["error"] if rec else None, **api_plugins()}
 
 
 def _ingest_via_plugin(path: str, format_id: str, name: str | None,
@@ -1295,10 +1409,14 @@ def main() -> None:
     args = ap.parse_args()
 
     if args.plugins_dir:
-        PLUGINS.load(_plugin_dirs(args.plugins_dir))
+        global PLUGIN_DIRS
+        PLUGIN_DIRS = _plugin_dirs(args.plugins_dir)
+        _reload_plugins()
     for p in PLUGINS.describe():
         if p["error"]:
             print(f"Plugin FAILED: {p['name']} ({p['path']}): {p['error']}", file=sys.stderr)
+        elif not p["enabled"]:
+            print(f"Plugin disabled: {p['name']} (toggle in Settings → Plugins)")
         else:
             fmts = ", ".join(p["formats"]) or "no formats"
             print(f"Plugin loaded: {p['name']}" + (f" v{p['version']}" if p["version"] else "") + f" ({fmts})")

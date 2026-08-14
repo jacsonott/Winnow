@@ -191,16 +191,29 @@ class PluginRegistry:
     plugin didn't load instead of it silently not existing."""
 
     def __init__(self):
-        self.plugins: list[dict] = []       # [{name, path, version, description, error|None, formats:[ids]}]
+        self.plugins: list[dict] = []       # [{name, fs_name, path, version, description, error|None, enabled, formats:[ids]}]
         self._formats: dict[str, IngestFormat] = {}
         self._seq = 0  # unique module names across load() calls / same-named plugins in two dirs
 
     # ------------------------------------------------------------- loading
 
-    def load(self, directories: Iterable[str | Path]) -> None:
+    def load(self, directories: Iterable[str | Path], disabled: Iterable[str] = ()) -> None:
         """(Re)load from scratch. Directories that don't exist are fine —
         the default plugins/ dir simply not existing yet is the common
-        fresh-checkout state, not an error."""
+        fresh-checkout state, not an error.
+
+        Safe to call again on a live server — Settings → Plugins toggles
+        and installs do exactly that instead of requiring a restart. The
+        registry is rebuilt wholesale; modules from earlier loads linger
+        in sys.modules under their unique per-load names (Python can't
+        truly unload code) but nothing references them again.
+
+        `disabled` (filesystem names, from workspace.PluginPrefs) are
+        *discovered but never imported* — they appear in the listing with
+        enabled=False so the UI can offer the toggle, and their code never
+        runs, which is the entire value of an off switch on something
+        that executes with the app's privileges."""
+        disabled = set(disabled)
         self.plugins = []
         self._formats = {}
         for directory in directories:
@@ -211,9 +224,19 @@ class PluginRegistry:
                 if candidate.name.startswith((".", "_")):
                     continue
                 if candidate.is_file() and candidate.suffix == ".py":
-                    self._load_one(candidate.stem, candidate, candidate)
+                    fs_name, entry = candidate.stem, candidate
                 elif candidate.is_dir() and (candidate / "__init__.py").is_file():
-                    self._load_one(candidate.name, candidate / "__init__.py", candidate)
+                    fs_name, entry = candidate.name, candidate / "__init__.py"
+                else:
+                    continue
+                if fs_name in disabled:
+                    self.plugins.append({
+                        "name": fs_name, "fs_name": fs_name, "path": str(candidate),
+                        "version": None, "description": "", "error": None,
+                        "enabled": False, "formats": [],
+                    })
+                else:
+                    self._load_one(fs_name, entry, candidate)
 
     def _load_one(self, default_name: str, entry: Path, root: Path) -> None:
         self._seq += 1
@@ -222,8 +245,9 @@ class PluginRegistry:
         # reusing sys.modules state from a previous load.
         mod_name = f"winnow_plugin_{self._seq}_{default_name}"
         record = {
-            "name": default_name, "path": str(root), "version": None,
-            "description": "", "error": None, "formats": [],
+            "name": default_name, "fs_name": default_name, "path": str(root),
+            "version": None, "description": "", "error": None,
+            "enabled": True, "formats": [],
         }
         self.plugins.append(record)
         try:

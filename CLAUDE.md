@@ -20,8 +20,10 @@ plugin_api.py      Plugin host: discovery/loading from plugins/, PluginAPI
                     (register_ingest_format), the format registry server.py's
                     /api/plugins and /api/ingest/plugin/* routes read. The
                     authoring contract lives in its module docstring.
-plugins/           Analyst-installed plugins (gitignored except its README) —
-                    dropping a folder/.py here and restarting is the install.
+plugins/           Analyst-installed plugins (gitignored except its README).
+                    Managed from Settings → Plugins: per-plugin on/off
+                    toggles and a copy-from-disk installer, no restart —
+                    dropping a folder/.py here by hand works too.
 examples/plugins/  Committed example plugins. mft_usn parses raw NTFS $MFT and
                     USN-journal ($J) files in pure stdlib Python; copy it into
                     plugins/ to enable, and treat it as the reference for
@@ -646,10 +648,27 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
     (file-backed, shared with the OS page cache; costs address space,
     not RAM; SQLite clamps it to its compile-time max on old builds).
 
-- **Plugins** (plugin_api.py, `plugins/`, ≡ → Plugins…) are Notepad++-style
-  drop-in extensions, loaded once at server *import* (so `uvicorn
-  server:app` gets them, not just `python server.py`; `--plugins-dir` /
-  `$WINNOW_PLUGINS_DIR` add directories). The one extension point is
+- **Plugins** (plugin_api.py, `plugins/`, Settings → Plugins) are
+  Notepad++-style drop-in extensions, first loaded at server *import* (so
+  `uvicorn server:app` gets them, not just `python server.py`;
+  `--plugins-dir` / `$WINNOW_PLUGINS_DIR` add directories) and reloaded
+  live by `_reload_plugins()` whenever Settings → Plugins toggles or
+  installs one — `PluginRegistry.load` is written to be safely re-run on
+  a live server (registry rebuilt wholesale; superseded modules linger in
+  sys.modules under unique per-load names because Python can't truly
+  unload code, but nothing references them again). Enabled/disabled state
+  is `workspace/plugins.json` (`PluginPrefs`) — machine-level workflow
+  state, stored as a *disabled* list so presence in plugins/ means on by
+  default, keyed by filesystem name because that's the only identity that
+  exists without importing (a disabled plugin is discovered for the
+  listing but its code never runs — the point of the off switch).
+  `POST /api/plugins/install` copies an uploaded .py or folder (from the
+  panel's webkitdirectory picker) into `PLUGIN_DIRS[0]`, rejecting
+  absolute/`..` paths so an upload can't write outside the plugins dir; a
+  name collision is a 409 the frontend confirms into `overwrite=true`,
+  and an install whose *load* then fails still keeps the files and
+  reports the error (same standing as a hand-copied broken plugin). The
+  one extension point is
   `register_ingest_format`: parse a file into columns + a row iterable
   that feeds `Store.ingest_rows` — the generic sibling of `ingest_csv`
   with every one of its conventions (all-TEXT via `sanitize_columns`,
@@ -733,10 +752,12 @@ than re-testing logic the `Store`-level tests already cover directly.
 file otherwise only ever grows: the auto-created column indexes
 (listing/dropping) and `compact()`. `test_plugins.py` covers the plugin
 system end to end — loader isolation (a broken plugin never takes the
-rest down), `ingest_rows`' conventions, the HTTP routes, directory-scan
-routing, and the mft_usn example parsed against synthetic NTFS fixtures
-built byte-by-byte in the test file (both fixup states; no real evidence
-files in the repo). `test_sql_tabs.py` covers the SQL
+rest down; a disabled one is discovered but never imported, proved with a
+plugin whose module body raises), `ingest_rows`' conventions, the HTTP
+routes (toggle persistence, install path-traversal rejection, the
+409-then-overwrite flow), directory-scan routing, and the mft_usn example
+parsed against synthetic NTFS fixtures built byte-by-byte in the test
+file (both fixup states; no real evidence files in the repo). `test_sql_tabs.py` covers the SQL
 pane's sub-tabs, including that they actually survive closing and
 reopening the case file (the whole reason they live there rather than in
 `localStorage`) and that `reorder` keeps tabs it wasn't given.
