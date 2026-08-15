@@ -433,6 +433,152 @@ def test_install_broken_plugin_reports_load_error(plugin_client, plug_dir):
     assert (plug_dir / "busted.py").is_file()  # kept for the analyst to fix or remove
 
 
+# ====================================================== tabs / assets / APIs
+
+UI_PLUGIN_INIT = textwrap.dedent("""
+    def _echo(req):
+        return {"method": req.method, "route": req.route, "query": req.query,
+                "body": req.body, "has_store": req.store is not None}
+
+    def _boom(req):
+        raise ValueError("kaboom: bad input")
+
+    def register(api):
+        api.register_tab(id="view", label="My View", entry="ui/tab.js", description="demo tab")
+        api.register_api("echo", _echo, methods=["GET", "POST"])
+        api.register_api("boom", _boom, methods=["GET"])
+""")
+
+
+@pytest.fixture
+def ui_plug_dir(tmp_path) -> Path:
+    d = tmp_path / "uiplugs"
+    (d / "uiplug" / "ui").mkdir(parents=True)
+    (d / "uiplug" / "__init__.py").write_text(UI_PLUGIN_INIT)
+    (d / "uiplug" / "ui" / "tab.js").write_text("export default function mount(c, w) {}\n")
+    (d / "secret.txt").write_text("outside the plugin folder")
+    return d
+
+
+@pytest.fixture
+def ui_registry(ui_plug_dir) -> PluginRegistry:
+    reg = PluginRegistry()
+    reg.load([ui_plug_dir])
+    rec = reg.describe()[0]
+    assert rec["error"] is None, rec["error"]
+    return reg
+
+
+@pytest.fixture
+def ui_client(client, ui_registry, ui_plug_dir, monkeypatch):
+    import server
+
+    monkeypatch.setattr(server, "PLUGINS", ui_registry)
+    monkeypatch.setattr(server, "PLUGIN_DIRS", [ui_plug_dir])
+    return client
+
+
+def test_register_tab_and_api_are_listed(ui_registry):
+    rec = ui_registry.describe()[0]
+    assert rec["tabs"] == ["uiplug.view"]
+    (tab,) = ui_registry.list_tabs()
+    assert tab["label"] == "My View" and tab["entry"] == "ui/tab.js"
+    assert tab["plugin_fs"] == "uiplug" and tab["gen"] > 0
+    assert ui_registry.get_api("uiplug", "echo")["methods"] == {"GET", "POST"}
+    assert ui_registry.get_api("uiplug", "nope") is None
+
+
+def test_tab_gen_changes_on_reload(ui_plug_dir, ui_registry):
+    """gen is the frontend's import() cache-buster — a reload must change it
+    or a toggled plugin's updated JS would never be re-fetched."""
+    (old,) = ui_registry.list_tabs()
+    ui_registry.load([ui_plug_dir])
+    (new,) = ui_registry.list_tabs()
+    assert new["gen"] != old["gen"]
+
+
+def test_register_tab_validation(plug_dir):
+    _write_plugin(plug_dir, "badtab", """
+        def register(api):
+            api.register_tab(id="x", label="X", entry="ui/tab.js")
+    """)  # single-file plugin — no folder to serve assets from
+    pkg = plug_dir / "missing_entry"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text(textwrap.dedent("""
+        def register(api):
+            api.register_tab(id="x", label="X", entry="does/not/exist.js")
+    """))
+    reg = PluginRegistry()
+    reg.load([plug_dir])
+    by_name = {p["fs_name"]: p for p in reg.describe()}
+    assert "folder plugins" in by_name["badtab"]["error"]
+    assert "inside the plugin folder" in by_name["missing_entry"]["error"]
+
+
+def test_register_api_validation(plug_dir):
+    _write_plugin(plug_dir, "badroute", """
+        def register(api):
+            api.register_api("Bad Route!", lambda req: {}, methods=["GET"])
+    """)
+    _write_plugin(plug_dir, "badmethod", """
+        def register(api):
+            api.register_api("ok", lambda req: {}, methods=["YEET"])
+    """)
+    _write_plugin(plug_dir, "duperoute", """
+        def register(api):
+            api.register_api("ok", lambda req: {})
+            api.register_api("ok", lambda req: {})
+    """)
+    reg = PluginRegistry()
+    reg.load([plug_dir])
+    by_name = {p["fs_name"]: p for p in reg.describe()}
+    assert "Route" in by_name["badroute"]["error"]
+    assert "methods" in by_name["badmethod"]["error"]
+    assert "Duplicate" in by_name["duperoute"]["error"]
+
+
+def test_plugin_listing_includes_tabs(ui_client):
+    r = ui_client.get("/api/plugins").json()
+    assert [t["id"] for t in r["tabs"]] == ["uiplug.view"]
+
+
+def test_plugin_assets_served_and_contained(ui_client, ui_plug_dir):
+    r = ui_client.get("/plugin_assets/uiplug/ui/tab.js")
+    assert r.status_code == 200 and "export default" in r.text
+    # Traversal can't escape the plugin folder (encoded, so the client
+    # doesn't normalize it away before it reaches the route).
+    r = ui_client.get("/plugin_assets/uiplug/%2e%2e/secret.txt")
+    assert r.status_code == 404
+    r = ui_client.get("/plugin_assets/nope/ui/tab.js")
+    assert r.status_code == 404
+
+
+def test_plugin_api_dispatch(ui_client):
+    r = ui_client.get("/api/plugin/uiplug/echo?x=1&y=z")
+    assert r.status_code == 200
+    out = r.json()
+    assert out["method"] == "GET" and out["route"] == "echo"
+    assert out["query"] == {"x": "1", "y": "z"} and out["body"] is None
+    assert out["has_store"] is True  # the client fixture's open case
+
+    r = ui_client.post("/api/plugin/uiplug/echo", json={"a": [1, 2]})
+    assert r.json()["body"] == {"a": [1, 2]}
+
+    assert ui_client.put("/api/plugin/uiplug/echo", json={}).status_code == 405
+    assert ui_client.get("/api/plugin/uiplug/nope").status_code == 404
+    assert ui_client.get("/api/plugin/ghost/echo").status_code == 404
+
+    r = ui_client.get("/api/plugin/uiplug/boom")
+    assert r.status_code == 400 and "kaboom: bad input" in r.json()["detail"]
+
+
+def test_disabled_plugin_loses_assets_tabs_and_routes(ui_client):
+    r = ui_client.post("/api/plugins/toggle", json={"fs_name": "uiplug", "enabled": False})
+    assert r.status_code == 200 and r.json()["tabs"] == []
+    assert ui_client.get("/plugin_assets/uiplug/ui/tab.js").status_code == 404
+    assert ui_client.get("/api/plugin/uiplug/echo").status_code == 404
+
+
 # ============================================================ mft_usn plugin
 #
 # Synthetic fixtures built from the on-disk structures' documented layouts —
@@ -710,3 +856,166 @@ def test_mft_end_to_end_through_the_api(client, store, example_registry, mft_fil
         f"SELECT FullPath FROM {rec['table_name']} WHERE FileName='secret.txt'"
     ).fetchone()
     assert got[0] == ".\\Users\\bob\\secret.txt"
+
+
+# ================================================== lateral_movement plugin
+
+LOGON_ROWS = [
+    ["SourceHost", "DestHost", "User"],
+    ["WS1", "SRV1", "alice"],
+    ["WS1", "SRV1", "bob"],
+    ["WS2", "SRV1", "alice"],
+    ["WS1", "WS1", "alice"],   # self-loop — filtered
+    ["-", "SRV2", "carol"],    # EVTX "not present" spelling — filtered
+]
+
+
+@pytest.fixture
+def lateral_client(client, store, write_csv, example_registry, monkeypatch):
+    import server
+
+    monkeypatch.setattr(server, "PLUGINS", example_registry)
+    rec = store.ingest_csv(write_csv(LOGON_ROWS, "logons.csv"), name="logons")
+    return client, rec["id"]
+
+
+def test_lateral_movement_edges(lateral_client):
+    client, source_id = lateral_client
+    r = client.post("/api/plugin/lateral_movement/edges", json={
+        "source_id": source_id, "src_col": "SourceHost", "dst_col": "DestHost",
+        "label_col": "User",
+    })
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["truncated"] is False
+    assert out["edges"] == [
+        {"src": "WS1", "dst": "SRV1", "n": 2, "labels": 2},
+        {"src": "WS2", "dst": "SRV1", "n": 1, "labels": 1},
+    ]
+
+
+def test_lateral_movement_validation(lateral_client):
+    client, source_id = lateral_client
+    r = client.post("/api/plugin/lateral_movement/edges", json={
+        "source_id": source_id, "src_col": "SourceHost", "dst_col": "Nope",
+    })
+    assert r.status_code == 400 and "Nope" in r.json()["detail"]
+    r = client.post("/api/plugin/lateral_movement/edges", json={
+        "source_id": -1, "src_col": "a", "dst_col": "b",
+    })
+    assert r.status_code == 400 and "merge" in r.json()["detail"].lower()
+    r = client.post("/api/plugin/lateral_movement/edges", json={
+        "source_id": source_id, "src_col": "SourceHost", "dst_col": "SourceHost",
+    })
+    assert r.status_code == 400
+
+
+def test_lateral_movement_tab_asset(lateral_client):
+    client, _ = lateral_client
+    r = client.get("/plugin_assets/lateral_movement/ui/tab.js")
+    assert r.status_code == 200 and "export default" in r.text
+
+
+# ================================================== claude_assistant plugin
+#
+# The handler imports `anthropic` lazily, so the tests inject a fake module
+# into sys.modules — no network, no real SDK needed. The fake records the
+# exact request kwargs so the tests can assert on the API shape (model,
+# fallbacks, cache breakpoint) rather than just the happy path.
+
+import sys
+import types
+
+
+def _fake_anthropic(record: dict, msg) -> types.ModuleType:
+    mod = types.ModuleType("anthropic")
+    mod.AuthenticationError = type("AuthenticationError", (Exception,), {})
+    mod.APIConnectionError = type("APIConnectionError", (Exception,), {})
+    mod.APIStatusError = type("APIStatusError", (Exception,), {"status_code": 500, "message": "boom"})
+
+    class _Stream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get_final_message(self):
+            return msg
+
+    class _Messages:
+        def stream(self, **kw):
+            record.update(kw)
+            return _Stream()
+
+    class _Client:
+        def __init__(self, *a, **kw):
+            self.beta = types.SimpleNamespace(messages=_Messages())
+
+    mod.Anthropic = _Client
+    return mod
+
+
+def _claude_msg(stop_reason="end_turn", text="SELECT 1;"):
+    return types.SimpleNamespace(
+        content=[types.SimpleNamespace(type="text", text=text)],
+        stop_reason=stop_reason,
+        model="claude-opus-5",
+        usage=types.SimpleNamespace(input_tokens=100, output_tokens=42, cache_read_input_tokens=90),
+        stop_details=types.SimpleNamespace(explanation=None, category="cyber"),
+    )
+
+
+@pytest.fixture
+def claude_client(client, example_registry, monkeypatch):
+    import server
+
+    monkeypatch.setattr(server, "PLUGINS", example_registry)
+    return client
+
+
+def test_claude_ask_request_shape(claude_client, monkeypatch):
+    record = {}
+    monkeypatch.setitem(sys.modules, "anthropic", _fake_anthropic(record, _claude_msg()))
+    r = claude_client.post("/api/plugin/claude_assistant/ask", json={
+        "question": "Which src_ table has the 4624s?",
+        "schema": "CREATE TABLE src_1 (...);",
+        "history": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+            {"role": "system", "content": "sneaky"},   # not a chat role — dropped
+        ],
+    })
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["answer"] == "SELECT 1;" and out["model"] == "claude-opus-5"
+    assert out["usage"]["cache_read_input_tokens"] == 90
+
+    assert record["model"] == "claude-opus-5"
+    assert record["betas"] == ["server-side-fallback-2026-07-01"]
+    assert record["fallbacks"] == "default"
+    assert "thinking" not in record  # omitted on purpose — adaptive by default on this model
+    # Schema rides in system with the cache breakpoint on it.
+    assert record["system"][1]["text"].endswith("CREATE TABLE src_1 (...);")
+    assert record["system"][1]["cache_control"] == {"type": "ephemeral"}
+    # History sanitized; the new question is the last user turn.
+    assert [m["role"] for m in record["messages"]] == ["user", "assistant", "user"]
+    assert record["messages"][-1]["content"] == "Which src_ table has the 4624s?"
+
+
+def test_claude_refusal_is_a_400_with_category(claude_client, monkeypatch):
+    record = {}
+    monkeypatch.setitem(sys.modules, "anthropic", _fake_anthropic(record, _claude_msg(stop_reason="refusal")))
+    r = claude_client.post("/api/plugin/claude_assistant/ask", json={"question": "q"})
+    assert r.status_code == 400 and "cyber" in r.json()["detail"]
+
+
+def test_claude_missing_sdk_is_actionable(claude_client, monkeypatch):
+    monkeypatch.setitem(sys.modules, "anthropic", None)  # import anthropic -> ImportError
+    r = claude_client.post("/api/plugin/claude_assistant/ask", json={"question": "q"})
+    assert r.status_code == 400 and "pip install" in r.json()["detail"]
+
+
+def test_claude_empty_question_rejected(claude_client):
+    r = claude_client.post("/api/plugin/claude_assistant/ask", json={"question": "   "})
+    assert r.status_code == 400

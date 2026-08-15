@@ -24,10 +24,16 @@ plugins/           Analyst-installed plugins (gitignored except its README).
                     Managed from Settings → Plugins: per-plugin on/off
                     toggles and a copy-from-disk installer, no restart —
                     dropping a folder/.py here by hand works too.
-examples/plugins/  Committed example plugins. mft_usn parses raw NTFS $MFT and
-                    USN-journal ($J) files in pure stdlib Python; copy it into
-                    plugins/ to enable, and treat it as the reference for
-                    writing new ones.
+examples/plugins/  Committed example plugins, one per extension point — treat
+                    them as the reference for writing new ones. mft_usn: raw
+                    NTFS $MFT/$J parsing (ingest formats, stdlib-only).
+                    lateral_movement: a pinned graph tab (register_tab +
+                    register_api + a canvas ES module, offline).
+                    claude_assistant: a Claude chat tab (external service from
+                    a plugin route; needs network + `pip install anthropic` —
+                    deliberately NOT airgap-compatible, which is why it's a
+                    plugin). Install via Settings → Plugins or cp -r into
+                    plugins/.
 static/index.html  App shell. No framework. #home and #app are siblings; only
                     one is ever visible.
 static/app.js      Virtualized grid, filters, tagging, detail pane, SQL pane,
@@ -667,15 +673,36 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
   absolute/`..` paths so an upload can't write outside the plugins dir; a
   name collision is a 409 the frontend confirms into `overwrite=true`,
   and an install whose *load* then fails still keeps the files and
-  reports the error (same standing as a hand-copied broken plugin). The
-  one extension point is
-  `register_ingest_format`: parse a file into columns + a row iterable
+  reports the error (same standing as a hand-copied broken plugin).
+  Three extension points on PluginAPI:
+  `register_ingest_format` parses a file into columns + a row iterable
   that feeds `Store.ingest_rows` — the generic sibling of `ingest_csv`
   with every one of its conventions (all-TEXT via `sanitize_columns`,
   contiguous rid from 1, per-BATCH lock/commit, ragged pad-and-count,
   sampled types with an explicit `column_types` override, background FTS)
   — so invariants #1/#2 hold for plugin sources with no extra work, and a
-  plugin source is a completely normal source afterward. A plugin that
+  plugin source is a completely normal source afterward.
+  `register_tab` adds a pinned tab (SQL/Timeline siblings): the entry is
+  an ES module in the plugin folder, served via `/plugin_assets/<fs>/…`
+  (enabled folder plugins only; resolved-path containment blocks
+  traversal; same no-cache middleware as /static/) and dynamically
+  import()ed by `showPluginTab` in app.js with a `?v=<gen>` cache-buster
+  — `gen` is the registry load sequence, bumped on every reload, so a
+  toggle-off/on picks up changed JS. One mount per tab, kept across tab
+  switches, torn down on case switch (`resetPluginTabMounts`) and gen
+  change; the module's default export gets `(container, winnow)` where
+  `winnow` is `buildPluginTabContext`'s stable surface (api/post/el/
+  modal helpers, `sql()` → run_sql's own RO connection, `schemaText()`,
+  live state getters); optional onShow/onHide exports fire per switch.
+  `register_api` registers backend routes dispatched at request time by
+  the one catch-all `/api/plugin/{fs}/{route}` handler — deliberately
+  not real FastAPI routes, so a Settings toggle's registry reload is
+  instantly authoritative with no stale route objects. Handlers get a
+  plain `PluginRequest` (method/route/query/body/store — None when no
+  case is open) and return JSON-ables; ValueError → 400, same split as
+  api_view; the CSRF middleware already covers non-GET. Plugin backends
+  should read via `req.store.run_sql` (own RO connection — never holds
+  invariant #4's lock). A plugin that
   fails to import/register is recorded with its error and skipped, never
   fatal; `GET /api/plugins` carries the reason to the Plugins modal.
   Format matching is extension OR bare-filename fnmatch — the latter
@@ -755,9 +782,14 @@ system end to end — loader isolation (a broken plugin never takes the
 rest down; a disabled one is discovered but never imported, proved with a
 plugin whose module body raises), `ingest_rows`' conventions, the HTTP
 routes (toggle persistence, install path-traversal rejection, the
-409-then-overwrite flow), directory-scan routing, and the mft_usn example
-parsed against synthetic NTFS fixtures built byte-by-byte in the test
-file (both fixup states; no real evidence files in the repo). `test_sql_tabs.py` covers the SQL
+409-then-overwrite flow), tabs/assets/API dispatch (register_tab entry
+validation, asset containment, the gen cache-buster changing per reload,
+405/404/400 splits, disabled = no assets + no routes + no tabs), the
+mft_usn example parsed against synthetic NTFS fixtures built byte-by-byte
+in the test file (both fixup states; no real evidence files in the repo),
+lateral_movement's edge aggregation, and claude_assistant against a fake
+`anthropic` module injected into sys.modules (asserts the request shape —
+model, fallbacks, the schema cache breakpoint — with no network). `test_sql_tabs.py` covers the SQL
 pane's sub-tabs, including that they actually survive closing and
 reopening the case file (the whole reason they live there rather than in
 `localStorage`) and that `reorder` keeps tabs it wasn't given.

@@ -124,25 +124,40 @@ plugin's code is never even imported), and the install buttons copy a
 `plugins/` for you — all effective immediately, no restart. Dropping a
 plugin into the folder by hand works too.
 
-Plugins register **ingest formats** — parsers for file formats the app
-doesn't natively read — which then behave like built-ins everywhere:
-drag-and-drop, Import files…, folder import, and a per-format picker in
-the same Settings panel, with rows flowing into the same read-only
-`src_` tables as any CSV (so tagging, views, FTS, sessions and the SQL
-pane all just work).
+Plugins get three extension points:
 
-A worked example ships in `examples/plugins/mft_usn/`: raw NTFS `$MFT`
-and USN-journal (`$J`) parsing in pure stdlib Python — no MFTECmd/EZTools
-and no .NET runtime, so it runs on the same airgapped box Winnow does.
-Full paths reconstructed from parent references, `$SI`/`$FN` timestamps
-side by side with an `SI<FN Created` timestomp flag, USN reason flags
-decoded, and MFT entry/sequence numbers that let the two tables join in
-the SQL pane. Install it from Settings → Plugins → "Install a plugin
-folder…", or:
+- **Ingest formats** — parsers for file formats the app doesn't natively
+  read, which then behave like built-ins everywhere: drag-and-drop,
+  Import files…, folder import, and a per-format picker in the same
+  Settings panel, with rows flowing into the same read-only `src_`
+  tables as any CSV (so tagging, views, FTS, sessions and the SQL pane
+  all just work).
+- **Tabs** — a pinned tab next to SQL/Timeline whose content is entirely
+  the plugin's own UI: an ES module the plugin ships, mounted into the
+  main content area with a stable context object (API helpers, read-only
+  SQL against the case, live source/tag state, the app's own theming).
+- **API routes** — backend endpoints under `/api/plugin/<name>/…` for
+  whatever the plugin's UI needs the server to do: query the case, run a
+  computation, call an external service.
 
-```bash
-cp -r examples/plugins/mft_usn plugins/
-```
+Three worked examples ship in `examples/plugins/` — install any of them
+from Settings → Plugins → "Install a plugin folder…", or `cp -r` into
+`plugins/`:
+
+- **`mft_usn/`** — raw NTFS `$MFT` and USN-journal (`$J`) parsing in
+  pure stdlib Python (no MFTECmd/EZTools, no .NET — airgap-friendly):
+  full paths reconstructed from parent references, `$SI`/`$FN`
+  timestamps side by side with an `SI<FN Created` timestomp flag, USN
+  reason flags decoded, and MFT entry/sequence numbers that let the two
+  tables join in the SQL pane.
+- **`lateral_movement/`** — a pinned tab that draws source→destination
+  pairs from any table (4624s, firewall logs, netflow) as a
+  force-directed graph: edge width is event count, arrows show
+  direction, drag to untangle. Fully offline.
+- **`claude_assistant/`** — a pinned Claude chat tab that sees the
+  case's *schema* (never row data) and writes ready-to-paste SQL pane
+  queries. Needs network + an Anthropic API key, which is exactly why
+  it's an opt-in plugin rather than a feature — see its README.
 
 The authoring contract — `register(api)`, `register_ingest_format`, the
 streaming `parse` shape, per-format options — is documented at the top of

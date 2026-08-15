@@ -74,6 +74,7 @@ const S = {
   importProfiles: [],    // [{id, name, extensions, include_patterns, exclude_patterns, recursive}] — workspace/import_profiles.json
   plugins: [],           // loaded plugin records from GET /api/plugins — name/version/error, for the Plugins modal
   pluginFormats: [],     // plugin-registered ingest formats (extensions/patterns/options) — routes files to plugin parsers
+  pluginTabs: [],        // plugin-registered pinned tabs [{id, plugin, plugin_fs, label, entry, gen}] — see showPluginTab
   pluginDirs: [],        // where the server loads plugins from — shown in the Plugins modal so "drop it where?" has an answer
   sidebarFilter: '',      // substring filter typed into the sidebar's own search box
   timeline: {
@@ -3259,8 +3260,10 @@ async function loadPlugins() {
     const r = await api('/api/plugins');
     S.plugins = r.plugins || [];
     S.pluginFormats = r.formats || [];
+    S.pluginTabs = r.tabs || [];
     S.pluginDirs = r.dirs || [];
-  } catch { S.plugins = []; S.pluginFormats = []; S.pluginDirs = []; }
+  } catch { S.plugins = []; S.pluginFormats = []; S.pluginTabs = []; S.pluginDirs = []; }
+  renderPluginTabs();
 }
 
 /* fnmatch-lite for plugin filename_patterns ($MFT, *$UsnJrnl*) — the same
@@ -4083,7 +4086,9 @@ function buildPluginsPanel(b) {
   function applyListing(r) {
     S.plugins = r.plugins || [];
     S.pluginFormats = r.formats || [];
+    S.pluginTabs = r.tabs || [];
     S.pluginDirs = r.dirs || [];
+    renderPluginTabs(); // a toggle/install can add or remove pinned tabs
   }
 
   async function installFiles(fileList, relPaths) {
@@ -4142,9 +4147,12 @@ function buildPluginsPanel(b) {
         }
         renderPanel();
       };
+      const parts = [];
+      if ((p.formats || []).length) parts.push(`${p.formats.length} format${p.formats.length === 1 ? '' : 's'}`);
+      if ((p.tabs || []).length) parts.push(`${p.tabs.length} tab${p.tabs.length === 1 ? '' : 's'}`);
       const status = p.error ? 'failed to load'
         : !p.enabled ? 'disabled'
-        : `${(p.formats || []).length} format${(p.formats || []).length === 1 ? '' : 's'}`;
+        : (parts.join(', ') || 'loaded');
       row.append(cb, el('span', 'session-name', p.name + (p.version ? ` v${p.version}` : '')), el('span', 'count', status));
       box.append(row);
       if (p.error) {
@@ -4840,6 +4848,7 @@ function showSqlTab() {
   S.activeTab = 'sql';
   $('grid').hidden = true;
   $('timelineview').hidden = true;
+  hidePluginViews();
   $('sqlview').hidden = false;
   $('tabSql').setAttribute('aria-selected', 'true');
   $('tabTimeline').setAttribute('aria-selected', 'false');
@@ -5045,6 +5054,7 @@ function showGridTab() {
   S.activeTab = 'grid';
   $('sqlview').hidden = true;
   $('timelineview').hidden = true;
+  hidePluginViews();
   $('grid').hidden = false;
   $('tabSql').setAttribute('aria-selected', 'false');
   $('tabTimeline').setAttribute('aria-selected', 'false');
@@ -5054,6 +5064,7 @@ function showTimelineTab() {
   S.activeTab = 'timeline';
   $('grid').hidden = true;
   $('sqlview').hidden = true;
+  hidePluginViews();
   $('timelineview').hidden = false;
   $('tabSql').setAttribute('aria-selected', 'false');
   $('tabTimeline').setAttribute('aria-selected', 'true');
@@ -5064,6 +5075,126 @@ function showTimelineTab() {
 }
 $('tabSql').onclick = showSqlTab;
 $('tabTimeline').onclick = showTimelineTab;
+
+/* ---------------------------------------------------------- plugin tabs */
+
+/* Plugin-registered pinned tabs (plugin_api.register_tab) — SQL/Timeline
+   siblings whose content is a plugin-shipped ES module, dynamically
+   import()ed from /plugin_assets/ on first activation and handed an empty
+   <section class="pluginview"> plus the stable context object from
+   buildPluginTabContext. One mount per tab, kept alive across tab
+   switches (a half-built graph shouldn't vanish because the analyst
+   glanced at the grid); optional onShow/onHide exports fire on every
+   switch. The mount is torn down and rebuilt when its plugin's `gen`
+   changes (every registry reload bumps it — a toggle-off/on picks up
+   changed JS) and on a case switch (a view built from one case's data
+   has no business surviving into another). */
+
+const pluginTabMounts = new Map(); // tab id -> {container, module, gen}
+
+const pluginTabById = (id) => S.pluginTabs.find((t) => t.id === id) || null;
+
+function hidePluginViews() {
+  for (const m of pluginTabMounts.values()) {
+    if (!m.container.hidden) {
+      m.container.hidden = true;
+      if (m.module && m.module.onHide) { try { m.module.onHide(m.container); } catch (e) { console.error(e); } }
+    }
+  }
+  document.querySelectorAll('.tab-plugin').forEach((t) => t.setAttribute('aria-selected', 'false'));
+}
+
+function resetPluginTabMounts() {
+  for (const m of pluginTabMounts.values()) m.container.remove();
+  pluginTabMounts.clear();
+}
+
+/* The strip buttons, re-rendered whenever the plugin listing changes
+   (boot, Settings toggles/installs). If the active plugin tab just
+   disappeared — its plugin was toggled off — fall back to the grid rather
+   than leaving a headless view up. */
+function renderPluginTabs() {
+  document.querySelectorAll('.tab-plugin').forEach((t) => t.remove());
+  let after = $('tabTimeline');
+  for (const t of S.pluginTabs) {
+    const btn = el('button', 'tab tab-sql tab-plugin', t.label);
+    btn.dataset.tabId = t.id;
+    btn.title = t.description || `${t.label} — from the ${t.plugin} plugin`;
+    btn.setAttribute('aria-selected', String(S.activeTab === 'plugin:' + t.id));
+    btn.onclick = () => showPluginTab(t.id);
+    after.insertAdjacentElement('afterend', btn);
+    after = btn;
+  }
+  for (const [id, m] of [...pluginTabMounts]) {
+    const t = pluginTabById(id);
+    if (!t || t.gen !== m.gen) { m.container.remove(); pluginTabMounts.delete(id); }
+  }
+  if (S.activeTab.startsWith('plugin:') && !pluginTabById(S.activeTab.slice(7))) showGridTab();
+}
+
+/* The stable surface a plugin tab's module gets. Versioned via apiVersion
+   the same way PLUGIN_API_VERSION covers the Python side: additions are
+   free, changing what's already here isn't. `sql` (read-only, own
+   connection server-side — see run_sql) is the blessed way for a tab to
+   query the case; `schemaText` is the same LLM-ready schema dump the SQL
+   pane's copy button builds. */
+function buildPluginTabContext(tab) {
+  return {
+    apiVersion: 1,
+    plugin: tab.plugin,
+    base: `/api/plugin/${tab.plugin_fs}`,      // the plugin's own register_api routes
+    assets: `/plugin_assets/${tab.plugin_fs}`, // the plugin's own files (css, workers, data)
+    api, post, toast, el, modal, confirmDialog, promptDialog,
+    sql: (sql, limit = 5000) => post('/api/sql', { sql, limit }),
+    schemaText: sqlSchemaForLLM,
+    openSource,
+    state: {
+      get sources() { return S.sources; },
+      get sourceId() { return S.sourceId; },
+      get tags() { return S.tags; },
+    },
+  };
+}
+
+async function showPluginTab(tabId) {
+  const tab = pluginTabById(tabId);
+  if (!tab) return;
+  S.activeTab = 'plugin:' + tabId;
+  $('grid').hidden = true;
+  $('sqlview').hidden = true;
+  $('timelineview').hidden = true;
+  $('tabSql').setAttribute('aria-selected', 'false');
+  $('tabTimeline').setAttribute('aria-selected', 'false');
+  document.querySelectorAll('#sourceTabs .tab').forEach((t) => t.setAttribute('aria-selected', 'false'));
+  hidePluginViews();
+  document.querySelectorAll('.tab-plugin').forEach((t) => t.setAttribute('aria-selected', String(t.dataset.tabId === tabId)));
+  renderSidebar(); // same reasoning as showSqlTab — S.sourceId shouldn't read as active here
+  $('presetBanner').hidden = true;
+
+  let m = pluginTabMounts.get(tabId);
+  if (m && m.gen !== tab.gen) { m.container.remove(); pluginTabMounts.delete(tabId); m = null; }
+  if (m) {
+    m.container.hidden = false;
+  } else {
+    const container = el('section', 'pluginview');
+    $('grid').parentElement.append(container);
+    m = { container, module: null, gen: tab.gen };
+    pluginTabMounts.set(tabId, m);
+    try {
+      // ?v=gen: a reloaded plugin gets a fresh module even though import()
+      // caches by URL — see the gen note in plugin_api.PluginRegistry.
+      const mod = await import(`${buildPluginTabContext(tab).assets}/${tab.entry}?v=${tab.gen}`);
+      if (typeof mod.default !== 'function') throw new Error('tab module has no default export to mount');
+      await mod.default(container, buildPluginTabContext(tab));
+      m.module = mod;
+    } catch (e) {
+      console.error(e);
+      container.replaceChildren(el('p', 'note-status', `Plugin tab "${tab.label}" failed to load: ${e.message}`));
+      return;
+    }
+  }
+  if (m.module && m.module.onShow) { try { m.module.onShow(m.container); } catch (e) { console.error(e); } }
+}
 $('btnRunSql').onclick = runSql;
 $('sqlText').onkeydown = (e) => {
   if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); runSql(); }
@@ -6669,8 +6800,10 @@ async function openCase(path) {
   // its results reference source ids from the previous case.
   S.searchAll = null;
   updateSearchAllButton();
-  if (S.activeTab === 'timeline') showGridTab();
-  if (S.activeTab === 'sql') showGridTab();
+  // A mounted plugin tab's UI was built from the previous case's data —
+  // tear the mounts down so the next activation rebuilds against this one.
+  resetPluginTabMounts();
+  if (S.activeTab !== 'grid') showGridTab();
   setBrandLabel(res.name);
   showApp();
   await loadSources();

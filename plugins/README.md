@@ -12,9 +12,12 @@ on disk into here. Toggles and installs take effect immediately — no
 server restart. Copying a plugin into this folder by hand still works
 exactly the same; the panel picks it up on next open.
 
-A ready-made example — a raw NTFS `$MFT` / USN-journal (`$J`) parser —
-ships in [`examples/plugins/mft_usn/`](../examples/plugins/mft_usn/):
-install it from Settings → Plugins → "Install a plugin folder…", or
+Three ready-made examples ship in [`examples/plugins/`](../examples/plugins/):
+`mft_usn` (raw NTFS `$MFT`/`$J` parsing — an ingest-format plugin),
+`lateral_movement` (a pinned graph tab — a custom-UI plugin), and
+`claude_assistant` (a Claude chat tab — an external-integration plugin;
+needs network + API key). Install any of them from Settings → Plugins →
+"Install a plugin folder…", or
 
 ```bash
 cp -r examples/plugins/mft_usn plugins/

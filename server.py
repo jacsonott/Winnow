@@ -137,7 +137,12 @@ async def no_cache_static(request: Request, call_next):
     Last-Modified support when nothing actually changed, so this doesn't
     mean re-downloading the file every time, just always double-checking."""
     response = await call_next(request)
-    if request.url.path.startswith("/static/") or request.url.path == "/":
+    # /plugin_assets/ gets the same treatment as /static/ for the same
+    # reason — a plugin's tab JS changes during development, and a stale
+    # cached module is the same class of confusing non-bug. (import() also
+    # carries a ?v=<gen> cache-buster, but that only changes when the
+    # registry reloads, not on every save while iterating on a tab.)
+    if request.url.path.startswith(("/static/", "/plugin_assets/")) or request.url.path == "/":
         response.headers["Cache-Control"] = "no-cache"
     return response
 
@@ -620,7 +625,60 @@ def api_plugins():
         "dirs": [str(d) for d in PLUGIN_DIRS],
         "plugins": PLUGINS.describe(),
         "formats": PLUGINS.list_formats(),
+        "tabs": PLUGINS.list_tabs(),
     }
+
+
+@app.get("/plugin_assets/{fs_name}/{asset_path:path}")
+def api_plugin_asset(fs_name: str, asset_path: str):
+    """Serves a plugin folder's own files (its tab's ES module, CSS, any
+    helper modules it import()s) — how a plugin ships UI without touching
+    static/. Only enabled folder plugins are served: a disabled plugin's
+    UI shouldn't keep loading any more than its Python should, and the
+    resolved-path containment check means a crafted ../ path can't read
+    outside the plugin's folder."""
+    rec = next((p for p in PLUGINS.describe() if p["fs_name"] == fs_name and p["enabled"]), None)
+    if rec is None:
+        raise HTTPException(404, "No such plugin")
+    root = Path(rec["path"]).resolve()
+    if not root.is_dir():
+        raise HTTPException(404, "Not a folder plugin")
+    target = (root / asset_path).resolve()
+    if root not in target.parents or not target.is_file():
+        raise HTTPException(404, "No such asset")
+    return FileResponse(target)
+
+
+@app.api_route("/api/plugin/{fs_name}/{route:path}", methods=["GET", "POST", "PUT", "DELETE"])
+async def api_plugin_dispatch(fs_name: str, route: str, request: Request):
+    """One dispatcher for every plugin-registered backend route (see
+    plugin_api.PluginAPI.register_api) rather than mounting real FastAPI
+    routes per plugin: routes come and go with Settings → Plugins toggles,
+    and looking the handler up at request time in the live registry makes
+    a reload instantly authoritative — no stale route objects to tear out
+    of the app. The CSRF middleware already gates non-GET /api/* calls.
+    Handlers get a plain PluginRequest and return JSON-able data;
+    ValueError is the analyst-actionable 400 (same split api_view uses),
+    anything else surfaces as the 500 it is."""
+    entry = PLUGINS.get_api(fs_name, route)
+    if entry is None:
+        raise HTTPException(404, f"No plugin route {fs_name}/{route}")
+    if request.method not in entry["methods"]:
+        raise HTTPException(405, f"{request.method} not allowed on {fs_name}/{route}")
+    body = None
+    raw = await request.body()
+    if raw:
+        try:
+            body = json.loads(raw)
+        except json.JSONDecodeError:
+            raise HTTPException(400, "Request body must be JSON")
+    req = plugin_api.PluginRequest(
+        request.method, route, dict(request.query_params), body, STORE,
+    )
+    try:
+        return JSONResponse(entry["handler"](req))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 class PluginToggle(BaseModel):

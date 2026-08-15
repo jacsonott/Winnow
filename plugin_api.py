@@ -8,13 +8,26 @@ Winnow's own source. Deleting the folder removes the plugin — there is no
 install step, no manifest database, nothing fetched from a network
 (CLAUDE.md: assume airgapped).
 
-The one extension point today is **ingest formats**: teach Winnow to read a
-file format it doesn't natively understand (a raw $MFT, a USN journal, an
-EVTX, a prefetch file, ...) by parsing it into rows that flow through the
-same all-TEXT src_<id> path CSV/JSON imports use (Store.ingest_rows).
-PluginAPI is deliberately an object rather than a bag of module functions —
-it's the seam future hooks get added to (register_export_format,
-register_command, ...) without any existing plugin needing to change.
+Three extension points today, all on the PluginAPI object a plugin's
+register() receives (deliberately an object rather than a bag of module
+functions — the seam future hooks get added to without any existing
+plugin needing to change):
+
+- **Ingest formats** (register_ingest_format): teach Winnow to read a
+  file format it doesn't natively understand (a raw $MFT, a USN journal,
+  an EVTX, a prefetch file, ...) by parsing it into rows that flow
+  through the same all-TEXT src_<id> path CSV/JSON imports use
+  (Store.ingest_rows).
+- **Tabs** (register_tab): a pinned tab in the app — like the built-in
+  SQL and Timeline tabs — whose content is entirely the plugin's own UI:
+  an ES module the plugin ships, mounted into a container the app
+  provides. This is how a plugin adds a whole feature surface (a lateral
+  movement graph, an LLM assistant, a report builder, ...) rather than
+  just a parser.
+- **API routes** (register_api): backend endpoints under
+  /api/plugin/<fs_name>/<route>, for whatever the plugin's UI (or a
+  script) needs the server to do — query the case, call an external
+  service, run a computation. Folder plugins only, same as tabs.
 
 A plugin module provides:
 
@@ -49,6 +62,39 @@ A plugin module provides:
             "name": "custom display name",          # optional; else the file's basename
         }
 
+A tab plus its backend route, the full custom-UI shape:
+
+    def register(api):
+        api.register_tab(
+            id="graph",                  # unique within this plugin
+            label="Lateral movement",    # the pinned tab's caption
+            entry="ui/tab.js",           # ES module, relative to the plugin folder,
+        )                                #   served at /plugin_assets/<fs_name>/ui/tab.js
+        api.register_api("edges", edges_handler, methods=["POST"])
+
+    # ui/tab.js — mounted on first activation. `container` is an empty
+    # <section> filling the main content area; `winnow` is the stable UI
+    # context (see buildPluginTabContext in app.js): winnow.api/post/toast/
+    # el/modal helpers, winnow.base ("/api/plugin/<fs_name>") for the
+    # plugin's own routes, winnow.assets for its other files, winnow.sql()
+    # for read-only case queries, winnow.schemaText() for an LLM-ready
+    # schema dump, and winnow.state (live sources/tags/selection getters).
+    # Optional exports: onShow/onHide, called on every tab switch.
+    #
+    #   export default function mount(container, winnow) { ... }
+
+    def edges_handler(req):
+        # req: PluginRequest — method, route, query (dict of str), body
+        # (parsed JSON or None), and store (the open Store, or None when no
+        # case is open). For reads, use req.store.run_sql(sql, limit) — it
+        # opens its own read-only connection, so a slow plugin query never
+        # holds the shared connection's lock (invariant #4). Raise
+        # ValueError for a 400 the analyst can act on; return anything
+        # JSON-able.
+        if req.store is None:
+            raise ValueError("Open a case first")
+        return req.store.run_sql("SELECT ...", limit=5000)
+
 SECURITY: a plugin is arbitrary Python running with Winnow's own
 privileges — the same trust model as a Notepad++ plugin or an autopsy/
 Ghidra script. Winnow only ever loads from local plugin directories the
@@ -76,7 +122,24 @@ from typing import Any, Callable, Iterable
 PLUGIN_API_VERSION = 1
 
 FORMAT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+# API routes may nest ("chat/stream") but each segment keeps the same shape.
+ROUTE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*(/[a-z0-9][a-z0-9_-]*)*$")
 OPTION_TYPES = {"bool", "text", "choice"}
+HTTP_METHODS = {"GET", "POST", "PUT", "DELETE"}
+
+
+class PluginRequest:
+    """What a register_api handler receives — a deliberately plain shape
+    (no FastAPI types) so the contract stays stable across framework
+    versions and handlers are trivially testable. `store` is the currently
+    open Store, or None when no case is open."""
+
+    def __init__(self, method: str, route: str, query: dict, body: Any, store: Any):
+        self.method = method
+        self.route = route
+        self.query = query
+        self.body = body
+        self.store = store
 
 
 class IngestFormat:
@@ -152,9 +215,12 @@ class PluginAPI:
 
     api_version = PLUGIN_API_VERSION
 
-    def __init__(self, registry: "PluginRegistry", plugin_name: str):
+    def __init__(self, registry: "PluginRegistry", plugin_name: str,
+                 fs_name: str, root: Path):
         self._registry = registry
         self._plugin = plugin_name
+        self._fs = fs_name
+        self._root = root
 
     def register_ingest_format(self, *, id: str, label: str, parse: Callable,
                                extensions: Iterable[str] = (),
@@ -179,6 +245,47 @@ class PluginAPI:
         )
         self._registry._add_format(fmt)
 
+    def register_tab(self, *, id: str, label: str, entry: str,
+                     description: str = "") -> None:
+        """A pinned tab (like the built-in SQL/Timeline tabs) whose content
+        is the plugin's own UI. `entry` is an ES module path relative to
+        the plugin folder — validated to exist *now*, at registration, so a
+        typo'd path is a visible load error in Settings → Plugins instead
+        of a silent 404 the first time someone clicks the tab."""
+        if not FORMAT_ID_RE.match(id or ""):
+            raise ValueError(f"Tab id {id!r} must be lowercase [a-z0-9_-]")
+        if not label:
+            raise ValueError("register_tab needs a label")
+        if not self._root.is_dir():
+            raise ValueError("register_tab is for folder plugins — a single .py file has no assets to serve")
+        rel = Path(str(entry).replace("\\", "/"))
+        if rel.is_absolute() or ".." in rel.parts or not (self._root / rel).is_file():
+            raise ValueError(f"Tab entry {entry!r} must be a file inside the plugin folder")
+        self._registry._add_tab({
+            "id": f"{self._plugin}.{id}",
+            "plugin": self._plugin,
+            "plugin_fs": self._fs,
+            "label": label,
+            "entry": rel.as_posix(),
+            "description": description,
+        })
+
+    def register_api(self, route: str, handler: Callable[[PluginRequest], Any],
+                     methods: Iterable[str] = ("GET", "POST")) -> None:
+        """A backend endpoint at /api/plugin/<fs_name>/<route>, dispatched
+        to `handler(PluginRequest) -> JSON-able`. Raising ValueError in the
+        handler becomes a 400 with the message; anything else is a 500.
+        Non-GET calls get the same CSRF-header gate as every other /api/*
+        route, for free, from server.py's middleware."""
+        if not ROUTE_RE.match(route or ""):
+            raise ValueError(f"Route {route!r} must be lowercase [a-z0-9_-] segments separated by /")
+        if not callable(handler):
+            raise ValueError("register_api needs a callable handler")
+        methods = {str(m).upper() for m in methods}
+        if not methods or methods - HTTP_METHODS:
+            raise ValueError(f"methods must be a subset of {sorted(HTTP_METHODS)}")
+        self._registry._add_api(self._fs, route, handler, methods)
+
 
 class PluginRegistry:
     """Discovers, imports and indexes plugins. One module-level instance
@@ -191,8 +298,10 @@ class PluginRegistry:
     plugin didn't load instead of it silently not existing."""
 
     def __init__(self):
-        self.plugins: list[dict] = []       # [{name, fs_name, path, version, description, error|None, enabled, formats:[ids]}]
+        self.plugins: list[dict] = []       # [{name, fs_name, path, version, description, error|None, enabled, gen, formats:[ids], tabs:[ids]}]
         self._formats: dict[str, IngestFormat] = {}
+        self._tabs: dict[str, dict] = {}                 # namespaced tab id -> tab dict (see PluginAPI.register_tab)
+        self._apis: dict[tuple[str, str], dict] = {}     # (fs_name, route) -> {handler, methods}
         self._seq = 0  # unique module names across load() calls / same-named plugins in two dirs
 
     # ------------------------------------------------------------- loading
@@ -216,6 +325,8 @@ class PluginRegistry:
         disabled = set(disabled)
         self.plugins = []
         self._formats = {}
+        self._tabs = {}
+        self._apis = {}
         for directory in directories:
             d = Path(directory)
             if not d.is_dir():
@@ -233,7 +344,7 @@ class PluginRegistry:
                     self.plugins.append({
                         "name": fs_name, "fs_name": fs_name, "path": str(candidate),
                         "version": None, "description": "", "error": None,
-                        "enabled": False, "formats": [],
+                        "enabled": False, "gen": 0, "formats": [], "tabs": [],
                     })
                 else:
                     self._load_one(fs_name, entry, candidate)
@@ -247,7 +358,11 @@ class PluginRegistry:
         record = {
             "name": default_name, "fs_name": default_name, "path": str(root),
             "version": None, "description": "", "error": None,
-            "enabled": True, "formats": [],
+            # gen = this load's sequence number — the frontend cache-busts
+            # a tab entry's import() URL with it, so a toggle-off/on (or
+            # any registry reload) picks up changed JS instead of the
+            # browser's cached module.
+            "enabled": True, "gen": self._seq, "formats": [], "tabs": [],
         }
         self.plugins.append(record)
         try:
@@ -275,9 +390,11 @@ class PluginRegistry:
             if not callable(register):
                 raise RuntimeError("plugin has no register(api) function")
 
-            before = set(self._formats)
-            register(PluginAPI(self, record["name"]))
-            record["formats"] = sorted(set(self._formats) - before)
+            before_formats = set(self._formats)
+            before_tabs = set(self._tabs)
+            register(PluginAPI(self, record["name"], record["fs_name"], root))
+            record["formats"] = sorted(set(self._formats) - before_formats)
+            record["tabs"] = sorted(set(self._tabs) - before_tabs)
         except Exception as e:
             # Full traceback to the console for the plugin author; a
             # one-liner in the record for the UI.
@@ -288,6 +405,16 @@ class PluginRegistry:
         if fmt.id in self._formats:
             raise ValueError(f"Duplicate ingest format id: {fmt.id}")
         self._formats[fmt.id] = fmt
+
+    def _add_tab(self, tab: dict) -> None:
+        if tab["id"] in self._tabs:
+            raise ValueError(f"Duplicate tab id: {tab['id']}")
+        self._tabs[tab["id"]] = tab
+
+    def _add_api(self, fs_name: str, route: str, handler: Callable, methods: set[str]) -> None:
+        if (fs_name, route) in self._apis:
+            raise ValueError(f"Duplicate API route: {route}")
+        self._apis[(fs_name, route)] = {"handler": handler, "methods": methods}
 
     # -------------------------------------------------------------- lookup
 
@@ -309,6 +436,15 @@ class PluginRegistry:
 
     def list_formats(self) -> list[dict]:
         return [f.describe() for f in self._formats.values()]
+
+    def list_tabs(self) -> list[dict]:
+        """Every registered tab, each carrying its plugin's gen so the
+        frontend can cache-bust the entry module URL per load."""
+        gen_by_fs = {p["fs_name"]: p["gen"] for p in self.plugins}
+        return [{**t, "gen": gen_by_fs.get(t["plugin_fs"], 0)} for t in self._tabs.values()]
+
+    def get_api(self, fs_name: str, route: str) -> dict | None:
+        return self._apis.get((fs_name, route))
 
     def describe(self) -> list[dict]:
         return [dict(p) for p in self.plugins]
