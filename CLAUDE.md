@@ -87,19 +87,45 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
    contiguously from 1 on every ingest path and no source table is ever
    mutated after ingest (invariant #1).
 
-3. **Views live in the temp-attached `v` database** (`ATTACH DATABASE '' AS v`),
-   which SQLite deletes on disconnect. Case files stay clean. Views die with the
-   process — the frontend handles a 409 "view expired" by rebuilding.
+3. **Views live in the `v` database — a named temp file, not the anonymous
+   `ATTACH DATABASE ''` it used to be.** Created per Store in `/dev/shm`
+   when available (else the platform tempdir), WAL-journalled,
+   `synchronous=OFF` (views are re-derivable scratch, never evidence — see
+   the comment in `Store.__init__` for why each of those settings is
+   load-bearing), deleted in `close()`. Named so that the reader pool
+   (invariant #4) can attach it too — that's the entire reason it changed.
+   Case files stay clean. Views still die with the process — the frontend
+   handles a 409 "view expired" by rebuilding.
 
-4. **One shared connection guarded by `Store.lock`.** The temp attach only
-   exists on that connection, so per-request connections would break views. The
-   SQL pane is the exception: it opens its own read-only connection.
-   `ingest_csv` takes this seriously at scale: it acquires the lock per
-   `BATCH`-sized chunk (commit, release, re-acquire for the next chunk)
-   rather than once for the whole file, so a multi-minute import on a huge
-   CSV doesn't freeze every other request for its entire duration. Follow
-   this pattern for any other operation that might run long — hold the lock
-   for one unit of committed work, not for a whole loop over the file.
+4. **One writer connection guarded by `Store.lock`; reads go through the
+   `Store._reader()` pool.** Everything that mutates — ingest, view
+   materialisation, tags/notes, FTS/index builds, compact — runs on the one
+   shared `self.db` under `self.lock`, exactly as before. But the pure-read
+   paths (`fetch_rows` in all its kinds, `tag_positions`, `find_position`,
+   `column_values`, `column_max_lengths`, `group_summary`'s aggregate,
+   `fetch_timeline_rows`, the CSV/XLSX export streams, the search-all
+   counts) run on pooled read-only connections that never take `self.lock`
+   at all — WAL (already on for the case file, set on the views db at
+   attach) is what makes that safe, and it's what keeps paging at ~1ms
+   while a multi-second `build_view` or ingest holds the writer lock
+   (measured: 638 page fetches at idle-baseline speed during a 545ms
+   build, vs exactly 1 blocked call before). Two rules when touching this:
+   **never use `_reader()` inside an open writer transaction** (a reader
+   sees committed data only — code that needs to read back its own
+   uncommitted writes stays on `self.db`, e.g. ingest's `get_source`), and
+   a read that can race view eviction wraps its queries in
+   `_dropped_view_is_expired()` so a dropped `v.view_N` surfaces as the
+   KeyError → 409 contract, not a 500. The `_ensure_*` fire-and-forget
+   helpers keep their thread registries under `_threads_lock` (not
+   `self.lock`) for the same reason `_search_job_lock` exists — a "pure
+   read" that brushed the writer lock for bookkeeping would stall behind a
+   long build after all.
+   `ingest_csv` still takes the writer lock per `BATCH`-sized chunk
+   (commit, release, re-acquire) rather than once for the whole file, so a
+   multi-minute import doesn't freeze the *write* paths (tagging, other
+   imports) for its entire duration. Follow that pattern for any new
+   long-running writer — hold the lock for one unit of committed work, not
+   for a whole loop over the file.
 
 5. **Column names are user data.** Always run them through `store.q()` for
    quoting; never f-string a raw header into SQL. Headers get sanitised and
@@ -358,12 +384,14 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
   `post()` won't have it and will get 403'd. GET stays exempt on purpose (the
   Export/session/filters download links are plain navigations, which can't set
   custom headers at all).
-- `search_all_sources` takes `self.lock` **per source's count**, not once
-  around the loop — invariant #4's "one unit of committed work" applied to a
-  read sweep. It's N full LIKE scans back to back on a case whose indexes
-  aren't built; wrapping the loop froze every other request (paging,
-  tagging, view builds) for minutes on a 42 GB merge. Each count also stops
-  at `SEARCH_ALL_COUNT_CAP` (`SELECT COUNT(*) FROM (… LIMIT cap+1)`) and
+- `search_all_sources` runs each source's count on a `_reader()`
+  connection — the sweep never touches `self.lock` at all now (it used to
+  take it per source's count, which still stalled a concurrent request for
+  up to one source's scan; the history matters because it's N full LIKE
+  scans back to back on a case whose indexes aren't built, minutes on a
+  42 GB merge). The structural tests in `test_search.py` still assert the
+  lock is never held across the sweep. Each count also stops at
+  `SEARCH_ALL_COUNT_CAP` (`SELECT COUNT(*) FROM (… LIMIT cap+1)`) and
   reports `capped: True`, which the modal renders as "1,000+" — that pane
   only ranks which tables hit and roughly how hard, and an exact count is a
   scan of every matching row to produce a number nobody reads.
@@ -583,15 +611,15 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
   meant one modal the analyst had to sit in front of, no results until the
   very end, and nothing to come back to if they closed it. Measured on
   8×60k rows with no FTS built (the full-LIKE-scan shape): `start`
-  returns in **7ms** against a **2.8s** sweep, and an unrelated
-  `/api/sources` during the sweep takes ~370ms vs ~3ms idle — i.e. it
-  waits out at most *one* source's scan, not the whole sweep. That
-  remaining latency is inherent to the one-shared-connection design
-  (invariant #4), not something the job layer can remove.
+  returns in **7ms** against a **2.8s** sweep. (When this was first
+  built, an unrelated `/api/sources` during the sweep still took ~370ms
+  vs ~3ms idle — waiting out one source's scan on the then-shared
+  connection; the reader pool in invariant #4 has since removed that too,
+  the counts don't touch `self.lock` at all.)
   `search_all_sources` is now a thin collect-it-all wrapper over
   `_iter_search_all_sources`, a generator yielding `(scanned, total,
   hit_or_None)` per source — **one implementation, two callers**, so the
-  structural per-source-lock test in `test_search.py` still covers the
+  structural lock tests in `test_search.py` still cover the
   path the UI actually uses. Every source yields, matching or not, so
   `scanned` tracks real progress rather than counting hits. Only one job
   is alive at a time: starting another marks the old one cancelled and
@@ -613,8 +641,10 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
 - **The 2026-08 hot-path perf pass** (validated with `python3 -m bench
   --vs-ref` at both the 200k and 1.2M tiers — 0 slower, footprint
   unchanged), the shapes and their reasons:
-  - `Store._source_lite()` (and `_merge_source_lite`) is what internal
-    hot paths use instead of `get_source` — everything that only needs
+  - `Store._source_lite()` (whose query logic now lives in the
+    connection-parameterised `_source_lite_on`, shared with the reader
+    pool) is what internal hot paths use instead of `get_source` —
+    everything that only needs
     `table_name`/`columns`/`row_count`/`has_fts` to run a query:
     `fetch_rows` (was paying get_source's COUNT(DISTINCT rid) over
     row_tags — ~12ms on a heavily tagged source — at least twice per
@@ -653,6 +683,39 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
     that helps a multi-million-row view-build sort), mmap_size at 1 GB
     (file-backed, shared with the OS page cache; costs address space,
     not RAM; SQLite clamps it to its compile-time max on old builds).
+- **The 2026-08 reader-pool split** (invariants #3/#4 carry the rules;
+  this entry carries the numbers and the traps that were checked):
+  - Headline, via `bench/probe_concurrency.py` (a standalone before/after
+    probe, separate from the `@benchmark` harness because it times one op
+    *during* another): during a ~545ms `build_view`, `fetch_rows` on
+    another source went from **1 completed call (455ms — blocked for the
+    build's whole duration)** to **638 calls at 0.84ms mean**, which is
+    the idle baseline. An earlier per-call-connection prototype measured
+    1.61ms here; pooling (`READER_POOL_CAP` = app.js's
+    `PAGE_FETCH_CONCURRENCY`) recovered the difference.
+  - `bench --vs-ref main`: paging unchanged, `grouping/summary.*` and
+    `column_values` 10–30% **faster** (their aggregate no longer queues
+    behind the writer, and the ensure-index `sqlite_master` probe moved
+    off it too). The tagging benchmarks flagged +9–14% SLOWER on three
+    harness runs — chased and **not real**: an interleaved single-process
+    A/B of `set_tags` (10k rows, 40 reps alternating main/current)
+    measured 22.63ms vs 22.77ms (+0.6%), matching a ~0.2ms/commit cost of
+    the second attached WAL db, isolated with a pure-sqlite3 probe. The
+    harness's sequential ref-then-current runs pick up machine load drift
+    as systematic bias on a shared box; interleave before believing a
+    flag on a write path this change doesn't touch.
+  - The views db moving out of `temp_store=MEMORY` (a *named* attach
+    can't ride that pragma) was a real 20–100% regression on every
+    views/paging/timeline benchmark until `/dev/shm` + `v.synchronous=OFF`
+    recovered it — that's why those two settings in `Store.__init__` are
+    not optional decoration. macOS/Windows fall back to the tempdir file
+    (page-cache-backed, synchronous=OFF): fine for correctness,
+    unmeasured for speed on those platforms.
+  - `sqlite3.connect` is ~0.3–0.5ms with the attach + function
+    registration — why `_reader()` pools instead of opening per call, and
+    why the pool returns connections on the happy path but *closes* them
+    on any exception (a connection whose last statement died mid-view-drop
+    is cheaper to replace than to prove clean).
 
 - **Plugins** (plugin_api.py, `plugins/`, Settings → Plugins) are
   Notepad++-style drop-in extensions, first loaded at server *import* (so
