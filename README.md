@@ -54,8 +54,10 @@ FROM src_1 WHERE "Process" LIKE '%powershell%';
 ```
 
 The grid then pages with `WHERE pos BETWEEN ? AND ?`, and the row count comes
-free. Views live in a temporary database SQLite deletes on disconnect, so the
-case file stays clean.
+free. Views live in a temporary database deleted when the server exits, so the
+case file stays clean. Page reads (and every other pure-read path — grouping,
+exports, search counts) run on pooled read-only connections, so a multi-second
+view build or import never stalls scrolling in another tab.
 
 **Search** uses an external-content FTS5 table over every column, tokenized to
 keep `.`, `-`, `_`, `\`, `@` and `:` inside tokens so paths, GUIDs and account
