@@ -357,6 +357,36 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
   forever), and any `keep` set an in-flight bulk copy/tag still needs. Both
   can exceed the cap, in which case nothing is evicted; it's a cap on idle
   scrollback, not a hard limit that could break an operation mid-flight.
+- **The spacer that gives the grid its scroll height is capped**
+  (`MAX_SPACER_PX`, 16M px) and above that cap `scrollTop` is no longer a
+  row offset. A DOM element can't be arbitrarily tall — Blink clamps at
+  33,554,365px (measured; 2^25 LayoutUnits), Gecko at ~17.9M — so
+  `row_count * ROW_H` stops growing somewhere around 1.4M rows at 24px
+  while the row count keeps going, and the tail of the view becomes
+  unreachable: a 2,459,653-row `$J` table scrolled only to row ~1,398,090,
+  hiding 43% of the evidence with nothing on screen to say so. So every
+  conversion between `scrollTop` and a row goes through `vScroll()` (real →
+  virtual) / `rScroll()` (virtual → real), and the rows block is positioned
+  by `rowsPaintY()`, never by `first * ROW_H`. **Below the cap all three are
+  exactly the arithmetic they replaced**, which is what makes them safe to
+  apply everywhere — `render`, `renderGrouped`, `renderTimelineRows`,
+  `visiblePageRange`, `scrollIntoView`, `recenterOnRow`, `applyDensity`, and
+  `rebuildView` (whose kept scroll position is captured in *virtual* pixels,
+  since the outgoing and incoming views can have different row counts and so
+  different spacer scales). The non-obvious part is `rowsPaintY` subtracting
+  the fractional part of the virtual offset: drop it and the top row snaps
+  to the viewport edge, so the grid moves in whole-`ROW_H` steps instead of
+  scrolling smoothly. Above the cap the cost is granularity, not reach —
+  2.46M rows get ~6.5px of spacer per row instead of 24, so a wheel notch
+  travels ~3.7x further; every row stays addressable (that needs 1px/row,
+  which the cap doesn't reach until ~16M rows) and keyboard nav moves by row.
+  Related, and the reason this was found at all: `#app`'s four grid children
+  each pin their own `grid-row`. `#presetBanner` is `hidden` by default and a
+  `display:none` item isn't placed in the grid at all, so under
+  auto-placement `.main-area` slid into the 3rd (`auto`) track — harmless
+  until the spacer passed the browser's ceiling, at which point that track's
+  intrinsic size resolved to 0 and collapsed `.main-area`/`#grid`/`#body` to
+  zero height. Correct row count, sticky header painted, not one data row.
 - There's no auth — this is a local, single-analyst tool. The one guard against
   a malicious page on another tab silently triggering side effects (e.g. via an
   unpreflighted `multipart/form-data` upload) is server.py's

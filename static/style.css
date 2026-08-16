@@ -197,6 +197,26 @@ html[data-style="studio"][data-theme="light"] {
 #sidebar { grid-column: 1; grid-row: 1 / -1; }
 #sidebar[hidden] { display: none; }
 .bar, .toolbar, #presetBanner, .main-area { grid-column: 2; }
+/* Explicit row per child, not auto-placement. #presetBanner is `hidden`
+   (display: none) in its default state, and a display:none item is not
+   placed in the grid at all — so auto-placement had only three items to
+   place in column 2 and slid .main-area up into the 3rd (auto) track,
+   leaving the 4th (minmax(0, 1fr)) empty. That stayed invisible for a long
+   time because an auto track in a definite-height grid still stretches to
+   fill the leftover space, so .main-area got the right height anyway.
+   It stops being invisible once #spacerY (row_count * ROW_H) passes the
+   browser's max element height — ~33.55M px, 2^25 LayoutUnits in Blink,
+   i.e. ~1.4M rows at 24px / ~1.68M at 20px. Past that the auto track's
+   intrinsic contribution resolves to 0 rather than clamping, collapsing
+   .main-area -> #grid -> #body to zero height: correct row count in the
+   toolbar, sticky header still painted, and not one data row rendered.
+   Pinning the rows makes the banner's visibility irrelevant to where
+   .main-area lands. (The spacer is still clamped past that size — see
+   #spacerY — but a clamped spacer only costs reach, not the whole grid.) */
+.bar { grid-row: 1; }
+.toolbar { grid-row: 2; }
+#presetBanner { grid-row: 3; }
+.main-area { grid-row: 4; }
 /* Grid items default to min-width:auto (their content's min-content size),
    not 0 — without this, a row wide enough to overflow (e.g. many/long tab
    names in .bar) blows out #app's implicit single column, stretching every
