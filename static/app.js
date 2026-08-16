@@ -13,6 +13,26 @@ const OVERSCAN = 12;
 const ROW_H_COMFORTABLE = 24;
 const ROW_H_COMPACT = 20;
 let ROW_H = ROW_H_COMFORTABLE; // mutable — the Appearance density setting changes this at runtime, see applyDensity()
+
+/* Ceiling on the virtualized spacer's height. The spacer (#spacerY,
+   #timelineSpacerY) is what gives the scroller its scrollable height —
+   row_count * ROW_H — but a DOM element can't be arbitrarily tall. Blink
+   clamps at 33,554,365px (measured; 2^25 LayoutUnits) and Gecko lower still
+   (~17.9M), and past the clamp the spacer stops growing while the row count
+   doesn't: scrollTop stops mapping onto rows 1:1 and the tail of the view
+   becomes unreachable. Measured on a 2,459,653-row $J table, which wants
+   59,031,672px of spacer: scrolling bottomed out at row ~1,398,090, hiding
+   43% of the evidence with no indication anything was missing.
+   So the spacer is capped below every engine's limit, and above the cap every
+   conversion between scrollTop and a row goes through vScroll()/rScroll()
+   rather than a bare multiply or divide by ROW_H. Below the cap those are
+   the identity, so nothing changes for a table that already fit.
+   What the cap costs above it is scroll *granularity*, not reach: 2.46M rows
+   get ~6.5px of spacer per row instead of 24, so a wheel notch travels ~3.7x
+   further. Every row stays individually addressable (that needs 1px/row; the
+   cap doesn't reach it until ~16M rows), and keyboard navigation moves by row
+   rather than by pixel, so it's unaffected either way. */
+const MAX_SPACER_PX = 16000000;
 const GUTTER_W = 104; // keep in sync with `.gutter { width: ... }` in style.css
 const AUTOFIT_MAX_W = 480; // upper limit for autofit-to-content column widths
 
@@ -492,7 +512,7 @@ async function openSource(id) {
     clearPageCache();
     selClear();
     S.anchor = -1;
-    $('spacerY').style.height = cached.row_count * ROW_H + 'px';
+    $('spacerY').style.height = spacerPx(cached.row_count) + 'px';
     $('viewStats').innerHTML =
       `<b>${cached.row_count.toLocaleString()}</b> of ${src.row_count.toLocaleString()} rows · cached`;
     $('body').scrollTop = 0;
@@ -519,7 +539,12 @@ let rebuildSeq = 0;
 
 async function rebuildView({ keepScroll = true } = {}) {
   if (!S.sourceId) return;
-  const scroll = keepScroll ? $('body').scrollTop : 0;
+  // Captured in virtual (row-space) pixels rather than as a raw scrollTop:
+  // the outgoing and incoming views can have different row counts, and once
+  // either is over MAX_SPACER_PX they have different spacer scales too — the
+  // same scrollTop would then mean a different row on each side.
+  const oldTotal = S.groupByCols.length ? S.groupTotalRows : (S.view ? S.view.row_count : 0);
+  const scroll = keepScroll ? vScroll($('body'), oldTotal, headH()) : 0;
   const spec = currentSpec();
   const seq = ++rebuildSeq;
   let v;
@@ -578,10 +603,10 @@ async function rebuildView({ keepScroll = true } = {}) {
   S.cellRange = null;
   S.cellAnchor = null;
   const src = S.sources.find((s) => s.id === S.sourceId);
-  $('spacerY').style.height = v.row_count * ROW_H + 'px';
+  $('spacerY').style.height = spacerPx(v.row_count) + 'px';
   $('viewStats').innerHTML =
     `<b>${v.row_count.toLocaleString()}</b> of ${src.row_count.toLocaleString()} rows · ${v.elapsed_ms} ms`;
-  $('body').scrollTop = Math.min(scroll, Math.max(0, headH() + v.row_count * ROW_H - $('body').clientHeight));
+  $('body').scrollTop = rScroll($('body'), v.row_count, scroll, headH());
   if (S.groupByCols.length) {
     // The old view_id (and any expanded groups' sub-views) is gone now —
     // re-summarize against the new one, keeping the chosen grouping columns.
@@ -925,7 +950,8 @@ const MAX_CACHED_PAGES = 10;
    on arrival, so an eviction/refetch pair here would loop forever. */
 function visiblePageRange() {
   const body = $('body');
-  const first = Math.max(0, Math.floor(body.scrollTop / ROW_H) - OVERSCAN);
+  const total = S.groupByCols.length ? S.groupTotalRows : (S.view ? S.view.row_count : 0);
+  const first = Math.max(0, Math.floor(vScroll(body, total, headH()) / ROW_H) - OVERSCAN);
   const last = first + Math.ceil(body.clientHeight / ROW_H) + OVERSCAN * 2;
   return [Math.floor(first / PAGE), Math.floor(last / PAGE)];
 }
@@ -1034,6 +1060,47 @@ function syncSelectAllCheckbox() {
    its height must subtract it. */
 function headH() { return $('gridHead').offsetHeight; }
 
+/* The spacer height to use for `total` rows — capped, see MAX_SPACER_PX. */
+function spacerPx(total) { return Math.min(total * ROW_H, MAX_SPACER_PX); }
+
+/* scrollTop as the rest of the grid means it: an offset into `total * ROW_H`
+   pixels of rows. Identity below the spacer cap; a linear rescale above it.
+   `head` is the in-scroller sticky header's height — headH() for the grid, 0
+   for the timeline, whose header sits outside its scroller. Both ends are
+   anchored (0 maps to 0, max-scroll maps to max-offset), so the last row is
+   exactly reachable rather than merely nearly so. */
+function vScroll(scroller, total, head = 0) {
+  const want = total * ROW_H;
+  if (want <= MAX_SPACER_PX) return scroller.scrollTop;
+  const maxReal = Math.max(0, head + MAX_SPACER_PX - scroller.clientHeight);
+  const maxWant = Math.max(0, head + want - scroller.clientHeight);
+  if (maxReal <= 0) return 0;
+  return Math.min(scroller.scrollTop * (maxWant / maxReal), maxWant);
+}
+
+/* Inverse of vScroll: the real scrollTop that lands on virtual offset `virt`.
+   Clamps into range on the way, so callers can hand it an unbounded target
+   (a row far past the end, a negative centring term) the way they used to
+   hand one straight to scrollTop. */
+function rScroll(scroller, total, virt, head = 0) {
+  const want = total * ROW_H;
+  const maxWant = Math.max(0, head + want - scroller.clientHeight);
+  const target = Math.min(Math.max(0, virt), maxWant);
+  if (want <= MAX_SPACER_PX) return target;
+  const maxReal = Math.max(0, head + MAX_SPACER_PX - scroller.clientHeight);
+  return maxWant > 0 ? target * (maxReal / maxWant) : 0;
+}
+
+/* Where the virtualized rows block has to sit for row `first` to line up
+   under the row the scroll position actually points at. Below the cap this
+   reduces to exactly first * ROW_H. Above it, subtracting the fractional part
+   of the virtual offset is what keeps scrolling smooth — without it the top
+   row snaps to the viewport edge and the whole grid moves in ROW_H steps. */
+function rowsPaintY(scroller, virt, first) {
+  const anchor = Math.floor(virt / ROW_H);
+  return scroller.scrollTop - (virt - anchor * ROW_H) - (anchor - first) * ROW_H;
+}
+
 function syncRowsTop() {
   const t = headH() + 'px';
   const rowsEl = $('rows');
@@ -1058,7 +1125,8 @@ function render() {
   const body = $('body');
   const rowsEl = $('rows');
   const total = S.view.row_count;
-  const first = Math.max(0, Math.floor(body.scrollTop / ROW_H) - OVERSCAN);
+  const virt = vScroll(body, total, headH());
+  const first = Math.max(0, Math.floor(virt / ROW_H) - OVERSCAN);
   const visible = Math.ceil(body.clientHeight / ROW_H) + OVERSCAN * 2;
   const last = Math.min(total, first + visible);
 
@@ -1072,7 +1140,7 @@ function render() {
   const needle = S.search.trim().toLowerCase();
 
   syncRowsWidth(widths, cols);
-  rowsEl.style.transform = `translateY(${first * ROW_H}px)`;
+  rowsEl.style.transform = `translateY(${rowsPaintY(body, virt, first)}px)`;
   const frag = document.createDocumentFragment();
 
   for (let pos = first; pos < last; pos++) {
@@ -1262,13 +1330,14 @@ function renderGrouped() {
   const rowsEl = $('rows');
   rebuildGroupPrefix();
   const total = S.groupTotalRows;
-  $('spacerY').style.height = total * ROW_H + 'px';
+  $('spacerY').style.height = spacerPx(total) + 'px';
 
-  const first = Math.max(0, Math.floor(body.scrollTop / ROW_H) - OVERSCAN);
+  const virt = vScroll(body, total, headH());
+  const first = Math.max(0, Math.floor(virt / ROW_H) - OVERSCAN);
   const visible = Math.ceil(body.clientHeight / ROW_H) + OVERSCAN * 2;
   const last = Math.min(total, first + visible);
 
-  rowsEl.style.transform = `translateY(${first * ROW_H}px)`;
+  rowsEl.style.transform = `translateY(${rowsPaintY(body, virt, first)}px)`;
   const frag = document.createDocumentFragment();
   const cols = visibleCols();
   const colMeta = Object.fromEntries(S.columns.map((c) => [c.name, c]));
@@ -1868,10 +1937,16 @@ function scrollIntoView(pos) {
   // is still pos*ROW_H >= scrollTop. The bottom edge does: the row's real
   // content y is headH() further down, and without it the target row
   // parks its last ~two-rows'-worth below the viewport.
+  // Compared against the *virtual* offset, not raw scrollTop: top/bottom are
+  // row-space pixels, and scrollTop stops being row-space once the spacer is
+  // capped (MAX_SPACER_PX).
+  const total = S.groupByCols.length ? S.groupTotalRows : (S.view ? S.view.row_count : 0);
+  const head = headH();
+  const cur = vScroll(body, total, head);
   const top = pos * ROW_H;
-  const bottom = top + ROW_H + headH();
-  if (top < body.scrollTop) body.scrollTop = top;
-  else if (bottom > body.scrollTop + body.clientHeight) body.scrollTop = bottom - body.clientHeight;
+  const bottom = top + ROW_H + head;
+  if (top < cur) body.scrollTop = rScroll(body, total, top, head);
+  else if (bottom > cur + body.clientHeight) body.scrollTop = rScroll(body, total, bottom - body.clientHeight, head);
 }
 
 /* ---------------------------------------------------------------- modal */
@@ -4851,7 +4926,7 @@ async function buildTimeline() {
   }
   if (reqId !== S.timeline.reqId) return; // a newer build superseded this one
   S.timeline.view = v;
-  $('timelineSpacerY').style.height = v.row_count * ROW_H + 'px';
+  $('timelineSpacerY').style.height = spacerPx(v.row_count) + 'px';
   $('timelineStats').innerHTML = `<b>${v.row_count.toLocaleString()}</b> tagged row${v.row_count === 1 ? '' : 's'}`;
   $('timelineBody').scrollTop = 0;
   renderTimelineRows();
@@ -4884,13 +4959,16 @@ function renderTimelineRows() {
   const rowsEl = $('timelineRows');
   if (!total) { rowsEl.replaceChildren(); return; }
 
-  const first = Math.max(0, Math.floor(body.scrollTop / ROW_H) - OVERSCAN);
+  // head = 0: the timeline's header sits outside #timelineBody, unlike the
+  // grid's sticky one.
+  const virt = vScroll(body, total);
+  const first = Math.max(0, Math.floor(virt / ROW_H) - OVERSCAN);
   const visible = Math.ceil(body.clientHeight / ROW_H) + OVERSCAN * 2;
   const last = Math.min(total, first + visible);
   for (let p = Math.floor(first / PAGE); p <= Math.floor(Math.max(first, last - 1) / PAGE); p++) ensureTimelinePage(p);
 
   const tagColor = Object.fromEntries(S.tags.map((t) => [t.id, t.color]));
-  rowsEl.style.transform = `translateY(${first * ROW_H}px)`;
+  rowsEl.style.transform = `translateY(${rowsPaintY(body, virt, first)}px)`;
   const frag = document.createDocumentFragment();
   for (let pos = first; pos < last; pos++) {
     const r = timelineRowAt(pos);
@@ -5636,7 +5714,8 @@ async function recenterOnRow(anchor) {
   // Centers within the row band below the sticky header: the visible band
   // is [scrollTop + headH(), scrollTop + clientHeight], hence the extra
   // headH()/2 term.
-  $('body').scrollTop = Math.max(0, pos * ROW_H + ROW_H / 2 + headH() / 2 - $('body').clientHeight / 2);
+  $('body').scrollTop = rScroll($('body'), S.view.row_count,
+    pos * ROW_H + ROW_H / 2 + headH() / 2 - $('body').clientHeight / 2, headH());
   render();
 }
 
@@ -5952,17 +6031,20 @@ function applyDensity(density) {
   S.appearance.density = density;
   saveAppearance();
   const body = $('body');
-  const oldRowH = ROW_H;
-  const topRow = S.view ? Math.floor(body.scrollTop / oldRowH) : 0;
+  // Read against the outgoing ROW_H (paintDensity hasn't run yet), written
+  // back against the new one — so the anchor stays a row, not a pixel offset,
+  // across a change that moves every pixel position in the grid.
+  const total = () => (S.groupByCols.length ? S.groupTotalRows : (S.view ? S.view.row_count : 0));
+  const topRow = S.view ? Math.floor(vScroll(body, total(), headH()) / ROW_H) : 0;
   paintDensity();
   if (!S.view) return;
   if (S.groupByCols.length) {
     rebuildGroupPrefix();
-    $('spacerY').style.height = S.groupTotalRows * ROW_H + 'px';
+    $('spacerY').style.height = spacerPx(S.groupTotalRows) + 'px';
   } else {
-    $('spacerY').style.height = S.view.row_count * ROW_H + 'px';
+    $('spacerY').style.height = spacerPx(S.view.row_count) + 'px';
   }
-  body.scrollTop = topRow * ROW_H;
+  body.scrollTop = rScroll(body, total(), topRow * ROW_H, headH());
   S.groupByCols.length ? renderGrouped() : render();
   drawRail();
 }
