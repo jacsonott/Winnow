@@ -23,8 +23,10 @@ needs network + API key). Install any of them from Settings → Plugins →
 cp -r examples/plugins/mft_usn plugins/
 ```
 
-The authoring contract (metadata, `register_ingest_format`, the `parse`
-streaming contract, per-format options) is documented at the top of
+Writing one? Start with
+**[docs/writing-plugins.md](../docs/writing-plugins.md)** — quickstart,
+the three extension points (ingest formats, tabs, API routes), testing,
+and troubleshooting. The contract is also spelled out at the top of
 [`plugin_api.py`](../plugin_api.py). A plugin that fails to load never
 takes the server down — it's listed with its error in Settings → Plugins
 and in the startup output.

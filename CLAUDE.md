@@ -17,9 +17,14 @@ workspace.py       Cross-case JSON state (case registry, saved filters, default
                     tag template) — human-readable files in workspace/, outside
                     any single case.db so they survive switching cases.
 plugin_api.py      Plugin host: discovery/loading from plugins/, PluginAPI
-                    (register_ingest_format), the format registry server.py's
-                    /api/plugins and /api/ingest/plugin/* routes read. The
-                    authoring contract lives in its module docstring.
+                    (register_ingest_format / register_tab / register_api),
+                    the registry server.py's /api/plugins, /plugin_assets/*
+                    and /api/plugin/* routes read. The authoring contract
+                    lives in its module docstring; docs/writing-plugins.md
+                    is the long-form guide built on top of it (keep the two
+                    in sync when the contract changes).
+docs/              Long-form documentation. writing-plugins.md — the plugin
+                    developer guide.
 plugins/           Analyst-installed plugins (gitignored except its README).
                     Managed from Settings → Plugins: per-plugin on/off
                     toggles and a copy-from-disk installer, no restart —

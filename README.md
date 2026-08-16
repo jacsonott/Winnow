@@ -161,12 +161,13 @@ from Settings → Plugins → "Install a plugin folder…", or `cp -r` into
   queries. Needs network + an Anthropic API key, which is exactly why
   it's an opt-in plugin rather than a feature — see its README.
 
-The authoring contract — `register(api)`, `register_ingest_format`, the
-streaming `parse` shape, per-format options — is documented at the top of
-[`plugin_api.py`](plugin_api.py); a minimal format is ~30 lines. Extra
+**[docs/writing-plugins.md](docs/writing-plugins.md) is the developer
+guide** — quickstart, all three hooks, the tab context object, testing,
+and troubleshooting. The contract itself is also documented at the top of
+[`plugin_api.py`](plugin_api.py); a minimal format is ~20 lines. Extra
 plugin directories: `--plugins-dir DIR` or `$WINNOW_PLUGINS_DIR`. A
-plugin that fails to load is listed with its error (≡ → Plugins… and the
-startup output) and skipped, never fatal.
+plugin that fails to load is listed with its error (Settings → Plugins
+and the startup output) and skipped, never fatal.
 
 A plugin is arbitrary local Python running with Winnow's own privileges —
 installing it (from the UI or by hand) is the consent step, and nothing
