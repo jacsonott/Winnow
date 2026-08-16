@@ -1,0 +1,41 @@
+# plugins/
+
+Winnow's installed plugins live here — one `something.py` file or one
+folder with an `__init__.py` per plugin. Nothing in this folder is ever
+committed except this README.
+
+Manage plugins from **Settings → Plugins** (the `?` panel in the app):
+every plugin in this folder is listed there with a checkbox to toggle it
+on or off (a disabled plugin's code is never imported), and the two
+install buttons copy a `.py` file or a plugin folder picked from anywhere
+on disk into here. Toggles and installs take effect immediately — no
+server restart. Copying a plugin into this folder by hand still works
+exactly the same; the panel picks it up on next open.
+
+Three ready-made examples ship in [`examples/plugins/`](../examples/plugins/):
+`mft_usn` (raw NTFS `$MFT`/`$J` parsing — an ingest-format plugin),
+`lateral_movement` (a pinned graph tab — a custom-UI plugin), and
+`claude_assistant` (a Claude chat tab — an external-integration plugin;
+needs network + API key). Install any of them from Settings → Plugins →
+"Install a plugin folder…", or
+
+```bash
+cp -r examples/plugins/mft_usn plugins/
+```
+
+Writing one? Start with
+**[docs/writing-plugins.md](../docs/writing-plugins.md)** — quickstart,
+the three extension points (ingest formats, tabs, API routes), testing,
+and troubleshooting. The contract is also spelled out at the top of
+[`plugin_api.py`](../plugin_api.py). A plugin that fails to load never
+takes the server down — it's listed with its error in Settings → Plugins
+and in the startup output.
+
+Extra directories can be added with `--plugins-dir DIR` (repeatable) or
+the `WINNOW_PLUGINS_DIR` environment variable; installs from the UI
+always land in this folder.
+
+**Security:** a plugin is arbitrary Python running with the same
+privileges as Winnow itself — the same trust model as a Notepad++ plugin.
+Winnow never downloads plugins; installing one (from the UI or by hand)
+is the consent step. Only install plugins you have read or trust.

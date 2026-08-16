@@ -16,6 +16,29 @@ store.py           All SQLite: ingest, view materialisation, tags, sessions, exp
 workspace.py       Cross-case JSON state (case registry, saved filters, default
                     tag template) — human-readable files in workspace/, outside
                     any single case.db so they survive switching cases.
+plugin_api.py      Plugin host: discovery/loading from plugins/, PluginAPI
+                    (register_ingest_format / register_tab / register_api),
+                    the registry server.py's /api/plugins, /plugin_assets/*
+                    and /api/plugin/* routes read. The authoring contract
+                    lives in its module docstring; docs/writing-plugins.md
+                    is the long-form guide built on top of it (keep the two
+                    in sync when the contract changes).
+docs/              Long-form documentation. writing-plugins.md — the plugin
+                    developer guide.
+plugins/           Analyst-installed plugins (gitignored except its README).
+                    Managed from Settings → Plugins: per-plugin on/off
+                    toggles and a copy-from-disk installer, no restart —
+                    dropping a folder/.py here by hand works too.
+examples/plugins/  Committed example plugins, one per extension point — treat
+                    them as the reference for writing new ones. mft_usn: raw
+                    NTFS $MFT/$J parsing (ingest formats, stdlib-only).
+                    lateral_movement: a pinned graph tab (register_tab +
+                    register_api + a canvas ES module, offline).
+                    claude_assistant: a Claude chat tab (external service from
+                    a plugin route; needs network + `pip install anthropic` —
+                    deliberately NOT airgap-compatible, which is why it's a
+                    plugin). Install via Settings → Plugins or cp -r into
+                    plugins/.
 static/index.html  App shell. No framework. #home and #app are siblings; only
                     one is ever visible.
 static/app.js      Virtualized grid, filters, tagging, detail pane, SQL pane,
@@ -729,6 +752,77 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
     on any exception (a connection whose last statement died mid-view-drop
     is cheaper to replace than to prove clean).
 
+- **Plugins** (plugin_api.py, `plugins/`, Settings → Plugins) are
+  Notepad++-style drop-in extensions, first loaded at server *import* (so
+  `uvicorn server:app` gets them, not just `python server.py`;
+  `--plugins-dir` / `$WINNOW_PLUGINS_DIR` add directories) and reloaded
+  live by `_reload_plugins()` whenever Settings → Plugins toggles or
+  installs one — `PluginRegistry.load` is written to be safely re-run on
+  a live server (registry rebuilt wholesale; superseded modules linger in
+  sys.modules under unique per-load names because Python can't truly
+  unload code, but nothing references them again). Enabled/disabled state
+  is `workspace/plugins.json` (`PluginPrefs`) — machine-level workflow
+  state, stored as a *disabled* list so presence in plugins/ means on by
+  default, keyed by filesystem name because that's the only identity that
+  exists without importing (a disabled plugin is discovered for the
+  listing but its code never runs — the point of the off switch).
+  `POST /api/plugins/install` copies an uploaded .py or folder (from the
+  panel's webkitdirectory picker) into `PLUGIN_DIRS[0]`, rejecting
+  absolute/`..` paths so an upload can't write outside the plugins dir; a
+  name collision is a 409 the frontend confirms into `overwrite=true`,
+  and an install whose *load* then fails still keeps the files and
+  reports the error (same standing as a hand-copied broken plugin).
+  Three extension points on PluginAPI:
+  `register_ingest_format` parses a file into columns + a row iterable
+  that feeds `Store.ingest_rows` — the generic sibling of `ingest_csv`
+  with every one of its conventions (all-TEXT via `sanitize_columns`,
+  contiguous rid from 1, per-BATCH lock/commit, ragged pad-and-count,
+  sampled types with an explicit `column_types` override, background FTS)
+  — so invariants #1/#2 hold for plugin sources with no extra work, and a
+  plugin source is a completely normal source afterward.
+  `register_tab` adds a pinned tab (SQL/Timeline siblings): the entry is
+  an ES module in the plugin folder, served via `/plugin_assets/<fs>/…`
+  (enabled folder plugins only; resolved-path containment blocks
+  traversal; same no-cache middleware as /static/) and dynamically
+  import()ed by `showPluginTab` in app.js with a `?v=<gen>` cache-buster
+  — `gen` is the registry load sequence, bumped on every reload, so a
+  toggle-off/on picks up changed JS. One mount per tab, kept across tab
+  switches, torn down on case switch (`resetPluginTabMounts`) and gen
+  change; the module's default export gets `(container, winnow)` where
+  `winnow` is `buildPluginTabContext`'s stable surface (api/post/el/
+  modal helpers, `sql()` → run_sql's own RO connection, `schemaText()`,
+  live state getters); optional onShow/onHide exports fire per switch.
+  `register_api` registers backend routes dispatched at request time by
+  the one catch-all `/api/plugin/{fs}/{route}` handler — deliberately
+  not real FastAPI routes, so a Settings toggle's registry reload is
+  instantly authoritative with no stale route objects. Handlers get a
+  plain `PluginRequest` (method/route/query/body/store — None when no
+  case is open) and return JSON-ables; ValueError → 400, same split as
+  api_view; the CSRF middleware already covers non-GET. Plugin backends
+  should read via `req.store.run_sql` (own RO connection — never holds
+  invariant #4's lock). A plugin that
+  fails to import/register is recorded with its error and skipped, never
+  fatal; `GET /api/plugins` carries the reason to the Plugins modal.
+  Format matching is extension OR bare-filename fnmatch — the latter
+  because the files plugins exist for ("$MFT", "$J") *have* no extension;
+  that's also why `scan_import_directory` grew `filename_patterns` (a
+  second way past its extension gate, marked kind `"plugin"`; kinds the
+  frontend can't resolve to a loaded format fall back to the CSV path,
+  the pre-plugin behavior for analyst-added extensions) and why the
+  Plugins modal's per-format picker sets no `accept` attribute. Routing
+  precedence in app.js (`pluginFormatFor`): a built-in extension always
+  wins over a plugin claiming the same one. Parse errors are 400s like
+  every other ingest route. Security model is Notepad++'s: a plugin is
+  arbitrary local Python with the app's privileges, installed by the
+  analyst physically placing it — never fetched, so the airgap rule holds.
+- The example mft_usn plugin's fixup handling encodes a real-world trap:
+  extraction tools disagree about whether $MFT records arrive with NTFS's
+  multi-sector fixups still stamped (KAPE/icat/RawCopy: yes; ntfscat:
+  already un-applied — verified against a real mkntfs volume, where the
+  strict all-stamped check silently produced 0 rows). `_apply_fixups`
+  therefore distinguishes all-stamped (un-stamp), none-stamped (parse
+  as-is), and mixed (genuinely torn → skip the record).
+
 ## Backlog, roughly in order
 
 1. **DuckDB ingest path.** Current import is single-threaded Python `csv` at
@@ -781,12 +875,19 @@ layer itself (the CSRF header gate, request parsing, 400-vs-500) rather
 than re-testing logic the `Store`-level tests already cover directly.
 `test_maintenance.py` covers the things that only exist because the case
 file otherwise only ever grows: the auto-created column indexes
-(listing/dropping) and `compact()`. `test_concurrency.py` pins the
-reader-pool split (invariant #4) structurally: each test holds the writer
-lock for the *entire duration* of a read and asserts the read completes —
-a deterministic deadlock against a single-connection implementation, not a
-race — plus the dropped-view → KeyError mapping, pool recycling/drain on
-close, and read-your-committed-writes across the connection split. `test_sql_tabs.py` covers the SQL
+(listing/dropping) and `compact()`. `test_plugins.py` covers the plugin
+system end to end — loader isolation (a broken plugin never takes the
+rest down; a disabled one is discovered but never imported, proved with a
+plugin whose module body raises), `ingest_rows`' conventions, the HTTP
+routes (toggle persistence, install path-traversal rejection, the
+409-then-overwrite flow), tabs/assets/API dispatch (register_tab entry
+validation, asset containment, the gen cache-buster changing per reload,
+405/404/400 splits, disabled = no assets + no routes + no tabs), the
+mft_usn example parsed against synthetic NTFS fixtures built byte-by-byte
+in the test file (both fixup states; no real evidence files in the repo),
+lateral_movement's edge aggregation, and claude_assistant against a fake
+`anthropic` module injected into sys.modules (asserts the request shape —
+model, fallbacks, the schema cache breakpoint — with no network). `test_sql_tabs.py` covers the SQL
 pane's sub-tabs, including that they actually survive closing and
 reopening the case file (the whole reason they live there rather than in
 `localStorage`) and that `reorder` keeps tabs it wasn't given.

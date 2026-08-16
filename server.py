@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -22,12 +23,50 @@ from fastapi.responses import StreamingResponse, FileResponse, JSONResponse, Pla
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import plugin_api
 import workspace as WS
 from store import Store
 
 HERE = Path(__file__).parent
 app = FastAPI(title="Winnow")
 STORE: Store | None = None
+
+# ---------------------------------------------------------------- plugins
+
+# Loaded once at import (so `uvicorn server:app` gets them too, not just
+# `python server.py`) from plugins/ next to server.py plus an optional
+# WINNOW_PLUGINS_DIR env var; main() adds any --plugins-dir flags on top.
+# A plugin that fails to load is recorded with its error and skipped — it
+# shows up in GET /api/plugins with the reason, and never takes the server
+# down. See plugin_api.py for the whole model (and its security note: a
+# plugin is arbitrary local Python, same trust model as a Notepad++
+# plugin — the analyst putting it in plugins/ is the consent step).
+PLUGINS = plugin_api.PluginRegistry()
+
+
+def _plugin_dirs(extra: list[str] | None = None) -> list[Path]:
+    dirs = [HERE / "plugins"]
+    env = os.environ.get("WINNOW_PLUGINS_DIR")
+    if env:
+        dirs.append(Path(env))
+    dirs.extend(Path(p) for p in (extra or []))
+    return dirs
+
+
+# Module-level and mutable on purpose: main() swaps in a longer list when
+# --plugins-dir flags are given, and tests point it at a tmp dir. The first
+# entry is where /api/plugins/install copies new plugins to.
+PLUGIN_DIRS: list[Path] = _plugin_dirs()
+
+
+def _reload_plugins() -> None:
+    """Rescan PLUGIN_DIRS, honoring the Settings → Plugins disabled list.
+    Cheap enough (a directory listing plus importing whatever's enabled)
+    that toggles and installs just call it — no server restart involved."""
+    PLUGINS.load(PLUGIN_DIRS, disabled=WS.plugin_prefs.disabled())
+
+
+_reload_plugins()
 
 # ---------------------------------------------------------------------- csrf
 
@@ -98,7 +137,12 @@ async def no_cache_static(request: Request, call_next):
     Last-Modified support when nothing actually changed, so this doesn't
     mean re-downloading the file every time, just always double-checking."""
     response = await call_next(request)
-    if request.url.path.startswith("/static/") or request.url.path == "/":
+    # /plugin_assets/ gets the same treatment as /static/ for the same
+    # reason — a plugin's tab JS changes during development, and a stale
+    # cached module is the same class of confusing non-bug. (import() also
+    # carries a ?v=<gen> cache-buster, but that only changes when the
+    # registry reloads, not on every save while iterating on a tab.)
+    if request.url.path.startswith(("/static/", "/plugin_assets/")) or request.url.path == "/":
         response.headers["Cache-Control"] = "no-cache"
     return response
 
@@ -185,12 +229,21 @@ class IngestJsonPath(BaseModel):
     build_fts: bool = True
 
 
+class IngestPluginPath(BaseModel):
+    path: str
+    format_id: str          # namespaced "<plugin>.<format>" — see GET /api/plugins
+    name: str | None = None
+    options: dict = {}      # values for the format's declared options
+    build_fts: bool = True
+
+
 class DirectoryScan(BaseModel):
     root: str
     recursive: bool = True
     extensions: list[str] | None = None
     include_patterns: list[str] = []
     exclude_patterns: list[str] = []
+    filename_patterns: list[str] = []  # plugin formats' bare-name patterns ($MFT, $J) — see scan_import_directory
 
 
 class ImportProfileWrite(BaseModel):
@@ -410,6 +463,7 @@ def api_ingest_dir_scan(body: DirectoryScan):
     return store().scan_import_directory(
         body.root, recursive=body.recursive, extensions=body.extensions,
         include_patterns=body.include_patterns, exclude_patterns=body.exclude_patterns,
+        filename_patterns=body.filename_patterns,
     )
 
 
@@ -553,6 +607,228 @@ async def api_ingest_json_upload(
             tmp, name=name or file.filename, flatten_mode=flatten_mode, flatten_depth=flatten_depth,
             build_fts=build_fts,
         )
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/plugins")
+def api_plugins():
+    """Everything the frontend needs to surface plugins: every installed
+    plugin (enabled or not, loaded or failed-with-why), every registered
+    ingest format (extensions/patterns/options — what routes a dropped or
+    scanned file to a plugin parser), and where plugins load from so
+    Settings → Plugins can say which folder installs land in.
+    Case-independent; the toggle/install routes below return this same
+    shape so the panel re-renders from whichever response it just got."""
+    return {
+        "api_version": plugin_api.PLUGIN_API_VERSION,
+        "dirs": [str(d) for d in PLUGIN_DIRS],
+        "plugins": PLUGINS.describe(),
+        "formats": PLUGINS.list_formats(),
+        "tabs": PLUGINS.list_tabs(),
+    }
+
+
+@app.get("/plugin_assets/{fs_name}/{asset_path:path}")
+def api_plugin_asset(fs_name: str, asset_path: str):
+    """Serves a plugin folder's own files (its tab's ES module, CSS, any
+    helper modules it import()s) — how a plugin ships UI without touching
+    static/. Only enabled folder plugins are served: a disabled plugin's
+    UI shouldn't keep loading any more than its Python should, and the
+    resolved-path containment check means a crafted ../ path can't read
+    outside the plugin's folder."""
+    rec = next((p for p in PLUGINS.describe() if p["fs_name"] == fs_name and p["enabled"]), None)
+    if rec is None:
+        raise HTTPException(404, "No such plugin")
+    root = Path(rec["path"]).resolve()
+    if not root.is_dir():
+        raise HTTPException(404, "Not a folder plugin")
+    target = (root / asset_path).resolve()
+    if root not in target.parents or not target.is_file():
+        raise HTTPException(404, "No such asset")
+    return FileResponse(target)
+
+
+@app.api_route("/api/plugin/{fs_name}/{route:path}", methods=["GET", "POST", "PUT", "DELETE"])
+async def api_plugin_dispatch(fs_name: str, route: str, request: Request):
+    """One dispatcher for every plugin-registered backend route (see
+    plugin_api.PluginAPI.register_api) rather than mounting real FastAPI
+    routes per plugin: routes come and go with Settings → Plugins toggles,
+    and looking the handler up at request time in the live registry makes
+    a reload instantly authoritative — no stale route objects to tear out
+    of the app. The CSRF middleware already gates non-GET /api/* calls.
+    Handlers get a plain PluginRequest and return JSON-able data;
+    ValueError is the analyst-actionable 400 (same split api_view uses),
+    anything else surfaces as the 500 it is."""
+    entry = PLUGINS.get_api(fs_name, route)
+    if entry is None:
+        raise HTTPException(404, f"No plugin route {fs_name}/{route}")
+    if request.method not in entry["methods"]:
+        raise HTTPException(405, f"{request.method} not allowed on {fs_name}/{route}")
+    body = None
+    raw = await request.body()
+    if raw:
+        try:
+            body = json.loads(raw)
+        except json.JSONDecodeError:
+            raise HTTPException(400, "Request body must be JSON")
+    req = plugin_api.PluginRequest(
+        request.method, route, dict(request.query_params), body, STORE,
+    )
+    try:
+        return JSONResponse(entry["handler"](req))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+class PluginToggle(BaseModel):
+    fs_name: str   # the plugins/ entry's file/folder name — the identity that exists without importing
+    enabled: bool
+
+
+@app.post("/api/plugins/toggle")
+def api_plugins_toggle(body: PluginToggle):
+    """Settings → Plugins checkbox. Persists to workspace/plugins.json and
+    reloads the registry immediately — a disabled plugin's code is not
+    merely unrouted, it is never imported on any later load (see
+    PluginRegistry.load), which is the whole value of an off switch on
+    something that runs with the app's privileges."""
+    if not any(p["fs_name"] == body.fs_name for p in PLUGINS.describe()):
+        raise HTTPException(404, f"No installed plugin named {body.fs_name}")
+    WS.plugin_prefs.set_enabled(body.fs_name, body.enabled)
+    _reload_plugins()
+    return api_plugins()
+
+
+@app.post("/api/plugins/install")
+async def api_plugins_install(
+    files: list[UploadFile] = File(...),
+    paths: str | None = Form(None),  # JSON list of relative paths aligned with files — folder installs; omitted for a single .py
+    overwrite: bool = Form(False),
+):
+    """Install a plugin picked from the local disk (Settings → Plugins):
+    the browser uploads a single .py file, or a whole folder via a
+    webkitdirectory picker (every file inside, with its path relative to
+    the picked folder), and this copies it into PLUGIN_DIRS[0] and reloads.
+    The same consent model as dropping the file in plugins/ by hand — the
+    analyst explicitly picked it — with the copying done for them.
+
+    Every relative path is validated before anything is written: rejects
+    absolute paths and any '..' component, so an upload can't write
+    outside the plugins directory, and a folder install may only create
+    one top-level entry (the plugin folder itself). __pycache__/*.pyc
+    ride-alongs from a picked folder are dropped rather than copied.
+
+    A plugin that installs but then fails to load (syntax error, bad
+    register()) is still a *successful install* — the files are kept, the
+    response carries the load error, and the panel shows it exactly as it
+    would any other broken plugin; deleting or fixing it is the analyst's
+    call, same as a hand-copied broken plugin."""
+    try:
+        rel_paths = json.loads(paths) if paths else [f.filename or "" for f in files]
+    except json.JSONDecodeError:
+        raise HTTPException(400, "paths must be a JSON list")
+    if len(rel_paths) != len(files):
+        raise HTTPException(400, "paths and files must align")
+
+    keep: list[tuple[Path, UploadFile]] = []  # (relative path, upload)
+    for rel, f in zip(rel_paths, files):
+        p = Path(str(rel).replace("\\", "/"))
+        if not rel or p.is_absolute() or ".." in p.parts or not p.parts:
+            raise HTTPException(400, f"Unsafe path in upload: {rel!r}")
+        if "__pycache__" in p.parts or p.suffix == ".pyc":
+            continue
+        keep.append((p, f))
+    if not keep:
+        raise HTTPException(400, "Nothing installable in the upload")
+
+    if all(len(p.parts) == 1 for p, _ in keep):
+        if len(keep) != 1 or keep[0][0].suffix != ".py":
+            raise HTTPException(400, "A single-file plugin must be exactly one .py file")
+        fs_name = keep[0][0].stem
+        dest = PLUGIN_DIRS[0] / keep[0][0].name
+    else:
+        tops = {p.parts[0] for p, _ in keep}
+        if len(tops) != 1:
+            raise HTTPException(400, "A folder install must contain one top-level folder")
+        fs_name = tops.pop()
+        if not any(p.parts == (fs_name, "__init__.py") for p, _ in keep):
+            raise HTTPException(400, f"Not a plugin package: no {fs_name}/__init__.py in the folder")
+        dest = PLUGIN_DIRS[0] / fs_name
+
+    if dest.exists() and not overwrite:
+        # 409, not 400: the request is fine, the name is simply taken —
+        # the frontend confirms and retries with overwrite=true.
+        raise HTTPException(409, f"A plugin named {fs_name} is already installed")
+    if overwrite and dest.exists():
+        shutil.rmtree(dest) if dest.is_dir() else dest.unlink()
+
+    PLUGIN_DIRS[0].mkdir(parents=True, exist_ok=True)
+    for p, f in keep:
+        out_path = PLUGIN_DIRS[0] / p
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_path, "wb") as out:
+            while chunk := await f.read(4 << 20):
+                out.write(chunk)
+
+    # Installing something states intent to use it — clear any stale
+    # disabled mark left by an earlier install under the same name.
+    WS.plugin_prefs.set_enabled(fs_name, True)
+    _reload_plugins()
+    rec = next((p for p in PLUGINS.describe() if p["fs_name"] == fs_name), None)
+    return {"installed": fs_name, "error": rec["error"] if rec else None, **api_plugins()}
+
+
+def _ingest_via_plugin(path: str, format_id: str, name: str | None,
+                       options: dict, build_fts: bool) -> dict:
+    """Shared by the path and upload plugin-ingest routes: resolve the
+    format, run its parse, feed the result through Store.ingest_rows. The
+    parse call itself runs outside Store.lock (it's pure file reading —
+    only the row batches inside ingest_rows ever hold the lock), so a slow
+    multi-GB parse doesn't freeze other requests any more than a big CSV
+    import does."""
+    fmt = PLUGINS.get_format(format_id)  # KeyError -> 400 at the route
+    opts = fmt.resolve_options(options)
+    result = fmt.parse(path, opts)
+    if not isinstance(result, dict) or "columns" not in result or "rows" not in result:
+        raise ValueError(f"Plugin format {format_id} returned no columns/rows")
+    return store().ingest_rows(
+        result["columns"], result["rows"],
+        name=name or result.get("name") or os.path.basename(path),
+        path=path, build_fts=build_fts,
+        column_types=result.get("column_types"),
+    )
+
+
+@app.post("/api/ingest/plugin/path")
+def api_ingest_plugin_path(body: IngestPluginPath):
+    """Plugin sibling of api_ingest_path / api_ingest_json_path — same
+    by-server-path ingest for directory import and scripted use, with the
+    parsing done by a plugin-registered format instead of a built-in."""
+    if not os.path.isfile(body.path):
+        raise HTTPException(400, f"No file at {body.path}")
+    try:
+        return _ingest_via_plugin(body.path, body.format_id, body.name, body.options, body.build_fts)
+    except Exception as e:  # surface the real parser error to the UI, same as the other ingest routes
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/ingest/plugin/upload")
+async def api_ingest_plugin_upload(
+    file: UploadFile = File(...),
+    format_id: str = Form(...),
+    name: str | None = Form(None),
+    options: str | None = Form(None),  # JSON-encoded dict, since multipart forms are flat
+    build_fts: bool = Form(True),
+):
+    suffix = Path(file.filename or "upload.bin").suffix or ".bin"
+    fd, tmp = tempfile.mkstemp(suffix=suffix)
+    try:
+        with os.fdopen(fd, "wb") as out:
+            while chunk := await file.read(4 << 20):
+                out.write(chunk)
+        opts = json.loads(options) if options else {}
+        return _ingest_via_plugin(tmp, format_id, name or file.filename, opts, build_fts)
     except Exception as e:
         raise HTTPException(400, str(e))
 
@@ -1186,7 +1462,24 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=8777)
     ap.add_argument("--no-fts", action="store_true", help="Skip full-text index (faster import)")
     ap.add_argument("--no-browser", action="store_true")
+    ap.add_argument("--plugins-dir", action="append", default=[], metavar="DIR",
+                    help="Extra plugin directory (plugins/ next to server.py and $WINNOW_PLUGINS_DIR are always scanned; repeatable)")
     args = ap.parse_args()
+
+    if args.plugins_dir:
+        global PLUGIN_DIRS
+        PLUGIN_DIRS = _plugin_dirs(args.plugins_dir)
+        _reload_plugins()
+    for p in PLUGINS.describe():
+        if p["error"]:
+            print(f"Plugin FAILED: {p['name']} ({p['path']}): {p['error']}", file=sys.stderr)
+        elif not p["enabled"]:
+            print(f"Plugin disabled: {p['name']} (toggle in Settings → Plugins)")
+        else:
+            # Formats *and* tabs — a tab-only plugin reporting "no formats"
+            # reads like a failed load when it's a perfectly good plugin.
+            what = ", ".join(p["formats"] + p["tabs"]) or "registered nothing"
+            print(f"Plugin loaded: {p['name']}" + (f" v{p['version']}" if p["version"] else "") + f" ({what})")
 
     if args.host not in ("127.0.0.1", "localhost", "::1"):
         print(
