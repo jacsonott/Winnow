@@ -3,7 +3,7 @@ server.py — independent of any single case.db, so it survives switching
 between cases and travels with the app folder (airgapped/portable, same
 spirit as CLAUDE.md's no-CDN rule).
 
-Seven small stores, each backed by its own JSON file under workspace/:
+Eight small stores, each backed by its own JSON file under workspace/:
   cases.json              the home screen's case registry
   filters.json            saved/cyclable filters ([ and ] in the grid) — also
                            the one mechanism behind the "suggested filter"
@@ -26,6 +26,12 @@ Seven small stores, each backed by its own JSON file under workspace/:
                            timeline_templates.json and column_layouts.json are:
                            configure once, every future case with a similar
                            collection benefits
+  plugins.json            which installed plugins are toggled off (Settings →
+                           Plugins). Machine-level workflow state, not part of
+                           any case — and deliberately a *disabled* list, so a
+                           freshly dropped-in plugin is on by default and
+                           deleting workspace/ re-enables everything rather
+                           than silently turning it all off
 
 Never holds evidence data — only UI/workflow bookkeeping.
 """
@@ -511,6 +517,30 @@ class ImportProfiles:
             self._save(items)
 
 
+class PluginPrefs:
+    """Which plugins are toggled off in Settings → Plugins, keyed by their
+    filesystem name (the plugins/ entry's file/folder name — the only
+    identity that exists *without* importing the plugin, which is the
+    whole point: a disabled plugin's code never runs). Stored as a
+    disabled list so presence in plugins/ means enabled by default."""
+
+    FILE = "plugins.json"
+
+    def disabled(self) -> set[str]:
+        with _LOCK:
+            return set(_read(self.FILE, {"disabled": []})["disabled"])
+
+    def set_enabled(self, fs_name: str, enabled: bool) -> set[str]:
+        with _LOCK:
+            names = self.disabled()
+            if enabled:
+                names.discard(fs_name)
+            else:
+                names.add(fs_name)
+            _write(self.FILE, {"disabled": sorted(names)})
+            return names
+
+
 cases = CaseRegistry()
 filters = SavedFilters()
 header_nicknames = HeaderNicknames()
@@ -518,3 +548,4 @@ timeline_templates = TimelineTemplates()
 tags = TagTemplate()
 column_layouts = ColumnLayouts()
 import_profiles = ImportProfiles()
+plugin_prefs = PluginPrefs()

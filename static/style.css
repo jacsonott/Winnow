@@ -753,6 +753,10 @@ textarea:focus { border-color: var(--accent); outline: none; }
 /* --------------------------------------------------------- unified timeline */
 
 .timelineview { flex: 1 1 auto; min-height: 0; background: var(--ink); display: flex; flex-direction: column; }
+/* A plugin tab's mount container (see showPluginTab in app.js) — same
+   fill-the-main-area shape as .sqlview/.timelineview; everything inside
+   is the plugin's own DOM. */
+.pluginview { flex: 1 1 auto; min-height: 0; background: var(--ink); display: flex; flex-direction: column; overflow: auto; }
 .timeline-head {
   display: flex; align-items: center; gap: 10px; padding: 6px 10px;
   border-bottom: 1px solid var(--line); background: var(--panel);

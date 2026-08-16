@@ -116,6 +116,64 @@ JOIN src_1 s ON s.rid = rt.rid
 GROUP BY 1, 2 ORDER BY n DESC;
 ```
 
+## Plugins
+
+Winnow can be extended without touching its source, Notepad++-style.
+**Settings → Plugins** manages everything: it lists every plugin in
+`plugins/`, a checkbox per plugin toggles it on or off (a disabled
+plugin's code is never even imported), and the install buttons copy a
+`.py` file or a plugin folder picked from anywhere on disk into
+`plugins/` for you — all effective immediately, no restart. Dropping a
+plugin into the folder by hand works too.
+
+Plugins get three extension points:
+
+- **Ingest formats** — parsers for file formats the app doesn't natively
+  read, which then behave like built-ins everywhere: drag-and-drop,
+  Import files…, folder import, and a per-format picker in the same
+  Settings panel, with rows flowing into the same read-only `src_`
+  tables as any CSV (so tagging, views, FTS, sessions and the SQL pane
+  all just work).
+- **Tabs** — a pinned tab next to SQL/Timeline whose content is entirely
+  the plugin's own UI: an ES module the plugin ships, mounted into the
+  main content area with a stable context object (API helpers, read-only
+  SQL against the case, live source/tag state, the app's own theming).
+- **API routes** — backend endpoints under `/api/plugin/<name>/…` for
+  whatever the plugin's UI needs the server to do: query the case, run a
+  computation, call an external service.
+
+Three worked examples ship in `examples/plugins/` — install any of them
+from Settings → Plugins → "Install a plugin folder…", or `cp -r` into
+`plugins/`:
+
+- **`mft_usn/`** — raw NTFS `$MFT` and USN-journal (`$J`) parsing in
+  pure stdlib Python (no MFTECmd/EZTools, no .NET — airgap-friendly):
+  full paths reconstructed from parent references, `$SI`/`$FN`
+  timestamps side by side with an `SI<FN Created` timestomp flag, USN
+  reason flags decoded, and MFT entry/sequence numbers that let the two
+  tables join in the SQL pane.
+- **`lateral_movement/`** — a pinned tab that draws source→destination
+  pairs from any table (4624s, firewall logs, netflow) as a
+  force-directed graph: edge width is event count, arrows show
+  direction, drag to untangle. Fully offline.
+- **`claude_assistant/`** — a pinned Claude chat tab that sees the
+  case's *schema* (never row data) and writes ready-to-paste SQL pane
+  queries. Needs network + an Anthropic API key, which is exactly why
+  it's an opt-in plugin rather than a feature — see its README.
+
+**[docs/writing-plugins.md](docs/writing-plugins.md) is the developer
+guide** — quickstart, all three hooks, the tab context object, testing,
+and troubleshooting. The contract itself is also documented at the top of
+[`plugin_api.py`](plugin_api.py); a minimal format is ~20 lines. Extra
+plugin directories: `--plugins-dir DIR` or `$WINNOW_PLUGINS_DIR`. A
+plugin that fails to load is listed with its error (Settings → Plugins
+and the startup output) and skipped, never fatal.
+
+A plugin is arbitrary local Python running with Winnow's own privileges —
+installing it (from the UI or by hand) is the consent step, and nothing
+is ever fetched from a network. Only install plugins you have read or
+trust.
+
 ## Known limits
 
 - Import is single-threaded Python `csv`. Fine to ~200k rows/s; if you routinely

@@ -92,6 +92,10 @@ const S = {
   timeRange: { enabled: false, column: null, start: '', end: '' }, // survives filter/preset/tab changes on purpose — see toggleTimeRange
   timelineTemplates: [], // [{id, col_names, type_label, timestamp_column, body_columns}] — workspace/timeline_templates.json
   importProfiles: [],    // [{id, name, extensions, include_patterns, exclude_patterns, recursive}] — workspace/import_profiles.json
+  plugins: [],           // loaded plugin records from GET /api/plugins — name/version/error, for the Plugins modal
+  pluginFormats: [],     // plugin-registered ingest formats (extensions/patterns/options) — routes files to plugin parsers
+  pluginTabs: [],        // plugin-registered pinned tabs [{id, plugin, plugin_fs, label, entry, gen}] — see showPluginTab
+  pluginDirs: [],        // where the server loads plugins from — shown in the Plugins modal so "drop it where?" has an answer
   sidebarFilter: '',      // substring filter typed into the sidebar's own search box
   timeline: {
     view: null, pages: new Map(), pending: new Set(), reqId: 0,
@@ -3651,6 +3655,74 @@ function importKindFor(filename) {
   return ext === 'json' || ext === 'jsonl' || ext === 'ndjson' ? 'json' : 'csv';
 }
 
+/* ------------------------------------------------------------- plugins */
+
+/* Loaded once at boot — plugins are app-level (loaded by the server at its
+   own startup), not per-case. Failing the fetch just means no plugin
+   routing; every built-in import path works without it. */
+async function loadPlugins() {
+  try {
+    const r = await api('/api/plugins');
+    S.plugins = r.plugins || [];
+    S.pluginFormats = r.formats || [];
+    S.pluginTabs = r.tabs || [];
+    S.pluginDirs = r.dirs || [];
+  } catch { S.plugins = []; S.pluginFormats = []; S.pluginTabs = []; S.pluginDirs = []; }
+  renderPluginTabs();
+}
+
+/* fnmatch-lite for plugin filename_patterns ($MFT, *$UsnJrnl*) — the same
+   case-insensitive bare-filename semantics plugin_api.IngestFormat.matches
+   applies server-side, so a file routes the same way whichever side asks. */
+function globMatches(pattern, name) {
+  const rx = pattern.toLowerCase().replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*/g, '.*').replace(/\?/g, '.');
+  return new RegExp(`^${rx}$`).test(name.toLowerCase());
+}
+
+/* The plugin format claiming this filename, or null. Built-in extensions
+   win outright — a plugin claiming .csv doesn't hijack default routing; it
+   stays reachable through the Plugins modal's explicit per-format picker. */
+function pluginFormatFor(filename) {
+  const base = filename.split(/[\\/]/).pop();
+  const ext = extOf(base);
+  if (RECOGNIZED_IMPORT_EXTENSIONS.includes(ext) || SQLITE_IMPORT_EXTENSIONS.includes(ext)) return null;
+  return S.pluginFormats.find((f) =>
+    (ext && (f.extensions || []).includes(ext))
+    || (f.filename_patterns || []).some((p) => globMatches(p, base))) || null;
+}
+
+const pluginFormatById = (id) => S.pluginFormats.find((f) => f.id === id) || null;
+
+/* Extensions plugins add beyond the built-in list — merged into the import
+   pickers' accept attributes and the directory-import chips. Extension-less
+   plugin targets ($MFT, $J) can't ride an accept attribute at all; they
+   arrive by drag-drop, folder import (filename_patterns), or the Plugins
+   modal's own unrestricted picker. */
+function pluginExtensions() {
+  const out = [];
+  for (const f of S.pluginFormats) {
+    for (const e of f.extensions || []) {
+      if (!RECOGNIZED_IMPORT_EXTENSIONS.includes(e) && !out.includes(e)) out.push(e);
+    }
+  }
+  return out;
+}
+
+function pluginFilenamePatterns() {
+  const out = [];
+  for (const f of S.pluginFormats) {
+    for (const p of f.filename_patterns || []) if (!out.includes(p)) out.push(p);
+  }
+  return out;
+}
+
+function defaultPluginOptions(fmt) {
+  const out = {};
+  for (const o of fmt.options || []) out[o.name] = o.default ?? (o.type === 'bool' ? false : '');
+  return out;
+}
+
 /* Appends File objects to S.importQueue with each one's default settings —
    shared by openImportModal's own file-picker (addInput.onchange) and
    wireFileDrop, so a dropped file and a picked one queue identically. Not
@@ -3659,11 +3731,29 @@ function importKindFor(filename) {
    the modal even exists yet and it'll show up correctly whenever it opens. */
 function queueFiles(files) {
   for (const f of files) {
+    const fmt = pluginFormatFor(f.name);
+    if (fmt) {
+      queueFilesForFormat(fmt, [f]);
+      continue;
+    }
     const kind = importKindFor(f.name);
     S.importQueue.push(
       kind === 'json' ? { file: f, kind, flatten_mode: 'none', flatten_depth: 1, configured: false }
       : kind === 'sqlite' ? { file: f, kind, tables: null, configured: false }
       : { file: f, kind, delimiter: null, has_header: true, column_types: null, configured: false });
+  }
+}
+
+/* Queue files against one plugin format explicitly — bypasses filename
+   routing entirely, for the Plugins modal's per-format picker (the only
+   picker that can reach a file the format matches by pattern rather than
+   extension, since accept attributes can't express "$MFT"). */
+function queueFilesForFormat(fmt, files) {
+  for (const f of files) {
+    S.importQueue.push({
+      file: f, kind: 'plugin', format_id: fmt.id,
+      options: defaultPluginOptions(fmt), configured: false,
+    });
   }
 }
 
@@ -3691,15 +3781,34 @@ function openImportModal() {
       if (!S.importQueue.length) { queueList.append(el('div', 'note-status', 'No files queued.')); return; }
       S.importQueue.forEach((item, i) => {
         const row = el('div', 'row-actions session-row');
+        const kindLabel = item.kind === 'plugin'
+          ? (pluginFormatById(item.format_id)?.label || item.format_id)
+          : item.kind;
         const stateLabel = item.kind === 'sqlite'
           ? (item.configured ? `${item.tables.length} table${item.tables.length === 1 ? '' : 's'}` : 'pick tables') + ' · sqlite'
-          : (item.configured ? 'configured' : 'default settings') + ` · ${item.kind}`;
+          : (item.configured ? 'configured' : 'default settings') + ` · ${kindLabel}`;
         row.append(
           el('span', 'session-name', item.file.name),
           el('span', 'count', stateLabel),
         );
-        const cfg = el('button', 'btn ghost', item.kind === 'sqlite' ? 'Pick tables…' : 'Preview & configure');
+        const cfg = el('button', 'btn ghost',
+          item.kind === 'sqlite' ? 'Pick tables…' : item.kind === 'plugin' ? 'Options' : 'Preview & configure');
+        if (item.kind === 'plugin' && !(pluginFormatById(item.format_id)?.options || []).length) {
+          // Nothing to configure — the format declared no options.
+          cfg.disabled = true;
+          cfg.title = 'This plugin format has no options';
+        }
         cfg.onclick = () => {
+          if (item.kind === 'plugin') {
+            openPluginOptionsForm(item, {
+              onConfirm: (options) => {
+                Object.assign(item, { options, configured: true });
+                openImportModal();
+              },
+              onCancel: () => openImportModal(),
+            });
+            return;
+          }
           const openPreview = item.kind === 'json' ? openJsonImportPreview
             : item.kind === 'sqlite' ? openSqliteTablePicker
             : openImportPreview;
@@ -3725,7 +3834,7 @@ function openImportModal() {
     const addLabel = el('label', 'btn ghost', 'Choose files…');
     const addInput = el('input');
     addInput.type = 'file';
-    addInput.accept = [...RECOGNIZED_IMPORT_EXTENSIONS, ...SQLITE_IMPORT_EXTENSIONS].join(',');
+    addInput.accept = [...RECOGNIZED_IMPORT_EXTENSIONS, ...SQLITE_IMPORT_EXTENSIONS, ...pluginExtensions()].join(',');
     addInput.multiple = true;
     addInput.hidden = true;
     addInput.onchange = () => {
@@ -4018,7 +4127,9 @@ function wireFileDrop() {
    partial import with no explanation. */
 function handleDroppedFiles(files) {
   if (!files.length) return;
-  const known = (f) => RECOGNIZED_IMPORT_EXTENSIONS.includes(extOf(f.name)) || SQLITE_IMPORT_EXTENSIONS.includes(extOf(f.name));
+  const known = (f) => RECOGNIZED_IMPORT_EXTENSIONS.includes(extOf(f.name))
+    || SQLITE_IMPORT_EXTENSIONS.includes(extOf(f.name))
+    || !!pluginFormatFor(f.name);
   const recognized = files.filter(known);
   const skipped = files.filter((f) => !known(f));
   if (!recognized.length) {
@@ -4066,7 +4177,7 @@ async function openDirectoryImportModal(state = {}) {
     root: state.root || null,
     profileId: state.profileId || null,
     recursive: state.recursive ?? true,
-    extensions: state.extensions || RECOGNIZED_IMPORT_EXTENSIONS.slice(),
+    extensions: state.extensions || RECOGNIZED_IMPORT_EXTENSIONS.concat(pluginExtensions()),
     includeText: state.includeText || '',
     excludeText: state.excludeText || '',
   };
@@ -4095,6 +4206,9 @@ async function openDirectoryImportModal(state = {}) {
         r = await post('/api/ingest/dir/scan', {
           root: st.root, recursive: st.recursive, extensions: st.extensions,
           include_patterns: patternLines(st.includeText), exclude_patterns: patternLines(st.excludeText),
+          // Lets extension-less plugin targets ($MFT, $J) past the scan's
+          // extension gate — see scan_import_directory.
+          filename_patterns: pluginFilenamePatterns(),
         });
       } catch (e) {
         if (seq !== scanSeq) return; // a newer scan already started; don't clobber it with a stale error
@@ -4186,7 +4300,7 @@ async function openDirectoryImportModal(state = {}) {
         ...st,
         profileId: id,
         recursive: p ? p.recursive : true,
-        extensions: p ? (p.extensions || RECOGNIZED_IMPORT_EXTENSIONS.slice()) : RECOGNIZED_IMPORT_EXTENSIONS.slice(),
+        extensions: (p && p.extensions) || RECOGNIZED_IMPORT_EXTENSIONS.concat(pluginExtensions()),
         includeText: p ? (p.include_patterns || []).join('\n') : '',
         excludeText: p ? (p.exclude_patterns || []).join('\n') : '',
       });
@@ -4218,7 +4332,7 @@ async function openDirectoryImportModal(state = {}) {
     b.append(el('label', null, 'File types'));
     const extRow = el('div', 'row-actions');
     extRow.style.flexWrap = 'wrap';
-    for (const ext of RECOGNIZED_IMPORT_EXTENSIONS) {
+    for (const ext of RECOGNIZED_IMPORT_EXTENSIONS.concat(pluginExtensions())) {
       const chip = el('button', 'btn ghost', ext);
       chip.setAttribute('aria-pressed', String(st.extensions.includes(ext)));
       chip.onclick = () => {
@@ -4296,15 +4410,30 @@ async function openDirectoryImportModal(state = {}) {
       // corner panel takes over from there.
       let ok = 0;
       let failed = 0;
+      let pluginOk = 0;
       for (const m of toImport) {
+        // A plugin-claimed file parses server-side through the plugin's own
+        // endpoint — synchronous, since the jobs pipeline only knows the
+        // built-in kinds. A scan-matched extension no loaded plugin claims
+        // falls through to the delimited parser, the pre-plugin behavior.
+        const fmt = m.kind === 'plugin' ? pluginFormatFor(m.path) : null;
         try {
-          await post('/api/ingest/jobs/path', { path: m.path, name: m.rel_path, kind: m.kind === 'json' ? 'json' : 'csv' });
+          if (fmt) {
+            toast(`Importing ${m.rel_path}…`, 60000);
+            await post('/api/ingest/plugin/path', {
+              path: m.path, name: m.rel_path, format_id: fmt.id, options: defaultPluginOptions(fmt),
+            });
+            pluginOk++;
+          } else {
+            await post('/api/ingest/jobs/path', { path: m.path, name: m.rel_path, kind: m.kind === 'json' ? 'json' : 'csv' });
+          }
           ok++;
         } catch (e) {
           failed++;
           toast(`Could not queue ${m.rel_path}: ` + e.message, 6000);
         }
       }
+      if (pluginOk) await loadSources(); // sync plugin imports don't announce themselves through a job
       startJobsPoll();
       $('modal').hidden = true;
       toast(`Queued ${ok} import${ok === 1 ? '' : 's'}${failed ? ` — ${failed} failed to queue` : ''} — progress in the corner panel`, 4000);
@@ -4315,6 +4444,219 @@ async function openDirectoryImportModal(state = {}) {
     renderResults();
     if (st.root) runScan();
   }, { wide: true });
+}
+
+/* Options form for one queued plugin-format file, rendered generically
+   from the format's declared option specs (bool/text/choice — see
+   plugin_api.PluginAPI.register_ingest_format). Same {onConfirm, onCancel}
+   shape as openImportPreview/openJsonImportPreview so openImportModal's
+   one "configure" button can sit in front of any of the three. */
+function openPluginOptionsForm(item, { onConfirm, onCancel }) {
+  const fmt = pluginFormatById(item.format_id);
+  const values = { ...defaultPluginOptions(fmt), ...(item.options || {}) };
+  modal(fmt.label, (b) => {
+    if (fmt.description) b.append(el('p', null, fmt.description));
+    for (const o of fmt.options || []) {
+      if (o.type === 'bool') {
+        const label = el('label');
+        label.style.cssText = 'display:block;margin-bottom:10px';
+        const cb = el('input');
+        cb.type = 'checkbox';
+        cb.checked = !!values[o.name];
+        cb.onchange = () => { values[o.name] = cb.checked; };
+        label.append(cb, document.createTextNode(' ' + (o.label || o.name)));
+        b.append(label);
+      } else if (o.type === 'choice') {
+        b.append(el('label', null, o.label || o.name));
+        const sel = el('select');
+        sel.style.cssText = 'display:block;margin-bottom:10px;background:var(--ink);color:var(--text);border:1px solid var(--line-2);padding:6px 8px;font:inherit';
+        for (const c of o.choices || []) {
+          const opt = document.createElement('option');
+          opt.value = c;
+          opt.textContent = c;
+          sel.append(opt);
+        }
+        sel.value = values[o.name] ?? o.default ?? '';
+        sel.onchange = () => { values[o.name] = sel.value; };
+        b.append(sel);
+      } else {
+        b.append(el('label', null, o.label || o.name));
+        const inp = el('input');
+        inp.type = 'text';
+        inp.value = values[o.name] ?? '';
+        inp.oninput = () => { values[o.name] = inp.value; };
+        b.append(inp);
+      }
+    }
+    const acts = el('div', 'row-actions');
+    const ok = el('button', 'btn', 'Use these options');
+    ok.onclick = () => onConfirm(values);
+    const cancel = el('button', 'btn ghost', 'Cancel');
+    cancel.onclick = onCancel;
+    acts.append(ok, cancel);
+    b.append(acts);
+  });
+}
+
+/* Settings → Plugins: everything about drop-in extensions in one place —
+   every plugin found in the plugins directory (enabled, disabled, or
+   failed-to-load with why), a checkbox per plugin that takes effect
+   immediately (the server rescans and reloads its registry on every
+   toggle; a disabled plugin's code is never even imported), and an
+   installer that copies a picked .py file or plugin folder from anywhere
+   on disk into the plugins directory — the same consent model as copying
+   it in by hand, minus the hand. Appends into the Settings modal body and
+   re-renders itself in place, same inline pattern as buildColumnsPanel.
+   Each enabled format keeps its own no-accept-attribute file picker — the
+   one file-picking path that can reach a target the format matches by
+   bare-name pattern ("$MFT" has no extension for an accept to allow). */
+function buildPluginsPanel(b) {
+  const box = el('div');
+  b.append(box);
+
+  function applyListing(r) {
+    S.plugins = r.plugins || [];
+    S.pluginFormats = r.formats || [];
+    S.pluginTabs = r.tabs || [];
+    S.pluginDirs = r.dirs || [];
+    renderPluginTabs(); // a toggle/install can add or remove pinned tabs
+  }
+
+  async function installFiles(fileList, relPaths) {
+    const files = [...fileList];
+    if (!files.length) return;
+    const fd = new FormData();
+    for (const f of files) fd.append('files', f);
+    fd.append('paths', JSON.stringify(relPaths));
+    let r;
+    try {
+      r = await api('/api/plugins/install', { method: 'POST', body: fd });
+    } catch (e) {
+      if (e.status !== 409) { toast('Install failed: ' + e.message, 6000); return; }
+      // Name taken — the server won't clobber without being told to.
+      if (!(await confirmDialog(`${e.message}. Replace it?`, { danger: true, okLabel: 'Replace' }))) return;
+      fd.append('overwrite', 'true');
+      try {
+        r = await api('/api/plugins/install', { method: 'POST', body: fd });
+      } catch (e2) { toast('Install failed: ' + e2.message, 6000); return; }
+    }
+    applyListing(r);
+    renderPanel();
+    if (r.error) toast(`Installed ${r.installed}, but it failed to load: ${r.error}`, 8000);
+    else toast(`Installed ${r.installed}`);
+  }
+
+  function renderPanel() {
+    box.replaceChildren();
+    box.append(el('p', null,
+      'Drop-in extensions, Notepad++-style. Toggles and installs take effect immediately — no restart. '
+      + 'A plugin runs with the same privileges as Winnow itself, so only install plugins you trust.'));
+    for (const d of S.pluginDirs) {
+      const dir = el('div', 'note-status', d);
+      dir.style.cssText = 'font-family:var(--mono)';
+      box.append(dir);
+    }
+
+    if (!S.plugins.length) {
+      box.append(el('p', 'note-status',
+        'No plugins installed. A ready-made example (raw NTFS $MFT / USN journal parsing) ships in '
+        + 'examples/plugins/mft_usn — install it below, or see plugins/README.md.'));
+    }
+    for (const p of S.plugins) {
+      const row = el('div', 'row-actions session-row');
+      const cb = el('input');
+      cb.type = 'checkbox';
+      cb.checked = p.enabled;
+      cb.title = p.enabled ? 'Disable — its code will no longer be loaded' : 'Enable this plugin';
+      cb.onchange = async () => {
+        cb.disabled = true;
+        try {
+          applyListing(await post('/api/plugins/toggle', { fs_name: p.fs_name, enabled: cb.checked }));
+          toast(cb.checked ? `Enabled ${p.name}` : `Disabled ${p.name} — its code is no longer loaded`);
+        } catch (e) {
+          toast('Could not toggle plugin: ' + e.message, 5000);
+        }
+        renderPanel();
+      };
+      const parts = [];
+      if ((p.formats || []).length) parts.push(`${p.formats.length} format${p.formats.length === 1 ? '' : 's'}`);
+      if ((p.tabs || []).length) parts.push(`${p.tabs.length} tab${p.tabs.length === 1 ? '' : 's'}`);
+      const status = p.error ? 'failed to load'
+        : !p.enabled ? 'disabled'
+        : (parts.join(', ') || 'loaded');
+      row.append(cb, el('span', 'session-name', p.name + (p.version ? ` v${p.version}` : '')), el('span', 'count', status));
+      box.append(row);
+      if (p.error) {
+        const err = el('div', 'note-status', p.error);
+        err.style.cssText = 'color:var(--bad, #c0392b);margin:0 0 10px 24px';
+        box.append(err);
+        continue;
+      }
+      if (p.description) {
+        const desc = el('div', 'note-status', p.description);
+        desc.style.cssText = 'margin:0 0 6px 24px';
+        box.append(desc);
+      }
+      for (const fid of p.formats || []) {
+        const f = pluginFormatById(fid);
+        if (!f) continue;
+        const frow = el('div', 'row-actions session-row');
+        frow.style.marginLeft = '24px';
+        const matches = (f.extensions || []).concat(f.filename_patterns || []).join(', ');
+        frow.append(
+          el('span', 'session-name', f.label),
+          el('span', 'count', matches || 'no automatic matching'),
+        );
+        const pickLabel = el('label', 'btn ghost', 'Import files…');
+        const inp = el('input');
+        inp.type = 'file';
+        inp.multiple = true;
+        inp.hidden = true; // no accept attribute on purpose — see the panel comment
+        inp.onchange = () => {
+          if (!inp.files.length) return;
+          queueFilesForFormat(f, [...inp.files]);
+          openImportModal();
+        };
+        pickLabel.append(inp);
+        frow.append(pickLabel);
+        box.append(frow);
+      }
+    }
+
+    const acts = el('div', 'row-actions');
+    const fileLabel = el('label', 'btn ghost', 'Install a plugin file…');
+    const fileInput = el('input');
+    fileInput.type = 'file';
+    fileInput.accept = '.py';
+    fileInput.hidden = true;
+    fileInput.onchange = () => {
+      const files = [...fileInput.files];
+      fileInput.value = '';
+      installFiles(files, files.map((f) => f.name));
+    };
+    fileLabel.append(fileInput);
+    const folderLabel = el('label', 'btn ghost', 'Install a plugin folder…');
+    const folderInput = el('input');
+    folderInput.type = 'file';
+    // Folder picker: every file inside arrives with its path relative to
+    // the picked folder (webkitRelativePath), which is exactly what the
+    // install route's `paths` field wants.
+    folderInput.webkitdirectory = true;
+    folderInput.hidden = true;
+    folderInput.onchange = () => {
+      const files = [...folderInput.files];
+      folderInput.value = '';
+      installFiles(files, files.map((f) => f.webkitRelativePath || f.name));
+    };
+    folderLabel.append(folderInput);
+    acts.append(fileLabel, folderLabel);
+    box.append(acts);
+  }
+
+  renderPanel();
+  // Refresh from the server in the background — cheap, and catches a
+  // plugin someone dropped into the folder by hand since boot.
+  loadPlugins().then(renderPanel);
 }
 
 /* Real (non-merge) sources' schema, formatted as CREATE TABLE-ish SQL —
@@ -4937,6 +5279,7 @@ function showSqlTab() {
   S.activeTab = 'sql';
   $('grid').hidden = true;
   $('timelineview').hidden = true;
+  hidePluginViews();
   $('sqlview').hidden = false;
   $('tabSql').setAttribute('aria-selected', 'true');
   $('tabTimeline').setAttribute('aria-selected', 'false');
@@ -5142,6 +5485,7 @@ function showGridTab() {
   S.activeTab = 'grid';
   $('sqlview').hidden = true;
   $('timelineview').hidden = true;
+  hidePluginViews();
   $('grid').hidden = false;
   $('tabSql').setAttribute('aria-selected', 'false');
   $('tabTimeline').setAttribute('aria-selected', 'false');
@@ -5151,6 +5495,7 @@ function showTimelineTab() {
   S.activeTab = 'timeline';
   $('grid').hidden = true;
   $('sqlview').hidden = true;
+  hidePluginViews();
   $('timelineview').hidden = false;
   $('tabSql').setAttribute('aria-selected', 'false');
   $('tabTimeline').setAttribute('aria-selected', 'true');
@@ -5161,6 +5506,126 @@ function showTimelineTab() {
 }
 $('tabSql').onclick = showSqlTab;
 $('tabTimeline').onclick = showTimelineTab;
+
+/* ---------------------------------------------------------- plugin tabs */
+
+/* Plugin-registered pinned tabs (plugin_api.register_tab) — SQL/Timeline
+   siblings whose content is a plugin-shipped ES module, dynamically
+   import()ed from /plugin_assets/ on first activation and handed an empty
+   <section class="pluginview"> plus the stable context object from
+   buildPluginTabContext. One mount per tab, kept alive across tab
+   switches (a half-built graph shouldn't vanish because the analyst
+   glanced at the grid); optional onShow/onHide exports fire on every
+   switch. The mount is torn down and rebuilt when its plugin's `gen`
+   changes (every registry reload bumps it — a toggle-off/on picks up
+   changed JS) and on a case switch (a view built from one case's data
+   has no business surviving into another). */
+
+const pluginTabMounts = new Map(); // tab id -> {container, module, gen}
+
+const pluginTabById = (id) => S.pluginTabs.find((t) => t.id === id) || null;
+
+function hidePluginViews() {
+  for (const m of pluginTabMounts.values()) {
+    if (!m.container.hidden) {
+      m.container.hidden = true;
+      if (m.module && m.module.onHide) { try { m.module.onHide(m.container); } catch (e) { console.error(e); } }
+    }
+  }
+  document.querySelectorAll('.tab-plugin').forEach((t) => t.setAttribute('aria-selected', 'false'));
+}
+
+function resetPluginTabMounts() {
+  for (const m of pluginTabMounts.values()) m.container.remove();
+  pluginTabMounts.clear();
+}
+
+/* The strip buttons, re-rendered whenever the plugin listing changes
+   (boot, Settings toggles/installs). If the active plugin tab just
+   disappeared — its plugin was toggled off — fall back to the grid rather
+   than leaving a headless view up. */
+function renderPluginTabs() {
+  document.querySelectorAll('.tab-plugin').forEach((t) => t.remove());
+  let after = $('tabTimeline');
+  for (const t of S.pluginTabs) {
+    const btn = el('button', 'tab tab-sql tab-plugin', t.label);
+    btn.dataset.tabId = t.id;
+    btn.title = t.description || `${t.label} — from the ${t.plugin} plugin`;
+    btn.setAttribute('aria-selected', String(S.activeTab === 'plugin:' + t.id));
+    btn.onclick = () => showPluginTab(t.id);
+    after.insertAdjacentElement('afterend', btn);
+    after = btn;
+  }
+  for (const [id, m] of [...pluginTabMounts]) {
+    const t = pluginTabById(id);
+    if (!t || t.gen !== m.gen) { m.container.remove(); pluginTabMounts.delete(id); }
+  }
+  if (S.activeTab.startsWith('plugin:') && !pluginTabById(S.activeTab.slice(7))) showGridTab();
+}
+
+/* The stable surface a plugin tab's module gets. Versioned via apiVersion
+   the same way PLUGIN_API_VERSION covers the Python side: additions are
+   free, changing what's already here isn't. `sql` (read-only, own
+   connection server-side — see run_sql) is the blessed way for a tab to
+   query the case; `schemaText` is the same LLM-ready schema dump the SQL
+   pane's copy button builds. */
+function buildPluginTabContext(tab) {
+  return {
+    apiVersion: 1,
+    plugin: tab.plugin,
+    base: `/api/plugin/${tab.plugin_fs}`,      // the plugin's own register_api routes
+    assets: `/plugin_assets/${tab.plugin_fs}`, // the plugin's own files (css, workers, data)
+    api, post, toast, el, modal, confirmDialog, promptDialog,
+    sql: (sql, limit = 5000) => post('/api/sql', { sql, limit }),
+    schemaText: sqlSchemaForLLM,
+    openSource,
+    state: {
+      get sources() { return S.sources; },
+      get sourceId() { return S.sourceId; },
+      get tags() { return S.tags; },
+    },
+  };
+}
+
+async function showPluginTab(tabId) {
+  const tab = pluginTabById(tabId);
+  if (!tab) return;
+  S.activeTab = 'plugin:' + tabId;
+  $('grid').hidden = true;
+  $('sqlview').hidden = true;
+  $('timelineview').hidden = true;
+  $('tabSql').setAttribute('aria-selected', 'false');
+  $('tabTimeline').setAttribute('aria-selected', 'false');
+  document.querySelectorAll('#sourceTabs .tab').forEach((t) => t.setAttribute('aria-selected', 'false'));
+  hidePluginViews();
+  document.querySelectorAll('.tab-plugin').forEach((t) => t.setAttribute('aria-selected', String(t.dataset.tabId === tabId)));
+  renderSidebar(); // same reasoning as showSqlTab — S.sourceId shouldn't read as active here
+  $('presetBanner').hidden = true;
+
+  let m = pluginTabMounts.get(tabId);
+  if (m && m.gen !== tab.gen) { m.container.remove(); pluginTabMounts.delete(tabId); m = null; }
+  if (m) {
+    m.container.hidden = false;
+  } else {
+    const container = el('section', 'pluginview');
+    $('grid').parentElement.append(container);
+    m = { container, module: null, gen: tab.gen };
+    pluginTabMounts.set(tabId, m);
+    try {
+      // ?v=gen: a reloaded plugin gets a fresh module even though import()
+      // caches by URL — see the gen note in plugin_api.PluginRegistry.
+      const mod = await import(`${buildPluginTabContext(tab).assets}/${tab.entry}?v=${tab.gen}`);
+      if (typeof mod.default !== 'function') throw new Error('tab module has no default export to mount');
+      await mod.default(container, buildPluginTabContext(tab));
+      m.module = mod;
+    } catch (e) {
+      console.error(e);
+      container.replaceChildren(el('p', 'note-status', `Plugin tab "${tab.label}" failed to load: ${e.message}`));
+      return;
+    }
+  }
+  if (m.module && m.module.onShow) { try { m.module.onShow(m.container); } catch (e) { console.error(e); } }
+}
 $('btnRunSql').onclick = runSql;
 $('sqlText').onkeydown = (e) => {
   if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); runSql(); }
@@ -6694,6 +7159,9 @@ function openSettings() {
     impLabel.append(impInput);
     fActs.append(exp, impLabel);
     b.append(fActs);
+
+    b.append(el('h4', null, 'Plugins'));
+    buildPluginsPanel(b);
   });
 }
 
@@ -6781,8 +7249,10 @@ async function openCase(path) {
   // its results reference source ids from the previous case.
   S.searchAll = null;
   updateSearchAllButton();
-  if (S.activeTab === 'timeline') showGridTab();
-  if (S.activeTab === 'sql') showGridTab();
+  // A mounted plugin tab's UI was built from the previous case's data —
+  // tear the mounts down so the next activation rebuilds against this one.
+  resetPluginTabMounts();
+  if (S.activeTab !== 'grid') showGridTab();
   setBrandLabel(res.name);
   showApp();
   await loadSources();
@@ -7155,7 +7625,7 @@ async function refreshCases() {
 $('btnHome').onclick = () => { showHome(); refreshCases(); };
 
 async function boot() {
-  await Promise.all([loadSavedFilters(), loadHeaderNicknames(), loadTimelineTemplates()]);
+  await Promise.all([loadSavedFilters(), loadHeaderNicknames(), loadTimelineTemplates(), loadPlugins()]);
   const cur = await api('/api/case/current').catch(() => ({ open: false }));
   if (cur.open) {
     setBrandLabel(cur.name);
