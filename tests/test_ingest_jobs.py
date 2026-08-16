@@ -215,28 +215,6 @@ def test_job_cancel_endpoint_contract(client, store, write_csv):
 # --------------------------------------------- server-disk (no-copy) path
 
 
-def test_browse_dir_lists_importable_files_on_request(client, tmp_path):
-    # A clean subdir — tmp_path itself also holds the store fixture's own
-    # case.db, which is (correctly) importable and would pollute the list.
-    root = tmp_path / "evidence_dir"
-    root.mkdir()
-    (root / "evidence.csv").write_text("a,b\n1,2\n")
-    (root / "history.db").write_bytes(b"SQLite format 3\x00")
-    (root / "notes.exe").write_text("not importable")
-    (root / "sub").mkdir()
-
-    r = client.get(f"/api/browse_dir?path={root}")
-    assert r.status_code == 200
-    assert "files" not in r.json()  # default shape unchanged for old callers
-
-    r = client.get(f"/api/browse_dir?files=true&path={root}")
-    body = r.json()
-    assert body["dirs"] == ["sub"]
-    names = [f["name"] for f in body["files"]]
-    assert names == ["evidence.csv", "history.db"]  # .exe filtered, sorted
-    assert body["files"][0]["size"] > 0
-
-
 def test_preview_path_csv_and_sqlite(client, write_csv, tmp_path):
     csv_path = write_csv([["Name", "Val"], ["a", "1"]], name="p.csv")
     r = client.post("/api/ingest/preview/path", json={"path": csv_path})
@@ -296,7 +274,7 @@ def test_resolve_local_finds_file_in_recently_browsed_dir(client, tmp_path):
     p.write_text("a,b\n" + "x,y\n" * 5000)
     # Seed the candidate list the way a real session does — the analyst
     # browsed here (folder picker, file picker, or a dir scan).
-    client.get(f"/api/browse_dir?files=true&path={root}")
+    client.get(f"/api/browse_dir?path={root}")
 
     st = os.stat(p)
     data = p.read_bytes()

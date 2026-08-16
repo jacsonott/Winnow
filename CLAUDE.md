@@ -541,21 +541,22 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
   detached async chain uploads sequentially (one disk, one spool at a
   time) while the jobs panel tracks everything. Don't add a second
   menu entry per format again; the queue is the router.
-  The queue holds two item shapes: `{file: File}` from the picker/drop,
-  and `{path, name, size}` from "Add from this machine…"
-  (`openServerFileBrowser`, `/api/browse_dir?files=true`) — a browser can
-  never reveal a picked file's real filesystem path (sandbox), so
-  same-host analysts get a server-side picker instead, and a path item
-  imports via `/api/ingest/jobs/path` reading the file **in place**: no
+  Every queue item is a picked/dropped `{file: File}`, and the no-copy
+  transport is chosen **invisibly**: before uploading, each item tries
+  `resolveLocalFile` → `POST /api/ingest/resolve_local`, and a hit
+  imports via `/api/ingest/jobs/path` reading the file **in place** — no
   upload leg, no tempfile spool, no 50 GB copied to produce a file that
-  was already on the disk. The three configure previews take either
-  shape (`file.path` routes to `POST /api/ingest/preview/path`, which
-  reads the same bounded CSV sample / calls the same path-based
-  json/sqlite store previews). Directory import is the same principle
-  for folders and predates it.
-  On top of that, a picked/dropped `{file: File}` item *also* tries the
-  no-copy route invisibly (`resolveLocalFile` → `POST
-  /api/ingest/resolve_local`): one Import button, two transports. The
+  was already on the disk. The three configure previews run the same
+  resolve first and, on a hit, preview by path too (`POST
+  /api/ingest/preview/path` — bounded CSV sample / the path-based
+  json/sqlite store previews; this matters most for JSON, whose upload
+  preview round-trips the whole file). There is deliberately **no
+  visible control** for any of this: a server-disk file picker ("Add
+  from this machine…", `openServerFileBrowser`, `browse_dir?files=true`)
+  was built and then removed on request — one Import button, two
+  transports, and the only visible difference is the upload phase not
+  existing. Don't reintroduce a picker; directory import remains the
+  explicit path route, for folders. The
   sandbox can't be asked for the path, but a same-host client's picked
   file necessarily exists on the server's own disk, so the frontend sends
   a fingerprint — name, size, mtime, first/last 64 KB via `File.slice`
@@ -577,19 +578,18 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
   TestClient suite honest without monkeypatching.
 - **Dragging a file from the OS onto the window** (`wireFileDrop`,
   `handleDroppedFiles`) is an alternative entry point into the *existing*
-  import flows, not a new one — a dropped CSV/JSON queues into the same
-  `S.importQueue`/`openImportModal` a picked file does (via `queueFiles`,
-  factored out of the file `<input>`'s own `onchange`), and a single
-  dropped SQLite file opens `openSqliteImportModal` pre-loaded (it takes an
-  optional `initialFile` now and extracts `loadFile` so a handed-in file
-  previews identically to a picked one — which table(s) to pull out is a
-  real choice, so it still can't just auto-import the way CSV/JSON does).
-  The one genuinely new piece is recognizing what was dropped at all: a
-  raw OS drop has no equivalent of a `<input accept>` filtering what's
-  offered, so `handleDroppedFiles` filters by extension itself, against
-  `RECOGNIZED_IMPORT_EXTENSIONS`/`SQLITE_IMPORT_EXTENSIONS` — the same
-  lists `openImportModal`'s/`openSqliteImportModal`'s own `accept`
-  attributes are now built from, so there's one true list per format
+  import flows, not a new one — every dropped file (CSV/JSON *and*
+  SQLite) queues into the same `S.importQueue`/`openImportModal` a picked
+  file does (via `queueFiles`, factored out of the file `<input>`'s own
+  `onchange`); a queued SQLite item still has to go through "Pick
+  tables…" (`openSqliteTablePicker`) before it can import — which
+  table(s) to pull out is a real choice, so it can't just auto-import the
+  way CSV/JSON does. The one genuinely new piece is recognizing what was
+  dropped at all: a raw OS drop has no equivalent of a `<input accept>`
+  filtering what's offered, so `handleDroppedFiles` filters by extension
+  itself, against `RECOGNIZED_IMPORT_EXTENSIONS`/
+  `SQLITE_IMPORT_EXTENSIONS` — the same lists the import modal's own
+  `accept` attribute is built from, so there's one true list per format
   instead of three hand-typed copies. Every listener in `wireFileDrop`
   gates on `e.dataTransfer.types.includes('Files')` — an OS file drag
   carries a `'Files'` type; every *internal* drag (`wireDragReorder`,

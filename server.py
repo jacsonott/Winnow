@@ -25,8 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import workspace as WS
-from store import (DEFAULT_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS,
-                   OpCancelled, Store)
+from store import SQLITE_IMPORT_EXTENSIONS, OpCancelled, Store
 
 HERE = Path(__file__).parent
 app = FastAPI(title="Winnow")
@@ -319,7 +318,7 @@ def api_case_compact():
 
 
 @app.get("/api/browse_dir")
-def api_browse_dir(path: str = "", files: bool = False):
+def api_browse_dir(path: str = ""):
     """Directory names only, one level — backs the "Browse..." folder picker
     in the new-case modal. A regular browser file/folder input can't hand
     back a real filesystem path (sandboxed for security), and this is a
@@ -334,36 +333,15 @@ def api_browse_dir(path: str = "", files: bool = False):
     if not os.path.isdir(base):
         raise HTTPException(400, f"Not a directory: {base}")
     _note_recent_dir(base)
-    importable = DEFAULT_IMPORT_EXTENSIONS | SQLITE_IMPORT_EXTENSIONS
-    file_rows: list[dict] = []
     try:
-        entries = list(os.scandir(base))
         dirs = sorted(
-            (e.name for e in entries if e.is_dir() and not e.name.startswith(".")),
+            (e.name for e in os.scandir(base) if e.is_dir() and not e.name.startswith(".")),
             key=str.lower,
         )
-        if files:
-            # Only files an import could actually take — this backs the
-            # import modal's server-disk picker, not a general file manager.
-            for e in entries:
-                if not e.is_file() or e.name.startswith("."):
-                    continue
-                if Path(e.name).suffix.lower() not in importable:
-                    continue
-                try:
-                    size = e.stat().st_size
-                except OSError:
-                    size = 0
-                file_rows.append({"name": e.name, "size": size})
-            file_rows.sort(key=lambda f: f["name"].lower())
     except PermissionError:
         dirs = []
-        file_rows = []
     parent = os.path.dirname(base)
-    out = {"path": base, "parent": parent if parent != base else None, "dirs": dirs}
-    if files:
-        out["files"] = file_rows
-    return out
+    return {"path": base, "parent": parent if parent != base else None, "dirs": dirs}
 
 
 @app.get("/api/cases")
