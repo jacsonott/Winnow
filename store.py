@@ -446,6 +446,18 @@ def _iter_json_records(path: str) -> Iterable[dict]:
         yield {"value": data}
 
 
+class IngestCancelled(Exception):
+    """An ingest job was cancelled — raised out of the ingest_* method
+    after the partial source has been dropped. Callers that don't pass a
+    `cancel` callable never see it."""
+
+
+class OpCancelled(Exception):
+    """A registered cancellable operation (view/timeline build, group
+    summary) was interrupted via cancel_op. server.py maps it to HTTP 499 —
+    not an error, not the analyst's fault, keep what you had."""
+
+
 class Store:
     def __init__(self, path: str, default_tags: list[tuple] | None = None):
         self.path = path
@@ -538,6 +550,25 @@ class Store:
         self._search_job: dict | None = None
         self._search_job_thread: threading.Thread | None = None
         self._search_job_seq = 0
+
+        # Ingest jobs — same fire-and-forget-with-a-registry shape as the
+        # search-all job above, but plural: a directory import legitimately
+        # starts many at once. The semaphore caps how many actually ingest
+        # concurrently; the rest sit 'queued'. Each worker's writes still go
+        # through self.lock per BATCH like any other ingest, so the cap is
+        # about not stacking N ingest threads' parse work on the CPU, not
+        # about connection safety.
+        self._ingest_jobs: dict[int, dict] = {}
+        self._ingest_jobs_lock = threading.Lock()
+        self._ingest_job_seq = 0
+        self._ingest_sem = threading.Semaphore(self.MAX_CONCURRENT_INGESTS)
+
+        # Cancellable-op registry (see _interruptible/cancel_op): token →
+        # the connection running that op, so a cancel can interrupt() it.
+        # Its own lock for the same reason _search_job_lock exists.
+        self._op_lock = threading.Lock()
+        self._op_conns: dict[str, sqlite3.Connection] = {}
+        self._op_cancelled: set[str] = set()
         self._downgrade_legacy_fts()
 
     def _downgrade_legacy_fts(self) -> None:
@@ -931,6 +962,18 @@ class Store:
         for conn in idle:
             with contextlib.suppress(sqlite3.Error):
                 conn.close()
+        # Stop any running ingest jobs before the connection goes away — a
+        # worker mid-batch would otherwise die on a closed database. Cancel
+        # is cooperative (checked per BATCH), so the join is bounded by one
+        # batch commit plus the partial-source drop.
+        with self._ingest_jobs_lock:
+            jobs = list(self._ingest_jobs.values())
+            for j in jobs:
+                j["cancelled"] = True
+        for j in jobs:
+            t = j.get("thread")
+            if t and t is not threading.current_thread() and t.is_alive():
+                t.join(15)
         with self.lock:
             self.db.close()
         # A reader still checked out by an in-flight request holds the
@@ -1033,6 +1076,61 @@ class Store:
 
     # ------------------------------------------------------------------ ingest
 
+    # ------------------------------------------------------- cancellable ops
+
+    def cancel_op(self, token: str) -> bool:
+        """Cancels the in-flight operation registered under `token` (a
+        client-generated one-shot id riding on the request that started
+        it — see _interruptible). Returns whether there was anything to
+        interrupt. Marking the token cancelled *first* closes the start
+        race: a cancel that lands before the operation registers still
+        takes effect the moment it tries to."""
+        with self._op_lock:
+            self._op_cancelled.add(token)
+            while len(self._op_cancelled) > 512:  # one-shot ids; keep it bounded
+                self._op_cancelled.pop()
+            conn = self._op_conns.get(token)
+            if conn is not None:
+                conn.interrupt()
+                return True
+        return False
+
+    @contextlib.contextmanager
+    def _interruptible(self, token: str | None, conn: sqlite3.Connection):
+        """Registers `conn` as interruptible under `token` for the block,
+        turning cancel_op(token) into OpCancelled out of this block.
+
+        The discipline that makes interrupt() safe to expose at all: a
+        writer caller enters this block while *holding* self.lock and
+        unregisters before releasing it, so the only statements that can be
+        running on the writer connection while its token is registered are
+        the block's own. interrupt() aborts running statements only; a
+        cancel arriving in the gap between two statements is a no-op (the
+        flag clears when the statement count hits zero), which surfaces as
+        "the cancel didn't land — click again", never as a mis-aimed kill
+        of someone else's write. Reader-pool callers pass their checked-out
+        reader (and stack this innermost): an interrupted reader raises out
+        of _reader(), which already closes — not repools — a connection
+        that died mid-statement."""
+        if not token:
+            yield
+            return
+        with self._op_lock:
+            if token in self._op_cancelled:
+                raise OpCancelled("Cancelled")
+            self._op_conns[token] = conn
+        try:
+            yield
+        except sqlite3.OperationalError as e:
+            with self._op_lock:
+                was_cancelled = token in self._op_cancelled
+            if was_cancelled and "interrupt" in str(e).lower():
+                raise OpCancelled("Cancelled") from e
+            raise
+        finally:
+            with self._op_lock:
+                self._op_conns.pop(token, None)
+
     @contextlib.contextmanager
     def _ingest_synchronous_off(self):
         """synchronous=OFF for the duration of one import's batch-commit
@@ -1069,6 +1167,7 @@ class Store:
         has_header: bool = True,
         column_types: list[str] | None = None,
         progress=None,
+        cancel=None,
     ) -> dict:
         """Stream a delimited file into its own table. Returns the source record.
 
@@ -1158,13 +1257,33 @@ class Store:
                     if len(sample) < SAMPLE_ROWS:
                         sample.append(row)
                     if len(batch) >= BATCH:
+                        if cancel is not None and cancel():
+                            raise IngestCancelled(f"Import of {name} cancelled")
                         total = self._commit_ingest_batch(insert, batch, source_id, total)
                         batch.clear()
                         if progress:
-                            progress(total, fh.tell(), size)
+                            # NOT fh.tell(): a text file being iterated (the
+                            # csv reader drives the file iterator) raises
+                            # "telling position disabled by next() call" on
+                            # tell(). The underlying BufferedReader's byte
+                            # position is legal to read and ahead of the
+                            # decoded position by at most the 1 MB buffer.
+                            progress(total, fh.buffer.tell(), size)
                 if batch:
+                    if cancel is not None and cancel():
+                        raise IngestCancelled(f"Import of {name} cancelled")
                     total = self._commit_ingest_batch(insert, batch, source_id, total)
                     batch.clear()
+                if progress:
+                    progress(total, size, size)  # exact final tick — the loop's ticks stop at the last full batch
+            except IngestCancelled:
+                # An explicit cancel discards the partial import — unlike a
+                # mid-file *error*, which keeps what already committed (see
+                # the docstring). The analyst asked for this source not to
+                # exist, and a keep-what-committed half-table would look
+                # exactly like a complete import in every table list.
+                self.drop_source(source_id)
+                raise
             except Exception as e:
                 error = e
             finally:
@@ -1293,6 +1412,7 @@ class Store:
         build_fts: bool = True,
         timestamp_columns: list[str] | None = None,
         progress=None,
+        cancel=None,
     ) -> dict:
         """Imports one table from an external SQLite file as a new source —
         same TEXT-column, batched-commit convention as ingest_csv (see its
@@ -1362,12 +1482,20 @@ class Store:
                         rows = src_cursor.fetchmany(BATCH)
                         if not rows:
                             break
+                        if cancel is not None and cancel():
+                            raise IngestCancelled(f"Import of {name} cancelled")
                         batch = [tuple(to_text(i, v) for i, v in enumerate(r)) for r in rows]
                         if len(sample) < SAMPLE_ROWS:
                             sample.extend(batch[: SAMPLE_ROWS - len(sample)])
                         total = self._commit_ingest_batch(insert, batch, source_id, total)
                         if progress:
                             progress(total, total, total_rows)
+                    if progress:
+                        progress(total, total, total_rows)
+                except IngestCancelled:
+                    # Same cancel-discards-the-partial contract as ingest_csv.
+                    self.drop_source(source_id)
+                    raise
                 except Exception as e:
                     error = e
         finally:
@@ -1439,6 +1567,7 @@ class Store:
         flatten_depth: int = 0,
         build_fts: bool = True,
         progress=None,
+        cancel=None,
     ) -> dict:
         """Streams a .json/.jsonl file into its own table — same TEXT-
         column, batched-commit convention as ingest_csv (self.lock held per
@@ -1466,6 +1595,10 @@ class Store:
                     seen_set.add(k)
                     seen_cols.append(k)
             record_count += 1
+            # Pass 1 runs before the source row exists, so a cancel here has
+            # nothing to clean up — it just stops the scan.
+            if cancel is not None and record_count % 50_000 == 0 and cancel():
+                raise IngestCancelled(f"Import of {name or os.path.basename(path)} cancelled")
         if record_count == 0:
             raise ValueError("File has no records")
 
@@ -1503,13 +1636,23 @@ class Store:
                     if len(sample) < SAMPLE_ROWS:
                         sample.append(row)
                     if len(batch) >= BATCH:
+                        if cancel is not None and cancel():
+                            raise IngestCancelled(f"Import of {name} cancelled")
                         total = self._commit_ingest_batch(insert, batch, source_id, total)
                         batch.clear()
                         if progress:
                             progress(total, total, record_count)
                 if batch:
+                    if cancel is not None and cancel():
+                        raise IngestCancelled(f"Import of {name} cancelled")
                     total = self._commit_ingest_batch(insert, batch, source_id, total)
                     batch.clear()
+                if progress:
+                    progress(total, total, record_count)
+            except IngestCancelled:
+                # Same cancel-discards-the-partial contract as ingest_csv.
+                self.drop_source(source_id)
+                raise
             except Exception as e:
                 error = e
 
@@ -1624,6 +1767,193 @@ class Store:
         matched.sort(key=lambda e: e["rel_path"])
         excluded.sort(key=lambda e: e["rel_path"])
         return {"root": root_abs, "matched": matched, "excluded": excluded, "truncated": truncated}
+
+    # ------------------------------------------------------------ ingest jobs
+
+    MAX_CONCURRENT_INGESTS = 2  # parse work is CPU-bound; more just thrash
+    INGEST_JOB_KEEP = 20        # finished jobs kept for the UI panel
+
+    def start_ingest_job(self, kind: str, path: str, *, name: str | None = None,
+                         options: dict | None = None, delete_after: bool = False) -> dict:
+        """Runs an ingest on a background daemon thread and returns its job
+        record immediately — the exact reason start_search_all_job exists,
+        applied to the operation that takes the longest of anything in the
+        app. A 50 GB import used to be one multi-minute POST the analyst
+        sat behind with no progress, no way to tell "working" from
+        "crashed", and a browser tab they couldn't use meanwhile.
+
+        `kind` is 'csv' | 'json' | 'sqlite'. For 'sqlite',
+        options['tables'] is [{table, name?, timestamp_columns?}, ...] —
+        one uploaded file, one job, N sources, so the file is spooled and
+        read once rather than re-uploaded per table. `delete_after` removes
+        `path` when the job ends (the upload route's tempfile — which the
+        old synchronous upload endpoints leaked on disk, tens of GB at
+        this tool's file sizes).
+
+        Progress lands in the job record from the per-BATCH `progress`
+        callback the ingest paths already had (rows plus a unit/units_total
+        pair: bytes for CSV — a percentage without pre-scanning the file —
+        records for JSON, rows for SQLite). Cancellation is cooperative per
+        BATCH; a cancelled ingest *drops* its partial source (see
+        ingest_csv)."""
+        if kind not in ("csv", "json", "sqlite"):
+            raise ValueError(f"Unknown ingest kind: {kind}")
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            size = 0
+        with self._ingest_jobs_lock:
+            self._ingest_job_seq += 1
+            job = {
+                "job_id": self._ingest_job_seq,
+                "kind": kind,
+                "name": name or os.path.basename(path),
+                "path": path,
+                "status": "queued",
+                "rows_done": 0,
+                "units_done": 0,
+                "units_total": size if kind == "csv" else 0,
+                "unit": "bytes" if kind == "csv" else ("records" if kind == "json" else "rows"),
+                "tables_done": 0,
+                "tables_total": len((options or {}).get("tables") or []) if kind == "sqlite" else 0,
+                "current_table": None,
+                "source_ids": [],
+                "result": None,
+                "error": None,
+                "cancelled": False,
+                "started_at": time.time(),
+                "finished_at": None,
+                "options": options or {},
+                "delete_after": delete_after,
+                "thread": None,
+            }
+            self._ingest_jobs[job["job_id"]] = job
+            self._prune_ingest_jobs_locked()
+        t = threading.Thread(target=self._ingest_job_worker, args=(job,), daemon=True)
+        with self._ingest_jobs_lock:
+            job["thread"] = t
+        t.start()
+        return self._ingest_job_snapshot(job)
+
+    def _ingest_job_worker(self, job: dict) -> None:
+        acquired = False
+        try:
+            self._ingest_sem.acquire()
+            acquired = True
+            with self._ingest_jobs_lock:
+                if job["cancelled"]:
+                    job["status"] = "cancelled"
+                    return
+                job["status"] = "running"
+
+            def cancel() -> bool:
+                return job["cancelled"]  # plain bool read; set under the jobs lock
+
+            def progress(rows: int, units: int, units_total: int) -> None:
+                with self._ingest_jobs_lock:
+                    job["rows_done"] = rows
+                    job["units_done"] = units
+                    job["units_total"] = units_total
+
+            opts = job["options"]
+            if job["kind"] == "csv":
+                results = [self.ingest_csv(
+                    job["path"], name=job["name"],
+                    delimiter=opts.get("delimiter"), build_fts=opts.get("build_fts", True),
+                    has_header=opts.get("has_header", True), column_types=opts.get("column_types"),
+                    progress=progress, cancel=cancel,
+                )]
+            elif job["kind"] == "json":
+                results = [self.ingest_json(
+                    job["path"], name=job["name"],
+                    flatten_mode=opts.get("flatten_mode", "none"),
+                    flatten_depth=opts.get("flatten_depth", 0),
+                    build_fts=opts.get("build_fts", True),
+                    progress=progress, cancel=cancel,
+                )]
+            else:  # sqlite: one job, N tables out of the one spooled file
+                results = []
+                for i, t in enumerate(opts.get("tables") or []):
+                    if job["cancelled"]:
+                        raise IngestCancelled("cancelled between tables")
+                    with self._ingest_jobs_lock:
+                        job["current_table"] = t["table"]
+                        job["tables_done"] = i
+                    results.append(self.ingest_sqlite_table(
+                        job["path"], t["table"], name=t.get("name"),
+                        build_fts=opts.get("build_fts", True),
+                        timestamp_columns=t.get("timestamp_columns"),
+                        progress=progress, cancel=cancel,
+                    ))
+                    with self._ingest_jobs_lock:
+                        job["tables_done"] = i + 1
+            with self._ingest_jobs_lock:
+                job["status"] = "done"
+                job["rows_done"] = sum(r.get("row_count") or 0 for r in results)
+                job["source_ids"] = [r["id"] for r in results]
+                job["result"] = [
+                    {k: r.get(k) for k in ("id", "name", "row_count", "elapsed_sec", "rows_per_sec", "ragged_rows")}
+                    for r in results
+                ]
+        except IngestCancelled:
+            with self._ingest_jobs_lock:
+                job["status"] = "cancelled"
+        except Exception as e:  # noqa: BLE001 — surfaced to the UI as job.error
+            with self._ingest_jobs_lock:
+                job["status"] = "error"
+                job["error"] = str(e)
+        finally:
+            with self._ingest_jobs_lock:
+                job["finished_at"] = time.time()
+            if acquired:
+                self._ingest_sem.release()
+            if job["delete_after"]:
+                with contextlib.suppress(OSError):
+                    os.remove(job["path"])
+
+    def _ingest_job_snapshot(self, job: dict) -> dict:
+        keys = ("job_id", "kind", "name", "status", "rows_done", "units_done",
+                "units_total", "unit", "tables_done", "tables_total", "current_table",
+                "source_ids", "result", "error", "cancelled", "started_at", "finished_at")
+        with self._ingest_jobs_lock:
+            return {k: job[k] for k in keys}
+
+    def _prune_ingest_jobs_locked(self) -> None:
+        done = [j for j in self._ingest_jobs.values()
+                if j["status"] in ("done", "error", "cancelled")]
+        excess = len(done) - self.INGEST_JOB_KEEP
+        if excess > 0:
+            done.sort(key=lambda j: j["finished_at"] or 0)
+            for j in done[:excess]:
+                self._ingest_jobs.pop(j["job_id"], None)
+
+    def list_ingest_jobs(self) -> list[dict]:
+        with self._ingest_jobs_lock:
+            ids = sorted(self._ingest_jobs, reverse=True)
+            jobs = [self._ingest_jobs[i] for i in ids]
+        return [self._ingest_job_snapshot(j) for j in jobs]
+
+    def cancel_ingest_job(self, job_id: int) -> bool:
+        with self._ingest_jobs_lock:
+            job = self._ingest_jobs.get(job_id)
+            if job is None or job["status"] in ("done", "error", "cancelled"):
+                return False
+            job["cancelled"] = True
+            return True
+
+    def wait_for_ingest_job(self, job_id: int | None = None, timeout: float | None = None) -> dict | None:
+        """Blocks until the given (or every) ingest job finishes. Tests
+        only; nothing in the request path waits on a job."""
+        with self._ingest_jobs_lock:
+            jobs = [j for j in self._ingest_jobs.values()
+                    if job_id is None or j["job_id"] == job_id]
+        snap = None
+        for j in jobs:
+            t = j.get("thread")
+            if t and t.is_alive():
+                t.join(timeout)
+            snap = self._ingest_job_snapshot(j)
+        return snap
 
     def build_fts(self, source_id: int) -> None:
         """(Re)builds the trigram substring index for a source: a single
@@ -2024,8 +2354,7 @@ class Store:
                 + f" {order}"
             )
         t0 = time.time()
-        with self.lock, self.db:
-            self._evict_root_views(source_id)
+        with self.lock, self._interruptible(spec.get("op_token"), self.db), self.db:
             # pos declared INTEGER PRIMARY KEY makes it *be* the rowid, so
             # this alone gives the same unique/indexed-by-pos lookup the old
             # CTAS + separate CREATE UNIQUE INDEX did, for one less full
@@ -2041,6 +2370,13 @@ class Store:
             # without re-scanning the table we just wrote.
             self.db.execute(f"CREATE TABLE v.{q(vid)} (pos INTEGER PRIMARY KEY, source_id INTEGER, rid INTEGER)")
             n = self.db.execute(sql, params).rowcount
+            # Evicted *after* the new view is built, not before (it used to
+            # be first): the whole block is one transaction, so a cancelled
+            # (interrupted) build rolls back to a world where the previous
+            # view still exists — the frontend keeps its rows instead of
+            # every open handle 409ing. The new view's handle isn't in
+            # self._views yet, so the eviction loop can't touch it.
+            self._evict_root_views(source_id)
 
         handle = {
             "view_id": vid,
@@ -2134,7 +2470,8 @@ class Store:
 
     # -------------------------------------------------------------- timeline
 
-    def build_timeline(self, configs: dict[int, dict] | None = None, tag_ids: list[int] | None = None) -> dict:
+    def build_timeline(self, configs: dict[int, dict] | None = None, tag_ids: list[int] | None = None,
+                       op_token: str | None = None) -> dict:
         """Materialises one row per *tagged* row across every real source in
         the case (open or closed — this is "every finding in the case", not
         "every finding in a currently-open tab"), each contributing its own
@@ -2198,11 +2535,7 @@ class Store:
 
         self._view_seq += 1
         vid = f"view_{self._view_seq}"
-        with self.lock, self.db:
-            for old in list(self._views):
-                h = self._views.get(old)
-                if h and h.get("kind") == "timeline":
-                    self._evict_view_and_children(old)
+        with self.lock, self._interruptible(op_token, self.db), self.db:
             self.db.execute(
                 f"CREATE TABLE v.{q(vid)} (pos INTEGER PRIMARY KEY, source_id INTEGER, rid INTEGER, "
                 f"ts TEXT, body TEXT, type_label TEXT, source_name TEXT, tag_ids TEXT)"
@@ -2219,6 +2552,11 @@ class Store:
                     f"ORDER BY (ts IS NULL) ASC, ts ASC, source_id, rid",
                     params,
                 ).rowcount
+            # Same evict-after-build ordering (and reasoning) as build_view.
+            for old in list(self._views):
+                h = self._views.get(old)
+                if h and h.get("kind") == "timeline":
+                    self._evict_view_and_children(old)
 
         self._views[vid] = {"view_id": vid, "kind": "timeline", "row_count": n}
         return {"view_id": vid, "row_count": n}
@@ -2319,7 +2657,8 @@ class Store:
         return bool(src["row_count"]) and handle["row_count"] == src["row_count"]
 
     def group_summary(self, view_id: str, column: str, order: str = "count", direction: str | None = None,
-                       limit: int = 1000, path: list[dict] | None = None) -> dict:
+                       limit: int = 1000, path: list[dict] | None = None,
+                       op_token: str | None = None) -> dict:
         """One aggregate pass over the already-filtered view — SELECT val,
         count(*) per member, unioned and re-summed. Not a paging operation,
         so no O(window) concern here; capped at `limit` distinct groups.
@@ -2404,7 +2743,10 @@ class Store:
             order_sql = f"{_numeric_expr('val')} {dir_sql}" if colnames[column] == "number" else f"val COLLATE NOCASE {dir_sql}"
         else:
             order_sql = f"n {dir_sql}"
-        with self._reader() as ro, self._dropped_view_is_expired():
+        # _interruptible innermost: an interrupt becomes OpCancelled before
+        # _dropped_view_is_expired can see the OperationalError, and _reader
+        # then closes (not repools) the interrupted connection on the way out.
+        with self._reader() as ro, self._dropped_view_is_expired(), self._interruptible(op_token, ro):
             rows = ro.execute(
                 f"SELECT val, SUM(n) AS n FROM ({union_sql}) GROUP BY val ORDER BY {order_sql} LIMIT ?",
                 (*params, limit + 1),
