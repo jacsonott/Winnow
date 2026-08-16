@@ -1476,8 +1476,10 @@ def main() -> None:
         elif not p["enabled"]:
             print(f"Plugin disabled: {p['name']} (toggle in Settings → Plugins)")
         else:
-            fmts = ", ".join(p["formats"]) or "no formats"
-            print(f"Plugin loaded: {p['name']}" + (f" v{p['version']}" if p["version"] else "") + f" ({fmts})")
+            # Formats *and* tabs — a tab-only plugin reporting "no formats"
+            # reads like a failed load when it's a perfectly good plugin.
+            what = ", ".join(p["formats"] + p["tabs"]) or "registered nothing"
+            print(f"Plugin loaded: {p['name']}" + (f" v{p['version']}" if p["version"] else "") + f" ({what})")
 
     if args.host not in ("127.0.0.1", "localhost", "::1"):
         print(

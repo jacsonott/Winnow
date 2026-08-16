@@ -5,11 +5,13 @@ the running app — new file parsers, new tabs with their own UI, new
 backend endpoints — without touching Winnow's source. Drop it in
 `plugins/`, and it's installed. Delete it, and it's gone.
 
-This guide is the long form. The authoritative contract lives in
-[`plugin_api.py`](../plugin_api.py)'s module docstring; three working
-plugins live in [`examples/plugins/`](../examples/plugins/). If you only
-read one thing, read the Quickstart and then crib from whichever example
-is closest to what you're building.
+This guide is the long form, and it stands alone — every hook, data
+shape and example you need to write a plugin is in this file, and every
+code sample in it was extracted verbatim and run before shipping. The
+enforcing contract lives in [`plugin_api.py`](../plugin_api.py)'s module
+docstring, and three fuller plugins live in
+[`examples/plugins/`](../examples/plugins/), but neither is required
+reading. Start with the Quickstart.
 
 **Contents**
 
@@ -25,6 +27,11 @@ is closest to what you're building.
 10. [Security model](#10-security-model)
 11. [Troubleshooting](#11-troubleshooting)
 12. [Reference](#12-reference)
+13. [Writing a plugin with an LLM](#13-writing-a-plugin-with-an-llm)
+
+> **This file is self-contained.** You do not need to read Winnow's
+> source to write a plugin against it, and neither does an LLM you're
+> working with — see [§13](#13-writing-a-plugin-with-an-llm).
 
 ---
 
@@ -378,6 +385,89 @@ For regular DOM, reuse Winnow's own classes — `btn`, `btn ghost`,
 `note-status`, `row-actions`, `session-row` — and you inherit the app's
 look for free.
 
+### A complete tab plugin
+
+Everything above, assembled — a tab that charts how many rows carry each
+tag, across the whole case. Two files, and it's the smallest thing that
+exercises all three hooks' interaction (tab + route + case query).
+
+`plugins/tagchart/__init__.py`:
+
+```python
+"""Tag summary: how many rows carry each tag, case-wide."""
+
+PLUGIN = {"name": "tagchart", "version": "1.0.0",
+          "description": "Bar chart of tagged rows per tag."}
+
+
+def summary(req):
+    if req.store is None:
+        raise ValueError("Open a case first")
+    res = req.store.run_sql(
+        "SELECT t.name AS tag, COUNT(*) AS n "
+        "FROM row_tags rt JOIN tag_defs t ON t.id = rt.tag_id "
+        "GROUP BY 1 ORDER BY n DESC",
+        limit=200,
+    )
+    return {"rows": [dict(zip(res["columns"], r)) for r in res["rows"]]}
+
+
+def register(api):
+    api.register_tab(id="chart", label="Tag chart", entry="ui/tab.js",
+                     description="Tagged rows per tag, across every table.")
+    api.register_api("summary", summary, methods=["POST"])
+```
+
+`plugins/tagchart/ui/tab.js`:
+
+```js
+let refresh = null;   // module-level so onShow can re-run it
+
+export default function mount(container, winnow) {
+  const { el, post } = winnow;
+  const box = el('div');
+  box.style.cssText = 'padding:14px;overflow:auto;display:flex;flex-direction:column;gap:6px';
+  container.append(box);
+
+  refresh = async () => {
+    box.replaceChildren(el('div', 'note-status', 'Loading…'));
+    let rows;
+    try {
+      ({ rows } = await post(`${winnow.base}/summary`, {}));
+    } catch (e) {
+      box.replaceChildren(el('div', 'note-status', 'Failed: ' + e.message));
+      return;
+    }
+    box.replaceChildren();
+    if (!rows.length) {
+      box.append(el('div', 'note-status', 'No tagged rows in this case yet.'));
+      return;
+    }
+    const max = Math.max(...rows.map((r) => r.n));
+    for (const r of rows) {
+      const line = el('div', 'row-actions');
+      const track = el('div');
+      track.style.cssText = 'flex:1;background:var(--panel-3);height:14px';
+      const bar = el('div');
+      bar.style.cssText = `height:14px;width:${(r.n / max) * 100}%;background:var(--accent)`;
+      track.append(bar);
+      line.append(el('span', 'session-name', r.tag), track,
+                  el('span', 'count', r.n.toLocaleString()));
+      box.append(line);
+    }
+  };
+  refresh();
+}
+
+// Tags change while you're on other tabs — recount on every activation.
+export function onShow() { if (refresh) refresh(); }
+```
+
+Note what it does *not* do: no `fetch()` (that would miss the CSRF
+header — `winnow.post` handles it), no hardcoded colors (`--accent` and
+`--panel-3` follow the analyst's theme), and no direct SQLite access
+(`run_sql` keeps it off the writer lock).
+
 ### Shipping more than one file
 
 Anything inside your plugin folder is fetchable under `winnow.assets`:
@@ -459,10 +549,35 @@ Other useful methods:
 
 | Call | Returns |
 | --- | --- |
-| `store.list_sources()` | Every source with columns, row counts, tag counts |
-| `store.get_source(source_id)` | One source (raises `KeyError` if absent) |
+| `store.list_sources()` | `list[dict]` — every source, shape below |
+| `store.get_source(source_id)` | One source dict; raises `KeyError` if absent |
 | `store.ingest_rows(columns, rows, name=...)` | Create a new table from computed rows |
 | `store.path` | The case file's path |
+
+A source dict:
+
+```python
+{
+  "id": 1,
+  "name": "evtx-security.csv",       # display name (the tab caption)
+  "table_name": "src_1",             # what you query — always src_<id>
+  "columns": [{"name": "Timestamp", "type": "datetime"}, ...],
+  "row_count": 331_642,
+  "path": "/evidence/…",             # absolute source path, may be None
+  "file_hash": "…", "imported_at": "2026-08-16T09:12:44",
+  "has_fts": 1, "fts_building": False,
+  "is_open": True,                    # has a visible tab
+  "tagged_row_count": 118, "note_count": 4,
+}
+```
+
+Two things to know about ids: a **negative** `source_id` is a *merge*
+(a virtual union of several sources) with no single backing table — if
+your feature needs `table_name`, reject negatives with a `ValueError`
+rather than building broken SQL. And the sidecar tables are queryable
+too: `row_tags(source_id, rid, tag_id)`, `row_notes(source_id, rid,
+note)`, `tag_defs(id, name, color, hotkey)` — that's how you join
+analyst findings to evidence rows.
 
 ### Quoting identifiers
 
@@ -530,19 +645,47 @@ fmt = reg.get_format("my-plugin.thing")
 assert fmt.matches("evidence.thing")
 ```
 
-Handlers take a plain `PluginRequest`, so they're callable directly:
+**Test a route handler** by building a throwaway case. Handlers take a
+plain `PluginRequest`, so no HTTP and no fixtures from Winnow's own
+suite are involved — this file runs on its own with just `pytest`:
 
 ```python
-from plugin_api import PluginRequest
+# test_myplugin.py — put it next to your plugin folder
+import sys
+from pathlib import Path
 
-out = my_module.edges(PluginRequest("POST", "edges", {}, {"source_id": 1}, store))
+import pytest
+
+sys.path.insert(0, "/path/to/winnow")        # so `import plugin_api, store` works
+from plugin_api import PluginRequest          # noqa: E402
+from store import DEFAULT_TAGS, Store         # noqa: E402
+
+import myplugin                               # your plugin package
+
+
+@pytest.fixture
+def store(tmp_path):
+    s = Store(str(tmp_path / "case.db"), default_tags=DEFAULT_TAGS)
+    # Give it something to query: ingest_rows is the same path a parser feeds.
+    s.ingest_rows(["Host", "User"], [["WS1", "alice"], ["WS2", "bob"]], name="logons")
+    yield s
+    s.close()
+
+
+def test_handler(store):
+    out = myplugin.summary(PluginRequest("POST", "summary", {}, {"source_id": 1}, store))
+    assert out["rows"] == [...]
+
+
+def test_handler_without_a_case():
+    with pytest.raises(ValueError):        # -> the 400 the analyst sees
+        myplugin.summary(PluginRequest("POST", "summary", {}, {}, None))
 ```
 
-`tests/test_plugins.py` in this repo is a worked example of all three,
-including how to fake an external SDK (`monkeypatch.setitem(sys.modules,
-"anthropic", fake)`) so a network-dependent plugin is still testable
-offline. Build binary fixtures in the test file rather than committing
-evidence files.
+Two habits worth copying from `tests/test_plugins.py`: fake an external
+SDK with `monkeypatch.setitem(sys.modules, "anthropic", fake_module)` so
+a network-dependent plugin is still testable offline, and build binary
+fixtures in the test file rather than committing evidence.
 
 For a tab's JS there's no browser test runner, but you can at least
 syntax-check it the way the repo checks `app.js` — see the Testing
@@ -660,3 +803,68 @@ Module: `export default function mount(container, winnow)`, plus optional
 
 The path/upload ingest routes are also the scripting entry point — you
 can drive a plugin parser from `curl` without touching the UI.
+
+---
+
+## 13. Writing a plugin with an LLM
+
+**Paste this one file. That's the whole context budget.**
+
+Everything an author needs is here: the contract for all three hooks,
+the data shapes you'll consume, complete runnable examples of an ingest
+format and a tab, and a standalone test recipe. It deliberately does not
+assume you can read Winnow's source — every example in it was extracted
+verbatim from this document and run against a live server before it
+shipped.
+
+Rough context cost (character estimate, not a tokenizer run):
+
+| What you paste | Size | Use it when |
+| --- | ---: | --- |
+| **This guide alone** | **~8k tokens** | Anything described here — which is every hook |
+| \+ `plugin_api.py` | ~14k tokens | You want the enforcing code beside the prose (validation rules, exact error text) |
+| \+ one `examples/plugins/*` | ~12–23k tokens | You're building something close to that example and want a full working precedent |
+| The whole codebase | ~190k tokens | You're changing Winnow itself, not writing a plugin |
+
+So the guide is roughly **1/24th** the cost of loading the tool, and the
+step up to guide + contract is still under a tenth.
+
+### A prompt that works
+
+> Here is the plugin development guide for Winnow, a local DFIR triage
+> tool. Write a plugin that <what you want>. Follow the contract in the
+> guide exactly — do not invent API surface that isn't documented in it.
+> Include a test file using the standalone recipe in §8.
+>
+> <paste this file>
+
+### What to hand it *instead of* the codebase
+
+- **Don't paste `tests/test_plugins.py`.** It mostly tests Winnow's
+  plugin *host* — the loader, installs, traversal rejection — none of
+  which a plugin author implements. §8's recipe is the part that's
+  actually about testing your own plugin.
+- **Don't paste `store.py`.** The supported surface is the short list in
+  §7; the rest is internals a plugin must not reach into anyway. If you
+  paste it, an LLM will happily use a private method and you'll find out
+  when Winnow refactors.
+- **Do paste an example plugin** if you're building something in the
+  same shape — a precedent is worth more than prose for the last 10%.
+
+### The honest edges
+
+Three things this guide can't do for you:
+
+- **New hook types.** If you need an extension point that doesn't exist
+  (a new export format, a right-click action), no amount of guide helps
+  — that's a change to `plugin_api.py`, i.e. a Winnow PR.
+- **Matching internal behavior exactly.** If your parser has to reproduce
+  a Winnow-specific detail not spelled out here (say, precisely how the
+  timeframe filter normalizes an odd timestamp shape), read the source
+  for that one function.
+- **Anything an LLM asserts that isn't in here.** The failure mode to
+  watch for is a confidently invented method — `store.query()`,
+  `api.register_command()`, `winnow.refresh()`. None of those exist.
+  Cross-check any API call against §12; if it isn't listed, it's a
+  hallucination, and the plugin will fail at load or at first click with
+  a message that says so.
