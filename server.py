@@ -24,7 +24,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import workspace as WS
-from store import OpCancelled, Store
+from store import (DEFAULT_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS,
+                   OpCancelled, Store)
 
 HERE = Path(__file__).parent
 app = FastAPI(title="Winnow")
@@ -293,7 +294,7 @@ def api_case_compact():
 
 
 @app.get("/api/browse_dir")
-def api_browse_dir(path: str = ""):
+def api_browse_dir(path: str = "", files: bool = False):
     """Directory names only, one level — backs the "Browse..." folder picker
     in the new-case modal. A regular browser file/folder input can't hand
     back a real filesystem path (sandboxed for security), and this is a
@@ -307,15 +308,36 @@ def api_browse_dir(path: str = ""):
     base = os.path.abspath(os.path.expanduser(path)) if path else str(Path.home())
     if not os.path.isdir(base):
         raise HTTPException(400, f"Not a directory: {base}")
+    importable = DEFAULT_IMPORT_EXTENSIONS | SQLITE_IMPORT_EXTENSIONS
+    file_rows: list[dict] = []
     try:
+        entries = list(os.scandir(base))
         dirs = sorted(
-            (e.name for e in os.scandir(base) if e.is_dir() and not e.name.startswith(".")),
+            (e.name for e in entries if e.is_dir() and not e.name.startswith(".")),
             key=str.lower,
         )
+        if files:
+            # Only files an import could actually take — this backs the
+            # import modal's server-disk picker, not a general file manager.
+            for e in entries:
+                if not e.is_file() or e.name.startswith("."):
+                    continue
+                if Path(e.name).suffix.lower() not in importable:
+                    continue
+                try:
+                    size = e.stat().st_size
+                except OSError:
+                    size = 0
+                file_rows.append({"name": e.name, "size": size})
+            file_rows.sort(key=lambda f: f["name"].lower())
     except PermissionError:
         dirs = []
+        file_rows = []
     parent = os.path.dirname(base)
-    return {"path": base, "parent": parent if parent != base else None, "dirs": dirs}
+    out = {"path": base, "parent": parent if parent != base else None, "dirs": dirs}
+    if files:
+        out["files"] = file_rows
+    return out
 
 
 @app.get("/api/cases")
@@ -581,10 +603,57 @@ async def api_ingest_json_upload(
 _JSON_INGEST_EXTS = {".json", ".jsonl", ".ndjson"}
 
 
+def _ingest_kind_for_path(path: str) -> str:
+    suffix = Path(path).suffix.lower()
+    if suffix in SQLITE_IMPORT_EXTENSIONS:
+        return "sqlite"
+    return "json" if suffix in _JSON_INGEST_EXTS else "csv"
+
+
+class PreviewPath(BaseModel):
+    """Path-based twin of the three upload previews, for files picked with
+    the server-disk browser — the whole point of that flow is not copying
+    the file, and the configure step shouldn't undo it. kind=None
+    auto-detects by extension."""
+    path: str
+    kind: str | None = None
+    # csv
+    delimiter: str | None = None
+    has_header: bool = True
+    # json
+    flatten_mode: str = "none"
+    flatten_depth: int = 0
+
+
+@app.post("/api/ingest/preview/path")
+def api_ingest_preview_path(body: PreviewPath):
+    if not os.path.isfile(body.path):
+        raise HTTPException(400, f"No file at {body.path}")
+    kind = body.kind or _ingest_kind_for_path(body.path)
+    try:
+        if kind == "csv":
+            # Same bounded sample the upload preview reads — never the file.
+            with open(body.path, "rb") as f:
+                raw = f.read(512 * 1024)
+            text = raw.decode("utf-8-sig", errors="replace")
+            return store().preview_csv_text(text, delimiter=body.delimiter or None,
+                                            has_header=body.has_header)
+        if kind == "json":
+            return store().preview_json_file(body.path, flatten_mode=body.flatten_mode,
+                                             flatten_depth=body.flatten_depth)
+        return store().preview_sqlite_tables(body.path)
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
 class IngestJobPath(BaseModel):
     """Start a background ingest job for a file already on the server's
-    disk (the directory-import loop's path — browser and server are the
-    same machine there). kind=None auto-detects json vs csv by extension."""
+    disk — the directory-import loop and the import modal's server-disk
+    picker, both of which exist because browser and server are the same
+    machine here and round-tripping a file that's already on disk through
+    a multipart upload copies it for nothing. kind=None auto-detects by
+    extension; sqlite additionally needs `tables` (which tables to pull
+    out is a real choice — see preview_sqlite_tables)."""
     path: str
     kind: str | None = None
     name: str | None = None
@@ -596,6 +665,8 @@ class IngestJobPath(BaseModel):
     # json options
     flatten_mode: str = "none"
     flatten_depth: int = 0
+    # sqlite options
+    tables: list[dict] | None = None  # [{table, name?, timestamp_columns?}]
 
 
 def _ingest_job_options(kind: str, *, build_fts: bool, delimiter=None, has_header=True,
@@ -614,7 +685,9 @@ def _ingest_job_options(kind: str, *, build_fts: bool, delimiter=None, has_heade
 def api_ingest_job_path(body: IngestJobPath):
     if not os.path.isfile(body.path):
         raise HTTPException(400, f"No file at {body.path}")
-    kind = body.kind or ("json" if Path(body.path).suffix.lower() in _JSON_INGEST_EXTS else "csv")
+    kind = body.kind or _ingest_kind_for_path(body.path)
+    if kind == "sqlite" and not body.tables:
+        raise HTTPException(400, "A sqlite import needs its tables picked first")
     try:
         return store().start_ingest_job(
             kind, body.path, name=body.name,
@@ -622,6 +695,7 @@ def api_ingest_job_path(body: IngestJobPath):
                 kind, build_fts=body.build_fts, delimiter=body.delimiter,
                 has_header=body.has_header, column_types=body.column_types,
                 flatten_mode=body.flatten_mode, flatten_depth=body.flatten_depth,
+                tables=body.tables,
             ),
         )
     except ValueError as e:

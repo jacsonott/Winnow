@@ -210,3 +210,77 @@ def test_job_cancel_endpoint_contract(client, store, write_csv):
     assert r.json() == {"cancelled": False}
     r = client.post("/api/ingest/jobs/999999/cancel")
     assert r.json() == {"cancelled": False}
+
+
+# --------------------------------------------- server-disk (no-copy) path
+
+
+def test_browse_dir_lists_importable_files_on_request(client, tmp_path):
+    # A clean subdir — tmp_path itself also holds the store fixture's own
+    # case.db, which is (correctly) importable and would pollute the list.
+    root = tmp_path / "evidence_dir"
+    root.mkdir()
+    (root / "evidence.csv").write_text("a,b\n1,2\n")
+    (root / "history.db").write_bytes(b"SQLite format 3\x00")
+    (root / "notes.exe").write_text("not importable")
+    (root / "sub").mkdir()
+
+    r = client.get(f"/api/browse_dir?path={root}")
+    assert r.status_code == 200
+    assert "files" not in r.json()  # default shape unchanged for old callers
+
+    r = client.get(f"/api/browse_dir?files=true&path={root}")
+    body = r.json()
+    assert body["dirs"] == ["sub"]
+    names = [f["name"] for f in body["files"]]
+    assert names == ["evidence.csv", "history.db"]  # .exe filtered, sorted
+    assert body["files"][0]["size"] > 0
+
+
+def test_preview_path_csv_and_sqlite(client, write_csv, tmp_path):
+    csv_path = write_csv([["Name", "Val"], ["a", "1"]], name="p.csv")
+    r = client.post("/api/ingest/preview/path", json={"path": csv_path})
+    assert r.status_code == 200
+    assert r.json()["columns"] == ["Name", "Val"]
+
+    dbp = tmp_path / "ext.db"
+    conn = sqlite3.connect(dbp)
+    conn.execute("CREATE TABLE t (x TEXT)")
+    conn.execute("INSERT INTO t VALUES ('v')")
+    conn.commit()
+    conn.close()
+    r = client.post("/api/ingest/preview/path", json={"path": str(dbp)})
+    assert r.status_code == 200
+    assert [t["name"] for t in r.json()["tables"]] == ["t"]
+
+
+def test_preview_path_json(client, tmp_path):
+    p = tmp_path / "recs.jsonl"
+    p.write_text('{"a": "1"}\n{"a": "2"}\n')
+    r = client.post("/api/ingest/preview/path", json={"path": str(p)})
+    assert r.status_code == 200
+    assert "a" in r.json()["columns"]
+
+
+def test_sqlite_job_by_path(client, store, tmp_path):
+    dbp = tmp_path / "ext2.db"
+    conn = sqlite3.connect(dbp)
+    conn.execute("CREATE TABLE alpha (x TEXT)")
+    conn.execute("INSERT INTO alpha VALUES ('a')")
+    conn.commit()
+    conn.close()
+
+    # No tables picked -> refused up front, not a doomed job.
+    r = client.post("/api/ingest/jobs/path", json={"path": str(dbp)})
+    assert r.status_code == 400
+
+    r = client.post("/api/ingest/jobs/path",
+                    json={"path": str(dbp), "tables": [{"table": "alpha"}], "build_fts": False})
+    assert r.status_code == 200
+    job = r.json()
+    assert job["kind"] == "sqlite"
+    done = store.wait_for_ingest_job(job["job_id"], timeout=30)
+    assert done["status"] == "done"
+    assert store.list_sources()[0]["row_count"] == 1
+    # Path-based: the source file is read in place, never spooled/deleted.
+    assert os.path.exists(dbp)

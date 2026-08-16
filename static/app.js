@@ -3394,12 +3394,21 @@ function openImportPreview(file, opts = {}) {
 
     async function refreshPreview() {
       status.textContent = 'Loading preview…';
-      const fd = new FormData();
-      fd.append('file', file);
-      if (delimSel.value) fd.append('delimiter', delimSel.value);
-      fd.append('has_header', headerCb.checked ? 'true' : 'false');
       try {
-        preview = await api('/api/ingest/preview', { method: 'POST', body: fd });
+        // A server-disk queue item ({path, name}, no File) previews by
+        // path — the point of that flow is never shipping the bytes over.
+        if (file.path) {
+          preview = await post('/api/ingest/preview/path', {
+            path: file.path, kind: 'csv',
+            delimiter: delimSel.value || null, has_header: headerCb.checked,
+          });
+        } else {
+          const fd = new FormData();
+          fd.append('file', file);
+          if (delimSel.value) fd.append('delimiter', delimSel.value);
+          fd.append('has_header', headerCb.checked ? 'true' : 'false');
+          preview = await api('/api/ingest/preview', { method: 'POST', body: fd });
+        }
         if (!columnTypes || columnTypes.length !== preview.columns.length) columnTypes = preview.inferred_types.slice();
         renderTable();
       } catch (e) {
@@ -3503,12 +3512,19 @@ function openJsonImportPreview(file, opts = {}) {
 
     async function refreshPreview() {
       status.textContent = 'Loading preview…';
-      const fd = new FormData();
-      fd.append('file', file);
-      fd.append('flatten_mode', flattenMode);
-      fd.append('flatten_depth', String(flattenDepth));
       try {
-        preview = await api('/api/ingest/json/preview', { method: 'POST', body: fd });
+        if (file.path) { // server-disk item — preview by path, no upload
+          preview = await post('/api/ingest/preview/path', {
+            path: file.path, kind: 'json',
+            flatten_mode: flattenMode, flatten_depth: flattenDepth,
+          });
+        } else {
+          const fd = new FormData();
+          fd.append('file', file);
+          fd.append('flatten_mode', flattenMode);
+          fd.append('flatten_depth', String(flattenDepth));
+          preview = await api('/api/ingest/json/preview', { method: 'POST', body: fd });
+        }
         renderTable();
       } catch (e) {
         status.textContent = 'Preview failed: ' + e.message;
@@ -3595,6 +3611,98 @@ function queueFiles(files) {
   }
 }
 
+/* Path twin of queueFiles, for files picked with the server-disk browser:
+   {path, name, size} instead of a File. Same per-kind defaults; the item
+   later imports via /api/ingest/jobs/path — no upload, no spool, no copy,
+   which is the whole point on a single-host analysis box where the
+   browser's own picker can never reveal a file's real path. */
+function queuePaths(entries) {
+  for (const f of entries) {
+    const kind = importKindFor(f.name);
+    S.importQueue.push(
+      kind === 'json' ? { path: f.path, name: f.name, size: f.size, kind, flatten_mode: 'none', flatten_depth: 1, configured: false }
+      : kind === 'sqlite' ? { path: f.path, name: f.name, size: f.size, kind, tables: null, configured: false }
+      : { path: f.path, name: f.name, size: f.size, kind, delimiter: null, has_header: true, column_types: null, configured: false });
+  }
+}
+
+/* Browse the server's own disk and pick importable files — dirs navigate,
+   files toggle. The selection (a path-keyed Map) survives navigating
+   between folders, so one pass can collect files from several. Built on
+   the same /api/browse_dir as openFolderBrowser, with files=true. */
+function openServerFileBrowser(onDone, onCancel) {
+  let current = null;
+  const picked = new Map(); // path -> {path, name, size}
+  modal('Add files from this machine', (b) => {
+    b.append(el('p', null,
+      'Files picked here import directly from their path on disk — no upload copy. '
+      + 'Only importable extensions are listed.'));
+    const pathLabel = el('div', 'note-status');
+    pathLabel.style.cssText = 'font-family:var(--mono);word-break:break-all;margin-bottom:8px';
+    b.append(pathLabel);
+    const list = el('div', 'session-list');
+    list.style.maxHeight = '46vh';
+    list.style.overflow = 'auto';
+    b.append(list);
+
+    const actions = el('div', 'row-actions');
+    const useBtn = el('button', 'btn', 'Add 0 files');
+    const syncUse = () => {
+      useBtn.textContent = `Add ${picked.size} file${picked.size === 1 ? '' : 's'}`;
+      useBtn.disabled = picked.size === 0;
+    };
+    async function load(path) {
+      let res;
+      try {
+        res = await api(`/api/browse_dir?files=true&path=${encodeURIComponent(path || '')}`);
+      } catch (e) {
+        toast('Could not list that folder: ' + e.message, 4000);
+        return;
+      }
+      current = res.path;
+      pathLabel.textContent = current;
+      list.replaceChildren();
+      if (res.parent) {
+        const up = el('button', 'btn ghost', '.. (up a level)');
+        up.style.cssText = 'justify-content:flex-start;text-align:left';
+        up.onclick = () => load(res.parent);
+        list.append(up);
+      }
+      for (const d of res.dirs) {
+        const row = el('button', 'btn ghost', '📁 ' + d);
+        row.style.cssText = 'justify-content:flex-start;text-align:left;width:100%';
+        row.onclick = () => load(current + '/' + d);
+        list.append(row);
+      }
+      for (const f of res.files || []) {
+        const full = current + '/' + f.name;
+        const row = el('label', 'session-row');
+        row.style.cssText = 'display:flex;align-items:center;gap:8px;cursor:pointer';
+        const cb = el('input');
+        cb.type = 'checkbox';
+        cb.checked = picked.has(full);
+        cb.onchange = () => {
+          if (cb.checked) picked.set(full, { path: full, name: f.name, size: f.size });
+          else picked.delete(full);
+          syncUse();
+        };
+        row.append(cb, el('span', 'session-name', f.name),
+                   el('span', 'count', f.size >= 1048576 ? `${(f.size / 1048576).toFixed(1)} MB` : `${(f.size / 1024).toFixed(0)} KB`));
+        list.append(row);
+      }
+      if (!res.dirs.length && !(res.files || []).length) list.append(el('div', 'note-status', 'Nothing importable here.'));
+    }
+    load('');
+
+    useBtn.onclick = () => onDone([...picked.values()]);
+    const cancel = el('button', 'btn ghost', 'Cancel');
+    cancel.onclick = () => { if (onCancel) onCancel(); else $('modal').hidden = true; };
+    actions.append(useBtn, cancel);
+    syncUse();
+    b.append(actions);
+  }, { wide: true });
+}
+
 /* The one way to bring files into a case — queue any number of CSV/TSV or
    JSON/JSONL files (kind picked per file from its extension), optionally
    preview/configure each (delimiter+header+column-types for CSV,
@@ -3610,7 +3718,8 @@ function openImportModal() {
     b.append(el('p', null,
       'Queue CSV/TSV, JSON/JSONL, or SQLite files (a SQLite file needs its tables picked first), '
       + 'then import them all — imports run in the background, so you can keep working while the '
-      + 'corner panel tracks progress.'));
+      + 'corner panel tracks progress. For big files already on this machine, "Add from this '
+      + 'machine…" imports straight from the path on disk and skips the upload copy entirely.'));
 
     const queueList = el('div', 'session-queue');
 
@@ -3619,11 +3728,12 @@ function openImportModal() {
       if (!S.importQueue.length) { queueList.append(el('div', 'note-status', 'No files queued.')); return; }
       S.importQueue.forEach((item, i) => {
         const row = el('div', 'row-actions session-row');
-        const stateLabel = item.kind === 'sqlite'
+        const stateLabel = (item.kind === 'sqlite'
           ? (item.configured ? `${item.tables.length} table${item.tables.length === 1 ? '' : 's'}` : 'pick tables') + ' · sqlite'
-          : (item.configured ? 'configured' : 'default settings') + ` · ${item.kind}`;
+          : (item.configured ? 'configured' : 'default settings') + ` · ${item.kind}`)
+          + (item.path ? ' · on disk' : '');
         row.append(
-          el('span', 'session-name', item.file.name),
+          el('span', 'session-name', item.file ? item.file.name : item.name),
           el('span', 'count', stateLabel),
         );
         const cfg = el('button', 'btn ghost', item.kind === 'sqlite' ? 'Pick tables…' : 'Preview & configure');
@@ -3631,7 +3741,7 @@ function openImportModal() {
           const openPreview = item.kind === 'json' ? openJsonImportPreview
             : item.kind === 'sqlite' ? openSqliteTablePicker
             : openImportPreview;
-          openPreview(item.file, {
+          openPreview(item.file || { path: item.path, name: item.name }, {
             initial: item,
             onConfirm: (settings) => {
               Object.assign(item, settings, { configured: true });
@@ -3662,6 +3772,12 @@ function openImportModal() {
       renderQueue();
     };
     addLabel.append(addInput);
+    const diskBtn = el('button', 'btn ghost', 'Add from this machine…');
+    diskBtn.title = "Browse the server's own disk — imports read the file in place, no upload copy";
+    diskBtn.onclick = () => openServerFileBrowser(
+      (entries) => { queuePaths(entries); openImportModal(); },
+      () => openImportModal(),
+    );
     const folderBtn = el('button', 'btn ghost', 'Import a whole folder…');
     folderBtn.title = 'Scan a directory (e.g. KAPE output) against extension + glob patterns';
     folderBtn.onclick = () => openDirectoryImportModal();
@@ -3683,6 +3799,25 @@ function openImportModal() {
       // the corner panel is already tracking.
       (async () => {
         for (const item of queue) {
+          if (item.path) {
+            // Already on the server's disk (server-disk picker) — the job
+            // reads it in place, so "starting the import" is one small POST.
+            try {
+              await post('/api/ingest/jobs/path', {
+                path: item.path, name: item.name, kind: item.kind,
+                delimiter: item.delimiter || null,
+                has_header: item.has_header !== false,
+                column_types: item.column_types || null,
+                flatten_mode: item.flatten_mode || 'none',
+                flatten_depth: item.flatten_depth || 0,
+                tables: item.tables || null,
+              });
+              startJobsPoll();
+            } catch (e) {
+              toast(`Could not start import for ${item.name}: ` + e.message, 6000);
+            }
+            continue;
+          }
           const fd = new FormData();
           fd.append('file', item.file);
           fd.append('kind', item.kind);
@@ -3704,7 +3839,7 @@ function openImportModal() {
         }
       })();
     };
-    queueActs.append(addLabel, folderBtn, importAll);
+    queueActs.append(addLabel, diskBtn, folderBtn, importAll);
     b.append(queueActs);
   }, { wide: true });
 }
@@ -3790,10 +3925,14 @@ function openSqliteTablePicker(initialFile, { initial, onConfirm, onCancel } = {
     async function loadFile(f) {
       file = f;
       pickStatus.textContent = 'Reading…';
-      const fd = new FormData();
-      fd.append('file', file);
       try {
-        const res = await api('/api/ingest/sqlite/preview', { method: 'POST', body: fd });
+        const res = file.path // server-disk item — preview by path, no upload
+          ? await post('/api/ingest/preview/path', { path: file.path, kind: 'sqlite' })
+          : await (async () => {
+              const fd = new FormData();
+              fd.append('file', file);
+              return api('/api/ingest/sqlite/preview', { method: 'POST', body: fd });
+            })();
         tables = res.tables;
       } catch (e) {
         pickStatus.textContent = '';

@@ -541,6 +541,18 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
   detached async chain uploads sequentially (one disk, one spool at a
   time) while the jobs panel tracks everything. Don't add a second
   menu entry per format again; the queue is the router.
+  The queue holds two item shapes: `{file: File}` from the picker/drop,
+  and `{path, name, size}` from "Add from this machine…"
+  (`openServerFileBrowser`, `/api/browse_dir?files=true`) — a browser can
+  never reveal a picked file's real filesystem path (sandbox), so
+  same-host analysts get a server-side picker instead, and a path item
+  imports via `/api/ingest/jobs/path` reading the file **in place**: no
+  upload leg, no tempfile spool, no 50 GB copied to produce a file that
+  was already on the disk. The three configure previews take either
+  shape (`file.path` routes to `POST /api/ingest/preview/path`, which
+  reads the same bounded CSV sample / calls the same path-based
+  json/sqlite store previews). Directory import is the same principle
+  for folders and predates it.
 - **Dragging a file from the OS onto the window** (`wireFileDrop`,
   `handleDroppedFiles`) is an alternative entry point into the *existing*
   import flows, not a new one — a dropped CSV/JSON queues into the same

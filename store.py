@@ -56,6 +56,11 @@ SEARCH_ALL_COUNT_CAP = 1000
 # inventing a separate notion of "supported" — one format list, two places
 # it has to be spelled out (a browser <input> can't read a Python constant).
 DEFAULT_IMPORT_EXTENSIONS = {".csv", ".tsv", ".txt", ".psv", ".json", ".jsonl", ".ndjson"}
+# The SQLite set is separate because these files can't be bulk-imported
+# blind — which tables to pull out is a per-file choice (see
+# preview_sqlite_tables) — so directory import ignores them while the
+# server-disk file browser still lists them.
+SQLITE_IMPORT_EXTENSIONS = {".db", ".sqlite", ".sqlite3", ".db-wal"}
 # scan_import_directory stops walking once matched+excluded together hit
 # this many entries — same "cap and say so" reasoning as
 # SEARCH_ALL_COUNT_CAP, guarding against an analyst accidentally pointing
