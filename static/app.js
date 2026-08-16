@@ -284,6 +284,30 @@ function uploadWithProgress(url, fd, name) {
   });
 }
 
+/* Same-host path recovery: the browser sandbox never reveals a picked
+   file's real path, but when this page is served from the same machine,
+   the picked file is somewhere on the server's own disk — so send a
+   fingerprint (name, size, mtime, first/last 64 KB via File.slice — two
+   tiny reads even on a 50 GB file) and let the server look for it in the
+   places files usually come from. A hit skips the entire upload copy; a
+   miss (remote client, unguessable directory) returns null and the
+   caller falls back to the normal upload. Deliberately silent either
+   way — one Import button, two transports, no decision for the analyst. */
+async function resolveLocalFile(file) {
+  try {
+    const fd = new FormData();
+    fd.append('name', file.name);
+    fd.append('size', String(file.size));
+    fd.append('mtime_ms', String(file.lastModified));
+    fd.append('head', file.slice(0, 65536));
+    fd.append('tail', file.slice(Math.max(0, file.size - 65536)));
+    const res = await api('/api/ingest/resolve_local', { method: 'POST', body: fd });
+    return res.path || null;
+  } catch {
+    return null; // resolution is an optimization, never a failure mode
+  }
+}
+
 function startJobsPoll() {
   if (!jobsPollTimer) pollJobs();
 }
@@ -3817,6 +3841,24 @@ function openImportModal() {
               toast(`Could not start import for ${item.name}: ` + e.message, 6000);
             }
             continue;
+          }
+          // Picked/dropped File on a same-host client: try to recover its
+          // real path first — a hit imports in place with no upload at all.
+          const localPath = await resolveLocalFile(item.file);
+          if (localPath) {
+            try {
+              await post('/api/ingest/jobs/path', {
+                path: localPath, name: item.file.name, kind: item.kind,
+                delimiter: item.delimiter || null,
+                has_header: item.has_header !== false,
+                column_types: item.column_types || null,
+                flatten_mode: item.flatten_mode || 'none',
+                flatten_depth: item.flatten_depth || 0,
+                tables: item.tables || null,
+              });
+              startJobsPoll();
+              continue;
+            } catch { /* fall through to the upload — resolution never blocks an import */ }
           }
           const fd = new FormData();
           fd.append('file', item.file);

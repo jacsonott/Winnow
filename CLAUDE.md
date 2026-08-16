@@ -553,6 +553,28 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
   reads the same bounded CSV sample / calls the same path-based
   json/sqlite store previews). Directory import is the same principle
   for folders and predates it.
+  On top of that, a picked/dropped `{file: File}` item *also* tries the
+  no-copy route invisibly (`resolveLocalFile` → `POST
+  /api/ingest/resolve_local`): one Import button, two transports. The
+  sandbox can't be asked for the path, but a same-host client's picked
+  file necessarily exists on the server's own disk, so the frontend sends
+  a fingerprint — name, size, mtime, first/last 64 KB via `File.slice`
+  (two tiny reads even on 50 GB) — and the server looks for it in a fixed
+  handful of candidate dirs (recently browsed/scanned dirs, dirs of
+  previous imports, registered cases' dirs, Downloads/Desktop/Documents/
+  home — stat calls, never a disk search). A hit imports by path with no
+  upload; a miss falls back to the upload silently — resolution is an
+  optimization, never a failure mode, and never a user decision. The
+  match is deliberately strict (exact name+size, mtime ±2s, byte-equal
+  head *and* tail), which is also the answer to the loopback check's one
+  hole: an SSH-tunneled remote client looks local (`request.client` is
+  the socket peer — header-spoof-proof, but a tunnel terminates locally),
+  and strict content equality means the only file it can ever be handed
+  is byte-identical at both ends anyway. Names are `basename()`d before
+  joining, so a crafted name can't traverse out of a candidate dir.
+  `_is_loopback` also admits Starlette's literal "testclient" peer —
+  never a real IP, so it can't admit a network peer, and it keeps the
+  TestClient suite honest without monkeypatching.
 - **Dragging a file from the OS onto the window** (`wireFileDrop`,
   `handleDroppedFiles`) is an alternative entry point into the *existing*
   import flows, not a new one — a dropped CSV/JSON queues into the same
