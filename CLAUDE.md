@@ -528,6 +528,19 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
   variable rather than one per axis on purpose: a drag started on a tab and
   dropped on a sidebar row (or vice versa) still reorders correctly, since
   both surfaces render from the same `openTabsSorted()`.
+- **There is one import entry point** — the Session menu's "Import…" →
+  `openImportModal`, whose queue now takes CSV/TSV, JSON/JSONL *and*
+  SQLite files (`importKindFor` routes by extension; a sqlite item's
+  "Pick tables…" opens `openSqliteTablePicker`, the old standalone
+  sqlite modal reshaped into the same `{initial, onConfirm, onCancel}`
+  contract the CSV/JSON previews already had, storing
+  `{tables: [{table, timestamp_columns}]}` on the queue item). The
+  directory-import modal is reached from inside it ("Import a whole
+  folder…") and both flows start background jobs rather than awaiting
+  sync uploads — "Import all queued" closes the modal immediately and a
+  detached async chain uploads sequentially (one disk, one spool at a
+  time) while the jobs panel tracks everything. Don't add a second
+  menu entry per format again; the queue is the router.
 - **Dragging a file from the OS onto the window** (`wireFileDrop`,
   `handleDroppedFiles`) is an alternative entry point into the *existing*
   import flows, not a new one — a dropped CSV/JSON queues into the same
@@ -650,6 +663,56 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
   opening any other modal supersedes it). Switching builder mode no longer
   auto-runs a search — with a real job that would abandon a sweep in
   progress just because you glanced at the other tab.
+- **Every import runs as a background job** (`Store.start_ingest_job` /
+  `_ingest_job_worker`, `POST /api/ingest/jobs/{path,upload}`, `GET
+  /api/ingest/jobs`, per-job cancel) — the search-all job pattern made
+  plural, since a directory import legitimately starts many at once (a
+  semaphore caps concurrent parses at `MAX_CONCURRENT_INGESTS`; the rest
+  sit `queued`). The three `ingest_*` paths' per-BATCH `progress` callback
+  (the one backlog item 5 said nothing consumed) feeds the job record —
+  and consuming it exposed that it never worked: `fh.tell()` on a text
+  file being iterated raises "telling position disabled by next() call"
+  the moment csv.reader drives the iterator. `fh.buffer.tell()` (the
+  BufferedReader's byte position, ahead by at most the 1 MB read buffer)
+  is the legal spelling; CSV progress is therefore bytes/size — a
+  percentage with no pre-scan — while JSON reports records (pass 1 already
+  counts them) and SQLite rows (`COUNT(*)` known up front). Cancellation
+  is cooperative per BATCH, and **a cancelled ingest drops its partial
+  source** — the deliberate opposite of a mid-file *error*, which keeps
+  what committed: the analyst asked for the source not to exist, and a
+  half-table looks exactly like a complete import in every list.
+  `Store.close()` cancels and joins running jobs so a case switch can't
+  strand a worker on a closed connection. One sqlite job takes N tables
+  from one spooled upload (`options["tables"]`) rather than re-uploading
+  the file per table. Upload spools are deleted when the job ends —
+  the old sync upload endpoints (kept for compat, same `finally` added)
+  leaked the full file size in the OS tempdir on every upload, found as
+  a stray 50 GB tempfile. Frontend: `uploadWithProgress` (XHR — fetch
+  can't report upload progress) plus `pollJobs`/`renderJobsPanel`, the
+  bottom-right panel that also surfaces `fts_building` — background index
+  builds used to be invisible, and a server restart kills one silently
+  (`_build_fts_worker` swallows everything; the next search retries).
+  `boot()` restarts the poll so a reload mid-import picks the job back up.
+- **Long view work is cancellable via a client-generated `op_token`**
+  (`Store.cancel_op` / `_interruptible`, `POST /api/cancel_op`;
+  `build_view`, `build_timeline`, `group_summary`). cancel_op marks the
+  token cancelled *first*, then `interrupt()`s the registered connection —
+  so a cancel that lands before the op registers still takes effect at
+  registration, and one that lands after unregistration is a no-op. The
+  discipline making `interrupt()` safe on the shared writer: a writer op
+  registers while *holding* `self.lock` and unregisters before releasing
+  it, so the only interruptible statements under a token are that op's
+  own; a cancel between statements is a missed cancel ("click again"),
+  never a mis-aimed kill. Reader ops (group_summary) stack
+  `_interruptible` innermost so the interrupt becomes `OpCancelled` before
+  `_dropped_view_is_expired` can misread it, and `_reader()` closes — not
+  repools — the interrupted connection. **Builds evict the previous view
+  *after* the new INSERT, inside the same transaction** — a cancelled
+  build rolls back to a world where the old view still exists, which is
+  why the frontend can keep its rows on a 499 instead of 409-rebuilding.
+  server.py maps `OpCancelled` → HTTP 499 in one exception handler; app.js
+  arms a cancel chip (`armOpCancel`) only after ~1.2s in flight, so fast
+  rebuilds never flash it.
 - **The 2026-08 hot-path perf pass** (validated with `python3 -m bench
   --vs-ref` at both the 200k and 1.2M tiers — 0 slower, footprint
   unchanged), the shapes and their reasons:
@@ -741,15 +804,9 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
    a normalised timestamp column. The big one for real triage.
 4. **Drag-to-reorder columns.** `S.order` is already persisted in the layout;
    only the drag handler is missing.
-5. **Import progress streaming.** `ingest_csv` takes a `progress` callback that
-   nothing currently consumes; wire it to SSE or a websocket. `ingest_csv` now
-   commits (and calls `progress`, when something consumes it) per `BATCH`-sized
-   chunk rather than once for the whole file, which is exactly the boundary an
-   SSE progress tick would want — the remaining work is wiring, not restructuring
-   ingest itself.
-6. **Saved views UI.** Endpoints (`/api/saved_views`) exist and work; nothing in
+5. **Saved views UI.** Endpoints (`/api/saved_views`) exist and work; nothing in
    the frontend calls them yet.
-7. `.tle_sess` import, so existing Timeline Explorer sessions carry over.
+6. `.tle_sess` import, so existing Timeline Explorer sessions carry over.
 
 ## Testing
 
@@ -781,7 +838,15 @@ layer itself (the CSRF header gate, request parsing, 400-vs-500) rather
 than re-testing logic the `Store`-level tests already cover directly.
 `test_maintenance.py` covers the things that only exist because the case
 file otherwise only ever grows: the auto-created column indexes
-(listing/dropping) and `compact()`. `test_concurrency.py` pins the
+(listing/dropping) and `compact()`. `test_ingest_jobs.py` covers the
+background ingest jobs (lifecycle, byte-progress, the queued-cancel path,
+cancel-drops-the-partial-source — driven through `ingest_csv`'s own
+`cancel` hook so the cancellation point is deterministic, not a race —
+multi-table sqlite jobs, spool deletion, close-with-running-job).
+`test_cancel_op.py` covers cancellable builds, using a
+catastrophic-backtracking regex filter as a reliably-slow build to
+interrupt; its key regression assert is that the *previous* view still
+pages after a cancelled rebuild. `test_concurrency.py` pins the
 reader-pool split (invariant #4) structurally: each test holds the writer
 lock for the *entire duration* of a read and asserts the read completes —
 a deterministic deadlock against a single-connection implementation, not a

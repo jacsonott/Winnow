@@ -173,6 +173,15 @@ try {
 </div>
 
 <div class="toast" id="toast" hidden></div>
+
+<!-- Cancel chip for a long-running cancellable op (view/timeline build,
+     group summary) — armOpCancel() shows it only once the op has been in
+     flight long enough to be worth cancelling. -->
+<button class="busy-cancel" id="busyCancel" hidden>✕ Cancel</button>
+
+<!-- Background-work panel: upload transfers, ingest jobs, index builds.
+     renderJobsPanel() in app.js owns its contents; hidden when idle. -->
+<div class="jobs-panel" id="jobsPanel" hidden aria-live="polite"></div>
 <div class="tag-toolbar" id="tagToolbar" hidden></div>
 <div class="drop-overlay" id="dropOverlay" hidden aria-hidden="true">
   <div class="drop-overlay-card">Drop to import — CSV/TSV/JSON, or a single SQLite file</div>
