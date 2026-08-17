@@ -255,6 +255,30 @@ def _day_bucket(raw: Any) -> str | None:
     return None
 
 
+def _body_join(*parts: Any) -> str:
+    """Registered as the variadic SQL function BODY_JOIN — joins its
+    non-empty arguments with " | ". The timeline body used to be a chain
+    of COALESCE(col, '') || ' | ' || …, which rendered every empty cell
+    as a dangling separator; skipping empties needs to happen per-row,
+    which SQL string concatenation can't express. Variadic (narg=-1), so
+    one call handles any column count — but SQLite caps a function call
+    at SQLITE_MAX_FUNCTION_ARG (default 100) arguments, which is why
+    _body_join_expr chunks wide sources into nested calls."""
+    return " | ".join(str(v) for v in parts if v is not None and str(v) != "")
+
+
+def _body_join_expr(idents: list[str]) -> str:
+    """BODY_JOIN(...) over the given already-quoted column expressions,
+    nested in chunks of 90 to stay under SQLite's per-call argument cap
+    (an all-columns fallback body on a wide export can exceed 100).
+    Nesting is safe because an inner chunk's result is either '' (skipped
+    by the outer call) or already-joined non-empty text."""
+    if len(idents) <= 90:
+        return f"BODY_JOIN({', '.join(idents)})"
+    chunks = [idents[i:i + 90] for i in range(0, len(idents), 90)]
+    return f"BODY_JOIN({', '.join(_body_join_expr(c) for c in chunks)})"
+
+
 def _ts_normalize(raw: Any) -> str | None:
     """Registered as the SQL function TS_NORMALIZE(x) — a zero-padded,
     lexicographically-sortable "YYYY-MM-DD HH:MM:SS" for a value in either
@@ -473,6 +497,7 @@ class Store:
         self.db.create_function("REGEXP", 2, _regexp, deterministic=True)
         self.db.create_function("DAY_BUCKET", 1, _day_bucket, deterministic=True)
         self.db.create_function("TS_NORMALIZE", 1, _ts_normalize, deterministic=True)
+        self.db.create_function("BODY_JOIN", -1, _body_join, deterministic=True)
         self._tune(self.db)
         # Materialised views live in their own on-disk database, named and
         # WAL-journalled (not the anonymous `ATTACH DATABASE ''` this used
@@ -1009,6 +1034,7 @@ class Store:
         ro.create_function("REGEXP", 2, _regexp, deterministic=True)
         ro.create_function("DAY_BUCKET", 1, _day_bucket, deterministic=True)
         ro.create_function("TS_NORMALIZE", 1, _ts_normalize, deterministic=True)
+        ro.create_function("BODY_JOIN", -1, _body_join, deterministic=True)
         # Same mmap reasoning as _tune (address space, not RAM — and shared
         # with the writer's mapping via the OS page cache). busy_timeout
         # covers the rare WAL edge (recovery, checkpoint restart) where
@@ -2602,7 +2628,7 @@ class Store:
     # -------------------------------------------------------------- timeline
 
     def build_timeline(self, configs: dict[int, dict] | None = None, tag_ids: list[int] | None = None,
-                       op_token: str | None = None) -> dict:
+                       search: str = "", sort: str = "asc", op_token: str | None = None) -> dict:
         """Materialises one row per *tagged* row across every real source in
         the case (open or closed — this is "every finding in the case", not
         "every finding in a currently-open tab"), each contributing its own
@@ -2618,6 +2644,24 @@ class Store:
 
         `tag_ids` narrows to rows carrying at least one of those tags;
         None/empty means every tagged row regardless of which tag(s).
+        `sort` is "asc" or "desc" over the normalized timestamp; events
+        with no parseable timestamp sort last either way (a row you can't
+        place in time belongs at the edge you scroll to on purpose, not
+        at the head of a reversed timeline).
+        `search` is a plain substring filter over the *derived* event
+        (timestamp, body, type label, source name, timestamp label) —
+        applied at build time, not fetch time, so the row count and rail
+        stay honest.
+
+        A config's `timestamp_columns` may list several columns, in which
+        case each tagged row lands on the timeline once per timestamp —
+        the MACB case for $MFT — each event carrying `ts_label` (the
+        column name, or the config's custom label). With several
+        timestamps an event whose column is empty/unparseable is dropped
+        (its row still appears under its other timestamps); a
+        single-timestamp source keeps the old contract, where a row with
+        no parseable timestamp still shows, sorted to the end — dropping
+        it there would silently hide the row entirely.
 
         Same materialize-into-v.-then-page-by-pos pattern as build_view
         (CLAUDE.md invariant #2) — a heavily-tagged case can still be
@@ -2640,47 +2684,77 @@ class Store:
             dt_cols = [c["name"] for c in src["columns"] if c["type"] == "datetime"]
             cfg = configs.get(source_id, {})
 
-            ts_col = cfg.get("timestamp_column")
-            if ts_col not in col_names:
-                ts_col = dt_cols[0] if dt_cols else None
-            ts_expr = f"TS_NORMALIZE(s.{q(ts_col)})" if ts_col else "NULL"
+            ts_entries = [t for t in (cfg.get("timestamp_columns") or [])
+                          if t.get("column") in col_names]
+            if not ts_entries:
+                ts_entries = [{"column": dt_cols[0] if dt_cols else None, "label": None}]
+            multi_ts = len(ts_entries) > 1
 
             body_cols = [c for c in (cfg.get("body_columns") or []) if c in col_names]
             if not body_cols:
                 body_cols = [c["name"] for c in src["columns"]]
-            body_expr = " || ' | ' || ".join(f"COALESCE(s.{q(c)}, '')" for c in body_cols)
+            # BODY_JOIN skips empty cells — a sparse row no longer renders
+            # as a run of dangling " | " separators.
+            body_expr = _body_join_expr([f"s.{q(c)}" for c in body_cols])
 
             type_label = cfg.get("type_label") or src["name"]
             table = src["table_name"]
-            branches.append(
-                f"SELECT {int(source_id)} AS source_id, s.rid AS rid, {ts_expr} AS ts, ({body_expr}) AS body, "
-                f"? AS type_label, ? AS source_name, "
-                f"(SELECT GROUP_CONCAT(tag_id) FROM row_tags WHERE source_id={int(source_id)} AND rid=s.rid) AS tag_ids "
-                f"FROM {q(table)} s "
-                f"WHERE s.rid IN (SELECT rid FROM row_tags WHERE source_id={int(source_id)}{tag_clause})"
-            )
-            params.append(type_label)
-            params.append(src["name"])
-            if tag_ids:
-                params.extend(tag_ids)
+            for entry in ts_entries:
+                ts_col = entry.get("column")
+                ts_expr = f"TS_NORMALIZE(s.{q(ts_col)})" if ts_col else "NULL"
+                # The label only rides along when there's something to tell
+                # apart — a single-timestamp event says nothing extra.
+                ts_label = (entry.get("label") or ts_col) if multi_ts else entry.get("label")
+                # Multi-timestamp: drop events whose column didn't parse
+                # (the row still appears under its other timestamps);
+                # single-timestamp keeps NULL-ts rows, sorted to the end.
+                null_clause = f" AND {ts_expr} IS NOT NULL" if multi_ts else ""
+                branches.append(
+                    f"SELECT {int(source_id)} AS source_id, s.rid AS rid, {ts_expr} AS ts, ? AS ts_label, ({body_expr}) AS body, "
+                    f"? AS type_label, ? AS source_name, "
+                    f"(SELECT GROUP_CONCAT(tag_id) FROM row_tags WHERE source_id={int(source_id)} AND rid=s.rid) AS tag_ids "
+                    f"FROM {q(table)} s "
+                    f"WHERE s.rid IN (SELECT rid FROM row_tags WHERE source_id={int(source_id)}{tag_clause})"
+                    f"{null_clause}"
+                )
+                params.append(ts_label)
+                params.append(type_label)
+                params.append(src["name"])
+                if tag_ids:
+                    params.extend(tag_ids)
 
         self._view_seq += 1
         vid = f"view_{self._view_seq}"
         with self.lock, self._interruptible(op_token, self.db), self.db:
             self.db.execute(
                 f"CREATE TABLE v.{q(vid)} (pos INTEGER PRIMARY KEY, source_id INTEGER, rid INTEGER, "
-                f"ts TEXT, body TEXT, type_label TEXT, source_name TEXT, tag_ids TEXT)"
+                f"ts TEXT, ts_label TEXT, body TEXT, type_label TEXT, source_name TEXT, tag_ids TEXT)"
             )
             n = 0
             if branches:
                 union_sql = " UNION ALL ".join(branches)
+                where = ""
+                if (search or "").strip():
+                    # Substring over the derived event, not the raw row —
+                    # what the analyst sees on the timeline is what the
+                    # search runs against. Escaped LIKE, same as the
+                    # grid's blob-scan fallback.
+                    pat = f"%{_esc_like(search.strip())}%"
+                    fields = ["ts", "ts_label", "body", "type_label", "source_name"]
+                    where = (" WHERE ("
+                             + " OR ".join(f"{f} LIKE ? ESCAPE '\\'" for f in fields)
+                             + ")")
+                    params.extend([pat] * len(fields))
                 # ORDER BY-fed insert, same as build_view: pos auto-assigns
-                # in sorted order ((source_id, rid) makes the order fully
-                # determined), rowcount replaces a count(*) re-scan.
+                # in sorted order ((source_id, rid, ts_label) makes the
+                # order fully determined even with several events per row),
+                # rowcount replaces a count(*) re-scan.
+                ts_dir = "DESC" if sort == "desc" else "ASC"
                 n = self.db.execute(
-                    f"INSERT INTO v.{q(vid)}(source_id, rid, ts, body, type_label, source_name, tag_ids) "
-                    f"SELECT source_id, rid, ts, body, type_label, source_name, tag_ids FROM ({union_sql}) "
-                    f"ORDER BY (ts IS NULL) ASC, ts ASC, source_id, rid",
+                    f"INSERT INTO v.{q(vid)}(source_id, rid, ts, ts_label, body, type_label, source_name, tag_ids) "
+                    f"SELECT source_id, rid, ts, ts_label, body, type_label, source_name, tag_ids FROM ({union_sql})"
+                    f"{where} "
+                    f"ORDER BY (ts IS NULL) ASC, ts {ts_dir}, source_id, rid, COALESCE(ts_label, '')",
                     params,
                 ).rowcount
             # Same evict-after-build ordering (and reasoning) as build_view.
@@ -2692,13 +2766,41 @@ class Store:
         self._views[vid] = {"view_id": vid, "kind": "timeline", "row_count": n}
         return {"view_id": vid, "row_count": n}
 
+    def get_row(self, source_id: int, rid: int) -> dict:
+        """One source row with its columns, tags and note — the timeline
+        detail pane's fetch (a timeline event carries only the derived
+        body; the pane shows the actual row). Reader-pool, no lock."""
+        with self._reader() as ro:
+            src = self._source_lite_on(ro, source_id)
+            row = ro.execute(
+                f"SELECT * FROM {q(src['table_name'])} WHERE rid = ?", (rid,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"No row {rid} in source {source_id}")
+            tags = [r[0] for r in ro.execute(
+                "SELECT tag_id FROM row_tags WHERE source_id = ? AND rid = ?",
+                (source_id, rid)).fetchall()]
+            note = ro.execute(
+                "SELECT note FROM row_notes WHERE source_id = ? AND rid = ?",
+                (source_id, rid)).fetchone()
+        cols = [c["name"] for c in src["columns"]]
+        return {
+            "source_id": source_id,
+            "rid": rid,
+            "source_name": src.get("name"),
+            "columns": src["columns"],
+            "cells": [row[c] for c in cols],
+            "tags": tags,
+            "note": note[0] if note else None,
+        }
+
     def fetch_timeline_rows(self, view_id: str, start: int, count: int) -> dict:
         handle = self._views.get(view_id)
         if not handle or handle.get("kind") != "timeline":
             raise KeyError("View expired — rebuild it")
         with self._reader() as ro, self._dropped_view_is_expired():
             rows = ro.execute(
-                f"SELECT pos, source_id, rid, ts, body, type_label, source_name, tag_ids "
+                f"SELECT pos, source_id, rid, ts, ts_label, body, type_label, source_name, tag_ids "
                 f"FROM v.{q(view_id)} WHERE pos >= ? AND pos < ? ORDER BY pos",
                 (start + 1, start + 1 + count),
             ).fetchall()
@@ -2708,6 +2810,7 @@ class Store:
                 "source_id": r["source_id"],
                 "rid": r["rid"],
                 "ts": r["ts"],
+                "ts_label": r["ts_label"],
                 "body": r["body"],
                 "type_label": r["type_label"],
                 "source_name": r["source_name"],

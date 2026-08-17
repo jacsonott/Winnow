@@ -34,8 +34,10 @@ def _two_tagged_sources(store, write_csv):
     store.set_tags(rec2["id"], [2], tag_a, True)  # history row 2 (untagged row 1 excluded)
 
     configs = {
-        rec1["id"]: {"timestamp_column": "Timestamp", "body_columns": ["EventId", "User"], "type_label": "Windows Event Log"},
-        rec2["id"]: {"timestamp_column": "VisitTime", "body_columns": ["Url"], "type_label": "Browser History"},
+        rec1["id"]: {"timestamp_columns": [{"column": "Timestamp", "label": None}],
+                     "body_columns": ["EventId", "User"], "type_label": "Windows Event Log"},
+        rec2["id"]: {"timestamp_columns": [{"column": "VisitTime", "label": None}],
+                     "body_columns": ["Url"], "type_label": "Browser History"},
     }
     return rec1["id"], rec2["id"], tag_a, tag_b, configs
 
@@ -115,17 +117,19 @@ def test_timeline_api_routes(client, write_csv):
 
     rec1_id, rec2_id, tag_a, tag_b, configs = _two_tagged_sources(server.STORE, write_csv)
 
+    baseline = len(client.get("/api/timeline_templates").json())  # shipped KAPE defaults
+
     for source_id, cfg in configs.items():
         src = server.STORE.get_source(source_id)
         col_names = [c["name"] for c in src["columns"]]
         r = client.post("/api/timeline_templates", json={
             "col_names": col_names, "type_label": cfg["type_label"],
-            "timestamp_column": cfg["timestamp_column"], "body_columns": cfg["body_columns"],
+            "timestamp_columns": cfg["timestamp_columns"], "body_columns": cfg["body_columns"],
         })
         assert r.status_code == 200
 
     listed = client.get("/api/timeline_templates").json()
-    assert len(listed) == 2
+    assert len(listed) == baseline + 2
 
     r = client.post("/api/timeline", json={"tag_ids": []})
     assert r.status_code == 200
@@ -138,7 +142,7 @@ def test_timeline_api_routes(client, write_csv):
     assert len(rows) == 3
     assert rows[0]["body"] == "4624 | alice"  # template's body_columns applied via the API path too
 
-    del_id = listed[0]["id"]
+    del_id = next(t["id"] for t in listed if t["type_label"] == "Windows Event Log")
     r3 = client.delete(f"/api/timeline_templates/{del_id}")
     assert r3.status_code == 200
-    assert len(client.get("/api/timeline_templates").json()) == 1
+    assert len(client.get("/api/timeline_templates").json()) == baseline + 1

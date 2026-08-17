@@ -1410,9 +1410,15 @@ def api_header_nicknames_delete(nickname_id: int):
 
 
 class TimelineTemplateWrite(BaseModel):
-    col_names: list[str]
+    """A template matches by header set and/or file-name pattern (see
+    workspace.TimelineTemplates), carries N timestamp columns (N > 1 means
+    one timeline event per timestamp per tagged row) and an *ordered* body
+    column list."""
+    id: int | None = None
     type_label: str
-    timestamp_column: str | None = None
+    col_names: list[str] | None = None
+    filename_pattern: str | None = None
+    timestamp_columns: list[dict] = []
     body_columns: list[str] = []
 
 
@@ -1423,7 +1429,12 @@ def api_timeline_templates_list():
 
 @app.post("/api/timeline_templates")
 def api_timeline_templates_save(body: TimelineTemplateWrite):
-    return WS.timeline_templates.save(body.col_names, body.type_label, body.timestamp_column, body.body_columns)
+    if body.col_names is None and not (body.filename_pattern or "").strip():
+        raise HTTPException(400, "A template needs a header set, a file-name pattern, or both — otherwise it can never match")
+    return WS.timeline_templates.upsert(
+        body.id, body.type_label, body.col_names, body.filename_pattern,
+        body.timestamp_columns, body.body_columns,
+    )
 
 
 @app.delete("/api/timeline_templates/{template_id}")
@@ -1432,21 +1443,39 @@ def api_timeline_templates_delete(template_id: int):
     return {"ok": True}
 
 
+@app.get("/api/timeline_templates/export")
+def api_timeline_templates_export():
+    return JSONResponse(
+        WS.timeline_templates.export_all(),
+        headers={"Content-Disposition": 'attachment; filename="winnow-timeline-templates.json"'},
+    )
+
+
+@app.post("/api/timeline_templates/import")
+async def api_timeline_templates_import(file: UploadFile = File(...), merge: bool = Form(True)):
+    try:
+        data = json.loads(await file.read())
+    except Exception as e:
+        raise HTTPException(400, f"Not a valid templates file: {e}")
+    added = WS.timeline_templates.import_all(data, merge=merge)
+    return {"added": added}
+
+
 def _resolve_timeline_configs() -> dict[int, dict]:
-    """Matches every real source currently in the case against workspace.
-    timeline_templates by header set (order/case-independent, same
-    convention every header-set-keyed workspace store uses), returning
-    only the sources that actually matched — build_timeline already
-    supplies its own per-source defaults for anything missing here."""
-    templates = WS.timeline_templates.list()
-    by_key = {tuple(t["col_names"]): t for t in templates}
+    """Matches each real source against workspace.timeline_templates —
+    header set and/or file-name pattern, precedence and tie-breaks in
+    TimelineTemplates.find_for_source — and hands build_timeline plain
+    {source_id: {...}} dicts. Lives here, not in store.py, because
+    store.py can't import workspace.py (see pop_legacy_presets).
+    build_timeline supplies its own per-source defaults for anything
+    missing here."""
     configs: dict[int, dict] = {}
     for src in store().list_sources():
-        key = tuple(sorted(c["name"].strip().lower() for c in src["columns"]))
-        tmpl = by_key.get(key)
+        tmpl = WS.timeline_templates.find_for_source(
+            [c["name"] for c in src["columns"]], src["name"])
         if tmpl:
             configs[src["id"]] = {
-                "timestamp_column": tmpl.get("timestamp_column"),
+                "timestamp_columns": tmpl.get("timestamp_columns") or [],
                 "body_columns": tmpl.get("body_columns"),
                 "type_label": tmpl.get("type_label"),
             }
@@ -1455,13 +1484,25 @@ def _resolve_timeline_configs() -> dict[int, dict]:
 
 class TimelineBuild(BaseModel):
     tag_ids: list[int] = []
+    search: str = ""
+    sort: str = "asc"  # "asc" | "desc" over the normalized timestamp
     op_token: str | None = None
 
 
 @app.post("/api/timeline")
 def api_timeline_build(body: TimelineBuild):
     return store().build_timeline(_resolve_timeline_configs(), body.tag_ids or None,
-                                  op_token=body.op_token)
+                                  search=body.search, sort=body.sort, op_token=body.op_token)
+
+
+@app.get("/api/row")
+def api_row(source_id: int, rid: int):
+    """One source row with columns/tags/note — the timeline detail pane's
+    fetch (a timeline event carries only its derived body)."""
+    try:
+        return JSONResponse(store().get_row(source_id, rid))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
 
 
 @app.get("/api/timeline_rows")
@@ -1764,7 +1805,7 @@ def main() -> None:
         if p["error"]:
             print(f"Plugin FAILED: {p['name']} ({p['path']}): {p['error']}", file=sys.stderr)
         elif not p["enabled"]:
-            print(f"Plugin disabled: {p['name']} (toggle in Settings → Plugins)")
+            print(f"Plugin disabled: {p['name']} (toggle in Settings -> Plugins)")  # ASCII: a cp1252 Windows console can't print '→'
         else:
             # Formats *and* tabs — a tab-only plugin reporting "no formats"
             # reads like a failed load when it's a perfectly good plugin.
