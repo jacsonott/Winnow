@@ -1056,6 +1056,23 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
     rows via the one shared `wireDragReorder`, scoped by
     `currentIds: sameGroupFilterIds(...)` so a drag across header sets is
     a structural no-op rather than a rule someone has to remember.
+- **The toolbar is grid-only chrome** (`syncTabChrome`, called by every
+  `show*Tab`). Group-by strip, tag filter ribbon, row stats, timeframe,
+  filters and search all act on the *grid's* view spec, so they're hidden
+  on the SQL/Timeline/plugin tabs, which have their own controls (the
+  Timeline literally showed a second tag row above its own before this).
+  Two things make it work: `.toolbar[hidden] { display: none }` has to be
+  spelled out, because `.toolbar { display: flex }` beats the UA
+  stylesheet's `[hidden]` rule (same reason `#sidebar[hidden]` exists);
+  and hiding a grid child is only safe because every `#app` child pins its
+  own `grid-row` — under the old auto-placement this would have shifted
+  `.main-area` up a track, the exact failure documented above. The
+  keyboard half matters as much: `TAB_AGNOSTIC_ACTIONS` (settings, tables,
+  search-all) is the allowlist, and every other bound key — plus the 1-9
+  tag hotkeys — no-ops unless `S.activeTab === 'grid'`. Before that, a tag
+  hotkey pressed on the SQL pane silently tagged whatever was selected in
+  the grid behind it; with the ribbon no longer there to hint at it, that
+  would have become invisible as well as wrong.
 - The example mft_usn plugin's fixup handling encodes a real-world trap:
   extraction tools disagree about whether $MFT records arrive with NTFS's
   multi-sector fixups still stamped (KAPE/icat/RawCopy: yes; ntfscat:
