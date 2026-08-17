@@ -1203,6 +1203,49 @@ def api_view(spec: ViewSpec):
         raise HTTPException(400, str(e))
 
 
+@app.post("/api/view/sql")
+def api_view_sql(spec: ViewSpec):
+    """The spec rendered as standalone SQL for the SQL pane — same
+    400-on-analyst-fixable split as api_view."""
+    try:
+        return {"sql": store().spec_sql(spec.source_id, spec.model_dump())}
+    except (ValueError, KeyError) as e:
+        raise HTTPException(400, str(e))
+
+
+class FindTimestampReq(BaseModel):
+    view_id: str
+    value: str
+    column: str | None = None
+
+
+@app.post("/api/view/find_ts")
+def api_view_find_ts(body: FindTimestampReq):
+    try:
+        res = store().find_nearest_timestamp(body.view_id, body.value, body.column)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except KeyError as e:
+        raise HTTPException(409, str(e))  # view expired — same contract as /api/rows
+    if res is None:
+        raise HTTPException(404, "No row in this view has a usable timestamp")
+    return res
+
+
+class TagTimeBoundsReq(BaseModel):
+    source_id: int
+    tag_ids: list[int] = []
+    column: str | None = None
+
+
+@app.post("/api/tag_time_bounds")
+def api_tag_time_bounds(body: TagTimeBoundsReq):
+    try:
+        return store().tag_time_bounds(body.source_id, body.tag_ids, body.column)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+
+
 @app.delete("/api/view/{view_id}")
 def api_view_close(view_id: str):
     store().close_view(view_id)
@@ -1369,6 +1412,146 @@ def api_default_tags_get():
 @app.post("/api/settings/default_tags")
 def api_default_tags_save(body: DefaultTagsWrite):
     return WS.tags.save(body.tags)
+
+
+class AppSettingsWrite(BaseModel):
+    default_ts_format: str | None = None
+
+
+@app.get("/api/settings/app")
+def api_app_settings_get():
+    return WS.app_settings.get()
+
+
+@app.post("/api/settings/app")
+def api_app_settings_save(body: AppSettingsWrite):
+    try:
+        return WS.app_settings.save(body.model_dump(exclude_none=True))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+class CaseSettingWrite(BaseModel):
+    ts_format: str | None = None
+
+
+@app.get("/api/case_settings")
+def api_case_settings_get():
+    return store().get_case_settings()
+
+
+@app.post("/api/case_settings")
+def api_case_settings_save(body: CaseSettingWrite):
+    """A blank/absent ts_format clears the case override, so the case falls
+    back to the system-wide default rather than pinning today's value."""
+    if body.ts_format is not None and body.ts_format not in WS.AppSettings.TS_FORMATS | {""}:
+        raise HTTPException(400, f"Unknown timestamp format: {body.ts_format}")
+    store().set_case_setting("ts_format", body.ts_format)
+    return store().get_case_settings()
+
+
+# ------------------------------------------------------------ derived columns
+
+
+class DerivedCreate(BaseModel):
+    source_id: int
+    name: str
+    input_column: str
+    op_id: str
+    params: dict = {}
+
+
+class DerivedProbe(BaseModel):
+    source_id: int
+    column: str
+    op_id: str | None = None
+    params: dict = {}
+
+
+class RederiveWrite(BaseModel):
+    params: dict = {}
+
+
+@app.get("/api/derived/ops")
+def api_derived_ops():
+    return store().list_derived_ops()
+
+
+@app.get("/api/derived")
+def api_derived_list(source_id: int):
+    return store().list_derived_columns(source_id)
+
+
+@app.post("/api/derived")
+def api_derived_create(body: DerivedCreate):
+    try:
+        return store().add_derived_column(
+            body.source_id, body.name, body.input_column, body.op_id, body.params
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.delete("/api/derived/{def_id}")
+def api_derived_delete(def_id: int):
+    try:
+        store().remove_derived_column(def_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    return {"ok": True}
+
+
+@app.post("/api/derived/{def_id}/rederive")
+def api_derived_rederive(def_id: int, body: RederiveWrite):
+    try:
+        return store().rederive_column(def_id, body.params)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/derived/detect")
+def api_derived_detect(body: DerivedProbe):
+    try:
+        return store().detect_timestamp_format(body.source_id, body.column)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.get("/api/derived/suggestions")
+def api_derived_suggestions(source_id: int):
+    try:
+        return store().detect_source_suggestions(source_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/derived/preview")
+def api_derived_preview(body: DerivedProbe):
+    if not body.op_id:
+        raise HTTPException(400, "op_id is required")
+    try:
+        return store().preview_derived(body.source_id, body.column, body.op_id, body.params)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.get("/api/derived/{def_id}/unparsed_filter")
+def api_derived_unparsed_filter(def_id: int):
+    """The advanced-filter fragment for "show me the rows that didn't
+    parse" — built server-side so the UI never has to quote a column name
+    into SQL itself."""
+    try:
+        return {"sql": store().unparsed_where_fragment(def_id)}
+    except KeyError as e:
+        raise HTTPException(404, str(e))
 
 
 @app.post("/api/row_tags")

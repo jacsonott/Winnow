@@ -37,6 +37,8 @@ try:  # POSIX only — see sweep_orphan_views for why Windows needs no substitut
 except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
 
+import timeparse
+
 BATCH = 20_000
 SAMPLE_ROWS = 500
 TRIGRAM_MIN_LEN = 3  # the trigram FTS5 tokenizer can't index anything shorter — see _fts_like_pattern
@@ -155,6 +157,38 @@ CREATE TABLE IF NOT EXISTS sql_tabs (
     name TEXT NOT NULL,
     sql  TEXT NOT NULL DEFAULT '',
     pos  INTEGER NOT NULL DEFAULT 0     -- left-to-right strip order; ties break by id
+);
+-- Derived (computed) column definitions. The VALUES live in a per-source
+-- sidecar table drv_<source_id> (rid INTEGER PRIMARY KEY, one TEXT column
+-- per derived column) created lazily by add_derived_column — the
+-- row_tags/row_notes sidecar pattern, so src_<id> is never mutated
+-- (invariant #1). sources.columns stays base-only (it is the imported
+-- file's identity — merge signatures and workspace header-set keys hang
+-- off it); derived entries are merged into src["columns"] at read time.
+CREATE TABLE IF NOT EXISTS derived_columns (
+    id             INTEGER PRIMARY KEY,
+    source_id      INTEGER NOT NULL,
+    name           TEXT NOT NULL,      -- analyst-chosen; collision-checked vs base+derived
+    input_column   TEXT NOT NULL,      -- a base column name
+    op_id          TEXT NOT NULL,      -- timeparse.OPERATIONS key
+    params         TEXT NOT NULL DEFAULT '{}',
+    status         TEXT NOT NULL DEFAULT 'building',  -- building | ready | partial | error
+    parse_failures INTEGER,            -- non-empty inputs that produced NULL; set at backfill end
+    created_at     TEXT
+);
+-- No index on source_id on purpose: this table holds one row per derived
+-- column in the whole case (tens at the very most), so a scan is one page
+-- either way, and at the 64KB page size _tune sets, an index would cost
+-- more file than it could ever save. The lookup IS on a hot path
+-- (_source_lite_on, once per page fetch) — it's just a hot path over a
+-- table that fits in a single page.
+-- Per-case settings (first key: ts_format, the case-level datetime display
+-- default). In the case file, not workspace/, because "how this case's
+-- timestamps read" should travel with the case when it's handed to
+-- another analyst — same reasoning as sql_tabs.
+CREATE TABLE IF NOT EXISTS case_settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 """
 
@@ -993,8 +1027,11 @@ class Store:
                         if sid == source_id and t.is_alive()}
         out = []
         for c in src["columns"]:
-            name = self._column_index_name(table, c["name"])
-            sort_name = self._column_index_name(table, c["name"], "sort")
+            # A derived column's indexes live on the drv_<id> sidecar, where
+            # its values are — see _index_table_for.
+            ctable = self._index_table_for(src, c["name"], table)
+            name = self._column_index_name(ctable, c["name"])
+            sort_name = self._column_index_name(ctable, c["name"], "sort")
             if name in existing or sort_name in existing:
                 out.append({"column": c["name"], "index_name": name if name in existing else sort_name, "building": False})
             elif c["name"] in building:
@@ -1015,7 +1052,7 @@ class Store:
             raise KeyError(column)
         with self.lock, self.db:
             for purpose in ("filter", "sort"):
-                name = self._column_index_name(src["table_name"], column, purpose)
+                name = self._column_index_name(self._index_table_for(src, column), column, purpose)
                 self.db.execute(f"DROP INDEX IF EXISTS {q(name)}")
 
     # Slack VACUUM needs beyond a full second copy of the file, for the
@@ -2085,8 +2122,15 @@ class Store:
         pair: bytes for CSV — a percentage without pre-scanning the file —
         records for JSON, rows for SQLite). Cancellation is cooperative per
         BATCH; a cancelled ingest *drops* its partial source (see
-        ingest_csv)."""
-        if kind not in ("csv", "json", "sqlite"):
+        ingest_csv).
+
+        'derive' is the odd one out: no file at all (`path` is ''), it
+        backfills one derived column's values from a column already in the
+        case. It rides this machinery rather than growing a second job
+        system because it wants exactly what this one provides — a progress
+        bar over a multi-million-row pass, per-BATCH cancellation, the jobs
+        panel, and close()'s cancel-and-join."""
+        if kind not in ("csv", "json", "sqlite", "derive"):
             raise ValueError(f"Unknown ingest kind: {kind}")
         try:
             size = os.path.getsize(path)
@@ -2102,7 +2146,7 @@ class Store:
                 "status": "queued",
                 "rows_done": 0,
                 "units_done": 0,
-                "units_total": size if kind == "csv" else 0,
+                "units_total": size if kind == "csv" else ((options or {}).get("units_total") or 0),
                 "unit": "bytes" if kind == "csv" else ("records" if kind == "json" else "rows"),
                 "tables_done": 0,
                 "tables_total": len((options or {}).get("tables") or []) if kind == "sqlite" else 0,
@@ -2153,6 +2197,17 @@ class Store:
                     has_header=opts.get("has_header", True), column_types=opts.get("column_types"),
                     progress=progress, cancel=cancel,
                 )]
+            elif job["kind"] == "derive":
+                res = self.backfill_derived_column(
+                    opts["def_id"], progress=progress, cancel=cancel,
+                    drop_on_cancel=opts.get("drop_on_cancel", False),
+                )
+                with self._ingest_jobs_lock:
+                    job["status"] = "done"
+                    job["rows_done"] = res["rows"]
+                    job["source_ids"] = [res["source_id"]]
+                    job["result"] = [res]
+                return
             elif job["kind"] == "json":
                 results = [self.ingest_json(
                     job["path"], name=job["name"],
@@ -2307,7 +2362,12 @@ class Store:
         go in, and under detail=none query cost is dominated by verifying
         candidates against the content view, not by walking segments."""
         src = self._source_lite(source_id)
-        table, cols = src["table_name"], [c["name"] for c in src["columns"]]
+        # Base columns only. A derived column is computed from a column
+        # that's already in the doc blob, so indexing it would only make
+        # the same evidence match twice — and keeping the doc view over the
+        # source table alone means the index needs no rebuild when a
+        # derived column is added or removed.
+        table, cols = src["table_name"], [c["name"] for c in self._base_cols(src)]
         fts = f"fts_{source_id}"
         doc_view = f"{table}_doc"
         with self.lock, self.db:
@@ -2368,9 +2428,18 @@ class Store:
             open_ids = {r[0] for r in self.db.execute("SELECT source_id FROM open_tabs")}
             tagged = dict(self.db.execute("SELECT source_id, COUNT(DISTINCT rid) FROM row_tags GROUP BY source_id"))
             notes = dict(self.db.execute("SELECT source_id, COUNT(*) FROM row_notes GROUP BY source_id"))
+            derived = self.db.execute(
+                "SELECT * FROM derived_columns ORDER BY source_id, id"
+            ).fetchall()
+        by_src: dict[int, list] = {}
+        for r in derived:
+            by_src.setdefault(r["source_id"], []).append(r)
         out = []
         for r in rows:
             d = self._src_dict(r)
+            for dr in by_src.get(d["id"], []):
+                d["columns"].append(self._derived_col_entry(dr))
+                d["has_derived"] = True
             d["is_open"] = d["id"] in open_ids
             d["tagged_row_count"] = tagged.get(d["id"], 0)
             d["note_count"] = notes.get(d["id"], 0)
@@ -2407,7 +2476,13 @@ class Store:
                 raise KeyError(f"No source {source_id}")
             tagged = self.db.execute("SELECT COUNT(DISTINCT rid) FROM row_tags WHERE source_id=?", (source_id,)).fetchone()[0]
             note_count = self.db.execute("SELECT COUNT(*) FROM row_notes WHERE source_id=?", (source_id,)).fetchone()[0]
+            derived = self.db.execute(
+                "SELECT * FROM derived_columns WHERE source_id=? ORDER BY id", (source_id,)
+            ).fetchall()
         d = self._src_dict(row)
+        for dr in derived:
+            d["columns"].append(self._derived_col_entry(dr))
+            d["has_derived"] = True
         d.update(self._tab_meta(source_id))
         d["tagged_row_count"] = tagged
         d["note_count"] = note_count
@@ -2419,6 +2494,25 @@ class Store:
         d = dict(row)
         d["columns"] = json.loads(d["columns"])
         return d
+
+    @staticmethod
+    def _derived_col_entry(r: sqlite3.Row) -> dict:
+        """A derived_columns row -> the column-list entry merged into
+        src["columns"]. Carries everything the UI needs to mark, manage and
+        type the column; the `derived` flag is what the handful of
+        base-only sites (_base_cols) filter on."""
+        op = timeparse.OPERATIONS.get(r["op_id"]) or {}
+        return {
+            "name": r["name"],
+            "type": op.get("value_type", "datetime"),
+            "derived": True,
+            "derived_id": r["id"],
+            "derived_from": r["input_column"],
+            "derived_op": r["op_id"],
+            "derived_kind": op.get("derived_kind", "datetime"),
+            "derived_status": r["status"],
+            "parse_failures": r["parse_failures"],
+        }
 
     def _source_lite(self, source_id: int) -> dict:
         """Cheap source metadata for internal hot paths: just the sources
@@ -2454,7 +2548,12 @@ class Store:
                 "path": None,
                 "table_name": None,
                 "row_count": sum(m["row_count"] for m in members),
-                "columns": members[0]["columns"],  # canonical — lowest-id (first-created) member
+                # canonical — lowest-id (first-created) member. Base columns
+                # only: derived columns aren't available on merges in v1
+                # (each member has its own drv_ table and its own set of
+                # definitions; a UNION ALL over mismatched sets would need
+                # per-member NULL-padding nothing here does yet).
+                "columns": [c for c in members[0]["columns"] if not c.get("derived")],
                 "file_hash": None,
                 "imported_at": row["created_at"],
                 "has_fts": 1 if all(m["has_fts"] for m in members) else 0,
@@ -2464,7 +2563,13 @@ class Store:
         row = conn.execute("SELECT * FROM sources WHERE id=?", (source_id,)).fetchone()
         if not row:
             raise KeyError(f"No source {source_id}")
-        return self._src_dict(row)
+        d = self._src_dict(row)
+        for dr in conn.execute(
+            "SELECT * FROM derived_columns WHERE source_id=? ORDER BY id", (source_id,)
+        ):
+            d["columns"].append(self._derived_col_entry(dr))
+            d["has_derived"] = True
+        return d
 
     def _merge_row(self, merge_id: int) -> sqlite3.Row:
         with self.lock:
@@ -2487,7 +2592,9 @@ class Store:
             "path": None,
             "table_name": None,
             "row_count": sum(m["row_count"] for m in members),
-            "columns": members[0]["columns"],  # canonical — lowest-id (first-created) member
+            # canonical — lowest-id (first-created) member; base columns only
+            # (derived columns aren't available on merges, see _source_lite_on)
+            "columns": [c for c in members[0]["columns"] if not c.get("derived")],
             "file_hash": None,
             "imported_at": row["created_at"],
             "has_fts": 1 if all(m["has_fts"] for m in members) else 0,
@@ -2525,7 +2632,9 @@ class Store:
         if len(source_ids) < 2:
             raise ValueError("A merge needs at least 2 sources")
         sources = [self.get_source(sid) for sid in source_ids]
-        sigs = {column_signature([c["name"] for c in s["columns"]]) for s in sources}
+        # Base columns only: adding a derived column to one member must not
+        # change whether two files of the same format can merge.
+        sigs = {column_signature([c["name"] for c in s["columns"] if not c.get("derived")]) for s in sources}
         if len(sigs) > 1:
             raise ValueError("Selected sources don't have matching columns")
         with self.lock, self.db:
@@ -2571,7 +2680,420 @@ class Store:
             self.db.execute("DELETE FROM saved_views WHERE source_id=?", (source_id,))
             self.db.execute("DELETE FROM open_tabs WHERE source_id=?", (source_id,))
             self.db.execute("DELETE FROM sources WHERE id=?", (source_id,))
+            self.db.execute(f"DROP TABLE IF EXISTS {q(self._derived_table(source_id))}")
+            self.db.execute("DELETE FROM derived_columns WHERE source_id=?", (source_id,))
         self._maxlen_cache.pop(source_id, None)
+
+    # -------------------------------------------------------- derived columns
+
+    @staticmethod
+    def _derived_table(source_id: int) -> str:
+        return f"drv_{source_id}"
+
+    @staticmethod
+    def _base_cols(src: dict) -> list[dict]:
+        """The source's own columns, as imported. Used by everything that
+        must see the *evidence file's* shape rather than the analyst's
+        additions: the FTS doc view and its LIKE-fallback twin (a derived
+        value is computed from data that's already searchable), merge
+        eligibility, and the session file's column list."""
+        return [c for c in src["columns"] if not c.get("derived")]
+
+    def _from_clause(self, src: dict, alias: str | None = None) -> str:
+        """FROM-clause text for reading a source's rows: the source table
+        alone, or LEFT JOIN'd to its derived-value sidecar.
+
+        `USING(rid)` rather than `ON a.rid = b.rid` so an unqualified `rid`
+        stays legal on both sides (every read path selects it that way).
+        drv_<id> has rid as its INTEGER PRIMARY KEY, so the join matches at
+        most one row and can never change the row count or their order —
+        which is what keeps _fetch_virtual_root_rows' `pos = rid - 1`
+        exact (invariant #2). A source with no derived columns compiles
+        byte-identical SQL to before this feature existed."""
+        t = q(src["table_name"])
+        if alias:
+            t = f"{t} {alias}"
+        if not any(c.get("derived") for c in src["columns"]):
+            return t
+        return f"{t} LEFT JOIN {q(self._derived_table(src['id']))} USING(rid)"
+
+    def _col_ref(self, src: dict, column: str, alias: str | None = None,
+                 derived_alias: str | None = None) -> str:
+        """SQL reference to one of a source's columns. Base columns take the
+        caller's table alias (`s."Time"`); a derived column lives in the
+        joined sidecar instead, so it's referenced bare under _from_clause's
+        USING(rid) shape, or by `derived_alias` in the chained-join shapes
+        (group_summary's view join) that can't use USING. Unambiguous either
+        way because add_derived_column refuses a name that collides with a
+        base column, case-insensitively — how SQLite resolves quoted
+        identifiers."""
+        for c in src["columns"]:
+            if c.get("derived") and c["name"].lower() == column.lower():
+                return f"{derived_alias}.{q(column)}" if derived_alias else q(column)
+        return f"{alias}.{q(column)}" if alias else q(column)
+
+    def _is_derived(self, src: dict, column: str) -> bool:
+        return any(c.get("derived") and c["name"].lower() == str(column).lower()
+                   for c in src["columns"])
+
+    def _member_from(self, src: dict, m: dict, alias: str | None = None) -> str:
+        """FROM text for one member table of a (possibly merged) view. Only
+        a non-merge source can carry derived columns, so only its own member
+        ever picks up the sidecar join."""
+        if not src.get("is_merge") and m["source_id"] == src["id"]:
+            return self._from_clause(src, alias)
+        t = q(m["table_name"])
+        return f"{t} {alias}" if alias else t
+
+    def _derived_join(self, src: dict, on_alias: str, alias: str = "d") -> str:
+        """`LEFT JOIN drv_<id> d ON d.rid = <on_alias>.rid`, for the query
+        shapes that already chain a JOIN ... ON (group_summary's view join)
+        and so can't use _from_clause's USING(rid) form — an ON clause after
+        a USING join would bind to the wrong join."""
+        if src.get("is_merge") or not any(c.get("derived") for c in src["columns"]):
+            return ""
+        return f" LEFT JOIN {q(self._derived_table(src['id']))} {alias} ON {alias}.rid = {on_alias}.rid"
+
+    @staticmethod
+    def _derived_dict(row: sqlite3.Row) -> dict:
+        d = dict(row)
+        d["params"] = json.loads(d["params"] or "{}")
+        return d
+
+    def list_derived_ops(self) -> list[dict]:
+        """The parsing operations the UI offers, straight from the
+        timeparse registry (id/label/description/param schema)."""
+        return timeparse.list_ops()
+
+    def list_derived_columns(self, source_id: int) -> list[dict]:
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT * FROM derived_columns WHERE source_id=? ORDER BY id", (source_id,)
+            ).fetchall()
+        return [self._derived_dict(r) for r in rows]
+
+    def get_derived_column(self, def_id: int) -> dict:
+        with self.lock:
+            row = self.db.execute("SELECT * FROM derived_columns WHERE id=?", (def_id,)).fetchone()
+        if not row:
+            raise KeyError(f"No derived column {def_id}")
+        return self._derived_dict(row)
+
+    def _find_column(self, src: dict, name: str) -> dict | None:
+        for c in src["columns"]:
+            if c["name"].lower() == str(name).lower():
+                return c
+        return None
+
+    def add_derived_column(self, source_id: int, name: str, input_column: str,
+                           op_id: str, params: dict | None = None) -> dict:
+        """Define a derived column and kick off its backfill job.
+
+        The values are materialised into the drv_<source_id> sidecar rather
+        than computed per query: they have to be sortable, filterable,
+        groupable and exportable, all of which are server-side SQL over a
+        column that either exists or doesn't. The source table itself is
+        never touched (invariant #1)."""
+        if source_id < 0:
+            raise ValueError("Derived columns aren't supported on merged tables")
+        op = timeparse.OPERATIONS.get(op_id)
+        if op is None:
+            raise ValueError(f"Unknown operation: {op_id}")
+        params = timeparse.validate_params(op_id, params)
+        src = self._source_lite(source_id)
+
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("The new column needs a name")
+        if len(name) > 200:
+            raise ValueError("Column name is too long")
+        if name.lower() in RESERVED_COLUMN_NAMES:
+            raise ValueError(f"{name!r} is a reserved column name")
+        if self._find_column(src, name):
+            raise ValueError(f"This table already has a column called {name!r}")
+
+        # Inputs: a parse operation reads one of the file's own columns; a
+        # two-input operation (duration) can also read an already-built
+        # derived datetime column, so deltas can chain off parsed values.
+        def _check_input(col: str, label: str) -> dict:
+            entry = self._find_column(src, col)
+            if entry is None:
+                raise ValueError(f"No column called {col!r} to use as the {label}")
+            if entry.get("derived"):
+                if not op["two_input"]:
+                    raise ValueError(f"{col!r} is itself a derived column — parse the original column instead")
+                if entry.get("derived_status") != "ready":
+                    raise ValueError(f"{col!r} is still building — wait for it to finish first")
+            return entry
+
+        _check_input(input_column, "input column")
+        if op["two_input"]:
+            _check_input(params["other_column"], "second column")
+
+        drv = self._derived_table(source_id)
+        with self.lock, self.db:
+            self.db.execute(f"CREATE TABLE IF NOT EXISTS {q(drv)} (rid INTEGER PRIMARY KEY)")
+            existing = {r[1].lower() for r in self.db.execute(f"PRAGMA table_info({q(drv)})")}
+            if name.lower() in existing:
+                # An orphan physical column left behind by a remove on a
+                # SQLite too old for DROP COLUMN (< 3.35). Definitions drive
+                # visibility, so it was invisible; reuse it, blanked.
+                self.db.execute(f"UPDATE {q(drv)} SET {q(name)}=NULL")
+            else:
+                self.db.execute(f"ALTER TABLE {q(drv)} ADD COLUMN {q(name)} TEXT")
+            cur = self.db.execute(
+                "INSERT INTO derived_columns(source_id, name, input_column, op_id, params, status, created_at) "
+                "VALUES (?,?,?,?,?,'building',?)",
+                (source_id, name, input_column, op_id, json.dumps(params),
+                 time.strftime("%Y-%m-%dT%H:%M:%S")),
+            )
+            def_id = cur.lastrowid
+        job = self.start_ingest_job(
+            "derive", "", name=name,
+            options={"def_id": def_id, "drop_on_cancel": True, "units_total": src["row_count"]},
+        )
+        return {"definition": self.get_derived_column(def_id), "job_id": job["job_id"]}
+
+    def remove_derived_column(self, def_id: int) -> None:
+        d = self.get_derived_column(def_id)
+        with self.lock:
+            others = self.db.execute(
+                "SELECT * FROM derived_columns WHERE source_id=? AND id<>?",
+                (d["source_id"], def_id),
+            ).fetchall()
+        for o in others:
+            o_params = json.loads(o["params"] or "{}")
+            if (o["input_column"].lower() == d["name"].lower()
+                    or str(o_params.get("other_column", "")).lower() == d["name"].lower()):
+                raise ValueError(f"{o['name']!r} is computed from this column — remove that one first")
+        drv = self._derived_table(d["source_id"])
+        with self.lock, self.db:
+            self.db.execute("DELETE FROM derived_columns WHERE id=?", (def_id,))
+            try:
+                self.db.execute(f"ALTER TABLE {q(drv)} DROP COLUMN {q(d['name'])}")
+            except sqlite3.OperationalError:
+                # SQLite < 3.35 has no DROP COLUMN. The definition is gone,
+                # so the column is invisible everywhere; add_derived_column
+                # reuses the orphan if the same name comes back.
+                pass
+
+    def rederive_column(self, def_id: int, params: dict | None = None) -> dict:
+        """Recompute a derived column in place — the path for "I set the
+        wrong syslog year" or "these were local time, not UTC"."""
+        d = self.get_derived_column(def_id)
+        new_params = timeparse.validate_params(d["op_id"], params if params is not None else d["params"])
+        with self.lock, self.db:
+            self.db.execute(
+                "UPDATE derived_columns SET params=?, status='building', parse_failures=NULL WHERE id=?",
+                (json.dumps(new_params), def_id),
+            )
+        src = self._source_lite(d["source_id"])
+        job = self.start_ingest_job(
+            "derive", "", name=d["name"],
+            options={"def_id": def_id, "drop_on_cancel": False, "units_total": src["row_count"]},
+        )
+        return {"definition": self.get_derived_column(def_id), "job_id": job["job_id"]}
+
+    def backfill_derived_column(self, def_id: int, progress=None, cancel=None,
+                                drop_on_cancel: bool = False) -> dict:
+        """Compute every row's value for one derived column.
+
+        Batched exactly like ingest_csv/build_fts: read a BATCH-sized window
+        on a pooled reader (committed data — the source table hasn't changed
+        since ingest, invariant #1), parse in Python, then take the writer
+        lock for just that batch's upsert (invariant #4). Rows are walked in
+        rid order because the stateful operations need it — BSD syslog's
+        year rollover is decided by comparing each line's month against the
+        previous line's, so the order rows are parsed in is part of the
+        answer, not an implementation detail."""
+        d = self.get_derived_column(def_id)
+        source_id = d["source_id"]
+        src = self._source_lite(source_id)
+        op = timeparse.OPERATIONS[d["op_id"]]
+        params, name = d["params"], d["name"]
+        drv = self._derived_table(source_id)
+        frm = self._from_clause(src)
+        two = op["two_input"]
+        if two:
+            sel = f"{self._col_ref(src, d['input_column'])}, {self._col_ref(src, params['other_column'])}"
+        else:
+            sel = self._col_ref(src, d["input_column"])
+        upsert = (f"INSERT INTO {q(drv)}(rid, {q(name)}) VALUES(?,?) "
+                  f"ON CONFLICT(rid) DO UPDATE SET {q(name)}=excluded.{q(name)}")
+
+        state: dict = {}
+        rows_done, last_rid = 0, 0
+        total = src["row_count"]
+        try:
+            while True:
+                with self._reader() as ro:
+                    rows = ro.execute(
+                        f"SELECT rid, {sel} FROM {frm} WHERE rid > ? ORDER BY rid LIMIT {BATCH}",
+                        (last_rid,),
+                    ).fetchall()
+                if not rows:
+                    break
+                vals = []
+                for r in rows:
+                    t = tuple(r)
+                    if two:
+                        out = op["parse_pair"](t[1], t[2], params)
+                    else:
+                        out = op["parse"](t[1], params, state)
+                    vals.append((t[0], out))
+                last_rid = vals[-1][0]
+                with self.lock, self.db:
+                    if cancel and cancel():
+                        raise IngestCancelled("cancelled during derive")
+                    self.db.executemany(upsert, vals)
+                rows_done += len(vals)
+                if progress:
+                    progress(rows_done, rows_done, total)
+                time.sleep(0.02)  # same anti-starvation yield build_fts uses
+        except IngestCancelled:
+            if drop_on_cancel:
+                # Mirror of cancel-drops-the-partial-source: the analyst
+                # asked for this column not to exist, and a half-filled one
+                # looks exactly like a complete one in the grid.
+                self.remove_derived_column(def_id)
+            else:
+                with self.lock, self.db:
+                    self.db.execute("UPDATE derived_columns SET status='partial' WHERE id=?", (def_id,))
+            raise
+
+        failures = self._count_parse_failures(src, d)
+        with self.lock, self.db:
+            self.db.execute(
+                "UPDATE derived_columns SET status='ready', parse_failures=? WHERE id=?",
+                (failures, def_id),
+            )
+        return {"def_id": def_id, "source_id": source_id, "name": name,
+                "rows": rows_done, "parse_failures": failures}
+
+    def _count_parse_failures(self, src: dict, d: dict) -> int:
+        """Rows whose input had something in it but produced no datetime —
+        the number the analyst needs to decide whether they picked the wrong
+        format. An empty input cell isn't a failure, it's an empty cell."""
+        drv = self._derived_table(d["source_id"])
+        inp = self._col_ref(src, d["input_column"], "s")
+        with self._reader() as ro:
+            return ro.execute(
+                f"SELECT COUNT(*) FROM {self._from_clause(src, 's')} "
+                f"WHERE {inp} IS NOT NULL AND {inp} <> '' AND {q(drv)}.{q(d['name'])} IS NULL"
+            ).fetchone()[0]
+
+    def unparsed_where_fragment(self, def_id: int) -> str:
+        """An advanced-filter fragment selecting exactly the rows that
+        failed to parse, so "12 failures" is one click from "show me
+        which 12". Built here rather than in the frontend because it has
+        to quote two analyst-named columns into SQL (invariant #5)."""
+        d = self.get_derived_column(def_id)
+        return f"{q(d['name'])} IS NULL AND {q(d['input_column'])} <> ''"
+
+    DETECT_SAMPLE = 200
+
+    def _sample_column(self, src: dict, column: str, limit: int | None = None) -> list:
+        with self._reader() as ro:
+            return [r[0] for r in ro.execute(
+                f"SELECT {self._col_ref(src, column)} FROM {self._from_clause(src)} "
+                f"WHERE {self._col_ref(src, column)} IS NOT NULL "
+                f"AND {self._col_ref(src, column)} <> '' LIMIT ?",
+                (limit or self.DETECT_SAMPLE,),
+            )]
+
+    def detect_timestamp_format(self, source_id: int, column: str) -> list[dict]:
+        """Which operations can read this column, best first. Same
+        sample-and-round-trip shape preview_sqlite_tables uses to pre-check
+        likely WebKit columns: try every parser against real values and
+        rank by how many it reads. Ambiguous numeric ranges (Mac absolute
+        vs unix seconds) legitimately return several — the caller's preview
+        of actual converted values is what settles it."""
+        src = self._source_lite(source_id)
+        if self._find_column(src, column) is None:
+            raise KeyError(column)
+        samples = self._sample_column(src, column)
+        out = []
+        for r in timeparse.detect(samples):
+            out.append({**r, "preview": self._preview_rows(samples[:10], r["op_id"], r["params"])})
+        return out
+
+    def detect_source_suggestions(self, source_id: int, min_confidence: float = 0.9) -> list[dict]:
+        """Columns that look like timestamps the app can't already read —
+        the basis for the post-import "this looks like a Unix epoch, want a
+        datetime column?" hint. Columns already typed `datetime` at ingest
+        are skipped: those already sort and filter correctly, so converting
+        them would just duplicate data."""
+        src = self._source_lite(source_id)
+        # Nothing to suggest for a column the analyst has already converted.
+        converted = {d["input_column"].lower() for d in self.list_derived_columns(source_id)}
+        out = []
+        for c in self._base_cols(src):
+            if c["type"] == "datetime" or c["name"].lower() in converted:
+                continue
+            samples = self._sample_column(src, c["name"])
+            if not samples:
+                continue
+            ranked = timeparse.detect(samples)
+            if ranked and ranked[0]["confidence"] >= min_confidence:
+                best = ranked[0]
+                out.append({
+                    "column": c["name"], "op_id": best["op_id"], "label": best["label"],
+                    "confidence": best["confidence"], "params": best["params"],
+                    "preview": self._preview_rows(samples[:5], best["op_id"], best["params"]),
+                })
+        return out
+
+    def _preview_rows(self, values: list, op_id: str, params: dict) -> list[dict]:
+        op = timeparse.OPERATIONS[op_id]
+        state: dict = {}
+        return [{"input": v, "output": op["parse"](v, params, state)} for v in values]
+
+    def preview_derived(self, source_id: int, column: str, op_id: str,
+                        params: dict | None = None, limit: int = 10) -> dict:
+        """A handful of real input→output pairs plus how many of the
+        sampled values this operation can't read, so the analyst sees what
+        they're about to create before committing to a full backfill."""
+        op = timeparse.OPERATIONS.get(op_id)
+        if op is None:
+            raise ValueError(f"Unknown operation: {op_id}")
+        params = timeparse.validate_params(op_id, params)
+        src = self._source_lite(source_id)
+        if self._find_column(src, column) is None:
+            raise KeyError(column)
+        if op["two_input"]:
+            other = params["other_column"]
+            if self._find_column(src, other) is None:
+                raise KeyError(other)
+            with self._reader() as ro:
+                rows = ro.execute(
+                    f"SELECT {self._col_ref(src, column)}, {self._col_ref(src, other)} "
+                    f"FROM {self._from_clause(src)} LIMIT ?", (limit,),
+                ).fetchall()
+            preview = [{"input": r[0], "output": op["parse_pair"](r[0], r[1], params)} for r in rows]
+            failures = sum(1 for p in preview if p["output"] is None)
+            return {"preview": preview, "sampled": len(preview), "failures": failures}
+        samples = self._sample_column(src, column)
+        preview = self._preview_rows(samples[:limit], op_id, params)
+        state: dict = {}
+        failures = sum(1 for v in samples if op["parse"](v, params, state) is None)
+        return {"preview": preview, "sampled": len(samples), "failures": failures}
+
+    # ------------------------------------------------------------ case settings
+
+    def get_case_settings(self) -> dict:
+        with self.lock:
+            return {r["key"]: r["value"] for r in self.db.execute("SELECT key, value FROM case_settings")}
+
+    def set_case_setting(self, key: str, value: str | None) -> None:
+        with self.lock, self.db:
+            if value is None or value == "":
+                self.db.execute("DELETE FROM case_settings WHERE key=?", (key,))
+            else:
+                self.db.execute(
+                    "INSERT INTO case_settings(key, value) VALUES (?,?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (key, str(value)),
+                )
 
     # ------------------------------------------------------------------- views
 
@@ -2631,15 +3153,21 @@ class Store:
         else:
             table = src["table_name"]
             where, params = self._compile_where(source_id, src, spec, colnames)
+            derived_names = {c["name"] for c in src["columns"] if c.get("derived")}
             for col in sort_cols:
-                self._ensure_sort_index_building(source_id, col, table)
+                # A derived column's values live in the sidecar, so its sort
+                # index belongs on that table, not on src_<id>.
+                self._ensure_sort_index_building(
+                    source_id, col,
+                    self._derived_table(source_id) if col in derived_names else table,
+                )
             if not where and not has_sort:
                 return self._build_virtual_root_view(source_id, src)
             self._view_seq += 1
             vid = f"view_{self._view_seq}"
             sql = (
                 f"INSERT INTO v.{q(vid)}(source_id, rid) "
-                f"SELECT {int(source_id)}, rid FROM {q(table)}"
+                f"SELECT {int(source_id)}, rid FROM {self._from_clause(src)}"
                 + (f" WHERE {where}" if where else "")
                 + f" {order}"
             )
@@ -2802,20 +3330,29 @@ class Store:
             ts_col = cfg.get("timestamp_column")
             if ts_col not in col_names:
                 ts_col = dt_cols[0] if dt_cols else None
-            ts_expr = f"TS_NORMALIZE(s.{q(ts_col)})" if ts_col else "NULL"
+            # A derived column is already canonical "YYYY-MM-DD HH:MM:SS",
+            # so it's used as-is: TS_NORMALIZE would only truncate the
+            # sub-second part that makes two same-second events sort in the
+            # order they happened. Everything else still normalises, which
+            # is what lets sources in different formats interleave.
+            ts_expr = "NULL"
+            if ts_col:
+                ref = self._col_ref(src, ts_col, "s")
+                ts_expr = ref if self._is_derived(src, ts_col) else f"TS_NORMALIZE({ref})"
 
             body_cols = [c for c in (cfg.get("body_columns") or []) if c in col_names]
             if not body_cols:
                 body_cols = [c["name"] for c in src["columns"]]
-            body_expr = " || ' | ' || ".join(f"COALESCE(s.{q(c)}, '')" for c in body_cols)
+            body_expr = " || ' | ' || ".join(
+                f"COALESCE({self._col_ref(src, c, 's')}, '')" for c in body_cols
+            )
 
             type_label = cfg.get("type_label") or src["name"]
-            table = src["table_name"]
             branches.append(
                 f"SELECT {int(source_id)} AS source_id, s.rid AS rid, {ts_expr} AS ts, ({body_expr}) AS body, "
                 f"? AS type_label, ? AS source_name, "
                 f"(SELECT GROUP_CONCAT(tag_id) FROM row_tags WHERE source_id={int(source_id)} AND rid=s.rid) AS tag_ids "
-                f"FROM {q(table)} s "
+                f"FROM {self._from_clause(src, 's')} "
                 f"WHERE s.rid IN (SELECT rid FROM row_tags WHERE source_id={int(source_id)}{tag_clause})"
             )
             params.append(type_label)
@@ -2892,14 +3429,19 @@ class Store:
             return f"{expr} IS ?", [None]
         return f"{expr} = ?", [value]
 
-    def _path_where(self, path: list[dict] | None, colnames: dict, alias: str = "") -> tuple[list[str], list]:
+    def _path_where(self, path: list[dict] | None, colnames: dict, alias: str = "",
+                    src: dict | None = None, derived_alias: str | None = None) -> tuple[list[str], list]:
         """Compile a group-by path (the outer levels' already-fixed values,
         for nested multi-column grouping) into per-column condition
         fragments. `alias` (e.g. "s"), when given, is baked into the
         identifier _eq_condition builds on — NOT prefixed onto the
         returned fragment by the caller afterward, since a datetime
         column's fragment starts with DAY_BUCKET(...) and "s.DAY_BUCKET(...)"
-        isn't valid SQL the way "s.\"col\"" is."""
+        isn't valid SQL the way "s.\"col\"" is.
+
+        `src` routes each column through _col_ref, so a level grouped on a
+        derived column resolves against the sidecar rather than taking the
+        source table's alias (which would be "no such column")."""
         prefix = f"{alias}." if alias else ""
         clauses: list[str] = []
         params: list[Any] = []
@@ -2907,7 +3449,9 @@ class Store:
             col = p.get("column")
             if col not in colnames:
                 raise KeyError(col)
-            c, v = self._eq_condition(f"{prefix}{q(col)}", p.get("value"), colnames[col] == "datetime")
+            ident = (self._col_ref(src, col, alias or None, derived_alias) if src is not None
+                     else f"{prefix}{q(col)}")
+            c, v = self._eq_condition(ident, p.get("value"), colnames[col] == "datetime")
             clauses.append(c)
             params.extend(v)
         return clauses, params
@@ -2990,10 +3534,18 @@ class Store:
         if column not in colnames:
             raise KeyError(column)
         is_datetime = colnames[column] == "datetime"
-        path_clauses, path_params = self._path_where(path, colnames, alias="s")
-        extra_where = "".join(f" AND {c}" for c in path_clauses)
 
-        val_expr = f"DAY_BUCKET(s.{q(column)})" if is_datetime else f"s.{q(column)}"
+        # The two branches below reach the derived sidecar differently — the
+        # direct shape joins it with USING(rid) (bare column refs), the view
+        # shape chains a second ON join (refs go through the `d` alias) — so
+        # the value expression and the path conditions are built per branch.
+        def _refs(derived_alias: str | None):
+            ref = self._col_ref(src, column, "s", derived_alias)
+            val = f"DAY_BUCKET({ref})" if is_datetime else ref
+            clauses, p = self._path_where(path, colnames, "s", src, derived_alias)
+            return val, clauses, p
+
+        path_clauses, path_params = self._path_where(path, colnames, "s", src)
         whole_source = not path_clauses and self._grouping_covers_whole_source(handle, src)
         # A root_virtual view has no v.view_N to join at all (it was never
         # materialised — see _build_virtual_root_view), path or no path, so
@@ -3010,15 +3562,23 @@ class Store:
             # before this had to also cover root_virtual.
             if whole_source and not is_datetime:
                 for m in members:
-                    self._ensure_column_index_building(m["source_id"], column, m["table_name"])
+                    self._ensure_column_index_building(
+                        m["source_id"], column, self._index_table_for(src, column, m["table_name"])
+                    )
+            val_expr, path_clauses, path_params = _refs(None)
+            extra_where = "".join(f" AND {c}" for c in path_clauses)
             branches = [
-                f"SELECT {val_expr} AS val, count(*) AS n FROM {q(m['table_name'])} s WHERE 1=1{extra_where} GROUP BY 1"
+                f"SELECT {val_expr} AS val, count(*) AS n FROM {self._member_from(src, m, 's')} "
+                f"WHERE 1=1{extra_where} GROUP BY 1"
                 for m in members
             ]
         else:
+            val_expr, path_clauses, path_params = _refs("d")
+            extra_where = "".join(f" AND {c}" for c in path_clauses)
             branches = [
                 f"SELECT {val_expr} AS val, count(*) AS n FROM v.{q(view_id)} vv "
-                f"JOIN {q(m['table_name'])} s ON s.rid = vv.rid AND vv.source_id = {int(m['source_id'])} "
+                f"JOIN {q(m['table_name'])} s ON s.rid = vv.rid AND vv.source_id = {int(m['source_id'])}"
+                f"{self._derived_join(src, 's')} "
                 f"WHERE 1=1{extra_where} GROUP BY 1"
                 for m in members
             ]
@@ -3067,24 +3627,30 @@ class Store:
             raise KeyError(column)
 
         members = self._resolve_members(root["source_id"])
-        col_ident = f"s.{q(column)}"
-        cond_sql, cond_val = self._eq_condition(col_ident, value, colnames[column] == "datetime")
-        path_clauses, path_params = self._path_where(path, colnames, alias="s")
-        extra_where = "".join(f" AND {c}" for c in path_clauses)
         is_root_virtual = root.get("kind") == "root_virtual"
+        # Same split group_summary makes: the direct-against-the-table shape
+        # picks the derived sidecar up through _from_clause's USING(rid)
+        # (bare refs), the view-join shape chains a second ON join and
+        # refers to it by alias.
+        d_alias = None if is_root_virtual else "d"
+        djoin = "" if is_root_virtual else self._derived_join(src, "s")
+        col_ident = self._col_ref(src, column, "s", d_alias)
+        cond_sql, cond_val = self._eq_condition(col_ident, value, colnames[column] == "datetime")
+        path_clauses, path_params = self._path_where(path, colnames, "s", src, d_alias)
+        extra_where = "".join(f" AND {c}" for c in path_clauses)
 
         with self.lock:
             total = 0
             for m in members:
                 if is_root_virtual:
                     n = self.db.execute(
-                        f"SELECT count(*) FROM {q(m['table_name'])} s WHERE {cond_sql}{extra_where}",
+                        f"SELECT count(*) FROM {self._member_from(src, m, 's')} WHERE {cond_sql}{extra_where}",
                         [*cond_val, *path_params],
                     ).fetchone()[0]
                 else:
                     n = self.db.execute(
                         f"SELECT count(*) FROM v.{q(view_id)} vv JOIN {q(m['table_name'])} s "
-                        f"ON s.rid = vv.rid AND vv.source_id = ? WHERE {cond_sql}{extra_where}",
+                        f"ON s.rid = vv.rid AND vv.source_id = ?{djoin} WHERE {cond_sql}{extra_where}",
                         [m["source_id"], *cond_val, *path_params],
                     ).fetchone()[0]
                 total += n
@@ -3099,13 +3665,14 @@ class Store:
                 if is_root_virtual:
                     branches.append(
                         f"SELECT s.rid AS root_pos, {int(m['source_id'])} AS source_id, s.rid AS rid "
-                        f"FROM {q(m['table_name'])} s WHERE {cond_sql}{extra_where}"
+                        f"FROM {self._member_from(src, m, 's')} WHERE {cond_sql}{extra_where}"
                     )
                     params.extend([*cond_val, *path_params])
                 else:
                     branches.append(
                         f"SELECT vv.pos AS root_pos, vv.source_id, vv.rid FROM v.{q(view_id)} vv "
-                        f"JOIN {q(m['table_name'])} s ON s.rid = vv.rid AND vv.source_id = ? WHERE {cond_sql}{extra_where}"
+                        f"JOIN {q(m['table_name'])} s ON s.rid = vv.rid AND vv.source_id = ?{djoin} "
+                        f"WHERE {cond_sql}{extra_where}"
                     )
                     params.extend([m["source_id"], *cond_val, *path_params])
             union_sql = " UNION ALL ".join(branches)
@@ -3148,8 +3715,11 @@ class Store:
         member_sid = handle["members"][0]["source_id"]
         src = self._source_lite_on(conn, member_sid) if conn is not None else self._source_lite(member_sid)
         colnames = {c["name"]: c["type"] for c in src["columns"]}
+        # Unqualified names throughout: every caller runs this against the
+        # member table joined to its sidecar with USING(rid), where a base
+        # and a derived column are both addressable bare.
         cond_sql, cond_val = self._eq_condition(q(column), value, colnames[column] == "datetime")
-        path_clauses, path_params = self._path_where(handle.get("path"), colnames)
+        path_clauses, path_params = self._path_where(handle.get("path"), colnames, "", src)
         extra = "".join(f" AND {c}" for c in path_clauses)
         return f"{cond_sql}{extra}", [*cond_val, *path_params]
 
@@ -3217,7 +3787,17 @@ class Store:
             return any(Store._tree_has_raw(c) for c in node.get("children", []))
         return False
 
-    def _compile_tree(self, node: dict | None, colnames: dict, source_id: int, table_name: str) -> tuple[str, list]:
+    def _index_table_for(self, src: dict, column: str, table_name: str | None = None) -> str:
+        """Which physical table an auto-created index for this column
+        belongs on — a derived column's values live in the drv_<id>
+        sidecar, not in src_<id>. `table_name` is the caller's already
+        resolved member table (a merge's src has none of its own)."""
+        for c in src["columns"]:
+            if c.get("derived") and c["name"].lower() == str(column).lower():
+                return self._derived_table(src["id"])
+        return table_name or src["table_name"]
+
+    def _compile_tree(self, node: dict | None, colnames: dict, source_id: int, src: dict) -> tuple[str, list]:
         """Compile a guided filter-builder tree (group/cond/raw nodes) into a
         parameterized WHERE fragment."""
         if not node:
@@ -3227,7 +3807,7 @@ class Store:
             parts: list[str] = []
             params: list[Any] = []
             for child in node.get("children", []):
-                c, p = self._compile_tree(child, colnames, source_id, table_name)
+                c, p = self._compile_tree(child, colnames, source_id, src)
                 if c:
                     parts.append(c)
                     params.extend(p)
@@ -3245,7 +3825,7 @@ class Store:
             col, op = node.get("column"), node.get("op")
             c, p = self._compile_condition(col, op, node.get("value", ""), colnames)
             if c and op in SARGABLE_OPS and col in colnames:
-                self._ensure_column_index_building(source_id, col, table_name)
+                self._ensure_column_index_building(source_id, col, self._index_table_for(src, col))
             return c, p
         return "", []
 
@@ -3307,7 +3887,7 @@ class Store:
         ro.row_factory = sqlite3.Row
         ro.create_function("REGEXP", 2, _regexp, deterministic=True)
         try:
-            ro.execute(f"EXPLAIN QUERY PLAN SELECT 1 FROM {q(src['table_name'])} WHERE ({frag}) LIMIT 0")
+            ro.execute(f"EXPLAIN QUERY PLAN SELECT 1 FROM {self._from_clause(src)} WHERE ({frag}) LIMIT 0")
         except sqlite3.Error as e:
             raise ValueError(f"Not a valid filter expression: {e}")
         finally:
@@ -3324,11 +3904,11 @@ class Store:
                 clauses.append(c)
                 params.extend(p)
                 if op in SARGABLE_OPS and col in colnames:
-                    self._ensure_column_index_building(source_id, col, src["table_name"])
+                    self._ensure_column_index_building(source_id, col, self._index_table_for(src, col))
 
         tree = spec.get("filter_tree")
         if tree:
-            c, p = self._compile_tree(tree, colnames, source_id, src["table_name"])
+            c, p = self._compile_tree(tree, colnames, source_id, src)
             if c:
                 clauses.append(c)
                 params.extend(p)
@@ -3336,13 +3916,16 @@ class Store:
         search_mode = spec.get("search_mode", "contains")
         search = (spec.get("search") or "").strip()
         if search_mode == "regex" and search:
-            blob = _blob_expr([c["name"] for c in src["columns"]])
+            # Base columns only, matching build_fts's doc view exactly — the
+            # indexed and fallback paths have to search the same text, and
+            # derived values are computed from data that's already in it.
+            blob = _blob_expr([c["name"] for c in self._base_cols(src)])
             clauses.append(f"({blob}) REGEXP ?")
             params.append(search)
         elif search_mode == "advanced":
             terms = spec.get("search_terms") or []
             if terms:
-                cols = [c["name"] for c in src["columns"]]
+                cols = [c["name"] for c in self._base_cols(src)]
                 if not src["has_fts"]:
                     self._ensure_fts_building(source_id)
                 if src["has_fts"]:
@@ -3369,7 +3952,7 @@ class Store:
                 clauses.append(f"rid IN (SELECT rowid FROM {fts_ident} WHERE doc LIKE ?)")
                 params.append(pattern)
             else:
-                blob = _blob_expr([c["name"] for c in src["columns"]])
+                blob = _blob_expr([c["name"] for c in self._base_cols(src)])
                 clauses.append(f"({blob}) LIKE ? ESCAPE '\\'")
                 params.append(f"%{_esc_like(search)}%")
 
@@ -3439,6 +4022,85 @@ class Store:
         parts.append("rid ASC")
         return "ORDER BY " + ", ".join(parts)
 
+    @staticmethod
+    def _inline_sql_params(sql: str, params: list) -> str:
+        """Substitute ? placeholders with safely-quoted literals, producing
+        SQL fit to hand the analyst in the SQL pane. Skips any ? that sits
+        inside a string literal — a raw filter fragment the analyst typed
+        can legitimately contain one — by walking the text with the same
+        ''-doubling rule SQLite itself uses."""
+        out: list[str] = []
+        it = iter(params)
+        in_str = False
+        i = 0
+        while i < len(sql):
+            ch = sql[i]
+            if in_str:
+                if ch == "'":
+                    if i + 1 < len(sql) and sql[i + 1] == "'":
+                        out.append("''")
+                        i += 2
+                        continue
+                    in_str = False
+                out.append(ch)
+            elif ch == "'":
+                in_str = True
+                out.append(ch)
+            elif ch == "?":
+                try:
+                    v = next(it)
+                except StopIteration:
+                    raise ValueError("Filter could not be rendered as SQL (placeholder mismatch)")
+                if v is None:
+                    out.append("NULL")
+                elif isinstance(v, (int, float)) and not isinstance(v, bool):
+                    out.append(repr(v))
+                else:
+                    out.append("'" + str(v).replace("'", "''") + "'")
+            else:
+                out.append(ch)
+            i += 1
+        return "".join(out)
+
+    def spec_sql(self, source_id: int, spec: dict) -> str:
+        """The current filter/sort/search spec rendered as a runnable
+        SELECT — the "open this filter in the SQL pane" action. Compiled by
+        the exact same _compile_where/_compile_order the view build uses,
+        so what the analyst gets is the query their grid is actually
+        showing, not a hand-maintained approximation; the only difference
+        is that bound parameters are inlined as literals so the text stands
+        alone. run_sql's own connection registers REGEXP/TS_NORMALIZE/
+        DAY_BUCKET, so every compiled shape runs there unchanged."""
+        src = self._source_lite(source_id)
+        colnames = {c["name"]: c["type"] for c in src["columns"]}
+        order = self._compile_order(spec, colnames)
+        if src.get("is_merge"):
+            if self._tree_has_raw(spec.get("filter_tree")):
+                raise ValueError(
+                    "Raw SQL filters aren't supported on merged sources yet — use the guided filter builder"
+                )
+            collist = ", ".join(q(c) for c in colnames)
+            branches = []
+            params: list[Any] = []
+            for m in self._resolve_members(source_id):
+                msrc = self._source_lite(m["source_id"])
+                where, p = self._compile_where(m["source_id"], msrc, spec, colnames)
+                branches.append(
+                    f"SELECT {int(m['source_id'])} AS source_id, rid, {collist}\n"
+                    f"FROM {q(m['table_name'])}"
+                    + (f"\nWHERE {where}" if where else "")
+                )
+                params.extend(p)
+            sql = "\nUNION ALL\n".join(branches) + f"\n{order}"
+        else:
+            where, params = self._compile_where(source_id, src, spec, colnames)
+            collist = ", ".join(q(c) for c in colnames)
+            sql = f"SELECT rid, {collist}\nFROM {self._from_clause(src)}"
+            if where:
+                sql += f"\nWHERE {where}"
+            sql += f"\n{order}"
+        return self._inline_sql_params(sql, params)
+
     def fetch_rows(self, view_id: str, start: int, count: int) -> dict:
         """Pages v.view_N by pos, then resolves each row's cells/tags/notes
         against ITS OWN source_id — not a single handle-level constant. For
@@ -3473,9 +4135,11 @@ class Store:
             notes: dict[tuple[int, int], str] = {}
             sel = ", ".join(q(c) for c in cols)
             for sid, rids in by_source.items():
-                member_table = self._source_lite_on(ro, sid)["table_name"]
+                member_src = self._source_lite_on(ro, sid)
                 ph = ",".join("?" * len(rids))
-                for row in ro.execute(f"SELECT rid, {sel} FROM {q(member_table)} WHERE rid IN ({ph})", rids):
+                for row in ro.execute(
+                    f"SELECT rid, {sel} FROM {self._from_clause(member_src)} WHERE rid IN ({ph})", rids
+                ):
                     # positional: the SELECT puts rid first, then cols in
                     # order — tuple(row) is one C-level copy, vs a
                     # per-cell name lookup for row[c]
@@ -3523,7 +4187,7 @@ class Store:
             sel = ", ".join(q(c) for c in cols)
 
             rows = ro.execute(
-                f"SELECT rid, {sel} FROM {q(member['table_name'])} WHERE {where_sql} "
+                f"SELECT rid, {sel} FROM {self._from_clause(src)} WHERE {where_sql} "
                 f"ORDER BY rid LIMIT ? OFFSET ?",
                 [*where_params, count, start],
             ).fetchall()
@@ -3571,8 +4235,13 @@ class Store:
             cols = [c["name"] for c in src["columns"]]
             sel = ", ".join(q(c) for c in cols)
 
+            # _from_clause adds the derived-value sidecar join only when the
+            # source has derived columns, and that join is on drv's INTEGER
+            # PRIMARY KEY — at most one match per rid, so the rid window
+            # still yields exactly its rows in rid order and `pos = rid - 1`
+            # below stays exact (invariant #2).
             rows = ro.execute(
-                f"SELECT rid, {sel} FROM {q(src['table_name'])} WHERE rid >= ? AND rid < ? ORDER BY rid",
+                f"SELECT rid, {sel} FROM {self._from_clause(src)} WHERE rid >= ? AND rid < ? ORDER BY rid",
                 (start + 1, start + 1 + count),
             ).fetchall()
             rids = [r["rid"] for r in rows]
@@ -3668,6 +4337,99 @@ class Store:
             ).fetchone()
         return row["pos"] - 1 if row else None
 
+    def find_nearest_timestamp(self, view_id: str, value: str, column: str | None = None) -> dict | None:
+        """Position (0-indexed, within this view) of the row whose timestamp
+        is closest in time to `value` — "jump to timestamp". `column` picks
+        which datetime column measures closeness; None means the nearest
+        across every datetime column, same spirit as the timeframe filter's
+        all-columns mode.
+
+        Closeness is |julianday(a) - julianday(b)| over TS_NORMALIZE'd
+        values — string comparison can order timestamps but can't measure
+        between them. That makes this a scan of the view (TS_NORMALIZE is a
+        registered Python function), which is the same cost shape as
+        group_summary's whole-source aggregate: fine for a user-initiated,
+        occasional action, and it runs on a pooled reader so it never
+        blocks anything. Rows whose timestamp doesn't parse simply can't
+        win. Returns None when no row has a usable timestamp."""
+        handle = self._views.get(view_id)
+        if not handle:
+            raise KeyError("View expired — rebuild it")
+        norm = _ts_normalize(value)
+        if norm is None:
+            raise ValueError("Not a recognized timestamp — try YYYY-MM-DD HH:MM:SS")
+        best: tuple | None = None  # (diff, source_id, rid, pos_or_None, ts)
+        with self._reader() as ro, self._dropped_view_is_expired():
+            src = self._source_lite_on(ro, handle["source_id"])
+            colnames = {c["name"]: c["type"] for c in src["columns"]}
+            if column:
+                if colnames.get(column) != "datetime":
+                    raise ValueError(f"{column!r} is not a datetime column")
+                ts_cols = [column]
+            else:
+                ts_cols = [c for c, t in colnames.items() if t == "datetime"]
+            if not ts_cols:
+                raise ValueError("This table has no datetime columns")
+            kind = handle.get("kind")
+            members = self._resolve_members_on(ro, handle["source_id"])
+            for m in members:
+                msrc = self._source_lite_on(ro, m["source_id"])
+                for c in ts_cols:
+                    if not any(cc["name"] == c for cc in msrc["columns"]):
+                        continue  # merge member without this column
+                    if kind == "root_virtual":
+                        ts_expr = f"TS_NORMALIZE({q(c)})"
+                        row = ro.execute(
+                            f"SELECT rid, NULL AS pos, {ts_expr} AS ts, "
+                            f"ABS(julianday({ts_expr}) - julianday(?)) AS d "
+                            f"FROM {self._from_clause(msrc)} "
+                            f"WHERE {ts_expr} IS NOT NULL ORDER BY d LIMIT 1",
+                            (norm,),
+                        ).fetchone()
+                    elif kind == "group_virtual":
+                        where_sql, where_params = self._virtual_group_where(handle, ro)
+                        ts_expr = f"TS_NORMALIZE({q(c)})"
+                        row = ro.execute(
+                            f"SELECT rid, NULL AS pos, {ts_expr} AS ts, "
+                            f"ABS(julianday({ts_expr}) - julianday(?)) AS d "
+                            f"FROM {self._member_from(msrc, m)} WHERE ({where_sql}) "
+                            f"AND {ts_expr} IS NOT NULL ORDER BY d LIMIT 1",
+                            (norm, *where_params),
+                        ).fetchone()
+                    else:
+                        ts_expr = f"TS_NORMALIZE({self._col_ref(msrc, c, 's', 'd')})"
+                        row = ro.execute(
+                            f"SELECT vv.rid AS rid, vv.pos AS pos, {ts_expr} AS ts, "
+                            f"ABS(julianday({ts_expr}) - julianday(?)) AS d "
+                            f"FROM v.{q(view_id)} vv "
+                            f"JOIN {q(m['table_name'])} s ON s.rid = vv.rid AND vv.source_id = ?"
+                            f"{self._derived_join(msrc, 's')} "
+                            f"WHERE {ts_expr} IS NOT NULL ORDER BY d LIMIT 1",
+                            (norm, m["source_id"]),
+                        ).fetchone()
+                    if row and row["d"] is not None and (best is None or row["d"] < best[0]):
+                        best = (row["d"], m["source_id"], row["rid"], row["pos"], row["ts"])
+            if best is None:
+                return None
+            d, sid, rid, pos, ts = best
+            if kind == "root_virtual":
+                pos = rid - 1  # exact — see _fetch_virtual_root_rows / invariant #2
+            elif kind == "group_virtual":
+                # pos within a virtual group = how many of its rows page in
+                # before this rid (they page in rid order, see
+                # _fetch_virtual_group_rows).
+                where_sql, where_params = self._virtual_group_where(handle, ro)
+                member = handle["members"][0]
+                msrc = self._source_lite_on(ro, member["source_id"])
+                pos = ro.execute(
+                    f"SELECT COUNT(*) FROM {self._member_from(msrc, member)} "
+                    f"WHERE ({where_sql}) AND rid < ?",
+                    (*where_params, rid),
+                ).fetchone()[0]
+            else:
+                pos = pos - 1  # v.view_N pos is 1-based
+        return {"pos": pos, "source_id": sid, "rid": rid, "ts": ts}
+
     def column_values(self, source_id: int, column: str, limit: int = 200) -> list[dict]:
         """Distinct values + counts for one column — the filter box's
         value-picker dropdown.
@@ -3690,8 +4452,12 @@ class Store:
                 raise KeyError(column)
             members = self._resolve_members_on(ro, source_id)
             for m in members:
-                self._ensure_column_index_building(m["source_id"], column, m["table_name"])
-            union_sql = " UNION ALL ".join(f"SELECT {q(column)} AS val FROM {q(m['table_name'])}" for m in members)
+                self._ensure_column_index_building(
+                    m["source_id"], column, self._index_table_for(src, column, m["table_name"])
+                )
+            union_sql = " UNION ALL ".join(
+                f"SELECT {q(column)} AS val FROM {self._member_from(src, m)}" for m in members
+            )
             rows = ro.execute(
                 f"SELECT val, count(*) AS n FROM ({union_sql}) GROUP BY 1 ORDER BY n DESC LIMIT ?",
                 (limit,),
@@ -3718,7 +4484,7 @@ class Store:
             sel = ", ".join(f"MAX(LENGTH({q(c)}))" for c in cols)
             maxes = [0] * len(cols)
             for m in members:
-                row = ro.execute(f"SELECT {sel} FROM {q(m['table_name'])}").fetchone()
+                row = ro.execute(f"SELECT {sel} FROM {self._member_from(src, m)}").fetchone()
                 for i, v in enumerate(row):
                     if v and v > maxes[i]:
                         maxes[i] = v
@@ -3727,6 +4493,46 @@ class Store:
         return result
 
     # -------------------------------------------------------------------- tags
+
+    def tag_time_bounds(self, source_id: int, tag_ids: list[int] | None = None,
+                        column: str | None = None) -> dict:
+        """Earliest and latest timestamp among this source's tagged rows —
+        what "set the timeframe filter from my findings" needs. `tag_ids`
+        empty/None means any tag; `column` narrows which datetime column
+        counts, else every datetime column does (same all-columns semantics
+        as the timeframe filter itself, so the range this fills is
+        guaranteed to cover the rows it was derived from). Values are
+        TS_NORMALIZE'd, i.e. exactly the shape the timeframe filter
+        compares through."""
+        src = self._source_lite(source_id)
+        colnames = {c["name"]: c["type"] for c in src["columns"]}
+        if column and colnames.get(column) == "datetime":
+            ts_cols = [column]
+        else:
+            ts_cols = [c for c, t in colnames.items() if t == "datetime"]
+        if not ts_cols:
+            return {"start": None, "end": None}
+        ids = [int(t) for t in (tag_ids or [])]
+        tag_clause = f" AND tag_id IN ({','.join('?' * len(ids))})" if ids else ""
+        lo = hi = None
+        with self._reader() as ro:
+            for m in self._resolve_members_on(ro, source_id):
+                msrc = self._source_lite_on(ro, m["source_id"])
+                member_names = {c["name"] for c in msrc["columns"]}
+                for c in ts_cols:
+                    if c not in member_names:
+                        continue
+                    row = ro.execute(
+                        f"SELECT MIN(TS_NORMALIZE({q(c)})), MAX(TS_NORMALIZE({q(c)})) "
+                        f"FROM {self._from_clause(msrc)} "
+                        f"WHERE rid IN (SELECT rid FROM row_tags WHERE source_id=?{tag_clause})",
+                        [m["source_id"], *ids],
+                    ).fetchone()
+                    if row[0] is not None and (lo is None or row[0] < lo):
+                        lo = row[0]
+                    if row[1] is not None and (hi is None or row[1] > hi):
+                        hi = row[1]
+        return {"start": lo, "end": hi}
 
     def list_tags(self) -> list[dict]:
         with self.lock:
@@ -3851,6 +4657,8 @@ class Store:
                            exclude: list[Iterable[int]] | None = None) -> dict:
         member = handle["members"][0]
         sid = member["source_id"]
+        src = self._source_lite(sid)
+        member_from = self._member_from(src, member)
         where_sql, where_params = self._virtual_group_where(handle)
         # A virtual group is always one real source, so only that source's
         # rids in the exclusion list can possibly be in it.
@@ -3862,13 +4670,13 @@ class Store:
             if on:
                 self.db.execute(
                     f"INSERT OR IGNORE INTO row_tags(source_id, rid, tag_id) "
-                    f"SELECT ?, rid, ? FROM {q(member['table_name'])} WHERE {where_sql}",
+                    f"SELECT ?, rid, ? FROM {member_from} WHERE {where_sql}",
                     [sid, tag_id, *where_params],
                 )
             else:
                 self.db.execute(
                     f"DELETE FROM row_tags WHERE source_id=? AND tag_id=? "
-                    f"AND rid IN (SELECT rid FROM {q(member['table_name'])} WHERE {where_sql})",
+                    f"AND rid IN (SELECT rid FROM {member_from} WHERE {where_sql})",
                     [sid, tag_id, *where_params],
                 )
         out = self.tag_counts(sid)
@@ -4072,13 +4880,25 @@ class Store:
                 "path": src["path"],
                 "file_hash": src["file_hash"],
                 "row_count": src["row_count"],
-                "columns": src["columns"],
+                # The imported file's own columns — this is what
+                # import_session matches against, and a derived column the
+                # exporting analyst happened to add isn't part of the
+                # evidence's shape.
+                "columns": self._base_cols(src),
             },
             "tag_defs": tags,
             "row_tags": rt,
             "row_notes": notes,
             "layout": self.get_layout(source_id),
             "saved_views": self.list_saved_views(source_id),
+            # Definitions, not values: a derived column is a deterministic
+            # function of data the receiving case already has, so importing
+            # re-runs the backfill rather than shipping a second copy of
+            # every timestamp.
+            "derived_columns": [
+                {k: d[k] for k in ("name", "input_column", "op_id", "params")}
+                for d in self.list_derived_columns(source_id)
+            ],
         }
 
     def import_session(self, source_id: int, session: dict, merge: bool = True) -> dict:
@@ -4119,7 +4939,22 @@ class Store:
             self.save_layout(source_id, session["layout"])
         for sv in session.get("saved_views", []):
             self.save_view(source_id, sv["name"], sv["payload"])
-        return {"warnings": warnings, "tags_applied": len(session.get("row_tags", []))}
+
+        # Derived columns arrive as definitions and are recomputed here —
+        # each starts its own backfill job. A name that's already taken
+        # (the analyst built the same column locally, or a base column has
+        # that name) is a warning, never a failure: the tags and notes are
+        # the part of a session that can't be reconstructed.
+        derived_added = 0
+        for d in session.get("derived_columns", []):
+            try:
+                self.add_derived_column(source_id, d["name"], d["input_column"],
+                                        d["op_id"], d.get("params"))
+                derived_added += 1
+            except (ValueError, KeyError) as e:
+                warnings.append(f"Derived column {d.get('name')!r} not recreated: {e}")
+        return {"warnings": warnings, "tags_applied": len(session.get("row_tags", [])),
+                "derived_columns_added": derived_added}
 
     # ---------------------------------------------------------- case sessions
 
@@ -4258,7 +5093,8 @@ class Store:
             buf.seek(0), buf.truncate(0)
 
             rows = ro.execute(
-                f"SELECT rid, {sel} FROM {q(member['table_name'])} WHERE {where_sql} ORDER BY rid", where_params
+                f"SELECT rid, {sel} FROM {self._member_from(src, member)} WHERE {where_sql} ORDER BY rid",
+                where_params,
             ).fetchall()
             rids = [r["rid"] for r in rows]
             tmap: dict[int, list[str]] = {}
@@ -4308,7 +5144,7 @@ class Store:
             last_rid = 0
             while True:
                 chunk = ro.execute(
-                    f"SELECT rid, {sel} FROM {q(table)} WHERE rid > ? ORDER BY rid LIMIT 5000",
+                    f"SELECT rid, {sel} FROM {self._from_clause(src)} WHERE rid > ? ORDER BY rid LIMIT 5000",
                     (last_rid,),
                 ).fetchall()
                 if not chunk:
@@ -4398,9 +5234,11 @@ class Store:
                         rids = [r for r in rids if r in tagged_set]
                         if not rids:
                             continue
-                    member_table = self._source_lite_on(ro, sid)["table_name"]
+                    member_src = self._source_lite_on(ro, sid)
                     ph = ",".join("?" * len(rids))
-                    for row in ro.execute(f"SELECT rid, {sel} FROM {q(member_table)} WHERE rid IN ({ph})", rids):
+                    for row in ro.execute(
+                        f"SELECT rid, {sel} FROM {self._from_clause(member_src)} WHERE rid IN ({ph})", rids
+                    ):
                         cellmap[(sid, row["rid"])] = tuple(row[c] for c in cols)
                     for rid, tid in ro.execute(
                         f"SELECT rid, tag_id FROM row_tags WHERE source_id=? AND rid IN ({ph})", [sid, *rids]
@@ -4455,7 +5293,7 @@ class Store:
                 if rids:
                     ph = ",".join("?" * len(rids))
                     for row in ro.execute(
-                        f"SELECT rid, {sel} FROM {q(src['table_name'])} WHERE rid IN ({ph})", rids
+                        f"SELECT rid, {sel} FROM {self._from_clause(src)} WHERE rid IN ({ph})", rids
                     ):
                         cellmap[row["rid"]] = tuple(row[c] for c in cols)
                     for rid, tid in ro.execute(
@@ -4550,7 +5388,9 @@ class Store:
         for src in sources:
             source_id = src["id"]
             table = src["table_name"]
-            cols = [c["name"] for c in src["columns"]]
+            # Base columns only — the search-all sweep has to agree with the
+            # per-source search paths, which scan build_fts's doc view.
+            cols = [c["name"] for c in self._base_cols(src)]
             if not src.get("has_fts"):
                 self._ensure_fts_building(source_id)
             inner = None
@@ -4733,6 +5573,12 @@ class Store:
         ro = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, check_same_thread=False)
         ro.row_factory = sqlite3.Row
         ro.create_function("REGEXP", 2, _regexp, deterministic=True)
+        # The full trio, matching the writer/reader-pool connections: a
+        # filter opened in the SQL pane (spec_sql) can legitimately contain
+        # TS_NORMALIZE/DAY_BUCKET, and they're useful in hand-written pane
+        # queries anyway.
+        ro.create_function("DAY_BUCKET", 1, _day_bucket, deterministic=True)
+        ro.create_function("TS_NORMALIZE", 1, _ts_normalize, deterministic=True)
         try:
             t0 = time.time()
             cur = ro.execute(sql)

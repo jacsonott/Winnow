@@ -134,3 +134,25 @@ def test_note_set_and_clear(ingested):
     store.set_note(source_id, 1, "   ")  # blank/whitespace clears it
     rows = {r["rid"]: r for r in store.fetch_rows(view["view_id"], 0, 10)["rows"]}
     assert rows[1]["note"] is None
+
+
+def test_tag_time_bounds_any_tag_subset_and_column(ingested):
+    """Timeframe-from-tags: earliest/latest TS_NORMALIZE'd timestamp among
+    tagged rows — any tag, a subset, or measured against one column."""
+    store, sid = ingested
+    tags = store.list_tags()
+    store.set_tags(sid, [1, 3], tags[0]["id"], True)   # 01-05 13:22:01, 01-06 09:15:00
+    store.set_tags(sid, [4], tags[1]["id"], True)      # 01-07 22:01:59
+
+    assert store.tag_time_bounds(sid) == {"start": "2024-01-05 13:22:01", "end": "2024-01-07 22:01:59"}
+    assert store.tag_time_bounds(sid, [tags[0]["id"]]) == {
+        "start": "2024-01-05 13:22:01", "end": "2024-01-06 09:15:00"}
+    assert store.tag_time_bounds(sid, None, "Timestamp")["start"] == "2024-01-05 13:22:01"
+    # An unknown/non-datetime column falls back to every datetime column
+    # rather than erroring — same leniency as the timeframe filter itself.
+    assert store.tag_time_bounds(sid, None, "User")["start"] == "2024-01-05 13:22:01"
+
+
+def test_tag_time_bounds_empty_when_nothing_tagged(ingested):
+    store, sid = ingested
+    assert store.tag_time_bounds(sid) == {"start": None, "end": None}

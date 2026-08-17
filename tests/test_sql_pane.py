@@ -56,3 +56,45 @@ def test_run_sql_limit_and_truncated(store, tmp_path):
     res_full = store.run_sql(f"SELECT N FROM src_{rec['id']} ORDER BY rid", limit=100)
     assert len(res_full["rows"]) == 20
     assert res_full["truncated"] is False
+
+
+def test_spec_sql_renders_the_live_filter_as_runnable_sql(ingested):
+    """spec_sql is 'open this filter in the SQL pane': the compiled text
+    must (a) run unchanged on run_sql's own connection and (b) return the
+    same rows the view shows — it's the same _compile_where, with params
+    inlined. A value with a quote in it and a raw fragment containing a
+    literal ? inside a string are the two inlining traps."""
+    store, sid = ingested
+    spec = {
+        "filters": [{"column": "User", "op": "contains", "value": "ACME"}],
+        "sort": [{"column": "Timestamp", "dir": "desc"}],
+        "filter_tree": {"type": "group", "op": "AND", "children": [
+            {"type": "raw", "sql": "\"CommandLine\" <> 'what?'"},
+        ]},
+        "time_range": {"enabled": True, "start": "2024-01-05 00:00:00", "end": "2024-01-06 23:59:59"},
+    }
+    sql = store.spec_sql(sid, spec)
+    res = store.run_sql(sql)
+    view = store.build_view(sid, spec)
+    view_rids = [r["rid"] for r in store.fetch_rows(view["view_id"], 0, 10)["rows"]]
+    rid_col = res["columns"].index("rid")
+    assert [r[rid_col] for r in res["rows"]] == view_rids
+    # The literal ? inside the raw fragment's string must survive inlining
+    # untouched — a naive placeholder substitution would corrupt it.
+    assert "'what?'" in sql
+
+
+def test_spec_sql_inlines_quotes_safely(ingested):
+    store, sid = ingested
+    sql = store.spec_sql(sid, {"filters": [{"column": "User", "op": "equals", "value": "o'malley"}]})
+    assert "'o''malley'" in sql
+    assert store.run_sql(sql)["rows"] == []  # runs clean, matches nothing
+
+
+def test_sql_pane_connection_has_the_timestamp_functions(ingested):
+    """spec_sql output can contain TS_NORMALIZE/DAY_BUCKET (the timeframe
+    filter compiles to them), so run_sql's connection must register the
+    same trio the writer and reader pool do."""
+    store, sid = ingested
+    res = store.run_sql(f"SELECT DAY_BUCKET(\"Timestamp\") AS d FROM src_{sid} ORDER BY rid LIMIT 1")
+    assert res["rows"][0][0] == "2024-01-05"
