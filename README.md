@@ -173,14 +173,3 @@ A plugin is arbitrary local Python running with Winnow's own privileges —
 installing it (from the UI or by hand) is the consent step, and nothing
 is ever fetched from a network. Only install plugins you have read or
 trust.
-
-## Known limits
-
-- Import is single-threaded Python `csv`. Fine to ~200k rows/s; if you routinely
-  handle 50M-row files, swapping the ingest path to DuckDB's `read_csv_auto` and
-  copying into SQLite is the next move.
-- One view is materialised per source at a time. Changing a filter drops the
-  previous one.
-- No column reordering by drag yet — order is stored in the layout, so the
-  plumbing is there.
-- Multi-file correlation (one merged timeline across sources) isn't built.
