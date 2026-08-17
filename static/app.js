@@ -47,8 +47,10 @@ const el = (tag, cls, txt) => {
 const S = {
   sources: [],
   sourceId: null,
-  columns: [],          // [{name, type}]
-  layout: {},           // name -> {w, hidden, pinned}
+  columns: [],          // [{name, type}] plus, for analyst-added derived columns, {derived, derived_from, derived_op, derived_status, derived_id, parse_failures}
+  appSettings: {},      // system-wide prefs (workspace/app_settings.json) — currently default_ts_format
+  caseSettings: {},     // this case's own overrides (case_settings table) — currently ts_format
+  layout: {},           // name -> {w, hidden, pinned, tsFormat, durFormat}
   order: [],            // column names in display order
   filters: {},          // name -> raw filter text
   sort: [],             // [{column, dir}]
@@ -58,6 +60,8 @@ const S = {
   filterTree: { type: 'group', op: 'AND', children: [] }, // guided filter builder
   tagFilter: [],        // tag ids, or ['__any__'] / ['__none__']
   view: null,           // {view_id, row_count}
+  jumpTs: { value: '', column: null }, // "jump to timestamp" target — deliberately NOT reset by openSource, so the same moment is reachable in every table
+  lastGroupBy: null,     // {cols, sort, dir} — what toggleGrouping restores
   pages: new Map(),      // page index -> rows; capped, see MAX_CACHED_PAGES/trimPageCache
   pending: new Map(),    // page index -> in-flight fetch promise, so concurrent callers share one request
   pageGen: 0,            // bumped by clearPageCache() so an in-flight fetch issued before it can't repopulate stale rows
@@ -232,6 +236,20 @@ function toast(msg, ms = 2600) {
   toast._t = setTimeout(() => (t.hidden = true), ms);
 }
 
+/* A toast with one thing you can do about it. Longer-lived than a plain
+   toast (it's only useful if it's still there when you look up) and
+   dismissed by acting on it. */
+function toastAction(msg, label, onclick, ms = 12000) {
+  const t = $('toast');
+  t.replaceChildren(el('span', null, msg));
+  const btn = el('button', 'toast-action', label);
+  btn.onclick = () => { t.hidden = true; onclick(); };
+  t.append(btn);
+  t.hidden = false;
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => (t.hidden = true), ms);
+}
+
 /* ---------------------------------------------------------- import jobs */
 
 /* Imports run as background jobs server-side (Store.start_ingest_job) and
@@ -336,11 +354,25 @@ async function pollJobs() {
   } catch { ingestJobs = []; }
 
   for (const j of finishedNow) {
+    if (j.kind === 'derive') {
+      // A derive job's "rows" are one column's values, not an import.
+      const res = (j.result || [])[0] || {};
+      if (j.status === 'done') {
+        const failed = res.parse_failures || 0;
+        toast(`"${j.name}": ${(res.rows || 0).toLocaleString()} values derived`
+          + (failed ? ` · ${failed.toLocaleString()} could not be parsed` : ''), failed ? 6000 : 3000);
+      } else if (j.status === 'error') {
+        toast(`Could not derive "${j.name}": ${j.error}`, 8000);
+      }
+      setTimeout(() => { dismissedJobs.add(j.job_id); renderJobsPanel(); }, 8000);
+      continue;
+    }
     if (j.status === 'done') {
       const total = (j.result || []).reduce((a, r) => a + (r.row_count || 0), 0);
       const ragged = (j.result || []).reduce((a, r) => a + (r.ragged_rows || 0), 0);
       toast(`${j.name}: ${total.toLocaleString()} rows imported${ragged ? ` · ${ragged.toLocaleString()} ragged rows padded/trimmed` : ''}`, ragged ? 6000 : 3500);
       setTimeout(() => { dismissedJobs.add(j.job_id); renderJobsPanel(); }, 8000);
+      for (const sid of j.source_ids || []) offerTimestampColumns(sid);
     } else if (j.status === 'error') {
       toast(`Import failed for ${j.name}: ${j.error}`, 8000);
     } else {
@@ -736,7 +768,7 @@ async function openSource(id) {
   let defaultLayout = null;
   if (!saved.order) {
     const qp = new URLSearchParams();
-    for (const c of S.columns) qp.append('col_names', c.name);
+    for (const c of baseColumns()) qp.append('col_names', c.name);
     const found = await api(`/api/column_layouts/find?${qp.toString()}`).catch(() => null);
     if (found && found.order) defaultLayout = found;
   }
@@ -751,6 +783,7 @@ async function openSource(id) {
   if (dt && !saved.sort) S.sort = [{ column: dt.name, dir: 'asc' }];
   if (saved.sort) S.sort = saved.sort;
 
+  if (S.columns.some((c) => c.derived)) await derivedOps().catch(() => {});
   await loadTags();
   renderHead();
 
@@ -906,14 +939,21 @@ const visibleCols = () => S.order.filter((n) => !(S.layout[n] || {}).hidden);
    families store.py's DATE_RE already recognizes as "datetime" at ingest,
    then formatting is pure string padding — no Date object, no TZ math. A
    value that doesn't match either shape is left exactly as it was. */
-const TS_ISO_RE = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?/;
+const TS_ISO_RE = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2})(?:[.,](\d{1,9}))?)?)?/;
 const TS_US_RE = /^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:[ ,]+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM|am|pm)?)?/;
 
 function parseTimestamp(raw) {
   const s = String(raw).trim();
   let m = TS_ISO_RE.exec(s);
   if (m) {
-    return { y: +m[1], mo: +m[2], d: +m[3], h: +(m[4] || 0), mi: +(m[5] || 0), s: +(m[6] || 0) };
+    return {
+      y: +m[1], mo: +m[2], d: +m[3], h: +(m[4] || 0), mi: +(m[5] || 0), s: +(m[6] || 0),
+      /* Sub-second digits kept as the raw string, padded/truncated only at
+         format time — parsing them to a number would lose the distinction
+         between .1 (100ms) and .000001, which matters for ordering
+         same-second events. */
+      frac: m[7] || '',
+    };
   }
   m = TS_US_RE.exec(s);
   if (m) {
@@ -921,7 +961,7 @@ function parseTimestamp(raw) {
     const ampm = (m[7] || '').toLowerCase();
     if (ampm === 'pm' && h < 12) h += 12;
     if (ampm === 'am' && h === 12) h = 0;
-    return { y: +m[3], mo: +m[1], d: +m[2], h, mi: +(m[5] || 0), s: +(m[6] || 0) };
+    return { y: +m[3], mo: +m[1], d: +m[2], h, mi: +(m[5] || 0), s: +(m[6] || 0), frac: '' };
   }
   return null;
 }
@@ -930,25 +970,432 @@ const pad2 = (n) => String(n).padStart(2, '0');
 const TS_FORMATS = {
   raw: 'As stored',
   iso: 'YYYY-MM-DD HH:MM:SS',
+  iso_ms: 'YYYY-MM-DD HH:MM:SS.mmm',
+  iso_us: 'YYYY-MM-DD HH:MM:SS.ffffff',
   date: 'YYYY-MM-DD',
   time: 'HH:MM:SS',
   us: 'MM/DD/YYYY HH:MM:SS',
   us_date: 'MM/DD/YYYY',
 };
+/* Sub-second digits to exactly `n` places. A value with no fraction shows
+   zeros rather than being left short, so the column stays column-aligned
+   and two timestamps remain visually comparable. */
+function fracTo(frac, n) { return (frac || '').padEnd(n, '0').slice(0, n); }
 function formatTimestamp(raw, fmt) {
   if (!fmt || fmt === 'raw' || raw == null || raw === '') return raw;
   const t = parseTimestamp(raw);
   if (!t) return raw; // doesn't match a recognized shape — show unchanged, never fabricate
+  const ymd = `${t.y}-${pad2(t.mo)}-${pad2(t.d)}`;
+  const hms = `${pad2(t.h)}:${pad2(t.mi)}:${pad2(t.s)}`;
   switch (fmt) {
-    case 'iso': return `${t.y}-${pad2(t.mo)}-${pad2(t.d)} ${pad2(t.h)}:${pad2(t.mi)}:${pad2(t.s)}`;
-    case 'date': return `${t.y}-${pad2(t.mo)}-${pad2(t.d)}`;
-    case 'time': return `${pad2(t.h)}:${pad2(t.mi)}:${pad2(t.s)}`;
-    case 'us': return `${pad2(t.mo)}/${pad2(t.d)}/${t.y} ${pad2(t.h)}:${pad2(t.mi)}:${pad2(t.s)}`;
+    case 'iso': return `${ymd} ${hms}`;
+    case 'iso_ms': return `${ymd} ${hms}.${fracTo(t.frac, 3)}`;
+    case 'iso_us': return `${ymd} ${hms}.${fracTo(t.frac, 6)}`;
+    case 'date': return ymd;
+    case 'time': return hms;
+    case 'us': return `${pad2(t.mo)}/${pad2(t.d)}/${t.y} ${hms}`;
     case 'us_date': return `${pad2(t.mo)}/${pad2(t.d)}/${t.y}`;
     default: return raw;
   }
 }
-function tsFormatFor(name) { return (S.layout[name] || {}).tsFormat || 'raw'; }
+/* Four layers, most specific first: this column in this table, then this
+   case, then the system-wide default, then 'iso'. Before derived columns
+   existed the fallback was 'raw' — analysts who prefer that set it as
+   their system default (Settings > Timestamps); an explicitly-chosen
+   per-column format still wins, so existing saved layouts are unaffected. */
+function tsFormatFor(name) {
+  return (S.layout[name] || {}).tsFormat
+    || S.caseSettings.ts_format
+    || S.appSettings.default_ts_format
+    || 'iso';
+}
+
+/* A duration column holds seconds (see timeparse's duration_delta). Shown
+   humanized by default because "1h 23m 45s" is the question the analyst
+   asked; the raw seconds stay one click away in the header menu. */
+function formatDuration(raw, mode) {
+  if (raw == null || raw === '' || mode === 'raw') return raw;
+  const total = Number(raw);
+  if (!isFinite(total)) return raw;
+  const sign = total < 0 ? '-' : '';
+  let rest = Math.abs(total);
+  const h = Math.floor(rest / 3600); rest -= h * 3600;
+  const m = Math.floor(rest / 60); rest -= m * 60;
+  const s = Math.round(rest * 1000) / 1000;
+  const parts = [];
+  if (h) parts.push(h + 'h');
+  if (m || h) parts.push(m + 'm');
+  parts.push(s + 's');
+  return sign + parts.join(' ');
+}
+
+function columnMeta(name) { return S.columns.find((c) => c.name === name) || null; }
+/* The imported file's own columns. Header-set identity (saved filters,
+   cross-case layouts, nicknames, timeline templates) has to key off these
+   alone — a derived column is one analyst's addition, and including it
+   would stop the same file matching its own saved work elsewhere. */
+function baseColumns() { return S.columns.filter((c) => !c.derived); }
+
+/* Presentation for one cell, given its column's type. Kept in one place
+   because four call sites (grid, grouped grid, detail pane, copy) have to
+   agree on what the analyst is looking at. */
+function displayCell(name, val) {
+  const c = columnMeta(name);
+  if (!c) return val;
+  if (c.derived_kind === 'duration') return formatDuration(val, (S.layout[name] || {}).durFormat);
+  if (c.type === 'datetime') return formatTimestamp(val, tsFormatFor(name));
+  return val;
+}
+
+/* ------------------------------------------------------- derived columns */
+
+/* Analyst-added columns computed from an existing one (see timeparse.py).
+   The values are materialised server-side into a sidecar table, so a
+   derived column sorts, filters, groups and exports like any other — the
+   only frontend-visible difference is the marker, the management menu,
+   and that its display format defaults like any datetime column. */
+
+let DERIVED_OPS = null; // registry from /api/derived/ops, fetched once per load
+
+async function derivedOps() {
+  if (!DERIVED_OPS) DERIVED_OPS = await api('/api/derived/ops');
+  return DERIVED_OPS;
+}
+
+function opLabel(opId) {
+  const op = (DERIVED_OPS || []).find((o) => o.id === opId);
+  return op ? op.label : opId;
+}
+
+function columnMenuItems(name) {
+  const c = columnMeta(name) || {};
+  const items = [];
+  if (c.derived_kind === 'duration') {
+    const cur = (S.layout[name] || {}).durFormat || 'human';
+    for (const [key, label] of [['human', '1h 23m 45s'], ['raw', 'Seconds']]) {
+      items.push({
+        label: (key === cur ? '✓ ' : '   ') + label,
+        onclick: () => {
+          S.layout[name] = Object.assign({}, S.layout[name] || {}, { durFormat: key });
+          render();
+          saveLayout();
+        },
+      });
+    }
+  } else if (c.type === 'datetime') {
+    const current = tsFormatFor(name);
+    for (const key of Object.keys(TS_FORMATS)) {
+      items.push({
+        label: (key === current ? '✓ ' : '   ') + TS_FORMATS[key],
+        onclick: () => {
+          /* The chosen key is always stored, including 'raw'. It used to be
+             stored as undefined, which was equivalent back when the
+             fallback was 'raw' — with a configurable default underneath,
+             that would silently mean "inherit" instead of "as stored". */
+          S.layout[name] = Object.assign({}, S.layout[name] || {}, { tsFormat: key });
+          render();
+          saveLayout();
+        },
+      });
+    }
+  }
+  if (items.length) items.push('-');
+  items.push({ label: 'Add datetime column from this…', onclick: () => openDerivedColumnModal(name) });
+  if (c.derived) {
+    if (c.parse_failures) {
+      items.push({
+        label: `Show ${c.parse_failures.toLocaleString()} unparsed row${c.parse_failures === 1 ? '' : 's'}`,
+        onclick: () => showUnparsedRows(c),
+      });
+    }
+    items.push({ label: 'Re-derive…', onclick: () => openDerivedColumnModal(c.derived_from, c) });
+    items.push({ label: 'Remove derived column…', onclick: () => removeDerivedColumn(c) });
+  }
+  return items;
+}
+
+/* "12 failures" is only useful if you can see which 12. The fragment is
+   built server-side (it has to quote two column names into SQL) and lands
+   in the guided filter builder's raw slot, so it shows up as a normal
+   filter the analyst can then edit or clear. */
+async function showUnparsedRows(c) {
+  try {
+    const res = await api(`/api/derived/${c.derived_id}/unparsed_filter`);
+    S.filterTree = { type: 'group', op: 'AND', children: [{ type: 'raw', sql: res.sql }] };
+    updateFiltersButton();
+    await rebuildView();
+    toast(`Showing rows where "${c.name}" could not be parsed`);
+  } catch (e) {
+    toast('Could not filter: ' + e.message, 6000);
+  }
+}
+
+async function removeDerivedColumn(c) {
+  const ok = await confirmDialog(
+    `Remove the derived column "${c.name}"? Its values are recomputed from "${c.derived_from}", so it can be added back at any time.`,
+    { okLabel: 'Remove', danger: true });
+  if (!ok) return;
+  try {
+    await api(`/api/derived/${c.derived_id}`, { method: 'DELETE' });
+    delete S.layout[c.name];
+    S.order = S.order.filter((n) => n !== c.name);
+    await loadSources();
+    await openSource(S.sourceId);
+    toast(`Removed "${c.name}"`);
+  } catch (e) {
+    toast('Could not remove: ' + e.message, 6000);
+  }
+}
+
+/* The add/re-derive modal. `prefill` is the column to parse; `editing` is
+   the existing definition when re-deriving (the column and operation are
+   then fixed — only the parameters are in play, which is the actual use
+   case: "I set the wrong syslog year"). */
+async function openDerivedColumnModal(prefill, editing) {
+  let ops;
+  try {
+    ops = await derivedOps();
+  } catch (e) {
+    toast('Could not load timestamp formats: ' + e.message, 6000);
+    return;
+  }
+  const textCols = baseColumns();
+  if (!textCols.length) return;
+  const state = {
+    column: editing ? editing.derived_from : (prefill || textCols[0].name),
+    opId: editing ? editing.derived_op : null,
+    params: {},
+    name: editing ? editing.name : '',
+  };
+
+  modal(editing ? `Re-derive "${editing.name}"` : 'Add datetime column', (body) => {
+    const previewBox = el('div', 'derived-preview');
+    const paramBox = el('div', 'derived-params');
+    const nameInput = el('input');
+    nameInput.className = 'derived-name';
+    const opSelect = el('select');
+    const colSelect = el('select');
+    const suggestNote = el('div', 'fb-help');
+
+    for (const c of textCols) {
+      const o = el('option', null, c.name);
+      o.value = c.name;
+      colSelect.append(o);
+    }
+    colSelect.value = state.column;
+    colSelect.disabled = !!editing;
+
+    for (const op of ops) {
+      // A two-input operation (duration) needs a second column, not a
+      // format guess, so it's offered here too — but never auto-suggested.
+      const o = el('option', null, op.label);
+      o.value = op.id;
+      opSelect.append(o);
+    }
+
+    function currentOp() { return ops.find((o) => o.id === opSelect.value); }
+
+    function defaultName() {
+      const op = currentOp();
+      if (op && op.derived_kind === 'duration') return `${state.column} elapsed`;
+      return `${state.column} (parsed)`;
+    }
+
+    function buildParams() {
+      paramBox.replaceChildren();
+      const op = currentOp();
+      if (!op) return;
+      for (const spec of op.params) {
+        const row = el('label', 'derived-param');
+        row.append(el('span', 'derived-param-label', spec.label + (spec.required ? ' *' : '')));
+        let input;
+        if (spec.type === 'select') {
+          input = el('select');
+          for (const opt of spec.options) {
+            const o = el('option', null, opt);
+            o.value = opt;
+            input.append(o);
+          }
+        } else if (spec.type === 'column') {
+          input = el('select');
+          for (const c of S.columns) {
+            if (c.name === state.name) continue;
+            const o = el('option', null, c.name);
+            o.value = c.name;
+            input.append(o);
+          }
+        } else {
+          input = el('input');
+          if (spec.type === 'int') input.type = 'number';
+          input.placeholder = spec.type === 'offset' ? '+00:00' : '';
+        }
+        const existing = state.params[spec.name];
+        if (existing != null && existing !== '') input.value = existing;
+        else if (spec.default != null) input.value = spec.default;
+        else if (spec.type === 'int' && spec.name === 'base_year') input.value = new Date().getFullYear();
+        state.params[spec.name] = input.value;
+        input.oninput = () => { state.params[spec.name] = input.value; refreshPreview(); };
+        input.onchange = () => { state.params[spec.name] = input.value; refreshPreview(); };
+        row.append(input);
+        if (spec.help) row.append(el('span', 'fb-help derived-param-help', spec.help));
+        paramBox.append(row);
+      }
+    }
+
+    let previewSeq = 0;
+    async function refreshPreview() {
+      const seq = ++previewSeq;
+      previewBox.replaceChildren(el('div', 'fb-help', 'Checking…'));
+      let res;
+      try {
+        res = await post('/api/derived/preview', {
+          source_id: S.sourceId, column: state.column, op_id: opSelect.value, params: state.params,
+        });
+      } catch (e) {
+        if (seq !== previewSeq) return;
+        previewBox.replaceChildren(el('div', 'fb-help bad', e.message));
+        return;
+      }
+      if (seq !== previewSeq) return; // a later keystroke already superseded this
+      previewBox.replaceChildren();
+      const table = el('div', 'derived-preview-rows');
+      for (const row of res.preview) {
+        const r = el('div', 'derived-preview-row');
+        r.append(el('span', 'derived-in', String(row.input == null ? '' : row.input)));
+        r.append(el('span', 'derived-arrow', '→'));
+        r.append(el('span', 'derived-out' + (row.output == null ? ' bad' : ''),
+                    row.output == null ? "can't parse" : row.output));
+        table.append(r);
+      }
+      previewBox.append(table);
+      previewBox.append(el('div', 'fb-help derived-verdict' + (res.failures ? ' bad' : ''),
+        res.failures
+          ? `${res.failures.toLocaleString()} of ${res.sampled.toLocaleString()} sampled values can't be parsed this way.`
+          : `All ${res.sampled.toLocaleString()} sampled values parse.`));
+    }
+
+    async function pickColumn(name) {
+      state.column = name;
+      if (!editing) {
+        nameInput.value = defaultName();
+        state.name = nameInput.value;
+      }
+      suggestNote.textContent = 'Detecting format…';
+      let ranked = [];
+      try {
+        ranked = await post('/api/derived/detect', { source_id: S.sourceId, column: name });
+      } catch { /* detection is a convenience — the picker still works */ }
+      if (ranked.length) {
+        const best = ranked[0];
+        suggestNote.textContent =
+          `Suggested: ${best.label} — ${Math.round(best.confidence * 100)}% of sampled values parse.`;
+        if (!editing) {
+          opSelect.value = best.op_id;
+          state.params = Object.assign({}, best.params);
+        }
+      } else {
+        suggestNote.textContent = editing ? '' : "No format detected — pick one below to see what it produces.";
+      }
+      buildParams();
+      refreshPreview();
+    }
+
+    colSelect.onchange = () => pickColumn(colSelect.value);
+    opSelect.onchange = () => { state.params = {}; buildParams(); refreshPreview(); };
+    nameInput.oninput = () => { state.name = nameInput.value; };
+
+    body.append(labeledRow('Parse column', colSelect));
+    body.append(suggestNote);
+    body.append(labeledRow('Format', opSelect));
+    body.append(paramBox);
+    if (!editing) {
+      nameInput.value = defaultName();
+      state.name = nameInput.value;
+      body.append(labeledRow('New column name', nameInput));
+    }
+    body.append(el('div', 'derived-preview-title', 'Preview'));
+    body.append(previewBox);
+
+    if (editing) {
+      state.opId = editing.derived_op;
+      opSelect.value = editing.derived_op;
+      opSelect.disabled = true;
+      api(`/api/derived?source_id=${S.sourceId}`).then((defs) => {
+        const d = defs.find((x) => x.id === editing.derived_id);
+        if (d) { state.params = Object.assign({}, d.params); buildParams(); refreshPreview(); }
+      }).catch(() => {});
+      buildParams();
+      refreshPreview();
+    } else {
+      pickColumn(state.column);
+    }
+
+    const actions = el('div', 'row-actions');
+    const go = el('button', 'btn', editing ? 'Re-derive' : 'Add column');
+    go.onclick = async () => {
+      go.disabled = true;
+      try {
+        let res;
+        if (editing) {
+          res = await post(`/api/derived/${editing.derived_id}/rederive`, { params: state.params });
+        } else {
+          res = await post('/api/derived', {
+            source_id: S.sourceId, name: state.name, input_column: state.column,
+            op_id: opSelect.value, params: state.params,
+          });
+        }
+        $('modal').hidden = true;
+        // The column shows up immediately (status 'building') and fills in
+        // top-down as the backfill runs; the jobs panel tracks it.
+        await loadSources();
+        await openSource(S.sourceId);
+        startJobsPoll();
+        toast(editing ? `Re-deriving "${editing.name}"…` : `Adding "${state.name}"…`);
+      } catch (e) {
+        go.disabled = false;
+        toast('Could not add column: ' + e.message, 8000);
+      }
+    };
+    const cancel = el('button', 'btn ghost', 'Cancel');
+    cancel.onclick = () => { $('modal').hidden = true; };
+    actions.append(go, cancel);
+    body.append(actions);
+  }, { wide: true });
+}
+
+/* After an import, if a column looks strongly like a timestamp the app
+   can't already read (an epoch, a syslog line), say so once. A toast with
+   an action rather than a modal: the analyst asked to import a file, not
+   to be interrupted — and a column that isn't converted still shows and
+   searches exactly as before. */
+const suggestedSources = new Set();
+
+async function offerTimestampColumns(sourceId) {
+  if (suggestedSources.has(sourceId)) return;
+  suggestedSources.add(sourceId);
+  let suggestions = [];
+  try {
+    suggestions = await api(`/api/derived/suggestions?source_id=${sourceId}`);
+  } catch { return; }
+  if (!suggestions.length) return;
+  const s = suggestions[0];
+  const src = (S.sources || []).find((x) => x.id === sourceId);
+  const more = suggestions.length > 1 ? ` (and ${suggestions.length - 1} more)` : '';
+  toastAction(
+    `"${s.column}" in ${src ? src.name : 'the new table'} looks like ${s.label}${more}`,
+    'Add datetime column',
+    async () => {
+      if (S.sourceId !== sourceId) await openSource(sourceId);
+      openDerivedColumnModal(s.column);
+    });
+}
+
+function labeledRow(label, control) {
+  const row = el('label', 'derived-row');
+  row.append(el('span', 'derived-row-label', label));
+  row.append(control);
+  return row;
+}
 
 /* ----------------------------------------------------------- column drag */
 
@@ -1043,22 +1490,25 @@ function renderHead() {
     if (si >= 0) {
       h.append(el('span', 'sort', (S.sort[si].dir === 'asc' ? '▲' : '▼') + (S.sort.length > 1 ? si + 1 : '')));
     }
-    const colMetaEntry = S.columns.find((x) => x.name === name);
-    if (colMetaEntry && colMetaEntry.type === 'datetime') {
+    const colMetaEntry = columnMeta(name);
+    if (colMetaEntry && colMetaEntry.derived) {
+      // Marks the column as the analyst's own addition rather than
+      // something that came out of the evidence file.
+      const mark = el('span', 'hcell-derived', 'ƒ');
+      const dstatus = colMetaEntry.derived_status;
+      mark.title = `Derived from "${colMetaEntry.derived_from}" — ${opLabel(colMetaEntry.derived_op)}`
+        + (dstatus === 'building' ? ' (building…)' : '')
+        + (dstatus === 'partial' ? ' (incomplete — re-derive to finish)' : '');
+      if (dstatus !== 'ready') mark.classList.add('pending');
+      h.append(mark);
+    }
+    if (colMetaEntry) {
       const fmtBtn = el('button', 'hcell-fmt', '▾');
       fmtBtn.draggable = false;
-      fmtBtn.title = 'Timestamp display format';
+      fmtBtn.title = 'Column options';
       fmtBtn.onclick = (e) => {
         e.stopPropagation();
-        const current = tsFormatFor(name);
-        dropdownMenu(fmtBtn, Object.entries(TS_FORMATS).map(([key, label]) => ({
-          label: (key === current ? '✓ ' : '   ') + label,
-          onclick: () => {
-            S.layout[name] = { ...(S.layout[name] || {}), tsFormat: key === 'raw' ? undefined : key };
-            render();
-            saveLayout();
-          },
-        })));
+        dropdownMenu(fmtBtn, columnMenuItems(name));
       };
       h.append(fmtBtn);
     }
@@ -1141,7 +1591,10 @@ async function saveDefaultLayout() {
   if (!S.sourceId || !S.columns.length) return;
   try {
     await post('/api/column_layouts', {
-      col_names: S.columns.map((c) => c.name), order: S.order, columns: S.layout,
+      // Keyed by the imported file's own columns: a derived column is this
+      // analyst's addition, and including it would stop the same file
+      // matching this layout when it's opened somewhere else.
+      col_names: baseColumns().map((c) => c.name), order: S.order, columns: S.layout,
     });
     toast('Saved as the default layout for this set of columns');
   } catch (e) {
@@ -1443,8 +1896,7 @@ function render() {
         // search, so the matched substring stays visible — only substitute
         // the formatted display when there's nothing to highlight.
         if (needle && String(val).toLowerCase().includes(needle)) highlight(c, String(val), needle);
-        else if (colMeta[name] && colMeta[name].type === 'datetime') c.textContent = formatTimestamp(val, tsFormatFor(name));
-        else c.textContent = val;
+        else c.textContent = displayCell(name, val);
       }
       row.append(c);
     });
@@ -1576,7 +2028,7 @@ function renderGroupDataRow(r, cols, colMeta, idx, widths) {
     c.style.flexBasis = widths[name] + 'px';
     const val = r ? r.cells[idx[name]] : '';
     if (val != null && val !== '') {
-      c.textContent = colMeta[name] && colMeta[name].type === 'datetime' ? formatTimestamp(val, tsFormatFor(name)) : val;
+      c.textContent = displayCell(name, val);
     }
     row.append(c);
   }
@@ -1753,6 +2205,42 @@ async function dropGrouping() {
   render();
   drawRail();
   saveLayout();
+}
+
+/* Replace the whole grouping set at once (preset apply, toggle restore) —
+   the incremental addGroupLevel/removeGroupLevel path exists for drag
+   interactions, but swapping one saved grouping for another needs the
+   pre-grouping column order restored first, or a formerly-grouped column
+   leaks out of the visible layout. Caller renders + regroups (or lets
+   rebuildView's own regroupAll do it). */
+function setGrouping(cols, gsort, gdir) {
+  if (S.preGroupOrder) { S.order = S.preGroupOrder; S.preGroupOrder = null; }
+  const valid = (cols || []).filter((c) => S.columns.some((x) => x.name === c));
+  S.groupByCols = [];
+  if (valid.length) {
+    S.preGroupOrder = [...S.order];
+    S.groupByCols = valid;
+    S.order = S.order.filter((n) => !valid.includes(n));
+  }
+  if (gsort) S.groupSort = gsort;
+  if (gdir) S.groupSortDir = gdir;
+}
+
+/* One keypress parks the grouping, the next brings the same grouping back —
+   independent of the filters (same independence toggleTimeRange has),
+   for flipping between "the shape of the data" and "the rows themselves". */
+async function toggleGrouping() {
+  if (S.groupByCols.length) {
+    S.lastGroupBy = { cols: [...S.groupByCols], sort: S.groupSort, dir: S.groupSortDir };
+    await dropGrouping();
+    toast('Grouping off — press again to restore');
+  } else if (S.lastGroupBy && S.lastGroupBy.cols.some((c) => S.columns.some((x) => x.name === c))) {
+    setGrouping(S.lastGroupBy.cols, S.lastGroupBy.sort, S.lastGroupBy.dir);
+    renderHead();
+    await regroupAll();
+  } else {
+    toast('No grouping to restore — drag a column header into the Group by strip');
+  }
 }
 
 let draggedPillIdx = null;
@@ -2162,7 +2650,7 @@ function showDetail(pos) {
     if (v == null || v === '') return;
     dl.append(el('dt', null, c.name));
     const dd = el('dd');
-    dd.append(renderDetailContent(c.type === 'datetime' ? formatTimestamp(v, tsFormatFor(c.name)) : v));
+    dd.append(renderDetailContent(displayCell(c.name, v)));
     dl.append(dd);
   });
   const note = $('noteInput');
@@ -2679,7 +3167,7 @@ function openFilterBuilder(editing = null) {
       if (!hasActiveFilterTree()) { toast('Build a filter first'); return; }
       const name = await promptDialog('Filter name:');
       if (!name || !name.trim()) return;
-      const rec = await post('/api/saved_filters', { name: name.trim(), col_names: S.columns.map((c) => c.name), payload: currentFilterPayload() });
+      const rec = await post('/api/saved_filters', { name: name.trim(), col_names: baseColumns().map((c) => c.name), payload: currentFilterPayload() });
       S.savedFilters.push(rec);
       updateFiltersButton();
       checkPresets(S.sourceId); // this filter may now match the open table's banner
@@ -2833,8 +3321,9 @@ function applyPreset(preset) {
   syncSearchExpansion();
   updateSearchHint();
   updateFiltersButton();
+  if (p.group_by && p.group_by.length) setGrouping(p.group_by, p.group_sort, p.group_sort_dir);
   renderHead();
-  rebuildView({ keepScroll: false });
+  rebuildView({ keepScroll: false });  // regroups via regroupAll when grouping is set
   toast(`Applied preset "${preset.name}"`);
 }
 
@@ -2849,8 +3338,16 @@ async function loadSavedFilters() {
   try { S.savedFilters = await api('/api/saved_filters'); } catch { S.savedFilters = []; }
 }
 
+async function loadAppSettings() {
+  try { S.appSettings = await api('/api/settings/app'); } catch { S.appSettings = {}; }
+}
+
+async function loadCaseSettings() {
+  try { S.caseSettings = await api('/api/case_settings'); } catch { S.caseSettings = {}; }
+}
+
 function filtersForCurrentSource() {
-  const cur = new Set(S.columns.map((c) => c.name.trim().toLowerCase()));
+  const cur = new Set(baseColumns().map((c) => c.name.trim().toLowerCase()));
   return S.savedFilters.filter((f) => {
     const cols = new Set((f.col_names || []).map((c) => c.trim().toLowerCase()));
     return cols.size === cur.size && [...cols].every((c) => cur.has(c));
@@ -2877,9 +3374,116 @@ function cycleSavedFilter(dir) {
   }
 }
 
+/* The grid's current filter/sort/search, rendered server-side as a
+   standalone SELECT (spec_sql — the same compiler the view build uses) and
+   dropped into a new SQL pane tab. For when a filter has done all it can
+   and the next question needs a JOIN or a GROUP BY. */
+async function openFilterSqlTab() {
+  if (!S.sourceId) { toast('Open a table first'); return; }
+  try {
+    const res = await post('/api/view/sql', currentSpec());
+    const src = S.sources.find((x) => x.id === S.sourceId);
+    const rec = await post('/api/sql_tabs', { name: `Filter: ${src ? src.name : 'table'}`, sql: res.sql });
+    S.sqlTabId = rec.id;  // loadSqlTabs (via showSqlTab) keeps a still-valid selection
+    showSqlTab();
+  } catch (e) {
+    toast('Could not open in SQL pane: ' + e.message, 5000);
+  }
+}
+
+/* ------------------------------------------------------ jump to timestamp */
+
+/* Scroll to the row whose timestamp is closest to a given moment. The
+   target is saved in S.jumpTs and deliberately survives switching tables —
+   the workflow this exists for is "something happened at 13:22:01; show me
+   that moment in the EVTX table, now in the proxy log, now in the MFT". */
+function openJumpTsModal() {
+  if (!S.sourceId) { toast('Open a table first'); return; }
+  const dtCols = S.columns.filter((c) => c.type === 'datetime').map((c) => c.name);
+  modal('Jump to timestamp', (b) => {
+    const jumpKey = (S.keymap.repeatJumpTs || [])[0] || '(unbound)';
+    b.append(el('p', null,
+      'Scrolls to the row whose timestamp is closest to this moment. The value is remembered '
+      + `across tables — press "${jumpKey}" in any table to jump straight to it again.`));
+
+    b.append(el('label', null, 'Column'));
+    const colSel = el('select');
+    colSel.style.cssText = 'display:block;width:100%;background:var(--ink);color:var(--text);'
+      + 'border:1px solid var(--line-2);padding:6px 8px;font:inherit;margin-bottom:10px';
+    const allOpt = document.createElement('option');
+    allOpt.value = '';
+    allOpt.textContent = 'Nearest across all datetime columns';
+    colSel.append(allOpt);
+    for (const name of dtCols) {
+      const opt = document.createElement('option');
+      opt.value = name;
+      opt.textContent = name;
+      colSel.append(opt);
+    }
+    colSel.value = dtCols.includes(S.jumpTs.column) ? S.jumpTs.column : '';
+    b.append(colSel);
+    if (!dtCols.length) b.append(el('p', 'fb-help', 'This table has no datetime columns — the jump will have nothing to measure against here.'));
+
+    const row = el('div', 'row-actions');
+    const input = el('input');
+    input.type = 'text';
+    input.placeholder = 'YYYY-MM-DD HH:MM:SS';
+    input.style.cssText = 'flex:1;background:var(--ink);color:var(--text);border:1px solid var(--line-2);'
+      + 'padding:6px 8px;font:inherit;font-family:var(--mono)';
+    input.value = S.jumpTs.value || '';
+    row.append(el('span', null, 'Moment'), input);
+    b.append(row);
+    b.append(el('p', 'fb-help', '24-hour time — the date alone, or date plus HH:MM, also work.'));
+
+    const go = () => {
+      const v = input.value.trim();
+      if (!v) { toast('Enter a timestamp'); return; }
+      if (!parseTimestamp(v)) { toast('Not a recognized timestamp — try YYYY-MM-DD HH:MM:SS', 4000); return; }
+      S.jumpTs = { value: v, column: colSel.value || null };
+      $('modal').hidden = true;
+      doJumpTs();
+    };
+    input.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); go(); } };
+    const actions = el('div', 'row-actions');
+    const jumpBtn = el('button', 'btn', 'Jump');
+    jumpBtn.onclick = go;
+    const cancel = el('button', 'btn ghost', 'Cancel');
+    cancel.onclick = () => { $('modal').hidden = true; };
+    actions.append(jumpBtn, cancel);
+    b.append(actions);
+    setTimeout(() => { input.focus(); input.select(); }, 0);
+  });
+}
+
+async function doJumpTs() {
+  if (!S.jumpTs.value) { openJumpTsModal(); return; }
+  if (!S.view || !S.sourceId) { toast('Open a table first'); return; }
+  if (S.groupByCols.length) { toast('Jump works in the flat view — toggle grouping off first'); return; }
+  // The saved column may not exist in this table — fall back to
+  // nearest-across-all rather than erroring on a per-table mismatch.
+  const col = S.jumpTs.column && S.columns.some((c) => c.name === S.jumpTs.column && c.type === 'datetime')
+    ? S.jumpTs.column : null;
+  try {
+    const res = await post('/api/view/find_ts', { view_id: S.view.view_id, value: S.jumpTs.value, column: col });
+    moveCursor(res.pos, false);
+    toast(`Jumped to ${res.ts} (row ${(res.pos + 1).toLocaleString()})`);
+  } catch (e) {
+    toast((e.status === 404 ? e.message : 'Could not jump: ' + e.message), 4000);
+  }
+}
+
 /* Same shape saveFilterAs/saveAs POST as a saved filter/preset's payload. */
 function currentFilterPayload() {
-  return { filter_tree: S.filterTree, sort: S.sort, search: S.search, search_mode: S.searchMode, search_terms: S.searchTerms };
+  const p = { filter_tree: S.filterTree, sort: S.sort, search: S.search, search_mode: S.searchMode, search_terms: S.searchTerms };
+  // Grouping rides along only when one is active — a filter saved without
+  // grouping omits the key entirely, and applying it leaves any current
+  // grouping alone (same leniency `sort: p.sort || S.sort` has).
+  if (S.groupByCols.length) {
+    p.group_by = [...S.groupByCols];
+    p.group_sort = S.groupSort;
+    p.group_sort_dir = S.groupSortDir;
+  }
+  return p;
 }
 
 /* No separate "which saved filter is active" flag to keep in sync — instead
@@ -3038,6 +3642,46 @@ function openTimeRangeModal() {
       return true;
     };
 
+    // Fill the range from what's already been triaged: earliest/latest
+    // timestamp among tagged rows — any tag, or just the ones toggled on.
+    if (S.sourceId && S.tags.length) {
+      b.append(el('label', null, 'From tagged rows'));
+      const tagRow = el('div', 'row-actions tr-tag-row');
+      const selectedTags = new Set();
+      for (const t of S.tags) {
+        const chip = el('button', 'tag-chip');
+        chip.setAttribute('aria-pressed', 'false');
+        const sw = el('span', 'swatch');
+        sw.style.background = t.color;
+        chip.append(sw, el('span', null, t.name));
+        chip.title = 'Toggle — no tags toggled means any tag counts';
+        chip.onclick = () => {
+          if (selectedTags.has(t.id)) selectedTags.delete(t.id); else selectedTags.add(t.id);
+          chip.setAttribute('aria-pressed', String(selectedTags.has(t.id)));
+          chip.style.color = selectedTags.has(t.id) ? t.color : '';
+        };
+        tagRow.append(chip);
+      }
+      const fillBtn = el('button', 'btn ghost', 'Fill range');
+      fillBtn.title = 'Set start/end to the earliest and latest timestamps among tagged rows (respects the column chosen above)';
+      fillBtn.onclick = async () => {
+        try {
+          const res = await post('/api/tag_time_bounds', {
+            source_id: S.sourceId, tag_ids: [...selectedTags], column: colSel.value || null,
+          });
+          if (!res.start && !res.end) { toast('No tagged rows with a usable timestamp'); return; }
+          startInput.value = res.start || '';
+          endInput.value = res.end || '';
+          enabledCb.checked = true;
+          toast('Range set from tagged rows — Apply to use it');
+        } catch (e) {
+          toast('Could not read tagged range: ' + e.message, 4000);
+        }
+      };
+      tagRow.append(fillBtn);
+      b.append(tagRow);
+    }
+
     const actions = el('div', 'row-actions');
     const apply = el('button', 'btn', 'Apply');
     apply.onclick = () => {
@@ -3102,7 +3746,7 @@ function openSavedFiltersModal() {
     const list = el('div', 'session-list');
     b.append(list);
 
-    const curCols = new Set(S.columns.map((c) => c.name.trim().toLowerCase()));
+    const curCols = new Set(baseColumns().map((c) => c.name.trim().toLowerCase()));
     const active = activeSavedFilterRecord();
 
     function render() {
@@ -3166,6 +3810,20 @@ function openSavedFiltersModal() {
         downBtn.disabled = gIdx >= groupIds.length - 1;
         downBtn.onclick = async () => { await moveSavedFilter(f, 1); render(); };
         row.append(applyBtn, headerLabel, editBtn, nicknameBtn, upBtn, downBtn);
+        // Drag to reorder as well — same one DnD implementation the tab
+        // strip and SQL sub-tabs use. currentIds scopes the drop to this
+        // filter's own header set, so dragging across sets is a no-op
+        // (wireDragReorder's own from === -1 guard).
+        wireDragReorder(row, f.id, {
+          containerSelector: '.session-list',
+          rowSelector: '.session-row',
+          horizontal: false,
+          currentIds: () => sameGroupFilterIds(f.col_names),
+          onReorder: async (ids) => {
+            S.savedFilters = await post('/api/saved_filters/reorder', { ids });
+            render();
+          },
+        });
         list.append(row);
       }
       if (!shown) list.append(el('div', 'note-status', 'No saved filters match that search.'));
@@ -3207,14 +3865,17 @@ function buildColumnsPanel(container, refresh = openColumnsModal) {
       renderHead(); render(); saveLayout();
     };
     lab.append(cb, el('span', null, name));
-    const c = S.columns.find((x) => x.name === name);
-    lab.append(el('span', 'count', ' ' + (c ? c.type : '')));
+    const c = columnMeta(name);
+    lab.append(el('span', 'count', ' ' + (c ? c.type : '') + (c && c.derived ? ' · derived' : '')));
     row.append(lab);
     list.append(row);
   });
   container.append(list);
   container.append(el('p', 'fb-help', 'Drag a column header in the grid to reorder it.'));
   const acts = el('div', 'row-actions');
+  const addDerived = el('button', 'btn ghost', 'Add datetime column…');
+  addDerived.onclick = () => openDerivedColumnModal();
+  acts.append(addDerived);
   const all = el('button', 'btn ghost', 'Show all');
   all.onclick = () => { for (const n of S.order) S.layout[n] = { ...(S.layout[n] || {}), hidden: false }; renderHead(); render(); saveLayout(); refresh(); };
   const none = el('button', 'btn ghost', 'Hide empty columns');
@@ -5851,7 +6512,10 @@ function openTimelineSourceConfig() {
 
     const realSources = S.sources.filter((s) => !s.is_merge && !s.error);
     for (const src of realSources) {
-      const colNames = src.columns.map((c) => c.name);
+      // Header-set key: the file's own columns (see baseColumns). A derived
+      // column can still be *picked* as the timestamp below — it just isn't
+      // part of what identifies this source type.
+      const colNames = src.columns.filter((c) => !c.derived).map((c) => c.name);
       const dtCols = src.columns.filter((c) => c.type === 'datetime').map((c) => c.name);
       const existing = timelineTemplateFor(colNames);
 
@@ -6554,6 +7218,13 @@ async function clearAllFilters() {
   // timeframe"), same as it survives applyPreset() and a tab switch. Use
   // the Timeframe filter's own "Clear" button, or toggleTimeRange, for that.
   const anchor = selectedRowAnchor();
+  // Grouping goes with the filters (stashed first, so toggleGrouping can
+  // bring it back) — clearing "the filters" should land on the plain
+  // table, not on an empty filter under the old grouping.
+  if (S.groupByCols.length) {
+    S.lastGroupBy = { cols: [...S.groupByCols], sort: S.groupSort, dir: S.groupSortDir };
+    await dropGrouping();
+  }
   S.filters = {}; S.search = ''; S.tagFilter = []; S.searchTerms = [];
   S.filterTree = { type: 'group', op: 'AND', children: [] };
   updateFiltersButton();
@@ -6565,6 +7236,9 @@ async function clearAllFilters() {
   await recenterOnRow(anchor);
 }
 $('btnReset').onclick = clearAllFilters;
+// The empty-case state's one useful next action, right where the eye lands —
+// the same openImportModal the Session menu's "Import…" entry opens.
+$('emptyImportBtn').onclick = () => openImportModal();
 function openExportModal() {
   modal('Export', (b) => {
     if (S.view) {
@@ -6695,6 +7369,10 @@ const DEFAULT_KEYMAP = {
   saveDefaultLayout: ['L'],
   toggleTimeRange: ['T'],
   openTimeRange: ['R'],
+  toggleGrouping: ['X'],
+  openFilterSql: ['Q'],
+  openJumpTs: ['J'],
+  repeatJumpTs: ['.'],
 };
 const ACTION_LABELS = {
   moveDown: 'Move down', moveUp: 'Move up',
@@ -6715,6 +7393,10 @@ const ACTION_LABELS = {
   saveDefaultLayout: "Save this column order/visibility as the default for this header set",
   toggleTimeRange: 'Toggle the timeframe filter on/off',
   openTimeRange: 'Open the timeframe filter (set column/range)',
+  toggleGrouping: 'Toggle grouping off/on (remembers the last grouping)',
+  openFilterSql: 'Open the current filter as a query in the SQL pane',
+  openJumpTs: 'Jump to timestamp… (set the moment and column)',
+  repeatJumpTs: 'Jump again to the saved timestamp (works across tables)',
 };
 
 function loadKeymap() {
@@ -6771,6 +7453,10 @@ const ACTION_HANDLERS = {
   saveDefaultLayout: () => saveDefaultLayout(),
   toggleTimeRange: () => toggleTimeRange(),
   openTimeRange: () => openTimeRangeModal(),
+  toggleGrouping: () => toggleGrouping(),
+  openFilterSql: () => openFilterSqlTab(),
+  openJumpTs: () => openJumpTsModal(),
+  repeatJumpTs: () => doJumpTs(),
 };
 
 S.keymap = loadKeymap();
@@ -7054,6 +7740,52 @@ function openSettings() {
       + "column at once (catches a row via its Modified time even if its Created time was timestomped) — "
       + 'unlike the other filters, it stays applied when you clear filters, apply a saved filter, or switch tables.'));
 
+    b.append(el('h4', null, 'Timestamps'));
+    b.append(el('p', null,
+      'How datetime columns are displayed. This is presentation only — the stored and exported '
+      + 'value is always the text the file came with. A format picked on an individual column '
+      + "(its ▾ menu) beats the case setting, which beats the system-wide one."));
+
+    const tsSystemSel = el('select');
+    for (const [key, label] of Object.entries(TS_FORMATS)) {
+      const o = el('option', null, label);
+      o.value = key;
+      tsSystemSel.append(o);
+    }
+    tsSystemSel.value = S.appSettings.default_ts_format || 'iso';
+    tsSystemSel.onchange = async () => {
+      try {
+        S.appSettings = await post('/api/settings/app', { default_ts_format: tsSystemSel.value });
+        render();
+        toast('Default timestamp format saved');
+      } catch (e) {
+        toast('Could not save: ' + e.message, 5000);
+      }
+    };
+    b.append(labeledRow('Every case on this machine', tsSystemSel));
+
+    const tsCaseSel = el('select');
+    const inherit = el('option', null, 'Use the system-wide default');
+    inherit.value = '';
+    tsCaseSel.append(inherit);
+    for (const [key, label] of Object.entries(TS_FORMATS)) {
+      const o = el('option', null, label);
+      o.value = key;
+      tsCaseSel.append(o);
+    }
+    tsCaseSel.value = S.caseSettings.ts_format || '';
+    tsCaseSel.disabled = !S.sources.length && !S.sourceId;
+    tsCaseSel.onchange = async () => {
+      try {
+        S.caseSettings = await post('/api/case_settings', { ts_format: tsCaseSel.value });
+        render();
+        toast('Case timestamp format saved');
+      } catch (e) {
+        toast('Could not save: ' + e.message, 5000);
+      }
+    };
+    b.append(labeledRow('This case', tsCaseSel));
+
     b.append(el('h4', null, 'Default tags for new cases'));
     b.append(el('p', null,
       "Seeds a brand-new case's tag set when you create one from the home screen. Doesn't change tags in "
@@ -7255,6 +7987,9 @@ async function openCase(path) {
   if (S.activeTab !== 'grid') showGridTab();
   setBrandLabel(res.name);
   showApp();
+  // ts_format lives in the case file, so it's per-case state like sql_tabs
+  // — reload it rather than carrying the last case's setting over.
+  await loadCaseSettings();
   await loadSources();
 }
 
@@ -7625,11 +8360,13 @@ async function refreshCases() {
 $('btnHome').onclick = () => { showHome(); refreshCases(); };
 
 async function boot() {
-  await Promise.all([loadSavedFilters(), loadHeaderNicknames(), loadTimelineTemplates(), loadPlugins()]);
+  await Promise.all([loadSavedFilters(), loadHeaderNicknames(), loadTimelineTemplates(),
+                     loadPlugins(), loadAppSettings()]);
   const cur = await api('/api/case/current').catch(() => ({ open: false }));
   if (cur.open) {
     setBrandLabel(cur.name);
     showApp();
+    await loadCaseSettings();
     await loadSources();
     startJobsPoll(); // an import (or index build) from before a reload shows back up
   } else {

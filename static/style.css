@@ -528,6 +528,15 @@ html[data-style="studio"][data-theme="light"] {
   padding: 0 2px; flex: 0 0 auto;
 }
 .hcell-fmt:hover { color: var(--accent); }
+
+/* Marks an analyst-added derived column, so it's never mistaken for a
+   field that came out of the evidence file. Dimmed-but-italic while the
+   backfill is still running (or left partial by a cancel). */
+.hcell-derived {
+  flex: 0 0 auto; padding: 0 3px; color: var(--accent);
+  font-family: var(--mono); font-size: 11px; opacity: .85;
+}
+.hcell-derived.pending { opacity: .5; font-style: italic; }
 .hcell.dragging { opacity: .4; }
 .hcell.drop-before { box-shadow: inset 2px 0 0 var(--accent); }
 .hcell.drop-after { box-shadow: inset -2px 0 0 var(--accent); }
@@ -928,6 +937,11 @@ textarea:focus { border-color: var(--accent); outline: none; }
 
 .session-list, .session-queue { display: grid; gap: 4px; margin: 6px 0 12px; }
 .session-row { justify-content: flex-start; padding: 5px 8px; background: var(--panel-2); border-radius: var(--radius-sm); }
+/* Drag-to-reorder feedback for saved-filter rows (wireDragReorder) — same
+   vocabulary the tab strip and column headers use, on the vertical axis. */
+.session-row.dragging { opacity: .4; }
+.session-row.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
+.session-row.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
 .session-name { font-family: var(--mono); font-size: 12px; color: var(--text); }
 .session-row .count { color: var(--dim); font-size: 11px; margin-right: auto; }
 
@@ -1114,7 +1128,41 @@ textarea:focus { border-color: var(--accent); outline: none; }
   position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
   background: var(--panel-2); border: var(--border-w) solid var(--accent-dim); border-radius: var(--radius-sm);
   padding: 7px 14px; font-size: 12px; z-index: 60; box-shadow: var(--shadow-tag);
+  display: flex; align-items: center; gap: 10px;
 }
+.toast-action {
+  background: var(--accent-dim); color: var(--text); border: var(--border-w) solid var(--accent);
+  border-radius: var(--radius-sm); padding: 3px 9px; font: inherit; font-size: 11px; cursor: pointer;
+}
+.toast-action:hover { background: var(--accent); }
+
+/* Add/re-derive datetime column modal (openDerivedColumnModal). */
+.derived-row { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
+.derived-row-label { flex: 0 0 150px; font-size: 12px; color: var(--text-dim); }
+.derived-row select, .derived-row input {
+  flex: 1; background: var(--ink); color: var(--text);
+  border: 1px solid var(--line-2); border-radius: var(--radius-sm); padding: 5px 8px; font: inherit;
+}
+.derived-params { margin: 4px 0 10px; }
+.derived-param { display: flex; align-items: center; gap: 10px; margin: 6px 0; }
+.derived-param-label { flex: 0 0 150px; font-size: 12px; color: var(--text-dim); }
+.derived-param select, .derived-param input {
+  flex: 0 0 160px; background: var(--ink); color: var(--text);
+  border: 1px solid var(--line-2); border-radius: var(--radius-sm); padding: 5px 8px; font: inherit;
+}
+.derived-param-help { flex: 1; min-width: 0; margin: 0; }
+.derived-preview-title { font-size: 12px; color: var(--text-dim); margin-top: 12px; }
+.derived-preview {
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  padding: 8px 10px; margin-top: 4px; max-height: 240px; overflow: auto;
+}
+.derived-preview-row { display: flex; align-items: baseline; gap: 8px; font-family: var(--mono); font-size: 11px; }
+.derived-in { flex: 0 1 auto; max-width: 45%; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.derived-arrow { flex: 0 0 auto; color: var(--text-dim); }
+.derived-out { flex: 1 1 auto; min-width: 0; }
+.derived-out.bad, .fb-help.bad { color: var(--danger, #c0392b); }
+.derived-verdict { margin: 8px 0 0; }
+.derived-name { font-family: var(--mono); }
 
 /* Shown while dragging OS files over the window (wireFileDrop in app.js) —
    above .modal's own z-index so it's visible even if a modal happens to be

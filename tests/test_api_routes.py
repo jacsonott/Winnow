@@ -429,3 +429,110 @@ def test_case_open_failure_keeps_current_case_usable(client, ingested, tmp_path)
     r = client.get("/api/sources")
     assert r.status_code == 200
     assert len(r.json()) == 1
+
+
+def test_derived_column_routes_end_to_end(client, store, write_csv):
+    """The add → poll → list → delete cycle over HTTP, including the
+    400-vs-404 split api_view established (a bad request is the analyst's
+    to fix; a missing id isn't the same thing)."""
+    p = write_csv([["Epoch"], ["1700000000"], ["1700000060"]], name="e.csv")
+    sid = store.ingest_csv(p, name="e.csv", build_fts=False)["id"]
+
+    ops = client.get("/api/derived/ops").json()
+    assert "unix_epoch" in [o["id"] for o in ops]
+
+    detected = client.post("/api/derived/detect", json={"source_id": sid, "column": "Epoch"}).json()
+    assert detected[0]["op_id"] == "unix_epoch"
+
+    preview = client.post("/api/derived/preview", json={
+        "source_id": sid, "column": "Epoch", "op_id": "unix_epoch", "params": {},
+    }).json()
+    assert preview["failures"] == 0
+    assert preview["preview"][0]["output"] == "2023-11-14 22:13:20"
+
+    created = client.post("/api/derived", json={
+        "source_id": sid, "name": "When", "input_column": "Epoch", "op_id": "unix_epoch",
+    })
+    assert created.status_code == 200
+    def_id = created.json()["definition"]["id"]
+    store.wait_for_ingest_job(created.json()["job_id"], timeout=30)
+
+    listed = client.get(f"/api/derived?source_id={sid}").json()
+    assert [d["name"] for d in listed] == ["When"]
+    assert listed[0]["status"] == "ready"
+
+    frag = client.get(f"/api/derived/{def_id}/unparsed_filter").json()["sql"]
+    assert '"When" IS NULL' in frag
+
+    dup = client.post("/api/derived", json={
+        "source_id": sid, "name": "When", "input_column": "Epoch", "op_id": "unix_epoch",
+    })
+    assert dup.status_code == 400  # name collision is the analyst's to fix
+
+    assert client.delete("/api/derived/99999").status_code == 404
+    assert client.delete(f"/api/derived/{def_id}").status_code == 200
+    assert client.get(f"/api/derived?source_id={sid}").json() == []
+
+
+def test_derived_rederive_and_suggestion_routes(client, store, write_csv):
+    p = write_csv([["When"], ["Dec 31 23:59:59"], ["Jan  1 00:00:01"]], name="sys.csv")
+    sid = store.ingest_csv(p, name="sys.csv", build_fts=False)["id"]
+
+    suggestions = client.get(f"/api/derived/suggestions?source_id={sid}").json()
+    assert suggestions[0]["column"] == "When" and suggestions[0]["op_id"] == "syslog_bsd"
+
+    created = client.post("/api/derived", json={
+        "source_id": sid, "name": "Time", "input_column": "When", "op_id": "syslog_bsd",
+        "params": {"base_year": 2023},
+    })
+    def_id = created.json()["definition"]["id"]
+    store.wait_for_ingest_job(created.json()["job_id"], timeout=30)
+
+    re_ = client.post(f"/api/derived/{def_id}/rederive", json={"params": {"base_year": 2020}})
+    assert re_.status_code == 200
+    store.wait_for_ingest_job(re_.json()["job_id"], timeout=30)
+    assert store.get_derived_column(def_id)["params"] == {"base_year": 2020}
+
+    # A required param that's missing is a 400, not a 500.
+    bad = client.post("/api/derived", json={
+        "source_id": sid, "name": "T2", "input_column": "When", "op_id": "syslog_bsd",
+    })
+    assert bad.status_code == 400
+
+
+def test_timestamp_format_settings_routes(client):
+    assert client.get("/api/settings/app").json()["default_ts_format"] == "iso"
+    assert client.post("/api/settings/app", json={"default_ts_format": "us"}).status_code == 200
+    assert client.get("/api/settings/app").json()["default_ts_format"] == "us"
+    assert client.post("/api/settings/app", json={"default_ts_format": "klingon"}).status_code == 400
+
+    assert client.get("/api/case_settings").json() == {}
+    assert client.post("/api/case_settings", json={"ts_format": "date"}).status_code == 200
+    assert client.get("/api/case_settings").json()["ts_format"] == "date"
+    # Blank clears the case override rather than pinning the current value.
+    client.post("/api/case_settings", json={"ts_format": ""})
+    assert client.get("/api/case_settings").json() == {}
+
+
+def test_view_sql_find_ts_and_tag_bounds_routes(client, ingested):
+    """The three view-tool routes: spec→SQL rendering, jump-to-timestamp
+    (409 on an expired view, same contract as /api/rows), and
+    timeframe-from-tags."""
+    store, sid = ingested
+
+    r = client.post("/api/view/sql", json={"source_id": sid, "search": "svchost"})
+    assert r.status_code == 200 and "FROM" in r.json()["sql"]
+    assert client.post("/api/view/sql", json={"source_id": 999}).status_code == 400
+
+    view = client.post("/api/view", json={"source_id": sid}).json()
+    r = client.post("/api/view/find_ts", json={"view_id": view["view_id"], "value": "2024-01-05 13:22:30"})
+    assert r.status_code == 200 and r.json()["rid"] == 1
+    assert client.post("/api/view/find_ts", json={"view_id": view["view_id"], "value": "junk"}).status_code == 400
+    assert client.post("/api/view/find_ts", json={"view_id": "view_999", "value": "2024-01-05 10:00:00"}).status_code == 409
+
+    tag = store.list_tags()[0]["id"]
+    store.set_tags(sid, [2], tag, True)
+    r = client.post("/api/tag_time_bounds", json={"source_id": sid})
+    assert r.json() == {"start": "2024-01-05 13:23:11", "end": "2024-01-05 13:23:11"}
+    r = client.post("/api/tag_time_bounds", json={"source_id": sid, "tag_ids": [9999]})
+    assert r.json() == {"start": None, "end": None}

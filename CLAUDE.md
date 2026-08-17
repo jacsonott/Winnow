@@ -13,6 +13,9 @@ at runtime, it's the wrong change.
 ```
 server.py          FastAPI routes, CLI entrypoint. Thin — logic lives in store.
 store.py           All SQLite: ingest, view materialisation, tags, sessions, export.
+timeparse.py       Timestamp-parsing operations for derived datetime columns —
+                    the registry store.py's add_derived_column/detect read.
+                    Stdlib only, imports nothing from the app.
 workspace.py       Cross-case JSON state (case registry, saved filters, default
                     tag template) — human-readable files in workspace/, outside
                     any single case.db so they survive switching cases.
@@ -912,6 +915,135 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
   every other ingest route. Security model is Notepad++'s: a plugin is
   arbitrary local Python with the app's privileges, installed by the
   analyst physically placing it — never fetched, so the airgap rule holds.
+- **Derived columns** (`timeparse.py`, `derived_columns`/`drv_<id>` tables,
+  `/api/derived/*`, the header `▾` menu's "Add datetime column from
+  this…") let an analyst add a *computed* datetime column from one that's
+  already there — a Unix epoch, a BSD syslog line, a FILETIME, whatever
+  the tool that produced the file happened to emit. Shape, and why each
+  piece is where it is:
+  - **Definitions in `derived_columns`, values materialised in a per-source
+    `drv_<id>` sidecar** (`rid INTEGER PRIMARY KEY`, one TEXT column per
+    derived column) — the row_tags/row_notes pattern, so invariant #1
+    holds literally: `src_<id>` is never touched. Materialised rather than
+    computed per query because the whole point is that these sort, filter,
+    group and export like any other column, and all of that is server-side
+    SQL over a column that either exists or doesn't.
+  - **`sources.columns` in the DB stays base-only**; derived entries are
+    merged into `src["columns"]` at read time (`_derived_col_entry`, in
+    `get_source`/`list_sources`/`_source_lite_on`) with `derived: true`.
+    That's deliberately fail-open: the ~15 read paths that iterate
+    `src["columns"]` pick derived columns up for free, and only the
+    handful that must see *the evidence file's own shape* filter them back
+    out via `_base_cols` — the FTS doc view and its LIKE-fallback twin
+    (identical by construction, so a derived value is **not** searchable —
+    it's computed from text that already is), `column_signature` (adding a
+    derived column must not change merge eligibility), `_iter_search_all_sources`,
+    and the session file's column list. Merges get base columns only: each
+    member has its own `drv_` table and its own definitions, and a UNION
+    ALL across mismatched sets would need per-member NULL padding nothing
+    does yet.
+  - **`_from_clause(src)` is the one place the join is spelled** —
+    `LEFT JOIN drv_<id> USING(rid)`, so an unqualified `rid` stays legal
+    on both sides. `drv`'s rid is an INTEGER PRIMARY KEY, so the join
+    matches at most one row and can't change the row count or order: that
+    is what keeps `_fetch_virtual_root_rows`' `pos = rid - 1` exact
+    (invariant #2), pinned by an EXPLAIN QUERY PLAN test in
+    `test_derived.py`. A source with no derived columns compiles
+    byte-identical SQL, which is why `bench --vs-ref` is flat.
+  - **Two join shapes, not one.** `group_summary`/`expand_group`'s
+    view-join branch already chains `JOIN … ON`, and an `ON` after a
+    `USING` join binds to the wrong join — so those use `_derived_join`
+    (an explicit aliased `LEFT JOIN … ON d.rid = s.rid`) and refer to
+    derived columns as `d."col"`. `_col_ref(src, col, alias, derived_alias)`
+    is what picks the right spelling; `_path_where` takes `src` for the
+    same reason. This is the `s.DAY_BUCKET(...)` alias trap one level
+    further in — a derived column can't take the source table's alias at
+    all, because it isn't in the source table.
+  - **Backfill is a `derive` ingest job** (`backfill_derived_column`,
+    `start_ingest_job(kind='derive')` with no file) — per-BATCH lock
+    discipline, progress, cancel, the jobs panel, and `close()`'s
+    cancel-and-join, all for free. Rows are parsed **in rid order** because
+    the syslog operation is *stateful*: BSD syslog carries no year, so the
+    analyst supplies the first line's year and the parser rolls it forward
+    every time the month decreases. That assumes syslog files are appended
+    chronologically — an out-of-order line whose month is lower than its
+    predecessor's is attributed to the next year, documented in the op's
+    own description. Cancelling an *add* drops the column (mirror of
+    cancel-drops-the-partial-source: a half-filled column is
+    indistinguishable from a finished one in the grid); cancelling a
+    *re-derive* keeps it and marks it `partial`, since that wasn't a
+    request to delete the analyst's column.
+  - **Canonical output is `YYYY-MM-DD HH:MM:SS[.ffffff]`**, sub-second only
+    when the source has that resolution. That exact shape is why there are
+    **no new regexes to hand-sync**: `_TS_ISO_RE`/`TS_NORMALIZE`/`DAY_BUCKET`
+    and app.js's `parseTimestamp` already prefix-match it. Timezones:
+    epoch-family values are UTC by definition, values carrying an explicit
+    offset (ISO `Z`/`±HH:MM`, CLF, RFC 2822) are converted to UTC, and
+    naive text is kept exactly as written unless the analyst sets the
+    op's optional fixed `utc_offset` — never a TZ database, never DST
+    inference. Unparseable input is NULL, not `''`: it drops out of
+    comparisons and the timeframe filter instead of pretending to be data,
+    and the count of non-empty inputs that produced NULL is surfaced per
+    column ("Show N unparsed rows" builds a raw-filter fragment
+    server-side, so the UI never quotes a column name into SQL itself).
+  - **Display format layers**, most specific first: the column's own
+    `tsFormat` in the layout → this case (`case_settings`, in the case
+    file so it travels with the evidence) → system-wide
+    (`workspace/app_settings.json`, machine-level workflow state) →
+    `'iso'`. The old hard default was `'raw'`; analysts who want that set
+    it as their system default. Note `tsFormatFor`'s menu now always
+    stores the chosen key — it used to store `undefined` for `'raw'`,
+    which was equivalent only while `'raw'` *was* the fallback.
+  - Cost: two new tables ≈ **3 pages / 192KB fixed** per case file at the
+    64KB page size `_tune` sets (measured), independent of row count.
+    `derived_columns` deliberately has no index on `source_id` — it holds
+    one row per derived column in the whole case, so a scan is one page
+    either way and an index would cost more file than it could save.
+- **The 2026-08 navigation batch** — five smaller features, and the traps
+  each one carries:
+  - **"Open filter in SQL pane"** (`Store.spec_sql`, `POST /api/view/sql`,
+    keybind `Q`) renders the live spec through the *same*
+    `_compile_where`/`_compile_order` the view build uses — never a
+    parallel SQL generator that could drift — then inlines bound params as
+    literals via `_inline_sql_params`, which walks string literals with
+    SQLite's own ''-doubling rule so a `?` *inside* an analyst's raw
+    filter fragment is not mistaken for a placeholder. `run_sql`'s
+    connection now registers TS_NORMALIZE/DAY_BUCKET alongside REGEXP —
+    a compiled timeframe filter contains them, and the pane erroring on
+    its own generated SQL was the bug that surfaced this.
+  - **Grouping travels with saved filters**: `currentFilterPayload()` adds
+    `group_by`/`group_sort`/`group_sort_dir` *only when a grouping is
+    active*, so filters saved without one keep byte-identical payloads —
+    that's what keeps `activeSavedFilterRecord()`'s JSON-stringify
+    matching honest, and it gives apply-time the same leniency `sort:
+    p.sort || S.sort` has (a payload without the key leaves the current
+    grouping alone; setGrouping() replaces wholesale, restoring
+    `S.preGroupOrder` first so a formerly-grouped column doesn't leak out
+    of the visible layout). `clearAllFilters()` now drops grouping too —
+    stashed in `S.lastGroupBy` first, which is also what the `X`
+    toggleGrouping keybind restores (the deliberate contrast with lowercase
+    `x` dropGrouping, which just drops).
+  - **Jump to timestamp** (`Store.find_nearest_timestamp`,
+    `POST /api/view/find_ts`, keybinds `J`/`.`) measures closeness by
+    `ABS(julianday(TS_NORMALIZE(col)) - julianday(target))` — string order
+    can rank timestamps but can't measure *between* them — which makes it
+    a scan of the view; that's the same cost shape as group_summary's
+    aggregate and it runs on a pooled reader. Returns a pos each view kind
+    computes its own way (root_virtual: rid-1; materialized: vv.pos-1;
+    group_virtual: COUNT of group rows with a smaller rid, matching that
+    path's rid-order paging). `S.jumpTs` deliberately survives
+    `openSource()` — the workflow is "show me 13:22:01 in *each* table".
+  - **Timeframe-from-tags** (`Store.tag_time_bounds`,
+    `POST /api/tag_time_bounds`, the timeframe modal's "Fill range")
+    returns TS_NORMALIZE'd bounds — the exact shape the timeframe filter
+    compares through — over any-tag or a tag subset, honoring the modal's
+    column choice with the same all-datetime-columns fallback the filter
+    itself has, so the filled range always covers the rows it came from.
+  - **Saved-filter reordering** predates this batch (▲/▼ +
+    `SavedFilters.reorder`); the addition is drag-to-reorder on the modal
+    rows via the one shared `wireDragReorder`, scoped by
+    `currentIds: sameGroupFilterIds(...)` so a drag across header sets is
+    a structural no-op rather than a rule someone has to remember.
 - The example mft_usn plugin's fixup handling encodes a real-world trap:
   extraction tools disagree about whether $MFT records arrive with NTFS's
   multi-sector fixups still stamped (KAPE/icat/RawCopy: yes; ntfscat:
@@ -996,6 +1128,19 @@ model, fallbacks, the schema cache breakpoint — with no network). `test_sql_ta
 pane's sub-tabs, including that they actually survive closing and
 reopening the case file (the whole reason they live there rather than in
 `localStorage`) and that `reorder` keeps tabs it wasn't given.
+`test_timeparse.py` covers every timestamp operation as pure functions —
+epoch auto-ranging boundaries, hex-vs-decimal FILETIME, the syslog year
+rollover (including across a batch boundary and Feb 29 in a non-leap
+year), offset-to-UTC conversion — plus the guarantee that every parser's
+output is accepted by `_TS_ISO_RE`/`TS_NORMALIZE`/`DAY_BUCKET`, which is
+what makes derived columns need no new regexes on either side.
+`test_derived.py` covers the column lifecycle and, more importantly, the
+integration choices that are easy to reverse by accident: the
+virtual-root EXPLAIN plan (invariant #2), that derived values are *not*
+searchable, that merge eligibility is unaffected, and both cancel
+semantics (driven through the backfill's own cancel hook, so the
+cancellation point is deterministic rather than a race — same technique
+as `test_ingest_jobs.py`).
 
 There's no browser-side test runner, but `static/app.js` can at least be
 checked for syntax errors without one — the repo has `esprima` (the Python

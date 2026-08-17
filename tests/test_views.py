@@ -487,3 +487,46 @@ def test_time_range_open_ended_start_or_end(mft_like):
         "time_range": {"enabled": True, "column": "Modified", "start": None, "end": "2020-12-31T23:59"},
     }
     assert set(_names(store, only_before)) == {"old_file.txt", "created_only.dll"}
+
+
+def test_find_nearest_timestamp_on_every_view_kind(ingested):
+    """Jump-to-timestamp measures closeness in real time (julianday over
+    TS_NORMALIZE), not string order, and must return a position that
+    fetch_rows agrees with on all three view shapes."""
+    store, sid = ingested
+
+    # root_virtual: pos = rid - 1 (invariant #2's carve-out)
+    v = store.build_view(sid, {})
+    assert v["kind"] == "root_virtual"
+    hit = store.find_nearest_timestamp(v["view_id"], "2024-01-05 13:23:00")
+    assert (hit["rid"], hit["pos"], hit["ts"]) == (2, 1, "2024-01-05 13:23:11")
+    # 13:22:36 is 35s from row 1 and 35s from row 2 — nearer wins, ties are fine either way;
+    # a clearly-nearer probe pins the math:
+    assert store.find_nearest_timestamp(v["view_id"], "2024-01-05 13:22:05")["rid"] == 1
+
+    # materialized (sorted desc): pos must be the view's own, not rid math
+    v2 = store.build_view(sid, {"sort": [{"column": "Timestamp", "dir": "desc"}]})
+    hit = store.find_nearest_timestamp(v2["view_id"], "2024-01-07 20:00:00", "Timestamp")
+    assert hit["rid"] == 4  # 22:01:59 the same evening — ~2h away, vs ~35h to the previous row
+    row = store.fetch_rows(v2["view_id"], hit["pos"], 1)["rows"][0]
+    assert row["rid"] == hit["rid"]
+
+    # group_virtual: pos is the row's rank among the group's rid-ordered rows
+    root = store.build_view(sid, {})
+    g = store.expand_group(root["view_id"], "User", "ACME\\bob")
+    hit = store.find_nearest_timestamp(g["view_id"], "2024-01-01 00:00:00")
+    assert hit["rid"] == 3 and hit["pos"] == 0
+
+
+def test_find_nearest_timestamp_rejects_garbage_and_misses(ingested):
+    store, sid = ingested
+    v = store.build_view(sid, {})
+    with pytest.raises(ValueError):
+        store.find_nearest_timestamp(v["view_id"], "not a time")
+    with pytest.raises(ValueError):
+        store.find_nearest_timestamp(v["view_id"], "2024-01-05 10:00:00", "User")
+    # A filtered view with no parseable timestamps in range still answers
+    # (nearest is nearest, even far away); an all-unparseable column is the
+    # None case — simulate by filtering to nothing.
+    empty = store.build_view(sid, {"filters": [{"column": "User", "op": "equals", "value": "nobody"}]})
+    assert store.find_nearest_timestamp(empty["view_id"], "2024-01-05 10:00:00") is None

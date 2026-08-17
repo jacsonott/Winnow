@@ -541,6 +541,40 @@ class PluginPrefs:
             return names
 
 
+class AppSettings:
+    """System-wide UI preferences that belong on the machine rather than in
+    any one case file — currently just the default timestamp display
+    format, which an analyst sets once and expects to apply to every case
+    they open afterward.
+
+    Not localStorage (like theme/keymap) because this is a workflow
+    default, not a per-browser look; not the case file because it must
+    apply to cases that don't exist yet. Same shape as TagTemplate: one
+    small document, read whole, written whole."""
+
+    FILE = "app_settings.json"
+    DEFAULTS = {"default_ts_format": "iso"}
+    # Mirrors app.js's TS_FORMATS. A value outside this set would silently
+    # fall through formatTimestamp's switch and render raw, so it's
+    # rejected here rather than stored and quietly ignored.
+    TS_FORMATS = {"raw", "iso", "iso_ms", "iso_us", "date", "time", "us", "us_date"}
+
+    def get(self) -> dict:
+        with _LOCK:
+            return {**self.DEFAULTS, **_read(self.FILE, {})}
+
+    def save(self, values: dict) -> dict:
+        fmt = values.get("default_ts_format")
+        if fmt is not None and fmt not in self.TS_FORMATS:
+            raise ValueError(f"Unknown timestamp format: {fmt}")
+        with _LOCK:
+            current = {**self.DEFAULTS, **_read(self.FILE, {})}
+            if fmt is not None:
+                current["default_ts_format"] = fmt
+            _write(self.FILE, current)
+            return current
+
+
 cases = CaseRegistry()
 filters = SavedFilters()
 header_nicknames = HeaderNicknames()
@@ -549,3 +583,4 @@ tags = TagTemplate()
 column_layouts = ColumnLayouts()
 import_profiles = ImportProfiles()
 plugin_prefs = PluginPrefs()
+app_settings = AppSettings()

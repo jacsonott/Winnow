@@ -201,3 +201,16 @@ def test_import_profiles_upsert_with_unknown_id_creates_new():
     rec = WS.import_profiles.upsert(9999, "New", None, [], [], True)
     assert rec["id"] != 9999
     assert [p["name"] for p in WS.import_profiles.list()] == ["New"]
+
+
+def test_app_settings_seed_save_and_validation():
+    # Seeded rather than empty: tsFormatFor's fallback chain ends here, so
+    # a missing file has to still name a real format.
+    assert WS.app_settings.get()["default_ts_format"] == "iso"
+    assert WS.app_settings.save({"default_ts_format": "us_date"})["default_ts_format"] == "us_date"
+    assert WS.app_settings.get()["default_ts_format"] == "us_date"
+
+    import pytest
+    with pytest.raises(ValueError):
+        WS.app_settings.save({"default_ts_format": "not_a_format"})
+    assert WS.app_settings.get()["default_ts_format"] == "us_date"  # unchanged
