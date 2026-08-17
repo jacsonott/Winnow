@@ -224,18 +224,256 @@ function setBusy(on) {
   $('busyBar').hidden = busyCount === 0;
 }
 
-function raggedNote(rec) {
-  return rec.ragged_rows
-    ? ` · ${rec.ragged_rows.toLocaleString()} ragged row${rec.ragged_rows === 1 ? '' : 's'} padded/trimmed to fit`
-    : '';
-}
-
 function toast(msg, ms = 2600) {
   const t = $('toast');
   t.textContent = msg;
   t.hidden = false;
   clearTimeout(toast._t);
   toast._t = setTimeout(() => (t.hidden = true), ms);
+}
+
+/* ---------------------------------------------------------- import jobs */
+
+/* Imports run as background jobs server-side (Store.start_ingest_job) and
+   the transfer phase runs as an XHR here, so the analyst keeps working —
+   in this tab — while both happen. This panel (bottom-right corner) is the
+   one place every phase of that reports: upload transfer (XHR progress
+   events), the ingest itself (polled from /api/ingest/jobs — bytes for
+   CSV, records/rows otherwise), and the background search-index builds
+   (S.sources[].fts_building), which used to be completely invisible: a
+   killed server took an index build down silently and nothing anywhere
+   said so. Polling resumes on boot, so reloading the tab mid-import shows
+   the running job again instead of losing sight of it. */
+const activeUploads = new Map(); // clientId -> {name, loaded, total, xhr}
+let uploadSeq = 0;
+let ingestJobs = [];
+let jobsPollTimer = null;
+const seenJobStatus = new Map(); // job_id -> last status, for transition toasts
+const dismissedJobs = new Set();
+const ftsWatch = new Set();      // source ids seen building, for the "ready" toast
+
+function uploadWithProgress(url, fd, name) {
+  const id = ++uploadSeq;
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', url);
+    xhr.setRequestHeader('X-Timeline-Lite-Client', '1');
+    xhr.upload.onprogress = (e) => {
+      const u = activeUploads.get(id);
+      if (u && e.lengthComputable) { u.loaded = e.loaded; u.total = e.total; renderJobsPanel(); }
+    };
+    xhr.onload = () => {
+      activeUploads.delete(id);
+      let body = null;
+      try { body = JSON.parse(xhr.responseText); } catch {}
+      if (xhr.status >= 200 && xhr.status < 300) { startJobsPoll(); resolve(body); }
+      else {
+        renderJobsPanel();
+        const err = new Error((body && body.detail) || xhr.statusText);
+        err.status = xhr.status;
+        reject(err);
+      }
+    };
+    xhr.onerror = () => { activeUploads.delete(id); renderJobsPanel(); reject(new Error('Upload failed — is the server still up?')); };
+    xhr.onabort = () => {
+      activeUploads.delete(id);
+      renderJobsPanel();
+      const e = new Error('Upload cancelled');
+      e.cancelled = true;
+      reject(e);
+    };
+    activeUploads.set(id, { name, loaded: 0, total: 0, xhr });
+    renderJobsPanel();
+    xhr.send(fd);
+  });
+}
+
+/* Same-host path recovery: the browser sandbox never reveals a picked
+   file's real path, but when this page is served from the same machine,
+   the picked file is somewhere on the server's own disk — so send a
+   fingerprint (name, size, mtime, first/last 64 KB via File.slice — two
+   tiny reads even on a 50 GB file) and let the server look for it in the
+   places files usually come from. A hit skips the entire upload copy; a
+   miss (remote client, unguessable directory) returns null and the
+   caller falls back to the normal upload. Deliberately silent either
+   way — one Import button, two transports, no decision for the analyst. */
+async function resolveLocalFile(file) {
+  try {
+    const fd = new FormData();
+    fd.append('name', file.name);
+    fd.append('size', String(file.size));
+    fd.append('mtime_ms', String(file.lastModified));
+    fd.append('head', file.slice(0, 65536));
+    fd.append('tail', file.slice(Math.max(0, file.size - 65536)));
+    const res = await api('/api/ingest/resolve_local', { method: 'POST', body: fd });
+    return res.path || null;
+  } catch {
+    return null; // resolution is an optimization, never a failure mode
+  }
+}
+
+function startJobsPoll() {
+  if (!jobsPollTimer) pollJobs();
+}
+
+async function pollJobs() {
+  jobsPollTimer = null;
+  const firstPoll = seenJobStatus.size === 0;
+  const finishedNow = [];
+  try {
+    const d = await api('/api/ingest/jobs');
+    for (const j of d.jobs) {
+      const done = j.status === 'done' || j.status === 'error' || j.status === 'cancelled';
+      const prev = seenJobStatus.get(j.job_id);
+      if (done && prev && prev !== j.status) finishedNow.push(j);
+      // Jobs that were already finished before this page ever polled
+      // (server keeps the last 20) are history, not news — don't toast
+      // them and don't fill the panel with them on load.
+      if (done && firstPoll) dismissedJobs.add(j.job_id);
+      seenJobStatus.set(j.job_id, j.status);
+    }
+    ingestJobs = d.jobs;
+  } catch { ingestJobs = []; }
+
+  for (const j of finishedNow) {
+    if (j.status === 'done') {
+      const total = (j.result || []).reduce((a, r) => a + (r.row_count || 0), 0);
+      const ragged = (j.result || []).reduce((a, r) => a + (r.ragged_rows || 0), 0);
+      toast(`${j.name}: ${total.toLocaleString()} rows imported${ragged ? ` · ${ragged.toLocaleString()} ragged rows padded/trimmed` : ''}`, ragged ? 6000 : 3500);
+      setTimeout(() => { dismissedJobs.add(j.job_id); renderJobsPanel(); }, 8000);
+    } else if (j.status === 'error') {
+      toast(`Import failed for ${j.name}: ${j.error}`, 8000);
+    } else {
+      toast(`Import of ${j.name} cancelled`, 3000);
+      setTimeout(() => { dismissedJobs.add(j.job_id); renderJobsPanel(); }, 8000);
+    }
+  }
+  if (!$('app').hidden) {
+    if (finishedNow.some((j) => j.status === 'done')) {
+      try { await loadSources(); } catch {}
+    } else if (ftsWatch.size) {
+      // Keep the index-build rows honest without loadSources()'s tab
+      // re-select side effects (same reasoning as the Tables modal poll).
+      try { await refreshSourcesQuietly(); } catch {}
+    }
+  }
+  for (const src of S.sources || []) {
+    if (src.fts_building) ftsWatch.add(src.id);
+    else if (ftsWatch.has(src.id)) {
+      ftsWatch.delete(src.id);
+      if (src.has_fts) toast(`Search index ready for ${src.name}`, 3000);
+    }
+  }
+  renderJobsPanel();
+  const active = activeUploads.size > 0
+    || ingestJobs.some((j) => j.status === 'running' || j.status === 'queued')
+    || ftsWatch.size > 0;
+  if (active) jobsPollTimer = setTimeout(pollJobs, 900);
+}
+
+function jobPanelRow({ label, phase, pct, detail, indeterminate, done, onCancel, onDismiss }) {
+  const row = el('div', 'job-row');
+  const head = el('div', 'job-head');
+  head.append(el('span', 'job-name', label), el('span', 'job-phase ' + phase, phase));
+  if (onCancel) {
+    const x = el('button', 'job-x', '✕');
+    x.title = 'Cancel';
+    x.onclick = onCancel;
+    head.append(x);
+  }
+  if (onDismiss) {
+    const x = el('button', 'job-x', '✕');
+    x.title = 'Dismiss';
+    x.onclick = onDismiss;
+    head.append(x);
+  }
+  row.append(head);
+  if (!done) {
+    const bar = el('div', 'job-bar' + (indeterminate ? ' indeterminate' : ''));
+    const fill = el('div', 'job-bar-fill');
+    if (!indeterminate) fill.style.width = `${Math.round(Math.min(1, pct || 0) * 100)}%`;
+    bar.append(fill);
+    row.append(bar);
+  }
+  if (detail) row.append(el('div', 'job-detail', detail));
+  return row;
+}
+
+function renderJobsPanel() {
+  const panel = $('jobsPanel');
+  if (!panel) return;
+  panel.replaceChildren();
+  let count = 0;
+  for (const [, u] of activeUploads) {
+    panel.append(jobPanelRow({
+      label: u.name, phase: 'uploading',
+      pct: u.total ? u.loaded / u.total : 0,
+      detail: u.total ? `${(u.loaded / 1048576).toFixed(1)} / ${(u.total / 1048576).toFixed(1)} MB` : '',
+      onCancel: () => u.xhr.abort(),
+    }));
+    count++;
+  }
+  for (const j of ingestJobs) {
+    if (dismissedJobs.has(j.job_id)) continue;
+    const running = j.status === 'running' || j.status === 'queued';
+    const label = j.tables_total > 1
+      ? `${j.name} — ${Math.min(j.tables_done + 1, j.tables_total)}/${j.tables_total}${j.current_table ? `: ${j.current_table}` : ''}`
+      : j.name;
+    if (running) {
+      panel.append(jobPanelRow({
+        label, phase: j.status === 'queued' ? 'queued' : 'importing',
+        pct: j.units_total ? j.units_done / j.units_total : 0,
+        indeterminate: !j.units_total,
+        detail: j.rows_done ? `${j.rows_done.toLocaleString()} rows` : '',
+        onCancel: () => post(`/api/ingest/jobs/${j.job_id}/cancel`, {}).then(startJobsPoll).catch(() => {}),
+      }));
+    } else {
+      panel.append(jobPanelRow({
+        label: j.name, phase: j.status, done: true,
+        detail: j.status === 'done'
+          ? `${(j.result || []).reduce((a, r) => a + (r.row_count || 0), 0).toLocaleString()} rows`
+          : (j.error || ''),
+        onDismiss: () => { dismissedJobs.add(j.job_id); renderJobsPanel(); },
+      }));
+    }
+    count++;
+  }
+  for (const src of S.sources || []) {
+    if (src.fts_building) {
+      panel.append(jobPanelRow({ label: src.name, phase: 'indexing', indeterminate: true }));
+      count++;
+    }
+  }
+  panel.hidden = count === 0;
+}
+
+/* ----------------------------------------------------- cancellable ops */
+
+/* One-shot client-generated handle for a cancellable server operation
+   (view/timeline build, group summary — Store.cancel_op). The chip under
+   the busy bar only appears once the op has been in flight ~1.2s: a fast
+   rebuild finishing under that never flashes a cancel button at all. */
+const opToken = () => `op_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+let opCancelCurrent = null;
+
+function armOpCancel(token, delay = 1200) {
+  const btn = $('busyCancel');
+  const timer = setTimeout(() => {
+    opCancelCurrent = token;
+    btn.onclick = () => {
+      btn.disabled = true;
+      post('/api/cancel_op', { token }).catch(() => {}).finally(() => { btn.disabled = false; });
+    };
+    btn.disabled = false;
+    btn.hidden = false;
+  }, delay);
+  return () => {
+    clearTimeout(timer);
+    if (opCancelCurrent === token) {
+      $('busyCancel').hidden = true;
+      opCancelCurrent = null;
+    }
+  };
 }
 
 /* -------------------------------------------------------------- filters */
@@ -415,6 +653,16 @@ function renderTabs() {
     } else {
       t.append(el('span', null, (s.is_merge ? '⛓ ' : '') + s.name), el('span', 'count', s.row_count.toLocaleString()));
     }
+    if (!s.error) {
+      const colsBtn = el('span', 'cols', '▦');
+      colsBtn.title = 'Choose columns  —  press C';
+      colsBtn.onclick = async (e) => {
+        e.stopPropagation();
+        if (s.id !== S.sourceId || S.activeTab !== 'grid') await openSource(s.id);
+        openColumnsModal();
+      };
+      t.append(colsBtn);
+    }
     const x = el('span', 'x', '✕');
     x.title = 'Close tab — stays in this case, reopen it from Tables';
     x.onclick = async (e) => { e.stopPropagation(); await closeTab(s); };
@@ -550,14 +798,20 @@ async function rebuildView({ keepScroll = true } = {}) {
   const oldTotal = S.groupByCols.length ? S.groupTotalRows : (S.view ? S.view.row_count : 0);
   const scroll = keepScroll ? vScroll($('body'), oldTotal, headH()) : 0;
   const spec = currentSpec();
+  spec.op_token = opToken();
   const seq = ++rebuildSeq;
   let v;
   let seeded = [];
   setBusy(true);
+  const disarmCancel = armOpCancel(spec.op_token);
   try {
     try {
       v = await post('/api/view', spec);
     } catch (e) {
+      // 499 = the analyst cancelled this build. Server-side the transaction
+      // rolled back with the previous view intact (see build_view), so the
+      // rows on screen are still real — just keep them.
+      if (e.status === 499) { toast('Cancelled — kept the previous view', 2500); return; }
       // 409 = the case/view this tab was talking to is gone (e.g. another
       // client switched cases) — show the server's message as-is rather
       // than mislabeling it a filter problem.
@@ -591,6 +845,7 @@ async function rebuildView({ keepScroll = true } = {}) {
     }
   } finally {
     setBusy(false);
+    disarmCancel();
   }
   // A newer rebuild started while this one was in flight — its view has
   // already evicted ours server-side; let it win.
@@ -1376,7 +1631,20 @@ async function fetchGroupLevel(path) {
     view_id: S.view.view_id, column, order: S.groupSort === 'value' ? 'value' : 'count', direction: S.groupSortDir,
   });
   if (path.length) params.set('path', JSON.stringify(path));
-  const res = await api(`/api/group_summary?${params.toString()}`);
+  const token = opToken();
+  params.set('op_token', token);
+  const disarmCancel = armOpCancel(token);
+  let res;
+  try {
+    res = await api(`/api/group_summary?${params.toString()}`);
+  } catch (e) {
+    // Cancelled: hand back an empty level rather than throwing — the
+    // grouping stays on with no groups, and dropping it is one keypress.
+    if (e.status === 499) { toast('Grouping cancelled', 2500); return []; }
+    throw e;
+  } finally {
+    disarmCancel();
+  }
   if (res.truncated) toast(`Showing the top ${res.groups.length.toLocaleString()} groups`, 4000);
   return res.groups;
 }
@@ -2919,7 +3187,10 @@ function openSavedFiltersModal() {
    directly to whatever container it's given (called with the Settings
    modal body), and re-invokes openSettings() to refresh itself in place
    after an action instead of managing its own re-render. */
-function buildColumnsPanel(container) {
+/* `refresh` re-renders whatever surface is hosting the panel after a bulk
+   action ("Show all"/"Hide empty") — the per-column checkboxes repaint the
+   grid directly and don't need it. */
+function buildColumnsPanel(container, refresh = openColumnsModal) {
   if (!S.sourceId) {
     container.append(el('p', null, 'Open a table to manage its columns.'));
     return;
@@ -2945,7 +3216,7 @@ function buildColumnsPanel(container) {
   container.append(el('p', 'fb-help', 'Drag a column header in the grid to reorder it.'));
   const acts = el('div', 'row-actions');
   const all = el('button', 'btn ghost', 'Show all');
-  all.onclick = () => { for (const n of S.order) S.layout[n] = { ...(S.layout[n] || {}), hidden: false }; renderHead(); render(); saveLayout(); openSettings(); };
+  all.onclick = () => { for (const n of S.order) S.layout[n] = { ...(S.layout[n] || {}), hidden: false }; renderHead(); render(); saveLayout(); refresh(); };
   const none = el('button', 'btn ghost', 'Hide empty columns');
   none.onclick = async () => {
     // Hide columns with no value in the first 2000 rows of the current view.
@@ -2954,10 +3225,20 @@ function buildColumnsPanel(container) {
       const empty = sample.rows.every((r) => r.cells[i] == null || r.cells[i] === '');
       if (empty) S.layout[c.name] = { ...(S.layout[c.name] || {}), hidden: true };
     });
-    renderHead(); render(); saveLayout(); openSettings();
+    renderHead(); render(); saveLayout(); refresh();
   };
   acts.append(all, none);
   container.append(acts);
+}
+
+/* The column chooser lives here — on the tab strip's hover button and the
+   openColumns keybind — not in Settings: which columns are visible is a
+   per-table working decision made constantly during triage, while Settings
+   holds machine-level preferences you touch once. */
+function openColumnsModal() {
+  if (!S.sourceId || S.activeTab !== 'grid') { toast('Open a table first'); return; }
+  const src = S.sources.find((x) => x.id === S.sourceId);
+  modal(`Columns — ${src ? src.name : ''}`, (b) => buildColumnsPanel(b, openColumnsModal));
 }
 
 function openTagEditor() {
@@ -3139,14 +3420,25 @@ function openImportPreview(file, opts = {}) {
       tableWrap.append(t);
     }
 
+    let resolvedPath; // undefined = not tried yet; null = tried, not local
     async function refreshPreview() {
       status.textContent = 'Loading preview…';
-      const fd = new FormData();
-      fd.append('file', file);
-      if (delimSel.value) fd.append('delimiter', delimSel.value);
-      fd.append('has_header', headerCb.checked ? 'true' : 'false');
       try {
-        preview = await api('/api/ingest/preview', { method: 'POST', body: fd });
+        // Same invisible same-host shortcut the import itself uses: a
+        // resolve hit previews by path instead of shipping a sample over.
+        if (resolvedPath === undefined) resolvedPath = await resolveLocalFile(file);
+        if (resolvedPath) {
+          preview = await post('/api/ingest/preview/path', {
+            path: resolvedPath, kind: 'csv',
+            delimiter: delimSel.value || null, has_header: headerCb.checked,
+          });
+        } else {
+          const fd = new FormData();
+          fd.append('file', file);
+          if (delimSel.value) fd.append('delimiter', delimSel.value);
+          fd.append('has_header', headerCb.checked ? 'true' : 'false');
+          preview = await api('/api/ingest/preview', { method: 'POST', body: fd });
+        }
         if (!columnTypes || columnTypes.length !== preview.columns.length) columnTypes = preview.inferred_types.slice();
         renderTable();
       } catch (e) {
@@ -3167,19 +3459,32 @@ function openImportPreview(file, opts = {}) {
         opts.onConfirm(settings);
         return;
       }
+      $('modal').hidden = true;
+      if (resolvedPath) { // resolved during preview — import in place
+        try {
+          await post('/api/ingest/jobs/path', {
+            path: resolvedPath, name: file.name, kind: 'csv',
+            delimiter: settings.delimiter, has_header: settings.has_header,
+            column_types: settings.column_types,
+          });
+          startJobsPoll();
+        } catch (e) {
+          toast('Import failed: ' + e.message, 6000);
+        }
+        return;
+      }
       const fd = new FormData();
       fd.append('file', file);
+      fd.append('kind', 'csv');
       if (settings.delimiter) fd.append('delimiter', settings.delimiter);
       fd.append('has_header', settings.has_header ? 'true' : 'false');
       fd.append('column_types', JSON.stringify(settings.column_types));
-      $('modal').hidden = true;
-      toast(`Importing ${file.name}…`, 60000);
+      // Same background pipeline as the queue: transfer with progress, then
+      // an ingest job the corner panel tracks.
       try {
-        const rec = await api('/api/ingest/upload', { method: 'POST', body: fd });
-        toast(`${rec.name}: ${rec.row_count.toLocaleString()} rows in ${rec.elapsed_sec}s${raggedNote(rec)}`, rec.ragged_rows ? 6000 : 2600);
-        await loadSources(rec.id);
+        await uploadWithProgress('/api/ingest/jobs/upload', fd, file.name);
       } catch (e) {
-        toast('Import failed: ' + e.message, 6000);
+        if (!e.cancelled) toast('Import failed: ' + e.message, 6000);
       }
     };
     const cancel = el('button', 'btn ghost', 'Cancel');
@@ -3248,14 +3553,26 @@ function openJsonImportPreview(file, opts = {}) {
       tableWrap.append(t);
     }
 
+    let resolvedPath; // undefined = not tried yet; null = tried, not local
     async function refreshPreview() {
       status.textContent = 'Loading preview…';
-      const fd = new FormData();
-      fd.append('file', file);
-      fd.append('flatten_mode', flattenMode);
-      fd.append('flatten_depth', String(flattenDepth));
       try {
-        preview = await api('/api/ingest/json/preview', { method: 'POST', body: fd });
+        // Resolve matters most here: a .json document can't be truncated,
+        // so the upload preview round-trips the WHOLE file — a resolve hit
+        // previews in place instead.
+        if (resolvedPath === undefined) resolvedPath = await resolveLocalFile(file);
+        if (resolvedPath) {
+          preview = await post('/api/ingest/preview/path', {
+            path: resolvedPath, kind: 'json',
+            flatten_mode: flattenMode, flatten_depth: flattenDepth,
+          });
+        } else {
+          const fd = new FormData();
+          fd.append('file', file);
+          fd.append('flatten_mode', flattenMode);
+          fd.append('flatten_depth', String(flattenDepth));
+          preview = await api('/api/ingest/json/preview', { method: 'POST', body: fd });
+        }
         renderTable();
       } catch (e) {
         status.textContent = 'Preview failed: ' + e.message;
@@ -3282,18 +3599,29 @@ function openJsonImportPreview(file, opts = {}) {
         opts.onConfirm(settings);
         return;
       }
+      $('modal').hidden = true;
+      if (resolvedPath) { // resolved during preview — import in place
+        try {
+          await post('/api/ingest/jobs/path', {
+            path: resolvedPath, name: file.name, kind: 'json',
+            flatten_mode: flattenMode, flatten_depth: flattenDepth,
+          });
+          startJobsPoll();
+        } catch (e) {
+          toast('Import failed: ' + e.message, 6000);
+        }
+        return;
+      }
       const fd = new FormData();
       fd.append('file', file);
+      fd.append('kind', 'json');
       fd.append('flatten_mode', flattenMode);
       fd.append('flatten_depth', String(flattenDepth));
-      $('modal').hidden = true;
-      toast(`Importing ${file.name}…`, 60000);
+      // Same background pipeline as the queue.
       try {
-        const rec = await api('/api/ingest/json/upload', { method: 'POST', body: fd });
-        toast(`${rec.name}: ${rec.row_count.toLocaleString()} rows in ${rec.elapsed_sec}s`, 2600);
-        await loadSources(rec.id);
+        await uploadWithProgress('/api/ingest/jobs/upload', fd, file.name);
       } catch (e) {
-        toast('Import failed: ' + e.message, 6000);
+        if (!e.cancelled) toast('Import failed: ' + e.message, 6000);
       }
     };
     const cancel = el('button', 'btn ghost', 'Cancel');
@@ -3311,8 +3639,9 @@ function openJsonImportPreview(file, opts = {}) {
    OS drop has no equivalent of a picker's accept attribute doing that
    filtering natively, so the drop handler has to do it itself. */
 const RECOGNIZED_IMPORT_EXTENSIONS = ['.csv', '.tsv', '.txt', '.psv', '.json', '.jsonl', '.ndjson'];
-/* openSqliteImportModal's own file-picker accept list, factored out so
-   wireFileDrop can recognize the same set without a second hand-typed copy. */
+/* The SQLite extension set — routed to openSqliteTablePicker's configure
+   step by the unified import queue, and recognized by wireFileDrop without
+   a second hand-typed copy. */
 const SQLITE_IMPORT_EXTENSIONS = ['.db', '.sqlite', '.sqlite3', '.db-wal'];
 
 function extOf(filename) {
@@ -3321,6 +3650,7 @@ function extOf(filename) {
 }
 
 function importKindFor(filename) {
+  if (SQLITE_IMPORT_EXTENSIONS.includes(extOf(filename))) return 'sqlite';
   const ext = extOf(filename).slice(1); // drop the leading '.' — json/jsonl/ndjson below are bare
   return ext === 'json' || ext === 'jsonl' || ext === 'ndjson' ? 'json' : 'csv';
 }
@@ -3407,8 +3737,9 @@ function queueFiles(files) {
       continue;
     }
     const kind = importKindFor(f.name);
-    S.importQueue.push(kind === 'json'
-      ? { file: f, kind, flatten_mode: 'none', flatten_depth: 1, configured: false }
+    S.importQueue.push(
+      kind === 'json' ? { file: f, kind, flatten_mode: 'none', flatten_depth: 1, configured: false }
+      : kind === 'sqlite' ? { file: f, kind, tables: null, configured: false }
       : { file: f, kind, delimiter: null, has_header: true, column_types: null, configured: false });
   }
 }
@@ -3437,10 +3768,11 @@ function queueFilesForFormat(fmt, files) {
    workflow — pick some files, maybe tweak settings, import — regardless
    of which parser ends up handling a given one. */
 function openImportModal() {
-  modal('Import files', (b) => {
+  modal('Import', (b) => {
     b.append(el('p', null,
-      'Queue one or more CSV/TSV or JSON/JSONL files, optionally previewing/configuring each, '
-      + 'then import them all at once.'));
+      'Queue CSV/TSV, JSON/JSONL, or SQLite files (a SQLite file needs its tables picked first), '
+      + 'then import them all — imports run in the background, so you can keep working while the '
+      + 'corner panel tracks progress.'));
 
     const queueList = el('div', 'session-queue');
 
@@ -3452,11 +3784,15 @@ function openImportModal() {
         const kindLabel = item.kind === 'plugin'
           ? (pluginFormatById(item.format_id)?.label || item.format_id)
           : item.kind;
+        const stateLabel = item.kind === 'sqlite'
+          ? (item.configured ? `${item.tables.length} table${item.tables.length === 1 ? '' : 's'}` : 'pick tables') + ' · sqlite'
+          : (item.configured ? 'configured' : 'default settings') + ` · ${kindLabel}`;
         row.append(
           el('span', 'session-name', item.file.name),
-          el('span', 'count', (item.configured ? 'configured' : 'default settings') + ` · ${kindLabel}`),
+          el('span', 'count', stateLabel),
         );
-        const cfg = el('button', 'btn ghost', item.kind === 'plugin' ? 'Options' : 'Preview & configure');
+        const cfg = el('button', 'btn ghost',
+          item.kind === 'sqlite' ? 'Pick tables…' : item.kind === 'plugin' ? 'Options' : 'Preview & configure');
         if (item.kind === 'plugin' && !(pluginFormatById(item.format_id)?.options || []).length) {
           // Nothing to configure — the format declared no options.
           cfg.disabled = true;
@@ -3473,7 +3809,9 @@ function openImportModal() {
             });
             return;
           }
-          const openPreview = item.kind === 'json' ? openJsonImportPreview : openImportPreview;
+          const openPreview = item.kind === 'json' ? openJsonImportPreview
+            : item.kind === 'sqlite' ? openSqliteTablePicker
+            : openImportPreview;
           openPreview(item.file, {
             initial: item,
             onConfirm: (settings) => {
@@ -3496,7 +3834,7 @@ function openImportModal() {
     const addLabel = el('label', 'btn ghost', 'Choose files…');
     const addInput = el('input');
     addInput.type = 'file';
-    addInput.accept = RECOGNIZED_IMPORT_EXTENSIONS.concat(pluginExtensions()).join(',');
+    addInput.accept = [...RECOGNIZED_IMPORT_EXTENSIONS, ...SQLITE_IMPORT_EXTENSIONS, ...pluginExtensions()].join(',');
     addInput.multiple = true;
     addInput.hidden = true;
     addInput.onchange = () => {
@@ -3505,86 +3843,107 @@ function openImportModal() {
       renderQueue();
     };
     addLabel.append(addInput);
+    const folderBtn = el('button', 'btn ghost', 'Import a whole folder…');
+    folderBtn.title = 'Scan a directory (e.g. KAPE output) against extension + glob patterns';
+    folderBtn.onclick = () => openDirectoryImportModal();
     const importAll = el('button', 'btn', 'Import all queued');
-    importAll.onclick = async () => {
+    importAll.onclick = () => {
       if (!S.importQueue.length) return;
+      const unpicked = S.importQueue.find((i) => i.kind === 'sqlite' && !i.configured);
+      if (unpicked) {
+        toast(`Pick which tables to import from ${unpicked.file.name} first`, 4500);
+        return;
+      }
       const queue = S.importQueue.slice();
       S.importQueue = [];
       renderQueue();
-      setBusy(true);
-      try {
+      $('modal').hidden = true;
+      // Deliberately not awaited: uploads run sequentially (one disk, one
+      // spool at a time) behind this detached chain while the analyst
+      // keeps working; each upload resolves into a background ingest job
+      // the corner panel is already tracking.
+      (async () => {
         for (const item of queue) {
-          toast(`Importing ${item.file.name}…`, 60000);
+          // Same-host client: try to recover the picked file's real path
+          // first — a hit imports in place with no upload at all. This is
+          // deliberately the ONLY route to the no-copy transport: one
+          // Import button, and the analyst never chooses (or sees) which
+          // transport carried a file, beyond the upload phase not existing.
+          const localPath = await resolveLocalFile(item.file);
+          if (localPath) {
+            try {
+              await post('/api/ingest/jobs/path', {
+                path: localPath, name: item.file.name, kind: item.kind,
+                delimiter: item.delimiter || null,
+                has_header: item.has_header !== false,
+                column_types: item.column_types || null,
+                flatten_mode: item.flatten_mode || 'none',
+                flatten_depth: item.flatten_depth || 0,
+                tables: item.tables || null,
+              });
+              startJobsPoll();
+              continue;
+            } catch { /* fall through to the upload — resolution never blocks an import */ }
+          }
           const fd = new FormData();
           fd.append('file', item.file);
+          fd.append('kind', item.kind);
+          if (item.kind === 'json') {
+            fd.append('flatten_mode', item.flatten_mode || 'none');
+            fd.append('flatten_depth', String(item.flatten_depth || 1));
+          } else if (item.kind === 'sqlite') {
+            fd.append('tables', JSON.stringify(item.tables));
+          } else {
+            if (item.delimiter) fd.append('delimiter', item.delimiter);
+            fd.append('has_header', item.has_header ? 'true' : 'false');
+            if (item.column_types) fd.append('column_types', JSON.stringify(item.column_types));
+          }
           try {
-            if (item.kind === 'json') {
-              fd.append('flatten_mode', item.flatten_mode || 'none');
-              fd.append('flatten_depth', String(item.flatten_depth || 1));
-              const rec = await api('/api/ingest/json/upload', { method: 'POST', body: fd });
-              toast(`${rec.name}: ${rec.row_count.toLocaleString()} rows in ${rec.elapsed_sec}s`, 2600);
-            } else if (item.kind === 'plugin') {
-              fd.append('format_id', item.format_id);
-              fd.append('options', JSON.stringify(item.options || {}));
-              const rec = await api('/api/ingest/plugin/upload', { method: 'POST', body: fd });
-              toast(`${rec.name}: ${rec.row_count.toLocaleString()} rows in ${rec.elapsed_sec}s${raggedNote(rec)}`, rec.ragged_rows ? 6000 : 2600);
-            } else {
-              if (item.delimiter) fd.append('delimiter', item.delimiter);
-              fd.append('has_header', item.has_header ? 'true' : 'false');
-              if (item.column_types) fd.append('column_types', JSON.stringify(item.column_types));
-              const rec = await api('/api/ingest/upload', { method: 'POST', body: fd });
-              toast(`${rec.name}: ${rec.row_count.toLocaleString()} rows in ${rec.elapsed_sec}s${raggedNote(rec)}`, rec.ragged_rows ? 6000 : 2600);
-            }
+            await uploadWithProgress('/api/ingest/jobs/upload', fd, item.file.name);
           } catch (e) {
-            toast(`Import failed for ${item.file.name}: ` + e.message, 6000);
+            if (!e.cancelled) toast(`Upload failed for ${item.file.name}: ` + e.message, 6000);
           }
         }
-        await loadSources();
-      } finally {
-        setBusy(false);
-      }
-      $('modal').hidden = true;
+      })();
     };
-    queueActs.append(addLabel, importAll);
+    queueActs.append(addLabel, folderBtn, importAll);
     b.append(queueActs);
   }, { wide: true });
 }
 
-/* Import one or more tables out of an external SQLite file — Chromium's
-   History/Cookies/Web Data/... or any other .db/.sqlite — as new sources.
-   Two-step, mirroring the CSV preview flow: pick a file, see every table
-   with a row count and (for any column that looks like a WebKit/Chrome
-   timestamp — microseconds since 1601-01-01, Chromium's own convention)
-   a pre-checked option to convert it to a readable datetime on import
-   rather than leaving it as an opaque integer. */
-function openSqliteImportModal(initialFile) {
+/* Configure which tables come out of a queued SQLite file — Chromium's
+   History/Cookies/Web Data/... or any other .db. Same {initial, onConfirm,
+   onCancel} shape as openImportPreview/openJsonImportPreview, so the
+   unified import queue can sit one "Pick tables…" button in front of any
+   of the three. Shows every table with a row count and (for any column
+   that looks like a WebKit/Chrome timestamp — microseconds since
+   1601-01-01, Chromium's own convention) a pre-checked option to convert
+   it to a readable datetime on import rather than leaving it as an opaque
+   integer. Confirm hands back {tables: [{table, timestamp_columns}]} for
+   the queue item; the actual import happens later as one background job
+   reading every picked table out of one uploaded spool. */
+function openSqliteTablePicker(initialFile, { initial, onConfirm, onCancel } = {}) {
   let file = null;
   let tables = null; // [{name, row_count, columns, likely_timestamp_columns}]
   const selected = new Map(); // table name -> Set of timestamp columns to convert
   const included = new Set(); // table names checked for import
 
-  modal('Import SQLite tables', (b) => {
+  modal('Pick SQLite tables', (b) => {
     b.append(el('p', null,
-      'Pick a SQLite file — a Chromium History/Cookies/Web Data file, or any other .db — and choose '
-      + 'which of its tables to import, each as its own source.'));
+      'Choose which tables to import from this file — each becomes its own source.'));
 
     const pickRow = el('div', 'row-actions');
-    const pickLabel = el('label', 'btn ghost', 'Choose a SQLite file…');
-    const pickInput = el('input');
-    pickInput.type = 'file';
-    pickInput.accept = SQLITE_IMPORT_EXTENSIONS.join(',');
-    pickInput.hidden = true;
     const pickStatus = el('span', 'count', '');
-    pickRow.append(pickLabel, pickStatus);
+    pickRow.append(pickStatus);
     b.append(pickRow);
 
     const tableList = el('div', 'session-list');
     b.append(tableList);
 
     const actions = el('div', 'row-actions');
-    const importBtn = el('button', 'btn', 'Import selected');
+    const importBtn = el('button', 'btn', 'Use selected tables');
     const cancel = el('button', 'btn ghost', 'Cancel');
-    cancel.onclick = () => { $('modal').hidden = true; };
+    cancel.onclick = () => { if (onCancel) onCancel(); else $('modal').hidden = true; };
     actions.append(importBtn, cancel);
     b.append(actions);
 
@@ -3633,10 +3992,17 @@ function openSqliteImportModal(initialFile) {
     async function loadFile(f) {
       file = f;
       pickStatus.textContent = 'Reading…';
-      const fd = new FormData();
-      fd.append('file', file);
       try {
-        const res = await api('/api/ingest/sqlite/preview', { method: 'POST', body: fd });
+        // Same invisible same-host shortcut as the import: a resolve hit
+        // previews the tables by path instead of uploading the whole .db.
+        const localPath = await resolveLocalFile(file);
+        const res = localPath
+          ? await post('/api/ingest/preview/path', { path: localPath, kind: 'sqlite' })
+          : await (async () => {
+              const fd = new FormData();
+              fd.append('file', file);
+              return api('/api/ingest/sqlite/preview', { method: 'POST', body: fd });
+            })();
         tables = res.tables;
       } catch (e) {
         pickStatus.textContent = '';
@@ -3646,39 +4012,32 @@ function openSqliteImportModal(initialFile) {
       pickStatus.textContent = file.name;
       included.clear();
       selected.clear();
+      const prior = initial && initial.tables
+        ? new Map(initial.tables.map((t) => [t.table, new Set(t.timestamp_columns || [])]))
+        : null;
       for (const t of tables) {
-        selected.set(t.name, new Set(t.likely_timestamp_columns)); // default: convert every detected one
+        // Re-opening the picker restores the previous choices; a fresh file
+        // defaults to converting every detected timestamp column.
+        if (prior) {
+          if (prior.has(t.name)) included.add(t.name);
+          selected.set(t.name, prior.get(t.name) || new Set(t.likely_timestamp_columns));
+        } else {
+          selected.set(t.name, new Set(t.likely_timestamp_columns));
+        }
       }
       renderTables();
     }
-    pickInput.onchange = () => { if (pickInput.files[0]) loadFile(pickInput.files[0]); };
-    pickLabel.append(pickInput);
-    if (initialFile) loadFile(initialFile);
+    loadFile(initialFile);
 
-    importBtn.onclick = async () => {
-      if (!file) { toast('Choose a file first'); return; }
+    importBtn.onclick = () => {
       const targets = [...included];
       if (!targets.length) { toast('Check at least one table to import'); return; }
-      setBusy(true);
-      try {
-        for (const tableName of targets) {
-          toast(`Importing ${tableName}…`, 60000);
-          const fd = new FormData();
-          fd.append('file', file);
-          fd.append('table', tableName);
-          fd.append('timestamp_columns', JSON.stringify([...selected.get(tableName)]));
-          try {
-            const rec = await api('/api/ingest/sqlite/upload', { method: 'POST', body: fd });
-            toast(`${rec.name}: ${rec.row_count.toLocaleString()} rows in ${rec.elapsed_sec}s`, 2600);
-          } catch (e) {
-            toast(`Import failed for ${tableName}: ` + e.message, 6000);
-          }
-        }
-        await loadSources();
-      } finally {
-        setBusy(false);
-      }
-      $('modal').hidden = true;
+      onConfirm({
+        tables: targets.map((tableName) => ({
+          table: tableName,
+          timestamp_columns: [...selected.get(tableName)],
+        })),
+      });
     };
   }, { wide: true });
 }
@@ -3768,12 +4127,11 @@ function wireFileDrop() {
    partial import with no explanation. */
 function handleDroppedFiles(files) {
   if (!files.length) return;
-  if (files.length === 1 && SQLITE_IMPORT_EXTENSIONS.includes(extOf(files[0].name))) {
-    openSqliteImportModal(files[0]);
-    return;
-  }
-  const recognized = files.filter((f) => RECOGNIZED_IMPORT_EXTENSIONS.includes(extOf(f.name)) || pluginFormatFor(f.name));
-  const skipped = files.filter((f) => !recognized.includes(f));
+  const known = (f) => RECOGNIZED_IMPORT_EXTENSIONS.includes(extOf(f.name))
+    || SQLITE_IMPORT_EXTENSIONS.includes(extOf(f.name))
+    || !!pluginFormatFor(f.name);
+  const recognized = files.filter(known);
+  const skipped = files.filter((f) => !known(f));
   if (!recognized.length) {
     toast(`No recognized files in the drop (${skipped.map((f) => f.name).join(', ')})`, 5000);
     return;
@@ -4046,41 +4404,39 @@ async function openDirectoryImportModal(state = {}) {
     importBtn.onclick = async () => {
       const toImport = scanResult.matched.filter((_, i) => checked.has(i));
       if (!toImport.length) return;
-      setBusy(true);
+      // The files are already on the server's disk, so there's no upload
+      // phase — each request just *starts* a background job (milliseconds
+      // each; the semaphore in Store caps how many ingest at once) and the
+      // corner panel takes over from there.
       let ok = 0;
       let failed = 0;
-      try {
-        for (const m of toImport) {
-          toast(`Importing ${m.rel_path}…`, 60000);
-          try {
-            const fmt = m.kind === 'plugin' ? pluginFormatFor(m.path) : null;
-            if (m.kind === 'json') {
-              const rec = await post('/api/ingest/json/path', { path: m.path, name: m.rel_path });
-              toast(`${rec.name}: ${rec.row_count.toLocaleString()} rows in ${rec.elapsed_sec}s`, 2600);
-            } else if (fmt) {
-              const rec = await post('/api/ingest/plugin/path', {
-                path: m.path, name: m.rel_path, format_id: fmt.id, options: defaultPluginOptions(fmt),
-              });
-              toast(`${rec.name}: ${rec.row_count.toLocaleString()} rows in ${rec.elapsed_sec}s${raggedNote(rec)}`, rec.ragged_rows ? 6000 : 2600);
-            } else {
-              // kind "csv", or a scan-matched extension no loaded plugin
-              // actually claims — the delimited parser is the pre-plugin
-              // behavior for any analyst-added extension.
-              const rec = await post('/api/ingest/path', { path: m.path, name: m.rel_path });
-              toast(`${rec.name}: ${rec.row_count.toLocaleString()} rows in ${rec.elapsed_sec}s${raggedNote(rec)}`, rec.ragged_rows ? 6000 : 2600);
-            }
-            ok++;
-          } catch (e) {
-            failed++;
-            toast(`Import failed for ${m.rel_path}: ` + e.message, 6000);
+      let pluginOk = 0;
+      for (const m of toImport) {
+        // A plugin-claimed file parses server-side through the plugin's own
+        // endpoint — synchronous, since the jobs pipeline only knows the
+        // built-in kinds. A scan-matched extension no loaded plugin claims
+        // falls through to the delimited parser, the pre-plugin behavior.
+        const fmt = m.kind === 'plugin' ? pluginFormatFor(m.path) : null;
+        try {
+          if (fmt) {
+            toast(`Importing ${m.rel_path}…`, 60000);
+            await post('/api/ingest/plugin/path', {
+              path: m.path, name: m.rel_path, format_id: fmt.id, options: defaultPluginOptions(fmt),
+            });
+            pluginOk++;
+          } else {
+            await post('/api/ingest/jobs/path', { path: m.path, name: m.rel_path, kind: m.kind === 'json' ? 'json' : 'csv' });
           }
+          ok++;
+        } catch (e) {
+          failed++;
+          toast(`Could not queue ${m.rel_path}: ` + e.message, 6000);
         }
-        await loadSources();
-      } finally {
-        setBusy(false);
       }
+      if (pluginOk) await loadSources(); // sync plugin imports don't announce themselves through a job
+      startJobsPoll();
       $('modal').hidden = true;
-      toast(`Imported ${ok} of ${toImport.length} file${toImport.length === 1 ? '' : 's'}${failed ? ` — ${failed} failed` : ''}`, 4000);
+      toast(`Queued ${ok} import${ok === 1 ? '' : 's'}${failed ? ` — ${failed} failed to queue` : ''} — progress in the corner panel`, 4000);
     };
     actions.append(importBtn, cancelBtn);
     b.append(actions);
@@ -5378,8 +5734,15 @@ async function buildTimeline() {
   setBusy(true);
   let v;
   try {
-    v = await post('/api/timeline', { tag_ids: S.timeline.tagFilter });
+    const token = opToken();
+    const disarmCancel = armOpCancel(token);
+    try {
+      v = await post('/api/timeline', { tag_ids: S.timeline.tagFilter, op_token: token });
+    } finally {
+      disarmCancel();
+    }
   } catch (e) {
+    if (e.status === 499) { toast('Timeline build cancelled', 2500); return; }
     toast('Could not build timeline: ' + e.message, 6000);
     return;
   } finally {
@@ -6099,6 +6462,13 @@ function sidebarRow(s, { open, index, total }) {
   if (!s.error) row.append(el('span', 'sidebar-row-count', s.row_count.toLocaleString()));
   if (open) {
     const acts = el('div', 'sidebar-row-actions');
+    const cols = el('button', 'menu-item-action', '▦');
+    cols.title = 'Choose columns';
+    cols.onclick = async () => {
+      if (s.error) return;
+      if (s.id !== S.sourceId || S.activeTab !== 'grid') await openSource(s.id);
+      openColumnsModal();
+    };
     const up = el('button', 'menu-item-action', '▲');
     up.title = 'Move earlier';
     up.disabled = index === 0;
@@ -6110,7 +6480,7 @@ function sidebarRow(s, { open, index, total }) {
     const x = el('button', 'menu-item-action', '✕');
     x.title = 'Close tab — stays in this case, reopen it from here';
     x.onclick = async () => { await closeTab(s); };
-    acts.append(up, down, x);
+    acts.append(cols, up, down, x);
     row.append(acts);
     wireSidebarRowDrag(row, s.id);
   }
@@ -6140,9 +6510,7 @@ function initSidebar() {
 $('btnTabJump').onclick = () => setSidebarVisible($('sidebar').hidden);
 
 $('btnSession').onclick = () => dropdownMenu($('btnSession'), [
-  { label: 'Import files…', onclick: openImportModal },
-  { label: 'Import SQLite tables…', onclick: openSqliteImportModal },
-  { label: 'Import a folder…', onclick: openDirectoryImportModal },
+  { label: 'Import…', onclick: openImportModal },
   { label: 'Merge sources…', onclick: openMergeBuilder },
   { label: 'Tables…', onclick: openTablesManager },
   '-',
@@ -6320,6 +6688,7 @@ const DEFAULT_KEYMAP = {
   filterBySelectedCell: ['F'],
   clearFilters: ['c'],
   openTables: ['t'],
+  openColumns: ['C'],
   openSearchAll: ['s'],
   toggleDetail: ['d'],
   dropGrouping: ['x'],
@@ -6339,6 +6708,7 @@ const ACTION_LABELS = {
   filterBySelectedCell: "Filter by selected cell's value",
   clearFilters: 'Clear all filters, search and tag filter',
   openTables: 'Open Tables manager',
+  openColumns: 'Open the column chooser for the current table',
   openSearchAll: 'Search all tables',
   toggleDetail: 'Open/close the detail pane',
   dropGrouping: 'Drop all grouping, restore column order',
@@ -6394,6 +6764,7 @@ const ACTION_HANDLERS = {
   filterBySelectedCell: () => filterBySelectedCell(),
   clearFilters: () => clearAllFilters(),
   openTables: () => openTablesManager(),
+  openColumns: () => openColumnsModal(),
   toggleDetail: () => toggleDetailPane(),
   openSearchAll: () => openSearchAllModal(),
   dropGrouping: () => { if (S.groupByCols.length) dropGrouping(); },
@@ -6600,10 +6971,6 @@ function openSettings() {
       densitySeg.append(btn);
     }
     b.append(densitySeg);
-
-    b.append(el('h4', null, 'Columns'));
-    b.append(el('p', null, 'Show, hide, or bulk-manage columns for the currently open table.'));
-    buildColumnsPanel(b);
 
     b.append(el('h4', null, 'Keyboard shortcuts'));
     b.append(el('p', null, 'Tag hotkeys (1–9) are set per-tag in Edit tags. Escape always clears the selection or closes a panel.'));
@@ -7264,6 +7631,7 @@ async function boot() {
     setBrandLabel(cur.name);
     showApp();
     await loadSources();
+    startJobsPoll(); // an import (or index build) from before a reload shows back up
   } else {
     showHome();
     await refreshCases();

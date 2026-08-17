@@ -176,6 +176,59 @@ html[data-style="studio"][data-theme="light"] {
   100% { background-position: -200% 0; }
 }
 
+/* Cancel chip for cancellable ops — sits just under the busy bar, only
+   shown by armOpCancel() once an op has run ~1.2s (a fast rebuild never
+   flashes it). */
+.busy-cancel {
+  position: fixed; top: 8px; left: 50%; transform: translateX(-50%); z-index: 9999;
+  background: var(--panel-2); color: var(--text);
+  border: var(--border-w) solid var(--accent-dim); border-radius: var(--radius-sm);
+  padding: 4px 12px; font: inherit; font-size: 12px; cursor: pointer;
+  box-shadow: var(--shadow-tag);
+}
+.busy-cancel:hover { border-color: var(--danger); color: var(--danger); }
+
+/* -------------------------------------------------------- background jobs */
+
+/* Bottom-right stack of everything running behind the analyst's back:
+   upload transfers, ingest jobs (uploadWithProgress/pollJobs in app.js),
+   and search-index builds. Below .toast's bottom-center spot; above the
+   grid. */
+.jobs-panel {
+  position: fixed; right: 14px; bottom: 14px; z-index: 55;
+  display: flex; flex-direction: column; gap: 8px;
+  width: 300px; max-height: 50vh; overflow-y: auto;
+}
+.job-row {
+  background: var(--panel-2); border: var(--border-w) solid var(--line-2);
+  border-radius: var(--radius-sm); padding: 8px 10px; font-size: 12px;
+  box-shadow: var(--shadow-tag);
+}
+.job-head { display: flex; align-items: center; gap: 8px; }
+.job-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job-phase { color: var(--dim); text-transform: uppercase; font-size: 10px; letter-spacing: .06em; }
+.job-phase.error { color: var(--danger); }
+.job-phase.done { color: var(--str); }
+.job-x {
+  background: none; border: 0; padding: 0 2px; font: inherit; color: var(--dim);
+  cursor: pointer; opacity: .6;
+}
+.job-x:hover { opacity: 1; color: var(--danger); }
+.job-bar {
+  height: 3px; margin-top: 6px; border-radius: 2px; overflow: hidden;
+  background: var(--line-2);
+}
+.job-bar-fill { height: 100%; background: var(--accent); transition: width .3s var(--ease); }
+.job-bar.indeterminate .job-bar-fill {
+  width: 40%;
+  animation: job-slide 1.2s var(--ease) infinite;
+}
+@keyframes job-slide {
+  0%   { margin-left: -40%; }
+  100% { margin-left: 100%; }
+}
+.job-detail { margin-top: 4px; color: var(--dim); font-size: 11px; }
+
 #app {
   height: 100%;
   display: grid;
@@ -277,6 +330,12 @@ html[data-style="studio"][data-theme="light"] {
 .tab-sql[aria-selected="true"] { color: var(--accent); }
 .tab .x { color: var(--dim); opacity: .5; }
 .tab .x:hover { opacity: 1; color: var(--danger); }
+/* Hover-revealed like the sidebar rows' action buttons (.sidebar-row-actions
+   below): hidden until the tab is hovered or selected, so the strip stays
+   quiet. Same slot styling as .x, one glyph over. */
+.tab .cols { color: var(--dim); display: none; }
+.tab:hover .cols, .tab[aria-selected="true"] .cols { display: inline; }
+.tab .cols:hover { color: var(--accent); }
 .tab.dragging { opacity: .4; }
 .tab.drop-before { box-shadow: inset 2px 0 0 var(--accent); }
 .tab.drop-after { box-shadow: inset -2px 0 0 var(--accent); }

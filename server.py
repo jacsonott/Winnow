@@ -8,6 +8,8 @@ Then browse to http://127.0.0.1:8777
 from __future__ import annotations
 
 import argparse
+import collections
+import contextlib
 import json
 import os
 import shutil
@@ -25,11 +27,35 @@ from pydantic import BaseModel
 
 import plugin_api
 import workspace as WS
-from store import Store
+from store import SQLITE_IMPORT_EXTENSIONS, OpCancelled, Store
 
 HERE = Path(__file__).parent
 app = FastAPI(title="Winnow")
 STORE: Store | None = None
+
+# Directories the analyst has recently pointed the server at (folder/file
+# browser, directory-import scans) — the freshest candidates for
+# resolve_local's path recovery. In-process only, on purpose: it's a
+# convenience cache, not state worth persisting.
+RECENT_DIRS: collections.deque[str] = collections.deque(maxlen=20)
+
+
+def _note_recent_dir(path: str) -> None:
+    if path in RECENT_DIRS:
+        RECENT_DIRS.remove(path)
+    RECENT_DIRS.appendleft(path)
+
+
+def _is_loopback(request: Request) -> bool:
+    """Whether the TCP peer is this machine. request.client comes from the
+    socket's peer address (uvicorn), not from anything the client sends, so
+    it can't be header-spoofed. "testclient" is Starlette's TestClient peer
+    name — never a real IP, so allowing it can't admit a network peer. The
+    one honest caveat: an SSH-tunneled remote client also looks like
+    loopback; resolve_local's full content fingerprint is what keeps that
+    from ever importing the wrong file (see api_ingest_resolve_local)."""
+    host = request.client.host if request.client else ""
+    return host in ("127.0.0.1", "::1", "testclient")
 
 # ---------------------------------------------------------------- plugins
 
@@ -113,6 +139,14 @@ async def closed_database_handler(request: Request, exc: sqlite3.ProgrammingErro
     return JSONResponse({"detail": f"Internal error: {exc}"}, status_code=500)
 
 
+@app.exception_handler(OpCancelled)
+async def op_cancelled_handler(request: Request, exc: OpCancelled):
+    # 499 ("client closed request"): not an error and not the analyst's
+    # fault — the frontend treats it as "keep what you had". Deliberately
+    # not 4xx-per-endpoint: any cancellable operation can raise this.
+    return JSONResponse({"detail": "Cancelled"}, status_code=499)
+
+
 @app.middleware("http")
 async def require_client_header(request: Request, call_next):
     if request.method not in ("GET", "HEAD", "OPTIONS") and request.url.path.startswith("/api/"):
@@ -173,6 +207,7 @@ class ViewSpec(BaseModel):
     filter_tree: dict | None = None  # guided filter-builder tree; group/cond/raw nodes
     tags: list = []
     time_range: dict | None = None  # {enabled, column, start, end} — see _compile_where; survives filter/preset changes
+    op_token: str | None = None  # client-generated cancel handle — see Store.cancel_op
 
 
 class TagWrite(BaseModel):
@@ -350,6 +385,7 @@ def api_browse_dir(path: str = ""):
     base = os.path.abspath(os.path.expanduser(path)) if path else str(Path.home())
     if not os.path.isdir(base):
         raise HTTPException(400, f"Not a directory: {base}")
+    _note_recent_dir(base)
     try:
         dirs = sorted(
             (e.name for e in os.scandir(base) if e.is_dir() and not e.name.startswith(".")),
@@ -460,6 +496,7 @@ def api_ingest_dir_scan(body: DirectoryScan):
     not just once behind an explicit button."""
     if not os.path.isdir(body.root):
         raise HTTPException(400, f"Not a directory: {body.root}")
+    _note_recent_dir(os.path.abspath(body.root))
     return store().scan_import_directory(
         body.root, recursive=body.recursive, extensions=body.extensions,
         include_patterns=body.include_patterns, exclude_patterns=body.exclude_patterns,
@@ -507,6 +544,11 @@ async def api_ingest_upload(
         )
     except Exception as e:
         raise HTTPException(400, str(e))
+    finally:
+        # The rows are in the case file the moment ingest returns; the spool
+        # was leaking its full size in the OS tempdir on every upload.
+        with contextlib.suppress(OSError):
+            os.remove(tmp)
 
 
 @app.post("/api/ingest/preview")
@@ -565,6 +607,9 @@ async def api_ingest_sqlite_upload(
         )
     except Exception as e:
         raise HTTPException(400, str(e))
+    finally:
+        with contextlib.suppress(OSError):
+            os.remove(tmp)
 
 
 @app.post("/api/ingest/json/preview")
@@ -609,6 +654,235 @@ async def api_ingest_json_upload(
         )
     except Exception as e:
         raise HTTPException(400, str(e))
+    finally:
+        with contextlib.suppress(OSError):
+            os.remove(tmp)
+
+
+_JSON_INGEST_EXTS = {".json", ".jsonl", ".ndjson"}
+
+
+def _ingest_kind_for_path(path: str) -> str:
+    suffix = Path(path).suffix.lower()
+    if suffix in SQLITE_IMPORT_EXTENSIONS:
+        return "sqlite"
+    return "json" if suffix in _JSON_INGEST_EXTS else "csv"
+
+
+class PreviewPath(BaseModel):
+    """Path-based twin of the three upload previews, for files picked with
+    the server-disk browser — the whole point of that flow is not copying
+    the file, and the configure step shouldn't undo it. kind=None
+    auto-detects by extension."""
+    path: str
+    kind: str | None = None
+    # csv
+    delimiter: str | None = None
+    has_header: bool = True
+    # json
+    flatten_mode: str = "none"
+    flatten_depth: int = 0
+
+
+@app.post("/api/ingest/preview/path")
+def api_ingest_preview_path(body: PreviewPath):
+    if not os.path.isfile(body.path):
+        raise HTTPException(400, f"No file at {body.path}")
+    kind = body.kind or _ingest_kind_for_path(body.path)
+    try:
+        if kind == "csv":
+            # Same bounded sample the upload preview reads — never the file.
+            with open(body.path, "rb") as f:
+                raw = f.read(512 * 1024)
+            text = raw.decode("utf-8-sig", errors="replace")
+            return store().preview_csv_text(text, delimiter=body.delimiter or None,
+                                            has_header=body.has_header)
+        if kind == "json":
+            return store().preview_json_file(body.path, flatten_mode=body.flatten_mode,
+                                             flatten_depth=body.flatten_depth)
+        return store().preview_sqlite_tables(body.path)
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
+class IngestJobPath(BaseModel):
+    """Start a background ingest job for a file already on the server's
+    disk — the directory-import loop and the import modal's server-disk
+    picker, both of which exist because browser and server are the same
+    machine here and round-tripping a file that's already on disk through
+    a multipart upload copies it for nothing. kind=None auto-detects by
+    extension; sqlite additionally needs `tables` (which tables to pull
+    out is a real choice — see preview_sqlite_tables)."""
+    path: str
+    kind: str | None = None
+    name: str | None = None
+    build_fts: bool = True
+    # csv options
+    delimiter: str | None = None
+    has_header: bool = True
+    column_types: list[str] | None = None
+    # json options
+    flatten_mode: str = "none"
+    flatten_depth: int = 0
+    # sqlite options
+    tables: list[dict] | None = None  # [{table, name?, timestamp_columns?}]
+
+
+def _ingest_job_options(kind: str, *, build_fts: bool, delimiter=None, has_header=True,
+                        column_types=None, flatten_mode="none", flatten_depth=0,
+                        tables=None) -> dict:
+    if kind == "csv":
+        return {"build_fts": build_fts, "delimiter": delimiter,
+                "has_header": has_header, "column_types": column_types}
+    if kind == "json":
+        return {"build_fts": build_fts, "flatten_mode": flatten_mode,
+                "flatten_depth": flatten_depth}
+    return {"build_fts": build_fts, "tables": tables or []}
+
+
+@app.post("/api/ingest/jobs/path")
+def api_ingest_job_path(body: IngestJobPath):
+    if not os.path.isfile(body.path):
+        raise HTTPException(400, f"No file at {body.path}")
+    kind = body.kind or _ingest_kind_for_path(body.path)
+    if kind == "sqlite" and not body.tables:
+        raise HTTPException(400, "A sqlite import needs its tables picked first")
+    try:
+        return store().start_ingest_job(
+            kind, body.path, name=body.name,
+            options=_ingest_job_options(
+                kind, build_fts=body.build_fts, delimiter=body.delimiter,
+                has_header=body.has_header, column_types=body.column_types,
+                flatten_mode=body.flatten_mode, flatten_depth=body.flatten_depth,
+                tables=body.tables,
+            ),
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/ingest/jobs/upload")
+async def api_ingest_job_upload(
+    file: UploadFile = File(...),
+    kind: str = Form("csv"),
+    name: str | None = Form(None),
+    build_fts: bool = Form(True),
+    delimiter: str | None = Form(None),
+    has_header: bool = Form(True),
+    column_types: str | None = Form(None),   # JSON-encoded list[str] — multipart forms are flat
+    flatten_mode: str = Form("none"),
+    flatten_depth: int = Form(0),
+    tables: str | None = Form(None),         # sqlite: JSON [{table, name?, timestamp_columns?}]
+):
+    """Upload-then-job: the HTTP transfer *is* this request (the browser
+    gets transfer progress from its own XHR events), and the moment the
+    spool completes a background ingest job takes over — the response
+    carries the job record, not the finished source. delete_after cleans
+    the spooled tempfile whichever way the job ends."""
+    suffix = Path(file.filename or "upload").suffix or ".dat"
+    fd, tmp = tempfile.mkstemp(suffix=suffix)
+    try:
+        with os.fdopen(fd, "wb") as out:
+            while chunk := await file.read(4 << 20):
+                out.write(chunk)
+        table_list = json.loads(tables) if tables else None
+        types = json.loads(column_types) if column_types else None
+        return store().start_ingest_job(
+            kind, tmp, name=name or file.filename, delete_after=True,
+            options=_ingest_job_options(
+                kind, build_fts=build_fts, delimiter=delimiter or None,
+                has_header=has_header, column_types=types,
+                flatten_mode=flatten_mode, flatten_depth=flatten_depth,
+                tables=table_list,
+            ),
+        )
+    except Exception as e:
+        with contextlib.suppress(OSError):
+            os.remove(tmp)
+        raise HTTPException(400, str(e))
+
+
+def _resolve_candidate_dirs() -> list[str]:
+    """Likely homes for a just-picked file, cheapest-to-check first. Not a
+    disk search — a fixed handful of stat calls: recently browsed/scanned
+    dirs, the dirs previous imports came from (the DC-02-next-to-DC-01
+    workflow), registered case files' dirs, and the standard user dirs a
+    file dialog usually opens on."""
+    dirs: list[str] = list(RECENT_DIRS)
+    with contextlib.suppress(Exception):
+        for src in store().list_sources():
+            if src.get("path"):
+                dirs.append(os.path.dirname(src["path"]))
+    with contextlib.suppress(Exception):
+        for case in WS.cases.list():
+            if case.get("path"):
+                dirs.append(os.path.dirname(case["path"]))
+    home = Path.home()
+    dirs += [str(home / d) for d in ("Downloads", "Desktop", "Documents")]
+    dirs.append(str(home))
+    seen: set[str] = set()
+    out = []
+    for d in dirs:
+        if d and d not in seen:
+            seen.add(d)
+            out.append(d)
+    return out
+
+
+@app.post("/api/ingest/resolve_local")
+async def api_ingest_resolve_local(
+    request: Request,
+    name: str = Form(...),
+    size: int = Form(...),
+    mtime_ms: int = Form(...),
+    head: UploadFile = File(...),
+    tail: UploadFile = File(...),
+):
+    """Path recovery for a same-host pick: the browser sandbox never
+    reveals a picked file's real path, but if the client is this machine,
+    the picked file is *somewhere* on this disk — so the frontend sends a
+    fingerprint (name, size, mtime, first/last 64 KB) and this looks for
+    it in _resolve_candidate_dirs. A hit means the import can read the
+    file in place (jobs/path) instead of copying every byte through an
+    upload; a miss just means the upload happens as before. The match is
+    deliberately strict — exact name and size, mtime within 2s (FAT
+    granularity), *and* byte-equal head+tail — so a tunneled client whose
+    loopback appearance lies about locality still can't be handed the
+    wrong file: matching bytes at both ends of an identically-sized,
+    identically-stamped file is the same evidence either way."""
+    if not _is_loopback(request):
+        return {"path": None}
+    head_bytes = await head.read(65536)
+    tail_bytes = await tail.read(65536)
+    base_name = os.path.basename(name)  # never let a crafted name walk dirs
+    for d in _resolve_candidate_dirs():
+        cand = os.path.join(d, base_name)
+        try:
+            st = os.stat(cand)
+            if not os.path.isfile(cand) or st.st_size != size:
+                continue
+            if abs(st.st_mtime * 1000 - mtime_ms) > 2000:
+                continue
+            with open(cand, "rb") as f:
+                if f.read(len(head_bytes)) != head_bytes:
+                    continue
+                f.seek(max(0, st.st_size - len(tail_bytes)))
+                if f.read(len(tail_bytes)) != tail_bytes:
+                    continue
+            return {"path": cand}
+        except OSError:
+            continue
+    return {"path": None}
+
+
+@app.get("/api/ingest/jobs")
+def api_ingest_jobs():
+    return {"jobs": store().list_ingest_jobs()}
+
+
+@app.post("/api/ingest/jobs/{job_id}/cancel")
+def api_ingest_job_cancel(job_id: int):
+    return {"cancelled": store().cancel_ingest_job(job_id)}
 
 
 @app.get("/api/plugins")
@@ -897,9 +1171,22 @@ def api_view_close(view_id: str):
     return {"ok": True}
 
 
+class CancelOp(BaseModel):
+    token: str
+
+
+@app.post("/api/cancel_op")
+def api_cancel_op(body: CancelOp):
+    """Interrupts the in-flight cancellable operation (view/timeline build,
+    group summary) started with this client-generated token. A miss — the
+    operation already finished, or never started — is a no-op, reported as
+    cancelled: false."""
+    return {"cancelled": store().cancel_op(body.token)}
+
+
 @app.get("/api/group_summary")
 def api_group_summary(view_id: str, column: str, order: str = "count", direction: str | None = None,
-                       limit: int = 1000, path: str = ""):
+                       limit: int = 1000, path: str = "", op_token: str | None = None):
     try:
         # `path` (the outer levels already fixed by nested grouping) is a
         # JSON-encoded list — GET query params don't carry structured data,
@@ -907,7 +1194,8 @@ def api_group_summary(view_id: str, column: str, order: str = "count", direction
         # side-effect-free shape as every other view-summary read.
         path_list = json.loads(path) if path else None
         return JSONResponse(store().group_summary(view_id, column, order=order, direction=direction,
-                                                  limit=min(limit, 5000), path=path_list))
+                                                  limit=min(limit, 5000), path=path_list,
+                                                  op_token=op_token))
     except KeyError as e:
         raise HTTPException(409, str(e))
 
@@ -1167,11 +1455,13 @@ def _resolve_timeline_configs() -> dict[int, dict]:
 
 class TimelineBuild(BaseModel):
     tag_ids: list[int] = []
+    op_token: str | None = None
 
 
 @app.post("/api/timeline")
 def api_timeline_build(body: TimelineBuild):
-    return store().build_timeline(_resolve_timeline_configs(), body.tag_ids or None)
+    return store().build_timeline(_resolve_timeline_configs(), body.tag_ids or None,
+                                  op_token=body.op_token)
 
 
 @app.get("/api/timeline_rows")
