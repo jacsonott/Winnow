@@ -101,6 +101,18 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
    (invariant #4) can attach it too — that's the entire reason it changed.
    Case files stay clean. Views still die with the process — the frontend
    handles a 409 "view expired" by rebuilding.
+   **Two things make "deleted in `close()`" actually true**, and neither is
+   optional: server.py's `_lifespan` shutdown hook calls `Store.close()` on
+   the way out (nothing did before — `main()` blocks in `uvicorn.run` and
+   the only other caller is a case switch, so every Ctrl+C, SIGTERM and
+   crash stranded one file per session, permanently, in `/dev/shm` or
+   `C:\Windows\Temp`), and `sweep_orphan_views()` runs at startup to
+   collect whatever a *hard* kill still left behind. The sweep can delete
+   another process's file only because each Store holds an exclusive
+   `flock` on its own for its whole life (`Store.__init__` keeps the
+   mkstemp fd open for exactly this), so a live second Winnow is never
+   swept — if you change how that file is created or named, keep the lock
+   and the `winnow-views-` prefix.
 
 4. **One writer connection guarded by `Store.lock`; reads go through the
    `Store._reader()` pool.** Everything that mutates — ingest, view
@@ -964,9 +976,11 @@ session import's tag-remap-by-name, CSV formula-injection prefixing not
 touching the stored value, and so on. `test_api_routes.py` covers the HTTP
 layer itself (the CSRF header gate, request parsing, 400-vs-500) rather
 than re-testing logic the `Store`-level tests already cover directly.
-`test_maintenance.py` covers the things that only exist because the case
-file otherwise only ever grows: the auto-created column indexes
-(listing/dropping) and `compact()`. `test_ingest_jobs.py` covers the
+`test_maintenance.py` covers the things that only exist because everything
+else only ever grows: the auto-created column indexes (listing/dropping),
+`compact()`, and `sweep_orphan_views()` — whose load-bearing test is that a
+*live* Store's views database survives a sweep, since that's the assumption
+that makes deleting another process's file safe at all. `test_ingest_jobs.py` covers the
 background ingest jobs (lifecycle, byte-progress, the queued-cancel path,
 cancel-drops-the-partial-source — driven through `ingest_csv`'s own
 `cancel` hook so the cancellation point is deterministic, not a race —

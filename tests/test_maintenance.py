@@ -1,17 +1,20 @@
-"""Case-file maintenance the analyst can see and act on: the auto-created
-per-column filter indexes (listing/dropping them) and compact() / VACUUM.
+"""Maintenance: the auto-created per-column filter indexes (listing/dropping
+them), compact() / VACUUM, and the sweep for orphaned views databases.
 
-Both exist because everything else in the app only ever *adds* to the case
-file — indexes appear behind the analyst's back and freed pages go to
-SQLite's freelist rather than back to the OS."""
+All of it exists because everything else in the app only ever *adds* —
+indexes appear behind the analyst's back, freed pages go to SQLite's
+freelist rather than back to the OS, and a views database whose process was
+killed sits in /dev/shm or the platform tempdir forever."""
 
 from __future__ import annotations
 
 import os
+import sqlite3
 
 import pytest
 
-from store import Store
+import store as store_module
+from store import VIEWS_PREFIX, VIEWS_SUFFIX, Store, sweep_orphan_views
 
 
 def test_column_index_listed_after_a_sargable_filter(ingested):
@@ -139,8 +142,6 @@ def test_compact_leaves_live_views_and_data_alone(ingested):
 def test_compact_refuses_without_enough_free_disk(ingested, monkeypatch):
     import shutil as shutil_module
 
-    import store as store_module
-
     store, _ = ingested
     fake = shutil_module.disk_usage(".")._replace(free=1024)
     monkeypatch.setattr(store_module.shutil, "disk_usage", lambda _p: fake)
@@ -155,3 +156,118 @@ def test_compact_restores_temp_store_to_memory(ingested):
     store, _ = ingested
     store.compact()
     assert store.db.execute("PRAGMA temp_store").fetchone()[0] == 2  # 2 == MEMORY
+
+
+# ------------------------------------------- orphaned views databases (temp)
+
+@pytest.fixture
+def views_in(tmp_path, monkeypatch):
+    """Point both new views databases *and* the sweep at one tmp dir, so a
+    test never creates or deletes anything in the real /dev/shm or /tmp."""
+    d = tmp_path / "tmp"
+    d.mkdir()
+    monkeypatch.setattr(store_module, "_preferred_views_dir", lambda: str(d))
+    monkeypatch.setattr(store_module, "_views_dirs", lambda: [str(d)])
+    return d
+
+
+def _abandoned(d, stem="abandoned"):
+    """The three files a killed process leaves behind, unlocked."""
+    base = d / f"{VIEWS_PREFIX}{stem}{VIEWS_SUFFIX}"
+    for suffix in ("", "-wal", "-shm"):
+        (d / (base.name + suffix)).write_bytes(b"x" * 1024)
+    return base
+
+
+def test_sweep_removes_a_views_db_whose_process_is_gone(views_in):
+    base = _abandoned(views_in)
+    swept = sweep_orphan_views()
+    assert swept["removed"] == 3  # .db plus its -wal/-shm
+    assert swept["bytes_freed"] == 3 * 1024
+    for suffix in ("", "-wal", "-shm"):
+        assert not os.path.exists(str(base) + suffix)
+
+
+def test_sweep_leaves_a_live_stores_views_db_alone(views_in, case_path):
+    """The one that makes the sweep safe to run at all: a second Winnow
+    starting up must not delete the scratch database this process is still
+    querying out of. The flock Store.__init__ holds is what says so."""
+    store = Store(case_path)
+    try:
+        assert os.path.exists(store._views_path)
+        assert sweep_orphan_views() == {"removed": 0, "bytes_freed": 0}
+        assert os.path.exists(store._views_path)
+        store.db.execute("SELECT 1 FROM v.sqlite_master").fetchall()  # still attached
+    finally:
+        store.close()
+
+
+def test_sweep_takes_the_dead_and_keeps_the_live_in_one_pass(views_in, case_path):
+    store = Store(case_path)
+    try:
+        base = _abandoned(views_in)
+        assert sweep_orphan_views()["removed"] == 3
+        assert not os.path.exists(base)
+        assert os.path.exists(store._views_path)
+    finally:
+        store.close()
+
+
+def test_sweep_ignores_files_that_are_not_ours(views_in):
+    keep = views_in / "case.db"
+    keep.write_bytes(b"not a views database")
+    (views_in / "winnow-something-else.txt").write_bytes(b"nor this")
+    assert sweep_orphan_views() == {"removed": 0, "bytes_freed": 0}
+    assert keep.exists()
+
+
+def test_sweep_collects_a_stray_wal_whose_db_is_already_gone(views_in):
+    # close() removes the .db first, so a -wal that outlived it can only
+    # belong to a dead owner — there's nothing left to lock and probe.
+    stray = views_in / f"{VIEWS_PREFIX}half{VIEWS_SUFFIX}-wal"
+    stray.write_bytes(b"x" * 512)
+    swept = sweep_orphan_views()
+    assert swept == {"removed": 1, "bytes_freed": 512}
+    assert not stray.exists()
+
+
+def test_a_file_close_could_not_remove_is_collected_by_the_next_sweep(
+    views_in, case_path, monkeypatch
+):
+    """Windows can't unlink a file an in-flight reader still has open, so
+    close() swallows the error and leaves one behind. It must not be
+    permanent: close() releases the lock first, so the next start sweeps it."""
+    store = Store(case_path)
+    views_path = store._views_path
+    # A context, not a bare setattr: undoing the whole `monkeypatch` fixture
+    # would also undo views_in's redirection and point the sweep below at
+    # the developer's real /dev/shm and /tmp.
+    with monkeypatch.context() as m:
+        m.setattr(store_module.os, "remove", _raise_oserror)
+        store.close()
+    assert os.path.exists(views_path)
+    assert sweep_orphan_views()["removed"] >= 1
+    assert not os.path.exists(views_path)
+
+
+def _raise_oserror(*_args, **_kwargs):
+    raise OSError("simulated: file still open by another process")
+
+
+def test_lifespan_shutdown_closes_the_open_case(views_in, case_path):
+    """The other half: nothing used to call Store.close() on the way out, so
+    Ctrl+C stranded the views database every time."""
+    import server
+    from fastapi.testclient import TestClient
+
+    store = Store(case_path)
+    server.STORE = store
+    try:
+        with TestClient(server.app) as client:   # `with` is what runs the lifespan
+            assert client.get("/api/case/current").json()["open"] is True
+        assert server.STORE is None
+        assert not os.path.exists(store._views_path)
+        with pytest.raises(sqlite3.ProgrammingError):
+            store.db.execute("SELECT 1")
+    finally:
+        server.STORE = None
