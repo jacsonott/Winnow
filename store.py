@@ -32,6 +32,11 @@ from typing import Any, Iterable, Iterator
 
 from openpyxl import Workbook
 
+try:  # POSIX only — see sweep_orphan_views for why Windows needs no substitute
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None  # type: ignore[assignment]
+
 import timeparse
 
 BATCH = 20_000
@@ -497,6 +502,134 @@ class OpCancelled(Exception):
     not an error, not the analyst's fault, keep what you had."""
 
 
+# ------------------------------------------------- the views scratch database
+
+# Naming for the per-Store views database (invariant #3). The prefix is the
+# only thing identifying one of these files as ours once the process that
+# made it is gone, so sweep_orphan_views matches on it — don't change it
+# without leaving a sweep for the old shape behind.
+VIEWS_PREFIX = "winnow-views-"
+VIEWS_SUFFIX = ".db"
+VIEWS_DB_SUFFIXES = ("", "-wal", "-shm")  # the three files a WAL database is
+
+
+def _preferred_views_dir() -> str | None:
+    """Where a *new* views database goes: /dev/shm when it's usable (tmpfs,
+    Linux-only — see Store.__init__ for why that's worth 20-100%), else None
+    for tempfile's own default (the platform tempdir: /tmp, or on Windows
+    %TMP%/%TEMP%, which for an account with neither set is C:\\Windows\\Temp)."""
+    if os.path.isdir("/dev/shm") and os.access("/dev/shm", os.W_OK):
+        return "/dev/shm"
+    return None
+
+
+def _views_dirs() -> list[str]:
+    """Every directory a views database could be sitting in — the preferred
+    one *and* the platform tempdir, not just today's choice. A machine can
+    have accumulated files in both (a /dev/shm that wasn't writable on some
+    earlier run, a container where it appeared later), and the whole point of
+    the sweep is to find files an earlier process left behind."""
+    dirs = []
+    preferred = _preferred_views_dir()
+    if preferred:
+        dirs.append(preferred)
+    with contextlib.suppress(Exception):
+        tmp = tempfile.gettempdir()
+        if tmp not in dirs:
+            dirs.append(tmp)
+    return dirs
+
+
+def _views_file_is_orphaned(path: str) -> bool:
+    """Whether no live Store still owns `path`. Every Store holds an
+    exclusive flock on its own views file for its entire life
+    (Store.__init__), so a file this can lock has no owner left.
+
+    Fail-safe in both directions, which is what makes it usable against a
+    file another process might be mid-query on: an unreadable candidate, or
+    one whose lock is held (or whose filesystem doesn't implement flock at
+    all — the same OSError, and the same answer), is reported as still in
+    use and therefore never deleted. On Windows there is no flock and none
+    is needed: the OS refuses to unlink a file any process has open, so the
+    delete in sweep_orphan_views is itself the liveness test there."""
+    if fcntl is None:  # pragma: no cover - Windows
+        return True
+    try:
+        fd = os.open(path, os.O_RDWR)
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    finally:
+        os.close(fd)  # releases the probe's own lock immediately
+    return True
+
+
+def sweep_orphan_views() -> dict:
+    """Delete views databases left behind by Winnow processes that are no
+    longer running, and report `{"removed": n, "bytes_freed": n}`.
+
+    Store.close() removes its own — but only a *clean* exit ever reaches it.
+    A SIGKILL, a power loss, an OOM kill, or (before server.py grew its
+    lifespan shutdown hook) simply closing the terminal did not, and every
+    one of those stranded a `winnow-views-<random>.db` plus its `-wal`/`-shm`
+    siblings that nothing would ever clean up again. On Linux they sit in
+    /dev/shm and cost RAM until reboot; on macOS/Windows they sit in the
+    platform tempdir — `C:\\Windows\\Temp` for an account with no TMP/TEMP
+    set — and accumulate across reboots, one set per killed session, at
+    whatever size that session's biggest materialised view reached.
+
+    Deleting another process's file is only safe because views are
+    re-derivable scratch that dies with the process anyway (invariant #3)
+    *and* because _views_file_is_orphaned proves the owner is gone first —
+    a second, live Winnow on the same machine keeps its own file. Called
+    once at server startup; never fatal (any error just leaves the file)."""
+    removed, bytes_freed = 0, 0
+    for d in _views_dirs():
+        try:
+            entries = os.listdir(d)
+        except OSError:
+            continue  # tempdir unreadable or gone — nothing to sweep, not an error
+        for name in entries:
+            # -wal/-shm are removed with the .db they belong to, below.
+            if not (name.startswith(VIEWS_PREFIX) and name.endswith(VIEWS_SUFFIX)):
+                continue
+            base = os.path.join(d, name)
+            if not _views_file_is_orphaned(base):
+                continue
+            for suffix in VIEWS_DB_SUFFIXES:
+                path = base + suffix
+                try:
+                    size = os.path.getsize(path)
+                except OSError:
+                    continue  # no -wal/-shm for this one; normal
+                try:
+                    os.remove(path)
+                except OSError:
+                    break  # can't remove the base => don't touch its siblings
+                removed += 1
+                bytes_freed += size
+        for name in entries:
+            # A -wal/-shm whose .db is already gone. Only a dead owner can
+            # leave that shape (close() removes the .db first, and a live
+            # Store always has its .db), so there's nothing to probe.
+            if not name.startswith(VIEWS_PREFIX) or not name.endswith(("-wal", "-shm")):
+                continue
+            path = os.path.join(d, name)
+            if os.path.exists(path[:-4]):  # both suffixes are 4 chars
+                continue
+            try:
+                size = os.path.getsize(path)
+                os.remove(path)
+            except OSError:
+                continue
+            removed += 1
+            bytes_freed += size
+    return {"removed": removed, "bytes_freed": bytes_freed}
+
+
 class Store:
     def __init__(self, path: str, default_tags: list[tuple] | None = None):
         self.path = path
@@ -530,9 +663,27 @@ class Store:
         # documents why OFF is off-limits. On macOS/Windows there's no
         # tmpfs path, so the tempdir file leans on synchronous=OFF plus the
         # OS page cache alone.
-        views_dir = "/dev/shm" if os.path.isdir("/dev/shm") and os.access("/dev/shm", os.W_OK) else None
-        fd, self._views_path = tempfile.mkstemp(suffix=".db", prefix="winnow-views-", dir=views_dir)
-        os.close(fd)
+        fd, self._views_path = tempfile.mkstemp(
+            suffix=VIEWS_SUFFIX, prefix=VIEWS_PREFIX, dir=_preferred_views_dir()
+        )
+        # The mkstemp fd is kept open and flocked for this Store's whole
+        # life rather than closed straight away: it's the liveness signal
+        # sweep_orphan_views() probes, so the startup janitor in a *second*
+        # Winnow process can tell this file apart from one a killed process
+        # abandoned. If the lock can't be taken (a filesystem without flock;
+        # Windows, where fcntl doesn't exist at all) the fd is just closed —
+        # the sweep's own probe fails the same way and errs toward keeping
+        # the file, so the degraded mode is "not swept", never "swept while
+        # in use". See _views_file_is_orphaned.
+        self._views_fd: int | None = None
+        if fcntl is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self._views_fd = fd
+            except OSError:
+                os.close(fd)
+        else:  # pragma: no cover - Windows
+            os.close(fd)
         self.db.execute(f"ATTACH DATABASE '{self._views_path}' AS v")
         # WAL on the views db is what lets _reader() connections read a
         # view concurrently with the writer materialising the next one.
@@ -1018,11 +1169,19 @@ class Store:
                 t.join(15)
         with self.lock:
             self.db.close()
+        # Release the flock (see __init__) before unlinking, so that if the
+        # remove below is the one that fails, what's left behind is an
+        # unlocked file the next process's sweep_orphan_views can collect.
+        if self._views_fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(self._views_fd)
+            self._views_fd = None
         # A reader still checked out by an in-flight request holds the
         # unlinked file open — fine on POSIX (the pages stay readable until
         # its close), and on Windows the remove just fails and is skipped,
-        # leaving a stray temp file rather than an error.
-        for suffix in ("", "-wal", "-shm"):
+        # leaving a stray temp file rather than an error. Either way it's no
+        # longer permanent: the sweep at the next server start takes it.
+        for suffix in VIEWS_DB_SUFFIXES:
             try:
                 os.remove(self._views_path + suffix)
             except OSError:

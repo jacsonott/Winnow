@@ -79,4 +79,13 @@ def client(store, monkeypatch):
     monkeypatch.setattr(server, "STORE", store)
     from fastapi.testclient import TestClient
 
-    return TestClient(server.app, headers={"X-Timeline-Lite-Client": "1"})
+    yield TestClient(server.app, headers={"X-Timeline-Lite-Client": "1"})
+    # A test that goes through /api/case/open leaves server.STORE pointing at
+    # a Store that route created. monkeypatch puts the attribute back but
+    # can't close that object, and an unclosed Store keeps its views database
+    # in /dev/shm (or the platform tempdir) forever — the suite was leaking
+    # one file per run, which is the exact shape of the leak the sweep in
+    # test_maintenance.py exists to clean up.
+    opened = server.STORE
+    if opened is not None and opened is not store:
+        opened.close()

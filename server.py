@@ -27,10 +27,48 @@ from pydantic import BaseModel
 
 import plugin_api
 import workspace as WS
-from store import SQLITE_IMPORT_EXTENSIONS, OpCancelled, Store
+from store import SQLITE_IMPORT_EXTENSIONS, OpCancelled, Store, sweep_orphan_views
 
 HERE = Path(__file__).parent
-app = FastAPI(title="Winnow")
+
+
+@contextlib.asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    """Startup/shutdown for the views scratch databases (invariant #3).
+
+    Both halves exist for the same bug: those files are created per open
+    case and deleted in Store.close(), and *nothing used to call close() on
+    the way out*. main() blocks in uvicorn.run and the only other caller is
+    a case switch, so Ctrl+C, a closed terminal, SIGTERM and every crash
+    left a `winnow-views-*.db` (+ -wal/-shm) behind for good — in /dev/shm
+    on Linux, in the platform tempdir (`C:\\Windows\\Temp` for an account
+    with no TMP/TEMP) on Windows, at whatever size that session's largest
+    materialised view reached.
+
+    Shutdown closing the store fixes every *clean* exit, including Ctrl+C —
+    uvicorn runs the lifespan for SIGINT/SIGTERM — and it's the only half
+    that can be exact. Startup sweeping is what covers the rest (SIGKILL,
+    OOM, power loss) plus whatever backlog a machine already has; it can't
+    hurt a second live Winnow, see sweep_orphan_views. Attached here rather
+    than in main() so `uvicorn server:app` gets both too."""
+    global STORE
+    swept = sweep_orphan_views()
+    if swept["removed"]:
+        print(f"Cleaned up {swept['removed']} orphaned temp file(s) from previous runs "
+              f"({swept['bytes_freed'] / (1 << 20):.1f} MB)")
+    try:
+        yield
+    finally:
+        old, STORE = STORE, None
+        if old is not None:
+            # Also cancels and joins running ingest jobs (bounded by one
+            # batch commit each), so Ctrl+C mid-import drops its partial
+            # source instead of stranding a half-table that looks complete.
+            with contextlib.suppress(Exception):
+                old.close()
+
+
+app = FastAPI(title="Winnow", lifespan=_lifespan)
 STORE: Store | None = None
 
 # Directories the analyst has recently pointed the server at (folder/file
