@@ -169,3 +169,81 @@ def test_kape_defaults_place_real_headers(client, store, write_csv):
         "Created0x10", "LastModified0x10", "LastRecordChange0x10", "LastAccess0x10"}
     assert all(r["type_label"] == "MFT" for r in rows)
     assert all("mal.exe" in r["body"] for r in rows)
+
+
+# ---------------------------------------- sort, body joining, row fetch
+
+
+def test_sort_desc_reverses_but_null_ts_stays_last(client, store, write_csv):
+    p = write_csv([
+        ["When", "What"],
+        ["2026-01-01 10:00:00", "early"],
+        ["2026-01-05 10:00:00", "late"],
+        ["not a date", "dateless"],
+    ], name="plain.csv")
+    rec = store.ingest_csv(p, name="plain.csv", build_fts=False)
+    store.set_tags(rec["id"], [1, 2, 3], 1, True)
+
+    v = client.post("/api/timeline", json={"sort": "desc"}).json()
+    rows = client.get(f"/api/timeline_rows?view_id={v['view_id']}&start=0&count=10").json()["rows"]
+    assert [r["body"].split(" | ")[-1] for r in rows] == ["late", "early", "dateless"]
+    assert rows[-1]["ts"] is None  # unplaceable rows sort last in both directions
+
+    v = client.post("/api/timeline", json={"sort": "asc"}).json()
+    rows = client.get(f"/api/timeline_rows?view_id={v['view_id']}&start=0&count=10").json()["rows"]
+    assert [r["body"].split(" | ")[-1] for r in rows] == ["early", "late", "dateless"]
+
+
+def test_body_join_skips_empty_cells(client, store, write_csv):
+    p = write_csv([
+        ["When", "A", "B", "C"],
+        ["2026-01-01 10:00:00", "left", "", "right"],
+        ["2026-01-02 10:00:00", "", "", "only"],
+    ], name="sparse.csv")
+    rec = store.ingest_csv(p, name="sparse.csv", build_fts=False)
+    store.set_tags(rec["id"], [1, 2], 1, True)
+    WS.timeline_templates.upsert(None, "sparse", None, "sparse*",
+                                 [{"column": "When", "label": None}], ["A", "B", "C"])
+    v = client.post("/api/timeline", json={}).json()
+    rows = client.get(f"/api/timeline_rows?view_id={v['view_id']}&start=0&count=10").json()["rows"]
+    assert rows[0]["body"] == "left | right"   # no dangling separator for empty B
+    assert rows[1]["body"] == "only"
+
+
+def test_body_join_expr_chunks_wide_sources(client, store, write_csv):
+    from store import _body_join_expr
+    # The expr builder nests past SQLite's per-call argument cap...
+    expr = _body_join_expr([f'"c{i}"' for i in range(200)])
+    assert expr.count("BODY_JOIN(") == 4  # 90 + 90 + 20 inner chunks under one outer call
+    # ...and a genuinely wide source builds end to end (fallback body =
+    # every column).
+    header = ["When"] + [f"col{i}" for i in range(119)]
+    row = ["2026-01-01 10:00:00"] + [f"v{i}" if i % 7 == 0 else "" for i in range(119)]
+    p = write_csv([header, row], name="wide.csv")
+    rec = store.ingest_csv(p, name="wide.csv", build_fts=False)
+    store.set_tags(rec["id"], [1], 1, True)
+    v = client.post("/api/timeline", json={}).json()
+    assert v["row_count"] == 1
+    rows = client.get(f"/api/timeline_rows?view_id={v['view_id']}&start=0&count=10").json()["rows"]
+    assert "v0 | v7" in rows[0]["body"] and " |  | " not in rows[0]["body"]
+
+
+def test_api_row_returns_full_source_row(client, store, write_csv):
+    p = write_csv([
+        ["When", "What"],
+        ["2026-01-01 10:00:00", "hello"],
+    ], name="plain.csv")
+    rec = store.ingest_csv(p, name="plain.csv", build_fts=False)
+    store.set_tags(rec["id"], [1], 2, True)
+    store.set_note(rec["id"], 1, "interesting")
+
+    r = client.get(f"/api/row?source_id={rec['id']}&rid=1")
+    assert r.status_code == 200
+    d = r.json()
+    assert d["source_name"] == "plain.csv"
+    assert [c["name"] for c in d["columns"]] == ["When", "What"]
+    assert d["cells"] == ["2026-01-01 10:00:00", "hello"]
+    assert d["tags"] == [2]
+    assert d["note"] == "interesting"
+
+    assert client.get(f"/api/row?source_id={rec['id']}&rid=999").status_code == 404

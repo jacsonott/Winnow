@@ -255,6 +255,30 @@ def _day_bucket(raw: Any) -> str | None:
     return None
 
 
+def _body_join(*parts: Any) -> str:
+    """Registered as the variadic SQL function BODY_JOIN — joins its
+    non-empty arguments with " | ". The timeline body used to be a chain
+    of COALESCE(col, '') || ' | ' || …, which rendered every empty cell
+    as a dangling separator; skipping empties needs to happen per-row,
+    which SQL string concatenation can't express. Variadic (narg=-1), so
+    one call handles any column count — but SQLite caps a function call
+    at SQLITE_MAX_FUNCTION_ARG (default 100) arguments, which is why
+    _body_join_expr chunks wide sources into nested calls."""
+    return " | ".join(str(v) for v in parts if v is not None and str(v) != "")
+
+
+def _body_join_expr(idents: list[str]) -> str:
+    """BODY_JOIN(...) over the given already-quoted column expressions,
+    nested in chunks of 90 to stay under SQLite's per-call argument cap
+    (an all-columns fallback body on a wide export can exceed 100).
+    Nesting is safe because an inner chunk's result is either '' (skipped
+    by the outer call) or already-joined non-empty text."""
+    if len(idents) <= 90:
+        return f"BODY_JOIN({', '.join(idents)})"
+    chunks = [idents[i:i + 90] for i in range(0, len(idents), 90)]
+    return f"BODY_JOIN({', '.join(_body_join_expr(c) for c in chunks)})"
+
+
 def _ts_normalize(raw: Any) -> str | None:
     """Registered as the SQL function TS_NORMALIZE(x) — a zero-padded,
     lexicographically-sortable "YYYY-MM-DD HH:MM:SS" for a value in either
@@ -473,6 +497,7 @@ class Store:
         self.db.create_function("REGEXP", 2, _regexp, deterministic=True)
         self.db.create_function("DAY_BUCKET", 1, _day_bucket, deterministic=True)
         self.db.create_function("TS_NORMALIZE", 1, _ts_normalize, deterministic=True)
+        self.db.create_function("BODY_JOIN", -1, _body_join, deterministic=True)
         self._tune(self.db)
         # Materialised views live in their own on-disk database, named and
         # WAL-journalled (not the anonymous `ATTACH DATABASE ''` this used
@@ -1009,6 +1034,7 @@ class Store:
         ro.create_function("REGEXP", 2, _regexp, deterministic=True)
         ro.create_function("DAY_BUCKET", 1, _day_bucket, deterministic=True)
         ro.create_function("TS_NORMALIZE", 1, _ts_normalize, deterministic=True)
+        ro.create_function("BODY_JOIN", -1, _body_join, deterministic=True)
         # Same mmap reasoning as _tune (address space, not RAM — and shared
         # with the writer's mapping via the OS page cache). busy_timeout
         # covers the rare WAL edge (recovery, checkpoint restart) where
@@ -2602,7 +2628,7 @@ class Store:
     # -------------------------------------------------------------- timeline
 
     def build_timeline(self, configs: dict[int, dict] | None = None, tag_ids: list[int] | None = None,
-                       search: str = "", op_token: str | None = None) -> dict:
+                       search: str = "", sort: str = "asc", op_token: str | None = None) -> dict:
         """Materialises one row per *tagged* row across every real source in
         the case (open or closed — this is "every finding in the case", not
         "every finding in a currently-open tab"), each contributing its own
@@ -2618,6 +2644,10 @@ class Store:
 
         `tag_ids` narrows to rows carrying at least one of those tags;
         None/empty means every tagged row regardless of which tag(s).
+        `sort` is "asc" or "desc" over the normalized timestamp; events
+        with no parseable timestamp sort last either way (a row you can't
+        place in time belongs at the edge you scroll to on purpose, not
+        at the head of a reversed timeline).
         `search` is a plain substring filter over the *derived* event
         (timestamp, body, type label, source name, timestamp label) —
         applied at build time, not fetch time, so the row count and rail
@@ -2663,7 +2693,9 @@ class Store:
             body_cols = [c for c in (cfg.get("body_columns") or []) if c in col_names]
             if not body_cols:
                 body_cols = [c["name"] for c in src["columns"]]
-            body_expr = " || ' | ' || ".join(f"COALESCE(s.{q(c)}, '')" for c in body_cols)
+            # BODY_JOIN skips empty cells — a sparse row no longer renders
+            # as a run of dangling " | " separators.
+            body_expr = _body_join_expr([f"s.{q(c)}" for c in body_cols])
 
             type_label = cfg.get("type_label") or src["name"]
             table = src["table_name"]
@@ -2717,11 +2749,12 @@ class Store:
                 # in sorted order ((source_id, rid, ts_label) makes the
                 # order fully determined even with several events per row),
                 # rowcount replaces a count(*) re-scan.
+                ts_dir = "DESC" if sort == "desc" else "ASC"
                 n = self.db.execute(
                     f"INSERT INTO v.{q(vid)}(source_id, rid, ts, ts_label, body, type_label, source_name, tag_ids) "
                     f"SELECT source_id, rid, ts, ts_label, body, type_label, source_name, tag_ids FROM ({union_sql})"
                     f"{where} "
-                    f"ORDER BY (ts IS NULL) ASC, ts ASC, source_id, rid, COALESCE(ts_label, '')",
+                    f"ORDER BY (ts IS NULL) ASC, ts {ts_dir}, source_id, rid, COALESCE(ts_label, '')",
                     params,
                 ).rowcount
             # Same evict-after-build ordering (and reasoning) as build_view.
@@ -2732,6 +2765,34 @@ class Store:
 
         self._views[vid] = {"view_id": vid, "kind": "timeline", "row_count": n}
         return {"view_id": vid, "row_count": n}
+
+    def get_row(self, source_id: int, rid: int) -> dict:
+        """One source row with its columns, tags and note — the timeline
+        detail pane's fetch (a timeline event carries only the derived
+        body; the pane shows the actual row). Reader-pool, no lock."""
+        with self._reader() as ro:
+            src = self._source_lite_on(ro, source_id)
+            row = ro.execute(
+                f"SELECT * FROM {q(src['table_name'])} WHERE rid = ?", (rid,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"No row {rid} in source {source_id}")
+            tags = [r[0] for r in ro.execute(
+                "SELECT tag_id FROM row_tags WHERE source_id = ? AND rid = ?",
+                (source_id, rid)).fetchall()]
+            note = ro.execute(
+                "SELECT note FROM row_notes WHERE source_id = ? AND rid = ?",
+                (source_id, rid)).fetchone()
+        cols = [c["name"] for c in src["columns"]]
+        return {
+            "source_id": source_id,
+            "rid": rid,
+            "source_name": src.get("name"),
+            "columns": src["columns"],
+            "cells": [row[c] for c in cols],
+            "tags": tags,
+            "note": note[0] if note else None,
+        }
 
     def fetch_timeline_rows(self, view_id: str, start: int, count: int) -> dict:
         handle = self._views.get(view_id)

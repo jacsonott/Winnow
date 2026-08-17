@@ -796,14 +796,20 @@ textarea:focus { border-color: var(--accent); outline: none; }
 }
 .timeline-row .tl-tag-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
 /* Which of a multi-timestamp source's clocks this event is — Created0x10
-   vs LastModified0x10 on an MFT row (build_timeline only sets ts_label
-   when a source has more than one timestamp column configured). */
-.timeline-row .tl-ts-label {
-  margin-left: 6px; padding: 0 5px; border-radius: 3px; flex: 0 0 auto;
-  background: var(--panel-2); border: 1px solid var(--line-2);
-  font-size: 9px; letter-spacing: .03em; color: var(--dim);
-  overflow: hidden; text-overflow: ellipsis; max-width: 90px; white-space: nowrap;
+   vs LastModified0x10 on an MFT row. Its own column (build_timeline only
+   sets ts_label when a source has more than one timestamp configured, so
+   single-clock cases render it empty). */
+.tl-col-clock { flex: 0 0 130px; }
+.timeline-row .tl-col-clock {
+  font-family: var(--mono); font-size: 10px; color: var(--dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* The timestamp header doubles as the sort toggle. */
+.tl-sort {
+  background: none; border: 0; padding: 0 10px; font: inherit; color: inherit;
+  text-align: left; cursor: pointer;
+}
+.tl-sort:hover { color: var(--accent); }
 .timeline-head-hint { color: var(--dim); font-size: 11px; }
 
 /* Ordered body-column pills in the timeline source editor — drag to

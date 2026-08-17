@@ -1885,11 +1885,13 @@ async function loadTags() {
 function renderTagRibbon() {
   const rib = $('tagRibbon');
   const onTimeline = S.activeTab === 'timeline';
-  if (onTimeline && S.timeline.tagFilter === null) S.timeline.tagFilter = S.tags.map((t) => t.id);
+  // null = "all tags", materialized only once tags exist — initializing
+  // from an empty S.tags would freeze [] as "none selected" forever.
+  if (onTimeline && S.timeline.tagFilter === null && S.tags.length) S.timeline.tagFilter = S.tags.map((t) => t.id);
   rib.replaceChildren();
   for (const t of S.tags) {
     const chip = el('button', 'tag-chip');
-    const pressed = onTimeline ? S.timeline.tagFilter.includes(t.id) : S.tagFilter.includes(t.id);
+    const pressed = onTimeline ? (S.timeline.tagFilter === null || S.timeline.tagFilter.includes(t.id)) : S.tagFilter.includes(t.id);
     chip.setAttribute('aria-pressed', String(pressed));
     chip.style.color = pressed ? t.color : '';
     const sw = el('span', 'swatch');
@@ -1903,9 +1905,10 @@ function renderTagRibbon() {
       : `Click to filter to ${t.name}. Press ${t.hotkey || '—'} to tag the selection.`;
     chip.onclick = () => {
       if (onTimeline) {
-        S.timeline.tagFilter = S.timeline.tagFilter.includes(t.id)
-          ? S.timeline.tagFilter.filter((id) => id !== t.id)
-          : [...S.timeline.tagFilter, t.id];
+        const cur = S.timeline.tagFilter === null ? S.tags.map((x) => x.id) : S.timeline.tagFilter;
+        S.timeline.tagFilter = cur.includes(t.id)
+          ? cur.filter((id) => id !== t.id)
+          : [...cur, t.id];
         renderTagRibbon();
         buildTimeline();
         return;
@@ -1918,7 +1921,7 @@ function renderTagRibbon() {
   }
   const any = el('button', 'tag-chip');
   if (onTimeline) {
-    const allOn = S.timeline.tagFilter.length === S.tags.length;
+    const allOn = S.timeline.tagFilter === null || S.timeline.tagFilter.length === S.tags.length;
     any.setAttribute('aria-pressed', String(allOn));
     any.append(el('span', null, 'All tags'));
     any.title = 'Show every tagged row on the timeline';
@@ -5767,11 +5770,11 @@ function suggestTimelinePattern(name) {
 }
 
 async function buildTimeline() {
-  if (S.timeline.tagFilter === null) S.timeline.tagFilter = S.tags.map((t) => t.id);
+  if (S.timeline.tagFilter === null && S.tags.length) S.timeline.tagFilter = S.tags.map((t) => t.id);
   S.timeline.pages.clear();
   S.timeline.pending.clear();
   const reqId = ++S.timeline.reqId;
-  if (!S.timeline.tagFilter.length) {
+  if (S.timeline.tagFilter !== null && !S.timeline.tagFilter.length) {
     $('timelineEmpty').textContent = 'No tags selected — turn a tag chip back on in the toolbar.';
     // Every tag unchecked -> nothing can match; skip the round trip and
     // show the empty state directly rather than asking the server for
@@ -5786,7 +5789,8 @@ async function buildTimeline() {
     const token = opToken();
     const disarmCancel = armOpCancel(token);
     try {
-      v = await post('/api/timeline', { tag_ids: S.timeline.tagFilter, search: S.search.trim(), op_token: token });
+      v = await post('/api/timeline', { tag_ids: S.timeline.tagFilter || [], search: S.search.trim(),
+                                        sort: S.timeline.sortDir || 'asc', op_token: token });
     } finally {
       disarmCancel();
     }
@@ -5801,12 +5805,18 @@ async function buildTimeline() {
   S.timeline.view = v;
   $('timelineSpacerY').style.height = spacerPx(v.row_count) + 'px';
   $('timelineStats').innerHTML = `<b>${v.row_count.toLocaleString()}</b> event${v.row_count === 1 ? '' : 's'}`;
-  $('timelineEmpty').textContent = (S.search.trim() || S.timeline.tagFilter.length < S.tags.length)
+  $('timelineEmpty').textContent = (S.search.trim() || (S.timeline.tagFilter !== null && S.timeline.tagFilter.length < S.tags.length))
     ? 'No timeline events match the current search / tag filter.'
     : 'No tagged rows yet — tag some rows in any table, then come back here.';
   $('timelineBody').scrollTop = 0;
+  $('tlSortTs').textContent = `Timestamp ${(S.timeline.sortDir || 'asc') === 'asc' ? '▲' : '▼'}`;
   renderTimelineRows();
 }
+
+$('tlSortTs').onclick = () => {
+  S.timeline.sortDir = (S.timeline.sortDir || 'asc') === 'asc' ? 'desc' : 'asc';
+  buildTimeline();
+};
 
 const buildTimelineSoon = debounce(() => { if (S.activeTab === 'timeline') buildTimeline(); }, 300);
 
@@ -5852,11 +5862,8 @@ function renderTimelineRows() {
     const r = timelineRowAt(pos);
     const row = el('div', 'timeline-row' + (r ? '' : ' pending'));
     const tsCell = el('div', 'tl-col-ts', r ? (r.ts || '—') : '');
-    if (r && r.ts_label) {
-      const lab = el('span', 'tl-ts-label', r.ts_label);
-      lab.title = `This event is the row's ${r.ts_label} timestamp`;
-      tsCell.append(lab);
-    }
+    const clockCell = el('div', 'tl-col-clock', r ? (r.ts_label || '') : '');
+    if (r && r.ts_label) clockCell.title = `This event is the row's ${r.ts_label} timestamp`;
     const typeCell = el('div', 'tl-col-type');
     if (r) {
       for (const tid of r.tags) {
@@ -5871,8 +5878,23 @@ function renderTimelineRows() {
     }
     const bodyCell = el('div', 'tl-col-body', r ? r.body : '');
     if (r) bodyCell.title = r.body;
-    row.append(tsCell, typeCell, bodyCell);
-    if (r) row.onclick = () => jumpToTimelineRow(r.source_id, r.rid);
+    row.append(tsCell, clockCell, typeCell, bodyCell);
+    // Single click: detail pane. Double click: jump to the row in its
+    // source table. Manual double-click detection, same reasoning as the
+    // grid's (see activateRow): these nodes get replaced by re-renders,
+    // and a replaced mousedown target never synthesizes dblclick.
+    if (r) row.onclick = () => {
+      const now = performance.now();
+      if (tlLastClick.pos === pos && now - tlLastClick.t < 350) {
+        tlLastClick = { pos: -1, t: 0 };
+        clearTimeout(tlClickTimer);
+        jumpToTimelineRow(r.source_id, r.rid);
+        return;
+      }
+      tlLastClick = { pos, t: now };
+      clearTimeout(tlClickTimer);
+      tlClickTimer = setTimeout(() => showTimelineDetail(r), 280);
+    };
     frag.append(row);
   }
   rowsEl.replaceChildren(frag);
@@ -5882,6 +5904,42 @@ async function jumpToTimelineRow(sourceId, rid) {
   await openSource(sourceId);
   showGridTab();
   await recenterOnRow({ source_id: sourceId, rid });
+}
+
+let tlLastClick = { pos: -1, t: 0 };
+let tlClickTimer = null;
+
+/* The same detail pane the grid uses, fed from /api/row (a timeline event
+   only carries its derived body — the pane shows the actual source row).
+   Note editing works unchanged: noteInput saves against the explicit
+   source_id/rid stamped on it, not against grid state. */
+async function showTimelineDetail(tlRow) {
+  let r;
+  try {
+    r = await api(`/api/row?source_id=${tlRow.source_id}&rid=${tlRow.rid}`);
+  } catch (e) {
+    toast('Could not load that row: ' + e.message, 4000);
+    return;
+  }
+  const d = $('detail');
+  d.hidden = false;
+  $('detailResize').hidden = false;
+  $('detailTitle').textContent = `Line ${r.rid} — ${r.source_name}`;
+  const dl = $('detailFields');
+  dl.replaceChildren();
+  r.columns.forEach((c, i) => {
+    const v = r.cells[i];
+    if (v == null || v === '') return;
+    dl.append(el('dt', null, c.name));
+    const dd = el('dd');
+    dd.append(renderDetailContent(c.type === 'datetime' ? formatTimestamp(v, tsFormatFor(c.name)) : v));
+    dl.append(dd);
+  });
+  const note = $('noteInput');
+  note.value = r.note || '';
+  note.dataset.rid = r.rid;
+  note.dataset.sourceId = r.source_id;
+  $('noteStatus').textContent = '';
 }
 
 // Guarded like #body's own scroll handler below: scroll can fire several

@@ -1485,13 +1485,24 @@ def _resolve_timeline_configs() -> dict[int, dict]:
 class TimelineBuild(BaseModel):
     tag_ids: list[int] = []
     search: str = ""
+    sort: str = "asc"  # "asc" | "desc" over the normalized timestamp
     op_token: str | None = None
 
 
 @app.post("/api/timeline")
 def api_timeline_build(body: TimelineBuild):
     return store().build_timeline(_resolve_timeline_configs(), body.tag_ids or None,
-                                  search=body.search, op_token=body.op_token)
+                                  search=body.search, sort=body.sort, op_token=body.op_token)
+
+
+@app.get("/api/row")
+def api_row(source_id: int, rid: int):
+    """One source row with columns/tags/note — the timeline detail pane's
+    fetch (a timeline event carries only its derived body)."""
+    try:
+        return JSONResponse(store().get_row(source_id, rid))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
 
 
 @app.get("/api/timeline_rows")
