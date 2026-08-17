@@ -38,6 +38,7 @@ Never holds evidence data — only UI/workflow bookkeeping.
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import threading
@@ -323,58 +324,139 @@ class HeaderNicknames:
 
 
 class TimelineTemplates:
-    """The "database of headers" the unified Timeline tab uses to turn a
-    real source's raw columns into one timeline event per tagged row:
-    which column is the timestamp, which columns (in the order given)
-    get joined with " | " into the body, and what to call this source
-    type (e.g. "Windows Event Log" instead of the raw file name). Keyed
-    by header set like ColumnLayouts/HeaderNicknames — cross-case on
-    purpose, so configuring a Chromium History import's columns once
-    means every future case with a same-shaped History table already
-    knows how to place it on a timeline. A source whose header set has no
-    matching template here falls back to sensible defaults (first
-    datetime column, every column, its own file name) — see server.py's
-    _resolve_timeline_configs — so the Timeline tab is never blocked on
+    """The "database of source shapes" the unified Timeline tab uses to
+    turn a real source's raw columns into timeline events per tagged row:
+    which column(s) are timestamps (several means several events per row —
+    the MACB case), which columns (in the order given) get joined with
+    " | " into the body, and what to call this source type ("Event Log"
+    instead of the raw file name).
+
+    A template matches a source by **header set and/or file-name pattern**
+    (fnmatch wildcards, case-insensitive — same matching family as
+    directory import): headers are exact and version-fragile, patterns
+    survive EZTools adding a column, and a template may require both.
+    Precedence in find_for_source: both-specified templates first, then
+    header-only, then pattern-only — so a template the analyst saved for
+    this exact header set out-ranks a shipped pattern default. Within a
+    tier the *newest* (highest id) wins, so re-saving beats anything
+    seeded.
+
+    Cross-case on purpose, like SavedFilters/ColumnLayouts — configuring
+    an EVTX export once means every future case's EVTX export is already
+    placed. Seeded with KAPE/EZTools defaults on first load (built from a
+    real triage — see DEFAULT_TIMELINE_TEMPLATES); the analyst can edit
+    or delete any of them, and export/import mirrors saved filters. A
+    source nothing matches falls back to sensible defaults (first
+    datetime column, every column, its own file name) in server.py's
+    _resolve_timeline_configs, so the Timeline tab is never blocked on
     setup, just improved by it."""
 
     FILE = "timeline_templates.json"
 
     def _load(self) -> list[dict]:
-        return _read(self.FILE, {"templates": []})["templates"]
+        items = _read(self.FILE, {"templates": None})["templates"]
+        if items is None:
+            # First load ever: seed the KAPE/EZTools defaults. Deliberately
+            # only when the file doesn't exist — an analyst who deleted a
+            # default meant it.
+            items = [dict(t, id=i + 1) for i, t in enumerate(DEFAULT_TIMELINE_TEMPLATES)]
+            self._save(items)
+            return items
+        return [self._migrate(r) for r in items]
 
     def _save(self, items: list[dict]) -> None:
         _write(self.FILE, {"templates": items})
 
     @staticmethod
+    def _migrate(rec: dict) -> dict:
+        """Old records (pre filename/multi-timestamp) had a single
+        `timestamp_column`. Upgraded on read, non-destructively — the next
+        save writes the new shape."""
+        if "timestamp_columns" not in rec:
+            ts = rec.pop("timestamp_column", None)
+            rec["timestamp_columns"] = [{"column": ts, "label": None}] if ts else []
+        rec.setdefault("filename_pattern", None)
+        rec.setdefault("col_names", None)
+        return rec
+
+    @staticmethod
     def _key(col_names: list[str]) -> list[str]:
         return sorted(c.strip().lower() for c in col_names)
+
+    @staticmethod
+    def _pattern_matches(pattern: str, filename: str) -> bool:
+        return fnmatch.fnmatch(filename.lower(), pattern.lower())
 
     def list(self) -> list[dict]:
         with _LOCK:
             return self._load()
 
-    def find(self, col_names: list[str]) -> dict | None:
-        key = self._key(col_names)
-        with _LOCK:
-            for rec in self._load():
-                if rec["col_names"] == key:
-                    return rec
-        return None
-
-    def save(
-        self, col_names: list[str], type_label: str,
-        timestamp_column: str | None, body_columns: list[str],
-    ) -> dict:
+    def find_for_source(self, col_names: list[str], filename: str) -> dict | None:
+        """Best template for a source: both-criteria matches beat
+        header-only beat pattern-only; newest wins within a tier."""
         key = self._key(col_names)
         with _LOCK:
             items = self._load()
-            rec = next((r for r in items if r["col_names"] == key), None)
+        best = (-1, -1)  # (tier score, id)
+        found = None
+        for rec in items:
+            cols_ok = rec.get("col_names") is not None and rec["col_names"] == key
+            pat = rec.get("filename_pattern")
+            pat_ok = bool(pat) and self._pattern_matches(pat, filename)
+            if rec.get("col_names") is not None and pat:
+                if not (cols_ok and pat_ok):
+                    continue
+                tier = 3
+            elif rec.get("col_names") is not None:
+                if not cols_ok:
+                    continue
+                tier = 2
+            elif pat:
+                if not pat_ok:
+                    continue
+                tier = 1
+            else:
+                continue  # a template that matches nothing matches nothing
+            score = (tier, rec.get("id") or 0)
+            if score > best:
+                best = score
+                found = rec
+        return found
+
+    def upsert(
+        self, template_id: int | None, type_label: str,
+        col_names: list[str] | None, filename_pattern: str | None,
+        timestamp_columns: list[dict], body_columns: list[str],
+    ) -> dict:
+        ts_cols = [
+            {"column": t["column"], "label": t.get("label") or None}
+            for t in (timestamp_columns or []) if t.get("column")
+        ]
+        with _LOCK:
+            items = self._load()
+            rec = next((r for r in items if r["id"] == template_id), None) if template_id else None
+            if rec is None and col_names is not None:
+                # No id but the exact header set already has a template —
+                # editing that one, same dedupe the old keyed-by-headers
+                # store gave for free.
+                key = self._key(col_names)
+                rec = next((r for r in items if r.get("col_names") == key), None)
             if rec:
-                rec.update(type_label=type_label, timestamp_column=timestamp_column, body_columns=body_columns)
+                rec.update(
+                    type_label=type_label,
+                    col_names=self._key(col_names) if col_names is not None else None,
+                    filename_pattern=filename_pattern or None,
+                    timestamp_columns=ts_cols,
+                    body_columns=body_columns,
+                )
             else:
                 rec = {
-                    "id": _next_id(items), "col_names": key, "type_label": type_label,
-                    "timestamp_column": timestamp_column, "body_columns": body_columns,
+                    "id": _next_id(items),
+                    "type_label": type_label,
+                    "col_names": self._key(col_names) if col_names is not None else None,
+                    "filename_pattern": filename_pattern or None,
+                    "timestamp_columns": ts_cols,
+                    "body_columns": body_columns,
                 }
                 items.append(rec)
             self._save(items)
@@ -385,6 +467,112 @@ class TimelineTemplates:
             items = [r for r in self._load() if r["id"] != template_id]
             self._save(items)
 
+    def export_all(self) -> dict:
+        with _LOCK:
+            return {"format": "winnow-timeline-templates/1", "templates": self._load()}
+
+    def import_all(self, data: dict, merge: bool = True) -> int:
+        incoming = data.get("templates", [])
+        with _LOCK:
+            items = self._load() if merge else []
+
+            def identity(r):
+                return (
+                    tuple(r.get("col_names") or []) or None,
+                    (r.get("filename_pattern") or "").lower() or None,
+                    r.get("type_label"),
+                )
+
+            seen = {identity(r) for r in items}
+            added = 0
+            for r in incoming:
+                r = self._migrate(dict(r))
+                if identity(r) in seen:
+                    continue
+                items.append({
+                    "id": _next_id(items),
+                    "type_label": r.get("type_label", "Imported"),
+                    "col_names": self._key(r["col_names"]) if r.get("col_names") else None,
+                    "filename_pattern": r.get("filename_pattern") or None,
+                    "timestamp_columns": r.get("timestamp_columns", []),
+                    "body_columns": r.get("body_columns", []),
+                })
+                seen.add(identity(r))
+                added += 1
+            self._save(items)
+            return added
+
+
+def _tpl(pattern, label, ts, body):
+    return {
+        "type_label": label, "col_names": None, "filename_pattern": pattern,
+        "timestamp_columns": [{"column": c, "label": None} for c in ts],
+        "body_columns": body,
+    }
+
+
+# Built from a real KAPE triage's EZTools output (headers verified against
+# the sample tree, 2026-08). Pattern-matched rather than header-matched on
+# purpose: an EZTools update that adds a column would silently orphan an
+# exact header set, while the output file names have been stable for
+# years. Multiple timestamp_columns mean one timeline event per timestamp
+# per tagged row — the MACB case for $MFT is the canonical example. An
+# analyst's own header-set template for the same source out-ranks these
+# (see find_for_source), and any of these can be edited or deleted.
+DEFAULT_TIMELINE_TEMPLATES: list[dict] = [
+    _tpl("*MFTECmd*$MFT_Output*", "MFT",
+         ["Created0x10", "LastModified0x10", "LastRecordChange0x10", "LastAccess0x10"],
+         ["ParentPath", "FileName", "Extension", "FileSize", "ZoneIdContents"]),
+    _tpl("*MFTECmd*$J_Output*", "USN Journal",
+         ["UpdateTimestamp"],
+         ["ParentPath", "Name", "UpdateReasons", "FileAttributes"]),
+    _tpl("*EvtxECmd_Output*", "Event Log",
+         ["TimeCreated"],
+         ["EventId", "Channel", "Computer", "UserName", "MapDescription",
+          "ExecutableInfo", "PayloadData1", "PayloadData2"]),
+    _tpl("*Amcache_*FileEntries*", "Amcache",
+         ["FileKeyLastWriteTimestamp"],
+         ["FullPath", "SHA1", "Size", "Description"]),
+    _tpl("*Amcache_ProgramEntries*", "Amcache Program",
+         ["KeyLastWriteTimestamp", "InstallDate"],
+         ["Name", "Version", "Publisher", "RootDirPath", "UninstallString"]),
+    _tpl("*AppCompatCache*", "Shimcache",
+         ["LastModifiedTimeUTC"],
+         ["Path", "Executed"]),
+    _tpl("*LECmd_Output*", "LNK",
+         ["SourceCreated", "SourceModified", "TargetCreated", "TargetModified"],
+         ["LocalPath", "TargetIDAbsolutePath", "Arguments", "WorkingDirectory", "MachineID"]),
+    _tpl("*AutomaticDestinations*", "JumpList (auto)",
+         ["CreationTime", "LastModified"],
+         ["AppIdDescription", "Path", "TargetIDAbsolutePath", "Hostname"]),
+    _tpl("*CustomDestinations*", "JumpList (custom)",
+         ["SourceCreated", "SourceModified"],
+         ["AppIdDescription", "Path", "TargetIDAbsolutePath"]),
+    _tpl("*_UsrClass.csv", "Shellbags",
+         ["LastWriteTime", "FirstInteracted", "LastInteracted"],
+         ["AbsolutePath", "Value"]),
+    _tpl("*_NTUSER.csv", "Shellbags",
+         ["LastWriteTime", "FirstInteracted", "LastInteracted"],
+         ["AbsolutePath", "Value"]),
+    _tpl("*_Activity.csv", "Windows Activity",
+         ["StartTime", "EndTime"],
+         ["Executable", "DisplayText", "ContentInfo", "ActivityType"]),
+    _tpl("*SrumECmd_NetworkUsages*", "SRUM Network",
+         ["Timestamp"],
+         ["ExeInfo", "UserName", "BytesSent", "BytesReceived"]),
+    _tpl("*SrumECmd_NetworkConnections*", "SRUM Connection",
+         ["Timestamp", "ConnectStartTime"],
+         ["ExeInfo", "UserName", "ProfileName"]),
+    _tpl("*SrumECmd_*", "SRUM",
+         ["Timestamp"],
+         ["ExeInfo", "UserName"]),
+    _tpl("*RBCmd_Output*", "Recycle Bin",
+         ["DeletedOn"],
+         ["FileName", "FileSize", "FileType"]),
+    _tpl("*PECmd_Output*", "Prefetch",
+         ["LastRun"],
+         ["ExecutableName", "RunCount", "FilesLoaded"]),
+]
 
 class ColumnLayouts:
     """The analyst's preferred default column order/visibility/timestamp

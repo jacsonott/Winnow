@@ -1873,24 +1873,43 @@ async function loadTags() {
   S.tags = d.tags;
   S.tagCounts = d.counts || {};
   renderTagRibbon();
-  renderTimelineTagFilter();
 }
 
+/* One set of tag chips, two targets: on the grid they filter the open
+   table (single-select, off by default); on the Timeline tab they toggle
+   which tags' rows the timeline unions (multi-select, all on by default —
+   the timeline IS a view of tagged rows, so "no tags" means empty). The
+   same chips visibly doing nothing to the timeline is exactly the bug
+   this replaces — the timeline used to have its own separate checkbox
+   row while these stayed wired to the hidden grid. */
 function renderTagRibbon() {
   const rib = $('tagRibbon');
+  const onTimeline = S.activeTab === 'timeline';
+  if (onTimeline && S.timeline.tagFilter === null) S.timeline.tagFilter = S.tags.map((t) => t.id);
   rib.replaceChildren();
   for (const t of S.tags) {
     const chip = el('button', 'tag-chip');
-    chip.setAttribute('aria-pressed', String(S.tagFilter.includes(t.id)));
-    chip.style.color = S.tagFilter.includes(t.id) ? t.color : '';
+    const pressed = onTimeline ? S.timeline.tagFilter.includes(t.id) : S.tagFilter.includes(t.id);
+    chip.setAttribute('aria-pressed', String(pressed));
+    chip.style.color = pressed ? t.color : '';
     const sw = el('span', 'swatch');
     sw.style.background = t.color;
     chip.append(sw, el('span', null, t.name));
     if (t.hotkey) chip.append(el('span', 'key', t.hotkey));
     const n = S.tagCounts[t.id] || 0;
     if (n) chip.append(el('span', 'n', n.toLocaleString()));
-    chip.title = `Click to filter to ${t.name}. Press ${t.hotkey || '—'} to tag the selection.`;
+    chip.title = onTimeline
+      ? `Toggle ${t.name} rows on the timeline`
+      : `Click to filter to ${t.name}. Press ${t.hotkey || '—'} to tag the selection.`;
     chip.onclick = () => {
+      if (onTimeline) {
+        S.timeline.tagFilter = S.timeline.tagFilter.includes(t.id)
+          ? S.timeline.tagFilter.filter((id) => id !== t.id)
+          : [...S.timeline.tagFilter, t.id];
+        renderTagRibbon();
+        buildTimeline();
+        return;
+      }
       S.tagFilter = S.tagFilter.includes(t.id) ? [] : [t.id];
       renderTagRibbon();
       rebuildView({ keepScroll: false });
@@ -1898,13 +1917,25 @@ function renderTagRibbon() {
     rib.append(chip);
   }
   const any = el('button', 'tag-chip');
-  any.setAttribute('aria-pressed', String(S.tagFilter[0] === '__any__'));
-  any.append(el('span', null, 'Any tag'));
-  any.onclick = () => {
-    S.tagFilter = S.tagFilter[0] === '__any__' ? [] : ['__any__'];
-    renderTagRibbon();
-    rebuildView({ keepScroll: false });
-  };
+  if (onTimeline) {
+    const allOn = S.timeline.tagFilter.length === S.tags.length;
+    any.setAttribute('aria-pressed', String(allOn));
+    any.append(el('span', null, 'All tags'));
+    any.title = 'Show every tagged row on the timeline';
+    any.onclick = () => {
+      S.timeline.tagFilter = S.tags.map((t) => t.id);
+      renderTagRibbon();
+      buildTimeline();
+    };
+  } else {
+    any.setAttribute('aria-pressed', String(S.tagFilter[0] === '__any__'));
+    any.append(el('span', null, 'Any tag'));
+    any.onclick = () => {
+      S.tagFilter = S.tagFilter[0] === '__any__' ? [] : ['__any__'];
+      renderTagRibbon();
+      rebuildView({ keepScroll: false });
+    };
+  }
   rib.append(any);
   const edit = el('button', 'tag-chip');
   edit.append(el('span', null, 'Edit tags'));
@@ -5489,10 +5520,12 @@ function showGridTab() {
   $('grid').hidden = false;
   $('tabSql').setAttribute('aria-selected', 'false');
   $('tabTimeline').setAttribute('aria-selected', 'false');
+  renderTagRibbon(); // back to grid semantics
   if (S.sourceId) checkPresets(S.sourceId); // restore the banner, hidden while on SQL/Timeline
 }
 function showTimelineTab() {
   S.activeTab = 'timeline';
+  renderTagRibbon(); // chips flip to timeline semantics (multi-toggle, all-on default)
   $('grid').hidden = true;
   $('sqlview').hidden = true;
   hidePluginViews();
@@ -5692,30 +5725,45 @@ async function loadTimelineTemplates() {
   try { S.timelineTemplates = await api('/api/timeline_templates'); } catch { S.timelineTemplates = []; }
 }
 
-function timelineTemplateFor(colNames) {
-  const sig = headerSig(colNames);
-  return S.timelineTemplates.find((t) => headerSig(t.col_names) === sig) || null;
+/* fnmatch-style wildcard match, case-insensitive — the same matching
+   family directory-import patterns use, client-side. */
+function wildcardMatch(pattern, name) {
+  const rx = '^' + pattern.toLowerCase().split(/([*?])/).map((part) =>
+    part === '*' ? '.*' : part === '?' ? '.' : part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('') + '$';
+  return new RegExp(rx).test(name.toLowerCase());
 }
 
-function renderTimelineTagFilter() {
-  const wrap = $('timelineTagFilter');
-  wrap.replaceChildren();
-  if (S.timeline.tagFilter === null) S.timeline.tagFilter = S.tags.map((t) => t.id);
-  for (const t of S.tags) {
-    const lab = el('label');
-    const cb = el('input');
-    cb.type = 'checkbox';
-    cb.checked = S.timeline.tagFilter.includes(t.id);
-    cb.onchange = () => {
-      S.timeline.tagFilter = cb.checked
-        ? [...S.timeline.tagFilter, t.id]
-        : S.timeline.tagFilter.filter((id) => id !== t.id);
-      buildTimeline();
-    };
-    lab.append(cb, el('span', 'swatch'), document.createTextNode(t.name));
-    lab.children[1].style.background = t.color;
-    wrap.append(lab);
+/* Client-side mirror of workspace.TimelineTemplates.find_for_source —
+   same precedence (both criteria > header set > pattern, newest id wins
+   inside a tier) so the config modal's "matched" labels agree with what
+   the server actually builds. */
+function timelineTemplateForSource(src) {
+  const sig = headerSig(src.columns.map((c) => c.name));
+  let best = null;
+  let bestTier = -1;
+  let bestId = -1;
+  for (const t of S.timelineTemplates) {
+    const colsSpec = t.col_names != null;
+    const colsOk = colsSpec && headerSig(t.col_names) === sig;
+    const patOk = !!t.filename_pattern && wildcardMatch(t.filename_pattern, src.name);
+    let tier;
+    if (colsSpec && t.filename_pattern) { if (!(colsOk && patOk)) continue; tier = 3; }
+    else if (colsSpec) { if (!colsOk) continue; tier = 2; }
+    else if (t.filename_pattern) { if (!patOk) continue; tier = 1; }
+    else continue;
+    if (tier > bestTier || (tier === bestTier && (t.id || 0) > bestId)) {
+      bestTier = tier; bestId = t.id || 0; best = t;
+    }
   }
+  return best;
+}
+
+/* Default file-name pattern for a source: EZTools output is stamped with
+   a leading timestamp ("20260329222647_MFTECmd_$MFT_Output.csv") that
+   must not end up in a reusable pattern. */
+function suggestTimelinePattern(name) {
+  const stripped = name.replace(/^[0-9][0-9_\-T]*_/, '');
+  return '*' + (stripped || name);
 }
 
 async function buildTimeline() {
@@ -5724,6 +5772,7 @@ async function buildTimeline() {
   S.timeline.pending.clear();
   const reqId = ++S.timeline.reqId;
   if (!S.timeline.tagFilter.length) {
+    $('timelineEmpty').textContent = 'No tags selected — turn a tag chip back on in the toolbar.';
     // Every tag unchecked -> nothing can match; skip the round trip and
     // show the empty state directly rather than asking the server for
     // "no tag filter," which would mean the opposite (every tagged row).
@@ -5737,7 +5786,7 @@ async function buildTimeline() {
     const token = opToken();
     const disarmCancel = armOpCancel(token);
     try {
-      v = await post('/api/timeline', { tag_ids: S.timeline.tagFilter, op_token: token });
+      v = await post('/api/timeline', { tag_ids: S.timeline.tagFilter, search: S.search.trim(), op_token: token });
     } finally {
       disarmCancel();
     }
@@ -5751,10 +5800,15 @@ async function buildTimeline() {
   if (reqId !== S.timeline.reqId) return; // a newer build superseded this one
   S.timeline.view = v;
   $('timelineSpacerY').style.height = spacerPx(v.row_count) + 'px';
-  $('timelineStats').innerHTML = `<b>${v.row_count.toLocaleString()}</b> tagged row${v.row_count === 1 ? '' : 's'}`;
+  $('timelineStats').innerHTML = `<b>${v.row_count.toLocaleString()}</b> event${v.row_count === 1 ? '' : 's'}`;
+  $('timelineEmpty').textContent = (S.search.trim() || S.timeline.tagFilter.length < S.tags.length)
+    ? 'No timeline events match the current search / tag filter.'
+    : 'No tagged rows yet — tag some rows in any table, then come back here.';
   $('timelineBody').scrollTop = 0;
   renderTimelineRows();
 }
+
+const buildTimelineSoon = debounce(() => { if (S.activeTab === 'timeline') buildTimeline(); }, 300);
 
 async function ensureTimelinePage(idx) {
   if (S.timeline.pages.has(idx) || S.timeline.pending.has(idx) || !S.timeline.view || !S.timeline.view.view_id) return;
@@ -5798,6 +5852,11 @@ function renderTimelineRows() {
     const r = timelineRowAt(pos);
     const row = el('div', 'timeline-row' + (r ? '' : ' pending'));
     const tsCell = el('div', 'tl-col-ts', r ? (r.ts || '—') : '');
+    if (r && r.ts_label) {
+      const lab = el('span', 'tl-ts-label', r.ts_label);
+      lab.title = `This event is the row's ${r.ts_label} timestamp`;
+      tsCell.append(lab);
+    }
     const typeCell = el('div', 'tl-col-type');
     if (r) {
       for (const tid of r.tags) {
@@ -5833,84 +5892,241 @@ $('timelineBody').addEventListener('scroll', () => {
   if (!timelineScrollRaf) timelineScrollRaf = requestAnimationFrame(() => { timelineScrollRaf = null; renderTimelineRows(); });
 }, { passive: true });
 
-/* Per-source "which column is the timestamp, which columns make up the
-   body, what's this source called on the timeline" editor — writes to
-   workspace.timeline_templates (keyed by header set, so it's reused by
-   any future case whose columns match), not anything case-scoped. Every
-   real source gets a row here, whether or not it has tagged rows yet —
-   configuring ahead of tagging is the normal workflow, not an edge case. */
+/* Configure sources: a status list first — every real source, what config
+   applies to it (and by which rule), one Configure button each — with the
+   actual editor behind that button rather than every source's whole form
+   stacked on screen at once. Configs are cross-case workspace templates
+   (see workspace.TimelineTemplates): matched by header set and/or
+   file-name wildcard, N timestamp columns (N > 1 = one event per
+   timestamp per row — MACB), ordered body columns, exportable/importable
+   like saved filters. */
 function openTimelineSourceConfig() {
   modal('Configure timeline sources', (b) => {
     b.append(el('p', null,
-      'Per header set, reused across cases: which column is the timestamp, which columns (in the order '
-      + 'checked) make up the body, and what to call this source type. A table with no matching config '
-      + 'here falls back to its first datetime column, every column, and its own file name.'));
+      'Each table shows the config that applies to it — saved configs are cross-case and match by '
+      + 'header set and/or file-name pattern (wildcards allowed). A table with no match falls back to '
+      + 'its first datetime column, every column, and its own file name.'));
 
     const list = el('div', 'session-list');
-    b.append(list);
-
-    const realSources = S.sources.filter((s) => !s.is_merge && !s.error);
+    const realSources = S.sources.filter((s2) => !s2.is_merge && !s2.error);
     for (const src of realSources) {
-      const colNames = src.columns.map((c) => c.name);
-      const dtCols = src.columns.filter((c) => c.type === 'datetime').map((c) => c.name);
-      const existing = timelineTemplateFor(colNames);
-
+      const t = timelineTemplateForSource(src);
       const row = el('div', 'row-actions session-row');
-      row.style.flexDirection = 'column';
-      row.style.alignItems = 'stretch';
       row.append(el('span', 'session-name', src.name));
-
-      const typeInput = fieldInput(existing ? existing.type_label : '');
-      typeInput.placeholder = `Source type (defaults to "${src.name}")`;
-      row.append(typeInput);
-
-      const tsSel = el('select');
-      tsSel.style.cssText = 'background:var(--ink);color:var(--text);border:1px solid var(--line-2);padding:5px 8px;font:inherit;margin-top:6px';
-      const noneOpt = document.createElement('option');
-      noneOpt.value = '';
-      noneOpt.textContent = dtCols.length ? '(first datetime column)' : '(no datetime column on this table)';
-      tsSel.append(noneOpt);
-      for (const c of dtCols) {
-        const opt = document.createElement('option');
-        opt.value = c; opt.textContent = c;
-        tsSel.append(opt);
+      let status;
+      if (t) {
+        const tsNames = (t.timestamp_columns || []).map((x) => x.label || x.column);
+        const basis = [t.col_names != null ? 'headers' : null,
+                       t.filename_pattern ? `pattern ${t.filename_pattern}` : null]
+          .filter(Boolean).join(' + ');
+        status = `${t.type_label} · ${tsNames.length ? tsNames.join(', ') : 'first datetime col'} · by ${basis}`;
+      } else {
+        status = 'no config — fallback: first datetime column, every column';
       }
-      tsSel.value = existing && dtCols.includes(existing.timestamp_column) ? existing.timestamp_column : '';
-      row.append(tsSel);
-
-      const bodyWrap = el('div', 'row-actions');
-      bodyWrap.style.flexWrap = 'wrap';
-      let bodyOrder = existing && existing.body_columns && existing.body_columns.length
-        ? existing.body_columns.filter((c) => colNames.includes(c))
-        : [];
-      for (const c of colNames) {
-        const chip = el('button', 'btn ghost', c);
-        chip.setAttribute('aria-pressed', String(bodyOrder.includes(c)));
-        chip.title = 'Toggle inclusion in the body — order follows the order you check them in';
-        chip.onclick = () => {
-          bodyOrder = bodyOrder.includes(c) ? bodyOrder.filter((x) => x !== c) : [...bodyOrder, c];
-          chip.setAttribute('aria-pressed', String(bodyOrder.includes(c)));
-        };
-        bodyWrap.append(chip);
-      }
-      row.append(el('span', 'fb-help', 'Body columns (click to toggle, order = click order; none checked = every column):'), bodyWrap);
-
-      const saveBtn = el('button', 'btn', 'Save');
-      saveBtn.style.marginTop = '6px';
-      saveBtn.onclick = async () => {
-        await post('/api/timeline_templates', {
-          col_names: colNames,
-          type_label: typeInput.value.trim() || src.name,
-          timestamp_column: tsSel.value || null,
-          body_columns: bodyOrder,
-        });
-        await loadTimelineTemplates();
-        toast(`Saved timeline config for ${src.name}`);
-      };
-      row.append(saveBtn);
+      row.append(el('span', 'count', status));
+      const cfgBtn = el('button', 'btn ghost', 'Configure…');
+      cfgBtn.onclick = () => openTimelineTemplateEditor(src);
+      row.append(cfgBtn);
       list.append(row);
     }
     if (!realSources.length) list.append(el('div', 'note-status', 'No tables in this case yet.'));
+    b.append(list);
+
+    // Every saved config, matched here or not — the delete/housekeeping
+    // view, and what export/import operates on.
+    b.append(el('h4', null, 'Saved configs'));
+    const tlist = el('div', 'session-list');
+    for (const t of S.timelineTemplates) {
+      const row = el('div', 'row-actions session-row');
+      const basis = [t.col_names != null ? `${t.col_names.length}-column header set` : null,
+                     t.filename_pattern || null].filter(Boolean).join(' + ');
+      row.append(
+        el('span', 'session-name', t.type_label),
+        el('span', 'count', `${basis} · ${(t.timestamp_columns || []).length || 'fallback'} ts`),
+      );
+      const del = el('button', 'btn ghost', '✕');
+      del.title = 'Delete this config';
+      del.onclick = async () => {
+        await api(`/api/timeline_templates/${t.id}`, { method: 'DELETE' });
+        await loadTimelineTemplates();
+        buildTimeline();
+        openTimelineSourceConfig();
+      };
+      row.append(del);
+      tlist.append(row);
+    }
+    if (!S.timelineTemplates.length) tlist.append(el('div', 'note-status', 'No saved configs.'));
+    b.append(tlist);
+
+    const acts = el('div', 'row-actions');
+    const exp = el('button', 'btn ghost', 'Export configs…');
+    exp.onclick = () => { window.location = '/api/timeline_templates/export'; };
+    const impLabel = el('label', 'btn ghost', 'Import configs…');
+    const impInput = el('input');
+    impInput.type = 'file';
+    impInput.accept = '.json';
+    impInput.hidden = true;
+    impInput.onchange = async () => {
+      const fd = new FormData();
+      fd.append('file', impInput.files[0]);
+      fd.append('merge', 'true');
+      try {
+        const res = await api('/api/timeline_templates/import', { method: 'POST', body: fd });
+        toast(`Imported ${res.added} config${res.added === 1 ? '' : 's'}`);
+      } catch (e) {
+        toast('Import failed: ' + e.message, 6000);
+      }
+      await loadTimelineTemplates();
+      buildTimeline();
+      openTimelineSourceConfig();
+    };
+    impLabel.append(impInput);
+    acts.append(exp, impLabel);
+    b.append(acts);
+  }, { wide: true });
+}
+
+/* The per-source editor behind "Configure…". Saves a workspace template:
+   the matched existing config seeds the form, and Save upserts (by id
+   when editing, else deduped by header set server-side). */
+function openTimelineTemplateEditor(src) {
+  const colNames = src.columns.map((c) => c.name);
+  const existing = timelineTemplateForSource(src);
+  const st = {
+    id: existing ? existing.id : null,
+    type: existing ? existing.type_label : '',
+    matchHeaders: existing ? existing.col_names != null : true,
+    matchPattern: existing ? !!existing.filename_pattern : false,
+    pattern: (existing && existing.filename_pattern) || suggestTimelinePattern(src.name),
+    ts: existing
+      ? (existing.timestamp_columns || []).map((x) => x.column).filter((c) => colNames.includes(c))
+      : src.columns.filter((c) => c.type === 'datetime').slice(0, 1).map((c) => c.name),
+    body: existing && existing.body_columns
+      ? existing.body_columns.filter((c) => colNames.includes(c))
+      : [],
+  };
+
+  modal(`Timeline config — ${src.name}`, (b) => {
+    b.append(el('label', null, 'Source type label'));
+    const typeInput = fieldInput(st.type);
+    typeInput.placeholder = `e.g. "Event Log" (defaults to "${src.name}")`;
+    typeInput.oninput = () => { st.type = typeInput.value; };
+    const typeRow = el('div', 'row-actions');
+    typeRow.append(typeInput);
+    b.append(typeRow);
+
+    // --- what this config matches on
+    b.append(el('label', null, 'Applies to (either or both)'));
+    const matchRow = el('div', 'row-actions');
+    matchRow.style.flexWrap = 'wrap';
+    const hLab = el('label');
+    hLab.style.cssText = 'display:flex;align-items:center;gap:6px';
+    const hCb = el('input');
+    hCb.type = 'checkbox';
+    hCb.checked = st.matchHeaders;
+    hCb.onchange = () => { st.matchHeaders = hCb.checked; };
+    hLab.append(hCb, el('span', null, `tables with this exact header set (${colNames.length} columns)`));
+    const pLab = el('label');
+    pLab.style.cssText = 'display:flex;align-items:center;gap:6px';
+    const pCb = el('input');
+    pCb.type = 'checkbox';
+    pCb.checked = st.matchPattern;
+    const patInput = fieldInput(st.pattern);
+    patInput.style.minWidth = '260px';
+    patInput.oninput = () => { st.pattern = patInput.value; };
+    pCb.onchange = () => { st.matchPattern = pCb.checked; };
+    pLab.append(pCb, el('span', null, 'file names matching'), patInput);
+    matchRow.append(hLab, pLab);
+    b.append(matchRow);
+    b.append(el('p', 'fb-help',
+      'Header matching is exact and survives renames; a wildcard pattern (* and ?) survives a tool '
+      + 'update adding a column. Header matches out-rank pattern matches when both could apply.'));
+
+    // --- timestamps (several = one timeline event per timestamp per row)
+    b.append(el('label', null, 'Timestamp columns — several means each row appears once per timestamp (MACB)'));
+    const tsWrap = el('div', 'row-actions');
+    tsWrap.style.flexWrap = 'wrap';
+    const ordered = [...src.columns].sort((a, c) => (c.type === 'datetime') - (a.type === 'datetime'));
+    for (const col of ordered) {
+      const chip = el('button', 'btn ghost', col.name + (col.type === 'datetime' ? ' ⏱' : ''));
+      chip.setAttribute('aria-pressed', String(st.ts.includes(col.name)));
+      chip.title = col.type === 'datetime'
+        ? 'Sampled as a datetime column'
+        : 'Not sampled as datetime — usable, but check the values parse';
+      chip.onclick = () => {
+        st.ts = st.ts.includes(col.name) ? st.ts.filter((c) => c !== col.name) : [...st.ts, col.name];
+        chip.setAttribute('aria-pressed', String(st.ts.includes(col.name)));
+      };
+      tsWrap.append(chip);
+    }
+    b.append(tsWrap);
+
+    // --- ordered body columns: pills drag to reorder, chips below add
+    b.append(el('label', null, 'Body columns — drag to reorder; none picked = every column'));
+    const pills = el('div', 'tl-body-pills');
+    pills.id = 'tlBodyPills';
+    const addWrap = el('div', 'row-actions');
+    addWrap.style.flexWrap = 'wrap';
+
+    function renderBodyPills() {
+      pills.replaceChildren();
+      for (const c of st.body) {
+        const pill = el('span', 'tl-body-pill');
+        pill.dataset.id = c;
+        pill.append(el('span', null, c));
+        const x = el('span', 'x', '✕');
+        x.onclick = () => { st.body = st.body.filter((v) => v !== c); renderBodyPills(); renderAddChips(); };
+        pill.append(x);
+        wireDragReorder(pill, c, {
+          containerSelector: '#tlBodyPills', rowSelector: '.tl-body-pill', horizontal: true,
+          currentIds: () => st.body.slice(),
+          onReorder: (ids) => { st.body = ids; renderBodyPills(); },
+        });
+        pills.append(pill);
+      }
+      if (!st.body.length) pills.append(el('span', 'fb-help', '(every column)'));
+    }
+    function renderAddChips() {
+      addWrap.replaceChildren();
+      for (const c of colNames.filter((c2) => !st.body.includes(c2))) {
+        const chip = el('button', 'btn ghost', '+ ' + c);
+        chip.onclick = () => { st.body = [...st.body, c]; renderBodyPills(); renderAddChips(); };
+        addWrap.append(chip);
+      }
+    }
+    renderBodyPills();
+    renderAddChips();
+    b.append(pills, addWrap);
+
+    const acts = el('div', 'row-actions');
+    const save = el('button', 'btn', 'Save config');
+    save.onclick = async () => {
+      if (!st.matchHeaders && !(st.matchPattern && st.pattern.trim())) {
+        toast('Pick at least one way this config matches — headers or a file-name pattern', 4500);
+        return;
+      }
+      try {
+        await post('/api/timeline_templates', {
+          id: st.id,
+          type_label: st.type.trim() || src.name,
+          col_names: st.matchHeaders ? colNames : null,
+          filename_pattern: st.matchPattern ? st.pattern.trim() : null,
+          timestamp_columns: st.ts.map((c) => ({ column: c, label: null })),
+          body_columns: st.body,
+        });
+      } catch (e) {
+        toast('Could not save: ' + e.message, 5000);
+        return;
+      }
+      await loadTimelineTemplates();
+      buildTimeline();
+      toast(`Saved timeline config for ${src.name}`);
+      openTimelineSourceConfig();
+    };
+    const back = el('button', 'btn ghost', 'Back');
+    back.onclick = () => openTimelineSourceConfig();
+    acts.append(save, back);
+    b.append(acts);
   }, { wide: true });
 }
 $('btnTimelineConfig').onclick = openTimelineSourceConfig;
@@ -6339,7 +6555,16 @@ document.querySelectorAll('#searchModeToggle button').forEach((b) => {
   b.onclick = () => setSearchMode(b.dataset.mode);
 });
 
-$('search').oninput = (e) => { S.search = e.target.value; syncSearchExpansion(true); rebuildSoon(); };
+$('search').oninput = (e) => {
+  S.search = e.target.value;
+  syncSearchExpansion(true);
+  // Same box, two targets: on the Timeline tab it's a substring filter
+  // over the derived events (build_timeline's `search`); on the grid it's
+  // the usual view search. The visible-but-inert search box on the
+  // timeline was the other half of the "doesn't work on this page" bug.
+  if (S.activeTab === 'timeline') buildTimelineSoon();
+  else rebuildSoon();
+};
 $('search').onkeydown = (e) => {
   if (e.key === 'Escape') { e.target.value = ''; S.search = ''; rebuildView({ keepScroll: false }); $('body').focus(); }
   if (e.key === 'Enter') { rebuildView({ keepScroll: false }); $('body').focus(); }
@@ -6549,6 +6774,17 @@ async function recenterOnRow(anchor) {
 }
 
 async function clearAllFilters() {
+  if (S.activeTab === 'timeline') {
+    // The timeline's "filters" are the tag chips and the search box —
+    // same reset gesture, its own state. Deliberately doesn't touch the
+    // grid's filters (or S.timeRange, as ever).
+    S.timeline.tagFilter = S.tags.map((t) => t.id);
+    S.search = '';
+    $('search').value = '';
+    renderTagRibbon();
+    buildTimeline();
+    return;
+  }
   // Deliberately doesn't touch S.timeRange — the timeframe filter is meant
   // to survive exactly this ("apply/clear filters shouldn't lose my
   // timeframe"), same as it survives applyPreset() and a tab switch. Use

@@ -198,18 +198,54 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
   uses, so tables with different timestamp formats still sort correctly
   against each other), a "source type" label, and a body joined from a
   configurable subset of that source's columns with `" | "`. Per-source
-  config (which column is the timestamp, which columns make the body, what
-  to call the type) lives in `workspace.timeline_templates` — keyed by
-  header set like `ColumnLayouts`/`HeaderNicknames`, cross-case on purpose
-  (the "database of headers" that maps a header shape to a source type).
-  store.py can't resolve these itself (can't import workspace.py — see
-  `pop_legacy_presets`), so server.py's `_resolve_timeline_configs` does
-  the header-set matching and hands `build_timeline` a plain `{source_id:
-  {...}}` dict; a source with no matching template still works, falling
-  back to its first datetime column, every column, and its own file name.
-  Same materialize-into-`v.`-then-page-by-pos pattern as `build_view`
-  (invariant #2) — only one timeline view is ever alive at a time, rebuilt
-  (and the old one evicted) on every tag-filter change.
+  config lives in `workspace.timeline_templates` — cross-case on purpose,
+  and matched by **header set and/or file-name wildcard** (fnmatch,
+  case-insensitive; `TimelineTemplates.find_for_source`): both-criteria
+  templates out-rank header-only out-rank pattern-only, newest id wins
+  within a tier, so a template the analyst saves for an exact header set
+  beats a shipped pattern default. First load **seeds
+  `DEFAULT_TIMELINE_TEMPLATES`** — built from a real KAPE/EZTools triage
+  (MFT with full MACB, $J, EvtxECmd, Amcache, Shimcache, LNK, JumpLists,
+  Shellbags, Activity, SRUM, RBCmd, PECmd), pattern-matched because
+  EZTools file names have been stable for years while a tool update
+  adding a column would orphan an exact header set; seeding only fires
+  when the file doesn't exist, so deleting a default sticks. Templates
+  export/import like saved filters (`/api/timeline_templates/export`,
+  `…/import`).
+  A template's `timestamp_columns` may list **several columns** — each
+  tagged row then lands on the timeline once per timestamp (the MACB case
+  for $MFT), each event carrying `ts_label` (shown as a chip; only set
+  when there's more than one clock to tell apart). With several
+  timestamps, an event whose column didn't parse is dropped — the row
+  still appears under its other clocks — while a single-timestamp source
+  keeps the old contract (NULL-ts rows shown, sorted last), because
+  dropping there would hide the row entirely. `build_timeline` also takes
+  `search`, a substring filter over the *derived* event (ts, labels,
+  body, type, source name) applied at build time so the count and rail
+  stay honest.
+  store.py can't resolve templates itself (can't import workspace.py —
+  see `pop_legacy_presets`), so server.py's `_resolve_timeline_configs`
+  does the matching and hands `build_timeline` plain `{source_id: {...}}`
+  dicts; a source nothing matches falls back to its first datetime
+  column, every column, and its own file name. Same
+  materialize-into-`v.`-then-page-by-pos pattern as `build_view`
+  (invariant #2) — one timeline view alive at a time.
+  On the frontend, **the toolbar's tag chips and search box drive the
+  timeline when it's the active tab** (`renderTagRibbon` is mode-aware:
+  grid = single-select filter, timeline = multi-toggle over
+  `S.timeline.tagFilter` with an "All tags" reset; the search box routes
+  to `buildTimelineSoon`). The timeline used to have its own separate
+  checkbox row while the toolbar's identical-looking controls silently
+  operated on the hidden grid — the "search and tag filtering don't work
+  on this page" bug. Don't add timeline-local filter controls again; the
+  toolbar is the one set. `clearAllFilters` on the timeline resets its
+  tag set + search and nothing of the grid's. "Configure sources"
+  (`openTimelineSourceConfig`) is a status list — every source, which
+  config claims it and by which rule — with the editor behind a
+  per-source Configure button (`openTimelineTemplateEditor`: match-by
+  checkboxes with a suggested pattern that strips EZTools' leading
+  timestamp, timestamp chips, body columns as drag-to-reorder pills via
+  `wireDragReorder`).
 - The **timeframe filter** (`S.timeRange` in app.js, `time_range` on
   `ViewSpec`, compiled in `_compile_where` via the registered SQL function
   `TS_NORMALIZE`) is deliberately a separate piece of state from every
@@ -980,6 +1016,14 @@ lock for the *entire duration* of a read and asserts the read completes —
 a deterministic deadlock against a single-connection implementation, not a
 race — plus the dropped-view → KeyError mapping, pool recycling/drain on
 close, and read-your-committed-writes across the connection split.
+`test_timeline_templates.py` covers template matching precedence
+(headers over patterns, both-criteria strictness, newest-wins,
+upsert-dedupe by header set), the old-shape migration, default seeding
+(once — a deleted default stays deleted), export/import round-trips, the
+no-criteria 400, and the multi-timestamp contract through the API: one
+event per clock with `ts_label`, empty clocks dropped only for multi-ts
+sources, LIKE metacharacters in timeline search treated as literals, and
+the shipped MFT default MACB-expanding a synthetic $MFT-shaped file.
 `test_plugins.py` covers the plugin
 system end to end — loader isolation (a broken plugin never takes the
 rest down; a disabled one is discovered but never imported, proved with a
