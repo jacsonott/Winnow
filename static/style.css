@@ -311,6 +311,29 @@ html[data-style="studio"][data-theme="light"] {
 }
 .tab-jump:hover { color: var(--text); background: var(--panel-2); }
 .tabs { display: flex; align-items: stretch; overflow-x: auto; flex: 1; min-width: 0; }
+/* The bar's flexible middle is shared by two scrolling strips: #sourceTabs
+   (tables) takes whatever #pageTabs (SQL/Timeline/plugin tabs) doesn't.
+   Untouched, the page strip is content-width and never shrinks — what it
+   always was as three loose .tab-sql buttons — except for the 60% cap,
+   which stops a case with several plugin tabs from squeezing the table
+   strip down to nothing; past the cap it scrolls, exactly as the table
+   strip has always done. Drag the divider and applyPageTabsSize() sets an
+   explicit flex-basis inline instead (and clears the cap, since an
+   explicit width IS the user saying how much room this gets). */
+#pageTabs { flex: 0 0 auto; max-width: 60%; }
+/* Same handle idiom as .detail-resize: a hit target wider than the line it
+   paints, pulled back into the bar's 12px gap by a negative margin so it
+   doesn't push the strips apart. */
+.tab-split {
+  flex: 0 0 auto; width: 7px; margin: 0 -5px; position: relative;
+  cursor: col-resize; touch-action: none;
+}
+.tab-split::after {
+  content: ""; position: absolute; inset: 9px 3px;
+  background: var(--line-2); border-radius: 1px;
+  transition: background var(--transition-fast) var(--ease);
+}
+.tab-split:hover::after, .tab-split.dragging::after { background: var(--accent); }
 .tab {
   display: flex; align-items: center; gap: 8px;
   padding: 0 14px; border: 0; border-right: 1px solid var(--line);
@@ -327,6 +350,10 @@ html[data-style="studio"][data-theme="light"] {
 .tab-merge { box-shadow: inset 0 2px 0 var(--accent-dim); }
 .tab-merge[aria-selected="true"] { box-shadow: inset 0 2px 0 var(--accent-dim), inset 0 -2px 0 var(--accent); }
 .tab-sql { flex: 0 0 auto; border-left: 1px solid var(--line); font-family: var(--mono); color: var(--accent-dim); }
+/* First tab in the strip sits against the divider, which is separator
+   enough — the left border only ever existed to fence the page tabs off
+   from the table strip they used to share a flex row with. */
+.page-tabs .tab-sql:first-child { border-left: 0; }
 .tab-sql[aria-selected="true"] { color: var(--accent); }
 .tab .x { color: var(--dim); opacity: .5; }
 .tab .x:hover { opacity: 1; color: var(--danger); }

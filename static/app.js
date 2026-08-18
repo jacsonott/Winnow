@@ -109,8 +109,9 @@ const S = {
   cases: [],               // home screen's case registry, from workspace/cases.json
   homeSearch: '',          // home screen's case/group name filter, persisted across re-renders
   homeShowOlder: false,    // reveals cases not opened in >30 days once toggled
-  activeTab: 'grid',       // 'grid' | 'sql' — which of #grid/#sqlview the pinned SQL tab has swapped in
+  activeTab: 'grid',       // 'grid' or a page tab's key ('sql' | 'timeline' | 'plugin:<id>') — which of #grid/#sqlview/#timelineview/.pluginview is up
   tabOrder: [],            // source/merge ids, drag-reordered — ids not listed here sort after, in loadSources() order
+  pageTabPrefs: null,      // {order, width} for the page-tab strip, from localStorage — set below, see loadPageTabPrefs
   sqlTabs: [],             // [{id, name, sql, pos}] from the case file's sql_tabs table (see showSqlTab)
   sqlTabId: null,          // which sql tab the editor/result pane is currently showing
   sqlResults: new Map(),   // sql tab id -> last {columns, rows, elapsed_ms, truncated} | {error}, in memory only
@@ -678,7 +679,10 @@ function renderTabs() {
   for (const s of openTabs) {
     const t = el('button', 'tab' + (s.is_merge ? ' tab-merge' : ''));
     t.dataset.id = String(s.id);
-    t.setAttribute('aria-selected', String(s.id === S.sourceId));
+    // Same condition syncTabSelection applies, for the same reason: a
+    // background loadSources() (an import finishing, say) can land while a
+    // page tab is showing, and S.sourceId still names a table then.
+    t.setAttribute('aria-selected', String(S.activeTab === 'grid' && s.id === S.sourceId));
     if (s.error) {
       t.append(el('span', null, `⚠ ${s.name}`));
       t.title = s.error;
@@ -706,6 +710,226 @@ function renderTabs() {
   renderSidebar(); // every caller here (loadSources, moveTab, the drag-drop handler) means S.sources or S.tabOrder just changed
   return openTabs;
 }
+
+/* -------------------------------------------------------------- page tabs */
+
+/* The tabs that aren't tables — SQL, Timeline, and whatever pinned tabs
+   plugins registered (plugin_api.register_tab). They have their own strip
+   (#pageTabs) beside the table strip, and are reordered by the same
+   gestures tabs are: drag along the strip, or drag/▲/▼ in the sidebar.
+   Two things differ from S.tabOrder's table tabs, both following from what
+   a page tab *is*:
+
+   - It's identified by a string key ('sql' | 'timeline' | 'plugin:<id>'),
+     not a numeric source id. That's also what keeps the shared
+     wireDragReorder honest between the two strips with one draggedTabId
+     between them: a table tab dropped on the page strip resolves to no
+     index in that strip's currentIds() and no-ops, and vice versa.
+   - Order (and the strip's width) persist in localStorage
+     'winnow.pagetabs', next to winnow.sidebar/winnow.detail, instead of
+     dying with the case the way S.tabOrder does. "SQL" means the same
+     thing in every case, so nothing about switching cases should move it
+     back — and a plugin tab belongs to this machine's plugins folder, not
+     to any one case file either.
+
+   S.activeTab holds the active page tab's key verbatim ('grid' while a
+   table is showing), which is what lets syncTabSelection paint the strip
+   from one comparison rather than a branch per tab. */
+
+const PAGE_TABS_KEY = 'winnow.pagetabs';
+const PAGE_TABS_MIN = 60;    // a strip narrower than one tab is still usable — it scrolls
+const SOURCE_TABS_MIN = 140; // ...but not at the cost of an unreadable table strip
+
+function loadPageTabPrefs() {
+  let p = {};
+  try { p = JSON.parse(localStorage.getItem(PAGE_TABS_KEY) || '{}'); } catch { /* fall through to defaults */ }
+  // Validated rather than spread-with-defaults (the winnow.detail idiom):
+  // these two feed indexOf() and a CSS length, and a corrupt value from an
+  // older/hand-edited profile should read as "no preference", not throw.
+  return {
+    order: Array.isArray(p.order) ? p.order.filter((k) => typeof k === 'string') : [],
+    width: typeof p.width === 'number' && p.width > 0 ? p.width : null,
+  };
+}
+S.pageTabPrefs = loadPageTabPrefs();
+function savePageTabPrefs() { localStorage.setItem(PAGE_TABS_KEY, JSON.stringify(S.pageTabPrefs)); }
+
+/* Every page tab that exists right now, in declaration order. Rebuilt per
+   call because S.pluginTabs changes under it — toggling a plugin in
+   Settings adds or removes one with no reload. */
+function pageTabs() {
+  return [
+    { key: 'sql', label: 'SQL', title: 'Read-only SQL against the case file', node: () => $('tabSql'), show: showSqlTab },
+    { key: 'timeline', label: 'Timeline', title: 'Unified timeline of every tagged row across the case', node: () => $('tabTimeline'), show: showTimelineTab },
+    ...S.pluginTabs.map((t) => ({
+      key: 'plugin:' + t.id,
+      label: t.label,
+      title: t.description || `${t.label} — from the ${t.plugin} plugin`,
+      plugin: t,
+      show: () => showPluginTab(t.id),
+    })),
+  ];
+}
+
+/* Same rule openTabsSorted() applies to tables: keys the user has ordered
+   first, anything else after in declaration order — so a plugin installed
+   after the order was saved lands at the end rather than nowhere. */
+function pageTabsSorted() {
+  const order = S.pageTabPrefs.order;
+  return pageTabs().sort((a, b) => {
+    const ia = order.indexOf(a.key), ib = order.indexOf(b.key);
+    if (ia === -1 && ib === -1) return 0;
+    if (ia === -1) return 1;
+    if (ib === -1) return -1;
+    return ia - ib;
+  });
+}
+
+function setPageTabOrder(keys) {
+  S.pageTabPrefs.order = keys;
+  savePageTabPrefs();
+  renderPageTabs(); // which re-renders the sidebar's Pages section in turn
+}
+
+/* Menu-driven equivalent of the drag, for the sidebar's ▲/▼ — no-ops at
+   either end rather than wrapping, exactly like moveTab. */
+function movePageTab(key, dir) {
+  const keys = pageTabsSorted().map((t) => t.key);
+  const idx = keys.indexOf(key);
+  const swapIdx = idx + dir;
+  if (idx === -1 || swapIdx < 0 || swapIdx >= keys.length) return;
+  [keys[idx], keys[swapIdx]] = [keys[swapIdx], keys[idx]];
+  setPageTabOrder(keys);
+}
+
+/* SQL and Timeline are markup in index.html — a dozen places reach them by
+   id — so they're *moved* into position here rather than rebuilt; plugin
+   tabs are built. Either way a node is wired for dragging exactly once:
+   the two reused ones would otherwise collect another listener set on
+   every render, and a drop would then apply the same reorder N times. */
+function renderPageTabs() {
+  const strip = $('pageTabs');
+  const nodes = [];
+  for (const t of pageTabsSorted()) {
+    const btn = t.plugin ? el('button', 'tab tab-sql tab-plugin', t.label) : t.node();
+    if (t.plugin) {
+      btn.dataset.tabId = t.plugin.id;
+      btn.title = t.title;
+      btn.onclick = t.show;
+    }
+    btn.dataset.pageKey = t.key;
+    if (!btn.dataset.dragWired) {
+      wireDragReorder(btn, t.key, {
+        containerSelector: '#pageTabs',
+        rowSelector: '.tab',
+        horizontal: true,
+        currentIds: () => pageTabsSorted().map((x) => x.key),
+        onReorder: setPageTabOrder,
+      });
+      btn.dataset.dragWired = '1';
+    }
+    nodes.push(btn);
+  }
+  strip.replaceChildren(...nodes);
+  syncTabSelection();
+}
+
+/* One place paints "which tab is current". S.activeTab is either a page
+   tab's key or 'grid', in which case S.sourceId names the table tab that
+   owns the highlight — which is also why no source tab may look selected
+   while a page tab is up: S.sourceId is never cleared on the way to
+   SQL/Timeline (there's no single "a source is open" flag to unset), it
+   just stops being what's on screen. The sidebar re-render lives here for
+   the same reason renderTabs() ends with one — every caller has, by
+   definition, just changed what's active. */
+function syncTabSelection() {
+  document.querySelectorAll('#pageTabs .tab').forEach((t) =>
+    t.setAttribute('aria-selected', String(t.dataset.pageKey === S.activeTab)));
+  document.querySelectorAll('#sourceTabs .tab').forEach((t) =>
+    t.setAttribute('aria-selected', String(S.activeTab === 'grid' && Number(t.dataset.id) === S.sourceId)));
+  renderSidebar();
+}
+
+/* ------------------------------------------------- page/table strip split */
+
+/* What's stored is the width the analyst dragged to; what's applied is
+   that width clamped to what the bar can currently give it. Nothing writes
+   the clamped value back, so opening the same case in a narrower window
+   (or with the sidebar out) squeezes the strip without amnesia — widen the
+   window again and the chosen width comes back. */
+
+/* The widest the page strip may be given `total` px to share with the
+   table strip. Below the point where both minimums fit, neither gets its
+   floor and the space is halved instead — starving the table strip to
+   nothing to honour a 60px page strip is the worse of the two failures,
+   and both strips scroll, so half of a cramped bar is still usable. */
+function pageTabsMaxWidth(total) {
+  return Math.max(0, total < PAGE_TABS_MIN + SOURCE_TABS_MIN ? total / 2 : total - SOURCE_TABS_MIN);
+}
+
+function clampPageTabsWidth(px) {
+  // The two strips share one pool of space, so the pool is just their
+  // current widths added together — true whichever of them is flexing.
+  const total = $('sourceTabs').getBoundingClientRect().width + $('pageTabs').getBoundingClientRect().width;
+  // ...except before a case is open: #app is [hidden], so every rect is 0
+  // and there is nothing to clamp against. Take the stored width as-is and
+  // let showApp() re-clamp it once the bar has a real width — clamping
+  // against a zero-width bar would otherwise pin the strip at 0px for the
+  // whole session, since nothing but a resize re-runs this.
+  if (!total) return Math.round(px);
+  const max = pageTabsMaxWidth(total);
+  return Math.round(Math.min(Math.max(px, Math.min(PAGE_TABS_MIN, max)), max));
+}
+
+function applyPageTabsSize() {
+  const strip = $('pageTabs');
+  if (!S.pageTabPrefs.width) {
+    // No preference: back to the stylesheet's content-width-with-a-60%-cap.
+    strip.style.flexBasis = '';
+    strip.style.maxWidth = '';
+    return;
+  }
+  strip.style.maxWidth = 'none'; // an explicit width IS the cap now
+  strip.style.flexBasis = clampPageTabsWidth(S.pageTabPrefs.width) + 'px';
+}
+
+$('tabSplit').addEventListener('mousedown', (e) => {
+  e.preventDefault();
+  const strip = $('pageTabs'), handle = $('tabSplit');
+  const startX = e.clientX;
+  const startW = strip.getBoundingClientRect().width;
+  const max = pageTabsMaxWidth(startW + $('sourceTabs').getBoundingClientRect().width);
+  const min = Math.min(PAGE_TABS_MIN, max);
+  handle.classList.add('dragging');
+  strip.style.maxWidth = 'none';
+  const move = (ev) => {
+    // The handle sits on the page strip's left edge, so dragging left grows
+    // it — same "toward the edge it's docked against" rule as detailResize.
+    const w = Math.round(Math.min(Math.max(startW + (startX - ev.clientX), min), max));
+    strip.style.flexBasis = w + 'px';
+    S.pageTabPrefs.width = w;
+  };
+  const up = () => {
+    document.removeEventListener('mousemove', move);
+    document.removeEventListener('mouseup', up);
+    handle.classList.remove('dragging');
+    savePageTabPrefs();
+  };
+  document.addEventListener('mousemove', move);
+  document.addEventListener('mouseup', up);
+});
+
+/* Double-click clears the size rather than restoring some hardcoded px —
+   "no preference" is a real state (content width), and it's the one a
+   fresh profile starts in. */
+$('tabSplit').ondblclick = () => {
+  S.pageTabPrefs.width = null;
+  applyPageTabsSize();
+  savePageTabPrefs();
+};
+
+applyPageTabsSize();
+renderPageTabs(); // paints the saved order onto SQL/Timeline before plugins load
 
 async function loadSources(select) {
   const [sources, merges] = await Promise.all([api('/api/sources'), api('/api/merges')]);
@@ -807,9 +1031,7 @@ async function openSource(id) {
   } else {
     await rebuildView({ keepScroll: false });
   }
-  document.querySelectorAll('#sourceTabs .tab').forEach((t) =>
-    t.setAttribute('aria-selected', String(Number(t.dataset.id) === id)));
-  renderSidebar(); // lightweight re-render (S.sources is already current) to move the .active row
+  syncTabSelection(); // moves the strip highlight and the sidebar's .active row onto this table
   checkPresets(id); // fire-and-forget — a suggestion banner, not core to opening the source
 }
 
@@ -5942,10 +6164,7 @@ function showSqlTab() {
   $('timelineview').hidden = true;
   hidePluginViews();
   $('sqlview').hidden = false;
-  $('tabSql').setAttribute('aria-selected', 'true');
-  $('tabTimeline').setAttribute('aria-selected', 'false');
-  document.querySelectorAll('#sourceTabs .tab').forEach((t) => t.setAttribute('aria-selected', 'false'));
-  renderSidebar(); // S.sourceId is unchanged (still the last-open source) but nothing in the sidebar should read as active here
+  syncTabSelection();
   // The "matching saved filter" banner is about a specific table's columns —
   // meaningless on a tab that isn't showing any one table's grid.
   $('presetBanner').hidden = true;
@@ -6148,8 +6367,7 @@ function showGridTab() {
   $('timelineview').hidden = true;
   hidePluginViews();
   $('grid').hidden = false;
-  $('tabSql').setAttribute('aria-selected', 'false');
-  $('tabTimeline').setAttribute('aria-selected', 'false');
+  syncTabSelection();
   if (S.sourceId) checkPresets(S.sourceId); // restore the banner, hidden while on SQL/Timeline
 }
 function showTimelineTab() {
@@ -6158,10 +6376,7 @@ function showTimelineTab() {
   $('sqlview').hidden = true;
   hidePluginViews();
   $('timelineview').hidden = false;
-  $('tabSql').setAttribute('aria-selected', 'false');
-  $('tabTimeline').setAttribute('aria-selected', 'true');
-  document.querySelectorAll('#sourceTabs .tab').forEach((t) => t.setAttribute('aria-selected', 'false'));
-  renderSidebar(); // same reasoning as showSqlTab — S.sourceId is stale for highlighting purposes here
+  syncTabSelection();
   $('presetBanner').hidden = true;
   buildTimeline(); // always fresh — tags can change in any table while this tab isn't the active one
 }
@@ -6193,7 +6408,6 @@ function hidePluginViews() {
       if (m.module && m.module.onHide) { try { m.module.onHide(m.container); } catch (e) { console.error(e); } }
     }
   }
-  document.querySelectorAll('.tab-plugin').forEach((t) => t.setAttribute('aria-selected', 'false'));
 }
 
 function resetPluginTabMounts() {
@@ -6201,22 +6415,16 @@ function resetPluginTabMounts() {
   pluginTabMounts.clear();
 }
 
-/* The strip buttons, re-rendered whenever the plugin listing changes
-   (boot, Settings toggles/installs). If the active plugin tab just
-   disappeared — its plugin was toggled off — fall back to the grid rather
-   than leaving a headless view up. */
+/* Called whenever the plugin listing changes (boot, Settings
+   toggles/installs). The strip itself is renderPageTabs' job — plugin tabs
+   are ordered among SQL/Timeline, not pinned after them, so there's one
+   renderer for all three rather than one that inserts around another's
+   output. What's left here is the mount bookkeeping: drop a mount whose
+   plugin reloaded or vanished, and if the *active* plugin tab is the one
+   that vanished — its plugin was toggled off — fall back to the grid
+   rather than leaving a headless view up. */
 function renderPluginTabs() {
-  document.querySelectorAll('.tab-plugin').forEach((t) => t.remove());
-  let after = $('tabTimeline');
-  for (const t of S.pluginTabs) {
-    const btn = el('button', 'tab tab-sql tab-plugin', t.label);
-    btn.dataset.tabId = t.id;
-    btn.title = t.description || `${t.label} — from the ${t.plugin} plugin`;
-    btn.setAttribute('aria-selected', String(S.activeTab === 'plugin:' + t.id));
-    btn.onclick = () => showPluginTab(t.id);
-    after.insertAdjacentElement('afterend', btn);
-    after = btn;
-  }
+  renderPageTabs();
   for (const [id, m] of [...pluginTabMounts]) {
     const t = pluginTabById(id);
     if (!t || t.gen !== m.gen) { m.container.remove(); pluginTabMounts.delete(id); }
@@ -6255,12 +6463,8 @@ async function showPluginTab(tabId) {
   $('grid').hidden = true;
   $('sqlview').hidden = true;
   $('timelineview').hidden = true;
-  $('tabSql').setAttribute('aria-selected', 'false');
-  $('tabTimeline').setAttribute('aria-selected', 'false');
-  document.querySelectorAll('#sourceTabs .tab').forEach((t) => t.setAttribute('aria-selected', 'false'));
   hidePluginViews();
-  document.querySelectorAll('.tab-plugin').forEach((t) => t.setAttribute('aria-selected', String(t.dataset.tabId === tabId)));
-  renderSidebar(); // same reasoning as showSqlTab — S.sourceId shouldn't read as active here
+  syncTabSelection();
   $('presetBanner').hidden = true;
 
   let m = pluginTabMounts.get(tabId);
@@ -7076,17 +7280,22 @@ $('btnSearchAll').onclick = openSearchAllModal;
    ingest auto-opens its tab), and reopening a dropdown that many times
    over doesn't scale the way clicking down a standing list does.
 
-   Two sections, matching the tab strip's own "shown vs not" rule (an
-   errored source is always shown, bucketed with Open rather than a third
-   section). Rows reuse the dropdown's own .menu-item/.menu-item-action
-   classes (see style.css) rather than a parallel set of near-identical
-   ones. Filtered by S.sidebarFilter — a plain client-side substring match,
-   not a network round trip, since S.sources is already in memory and this
-   can be retyped on every keystroke.
+   Three sections. Open/Closed match the tab strip's own "shown vs not"
+   rule (an errored source is always shown, bucketed with Open rather than
+   a section of its own); Pages is the same standing list for the *other*
+   strip — SQL, Timeline and any plugin tabs — and exists for the same
+   reason the table sections do, since that strip scrolls too once a few
+   plugin tabs are installed or the divider is dragged in. Rows reuse the
+   dropdown's own .menu-item/.menu-item-action classes (see style.css)
+   rather than a parallel set of near-identical ones. Filtered by
+   S.sidebarFilter — a plain client-side substring match over both kinds,
+   not a network round trip, since S.sources/S.pluginTabs are already in
+   memory and this can be retyped on every keystroke.
 
-   Open rows also get ▲/▼/✕ — the same reorder/close the tab strip itself
-   offers via drag-and-drop and its own ✕, kept here for when the strip is
-   scrolled out of view or a standing list is just easier to act on. */
+   Open rows also get ▲/▼/✕, and page rows ▲/▼ — the same reorder/close
+   each strip offers via drag-and-drop and its own ✕, kept here for when a
+   strip is scrolled out of view or a standing list is just easier to act
+   on. */
 function renderSidebar() {
   const list = $('sidebarList');
   list.replaceChildren();
@@ -7094,9 +7303,12 @@ function renderSidebar() {
   const match = (s) => !q || s.name.toLowerCase().includes(q);
   const openSrcs = openTabsSorted().filter(match);
   const closedSrcs = S.sources.filter((s) => !s.error && !s.is_open).filter(match);
+  // Indices for ▲/▼ come from the *unfiltered* order, so the arrows move a
+  // page where it actually is rather than where the filter makes it look.
+  const pages = pageTabsSorted();
+  const shownPages = pages.filter((t) => !q || t.label.toLowerCase().includes(q));
   if (!openSrcs.length && !closedSrcs.length) {
     list.append(el('div', 'note-status', q ? 'No matching tables.' : 'No tables in this case yet.'));
-    return;
   }
   if (openSrcs.length) {
     list.append(el('div', 'menu-header', 'Open'));
@@ -7106,6 +7318,41 @@ function renderSidebar() {
     list.append(el('div', 'menu-header', 'Closed'));
     for (const s of closedSrcs) list.append(sidebarRow(s, { open: false }));
   }
+  if (shownPages.length) {
+    list.append(el('div', 'menu-header', 'Pages'));
+    for (const t of shownPages) list.append(pageSidebarRow(t, pages.indexOf(t), pages.length));
+  }
+}
+
+/* A page tab's row: click to show it, ▲/▼ or drag to reorder. No ✕ —
+   unlike a table tab, a page tab isn't something you can close and reopen
+   (SQL and Timeline are always there; a plugin tab comes and goes with its
+   plugin's checkbox in Settings), so there's nothing for one to do. */
+function pageSidebarRow(t, index, total) {
+  const row = el('div', 'sidebar-row' + (S.activeTab === t.key ? ' active' : ''));
+  const label = el('button', 'menu-item', t.label);
+  label.title = t.title || t.label;
+  label.onclick = t.show;
+  row.append(label);
+  const acts = el('div', 'sidebar-row-actions');
+  const up = el('button', 'menu-item-action', '▲');
+  up.title = 'Move earlier';
+  up.disabled = index === 0;
+  up.onclick = () => movePageTab(t.key, -1);
+  const down = el('button', 'menu-item-action', '▼');
+  down.title = 'Move later';
+  down.disabled = index === total - 1;
+  down.onclick = () => movePageTab(t.key, 1);
+  acts.append(up, down);
+  row.append(acts);
+  wireDragReorder(row, t.key, {
+    containerSelector: '#sidebarList',
+    rowSelector: '.sidebar-row',
+    horizontal: false,
+    currentIds: () => pageTabsSorted().map((x) => x.key),
+    onReorder: setPageTabOrder,
+  });
+  return row;
 }
 
 function sidebarRow(s, { open, index, total }) {
@@ -7926,7 +8173,7 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-window.addEventListener('resize', () => { render(); drawRail(); });
+window.addEventListener('resize', () => { render(); drawRail(); applyPageTabsSize(); });
 
 /* -------------------------------------------------------------- home screen */
 
@@ -7937,7 +8184,11 @@ window.addEventListener('resize', () => { render(); drawRail(); });
    actually swaps the server's STORE; navigating back to Home via #btnHome
    just changes what the client is looking at. */
 
-function showApp() { $('home').hidden = true; $('app').hidden = false; }
+function showApp() {
+  $('home').hidden = true;
+  $('app').hidden = false;
+  applyPageTabsSize(); // first moment the bar has a real width to clamp against
+}
 function showHome() { $('app').hidden = true; $('home').hidden = false; setBrandLabel(null); }
 
 // The brand button doubles as "which case is this" once one's open — falls

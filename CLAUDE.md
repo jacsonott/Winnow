@@ -545,13 +545,15 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
   is called from inside `renderTabs()` itself (every one of `renderTabs`'s
   three callers — `loadSources`, `moveTab`, the tab-strip's own drag-drop
   handler — means `S.sources`/`S.tabOrder` just changed), not from a
-  parallel set of call sites that could drift out of sync. Its active-row
-  highlight isn't simply `s.id === S.sourceId`: `S.sourceId` is never
-  cleared while the SQL or Timeline pinned tab is showing (there's no
+  parallel set of call sites that could drift out of sync. It lists page tabs
+  too, in a third section (Pages) under Open/Closed — same rows, same
+  drag/▲/▼ reorder, just against the other strip; see the two-strips entry
+  below. Its active-row highlight isn't simply `s.id === S.sourceId`:
+  `S.sourceId` is never cleared while a page tab is showing (there's no
   single "a source is open" flag to unset), so `sidebarRow` also requires
-  `S.activeTab === 'grid'` — the same reason `showSqlTab`/`showTimelineTab`
-  already force every `#sourceTabs .tab` to `aria-selected="false"` even
-  though the underlying source hasn't changed. Collapse state persists in
+  `S.activeTab === 'grid'` — the same condition `syncTabSelection` applies
+  to the strip itself, which is why both now live in that one function
+  rather than as a block repeated in every `show*Tab`. Collapse state persists in
   `localStorage` (`winnow.sidebar`) like `winnow.keymap`/`winnow.appearance` — a
   per-browser UI preference, not `workspace/` state. `dropdownMenu` lost
   its `actions`/`forceReopen` support in the same change — `openTabJumpMenu`
@@ -674,6 +676,47 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
   `.hcell`'s `cursor: pointer` and hover tint — it's the one header cell
   that doesn't sort. The select-all box's indeterminate state was already
   handled by `syncSelectAllCheckbox`.
+- **Two tab strips share the header bar**: `#sourceTabs` (tables, ordered
+  by `S.tabOrder`) and `#pageTabs` (SQL, Timeline and plugin tabs, ordered
+  by `S.pageTabPrefs.order`), split by the `#tabSplit` divider. Page tabs
+  were three loose `.tab-sql` buttons sitting directly in `.bar` before —
+  fixed order, no scrolling of their own, and free to squeeze the table
+  strip to nothing once a couple of plugin tabs existed. Now:
+  - A page tab is identified by a **string key** — `'sql'`, `'timeline'`,
+    `'plugin:<id>'` — where a table tab is a numeric source id. That's
+    what lets the one shared `wireDragReorder` (and its one shared
+    `draggedTabId`) span both strips safely: a tab dragged from one strip
+    to the other resolves to no index in the target's own `currentIds()`
+    and the drop no-ops — the same guard the SQL sub-tabs already relied
+    on. `S.activeTab` holds that key verbatim (or `'grid'`), which is what
+    makes `syncTabSelection` one comparison per node rather than a branch
+    per tab. It is now the only thing that writes `aria-selected` on
+    either strip, and it ends with the sidebar re-render for the same
+    reason `renderTabs()` does — every caller has just changed what's
+    active.
+  - `renderPageTabs` **moves** `#tabSql`/`#tabTimeline` into place rather
+    than rebuilding them (a dozen places reach them by id) and builds the
+    plugin ones. Each node is drag-wired exactly once
+    (`dataset.dragWired`): the two reused ones would otherwise accumulate
+    a listener set per render, and one drop would then apply the same
+    reorder once per set.
+  - Order and divider position persist in `localStorage`
+    (`winnow.pagetabs`), unlike `S.tabOrder`, which is in-memory and
+    resets per case. "SQL" means the same thing in every case, and a
+    plugin tab belongs to this machine's `plugins/` rather than to any one
+    case file — neither has a reason to jump back on a case switch.
+  - The divider stores **the width the analyst dragged to** and applies
+    that width *clamped* to what the bar can currently give it
+    (`clampPageTabsWidth`); the clamped value is never written back, so a
+    narrower window squeezes the strip without forgetting the setting.
+    Below the width where both strips' minimums fit, the space is halved
+    rather than honouring either — starving the table strip to hold a
+    60px page strip is the worse failure, and both strips scroll. The
+    clamp is deliberately a no-op while `#app` is `[hidden]`: every rect
+    is 0 before a case is open, which would otherwise pin the strip at 0px
+    for the whole session, since only `showApp()` and the window `resize`
+    handler re-run it.
+
 - **The SQL pane has named sub-tabs** (`sql_tabs`, a per-case sidecar
   table; `list/create/update/delete/reorder_sql_tabs`, `/api/sql_tabs`,
   `renderSqlTabs` and friends in app.js). Stored in the **case file**, not
@@ -892,7 +935,9 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
   sampled types with an explicit `column_types` override, background FTS)
   — so invariants #1/#2 hold for plugin sources with no extra work, and a
   plugin source is a completely normal source afterward.
-  `register_tab` adds a pinned tab (SQL/Timeline siblings): the entry is
+  `register_tab` adds a page tab (a true SQL/Timeline sibling — ordered
+  among them by the analyst, not pinned after them; see the two-strips
+  entry above): the entry is
   an ES module in the plugin folder, served via `/plugin_assets/<fs>/…`
   (enabled folder plugins only; resolved-path containment blocks
   traversal; same no-cache middleware as /static/) and dynamically
