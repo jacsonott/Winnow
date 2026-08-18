@@ -45,7 +45,9 @@ examples/plugins/  Committed example plugins, one per extension point — treat
 static/index.html  App shell. No framework. #home and #app are siblings; only
                     one is ever visible.
 static/app.js      Virtualized grid, filters, tagging, detail pane, SQL pane,
-                    home screen.
+                    home screen. The right-click surfaces (row menu, table
+                    menu) and the header value picker all ride one floating-
+                    menu implementation — see "Things that bite".
 bench/             Performance suite — stdlib-only timing harness, seeded
                     fixtures, baseline/`--vs-ref` comparison. Separate from
                     tests/ on purpose; see the Performance section below.
@@ -1056,6 +1058,111 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
     rows via the one shared `wireDragReorder`, scoped by
     `currentIds: sameGroupFilterIds(...)` so a drag across header sets is
     a structural no-op rather than a rule someone has to remember.
+- **The three right-click surfaces** (row menu, table menu, header value
+  picker) all hang off one floating-menu implementation in app.js —
+  `showFloating`/`placeFloating` plus the single `openMenuEl`/`openMenuAnchor`
+  pair, with `dropdownMenu` (anchored under a button), `contextMenu`
+  (positioned at the pointer) and `anchoredPanel` (a card with real
+  controls in it) as the three entry points. That's what makes "only one
+  of these is open at a time, and Escape closes it" true across all of
+  them rather than three near-copies of the same two listeners. Two
+  details are load-bearing: `onMenuKeydown` now `stopPropagation()`s its
+  Escape (the document-level handler underneath clears the row selection,
+  and dismissing a menu shouldn't throw away what was selected under it),
+  and a menu's `items` may be a *function* — which is what `keepOpen`
+  items re-run to repaint themselves, so toggling three tags from the row
+  menu is three clicks instead of three right-clicks. `placeFloating`
+  flips above the anchor rect when there's no room below; right-clicking
+  a row near the bottom of the grid is the common case, not the edge one.
+- **The row context menu is a section registry** (`ROW_MENU_SECTIONS`,
+  `rowMenuItems`), not one function that spells the list out, because it's
+  now the place per-row features are expected to land — a new action
+  should be an entry, never surgery on a growing if-chain. Sections get
+  `{pos, colName, colIndex, value}` and return items; an empty return is
+  skipped, separator and all. The row is re-resolved (`rowAt(ctx.pos)`) on
+  every repaint rather than captured, because a keepOpen tag item
+  re-renders after tagging and the bulk tag path clears the page cache
+  underneath it. Scope follows the selection: right-clicking *inside* one
+  acts on the whole selection (tagging 200 checked rows shouldn't collapse
+  to the row under the pointer), right-clicking outside it moves the
+  cursor there first. Flat mode only, same as the click/mousedown handlers
+  next to it — grouped mode has no row selection to act on. A tag's ✓
+  reads the clicked row even when the target is a whole selection, which
+  is deliberately the same sample-one-row rule `resolveTagDirection`
+  already uses for the number hotkeys, so the menu can't promise a
+  different outcome than pressing `2` would.
+- **The header value picker** (`openValuePicker`, the `▾` in each filter
+  cell) is an *author* for the filter the header box already understands —
+  it writes `=v` or `a|b|c` into `S.filters` and nothing downstream knows
+  it exists. Four things about it are decisions, not accidents:
+  - **Which values it lists.** Unfiltered column: the current view, via
+    `group_summary` — so the list reflects every *other* filter in play,
+    which is Excel's behaviour and the one that answers "which processes
+    survive this timeframe". Already filtered on this column: the whole
+    table, via `column_values` — a view narrowed to three values can only
+    offer those three back, and widening is the main reason to reopen the
+    dropdown. Both are swappable from the panel, because a guess about
+    scope that isn't visible is a lie. Building a *second* view with just
+    this column's filter removed would be the truly Excel-exact answer and
+    is not available: `Store._views` evicts any other view for the same
+    source (backlog item 2).
+  - **`bucket_datetime=False`.** `group_summary` day-buckets datetime
+    columns, and a `2024-01-05` bucket matches no stored value, so an
+    `=`/`in` filter built from one selects nothing. The flag turns the
+    bucketing off for this one caller. It relaxes nothing about grouping's
+    contract — the picker returns values, never groups anything gets
+    expanded against, so there's no `_eq_condition` on the other side to
+    keep in step — and raw values make the column index worth building
+    again, hence the `whole_source and not is_datetime` gate admitting them.
+  - **The size gate.** Distinct-values-with-counts is an aggregate pass
+    with no index to lean on until the lazy per-column one exists, so the
+    button is only rendered under `VALUE_FILTER_AUTO_MAX` (250k) rows by
+    default. Overrides are three-layer, most specific first: the column's
+    own pin (in the layout, so it travels with a saved default layout for
+    the header set) → the table's `value_filters` mode (per-source, in the
+    layout payload — it's a judgement about *this table's* size, which a
+    header-set-keyed cross-case layout has no business carrying) → the row
+    count. The row menu's "Filter by values…" opens it regardless: an
+    explicit click is consent to pay for the scan in a way an
+    always-present button isn't.
+  - **What the filter box can't spell.** `=v` round-trips any value
+    including one containing `|` (parseFilter matches the `=` prefix
+    first), but the box trims, `a|b|c` is its only multi-value spelling,
+    and `IN ()` drops empty strings server-side. So a selection with edge
+    whitespace, a `|` in a multi-selection, or `(empty)` mixed with real
+    values goes into the guided filter tree instead (`setPickerTreeNode`),
+    with a toast saying so. That node is recognised *structurally* on the
+    way back (an in/equals/empty cond on the column, or an OR of exactly
+    those) rather than by a marker field, because `openFilterBuilder`
+    round-trips the tree through SQL text and would drop any marker we
+    invented.
+- **The table menu replaced the tab strip's `▦` column-chooser button**
+  (`TABLE_MENU_SECTIONS`/`openTableMenu`, right-click a tab or a sidebar
+  row, or press `C`). Same registry reasoning as the row menu: it's where
+  per-table features land, and the tab strip can't grow an icon per
+  feature. `openTableMenu(sourceId)` opens that source first when it isn't
+  the one on screen — not a convenience, a precondition, since every panel
+  reads the live `S.layout`/`S.order`/`S.columns` rather than the record it
+  was handed.
+- **`clearAllFilters(seed)`** — Shift+F ("filter to this value and drop the
+  rest") is that reset plus one filter, so it goes through the same
+  function rather than a second implementation that would forget the
+  carve-outs: the timeframe filter survives, grouping is stashed into
+  `S.lastGroupBy` rather than lost. Note `$('btnReset').onclick` is now a
+  wrapper — passing `clearAllFilters` directly would hand it the MouseEvent
+  as `seed`.
+- **Stored keymaps are migrated on load, not merged blindly.**
+  `loadKeymap` used to be `{...DEFAULT_KEYMAP, ...stored}`, which means a
+  returning analyst's localStorage outranks every later change to the
+  defaults — including a *rename*, where the stored entry keeps swallowing
+  its key while pointing at an action that no longer has a handler (
+  `matchAction` scans the stored map, so the key resolves and nothing
+  happens). So there's a `KEYMAP_MIGRATIONS` list with a version counter in
+  `winnow.keymap.v`, and unknown actions are dropped on the way through.
+  The v1 migration carries `openColumns` → `openTableMenu` and moves the
+  `f`/`Shift+F` pair (focus-first-filter → filter-by-this-value, plus the
+  new drop-the-others variant) *only* for analysts still on the old
+  defaults — a binding someone chose themselves is never touched.
 - The example mft_usn plugin's fixup handling encodes a real-world trap:
   extraction tools disagree about whether $MFT records arrive with NTFS's
   multi-sector fixups still stamped (KAPE/icat/RawCopy: yes; ntfscat:

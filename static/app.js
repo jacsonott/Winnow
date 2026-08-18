@@ -50,8 +50,9 @@ const S = {
   columns: [],          // [{name, type}] plus, for analyst-added derived columns, {derived, derived_from, derived_op, derived_status, derived_id, parse_failures}
   appSettings: {},      // system-wide prefs (workspace/app_settings.json) — currently default_ts_format
   caseSettings: {},     // this case's own overrides (case_settings table) — currently ts_format
-  layout: {},           // name -> {w, hidden, pinned, tsFormat, durFormat}
+  layout: {},           // name -> {w, hidden, pinned, tsFormat, durFormat, valuePicker}
   order: [],            // column names in display order
+  valueFilterMode: 'auto', // 'auto' (on under VALUE_FILTER_AUTO_MAX rows) | 'on' | 'off' — this table's value-picker default, per-column overrides live in S.layout
   filters: {},          // name -> raw filter text
   sort: [],             // [{column, dir}]
   search: '',
@@ -685,21 +686,18 @@ function renderTabs() {
     } else {
       t.append(el('span', null, (s.is_merge ? '⛓ ' : '') + s.name), el('span', 'count', s.row_count.toLocaleString()));
     }
-    if (!s.error) {
-      const colsBtn = el('span', 'cols', '▦');
-      colsBtn.title = 'Choose columns  —  press C';
-      colsBtn.onclick = async (e) => {
-        e.stopPropagation();
-        if (s.id !== S.sourceId || S.activeTab !== 'grid') await openSource(s.id);
-        openColumnsModal();
-      };
-      t.append(colsBtn);
-    }
     const x = el('span', 'x', '✕');
     x.title = 'Close tab — stays in this case, reopen it from Tables';
     x.onclick = async (e) => { e.stopPropagation(); await closeTab(s); };
     t.append(x);
-    if (!s.error) t.onclick = () => openSource(s.id);
+    if (!s.error) {
+      t.onclick = () => openSource(s.id);
+      // Right-click is where the table menu lives now (the ▦ column-chooser
+      // button that used to sit here opened a strict subset of it) — same
+      // menu from the tab, the sidebar row and the openTableMenu keybind.
+      t.oncontextmenu = (e) => { e.preventDefault(); openTableMenu(s.id); };
+      t.title = 'Right-click for the table menu';
+    }
     wireTabDrag(t, s.id);
     tabs.append(t);
   }
@@ -773,6 +771,10 @@ async function openSource(id) {
     if (found && found.order) defaultLayout = found;
   }
   S.layout = saved.columns || (defaultLayout && defaultLayout.columns) || {};
+  // Per-source, unlike the per-column overrides inside S.layout: this one is
+  // a judgement about *this table's* size, and a cross-case default layout
+  // (which is keyed by header set, not row count) has no business carrying it.
+  S.valueFilterMode = saved.value_filters || 'auto';
   S.order = (saved.order && saved.order.filter((n) => S.columns.some((c) => c.name === n)))
     || (defaultLayout && defaultLayout.order.filter((n) => S.columns.some((c) => c.name === n)))
     || S.columns.map((c) => c.name);
@@ -1074,7 +1076,8 @@ function columnMenuItems(name) {
     const cur = (S.layout[name] || {}).durFormat || 'human';
     for (const [key, label] of [['human', '1h 23m 45s'], ['raw', 'Seconds']]) {
       items.push({
-        label: (key === cur ? '✓ ' : '   ') + label,
+        label,
+        checked: key === cur, // the menu's own ✓ slot, rather than a padded label
         onclick: () => {
           S.layout[name] = Object.assign({}, S.layout[name] || {}, { durFormat: key });
           render();
@@ -1086,7 +1089,8 @@ function columnMenuItems(name) {
     const current = tsFormatFor(name);
     for (const key of Object.keys(TS_FORMATS)) {
       items.push({
-        label: (key === current ? '✓ ' : '   ') + TS_FORMATS[key],
+        label: TS_FORMATS[key],
+        checked: key === current,
         onclick: () => {
           /* The chosen key is always stored, including 'raw'. It used to be
              stored as undefined, which was equivalent back when the
@@ -1549,6 +1553,24 @@ function renderHead() {
       if (e.key === 'Enter') { e.preventDefault(); rebuildView(); $('body').focus(); }
     };
     f.append(inp);
+    if (valueFilterEnabled(name)) {
+      // Excel's funnel, in the place the filter it writes will appear.
+      // Whether it's here at all is the size rule + the table menu's
+      // overrides — see valueFilterEnabled.
+      const pick = el('button', 'fcell-pick', '▾');
+      pick.dataset.col = name;
+      pick.tabIndex = -1;
+      // A selection the box couldn't spell lives in the filter tree instead
+      // (see setPickerTreeNode), which would otherwise leave this column
+      // looking unfiltered — the box next to it is empty.
+      const inTree = !!pickerTreeNode(name);
+      if (inTree) pick.classList.add('active');
+      pick.title = inTree
+        ? `${name} is filtered to picked values — shown under Filters ▾ because the filter box can't spell them`
+        : `Pick values to filter ${name} by`;
+      pick.onclick = (ev) => { ev.stopPropagation(); openValuePicker(name, pick); };
+      f.append(pick);
+    }
     filt.append(f);
   }
 }
@@ -1577,7 +1599,7 @@ const saveLayout = debounce(() => {
   if (!S.sourceId) return;
   post('/api/layout', {
     source_id: S.sourceId,
-    payload: { columns: S.layout, order: S.order, sort: S.sort },
+    payload: { columns: S.layout, order: S.order, sort: S.sort, value_filters: S.valueFilterMode },
   }).catch(() => {});
 }, 400);
 
@@ -2797,9 +2819,18 @@ function promptDialog(message, defaultValue = '', opts = {}) {
 
 /* ------------------------------------------------------------ dropdown menu */
 
-/* Minimal anchored menu — one instance ever open at a time. Closes on
+/* Minimal floating menu — one instance ever open at a time. Closes on
    outside click, Escape, or an item's own click (items are expected to
-   open a modal/do their thing and don't need to close it themselves). */
+   open a modal/do their thing and don't need to close it themselves).
+
+   Three surfaces share this machinery, differing only in what they're
+   positioned against and what they hold: `dropdownMenu` (under a button —
+   the Session menu, a column's ▾), `contextMenu` (at the pointer — the
+   right-click menus on a row, a tab, a sidebar row) and `anchoredPanel` (a
+   card with real controls in it — the header value picker). One
+   implementation is what makes "only one of these is ever open, and Escape
+   always closes it" true across all three instead of three near-copies of
+   the same two listeners. */
 let openMenuEl = null;
 let openMenuAnchor = null;
 function closeMenu() {
@@ -2811,34 +2842,125 @@ function closeMenu() {
   document.removeEventListener('keydown', onMenuKeydown, true);
 }
 function onMenuOutsideClick(e) { if (openMenuEl && !openMenuEl.contains(e.target)) closeMenu(); }
-function onMenuKeydown(e) { if (e.key === 'Escape') closeMenu(); }
-
-/* items: {label, onclick, disabled}, '-' for a separator, or {header} for
-   a section label. */
-function dropdownMenu(anchorEl, items) {
-  const wasOpenForSameAnchor = openMenuAnchor === anchorEl;
+/* Swallowed rather than left to bubble: the document-level Escape handler
+   further down clears the row selection, and dismissing a menu you just
+   opened shouldn't also throw away what was selected underneath it. */
+function onMenuKeydown(e) {
+  if (e.key !== 'Escape' || !openMenuEl) return;
+  e.preventDefault();
+  e.stopPropagation();
   closeMenu();
-  if (wasOpenForSameAnchor) return; // second click on the same anchor just toggles it shut
-  const menu = el('div', 'menu');
+}
+
+/* One item is {label, onclick} plus any of: `disabled`, `title`, `checked`
+   (renders a ✓ column — pass false for "checkable but off", omit entirely
+   for a plain item), `swatch` (a color chip, for tags), `hint` (right-aligned
+   dim text, e.g. a hotkey) and `keepOpen` (re-render the menu in place
+   instead of closing it, so toggling three tags is three clicks). '-' is a
+   separator and {header} a section label. */
+function menuItemNode(item, rerender) {
+  // menu-item-flex, not plain .menu-item: the ✓/swatch/hint slots need a
+  // flex row, while the sidebar's own hand-built .menu-item rows (a bare
+  // text node inside the button) still rely on block-level ellipsing.
+  const b = el('button', 'menu-item menu-item-flex');
+  if (item.checked !== undefined) b.append(el('span', 'menu-check', item.checked ? '✓' : ''));
+  if (item.swatch) {
+    const sw = el('span', 'menu-swatch');
+    sw.style.background = item.swatch;
+    b.append(sw);
+  }
+  b.append(el('span', 'menu-item-text', item.label));
+  if (item.hint) b.append(el('span', 'menu-item-hint', item.hint));
+  b.disabled = !!item.disabled;
+  if (item.title) b.title = item.title;
+  b.onclick = async () => {
+    if (!item.keepOpen) { closeMenu(); item.onclick(); return; }
+    await item.onclick();
+    rerender();
+  };
+  return b;
+}
+
+function fillMenuNode(menu, items, rerender) {
+  menu.replaceChildren();
   for (const item of items) {
+    if (!item) continue;
     if (item === '-') { menu.append(el('div', 'menu-sep')); continue; }
     if (item.header) { menu.append(el('div', 'menu-header', item.header)); continue; }
-    const b = el('button', 'menu-item', item.label);
-    b.disabled = !!item.disabled;
-    b.onclick = () => { closeMenu(); item.onclick(); };
-    menu.append(b);
+    menu.append(menuItemNode(item, rerender));
   }
-  document.body.append(menu);
-  const r = anchorEl.getBoundingClientRect();
-  menu.style.top = r.bottom + 4 + 'px';
-  menu.style.left = Math.min(r.left, window.innerWidth - menu.offsetWidth - 8) + 'px';
-  openMenuEl = menu;
-  openMenuAnchor = anchorEl;
-  anchorEl.setAttribute('aria-expanded', 'true');
+}
+
+/* Positions a floating node against a rect — a button's own bounding box,
+   or a zero-size rect at the pointer. Flips above the rect when there isn't
+   room below (right-clicking a row near the bottom of the grid is the
+   common case, not the edge case) and clamps into the viewport on both
+   axes. Measured after the node is in the DOM, so callers append first. */
+function placeFloating(node, rect) {
+  const m = 8;
+  const w = node.offsetWidth, h = node.offsetHeight;
+  let top = rect.bottom + 4;
+  if (top + h > window.innerHeight - m) {
+    const above = rect.top - h - 4;
+    top = above >= m ? above : Math.max(m, window.innerHeight - h - m);
+  }
+  let left = rect.left;
+  if (left + w > window.innerWidth - m) left = rect.right - w;
+  node.style.top = Math.max(m, top) + 'px';
+  node.style.left = Math.max(m, left) + 'px';
+}
+
+function showFloating(node, rect, anchorEl) {
+  document.body.append(node);
+  placeFloating(node, rect);
+  openMenuEl = node;
+  openMenuAnchor = anchorEl || null;
+  if (anchorEl) anchorEl.setAttribute('aria-expanded', 'true');
   setTimeout(() => {
     document.addEventListener('mousedown', onMenuOutsideClick, true);
     document.addEventListener('keydown', onMenuKeydown, true);
   }, 0);
+}
+
+/* `items` may be a function returning the array — that's what a keepOpen
+   item re-runs to repaint itself with fresh state (a tag's ✓ after the
+   tag actually landed), so callers build items from live state rather than
+   patching DOM nodes by hand. */
+function showMenu(items, rect, anchorEl) {
+  const get = typeof items === 'function' ? items : () => items;
+  const menu = el('div', 'menu');
+  const rerender = () => { if (openMenuEl === menu) fillMenuNode(menu, get(), rerender); };
+  fillMenuNode(menu, get(), rerender);
+  showFloating(menu, rect, anchorEl);
+  return menu;
+}
+
+function dropdownMenu(anchorEl, items) {
+  const wasOpenForSameAnchor = openMenuAnchor === anchorEl;
+  closeMenu();
+  if (wasOpenForSameAnchor) return; // second click on the same anchor just toggles it shut
+  showMenu(items, anchorEl.getBoundingClientRect(), anchorEl);
+}
+
+/* Right-click menus. `e` is the contextmenu event — its client coords are
+   the anchor, and preventDefault() is the caller's job (some surfaces want
+   the browser's own menu when the click misses anything actionable). */
+function contextMenu(e, items) {
+  closeMenu();
+  showMenu(items, { top: e.clientY, bottom: e.clientY, left: e.clientX, right: e.clientX });
+}
+
+/* A floating card that isn't a list of buttons — same one-at-a-time,
+   outside-click and Escape behaviour, arbitrary contents. `build` gets the
+   panel node and the close function. */
+function anchoredPanel(anchorEl, cls, build) {
+  const wasOpenForSameAnchor = openMenuAnchor === anchorEl;
+  closeMenu();
+  if (wasOpenForSameAnchor) return null;
+  const panel = el('div', 'menu ' + cls);
+  build(panel, closeMenu);
+  showFloating(panel, anchorEl.getBoundingClientRect(), anchorEl);
+  return panel;
 }
 
 /* --------------------------------------------------------- filter builder */
@@ -3848,7 +3970,7 @@ function openSavedFiltersModal() {
 /* `refresh` re-renders whatever surface is hosting the panel after a bulk
    action ("Show all"/"Hide empty") — the per-column checkboxes repaint the
    grid directly and don't need it. */
-function buildColumnsPanel(container, refresh = openColumnsModal) {
+function buildColumnsPanel(container, refresh = openTableMenu) {
   if (!S.sourceId) {
     container.append(el('p', null, 'Open a table to manage its columns.'));
     return;
@@ -3868,6 +3990,25 @@ function buildColumnsPanel(container, refresh = openColumnsModal) {
     const c = columnMeta(name);
     lab.append(el('span', 'count', ' ' + (c ? c.type : '') + (c && c.derived ? ' · derived' : '')));
     row.append(lab);
+    // Per-column value-picker override, in the same row as the visibility
+    // box because they're the same kind of decision about the same column.
+    // Three states, not two: following the table's setting is distinct from
+    // being explicitly on or off, and only an explicit choice survives the
+    // table default changing later.
+    const override = (S.layout[name] || {}).valuePicker;
+    const state = override === undefined ? 'auto' : (override ? 'on' : 'off');
+    const pick = el('button', 'btn ghost collist-pick', '▾ ' + state);
+    pick.setAttribute('aria-pressed', String(valueFilterEnabled(name)));
+    pick.title = state === 'auto'
+      ? `Value dropdown follows this table's setting (currently ${valueFilterEnabled(name) ? 'on' : 'off'}) — click to pin it on`
+      : `Value dropdown pinned ${state} for this column — click to cycle`;
+    pick.onclick = () => {
+      // auto → on → off → auto: all three states reachable in one direction,
+      // including pinning a column on while the table default is off.
+      setColumnValueFilter(name, state === 'auto' ? true : (state === 'on' ? false : null));
+      refresh();
+    };
+    row.append(pick);
     list.append(row);
   });
   container.append(list);
@@ -3892,14 +4033,94 @@ function buildColumnsPanel(container, refresh = openColumnsModal) {
   container.append(acts);
 }
 
-/* The column chooser lives here — on the tab strip's hover button and the
-   openColumns keybind — not in Settings: which columns are visible is a
-   per-table working decision made constantly during triage, while Settings
-   holds machine-level preferences you touch once. */
-function openColumnsModal() {
-  if (!S.sourceId || S.activeTab !== 'grid') { toast('Open a table first'); return; }
-  const src = S.sources.find((x) => x.id === S.sourceId);
-  modal(`Columns — ${src ? src.name : ''}`, (b) => buildColumnsPanel(b, openColumnsModal));
+/* The table menu's value-filter section: the table-wide default the
+   per-column overrides above fall back to. */
+function buildValueFilterPanel(container, refresh) {
+  const src = S.sources.find((s) => s.id === S.sourceId);
+  const rows = src ? src.row_count : 0;
+  container.append(el('p', null,
+    'A ▾ button on each column filter box lists that column’s distinct values with counts, '
+    + 'so you can tick the ones to filter to. Reading those values is a scan, which is why big '
+    + 'tables start with it off.'));
+  const seg = el('div', 'vp-seg');
+  for (const [key, label, title] of [
+    ['auto', `Auto (on under ${VALUE_FILTER_AUTO_MAX.toLocaleString()} rows)`,
+      `This table has ${rows.toLocaleString()} rows — auto means ${valueFilterAutoOn() ? 'on' : 'off'} here`],
+    ['on', 'On for every column', 'Show the picker on every column regardless of size'],
+    ['off', 'Off', 'No picker buttons — the row menu’s "Filter by values…" still opens one'],
+  ]) {
+    const b = el('button', 'btn ghost', label);
+    b.setAttribute('aria-pressed', String(S.valueFilterMode === key));
+    b.title = title;
+    b.onclick = () => { setValueFilterMode(key); refresh(); };
+    seg.append(b);
+  }
+  container.append(seg);
+  const pinned = S.order.filter((n) => (S.layout[n] || {}).valuePicker !== undefined);
+  if (pinned.length) {
+    const clear = el('button', 'btn ghost', `Clear ${pinned.length} per-column override${pinned.length > 1 ? 's' : ''}`);
+    clear.style.marginTop = '10px';
+    clear.onclick = () => { for (const n of pinned) setColumnValueFilter(n, null); refresh(); };
+    container.append(clear);
+  }
+}
+
+function buildTableActionsPanel(container, refresh) {
+  const src = S.sources.find((s) => s.id === S.sourceId);
+  const acts = el('div', 'row-actions');
+  const dflt = el('button', 'btn ghost', 'Save layout as default for these columns');
+  dflt.title = 'Reuse this column order/visibility for any table imported with the same headers';
+  dflt.onclick = () => saveDefaultLayout();
+  const nick = el('button', 'btn ghost', 'Name this header set…');
+  nick.onclick = () => setNicknameFor(baseColumns().map((c) => c.name), nicknameFor(baseColumns().map((c) => c.name)));
+  const tables = el('button', 'btn ghost', 'Tables manager…');
+  tables.title = 'Every table in the case — indexes, row counts, dropping a source';
+  tables.onclick = () => openTablesManager();
+  acts.append(dflt, nick, tables);
+  container.append(acts);
+  if (src && src.is_open) {
+    const close = el('button', 'btn ghost', 'Close this tab');
+    close.title = 'Stays in the case — reopen it from the sidebar';
+    close.style.marginTop = '10px';
+    close.onclick = async () => { $('modal').hidden = true; await closeTab(src); };
+    container.append(close);
+  }
+}
+
+/* The table menu — everything that's about *this table* rather than the
+   case or the app. Sections are a registry for the same reason the row
+   menu's are: this is where per-table features are expected to land, and
+   adding one should be adding an entry. `build` gets (container, refresh)
+   and may render nothing at all.
+
+   It lives behind a right-click on the tab or the sidebar row (and the
+   openTableMenu keybind) rather than a visible ▦ button, which is the icon
+   this replaced — a menu that's going to keep growing needs a home that
+   doesn't cost tab-strip width per entry. */
+const TABLE_MENU_SECTIONS = [
+  { id: 'columns', title: 'Columns', build: buildColumnsPanel },
+  { id: 'valueFilters', title: 'Value filter dropdowns', build: buildValueFilterPanel },
+  { id: 'table', title: 'This table', build: buildTableActionsPanel },
+];
+
+/* `sourceId` is optional — the tab/sidebar entry points pass the table that
+   was right-clicked, which may not be the one on screen. The panels all
+   read S.layout/S.order/S.columns (this table's live state), so opening
+   that source first isn't a convenience, it's the precondition. */
+async function openTableMenu(sourceId) {
+  const id = sourceId === undefined ? S.sourceId : sourceId;
+  if (id == null) { toast('Open a table first'); return; }
+  if (id !== S.sourceId || S.activeTab !== 'grid') await openSource(id);
+  if (S.sourceId !== id) return; // openSource no-ops on an id it can't find
+  const src = S.sources.find((x) => x.id === id);
+  modal(`Table — ${src ? src.name : ''}`, (b) => {
+    for (const section of TABLE_MENU_SECTIONS) {
+      const wrap = el('div', 'table-menu-section');
+      wrap.append(el('h4', null, section.title));
+      section.build(wrap, () => openTableMenu(id));
+      b.append(wrap);
+    }
+  });
 }
 
 function openTagEditor() {
@@ -6721,6 +6942,494 @@ document.addEventListener('mouseup', () => {
   render(); // guarantee the final drag state is painted, don't rely on a pending rAF firing
 });
 
+/* --------------------------------------------------- value filter picker */
+
+/* Excel's header dropdown: a column's distinct values with their counts, as
+   a checkbox list you tick and apply. What it writes is an ordinary column
+   filter (`=v`, or `a|b|c` for several) — the picker is a way to *author*
+   the filter the header box already understands, not a fourth filtering
+   mechanism, so everything downstream (saved filters, Q's SQL, the filter
+   builder) sees exactly what typing would have produced.
+
+   Off above VALUE_FILTER_AUTO_MAX rows by default, and the reason is the
+   scan behind it: distinct-values-with-counts is one aggregate pass over
+   the view (or over the source, for whole-table scope) with no index to
+   lean on until the lazy per-column one exists. At a few hundred thousand
+   rows that's tens of milliseconds; on a 2.4M-row $J it's the kind of
+   pause a button you might click by accident shouldn't be able to cause.
+   The override lives per-table and per-column in the table menu (right-
+   click a tab), and the row menu's "Filter by values…" opens it regardless
+   — an explicit click is consent to pay for the scan in a way an
+   always-present button isn't. */
+const VALUE_FILTER_AUTO_MAX = 250000;
+const VALUE_PICKER_LIMIT = 1000;
+
+function valueFilterAutoOn() {
+  const src = S.sources.find((s) => s.id === S.sourceId);
+  return !!src && src.row_count <= VALUE_FILTER_AUTO_MAX;
+}
+
+/* Three layers, most specific first: the column's own override (stored in
+   the layout, so it travels with a saved default layout for this header
+   set), the table's mode, then the row-count rule. */
+function valueFilterEnabled(name) {
+  const override = (S.layout[name] || {}).valuePicker;
+  if (override !== undefined) return !!override;
+  if (S.valueFilterMode === 'on') return true;
+  if (S.valueFilterMode === 'off') return false;
+  return valueFilterAutoOn();
+}
+
+function setValueFilterMode(mode) {
+  S.valueFilterMode = mode;
+  saveLayout();
+  renderHead();
+}
+
+function setColumnValueFilter(name, enabled) {
+  const layout = { ...(S.layout[name] || {}) };
+  if (enabled === null) delete layout.valuePicker; else layout.valuePicker = enabled;
+  S.layout[name] = layout;
+  saveLayout();
+  renderHead();
+}
+
+/* Which values the column's current filter already selects, or null when it
+   isn't a value selection at all (a contains/regex/numeric filter, or no
+   filter) — null means "nothing is excluded yet", which the picker renders
+   as everything ticked, the same way Excel opens on an unfiltered column. */
+function currentValueSelection(column) {
+  const raw = S.filters[column];
+  if (raw) {
+    const p = parseFilter(raw);
+    if (!p) return null;
+    if (p.op === 'equals') return new Set([p.value]);
+    if (p.op === 'in') return new Set(p.value);
+    if (p.op === 'empty') return new Set(['']);
+    return null;
+  }
+  const node = pickerTreeNode(column);
+  return node ? new Set(valuesFromPickerNode(node)) : null;
+}
+
+/* The picker's node in the guided filter tree, for the selections the
+   header box can't spell (a value containing `|`, one with whitespace at
+   its edges, or `(empty)` mixed with real values — `IN ()` drops empty
+   strings server-side, so that combination has to be an OR).
+
+   Recognised structurally rather than by a marker field: openFilterBuilder
+   round-trips the tree through SQL text, which would drop any marker we
+   invented, so "an in/equals/empty condition on this column, or an OR of
+   exactly those" is the only durable identity available. */
+function isPickerNode(node, column) {
+  if (!node) return false;
+  if (node.type === 'cond') return node.column === column && ['in', 'equals', 'empty'].includes(node.op);
+  if (node.type === 'group' && node.op === 'OR' && (node.children || []).length) {
+    return node.children.every((c) => isPickerNode(c, column));
+  }
+  return false;
+}
+
+function pickerTreeNode(column) {
+  const root = S.filterTree;
+  if (!root || root.type !== 'group' || root.op !== 'AND') return null;
+  return (root.children || []).find((n) => isPickerNode(n, column)) || null;
+}
+
+function valuesFromPickerNode(node) {
+  if (node.type === 'cond') {
+    if (node.op === 'empty') return [''];
+    if (node.op === 'equals') return [node.value];
+    return Array.isArray(node.value) ? node.value.slice() : [];
+  }
+  return node.children.flatMap(valuesFromPickerNode);
+}
+
+function makePickerNode(column, values) {
+  const nonEmpty = values.filter((v) => v !== '');
+  const conds = [];
+  if (nonEmpty.length === 1) conds.push({ type: 'cond', column, op: 'equals', value: nonEmpty[0] });
+  else if (nonEmpty.length) conds.push({ type: 'cond', column, op: 'in', value: nonEmpty });
+  if (nonEmpty.length !== values.length) conds.push({ type: 'cond', column, op: 'empty', value: '' });
+  return conds.length === 1 ? conds[0] : { type: 'group', op: 'OR', children: conds };
+}
+
+function setPickerTreeNode(column, values) {
+  const root = S.filterTree;
+  const node = values && values.length ? makePickerNode(column, values) : null;
+  if (root && root.type === 'group' && root.op === 'AND') {
+    root.children = (root.children || []).filter((n) => !isPickerNode(n, column));
+    if (node) root.children.push(node);
+    return;
+  }
+  // A root the analyst turned into an OR, or a bare raw fragment, keeps its
+  // own meaning — AND the picker's condition onto it rather than into it.
+  if (node) S.filterTree = { type: 'group', op: 'AND', children: [root, node] };
+}
+
+/* The header box's two spellings, or null when neither fits — see
+   valueFilterText for why `=v` is safe with a `|` in it but a multi-value
+   `a|b|c` isn't, and why edge whitespace never survives either. */
+function quickFilterTextForValues(values) {
+  if (values.length === 1) return valueFilterText(values[0] === '' ? '' : values[0]);
+  if (values.some((v) => v === '' || String(v).includes('|') || valueFilterText(v) === null)) return null;
+  return values.join('|');
+}
+
+async function applyValueSelection(column, values, { clearInstead }) {
+  setPickerTreeNode(column, null); // whatever the picker last put in the tree for this column
+  if (clearInstead) {
+    setColumnFilter(column, '');
+  } else {
+    const text = quickFilterTextForValues(values);
+    setColumnFilter(column, text === null ? '' : text);
+    if (text === null) {
+      setPickerTreeNode(column, values);
+      toast(`${column}: applied under Filters ▾ — these values can't be written in the filter box`, 5000);
+    }
+  }
+  updateFiltersButton();
+  renderHead(); // repaints the ▾'s in-tree marker (and the box) for this column
+  await rebuildView({ keepScroll: false });
+}
+
+/* Two sources for the list, and which one is right depends on what the
+   column is already filtered by. Unfiltered: the current view, so the list
+   reflects every other filter in play (Excel's behaviour, and the one that
+   makes "which processes survive this timeframe" answerable). Already
+   filtered on this column: the whole table, because a view narrowed to
+   three values can only ever offer those three back, and widening the
+   selection is the main reason to reopen the dropdown. Either way it's
+   swappable from the panel — the scope is stated, never guessed at. */
+async function fetchPickerValues(column, scope) {
+  if (scope === 'view' && S.view) {
+    const r = await api(`/api/group_summary?view_id=${encodeURIComponent(S.view.view_id)}`
+      + `&column=${encodeURIComponent(column)}&limit=${VALUE_PICKER_LIMIT}&order=count&bucket_datetime=false`);
+    return { values: r.groups, truncated: !!r.truncated };
+  }
+  const rows = await api(`/api/column_values?source_id=${S.sourceId}`
+    + `&column=${encodeURIComponent(column)}&limit=${VALUE_PICKER_LIMIT + 1}`);
+  return { values: rows.slice(0, VALUE_PICKER_LIMIT), truncated: rows.length > VALUE_PICKER_LIMIT };
+}
+
+/* Opens the picker against a column's own filter-row button, or against the
+   header cell when that button isn't rendered (the size default is off, and
+   the row menu's "Filter by values…" is how you got here). */
+function openValuePickerForColumn(column) {
+  const anchor = document.querySelector(`.fcell-pick[data-col="${CSS.escape(column)}"]`)
+    || document.querySelector(`.hcell[data-col="${CSS.escape(column)}"]`);
+  if (!anchor) { toast('Open the table first'); return; }
+  openValuePicker(column, anchor);
+}
+
+function openValuePicker(column, anchorEl) {
+  if (!S.sourceId || S.activeTab !== 'grid') { toast('Open a table first'); return; }
+  const state = {
+    // An existing selection on this column means the view can't show what
+    // else is out there — start from the whole table so it can be widened.
+    scope: currentValueSelection(column) ? 'table' : 'view',
+    sort: 'count',
+    search: '',
+    values: null,
+    truncated: false,
+    checked: new Set(),
+    loading: true,
+    error: null,
+  };
+  let paint = () => {};
+  const panel = anchoredPanel(anchorEl, 'value-picker', (p, close) => {
+    paint = () => renderValuePicker(p, column, state, { reload, apply, close });
+    paint();
+  });
+  if (!panel) return; // second click on the same button — toggled shut
+
+  async function reload() {
+    state.loading = true;
+    state.error = null;
+    paint();
+    try {
+      const res = await fetchPickerValues(column, state.scope);
+      state.values = res.values;
+      state.truncated = res.truncated;
+      const selected = currentValueSelection(column);
+      // Intersected with what's actually listed, so "apply" can never send
+      // back a value the analyst was never shown — a truncated list would
+      // otherwise silently carry values it never rendered.
+      state.checked = new Set(res.values
+        .map((v) => (v.value == null ? '' : String(v.value)))
+        .filter((v) => !selected || selected.has(v)));
+    } catch (e) {
+      // 409 = the view was evicted (see invariant #3). Whole-table scope
+      // needs no view at all, so the question is still answerable — re-ask
+      // it there rather than showing an error nobody can act on.
+      if (e.status === 409 && state.scope === 'view') {
+        state.scope = 'table';
+        toast('That view expired — showing whole-table values');
+        return reload();
+      }
+      state.error = e.message;
+      state.values = [];
+    }
+    state.loading = false;
+    paint();
+  }
+
+  async function apply() {
+    const listed = (state.values || []).map((v) => (v.value == null ? '' : String(v.value)));
+    const values = listed.filter((v) => state.checked.has(v));
+    // Everything ticked out of a complete list is the same statement as no
+    // filter at all — and says so, rather than writing a 400-term `IN`.
+    const clearInstead = !state.truncated && values.length === listed.length;
+    closeMenu();
+    await applyValueSelection(column, values, { clearInstead });
+  }
+
+  reload();
+}
+
+function pickerRows(state) {
+  const q = state.search.trim().toLowerCase();
+  const rows = (state.values || [])
+    .map((v) => ({ value: v.value == null ? '' : String(v.value), count: v.count }))
+    .filter((v) => !q || v.value.toLowerCase().includes(q) || (v.value === '' && '(empty)'.includes(q)));
+  // Sorted client-side: the fetch always asks for the most common values
+  // first (that's the right thing to keep when the list is capped), so
+  // A→Z is a re-sort of what came back rather than a second round trip.
+  if (state.sort === 'value') rows.sort((a, b) => a.value.localeCompare(b.value, undefined, { numeric: true }));
+  return rows;
+}
+
+function renderValuePicker(panel, column, state, actions) {
+  panel.replaceChildren();
+  panel.append(el('div', 'menu-header', column));
+
+  const search = el('input', 'vp-search');
+  search.type = 'search';
+  search.placeholder = 'Find a value…';
+  search.value = state.search;
+  search.oninput = () => { state.search = search.value; paintList(); };
+  search.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); actions.apply(); } };
+  panel.append(search);
+
+  const toggles = el('div', 'vp-toggles');
+  const scopeGroup = el('div', 'vp-seg');
+  for (const [key, label, title] of [
+    ['view', 'This view', 'Values among the rows the current filters leave — the other filters still apply'],
+    ['table', 'Whole table', 'Every value in the column, ignoring the current filters'],
+  ]) {
+    const b = el('button', 'btn ghost', label);
+    b.setAttribute('aria-pressed', String(state.scope === key));
+    b.title = title;
+    b.onclick = () => { if (state.scope !== key) { state.scope = key; actions.reload(); } };
+    scopeGroup.append(b);
+  }
+  const sortBtn = el('button', 'btn ghost', state.sort === 'count' ? 'By count' : 'A→Z');
+  sortBtn.title = 'Switch between most-common-first and alphabetical';
+  sortBtn.onclick = () => {
+    state.sort = state.sort === 'count' ? 'value' : 'count';
+    sortBtn.textContent = state.sort === 'count' ? 'By count' : 'A→Z';
+    paintList(); // not a full re-render: that would drop what's typed in the search box
+  };
+  toggles.append(scopeGroup, sortBtn);
+  panel.append(toggles);
+
+  const list = el('div', 'vp-list');
+  panel.append(list);
+  const status = el('div', 'vp-status');
+  panel.append(status);
+
+  const acts = el('div', 'vp-actions');
+  const all = el('button', 'btn ghost', 'All');
+  all.onclick = () => { for (const r of pickerRows(state)) state.checked.add(r.value); paintList(); };
+  const none = el('button', 'btn ghost', 'None');
+  none.onclick = () => { for (const r of pickerRows(state)) state.checked.delete(r.value); paintList(); };
+  const cancel = el('button', 'btn ghost', 'Cancel');
+  cancel.onclick = () => actions.close();
+  const applyBtn = el('button', 'btn', 'Apply');
+  applyBtn.onclick = () => actions.apply();
+  acts.append(all, none, el('span', 'spacer'), cancel, applyBtn);
+  panel.append(acts);
+
+  function paintList() {
+    list.replaceChildren();
+    if (state.loading) { list.append(el('div', 'vp-note', 'Reading values…')); }
+    const rows = pickerRows(state);
+    for (const r of rows) {
+      const lab = el('label', 'vp-row');
+      const cb = el('input');
+      cb.type = 'checkbox';
+      cb.checked = state.checked.has(r.value);
+      cb.onchange = () => {
+        cb.checked ? state.checked.add(r.value) : state.checked.delete(r.value);
+        paintStatus();
+      };
+      const text = el('span', 'vp-value' + (r.value === '' ? ' vp-empty' : ''), r.value === '' ? '(empty)' : r.value);
+      text.title = r.value;
+      lab.append(cb, text, el('span', 'vp-count', r.count.toLocaleString()));
+      list.append(lab);
+    }
+    if (!state.loading && !rows.length) {
+      list.append(el('div', 'vp-note', state.values && state.values.length ? 'No value matches that.' : 'No values.'));
+    }
+    paintStatus();
+  }
+
+  function paintStatus() {
+    const rows = pickerRows(state);
+    const checked = rows.filter((r) => state.checked.has(r.value)).length;
+    status.replaceChildren();
+    if (state.error) status.append(el('div', 'vp-warn', state.error));
+    if (state.truncated) {
+      status.append(el('div', 'vp-warn',
+        `Showing the ${VALUE_PICKER_LIMIT.toLocaleString()} most common values — type above to find others, or filter the column first.`));
+    }
+    status.append(el('div', null, `${checked.toLocaleString()} of ${rows.length.toLocaleString()} shown values ticked`));
+    applyBtn.disabled = state.loading || !checked;
+    applyBtn.title = checked ? '' : 'Tick at least one value';
+  }
+
+  paintList();
+  setTimeout(() => search.focus(), 0);
+}
+
+/* ------------------------------------------------- row context menu */
+
+/* Right-clicking a row opens the menu built from these sections. It's a
+   registry rather than one function that spells the whole list out because
+   this menu is now where per-row actions are expected to land — adding one
+   should mean adding an entry here (or an item to an existing section),
+   never surgery on a growing if-chain. Each section gets the same ctx and
+   returns menu items (see fillMenuNode for the item shape); a section that
+   doesn't apply returns [] and is skipped, separator and all.
+
+   ctx: {pos, colName, colIndex, value} — the row and, when the click
+   landed on a cell rather than the gutter, that cell's column and its
+   value *at click time*. `pos` is deliberately re-resolved to a row on
+   every repaint (rowAt(ctx.pos)) rather than captured: a keepOpen tag item
+   re-renders the menu after tagging, and on the bulk path that tagging
+   clears the page cache underneath it. */
+const ROW_MENU_SECTIONS = [
+  { id: 'tags', build: rowMenuTagItems },
+  { id: 'cell', build: rowMenuCellItems },
+  { id: 'clipboard', build: rowMenuClipboardItems },
+];
+
+/* How many rows the menu's actions will hit: the selection when the
+   right-clicked row is part of it, otherwise just that row (openRowContextMenu
+   has already moved the cursor there). */
+function rowMenuTargets(ctx) {
+  const n = selCount();
+  return n ? { count: n, positions: () => selPositions() } : { count: 1, positions: () => [ctx.pos] };
+}
+
+function rowMenuTagItems(ctx) {
+  const { count } = rowMenuTargets(ctx);
+  const scope = count > 1 ? `${count.toLocaleString()} selected rows` : 'this row';
+  const items = [{ header: `Tag ${scope}` }];
+  const row = rowAt(ctx.pos);
+  for (const t of S.tags) {
+    // The ✓ reads the right-clicked row even when a whole selection is the
+    // target — same rule the hotkeys already follow (resolveTagDirection
+    // resolves the toggle direction from one sample row), so the menu can't
+    // claim a different outcome than pressing the tag's number would.
+    const on = !!row && row.tags.includes(t.id);
+    items.push({
+      label: t.name,
+      swatch: t.color,
+      checked: on,
+      hint: t.hotkey || '',
+      keepOpen: true, // tagging three tags in a row shouldn't need three right-clicks
+      title: `${on ? 'Remove' : 'Apply'} "${t.name}" — ${scope}`,
+      onclick: () => applyTag(t, !on),
+    });
+  }
+  if (!S.tags.length) items.push({ label: 'No tags in this case yet', disabled: true });
+  items.push({ label: 'Edit tags…', onclick: openTagEditor });
+  return items;
+}
+
+function rowMenuCellItems(ctx) {
+  if (!ctx.colName) return [];
+  const shown = ellipsize(displayValue(ctx.value));
+  return [
+    { header: ctx.colName },
+    { label: `Filter to ${shown}`, onclick: () => filterByValue(ctx.colName, ctx.value) },
+    {
+      label: `Filter to ${shown} only`,
+      title: 'Drops every other filter and the search — the timeframe filter stays',
+      onclick: () => filterByValue(ctx.colName, ctx.value, { only: true }),
+    },
+    { label: `Exclude ${shown}`, onclick: () => filterByValue(ctx.colName, ctx.value, { exclude: true }) },
+    {
+      // The way in when the column's own picker button is switched off for
+      // size (see valueFilterEnabled) — an explicit click is consent to pay
+      // for the scan, which the always-visible button isn't.
+      label: 'Filter by values…',
+      onclick: () => openValuePickerForColumn(ctx.colName),
+    },
+  ];
+}
+
+function rowMenuClipboardItems(ctx) {
+  const { count, positions } = rowMenuTargets(ctx);
+  const rows = count > 1 ? `${count.toLocaleString()} rows` : 'row';
+  return [
+    '-',
+    {
+      label: 'Copy cell',
+      disabled: !ctx.colName,
+      onclick: () => writeClipboardText(Promise.resolve(String(ctx.value == null ? '' : ctx.value)), 'Copied cell'),
+    },
+    { label: `Copy ${rows}`, onclick: () => copyRowsAsText(positions(), false) },
+    { label: `Copy ${rows} with headers`, onclick: () => copyRowsAsText(positions(), true) },
+  ];
+}
+
+function rowMenuItems(ctx) {
+  const out = [];
+  for (const section of ROW_MENU_SECTIONS) {
+    const items = section.build(ctx);
+    if (!items.length) continue;
+    if (out.length && items[0] !== '-') out.push('-');
+    out.push(...items);
+  }
+  return out;
+}
+
+function openRowContextMenu(ctx, e) {
+  contextMenu(e, () => rowMenuItems(ctx));
+}
+
+$('body').addEventListener('contextmenu', (e) => {
+  // Row-level actions stay flat-mode-only, same as the click/mousedown
+  // handlers above — grouped mode has no row selection to act on.
+  if (S.groupByCols.length) return;
+  const rowEl = e.target.closest('.row');
+  if (!rowEl) return; // header, gutter strip, empty space: leave the browser's own menu alone
+  const pos = Number(rowEl.dataset.pos);
+  const cellEl = e.target.closest('.cell');
+  const colIndex = cellEl ? Number(cellEl.dataset.col) : null;
+  const colName = colIndex == null ? null : visibleCols()[colIndex];
+  e.preventDefault();
+  // Right-clicking inside an existing selection acts on the whole selection
+  // (tagging 200 checked rows shouldn't collapse to the one under the
+  // pointer); right-clicking outside it moves there first, which is what
+  // every file manager does and what makes "this row" unambiguous.
+  const inSelection = selCount() && selHas(pos);
+  if (colIndex != null) {
+    // Highlight the cell the menu is about — and make it the thing Ctrl+C
+    // and the `f` keybind act on next, so the menu and the keyboard agree.
+    // Set before moveCursor so its render paints both changes at once.
+    S.cellAnchor = { pos, col: colIndex };
+    setCellRange(S.cellAnchor, S.cellAnchor);
+  }
+  if (!inSelection) moveCursor(pos, false); // renders
+  else render();
+  const r = rowAt(pos);
+  const value = r && colName ? r.cells[S.columns.findIndex((c) => c.name === colName)] : null;
+  openRowContextMenu({ pos, colName, colIndex, value }, e);
+});
+
 /* How many page fetches are allowed to be in flight at once. Unbounded, a
    select-all + Ctrl+C on a 1.2M-row view fired ~2,400 simultaneous requests
    at a single-connection SQLite backend; the browser queues most of them
@@ -6888,25 +7597,82 @@ async function handleCopyShortcut(withHeaders) {
   await copyRowsAsText(positions, withHeaders);
 }
 
+/* ------------------------------------------------- filter by a cell value */
+
+/* Everything that turns "this value, in this column" into a filter goes
+   through here — the `f` keybind, the row menu's Filter to…/Exclude, and
+   the value picker's single-value case — so the three can't drift apart on
+   what an empty cell means or how a value gets escaped.
+
+   `=value` is the spelling on purpose: it round-trips any value the box can
+   hold, including one containing a `|` (parseFilter matches the `=` prefix
+   before it ever looks for the any-of separator). What it can't hold is a
+   value whose own edges are whitespace — the box trims — which is why
+   valueFilterText() reports null rather than quietly filtering on the
+   trimmed text, and the picker routes those through the filter tree. */
+function valueFilterText(v) {
+  if (v == null || v === '') return '""';
+  const s = String(v);
+  return s === s.trim() && !/[\r\n]/.test(s) ? '=' + s : null;
+}
+
+function valueExcludeText(v) {
+  if (v == null || v === '') return '*'; // "not empty" is the exclusion of empty
+  const s = String(v);
+  return s === s.trim() && !/[\r\n]/.test(s) ? '!=' + s : null;
+}
+
+/* Writes a raw filter string into a column's header box and the state
+   behind it, keeping the visible input in step without a full renderHead()
+   (which would drop the cell selection the caller may still be acting on). */
+function setColumnFilter(name, raw) {
+  if (raw) S.filters[name] = raw; else delete S.filters[name];
+  const inp = document.querySelector(`.fcell input[data-col="${CSS.escape(name)}"]`);
+  if (inp) { inp.value = raw || ''; inp.classList.toggle('active', !!raw); }
+}
+
+const displayValue = (v) => (v == null || v === '' ? '(empty)' : String(v));
+const ellipsize = (s, n = 42) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
+
+/* `only: true` is the Shift+F half of the pair — filter to this value and
+   drop everything else that was narrowing the view. It's clearAllFilters
+   with a seed rather than its own reset, because the carve-outs that make
+   clearing correct (the timeframe filter survives; grouping is stashed, not
+   lost) are exactly the ones a second implementation would forget. */
+async function filterByValue(column, value, { only = false, exclude = false } = {}) {
+  const raw = exclude ? valueExcludeText(value) : valueFilterText(value);
+  if (raw === null) {
+    toast(`"${ellipsize(String(value))}" starts or ends with whitespace — use Filter by values… to select it`, 5000);
+    return;
+  }
+  const shown = ellipsize(displayValue(value));
+  if (only) {
+    await clearAllFilters({ column, raw });
+    toast(`Filtered ${column} ${exclude ? '≠' : '='} ${shown} · other filters cleared`);
+    return;
+  }
+  setColumnFilter(column, raw);
+  await rebuildView();
+  toast(`Filtered ${column} ${exclude ? '≠' : '='} ${shown}`);
+}
+
 /* Reuses the same single-cell selection a plain click already commits to
    S.cellRange (see setCellRange above) — takes the top-left cell of
-   whatever's selected, drops its value into that column's filter box as an
-   exact match, and reuses the existing S.filters + rebuildView() path so it
-   behaves exactly like typing "=value" into the header filter by hand. */
-function filterBySelectedCell() {
-  if (!S.cellRange) { toast('Click a cell first'); return; }
-  const name = visibleCols()[S.cellRange.c0];
+   whatever's selected and filters that column to its value, exactly as if
+   "=value" had been typed into the header filter by hand. */
+function selectedCellTarget() {
+  if (!S.cellRange) return null;
+  const column = visibleCols()[S.cellRange.c0];
   const r = rowAt(S.cellRange.r0);
-  if (!name || !r) { toast('Row not loaded yet'); return; }
-  const idx = S.columns.findIndex((c) => c.name === name);
-  const val = r.cells[idx];
-  const empty = val == null || val === '';
-  const raw = empty ? '""' : '=' + String(val);
-  S.filters[name] = raw;
-  const inp = document.querySelector(`.fcell input[data-col="${CSS.escape(name)}"]`);
-  if (inp) { inp.value = raw; inp.classList.add('active'); }
-  rebuildView();
-  toast(`Filtered ${name} = ${empty ? '(empty)' : val}`);
+  if (!column || !r) return null;
+  return { column, value: r.cells[S.columns.findIndex((c) => c.name === column)] };
+}
+
+async function filterBySelectedCell({ only = false } = {}) {
+  if (!S.cellRange) { toast('Click a cell first'); return; }
+  const target = selectedCellTarget();
+  if (!target) { toast('Row not loaded yet'); return; }
+  await filterByValue(target.column, target.value, { only });
 }
 
 function currentSourceHasFts() {
@@ -7123,16 +7889,16 @@ function sidebarRow(s, { open, index, total }) {
     await loadSources(s.id);
   };
   row.append(label);
-  if (!s.error) row.append(el('span', 'sidebar-row-count', s.row_count.toLocaleString()));
+  if (!s.error) {
+    // Same menu the tab strip's right-click opens, on the table's name in
+    // the sidebar — including for a closed table, which openTableMenu opens
+    // first (its panels all read the live S.layout/S.columns).
+    row.oncontextmenu = (e) => { e.preventDefault(); openTableMenu(s.id); };
+    label.title = 'Right-click for the table menu';
+    row.append(el('span', 'sidebar-row-count', s.row_count.toLocaleString()));
+  }
   if (open) {
     const acts = el('div', 'sidebar-row-actions');
-    const cols = el('button', 'menu-item-action', '▦');
-    cols.title = 'Choose columns';
-    cols.onclick = async () => {
-      if (s.error) return;
-      if (s.id !== S.sourceId || S.activeTab !== 'grid') await openSource(s.id);
-      openColumnsModal();
-    };
     const up = el('button', 'menu-item-action', '▲');
     up.title = 'Move earlier';
     up.disabled = index === 0;
@@ -7144,7 +7910,7 @@ function sidebarRow(s, { open, index, total }) {
     const x = el('button', 'menu-item-action', '✕');
     x.title = 'Close tab — stays in this case, reopen it from here';
     x.onclick = async () => { await closeTab(s); };
-    acts.append(cols, up, down, x);
+    acts.append(up, down, x);
     row.append(acts);
     wireSidebarRowDrag(row, s.id);
   }
@@ -7212,7 +7978,11 @@ async function recenterOnRow(anchor) {
   render();
 }
 
-async function clearAllFilters() {
+/* `seed` ({column, raw}) is the one carve-out: "filter to this value and
+   nothing else" (Shift+F, the row menu's "…only") is precisely this reset
+   plus one filter, and spelling the reset out a second time is how the
+   timeframe carve-out below gets forgotten in the copy. */
+async function clearAllFilters(seed = null) {
   // Deliberately doesn't touch S.timeRange — the timeframe filter is meant
   // to survive exactly this ("apply/clear filters shouldn't lose my
   // timeframe"), same as it survives applyPreset() and a tab switch. Use
@@ -7225,7 +7995,8 @@ async function clearAllFilters() {
     S.lastGroupBy = { cols: [...S.groupByCols], sort: S.groupSort, dir: S.groupSortDir };
     await dropGrouping();
   }
-  S.filters = {}; S.search = ''; S.tagFilter = []; S.searchTerms = [];
+  S.filters = seed ? { [seed.column]: seed.raw } : {};
+  S.search = ''; S.tagFilter = []; S.searchTerms = [];
   S.filterTree = { type: 'group', op: 'AND', children: [] };
   updateFiltersButton();
   $('search').value = '';
@@ -7235,7 +8006,9 @@ async function clearAllFilters() {
   syncSearchExpansion(false);
   await recenterOnRow(anchor);
 }
-$('btnReset').onclick = clearAllFilters;
+// Wrapped, not passed directly: an onclick handler is called with the
+// MouseEvent, which would arrive as `seed`.
+$('btnReset').onclick = () => clearAllFilters();
 // The empty-case state's one useful next action, right where the eye lands —
 // the same openImportModal the Session menu's "Import…" entry opens.
 $('emptyImportBtn').onclick = () => openImportModal();
@@ -7352,17 +8125,21 @@ const DEFAULT_KEYMAP = {
   jumpFirst: ['g'],
   jumpLast: ['G'],
   focusSearch: ['/'],
-  focusFilter: ['f'],
+  // No default: `f` is worth more as "filter to the value I'm looking at"
+  // (below) than as "focus the first column's filter box", which is a click
+  // away and was the less-used of the two. Still bindable in Settings.
+  focusFilter: [],
   focusNote: ['n'],
   openSettings: ['?'],
   resetColumnWidths: ['0'],
   autofitColumnWidths: ['='],
   cyclePrevFilter: ['['],
   cycleNextFilter: [']'],
-  filterBySelectedCell: ['F'],
+  filterBySelectedCell: ['f'],
+  filterBySelectedCellOnly: ['F'],
   clearFilters: ['c'],
   openTables: ['t'],
-  openColumns: ['C'],
+  openTableMenu: ['C'],
   openSearchAll: ['s'],
   toggleDetail: ['d'],
   dropGrouping: ['x'],
@@ -7384,9 +8161,10 @@ const ACTION_LABELS = {
   autofitColumnWidths: 'Autofit all column widths to content',
   cyclePrevFilter: 'Previous saved filter', cycleNextFilter: 'Next saved filter',
   filterBySelectedCell: "Filter by selected cell's value",
+  filterBySelectedCellOnly: "Filter by selected cell's value, dropping every other filter",
   clearFilters: 'Clear all filters, search and tag filter',
   openTables: 'Open Tables manager',
-  openColumns: 'Open the column chooser for the current table',
+  openTableMenu: 'Open the table menu (columns, value dropdowns) — also right-click a tab',
   openSearchAll: 'Search all tables',
   toggleDetail: 'Open/close the detail pane',
   dropGrouping: 'Drop all grouping, restore column order',
@@ -7399,12 +8177,65 @@ const ACTION_LABELS = {
   repeatJumpTs: 'Jump again to the saved timestamp (works across tables)',
 };
 
+/* Stored keymaps are a merge over the defaults, which means a returning
+   analyst's localStorage silently outranks every later change to
+   DEFAULT_KEYMAP — including a rename, which would leave a binding pointing
+   at an action that no longer has a handler (matchAction would resolve the
+   key and nothing would happen). So the stored map is migrated on load:
+   entries for actions that no longer exist are carried to their replacement
+   and dropped, and a *default* binding a change is meant to move is moved.
+   A binding the analyst chose themselves is never touched — the marker
+   below is what keeps each migration one-shot rather than fighting them
+   over it on every load. */
+const KEYMAP_VERSION_KEY = 'winnow.keymap.v';
+const KEYMAP_VERSION = 1;
+
+const KEYMAP_MIGRATIONS = [
+  // v1 (2026-08): the column chooser grew into the table menu, and `f`
+  // moved from "focus the first filter box" to "filter by this value"
+  // (Shift+F now doing that *and* clearing the other filters).
+  (map) => {
+    if (map.openColumns) map.openTableMenu = map.openColumns;
+    const wasDefault = (action, keys) =>
+      JSON.stringify((map[action] || []).slice().sort()) === JSON.stringify(keys.slice().sort());
+    if (wasDefault('focusFilter', ['f']) && wasDefault('filterBySelectedCell', ['F'])) {
+      map.focusFilter = [];
+      map.filterBySelectedCell = ['f'];
+      map.filterBySelectedCellOnly = ['F'];
+    }
+  },
+];
+
 function loadKeymap() {
-  try {
-    return { ...DEFAULT_KEYMAP, ...JSON.parse(localStorage.getItem('winnow.keymap') || '{}') };
-  } catch { return { ...DEFAULT_KEYMAP }; }
+  let stored;
+  try { stored = JSON.parse(localStorage.getItem('winnow.keymap') || '{}'); }
+  catch { return { ...DEFAULT_KEYMAP }; }
+  if (!stored || typeof stored !== 'object') return { ...DEFAULT_KEYMAP };
+
+  let from = 0;
+  try { from = Number(localStorage.getItem(KEYMAP_VERSION_KEY)) || 0; } catch { /* treat as unmigrated */ }
+  const pending = KEYMAP_MIGRATIONS.slice(from);
+  for (const migrate of pending) migrate(stored);
+
+  // Actions the app no longer has (renamed, removed) would otherwise keep
+  // swallowing their key forever, since matchAction scans the stored map,
+  // not the defaults.
+  const map = { ...DEFAULT_KEYMAP };
+  for (const [action, keys] of Object.entries(stored)) {
+    if (action in DEFAULT_KEYMAP && Array.isArray(keys)) map[action] = keys;
+  }
+  if (pending.length) {
+    try {
+      localStorage.setItem('winnow.keymap', JSON.stringify(map));
+      localStorage.setItem(KEYMAP_VERSION_KEY, String(KEYMAP_VERSION));
+    } catch { /* a full/blocked localStorage just means it migrates again next load */ }
+  }
+  return map;
 }
-function saveKeymap() { localStorage.setItem('winnow.keymap', JSON.stringify(S.keymap)); }
+function saveKeymap() {
+  localStorage.setItem('winnow.keymap', JSON.stringify(S.keymap));
+  localStorage.setItem(KEYMAP_VERSION_KEY, String(KEYMAP_VERSION));
+}
 
 function matchAction(e) {
   for (const [action, keys] of Object.entries(S.keymap)) {
@@ -7444,9 +8275,10 @@ const ACTION_HANDLERS = {
   cyclePrevFilter: () => cycleSavedFilter(-1),
   cycleNextFilter: () => cycleSavedFilter(1),
   filterBySelectedCell: () => filterBySelectedCell(),
+  filterBySelectedCellOnly: () => filterBySelectedCell({ only: true }),
   clearFilters: () => clearAllFilters(),
   openTables: () => openTablesManager(),
-  openColumns: () => openColumnsModal(),
+  openTableMenu: () => openTableMenu(),
   toggleDetail: () => toggleDetailPane(),
   openSearchAll: () => openSearchAllModal(),
   dropGrouping: () => { if (S.groupByCols.length) dropGrouping(); },
@@ -7715,6 +8547,8 @@ function openSettings() {
     fixedKeys.append(el('kbd', null, '1 – 9'), el('span', null, 'Toggle the tag with that hotkey on the selection'));
     fixedKeys.append(el('kbd', null, 'Shift + 1 – 9'), el('span', null, 'Apply that tag to every row in the current view'));
     fixedKeys.append(el('kbd', null, 'Esc'), el('span', null, 'Clear selection, or close a panel'));
+    fixedKeys.append(el('kbd', null, 'Right-click a row'), el('span', null, 'Tag it, filter to or exclude that cell’s value, copy'));
+    fixedKeys.append(el('kbd', null, 'Right-click a tab'), el('span', null, 'That table’s menu — columns, value dropdowns, layout'));
     b.append(fixedKeys);
 
     b.append(el('h4', null, 'Filter & search syntax'));
@@ -7732,6 +8566,11 @@ function openSettings() {
     const f = el('div', 'kv');
     for (const [a, c] of filters) { f.append(el('kbd', null, a), el('span', null, c)); }
     b.append(el('p', null, 'Column filter row:'), f);
+    b.append(el('p', null,
+      'The ▾ on a filter box lists that column’s distinct values with counts — tick the ones to keep. '
+      + `It appears automatically on tables under ${VALUE_FILTER_AUTO_MAX.toLocaleString()} rows (reading the values is a scan); `
+      + 'the table menu (right-click a tab) turns it on or off per table or per column, and a row’s '
+      + 'right-click menu can open it for any column.'));
     b.append(el('p', null,
       'Search box — Contains is always a true substring match; Regex is a full scan; Advanced supports '
       + 'multiple AND / OR / NOT terms and uses the FTS5 index when one was built at import.'));

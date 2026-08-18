@@ -1267,7 +1267,8 @@ def api_cancel_op(body: CancelOp):
 
 @app.get("/api/group_summary")
 def api_group_summary(view_id: str, column: str, order: str = "count", direction: str | None = None,
-                       limit: int = 1000, path: str = "", op_token: str | None = None):
+                       limit: int = 1000, path: str = "", op_token: str | None = None,
+                       bucket_datetime: bool = True):
     try:
         # `path` (the outer levels already fixed by nested grouping) is a
         # JSON-encoded list — GET query params don't carry structured data,
@@ -1276,7 +1277,7 @@ def api_group_summary(view_id: str, column: str, order: str = "count", direction
         path_list = json.loads(path) if path else None
         return JSONResponse(store().group_summary(view_id, column, order=order, direction=direction,
                                                   limit=min(limit, 5000), path=path_list,
-                                                  op_token=op_token))
+                                                  op_token=op_token, bucket_datetime=bucket_datetime))
     except KeyError as e:
         raise HTTPException(409, str(e))
 
