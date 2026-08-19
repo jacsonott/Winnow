@@ -323,14 +323,17 @@ html[data-style="studio"][data-theme="light"] {
 #pageTabs { flex: 0 0 auto; max-width: 60%; }
 /* Same handle idiom as .detail-resize: a hit target wider than the line it
    paints, pulled back into the bar's 12px gap by a negative margin so it
-   doesn't push the strips apart. */
+   doesn't push the strips apart. The line itself runs the full height of
+   the bar, like every other vertical rule in it (.tab/.tab-jump's 1px
+   borders) — just three times as thick, since this one separates two
+   *kinds* of tab rather than two tabs. */
 .tab-split {
-  flex: 0 0 auto; width: 7px; margin: 0 -5px; position: relative;
+  flex: 0 0 auto; width: 9px; margin: 0 -6px; position: relative;
   cursor: col-resize; touch-action: none;
 }
 .tab-split::after {
-  content: ""; position: absolute; inset: 9px 3px;
-  background: var(--line-2); border-radius: 1px;
+  content: ""; position: absolute; inset: 0 3px;
+  background: var(--line-2);
   transition: background var(--transition-fast) var(--ease);
 }
 .tab-split:hover::after, .tab-split.dragging::after { background: var(--accent); }

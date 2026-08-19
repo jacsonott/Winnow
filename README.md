@@ -83,10 +83,13 @@ Filters are typed straight into the box under each column header:
 Keys: `↑↓`/`jk` move, `Shift+↑↓` extend selection, `PgUp`/`PgDn`, `g`/`G` for
 top and bottom, `1`–`9` toggle a tag on the selection, `Shift+1`–`9` apply a tag
 to **every** row in the current view, `/` search, `f` first filter, `n` note,
-`?` help. `J` jumps to the row nearest a timestamp you type — the moment is
-remembered across tables, so `.` jumps straight to it again in whichever table
-you're looking at. `X` toggles the current grouping off and back on without
-touching the filters (`x` drops it outright). `Q` opens the current
+`?` help. `Alt`+`1`–`0` switches tabs: `Alt`+`1` is whichever table you were
+last in, `Alt`+`2` onward are the page tabs in strip order (so they follow a
+reorder rather than being nailed to SQL/Timeline). `J` jumps to the row nearest
+a timestamp you type — the moment is remembered across tables, so `.` jumps
+straight to it again in whichever table you're looking at. `X` toggles the
+current grouping off and back on without touching the filters (`x` drops it
+outright). `Q` opens the current
 filter/sort/search as a ready-made query in the SQL pane.
 
 Saved filters can carry a grouping: save while grouped and applying the filter
@@ -112,6 +115,8 @@ to go back to sizing itself). The sidebar down the left lists all of it as a
 standing list — every table in the case, open or closed, and every page — with
 ▲/▼ on each row for when dragging a strip that's scrolled out of view is more
 trouble than it's worth. Tab order and the divider are remembered per browser.
+`Alt`+`1`–`0` switches between them from the keyboard — `Alt`+`1` back to the
+table you were last in, `Alt`+`2` onward down the page strip.
 
 ## Timestamps
 

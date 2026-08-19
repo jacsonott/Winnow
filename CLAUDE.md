@@ -705,6 +705,17 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
     resets per case. "SQL" means the same thing in every case, and a
     plugin tab belongs to this machine's `plugins/` rather than to any one
     case file — neither has a reason to jump back on a case switch.
+  - **`Alt`+`1`–`0`** (`activateTabSlot`) addresses both strips as one key
+    row: 1 is the last-selected table, 2…0 the page tabs *in strip order*,
+    so the digits follow a reorder. Slot 1 calls `showGridTab()` rather
+    than `openSource()` when the target is already `S.sourceId` —
+    re-opening resets that table's filters/sort/search, which is not what
+    "back to where I was" means. It's handled before `matchAction` and the
+    tag hotkeys in the keydown listener because neither of those checks
+    modifiers (`'0'` is `resetColumnWidths`, `1`–`9` are tag hotkeys), and
+    it reads `e.code` rather than `e.key` since `Alt`+digit isn't a digit
+    in `e.key` on every layout. `Shift`+digit — the obvious row — was
+    already taken by apply-tag-to-view.
   - The divider stores **the width the analyst dragged to** and applies
     that width *clamped* to what the bar can currently give it
     (`clampPageTabsWidth`); the clamped value is never written back, so a

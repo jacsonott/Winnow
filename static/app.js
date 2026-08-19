@@ -802,6 +802,35 @@ function movePageTab(key, dir) {
   setPageTabOrder(keys);
 }
 
+/* Alt + 1…0 addresses both strips as one row of keys: 1 is the table tab
+   you were last in, and 2…0 are the page tabs in strip order — so the
+   digits follow a drag-reorder instead of being nailed to SQL/Timeline.
+   Slot 1 re-shows the grid rather than re-opening the source: clicking a
+   table's own tab runs openSource(), which resets its filters/sort/search,
+   and "take me back to the table I was in" means back to it as you left
+   it. Slots past the last page tab are silently ignored — the row is worth
+   having whether or not a plugin filled it out. */
+function activateTabSlot(digit) {
+  if (digit === '1') {
+    const open = openTabsSorted().filter((s) => !s.error);
+    // S.sourceId *is* the most recently selected table (openSource is the
+    // only thing that sets it, and it survives a trip through the page
+    // tabs) — unless it names one that has since been closed.
+    const target = open.find((s) => s.id === S.sourceId) || open[0];
+    if (!target) return;
+    if (target.id === S.sourceId) { if (S.activeTab !== 'grid') showGridTab(); }
+    else openSource(target.id);
+    // The grid is the one tab that doesn't focus anything on arrival (a
+    // click on its tab moves focus for free; a keystroke doesn't), so the
+    // SQL editor would still be holding it and the next j/k would type
+    // into a query.
+    $('body').focus();
+    return;
+  }
+  const t = pageTabsSorted()[(digit === '0' ? 10 : Number(digit)) - 2]; // 2→first page tab … 0→ninth
+  if (t) t.show();
+}
+
 /* SQL and Timeline are markup in index.html — a dozen places reach them by
    id — so they're *moved* into position here rather than rebuilt; plugin
    tabs are built. Either way a node is wired for dragging exactly once:
@@ -7961,6 +7990,7 @@ function openSettings() {
     fixedKeys.append(el('kbd', null, 'Shift + move keys'), el('span', null, 'Extend the selection'));
     fixedKeys.append(el('kbd', null, '1 – 9'), el('span', null, 'Toggle the tag with that hotkey on the selection'));
     fixedKeys.append(el('kbd', null, 'Shift + 1 – 9'), el('span', null, 'Apply that tag to every row in the current view'));
+    fixedKeys.append(el('kbd', null, 'Alt + 1 – 0'), el('span', null, 'Switch tabs — 1 is the table you were last in, 2 – 0 the page tabs in strip order'));
     fixedKeys.append(el('kbd', null, 'Esc'), el('span', null, 'Clear selection, or close a panel'));
     b.append(fixedKeys);
 
@@ -8151,6 +8181,29 @@ document.addEventListener('keydown', (e) => {
     if (typing) { e.target.blur(); $('body').focus(); return; }
     selClear(); render(); return;
   }
+  // e.code first because Alt+digit doesn't produce a digit in e.key on
+  // every layout (macOS Alt+1 is '¡'), and the tag hotkeys below want the
+  // same thing for the same reason.
+  const digit = e.code && e.code.startsWith('Digit') ? e.code.slice(5) : e.key;
+  /* Tab switching (Alt + 1…0), deliberately above the `typing` guard: the
+     SQL pane focuses its editor on arrival, so a shortcut that gave up
+     there could carry you *into* that tab and never back out. Skipped
+     while a dialog is up — the #modal singleton *or* a spawned
+     confirm/prompt overlay (_spawnDialog builds its own, so one check
+     doesn't cover the other) — since switching the tab behind a dialog
+     that's waiting on an answer isn't what anyone means. Ahead of
+     matchAction and the tag hotkeys below
+     because neither of those looks at modifiers — '0' is bound to
+     resetColumnWidths and 1–9 are tag hotkeys, and Alt+digit is meant for
+     neither. (Shift+digit was the obvious row and is taken: it applies a
+     tag to the whole view.) */
+  if (e.altKey && !e.ctrlKey && !e.metaKey && /^[0-9]$/.test(digit)) {
+    if (!$('modal').hidden || document.querySelector('.confirm-overlay')) return;
+    e.preventDefault();
+    activateTabSlot(digit);
+    return;
+  }
+
   if (typing) return;
 
   if ((e.ctrlKey || e.metaKey) && (e.key === 'c' || e.key === 'C') && (S.cellRange || selCount() || S.cursor >= 0)) {
@@ -8166,7 +8219,6 @@ document.addEventListener('keydown', (e) => {
     ACTION_HANDLERS[action](e, pageRows);
     return;
   }
-  const digit = e.code && e.code.startsWith('Digit') ? e.code.slice(5) : e.key;
   if (/^[1-9]$/.test(digit)) {
     const t = S.tags.find((x) => x.hotkey === digit);
     if (t) { e.preventDefault(); e.shiftKey ? applyTagToView(t) : applyTag(t); }
