@@ -59,6 +59,42 @@ def test_group_summary_datetime_buckets_by_day(ingested):
     }
 
 
+def test_group_summary_raw_datetime_values_for_the_value_picker(ingested):
+    """bucket_datetime=False returns the stored timestamps themselves, which
+    is the only shape the header value-picker can hand back as an `=`/`in`
+    filter — a "2024-01-05" day bucket matches no stored value at all."""
+    store, source_id = ingested
+    spec = {"source_id": source_id, "filters": [], "sort": []}
+    view = store.build_view(source_id, spec)
+
+    res = store.group_summary(view["view_id"], "Timestamp", order="value", bucket_datetime=False)
+    assert [g["value"] for g in res["groups"]] == [
+        "2024-01-05 13:22:01", "2024-01-05 13:23:11", "2024-01-06 09:15:00", "2024-01-07 22:01:59",
+    ]
+    assert all(g["count"] == 1 for g in res["groups"])
+
+    # And every value it offered really does select its row back.
+    for g in res["groups"]:
+        picked = store.build_view(source_id, {
+            "source_id": source_id,
+            "filters": [{"column": "Timestamp", "op": "equals", "value": g["value"]}],
+            "sort": [],
+        })
+        assert picked["row_count"] == 1
+
+
+def test_group_summary_bucket_datetime_only_affects_datetime_columns(ingested):
+    """Non-datetime columns are already raw — the flag must not perturb them,
+    so a picker and a grouping ask the same question of the same column."""
+    store, source_id = ingested
+    spec = {"source_id": source_id, "filters": [], "sort": []}
+    view = store.build_view(source_id, spec)
+
+    bucketed = store.group_summary(view["view_id"], "Process", order="value")
+    raw = store.group_summary(view["view_id"], "Process", order="value", bucket_datetime=False)
+    assert bucketed == raw
+
+
 def test_expand_group_datetime_bucket_finds_day_rows(ingested):
     store, source_id = ingested
     spec = {"source_id": source_id, "filters": [], "sort": []}

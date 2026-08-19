@@ -230,6 +230,23 @@ def test_group_summary_route_accepts_json_encoded_path(client, store, write_csv)
     assert {g["value"]: g["count"] for g in r2.json()["groups"]} == {"a": 1, "b": 1}
 
 
+def test_group_summary_route_passes_bucket_datetime_through(client, store, write_csv):
+    """The value-picker dropdown's query string, end to end: same route, one
+    flag, raw timestamps instead of day buckets."""
+    p = write_csv([["When", "Host"],
+                   ["2024-01-05 13:22:01", "H1"],
+                   ["2024-01-05 19:04:00", "H2"]])
+    rec = store.ingest_csv(p, name="ts.csv", build_fts=False)
+    view = store.build_view(rec["id"], {"source_id": rec["id"], "filters": [], "sort": []})
+
+    bucketed = client.get(f"/api/group_summary?view_id={view['view_id']}&column=When")
+    assert [g["value"] for g in bucketed.json()["groups"]] == ["2024-01-05"]
+
+    raw = client.get(f"/api/group_summary?view_id={view['view_id']}&column=When"
+                     f"&order=value&bucket_datetime=false")
+    assert [g["value"] for g in raw.json()["groups"]] == ["2024-01-05 13:22:01", "2024-01-05 19:04:00"]
+
+
 def test_column_layouts_find_and_save_routes(client):
     empty = client.get("/api/column_layouts/find?col_names=A&col_names=B")
     assert empty.status_code == 200
