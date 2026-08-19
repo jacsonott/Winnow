@@ -6210,9 +6210,9 @@ function showSqlTab() {
   $('tabTimeline').setAttribute('aria-selected', 'false');
   document.querySelectorAll('#sourceTabs .tab').forEach((t) => t.setAttribute('aria-selected', 'false'));
   renderSidebar(); // S.sourceId is unchanged (still the last-open source) but nothing in the sidebar should read as active here
-  // The "matching saved filter" banner is about a specific table's columns —
-  // meaningless on a tab that isn't showing any one table's grid.
-  $('presetBanner').hidden = true;
+  // The toolbar and the "matching saved filter" banner are about a
+  // specific table's grid — meaningless here (see syncTabChrome).
+  syncTabChrome();
   loadSqlTabs().then(() => $('sqlText').focus());
 }
 
@@ -6406,6 +6406,23 @@ async function closeSqlTab(t) {
   renderSqlTabs();
 }
 
+/* The toolbar (group-by strip, tag filter ribbon, row stats, timeframe,
+   filters, search) and the saved-filter banner all act on the *grid's*
+   view spec, so they're meaningless on the SQL, Timeline and plugin tabs —
+   those have their own controls (the Timeline its own tag filter and
+   stats; a plugin whatever it built). Hidden rather than left inert:
+   a row of controls that silently does nothing reads as broken, and the
+   space belongs to the pane you actually switched to.
+
+   Called by every show*Tab, so there's one place this rule lives rather
+   than four copies drifting apart. Grid: showGridTab re-runs checkPresets
+   afterward, which is what brings the banner back when it applies. */
+function syncTabChrome() {
+  const isGrid = S.activeTab === 'grid';
+  $('toolbar').hidden = !isGrid;
+  if (!isGrid) $('presetBanner').hidden = true;
+}
+
 function showGridTab() {
   S.activeTab = 'grid';
   $('sqlview').hidden = true;
@@ -6414,6 +6431,7 @@ function showGridTab() {
   $('grid').hidden = false;
   $('tabSql').setAttribute('aria-selected', 'false');
   $('tabTimeline').setAttribute('aria-selected', 'false');
+  syncTabChrome();
   if (S.sourceId) checkPresets(S.sourceId); // restore the banner, hidden while on SQL/Timeline
 }
 function showTimelineTab() {
@@ -6426,7 +6444,7 @@ function showTimelineTab() {
   $('tabTimeline').setAttribute('aria-selected', 'true');
   document.querySelectorAll('#sourceTabs .tab').forEach((t) => t.setAttribute('aria-selected', 'false'));
   renderSidebar(); // same reasoning as showSqlTab — S.sourceId is stale for highlighting purposes here
-  $('presetBanner').hidden = true;
+  syncTabChrome(); // the Timeline has its own tag filter and stats
   buildTimeline(); // always fresh — tags can change in any table while this tab isn't the active one
 }
 $('tabSql').onclick = showSqlTab;
@@ -6525,7 +6543,7 @@ async function showPluginTab(tabId) {
   hidePluginViews();
   document.querySelectorAll('.tab-plugin').forEach((t) => t.setAttribute('aria-selected', String(t.dataset.tabId === tabId)));
   renderSidebar(); // same reasoning as showSqlTab — S.sourceId shouldn't read as active here
-  $('presetBanner').hidden = true;
+  syncTabChrome();
 
   let m = pluginTabMounts.get(tabId);
   if (m && m.gen !== tab.gen) { m.container.remove(); pluginTabMounts.delete(tabId); m = null; }
@@ -8311,6 +8329,15 @@ function findKeyConflict(key, currentAction) {
   return null;
 }
 
+/* The shortcuts that still mean something when the grid isn't the active
+   tab — everything else moves a cursor, edits the grid's view spec or
+   tags its rows, none of which the analyst can see from the SQL, Timeline
+   or a plugin tab. They used to fire anyway: a tag hotkey pressed on the
+   SQL pane silently tagged whatever was selected in the grid behind it,
+   which the tag ribbon at least hinted at before the toolbar started
+   hiding itself there (see syncTabChrome). */
+const TAB_AGNOSTIC_ACTIONS = new Set(['openSettings', 'openTables', 'openSearchAll']);
+
 const ACTION_HANDLERS = {
   moveDown: (e, pageRows) => moveCursor(S.cursor + 1, e.shiftKey),
   moveUp: (e, pageRows) => moveCursor(S.cursor - 1, e.shiftKey),
@@ -8880,13 +8907,13 @@ document.addEventListener('keydown', (e) => {
 
   const pageRows = Math.floor(($('body').clientHeight - headH()) / ROW_H) - 1;
   const action = matchAction(e);
-  if (action && ACTION_HANDLERS[action]) {
+  if (action && ACTION_HANDLERS[action] && (S.activeTab === 'grid' || TAB_AGNOSTIC_ACTIONS.has(action))) {
     e.preventDefault();
     ACTION_HANDLERS[action](e, pageRows);
     return;
   }
   const digit = e.code && e.code.startsWith('Digit') ? e.code.slice(5) : e.key;
-  if (/^[1-9]$/.test(digit)) {
+  if (/^[1-9]$/.test(digit) && S.activeTab === 'grid') {
     const t = S.tags.find((x) => x.hotkey === digit);
     if (t) { e.preventDefault(); e.shiftKey ? applyTagToView(t) : applyTag(t); }
   }
