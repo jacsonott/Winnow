@@ -8,6 +8,9 @@ venv/
 *.db
 *.db-wal
 *.db-shm
+# Advisory "this case is open" markers (store._CaseLock) — per-process,
+# meaningless on another machine, and stale the moment the server exits.
+*.winnow-lock
 *.csv
 *.tsv
 *.winnow_case.json

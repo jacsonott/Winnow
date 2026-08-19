@@ -27,7 +27,8 @@ from pydantic import BaseModel
 
 import plugin_api
 import workspace as WS
-from store import SQLITE_IMPORT_EXTENSIONS, OpCancelled, Store, sweep_orphan_views
+from store import (SQLITE_IMPORT_EXTENSIONS, OpCancelled, Store, describe_case_lock,
+                   probe_case_lock, sweep_orphan_views)
 
 HERE = Path(__file__).parent
 
@@ -330,6 +331,7 @@ class ImportProfileWrite(BaseModel):
 
 class CaseOpen(BaseModel):
     path: str
+    force: bool = False  # open even though another Winnow holds it — see probe_case_lock
 
 
 class CaseCreate(BaseModel):
@@ -368,6 +370,31 @@ def api_case_open(body: CaseOpen):
     global STORE
     if not os.path.isfile(body.path):
         raise HTTPException(400, f"No case file at {body.path}")
+    # Re-opening the case that's already open is a no-op, not a reopen. Two
+    # reasons, and the second is the load-bearing one: the client's own
+    # state reset in openCase() is what that request is really for, and the
+    # open-before-close ordering below would otherwise make this process
+    # probe its *own* case lock and refuse itself.
+    # `not STORE.closed` matters: STORE outlives close() on both the case-
+    # switch path and the legacy-preset migration, and reopening a case
+    # whose Store has already been closed is a real reopen, not a no-op.
+    if STORE is not None and not STORE.closed and os.path.abspath(STORE.path) == os.path.abspath(body.path):
+        rec = WS.cases.find_by_path(body.path) or WS.cases.create(
+            body.path, name=os.path.splitext(os.path.basename(body.path))[0]
+        )
+        WS.cases.touch_opened(rec["id"])
+        return {"sources": STORE.list_sources(), "name": rec["name"]}
+    if not body.force:
+        holder = probe_case_lock(body.path)
+        if holder:
+            # 409 with a structured detail the frontend turns into the
+            # "open anyway / don't open" prompt. Advisory: re-POST with
+            # force=true is the way through, and nothing here can refuse it.
+            raise HTTPException(409, {
+                "error": "case_in_use",
+                "message": describe_case_lock(holder),
+                "holder": holder,
+            })
     # Open the new store BEFORE closing/replacing the old one. The old
     # order (close, then open) left a window where STORE pointed at a
     # closed connection — any request landing in it (or, if the open
@@ -1970,6 +1997,8 @@ def main() -> None:
     ap.add_argument("--case", default=None, help="SQLite case file (created if missing). Omit to land on the home screen.")
     ap.add_argument("--open", dest="open_files", nargs="*", default=[], help="CSVs to ingest at startup")
     ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--force", action="store_true",
+                    help="Open --case even if another Winnow already has it open")
     ap.add_argument("--port", type=int, default=8777)
     ap.add_argument("--no-fts", action="store_true", help="Skip full-text index (faster import)")
     ap.add_argument("--no-browser", action="store_true")
@@ -2004,6 +2033,21 @@ def main() -> None:
     case_path = args.case or ("case.db" if args.open_files else None)
     url = f"http://{args.host}:{args.port}"
     if case_path:
+        # Refuse rather than warn: this entrypoint is scriptable, a warning
+        # scrolls past, and opening a case twice is the failure the lock
+        # exists to catch. --force is the deliberate way through, and a
+        # holder that has actually died reads as free (stale heartbeat).
+        holder = probe_case_lock(case_path) if not args.force else None
+        if holder:
+            print(
+                f"ERROR: {os.path.abspath(case_path)} is already open in another Winnow.\n"
+                f"  {describe_case_lock(holder)}\n"
+                "  Opening one case in two servers has no cache invalidation between them, "
+                "and on a network share WAL locking doesn't work at all.\n"
+                "  Pass --force to open it anyway.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         STORE = _open_store(case_path)
         legacy_presets = STORE.pop_legacy_presets()
         if legacy_presets:
