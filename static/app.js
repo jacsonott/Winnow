@@ -373,12 +373,16 @@ async function pollJobs() {
 
   for (const j of finishedNow) {
     if (j.kind === 'derive') {
-      // A derive job's "rows" are one column's values, not an import.
-      const res = (j.result || [])[0] || {};
+      // A derive job's "rows" are its columns' values, not an import — and
+      // a flatten builds several columns in the one job, so the failure
+      // count has to be summed across them rather than read off the first.
+      const cols = j.result || [];
+      const res = cols[0] || {};
       if (j.status === 'done') {
-        const failed = res.parse_failures || 0;
-        toast(`"${j.name}": ${(res.rows || 0).toLocaleString()} values derived`
-          + (failed ? ` · ${failed.toLocaleString()} could not be parsed` : ''), failed ? 6000 : 3000);
+        const failed = cols.reduce((a, c) => a + (c.parse_failures || 0), 0);
+        const what = cols.length > 1 ? `${cols.length} columns` : `"${j.name}"`;
+        toast(`${what}: ${(res.rows || 0).toLocaleString()} rows read`
+          + (failed ? ` · ${failed.toLocaleString()} value${failed === 1 ? '' : 's'} not found` : ''), failed ? 6000 : 3000);
       } else if (j.status === 'error') {
         toast(`Could not derive "${j.name}": ${j.error}`, 8000);
       }
@@ -1372,14 +1376,32 @@ function columnMenuItems(name) {
   }
   if (items.length) items.push('-');
   items.push({ label: 'Add datetime column from this…', onclick: () => openDerivedColumnModal(name) });
+  // Offered on any base column rather than only ones that sniff as
+  // structured: the check costs a sample scan, the menu is built
+  // synchronously, and a column of JSON that happens to start with a
+  // non-document row would silently lose the entry. The picker itself says
+  // so when there's nothing in there.
+  if (!c.derived && S.sourceId >= 0) {
+    items.push({ label: 'Flatten JSON/XML into columns…', onclick: () => openFlattenModal(name) });
+  }
   if (c.derived) {
     if (c.parse_failures) {
+      // "Unparsed" is the right word for a timestamp that didn't convert;
+      // for an extracted field the same count means the document had no
+      // such field, which is a different thing to go and look at.
+      const extracted = c.derived_kind === 'text';
       items.push({
-        label: `Show ${c.parse_failures.toLocaleString()} unparsed row${c.parse_failures === 1 ? '' : 's'}`,
+        label: extracted
+          ? `Show ${c.parse_failures.toLocaleString()} row${c.parse_failures === 1 ? '' : 's'} without this field`
+          : `Show ${c.parse_failures.toLocaleString()} unparsed row${c.parse_failures === 1 ? '' : 's'}`,
         onclick: () => showUnparsedRows(c),
       });
     }
-    items.push({ label: 'Re-derive…', onclick: () => openDerivedColumnModal(c.derived_from, c) });
+    if (c.derived_kind === 'text') {
+      items.push({ label: 'Change the field path…', onclick: () => editExtractedPath(c) });
+    } else {
+      items.push({ label: 'Re-derive…', onclick: () => openDerivedColumnModal(c.derived_from, c) });
+    }
     items.push({ label: 'Remove derived column…', onclick: () => removeDerivedColumn(c) });
   }
   return items;
@@ -1401,6 +1423,24 @@ async function showUnparsedRows(c) {
   }
 }
 
+/* An extracted column's whole definition is its path, so "re-derive" here
+   is "edit the path" — the timestamp modal's format-and-parameters shape
+   has nothing to offer it. Recomputes in place via the same rederive
+   endpoint, so the column keeps its name, position and width. */
+async function editExtractedPath(c) {
+  const current = (c.derived_params || {}).path || '';
+  const next = await promptDialog(
+    `Field path for "${c.name}" (read from "${c.derived_from}"):`, current, { okLabel: 'Recompute' });
+  if (next === null || next.trim() === current) return;
+  try {
+    await post(`/api/derived/${c.derived_id}/rederive`, { params: { path: next.trim() } });
+    await showDerivedColumnsSoon();
+    toast(`Recomputing "${c.name}"…`);
+  } catch (e) {
+    toast('Could not change the path: ' + e.message, 6000);
+  }
+}
+
 async function removeDerivedColumn(c) {
   const ok = await confirmDialog(
     `Remove the derived column "${c.name}"? Its values are recomputed from "${c.derived_from}", so it can be added back at any time.`,
@@ -1416,6 +1456,223 @@ async function removeDerivedColumn(c) {
   } catch (e) {
     toast('Could not remove: ' + e.message, 6000);
   }
+}
+
+/* ------------------------------------------- extracted (JSON/XML) columns
+
+   These share the derived-column machinery with the timestamp ops — same
+   registry, same backfill, same sidecar, same session portability. The
+   only thing that differs is the question being asked, which is why they
+   are a separate `family` in the registry and a separate pair of entry
+   points here rather than another row in the timestamp modal's dropdown. */
+
+function extractOpFor(kind) { return kind === 'xml' ? 'xml_field' : 'json_field'; }
+
+/* A name that doesn't collide with a column already on the table, since
+   the obvious suggestion (a path's last component) collides constantly —
+   `$.user.name` and `$.host.name` both want "name". */
+function uniqueColumnName(base, taken) {
+  let name = (base || 'field').trim() || 'field';
+  if (!taken.has(name.toLowerCase())) return name;
+  for (let i = 2; i < 500; i++) {
+    const candidate = `${name} ${i}`;
+    if (!taken.has(candidate.toLowerCase())) return candidate;
+  }
+  return `${name} ${Date.now()}`;
+}
+
+function takenColumnNames() {
+  return new Set(S.columns.map((c) => c.name.toLowerCase()));
+}
+
+/* Suggests the column name the way structparse.suggest_name does — the
+   last meaningful component of the path, or an EVTX-style predicate's own
+   value, which is nearly always what the analyst would have typed. */
+function suggestColumnName(path, kind) {
+  const s = String(path);
+  const pred = s.match(/\[@[\w:.-]+='([^']*)'\]$/);
+  if (pred && pred[1].trim()) return pred[1].trim();
+  if (s.includes('@') && !s.trim().endsWith(']')) {
+    const at = s.lastIndexOf('@');
+    const attr = s.slice(at + 1);
+    const tail = s.slice(0, at).replace(/\/$/, '').split('/').pop().replace(/\[[^\]]*\]$/, '');
+    return (tail ? `${tail} ${attr}` : attr).trim();
+  }
+  if (kind === 'json') {
+    const parts = s.replace(/^\$/, '').match(/\["'](?:[^"']*)["']|\[\d+\]|[^.[\]]+/g) || [];
+    for (let i = parts.length - 1; i >= 0; i--) {
+      const seg = parts[i];
+      if (/^\[\d+\]$/.test(seg)) continue;
+      return seg.replace(/^\["']|["']\]$/g, '').replace(/^\[|\]$/g, '');
+    }
+    return s;
+  }
+  return s.replace(/\/$/, '').split('/').pop().replace(/\[\d+\]$/, '') || s;
+}
+
+/* One field, one column — the "add as a column" item on a right-clicked
+   node in the detail pane. No modal: the path came from a click, the name
+   is derivable, and interrupting that with a dialog to confirm two things
+   the analyst just expressed would be the wrong trade. The toast carries
+   the undo-shaped escape hatch instead (remove it from the header menu). */
+async function addExtractedColumn(column, path, kind) {
+  if (S.sourceId < 0) { toast("Derived columns aren't available on merged tables", 5000); return; }
+  const name = uniqueColumnName(suggestColumnName(path, kind), takenColumnNames());
+  setBusy(true);
+  try {
+    await post('/api/derived', {
+      source_id: S.sourceId, name, input_column: column,
+      op_id: extractOpFor(kind), params: { path },
+    });
+    await showDerivedColumnsSoon();
+    toast(`Adding "${name}" from ${ellipsize(path, 30)}…`);
+  } catch (e) {
+    toast('Could not add column: ' + e.message, 6000);
+  } finally { setBusy(false); }
+}
+
+/* Brings the new columns into view without waiting for the backfill —
+   same idiom the timestamp modal already uses. The columns appear
+   immediately with status 'building' and fill in top-down; the jobs panel
+   tracks progress and pollJobs reports the result. Blocking the UI on a
+   pass over a million rows would be the wrong trade for a column the
+   analyst can already see taking shape. */
+async function showDerivedColumnsSoon() {
+  await loadSources();
+  await openSource(S.sourceId);
+  startJobsPoll();
+}
+
+/* The flatten picker: every field found in a sample of the column, with
+   how much of the sample carried it, ticked into columns in one pass.
+
+   Coverage is shown and pre-selection is driven by it because that's the
+   judgement the analyst is actually making — a field in 3 of 200 rows is
+   usually noise from one outlier record, and a field in all 200 is a
+   column. Everything at full coverage starts ticked; the rest start
+   unticked and one click away. */
+async function openFlattenModal(column) {
+  if (S.sourceId < 0) { toast("Derived columns aren't available on merged tables", 5000); return; }
+  let found;
+  setBusy(true);
+  try {
+    found = await post('/api/derived/paths', { source_id: S.sourceId, column });
+  } catch (e) {
+    toast('Could not read that column: ' + e.message, 6000);
+    return;
+  } finally { setBusy(false); }
+
+  if (!found.kind || !found.paths.length) {
+    toast(`"${column}" doesn't look like JSON or XML`, 5000);
+    return;
+  }
+
+  const taken = takenColumnNames();
+  const rows = found.paths.map((p) => ({
+    path: p.path,
+    coverage: p.coverage,
+    count: p.count,
+    sample: p.sample,
+    // Present in every sampled row *and* actually carrying a value. A
+    // container element like <TimeCreated SystemTime="…"/> is present
+    // everywhere and empty everywhere; pre-ticking it would build a column
+    // of blanks (its value is on the attribute, one row down the list).
+    checked: p.coverage >= 1 && p.nonempty > 0,
+    name: uniqueColumnName(p.suggested_name || suggestColumnName(p.path, found.kind), taken),
+  }));
+  // Reserve every suggested name up front, so two paths that suggest the
+  // same one get distinct defaults rather than colliding at submit time.
+  rows.forEach((r) => taken.add(r.name.toLowerCase()));
+
+  modal(`Flatten "${column}" into columns`, (body) => {
+    const head = el('div', 'flatten-head');
+    head.append(el('div', 'fb-help',
+      `${found.kind.toUpperCase()} · ${found.paths.length} field${found.paths.length === 1 ? '' : 's'} found in ${found.sampled.toLocaleString()} sampled row${found.sampled === 1 ? '' : 's'}`));
+    const bulk = el('div');
+    const all = el('button', 'btn ghost', 'Select all');
+    const none = el('button', 'btn ghost', 'Select none');
+    bulk.append(all, none);
+    head.append(bulk);
+    body.append(head);
+
+    const list = el('div', 'flatten-list');
+    const count = el('div', 'fb-help');
+
+    function updateCount() {
+      const n = rows.filter((r) => r.checked).length;
+      count.textContent = n ? `${n} column${n === 1 ? '' : 's'} will be added, in a single pass over the table.`
+                            : 'Nothing selected.';
+      addBtn.disabled = !n;
+    }
+
+    function renderRows() {
+      list.replaceChildren();
+      for (const r of rows) {
+        const row = el('div', 'flatten-row');
+        const box = el('input');
+        box.type = 'checkbox';
+        box.checked = r.checked;
+        box.onchange = () => { r.checked = box.checked; updateCount(); };
+
+        // Name over path: the name is what the analyst edits, the path is
+        // what the column actually means, and burying the latter in a
+        // tooltip makes two similarly-named fields impossible to tell
+        // apart at a glance.
+        const namePart = el('div', 'flatten-name');
+        const name = el('input');
+        name.type = 'text';
+        name.value = r.name;
+        name.oninput = () => { r.name = name.value; };
+        const path = el('div', 'flatten-path', r.path);
+        path.title = r.path;
+        namePart.append(name, path);
+
+        const cov = el('div', 'flatten-cov', `${Math.round(r.coverage * 100)}%`);
+        cov.title = `${r.count.toLocaleString()} of ${found.sampled.toLocaleString()} sampled rows have this field`;
+        const sample = el('div', 'flatten-sample', r.sample || '—');
+        sample.title = r.sample || '';
+        row.append(box, namePart, cov, sample);
+        list.append(row);
+      }
+      updateCount();
+    }
+
+    all.onclick = () => { rows.forEach((r) => { r.checked = true; }); renderRows(); };
+    none.onclick = () => { rows.forEach((r) => { r.checked = false; }); renderRows(); };
+
+    const addBtn = el('button', 'btn primary', 'Add columns');
+    addBtn.onclick = async () => {
+      const picked = rows.filter((r) => r.checked);
+      const names = picked.map((r) => r.name.trim());
+      if (names.some((n) => !n)) { toast('Every selected column needs a name', 4000); return; }
+      const lower = names.map((n) => n.toLowerCase());
+      const dupe = lower.find((n, i) => lower.indexOf(n) !== i);
+      if (dupe) { toast(`Two columns are both called "${dupe}" — rename one`, 5000); return; }
+      $('modal').hidden = true;
+      setBusy(true);
+      try {
+        await post('/api/derived/batch', {
+          source_id: S.sourceId,
+          columns: picked.map((r, i) => ({
+            name: names[i], input_column: column,
+            op_id: extractOpFor(found.kind), params: { path: r.path },
+          })),
+        });
+        await showDerivedColumnsSoon();
+        toast(`Adding ${names.length} column${names.length === 1 ? '' : 's'}…`);
+      } catch (e) {
+        toast('Could not add columns: ' + e.message, 6000);
+      } finally { setBusy(false); }
+    };
+
+    renderRows();
+    body.append(list, count);
+    const foot = el('div', 'row-actions');
+    const cancel = el('button', 'btn ghost', 'Cancel');
+    cancel.onclick = () => { $('modal').hidden = true; };
+    foot.append(cancel, addBtn);
+    body.append(foot);
+  }, { wide: true });
 }
 
 /* The add/re-derive modal. `prefill` is the column to parse; `editing` is
@@ -2691,6 +2948,9 @@ async function loadTags() {
   S.tagCounts = d.counts || {};
   renderTagRibbon();
   renderTimelineTagFilter();
+  // Deleting a tag takes its history with it server-side, and opening a
+  // different case swaps the Store (and so the whole stack) underneath us.
+  refreshUndoState();
 }
 
 function renderTagRibbon() {
@@ -2805,6 +3065,7 @@ async function tagWholeViewSelection(tag, on) {
   renderTagRibbon();
   render();
   drawRail();
+  refreshUndoState();
   const n = res.affected != null ? res.affected : count;
   toast(`${on ? 'Tagged' : 'Untagged'} ${n.toLocaleString()} row${n === 1 ? '' : 's'} · ${tag.name}`);
 }
@@ -2845,7 +3106,52 @@ async function tagRowsAtPositions(tag, positions, on) {
   renderTagRibbon();
   render();
   drawRail();
+  refreshUndoState();
   toast(`${on ? 'Tagged' : 'Untagged'} ${rows.length.toLocaleString()} row${rows.length === 1 ? '' : 's'} · ${tag.name}`);
+}
+
+/* ---------------------------------------------------------- undo (tags) */
+
+/* The history itself lives server-side, for one reason: only the server
+   knows which rows a change actually moved. "Tag the 171k rows in this
+   view" is a set operation over a materialised view that this client never
+   fetches a row of, and even on the explicit-selection path, undoing by
+   re-sending the same rids with the direction flipped would strip the tag
+   off rows that already carried it before. So the client tracks nothing
+   but what the next undo *would* say, for the menu label. */
+let UNDO_NEXT = { available: false, depth: 0 };
+
+function setUndoState(next) {
+  UNDO_NEXT = next || { available: false, depth: 0 };
+}
+
+async function refreshUndoState() {
+  try { setUndoState(await api('/api/row_tags/undo')); }
+  catch { setUndoState(null); }
+}
+
+async function undoLastTagChange() {
+  let res;
+  setBusy(true);
+  try {
+    res = await post('/api/row_tags/undo', {});
+  } catch (e) {
+    // 400 is the empty-history case, which is a normal thing to press
+    // Ctrl+Z into rather than an error worth a five-second toast.
+    toast(e.message === 'Nothing to undo' ? 'Nothing to undo' : 'Could not undo: ' + e.message,
+          e.message === 'Nothing to undo' ? 2000 : 5000);
+    await refreshUndoState();
+    return;
+  } finally { setBusy(false); }
+  S.tagCounts = res.counts || {};
+  setUndoState(res.next);
+  // Same reasoning as the bulk tag path: the server changed rows this
+  // client may never have fetched, so there is nothing to patch in place.
+  clearPageCache();
+  renderTagRibbon();
+  render();
+  drawRail();
+  toast(`Undone: ${res.undone}`);
 }
 
 async function applyTagToView(tag) {
@@ -2860,6 +3166,7 @@ async function applyTagToView(tag) {
   renderTagRibbon();
   render();
   drawRail();
+  refreshUndoState();
   toast(`Tagged ${res.affected.toLocaleString()} rows · ${tag.name}`);
 }
 
@@ -2896,22 +3203,12 @@ function prettyXml(xml) {
   return out.trim();
 }
 
-function appendJsonHighlighted(container, jsonText) {
-  const re = /("(?:\\.|[^"\\])*"(\s*:)?|\btrue\b|\bfalse\b|\bnull\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g;
-  let last = 0, m;
-  while ((m = re.exec(jsonText))) {
-    if (m.index > last) container.append(jsonText.slice(last, m.index));
-    const tok = m[0];
-    let cls = 'jtok-num';
-    if (tok[0] === '"') cls = m[2] ? 'jtok-key' : 'jtok-str';
-    else if (tok === 'true' || tok === 'false') cls = 'jtok-bool';
-    else if (tok === 'null') cls = 'jtok-null';
-    container.append(el('span', cls, tok));
-    last = m.index + tok.length;
-  }
-  container.append(jsonText.slice(last));
-}
-
+/* The unhighlighted-but-readable fallback for XML the browser's own
+   parser rejects — truncated fragments, mismatched tags, the shapes real
+   evidence actually contains. Regex-based on purpose: it has to degrade
+   rather than throw, which is exactly what a parser can't do. Nothing it
+   emits carries a path, because there is no trustworthy structure to
+   address in a document that didn't parse. */
 function appendXmlHighlighted(container, xmlText) {
   const tagRe = /<(\/?)([a-zA-Z_][\w:.-]*)((?:\s+[a-zA-Z_][\w:.-]*\s*=\s*"[^"]*")*)\s*(\/?)>/g;
   const attrRe = /([a-zA-Z_][\w:.-]*)(\s*=\s*)("[^"]*")/g;
@@ -2939,15 +3236,219 @@ function appendXmlHighlighted(container, xmlText) {
   container.append(xmlText.slice(last));
 }
 
+/* ------------------ path-aware pretty-printing
+
+   The pretty-printer builds from the *parsed* document rather than
+   regexing over its serialized text, because every node it emits carries
+   the path that addresses it (`data-path`) on the span. That path is what
+   makes "right-click a field → add it as a column" a single click instead
+   of a syntax the analyst has to learn and type: the same string the
+   backend's json_field/xml_field operations take is already sitting on the
+   node under the pointer.
+
+   Everything appends DOM nodes and never innerHTML — field values are
+   untrusted forensic data that routinely contains HTML-looking text. */
+
+function jsonPathStep(base, seg) {
+  if (typeof seg === 'number') return `${base}[${seg}]`;
+  return /^[^.[\]"']+$/.test(seg) ? `${base}.${seg}` : `${base}["${String(seg).replace(/(["\\])/g, '\\$1')}"]`;
+}
+
+function jsonTokenClass(v) {
+  if (v === null) return 'jtok-null';
+  if (typeof v === 'boolean') return 'jtok-bool';
+  if (typeof v === 'number') return 'jtok-num';
+  return 'jtok-str';
+}
+
+/* A span the detail menu can act on: the path that addresses it, and the
+   raw (unformatted) value it holds, so "filter to this" filters to what's
+   in the data rather than to its pretty-printed rendering. */
+function fieldNode(cls, text, path, value, kind) {
+  const n = el('span', cls, text);
+  if (path) {
+    n.dataset.path = path;
+    n.dataset.structKind = kind;
+    if (value !== undefined) n.dataset.value = value;
+    n.classList.add('struct-node');
+  }
+  return n;
+}
+
+function appendJsonNodes(container, value, path, indent) {
+  const pad = '  '.repeat(indent);
+  const padIn = '  '.repeat(indent + 1);
+  if (Array.isArray(value)) {
+    if (!value.length) { container.append('[]'); return; }
+    container.append('[\n');
+    value.forEach((v, i) => {
+      container.append(padIn);
+      appendJsonNodes(container, v, jsonPathStep(path, i), indent + 1);
+      container.append(i < value.length - 1 ? ',\n' : '\n');
+    });
+    container.append(pad + ']');
+    return;
+  }
+  if (value && typeof value === 'object') {
+    const keys = Object.keys(value);
+    if (!keys.length) { container.append('{}'); return; }
+    container.append('{\n');
+    keys.forEach((k, i) => {
+      const kp = jsonPathStep(path, k);
+      const leaf = value[k];
+      const scalar = !leaf || typeof leaf !== 'object';
+      container.append(padIn);
+      // The key carries the path too, so clicking either half of
+      // `"user": "jacson"` means the same field.
+      container.append(fieldNode('jtok-key', JSON.stringify(k), kp,
+        scalar ? jsonLeafText(leaf) : undefined, 'json'));
+      container.append(': ');
+      appendJsonNodes(container, leaf, kp, indent + 1);
+      container.append(i < keys.length - 1 ? ',\n' : '\n');
+    });
+    container.append(pad + '}');
+    return;
+  }
+  container.append(fieldNode(jsonTokenClass(value), JSON.stringify(value), path,
+    jsonLeafText(value), 'json'));
+}
+
+/* Mirrors structparse._leaf_text — what the extracted column would hold,
+   which is what the filter/copy actions should act on. */
+function jsonLeafText(v) {
+  if (v === null || v === undefined) return '';
+  if (typeof v === 'boolean') return v ? 'true' : 'false';
+  if (typeof v === 'object') return JSON.stringify(v);
+  return String(v);
+}
+
+/* XML is rendered from a real parse when the browser can manage one, and
+   falls back to the old heuristic reflow when it can't — forensic XML
+   fragments are often malformed or truncated, and degrading to
+   "unhighlighted but readable" beats showing nothing. Only the parsed path
+   carries `data-path`; there is nothing trustworthy to address in a
+   document that didn't parse. */
+function parseXmlDoc(text) {
+  const body = text.trim();
+  // Same guard as structparse.load_xml: a DOCTYPE is refused rather than
+  // parsed. DOMParser won't expand external entities, but keeping the two
+  // sides on the same rule means the detail pane never offers a path the
+  // backend would then decline to extract.
+  if (/<!DOCTYPE/i.test(body)) return null;
+  const parse = (t) => {
+    const doc = new DOMParser().parseFromString(t, 'application/xml');
+    return doc.querySelector('parsererror') ? null : doc.documentElement;
+  };
+  return parse(body)
+    || parse(`<winnow-fragment>${body.replace(/^<\?xml[^>]*\?>/, '')}</winnow-fragment>`);
+}
+
+function xmlLocal(name) { return name.includes(':') ? name.split(':').pop() : name; }
+
+const XML_ID_ATTRS = ['name', 'key', 'id'];
+
+/* The frontend twin of structparse._sibling_selectors — repeated elements
+   that carry an identifying attribute are addressed by it rather than by
+   position, so an EVTX `<Data Name="LogonType">` offers a path that means
+   the same thing in every row. Kept in step with the backend: a path this
+   produces has to be one xml_field can resolve. */
+function xmlSiblingSelectors(kids) {
+  const groups = new Map();
+  kids.forEach((c, i) => {
+    const tag = xmlLocal(c.tagName);
+    if (!groups.has(tag)) groups.set(tag, []);
+    groups.get(tag).push(i);
+  });
+  const sel = new Array(kids.length).fill(0);
+  for (const idxs of groups.values()) {
+    let chosen = null;
+    if (idxs.length > 1) {
+      for (const want of XML_ID_ATTRS) {
+        const real = idxs.map((i) => [...kids[i].attributes].find((a) => xmlLocal(a.name).toLowerCase() === want));
+        const vals = real.map((a) => (a ? a.value : null));
+        if (vals.every((v) => v !== null) && new Set(vals).size === vals.length) {
+          chosen = { attr: xmlLocal(real[0].name), vals };
+          break;
+        }
+      }
+    }
+    idxs.forEach((i, slot) => { sel[i] = chosen ? [chosen.attr, chosen.vals[slot]] : slot; });
+  }
+  return sel;
+}
+
+function xmlStep(tag, sel) {
+  if (Array.isArray(sel)) return `${tag}[@${sel[0]}='${sel[1]}']`;
+  return sel === 0 ? tag : `${tag}[${sel}]`;
+}
+
+function appendXmlNodes(container, node, path, indent) {
+  const pad = '  '.repeat(indent);
+  const tag = xmlLocal(node.tagName);
+  const selector = path.endsWith(']') && /\[@[\w:.-]+='[^']*'\]$/.test(path);
+  const kids = [...node.children];
+  // A leaf element's text is its value, and the tag is what most people
+  // aim at — so the opening tag carries it too, rather than only the text
+  // run and the closing tag. Computed before anything is emitted because
+  // the opening tag is written first.
+  const leafText = kids.length ? undefined : (node.textContent || '').trim();
+  container.append(pad + '<');
+  container.append(fieldNode('xtok-tag', tag, path, leafText, 'xml'));
+  for (const a of node.attributes) {
+    const an = xmlLocal(a.name);
+    container.append(' ');
+    // An attribute that selected this element restates its own predicate;
+    // it still renders, it just isn't offered as a separate field.
+    const apath = selector && path.includes(`@${an}='${a.value}'`) ? null : `${path}@${an}`;
+    container.append(fieldNode('xtok-attr', an, apath, a.value, 'xml'));
+    container.append('=');
+    container.append(fieldNode('xtok-attrval', `"${a.value}"`, apath, a.value, 'xml'));
+  }
+  if (!kids.length) {
+    if (!leafText) { container.append('/>\n'); return; }
+    container.append('>');
+    container.append(fieldNode('xtok-text', leafText, path, leafText, 'xml'));
+    container.append('</');
+    container.append(fieldNode('xtok-tag', tag, path, leafText, 'xml'));
+    container.append('>\n');
+    return;
+  }
+  container.append('>\n');
+  const sel = xmlSiblingSelectors(kids);
+  kids.forEach((child, i) => {
+    appendXmlNodes(container, child, `${path ? path + '/' : ''}${xmlStep(xmlLocal(child.tagName), sel[i])}`, indent + 1);
+  });
+  container.append(pad + '</');
+  container.append(fieldNode('xtok-tag', tag, path, undefined, 'xml'));
+  container.append('>\n');
+}
+
 function renderDetailContent(v) {
   const json = tryParseJSON(v);
   if (json !== null && typeof json === 'object') {
     const pre = el('pre', 'detail-pretty');
-    appendJsonHighlighted(pre, JSON.stringify(json, null, 2));
+    appendJsonNodes(pre, json, '$', 0);
     return pre;
   }
   if (looksLikeXml(v)) {
+    const root = parseXmlDoc(v);
+    if (root) {
+      const pre = el('pre', 'detail-pretty');
+      // A synthetic fragment wrapper is ours, not the document's — its
+      // children are what the analyst actually has, and what paths are
+      // written against.
+      if (root.tagName === 'winnow-fragment') {
+        const kids = [...root.children];
+        const sel = xmlSiblingSelectors(kids);
+        kids.forEach((c, i) => appendXmlNodes(pre, c, xmlStep(xmlLocal(c.tagName), sel[i]), 0));
+      } else {
+        appendXmlNodes(pre, root, xmlLocal(root.tagName), 0);
+      }
+      return pre;
+    }
     try {
+      // Unparseable: the old heuristic reflow, highlighted but not
+      // addressable.
       const pre = el('pre', 'detail-pretty');
       appendXmlHighlighted(pre, prettyXml(v));
       return pre;
@@ -2977,8 +3478,15 @@ function showDetail(pos) {
   S.columns.forEach((c, i) => {
     const v = r.cells[i];
     if (v == null || v === '') return;
-    dl.append(el('dt', null, c.name));
+    const dt = el('dt', null, c.name);
+    dt.dataset.col = c.name;
+    dl.append(dt);
     const dd = el('dd');
+    // Which column a selection or a clicked node belongs to — the detail
+    // menu's actions (filter, exclude, add as column) all need it, and the
+    // <dd> is the only thing that still knows once you're deep inside a
+    // pretty-printed document.
+    dd.dataset.col = c.name;
     dd.append(renderDetailContent(displayCell(c.name, v)));
     dl.append(dd);
   });
@@ -2987,6 +3495,147 @@ function showDetail(pos) {
   note.dataset.rid = r.rid;
   note.dataset.sourceId = r.source_id;
   $('noteStatus').textContent = '';
+}
+
+/* ------------------------------------------------- detail pane menu
+
+   Right-clicking in the detail pane answers whichever of two questions the
+   pointer is actually over, and often both at once:
+
+   - text is selected → act on that substring (copy it, filter the column
+     to it, search the table for it). A selection inside a JSON blob is a
+     fragment, so it filters as *contains*, never as `=`: the cell it came
+     from is a whole document and an exact match would return nothing.
+   - the click landed on a node of a parsed JSON/XML document → act on that
+     field (add it as a column, filter to its exact value, copy it). This
+     is the path that makes extraction a click rather than a syntax to
+     learn — `data-path` was put on the node by the pretty-printer.
+
+   Both are scoped to the column the <dd> belongs to. */
+
+function detailSelectionText() {
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed) return '';
+  const node = sel.anchorNode;
+  const holder = node && (node.nodeType === 1 ? node : node.parentElement);
+  // A selection that started outside the detail fields isn't ours.
+  if (!holder || !holder.closest('#detailFields')) return '';
+  return String(sel).trim();
+}
+
+function detailMenuItems(ctx) {
+  const items = [];
+  const { column, selection, node } = ctx;
+
+  if (selection) {
+    const shown = ellipsize(selection);
+    items.push({ header: `Selection in ${column}` });
+    items.push({
+      label: 'Copy',
+      onclick: () => writeClipboardText(Promise.resolve(selection), 'Copied selection'),
+    });
+    items.push({
+      label: `Filter ${column} to ${shown}`,
+      title: 'Filters to rows whose value contains this text',
+      onclick: () => filterByContains(column, selection),
+    });
+    items.push({
+      label: `Filter ${column} to ${shown} only`,
+      title: 'Drops every other filter and the search — the timeframe filter stays',
+      onclick: () => filterByContains(column, selection, { only: true }),
+    });
+    items.push({
+      label: `Exclude ${shown}`,
+      onclick: () => filterByContains(column, selection, { exclude: true }),
+    });
+    items.push({
+      label: `Search all columns for ${shown}`,
+      onclick: () => searchForText(selection),
+    });
+  }
+
+  if (node && node.dataset.path) {
+    const path = node.dataset.path;
+    const value = node.dataset.value;
+    const kind = node.dataset.structKind;
+    if (items.length) items.push('-');
+    items.push({ header: ellipsize(path, 48), literal: true });
+    items.push({
+      label: 'Add as a column',
+      title: `Adds a column holding ${path} from every row of "${column}"`,
+      onclick: () => addExtractedColumn(column, path, kind),
+    });
+    if (value !== undefined && value !== '') {
+      items.push({
+        label: `Filter ${column} to this value`,
+        title: 'Filters to rows whose document contains this value',
+        onclick: () => filterByContains(column, value),
+      });
+      items.push({
+        label: 'Copy value',
+        onclick: () => writeClipboardText(Promise.resolve(value), 'Copied value'),
+      });
+    }
+    items.push({ label: 'Copy path', onclick: () => writeClipboardText(Promise.resolve(path), 'Copied path') });
+    items.push({
+      label: 'Flatten this document into columns…',
+      onclick: () => openFlattenModal(column),
+    });
+  }
+  return items;
+}
+
+$('detail').addEventListener('contextmenu', (e) => {
+  const dd = e.target.closest('#detailFields dd, #detailFields dt');
+  if (!dd || !dd.dataset.col) return; // the note box and the header keep the browser's menu
+  const ctx = {
+    column: dd.dataset.col,
+    selection: detailSelectionText(),
+    node: e.target.closest('.struct-node'),
+  };
+  const items = detailMenuItems(ctx);
+  if (!items.length) return;
+  e.preventDefault();
+  contextMenu(e, items);
+});
+
+/* Contains-filtering, as distinct from filterByValue's `=`. A selection or
+   a field pulled out of a document is a *part* of the cell, so the filter
+   that finds it again is the substring one. Reuses the same raw-filter
+   syntax the header boxes take, and the same clearAllFilters seeding that
+   makes `only` correct (the timeframe filter survives, grouping is
+   stashed) rather than reimplementing either. */
+async function filterByContains(column, text, { only = false, exclude = false } = {}) {
+  const value = String(text == null ? '' : text);
+  if (!value) return;
+  if (/^\s|\s$/.test(value)) {
+    toast('That selection starts or ends with whitespace — trim it and try again', 5000);
+    return;
+  }
+  const raw = (exclude ? '!' : '') + value;
+  const shown = ellipsize(value);
+  if (only) {
+    await clearAllFilters({ column, raw });
+    toast(`Filtered ${column} to ${shown} · other filters cleared`);
+    return;
+  }
+  setColumnFilter(column, raw);
+  await rebuildView();
+  toast(`Filtered ${column} ${exclude ? 'not ' : ''}containing ${shown}`);
+}
+
+async function searchForText(text) {
+  const value = String(text || '').trim();
+  if (!value) return;
+  // 'contains' is the plain-substring mode (see #searchModeToggle) — a
+  // selection lifted out of a document is literal text, so regex mode
+  // would treat its dots and brackets as syntax.
+  if (S.searchMode !== 'contains') await setSearchMode('contains');
+  S.search = value;
+  $('search').value = value;
+  syncSearchExpansion(true);
+  await rebuildView({ keepScroll: false });
+  toast(`Searching for ${ellipsize(value)}`);
 }
 
 const saveNote = debounce(async () => {
@@ -3193,7 +3842,10 @@ function fillMenuNode(menu, items, rerender) {
   for (const item of items) {
     if (!item) continue;
     if (item === '-') { menu.append(el('div', 'menu-sep')); continue; }
-    if (item.header) { menu.append(el('div', 'menu-header', item.header)); continue; }
+    if (item.header) {
+      menu.append(el('div', 'menu-header' + (item.literal ? ' menu-header-literal' : ''), item.header));
+      continue;
+    }
     menu.append(menuItemNode(item, rerender));
   }
 }
@@ -7647,6 +8299,13 @@ function rowMenuTagItems(ctx) {
     });
   }
   if (!S.tags.length) items.push({ label: 'No tags in this case yet', disabled: true });
+  if (UNDO_NEXT.available) {
+    items.push({
+      label: `Undo: ${UNDO_NEXT.label}`,
+      hint: 'Ctrl+Z',
+      onclick: () => undoLastTagChange(),
+    });
+  }
   items.push({ label: 'Edit tags…', onclick: openTagEditor });
   return items;
 }
@@ -8986,6 +9645,7 @@ function openSettings() {
     fixedKeys.append(el('kbd', null, '1 – 9'), el('span', null, 'Toggle the tag with that hotkey on the selection'));
     fixedKeys.append(el('kbd', null, 'Shift + 1 – 9'), el('span', null, 'Apply that tag to every row in the current view'));
     fixedKeys.append(el('kbd', null, 'Alt + 1 – 0'), el('span', null, 'Switch tabs — 1 is the table you were last in, 2 – 0 the page tabs in strip order'));
+    fixedKeys.append(el('kbd', null, 'Ctrl/⌘ + Z'), el('span', null, 'Undo the last tag applied or removed (repeat to keep stepping back)'));
     fixedKeys.append(el('kbd', null, 'Esc'), el('span', null, 'Clear selection, or close a panel'));
     fixedKeys.append(el('kbd', null, 'Right-click a row'), el('span', null, 'Tag it, filter to or exclude that cell’s value, copy'));
     fixedKeys.append(el('kbd', null, 'Right-click a tab'), el('span', null, 'That table’s menu — columns, value dropdowns, layout'));
@@ -9210,6 +9870,15 @@ document.addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && (e.key === 'c' || e.key === 'C') && (S.cellRange || selCount() || S.cursor >= 0)) {
     e.preventDefault();
     handleCopyShortcut(e.shiftKey);
+    return;
+  }
+
+  /* Undo lives here rather than in S.keymap because matchAction only
+     matches bare keys — the rebindable map has no notion of a modifier,
+     and Ctrl+Z with no modifier check would fire on a bare 'z'. */
+  if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === 'z' || e.key === 'Z')) {
+    e.preventDefault();
+    undoLastTagChange();
     return;
   }
 
