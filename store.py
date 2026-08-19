@@ -16,7 +16,9 @@ from __future__ import annotations
 import contextlib
 import csv
 import datetime
+import errno
 import fnmatch
+import getpass
 import hashlib
 import io
 import itertools
@@ -24,6 +26,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import sqlite3
 import tempfile
 import threading
@@ -630,6 +633,244 @@ def sweep_orphan_views() -> dict:
     return {"removed": removed, "bytes_freed": bytes_freed}
 
 
+# ----------------------------------------------------- the case "in use" lock
+
+# A case file open in one Winnow is not safe to open in a second one: SQLite's
+# own WAL locking keeps the *file* consistent, but nothing in this app
+# invalidates a second process's caches, its frontend's row counts, or its
+# idea of which tabs are open — and a long write (compact() is minutes by its
+# own docstring) will simply fail the other process's writes once the 5s busy
+# timeout runs out. On a network share it is worse than that: WAL needs a
+# shared-memory -shm mapping and does not work over SMB/NFS at all, which is
+# exactly the setup two analysts would use to collide.
+#
+# So each Store drops an advisory marker next to its case file and a second
+# Winnow probes it before opening. Advisory is the operative word — this
+# refuses nothing on its own. probe_case_lock() reports, server.py decides,
+# and the analyst always has a way through.
+CASE_LOCK_SUFFIX = ".winnow-lock"
+CASE_LOCK_HEARTBEAT_SEC = 30
+# Five missed beats. Generous on purpose, because the two wrong answers are
+# not symmetric: calling a live lock stale silently permits the collision
+# this whole mechanism exists to catch, while calling a dead lock live costs
+# one extra click on the prompt's "Open anyway".
+CASE_LOCK_STALE_AFTER_SEC = 150
+
+
+def case_lock_path(case_path: str) -> str:
+    return os.path.abspath(case_path) + CASE_LOCK_SUFFIX
+
+
+def _read_lock_record(path: str) -> dict:
+    """The marker's contents, or {} if there aren't any usable ones.
+
+    A torn read is expected and benign: _CaseLock._write rewrites the file in
+    place (it must — a write-to-temp-and-rename would move the flock onto an
+    unlinked inode), so a probe can catch a half-written record. {} then means
+    "no heartbeat signal", and probe_case_lock falls back to the flock."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            rec = json.load(f)
+        return rec if isinstance(rec, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _flock_state(path: str) -> str:
+    """'held' | 'free' | 'unknown' — what flock says about an existing marker.
+
+    'unknown' covers every way a filesystem can decline to answer (no fcntl
+    at all on Windows, ENOLCK/EOPNOTSUPP on a share, an unreadable file).
+    That's a third state rather than an error because the heartbeat is the
+    other half of the answer and is checked independently."""
+    if fcntl is None:  # pragma: no cover - Windows
+        return "unknown"
+    try:
+        fd = os.open(path, os.O_RDWR)
+    except OSError:
+        return "unknown"
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as e:
+        return "held" if e.errno in (errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK) else "unknown"
+    finally:
+        os.close(fd)  # releases the probe's own lock immediately
+    return "free"
+
+
+def _heartbeat_state(rec: dict) -> tuple[str, float | None]:
+    """'live' | 'stale' | 'unknown', plus the beat's age in seconds.
+
+    Wall-clock comparison across two machines, which is the point — it is the
+    only signal that survives a filesystem without working flock. Clock skew
+    is therefore real: a holder whose clock is far behind reads as stale. The
+    skew would have to exceed CASE_LOCK_STALE_AFTER_SEC to matter, and the
+    consequence is a missed prompt, not a wrong write."""
+    hb = rec.get("heartbeat_at")
+    if not isinstance(hb, (int, float)) or isinstance(hb, bool):
+        return "unknown", None
+    age = max(0.0, time.time() - float(hb))
+    return ("live" if age <= CASE_LOCK_STALE_AFTER_SEC else "stale"), age
+
+
+def probe_case_lock(case_path: str) -> dict | None:
+    """Who, if anyone, already has this case open. None means free.
+
+    Two independent signals, and either one alone is enough to report a
+    conflict: the flock (exact, instant, local filesystems) and the heartbeat
+    (works anywhere a file can be read, which is what covers the share). A
+    marker whose flock is free *and* whose heartbeat has gone stale is the
+    residue of a killed process and reports free — the next Store overwrites
+    it in place.
+
+    Deliberately biased toward reporting a conflict, the opposite of
+    _views_file_is_orphaned's bias: there, a wrong answer deletes a live
+    process's file, so it errs toward "in use"; here a wrong answer only
+    raises a prompt the analyst can click through."""
+    path = case_lock_path(case_path)
+    if not os.path.exists(path):
+        return None
+    rec = _read_lock_record(path)
+    flock_state = _flock_state(path)
+    hb_state, age = _heartbeat_state(rec)
+    if flock_state == "held":
+        evidence = "flock"
+    elif hb_state == "live":
+        evidence = "heartbeat"
+    elif flock_state == "unknown" and hb_state == "unknown":
+        # The marker exists but says nothing and can't be locked — most
+        # likely unreadable. Report it rather than assume it's junk.
+        evidence = "unreadable"
+    else:
+        return None
+    return {
+        "host": rec.get("host"),
+        "user": rec.get("user"),
+        "pid": rec.get("pid"),
+        "started_at": rec.get("started_at"),
+        "heartbeat_age_sec": None if age is None else round(age, 1),
+        "evidence": evidence,
+        "lock_path": path,
+    }
+
+
+def describe_case_lock(holder: dict) -> str:
+    """One line naming the holder, for the CLI refusal and the API detail."""
+    who = holder.get("user") or "an unknown user"
+    where = holder.get("host") or "an unknown host"
+    bits = f"{who}@{where}"
+    if holder.get("pid"):
+        bits += f" (pid {holder['pid']})"
+    if holder.get("started_at"):
+        bits += f", open since {holder['started_at']}"
+    if holder.get("evidence") == "unreadable":
+        return f"A lock file exists at {holder['lock_path']} but can't be read"
+    age = holder.get("heartbeat_age_sec")
+    if age is not None:
+        bits += f", last seen {int(age)}s ago"
+    return bits
+
+
+class _CaseLock:
+    """The marker one Store holds for its case file, for its whole life.
+
+    Modelled on the views file's flock (invariant #3) and shares its two
+    liveness guarantees: server.py's _lifespan shutdown hook reaches
+    Store.close() on every clean exit, and a hard kill leaves something the
+    next process can recognise as dead — here the stale heartbeat, since a
+    case marker can't be swept blindly the way a scratch views file can.
+
+    Best-effort by construction. Every failure path leaves `held` False and
+    lets the Store open anyway: an unwritable directory (evidence on
+    read-only media), a filesystem with no flock, a marker someone else
+    already holds. Refusing to open is server.py's decision, made from
+    probe_case_lock *before* a Store is ever constructed — a Store that has
+    got this far is one the analyst has already been asked about."""
+
+    def __init__(self, case_path: str):
+        self.path = case_lock_path(case_path)
+        self.case_path = os.path.abspath(case_path)
+        self.fd: int | None = None
+        self.held = False
+        self._started_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def acquire(self) -> bool:
+        try:
+            fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o644)
+        except OSError:
+            return False
+        if fcntl is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                # Held by someone else, or a filesystem without flock. Either
+                # way this process doesn't own the file: don't write to it and
+                # don't delete it on the way out.
+                os.close(fd)
+                return False
+        self.fd = fd
+        self.held = True
+        try:
+            self._write()
+        except OSError:
+            pass  # the flock still stands; only the heartbeat is missing
+        self._thread = threading.Thread(target=self._beat, daemon=True, name="winnow-case-lock")
+        self._thread.start()
+        return True
+
+    def _write(self) -> None:
+        payload = json.dumps({
+            "host": socket.gethostname(),
+            "user": _current_user(),
+            "pid": os.getpid(),
+            "case_path": self.case_path,
+            "started_at": self._started_at,
+            "heartbeat_at": time.time(),
+        }).encode("utf-8")
+        # In place on the locked fd. A rename would put the flock on an
+        # unlinked inode and silently un-hold the lock.
+        os.lseek(self.fd, 0, os.SEEK_SET)
+        os.ftruncate(self.fd, 0)
+        os.write(self.fd, payload)
+        with contextlib.suppress(OSError):
+            os.fsync(self.fd)  # the point is that another *machine* can read it
+
+    def _beat(self) -> None:
+        while not self._stop.wait(CASE_LOCK_HEARTBEAT_SEC):
+            try:
+                self._write()
+            except OSError:
+                return  # marker gone or disk full — stop; the lock is advisory
+
+    def release(self) -> None:
+        self._stop.set()
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(5)
+        self._thread = None
+        if self.fd is None:
+            return
+        fd, self.fd, self.held = self.fd, None, False
+        with contextlib.suppress(OSError):
+            os.close(fd)  # drops the flock
+        # Only unlink a marker that still names this process. On a
+        # filesystem without flock a second Winnow the analyst opened anyway
+        # will have overwritten the record with its own pid — deleting the
+        # file then would leave that live process looking free to a third.
+        rec = _read_lock_record(self.path)
+        if rec.get("pid") == os.getpid() and rec.get("host") == socket.gethostname():
+            with contextlib.suppress(OSError):
+                os.remove(self.path)
+
+
+def _current_user() -> str:
+    try:
+        return getpass.getuser()
+    except Exception:  # pragma: no cover - no pwd entry / no env vars
+        return "unknown"
+
+
 class Store:
     def __init__(self, path: str, default_tags: list[tuple] | None = None):
         self.path = path
@@ -689,6 +930,17 @@ class Store:
         # view concurrently with the writer materialising the next one.
         self.db.execute("PRAGMA v.journal_mode=WAL")
         self.db.execute("PRAGMA v.synchronous=OFF")
+        # "This case is open" marker for a *second* Winnow to probe — see
+        # _CaseLock. Taken after the database is open so a failed open can't
+        # strand one, and never fatal: `held` False just means nothing will
+        # warn the next process.
+        self._case_lock = _CaseLock(self.path)
+        self._case_lock.acquire()
+        # Public because server.py has to distinguish "STORE points at this
+        # case" from "STORE points at this case and can still answer" — the
+        # module global outlives close() on both the case-switch path and
+        # the legacy-preset migration path.
+        self.closed = False
         # Read-only connection pool for the pure-read paths (paging,
         # grouping, exports, search counts — everything that goes through
         # _reader()). Guarded by its own small lock, never self.lock: the
@@ -1186,6 +1438,8 @@ class Store:
                 os.remove(self._views_path + suffix)
             except OSError:
                 pass
+        self._case_lock.release()
+        self.closed = True
 
     READER_POOL_CAP = 6  # matches app.js's PAGE_FETCH_CONCURRENCY — the burstiest client
 

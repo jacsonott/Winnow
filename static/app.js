@@ -209,14 +209,23 @@ async function api(path, opts) {
   }
   const r = await fetch(path, o);
   if (!r.ok) {
-    let msg = r.statusText;
-    try { msg = (await r.json()).detail || msg; } catch {}
+    let msg = r.statusText, detail = null;
+    // FastAPI's `detail` is usually a string, but a few routes raise a
+    // structured one the caller needs to branch on (case-in-use, below).
+    // Keep both: `message` stays the human string every existing catch
+    // prints, `detail` carries the object when there is one.
+    try {
+      detail = (await r.json()).detail;
+      if (typeof detail === 'string') msg = detail;
+      else if (detail && detail.message) msg = detail.message;
+    } catch {}
     // The status rides along so callers can tell "you asked for something
     // invalid" (4xx) from "the server broke" (5xx) — the server is careful
     // to only 400 the former, and blaming an analyst's filter for a backend
     // defect sends them off fixing something that isn't wrong.
     const err = new Error(msg);
     err.status = r.status;
+    err.detail = detail;
     throw err;
   }
   return r.json();
@@ -8939,11 +8948,40 @@ function setBrandLabel(name) {
   $('brandLabel').textContent = name || 'Winnow';
 }
 
-async function openCase(path) {
+/* Text for the "already open elsewhere" prompt. Deliberately says what the
+   consequence is rather than just "in use" — the analyst clicking this is
+   deciding whether their colleague's afternoon survives, and "case is
+   locked" doesn't give them anything to decide with. */
+function describeCaseHolder(holder) {
+  const who = holder.user || 'an unknown user';
+  const where = holder.host || 'an unknown host';
+  let when = '';
+  if (holder.started_at) when = `, open since ${holder.started_at.replace('T', ' ')}`;
+  if (holder.evidence === 'unreadable') {
+    return 'A lock file sits next to this case but can\u2019t be read, so Winnow can\u2019t tell '
+      + 'whether another server has it open.';
+  }
+  const age = holder.heartbeat_age_sec;
+  const seen = (age === null || age === undefined) ? '' : ` (last seen ${Math.round(age)}s ago)`;
+  return `This case is already open in another Winnow \u2014 ${who} on ${where}${when}${seen}.\n\n`
+    + 'Opening it here too means neither server sees the other\u2019s tags, notes or imports until '
+    + 'it reloads, and a long write in one (an import, or Compact case) will start failing the '
+    + 'other. If the case file is on a network share, SQLite\u2019s locking does not work there '
+    + 'at all and the file can be corrupted.';
+}
+
+async function openCase(path, opts = {}) {
   let res;
   try {
-    res = await post('/api/case/open', { path });
+    res = await post('/api/case/open', { path, force: !!opts.force });
   } catch (e) {
+    if (e.status === 409 && e.detail && e.detail.error === 'case_in_use') {
+      const go = await confirmDialog(describeCaseHolder(e.detail.holder), {
+        okLabel: 'Open anyway', cancelLabel: 'Don\u2019t open', danger: true,
+      });
+      if (!go) return;
+      return openCase(path, { force: true });
+    }
     toast('Could not open case: ' + e.message, 6000);
     return;
   }

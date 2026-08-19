@@ -21,6 +21,18 @@ Opens http://127.0.0.1:8777. You can also skip `--open` and import from the UI.
 | `--no-fts` | Skip the full-text index. Roughly halves import time; search falls back to substring matching |
 | `--port`, `--host` | Defaults 8777 / 127.0.0.1 |
 | `--no-browser` | Don't auto-open a browser |
+| `--force` | Open `--case` even if another Winnow already has it open |
+
+A case file is meant to be open in **one** Winnow at a time. Each running
+server leaves a `<case>.winnow-lock` marker beside its case file, and opening
+a case another server still holds tells you who has it (user, host, when) and
+asks before continuing — the CLI refuses outright, and `--force` overrides.
+Going ahead anyway is supported but nothing merges the two: neither server
+sees the other's tags, notes or imports until it reloads, and a long write in
+one starts failing writes in the other. If the case file lives on a network
+share, don't — SQLite's WAL journalling needs shared memory that SMB and NFS
+don't provide. Two analysts on one investigation should work in separate case
+files and merge with session files, which is what tag remap-by-name is for.
 
 ## Measured on this machine
 

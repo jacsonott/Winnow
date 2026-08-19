@@ -166,6 +166,36 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
 
 ## Things that bite
 
+- **One case file, one Winnow.** SQLite's WAL keeps the *file* consistent
+  across processes, but nothing in this app invalidates a second process's
+  caches or its frontend's row counts, `compact()` holds the writer for
+  minutes (past the 5s busy timeout every write in the other process
+  fails), and on a network share WAL doesn't work at all — which is
+  precisely the setup two analysts would collide on. So each Store drops a
+  `<case>.winnow-lock` marker beside its case file (`_CaseLock`, modelled
+  on the views file's flock) and `probe_case_lock` reports on it.
+  **Two signals, either one enough to report a conflict**: the flock
+  (exact, local filesystems) and a 30s heartbeat written into the marker
+  (the only half that survives a filesystem where flock does nothing — do
+  not "simplify" it away, the share is the case that matters). Free flock
+  *and* a heartbeat older than `CASE_LOCK_STALE_AFTER_SEC` means a killed
+  process; that reads as free and the next Store overwrites the marker in
+  place. Rewritten **in place** on the held fd, never write-temp-and-rename
+  — a rename moves the flock onto an unlinked inode and silently un-holds
+  it, and a torn read is why the probe tolerates a corrupt record.
+  All of it is advisory: `Store` never refuses to open, `server.py` decides
+  (`/api/case/open` → 409 `case_in_use` → "Open anyway"; the CLI refuses
+  and names the holder, `--force` overrides). Biased toward *reporting* a
+  conflict, the opposite of `_views_file_is_orphaned`'s bias — there a
+  wrong answer deletes a live process's file, here it costs one click.
+- `/api/case/open` short-circuits when the requested path is **already the
+  open case** — necessary, because the open-before-close ordering would
+  otherwise make the process probe its own lock and refuse itself. Guarded
+  by `not STORE.closed`, and that guard is load-bearing: `STORE` outlives
+  `Store.close()` on both the case-switch path and the legacy-preset
+  migration, so "same path" alone is not "already open" and short-cutting
+  there serves rows off a closed connection.
+
 - Static assets (`/`, `/static/*`) get an explicit `Cache-Control: no-cache`
   from a middleware in server.py — FastAPI's `StaticFiles` only sends
   `ETag`/`Last-Modified`, and without an explicit `Cache-Control` the
