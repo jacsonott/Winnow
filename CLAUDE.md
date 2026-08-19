@@ -1136,6 +1136,42 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
     those) rather than by a marker field, because `openFilterBuilder`
     round-trips the tree through SQL text and would drop any marker we
     invented.
+- **`.fcell` needs its `min-width: 0`, and it's not tidying.** Giving the
+  filter cell `display: flex` (to seat the value picker's ▾ next to the
+  input) also made its own automatic minimum size content-based — and a
+  text input's intrinsic width is ~177px, so every filter cell silently
+  floored at 177px while its header stayed at the column's real
+  flex-basis. Measured: a 90px column had a 179px filter cell under it,
+  and the two rows stopped lining up from the first narrow column
+  onward. `.hcell` has never had the problem because the `overflow:
+  hidden` it already carries suppresses the same automatic minimum.
+  Anything else in this file that becomes a flex container while sitting
+  in the `.head-row`/`.filter-row` flex line needs one or the other.
+- **Autofit measures the header, it doesn't estimate it.** `widthForLen`
+  used `max(dataChars, name.length) * 7 + 24`, which ignored everything
+  the header cell carries besides its text — the sort arrow, the ▾
+  options button, the derived `ƒ` mark, 8px of padding either side — and
+  the header font is uppercase and letter-spaced, so it was never 7px per
+  character either. Result: a fit-to-content pass could leave `EVEN…▾`
+  sitting over a column of `1`s. `headerWidthFor` now reads the live DOM
+  instead: the label's `scrollWidth` (its full text, even while clipped)
+  plus `hcell.clientWidth - label.clientWidth` (padding, gaps and every
+  non-label child; the grip is absolutely positioned, so it isn't in
+  that difference). It's idempotent by construction — once the label
+  isn't clipped, both terms stop changing — and returns 0 for a column
+  with no header on screen, where callers fall back to the old estimate.
+- **The autofit cap is a user setting** (`S.appearance.autofitMax`,
+  Settings → Appearance, default `AUTOFIT_MAX_W_DEFAULT` = 900px, `0`
+  meaning uncapped), not the old hardcoded 480. A cap still exists by
+  default because the rows are `width: max-content`: one column of
+  base64 command lines fits to ~3,600px uncapped (measured) and every
+  horizontal scroll of every other column then goes through it. Two
+  rules inside `widthForLen`: the header may exceed the cap (a column
+  whose *name* is cut off can't be identified, while a truncated value
+  can still be read in the detail pane) but only to 2x, so one absurd
+  header can't defeat the cap either. Stored with the other per-browser
+  look-and-feel prefs rather than in the layout — it's a statement about
+  this screen, not about this table's columns.
 - **The table menu replaced the tab strip's `▦` column-chooser button**
   (`TABLE_MENU_SECTIONS`/`openTableMenu`, right-click a tab or a sidebar
   row, or press `C`). Same registry reasoning as the row menu: it's where

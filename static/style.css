@@ -535,8 +535,15 @@ html[data-style="studio"][data-theme="light"] {
 .hcell.drop-before { box-shadow: inset 2px 0 0 var(--accent); }
 .hcell.drop-after { box-shadow: inset -2px 0 0 var(--accent); }
 
+/* min-width: 0 is load-bearing, not tidying. Making this a flex container
+   (for the picker button) also made its own automatic minimum size
+   content-based, and a text input's intrinsic width is ~177px — so every
+   filter cell silently floored at 177px while its header stayed at the
+   column's real flex-basis, and the two rows stopped lining up on any
+   column narrower than that. .hcell gets the same protection from the
+   `overflow: hidden` it already had. */
 .fcell {
-  flex: 0 0 auto; border-right: 1px solid var(--line); padding: 2px;
+  flex: 0 0 auto; min-width: 0; border-right: 1px solid var(--line); padding: 2px;
   display: flex; align-items: center; gap: 2px;
 }
 /* The value picker's button. Always laid out (never display:none on hover)

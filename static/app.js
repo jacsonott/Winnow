@@ -34,7 +34,14 @@ let ROW_H = ROW_H_COMFORTABLE; // mutable — the Appearance density setting cha
    rather than by pixel, so it's unaffected either way. */
 const MAX_SPACER_PX = 16000000;
 const GUTTER_W = 104; // keep in sync with `.gutter { width: ... }` in style.css
-const AUTOFIT_MAX_W = 480; // upper limit for autofit-to-content column widths
+/* Default ceiling for autofit-to-content column widths, overridable (and
+   removable) per browser under Settings → Appearance — see autofitMaxWidth.
+   A cap exists because one pathological column can otherwise decide the
+   width of the whole grid: a CommandLine full of base64 is tens of
+   thousands of characters, and the rows are `width: max-content`, so an
+   uncapped fit makes every horizontal scroll of every other column a
+   journey. 900px is wide enough for a full Windows path, which 480 wasn't. */
+const AUTOFIT_MAX_W_DEFAULT = 900;
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, txt) => {
@@ -1632,9 +1639,46 @@ async function fetchColumnMaxLens() {
   catch (e) { toast('Could not measure column widths: ' + e.message); return null; }
 }
 
+/* 0/null means "no cap". Stored with the other per-browser look-and-feel
+   preferences rather than in the layout: it's a statement about this
+   screen, not about this table's columns. */
+function autofitMaxWidth() {
+  const v = S.appearance.autofitMax;
+  if (v === 0 || v === null) return 0;
+  return Number(v) > 0 ? Number(v) : AUTOFIT_MAX_W_DEFAULT;
+}
+
+/* What the header cell actually needs, measured off the live DOM rather
+   than estimated from the column name's length. The estimate ignored
+   everything the header carries besides its text — the sort arrow, the ▾
+   options button, the derived ƒ mark, 8px of padding either side — and the
+   header font is uppercase and letter-spaced, so it isn't 7px/char either.
+   That's how a fit-to-content pass could leave "EVEN…▾" sitting over a
+   column of 1s. `scrollWidth` gives the label's full text width even while
+   it's clipped; the difference between the cell's own clientWidth (which
+   includes its padding) and the label's is everything else in the row. The
+   grip is absolutely positioned, so it isn't in that difference.
+
+   Returns 0 for a column with no header on screen (hidden, or a caller
+   running before the first renderHead) — callers fall back to the estimate. */
+function headerWidthFor(name) {
+  const h = document.querySelector(`.hcell[data-col="${CSS.escape(name)}"]`);
+  const label = h && h.querySelector('.label');
+  if (!label) return 0;
+  return Math.ceil(label.scrollWidth + (h.clientWidth - label.clientWidth)) + 1;
+}
+
 function widthForLen(name, len) {
-  const chars = Math.max(len || 0, name.length);
-  return Math.min(AUTOFIT_MAX_W, Math.max(60, chars * 7 + 24));
+  const dataPx = Math.max(60, (len || 0) * 7 + 24);
+  const headPx = headerWidthFor(name) || (name.length * 7 + 24);
+  const px = Math.max(dataPx, headPx);
+  const cap = autofitMaxWidth();
+  if (!cap) return px;
+  // The header is allowed past the cap: a column whose *name* is cut off is
+  // unreadable in a way a truncated value isn't — you can widen a column you
+  // can still identify. Only to 2x, so one absurd header can't defeat the
+  // cap's whole purpose either.
+  return Math.min(px, Math.max(cap, Math.min(headPx, cap * 2)));
 }
 
 function resetAllColumnWidths() {
@@ -8315,7 +8359,10 @@ const STYLES = {
 const ACCENT_PRESETS = ['#d2a04a', '#39e881', '#ff6a1a', '#7c6cf6', '#4a90d9', '#d9534f'];
 
 function defaultAppearance() {
-  return { style: 'panel', themeMode: 'dark', accent: STYLES.panel.defaultAccent, accentCustomized: false, density: 'comfortable' };
+  return {
+    style: 'panel', themeMode: 'dark', accent: STYLES.panel.defaultAccent, accentCustomized: false,
+    density: 'comfortable', autofitMax: AUTOFIT_MAX_W_DEFAULT,
+  };
 }
 function loadAppearance() {
   try {
@@ -8489,6 +8536,43 @@ function openSettings() {
       densitySeg.append(btn);
     }
     b.append(densitySeg);
+
+    b.append(el('div', 'settings-sub-label', 'Autofit column width limit'));
+    b.append(el('p', 'fb-help',
+      'How wide fit-to-content (the ' + (S.keymap.autofitColumnWidths[0] || '=') + ' key, or double-clicking a column\u2019s '
+      + 'right edge) may make one column. A column whose header name needs more than this still gets '
+      + 'room for its name. Uncapped, a single base64 command line can make the grid enormously wide.'));
+    const capRow = el('div', 'row-actions');
+    const capInput = el('input');
+    capInput.type = 'number';
+    capInput.min = '80';
+    capInput.max = '20000';
+    capInput.step = '20';
+    capInput.style.cssText = 'width:90px;background:var(--ink);color:var(--text);border:1px solid var(--line-2);padding:4px 7px;font:inherit';
+    capInput.value = String(autofitMaxWidth() || AUTOFIT_MAX_W_DEFAULT);
+    capInput.disabled = !autofitMaxWidth();
+    const commitCap = () => {
+      const v = Math.max(80, Math.min(20000, Number(capInput.value) || AUTOFIT_MAX_W_DEFAULT));
+      capInput.value = String(v);
+      S.appearance.autofitMax = v;
+      saveAppearance();
+    };
+    capInput.onchange = commitCap;
+    const noCapLabel = el('label');
+    noCapLabel.style.cssText = 'display:flex;align-items:center;gap:6px';
+    const noCap = el('input');
+    noCap.type = 'checkbox';
+    noCap.checked = !autofitMaxWidth();
+    noCap.onchange = () => {
+      // 0 is the stored spelling of "no cap" — distinct from a missing key,
+      // which loadAppearance fills in with the default.
+      S.appearance.autofitMax = noCap.checked ? 0 : (Number(capInput.value) || AUTOFIT_MAX_W_DEFAULT);
+      capInput.disabled = noCap.checked;
+      saveAppearance();
+    };
+    noCapLabel.append(noCap, el('span', null, 'No limit'));
+    capRow.append(capInput, el('span', 'count', 'px'), noCapLabel);
+    b.append(capRow);
 
     b.append(el('h4', null, 'Keyboard shortcuts'));
     b.append(el('p', null, 'Tag hotkeys (1–9) are set per-tag in Edit tags. Escape always clears the selection or closes a panel.'));
