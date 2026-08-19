@@ -1136,6 +1136,25 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
     those) rather than by a marker field, because `openFilterBuilder`
     round-trips the tree through SQL text and would drop any marker we
     invented.
+- **Settings' sections are collapsed on open, every time**
+  (`settingsSection`, one wrapper per `h4` the modal used to append
+  straight into its body). Seven sections had grown to ~900px of scroll,
+  so the setting you came for was rarely the one on screen. Two
+  deliberate non-features: state isn't remembered between opens ("open
+  where I left it" and "collapsed by default" are different promises, and
+  the second is the one that was asked for), and opening one doesn't
+  close the others. A section's own code is unchanged apart from what it
+  appends into — which is also what keeps a section that fills itself
+  later (`buildPluginsPanel`'s async listing) landing inside its own
+  section rather than at the end of the modal.
+- **`S.keymap` must hold its own key arrays, not `DEFAULT_KEYMAP`'s.**
+  The settings UI's "+ key"/"✕" handlers splice and push those arrays in
+  place, so the old shallow `{...DEFAULT_KEYMAP}` handed them the
+  defaults' own arrays: on a profile with nothing stored yet, adding a
+  binding edited `DEFAULT_KEYMAP` itself, and "Reset to defaults" then
+  copied the polluted defaults back and looked like it did nothing.
+  `defaultKeymap()` (a per-action `[...keys]`) is what `loadKeymap` and
+  the reset button both go through now.
 - **`.fcell` needs its `min-width: 0`, and it's not tidying.** Giving the
   filter cell `display: flex` (to seat the value picker's ▾ next to the
   input) also made its own automatic minimum size content-based — and a

@@ -4007,10 +4007,6 @@ function openSavedFiltersModal() {
   });
 }
 
-/* Lives inline in Settings rather than its own modal — appends its content
-   directly to whatever container it's given (called with the Settings
-   modal body), and re-invokes openSettings() to refresh itself in place
-   after an action instead of managing its own re-render. */
 /* `refresh` re-renders whatever surface is hosting the panel after a bulk
    action ("Show all"/"Hide empty") — the per-column checkboxes repaint the
    grid directly and don't need it. */
@@ -8250,11 +8246,20 @@ const KEYMAP_MIGRATIONS = [
   },
 ];
 
+/* A *deep* copy: the settings UI's "+ key"/"✕" handlers mutate the key
+   arrays in place, and a shallow `{...DEFAULT_KEYMAP}` hands them
+   DEFAULT_KEYMAP's own arrays to mutate. That's how binding a key on a
+   fresh profile used to edit the defaults themselves — after which "Reset
+   to defaults" copied the polluted defaults back and appeared to do
+   nothing. */
+const defaultKeymap = () =>
+  Object.fromEntries(Object.entries(DEFAULT_KEYMAP).map(([action, keys]) => [action, [...keys]]));
+
 function loadKeymap() {
   let stored;
   try { stored = JSON.parse(localStorage.getItem('winnow.keymap') || '{}'); }
-  catch { return { ...DEFAULT_KEYMAP }; }
-  if (!stored || typeof stored !== 'object') return { ...DEFAULT_KEYMAP };
+  catch { return defaultKeymap(); }
+  if (!stored || typeof stored !== 'object') return defaultKeymap();
 
   let from = 0;
   try { from = Number(localStorage.getItem(KEYMAP_VERSION_KEY)) || 0; } catch { /* treat as unmigrated */ }
@@ -8264,7 +8269,7 @@ function loadKeymap() {
   // Actions the app no longer has (renamed, removed) would otherwise keep
   // swallowing their key forever, since matchAction scans the stored map,
   // not the defaults.
-  const map = { ...DEFAULT_KEYMAP };
+  const map = defaultKeymap();
   for (const [action, keys] of Object.entries(stored)) {
     if (action in DEFAULT_KEYMAP && Array.isArray(keys)) map[action] = keys;
   }
@@ -8461,10 +8466,45 @@ initAppearance();
 initSidebar();
 wireFileDrop();
 
+/* One collapsible section of the Settings modal. Returns the node the
+   section's own code appends into — sections are otherwise written exactly
+   as they were when they all ran into the modal body directly, which is
+   also what keeps a section that fills itself later (buildPluginsPanel's
+   async listing) landing inside its own section rather than at the end of
+   the modal.
+
+   Collapsed on open, every time: Settings had grown to seven sections and
+   ~900px of scroll, so the thing you came for was rarely the thing you
+   could see. Expansion state is deliberately not remembered — "open where
+   I left it" and "collapsed by default" are different promises, and this
+   one is the asked-for one. Several can be open at once; opening one
+   doesn't close another.
+
+   The header is a real <button> rather than a styled h4 so it's tabbable,
+   keyboard-activatable and announces its aria-expanded state without any
+   extra wiring. */
+function settingsSection(parent, title, { open = false } = {}) {
+  const wrap = el('div', 'settings-section');
+  const head = el('button', 'settings-section-head');
+  const caret = el('span', 'settings-section-caret', '▸');
+  head.append(caret, el('span', 'settings-section-title', title));
+  const body = el('div', 'settings-section-body');
+  const paint = () => {
+    head.setAttribute('aria-expanded', String(open));
+    caret.textContent = open ? '▾' : '▸';
+    body.hidden = !open;
+  };
+  head.onclick = () => { open = !open; paint(); };
+  paint();
+  wrap.append(head, body);
+  parent.append(wrap);
+  return body;
+}
+
 function openSettings() {
   modal('Settings', (b) => {
-    b.append(el('h4', null, 'Appearance'));
-    b.append(el('p', null, 'Pick a look, then a theme, then (optionally) your own accent color. All three are saved on this machine.'));
+    const secLook = settingsSection(b, 'Appearance');
+    secLook.append(el('p', null, 'Pick a look, then a theme, then (optionally) your own accent color. All three are saved on this machine.'));
 
     const styleGrid = el('div', 'appearance-styles');
     for (const [key, meta] of Object.entries(STYLES)) {
@@ -8483,9 +8523,9 @@ function openSettings() {
       };
       styleGrid.append(card);
     }
-    b.append(styleGrid);
+    secLook.append(styleGrid);
 
-    b.append(el('div', 'settings-sub-label', 'Theme'));
+    secLook.append(el('div', 'settings-sub-label', 'Theme'));
     const themeSeg = el('div', 'segmented');
     for (const mode of ['dark', 'light', 'auto']) {
       const btn = el('button', null, mode[0].toUpperCase() + mode.slice(1));
@@ -8496,9 +8536,9 @@ function openSettings() {
       };
       themeSeg.append(btn);
     }
-    b.append(themeSeg);
+    secLook.append(themeSeg);
 
-    b.append(el('div', 'settings-sub-label', 'Accent color'));
+    secLook.append(el('div', 'settings-sub-label', 'Accent color'));
     const accentGrid = el('div', 'accent-picker');
     for (const hex of ACCENT_PRESETS) {
       const sw = el('button', 'accent-swatch');
@@ -8522,9 +8562,9 @@ function openSettings() {
       accentGrid.querySelectorAll('.accent-swatch').forEach((sw2) => sw2.setAttribute('aria-pressed', String(sw2.dataset.accent.toLowerCase() === e.target.value.toLowerCase())));
     };
     accentGrid.append(customAccent);
-    b.append(accentGrid);
+    secLook.append(accentGrid);
 
-    b.append(el('div', 'settings-sub-label', 'Row density'));
+    secLook.append(el('div', 'settings-sub-label', 'Row density'));
     const densitySeg = el('div', 'segmented');
     for (const [key, label] of [['comfortable', 'Comfortable'], ['compact', 'Compact']]) {
       const btn = el('button', null, label);
@@ -8535,10 +8575,10 @@ function openSettings() {
       };
       densitySeg.append(btn);
     }
-    b.append(densitySeg);
+    secLook.append(densitySeg);
 
-    b.append(el('div', 'settings-sub-label', 'Autofit column width limit'));
-    b.append(el('p', 'fb-help',
+    secLook.append(el('div', 'settings-sub-label', 'Autofit column width limit'));
+    secLook.append(el('p', 'fb-help',
       'How wide fit-to-content (the ' + (S.keymap.autofitColumnWidths[0] || '=') + ' key, or double-clicking a column\u2019s '
       + 'right edge) may make one column. A column whose header name needs more than this still gets '
       + 'room for its name. Uncapped, a single base64 command line can make the grid enormously wide.'));
@@ -8572,10 +8612,10 @@ function openSettings() {
     };
     noCapLabel.append(noCap, el('span', null, 'No limit'));
     capRow.append(capInput, el('span', 'count', 'px'), noCapLabel);
-    b.append(capRow);
+    secLook.append(capRow);
 
-    b.append(el('h4', null, 'Keyboard shortcuts'));
-    b.append(el('p', null, 'Tag hotkeys (1–9) are set per-tag in Edit tags. Escape always clears the selection or closes a panel.'));
+    const secKeys = settingsSection(b, 'Keyboard shortcuts');
+    secKeys.append(el('p', null, 'Tag hotkeys (1–9) are set per-tag in Edit tags. Escape always clears the selection or closes a panel.'));
     const list = el('div', 'settings-keys');
 
     function renderList() {
@@ -8618,12 +8658,12 @@ function openSettings() {
       }
     }
     renderList();
-    b.append(list);
+    secKeys.append(list);
 
     const reset = el('button', 'btn ghost', 'Reset to defaults');
     reset.style.marginTop = '14px';
-    reset.onclick = () => { S.keymap = { ...DEFAULT_KEYMAP }; saveKeymap(); renderList(); };
-    b.append(reset);
+    reset.onclick = () => { S.keymap = defaultKeymap(); saveKeymap(); renderList(); };
+    secKeys.append(reset);
 
     const fixedKeys = el('div', 'kv');
     fixedKeys.style.marginTop = '10px';
@@ -8633,9 +8673,9 @@ function openSettings() {
     fixedKeys.append(el('kbd', null, 'Esc'), el('span', null, 'Clear selection, or close a panel'));
     fixedKeys.append(el('kbd', null, 'Right-click a row'), el('span', null, 'Tag it, filter to or exclude that cell’s value, copy'));
     fixedKeys.append(el('kbd', null, 'Right-click a tab'), el('span', null, 'That table’s menu — columns, value dropdowns, layout'));
-    b.append(fixedKeys);
+    secKeys.append(fixedKeys);
 
-    b.append(el('h4', null, 'Filter & search syntax'));
+    const secSyntax = settingsSection(b, 'Filter & search syntax');
     const filters = [
       ['svchost', 'contains'],
       ['!svchost', 'does not contain'],
@@ -8649,22 +8689,22 @@ function openSettings() {
     ];
     const f = el('div', 'kv');
     for (const [a, c] of filters) { f.append(el('kbd', null, a), el('span', null, c)); }
-    b.append(el('p', null, 'Column filter row:'), f);
-    b.append(el('p', null,
+    secSyntax.append(el('p', null, 'Column filter row:'), f);
+    secSyntax.append(el('p', null,
       'The ▾ on a filter box lists that column’s distinct values with counts — tick the ones to keep. '
       + `It appears automatically on tables under ${VALUE_FILTER_AUTO_MAX.toLocaleString()} rows (reading the values is a scan); `
       + 'the table menu (right-click a tab) turns it on or off per table or per column, and a row’s '
       + 'right-click menu can open it for any column.'));
-    b.append(el('p', null,
+    secSyntax.append(el('p', null,
       'Search box — Contains is always a true substring match; Regex is a full scan; Advanced supports '
       + 'multiple AND / OR / NOT terms and uses the FTS5 index when one was built at import.'));
-    b.append(el('p', null,
+    secSyntax.append(el('p', null,
       'The ⏱ Timeframe button pins a start/end range against one datetime column, or every datetime '
       + "column at once (catches a row via its Modified time even if its Created time was timestomped) — "
       + 'unlike the other filters, it stays applied when you clear filters, apply a saved filter, or switch tables.'));
 
-    b.append(el('h4', null, 'Timestamps'));
-    b.append(el('p', null,
+    const secTs = settingsSection(b, 'Timestamps');
+    secTs.append(el('p', null,
       'How datetime columns are displayed. This is presentation only — the stored and exported '
       + 'value is always the text the file came with. A format picked on an individual column '
       + "(its ▾ menu) beats the case setting, which beats the system-wide one."));
@@ -8685,7 +8725,7 @@ function openSettings() {
         toast('Could not save: ' + e.message, 5000);
       }
     };
-    b.append(labeledRow('Every case on this machine', tsSystemSel));
+    secTs.append(labeledRow('Every case on this machine', tsSystemSel));
 
     const tsCaseSel = el('select');
     const inherit = el('option', null, 'Use the system-wide default');
@@ -8707,10 +8747,10 @@ function openSettings() {
         toast('Could not save: ' + e.message, 5000);
       }
     };
-    b.append(labeledRow('This case', tsCaseSel));
+    secTs.append(labeledRow('This case', tsCaseSel));
 
-    b.append(el('h4', null, 'Default tags for new cases'));
-    b.append(el('p', null,
+    const secTags = settingsSection(b, 'Default tags for new cases');
+    secTags.append(el('p', null,
       "Seeds a brand-new case's tag set when you create one from the home screen. Doesn't change tags in "
       + 'any case that already exists — use "Apply default template" in Edit tags for that.'));
     const dtList = el('div', 'settings-keys');
@@ -8736,7 +8776,7 @@ function openSettings() {
     }
 
     api('/api/settings/default_tags').then((t) => { defaultTags = t; renderDefaultTagRows(); }).catch(() => {});
-    b.append(dtList);
+    secTags.append(dtList);
 
     const dtActs = el('div', 'row-actions');
     const dtAdd = el('button', 'btn ghost', '+ tag');
@@ -8748,10 +8788,10 @@ function openSettings() {
       toast('Default tag template saved');
     };
     dtActs.append(dtAdd, dtSave);
-    b.append(dtActs);
+    secTags.append(dtActs);
 
-    b.append(el('h4', null, 'Saved filters'));
-    b.append(el('p', null,
+    const secFilters = settingsSection(b, 'Saved filters');
+    secFilters.append(el('p', null,
       `Cycle through filters saved for the current source's columns with `
       + `${S.keymap.cyclePrevFilter[0] || '['} / ${S.keymap.cycleNextFilter[0] || ']'}. `
       + `A table with matching columns also suggests these on open. Save one from the Filter `
@@ -8791,7 +8831,7 @@ function openSettings() {
       }
     }
     renderFilterList();
-    b.append(flist);
+    secFilters.append(flist);
 
     const fActs = el('div', 'row-actions');
     const exp = el('button', 'btn ghost', 'Export filters…');
@@ -8813,10 +8853,10 @@ function openSettings() {
     };
     impLabel.append(impInput);
     fActs.append(exp, impLabel);
-    b.append(fActs);
+    secFilters.append(fActs);
 
-    b.append(el('h4', null, 'Plugins'));
-    buildPluginsPanel(b);
+    const secPlugins = settingsSection(b, 'Plugins');
+    buildPluginsPanel(secPlugins);
   });
 }
 

@@ -1151,6 +1151,23 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .accent-swatch { width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--line-2); background: var(--sw); cursor: pointer; padding: 0; }
 .accent-swatch[aria-pressed="true"] { box-shadow: 0 0 0 2px var(--panel), 0 0 0 3px var(--sw); }
 #appearanceAccentCustom { width: 24px; height: 24px; border: 1px solid var(--line-2); border-radius: var(--radius-sm); background: none; padding: 0; cursor: pointer; }
+/* Collapsible Settings sections. The header carries .modal-body h4's own
+   type treatment (accent, uppercase, tracked) so collapsing them didn't
+   change what a section *looks* like, only whether it's open. */
+.settings-section { border-top: 1px solid var(--line); }
+.settings-section:first-child { border-top: 0; }
+.settings-section-head {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  background: none; border: 0; cursor: pointer; text-align: left;
+  padding: 10px 4px; color: var(--accent); font: inherit;
+  font-size: 11px; letter-spacing: .1em; text-transform: uppercase;
+  border-radius: var(--radius-sm);
+}
+.settings-section-head:hover { background: var(--panel-2); }
+.settings-section-caret { flex: 0 0 auto; font-size: 9px; color: var(--dim); }
+.settings-section-head[aria-expanded="true"] .settings-section-caret { color: var(--accent); }
+.settings-section-body { padding: 0 4px 14px; }
+
 .settings-sub-label { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; margin-top: 14px; }
 .settings-sub-label:first-of-type { margin-top: 0; }
 
