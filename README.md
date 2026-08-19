@@ -97,10 +97,13 @@ top and bottom, `1`–`9` toggle a tag on the selection, `Shift+1`–`9` apply a
 to **every** row in the current view, `/` search, `f` filters to the value in
 the cell you're on (`Shift+F` does that *and* drops every other filter — the
 timeframe filter stays), `C` the table menu, `n` note,
-`?` help. `J` jumps to the row nearest a timestamp you type — the moment is
-remembered across tables, so `.` jumps straight to it again in whichever table
-you're looking at. `X` toggles the current grouping off and back on without
-touching the filters (`x` drops it outright). `Q` opens the current
+`?` help. `Alt`+`1`–`0` switches tabs: `Alt`+`1` is whichever table you were
+last in, `Alt`+`2` onward are the page tabs in strip order (so they follow a
+reorder rather than being nailed to SQL/Timeline). `J` jumps to the row nearest
+a timestamp you type — the moment is remembered across tables, so `.` jumps
+straight to it again in whichever table you're looking at. `X` toggles the
+current grouping off and back on without touching the filters (`x` drops it
+outright). `Q` opens the current
 filter/sort/search as a ready-made query in the SQL pane.
 
 Saved filters can carry a grouping: save while grouped and applying the filter
@@ -127,6 +130,19 @@ Click a column header to sort, `Shift`-click to add a secondary sort.
 The narrow strip down the right edge of the grid is a rail showing where tagged
 rows sit in the whole filtered view — so you can see clustering in a 200k-row
 result without scrolling through it.
+
+## Tabs
+
+The header bar carries two strips: your open tables on the left, and the pages —
+SQL, Timeline, anything a plugin pinned there — on the right. Both reorder by
+dragging a tab along its strip, both scroll when there are more tabs than room,
+and the divider between them sets how much of the bar each gets (double-click it
+to go back to sizing itself). The sidebar down the left lists all of it as a
+standing list — every table in the case, open or closed, and every page — with
+▲/▼ on each row for when dragging a strip that's scrolled out of view is more
+trouble than it's worth. Tab order and the divider are remembered per browser.
+`Alt`+`1`–`0` switches between them from the keyboard — `Alt`+`1` back to the
+table you were last in, `Alt`+`2` onward down the page strip.
 
 ## Timestamps
 
@@ -207,10 +223,11 @@ Plugins get three extension points:
   Settings panel, with rows flowing into the same read-only `src_`
   tables as any CSV (so tagging, views, FTS, sessions and the SQL pane
   all just work).
-- **Tabs** — a pinned tab next to SQL/Timeline whose content is entirely
-  the plugin's own UI: an ES module the plugin ships, mounted into the
-  main content area with a stable context object (API helpers, read-only
-  SQL against the case, live source/tag state, the app's own theming).
+- **Tabs** — a page tab alongside SQL and Timeline, reorderable with
+  them like any other tab, whose content is entirely the plugin's own
+  UI: an ES module the plugin ships, mounted into the main content area
+  with a stable context object (API helpers, read-only SQL against the
+  case, live source/tag state, the app's own theming).
 - **API routes** — backend endpoints under `/api/plugin/<name>/…` for
   whatever the plugin's UI needs the server to do: query the case, run a
   computation, call an external service.
