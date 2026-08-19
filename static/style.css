@@ -330,12 +330,6 @@ html[data-style="studio"][data-theme="light"] {
 .tab-sql[aria-selected="true"] { color: var(--accent); }
 .tab .x { color: var(--dim); opacity: .5; }
 .tab .x:hover { opacity: 1; color: var(--danger); }
-/* Hover-revealed like the sidebar rows' action buttons (.sidebar-row-actions
-   below): hidden until the tab is hovered or selected, so the strip stays
-   quiet. Same slot styling as .x, one glyph over. */
-.tab .cols { color: var(--dim); display: none; }
-.tab:hover .cols, .tab[aria-selected="true"] .cols { display: inline; }
-.tab .cols:hover { color: var(--accent); }
 .tab.dragging { opacity: .4; }
 .tab.drop-before { box-shadow: inset 2px 0 0 var(--accent); }
 .tab.drop-after { box-shadow: inset -2px 0 0 var(--accent); }
@@ -530,12 +524,6 @@ html[data-style="studio"][data-theme="light"] {
   cursor: col-resize; z-index: 3;
 }
 .hcell.pinned { background: var(--panel-2); box-shadow: inset 2px 0 0 var(--accent-dim); }
-.hcell-fmt {
-  background: none; border: 0; color: inherit; font: inherit; cursor: pointer;
-  padding: 0 2px; flex: 0 0 auto;
-}
-.hcell-fmt:hover { color: var(--accent); }
-
 /* Marks an analyst-added derived column, so it's never mistaken for a
    field that came out of the evidence file. Dimmed-but-italic while the
    backfill is still running (or left partial by a cancel). */
@@ -548,9 +536,30 @@ html[data-style="studio"][data-theme="light"] {
 .hcell.drop-before { box-shadow: inset 2px 0 0 var(--accent); }
 .hcell.drop-after { box-shadow: inset -2px 0 0 var(--accent); }
 
-.fcell { flex: 0 0 auto; border-right: 1px solid var(--line); padding: 2px; }
+/* min-width: 0 is load-bearing, not tidying. Making this a flex container
+   (for the picker button) also made its own automatic minimum size
+   content-based, and a text input's intrinsic width is ~177px — so every
+   filter cell silently floored at 177px while its header stayed at the
+   column's real flex-basis, and the two rows stopped lining up on any
+   column narrower than that. .hcell gets the same protection from the
+   `overflow: hidden` it already had. */
+.fcell {
+  flex: 0 0 auto; min-width: 0; border-right: 1px solid var(--line); padding: 2px;
+  display: flex; align-items: center; gap: 2px;
+}
+/* The value picker's button. Always laid out (never display:none on hover)
+   — it's the affordance that says the column has one at all, and a filter
+   row that reflows as the pointer crosses it is worse than a quiet ▾. */
+.fcell-pick {
+  flex: 0 0 auto; background: none; border: 0; cursor: pointer;
+  color: var(--dim); font: inherit; font-size: 10px; padding: 2px 3px;
+  border-radius: var(--radius-sm);
+}
+.fcell-pick:hover { color: var(--accent); background: var(--panel-2); }
+.fcell-pick[aria-expanded="true"] { color: var(--accent); background: var(--panel-2); }
+.fcell-pick.active { color: var(--accent); }
 .fcell input {
-  width: 100%; background: var(--ink); color: var(--text);
+  flex: 1 1 auto; min-width: 0; background: var(--ink); color: var(--text);
   border: 1px solid transparent; border-radius: var(--radius-sm);
   padding: 3px 6px; font-family: var(--mono); font-size: 11px;
 }
@@ -838,6 +847,15 @@ textarea:focus { border-color: var(--accent); outline: none; }
 }
 .menu-item-action:hover { background: var(--panel-2); color: var(--text); }
 .menu-item-action:disabled { color: var(--text-faint); cursor: default; background: none; }
+.menu-item-flex { display: flex; align-items: center; gap: 6px; }
+.menu-item-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Fixed width so labels line up whether or not their row is ticked. */
+.menu-check { flex: 0 0 10px; color: var(--accent); font-size: 11px; }
+.menu-swatch { flex: 0 0 auto; width: 9px; height: 9px; border-radius: 2px; }
+.menu-item-hint {
+  flex: 0 0 auto; color: var(--dim); font-family: var(--mono); font-size: 10px;
+  border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 0 4px;
+}
 .menu-sep { flex: 0 0 auto; height: 1px; background: var(--line); margin: 4px 2px; }
 .menu-header {
   flex: 0 0 auto;
@@ -939,6 +957,59 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .collist label { display: flex; align-items: center; gap: 8px; padding: 3px 4px; font-family: var(--mono); font-size: 12px; flex: 1; min-width: 0; }
 .modal-body .row-actions { display: flex; gap: 6px; margin-top: 12px; align-items: center; }
 .modal-body .row-actions h4 { flex: 1; margin: 0; }
+
+/* ---------------------------------------------------------- value picker */
+
+/* The Excel-style header dropdown. Rides .menu's own positioning/shadow
+   (it's opened through the same anchoredPanel machinery) and only adds the
+   internals — a fixed width so the list doesn't resize as values load, and
+   its own scroll region so the search box and Apply stay put. */
+.value-picker { width: 320px; max-width: 92vw; padding: 8px; gap: 6px; }
+.vp-search {
+  flex: 0 0 auto; width: 100%; background: var(--ink); color: var(--text);
+  border: 1px solid var(--line-2); border-radius: var(--radius-sm);
+  padding: 4px 7px; font: inherit; font-size: 12px;
+}
+.vp-search:focus { border-color: var(--accent); outline: none; }
+.vp-toggles { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; justify-content: space-between; }
+.vp-seg { display: flex; gap: 2px; flex-wrap: wrap; }
+.vp-seg .btn { font-size: 11px; padding: 3px 7px; }
+.vp-seg .btn[aria-pressed="true"] { color: var(--accent); border-color: var(--accent-dim); }
+.vp-list {
+  flex: 1 1 auto; min-height: 60px; max-height: 40vh; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 1px;
+  border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 4px 0;
+}
+.vp-row {
+  display: flex; align-items: center; gap: 6px; padding: 2px 4px;
+  border-radius: var(--radius-sm); cursor: pointer;
+}
+.vp-row:hover { background: var(--panel-2); }
+/* white-space: pre, not nowrap — a value whose edges are spaces is one the
+   header filter box can't hold (see quickFilterTextForValues), so the list
+   has to show the padding rather than let HTML collapse it away. */
+.vp-value {
+  flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: pre;
+  font-family: var(--mono); font-size: 11px;
+}
+.vp-empty { color: var(--dim); font-style: italic; }
+.vp-count { flex: 0 0 auto; color: var(--dim); font-family: var(--mono); font-size: 10px; }
+.vp-status { flex: 0 0 auto; color: var(--dim); font-size: 11px; display: grid; gap: 3px; }
+/* --accent, not --danger: a capped list or an expired view is something to
+   know about, not something that went wrong. */
+.vp-warn { color: var(--accent); }
+.vp-note { color: var(--dim); font-size: 12px; padding: 8px 4px; }
+.vp-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; }
+.vp-actions .btn { font-size: 11px; padding: 3px 8px; }
+
+/* ------------------------------------------------------------ table menu */
+
+/* Sections of the table menu modal (TABLE_MENU_SECTIONS in app.js) — one
+   rule for all of them so a new section needs no CSS of its own. */
+.table-menu-section + .table-menu-section { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 6px; }
+.table-menu-section h4 { margin: 10px 0 8px; }
+.collist-pick { flex: 0 0 auto; font-size: 10px; padding: 2px 6px; font-family: var(--mono); }
+.collist-pick[aria-pressed="true"] { color: var(--accent); border-color: var(--accent-dim); }
 
 /* --------------------------------------------------------------- sessions */
 
@@ -1081,6 +1152,23 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .accent-swatch { width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--line-2); background: var(--sw); cursor: pointer; padding: 0; }
 .accent-swatch[aria-pressed="true"] { box-shadow: 0 0 0 2px var(--panel), 0 0 0 3px var(--sw); }
 #appearanceAccentCustom { width: 24px; height: 24px; border: 1px solid var(--line-2); border-radius: var(--radius-sm); background: none; padding: 0; cursor: pointer; }
+/* Collapsible Settings sections. The header carries .modal-body h4's own
+   type treatment (accent, uppercase, tracked) so collapsing them didn't
+   change what a section *looks* like, only whether it's open. */
+.settings-section { border-top: 1px solid var(--line); }
+.settings-section:first-child { border-top: 0; }
+.settings-section-head {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  background: none; border: 0; cursor: pointer; text-align: left;
+  padding: 10px 4px; color: var(--accent); font: inherit;
+  font-size: 11px; letter-spacing: .1em; text-transform: uppercase;
+  border-radius: var(--radius-sm);
+}
+.settings-section-head:hover { background: var(--panel-2); }
+.settings-section-caret { flex: 0 0 auto; font-size: 9px; color: var(--dim); }
+.settings-section-head[aria-expanded="true"] .settings-section-caret { color: var(--accent); }
+.settings-section-body { padding: 0 4px 14px; }
+
 .settings-sub-label { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; margin-top: 14px; }
 .settings-sub-label:first-of-type { margin-top: 0; }
 

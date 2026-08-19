@@ -3492,7 +3492,7 @@ class Store:
 
     def group_summary(self, view_id: str, column: str, order: str = "count", direction: str | None = None,
                        limit: int = 1000, path: list[dict] | None = None,
-                       op_token: str | None = None) -> dict:
+                       op_token: str | None = None, bucket_datetime: bool = True) -> dict:
         """One aggregate pass over the already-filtered view — SELECT val,
         count(*) per member, unioned and re-summed. Not a paging operation,
         so no O(window) concern here; capped at `limit` distinct groups.
@@ -3508,6 +3508,19 @@ class Store:
         isn't useful for anything. `expand_group`/`_virtual_group_where`
         match this same DAY_BUCKET'ing (via _eq_condition's is_datetime
         flag) so a click on a day group's row actually finds its rows.
+
+        `bucket_datetime=False` turns that off, and exists for exactly one
+        caller: the header value-picker dropdown, which lists a column's
+        distinct values so the analyst can tick the ones to filter to. What
+        it writes is an ordinary `=`/`in` filter on the *stored* value, so
+        every value it shows has to be one such a filter can match — a
+        DAY_BUCKET'ed one never is. Nothing about the grouping contract
+        above is relaxed: this path returns values, never groups anything
+        gets expanded against, so there is no `_eq_condition` on the other
+        side to keep in step. Raw datetime values also make the column
+        index worth building (a DAY_BUCKET is a functional expression a
+        plain index can't serve), so the whole_source gate below admits
+        them.
 
         `direction` defaults per `order` if not given explicitly (matches
         the behavior before either was ever configurable): "desc" for
@@ -3533,7 +3546,7 @@ class Store:
         colnames = {c["name"]: c["type"] for c in src["columns"]}
         if column not in colnames:
             raise KeyError(column)
-        is_datetime = colnames[column] == "datetime"
+        is_datetime = colnames[column] == "datetime" and bucket_datetime
 
         # The two branches below reach the derived sidecar differently — the
         # direct shape joins it with USING(rid) (bare column refs), the view
