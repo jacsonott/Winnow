@@ -106,8 +106,9 @@ for the whole table or one column, and a row's right-click menu offers it for
 any column regardless.
 
 **Right-click** does the obvious thing in three places: a row (tag it, filter to
-or exclude the cell you clicked, copy), a tab or a sidebar table name (the table
-menu — columns, value dropdowns, layout defaults; also on `C`).
+or exclude the cell you clicked, copy), a column header (display format, add a
+datetime column from it, the derived-column actions), a tab or a sidebar table
+name (the table menu — columns, value dropdowns, layout defaults; also on `C`).
 
 Click a column header to sort, `Shift`-click to add a secondary sort.
 
@@ -118,9 +119,10 @@ result without scrolling through it.
 ## Timestamps
 
 Logs arrive with whatever timestamp shape the tool that wrote them felt like.
-Any column's `▾` menu has **Add datetime column from this…**, which reads the
-column and adds a *new* one holding a real, sortable datetime — the original is
-never modified, and neither is the file on disk.
+Right-clicking a column header opens its options, including **Add datetime
+column from this…**, which reads the column and adds a *new* one holding a
+real, sortable datetime — the original is never modified, and neither is the
+file on disk.
 
 Winnow samples the column and suggests a format, with a live preview of what
 each value becomes before you commit to it. It reads Unix epochs (seconds
@@ -146,8 +148,8 @@ one against the same evidence recomputes it.
 
 Display format is separate from all of that, and is presentation only: the
 stored and exported value is always the text the file came with. Set it per
-column from its `▾` menu, or set a default for the case and for every case on
-this machine under **Settings → Timestamps**. The default is
+column by right-clicking its header, or set a default for the case and for
+every case on this machine under **Settings → Timestamps**. The default is
 `YYYY-MM-DD HH:MM:SS`; "As stored" is still there if you want the raw text.
 
 ## Sessions

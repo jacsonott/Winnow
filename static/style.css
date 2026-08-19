@@ -517,12 +517,6 @@ html[data-style="studio"][data-theme="light"] {
   cursor: col-resize; z-index: 3;
 }
 .hcell.pinned { background: var(--panel-2); box-shadow: inset 2px 0 0 var(--accent-dim); }
-.hcell-fmt {
-  background: none; border: 0; color: inherit; font: inherit; cursor: pointer;
-  padding: 0 2px; flex: 0 0 auto;
-}
-.hcell-fmt:hover { color: var(--accent); }
-
 /* Marks an analyst-added derived column, so it's never mistaken for a
    field that came out of the evidence file. Dimmed-but-italic while the
    backfill is still running (or left partial by a cancel). */

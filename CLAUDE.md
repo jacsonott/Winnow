@@ -930,7 +930,7 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
   arbitrary local Python with the app's privileges, installed by the
   analyst physically placing it — never fetched, so the airgap rule holds.
 - **Derived columns** (`timeparse.py`, `derived_columns`/`drv_<id>` tables,
-  `/api/derived/*`, the header `▾` menu's "Add datetime column from
+  `/api/derived/*`, the column header's right-click menu's "Add datetime column from
   this…") let an analyst add a *computed* datetime column from one that's
   already there — a Unix epoch, a BSD syslog line, a FILETIME, whatever
   the tool that produced the file happened to emit. Shape, and why each
@@ -1058,14 +1058,19 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
     rows via the one shared `wireDragReorder`, scoped by
     `currentIds: sameGroupFilterIds(...)` so a drag across header sets is
     a structural no-op rather than a rule someone has to remember.
-- **The three right-click surfaces** (row menu, table menu, header value
-  picker) all hang off one floating-menu implementation in app.js —
+- **The right-click surfaces** (row menu, column-header menu, table menu,
+  header value picker) all hang off one floating-menu implementation in app.js —
   `showFloating`/`placeFloating` plus the single `openMenuEl`/`openMenuAnchor`
   pair, with `dropdownMenu` (anchored under a button), `contextMenu`
   (positioned at the pointer) and `anchoredPanel` (a card with real
   controls in it) as the three entry points. That's what makes "only one
   of these is open at a time, and Escape closes it" true across all of
-  them rather than three near-copies of the same two listeners. Two
+  them rather than four near-copies of the same two listeners. The
+  column-header menu is the one that *replaced* a visible control rather
+  than adding a surface: its `▾` (`.hcell-fmt`) cost a slot of every
+  header's width, on every table, forever, to be opened rarely — the same
+  trade the tab strip's `▦` lost. Both handed their discovery burden to a
+  title attribute. Two
   details are load-bearing: `onMenuKeydown` now `stopPropagation()`s its
   Escape (the document-level handler underneath clears the row selection,
   and dismissing a menu shouldn't throw away what was selected under it),

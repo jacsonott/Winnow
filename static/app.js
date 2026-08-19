@@ -1514,14 +1514,17 @@ function renderHead() {
       h.append(mark);
     }
     if (colMetaEntry) {
-      const fmtBtn = el('button', 'hcell-fmt', '▾');
-      fmtBtn.draggable = false;
-      fmtBtn.title = 'Column options';
-      fmtBtn.onclick = (e) => {
+      // Column options (display format, "Add datetime column from this…",
+      // the derived-column actions) are a right-click, not a ▾ button that
+      // spent a slot of every header's width forever to be used rarely —
+      // same move the tab strip's ▦ made. The header's title carries the
+      // discovery burden the glyph used to.
+      h.oncontextmenu = (e) => {
+        e.preventDefault();
         e.stopPropagation();
-        dropdownMenu(fmtBtn, columnMenuItems(name));
+        contextMenu(e, columnMenuItems(name));
       };
-      h.append(fmtBtn);
+      h.title = 'Click to sort · Shift-click to add a sort · Right-click for column options';
     }
     h.onclick = (e) => {
       const cur = S.sort.find((s) => s.column === name);
@@ -8707,7 +8710,7 @@ function openSettings() {
     secTs.append(el('p', null,
       'How datetime columns are displayed. This is presentation only — the stored and exported '
       + 'value is always the text the file came with. A format picked on an individual column '
-      + "(its ▾ menu) beats the case setting, which beats the system-wide one."));
+      + '(right-click its header) beats the case setting, which beats the system-wide one.'));
 
     const tsSystemSel = el('select');
     for (const [key, label] of Object.entries(TS_FORMATS)) {
