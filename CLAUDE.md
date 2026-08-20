@@ -360,6 +360,68 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
   the caller string-prepend it — `s.DAY_BUCKET(...)` isn't valid SQL the
   way `s."col"` is, so a caller that goes back to prepending `s.` onto the
   result will get a syntax error the moment it hits a datetime column.
+- **`expand_group`'s virtual fast path only applies to an unfiltered
+  parent.** `_virtual_group_where` reads straight off the member table with
+  nothing but `column = value` (+ the nested path) — it has no view to join
+  and so no way to express the parent's filters, search or timeframe. The
+  gate is `_grouping_covers_whole_source`; anything else materialises, same
+  as a merge or an over-threshold group already did. The bug this closed
+  was quiet in exactly the way that costs you: the *counts* come from the
+  other side (`group_summary` and `expand_group`'s own `total` both join the
+  view and stayed correct), so the grid asked for `row_count` rows and got
+  the first `row_count` of a longer, unfiltered list — and tag/export on the
+  group read the same way, which made it an over-tagging bug and not just a
+  display one.
+- **Grouping by tag** is a pseudo-column, `TAG_GROUP_COLUMN` (`"__tag__"`),
+  carried through every grouping path as an ordinary column name so nothing
+  between app.js and `group_summary` needs a second notion of what a level
+  is. It's in `RESERVED_COLUMN_NAMES`, so a CSV with a literal `__tag__`
+  header gets renamed at ingest and the sentinel can never be ambiguous.
+  Three things about it are decisions:
+  - **One group per tag, not one per tag-set.** A row with two tags is
+    counted under both, so the counts can sum to more than the view holds.
+    That's the only reading that answers "how much of this have I marked,
+    and as what"; a partition into `"Lateral movement, Persistence"`
+    combinations is combinatorial and useless.
+  - **A group's value is a tag *id*, not its name.** `tag_defs` has no
+    unique constraint on `name`, so grouping by name would silently merge
+    two tags an analyst deliberately kept apart. `groupValueLabel()` in
+    app.js renders the name from `S.tags`; the untagged group's value is
+    `NULL`.
+  - **The join order is pinned, and that's load-bearing.** `v.view_N` is
+    indexed on `pos` and nothing else, so reaching a view row by `rid` is a
+    full scan of it — and given a `WHERE vv.source_id = ?` to work with,
+    SQLite drives from `row_tags`' covering index and re-scans the entire
+    view once per tagged row (measured: 150k x 300k row visits, minutes,
+    where the right plan is 200ms). `_tag_group_branches` therefore uses
+    `CROSS JOIN` (which SQLite documents as suppressing reordering), drops
+    the per-member `source_id` restriction when there's no nested path, and
+    reaches the source table only through a self-contained `EXISTS`. The
+    whole-table case never touches the source at all — per-tag counts are
+    `row_tags`' own aggregate and the untagged remainder is arithmetic on
+    the member's `row_count`. `test_grouping.py` pins both with EXPLAIN.
+- **`tag_counts_in_view`** is what the tag ribbon shows once a filter or
+  search is on: the same shape `tag_counts` returns, counted over one view.
+  Scope is the view exactly as built, tag filter included — a ribbon that
+  quietly dropped one of the filters in play would be reporting on a view
+  nobody is looking at. The frontend keeps the whole-table counts in
+  `S.tagCountsAll` alongside and puts them in the chip's tooltip rather than
+  picking one number and hoping the analyst infers which it meant. Same
+  join `tag_positions` makes, same untagged-source short-circuit in front
+  of it, since this runs after every view build.
+- **Search-all breaks a pasted list down per term.** `_or_of_positive_terms`
+  recognises the one shape where a per-term count means anything on its own
+  — the "Paste a list" mode's OR of positive terms — and
+  `_search_all_term_counts` then runs one capped count per term, but *only*
+  on a source the union count already proved matched. That ordering is the
+  whole design: sources that miss (the majority of a big case) cost exactly
+  what they cost before the feature existed. A folded-in
+  `SUM(CASE WHEN … )`-per-term single query would instead lose the OR's
+  short-circuit on every source, matching or not.
+  `SEARCH_ALL_TERM_BREAKDOWN_MAX` bounds the accident (a whole wordlist
+  pasted in), not normal use. Mixed AND/NOT from the Advanced builder gets
+  no breakdown: those terms constrain each other, so a count for one alone
+  describes a query nobody ran.
 - There's no separate "preset" concept anymore — a preset is just a saved
   filter (`workspace.SavedFilters`, cross-case) whose `col_names` happens to
   match (exactly, or "similar" per the same Jaccard/subset heuristic the old
@@ -408,6 +470,51 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
   row that legitimately already had the tag keeps it), or an explicit
   subset (every page it spans is fetched *first*, and a failure is a toast,
   not a gap).
+- **Grouped mode's rows are ordinary rows.** They paint through the same
+  `buildDataRow` the flat grid uses and address themselves with the same
+  `pos`, so selection, the cursor, the cell range, the row menu, copy,
+  tagging and the detail pane all work in both modes off one
+  implementation. `rowAt(pos)` is the pivot: a `S.rowsByPos` lookup when
+  flat, `groupDataRowAt(pos)` when grouped. Four things follow from sharing
+  the address space:
+  - A grouped `pos` indexes the *flattened tree* (`S.groups` +
+    `S.groupPrefix`), which interleaves group headers with data rows.
+    `groupCoordAt()` answers "is there a row here" from the tree alone — no
+    page fetch — which is what lets `selSetRange`, the click handlers and
+    the context menu skip headers synchronously. `gridRowCount()` is the
+    bound for that space; nothing should reach for `S.view.row_count`
+    directly once a grouping can be on.
+  - **Expanding or collapsing renumbers everything below the toggled
+    header**, so `shiftGroupPositions` moves selection/cursor/anchor by the
+    exact delta (positions inside a collapsed span are *dropped*, since
+    those rows are no longer on screen). Re-resolving through row identity
+    would be the obvious alternative and needs a lookup the tree has no
+    index for. `selRemap` exists so this stays inside the `sel*` block.
+    Capture the (headerPos, oldTotal) pair via `groupShiftAnchor` at the
+    moment of the mutation, not at the top of `toggleGroup` — the expand
+    paths await a fetch first.
+  - The select-all *checkbox* stays disabled under a grouping: it means
+    "every row in the view", and the flattened tree is a mix of data rows
+    and headers whose collapsed groups aren't even loaded. `S.selectAll` is
+    therefore never set in grouped mode, which is what keeps `selCount()`/
+    `selHas()` honest there. Whole-view tagging still works — `Shift`+a tag
+    hotkey, and the group menu's tag-this-group, are both server-side.
+  - `loadRowsForPositions`/`positionsNeedLoading` are the mode-aware front
+    ends to `waitForPages`; grouped pages are per-group-sub-view and can't
+    share the root view's page index space. `waitForGroupPages` throws
+    rather than returning short for the same reason `waitForPages` does.
+- **The group header's own menu** (`groupMenuItems`) tags or untags every
+  row in a group in one `/api/row_tags/view` call against a view id from
+  `groupRowsView` — the group's own expanded sub-view when it has one,
+  otherwise a throwaway `expand_group` that gets DELETEd afterwards. So it
+  works on a collapsed group and on an outer nesting level, where the client
+  has never seen a single one of the rows. Untagging is a mode flip on the
+  same menu rather than a ✓ toggle: a group is a set of rows with mixed
+  tags, so there's no single row to read a checkmark off the way
+  `rowMenuTagItems` does. Tagging while grouped *by tag* calls
+  `regroupIfGroupedByTag()` — the tag just changed which group those rows
+  belong to, and the expanded sub-views are server-side with nothing here to
+  patch them with.
 - `waitForPages` has **no deadline and bounded concurrency**
   (`PAGE_FETCH_CONCURRENCY`), and throws rather than returning short. It
   used to fire one `ensurePage` per missing page at once — ~2,400
@@ -427,6 +534,21 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
   forever), and any `keep` set an in-flight bulk copy/tag still needs. Both
   can exceed the cap, in which case nothing is evicted; it's a cap on idle
   scrollback, not a hard limit that could break an operation mid-flight.
+- **Neighbouring pages are prefetched at idle** (`schedulePrefetch`,
+  `PREFETCH_RADIUS`). A page is 5,000 rows, so crossing a boundary is rare
+  — and when it happens the grid paints `pending` placeholders for a whole
+  5,000-row round trip, which is the entirety of "scrolling feels
+  sluggish". Three details are deliberate: it runs on
+  `requestIdleCallback` (a prefetch competing with the page the viewport is
+  actually waiting on would make the visible case slower to fix the
+  invisible one); only one pass is ever pending and it reads the viewport at
+  *fire* time, so nothing needs cancelling on a view rebuild; and a
+  prefetched page that lands outside the visible range skips the `render()`
+  every other arrival triggers — but checks rather than assumes, since the
+  analyst may have scrolled onto it mid-flight. Grouped mode has its own
+  pass (`prefetchGroupPages`) because it has two kinds of boundary: the
+  next page inside a big expanded group, and the first page of the next
+  expanded group.
 - **The spacer that gives the grid its scroll height is capped**
   (`MAX_SPACER_PX`, 16M px) and above that cap `scrollTop` is no longer a
   row offset. A DOM element can't be arbitrarily tall — Blink clamps at
@@ -702,9 +824,8 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
   and therefore fixed down the column. **The three selectors must keep
   the same `grid-template-columns`, `gap` and horizontal padding** — that's
   the whole contract. `.rid` sets `grid-column: 3` explicitly rather than
-  relying on sibling order, because grouped mode's gutter
-  (`renderGroupDataRow`) has no checkbox or stripe slot and a rid placed
-  by flow would land in column 1. `.gutter-head` also opts out of
+  relying on sibling order, because a row still paging in has an empty
+  middle slot and a rid placed by flow would land in column 1. `.gutter-head` also opts out of
   `.hcell`'s `cursor: pointer` and hover tint — it's the one header cell
   that doesn't sort. The select-all box's indeterminate state was already
   handled by `syncSelectAllCheckbox`.
@@ -1185,8 +1306,9 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
   underneath it. Scope follows the selection: right-clicking *inside* one
   acts on the whole selection (tagging 200 checked rows shouldn't collapse
   to the row under the pointer), right-clicking outside it moves the
-  cursor there first. Flat mode only, same as the click/mousedown handlers
-  next to it — grouped mode has no row selection to act on. A tag's ✓
+  cursor there first. Works in grouped mode too now (see "Grouped mode's
+  rows are ordinary rows" below); a right-click on a *group header* opens a
+  different menu instead — `groupMenuItems`. A tag's ✓
   reads the clicked row even when the target is a whole selection, which
   is deliberately the same sample-one-row rule `resolveTagDirection`
   already uses for the number hotkeys, so the menu can't promise a
@@ -1366,8 +1488,12 @@ Coverage is organized one file per concern (`test_ingest.py`,
 toward the invariants and "things that bite" documented above — numeric
 NULL-not-zero, ragged-row padding, the contains-mode substring fix, nested
 grouping's `path` threading through the virtual small-group fast path,
-session import's tag-remap-by-name, CSV formula-injection prefixing not
-touching the stored value, and so on. `test_api_routes.py` covers the HTTP
+that same fast path refusing a *filtered* parent (counts stayed right while
+the rows went wrong, so only an assertion on the rows catches it), grouping
+by tag — including two EXPLAIN assertions, since the wrong join order there
+returns the right numbers and takes minutes — tag counts scoped to a view,
+search-all's per-term breakdown, session import's tag-remap-by-name, CSV
+formula-injection prefixing not touching the stored value, and so on. `test_api_routes.py` covers the HTTP
 layer itself (the CSRF header gate, request parsing, 400-vs-500) rather
 than re-testing logic the `Store`-level tests already cover directly.
 `test_maintenance.py` covers the things that only exist because everything

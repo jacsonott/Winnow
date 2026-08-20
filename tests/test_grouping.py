@@ -5,7 +5,7 @@ gap fixed last session when nested grouping was added)."""
 
 from __future__ import annotations
 
-from store import Store
+from store import TAG_GROUP_COLUMN, Store
 
 
 def test_group_summary_count_and_value_order(ingested):
@@ -234,3 +234,241 @@ def test_expand_group_materializes_above_threshold(store, tmp_path):
     assert expanded["row_count"] == n
     handle = store._views[expanded["view_id"]]
     assert handle["kind"] == "group"
+
+
+def _search_grouped_fixture(store, write_csv):
+    """Two rows sharing a group value, only one of which matches the search."""
+    rows = [["Host", "User", "Note"]]
+    rows.append(["H1", "alice", "needle-one"])
+    rows.append(["H1", "alice", "haystack"])
+    rows.append(["H2", "bob", "needle-two"])
+    path = write_csv(rows, name="searched.csv")
+    rec = store.ingest_csv(path, name="searched.csv", build_fts=False)
+    spec = {"source_id": rec["id"], "filters": [], "sort": [], "search": "needle"}
+    return rec["id"], store.build_view(rec["id"], spec)
+
+
+def test_expand_group_under_search_pages_only_matching_rows(store, write_csv):
+    # The small-group fast path can't express the parent view's search (it
+    # reads the member table directly), so a filtered parent has to
+    # materialize. Before that gate, the count was right and the rows were
+    # wrong: 1 row reported, "haystack" served as the first of two.
+    source_id, view = _search_grouped_fixture(store, write_csv)
+    assert view["row_count"] == 2
+
+    summary = {g["value"]: g["count"] for g in store.group_summary(view["view_id"], "User")["groups"]}
+    assert summary == {"alice": 1, "bob": 1}
+
+    expanded = store.expand_group(view["view_id"], "User", "alice")
+    assert expanded["row_count"] == 1
+    assert store._views[expanded["view_id"]]["kind"] == "group"  # filtered parent -> materialized
+
+    fetched = store.fetch_rows(expanded["view_id"], 0, 10)["rows"]
+    assert [r["cells"][2] for r in fetched] == ["needle-one"]
+
+
+def test_tag_group_under_search_skips_non_matching_rows(store, write_csv):
+    # Same gap, but the expensive half: tagging a group off the virtual path
+    # tagged every row sharing the group value, search or no search.
+    source_id, view = _search_grouped_fixture(store, write_csv)
+    expanded = store.expand_group(view["view_id"], "User", "alice")
+    tag = store.upsert_tag(None, "search-scope", "#00ff00", None)
+    store.tag_view(expanded["view_id"], tag["id"], True)
+    assert store.tag_counts(source_id)["counts"][str(tag["id"])] == 1
+
+
+def test_expand_group_stays_virtual_on_an_unfiltered_parent(store, write_csv):
+    # The fast path is still the fast path where it's sound — a small group
+    # of a parent that provably holds every row of the source.
+    rows = [["Host", "User"], ["H1", "alice"], ["H1", "alice"], ["H2", "bob"]]
+    path = write_csv(rows, name="unfiltered.csv")
+    rec = store.ingest_csv(path, name="unfiltered.csv", build_fts=False)
+    view = store.build_view(rec["id"], {"source_id": rec["id"], "filters": [], "sort": [{"column": "User"}]})
+    expanded = store.expand_group(view["view_id"], "User", "alice")
+    assert store._views[expanded["view_id"]]["kind"] == "group_virtual"
+    assert expanded["row_count"] == 2
+
+
+# ------------------------------------------------------------- group by tag
+
+def _tagged_fixture(store, write_csv):
+    """10 rows; rids 1-3 tagged Alpha, rids 3-4 tagged Beta, 5-10 untagged."""
+    rows = [["Host", "User"]] + [[f"H{i % 2}", "alice"] for i in range(10)]
+    rec = store.ingest_csv(write_csv(rows, name="tagged.csv"), name="tagged.csv", build_fts=False)
+    alpha = store.upsert_tag(None, "Alpha", "#ff0000", "1")
+    beta = store.upsert_tag(None, "Beta", "#00ff00", "2")
+    store.set_tags(rec["id"], [1, 2, 3], alpha["id"], True)
+    store.set_tags(rec["id"], [3, 4], beta["id"], True)
+    return rec["id"], alpha, beta
+
+
+def test_group_by_tag_counts_each_tag_and_the_untagged_remainder(store, write_csv):
+    source_id, alpha, beta = _tagged_fixture(store, write_csv)
+    view = store.build_view(source_id, {"source_id": source_id, "filters": [], "sort": []})
+    res = store.group_summary(view["view_id"], TAG_GROUP_COLUMN)
+    by_value = {g["value"]: g["count"] for g in res["groups"]}
+    # A row with two tags is counted under both, so these sum to more than
+    # the 10 rows in the view — that's the point of grouping by tag.
+    assert by_value == {alpha["id"]: 3, beta["id"]: 2, None: 6}
+
+
+def test_group_by_tag_omits_the_untagged_group_when_every_row_is_tagged(store, write_csv):
+    rows = [["Host"], ["H1"], ["H2"]]
+    rec = store.ingest_csv(write_csv(rows, name="alltagged.csv"), name="alltagged.csv", build_fts=False)
+    tag = store.upsert_tag(None, "Everything", "#123456", None)
+    view = store.build_view(rec["id"], {"source_id": rec["id"], "filters": [], "sort": []})
+    store.tag_view(view["view_id"], tag["id"], True)
+    res = store.group_summary(view["view_id"], TAG_GROUP_COLUMN)
+    assert [g["value"] for g in res["groups"]] == [tag["id"]]
+
+
+def test_group_by_tag_orders_by_name_not_by_id(store, write_csv):
+    rows = [["Host"], ["H1"], ["H2"], ["H3"]]
+    rec = store.ingest_csv(write_csv(rows, name="named.csv"), name="named.csv", build_fts=False)
+    zeta = store.upsert_tag(None, "Zeta", "#111111", None)   # lower id, later name
+    alpha = store.upsert_tag(None, "Alpha", "#222222", None)
+    store.set_tags(rec["id"], [1, 2, 3], zeta["id"], True)
+    store.set_tags(rec["id"], [1], alpha["id"], True)
+    view = store.build_view(rec["id"], {"source_id": rec["id"], "filters": [], "sort": []})
+    ordered = store.group_summary(view["view_id"], TAG_GROUP_COLUMN, order="value")["groups"]
+    assert [g["value"] for g in ordered if g["value"] is not None] == [alpha["id"], zeta["id"]]
+
+
+def test_group_by_tag_scopes_to_the_filtered_view(store, write_csv):
+    source_id, alpha, beta = _tagged_fixture(store, write_csv)
+    # H1 rows are rids 2, 4, 6, 8, 10 — Alpha has one of them, Beta one.
+    view = store.build_view(source_id, {
+        "source_id": source_id, "filters": [{"column": "Host", "op": "equals", "value": "H1"}], "sort": [],
+    })
+    by_value = {g["value"]: g["count"] for g in store.group_summary(view["view_id"], TAG_GROUP_COLUMN)["groups"]}
+    assert by_value == {alpha["id"]: 1, beta["id"]: 1, None: 3}
+
+
+def test_expand_tag_group_returns_that_tags_rows(store, write_csv):
+    source_id, alpha, beta = _tagged_fixture(store, write_csv)
+    view = store.build_view(source_id, {"source_id": source_id, "filters": [], "sort": []})
+    exp = store.expand_group(view["view_id"], TAG_GROUP_COLUMN, alpha["id"])
+    assert exp["row_count"] == 3
+    assert [r["rid"] for r in store.fetch_rows(exp["view_id"], 0, 20)["rows"]] == [1, 2, 3]
+
+
+def test_expand_the_untagged_group(store, write_csv):
+    source_id, alpha, beta = _tagged_fixture(store, write_csv)
+    view = store.build_view(source_id, {"source_id": source_id, "filters": [], "sort": []})
+    exp = store.expand_group(view["view_id"], TAG_GROUP_COLUMN, None)
+    assert exp["row_count"] == 6
+    assert [r["rid"] for r in store.fetch_rows(exp["view_id"], 0, 20)["rows"]] == [5, 6, 7, 8, 9, 10]
+
+
+def test_tag_a_tag_group_both_directions(store, write_csv):
+    """Tagging/untagging a tag group reads row_tags in the subquery and
+    writes row_tags in the same statement — the shape most likely to be
+    quietly wrong."""
+    source_id, alpha, beta = _tagged_fixture(store, write_csv)
+    view = store.build_view(source_id, {"source_id": source_id, "filters": [], "sort": []})
+    gamma = store.upsert_tag(None, "Gamma", "#0000ff", None)
+
+    alpha_group = store.expand_group(view["view_id"], TAG_GROUP_COLUMN, alpha["id"])
+    store.tag_view(alpha_group["view_id"], gamma["id"], True)
+    assert store.tag_counts(source_id)["counts"][str(gamma["id"])] == 3
+
+    # Untagging Alpha off the Alpha group empties it.
+    store.tag_view(alpha_group["view_id"], alpha["id"], False)
+    assert str(alpha["id"]) not in store.tag_counts(source_id)["counts"]
+    assert store.tag_counts(source_id)["counts"][str(gamma["id"])] == 3  # untouched
+
+
+def test_nested_grouping_with_a_tag_as_the_outer_level(store, write_csv):
+    source_id, alpha, beta = _tagged_fixture(store, write_csv)
+    view = store.build_view(source_id, {"source_id": source_id, "filters": [], "sort": []})
+    path = [{"column": TAG_GROUP_COLUMN, "value": alpha["id"]}]
+    inner = store.group_summary(view["view_id"], "Host", path=path)
+    # Alpha is rids 1,2,3 -> H0 (rid 1, 3), H1 (rid 2)
+    assert {g["value"]: g["count"] for g in inner["groups"]} == {"H0": 2, "H1": 1}
+    sub = store.expand_group(view["view_id"], "Host", "H0", path=path)
+    assert [r["rid"] for r in store.fetch_rows(sub["view_id"], 0, 20)["rows"]] == [1, 3]
+
+
+def test_nested_grouping_with_a_tag_as_the_inner_level(store, write_csv):
+    source_id, alpha, beta = _tagged_fixture(store, write_csv)
+    view = store.build_view(source_id, {"source_id": source_id, "filters": [], "sort": []})
+    path = [{"column": "Host", "value": "H0"}]
+    inner = store.group_summary(view["view_id"], TAG_GROUP_COLUMN, path=path)
+    # H0 is the odd rids 1,3,5,7,9 — Alpha holds 1 and 3, Beta holds 3.
+    assert {g["value"]: g["count"] for g in inner["groups"]} == {alpha["id"]: 2, beta["id"]: 1, None: 3}
+    sub = store.expand_group(view["view_id"], TAG_GROUP_COLUMN, beta["id"], path=path)
+    assert [r["rid"] for r in store.fetch_rows(sub["view_id"], 0, 20)["rows"]] == [3]
+
+
+def test_group_by_tag_on_a_merge(store, write_csv):
+    p1 = write_csv([["Host"], ["H1"], ["H2"]], name="mt1.csv")
+    p2 = write_csv([["Host"], ["H3"], ["H4"]], name="mt2.csv")
+    rec1 = store.ingest_csv(p1, name="mt1.csv", build_fts=False)
+    rec2 = store.ingest_csv(p2, name="mt2.csv", build_fts=False)
+    tag = store.upsert_tag(None, "Across", "#abcdef", None)
+    store.set_tags(rec1["id"], [1], tag["id"], True)
+    store.set_tags(rec2["id"], [2], tag["id"], True)
+    merge = store.create_merge("merged", [rec1["id"], rec2["id"]])
+    view = store.build_view(merge["id"], {"source_id": merge["id"], "filters": [], "sort": []})
+    by_value = {g["value"]: g["count"] for g in store.group_summary(view["view_id"], TAG_GROUP_COLUMN)["groups"]}
+    # row_tags is keyed by (source_id, rid), so a merge has to test each
+    # member against its own source id — rid 1 of one member and rid 2 of
+    # the other, not both rids on both.
+    assert by_value == {tag["id"]: 2, None: 2}
+    exp = store.expand_group(view["view_id"], TAG_GROUP_COLUMN, tag["id"])
+    assert exp["row_count"] == 2
+    got = {(r["source_id"], r["rid"]) for r in store.fetch_rows(exp["view_id"], 0, 20)["rows"]}
+    assert got == {(rec1["id"], 1), (rec2["id"], 2)}
+
+
+def test_tag_pseudo_column_name_is_reserved_at_ingest(store, write_csv):
+    """A CSV that genuinely has a `__tag__` header must not shadow the
+    pseudo-column — sanitize_columns renames it, same as it does `rid`."""
+    rec = store.ingest_csv(
+        write_csv([[TAG_GROUP_COLUMN, "Host"], ["x", "H1"]], name="collide.csv"),
+        name="collide.csv", build_fts=False,
+    )
+    names = [c["name"] for c in store.get_source(rec["id"])["columns"]]
+    assert TAG_GROUP_COLUMN not in names
+    assert names[0] == TAG_GROUP_COLUMN + "_1"
+
+
+def test_group_by_tag_never_scans_the_view_per_tagged_row(store, write_csv):
+    """The plan, not just the answer. `v.view_N` is indexed on pos and
+    nothing else, so reaching a view row by rid is a full scan of it —
+    and given a `WHERE vv.source_id = ?` to work with, SQLite will happily
+    drive from row_tags' covering index and re-scan the whole view once per
+    tagged row. That plan returns the right numbers and took minutes where
+    the right one takes milliseconds, so only EXPLAIN catches it. The
+    CROSS JOIN in _tag_group_branches is what pins it."""
+    source_id, alpha, beta = _tagged_fixture(store, write_csv)
+    view = store.build_view(source_id, {
+        "source_id": source_id, "filters": [{"column": "Host", "op": "equals", "value": "H1"}], "sort": [],
+    })
+    branches, _ = store._tag_group_branches(
+        view["view_id"], store._source_lite(source_id),
+        store._resolve_members(source_id), False, {}, lambda m, d: ("", []),
+    )
+    tagged = next(b for b in branches if "row_tags rt " in b)
+    with store._reader() as ro:
+        steps = [r[3].upper() for r in ro.execute("EXPLAIN QUERY PLAN " + tagged)]
+    plan = " | ".join(steps)
+    # The view is the outer loop and row_tags is probed by its primary key,
+    # never the other way round.
+    assert steps[0].startswith("SCAN VV"), plan
+    assert "SEARCH RT USING PRIMARY KEY" in plan, plan
+
+
+def test_group_by_tag_on_a_whole_table_never_touches_the_source(store, write_csv):
+    """The unfiltered case is the common one (group by tag on a table you
+    just opened), and it's answerable from row_tags plus the row count
+    alone — no scan of the source table at all."""
+    source_id, alpha, beta = _tagged_fixture(store, write_csv)
+    view = store.build_view(source_id, {"source_id": source_id, "filters": [], "sort": []})
+    src = store._source_lite(source_id)
+    branches, params = store._tag_group_branches(
+        view["view_id"], src, store._resolve_members(source_id), True,
+        {source_id: src["row_count"]}, lambda m, d: ("", []),
+    )
+    assert params == []
+    assert not any(src["table_name"] in b for b in branches)

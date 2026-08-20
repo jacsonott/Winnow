@@ -483,6 +483,15 @@ html[data-style="studio"][data-theme="light"] {
 .group-pill-rm:hover { color: var(--danger); background: var(--panel-3); }
 .group-sort-btn { font-size: 11px; white-space: nowrap; margin-left: auto; flex: 0 0 auto; }
 .group-drop-btn { font-size: 11px; white-space: nowrap; flex: 0 0 auto; }
+/* The tag pseudo-column's way into the strip — it has no header to drag.
+   margin-left: auto when it's the only trailing control (nothing grouped
+   yet), so it sits with the sort/ungroup buttons rather than crowding the
+   "drag a column header here" hint. */
+.group-tag-btn { font-size: 11px; white-space: nowrap; flex: 0 0 auto; }
+.group-strip-hint + .group-tag-btn { margin-left: auto; }
+/* A tag group's colour, alongside its name in the group header — same
+   8px chip the tag ribbon and the timeline filter use. */
+.group-header-label .swatch { width: 8px; height: 8px; border-radius: 1px; flex: 0 0 auto; }
 
 .group-header-row {
   display: flex; align-items: center; cursor: pointer;
@@ -670,10 +679,11 @@ html[data-style="studio"][data-theme="light"] {
 .gutter-mid { display: flex; align-items: center; gap: 2px; overflow: hidden; min-width: 0; }
 .gutter .stripe { width: 4px; height: 12px; border-radius: 1px; flex: 0 0 auto; }
 .gutter .has-note { color: var(--accent); }
-/* Explicit grid-column: 3 rather than relying on sibling order — grouped
-   mode's gutter has no checkbox or stripe slot, so a rid placed by flow
-   would land in column 1 and stop lining up with flat mode's.
-   tabular-nums so rids of differing digit counts right-align cleanly. */
+/* Explicit grid-column: 3 rather than relying on sibling order — a row
+   still painting in (no cells resolved yet) has an empty middle slot, and a
+   rid placed by flow would land in column 1 and stop lining up with its
+   neighbours. tabular-nums so rids of differing digit counts right-align
+   cleanly. */
 .gutter .rid { grid-column: 3; justify-self: end; font-variant-numeric: tabular-nums; }
 
 .gutter input.rowcheck, .hcell input.select-all-rows {
@@ -1091,6 +1101,16 @@ textarea:focus { border-color: var(--accent); outline: none; }
   display: flex; align-items: center; gap: 12px;
   background: var(--panel-2); border-radius: var(--radius-sm); padding: 8px 10px;
 }
+/* A per-term row under its table: indented, quieter, and monospaced,
+   since the thing being named is a literal search term (a hash, a path, an
+   IP) rather than a file name. The left rule is what makes a run of them
+   read as belonging to the table above rather than as more tables. */
+.search-all-term-row {
+  margin-left: 20px; background: none;
+  border-left: 2px solid var(--line-2); border-radius: 0;
+  padding-top: 4px; padding-bottom: 4px;
+}
+.search-all-term-row .search-all-name { font-family: var(--mono); font-size: 12px; color: var(--dim); }
 .search-all-name { font-size: 13px; color: var(--text); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .search-all-count { font-family: var(--mono); font-size: 11px; color: var(--accent); white-space: nowrap; }
 .search-all-progress { font-family: var(--mono); font-size: 11px; color: var(--dim); }

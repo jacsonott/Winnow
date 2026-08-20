@@ -1417,6 +1417,17 @@ def api_tags(source_id: int | None = None):
     return out
 
 
+@app.get("/api/tag_counts")
+def api_tag_counts(view_id: str):
+    """Tag counts scoped to one view — what the ribbon shows once a filter
+    or search is on. 409 on an expired view, same contract as every other
+    view-keyed read."""
+    try:
+        return store().tag_counts_in_view(view_id)
+    except KeyError as e:
+        raise HTTPException(409, str(e))
+
+
 @app.post("/api/tags")
 def api_tag_upsert(body: TagDef):
     return store().upsert_tag(body.id, body.name, body.color, body.hotkey)
