@@ -2041,6 +2041,23 @@ def api_search_all_cancel(job_id: int | None = None):
     return {"cancelled": store().cancel_search_all_job(job_id)}
 
 
+@app.get("/api/search_all/history")
+def api_search_all_history():
+    return store().list_search_all_history()
+
+
+@app.delete("/api/search_all/history/{entry_id}")
+def api_search_all_history_delete(entry_id: int):
+    store().delete_search_all_history(entry_id)
+    return {"ok": True}
+
+
+@app.delete("/api/search_all/history")
+def api_search_all_history_clear():
+    store().delete_search_all_history()
+    return {"ok": True}
+
+
 @app.post("/api/sql")
 def api_sql(body: SqlQuery):
     try:
