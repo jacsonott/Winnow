@@ -97,7 +97,10 @@ top and bottom, `1`–`9` toggle a tag on the selection, `Shift+1`–`9` apply a
 to **every** row in the current view, `/` search, `f` filters to the value in
 the cell you're on (`Shift+F` does that *and* drops every other filter — the
 timeframe filter stays), `C` the table menu, `n` note,
-`?` help. `Alt`+`1`–`0` switches tabs: `Alt`+`1` is whichever table you were
+`?` help. `Ctrl`/`⌘`+`Z` undoes the last tag you applied or removed — press it
+again to keep stepping back. Undo reverses exactly the rows that op
+*changed*, so tagging a selection that overlaps rows you'd tagged earlier
+and then undoing leaves the earlier ones alone. `Alt`+`1`–`0` switches tabs: `Alt`+`1` is whichever table you were
 last in, `Alt`+`2` onward are the page tabs in strip order (so they follow a
 reorder rather than being nailed to SQL/Timeline). `J` jumps to the row nearest
 a timestamp you type — the moment is remembered across tables, so `.` jumps
@@ -120,10 +123,11 @@ it's on by default only under 250,000 rows; the table menu turns it on or off
 for the whole table or one column, and a row's right-click menu offers it for
 any column regardless.
 
-**Right-click** does the obvious thing in three places: a row (tag it, filter to
+**Right-click** does the obvious thing in four places: a row (tag it, filter to
 or exclude the cell you clicked, copy), a column header (display format, add a
-datetime column from it, the derived-column actions), a tab or a sidebar table
-name (the table menu — columns, value dropdowns, layout defaults; also on `C`).
+datetime column from it, flatten JSON/XML out of it, the derived-column
+actions), the detail pane (see below), a tab or a sidebar table name (the table
+menu — columns, value dropdowns, layout defaults; also on `C`).
 
 Click a column header to sort, `Shift`-click to add a secondary sort.
 
@@ -179,6 +183,70 @@ stored and exported value is always the text the file came with. Set it per
 column by right-clicking its header, or set a default for the case and for
 every case on this machine under **Settings → Timestamps**. The default is
 `YYYY-MM-DD HH:MM:SS`; "As stored" is still there if you want the raw text.
+
+## Nested JSON and XML
+
+Plenty of logs put a whole document in one cell — EVTX `EventData`, cloud
+audit `requestParameters`, EDR telemetry blobs. The grid can only show that
+as one long unreadable string, and you can't sort, filter or group by
+something buried inside it.
+
+Double-click a row to open the **detail pane**, and any field holding JSON or
+XML is pretty-printed and syntax-coloured. Every node in it is addressable:
+right-click one and **Add as a column** builds a real column holding that
+field from every row. No path syntax to learn — the path comes from the node
+you clicked.
+
+**Flatten JSON/XML into columns…** (a column header's right-click menu, or the
+detail pane's node menu) does the whole document at once. It samples the
+column, lists every field it finds with what fraction of the sample carried it
+and an example value, and builds a column per field you tick — all in one pass
+over the table rather than one pass each. Fields present in every sampled row
+start ticked; ones that are present but always empty (a `<TimeCreated
+SystemTime="…"/>` container, whose value is really on the attribute) sort to
+the bottom and start unticked.
+
+Extracted columns are ordinary derived columns: they sort, filter, group, feed
+the Timeline, appear in exports, are marked `ƒ`, and travel in session files as
+a *definition* that recomputes against the same evidence. The source table is
+never touched. Rows where the field wasn't there are empty and counted — the
+column's menu offers **Show N rows without this field**.
+
+Paths are written the way you'd expect, and you can edit one by hand
+(**Change the field path…** on the column's menu):
+
+| | |
+| --- | --- |
+| `$.user.name` | a JSON field — the leading `$` is optional |
+| `items[0].id` | into an array |
+| `["odd.key"].v` | for a key containing a dot |
+| `Event/System/EventID` | an XML element's text |
+| `Provider@Name` | an XML attribute |
+| `Data[@Name='LogonType']` | the repeated element with that attribute |
+| `Data[2]` | the third same-named sibling |
+
+That `[@Name='…']` form is why Windows event logs come out useful:
+`EventData` is a run of identical `<Data Name="…">` elements, and addressing
+them by name gives you a `LogonType` column that means the same thing in every
+row, where addressing them by position would give you a `Data[4]` that doesn't.
+
+XML that declares a `<!DOCTYPE>` is not parsed at all — evidence is untrusted
+input and entity expansion isn't a risk worth taking for a shape no log field
+has. Malformed or truncated XML still renders (unhighlighted), it just has
+nothing addressable in it.
+
+## The detail pane
+
+Double-click a row (or press `d`) for the full-value view of every field, plus
+the note box. Right-clicking in it gives you whichever of two things you're
+pointing at, and often both:
+
+- **Highlighted text** — copy it, filter the column to it, filter to it and
+  drop everything else, exclude it, or search every column for it. A selection
+  out of the middle of a document is a fragment, so it filters as *contains*
+  rather than as an exact match.
+- **A node of a parsed JSON/XML document** — add it as a column, filter the
+  column to that value, copy the value or the path, or open the flatten picker.
 
 ## Sessions
 

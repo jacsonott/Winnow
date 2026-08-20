@@ -32,6 +32,11 @@ counting failures.
 
 register_op() is module-internal for now but is the single seam a future
 PluginAPI.register_timestamp_op would call — don't inline the registry.
+It is also what `structparse.py` registers its JSON/XML field-extraction
+operations through: the registry is "operations that define a derived
+column", of which timestamp parsing is one family (`family: "datetime"`,
+the default) and extraction another. Everything below this docstring is
+still timestamps only.
 """
 
 from __future__ import annotations
@@ -121,6 +126,11 @@ def register_op(op: dict) -> None:
     op.setdefault("value_type", "datetime")
     op.setdefault("hidden_from_detect", False)
     op.setdefault("params", [])
+    # Which question the operation answers, and so which picker offers it:
+    # "datetime" ops turn a column into a sortable moment, "extract" ops
+    # (structparse.py) lift a field out of a document. Listing them
+    # together would put "JSON field" in the Add-datetime-column dropdown.
+    op.setdefault("family", "datetime")
     OPERATIONS[op["id"]] = op
 
 
@@ -208,6 +218,14 @@ def validate_params(op_id: str, params: dict | None) -> dict:
         else:
             val = str(val).strip()
         out[name] = val
+    # Per-op validation for anything the type-level schema can't express —
+    # a field path's syntax, say. Raises ValueError with an analyst-facing
+    # message, same contract as the checks above, so a bad path is caught
+    # at column-creation time rather than becoming a column of NULLs the
+    # analyst has to work out the cause of.
+    validate = op.get("validate")
+    if validate:
+        validate(out)
     return out
 
 
@@ -223,6 +241,7 @@ def list_ops() -> list[dict]:
             "two_input": op["two_input"],
             "value_type": op["value_type"],
             "derived_kind": op.get("derived_kind", "datetime"),
+            "family": op["family"],
         })
     return out
 

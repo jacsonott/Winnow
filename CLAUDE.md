@@ -14,8 +14,19 @@ at runtime, it's the wrong change.
 server.py          FastAPI routes, CLI entrypoint. Thin — logic lives in store.
 store.py           All SQLite: ingest, view materialisation, tags, sessions, export.
 timeparse.py       Timestamp-parsing operations for derived datetime columns —
-                    the registry store.py's add_derived_column/detect read.
-                    Stdlib only, imports nothing from the app.
+                    and, since structparse.py registers into it, the registry
+                    of derived-column operations generally. `family` splits
+                    them ("datetime" vs "extract") so each picker offers only
+                    the ops that answer its question. Stdlib only, imports
+                    nothing from the app.
+structparse.py     JSON/XML field-extraction operations, registered into
+                    timeparse.OPERATIONS via register_op (its documented
+                    seam) rather than a parallel registry — a derived column
+                    needs the same things either way. Also owns the two path
+                    syntaxes and the sample-and-enumerate discovery behind the
+                    flatten picker. Stdlib only; imports timeparse and nothing
+                    else from the app. store.py imports it for the
+                    registration side effect.
 workspace.py       Cross-case JSON state (case registry, saved filters, default
                     tag template) — human-readable files in workspace/, outside
                     any single case.db so they survive switching cases.
@@ -46,8 +57,15 @@ static/index.html  App shell. No framework. #home and #app are siblings; only
                     one is ever visible.
 static/app.js      Virtualized grid, filters, tagging, detail pane, SQL pane,
                     home screen. The right-click surfaces (row menu, table
-                    menu) and the header value picker all ride one floating-
-                    menu implementation — see "Things that bite".
+                    menu, detail-pane menu) and the header value picker all
+                    ride one floating-menu implementation — see "Things that
+                    bite". The detail pane's JSON/XML pretty-printer builds
+                    from the parsed document rather than regexing its text,
+                    because every node it emits carries the path that
+                    addresses it; xmlSiblingSelectors is a deliberate twin of
+                    structparse._sibling_selectors and has to stay in step
+                    with it, since a path the UI offers must be one the
+                    backend can resolve.
 bench/             Performance suite — stdlib-only timing harness, seeded
                     fixtures, baseline/`--vs-ref` comparison. Separate from
                     tests/ on purpose; see the Performance section below.
@@ -158,7 +176,31 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
    `translateY`. Don't introduce per-row listeners; the grid uses event
    delegation on `#body`.
 
-7. **`workspace/` is not a case file.** It holds UI/workflow bookkeeping only
+7. **A tag write records the rows it actually changed, and undo replays
+   that.** Every apply/remove — the selection paths, `tag_view`, both
+   virtual-view paths — goes through `Store._apply_tag_change`, which
+   materialises the *delta* (target rows minus the ones already in the
+   wanted state) into a `v.undo_<n>` table and then applies the change
+   **from that table**, so the rows recorded and the rows written are the
+   same set by construction. Undo is `_write_tag_delta` over that same
+   table with the direction flipped.
+   The reason this isn't just "re-send the rids with `on` inverted": tags
+   overlap. Tagging 200 rows when 40 already carried the tag moves 160; an
+   undo that deleted the tag from all 200 would strip it off the 40, and
+   nothing would ever tell the analyst. Silent corruption of triage state
+   is the worst failure this tool has (see the two-paths-no-third comment
+   on `applyTag` for the same reasoning applied one level up). If you add a
+   new tag write path, route it through `_apply_tag_change` — don't
+   INSERT/DELETE `row_tags` directly.
+   History lives in the views database (invariant #3), so it's scratch that
+   dies with the process, and it's bounded by both an entry count and a row
+   budget (`UNDO_LIMIT` / `UNDO_ROW_BUDGET`) because "tag every row in a
+   1.2M-row view" records 1.2M pairs. `delete_tag` drops the entries naming
+   it — undoing one would reinsert rows pointing at a dead tag_id.
+   `affected` stays "rows targeted" for backwards compatibility; `changed`
+   is the delta count.
+
+8. **`workspace/` is not a case file.** It holds UI/workflow bookkeeping only
    (case registry, saved filters, default-tag template) as human-readable
    JSON, never evidence data. Case files stay fully self-contained and
    portable on their own — deleting `workspace/` loses convenience state, not
@@ -1410,6 +1452,19 @@ rollover (including across a batch boundary and Feb 29 in a non-leap
 year), offset-to-UTC conversion — plus the guarantee that every parser's
 output is accepted by `_TS_ISO_RE`/`TS_NORMALIZE`/`DAY_BUCKET`, which is
 what makes derived columns need no new regexes on either side.
+`test_tag_undo.py` covers the undo stack, and its load-bearing test is the
+one that tags an overlapping selection and asserts the *pre-existing*
+assignments survive the undo — a naive re-send-inverted implementation
+passes every other test in that file and fails only that one.
+`test_structparse.py` covers the JSON/XML path syntaxes and extraction as
+pure functions (same shape as `test_timeparse.py`), including the round-trip
+property that makes paths safe to write into a column definition, the
+EVTX `[@Name='…']` predicate form, and the DOCTYPE refusal.
+`test_derived_extract.py` covers the store-level integration: that an
+extracted column is an ordinary derived column everywhere, that discovery
+only ever offers paths that actually extract, and that a batch is
+all-or-nothing (a name collision in the fifth spec must not leave four
+columns behind).
 `test_derived.py` covers the column lifecycle and, more importantly, the
 integration choices that are easy to reverse by accident: the
 virtual-root EXPLAIN plan (invariant #2), that derived values are *not*
