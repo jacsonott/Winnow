@@ -1028,6 +1028,15 @@ async function openSource(id) {
   if (S.activeTab !== 'grid') showGridTab();
   S.sourceId = id;
   S.columns = src.columns;
+  /* A cached row's `cells` is an array positional to S.columns, so changing
+     the column set invalidates every cached page — and the two were never
+     tied together. Adding or removing a derived column re-enters here with
+     a different S.columns while the cache still holds rows laid out for the
+     old one; rendering those would put values under the wrong headers,
+     which for evidence is far worse than a blank cell. Cleared here, before
+     anything can paint, rather than in each branch below (only one of which
+     used to do it). */
+  clearPageCache();
   S.filters = {};
   S.search = '';
   S.searchMode = 'contains';
@@ -1137,13 +1146,23 @@ async function rebuildView({ keepScroll = true } = {}) {
       // 499 = the analyst cancelled this build. Server-side the transaction
       // rolled back with the previous view intact (see build_view), so the
       // rows on screen are still real — just keep them.
-      if (e.status === 499) { toast('Cancelled — kept the previous view', 2500); return; }
+      if (e.status === 499) {
+        toast('Cancelled — kept the previous view', 2500);
+        // Repaint before leaving. The rows on screen are still real, but the
+        // *column set* may have changed since they were painted (this is the
+        // path a removed derived column takes when its rebuild is cancelled
+        // or superseded), and skipping the paint is what left the grid
+        // showing a column its own header had already dropped.
+        render();
+        return;
+      }
       // 409 = the case/view this tab was talking to is gone (e.g. another
       // client switched cases) — show the server's message as-is rather
       // than mislabeling it a filter problem.
       toast(e.status >= 500
         ? `Couldn't build the view: ${e.message} — this is a bug, check the server console`
         : (e.status === 409 ? e.message : 'Filter error: ' + e.message), 5000);
+      render(); // same reason as the 499 path above
       return;
     }
     // Fetch the page(s) covering where the grid will land BEFORE swapping
@@ -1165,8 +1184,14 @@ async function rebuildView({ keepScroll = true } = {}) {
       try {
         seeded = await Promise.all(pageIdxs.map(async (idx) => {
           const data = await api(`/api/rows?view_id=${v.view_id}&start=${idx * PAGE}&count=${PAGE}`);
-          return [idx, data.rows];
+          // An in-range page that came back empty is not a page — seeding it
+          // would cache the empty array, and ensurePage short-circuits on
+          // S.pages.has(), so nothing would ever refetch it. Same latch the
+          // guard in ensurePage exists to prevent, one layer up: the seed
+          // writes into the cache directly and so bypasses that guard.
+          return (!data.rows.length && idx * PAGE < v.row_count) ? null : [idx, data.rows];
         }));
+        seeded = seeded.filter(Boolean);
       } catch { seeded = []; }
     }
   } finally {
