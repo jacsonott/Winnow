@@ -74,7 +74,8 @@ const S = {
   pending: new Map(),    // page index -> in-flight fetch promise, so concurrent callers share one request
   pageGen: 0,            // bumped by clearPageCache() so an in-flight fetch issued before it can't repopulate stale rows
   tags: [],
-  tagCounts: {},
+  tagCounts: {},          // tag id -> tagged rows *in the current view* — what the ribbon shows
+  tagCountsAll: {},       // tag id -> tagged rows in the whole table, for the "of N" half of the tooltip
   cursor: -1,           // position in view
   /* Row selection is a flag plus a Set, never a materialized list of every
      selected position — see the sel* helpers below for the full contract.
@@ -98,7 +99,8 @@ const S = {
   groupPrefix: [],         // prefix sums: virtual position where each group's header row starts
   groupTotalRows: 0,
   groupPages: new Map(),   // `${viewId}:${pageIndex}` -> rows array, for expanded leaf groups' data
-  groupPending: new Set(),
+  groupPending: new Map(),  // same key -> the in-flight fetch promise, so concurrent callers share one request
+  groupPageGen: 0,         // bumped by clearGroupPageCache so an in-flight fetch can't repopulate stale rows
   savedFilters: [],        // cross-case cyclable filters, loaded from workspace/filters.json
   headerNicknames: [],     // [{id, col_names, nickname}] — friendly names for a header set
   timeRange: { enabled: false, column: null, start: '', end: '' }, // survives filter/preset/tab changes on purpose — see toggleTimeRange
@@ -138,7 +140,13 @@ const S = {
    and hand to the server as one bulk operation rather than a list of rids
    it only has page-cached a few hundred of (see applyTag). */
 
-const selViewRows = () => (S.view ? S.view.row_count : 0);
+/* How many addressable row positions the grid has right now — the view's
+   rows in flat mode, the flattened group tree's rows (data rows *and* group
+   headers) in grouped mode. Every bound on the shared position space goes
+   through this rather than reaching for S.view.row_count, which is only
+   half the answer once a grouping is on. */
+const gridRowCount = () => (S.groupByCols.length ? S.groupTotalRows : S.view ? S.view.row_count : 0);
+const selViewRows = () => gridRowCount();
 
 function selCount() {
   return S.selectAll ? Math.max(0, selViewRows() - S.selection.size) : S.selection.size;
@@ -152,7 +160,16 @@ function selSetAll() { S.selectAll = true; S.selection.clear(); }
 function selSetRange(from, to) {
   S.selectAll = false;
   S.selection.clear();
-  for (let p = Math.min(from, to); p <= Math.max(from, to); p++) S.selection.add(p);
+  const lo = Math.min(from, to), hi = Math.max(from, to);
+  // Grouped mode's position space interleaves group-header rows with data
+  // rows, and a header isn't a row anything can tag or copy. groupCoordAt
+  // answers that from the tree alone (no page fetch), so a range drag over
+  // three groups selects their rows and none of their headings — and
+  // selCount() stays a count of real rows.
+  for (let p = lo; p <= hi; p++) {
+    if (S.groupByCols.length && !groupCoordAt(p)) continue;
+    S.selection.add(p);
+  }
 }
 /* The lowest selected position, without materializing the rest. */
 function selFirst() {
@@ -168,6 +185,20 @@ function selPositions() {
   const out = [];
   for (let p = 0, n = selViewRows(); p < n; p++) if (!S.selection.has(p)) out.push(p);
   return out;
+}
+/* Rewrites every selected position through `fn`, dropping the ones it maps
+   to null. The one mutation that isn't add/remove/clear: grouped mode's
+   positions are indices into a tree whose shape changes under expand and
+   collapse, and the selection has to move with it (see
+   shiftGroupPositions). Lives here so the "nothing outside this block
+   touches S.selection" rule keeps holding. */
+function selRemap(fn) {
+  const moved = new Set();
+  for (const pos of S.selection) {
+    const to = fn(pos);
+    if (to !== null && to !== undefined) moved.add(to);
+  }
+  S.selection = moved;
 }
 /* Positions explicitly unchecked out of a select-all. Empty unless selectAll. */
 const selExcludedPositions = () => (S.selectAll ? [...S.selection] : []);
@@ -1130,7 +1161,7 @@ async function rebuildView({ keepScroll = true } = {}) {
   // the outgoing and incoming views can have different row counts, and once
   // either is over MAX_SPACER_PX they have different spacer scales too — the
   // same scrollTop would then mean a different row on each side.
-  const oldTotal = S.groupByCols.length ? S.groupTotalRows : (S.view ? S.view.row_count : 0);
+  const oldTotal = gridRowCount();
   const scroll = keepScroll ? vScroll($('body'), oldTotal, headH()) : 0;
   const spec = currentSpec();
   spec.op_token = opToken();
@@ -1225,6 +1256,7 @@ async function rebuildView({ keepScroll = true } = {}) {
     render();
     drawRail();
   }
+  refreshTagCounts(); // the scope changed, so every ribbon count did too
   updateFiltersButton();
 }
 
@@ -2293,7 +2325,7 @@ const MAX_CACHED_PAGES = 10;
    on arrival, so an eviction/refetch pair here would loop forever. */
 function visiblePageRange() {
   const body = $('body');
-  const total = S.groupByCols.length ? S.groupTotalRows : (S.view ? S.view.row_count : 0);
+  const total = gridRowCount();
   const first = Math.max(0, Math.floor(vScroll(body, total, headH()) / ROW_H) - OVERSCAN);
   const last = first + Math.ceil(body.clientHeight / ROW_H) + OVERSCAN * 2;
   return [Math.floor(first / PAGE), Math.floor(last / PAGE)];
@@ -2343,7 +2375,7 @@ function clearPageCache() {
    check S.pages afterwards. Concurrent callers for the same page share one
    request rather than the second one returning immediately as if it were
    already loaded. */
-function ensurePage(idx, { keep } = {}) {
+function ensurePage(idx, { keep, prefetch } = {}) {
   if (S.pages.has(idx)) return Promise.resolve();
   const inFlight = S.pending.get(idx);
   if (inFlight) return inFlight;
@@ -2373,8 +2405,15 @@ function ensurePage(idx, { keep } = {}) {
       S.pages.set(idx, data.rows);
       for (const r of data.rows) S.rowsByPos.set(r.pos, r);
       trimPageCache(keep);
-      render();
-      if (!$('detail').hidden && S.cursor >= 0 && rowAt(S.cursor)) showDetail(S.cursor);
+      // A prefetched page landing outside the viewport changes nothing on
+      // screen, and repainting for it is pure work — but the analyst may
+      // have scrolled onto it while it was in flight, in which case it's
+      // exactly the page render() is waiting on. Check, don't assume.
+      const [visFirst, visLast] = visiblePageRange();
+      if (!prefetch || (idx >= visFirst && idx <= visLast)) {
+        render();
+        if (!$('detail').hidden && S.cursor >= 0 && rowAt(S.cursor)) showDetail(S.cursor);
+      }
     } catch (e) {
       if (String(e.message).includes('expired')) rebuildView();
     } finally {
@@ -2385,15 +2424,108 @@ function ensurePage(idx, { keep } = {}) {
   return p;
 }
 
-const rowAt = (pos) => S.rowsByPos.get(pos);
+/* ------------------------------------------------------------- prefetch */
+
+/* Rows the analyst hasn't reached yet, fetched before they ask for them.
+
+   A page is PAGE (5,000) rows, so crossing a page boundary is rare — but
+   when it happens the grid paints `pending` placeholder rows until a
+   5,000-row round trip completes, and that stall is the whole of what
+   "scrolling feels sluggish" is. Warming the neighbouring pages turns the
+   boundary into a cache hit for at most two extra requests, well inside
+   MAX_CACHED_PAGES (a viewport spans one or two pages; this makes it three
+   or four).
+
+   Both directions, not just the direction of travel: scrolling back up
+   through a boundary stalls exactly as badly as scrolling down through it,
+   and guessing the direction wrong costs a wasted fetch while covering
+   both costs one.
+
+   Deferred to idle rather than fired inline from render(): a prefetch
+   competing with the page the viewport is actually waiting on would make
+   the visible case slower in order to fix the invisible one. Only one pass
+   is ever pending, and it reads the viewport at fire time rather than
+   closing over a range that scrolling has since invalidated. */
+const PREFETCH_RADIUS = 1; // pages either side of the visible range
+
+const whenIdle = (fn) => (window.requestIdleCallback ? requestIdleCallback(fn, { timeout: 500 }) : setTimeout(fn, 150));
+
+/* Never cancelled on a view rebuild or a grouping change: the callback
+   reads S.view / S.groups at fire time rather than closing over them, so a
+   pass scheduled against the old view simply warms the right pages of the
+   new one — and ensurePage's own generation check discards anything that
+   was already in flight across the change. */
+let prefetchHandle = null;
+function schedulePrefetch() {
+  if (prefetchHandle !== null) return;
+  prefetchHandle = whenIdle(() => {
+    prefetchHandle = null;
+    if (!S.view) return;
+    if (S.groupByCols.length) prefetchGroupPages();
+    else prefetchFlatPages();
+  });
+}
+
+function prefetchFlatPages() {
+  const maxPage = Math.floor(Math.max(0, S.view.row_count - 1) / PAGE);
+  const [firstPage, lastPage] = visiblePageRange();
+  for (let d = 1; d <= PREFETCH_RADIUS; d++) {
+    for (const idx of [lastPage + d, firstPage - d]) {
+      if (idx >= 0 && idx <= maxPage) ensurePage(idx, { prefetch: true });
+    }
+  }
+}
+
+/* Grouped mode's boundaries are closer together and there are two kinds:
+   the next page *within* a big expanded group, and the first page of the
+   *next* expanded group. Both stall the same way, so both get warmed. */
+function prefetchGroupPages() {
+  const body = $('body');
+  const virt = vScroll(body, S.groupTotalRows, headH());
+  const first = Math.max(0, Math.floor(virt / ROW_H) - OVERSCAN);
+  const last = Math.min(S.groupTotalRows - 1, first + Math.ceil(body.clientHeight / ROW_H) + OVERSCAN * 2);
+
+  for (const [vpos, step] of [[last, 1], [first, -1]]) {
+    const c = groupCoordAt(vpos);
+    if (c) {
+      const page = Math.floor(c.localIdx / PAGE) + step;
+      if (page >= 0 && page * PAGE < c.g.rowCount) ensureGroupPage(c.g, page, { prefetch: true });
+    }
+    const gi = nextExpandedLeaf(findGroupAt(Math.max(0, Math.min(vpos, S.groupTotalRows - 1))), step);
+    if (gi !== null) ensureGroupPage(S.groups[gi], step > 0 ? 0 : Math.floor((S.groups[gi].rowCount - 1) / PAGE), { prefetch: true });
+  }
+}
+
+/* The next expanded leaf group in `step` direction from `gi`, skipping the
+   headers of collapsed and non-leaf nodes — the next node that actually has
+   rows to warm. Null when there isn't one. */
+function nextExpandedLeaf(gi, step) {
+  for (let i = gi + step; i >= 0 && i < S.groups.length; i += step) {
+    const g = S.groups[i];
+    if (g.expanded && isLeafLevel(g.level) && g.rowCount) return i;
+  }
+  return null;
+}
+
+/* `pos` is a view position in flat mode and a position in the flattened
+   group tree in grouped mode — the two share one address space so that
+   every row-level consumer (the cursor, the cell range, the row menu, copy,
+   tagging, the detail pane) works in both without a second implementation.
+   See the group-by block for how grouped positions stay pinned to their
+   rows across an expand/collapse. Returns null for a group header row and
+   for a data row whose page hasn't landed yet — both mean "no row here". */
+const rowAt = (pos) => (S.groupByCols.length ? groupDataRowAt(pos) : S.rowsByPos.get(pos));
 
 /* -------------------------------------------------------------- painting */
 
 /* Kept in sync from render() (called after every S.selection mutation —
    row clicks, checkbox toggles, tag/copy actions that clear it, etc.)
-   rather than from each of those sites individually. Grouped mode has no
-   row-level selection yet (same "flat-mode-only for now" gate as the rest
-   of it), so the checkbox is disabled there rather than lying about it. */
+   rather than from each of those sites individually. Disabled under a
+   grouping: rows there *are* selectable, but this box means "every row in
+   the view", and the flattened tree it would have to check is a mix of
+   data rows and group headers whose collapsed groups aren't even loaded.
+   Tag-the-whole-view (Shift + a tag hotkey) and the group menu's
+   tag-this-group both do that job server-side without the ambiguity. */
 function syncSelectAllCheckbox() {
   const cb = $('selectAllRows');
   if (!cb) return;
@@ -2498,67 +2630,86 @@ function render() {
   const lastPage = Math.floor(Math.max(0, total - 1) / PAGE);
   const wantLast = Math.min(lastPage, Math.floor(Math.max(first, last - 1) / PAGE));
   for (let p = Math.floor(first / PAGE); p <= wantLast; p++) ensurePage(p);
+  schedulePrefetch();
 
-  const cols = visibleCols();
-  const colMeta = Object.fromEntries(S.columns.map((c) => [c.name, c]));
-  const idx = Object.fromEntries(S.columns.map((c, i) => [c.name, i]));
-  const tagColor = Object.fromEntries(S.tags.map((t) => [t.id, t.color]));
-  const widths = Object.fromEntries(cols.map((name) => [name, colWidth(name)]));
-  const needle = S.search.trim().toLowerCase();
+  const ctx = rowPaintContext();
 
-  syncRowsWidth(widths, cols);
+  syncRowsWidth(ctx.widths, ctx.cols);
   rowsEl.style.transform = `translateY(${rowsPaintY(body, virt, first)}px)`;
   const frag = document.createDocumentFragment();
 
-  for (let pos = first; pos < last; pos++) {
-    const r = rowAt(pos);
-    const row = el('div', 'row' + (r ? '' : ' pending'));
-    row.dataset.pos = pos;
-    if (pos === S.cursor) row.classList.add('cursor');
-    if (selHas(pos)) row.classList.add('selected');
-
-    // Three fixed slots (see .gutter in style.css): the checkbox, a middle
-    // strip for tag colors + the note mark, then the rid hard right. The
-    // middle slot is always present even when empty so the checkbox and the
-    // number keep the same x-position on every row regardless of whether
-    // that row happens to be tagged or annotated.
-    const g = el('div', 'gutter');
-    g.style.flexBasis = GUTTER_W + 'px';
-    const cb = el('input');
-    cb.type = 'checkbox';
-    cb.className = 'rowcheck';
-    cb.checked = selHas(pos);
-    const mid = el('div', 'gutter-mid');
-    if (r) {
-      for (const tid of r.tags) {
-        const s = el('div', 'stripe');
-        s.style.background = tagColor[tid] || '#888';
-        mid.append(s);
-      }
-      if (r.note) mid.append(el('span', 'has-note', '✎'));
-    }
-    g.append(cb, mid, el('span', 'rid', r ? String(r.rid) : '·'));
-    row.append(g);
-
-    cols.forEach((name, ci) => {
-      const c = el('div', 'cell' + (colMeta[name] && colMeta[name].type === 'number' ? ' num' : ''));
-      c.style.flexBasis = widths[name] + 'px';
-      c.dataset.col = ci;
-      if (cellInRange(pos, ci)) c.classList.add('cell-selected');
-      const val = r ? r.cells[idx[name]] : '';
-      if (val != null && val !== '') {
-        // Keep the raw value (with highlight) when it's what matched the
-        // search, so the matched substring stays visible — only substitute
-        // the formatted display when there's nothing to highlight.
-        if (needle && String(val).toLowerCase().includes(needle)) highlight(c, String(val), needle);
-        else c.textContent = displayCell(name, val);
-      }
-      row.append(c);
-    });
-    frag.append(row);
-  }
+  for (let pos = first; pos < last; pos++) frag.append(buildDataRow(pos, rowAt(pos), ctx));
   rowsEl.replaceChildren(frag);
   renderTagToolbar();
+}
+
+/* Everything a paint pass hoists out of its row loop — built once per
+   render and handed to buildDataRow for every row. Shared by the flat and
+   grouped painters so a change to either lands in both. */
+function rowPaintContext() {
+  const cols = visibleCols();
+  return {
+    cols,
+    colMeta: Object.fromEntries(S.columns.map((c) => [c.name, c])),
+    idx: Object.fromEntries(S.columns.map((c, i) => [c.name, i])),
+    tagColor: Object.fromEntries(S.tags.map((t) => [t.id, t.color])),
+    widths: Object.fromEntries(cols.map((name) => [name, colWidth(name)])),
+    needle: S.search.trim().toLowerCase(),
+  };
+}
+
+/* One data row's DOM. `pos` addresses the row the way the current mode
+   does — a view position when flat, a flattened-tree position when grouped
+   — and is what every delegated listener on #body reads back off
+   dataset.pos. Grouped mode paints through here rather than through a
+   reduced copy of it precisely so that selection, tag stripes, the note
+   mark and the cell-range highlight can't be present in one mode and
+   quietly missing in the other. */
+function buildDataRow(pos, r, { cols, colMeta, idx, tagColor, widths, needle }) {
+  const row = el('div', 'row' + (r ? '' : ' pending'));
+  row.dataset.pos = pos;
+  if (pos === S.cursor) row.classList.add('cursor');
+  if (selHas(pos)) row.classList.add('selected');
+
+  // Three fixed slots (see .gutter in style.css): the checkbox, a middle
+  // strip for tag colors + the note mark, then the rid hard right. The
+  // middle slot is always present even when empty so the checkbox and the
+  // number keep the same x-position on every row regardless of whether
+  // that row happens to be tagged or annotated.
+  const g = el('div', 'gutter');
+  g.style.flexBasis = GUTTER_W + 'px';
+  const cb = el('input');
+  cb.type = 'checkbox';
+  cb.className = 'rowcheck';
+  cb.checked = selHas(pos);
+  const mid = el('div', 'gutter-mid');
+  if (r) {
+    for (const tid of r.tags) {
+      const st = el('div', 'stripe');
+      st.style.background = tagColor[tid] || '#888';
+      mid.append(st);
+    }
+    if (r.note) mid.append(el('span', 'has-note', '✎'));
+  }
+  g.append(cb, mid, el('span', 'rid', r ? String(r.rid) : '·'));
+  row.append(g);
+
+  cols.forEach((name, ci) => {
+    const c = el('div', 'cell' + (colMeta[name] && colMeta[name].type === 'number' ? ' num' : ''));
+    c.style.flexBasis = widths[name] + 'px';
+    c.dataset.col = ci;
+    if (cellInRange(pos, ci)) c.classList.add('cell-selected');
+    const val = r ? r.cells[idx[name]] : '';
+    if (val != null && val !== '') {
+      // Keep the raw value (with highlight) when it's what matched the
+      // search, so the matched substring stays visible — only substitute
+      // the formatted display when there's nothing to highlight.
+      if (needle && String(val).toLowerCase().includes(needle)) highlight(c, String(val), needle);
+      else c.textContent = displayCell(name, val);
+    }
+    row.append(c);
+  });
+  return row;
 }
 
 function renderTagToolbar() {
@@ -2606,8 +2757,16 @@ function highlight(node, text, needle) {
    that contribute their own spans. Only the *last* level (level ===
    S.groupByCols.length - 1) ever materializes real data rows via
    /api/group_expand; every other level's "expand" is another
-   /api/group_summary call scoped by `path`. Row-level selection/tagging/
-   detail-pane stay flat-mode-only — group headers only toggle here. */
+   /api/group_summary call scoped by `path`.
+
+   Data rows here are ordinary rows: they paint through the same
+   buildDataRow the flat grid uses and address themselves with the same
+   `pos` (a position in this flattened tree rather than in the view), so
+   selection, the cursor, the cell range, the row menu, copy, tagging and
+   the detail pane all work without a second implementation. The one thing
+   grouped positions do that flat ones don't is *move* — expanding or
+   collapsing renumbers everything below the toggled header, which
+   shiftGroupPositions applies exactly to whatever was pointing at it. */
 
 function isLeafLevel(level) { return level === S.groupByCols.length - 1; }
 
@@ -2631,18 +2790,42 @@ function findGroupAt(vpos) {
   return ans;
 }
 
-function ensureGroupPage(g, pageIdx) {
+/* Returns a promise that settles once the page is cached or has finished
+   failing — the same contract ensurePage has in flat mode, and for the same
+   reason: waitForGroupPages needs something to await before it can promise
+   a caller that every row it asked for is really there. S.groupPending
+   holds the in-flight promise (it was a bare marker Set) so concurrent
+   callers for one page share the one request. */
+function ensureGroupPage(g, pageIdx, { prefetch } = {}) {
   const key = `${g.viewId}:${pageIdx}`;
-  if (S.groupPages.has(key) || S.groupPending.has(key)) return;
-  S.groupPending.add(key);
-  api(`/api/rows?view_id=${g.viewId}&start=${pageIdx * PAGE}&count=${PAGE}`)
+  if (S.groupPages.has(key)) return Promise.resolve();
+  const inFlight = S.groupPending.get(key);
+  if (inFlight) return inFlight;
+  const gen = S.groupPageGen;
+  const p = api(`/api/rows?view_id=${g.viewId}&start=${pageIdx * PAGE}&count=${PAGE}`)
     .then((data) => {
-      if (!S.groupByCols.length) return; // left group mode before this resolved
+      if (!S.groupByCols.length || S.groupPageGen !== gen) return; // left group mode, or the cache was invalidated, before this resolved
       S.groupPages.set(key, data.rows);
-      render();
+      // A prefetched page isn't on screen — nothing to repaint for. The
+      // rows that *are* on screen arrive through the unflagged path, which
+      // still renders on every arrival (same reasoning as ensurePage).
+      if (!prefetch) render();
     })
     .catch(() => {})
     .finally(() => { S.groupPending.delete(key); });
+  S.groupPending.set(key, p);
+  return p;
+}
+
+/* Grouped mode's answer to clearPageCache: after a bulk tag the server has
+   changed rows this client never fetched, so every cached page's `tags`
+   array is suspect. Bumping the generation is the half that's easy to miss
+   — a fetch issued before the tag would otherwise land afterwards and put
+   the pre-tag rows straight back. */
+function clearGroupPageCache() {
+  S.groupPages.clear();
+  S.groupPending.clear();
+  S.groupPageGen++;
 }
 
 function groupRowAt(g, localIdx) {
@@ -2652,41 +2835,96 @@ function groupRowAt(g, localIdx) {
   return page[localIdx - pageIdx * PAGE] || null;
 }
 
+/* Which group, and which row inside it, a flattened-tree position lands on
+   — or null when that position is a group header rather than a data row.
+   Structural only: it reads the tree and the prefix sums, never a page, so
+   every caller that just needs "is there a row here" (selSetRange, the
+   click handlers, the context menu) can ask synchronously and for free. */
+function groupCoordAt(vpos) {
+  if (!S.groups.length || vpos < 0 || vpos >= S.groupTotalRows) return null;
+  const gi = findGroupAt(vpos);
+  const g = S.groups[gi];
+  const localIdx = vpos - S.groupPrefix[gi] - 1;
+  if (localIdx < 0) return null;                      // the header row itself
+  if (!g.expanded || !isLeafLevel(g.level)) return null;
+  return { gi, g, localIdx };
+}
+
+/* The row at a flattened-tree position, or null for a header row / a data
+   row still paging in. This is what rowAt() dispatches to under grouping. */
+function groupDataRowAt(vpos) {
+  const c = groupCoordAt(vpos);
+  return c ? groupRowAt(c.g, c.localIdx) : null;
+}
+
+/* Loads every page the given flattened positions need, or throws — the
+   grouped-mode counterpart of waitForPages, and it exists for the same
+   reason that one does: a bulk tag or copy that quietly skipped the rows
+   it couldn't load would corrupt the analyst's record of what they've
+   triaged while looking like it worked. Bounded the same way, since these
+   are the same single-connection backend's pages. */
+async function waitForGroupPages(positions) {
+  const wanted = new Map(); // "viewId:pageIdx" -> {g, pageIdx}
+  for (const pos of positions) {
+    const c = groupCoordAt(pos);
+    if (!c) continue; // a header row: nothing to load
+    const pageIdx = Math.floor(c.localIdx / PAGE);
+    wanted.set(`${c.g.viewId}:${pageIdx}`, { g: c.g, pageIdx });
+  }
+  const queue = [...wanted.entries()].filter(([key]) => !S.groupPages.has(key));
+  let next = 0;
+  const worker = async () => {
+    while (next < queue.length) {
+      const [key, { g, pageIdx }] = queue[next++];
+      await ensureGroupPage(g, pageIdx);
+      if (!S.groupPages.has(key)) throw new Error('could not load every row in the selection');
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(PAGE_FETCH_CONCURRENCY, queue.length) }, worker));
+}
+
+/* "Load whatever these positions need," in whichever mode is current. Flat
+   mode's page indices are the root view's; grouped mode's are per-group
+   sub-view pages, so the two index spaces can't be shared — but every
+   caller (copy, bulk tag) only ever wants "make sure these rows are here,
+   or fail loudly," which is the same ask either way. */
+function loadRowsForPositions(positions) {
+  if (S.groupByCols.length) return waitForGroupPages(positions);
+  return waitForPages([...new Set(positions.map((p) => Math.floor(p / PAGE)))]);
+}
+
+/* True when at least one of these positions still needs a fetch — drives
+   the "Copying N rows…" toast, which is only worth showing for a copy that
+   will actually go to the network. */
+function positionsNeedLoading(positions) {
+  if (!S.groupByCols.length) return positions.some((p) => !S.pages.has(Math.floor(p / PAGE)));
+  return positions.some((pos) => {
+    const c = groupCoordAt(pos);
+    return c && !S.groupPages.has(`${c.g.viewId}:${Math.floor(c.localIdx / PAGE)}`);
+  });
+}
+
 function renderGroupHeaderRow(g, gi) {
   const row = el('div', 'row group-header-row');
   row.dataset.groupIdx = gi;
   row.dataset.level = g.level;
   row.style.setProperty('--group-level', g.level);
   const arrow = g.expanded ? '▾' : '▸';
-  const valueLabel = g.value === null || g.value === '' ? '(empty)' : g.value;
   const colName = S.groupByCols[g.level];
   const label = el('div', 'group-header-label');
   label.append(el('span', 'group-header-arrow', arrow));
-  label.append(el('span', 'group-header-col', colName + ': '));
-  label.append(el('span', 'group-header-value', String(valueLabel)));
+  label.append(el('span', 'group-header-col', groupColLabel(colName) + ': '));
+  // A tag level's swatch, so a grouped-by-tag list reads the same way the
+  // tag ribbon and the row stripes do.
+  const tag = isTagGroupCol(colName) ? S.tags.find((x) => x.id === g.value) : null;
+  if (tag) {
+    const sw = el('span', 'swatch');
+    sw.style.background = tag.color;
+    label.append(sw);
+  }
+  label.append(el('span', 'group-header-value', groupValueLabel(colName, g.value)));
   label.append(el('span', 'group-header-count', `${g.count.toLocaleString()} row${g.count === 1 ? '' : 's'}`));
   row.append(label);
-  return row;
-}
-
-function renderGroupDataRow(r, cols, colMeta, idx, widths) {
-  const row = el('div', 'row' + (r ? '' : ' pending'));
-  const g = el('div', 'gutter');
-  g.style.flexBasis = GUTTER_W + 'px';
-  // No checkbox in grouped mode (no row selection there yet), so this is the
-  // gutter's only child — .rid pins itself to grid column 3 rather than
-  // relying on sibling order, keeping it aligned with flat mode's rids.
-  g.append(el('span', 'rid', r ? String(r.rid) : '·'));
-  row.append(g);
-  for (const name of cols) {
-    const c = el('div', 'cell' + (colMeta[name] && colMeta[name].type === 'number' ? ' num' : ''));
-    c.style.flexBasis = widths[name] + 'px';
-    const val = r ? r.cells[idx[name]] : '';
-    if (val != null && val !== '') {
-      c.textContent = displayCell(name, val);
-    }
-    row.append(c);
-  }
   return row;
 }
 
@@ -2705,25 +2943,20 @@ function renderGrouped() {
 
   rowsEl.style.transform = `translateY(${rowsPaintY(body, virt, first)}px)`;
   const frag = document.createDocumentFragment();
-  const cols = visibleCols();
-  const colMeta = Object.fromEntries(S.columns.map((c) => [c.name, c]));
-  const idx = Object.fromEntries(S.columns.map((c, i) => [c.name, i]));
-  const widths = Object.fromEntries(cols.map((name) => [name, colWidth(name)]));
-  syncRowsWidth(widths, cols);
+  const ctx = rowPaintContext();
+  syncRowsWidth(ctx.widths, ctx.cols);
 
   for (let vpos = first; vpos < last; vpos++) {
     if (!S.groups.length) break;
     const gi = findGroupAt(vpos);
     const g = S.groups[gi];
     const localOffset = vpos - S.groupPrefix[gi];
-    if (localOffset === 0) {
-      frag.append(renderGroupHeaderRow(g, gi));
-    } else {
-      const r = g.expanded ? groupRowAt(g, localOffset - 1) : null;
-      frag.append(renderGroupDataRow(r, cols, colMeta, idx, widths));
-    }
+    if (localOffset === 0) frag.append(renderGroupHeaderRow(g, gi));
+    else frag.append(buildDataRow(vpos, g.expanded ? groupRowAt(g, localOffset - 1) : null, ctx));
   }
   rowsEl.replaceChildren(frag);
+  schedulePrefetch();
+  renderTagToolbar();
 }
 
 function makeGroupNode(gr, level, path) {
@@ -2756,6 +2989,58 @@ async function fetchGroupLevel(path) {
   return res.groups;
 }
 
+/* Grouped and flat positions are the same numbers over different row sets,
+   so anything that switches between them — or rebuilds the tree — has to
+   drop what the old numbers were pointing at rather than let a selection
+   silently land on different rows. */
+function clearGroupSelectionState() {
+  selClear();
+  S.cursor = -1;
+  S.anchor = -1;
+  S.cellRange = null;
+  S.cellAnchor = null;
+}
+
+/* Expanding or collapsing a group renumbers every flattened position below
+   it, and selection/cursor/cell-range all live in that number space (see
+   rowAt). Rather than re-resolving them through row identity — which would
+   need a lookup this tree has no index for — the shift is applied exactly:
+   the toggled header sits at `headerPos` and doesn't move, everything above
+   it doesn't move, and everything below moves by the change in total rows.
+   Positions inside a collapsed span are dropped, not shifted: those rows
+   are no longer on screen, and keeping them selected would mean a tag
+   landing on rows the analyst can't see.
+
+   Call with the tree already mutated and `oldTotal` captured before it was
+   — rebuildGroupPrefix() here is what makes S.groupTotalRows current. */
+function shiftGroupPositions(headerPos, oldTotal) {
+  rebuildGroupPrefix();
+  const delta = S.groupTotalRows - oldTotal;
+  if (!delta) return;
+  const removedEnd = headerPos - delta; // collapse only: last position that vanished
+  const remap = (pos) => {
+    if (pos <= headerPos) return pos;
+    if (delta < 0 && pos <= removedEnd) return null;
+    return pos + delta;
+  };
+  selRemap(remap);
+  if (S.cursor > headerPos) S.cursor = remap(S.cursor) ?? headerPos;
+  if (S.anchor > headerPos) S.anchor = remap(S.anchor) ?? -1;
+  // A cell range spanning the toggled group can't survive it intact —
+  // its rows are no longer contiguous — so it goes rather than silently
+  // covering different rows than it did a moment ago.
+  if (S.cellRange && (S.cellRange.r1 > headerPos)) { S.cellRange = null; S.cellAnchor = null; }
+}
+
+/* The (headerPos, oldTotal) pair shiftGroupPositions needs, read at the
+   moment of the mutation rather than at the top of toggleGroup: the expand
+   paths await a fetch first, and another toggle landing during that await
+   would leave both numbers describing a tree that no longer exists. */
+function groupShiftAnchor(gi) {
+  rebuildGroupPrefix();
+  return [S.groupPrefix[gi], S.groupTotalRows];
+}
+
 async function toggleGroup(gi) {
   const g = S.groups[gi];
   if (!g) return;
@@ -2769,8 +3054,10 @@ async function toggleGroup(gi) {
       if (S.groups[k].viewId) api(`/api/view/${S.groups[k].viewId}`, { method: 'DELETE' }).catch(() => {});
     }
     if (g.viewId) { api(`/api/view/${g.viewId}`, { method: 'DELETE' }).catch(() => {}); g.viewId = null; }
+    const [headerPos, oldTotal] = groupShiftAnchor(gi);
     S.groups.splice(gi + 1, end - gi - 1);
     g.expanded = false;
+    shiftGroupPositions(headerPos, oldTotal);
     render();
     return;
   }
@@ -2785,14 +3072,18 @@ async function toggleGroup(gi) {
       toast('Could not expand group: ' + e.message, 4000);
       return;
     }
+    const [headerPos, oldTotal] = groupShiftAnchor(gi);
     g.expanded = true;
+    shiftGroupPositions(headerPos, oldTotal);
     render();
   } else {
     const childPath = [...g.path, { column: S.groupByCols[g.level], value: g.value }];
     try {
       const children = await fetchGroupLevel(childPath);
+      const [headerPos, oldTotal] = groupShiftAnchor(gi);
       S.groups.splice(gi + 1, 0, ...children.map((gr) => makeGroupNode(gr, g.level + 1, childPath)));
       g.expanded = true;
+      shiftGroupPositions(headerPos, oldTotal);
       render();
     } catch (e) {
       toast('Could not expand group: ' + e.message, 4000);
@@ -2814,6 +3105,10 @@ async function regroupAll() {
   S.groups = [];
   S.groupPages.clear();
   S.groupPending.clear();
+  // The tree is about to be rebuilt from scratch, so every position that
+  // addressed a row in the old one now addresses something else — same rule
+  // as a view rebuild in flat mode (CLAUDE.md: positions are view-specific).
+  clearGroupSelectionState();
   renderGroupStrip();
   if (!S.groupByCols.length || !S.view) { render(); drawRail(); return; }
   try {
@@ -2828,11 +3123,43 @@ async function regroupAll() {
   drawRail();
 }
 
+/* "Group by the tags on the row" rather than by anything in the file.
+   Travels through every grouping path — S.groupByCols, the saved filter's
+   group_by, /api/group_summary's `column` — as an ordinary column name, so
+   nothing between here and store.py needs a second notion of what a
+   grouping level is. Kept in step with store.py's TAG_GROUP_COLUMN, which
+   reserves the name at ingest so a real header can never collide with it.
+
+   A tag group's *value* is a tag id (tag names aren't unique), and the
+   untagged group's value is null — both rendered through
+   groupValueLabel(). */
+const TAG_GROUP_COLUMN = '__tag__';
+const isTagGroupCol = (c) => c === TAG_GROUP_COLUMN;
+
+/* What a grouping level is called on screen. */
+function groupColLabel(column) {
+  return isTagGroupCol(column) ? 'Tag' : column;
+}
+
+/* What one group's value is called on screen: a tag's name for a tag
+   level (falling back to its id if the tag was deleted underneath the
+   grouping), the value itself otherwise. */
+function groupValueLabel(column, value) {
+  if (isTagGroupCol(column)) {
+    if (value === null || value === undefined) return '(untagged)';
+    const t = S.tags.find((x) => x.id === value);
+    return t ? t.name : `tag ${value}`;
+  }
+  return value === null || value === '' ? '(empty)' : String(value);
+}
+
 /* Adds a column as the innermost (last) grouping level — the drop target
    for dragging a header into the group strip. Removes it from the normal
    column list (S.order) so it doesn't also render as a data column while
    grouped; S.preGroupOrder snapshots S.order the first time this happens,
-   so dropGrouping() can restore the original layout exactly. */
+   so dropGrouping() can restore the original layout exactly. The tag
+   pseudo-column isn't in S.order to begin with, so that filter is a no-op
+   for it and it stays out of the way. */
 function addGroupLevel(column) {
   if (S.groupByCols.includes(column)) return;
   if (!S.preGroupOrder) S.preGroupOrder = [...S.order];
@@ -2845,7 +3172,8 @@ function addGroupLevel(column) {
 function removeGroupLevel(i) {
   const [removed] = S.groupByCols.splice(i, 1);
   if (!S.groupByCols.length) { dropGrouping(); return; }
-  if (!S.order.includes(removed)) S.order.push(removed);
+  // The tag pseudo-column has no column to give back to the layout.
+  if (!isTagGroupCol(removed) && !S.order.includes(removed)) S.order.push(removed);
   renderHead();
   regroupAll();
 }
@@ -2854,6 +3182,8 @@ async function dropGrouping() {
   await closeAllGroupViews();
   S.groupByCols = [];
   S.groups = [];
+  clearGroupSelectionState(); // grouped positions don't mean anything in the flat view
+
   if (S.preGroupOrder) { S.order = S.preGroupOrder; S.preGroupOrder = null; }
   renderHead();
   renderGroupStrip();
@@ -2870,7 +3200,7 @@ async function dropGrouping() {
    rebuildView's own regroupAll do it). */
 function setGrouping(cols, gsort, gdir) {
   if (S.preGroupOrder) { S.order = S.preGroupOrder; S.preGroupOrder = null; }
-  const valid = (cols || []).filter((c) => S.columns.some((x) => x.name === c));
+  const valid = (cols || []).filter((c) => isTagGroupCol(c) || S.columns.some((x) => x.name === c));
   S.groupByCols = [];
   if (valid.length) {
     S.preGroupOrder = [...S.order];
@@ -2947,18 +3277,40 @@ function groupSortLabel(by, dir, short) {
   return dir === 'asc' ? 'Value — low to high' : 'Value — high to low';
 }
 
+/* Tagging a row changes which tag group it belongs to, so a grouping that
+   includes the tag pseudo-column is stale the moment a tag lands — the
+   group counts and the membership of any expanded group's sub-view both.
+   The tree gets rebuilt rather than patched: those sub-views live on the
+   server and there is nothing here to patch them with. A grouping by an
+   ordinary column is unaffected by tagging and stays exactly where it is,
+   which is why this checks rather than always regrouping. */
+function regroupIfGroupedByTag() {
+  if (S.groupByCols.some(isTagGroupCol)) regroupAll();
+}
+
+/* The tag pseudo-column has no header to drag, so the strip carries its
+   own way in. Offered as long as it isn't already a level — grouping by
+   tag twice would be two identical levels. */
+function groupByTagButton() {
+  const btn = el('button', 'btn ghost group-tag-btn', '+ Tag');
+  btn.title = 'Add a grouping level that buckets rows by the tags on them';
+  btn.onclick = () => addGroupLevel(TAG_GROUP_COLUMN);
+  return btn;
+}
+
 function renderGroupStrip() {
   const strip = $('groupStrip');
   strip.replaceChildren();
   strip.append(el('span', 'group-strip-label', 'Group by'));
   if (!S.groupByCols.length) {
     strip.append(el('span', 'group-strip-hint', 'drag a column header here'));
+    strip.append(groupByTagButton());
     return;
   }
   S.groupByCols.forEach((name, i) => {
     const pill = el('div', 'group-pill');
     pill.draggable = true;
-    pill.append(el('span', null, name));
+    pill.append(el('span', null, groupColLabel(name)));
     const rm = el('button', 'group-pill-rm', '✕');
     rm.title = 'Remove this grouping level';
     rm.onclick = (e) => { e.stopPropagation(); removeGroupLevel(i); };
@@ -2974,6 +3326,7 @@ function renderGroupStrip() {
     onclick: () => { S.groupSort = o.by; S.groupSortDir = o.dir; regroupAll(); },
   })));
   strip.append(sortBtn);
+  if (!S.groupByCols.some(isTagGroupCol)) strip.append(groupByTagButton());
   const dropAll = el('button', 'btn ghost group-drop-btn', 'Ungroup');
   dropAll.title = 'Drop all grouping — hotkey: ' + ((S.keymap.dropGrouping || [])[0] || '');
   dropAll.onclick = dropGrouping;
@@ -3014,12 +3367,45 @@ async function drawRail() {
 async function loadTags() {
   const d = await api(`/api/tags?source_id=${S.sourceId}`);
   S.tags = d.tags;
+  // Whole-table counts. The ribbon shows the *view*-scoped ones the moment
+  // there's a view to scope to (refreshTagCounts, below); until then these
+  // are both the answer and the only answer.
+  S.tagCountsAll = d.counts || {};
   S.tagCounts = d.counts || {};
   renderTagRibbon();
   renderTimelineTagFilter();
+  refreshTagCounts();
   // Deleting a tag takes its history with it server-side, and opening a
   // different case swaps the Store (and so the whole stack) underneath us.
   refreshUndoState();
+}
+
+/* Re-reads the tag counts for whatever view is up. Called after every view
+   rebuild and after every tagging operation, because both change the
+   answer: a filter changes which rows are in scope, a tag changes which of
+   them are tagged.
+
+   Fire-and-forget on purpose — it's one aggregate over the view (the same
+   join tag_positions makes, with the same untagged short-circuit) and the
+   grid has no reason to wait on it. A failure leaves the previous numbers
+   up rather than blanking the ribbon; a stale count for one paint is a far
+   smaller lie than an empty one. */
+async function refreshTagCounts() {
+  const vid = S.view && S.view.view_id;
+  // loadTags() runs while switching tables, when S.view can still be the
+  // *previous* table's (live, not yet evicted) view — counting against that
+  // would put one table's numbers under another's tags for the moment
+  // before rebuildView lands.
+  if (!vid || S.view.source_id !== S.sourceId) return;
+  let d;
+  try {
+    d = await api(`/api/tag_counts?view_id=${vid}`);
+  } catch {
+    return; // expired view: the rebuild that replaces it calls back through here
+  }
+  if (!S.view || S.view.view_id !== vid) return; // superseded while in flight
+  S.tagCounts = d.counts || {};
+  renderTagRibbon();
 }
 
 function renderTagRibbon() {
@@ -3033,9 +3419,18 @@ function renderTagRibbon() {
     sw.style.background = t.color;
     chip.append(sw, el('span', null, t.name));
     if (t.hotkey) chip.append(el('span', 'key', t.hotkey));
+    // Scoped to the current view, not the whole table: with a filter or a
+    // search on, "how many of *these* are tagged" is the question the
+    // ribbon is sitting next to. The whole-table number isn't dropped, it
+    // moves into the tooltip — a count that silently changed meaning when a
+    // filter went on would be worse than either number alone.
     const n = S.tagCounts[t.id] || 0;
+    const all = S.tagCountsAll[t.id] || 0;
     if (n) chip.append(el('span', 'n', n.toLocaleString()));
-    chip.title = `Click to filter to ${t.name}. Press ${t.hotkey || '—'} to tag the selection.`;
+    const scope = n === all
+      ? `${all.toLocaleString()} tagged`
+      : `${n.toLocaleString()} tagged in this view · ${all.toLocaleString()} in the table`;
+    chip.title = `${scope}. Click to filter to ${t.name}. Press ${t.hotkey || '—'} to tag the selection.`;
     chip.onclick = () => {
       S.tagFilter = S.tagFilter.includes(t.id) ? [] : [t.id];
       renderTagRibbon();
@@ -3083,6 +3478,9 @@ async function applyTag(tag, on) {
   if (!S.view) return;
   if (!selCount()) {
     if (S.cursor < 0) return;
+    // In grouped mode the cursor can sit on a group header, which isn't a
+    // row — tag the whole group from its right-click menu instead.
+    if (S.groupByCols.length && !groupCoordAt(S.cursor)) return;
     await tagRowsAtPositions(tag, [S.cursor], on);
     return;
   }
@@ -3127,13 +3525,15 @@ async function tagWholeViewSelection(tag, on) {
     toast('Could not tag: ' + e.message, 5000);
     return;
   } finally { setBusy(false); }
-  S.tagCounts = res.counts || {};
+  S.tagCountsAll = res.counts || {};  // whole-table; refreshTagCounts re-reads the view-scoped half
+  refreshTagCounts();
   // Every cached row's `tags` array is now stale — the server changed rows
   // this client never fetched, so there's nothing to patch up in place.
   clearPageCache();
   renderTagRibbon();
   render();
   drawRail();
+  regroupIfGroupedByTag();
   refreshUndoState();
   const n = res.affected != null ? res.affected : count;
   toast(`${on ? 'Tagged' : 'Untagged'} ${n.toLocaleString()} row${n === 1 ? '' : 's'} · ${tag.name}`);
@@ -3144,12 +3544,10 @@ async function tagRowsAtPositions(tag, positions, on) {
   on = resolveTagDirection(tag, on, positions[0]);
   if (positions.length >= BULK_TAG_CONFIRM_AT
       && !(await confirmDialog(`${on ? 'Tag' : 'Untag'} ${positions.length.toLocaleString()} selected rows as "${tag.name}"?`))) return;
-  const pageIndices = [...new Set(positions.map((p) => Math.floor(p / PAGE)))];
-  const missing = pageIndices.filter((p) => !S.pages.has(p));
-  if (missing.length) {
+  if (positionsNeedLoading(positions)) {
     setBusy(true);
     try {
-      await waitForPages(pageIndices);
+      await loadRowsForPositions(positions);
     } catch (e) {
       toast('Could not tag: ' + e.message, 5000);
       return;
@@ -3171,10 +3569,12 @@ async function tagRowsAtPositions(tag, positions, on) {
   for (const r of rows) {
     r.tags = on ? [...new Set([...r.tags, tag.id])] : r.tags.filter((x) => x !== tag.id);
   }
-  S.tagCounts = res.counts || {};
+  S.tagCountsAll = res.counts || {};  // whole-table; refreshTagCounts re-reads the view-scoped half
+  refreshTagCounts();
   renderTagRibbon();
   render();
   drawRail();
+  regroupIfGroupedByTag();
   refreshUndoState();
   toast(`${on ? 'Tagged' : 'Untagged'} ${rows.length.toLocaleString()} row${rows.length === 1 ? '' : 's'} · ${tag.name}`);
 }
@@ -3212,7 +3612,8 @@ async function undoLastTagChange() {
     await refreshUndoState();
     return;
   } finally { setBusy(false); }
-  S.tagCounts = res.counts || {};
+  S.tagCountsAll = res.counts || {};  // whole-table; refreshTagCounts re-reads the view-scoped half
+  refreshTagCounts();
   setUndoState(res.next);
   // Same reasoning as the bulk tag path: the server changed rows this
   // client may never have fetched, so there is nothing to patch in place.
@@ -3220,6 +3621,7 @@ async function undoLastTagChange() {
   renderTagRibbon();
   render();
   drawRail();
+  regroupIfGroupedByTag(); // undo moved rows between tag groups too
   toast(`Undone: ${res.undone}`);
 }
 
@@ -3230,11 +3632,13 @@ async function applyTagToView(tag) {
   let res;
   try { res = await post('/api/row_tags/view', { view_id: S.view.view_id, tag_id: tag.id, on: true }); }
   finally { setBusy(false); }
-  S.tagCounts = res.counts || {};
+  S.tagCountsAll = res.counts || {};  // whole-table; refreshTagCounts re-reads the view-scoped half
+  refreshTagCounts();
   clearPageCache();
   renderTagRibbon();
   render();
   drawRail();
+  regroupIfGroupedByTag();
   refreshUndoState();
   toast(`Tagged ${res.affected.toLocaleString()} rows · ${tag.name}`);
 }
@@ -3722,8 +4126,9 @@ const saveNote = debounce(async () => {
 /* ------------------------------------------------------------- movement */
 
 function moveCursor(to, extend) {
-  if (!S.view || !S.view.row_count) return;
-  to = Math.max(0, Math.min(S.view.row_count - 1, to));
+  const total = gridRowCount();
+  if (!S.view || !total) return;
+  to = Math.max(0, Math.min(total - 1, to));
   if (extend) {
     if (S.anchor < 0) S.anchor = S.cursor < 0 ? to : S.cursor;
     selSetRange(S.anchor, to);
@@ -3747,7 +4152,7 @@ function scrollIntoView(pos) {
   // Compared against the *virtual* offset, not raw scrollTop: top/bottom are
   // row-space pixels, and scrollTop stops being row-space once the spacer is
   // capped (MAX_SPACER_PX).
-  const total = S.groupByCols.length ? S.groupTotalRows : (S.view ? S.view.row_count : 0);
+  const total = gridRowCount();
   const head = headH();
   const cur = vScroll(body, total, head);
   const top = pos * ROW_H;
@@ -6956,6 +7361,50 @@ async function startSearchAll() {
   if (st.running) pollSearchAll();
 }
 
+/* "1,000+" rather than a precise number the server never computed —
+   `capped` means the count stopped at SEARCH_ALL_COUNT_CAP instead of
+   scanning every matching row. */
+function searchAllCountLabel(d) {
+  return d.capped
+    ? `${d.match_count.toLocaleString()}+ matches`
+    : `${d.match_count.toLocaleString()} match${d.match_count === 1 ? '' : 'es'}`;
+}
+
+/* One results row. With `term`, it's that term's own count inside `hit`'s
+   table and opening it searches for just that term; without, it's the
+   table's total and opening it carries the whole query across. Both share
+   this so the open behaviour can't drift between the two. */
+function searchAllHitRow(st, hit, term) {
+  const r = el('div', 'search-all-row' + (term ? ' search-all-term-row' : ''));
+  r.append(
+    el('span', 'search-all-name', term ? term.term : hit.name),
+    el('span', 'search-all-count', searchAllCountLabel(term || hit)),
+  );
+  const openBtn = el('button', 'btn ghost', 'Open ↦');
+  openBtn.title = term
+    ? `Open ${hit.name} filtered to "${term.term}"`
+    : `Open ${hit.name} filtered to every term`;
+  openBtn.onclick = async () => {
+    const src = S.sources.find((s) => s.id === hit.source_id);
+    if (src && !src.is_open) await post(`/api/source/${hit.source_id}/open`, { open: true });
+    $('modal').hidden = true;
+    await loadSources(hit.source_id);
+    S.searchMode = 'advanced';
+    // The terms the *results* came from, not whatever's since been typed
+    // into the box — those are what this row's count describes.
+    S.searchTerms = term
+      ? [{ term: term.term, connector: 'AND', exclude: false }]
+      : st.terms.map((t) => ({ ...t }));
+    document.querySelectorAll('#searchModeToggle button').forEach((btn) => btn.setAttribute('aria-pressed', String(btn.dataset.mode === 'advanced')));
+    renderAdvancedChips();
+    syncSearchExpansion(true);
+    updateSearchHint();
+    await rebuildView({ keepScroll: false });
+  };
+  r.append(openBtn);
+  return r;
+}
+
 function openSearchAllModal() {
   const st = searchAllState();
   st.seen = true;
@@ -7020,35 +7469,16 @@ function openSearchAllModal() {
       // you care about often lands early), so this renders whatever's in
       // st.hits and just keeps the progress line alongside it.
       for (const h of st.hits) {
-        const r = el('div', 'search-all-row');
-        // `capped` means the server stopped counting at its ceiling rather
-        // than scanning every matching row (see SEARCH_ALL_COUNT_CAP) — say
-        // "1,000+" rather than imply a precise number it never computed.
-        const count = h.capped
-          ? `${h.match_count.toLocaleString()}+ matches`
-          : `${h.match_count.toLocaleString()} match${h.match_count === 1 ? '' : 'es'}`;
-        r.append(
-          el('span', 'search-all-name', h.name),
-          el('span', 'search-all-count', count),
-        );
-        const openBtn = el('button', 'btn ghost', 'Open ↦');
-        openBtn.onclick = async () => {
-          const src = S.sources.find((s) => s.id === h.source_id);
-          if (src && !src.is_open) await post(`/api/source/${h.source_id}/open`, { open: true });
-          $('modal').hidden = true;
-          await loadSources(h.source_id);
-          S.searchMode = 'advanced';
-          // The terms the *results* came from, not whatever's since been
-          // typed into the box — those are what this row's count describes.
-          S.searchTerms = st.terms.map((t) => ({ ...t }));
-          document.querySelectorAll('#searchModeToggle button').forEach((btn) => btn.setAttribute('aria-pressed', String(btn.dataset.mode === 'advanced')));
-          renderAdvancedChips();
-          syncSearchExpansion(true);
-          updateSearchHint();
-          await rebuildView({ keepScroll: false });
-        };
-        r.append(openBtn);
-        results.append(r);
+        results.append(searchAllHitRow(st, h));
+        // One row per term that matched this table, indented under it —
+        // the point of a pasted IOC list is knowing *which* indicators hit
+        // where, which a single summed count per table can't tell you.
+        // Absent (server sends []) for an Advanced query, where the terms
+        // constrain each other and a standalone per-term count would
+        // describe a query nobody ran.
+        for (const t of h.terms || []) {
+          results.append(searchAllHitRow(st, h, t));
+        }
       }
     }
     searchAllRepaint = paintResults;
@@ -7871,7 +8301,6 @@ function activateRow(pos, e) {
 $('body').addEventListener('click', (e) => {
   const groupHeader = e.target.closest('.group-header-row');
   if (groupHeader) { toggleGroup(Number(groupHeader.dataset.groupIdx)); return; }
-  if (S.groupByCols.length) return; // row-level selection/cursor stays flat-mode-only for now
   if (e.target.closest('.rowcheck')) return; // owned by the delegated `change` listener below
   // .cell clicks are handled synchronously from `mousedown` below (see the
   // comment there) — this handler is left only for gutter clicks (row
@@ -7931,7 +8360,6 @@ let cellDragRaf = null;
 
 $('body').addEventListener('mousedown', (e) => {
   if (e.button !== 0) return;
-  if (S.groupByCols.length) return; // row-level selection/cursor stays flat-mode-only for now
   const cell = e.target.closest('.cell');
   if (!cell) return;
   e.preventDefault(); // don't let the browser's native text-drag-select fight our highlight
@@ -8431,10 +8859,157 @@ function openRowContextMenu(ctx, e) {
   contextMenu(e, () => rowMenuItems(ctx));
 }
 
+/* ------------------------------------------------- group header actions */
+
+/* A view id covering exactly this group's rows. A leaf group that's already
+   expanded has one; anything else gets a throwaway built the same way, since
+   expand_group scopes by the group's column/value *plus* its path and so
+   answers for an outer level just as well as a leaf. Returns a release()
+   the caller must call — a no-op for the borrowed leaf view, a DELETE for
+   the throwaway, so tagging an unexpanded group doesn't leak a v.view_N
+   per right-click. */
+async function groupRowsView(g) {
+  if (g.viewId) return { viewId: g.viewId, release: () => {} };
+  const res = await post('/api/group_expand', {
+    view_id: S.view.view_id, column: S.groupByCols[g.level], value: g.value, path: g.path,
+  });
+  return {
+    viewId: res.view_id,
+    release: () => api(`/api/view/${res.view_id}`, { method: 'DELETE' }).catch(() => {}),
+  };
+}
+
+/* Tags every row in a group in one server-side operation, rather than
+   paging the group in to build a rid list — the same reason applyTag hands
+   a whole-view selection to /api/row_tags/view instead of enumerating it.
+   Works on a collapsed group and on an outer nesting level, where the
+   client has never seen a single one of the rows. */
+async function tagWholeGroup(g, tag, on) {
+  const n = g.count;
+  if (n >= BULK_TAG_CONFIRM_AT
+      && !(await confirmDialog(`${on ? 'Tag' : 'Untag'} all ${n.toLocaleString()} rows in this group as "${tag.name}"?`))) return;
+  setBusy(true);
+  let handle = null, res;
+  try {
+    handle = await groupRowsView(g);
+    res = await post('/api/row_tags/view', { view_id: handle.viewId, tag_id: tag.id, on });
+  } catch (e) {
+    toast('Could not tag: ' + e.message, 5000);
+    return;
+  } finally {
+    setBusy(false);
+    if (handle) handle.release();
+  }
+  S.tagCountsAll = res.counts || {};  // whole-table; refreshTagCounts re-reads the view-scoped half
+  refreshTagCounts();
+  clearGroupPageCache(); // the server changed rows this client may never have fetched
+  renderTagRibbon();
+  render();
+  drawRail();
+  regroupIfGroupedByTag();
+  refreshUndoState();
+  const affected = res.affected != null ? res.affected : n;
+  toast(`${on ? 'Tagged' : 'Untagged'} ${affected.toLocaleString()} row${affected === 1 ? '' : 's'} · ${tag.name}`);
+}
+
+/* The data-row span a leaf group occupies, as flattened positions — what
+   "select this group's rows" needs. Null for a group with no data rows on
+   screen (collapsed, or an outer level). */
+function groupRowSpan(gi) {
+  const g = S.groups[gi];
+  if (!g || !g.expanded || !isLeafLevel(g.level) || !g.rowCount) return null;
+  const start = S.groupPrefix[gi] + 1;
+  return { start, end: start + g.rowCount - 1 };
+}
+
+/* Flipped by the menu's own "Remove a tag instead" item, which repaints
+   through fillMenuNode's rerender rather than opening a second surface. A
+   group is a set of rows with mixed tags, so there's no single row to read
+   a ✓ off the way rowMenuTagItems does — apply and remove have to be two
+   explicit choices rather than one toggle. Module-level (not per-menu)
+   because the menu is a singleton; reset every time one opens. */
+let groupMenuUntagMode = false;
+
+function groupMenuItems(gi) {
+  const g = S.groups[gi];
+  if (!g) return [];
+  const colName = S.groupByCols[g.level];
+  const label = groupValueLabel(colName, g.value);
+  const scope = `${g.count.toLocaleString()} row${g.count === 1 ? '' : 's'}`;
+  const items = [{ header: `${groupColLabel(colName)}: ${ellipsize(label)} — ${scope}` }];
+  items.push({
+    label: g.expanded ? 'Collapse' : 'Expand',
+    onclick: () => toggleGroup(gi),
+  });
+  const span = groupRowSpan(gi);
+  if (span) {
+    items.push({
+      label: `Select these ${scope}`,
+      onclick: () => { selSetRange(span.start, span.end); S.anchor = span.start; S.cursor = span.start; render(); },
+    });
+  }
+  const on = !groupMenuUntagMode;
+  items.push({ header: `${on ? 'Tag' : 'Untag'} ${scope}` });
+  for (const t of S.tags) {
+    items.push({
+      label: t.name,
+      swatch: t.color,
+      hint: t.hotkey || '',
+      keepOpen: true,
+      title: `${on ? 'Apply' : 'Remove'} "${t.name}" ${on ? 'to' : 'from'} every row in this group`,
+      onclick: () => tagWholeGroup(g, t, on),
+    });
+  }
+  if (!S.tags.length) items.push({ label: 'No tags in this case yet', disabled: true });
+  if (S.tags.length) {
+    items.push({
+      label: on ? 'Remove a tag instead…' : 'Apply a tag instead…',
+      keepOpen: true,
+      onclick: () => { groupMenuUntagMode = !groupMenuUntagMode; },
+    });
+  }
+  // A datetime group's value is a calendar-day bucket (see DAY_BUCKET in
+  // store.py), not a value any row literally holds, so a "=value" filter
+  // built from it would match nothing — offer this only where it works.
+  // A tag group filters through the tag ribbon's own mechanism instead,
+  // since "tagged X" was never a column filter to begin with.
+  const colType = (S.columns.find((c) => c.name === colName) || {}).type;
+  if (isTagGroupCol(colName)) {
+    items.push('-');
+    items.push({
+      label: `Filter to ${ellipsize(label)}`,
+      title: 'Narrows the whole view to these rows — the same thing clicking the tag in the ribbon does',
+      onclick: () => {
+        S.tagFilter = [g.value === null ? '__none__' : g.value];
+        renderTagRibbon();
+        rebuildView({ keepScroll: false });
+      },
+    });
+  } else if (colType !== 'datetime') {
+    items.push('-');
+    items.push({ label: `Filter to ${ellipsize(displayValue(g.value))}`, onclick: () => filterByValue(colName, g.value) });
+    items.push({ label: `Exclude ${ellipsize(displayValue(g.value))}`, onclick: () => filterByValue(colName, g.value, { exclude: true }) });
+  }
+  items.push('-');
+  items.push({
+    label: 'Copy group value',
+    onclick: () => writeClipboardText(Promise.resolve(label), 'Copied group value'),
+  });
+  return items;
+}
+
+function openGroupContextMenu(gi, e) {
+  groupMenuUntagMode = false; // every menu opens in the common (apply) direction
+  contextMenu(e, () => groupMenuItems(gi));
+}
+
 $('body').addEventListener('contextmenu', (e) => {
-  // Row-level actions stay flat-mode-only, same as the click/mousedown
-  // handlers above — grouped mode has no row selection to act on.
-  if (S.groupByCols.length) return;
+  const groupHeader = e.target.closest('.group-header-row');
+  if (groupHeader) {
+    e.preventDefault();
+    openGroupContextMenu(Number(groupHeader.dataset.groupIdx), e);
+    return;
+  }
   const rowEl = e.target.closest('.row');
   if (!rowEl) return; // header, gutter strip, empty space: leave the browser's own menu alone
   const pos = Number(rowEl.dataset.pos);
@@ -8567,18 +9142,20 @@ async function copySelectedCells(withHeaders) {
   const rowCount = r1 - r0 + 1;
   if (rowCount > 20000) { toast('Selection too large to copy (max 20,000 rows)', 4000); return; }
   const cols = visibleCols().slice(c0, c1 + 1);
-  const firstPage = Math.floor(r0 / PAGE), lastPage = Math.floor(r1 / PAGE);
-  const pageIndices = [];
-  for (let p = firstPage; p <= lastPage; p++) pageIndices.push(p);
-  if (pageIndices.some((p) => !S.pages.has(p))) toast(`Copying ${rowCount.toLocaleString()} row${rowCount > 1 ? 's' : ''}…`, 8000);
+  const spanned = [];
+  for (let pos = r0; pos <= r1; pos++) spanned.push(pos);
+  if (positionsNeedLoading(spanned)) toast(`Copying ${rowCount.toLocaleString()} row${rowCount > 1 ? 's' : ''}…`, 8000);
   const textPromise = (async () => {
-    await waitForPages(pageIndices); // no-op fast path once everything's already cached
+    await loadRowsForPositions(spanned); // no-op fast path once everything's already cached
     const colIdx = Object.fromEntries(S.columns.map((c, i) => [c.name, i]));
     const lines = [];
     if (withHeaders) lines.push(cols.join('\t'));
-    for (let pos = r0; pos <= r1; pos++) {
-      // waitForPages threw if anything was missing, so a hole here would be
-      // a bug, not a slow fetch — refuse rather than emit a blank line.
+    for (const pos of spanned) {
+      // A grouped range can span group headers, which aren't rows — skip
+      // those. Anything else missing here would be a bug, not a slow fetch
+      // (the load above threw if it couldn't get a page), so refuse rather
+      // than emit a blank line.
+      if (S.groupByCols.length && !groupCoordAt(pos)) continue;
       const r = rowAt(pos);
       if (!r) throw new Error(`row ${pos + 1} could not be loaded`);
       lines.push(cols.map((name) => (r.cells[colIdx[name]] ?? '')).join('\t'));
@@ -8595,10 +9172,9 @@ async function copyRowsAsText(positions, withHeaders) {
   // fetching the whole table to build a clipboard string out of it.
   if (positions.length > 20000) { toast('Selection too large to copy (max 20,000 rows)', 4000); return; }
   const cols = visibleCols();
-  const pageIndices = [...new Set(positions.map((p) => Math.floor(p / PAGE)))];
-  if (pageIndices.some((p) => !S.pages.has(p))) toast(`Copying ${positions.length.toLocaleString()} row${positions.length > 1 ? 's' : ''}…`, 8000);
+  if (positionsNeedLoading(positions)) toast(`Copying ${positions.length.toLocaleString()} row${positions.length > 1 ? 's' : ''}…`, 8000);
   const textPromise = (async () => {
-    await waitForPages(pageIndices);
+    await loadRowsForPositions(positions);
     const colIdx = Object.fromEntries(S.columns.map((c, i) => [c.name, i]));
     const lines = [];
     if (withHeaders) lines.push(cols.join('\t'));
@@ -8623,7 +9199,9 @@ async function handleCopyShortcut(withHeaders) {
   // allocate an array of every position in the view just to have it
   // rejected by copyRowsAsText's own ceiling on the next line.
   if (count > 20000) { toast('Selection too large to copy (max 20,000 rows)', 4000); return; }
-  const positions = count ? selPositions() : S.cursor >= 0 ? [S.cursor] : [];
+  // The cursor fallback can be parked on a group header, which isn't a row.
+  const cursorRow = S.cursor >= 0 && !(S.groupByCols.length && !groupCoordAt(S.cursor));
+  const positions = count ? selPositions() : cursorRow ? [S.cursor] : [];
   if (!positions.length) return;
   await copyRowsAsText(positions, withHeaders);
 }
@@ -9357,7 +9935,7 @@ const ACTION_HANDLERS = {
   pageDown: (e, pageRows) => moveCursor(S.cursor + pageRows, e.shiftKey),
   pageUp: (e, pageRows) => moveCursor(S.cursor - pageRows, e.shiftKey),
   jumpFirst: () => moveCursor(0, false),
-  jumpLast: () => moveCursor(S.view ? S.view.row_count - 1 : 0, false),
+  jumpLast: () => moveCursor(Math.max(0, gridRowCount() - 1), false),
   focusSearch: () => expandSearch(),
   focusFilter: () => { const i = document.querySelector('.fcell input'); if (i) { i.focus(); i.select(); } },
   focusNote: () => { if (!$('detail').hidden) $('noteInput').focus(); },
@@ -9479,7 +10057,7 @@ function applyDensity(density) {
   // Read against the outgoing ROW_H (paintDensity hasn't run yet), written
   // back against the new one — so the anchor stays a row, not a pixel offset,
   // across a change that moves every pixel position in the grid.
-  const total = () => (S.groupByCols.length ? S.groupTotalRows : (S.view ? S.view.row_count : 0));
+  const total = gridRowCount;
   const topRow = S.view ? Math.floor(vScroll(body, total(), headH()) / ROW_H) : 0;
   paintDensity();
   if (!S.view) return;

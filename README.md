@@ -69,12 +69,22 @@ The grid then pages with `WHERE pos BETWEEN ? AND ?`, and the row count comes
 free. Views live in a temporary database deleted when the server exits, so the
 case file stays clean. Page reads (and every other pure-read path — grouping,
 exports, search counts) run on pooled read-only connections, so a multi-second
-view build or import never stalls scrolling in another tab.
+view build or import never stalls scrolling in another tab. The pages either
+side of the viewport are warmed while the browser is idle, so crossing a page
+boundary is a cache hit rather than a visible stall.
 
 **Search** uses an external-content FTS5 table over every column, tokenized to
 keep `.`, `-`, `_`, `\`, `@` and `:` inside tokens so paths, GUIDs and account
 names survive tokenization. Bare terms are quoted before they reach the FTS
 parser; `AND` / `OR` / `NOT` / `prefix*` pass through.
+
+**Search all tables** sweeps every table in the case, open or closed, in the
+background — paste a list of IOCs, one per line, and you get a row per table
+that matched *and* a row per indicator underneath it, so you can see which of
+your 60 hashes hit and where rather than just that something did. Each row
+opens that table filtered to that term. A mixed AND/OR/NOT query from the
+Advanced builder gets the single per-table count instead: its terms constrain
+each other, so a count for one of them alone would describe a query nobody ran.
 
 ## Using it
 
@@ -123,9 +133,10 @@ it's on by default only under 250,000 rows; the table menu turns it on or off
 for the whole table or one column, and a row's right-click menu offers it for
 any column regardless.
 
-**Right-click** does the obvious thing in four places: a row (tag it, filter to
-or exclude the cell you clicked, copy), a column header (display format, add a
-datetime column from it, flatten JSON/XML out of it, the derived-column
+**Right-click** does the obvious thing in five places: a row (tag it, filter to
+or exclude the cell you clicked, copy), a group header (tag or untag every row
+in the group in one go, without expanding it), a column header (display format,
+add a datetime column from it, flatten JSON/XML out of it, the derived-column
 actions), the detail pane (see below), a tab or a sidebar table name (the table
 menu — columns, value dropdowns, layout defaults; also on `C`).
 
@@ -133,7 +144,29 @@ Click a column header to sort, `Shift`-click to add a secondary sort.
 
 The narrow strip down the right edge of the grid is a rail showing where tagged
 rows sit in the whole filtered view — so you can see clustering in a 200k-row
-result without scrolling through it.
+result without scrolling through it. The count on each tag in the ribbon is
+scoped to what you're looking at — filter or search and it becomes "how many of
+*these* are tagged", with the whole-table number in the tooltip.
+
+## Grouping
+
+Drag a column header into the **Group by** strip to bucket the view by it —
+counts per value, expand a group to see its rows. Drag in a second column for a
+nested breakdown (Process, then User within each process); drag the pills to
+reorder the nesting, and the strip's Sort button orders groups by count or by
+value. A datetime column groups by calendar day.
+
+**+ Tag** adds a level that buckets by the tags on the rows instead: one group
+per tag, plus everything untagged. It's the one grouping whose counts can add
+up to more than the view holds — a row with two tags is in both groups, which
+is the point. It nests either way round, so "Lateral movement, broken down by
+Computer" and "each Computer, broken down by tag" are both a two-pill grouping.
+
+Grouped rows are ordinary rows: click, `Ctrl`-click and `Shift`-click to
+select, right-click for the row menu, tag with `1`–`9`, open the detail pane,
+copy. A group header's own menu tags or untags the whole group server-side,
+which works on a collapsed group and on an outer nesting level — neither needs
+the rows paged in first.
 
 ## Tabs
 

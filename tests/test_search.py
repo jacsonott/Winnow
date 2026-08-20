@@ -324,7 +324,9 @@ def test_search_all_sources_reports_uncapped_counts_exactly(store, write_csv):
     rows = [["Process"]] + [["svchost.exe"]] * 5 + [["cmd.exe"]] * 3
     rec = store.ingest_csv(write_csv(rows, "c1.csv"), name="c1.csv", build_fts=False)
     hits = store.search_all_sources(query="svchost")
-    assert hits == [{"source_id": rec["id"], "name": "c1.csv", "match_count": 5, "capped": False}]
+    # `terms` is the per-term breakdown, empty for a bare query — see
+    # _or_of_positive_terms.
+    assert hits == [{"source_id": rec["id"], "name": "c1.csv", "match_count": 5, "capped": False, "terms": []}]
 
 
 def test_search_all_sources_caps_the_count(store, write_csv, monkeypatch):
@@ -349,7 +351,7 @@ def test_search_all_sources_caps_on_the_indexed_and_advanced_paths_too(store, wr
     rec = store.ingest_csv(write_csv(rows, "c3.csv"), name="c3.csv")
     assert store.wait_for_fts(rec["id"], timeout=5)
     assert store.search_all_sources(query="svchost")[0] == {
-        "source_id": rec["id"], "name": "c3.csv", "match_count": 2, "capped": True,
+        "source_id": rec["id"], "name": "c3.csv", "match_count": 2, "capped": True, "terms": [],
     }
     terms = [{"term": "svchost", "connector": "AND", "exclude": False}]
     assert store.search_all_sources(terms=terms)[0]["capped"] is True
@@ -514,3 +516,105 @@ def test_search_all_job_does_not_hold_the_lock_across_sources(store, write_csv):
     assert len(job["hits"]) == 4
     assert counting.depth == 0
     assert counting.released_to_zero >= 4
+
+
+def test_search_all_breaks_a_pasted_list_down_per_term(store, write_csv):
+    """A pasted IOC list is a plain OR of positive terms, and the analyst
+    needs to know *which* indicators hit a table, not just that one did."""
+    rows = [["Process", "Host"]]
+    rows += [["evil.exe", "WS1"]] * 3
+    rows += [["cmd.exe", "WS2"]] * 2
+    rows += [["notepad.exe", "WS3"]]
+    rec = store.ingest_csv(write_csv(rows, "b1.csv"), name="b1.csv", build_fts=False)
+
+    terms = [
+        {"term": "evil.exe", "connector": "OR", "exclude": False},
+        {"term": "cmd.exe", "connector": "OR", "exclude": False},
+        {"term": "nothing-here", "connector": "OR", "exclude": False},
+    ]
+    hit = store.search_all_sources(terms=terms)[0]
+    assert hit["source_id"] == rec["id"]
+    assert hit["match_count"] == 5  # the union, unchanged
+    # Heaviest first, and a term that matched nothing gets no entry at all.
+    assert hit["terms"] == [
+        {"term": "evil.exe", "match_count": 3, "capped": False},
+        {"term": "cmd.exe", "match_count": 2, "capped": False},
+    ]
+
+
+def test_search_all_breakdown_counts_overlapping_terms_separately(store, write_csv):
+    # Two terms both matching the same rows: the per-term counts describe
+    # each term on its own, so they don't have to sum to match_count.
+    rows = [["Path"]] + [["C:\\Windows\\evil.exe"]] * 4
+    store.ingest_csv(write_csv(rows, "b2.csv"), name="b2.csv", build_fts=False)
+    terms = [
+        {"term": "Windows", "connector": "OR", "exclude": False},
+        {"term": "evil.exe", "connector": "OR", "exclude": False},
+    ]
+    hit = store.search_all_sources(terms=terms)[0]
+    assert hit["match_count"] == 4
+    assert [t["match_count"] for t in hit["terms"]] == [4, 4]
+
+
+def test_search_all_skips_the_breakdown_for_a_constrained_query(store, write_csv):
+    # AND/NOT terms constrain each other — a count for one in isolation
+    # describes a query the analyst never asked for, so there's no breakdown.
+    rows = [["Process", "Host"], ["evil.exe", "WS1"], ["evil.exe", "WS2"]]
+    store.ingest_csv(write_csv(rows, "b3.csv"), name="b3.csv", build_fts=False)
+    and_terms = [
+        {"term": "evil.exe", "connector": "AND", "exclude": False},
+        {"term": "WS1", "connector": "AND", "exclude": False},
+    ]
+    assert store.search_all_sources(terms=and_terms)[0]["terms"] == []
+    not_terms = [
+        {"term": "evil.exe", "connector": "OR", "exclude": False},
+        {"term": "WS2", "connector": "OR", "exclude": True},
+    ]
+    assert store.search_all_sources(terms=not_terms)[0]["terms"] == []
+
+
+def test_search_all_breakdown_matches_the_indexed_path(store, write_csv):
+    # Same answers whether the term routes through the trigram index or the
+    # LIKE fallback — the breakdown reuses _search_all_count_sql for exactly
+    # this reason.
+    rows = [["Process"]] + [["evil.exe"]] * 3 + [["cmd.exe"]] * 2
+    rec = store.ingest_csv(write_csv(rows, "b4.csv"), name="b4.csv")
+    assert store.wait_for_fts(rec["id"], timeout=5)
+    terms = [
+        {"term": "evil.exe", "connector": "OR", "exclude": False},
+        {"term": "cmd.exe", "connector": "OR", "exclude": False},
+    ]
+    hit = store.search_all_sources(terms=terms)[0]
+    assert [(t["term"], t["match_count"]) for t in hit["terms"]] == [("evil.exe", 3), ("cmd.exe", 2)]
+
+
+def test_search_all_breakdown_caps_each_term_independently(store, write_csv, monkeypatch):
+    import store as store_module
+
+    monkeypatch.setattr(store_module, "SEARCH_ALL_COUNT_CAP", 2)
+    rows = [["Process"]] + [["evil.exe"]] * 5 + [["cmd.exe"]]
+    store.ingest_csv(write_csv(rows, "b5.csv"), name="b5.csv", build_fts=False)
+    terms = [
+        {"term": "evil.exe", "connector": "OR", "exclude": False},
+        {"term": "cmd.exe", "connector": "OR", "exclude": False},
+    ]
+    hit = store.search_all_sources(terms=terms)[0]
+    by_term = {t["term"]: t for t in hit["terms"]}
+    assert by_term["evil.exe"] == {"term": "evil.exe", "match_count": 2, "capped": True}
+    assert by_term["cmd.exe"] == {"term": "cmd.exe", "match_count": 1, "capped": False}
+
+
+def test_search_all_breakdown_gives_up_on_an_absurd_term_list(store, write_csv, monkeypatch):
+    # The breakdown costs one capped count per term on every source that
+    # matched; past the ceiling it reports the union count alone rather than
+    # turning one sweep into thousands of scans.
+    import store as store_module
+
+    monkeypatch.setattr(store_module, "SEARCH_ALL_TERM_BREAKDOWN_MAX", 2)
+    rows = [["Process"], ["evil.exe"], ["cmd.exe"], ["notepad.exe"]]
+    store.ingest_csv(write_csv(rows, "b6.csv"), name="b6.csv", build_fts=False)
+    terms = [
+        {"term": t, "connector": "OR", "exclude": False}
+        for t in ("evil.exe", "cmd.exe", "notepad.exe")
+    ]
+    assert store.search_all_sources(terms=terms)[0]["terms"] == []

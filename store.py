@@ -60,6 +60,15 @@ TRIGRAM_LIKE_MIN_SQLITE = (3, 45, 0)
 # 480,113 is no more useful than "1,000+", and getting it costs a full
 # count over every matching row on a source whose index isn't built yet.
 SEARCH_ALL_COUNT_CAP = 1000
+# How many terms a "paste a list" sweep will break down per source before it
+# reports the union count alone. The breakdown costs one extra capped count
+# per term on each source that matched at all (see
+# _iter_search_all_sources), which is what makes an entry-per-term list
+# possible; a list long enough to make that N+1 shape hurt is one where the
+# per-term rows would be unreadable anyway. Well clear of a realistic IOC
+# paste — it exists to bound an accident (a whole wordlist pasted in), not
+# to ration normal use.
+SEARCH_ALL_TERM_BREAKDOWN_MAX = 250
 
 # The extensions a directory import (scan_import_directory) recognizes by
 # default — every format ingest_csv/ingest_json already know how to read.
@@ -361,6 +370,13 @@ def _webkit_to_iso(value: Any) -> str | None:
 
 
 
+# The pseudo-column that means "group these rows by the tags on them" rather
+# than by anything in the file (see group_summary). It's in the reserved set
+# below so sanitize_columns renames a real header of this name at ingest,
+# which is what makes the sentinel unambiguous with a column an analyst can
+# actually see.
+TAG_GROUP_COLUMN = "__tag__"
+
 # Column names that can't be used as-is: "rid" collides with every src_<id>
 # table's own primary-key column, and "rank"/"rowid" are FTS5-reserved \u2014
 # CREATE VIRTUAL TABLE ... USING fts5(...) rejects a column literally named
@@ -369,7 +385,7 @@ def _webkit_to_iso(value: Any) -> str | None:
 # and its rows were already committed \u2014 a CSV with a plausible header like
 # "Rank" (a real column name in e.g. some log formats) failed the *entire*
 # import with a confusing error, even though the data itself was fine.
-RESERVED_COLUMN_NAMES = {"rid", "rank", "rowid"}
+RESERVED_COLUMN_NAMES = {"rid", "rank", "rowid", TAG_GROUP_COLUMN}
 
 
 def sanitize_columns(raw: list[str]) -> list[str]:
@@ -3863,8 +3879,30 @@ class Store:
             return f"{expr} IS ?", [None]
         return f"{expr} = ?", [value]
 
+    @staticmethod
+    def _tag_condition(alias: str, source_id: int, value: Any) -> tuple[str, list]:
+        """"Rows carrying tag `value`", or "rows carrying no tag at all"
+        when `value` is None — the tag pseudo-column's answer to
+        _eq_condition, and the reason grouping by tag needs its own
+        condition builder rather than a clever column expression: the thing
+        being compared lives in the row_tags sidecar, keyed by
+        (source_id, rid), not in the source table at all.
+
+        `value` is a tag *id*, never a name: tag_defs has no unique
+        constraint on name, so grouping by name would silently merge two
+        tags an analyst deliberately kept apart. The frontend renders the
+        name it already has in S.tags."""
+        prefix = f"{alias}." if alias else ""
+        if value is None:
+            return f"{prefix}rid NOT IN (SELECT rid FROM row_tags WHERE source_id = ?)", [source_id]
+        return (
+            f"{prefix}rid IN (SELECT rid FROM row_tags WHERE source_id = ? AND tag_id = ?)",
+            [source_id, int(value)],
+        )
+
     def _path_where(self, path: list[dict] | None, colnames: dict, alias: str = "",
-                    src: dict | None = None, derived_alias: str | None = None) -> tuple[list[str], list]:
+                    src: dict | None = None, derived_alias: str | None = None,
+                    member_sid: int | None = None) -> tuple[list[str], list]:
         """Compile a group-by path (the outer levels' already-fixed values,
         for nested multi-column grouping) into per-column condition
         fragments. `alias` (e.g. "s"), when given, is baked into the
@@ -3881,6 +3919,17 @@ class Store:
         params: list[Any] = []
         for p in path or []:
             col = p.get("column")
+            if col == TAG_GROUP_COLUMN:
+                # A tag level's predicate is per *member* (row_tags is keyed
+                # by source_id), which is why member_sid is threaded down
+                # here rather than the whole path being compiled once and
+                # reused across a merge's members.
+                if member_sid is None:
+                    raise ValueError("grouping by tag needs a member source id")
+                c, v = self._tag_condition(alias, member_sid, p.get("value"))
+                clauses.append(c)
+                params.extend(v)
+                continue
             if col not in colnames:
                 raise KeyError(col)
             ident = (self._col_ref(src, col, alias or None, derived_alias) if src is not None
@@ -3936,6 +3985,17 @@ class Store:
         level already chosen, e.g. computing the User breakdown *within*
         the Process="svchost.exe" group of a Process-then-User grouping.
 
+        `column` may be TAG_GROUP_COLUMN, which groups by the tags on the
+        rows rather than by anything in the file: one group per tag (its
+        `value` is the tag *id* — tag names aren't unique) plus one for the
+        untagged remainder (`value` None). It's the one grouping whose
+        counts can sum to more than the view holds, because a row carrying
+        two tags belongs to both groups; that's what makes it answer "how
+        much of this have I marked, and as what", which a partition into
+        tag-set combinations would not. It nests in either direction like
+        any other level. See _tag_group_branches for the query shapes and
+        why their join order is pinned.
+
         A 'datetime' column groups by calendar day (DAY_BUCKET) rather than
         exact timestamp — grouping by the raw value would put nearly every
         row in a group of its own at second/millisecond precision, which
@@ -3974,33 +4034,45 @@ class Store:
         handle = self._views.get(view_id)
         if not handle:
             raise KeyError("View expired — rebuild it")
+        by_tag = column == TAG_GROUP_COLUMN
         with self._reader() as ro:
             src = self._source_lite_on(ro, handle["source_id"])
             members = self._resolve_members_on(ro, handle["source_id"])
+            # Only grouping by tag needs these, and only for its cheapest
+            # shape (below): "how many rows carry no tag" over a whole
+            # member table is that table's row count minus the number of
+            # distinct tagged rids, both of which come out of metadata and
+            # an index rather than a scan.
+            member_rows = (
+                {m["source_id"]: self._source_lite_on(ro, m["source_id"])["row_count"] for m in members}
+                if by_tag else {}
+            )
         colnames = {c["name"]: c["type"] for c in src["columns"]}
-        if column not in colnames:
+        if not by_tag and column not in colnames:
             raise KeyError(column)
-        is_datetime = colnames[column] == "datetime" and bucket_datetime
+        is_datetime = not by_tag and colnames[column] == "datetime" and bucket_datetime
 
         # The two branches below reach the derived sidecar differently — the
         # direct shape joins it with USING(rid) (bare column refs), the view
         # shape chains a second ON join (refs go through the `d` alias) — so
         # the value expression and the path conditions are built per branch.
-        def _refs(derived_alias: str | None):
+        def _val_expr(derived_alias: str | None) -> str:
             ref = self._col_ref(src, column, "s", derived_alias)
-            val = f"DAY_BUCKET({ref})" if is_datetime else ref
-            clauses, p = self._path_where(path, colnames, "s", src, derived_alias)
-            return val, clauses, p
+            return f"DAY_BUCKET({ref})" if is_datetime else ref
 
-        path_clauses, path_params = self._path_where(path, colnames, "s", src)
-        whole_source = not path_clauses and self._grouping_covers_whole_source(handle, src)
+        def _path_for(m: dict, derived_alias: str | None) -> tuple[str, list]:
+            clauses, p = self._path_where(path, colnames, "s", src, derived_alias, m["source_id"])
+            return "".join(f" AND {c}" for c in clauses), p
+
+        has_path = bool(path)
+        whole_source = not has_path and self._grouping_covers_whole_source(handle, src)
         # A root_virtual view has no v.view_N to join at all (it was never
         # materialised — see _build_virtual_root_view), path or no path, so
         # it always takes the direct-against-member-tables shape; a real
         # 'root' view only gets to skip the join when it's provably
         # unfiltered (whole_source, no path).
         direct = whole_source or handle.get("kind") == "root_virtual"
-        if direct:
+        if direct and not by_tag:
             # A datetime column groups by DAY_BUCKET(col), a functional
             # expression a plain index on the raw column can't serve — same
             # exclusion _ensure_column_index_building already documents for
@@ -4012,53 +4084,165 @@ class Store:
                     self._ensure_column_index_building(
                         m["source_id"], column, self._index_table_for(src, column, m["table_name"])
                     )
-            val_expr, path_clauses, path_params = _refs(None)
-            extra_where = "".join(f" AND {c}" for c in path_clauses)
-            branches = [
-                f"SELECT {val_expr} AS val, count(*) AS n FROM {self._member_from(src, m, 's')} "
-                f"WHERE 1=1{extra_where} GROUP BY 1"
-                for m in members
-            ]
-        else:
-            val_expr, path_clauses, path_params = _refs("d")
-            extra_where = "".join(f" AND {c}" for c in path_clauses)
-            branches = [
-                f"SELECT {val_expr} AS val, count(*) AS n FROM v.{q(view_id)} vv "
-                f"JOIN {q(m['table_name'])} s ON s.rid = vv.rid AND vv.source_id = {int(m['source_id'])}"
-                f"{self._derived_join(src, 's')} "
-                f"WHERE 1=1{extra_where} GROUP BY 1"
-                for m in members
-            ]
-        union_sql = " UNION ALL ".join(branches)
+
+        branches: list[str] = []
         params: list[Any] = []
-        for _ in members:
-            params.extend(path_params)
+        if by_tag:
+            branches, params = self._tag_group_branches(view_id, src, members, direct, member_rows, _path_for)
+        else:
+            for m in members:
+                derived_alias = None if direct else "d"
+                extra_where, path_params = _path_for(m, derived_alias)
+                if direct:
+                    scope = f"FROM {self._member_from(src, m, 's')} WHERE 1=1{extra_where}"
+                else:
+                    scope = (
+                        f"FROM v.{q(view_id)} vv "
+                        f"JOIN {q(m['table_name'])} s ON s.rid = vv.rid AND vv.source_id = {int(m['source_id'])}"
+                        f"{self._derived_join(src, 's')} "
+                        f"WHERE 1=1{extra_where}"
+                    )
+                branches.append(f"SELECT {_val_expr(derived_alias)} AS val, count(*) AS n {scope} GROUP BY 1")
+                params.extend(path_params)
+        union_sql = " UNION ALL ".join(branches)
         if direction is None:
             direction = "asc" if order == "value" else "desc"
         dir_sql = "DESC" if direction == "desc" else "ASC"
         if order == "value":
-            order_sql = f"{_numeric_expr('val')} {dir_sql}" if colnames[column] == "number" else f"val COLLATE NOCASE {dir_sql}"
+            if by_tag:
+                # "By value" for tags means by tag name — the label the
+                # analyst actually sees — not by the id the group carries.
+                order_sql = (
+                    f"(SELECT name FROM tag_defs WHERE id = val) COLLATE NOCASE {dir_sql}"
+                )
+            elif colnames[column] == "number":
+                order_sql = f"{_numeric_expr('val')} {dir_sql}"
+            else:
+                order_sql = f"val COLLATE NOCASE {dir_sql}"
         else:
             order_sql = f"n {dir_sql}"
         # _interruptible innermost: an interrupt becomes OpCancelled before
         # _dropped_view_is_expired can see the OperationalError, and _reader
         # then closes (not repools) the interrupted connection on the way out.
         with self._reader() as ro, self._dropped_view_is_expired(), self._interruptible(op_token, ro):
+            # HAVING is a no-op for a column grouping (every branch row is
+            # a real group of at least one row) and load-bearing for a tag
+            # one: the untagged branch is a bare aggregate, so it emits a
+            # zero on a source where every row is tagged.
             rows = ro.execute(
-                f"SELECT val, SUM(n) AS n FROM ({union_sql}) GROUP BY val ORDER BY {order_sql} LIMIT ?",
+                f"SELECT val, SUM(n) AS n FROM ({union_sql}) GROUP BY val HAVING SUM(n) > 0 "
+                f"ORDER BY {order_sql} LIMIT ?",
                 (*params, limit + 1),
             ).fetchall()
         truncated = len(rows) > limit
         rows = rows[:limit]
         return {"groups": [{"value": r["val"], "count": r["n"]} for r in rows], "truncated": truncated}
 
+    def _tag_group_branches(self, view_id: str, src: dict, members: list[dict], direct: bool,
+                            member_rows: dict[int, int], path_for) -> tuple[list[str], list]:
+        """The UNION ALL branches behind grouping by tag: one group per tag,
+        plus one for the untagged remainder. A row carrying two tags is
+        counted under both — that's what makes "group by tag" answer the
+        question analysts actually ask, and it's why these counts can sum to
+        more than the view holds.
+
+        Every shape here is written to pin the join order, because the
+        obvious spellings do not survive the query planner. `v.view_N` is
+        indexed on `pos` (its INTEGER PRIMARY KEY) and on nothing else, so
+        reaching a view row by `rid` is a full scan of it. Given a
+        `WHERE vv.source_id = ?` to work with, SQLite happily drives from
+        row_tags' covering index and scans the entire view once per tagged
+        row — measured at 150k x 300k row visits, minutes, on a case where
+        the correct plan takes 200ms. So:
+
+        - The view-scoped branches use `CROSS JOIN`, which SQLite documents
+          as suppressing join reordering, to force the view to be the outer
+          loop and row_tags to be probed by its (source_id, rid, tag_id)
+          primary key.
+        - They also drop the per-member `vv.source_id = ?` restriction
+          entirely when there's no nested path: the ON clause already
+          matches each view row against its own source's tags, so one
+          view-wide pair of branches is both correct for a merge and
+          cheaper than one pair per member.
+        - The whole-table case (an unfiltered view, no path) never touches
+          the source table at all: per-tag counts come from row_tags'
+          own aggregate, and the untagged remainder is the member's row
+          count minus its distinct tagged rids.
+        - The source table, when a path needs it, is reached through a
+          self-contained EXISTS rather than another join — nothing to
+          reorder, and it works against _from_clause's USING(rid) shape
+          without the alias juggling _derived_join exists for.
+        """
+        branches: list[str] = []
+        params: list[Any] = []
+        # Path conditions are compiled against _from_clause's USING(rid)
+        # shape (derived_alias None) since the source table only ever
+        # appears inside a standalone EXISTS here.
+        per_member = [(m, *path_for(m, None)) for m in members]
+        any_path = any(clause for _, clause, _ in per_member)
+
+        if not direct and not any_path:
+            branches.append(
+                f"SELECT rt.tag_id AS val, count(*) AS n FROM v.{q(view_id)} vv "
+                f"CROSS JOIN row_tags rt ON rt.source_id = vv.source_id AND rt.rid = vv.rid GROUP BY 1"
+            )
+            branches.append(
+                f"SELECT NULL AS val, count(*) AS n FROM v.{q(view_id)} vv "
+                f"WHERE NOT EXISTS (SELECT 1 FROM row_tags rt2 "
+                f"WHERE rt2.source_id = vv.source_id AND rt2.rid = vv.rid)"
+            )
+            return branches, params
+
+        for m, path_clause, path_params in per_member:
+            sid = int(m["source_id"])
+            member_from = self._member_from(src, m, "s")
+            if direct and not path_clause:
+                branches.append(
+                    f"SELECT tag_id AS val, count(*) AS n FROM row_tags WHERE source_id = {sid} GROUP BY 1"
+                )
+                branches.append(
+                    f"SELECT NULL AS val, {int(member_rows.get(sid, 0))} - "
+                    f"(SELECT count(DISTINCT rid) FROM row_tags WHERE source_id = {sid}) AS n"
+                )
+            elif direct:
+                branches.append(
+                    f"SELECT rt.tag_id AS val, count(*) AS n FROM row_tags rt WHERE rt.source_id = {sid} "
+                    f"AND EXISTS (SELECT 1 FROM {member_from} WHERE s.rid = rt.rid{path_clause}) GROUP BY 1"
+                )
+                params.extend(path_params)
+                branches.append(
+                    f"SELECT NULL AS val, count(*) AS n FROM {member_from} WHERE 1=1{path_clause} "
+                    f"AND NOT EXISTS (SELECT 1 FROM row_tags rt2 "
+                    f"WHERE rt2.source_id = {sid} AND rt2.rid = s.rid)"
+                )
+                params.extend(path_params)
+            else:
+                in_scope = (
+                    f"EXISTS (SELECT 1 FROM {member_from} "
+                    f"WHERE s.rid = vv.rid AND vv.source_id = {sid}{path_clause})"
+                )
+                branches.append(
+                    f"SELECT rt.tag_id AS val, count(*) AS n FROM v.{q(view_id)} vv "
+                    f"CROSS JOIN row_tags rt ON rt.source_id = vv.source_id AND rt.rid = vv.rid "
+                    f"WHERE {in_scope} GROUP BY 1"
+                )
+                params.extend(path_params)
+                branches.append(
+                    f"SELECT NULL AS val, count(*) AS n FROM v.{q(view_id)} vv WHERE {in_scope} "
+                    f"AND NOT EXISTS (SELECT 1 FROM row_tags rt2 "
+                    f"WHERE rt2.source_id = vv.source_id AND rt2.rid = vv.rid)"
+                )
+                params.extend(path_params)
+        return branches, params
+
     def expand_group(self, view_id: str, column: str, value: Any, path: list[dict] | None = None) -> dict:
         """Measures the group's real size within the current filtered root
         view (never trusts a client-cached count — the outer filter may have
-        changed), then picks a strategy: small single-source groups page
-        directly (no v.view_N churn); large groups, or any group on a
-        merge, get a real indexed sub-view so paging stays O(window) even
-        for a single dominant value across hundreds of thousands of rows.
+        changed), then picks a strategy: small single-source groups of an
+        *unfiltered* parent page directly (no v.view_N churn); large groups,
+        groups of a filtered parent, and any group on a merge get a real
+        indexed sub-view so paging stays O(window) even for a single
+        dominant value across hundreds of thousands of rows.
 
         A root_virtual parent (see _build_virtual_root_view) has no
         v.view_N to join — it's always a single, unfiltered source, so
@@ -4070,7 +4254,8 @@ class Store:
             raise KeyError("View expired — rebuild it")
         src = self._source_lite(root["source_id"])
         colnames = {c["name"]: c["type"] for c in src["columns"]}
-        if column not in colnames:
+        by_tag = column == TAG_GROUP_COLUMN
+        if not by_tag and column not in colnames:
             raise KeyError(column)
 
         members = self._resolve_members(root["source_id"])
@@ -4081,47 +4266,71 @@ class Store:
         # refers to it by alias.
         d_alias = None if is_root_virtual else "d"
         djoin = "" if is_root_virtual else self._derived_join(src, "s")
-        col_ident = self._col_ref(src, column, "s", d_alias)
-        cond_sql, cond_val = self._eq_condition(col_ident, value, colnames[column] == "datetime")
-        path_clauses, path_params = self._path_where(path, colnames, "s", src, d_alias)
-        extra_where = "".join(f" AND {c}" for c in path_clauses)
+
+        def _conds(m: dict) -> tuple[str, list]:
+            """This group's predicate for one member. Per member because
+            both halves can be: a tag test is keyed by source_id (row_tags
+            is), and so is any tag level in the nested path."""
+            if by_tag:
+                c, v = self._tag_condition("s", m["source_id"], value)
+            else:
+                c, v = self._eq_condition(
+                    self._col_ref(src, column, "s", d_alias), value, colnames[column] == "datetime"
+                )
+            pc, pp = self._path_where(path, colnames, "s", src, d_alias, m["source_id"])
+            return f"{c}" + "".join(f" AND {x}" for x in pc), [*v, *pp]
 
         with self.lock:
             total = 0
             for m in members:
+                where_sql, where_params = _conds(m)
                 if is_root_virtual:
                     n = self.db.execute(
-                        f"SELECT count(*) FROM {self._member_from(src, m, 's')} WHERE {cond_sql}{extra_where}",
-                        [*cond_val, *path_params],
+                        f"SELECT count(*) FROM {self._member_from(src, m, 's')} WHERE {where_sql}",
+                        where_params,
                     ).fetchone()[0]
                 else:
                     n = self.db.execute(
                         f"SELECT count(*) FROM v.{q(view_id)} vv JOIN {q(m['table_name'])} s "
-                        f"ON s.rid = vv.rid AND vv.source_id = ?{djoin} WHERE {cond_sql}{extra_where}",
-                        [m["source_id"], *cond_val, *path_params],
+                        f"ON s.rid = vv.rid AND vv.source_id = ?{djoin} WHERE {where_sql}",
+                        [m["source_id"], *where_params],
                     ).fetchone()[0]
                 total += n
 
+        # The virtual fast path reads straight off the member table with
+        # nothing but column=value (+ the nested path) — _virtual_group_where
+        # has no view to join and so no way to express the parent's own
+        # filters/search/timeframe. It is therefore only correct when the
+        # parent provably holds every row of the source; a filtered parent
+        # has to materialise. The failure it prevents is quiet, because the
+        # counts come from the other side: group_summary and `total` above
+        # both join the view and stay right, so the grid asks for row_count
+        # rows and gets the first row_count of a *longer*, unfiltered list —
+        # rows the filter excluded, rendered under a correct count. Tag and
+        # export on the group read the same way, which makes it an
+        # over-tagging bug too, not just a display one.
+        covers_source = self._grouping_covers_whole_source(root, src)
         is_merge = bool(src.get("is_merge"))
-        if is_merge or total > self.GROUP_MATERIALIZE_THRESHOLD:
+        if is_merge or not covers_source or total > self.GROUP_MATERIALIZE_THRESHOLD:
             self._view_seq += 1
             vid = f"view_{self._view_seq}"
             branches = []
             params: list[Any] = []
             for m in members:
+                where_sql, where_params = _conds(m)
                 if is_root_virtual:
                     branches.append(
                         f"SELECT s.rid AS root_pos, {int(m['source_id'])} AS source_id, s.rid AS rid "
-                        f"FROM {self._member_from(src, m, 's')} WHERE {cond_sql}{extra_where}"
+                        f"FROM {self._member_from(src, m, 's')} WHERE {where_sql}"
                     )
-                    params.extend([*cond_val, *path_params])
+                    params.extend(where_params)
                 else:
                     branches.append(
                         f"SELECT vv.pos AS root_pos, vv.source_id, vv.rid FROM v.{q(view_id)} vv "
                         f"JOIN {q(m['table_name'])} s ON s.rid = vv.rid AND vv.source_id = ?{djoin} "
-                        f"WHERE {cond_sql}{extra_where}"
+                        f"WHERE {where_sql}"
                     )
-                    params.extend([m["source_id"], *cond_val, *path_params])
+                    params.extend([m["source_id"], *where_params])
             union_sql = " UNION ALL ".join(branches)
             with self.lock, self.db:
                 # Same ORDER BY-fed insert as build_view: pos auto-assigns
@@ -4165,8 +4374,11 @@ class Store:
         # Unqualified names throughout: every caller runs this against the
         # member table joined to its sidecar with USING(rid), where a base
         # and a derived column are both addressable bare.
-        cond_sql, cond_val = self._eq_condition(q(column), value, colnames[column] == "datetime")
-        path_clauses, path_params = self._path_where(handle.get("path"), colnames, "", src)
+        if column == TAG_GROUP_COLUMN:
+            cond_sql, cond_val = self._tag_condition("", member_sid, value)
+        else:
+            cond_sql, cond_val = self._eq_condition(q(column), value, colnames[column] == "datetime")
+        path_clauses, path_params = self._path_where(handle.get("path"), colnames, "", src, None, member_sid)
         extra = "".join(f" AND {c}" for c in path_clauses)
         return f"{cond_sql}{extra}", [*cond_val, *path_params]
 
@@ -5331,6 +5543,58 @@ class Store:
         ).fetchall()
         return {"counts": {str(r["tag_id"]): r["n"] for r in rows}}
 
+    def tag_counts_in_view(self, view_id: str) -> dict:
+        """The same shape tag_counts returns, but counting only the rows
+        inside one view — so the tag ribbon can answer "how many of these
+        are tagged X" rather than "how many rows in the whole table are
+        tagged X", which is a different and usually less interesting
+        question once a filter or a search is on.
+
+        Scope is the view exactly as built, tag filter included: a ribbon
+        that quietly dropped one of the filters in play would be reporting a
+        count for a view nobody is looking at. The frontend keeps the
+        whole-table counts alongside these and shows both, rather than
+        picking one and hoping the analyst infers which it meant.
+
+        Cost is the same join tag_positions makes, with the same
+        untagged-source short-circuit in front of it — one indexed probe per
+        member — because this runs after every view build and an untagged
+        source is the common case. An unfiltered root_virtual view is every
+        row of the source by construction, so it skips straight to the
+        plain per-source counts with no join at all."""
+        handle = self._views.get(view_id)
+        if not handle:
+            raise KeyError("View expired — rebuild it")
+        if handle.get("kind") == "root_virtual":
+            return self.tag_counts(handle["source_id"])
+        with self._reader() as ro, self._dropped_view_is_expired():
+            if handle.get("kind") == "group_virtual":
+                member = handle["members"][0]
+                sid = member["source_id"]
+                msrc = self._source_lite_on(ro, sid)
+                where_sql, where_params = self._virtual_group_where(handle, ro)
+                # `rid IN (subquery)` rather than a join: _virtual_group_where
+                # builds unqualified column references (it has to — a derived
+                # column reaches its sidecar through USING(rid)), and row_tags
+                # has a `rid` of its own that would make them ambiguous.
+                rows = ro.execute(
+                    "SELECT tag_id, count(*) n FROM row_tags WHERE source_id=? AND rid IN "
+                    f"(SELECT rid FROM {self._member_from(msrc, member)} WHERE {where_sql}) GROUP BY 1",
+                    [sid, *where_params],
+                ).fetchall()
+                return {"counts": {str(r["tag_id"]): r["n"] for r in rows}}
+            any_tags = any(
+                ro.execute("SELECT 1 FROM row_tags WHERE source_id=? LIMIT 1", (m["source_id"],)).fetchone()
+                for m in self._resolve_members_on(ro, handle["source_id"])
+            )
+            if not any_tags:
+                return {"counts": {}}
+            rows = ro.execute(
+                f"SELECT rt.tag_id, count(*) n FROM v.{q(view_id)} vv "
+                f"JOIN row_tags rt ON rt.rid = vv.rid AND rt.source_id = vv.source_id GROUP BY 1"
+            ).fetchall()
+        return {"counts": {str(r["tag_id"]): r["n"] for r in rows}}
+
     def set_note(self, source_id: int, rid: int, note: str) -> None:
         with self.lock, self.db:
             if note.strip():
@@ -5988,7 +6252,14 @@ class Store:
         terms = [t for t in (terms or []) if (t.get("term") or "").strip()]
         if not query and not terms:
             return
-        pattern = _fts_like_pattern(query) if query else None
+        # A pasted list of IOCs is a plain OR of positive terms, and there
+        # the analyst wants an entry per term per table, not one row per
+        # table with everything summed into it. Anything else (mixed
+        # AND/NOT from the Advanced builder, a bare `query`) keeps the
+        # single union count — see _or_of_positive_terms.
+        breakdown = _or_of_positive_terms(terms) if terms else None
+        if breakdown and len(breakdown) > SEARCH_ALL_TERM_BREAKDOWN_MAX:
+            breakdown = None
         # Snapshot the source list up front (list_sources takes the lock
         # itself); the per-source work below re-acquires it one count at a
         # time. A source removed mid-sweep just yields a SQL error we skip.
@@ -6003,31 +6274,9 @@ class Store:
             cols = [c["name"] for c in self._base_cols(src)]
             if not src.get("has_fts"):
                 self._ensure_fts_building(source_id)
-            inner = None
-            params: tuple = ()
-            if terms:
-                if src.get("has_fts"):
-                    clause, params = _advanced_fts_clause(q("fts_" + str(source_id)), _blob_expr(cols), terms)
-                else:
-                    clause, params = _advanced_like_clause(cols, terms)
-                if clause:
-                    inner = f"SELECT 1 FROM {q(table)} WHERE {clause} LIMIT {SEARCH_ALL_COUNT_CAP + 1}"
-            elif src.get("has_fts") and pattern is not None:
-                fts_ident = q("fts_" + str(source_id))
-                params = (pattern,)
-                inner = (
-                    f"SELECT 1 FROM {q(table)} WHERE rid IN "
-                    f"(SELECT rowid FROM {fts_ident} WHERE doc LIKE ?) "
-                    f"LIMIT {SEARCH_ALL_COUNT_CAP + 1}"
-                )
-            else:
-                blob = _blob_expr(cols)
-                params = (f"%{_esc_like(query)}%",)
-                inner = (
-                    f"SELECT 1 FROM {q(table)} WHERE ({blob}) LIKE ? ESCAPE '\\' "
-                    f"LIMIT {SEARCH_ALL_COUNT_CAP + 1}"
-                )
+            inner, params = self._search_all_count_sql(src, table, cols, query, terms)
             n = 0
+            per_term: list[dict] = []
             if inner is not None:
                 # One _reader() checkout per source's count — the sweep
                 # never touches self.lock at all now, so even its worst
@@ -6038,8 +6287,22 @@ class Store:
                 try:
                     with self._reader() as ro:
                         n = ro.execute(f"SELECT COUNT(*) FROM ({inner})", params).fetchone()[0]
+                        # The per-term breakdown, and why it's here rather
+                        # than folded into the query above: counting each
+                        # term separately is the only way to say which of a
+                        # pasted IOC list actually hit, and a single query
+                        # with one SUM(CASE ...) per term would have to
+                        # evaluate *every* term against every candidate row
+                        # — losing the OR's short-circuit — on every source,
+                        # including the ones that don't match at all. Gated
+                        # on n instead, the sources that miss cost exactly
+                        # what they cost before this existed, and only a
+                        # source that already matched pays per term.
+                        if n and breakdown:
+                            per_term = self._search_all_term_counts(ro, src, table, cols, breakdown)
                 except sqlite3.Error:
                     n = 0  # source dropped (or its index swapped) mid-sweep
+                    per_term = []
             hit = None
             if n:
                 hit = {
@@ -6047,6 +6310,13 @@ class Store:
                     "name": src["name"],
                     "match_count": min(n, SEARCH_ALL_COUNT_CAP),
                     "capped": n > SEARCH_ALL_COUNT_CAP,
+                    # One entry per term that actually matched this source,
+                    # heaviest first. Empty when the query isn't a plain OR
+                    # of terms (see _or_of_positive_terms) — the modal falls
+                    # back to the single row per table it always showed.
+                    # Terms can overlap on a row, so these don't have to sum
+                    # to match_count.
+                    "terms": per_term,
                 }
             scanned += 1
             # Every source yields, matches or not, so `scanned` tracks real
@@ -6059,6 +6329,75 @@ class Store:
             time.sleep(0.02)
 
     # ------------------------------------------------ search-all as a job
+
+    def _search_all_count_sql(
+        self, src: dict, table: str, cols: list[str], query: str, terms: list[dict] | None
+    ) -> tuple[str | None, tuple]:
+        """The capped `SELECT 1 FROM ... WHERE <match> LIMIT cap+1` a
+        search-all count wraps in COUNT(*), for either a term list or a bare
+        substring query. Returns (None, ()) when there's nothing to match on.
+
+        Extracted so the per-term breakdown counts a term through exactly
+        the same shapes the whole-query count uses — indexed doc-LIKE when
+        the source has a usable trigram index, escaped blob LIKE otherwise
+        (see _fts_like_pattern). A single positive term is the same question
+        as a bare Contains query, which is why the breakdown reaches this
+        with `terms=None` and one string rather than a one-element chip
+        list."""
+        source_id = src["id"]
+        if terms:
+            if src.get("has_fts"):
+                clause, params = _advanced_fts_clause(q("fts_" + str(source_id)), _blob_expr(cols), terms)
+            else:
+                clause, params = _advanced_like_clause(cols, terms)
+            if not clause:
+                return None, ()
+            return f"SELECT 1 FROM {q(table)} WHERE {clause} LIMIT {SEARCH_ALL_COUNT_CAP + 1}", tuple(params)
+        if not query:
+            return None, ()
+        pattern = _fts_like_pattern(query)
+        if src.get("has_fts") and pattern is not None:
+            fts_ident = q("fts_" + str(source_id))
+            return (
+                f"SELECT 1 FROM {q(table)} WHERE rid IN "
+                f"(SELECT rowid FROM {fts_ident} WHERE doc LIKE ?) "
+                f"LIMIT {SEARCH_ALL_COUNT_CAP + 1}",
+                (pattern,),
+            )
+        blob = _blob_expr(cols)
+        return (
+            f"SELECT 1 FROM {q(table)} WHERE ({blob}) LIKE ? ESCAPE '\\' "
+            f"LIMIT {SEARCH_ALL_COUNT_CAP + 1}",
+            (f"%{_esc_like(query)}%",),
+        )
+
+    def _search_all_term_counts(
+        self, ro: sqlite3.Connection, src: dict, table: str, cols: list[str], terms: list[str]
+    ) -> list[dict]:
+        """One capped count per term against one source, heaviest first,
+        omitting the terms that didn't match it at all — the entry-per-term
+        half of a search-all hit.
+
+        Runs on the caller's already-checked-out reader so the whole source
+        (union count + breakdown) is one pool checkout, not N+1. Each count
+        is capped independently, so a term's own `capped` says "1,000+ of
+        *this* term", not "the source was busy" — and because a row can
+        match several terms, these deliberately don't have to sum to the
+        source's match_count."""
+        out = []
+        for term in terms:
+            inner, params = self._search_all_count_sql(src, table, cols, term, None)
+            if inner is None:
+                continue
+            n = ro.execute(f"SELECT COUNT(*) FROM ({inner})", params).fetchone()[0]
+            if n:
+                out.append({
+                    "term": term,
+                    "match_count": min(n, SEARCH_ALL_COUNT_CAP),
+                    "capped": n > SEARCH_ALL_COUNT_CAP,
+                })
+        out.sort(key=lambda d: -d["match_count"])
+        return out
 
     def start_search_all_job(self, query: str = "", terms: list[dict] | None = None) -> dict:
         """Runs a search_all sweep on a background daemon thread and returns
@@ -6317,6 +6656,31 @@ def _advanced_fts_clause(fts_ident: str, blob_expr: str, terms: list[dict]) -> t
     if not parts:
         return "", []
     return "(" + " ".join(parts) + ")", params
+
+
+def _or_of_positive_terms(terms: list[dict]) -> list[str] | None:
+    """The term strings, when `terms` is a plain OR of positive terms —
+    otherwise None.
+
+    That shape is exactly what the Search-all modal's "Paste a list" mode
+    produces (one term per line, OR'd, nothing excluded), and it's the only
+    shape where a per-term count means anything on its own: the terms are
+    independent alternatives, so "which of my IOCs hit this table, and how
+    hard" is a real question with a real answer. Under mixed AND/NOT the
+    terms constrain each other — a count for one of them in isolation
+    describes a query the analyst never asked — so those keep the single
+    union count they've always had.
+
+    Two terms or more: a one-term list's breakdown is its own total."""
+    strings = [(t.get("term") or "").strip() for t in terms]
+    if len(strings) < 2 or not all(strings):
+        return None
+    for i, t in enumerate(terms):
+        if t.get("exclude"):
+            return None
+        if i and str(t.get("connector", "AND")).upper() != "OR":
+            return None
+    return strings
 
 
 def _advanced_like_clause(cols: list[str], terms: list[dict]) -> tuple[str, list]:

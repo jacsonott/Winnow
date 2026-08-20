@@ -156,3 +156,67 @@ def test_tag_time_bounds_any_tag_subset_and_column(ingested):
 def test_tag_time_bounds_empty_when_nothing_tagged(ingested):
     store, sid = ingested
     assert store.tag_time_bounds(sid) == {"start": None, "end": None}
+
+
+def test_tag_counts_in_view_scopes_to_the_filter(store, write_csv):
+    rows = [["Process", "Host"]]
+    rows += [["evil.exe", "WS1"]] * 3
+    rows += [["evil.exe", "WS2"]] * 2
+    path = write_csv(rows, name="scoped.csv")
+    rec = store.ingest_csv(path, name="scoped.csv", build_fts=False)
+    tag = store.upsert_tag(None, "scoped", "#abcdef", None)
+
+    everything = store.build_view(rec["id"], {"source_id": rec["id"], "filters": [], "sort": []})
+    store.tag_view(everything["view_id"], tag["id"], True)
+    assert store.tag_counts(rec["id"])["counts"][str(tag["id"])] == 5
+    # An unfiltered root_virtual view is every row, so the two agree.
+    assert store.tag_counts_in_view(everything["view_id"])["counts"][str(tag["id"])] == 5
+
+    narrowed = store.build_view(rec["id"], {
+        "source_id": rec["id"], "filters": [{"column": "Host", "op": "equals", "value": "WS1"}], "sort": [],
+    })
+    # The table still holds 5 tagged rows; this view holds 3 of them.
+    assert store.tag_counts(rec["id"])["counts"][str(tag["id"])] == 5
+    assert store.tag_counts_in_view(narrowed["view_id"])["counts"][str(tag["id"])] == 3
+
+
+def test_tag_counts_in_view_scopes_to_a_search(store, write_csv):
+    rows = [["Process", "Note"], ["a.exe", "needle"], ["a.exe", "haystack"]]
+    rec = store.ingest_csv(write_csv(rows, name="scoped2.csv"), name="scoped2.csv", build_fts=False)
+    tag = store.upsert_tag(None, "s2", "#123123", None)
+    everything = store.build_view(rec["id"], {"source_id": rec["id"], "filters": [], "sort": []})
+    store.tag_view(everything["view_id"], tag["id"], True)
+
+    searched = store.build_view(rec["id"], {"source_id": rec["id"], "filters": [], "sort": [], "search": "needle"})
+    assert store.tag_counts_in_view(searched["view_id"])["counts"] == {str(tag["id"]): 1}
+
+
+def test_tag_counts_in_view_handles_a_group_subview(store, write_csv):
+    rows = [["Host", "User"], ["H1", "alice"], ["H1", "bob"], ["H2", "alice"]]
+    rec = store.ingest_csv(write_csv(rows, name="scoped3.csv"), name="scoped3.csv", build_fts=False)
+    tag = store.upsert_tag(None, "s3", "#321321", None)
+    root = store.build_view(rec["id"], {"source_id": rec["id"], "filters": [], "sort": []})
+    store.tag_view(root["view_id"], tag["id"], True)
+
+    grp = store.expand_group(root["view_id"], "Host", "H1")
+    assert store._views[grp["view_id"]]["kind"] == "group_virtual"
+    assert store.tag_counts_in_view(grp["view_id"])["counts"] == {str(tag["id"]): 2}
+
+
+def test_tag_counts_in_view_is_empty_when_nothing_is_tagged(store, write_csv):
+    rows = [["Host"], ["H1"], ["H2"]]
+    rec = store.ingest_csv(write_csv(rows, name="scoped4.csv"), name="scoped4.csv", build_fts=False)
+    view = store.build_view(rec["id"], {
+        "source_id": rec["id"], "filters": [{"column": "Host", "op": "equals", "value": "H1"}], "sort": [],
+    })
+    assert store.tag_counts_in_view(view["view_id"])["counts"] == {}
+
+
+def test_tag_counts_in_view_rejects_an_expired_view(store, write_csv):
+    import pytest as _pytest
+
+    rec = store.ingest_csv(write_csv([["Host"], ["H1"]], name="scoped5.csv"), name="scoped5.csv", build_fts=False)
+    view = store.build_view(rec["id"], {"source_id": rec["id"], "filters": [], "sort": []})
+    store.close_view(view["view_id"])
+    with _pytest.raises(KeyError):
+        store.tag_counts_in_view(view["view_id"])
