@@ -31,7 +31,7 @@ import sqlite3
 import tempfile
 import threading
 import time
-from typing import Any, Iterable, Iterator
+from typing import Any, Iterable, Iterator, Sequence
 
 from openpyxl import Workbook
 
@@ -40,6 +40,7 @@ try:  # POSIX only — see sweep_orphan_views for why Windows needs no substitut
 except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
 
+import structparse  # noqa: F401 — registers the JSON/XML extraction ops into timeparse.OPERATIONS
 import timeparse
 
 BATCH = 20_000
@@ -989,6 +990,12 @@ class Store:
         self._seed_tags()
         self._view_seq = 0
         self._views: dict[str, dict] = {}
+        self._undo_seq = 0
+        # Tag-change undo history. Entries are newest-last; each owns a
+        # v.undo_<n> delta table listing the rows the op *actually*
+        # changed. Scratch, not evidence — it lives in the views database
+        # (invariant #3) and dies with the process, same as a view.
+        self._undo: list[dict] = []
         self._maxlen_cache: dict[int, tuple[int, dict[str, int]]] = {}
         self._fts_threads: dict[int, threading.Thread] = {}
         self._index_threads: dict[tuple[int, str], threading.Thread] = {}
@@ -2468,15 +2475,18 @@ class Store:
                     progress=progress, cancel=cancel,
                 )]
             elif job["kind"] == "derive":
-                res = self.backfill_derived_column(
-                    opts["def_id"], progress=progress, cancel=cancel,
+                # options carries def_ids (a flatten adding several columns
+                # in one pass) or def_id (the single-column create and
+                # re-derive paths) — one job either way.
+                res = self.backfill_derived_columns(
+                    opts.get("def_ids") or [opts["def_id"]], progress=progress, cancel=cancel,
                     drop_on_cancel=opts.get("drop_on_cancel", False),
                 )
                 with self._ingest_jobs_lock:
                     job["status"] = "done"
                     job["rows_done"] = res["rows"]
                     job["source_ids"] = [res["source_id"]]
-                    job["result"] = [res]
+                    job["result"] = [dict(c, rows=res["rows"]) for c in res["columns"]]
                 return
             elif job["kind"] == "json":
                 results = [self.ingest_json(
@@ -2782,6 +2792,10 @@ class Store:
             "derived_kind": op.get("derived_kind", "datetime"),
             "derived_status": r["status"],
             "parse_failures": r["parse_failures"],
+            # The params come along so the UI can show what the column is
+            # defined by without a second round trip — for an extracted
+            # column that's the field path, which is the whole definition.
+            "derived_params": json.loads(r["params"] or "{}"),
         }
 
     def _source_lite(self, source_id: int) -> dict:
@@ -3124,6 +3138,117 @@ class Store:
         )
         return {"definition": self.get_derived_column(def_id), "job_id": job["job_id"]}
 
+    STRUCT_SAMPLE = 200
+
+    def detect_struct_paths(self, source_id: int, column: str) -> dict:
+        """What's inside a column that holds JSON or XML documents.
+
+        Samples the column, decides which of the two it is (or neither),
+        and enumerates every field found with how many of the sampled rows
+        carried it plus one example value. That coverage number is the
+        point: it's what turns "here are 60 paths" into "here are the six
+        worth making columns of", and it's why this samples rather than
+        scanning — the answer only has to be good enough to tick
+        checkboxes against, and a full scan of a 1.2M-row column to
+        populate a picker would cost more than building the columns."""
+        src = self._source_lite(source_id)
+        if not self._find_column(src, column):
+            raise KeyError(f"No column called {column!r}")
+        values = self._sample_column(src, column, limit=self.STRUCT_SAMPLE)
+        kind = structparse.sniff_kind(values)
+        if kind is None:
+            return {"kind": None, "paths": [], "sampled": len(values)}
+        return {
+            "kind": kind,
+            "sampled": len(values),
+            "paths": structparse.discover_paths(values, kind),
+        }
+
+    def add_derived_columns(self, source_id: int, specs: list[dict]) -> dict:
+        """Define several derived columns over one source and backfill them
+        in a single pass.
+
+        This exists for flattening: picking eight fields out of a JSON
+        column is one intent, and running it as eight `add_derived_column`
+        calls would mean eight full scans of the source table, eight jobs
+        in the panel, and eight chances to end up half-done. One job, one
+        scan, N columns.
+
+        Definitions are created up front and all-or-nothing — a name
+        collision in the fifth spec fails before the first column exists,
+        rather than leaving four behind for the analyst to clean up."""
+        if not specs:
+            raise ValueError("Nothing to add")
+        if source_id < 0:
+            raise ValueError("Derived columns aren't supported on merged tables")
+        src = self._source_lite(source_id)
+        drv = self._derived_table(source_id)
+
+        # Validated against each other as well as against the table: two
+        # specs asking for the same name is the realistic mistake here
+        # (two paths whose last component is "Name"), and _find_column
+        # can't see a column that doesn't exist yet.
+        taken = {c["name"].lower() for c in src["columns"]}
+        prepared = []
+        for spec in specs:
+            name = (spec.get("name") or "").strip()
+            op_id = spec.get("op_id")
+            input_column = spec.get("input_column")
+            op = timeparse.OPERATIONS.get(op_id)
+            if op is None:
+                raise ValueError(f"Unknown operation: {op_id}")
+            if op["two_input"]:
+                raise ValueError(f"{op['label']!r} takes two columns and can't be added in a batch")
+            if not name:
+                raise ValueError("Every new column needs a name")
+            if len(name) > 200:
+                raise ValueError(f"Column name {name!r} is too long")
+            if name.lower() in RESERVED_COLUMN_NAMES:
+                raise ValueError(f"{name!r} is a reserved column name")
+            if name.lower() in taken:
+                raise ValueError(f"This table already has a column called {name!r}")
+            entry = self._find_column(src, input_column)
+            if entry is None:
+                raise ValueError(f"No column called {input_column!r} to read")
+            if entry.get("derived"):
+                raise ValueError(f"{input_column!r} is itself a derived column — read the original instead")
+            taken.add(name.lower())
+            prepared.append({
+                "name": name, "input_column": input_column, "op_id": op_id,
+                "params": timeparse.validate_params(op_id, spec.get("params")),
+            })
+
+        def_ids = []
+        with self.lock, self.db:
+            self.db.execute(f"CREATE TABLE IF NOT EXISTS {q(drv)} (rid INTEGER PRIMARY KEY)")
+            existing = {r[1].lower() for r in self.db.execute(f"PRAGMA table_info({q(drv)})")}
+            for pspec in prepared:
+                name = pspec["name"]
+                if name.lower() in existing:
+                    # Orphan physical column from a remove on SQLite < 3.35
+                    # (no DROP COLUMN) — same reuse-it-blanked path
+                    # add_derived_column takes.
+                    self.db.execute(f"UPDATE {q(drv)} SET {q(name)}=NULL")
+                else:
+                    self.db.execute(f"ALTER TABLE {q(drv)} ADD COLUMN {q(name)} TEXT")
+                cur = self.db.execute(
+                    "INSERT INTO derived_columns(source_id, name, input_column, op_id, params, status, created_at) "
+                    "VALUES (?,?,?,?,?,'building',?)",
+                    (source_id, name, pspec["input_column"], pspec["op_id"],
+                     json.dumps(pspec["params"]), time.strftime("%Y-%m-%dT%H:%M:%S")),
+                )
+                def_ids.append(cur.lastrowid)
+
+        label = prepared[0]["name"] if len(prepared) == 1 else f"{len(prepared)} columns"
+        job = self.start_ingest_job(
+            "derive", "", name=label,
+            options={"def_ids": def_ids, "drop_on_cancel": True, "units_total": src["row_count"]},
+        )
+        return {
+            "definitions": [self.get_derived_column(d) for d in def_ids],
+            "job_id": job["job_id"],
+        }
+
     def remove_derived_column(self, def_id: int) -> None:
         d = self.get_derived_column(def_id)
         with self.lock:
@@ -3166,7 +3291,18 @@ class Store:
 
     def backfill_derived_column(self, def_id: int, progress=None, cancel=None,
                                 drop_on_cancel: bool = False) -> dict:
-        """Compute every row's value for one derived column.
+        """Compute every row's value for one derived column. The one-column
+        case of backfill_derived_columns, kept as its own name because
+        that's what the single-column create/re-derive paths mean."""
+        out = self.backfill_derived_columns(
+            [def_id], progress=progress, cancel=cancel, drop_on_cancel=drop_on_cancel,
+        )
+        return out["columns"][0] | {"rows": out["rows"]}
+
+    def backfill_derived_columns(self, def_ids: list[int], progress=None, cancel=None,
+                                 drop_on_cancel: bool = False) -> dict:
+        """Compute every row's values for one or more derived columns of the
+        same source, in a single pass.
 
         Batched exactly like ingest_csv/build_fts: read a BATCH-sized window
         on a pooled reader (committed data — the source table hasn't changed
@@ -3175,23 +3311,57 @@ class Store:
         rid order because the stateful operations need it — BSD syslog's
         year rollover is decided by comparing each line's month against the
         previous line's, so the order rows are parsed in is part of the
-        answer, not an implementation detail."""
-        d = self.get_derived_column(def_id)
-        source_id = d["source_id"]
+        answer, not an implementation detail. Each definition gets its own
+        `state` dict for exactly that reason: two columns derived in the
+        same pass must not share a rollover cursor.
+
+        Several columns at once is what flattening a JSON blob into its
+        fields needs (see add_derived_columns) — one scan and one progress
+        bar instead of N of each. The SELECT reads each distinct input
+        column once however many definitions want it."""
+        if not def_ids:
+            raise ValueError("Nothing to backfill")
+        defs = [self.get_derived_column(d) for d in def_ids]
+        source_id = defs[0]["source_id"]
+        if any(d["source_id"] != source_id for d in defs):
+            raise ValueError("All columns in one backfill must belong to the same source")
         src = self._source_lite(source_id)
-        op = timeparse.OPERATIONS[d["op_id"]]
-        params, name = d["params"], d["name"]
         drv = self._derived_table(source_id)
         frm = self._from_clause(src)
-        two = op["two_input"]
-        if two:
-            sel = f"{self._col_ref(src, d['input_column'])}, {self._col_ref(src, params['other_column'])}"
-        else:
-            sel = self._col_ref(src, d["input_column"])
-        upsert = (f"INSERT INTO {q(drv)}(rid, {q(name)}) VALUES(?,?) "
-                  f"ON CONFLICT(rid) DO UPDATE SET {q(name)}=excluded.{q(name)}")
 
-        state: dict = {}
+        # One SELECT slot per distinct input column, shared by every
+        # definition reading it.
+        slots: dict[str, int] = {}
+
+        def slot(col: str) -> int:
+            key = col.lower()
+            if key not in slots:
+                slots[key] = len(slots)
+            return slots[key]
+
+        plans = []
+        for d in defs:
+            op = timeparse.OPERATIONS[d["op_id"]]
+            plan = {"d": d, "op": op, "state": {}, "a": slot(d["input_column"])}
+            if op["two_input"]:
+                plan["b"] = slot(d["params"]["other_column"])
+            plans.append(plan)
+        cols = list(slots.keys())
+        # slot() keys case-insensitively but _col_ref needs the real name.
+        real = {}
+        for d in defs:
+            real[d["input_column"].lower()] = d["input_column"]
+            if timeparse.OPERATIONS[d["op_id"]]["two_input"]:
+                other = d["params"]["other_column"]
+                real[other.lower()] = other
+        sel = ", ".join(self._col_ref(src, real[c]) for c in cols)
+
+        names = [d["name"] for d in defs]
+        assigns = ", ".join(f"{q(n)}=excluded.{q(n)}" for n in names)
+        upsert = (f"INSERT INTO {q(drv)}(rid, {', '.join(q(n) for n in names)}) "
+                  f"VALUES({','.join('?' * (len(names) + 1))}) "
+                  f"ON CONFLICT(rid) DO UPDATE SET {assigns}")
+
         rows_done, last_rid = 0, 0
         total = src["row_count"]
         try:
@@ -3206,11 +3376,14 @@ class Store:
                 vals = []
                 for r in rows:
                     t = tuple(r)
-                    if two:
-                        out = op["parse_pair"](t[1], t[2], params)
-                    else:
-                        out = op["parse"](t[1], params, state)
-                    vals.append((t[0], out))
+                    out = [t[0]]
+                    for plan in plans:
+                        op = plan["op"]
+                        if op["two_input"]:
+                            out.append(op["parse_pair"](t[1 + plan["a"]], t[1 + plan["b"]], plan["d"]["params"]))
+                        else:
+                            out.append(op["parse"](t[1 + plan["a"]], plan["d"]["params"], plan["state"]))
+                    vals.append(tuple(out))
                 last_rid = vals[-1][0]
                 with self.lock, self.db:
                     if cancel and cancel():
@@ -3223,22 +3396,29 @@ class Store:
         except IngestCancelled:
             if drop_on_cancel:
                 # Mirror of cancel-drops-the-partial-source: the analyst
-                # asked for this column not to exist, and a half-filled one
+                # asked for these columns not to exist, and a half-filled one
                 # looks exactly like a complete one in the grid.
-                self.remove_derived_column(def_id)
+                for d in defs:
+                    self.remove_derived_column(d["id"])
             else:
                 with self.lock, self.db:
-                    self.db.execute("UPDATE derived_columns SET status='partial' WHERE id=?", (def_id,))
+                    self.db.executemany(
+                        "UPDATE derived_columns SET status='partial' WHERE id=?",
+                        [(d["id"],) for d in defs],
+                    )
             raise
 
-        failures = self._count_parse_failures(src, d)
-        with self.lock, self.db:
-            self.db.execute(
-                "UPDATE derived_columns SET status='ready', parse_failures=? WHERE id=?",
-                (failures, def_id),
-            )
-        return {"def_id": def_id, "source_id": source_id, "name": name,
-                "rows": rows_done, "parse_failures": failures}
+        out_cols = []
+        for d in defs:
+            failures = self._count_parse_failures(src, d)
+            with self.lock, self.db:
+                self.db.execute(
+                    "UPDATE derived_columns SET status='ready', parse_failures=? WHERE id=?",
+                    (failures, d["id"]),
+                )
+            out_cols.append({"def_id": d["id"], "source_id": source_id, "name": d["name"],
+                             "parse_failures": failures})
+        return {"source_id": source_id, "rows": rows_done, "columns": out_cols}
 
     def _count_parse_failures(self, src: dict, d: dict) -> int:
         """Rows whose input had something in it but produced no datetime —
@@ -5035,21 +5215,194 @@ class Store:
 
     def delete_tag(self, tag_id: int) -> None:
         with self.lock, self.db:
+            self._drop_undo_for_tag(tag_id)
             self.db.execute("DELETE FROM row_tags WHERE tag_id=?", (tag_id,))
             self.db.execute("DELETE FROM tag_defs WHERE id=?", (tag_id,))
 
-    def set_tags(self, source_id: int, rids: list[int], tag_id: int, on: bool) -> dict:
-        with self.lock, self.db:
-            if on:
-                self.db.executemany(
-                    "INSERT OR IGNORE INTO row_tags(source_id, rid, tag_id) VALUES (?,?,?)",
-                    [(source_id, r, tag_id) for r in rids],
-                )
+    # ------------------------------------------------------------------ undo
+
+    # How many tag changes deep Ctrl+Z goes, and the ceiling on how many
+    # delta rows the whole history is allowed to retain. The row budget is
+    # the one that actually bites: "tag every row in this 1.2M-row view"
+    # records 1.2M pairs, and a 25-deep stack of those would put half a
+    # gigabyte of scratch in /dev/shm. Whichever limit trips first evicts
+    # from the oldest end.
+    UNDO_LIMIT = 25
+    UNDO_ROW_BUDGET = 5_000_000
+
+    def _apply_tag_change(self, *, tag_id: int, on: bool, source_id: int, scope: str,
+                          target_sql: str | None = None, target_params: Sequence = (),
+                          pairs: Sequence[Sequence[int]] | None = None,
+                          count_ids: Sequence[int] | None = None) -> int:
+        """The single write path behind every tag apply/remove.
+
+        The target — the rows the analyst asked to change — arrives either
+        as a SELECT yielding (source_id, rid) (`target_sql`, the whole-view
+        paths) or as an explicit pair list (`pairs`, the selection paths).
+        What actually *changes* is a subset either way: tagging skips rows
+        that already carry the tag, untagging skips rows that don't.
+
+        Recording that delta rather than the target is the whole reason
+        undo can be correct. Undoing "tag these 200 rows" by deleting the
+        tag from all 200 would strip it off the rows that already had it
+        beforehand — a silent, unnoticeable corruption of the analyst's own
+        triage state, which is the worst failure mode this tool has (the
+        same trap `tag_view`'s `exclude` argument exists to avoid, one
+        level up).
+
+        The delta lands in a `v.undo_<n>` table and the change is then
+        applied *from* that table, so the rows recorded and the rows
+        written are the same set by construction rather than by two queries
+        agreeing. Returns how many rows actually changed.
+
+        CLAUDE.md invariant #7 — every tag write goes through here; nothing
+        INSERTs or DELETEs row_tags directly.
+
+        Caller must hold self.lock and be inside a self.db transaction."""
+        self._undo_seq += 1
+        table = f"undo_{self._undo_seq}"
+        if pairs is not None:
+            # Explicit pairs go in through executemany and are then filtered
+            # down in place, rather than being inlined as a VALUES list: a
+            # select-all-then-tag can carry tens of thousands of rows, and
+            # two bound parameters apiece blows past SQLITE_MAX_VARIABLE_NUMBER
+            # long before it blows past anything else.
+            self.db.execute(
+                f"CREATE TABLE v.{q(table)} (source_id INTEGER NOT NULL, rid INTEGER NOT NULL, "
+                f"PRIMARY KEY (source_id, rid)) WITHOUT ROWID"
+            )
+            self.db.executemany(
+                f"INSERT OR IGNORE INTO v.{q(table)}(source_id, rid) VALUES (?,?)",
+                [(int(sid), int(rid)) for sid, rid in pairs],
+            )
+            # Delete the rows this change *wouldn't* move: already tagged on
+            # the way in, not tagged on the way out.
+            self.db.execute(
+                f"DELETE FROM v.{q(table)} WHERE {'EXISTS' if on else 'NOT EXISTS'} "
+                f"(SELECT 1 FROM row_tags rt WHERE rt.source_id=v.{q(table)}.source_id "
+                f"AND rt.rid=v.{q(table)}.rid AND rt.tag_id=?)",
+                (tag_id,),
+            )
+        else:
+            # Keep the rows it *would* move — the mirror of the clause above.
+            self.db.execute(
+                f"CREATE TABLE v.{q(table)} AS "
+                f"SELECT DISTINCT t.source_id AS source_id, t.rid AS rid FROM ({target_sql}) t "
+                f"WHERE {'NOT EXISTS' if on else 'EXISTS'} "
+                f"(SELECT 1 FROM row_tags rt WHERE rt.source_id=t.source_id "
+                f"AND rt.rid=t.rid AND rt.tag_id=?)",
+                (*target_params, tag_id),
+            )
+        changed = self.db.execute(f"SELECT count(*) FROM v.{q(table)}").fetchone()[0]
+        self._write_tag_delta(table, tag_id, on)
+        if changed:
+            self._undo.append({
+                "undo_id": self._undo_seq, "table": table, "tag_id": tag_id,
+                "on": on, "count": changed, "source_id": source_id, "scope": scope,
+                "count_ids": list(count_ids) if count_ids is not None else None,
+                "at": time.time(),
+            })
+            self._trim_undo()
+        else:
+            # Nothing moved (re-tagging already-tagged rows). An entry here
+            # would make Ctrl+Z a no-op that still consumed a press, which
+            # reads as "undo is broken" rather than "there was nothing to
+            # undo" — so drop it rather than record it.
+            self.db.execute(f"DROP TABLE IF EXISTS v.{q(table)}")
+        return changed
+
+    def _write_tag_delta(self, table: str, tag_id: int, on: bool) -> None:
+        """Apply (or re-apply) one delta table's rows in the given
+        direction. Both the original write and its undo go through here —
+        undo is the same operation with `on` flipped, not a second
+        implementation of it."""
+        if on:
+            self.db.execute(
+                f"INSERT OR IGNORE INTO row_tags(source_id, rid, tag_id) "
+                f"SELECT source_id, rid, ? FROM v.{q(table)}",
+                (tag_id,),
+            )
+        else:
+            self.db.execute(
+                f"DELETE FROM row_tags WHERE tag_id=? AND (source_id, rid) IN "
+                f"(SELECT source_id, rid FROM v.{q(table)})",
+                (tag_id,),
+            )
+
+    def _trim_undo(self) -> None:
+        """Evict from the oldest end until both limits hold. Caller must
+        hold self.lock and be inside a self.db transaction."""
+        total = sum(e["count"] for e in self._undo)
+        while self._undo and (len(self._undo) > self.UNDO_LIMIT or total > self.UNDO_ROW_BUDGET):
+            dead = self._undo.pop(0)
+            total -= dead["count"]
+            self.db.execute(f"DROP TABLE IF EXISTS v.{q(dead['table'])}")
+
+    def _drop_undo_for_tag(self, tag_id: int) -> None:
+        """Deleting a tag definition takes its assignments with it, so every
+        history entry naming that tag is now describing a change to
+        something that no longer exists. Undoing one would resurrect rows
+        pointing at a dead tag_id. Caller holds self.lock, inside a
+        transaction."""
+        keep = []
+        for e in self._undo:
+            if e["tag_id"] == tag_id:
+                self.db.execute(f"DROP TABLE IF EXISTS v.{q(e['table'])}")
             else:
-                self.db.executemany(
-                    "DELETE FROM row_tags WHERE source_id=? AND rid=? AND tag_id=?",
-                    [(source_id, r, tag_id) for r in rids],
-                )
+                keep.append(e)
+        self._undo = keep
+
+    def _undo_entry_label(self, entry: dict) -> str:
+        row = self.db.execute("SELECT name FROM tag_defs WHERE id=?", (entry["tag_id"],)).fetchone()
+        name = row["name"] if row else "deleted tag"
+        n = entry["count"]
+        verb = "Tag" if entry["on"] else "Untag"
+        return f"{verb} {n:,} row{'' if n == 1 else 's'} · {name}"
+
+    def undo_peek(self) -> dict:
+        """What Ctrl+Z would undo, for the menu label and enabled state."""
+        with self.lock:
+            if not self._undo:
+                return {"available": False, "depth": 0}
+            e = self._undo[-1]
+            return {
+                "available": True, "depth": len(self._undo),
+                "label": self._undo_entry_label(e), "tag_id": e["tag_id"],
+                "on": e["on"], "count": e["count"], "source_id": e["source_id"],
+            }
+
+    def undo_last_tag_change(self) -> dict:
+        """Reverse the most recent tag change, exactly and only over the
+        rows it changed. Returns the source it touched (so the frontend
+        knows whether the visible table even needs repainting) alongside
+        the usual fresh counts."""
+        with self.lock, self.db:
+            if not self._undo:
+                raise ValueError("Nothing to undo")
+            e = self._undo[-1]
+            label = self._undo_entry_label(e)
+            self._write_tag_delta(e["table"], e["tag_id"], not e["on"])
+            self._undo.pop()
+            self.db.execute(f"DROP TABLE IF EXISTS v.{q(e['table'])}")
+            ids = e["count_ids"]
+            if ids is None:
+                ids = [m["source_id"] for m in self._resolve_members_on(self.db, e["source_id"])]
+            out = self._tag_counts_for_ids(ids)
+        out.update({
+            "undone": label, "affected": e["count"], "tag_id": e["tag_id"],
+            "source_id": e["source_id"], "was_on": e["on"],
+        })
+        out.update({"next": self.undo_peek()})
+        return out
+
+    def set_tags(self, source_id: int, rids: list[int], tag_id: int, on: bool) -> dict:
+        if not rids:
+            return self.tag_counts(source_id)
+        with self.lock, self.db:
+            self._apply_tag_change(
+                tag_id=tag_id, on=on, source_id=source_id, scope="rows",
+                pairs=[(source_id, r) for r in rids],
+            )
         return self.tag_counts(source_id)
 
     def set_tags_pairs(self, pairs: list[list[int]], tag_id: int, on: bool) -> dict:
@@ -5059,16 +5412,10 @@ class Store:
         if not pairs:
             return {"counts": {}}
         with self.lock, self.db:
-            if on:
-                self.db.executemany(
-                    "INSERT OR IGNORE INTO row_tags(source_id, rid, tag_id) VALUES (?,?,?)",
-                    [(sid, rid, tag_id) for sid, rid in pairs],
-                )
-            else:
-                self.db.executemany(
-                    "DELETE FROM row_tags WHERE source_id=? AND rid=? AND tag_id=?",
-                    [(sid, rid, tag_id) for sid, rid in pairs],
-                )
+            self._apply_tag_change(
+                tag_id=tag_id, on=on, source_id=int(pairs[0][0]), scope="rows",
+                pairs=pairs, count_ids=sorted({int(sid) for sid, _ in pairs}),
+            )
         member_ids = sorted({sid for sid, _ in pairs})
         ph = ",".join("?" * len(member_ids))
         with self.lock:
@@ -5103,20 +5450,15 @@ class Store:
             return self._tag_virtual_root(handle, tag_id, on, exclude)
         skip_sql, skip_params = self._exclude_clause(exclude, "source_id", "rid")
         with self.lock, self.db:
-            if on:
-                self.db.execute(
-                    f"INSERT OR IGNORE INTO row_tags(source_id, rid, tag_id) "
-                    f"SELECT source_id, rid, ? FROM v.{q(view_id)}{skip_sql}",
-                    (tag_id, *skip_params),
-                )
-            else:
-                self.db.execute(
-                    f"DELETE FROM row_tags WHERE tag_id=? "
-                    f"AND (source_id, rid) IN (SELECT source_id, rid FROM v.{q(view_id)}{skip_sql})",
-                    (tag_id, *skip_params),
-                )
+            changed = self._apply_tag_change(
+                tag_id=tag_id, on=on, source_id=handle["source_id"], scope="view",
+                target_sql=f"SELECT source_id, rid FROM v.{q(view_id)}{skip_sql}",
+                target_params=skip_params,
+                count_ids=[m["source_id"] for m in self._resolve_members_on(self.db, handle["source_id"])],
+            )
         out = self.tag_counts(handle["source_id"])
         out["affected"] = max(0, handle["row_count"] - len(exclude or []))
+        out["changed"] = changed
         return out
 
     @staticmethod
@@ -5146,20 +5488,15 @@ class Store:
             where_sql += f" AND rid NOT IN ({','.join('?' * len(skip_rids))})"
             where_params = [*where_params, *skip_rids]
         with self.lock, self.db:
-            if on:
-                self.db.execute(
-                    f"INSERT OR IGNORE INTO row_tags(source_id, rid, tag_id) "
-                    f"SELECT ?, rid, ? FROM {member_from} WHERE {where_sql}",
-                    [sid, tag_id, *where_params],
-                )
-            else:
-                self.db.execute(
-                    f"DELETE FROM row_tags WHERE source_id=? AND tag_id=? "
-                    f"AND rid IN (SELECT rid FROM {member_from} WHERE {where_sql})",
-                    [sid, tag_id, *where_params],
-                )
+            changed = self._apply_tag_change(
+                tag_id=tag_id, on=on, source_id=sid, scope="view",
+                target_sql=f"SELECT ? AS source_id, rid FROM {member_from} WHERE {where_sql}",
+                target_params=[sid, *where_params],
+                count_ids=[m["source_id"] for m in self._resolve_members_on(self.db, sid)],
+            )
         out = self.tag_counts(sid)
         out["affected"] = max(0, handle["row_count"] - len(skip_rids))
+        out["changed"] = changed
         return out
 
     def _tag_virtual_root(self, handle: dict, tag_id: int, on: bool,
@@ -5174,30 +5511,36 @@ class Store:
         skip_rids = [int(rid) for s, rid in (exclude or []) if int(s) == sid]
         skip_sql = f" WHERE rid NOT IN ({','.join('?' * len(skip_rids))})" if skip_rids else ""
         with self.lock, self.db:
-            if on:
-                self.db.execute(
-                    f"INSERT OR IGNORE INTO row_tags(source_id, rid, tag_id) "
-                    f"SELECT ?, rid, ? FROM {q(table)}{skip_sql}",
-                    [sid, tag_id, *skip_rids],
-                )
-            else:
-                self.db.execute(
-                    f"DELETE FROM row_tags WHERE source_id=? AND tag_id=? "
-                    f"AND rid IN (SELECT rid FROM {q(table)}{skip_sql})",
-                    [sid, tag_id, *skip_rids],
-                )
+            changed = self._apply_tag_change(
+                tag_id=tag_id, on=on, source_id=sid, scope="view",
+                target_sql=f"SELECT ? AS source_id, rid FROM {q(table)}{skip_sql}",
+                target_params=[sid, *skip_rids],
+                count_ids=[m["source_id"] for m in self._resolve_members_on(self.db, sid)],
+            )
         out = self.tag_counts(sid)
         out["affected"] = max(0, handle["row_count"] - len(skip_rids))
+        out["changed"] = changed
         return out
 
     def tag_counts(self, source_id: int) -> dict:
         member_ids = [m["source_id"] for m in self._resolve_members(source_id)]
-        ph = ",".join("?" * len(member_ids))
         with self.lock:
-            rows = self.db.execute(
-                f"SELECT tag_id, count(*) n FROM row_tags WHERE source_id IN ({ph}) GROUP BY 1",
-                member_ids,
-            ).fetchall()
+            return self._tag_counts_for_ids(member_ids)
+
+    def _tag_counts_for_ids(self, member_ids: Sequence[int]) -> dict:
+        """Counts over an explicit member list. Split out of tag_counts
+        because undo has to recount from inside its own open transaction
+        (self.lock is not re-entrant) and over the exact member set the
+        original change reported against — a merged view's ribbon counts
+        every member, not just the one the changed rows happened to
+        belong to."""
+        ids = [int(i) for i in member_ids]
+        if not ids:
+            return {"counts": {}}
+        ph = ",".join("?" * len(ids))
+        rows = self.db.execute(
+            f"SELECT tag_id, count(*) n FROM row_tags WHERE source_id IN ({ph}) GROUP BY 1", ids,
+        ).fetchall()
         return {"counts": {str(r["tag_id"]): r["n"] for r in rows}}
 
     def tag_counts_in_view(self, view_id: str) -> dict:

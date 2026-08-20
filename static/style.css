@@ -768,6 +768,40 @@ code { font-family: var(--mono); color: var(--accent); background: var(--panel);
 .xtok-tag { color: var(--accent); }
 .xtok-attr { color: var(--num); }
 .xtok-attrval { color: var(--str); }
+.xtok-text { color: var(--text); }
+
+/* A node of a parsed JSON/XML document, i.e. one the detail menu can turn
+   into a column or filter on. The hover underline is the only affordance
+   saying "there is something here to right-click" — deliberately quiet,
+   since in a large document nearly every token is one of these. */
+.struct-node { border-radius: 2px; }
+.struct-node:hover {
+  background: var(--accent-dim);
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+  cursor: context-menu;
+}
+
+/* The flatten picker: one row per discovered field, with how much of the
+   sample carried it and an example value. Sized so ~8 rows are visible
+   before it scrolls — enough to judge a column set without the modal
+   growing past the viewport. */
+.flatten-list {
+  max-height: 42vh; overflow: auto; border: var(--border-w) solid var(--line-2);
+  border-radius: var(--radius-sm); margin-top: 8px;
+}
+.flatten-row {
+  display: grid; grid-template-columns: 22px minmax(140px, 1.2fr) 66px minmax(120px, 1.5fr);
+  gap: 8px; align-items: center; padding: 5px 8px; border-bottom: var(--border-w) solid var(--line-1);
+}
+.flatten-name { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.flatten-row:last-child { border-bottom: none; }
+.flatten-row:hover { background: var(--row-hover); }
+.flatten-path { font-family: var(--mono); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.flatten-cov { font-size: 11px; color: var(--dim); text-align: right; align-self: start; padding-top: 5px; font-variant-numeric: tabular-nums; }
+.flatten-sample { font-family: var(--mono); font-size: 11px; color: var(--dim); align-self: start; padding-top: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.flatten-row input[type="text"] { font-size: 11px; padding: 2px 5px; width: 100%; }
+.flatten-head { display: flex; gap: 8px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
 
 .note-box { display: flex; flex-direction: column; gap: 5px; }
 .note-box label { font-size: 11px; text-transform: uppercase; letter-spacing: .1em; color: var(--dim); }
@@ -901,6 +935,12 @@ textarea:focus { border-color: var(--accent); outline: none; }
   flex: 0 0 auto;
   font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--dim);
   padding: 6px 10px 3px;
+}
+/* A header that is a value rather than a label — a JSON/XML field path.
+   Uppercasing one is actively wrong: paths are case-sensitive, so
+   `$.USER.NAME` names a field that isn't there. */
+.menu-header.menu-header-literal {
+  text-transform: none; letter-spacing: 0; font-family: var(--mono); font-size: 11px;
 }
 
 /* ---------------------------------------------------------------- sidebar */

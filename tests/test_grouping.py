@@ -472,3 +472,57 @@ def test_group_by_tag_on_a_whole_table_never_touches_the_source(store, write_csv
     )
     assert params == []
     assert not any(src["table_name"] in b for b in branches)
+
+
+def test_undo_survives_the_group_view_it_was_tagged_through(store, write_csv):
+    """Tagging a group from its header menu builds a throwaway sub-view and
+    drops it straight after (groupRowsView/release in app.js). Undo records
+    the *rows* in a v.undo_<n> table rather than the view, so dropping the
+    view mustn't take the undo entry with it."""
+    source_id, alpha, beta = _tagged_fixture(store, write_csv)
+    view = store.build_view(source_id, {"source_id": source_id, "filters": [], "sort": []})
+    gamma = store.upsert_tag(None, "Gamma", "#00ffff", None)
+
+    grp = store.expand_group(view["view_id"], "Host", "H0")
+    store.tag_view(grp["view_id"], gamma["id"], True)
+    tagged = store.tag_counts(source_id)["counts"][str(gamma["id"])]
+    assert tagged == 5
+
+    store.close_view(grp["view_id"])  # what the menu's release() does
+    store.undo_last_tag_change()
+    assert str(gamma["id"]) not in store.tag_counts(source_id)["counts"]
+
+
+def test_undo_a_tag_applied_to_a_tag_group(store, write_csv):
+    # The most exotic combination: grouped by tag, tag one of those groups,
+    # then undo. The group's rows are found through row_tags and the change
+    # is written to row_tags, so the delta has to be materialised before the
+    # write — which _apply_tag_change does by construction.
+    source_id, alpha, beta = _tagged_fixture(store, write_csv)
+    view = store.build_view(source_id, {"source_id": source_id, "filters": [], "sort": []})
+    gamma = store.upsert_tag(None, "Gamma", "#00ffff", None)
+
+    alpha_group = store.expand_group(view["view_id"], TAG_GROUP_COLUMN, alpha["id"])
+    assert alpha_group["row_count"] == 3
+    store.tag_view(alpha_group["view_id"], gamma["id"], True)
+    assert store.tag_counts(source_id)["counts"][str(gamma["id"])] == 3
+
+    store.undo_last_tag_change()
+    counts = store.tag_counts(source_id)["counts"]
+    assert str(gamma["id"]) not in counts
+    assert counts[str(alpha["id"])] == 3  # Alpha itself untouched by the undo
+
+
+def test_untagging_a_tag_group_removes_exactly_that_tag(store, write_csv):
+    """Untagging tag X off the group of rows tagged X reads row_tags in the
+    target query and deletes from row_tags in the same statement."""
+    source_id, alpha, beta = _tagged_fixture(store, write_csv)
+    view = store.build_view(source_id, {"source_id": source_id, "filters": [], "sort": []})
+    alpha_group = store.expand_group(view["view_id"], TAG_GROUP_COLUMN, alpha["id"])
+    store.tag_view(alpha_group["view_id"], alpha["id"], False)
+    counts = store.tag_counts(source_id)["counts"]
+    assert str(alpha["id"]) not in counts
+    assert counts[str(beta["id"])] == 2  # rid 3 keeps Beta
+
+    store.undo_last_tag_change()
+    assert store.tag_counts(source_id)["counts"][str(alpha["id"])] == 3

@@ -1511,6 +1511,23 @@ class RederiveWrite(BaseModel):
     params: dict = {}
 
 
+class DerivedBatchItem(BaseModel):
+    name: str
+    input_column: str
+    op_id: str
+    params: dict = {}
+
+
+class DerivedBatchCreate(BaseModel):
+    source_id: int
+    columns: list[DerivedBatchItem]
+
+
+class StructProbe(BaseModel):
+    source_id: int
+    column: str
+
+
 @app.get("/api/derived/ops")
 def api_derived_ops():
     return store().list_derived_ops()
@@ -1554,6 +1571,30 @@ def api_derived_rederive(def_id: int, body: RederiveWrite):
         raise HTTPException(404, str(e))
 
 
+@app.post("/api/derived/batch")
+def api_derived_create_batch(body: DerivedBatchCreate):
+    """Several derived columns at once, backfilled in one pass — what
+    flattening a JSON/XML column into its fields turns into."""
+    try:
+        return store().add_derived_columns(
+            body.source_id, [c.model_dump() for c in body.columns]
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/derived/paths")
+def api_derived_paths(body: StructProbe):
+    """The fields inside a JSON/XML column, with per-field coverage across
+    a sample — the picker behind "flatten this into columns"."""
+    try:
+        return store().detect_struct_paths(body.source_id, body.column)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+
+
 @app.post("/api/derived/detect")
 def api_derived_detect(body: DerivedProbe):
     try:
@@ -1591,6 +1632,20 @@ def api_derived_unparsed_filter(def_id: int):
         return {"sql": store().unparsed_where_fragment(def_id)}
     except KeyError as e:
         raise HTTPException(404, str(e))
+
+
+@app.get("/api/row_tags/undo")
+def api_row_tags_undo_peek():
+    """What Ctrl+Z would reverse, for the menu label and its enabled state."""
+    return store().undo_peek()
+
+
+@app.post("/api/row_tags/undo")
+def api_row_tags_undo():
+    try:
+        return store().undo_last_tag_change()
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.post("/api/row_tags")
