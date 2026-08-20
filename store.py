@@ -2831,9 +2831,14 @@ class Store:
         type the column; the `derived` flag is what the handful of
         base-only sites (_base_cols) filter on."""
         op = timeparse.OPERATIONS.get(r["op_id"]) or {}
+        params = json.loads(r["params"] or "{}")
         return {
             "name": r["name"],
-            "type": op.get("value_type", "datetime"),
+            # A per-definition value_type param (coalesce: datetime when
+            # every input is) beats the op's static one — it's what lets a
+            # coalesce of two parsed timestamps feed the timeframe filter
+            # and the Timeline like any other datetime column.
+            "type": params.get("value_type") or op.get("value_type", "datetime"),
             "derived": True,
             "derived_id": r["id"],
             "derived_from": r["input_column"],
@@ -2844,7 +2849,7 @@ class Store:
             # The params come along so the UI can show what the column is
             # defined by without a second round trip — for an extracted
             # column that's the field path, which is the whole definition.
-            "derived_params": json.loads(r["params"] or "{}"),
+            "derived_params": params,
         }
 
     def _source_lite(self, source_id: int) -> dict:
@@ -2881,12 +2886,13 @@ class Store:
                 "path": None,
                 "table_name": None,
                 "row_count": sum(m["row_count"] for m in members),
-                # canonical — lowest-id (first-created) member. Base columns
-                # only: derived columns aren't available on merges in v1
-                # (each member has its own drv_ table and its own set of
-                # definitions; a UNION ALL over mismatched sets would need
-                # per-member NULL-padding nothing here does yet).
-                "columns": [c for c in members[0]["columns"] if not c.get("derived")],
+                # canonical — lowest-id (first-created) member's base
+                # columns, plus the derived columns EVERY member shares
+                # (the merge-level fan-out creates them in lockstep; see
+                # _merge_derived_entries for why the set is an
+                # intersection).
+                "columns": [c for c in members[0]["columns"] if not c.get("derived")]
+                           + self._merge_derived_entries(members),
                 "file_hash": None,
                 "imported_at": row["created_at"],
                 "has_fts": 1 if all(m["has_fts"] for m in members) else 0,
@@ -2903,6 +2909,50 @@ class Store:
             d["columns"].append(self._derived_col_entry(dr))
             d["has_derived"] = True
         return d
+
+    @staticmethod
+    def _merge_derived_entries(members: list[dict]) -> list[dict]:
+        """The derived-column entries a merge exposes: the ones EVERY member
+        carries under the same name and operation, in the first member's
+        definition order.
+
+        An intersection rather than a union because a UNION ALL branch can
+        only select a column that exists on that branch's member — the
+        merge-level add fans a definition out to every member precisely so
+        this set is normally "all of them", and the intersection is the
+        fail-safe for the analyst who then deletes one member's copy by
+        hand: that column drops off the merge instead of erroring every
+        view build. The entry itself is the first member's (so derived_id
+        addresses the canonical member's definition — the merge-level
+        remove/re-derive paths fan out by *name*, not by that id), with
+        status aggregated pessimistically and parse_failures summed."""
+        per_member = [
+            {c["name"].lower(): c for c in m["columns"] if c.get("derived")}
+            for m in members
+        ]
+        out = []
+        for c in members[0]["columns"]:
+            if not c.get("derived"):
+                continue
+            key = c["name"].lower()
+            twins = [pm.get(key) for pm in per_member]
+            if any(t is None or t["derived_op"] != c["derived_op"] for t in twins):
+                continue
+            entry = dict(c)
+            # Worst status wins: a merge column is only usable when every
+            # member's copy is.
+            for status in ("error", "building", "partial"):
+                if any(t["derived_status"] == status for t in twins):
+                    entry["derived_status"] = status
+                    break
+            else:
+                entry["derived_status"] = "ready"
+            counts = [t.get("parse_failures") for t in twins]
+            entry["parse_failures"] = (
+                sum(n or 0 for n in counts) if any(n is not None for n in counts) else None
+            )
+            out.append(entry)
+        return out
 
     def _merge_row(self, merge_id: int) -> sqlite3.Row:
         with self.lock:
@@ -2925,9 +2975,10 @@ class Store:
             "path": None,
             "table_name": None,
             "row_count": sum(m["row_count"] for m in members),
-            # canonical — lowest-id (first-created) member; base columns only
-            # (derived columns aren't available on merges, see _source_lite_on)
-            "columns": [c for c in members[0]["columns"] if not c.get("derived")],
+            # canonical — lowest-id (first-created) member's base columns,
+            # plus the derived columns every member shares (_merge_derived_entries)
+            "columns": [c for c in members[0]["columns"] if not c.get("derived")]
+                       + self._merge_derived_entries(members),
             "file_hash": None,
             "imported_at": row["created_at"],
             "has_fts": 1 if all(m["has_fts"] for m in members) else 0,
@@ -3070,22 +3121,32 @@ class Store:
                    for c in src["columns"])
 
     def _member_from(self, src: dict, m: dict, alias: str | None = None) -> str:
-        """FROM text for one member table of a (possibly merged) view. Only
-        a non-merge source can carry derived columns, so only its own member
-        ever picks up the sidecar join."""
+        """FROM text for one member table of a (possibly merged) view. A
+        merge whose column set includes derived columns joins each member's
+        OWN drv_ sidecar — the merge-level fan-out guarantees every member
+        has the definition (and so the table); the USING(rid) shape keeps
+        both bare `rid` and bare derived-column references legal, same as
+        _from_clause."""
         if not src.get("is_merge") and m["source_id"] == src["id"]:
             return self._from_clause(src, alias)
         t = q(m["table_name"])
-        return f"{t} {alias}" if alias else t
+        if alias:
+            t = f"{t} {alias}"
+        if src.get("is_merge") and any(c.get("derived") for c in src["columns"]):
+            return f"{t} LEFT JOIN {q(self._derived_table(m['source_id']))} USING(rid)"
+        return t
 
-    def _derived_join(self, src: dict, on_alias: str, alias: str = "d") -> str:
+    def _derived_join(self, src: dict, on_alias: str, alias: str = "d",
+                      member_id: int | None = None) -> str:
         """`LEFT JOIN drv_<id> d ON d.rid = <on_alias>.rid`, for the query
         shapes that already chain a JOIN ... ON (group_summary's view join)
         and so can't use _from_clause's USING(rid) form — an ON clause after
-        a USING join would bind to the wrong join."""
-        if src.get("is_merge") or not any(c.get("derived") for c in src["columns"]):
+        a USING join would bind to the wrong join. On a merge the sidecar
+        is per member, so those callers pass the member's id."""
+        if not any(c.get("derived") for c in src["columns"]):
             return ""
-        return f" LEFT JOIN {q(self._derived_table(src['id']))} {alias} ON {alias}.rid = {on_alias}.rid"
+        sid = member_id if member_id is not None else src["id"]
+        return f" LEFT JOIN {q(self._derived_table(sid))} {alias} ON {alias}.rid = {on_alias}.rid"
 
     @staticmethod
     def _derived_dict(row: sqlite3.Row) -> dict:
@@ -3099,6 +3160,12 @@ class Store:
         return timeparse.list_ops()
 
     def list_derived_columns(self, source_id: int) -> list[dict]:
+        # A merge's derived definitions are its canonical (first) member's —
+        # that member's def ids are the ones the merged column entries carry
+        # (see _merge_derived_entries), so a caller prefilling params from
+        # this list finds them by exactly those ids.
+        if source_id < 0:
+            source_id = self._source_lite(source_id)["member_source_ids"][0]
         with self.lock:
             rows = self.db.execute(
                 "SELECT * FROM derived_columns WHERE source_id=? ORDER BY id", (source_id,)
@@ -3118,6 +3185,62 @@ class Store:
                 return c
         return None
 
+    def _insert_derived_def(self, source_id: int, name: str, input_column: str,
+                            op_id: str, params: dict) -> int:
+        """DDL + definition row for one derived column on one real source.
+        Caller holds self.lock inside a transaction (`with self.lock,
+        self.db:`) — that's what makes a fan-out over merge members
+        all-or-nothing."""
+        drv = self._derived_table(source_id)
+        self.db.execute(f"CREATE TABLE IF NOT EXISTS {q(drv)} (rid INTEGER PRIMARY KEY)")
+        existing = {r[1].lower() for r in self.db.execute(f"PRAGMA table_info({q(drv)})")}
+        if name.lower() in existing:
+            # An orphan physical column left behind by a remove on a
+            # SQLite too old for DROP COLUMN (< 3.35). Definitions drive
+            # visibility, so it was invisible; reuse it, blanked.
+            self.db.execute(f"UPDATE {q(drv)} SET {q(name)}=NULL")
+        else:
+            self.db.execute(f"ALTER TABLE {q(drv)} ADD COLUMN {q(name)} TEXT")
+        cur = self.db.execute(
+            "INSERT INTO derived_columns(source_id, name, input_column, op_id, params, status, created_at) "
+            "VALUES (?,?,?,?,?,'building',?)",
+            (source_id, name, input_column, op_id, json.dumps(params),
+             time.strftime("%Y-%m-%dT%H:%M:%S")),
+        )
+        return cur.lastrowid
+
+    def _derived_targets(self, src: dict) -> list[dict]:
+        """The real sources a derived-column change on `src` lands on: the
+        source itself, or — on a merge — every member. The merge-level
+        fan-out is what makes a merge's derived set 'all members' by
+        construction (see _merge_derived_entries)."""
+        if not src.get("is_merge"):
+            return [src]
+        return [self._source_lite(sid) for sid in src["member_source_ids"]]
+
+    def _check_derived_inputs(self, target: dict, op: dict, input_column: str, params: dict) -> None:
+        """Input columns must exist on `target`; a derived input is allowed
+        only for the ops that chain (duration, coalesce) and only once it's
+        fully built."""
+        chainable = op["two_input"] or op.get("multi_input")
+
+        def _check(col: str, label: str) -> None:
+            entry = self._find_column(target, col)
+            if entry is None:
+                raise ValueError(f"No column called {col!r} to use as the {label}")
+            if entry.get("derived"):
+                if not chainable:
+                    raise ValueError(f"{col!r} is itself a derived column — parse the original column instead")
+                if entry.get("derived_status") != "ready":
+                    raise ValueError(f"{col!r} is still building — wait for it to finish first")
+
+        _check(input_column, "input column")
+        if op["two_input"]:
+            _check(params["other_column"], "second column")
+        if op.get("multi_input"):
+            for col in params["columns"]:
+                _check(col, "input column")
+
     def add_derived_column(self, source_id: int, name: str, input_column: str,
                            op_id: str, params: dict | None = None) -> dict:
         """Define a derived column and kick off its backfill job.
@@ -3126,9 +3249,14 @@ class Store:
         than computed per query: they have to be sortable, filterable,
         groupable and exportable, all of which are server-side SQL over a
         column that either exists or doesn't. The source table itself is
-        never touched (invariant #1)."""
-        if source_id < 0:
-            raise ValueError("Derived columns aren't supported on merged tables")
+        never touched (invariant #1).
+
+        On a merge (negative id) the definition fans out to every member —
+        one definition per member, created in a single transaction, one
+        backfill job over all of them — which is what lets the merge expose
+        the column at all (each UNION ALL branch reads its own member's
+        sidecar) and keeps each member a completely normal source with a
+        completely normal derived column."""
         op = timeparse.OPERATIONS.get(op_id)
         if op is None:
             raise ValueError(f"Unknown operation: {op_id}")
@@ -3142,50 +3270,27 @@ class Store:
             raise ValueError("Column name is too long")
         if name.lower() in RESERVED_COLUMN_NAMES:
             raise ValueError(f"{name!r} is a reserved column name")
-        if self._find_column(src, name):
+
+        targets = self._derived_targets(src)
+        # The name is checked against the merge's own set AND every member:
+        # a member can carry an extra derived column (added on it directly)
+        # that the merge's intersection doesn't show. Inputs are checked
+        # per member — that's where the reads actually run.
+        if src.get("is_merge") and self._find_column(src, name):
             raise ValueError(f"This table already has a column called {name!r}")
+        for t in targets:
+            if self._find_column(t, name):
+                raise ValueError(f"This table already has a column called {name!r}")
+            self._check_derived_inputs(t, op, input_column, params)
 
-        # Inputs: a parse operation reads one of the file's own columns; a
-        # two-input operation (duration) can also read an already-built
-        # derived datetime column, so deltas can chain off parsed values.
-        def _check_input(col: str, label: str) -> dict:
-            entry = self._find_column(src, col)
-            if entry is None:
-                raise ValueError(f"No column called {col!r} to use as the {label}")
-            if entry.get("derived"):
-                if not op["two_input"]:
-                    raise ValueError(f"{col!r} is itself a derived column — parse the original column instead")
-                if entry.get("derived_status") != "ready":
-                    raise ValueError(f"{col!r} is still building — wait for it to finish first")
-            return entry
-
-        _check_input(input_column, "input column")
-        if op["two_input"]:
-            _check_input(params["other_column"], "second column")
-
-        drv = self._derived_table(source_id)
         with self.lock, self.db:
-            self.db.execute(f"CREATE TABLE IF NOT EXISTS {q(drv)} (rid INTEGER PRIMARY KEY)")
-            existing = {r[1].lower() for r in self.db.execute(f"PRAGMA table_info({q(drv)})")}
-            if name.lower() in existing:
-                # An orphan physical column left behind by a remove on a
-                # SQLite too old for DROP COLUMN (< 3.35). Definitions drive
-                # visibility, so it was invisible; reuse it, blanked.
-                self.db.execute(f"UPDATE {q(drv)} SET {q(name)}=NULL")
-            else:
-                self.db.execute(f"ALTER TABLE {q(drv)} ADD COLUMN {q(name)} TEXT")
-            cur = self.db.execute(
-                "INSERT INTO derived_columns(source_id, name, input_column, op_id, params, status, created_at) "
-                "VALUES (?,?,?,?,?,'building',?)",
-                (source_id, name, input_column, op_id, json.dumps(params),
-                 time.strftime("%Y-%m-%dT%H:%M:%S")),
-            )
-            def_id = cur.lastrowid
+            def_ids = [self._insert_derived_def(t["id"], name, input_column, op_id, params)
+                       for t in targets]
         job = self.start_ingest_job(
             "derive", "", name=name,
-            options={"def_id": def_id, "drop_on_cancel": True, "units_total": src["row_count"]},
+            options={"def_ids": def_ids, "drop_on_cancel": True, "units_total": src["row_count"]},
         )
-        return {"definition": self.get_derived_column(def_id), "job_id": job["job_id"]}
+        return {"definition": self.get_derived_column(def_ids[0]), "job_id": job["job_id"]}
 
     STRUCT_SAMPLE = 200
 
@@ -3225,19 +3330,21 @@ class Store:
 
         Definitions are created up front and all-or-nothing — a name
         collision in the fifth spec fails before the first column exists,
-        rather than leaving four behind for the analyst to clean up."""
+        rather than leaving four behind for the analyst to clean up. On a
+        merge every spec fans out to every member, same as
+        add_derived_column, still in one transaction and one job."""
         if not specs:
             raise ValueError("Nothing to add")
-        if source_id < 0:
-            raise ValueError("Derived columns aren't supported on merged tables")
         src = self._source_lite(source_id)
-        drv = self._derived_table(source_id)
+        targets = self._derived_targets(src)
 
-        # Validated against each other as well as against the table: two
+        # Validated against each other as well as against the table(s): two
         # specs asking for the same name is the realistic mistake here
         # (two paths whose last component is "Name"), and _find_column
         # can't see a column that doesn't exist yet.
         taken = {c["name"].lower() for c in src["columns"]}
+        for t in targets:
+            taken |= {c["name"].lower() for c in t["columns"]}
         prepared = []
         for spec in specs:
             name = (spec.get("name") or "").strip()
@@ -3256,11 +3363,12 @@ class Store:
                 raise ValueError(f"{name!r} is a reserved column name")
             if name.lower() in taken:
                 raise ValueError(f"This table already has a column called {name!r}")
-            entry = self._find_column(src, input_column)
-            if entry is None:
-                raise ValueError(f"No column called {input_column!r} to read")
-            if entry.get("derived"):
-                raise ValueError(f"{input_column!r} is itself a derived column — read the original instead")
+            for t in targets:
+                entry = self._find_column(t, input_column)
+                if entry is None:
+                    raise ValueError(f"No column called {input_column!r} to read")
+                if entry.get("derived"):
+                    raise ValueError(f"{input_column!r} is itself a derived column — read the original instead")
             taken.add(name.lower())
             prepared.append({
                 "name": name, "input_column": input_column, "op_id": op_id,
@@ -3269,24 +3377,11 @@ class Store:
 
         def_ids = []
         with self.lock, self.db:
-            self.db.execute(f"CREATE TABLE IF NOT EXISTS {q(drv)} (rid INTEGER PRIMARY KEY)")
-            existing = {r[1].lower() for r in self.db.execute(f"PRAGMA table_info({q(drv)})")}
-            for pspec in prepared:
-                name = pspec["name"]
-                if name.lower() in existing:
-                    # Orphan physical column from a remove on SQLite < 3.35
-                    # (no DROP COLUMN) — same reuse-it-blanked path
-                    # add_derived_column takes.
-                    self.db.execute(f"UPDATE {q(drv)} SET {q(name)}=NULL")
-                else:
-                    self.db.execute(f"ALTER TABLE {q(drv)} ADD COLUMN {q(name)} TEXT")
-                cur = self.db.execute(
-                    "INSERT INTO derived_columns(source_id, name, input_column, op_id, params, status, created_at) "
-                    "VALUES (?,?,?,?,?,'building',?)",
-                    (source_id, name, pspec["input_column"], pspec["op_id"],
-                     json.dumps(pspec["params"]), time.strftime("%Y-%m-%dT%H:%M:%S")),
-                )
-                def_ids.append(cur.lastrowid)
+            for t in targets:
+                for pspec in prepared:
+                    def_ids.append(self._insert_derived_def(
+                        t["id"], pspec["name"], pspec["input_column"], pspec["op_id"], pspec["params"]
+                    ))
 
         label = prepared[0]["name"] if len(prepared) == 1 else f"{len(prepared)} columns"
         job = self.start_ingest_job(
@@ -3298,18 +3393,25 @@ class Store:
             "job_id": job["job_id"],
         }
 
-    def remove_derived_column(self, def_id: int) -> None:
-        d = self.get_derived_column(def_id)
+    def _check_derived_removable(self, d: dict) -> None:
+        """Raises if another derived column on the same source reads this
+        one (duration's second column, a coalesce input, or a chained
+        input_column)."""
         with self.lock:
             others = self.db.execute(
                 "SELECT * FROM derived_columns WHERE source_id=? AND id<>?",
-                (d["source_id"], def_id),
+                (d["source_id"], d["id"]),
             ).fetchall()
         for o in others:
             o_params = json.loads(o["params"] or "{}")
-            if (o["input_column"].lower() == d["name"].lower()
-                    or str(o_params.get("other_column", "")).lower() == d["name"].lower()):
+            reads = [o["input_column"], str(o_params.get("other_column", ""))]
+            reads += [str(c) for c in (o_params.get("columns") or [])]
+            if any(r.lower() == d["name"].lower() for r in reads):
                 raise ValueError(f"{o['name']!r} is computed from this column — remove that one first")
+
+    def remove_derived_column(self, def_id: int) -> None:
+        d = self.get_derived_column(def_id)
+        self._check_derived_removable(d)
         drv = self._derived_table(d["source_id"])
         with self.lock, self.db:
             self.db.execute("DELETE FROM derived_columns WHERE id=?", (def_id,))
@@ -3338,6 +3440,51 @@ class Store:
         )
         return {"definition": self.get_derived_column(def_id), "job_id": job["job_id"]}
 
+    def _merge_member_defs(self, merge_id: int, name: str) -> tuple[dict, list[dict]]:
+        """The per-member definitions behind one of a merge's derived
+        columns, addressed by NAME — the merged column entry only carries
+        the canonical member's def id, and acting on that one alone would
+        desynchronise the members (which is the state _merge_derived_entries
+        exists to survive, not to invite)."""
+        merge = self._source_lite(-merge_id)
+        defs = []
+        for sid in merge["member_source_ids"]:
+            d = next((x for x in self.list_derived_columns(sid)
+                      if x["name"].lower() == name.lower()), None)
+            if d is None:
+                raise KeyError(f"No derived column {name!r} on member {sid}")
+            defs.append(d)
+        return merge, defs
+
+    def remove_merge_derived_column(self, merge_id: int, name: str) -> None:
+        """Removes a merge's derived column from every member. Removability
+        is pre-checked on every member before anything is deleted, so a
+        dependent column on member three doesn't leave one and two already
+        stripped."""
+        _, defs = self._merge_member_defs(merge_id, name)
+        for d in defs:
+            self._check_derived_removable(d)
+        for d in defs:
+            self.remove_derived_column(d["id"])
+
+    def rederive_merge_column(self, merge_id: int, name: str, params: dict | None = None) -> dict:
+        """rederive_column fanned across a merge's members: same new params
+        for every member's definition, one backfill job over all of them."""
+        merge, defs = self._merge_member_defs(merge_id, name)
+        new_params = timeparse.validate_params(
+            defs[0]["op_id"], params if params is not None else defs[0]["params"])
+        with self.lock, self.db:
+            self.db.executemany(
+                "UPDATE derived_columns SET params=?, status='building', parse_failures=NULL WHERE id=?",
+                [(json.dumps(new_params), d["id"]) for d in defs],
+            )
+        job = self.start_ingest_job(
+            "derive", "", name=name,
+            options={"def_ids": [d["id"] for d in defs], "drop_on_cancel": False,
+                     "units_total": merge["row_count"]},
+        )
+        return {"definition": self.get_derived_column(defs[0]["id"]), "job_id": job["job_id"]}
+
     def backfill_derived_column(self, def_id: int, progress=None, cancel=None,
                                 drop_on_cancel: bool = False) -> dict:
         """Compute every row's value for one derived column. The one-column
@@ -3350,8 +3497,63 @@ class Store:
 
     def backfill_derived_columns(self, def_ids: list[int], progress=None, cancel=None,
                                  drop_on_cancel: bool = False) -> dict:
-        """Compute every row's values for one or more derived columns of the
-        same source, in a single pass.
+        """Compute every row's values for one or more derived columns —
+        grouped by source, one single-pass scan per source (see
+        _backfill_source_group for the batching/lock discipline). One group
+        is the ordinary case; several is a merge-level add, whose fan-out
+        creates one definition per member and backfills them all under one
+        job, with progress reported over the summed row counts.
+
+        Cancellation semantics are job-wide, not per group: with
+        drop_on_cancel every definition goes (a merge column that exists on
+        three members out of five is exactly the mismatched-set state the
+        fan-out exists to prevent); without it, groups that finished stay
+        'ready' and the rest are marked 'partial'."""
+        if not def_ids:
+            raise ValueError("Nothing to backfill")
+        defs = [self.get_derived_column(d) for d in def_ids]
+        groups: dict[int, list[dict]] = {}
+        for d in defs:
+            groups.setdefault(d["source_id"], []).append(d)
+        srcs = {sid: self._source_lite(sid) for sid in groups}
+        grand_total = sum(s["row_count"] for s in srcs.values())
+
+        rows_all = 0
+        out_cols = []
+        try:
+            for sid, group in groups.items():
+                offset = rows_all
+
+                def prog(rows: int, _units: int, _total: int, _off=offset) -> None:
+                    if progress:
+                        progress(_off + rows, _off + rows, grand_total)
+
+                res = self._backfill_source_group(srcs[sid], group, progress=prog, cancel=cancel)
+                rows_all += res["rows"]
+                out_cols.extend(res["columns"])
+        except IngestCancelled:
+            if drop_on_cancel:
+                # Mirror of cancel-drops-the-partial-source: the analyst
+                # asked for these columns not to exist, and a half-filled one
+                # looks exactly like a complete one in the grid.
+                for d in defs:
+                    self.remove_derived_column(d["id"])
+            else:
+                # Groups that ran to completion inside THIS job are truly
+                # 'ready' (out_cols records them); everything else — the
+                # group mid-cancel and the ones never started — is a mix of
+                # runs, whatever its status said on the way in.
+                done_ids = {c["def_id"] for c in out_cols}
+                with self.lock, self.db:
+                    self.db.executemany(
+                        "UPDATE derived_columns SET status='partial' WHERE id=?",
+                        [(d["id"],) for d in defs if d["id"] not in done_ids],
+                    )
+            raise
+        return {"source_id": defs[0]["source_id"], "rows": rows_all, "columns": out_cols}
+
+    def _backfill_source_group(self, src: dict, defs: list[dict], progress=None, cancel=None) -> dict:
+        """One source's derived columns computed in a single pass.
 
         Batched exactly like ingest_csv/build_fts: read a BATCH-sized window
         on a pooled reader (committed data — the source table hasn't changed
@@ -3367,14 +3569,10 @@ class Store:
         Several columns at once is what flattening a JSON blob into its
         fields needs (see add_derived_columns) — one scan and one progress
         bar instead of N of each. The SELECT reads each distinct input
-        column once however many definitions want it."""
-        if not def_ids:
-            raise ValueError("Nothing to backfill")
-        defs = [self.get_derived_column(d) for d in def_ids]
-        source_id = defs[0]["source_id"]
-        if any(d["source_id"] != source_id for d in defs):
-            raise ValueError("All columns in one backfill must belong to the same source")
-        src = self._source_lite(source_id)
+        column once however many definitions want it. Cancellation raises
+        IngestCancelled; backfill_derived_columns owns what happens to the
+        definitions then."""
+        source_id = src["id"]
         drv = self._derived_table(source_id)
         frm = self._from_clause(src)
 
@@ -3389,20 +3587,21 @@ class Store:
             return slots[key]
 
         plans = []
+        real = {}  # slot() keys case-insensitively but _col_ref needs the real name
+
+        def want(col: str) -> int:
+            real[col.lower()] = col
+            return slot(col)
+
         for d in defs:
             op = timeparse.OPERATIONS[d["op_id"]]
-            plan = {"d": d, "op": op, "state": {}, "a": slot(d["input_column"])}
+            plan = {"d": d, "op": op, "state": {}, "a": want(d["input_column"])}
             if op["two_input"]:
-                plan["b"] = slot(d["params"]["other_column"])
+                plan["b"] = want(d["params"]["other_column"])
+            if op.get("multi_input"):
+                plan["many"] = [want(c) for c in d["params"]["columns"]]
             plans.append(plan)
         cols = list(slots.keys())
-        # slot() keys case-insensitively but _col_ref needs the real name.
-        real = {}
-        for d in defs:
-            real[d["input_column"].lower()] = d["input_column"]
-            if timeparse.OPERATIONS[d["op_id"]]["two_input"]:
-                other = d["params"]["other_column"]
-                real[other.lower()] = other
         sel = ", ".join(self._col_ref(src, real[c]) for c in cols)
 
         names = [d["name"] for d in defs]
@@ -3413,49 +3612,36 @@ class Store:
 
         rows_done, last_rid = 0, 0
         total = src["row_count"]
-        try:
-            while True:
-                with self._reader() as ro:
-                    rows = ro.execute(
-                        f"SELECT rid, {sel} FROM {frm} WHERE rid > ? ORDER BY rid LIMIT {BATCH}",
-                        (last_rid,),
-                    ).fetchall()
-                if not rows:
-                    break
-                vals = []
-                for r in rows:
-                    t = tuple(r)
-                    out = [t[0]]
-                    for plan in plans:
-                        op = plan["op"]
-                        if op["two_input"]:
-                            out.append(op["parse_pair"](t[1 + plan["a"]], t[1 + plan["b"]], plan["d"]["params"]))
-                        else:
-                            out.append(op["parse"](t[1 + plan["a"]], plan["d"]["params"], plan["state"]))
-                    vals.append(tuple(out))
-                last_rid = vals[-1][0]
-                with self.lock, self.db:
-                    if cancel and cancel():
-                        raise IngestCancelled("cancelled during derive")
-                    self.db.executemany(upsert, vals)
-                rows_done += len(vals)
-                if progress:
-                    progress(rows_done, rows_done, total)
-                time.sleep(0.02)  # same anti-starvation yield build_fts uses
-        except IngestCancelled:
-            if drop_on_cancel:
-                # Mirror of cancel-drops-the-partial-source: the analyst
-                # asked for these columns not to exist, and a half-filled one
-                # looks exactly like a complete one in the grid.
-                for d in defs:
-                    self.remove_derived_column(d["id"])
-            else:
-                with self.lock, self.db:
-                    self.db.executemany(
-                        "UPDATE derived_columns SET status='partial' WHERE id=?",
-                        [(d["id"],) for d in defs],
-                    )
-            raise
+        while True:
+            with self._reader() as ro:
+                rows = ro.execute(
+                    f"SELECT rid, {sel} FROM {frm} WHERE rid > ? ORDER BY rid LIMIT {BATCH}",
+                    (last_rid,),
+                ).fetchall()
+            if not rows:
+                break
+            vals = []
+            for r in rows:
+                t = tuple(r)
+                out = [t[0]]
+                for plan in plans:
+                    op = plan["op"]
+                    if op["two_input"]:
+                        out.append(op["parse_pair"](t[1 + plan["a"]], t[1 + plan["b"]], plan["d"]["params"]))
+                    elif op.get("multi_input"):
+                        out.append(op["parse_multi"]([t[1 + i] for i in plan["many"]], plan["d"]["params"]))
+                    else:
+                        out.append(op["parse"](t[1 + plan["a"]], plan["d"]["params"], plan["state"]))
+                vals.append(tuple(out))
+            last_rid = vals[-1][0]
+            with self.lock, self.db:
+                if cancel and cancel():
+                    raise IngestCancelled("cancelled during derive")
+                self.db.executemany(upsert, vals)
+            rows_done += len(vals)
+            if progress:
+                progress(rows_done, rows_done, total)
+            time.sleep(0.02)  # same anti-starvation yield build_fts uses
 
         out_cols = []
         for d in defs:
@@ -3492,6 +3678,12 @@ class Store:
     DETECT_SAMPLE = 200
 
     def _sample_column(self, src: dict, column: str, limit: int | None = None) -> list:
+        # A merge has no table of its own to sample; its canonical (first)
+        # member is representative by construction — merge eligibility
+        # demands the same header set, and detection/preview only need "what
+        # do values in this column look like".
+        if src.get("is_merge"):
+            src = self._source_lite(src["member_source_ids"][0])
         with self._reader() as ro:
             return [r[0] for r in ro.execute(
                 f"SELECT {self._col_ref(src, column)} FROM {self._from_clause(src)} "
@@ -3632,13 +3824,22 @@ class Store:
             collist = ", ".join(q(c) for c in colnames)
             branches = []
             params: list[Any] = []
+            merge_derived = {c["name"] for c in src["columns"] if c.get("derived")}
             for m in self._resolve_members(source_id):
                 msrc = self._source_lite(m["source_id"])
                 where, p = self._compile_where(m["source_id"], msrc, spec, colnames)
                 for col in sort_cols:
-                    self._ensure_sort_index_building(m["source_id"], col, msrc["table_name"])
+                    # A derived column's values live in that member's own
+                    # sidecar — same table split the non-merge branch makes.
+                    self._ensure_sort_index_building(
+                        m["source_id"], col,
+                        self._derived_table(m["source_id"]) if col in merge_derived else msrc["table_name"],
+                    )
+                # _member_from joins the member's drv_ sidecar when the
+                # merge's column set includes derived columns, so collist's
+                # bare references resolve on both sides of the USING(rid).
                 branches.append(
-                    f"SELECT {int(m['source_id'])} AS source_id, rid, {collist} FROM {q(m['table_name'])}"
+                    f"SELECT {int(m['source_id'])} AS source_id, rid, {collist} FROM {self._member_from(src, m)}"
                     + (f" WHERE {where}" if where else "")
                 )
                 params.extend(p)
@@ -4131,7 +4332,8 @@ class Store:
             if whole_source and not is_datetime:
                 for m in members:
                     self._ensure_column_index_building(
-                        m["source_id"], column, self._index_table_for(src, column, m["table_name"])
+                        m["source_id"], column,
+                        self._index_table_for(src, column, m["table_name"], m["source_id"]),
                     )
 
         branches: list[str] = []
@@ -4148,7 +4350,7 @@ class Store:
                     scope = (
                         f"FROM v.{q(view_id)} vv "
                         f"JOIN {q(m['table_name'])} s ON s.rid = vv.rid AND vv.source_id = {int(m['source_id'])}"
-                        f"{self._derived_join(src, 's')} "
+                        f"{self._derived_join(src, 's', member_id=m['source_id'])} "
                         f"WHERE 1=1{extra_where}"
                     )
                 branches.append(f"SELECT {_val_expr(derived_alias)} AS val, count(*) AS n {scope} GROUP BY 1")
@@ -4314,7 +4516,11 @@ class Store:
         # (bare refs), the view-join shape chains a second ON join and
         # refers to it by alias.
         d_alias = None if is_root_virtual else "d"
-        djoin = "" if is_root_virtual else self._derived_join(src, "s")
+
+        def _djoin(m: dict) -> str:
+            # Per member: a merge's derived sidecar is one drv_ table per
+            # member, so the alias join has to name that member's.
+            return "" if is_root_virtual else self._derived_join(src, "s", member_id=m["source_id"])
 
         def _conds(m: dict) -> tuple[str, list]:
             """This group's predicate for one member. Per member because
@@ -4341,7 +4547,7 @@ class Store:
                 else:
                     n = self.db.execute(
                         f"SELECT count(*) FROM v.{q(view_id)} vv JOIN {q(m['table_name'])} s "
-                        f"ON s.rid = vv.rid AND vv.source_id = ?{djoin} WHERE {where_sql}",
+                        f"ON s.rid = vv.rid AND vv.source_id = ?{_djoin(m)} WHERE {where_sql}",
                         [m["source_id"], *where_params],
                     ).fetchone()[0]
                 total += n
@@ -4376,7 +4582,7 @@ class Store:
                 else:
                     branches.append(
                         f"SELECT vv.pos AS root_pos, vv.source_id, vv.rid FROM v.{q(view_id)} vv "
-                        f"JOIN {q(m['table_name'])} s ON s.rid = vv.rid AND vv.source_id = ?{djoin} "
+                        f"JOIN {q(m['table_name'])} s ON s.rid = vv.rid AND vv.source_id = ?{_djoin(m)} "
                         f"WHERE {where_sql}"
                     )
                     params.extend([m["source_id"], *where_params])
@@ -4495,14 +4701,17 @@ class Store:
             return any(Store._tree_has_raw(c) for c in node.get("children", []))
         return False
 
-    def _index_table_for(self, src: dict, column: str, table_name: str | None = None) -> str:
+    def _index_table_for(self, src: dict, column: str, table_name: str | None = None,
+                         member_id: int | None = None) -> str:
         """Which physical table an auto-created index for this column
         belongs on — a derived column's values live in the drv_<id>
         sidecar, not in src_<id>. `table_name` is the caller's already
-        resolved member table (a merge's src has none of its own)."""
+        resolved member table (a merge's src has none of its own), and
+        `member_id` the member the index is for — a merge's own id is
+        negative and names no drv table."""
         for c in src["columns"]:
             if c.get("derived") and c["name"].lower() == str(column).lower():
-                return self._derived_table(src["id"])
+                return self._derived_table(member_id if member_id is not None else src["id"])
         return table_name or src["table_name"]
 
     def _compile_tree(self, node: dict | None, colnames: dict, source_id: int, src: dict) -> tuple[str, list]:
@@ -5161,7 +5370,8 @@ class Store:
             members = self._resolve_members_on(ro, source_id)
             for m in members:
                 self._ensure_column_index_building(
-                    m["source_id"], column, self._index_table_for(src, column, m["table_name"])
+                    m["source_id"], column,
+                    self._index_table_for(src, column, m["table_name"], m["source_id"]),
                 )
             union_sql = " UNION ALL ".join(
                 f"SELECT {q(column)} AS val FROM {self._member_from(src, m)}" for m in members

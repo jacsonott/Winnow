@@ -1353,6 +1353,18 @@ textarea:focus { border-color: var(--accent); outline: none; }
 }
 .toast-action:hover { background: var(--accent); }
 
+/* Coalesce-column modal: the chosen list is ordered chips (order is the
+   definition), the available list a wrap of plain buttons. */
+.coalesce-chosen, .coalesce-avail {
+  display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 12px;
+}
+.coalesce-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--panel-2); border: 1px solid var(--line-2); border-radius: var(--radius-sm);
+  padding: 3px 4px 3px 9px; font-family: var(--mono); font-size: 12px;
+}
+.coalesce-chip .btn { padding: 0 5px; }
+
 /* Add/re-derive datetime column modal (openDerivedColumnModal). */
 .derived-row { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
 .derived-row-label { flex: 0 0 150px; font-size: 12px; color: var(--text-dim); }
