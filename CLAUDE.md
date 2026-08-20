@@ -1244,10 +1244,8 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
     (identical by construction, so a derived value is **not** searchable —
     it's computed from text that already is), `column_signature` (adding a
     derived column must not change merge eligibility), `_iter_search_all_sources`,
-    and the session file's column list. Merges get base columns only: each
-    member has its own `drv_` table and its own definitions, and a UNION
-    ALL across mismatched sets would need per-member NULL padding nothing
-    does yet.
+    and the session file's column list. A merge exposes the derived
+    columns *every* member shares — see the merge fan-out entry below.
   - **`_from_clause(src)` is the one place the join is spelled** —
     `LEFT JOIN drv_<id> USING(rid)`, so an unqualified `rid` stays legal
     on both sides. `drv`'s rid is an INTEGER PRIMARY KEY, so the join
@@ -1305,6 +1303,56 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
     `derived_columns` deliberately has no index on `source_id` — it holds
     one row per derived column in the whole case, so a scan is one page
     either way and an index would cost more file than it could save.
+- **Derived columns on merges are a fan-out, not a merge-level store.** A
+  merge-level add (`add_derived_column`/`add_derived_columns` with a
+  negative source_id) creates the SAME definition on every member — one
+  transaction (all-or-nothing), one derive job whose backfill spans the
+  members (`backfill_derived_columns` groups def_ids by source and runs
+  `_backfill_source_group` per group, progress summed) — so each member
+  stays a completely normal source, sessions carry the definitions per
+  member for free, and every UNION ALL branch reads its own member's
+  `drv_` sidecar (`_member_from` joins it via USING(rid) whenever the
+  merge's column set has derived entries; the chained-ON shapes pass
+  `member_id` to `_derived_join`, and `_index_table_for` takes it too —
+  a merge's own id is negative and names no drv table). The merge's
+  column list is the *intersection* of members' derived sets by
+  (name, op) — `_merge_derived_entries` — which is normally "all of
+  them" and is the fail-safe when someone deletes one member's copy by
+  hand: the column drops off the merge instead of erroring every build.
+  The merged entry carries the canonical (first) member's `derived_id`,
+  so **acting on that id alone would desynchronise the members** — the
+  merge-level remove/re-derive fan out by NAME instead
+  (`remove_merge_derived_column` prechecks removability on every member
+  before deleting anything; `rederive_merge_column`;
+  `POST /api/merge_derived/{remove,rederive}` — their own path prefix
+  because `/api/derived/merge/...` would be captured by the
+  earlier-registered `/api/derived/{def_id}/...` routes), and app.js
+  routes those actions by `S.sourceId < 0`. Cancelling a merge add drops
+  every member's definition (a column on three members out of five is
+  exactly the mismatched state the fan-out exists to prevent); a
+  cancelled multi-group re-derive marks `partial` only the defs that
+  didn't finish *in that job* (`done_ids` from out_cols — a group that
+  completed is genuinely ready). Sampling paths (detect/preview/flatten
+  discovery) read the canonical member (`_sample_column`'s merge hop).
+  "Show N unparsed rows" stays hidden on merges: it compiles to a raw
+  SQL filter, which merged view builds still refuse.
+- **`coalesce_columns`** (timeparse, `family: "combine"`) is the first
+  multi-input operation: params carry an ordered `columns` list (type
+  `column_list` — order is the definition; duplicates rejected) and
+  `parse_multi` returns the first non-whitespace value, NULL on a full
+  miss (drops out of comparisons, same reasoning as unparsed
+  timestamps). It may read derived inputs (`_check_derived_inputs`
+  treats multi_input like two_input: allowed once 'ready') — coalescing
+  two *parsed* timestamp columns is the point — and the UI sets a
+  `value_type` param ('datetime' when every chosen column is datetime)
+  that `_derived_col_entry` prefers over the op's static value_type, so
+  the result feeds the timeframe filter, day-bucket grouping and the
+  Timeline. The dependent-removal check (`_check_derived_removable`)
+  scans `params["columns"]` too. UI: "Add coalesced column…" in the
+  table menu's Columns panel, "Coalesce with other columns…" on a column
+  header, `openCoalesceModal` (also the edit path — a coalesce's whole
+  definition is its list, so "re-derive" is re-picking it; no entry in
+  the Add-datetime dropdown, which filters by family).
 - **The 2026-08 navigation batch** — five smaller features, and the traps
   each one carries:
   - **"Open filter in SQL pane"** (`Store.spec_sql`, `POST /api/view/sql`,

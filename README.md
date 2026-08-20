@@ -219,6 +219,18 @@ Timeline, and appear in exports, like any other column. They're marked `ƒ` in
 the header. Session files carry the *definition*, not the values — importing
 one against the same evidence recomputes it.
 
+They work on **merged tables** too: adding one to a merge adds it to every
+member (one job, one progress bar), so the merge shows it, each member keeps a
+perfectly ordinary derived column of its own, and removing or re-deriving from
+the merge updates all of them together.
+
+**Coalesce** builds a column holding, for each row, the first non-empty value
+across several columns you pick, in the order you pick them — the table menu's
+"Add coalesced column…", or right-click a column header. Two timestamp columns
+that are never both set fold into one that sorts; when every chosen column is
+a datetime, the result is one too, so it feeds the timeframe filter, day
+grouping and the Timeline.
+
 Display format is separate from all of that, and is presentation only: the
 stored and exported value is always the text the file came with. Set it per
 column by right-clicking its header, or set a default for the case and for

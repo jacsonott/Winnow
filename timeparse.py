@@ -122,6 +122,7 @@ def register_op(op: dict) -> None:
     if "detect" not in op:
         op["detect"] = _success_rate_detect(op)
     op.setdefault("two_input", False)
+    op.setdefault("multi_input", False)
     op.setdefault("stateful", False)
     op.setdefault("value_type", "datetime")
     op.setdefault("hidden_from_detect", False)
@@ -215,6 +216,20 @@ def validate_params(op_id: str, params: dict | None) -> dict:
         elif kind == "offset":
             val = str(val).strip()
             _parse_utc_offset(val)  # raises on garbage
+        elif kind == "column_list":
+            # A list of column names in priority order (coalesce). Accepts a
+            # JSON-style list or a comma-separated string; order is the
+            # meaning, so it's preserved, and duplicates are rejected rather
+            # than silently collapsed.
+            if isinstance(val, str):
+                val = [p.strip() for p in val.split(",")]
+            if not isinstance(val, (list, tuple)):
+                raise ValueError(f"{spec.get('label', name)} must be a list of column names")
+            val = [str(p).strip() for p in val if str(p).strip()]
+            if len(val) < 2:
+                raise ValueError(f"{spec.get('label', name)} needs at least two columns")
+            if len({p.lower() for p in val}) != len(val):
+                raise ValueError(f"{spec.get('label', name)} lists the same column twice")
         else:
             val = str(val).strip()
         out[name] = val
@@ -239,6 +254,7 @@ def list_ops() -> list[dict]:
             "description": op["description"],
             "params": op["params"],
             "two_input": op["two_input"],
+            "multi_input": op["multi_input"],
             "value_type": op["value_type"],
             "derived_kind": op.get("derived_kind", "datetime"),
             "family": op["family"],
@@ -717,6 +733,54 @@ def _parse_delta_pair(end_raw: Any, start_raw: Any, params: dict) -> str | None:
     if end is None or start is None:
         return None
     return f"{(end - start).total_seconds():.6f}"
+
+
+# ----------------------------------------------------------- coalesce
+
+def _parse_coalesce(values: list, params: dict) -> str | None:
+    """First non-empty value across the chosen columns, in the order the
+    analyst listed them. Empty means NULL or whitespace-only — the same
+    reading the grid's `""` filter has — and a miss on every column is
+    NULL, not '', so it drops out of comparisons like an unparsed
+    timestamp does."""
+    for v in values:
+        if v is None:
+            continue
+        s = str(v)
+        if s.strip():
+            return s
+    return None
+
+
+register_op({
+    "id": "coalesce_columns",
+    "label": "First non-empty of several columns (coalesce)",
+    "description": "One column holding, for each row, the first of the chosen columns that has a value — in the order listed. For folding near-duplicate columns (e.g. two timestamp columns that are never both set) into one that sorts and filters.",
+    "params": [
+        {
+            "name": "columns", "label": "Columns, in priority order", "type": "column_list",
+            "required": True,
+            "help": "The first listed column with a non-empty value wins.",
+        },
+        # Set by the UI, not typed by the analyst: 'datetime' when every
+        # chosen column is datetime-typed, so the result feeds the
+        # timeframe filter, day-bucket grouping and the Timeline like any
+        # parsed column; 'text' otherwise. A param (rather than the op's
+        # static value_type) because the answer depends on the inputs.
+        {
+            "name": "value_type", "label": "Result type", "type": "select",
+            "options": ["text", "datetime", "number"], "required": False, "default": "text",
+        },
+    ],
+    "two_input": False,
+    "multi_input": True,
+    "value_type": "text",
+    "derived_kind": "coalesce",
+    "family": "combine",
+    "hidden_from_detect": True,
+    "parse": None,
+    "parse_multi": _parse_coalesce,
+})
 
 
 register_op({

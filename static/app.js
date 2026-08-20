@@ -1490,16 +1490,20 @@ function columnMenuItems(name) {
   }
   if (items.length) items.push('-');
   items.push({ label: 'Add datetime column from this…', onclick: () => openDerivedColumnModal(name) });
+  items.push({ label: 'Coalesce with other columns…', onclick: () => openCoalesceModal(name) });
   // Offered on any base column rather than only ones that sniff as
   // structured: the check costs a sample scan, the menu is built
   // synchronously, and a column of JSON that happens to start with a
   // non-document row would silently lose the entry. The picker itself says
-  // so when there's nothing in there.
-  if (!c.derived && S.sourceId >= 0) {
+  // so when there's nothing in there. Merges included — sampling reads the
+  // canonical member, and the batch add fans out (see store.py).
+  if (!c.derived) {
     items.push({ label: 'Flatten JSON/XML into columns…', onclick: () => openFlattenModal(name) });
   }
   if (c.derived) {
-    if (c.parse_failures) {
+    // A merged view refuses raw-SQL filters, which is what the unparsed
+    // filter compiles to — offer it where it can actually run.
+    if (c.parse_failures && S.sourceId >= 0) {
       // "Unparsed" is the right word for a timestamp that didn't convert;
       // for an extracted field the same count means the document had no
       // such field, which is a different thing to go and look at.
@@ -1513,6 +1517,10 @@ function columnMenuItems(name) {
     }
     if (c.derived_kind === 'text') {
       items.push({ label: 'Change the field path…', onclick: () => editExtractedPath(c) });
+    } else if (c.derived_kind === 'coalesce') {
+      // A coalesce's whole definition is its column list — re-picking it
+      // is the same modal as creating it.
+      items.push({ label: 'Change the coalesced columns…', onclick: () => openCoalesceModal(null, c) });
     } else {
       items.push({ label: 'Re-derive…', onclick: () => openDerivedColumnModal(c.derived_from, c) });
     }
@@ -1547,7 +1555,11 @@ async function editExtractedPath(c) {
     `Field path for "${c.name}" (read from "${c.derived_from}"):`, current, { okLabel: 'Recompute' });
   if (next === null || next.trim() === current) return;
   try {
-    await post(`/api/derived/${c.derived_id}/rederive`, { params: { path: next.trim() } });
+    if (S.sourceId < 0) {
+      await post('/api/merge_derived/rederive', { source_id: S.sourceId, name: c.name, params: { path: next.trim() } });
+    } else {
+      await post(`/api/derived/${c.derived_id}/rederive`, { params: { path: next.trim() } });
+    }
     await showDerivedColumnsSoon();
     toast(`Recomputing "${c.name}"…`);
   } catch (e) {
@@ -1561,7 +1573,14 @@ async function removeDerivedColumn(c) {
     { okLabel: 'Remove', danger: true });
   if (!ok) return;
   try {
-    await api(`/api/derived/${c.derived_id}`, { method: 'DELETE' });
+    if (S.sourceId < 0) {
+      // Fan the removal across the merge's members — deleting only the
+      // canonical member's def would leave the others orphaned and the
+      // column silently gone from the merge.
+      await post('/api/merge_derived/remove', { source_id: S.sourceId, name: c.name });
+    } else {
+      await api(`/api/derived/${c.derived_id}`, { method: 'DELETE' });
+    }
     delete S.layout[c.name];
     S.order = S.order.filter((n) => n !== c.name);
     await loadSources();
@@ -1570,6 +1589,113 @@ async function removeDerivedColumn(c) {
   } catch (e) {
     toast('Could not remove: ' + e.message, 6000);
   }
+}
+
+/* --------------------------------------------------------- coalesce column
+
+   A derived column holding, per row, the first non-empty value across the
+   columns the analyst picks — in the order picked, because that order IS
+   the definition ("prefer the parsed timestamp, fall back to the raw
+   one"). Rides the ordinary derived-column machinery (one backfill job,
+   ƒ mark, sessions carry the definition), and works on a merge via the
+   same fan-out every derived column uses. */
+
+function openCoalesceModal(seedColumn, editing) {
+  const chosen = editing
+    ? [...((editing.derived_params || {}).columns || [])]
+    : (seedColumn ? [seedColumn] : []);
+  modal(editing ? `Coalesce — ${editing.name}` : 'Add coalesced column', (b) => {
+    b.append(el('p', 'fb-help',
+      'The new column holds, for each row, the first of the chosen columns that has a value — '
+      + 'in the order chosen. Use it to fold near-duplicate columns (two timestamp columns that '
+      + 'are never both set, say) into one that sorts, filters and groups.'));
+
+    const nameInput = el('input');
+    nameInput.style.cssText = 'width:100%;background:var(--ink);color:var(--text);border:1px solid var(--line-2);padding:5px 8px;font:inherit';
+    nameInput.value = editing ? editing.name : 'Coalesced';
+    nameInput.disabled = !!editing;
+    const nameRow = el('div');
+    nameRow.append(el('div', 'settings-sub-label', 'New column name'), nameInput);
+    b.append(nameRow);
+
+    b.append(el('div', 'settings-sub-label', 'Chosen columns, in priority order'));
+    const chosenBox = el('div', 'coalesce-chosen');
+    b.append(chosenBox);
+    b.append(el('div', 'settings-sub-label', 'Add a column'));
+    const availBox = el('div', 'coalesce-avail');
+    b.append(availBox);
+    const typeNote = el('p', 'fb-help');
+    b.append(typeNote);
+
+    const colType = (n) => {
+      const c = S.columns.find((x) => x.name === n);
+      return c ? c.type : 'text';
+    };
+    const resultType = () =>
+      (chosen.length && chosen.every((n) => colType(n) === 'datetime')) ? 'datetime' : 'text';
+
+    function paint() {
+      chosenBox.replaceChildren();
+      if (!chosen.length) chosenBox.append(el('span', 'fb-help', 'Nothing chosen yet — click columns below.'));
+      chosen.forEach((n, i) => {
+        const chip = el('span', 'coalesce-chip');
+        chip.append(el('span', null, `${i + 1}. ${n}`));
+        const rm = el('button', 'btn ghost', '✕');
+        rm.title = 'Remove from the list';
+        rm.onclick = () => { chosen.splice(i, 1); paint(); };
+        chip.append(rm);
+        chosenBox.append(chip);
+      });
+      availBox.replaceChildren();
+      for (const c of S.columns) {
+        if (chosen.some((n) => n.toLowerCase() === c.name.toLowerCase())) continue;
+        if (editing && c.name.toLowerCase() === editing.name.toLowerCase()) continue;
+        const btn = el('button', 'btn ghost', c.name + (c.derived ? ' ƒ' : ''));
+        btn.onclick = () => { chosen.push(c.name); paint(); };
+        availBox.append(btn);
+      }
+      typeNote.textContent = chosen.length >= 2
+        ? (resultType() === 'datetime'
+          ? 'Every chosen column is a datetime, so the result will be one too — it feeds the timeframe filter, day grouping and the Timeline.'
+          : 'The result will be a text column.')
+        : 'Pick at least two columns.';
+    }
+    paint();
+
+    const actions = el('div', 'row-actions');
+    const go = el('button', 'btn', editing ? 'Recompute' : 'Add column');
+    go.onclick = async () => {
+      if (chosen.length < 2) { toast('Pick at least two columns'); return; }
+      go.disabled = true;
+      const params = { columns: [...chosen], value_type: resultType() };
+      try {
+        if (editing) {
+          if (S.sourceId < 0) {
+            await post('/api/merge_derived/rederive', { source_id: S.sourceId, name: editing.name, params });
+          } else {
+            await post(`/api/derived/${editing.derived_id}/rederive`, { params });
+          }
+        } else {
+          await post('/api/derived', {
+            source_id: S.sourceId, name: nameInput.value, input_column: chosen[0],
+            op_id: 'coalesce_columns', params,
+          });
+        }
+        $('modal').hidden = true;
+        await loadSources();
+        await openSource(S.sourceId);
+        startJobsPoll();
+        toast(editing ? `Recomputing "${editing.name}"…` : `Adding "${nameInput.value}"…`);
+      } catch (e) {
+        go.disabled = false;
+        toast('Could not add the column: ' + e.message, 8000);
+      }
+    };
+    const cancel = el('button', 'btn ghost', 'Cancel');
+    cancel.onclick = () => { $('modal').hidden = true; };
+    actions.append(go, cancel);
+    b.append(actions);
+  });
 }
 
 /* ------------------------------------------- extracted (JSON/XML) columns
@@ -1979,7 +2105,12 @@ async function openDerivedColumnModal(prefill, editing) {
       try {
         let res;
         if (editing) {
-          res = await post(`/api/derived/${editing.derived_id}/rederive`, { params: state.params });
+          // A merge's derived column is one definition per member — the
+          // merge endpoint fans the re-derive out by name, where the
+          // def-id route would recompute only the canonical member's copy.
+          res = S.sourceId < 0
+            ? await post('/api/merge_derived/rederive', { source_id: S.sourceId, name: editing.name, params: state.params })
+            : await post(`/api/derived/${editing.derived_id}/rederive`, { params: state.params });
         } else {
           res = await post('/api/derived', {
             source_id: S.sourceId, name: state.name, input_column: state.column,
@@ -5482,7 +5613,10 @@ function buildColumnsPanel(container, refresh = openTableMenu) {
   const acts = el('div', 'row-actions');
   const addDerived = el('button', 'btn ghost', 'Add datetime column…');
   addDerived.onclick = () => openDerivedColumnModal();
-  acts.append(addDerived);
+  const addCoalesce = el('button', 'btn ghost', 'Add coalesced column…');
+  addCoalesce.title = 'One column holding the first non-empty value across several columns';
+  addCoalesce.onclick = () => openCoalesceModal();
+  acts.append(addDerived, addCoalesce);
   const all = el('button', 'btn ghost', 'Show all');
   all.onclick = () => { for (const n of S.order) S.layout[n] = { ...(S.layout[n] || {}), hidden: false }; renderHead(); render(); saveLayout(); refresh(); };
   const none = el('button', 'btn ghost', 'Hide empty columns');

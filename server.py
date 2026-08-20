@@ -1613,6 +1613,43 @@ def api_derived_rederive(def_id: int, body: RederiveWrite):
         raise HTTPException(404, str(e))
 
 
+class MergeDerivedReq(BaseModel):
+    source_id: int  # the merge's negative id
+    name: str
+    params: dict | None = None
+
+
+@app.post("/api/merge_derived/remove")
+def api_merge_derived_remove(body: MergeDerivedReq):
+    """A merge's derived column is one definition per member (the fan-out),
+    so removing/re-deriving is addressed by (merge, column name) rather
+    than one def id — acting on a single member's def would desynchronise
+    the set and silently drop the column off the merge. Its own path
+    prefix, not /api/derived/merge/..., because that would be captured by
+    the earlier-registered /api/derived/{def_id}/... routes."""
+    if body.source_id >= 0:
+        raise HTTPException(400, "Not a merge id")
+    try:
+        store().remove_merge_derived_column(-body.source_id, body.name)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    return {"ok": True}
+
+
+@app.post("/api/merge_derived/rederive")
+def api_merge_derived_rederive(body: MergeDerivedReq):
+    if body.source_id >= 0:
+        raise HTTPException(400, "Not a merge id")
+    try:
+        return store().rederive_merge_column(-body.source_id, body.name, body.params)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+
+
 @app.post("/api/derived/batch")
 def api_derived_create_batch(body: DerivedBatchCreate):
     """Several derived columns at once, backfilled in one pass — what
