@@ -2308,6 +2308,23 @@ function ensurePage(idx, { keep } = {}) {
     try {
       const data = await api(`/api/rows?view_id=${vid}&start=${idx * PAGE}&count=${PAGE}`);
       if (!S.view || S.view.view_id !== vid || S.pageGen !== gen) return;
+      /* An in-range page that comes back empty means this client's view
+         handle and the server's view disagree about how many rows there
+         are. Caching the empty array would be the worst possible response:
+         ensurePage short-circuits on S.pages.has(idx), so nothing would
+         ever refetch it, no error would surface, and the grid would sit
+         there showing '·' for every row until the analyst reloaded the
+         page — which is exactly the "my data stopped loading" failure this
+         guard exists to prevent.
+
+         Rebuilding is the same recovery the expired-view path below takes,
+         and it can't loop: a rebuild replaces both the view id and the row
+         count, so if the view really is empty, row_count becomes 0 and
+         this branch stops being reachable. */
+      if (!data.rows.length && idx * PAGE < S.view.row_count) {
+        rebuildView();
+        return;
+      }
       S.pages.set(idx, data.rows);
       for (const r of data.rows) S.rowsByPos.set(r.pos, r);
       trimPageCache(keep);
@@ -2428,7 +2445,14 @@ function render() {
   const visible = Math.ceil(body.clientHeight / ROW_H) + OVERSCAN * 2;
   const last = Math.min(total, first + visible);
 
-  for (let p = Math.floor(first / PAGE); p <= Math.floor(Math.max(first, last - 1) / PAGE); p++) ensurePage(p);
+  /* Clamped to the pages the view actually has. Without the cap, a grid
+     still scrolled past the end of a view that just got shorter asks for a
+     page beyond the last row, which can only ever come back empty — and an
+     empty page is now a desync signal (see ensurePage), so requesting one
+     on purpose would spin rebuilds for no reason. */
+  const lastPage = Math.floor(Math.max(0, total - 1) / PAGE);
+  const wantLast = Math.min(lastPage, Math.floor(Math.max(first, last - 1) / PAGE));
+  for (let p = Math.floor(first / PAGE); p <= wantLast; p++) ensurePage(p);
 
   const cols = visibleCols();
   const colMeta = Object.fromEntries(S.columns.map((c) => [c.name, c]));
