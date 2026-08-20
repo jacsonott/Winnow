@@ -7290,9 +7290,75 @@ function searchAllState() {
       error: null,
       terms: [],       // the terms the current results were produced from
       seen: false,     // whether the analyst has looked at the finished results
+      history: null,   // finished sweeps from the case file — null until first fetched
+      historyOpen: new Set(),  // ids of history entries expanded in the pane
     };
   }
   return S.searchAll;
+}
+
+/* How results on tables that belong to a merge are presented: 'merge'
+   (default) folds member hits into one row on the merged table — the
+   analyst triages the merge, so that's where they'll open the hit — while
+   'both' keeps the per-file rows alongside for when "which file" matters.
+   A per-browser preference like the keymap, not case state. */
+const SEARCH_ALL_MERGE_KEY = 'winnow.searchAllMerges';
+function searchAllMergeMode() {
+  return localStorage.getItem(SEARCH_ALL_MERGE_KEY) === 'both' ? 'both' : 'merge';
+}
+function setSearchAllMergeMode(mode) { localStorage.setItem(SEARCH_ALL_MERGE_KEY, mode); }
+
+/* Folds a sweep's per-source hits into display rows per the mode above.
+   The sweep itself only ever scans real sources (a merge's rows already
+   belong to one), so merge rows are synthesized here: counts are the sum
+   of the member hits (capped if any member was — the "+" already means
+   "at least"), and the per-term breakdown sums the same way. A member
+   that matched but sits in no merge is untouched; one in several merges
+   counts toward each, same one-row-many-groups reading as tag grouping. */
+function aggregateSearchHits(hits) {
+  const byId = new Map(hits.map((h) => [h.source_id, h]));
+  const mergeRows = [];
+  const covered = new Set();
+  for (const m of S.sources) {
+    if (!m.is_merge || m.error) continue;
+    const memberHits = (m.member_source_ids || []).map((id) => byId.get(id)).filter(Boolean);
+    if (!memberHits.length) continue;
+    let count = 0;
+    let capped = false;
+    const termAgg = new Map();
+    for (const h of memberHits) {
+      count += h.match_count;
+      capped = capped || h.capped;
+      covered.add(h.source_id);
+      for (const t of h.terms || []) {
+        const cur = termAgg.get(t.term) || { term: t.term, match_count: 0, capped: false };
+        cur.match_count += t.match_count;
+        cur.capped = cur.capped || t.capped;
+        termAgg.set(t.term, cur);
+      }
+    }
+    mergeRows.push({
+      source_id: m.id,
+      name: sourceLabel(m),
+      match_count: count,
+      capped,
+      terms: [...termAgg.values()].sort((a, b) => b.match_count - a.match_count),
+      member_hit_count: memberHits.length,
+    });
+  }
+  const keepMembers = searchAllMergeMode() === 'both';
+  const rest = hits.filter((h) => keepMembers || !covered.has(h.source_id));
+  return [...mergeRows, ...rest].sort((a, b) => b.match_count - a.match_count);
+}
+
+/* Fetches the case's finished sweeps once per open (and again after each
+   completed run). Failure just means no history section — never an error
+   in front of the live results. */
+async function loadSearchAllHistory() {
+  const st = searchAllState();
+  try { st.history = await api('/api/search_all/history'); }
+  catch { st.history = []; }
+  searchAllRepaint();
 }
 
 /* Terms from whichever builder is active, in the shape the API wants. */
@@ -7337,6 +7403,10 @@ function pollSearchAll() {
     st.error = job.error;
     if (job.done || job.cancelled) {
       st.running = false;
+      // The finished sweep just became the newest history entry server-side
+      // (cancelled ones don't — see _search_all_worker) — refresh the pane's
+      // copy so it's there without a close/reopen.
+      if (!job.cancelled && !job.error) loadSearchAllHistory();
       const open = !$('modal').hidden && $('modalTitle').textContent === 'Search all tables';
       st.seen = open;
       if (!open && !job.cancelled) {
@@ -7432,7 +7502,7 @@ function searchAllHitRow(st, hit, term) {
   // too; the job's own hit.name (the file name) is the fallback for a
   // source dropped since the sweep ran.
   const hitSrc = S.sources.find((s) => s.id === hit.source_id);
-  const hitName = hitSrc ? sourceLabel(hitSrc) : hit.name;
+  const hitName = hitSrc ? (hitSrc.is_merge ? '⛓ ' : '') + sourceLabel(hitSrc) : hit.name;
   const r = el('div', 'search-all-row' + (term ? ' search-all-term-row' : ''));
   r.append(
     el('span', 'search-all-name', term ? term.term : hitName),
@@ -7444,7 +7514,11 @@ function searchAllHitRow(st, hit, term) {
     : `Open ${hitName} filtered to every term`;
   openBtn.onclick = async () => {
     const src = S.sources.find((s) => s.id === hit.source_id);
-    if (src && !src.is_open) await post(`/api/source/${hit.source_id}/open`, { open: true });
+    // Gone-source guard for history rows — a sweep recorded last week can
+    // name a table that's since been removed, and set_tab_open would
+    // happily create an orphan tab for it.
+    if (!src || src.error) { toast('That table is no longer in this case'); return; }
+    if (!src.is_open) await post(`/api/source/${hit.source_id}/open`, { open: true });
     $('modal').hidden = true;
     await loadSources(hit.source_id);
     S.searchMode = 'advanced';
@@ -7499,8 +7573,35 @@ function openSearchAllModal() {
     searchActs.append(searchBtn, cancelBtn, progress);
     b.append(searchActs);
 
+    /* Where a hit's table belongs to a merge: fold it into the merged
+       table (the default — that's the table the analyst actually triages
+       in) or show both. Only rendered when the case has a merge at all. */
+    const mergeRow = el('div', 'row-actions search-all-merge-toggle');
+    function syncMergeMode() {
+      mergeRow.querySelectorAll('button[data-mode]').forEach((btn) =>
+        btn.setAttribute('aria-pressed', String(btn.dataset.mode === searchAllMergeMode())));
+    }
+    if (S.sources.some((s) => s.is_merge && !s.error)) {
+      mergeRow.append(el('span', 'fb-help', 'Tables that are part of a merge:'));
+      for (const [key, label, title] of [
+        ['merge', 'Show the merged table', 'One row per merge, counts summed across its member tables'],
+        ['both', 'Show both', 'The merged row plus a row per member file'],
+      ]) {
+        const btn = el('button', 'btn ghost', label);
+        btn.title = title;
+        btn.dataset.mode = key;
+        btn.onclick = () => { setSearchAllMergeMode(key); syncMergeMode(); searchAllRepaint(); };
+        mergeRow.append(btn);
+      }
+      syncMergeMode();
+      b.append(mergeRow);
+    }
+
     const results = el('div', 'search-all-results');
     b.append(results);
+
+    const histSection = el('div', 'search-all-history');
+    b.append(histSection);
 
     textarea.value = st.pasteText;
     textarea.oninput = () => { st.pasteText = textarea.value; };
@@ -7517,6 +7618,7 @@ function openSearchAllModal() {
         : '';
 
       results.replaceChildren();
+      paintHistory();
       if (st.error) { results.append(el('div', 'note-status', 'Search failed: ' + st.error)); return; }
       if (!st.hits.length) {
         results.append(el('div', 'note-status',
@@ -7526,7 +7628,7 @@ function openSearchAllModal() {
       // Partial results while running are worth showing (a hit on the table
       // you care about often lands early), so this renders whatever's in
       // st.hits and just keeps the progress line alongside it.
-      for (const h of st.hits) {
+      for (const h of aggregateSearchHits(st.hits)) {
         results.append(searchAllHitRow(st, h));
         // One row per term that matched this table, indented under it —
         // the point of a pasted IOC list is knowing *which* indicators hit
@@ -7539,7 +7641,90 @@ function openSearchAllModal() {
         }
       }
     }
+
+    /* Finished sweeps, each collapsed under its timestamp. Rendered by the
+       same repaint the live results use, so a sweep finishing while the
+       pane is open appears here without a close/reopen. */
+    function paintHistory() {
+      histSection.replaceChildren();
+      const hist = st.history || [];
+      if (!hist.length) return;
+      const head = el('div', 'row-actions search-all-history-head');
+      head.append(el('h4', null, 'Previous searches'));
+      const clear = el('button', 'btn ghost', 'Clear history');
+      clear.onclick = async () => {
+        if (!(await confirmDialog('Forget every recorded search for this case?', { okLabel: 'Clear', danger: true }))) return;
+        try { await api('/api/search_all/history', { method: 'DELETE' }); }
+        catch (e) { toast('Could not clear the history: ' + e.message, 4000); return; }
+        st.history = [];
+        searchAllRepaint();
+      };
+      head.append(clear);
+      histSection.append(head);
+
+      for (const entry of hist) {
+        const expanded = st.historyOpen.has(entry.id);
+        const wrap = el('div', 'search-all-history-entry');
+        const headRow = el('div', 'row-actions search-all-history-row');
+        const hdr = el('button', 'search-all-history-header');
+        const termsLabel = entry.query
+          || entry.terms.map((t) => (t.exclude ? 'NOT ' : '') + t.term).join(', ');
+        hdr.append(
+          el('span', 'search-all-history-caret', expanded ? '▾' : '▸'),
+          el('span', 'search-all-history-stamp', (entry.created_at || '').replace('T', ' ')),
+          el('span', 'search-all-history-terms', termsLabel),
+          el('span', 'count', `${entry.hits.length} table${entry.hits.length === 1 ? '' : 's'}`),
+        );
+        hdr.title = expanded ? 'Collapse the results of this search' : 'Show the results of this search';
+        hdr.onclick = () => {
+          expanded ? st.historyOpen.delete(entry.id) : st.historyOpen.add(entry.id);
+          searchAllRepaint();
+        };
+        const reuse = el('button', 'btn ghost', 'Use terms');
+        reuse.title = 'Load this search back into the builder above';
+        reuse.onclick = () => {
+          const plainOr = entry.terms.length
+            && entry.terms.every((t) => t.connector !== 'AND' && !t.exclude);
+          if (plainOr) {
+            st.mode = 'paste';
+            st.pasteText = entry.terms.map((t) => t.term).join('\n');
+          } else {
+            st.mode = 'advanced';
+            st.chipTerms = entry.terms.length
+              ? entry.terms.map((t) => ({ ...t }))
+              : [{ term: '', connector: 'AND', exclude: false }];
+          }
+          openSearchAllModal(); // rebuild the pane with the builder refilled
+        };
+        const del = el('button', 'btn ghost', '✕');
+        del.title = 'Forget this search';
+        del.onclick = async () => {
+          try { await api(`/api/search_all/history/${entry.id}`, { method: 'DELETE' }); }
+          catch (e) { toast('Could not delete that: ' + e.message, 4000); return; }
+          st.history = st.history.filter((x) => x.id !== entry.id);
+          st.historyOpen.delete(entry.id);
+          searchAllRepaint();
+        };
+        headRow.append(hdr, reuse, del);
+        wrap.append(headRow);
+        if (expanded) {
+          const body = el('div', 'search-all-history-body');
+          if (!entry.hits.length) body.append(el('div', 'note-status', 'No matches.'));
+          // A shim in place of the live job state: searchAllHitRow only
+          // reads .terms from it, and this entry's rows must open with the
+          // terms *this* sweep ran, not whatever's typed above now.
+          const shim = { terms: entry.terms };
+          for (const h of aggregateSearchHits(entry.hits)) {
+            body.append(searchAllHitRow(shim, h));
+            for (const t of h.terms || []) body.append(searchAllHitRow(shim, h, t));
+          }
+          wrap.append(body);
+        }
+        histSection.append(wrap);
+      }
+    }
     searchAllRepaint = paintResults;
+    if (st.history == null) loadSearchAllHistory(); // async — repaints when it lands
 
     function syncMode() {
       pasteBtn.setAttribute('aria-pressed', String(st.mode === 'paste'));

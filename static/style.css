@@ -1154,6 +1154,29 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .search-all-name { font-size: 13px; color: var(--text); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .search-all-count { font-family: var(--mono); font-size: 11px; color: var(--accent); white-space: nowrap; }
 .search-all-progress { font-family: var(--mono); font-size: 11px; color: var(--dim); }
+.search-all-merge-toggle { margin-bottom: 10px; }
+.search-all-merge-toggle .btn[aria-pressed="true"] { color: var(--accent); border-color: var(--accent-dim); }
+
+/* Previous sweeps, one entry per run collapsed under its timestamp. The
+   header is a full-width button so the whole line toggles, with the
+   Use-terms/✕ actions sitting outside it. */
+.search-all-history { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 10px; }
+.search-all-history-head { justify-content: space-between; }
+.search-all-history-head h4 { margin: 0; }
+.search-all-history-entry { margin-top: 4px; }
+.search-all-history-header {
+  flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px;
+  background: none; border: none; color: var(--text); font: inherit; cursor: pointer;
+  padding: 5px 4px; text-align: left;
+}
+.search-all-history-header:hover { color: var(--accent); }
+.search-all-history-caret { color: var(--dim); width: 12px; flex: 0 0 auto; }
+.search-all-history-stamp { font-family: var(--mono); font-size: 11px; color: var(--dim); flex: 0 0 auto; }
+.search-all-history-terms {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--mono); font-size: 12px;
+}
+.search-all-history-body { display: grid; gap: 4px; margin: 2px 0 8px 22px; }
 
 /* The toolbar button while a sweep runs behind a closed modal — the only
    on-screen sign the job is still going, so it gets the accent rather than

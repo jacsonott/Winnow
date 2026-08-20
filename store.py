@@ -69,6 +69,12 @@ SEARCH_ALL_COUNT_CAP = 1000
 # paste — it exists to bound an accident (a whole wordlist pasted in), not
 # to ration normal use.
 SEARCH_ALL_TERM_BREAKDOWN_MAX = 250
+# How many finished search-all sweeps the case file remembers (oldest
+# dropped past this). Bounds the accident, not normal use — the record per
+# sweep is small (terms + capped counts, never rows), but nothing else
+# about a case grows without an explicit analyst action, and this
+# shouldn't be the exception.
+SEARCH_ALL_HISTORY_LIMIT = 40
 
 # The extensions a directory import (scan_import_directory) recognizes by
 # default — every format ingest_csv/ingest_json already know how to read.
@@ -203,6 +209,19 @@ CREATE TABLE IF NOT EXISTS derived_columns (
 CREATE TABLE IF NOT EXISTS case_settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+-- Finished "Search all tables" sweeps, newest kept up to
+-- SEARCH_ALL_HISTORY_LIMIT. In the case file (not workspace/, not memory)
+-- for the same reason sql_tabs are: which IOC lists were swept against
+-- this evidence, and what hit, is analysis about the case — it should
+-- survive a restart and travel with the file. Counts only (capped, same
+-- shape the modal shows), never row data.
+CREATE TABLE IF NOT EXISTS search_all_history (
+    id         INTEGER PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    query      TEXT NOT NULL DEFAULT '',
+    terms      TEXT NOT NULL DEFAULT '[]',  -- json: the chip list the sweep ran with
+    hits       TEXT NOT NULL DEFAULT '[]'   -- json: search_all hit dicts, heaviest first
 );
 """
 
@@ -6489,6 +6508,60 @@ class Store:
         finally:
             with self._search_job_lock:
                 job["done"] = True
+                record = None
+                # Only a sweep that ran to completion becomes history — a
+                # cancelled or errored one would record hits for a query it
+                # never finished asking, which reads as "these terms missed"
+                # when they were never fully checked. An empty query (the UI
+                # clearing the pane) is not a search either.
+                asked = bool(job["query"].strip()) or any(
+                    (t.get("term") or "").strip() for t in job["terms"])
+                if asked and not job["cancelled"] and not job["error"]:
+                    record = {
+                        "query": job["query"],
+                        "terms": job["terms"],
+                        "hits": sorted(job["hits"], key=lambda d: -d["match_count"]),
+                    }
+            if record is not None:
+                try:
+                    self._record_search_all_history(record)
+                except sqlite3.Error:
+                    pass  # history is a convenience — never fail a finished sweep over it
+
+    def _record_search_all_history(self, record: dict) -> None:
+        with self.lock, self.db:
+            self.db.execute(
+                "INSERT INTO search_all_history(created_at, query, terms, hits) VALUES (?,?,?,?)",
+                (time.strftime("%Y-%m-%dT%H:%M:%S"), record["query"],
+                 json.dumps(record["terms"]), json.dumps(record["hits"])),
+            )
+            self.db.execute(
+                "DELETE FROM search_all_history WHERE id NOT IN "
+                "(SELECT id FROM search_all_history ORDER BY id DESC LIMIT ?)",
+                (SEARCH_ALL_HISTORY_LIMIT,),
+            )
+
+    def list_search_all_history(self) -> list[dict]:
+        """Finished sweeps, newest first, JSON fields decoded."""
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT * FROM search_all_history ORDER BY id DESC"
+            ).fetchall()
+        return [{
+            "id": r["id"],
+            "created_at": r["created_at"],
+            "query": r["query"],
+            "terms": json.loads(r["terms"]),
+            "hits": json.loads(r["hits"]),
+        } for r in rows]
+
+    def delete_search_all_history(self, entry_id: int | None = None) -> None:
+        """One entry, or (with None) the whole history."""
+        with self.lock, self.db:
+            if entry_id is None:
+                self.db.execute("DELETE FROM search_all_history")
+            else:
+                self.db.execute("DELETE FROM search_all_history WHERE id=?", (entry_id,))
 
     def get_search_all_job(self, job_id: int | None = None) -> dict | None:
         """Snapshot of the current (or specifically requested) job. Hits come

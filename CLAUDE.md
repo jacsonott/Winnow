@@ -995,6 +995,38 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
   opening any other modal supersedes it). Switching builder mode no longer
   auto-runs a search — with a real job that would abandon a sweep in
   progress just because you glanced at the other tab.
+- **Search-all presents merges client-side** (`aggregateSearchHits`): the
+  sweep itself still scans only real sources (a merge's rows already
+  belong to one — see `_iter_search_all_sources`), and the frontend folds
+  member hits into one row per merge at render time: counts and the
+  per-term breakdown sum across members, `capped` ORs (a "+" already
+  means "at least"). Default mode shows the merge row *instead of* its
+  members (the merge is the table the analyst actually triages in);
+  `winnow.searchAllMerges` = 'both' keeps the per-file rows alongside — a
+  per-browser preference like the keymap, toggled in the pane and only
+  rendered when the case has a merge. A member that matched but sits in
+  no merge is untouched; one in several merges counts toward each, the
+  same one-row-many-groups reading grouping-by-tag has. Because it's
+  render-time aggregation, history entries get it too, under whatever
+  mode is current — the stored hits stay per-source.
+- **Finished search-all sweeps are history** (`search_all_history` in the
+  case file, `SEARCH_ALL_HISTORY_LIMIT` newest kept; `GET/DELETE
+  /api/search_all/history[/{id}]`). In the case file, not workspace/ or
+  memory, for the same reason sql_tabs are: which IOC lists were swept
+  against this evidence and what hit is analysis about the case, and
+  should survive a restart and travel with the file. Counts only (the
+  same capped shapes the modal shows), never row data. Recorded by
+  `_search_all_worker` after it releases the job lock — only for a sweep
+  that ran to completion: a cancelled or errored one would record "these
+  terms missed" for terms that were never fully checked, and an empty
+  query is not a search. The pane renders each entry collapsed under its
+  timestamp (expand for the same hit rows, opening with *that* sweep's
+  terms via a `{terms}` shim, not whatever's typed above now), with
+  "Use terms" loading a run back into the builder (paste mode when it was
+  a plain OR list, advanced otherwise) and per-entry/whole-history
+  delete. A history row whose table has since been dropped refuses to
+  open with a toast rather than letting `set_tab_open` create an orphan
+  tab.
 - **Every import runs as a background job** (`Store.start_ingest_job` /
   `_ingest_job_worker`, `POST /api/ingest/jobs/{path,upload}`, `GET
   /api/ingest/jobs`, per-job cancel) — the search-all job pattern made

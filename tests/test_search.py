@@ -618,3 +618,94 @@ def test_search_all_breakdown_gives_up_on_an_absurd_term_list(store, write_csv, 
         for t in ("evil.exe", "cmd.exe", "notepad.exe")
     ]
     assert store.search_all_sources(terms=terms)[0]["terms"] == []
+
+
+# ------------------------------------------------------- search-all history
+
+def test_finished_sweep_is_recorded_in_history(store, write_csv):
+    store.ingest_csv(write_csv([["Process"]] + [["svchost.exe"]] * 3, name="a.csv"),
+                     name="a.csv", build_fts=False)
+    terms = [{"term": "svchost", "connector": "OR", "exclude": False}]
+    store.start_search_all_job(terms=terms)
+    store.wait_for_search_all_job(timeout=10)
+
+    hist = store.list_search_all_history()
+    assert len(hist) == 1
+    entry = hist[0]
+    assert entry["terms"] == terms
+    assert entry["created_at"]
+    assert len(entry["hits"]) == 1
+    assert entry["hits"][0]["match_count"] == 3
+    # Hits are stored heaviest-first, same as the job snapshot shows them.
+    assert entry["hits"] == sorted(entry["hits"], key=lambda d: -d["match_count"])
+
+
+def test_history_survives_reopening_the_case(store, write_csv, case_path):
+    from store import DEFAULT_TAGS, Store
+
+    store.ingest_csv(write_csv([["Process"]] + [["svchost.exe"]], name="a.csv"),
+                     name="a.csv", build_fts=False)
+    store.start_search_all_job(query="svchost")
+    store.wait_for_search_all_job(timeout=10)
+    store.close()
+
+    reopened = Store(case_path, default_tags=DEFAULT_TAGS)
+    try:
+        hist = reopened.list_search_all_history()
+        assert len(hist) == 1 and hist[0]["query"] == "svchost"
+    finally:
+        reopened.close()
+
+
+def test_cancelled_and_empty_sweeps_are_not_history(store, write_csv):
+    store.ingest_csv(write_csv([["Process"]] + [["svchost.exe"]], name="a.csv"),
+                     name="a.csv", build_fts=False)
+    # Cancelled: hits for a question that was never finished being asked.
+    started = store.start_search_all_job(query="svchost")
+    store.cancel_search_all_job(started["job_id"])
+    store.wait_for_search_all_job(timeout=10)
+    # Empty: the UI clearing the pane starts no real search.
+    store.start_search_all_job(query="")
+    store.wait_for_search_all_job(timeout=10)
+    assert store.list_search_all_history() == []
+
+
+def test_history_is_capped_newest_kept(store, write_csv, monkeypatch):
+    import store as store_module
+
+    monkeypatch.setattr(store_module, "SEARCH_ALL_HISTORY_LIMIT", 3)
+    store.ingest_csv(write_csv([["Process"]] + [["svchost.exe"]], name="a.csv"),
+                     name="a.csv", build_fts=False)
+    for i in range(5):
+        store._record_search_all_history(
+            {"query": f"q{i}", "terms": [], "hits": []})
+    hist = store.list_search_all_history()
+    assert [h["query"] for h in hist] == ["q4", "q3", "q2"]
+
+
+def test_history_delete_one_and_all(store):
+    for i in range(3):
+        store._record_search_all_history({"query": f"q{i}", "terms": [], "hits": []})
+    hist = store.list_search_all_history()
+    store.delete_search_all_history(hist[1]["id"])
+    assert [h["query"] for h in store.list_search_all_history()] == ["q2", "q0"]
+    store.delete_search_all_history()
+    assert store.list_search_all_history() == []
+
+
+def test_history_routes(client, store, write_csv):
+    store.ingest_csv(write_csv([["Process"]] + [["svchost.exe"]], name="a.csv"),
+                     name="a.csv", build_fts=False)
+    r = client.post("/api/search_all/start", json={"query": "svchost"})
+    assert r.status_code == 200
+    store.wait_for_search_all_job(timeout=10)
+
+    hist = client.get("/api/search_all/history").json()
+    assert len(hist) == 1 and hist[0]["query"] == "svchost"
+
+    assert client.delete(f"/api/search_all/history/{hist[0]['id']}").status_code == 200
+    assert client.get("/api/search_all/history").json() == []
+
+    store._record_search_all_history({"query": "x", "terms": [], "hits": []})
+    assert client.delete("/api/search_all/history").status_code == 200
+    assert client.get("/api/search_all/history").json() == []

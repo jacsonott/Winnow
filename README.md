@@ -87,6 +87,12 @@ your 60 hashes hit and where rather than just that something did. Each row
 opens that table filtered to that term. A mixed AND/OR/NOT query from the
 Advanced builder gets the single per-table count instead: its terms constrain
 each other, so a count for one of them alone would describe a query nobody ran.
+Tables that belong to a merge fold into one row on the merged table (counts
+summed across the members), which is where you'd open the hit anyway — a
+toggle in the pane keeps the per-file rows alongside if you want both. Every
+finished sweep is remembered with the case: the pane lists previous searches
+collapsed under their timestamp, each expandable to the results it found,
+reloadable into the builder, and deletable one-by-one or wholesale.
 
 ## Using it
 
