@@ -13,6 +13,8 @@ python server.py --case case.db --open timeline.csv
 ```
 
 Opens http://127.0.0.1:8777. You can also skip `--open` and import from the UI.
+The home screen's ⏻ button (or Session → "Shut down Winnow…") stops the server
+again from the UI — everything is already saved in the case file.
 
 | flag | meaning |
 | --- | --- |

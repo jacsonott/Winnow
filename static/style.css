@@ -1309,6 +1309,15 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .home-case-actions { display: flex; gap: 6px; flex: 0 0 auto; }
 .home-show-older { margin-top: 4px; width: 100%; }
 
+/* The page shutdownWinnow leaves behind once the server is gone — plain
+   static text, since nothing dynamic can be served anymore. */
+.shutdown-note {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  height: 100vh; gap: 10px; padding: 40px; text-align: center;
+  color: var(--dim); font-size: 13px;
+}
+.shutdown-note-title { color: var(--text); font-size: 16px; letter-spacing: .02em; }
+
 .toast {
   position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
   background: var(--panel-2); border: var(--border-w) solid var(--accent-dim); border-radius: var(--radius-sm);

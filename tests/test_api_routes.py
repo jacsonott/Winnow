@@ -553,3 +553,22 @@ def test_view_sql_find_ts_and_tag_bounds_routes(client, ingested):
     assert r.json() == {"start": "2024-01-05 13:23:11", "end": "2024-01-05 13:23:11"}
     r = client.post("/api/tag_time_bounds", json={"source_id": sid, "tag_ids": [9999]})
     assert r.json() == {"start": None, "end": None}
+
+
+def test_shutdown_route_triggers_and_responds(client, monkeypatch):
+    """POST /api/shutdown answers before the process dies (the UI needs the
+    200 to show its farewell page) and goes through _trigger_shutdown —
+    monkeypatched here, since the real one raises SIGINT at pytest."""
+    import server
+
+    fired = []
+    monkeypatch.setattr(server, "_trigger_shutdown", lambda: fired.append(True))
+    r = client.post("/api/shutdown", json={})
+    assert r.status_code == 200 and r.json() == {"ok": True}
+    assert fired == [True]
+
+    # CSRF gate still applies — a hostile page in another tab must not be
+    # able to turn the server off with a bare fetch().
+    from fastapi.testclient import TestClient
+    bare = TestClient(server.app)
+    assert bare.post("/api/shutdown", json={}).status_code == 403

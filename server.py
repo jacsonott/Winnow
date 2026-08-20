@@ -365,6 +365,31 @@ def api_case_current():
     return {"open": True, "path": STORE.path, "name": _case_display_name(STORE.path)}
 
 
+def _trigger_shutdown() -> None:
+    """Deliver SIGINT to this process shortly after the response flushes.
+
+    A separate function so tests can monkeypatch it instead of killing the
+    pytest process. signal.raise_signal rather than os.kill because it also
+    works on Windows (where SIGINT can't be delivered via kill); uvicorn
+    treats it exactly like Ctrl+C — graceful shutdown, so _lifespan's
+    Store.close() still runs and the views scratch files are deleted. The
+    short delay is what lets the HTTP response reach the browser first."""
+    import signal
+    import threading
+    threading.Timer(0.3, lambda: signal.raise_signal(signal.SIGINT)).start()
+
+
+@app.post("/api/shutdown")
+def api_shutdown():
+    """The UI's off switch. Winnow is a local single-analyst tool whose
+    server usually lives in a forgotten terminal (or was started by a
+    shortcut with no terminal at all) — "close the browser tab" leaving the
+    process running forever is how a case file stays locked all weekend.
+    Nothing to save: every write already went to the case file."""
+    _trigger_shutdown()
+    return {"ok": True}
+
+
 @app.post("/api/case/open")
 def api_case_open(body: CaseOpen):
     global STORE
@@ -1190,6 +1215,23 @@ def api_set_tab_open(source_id: int, body: TabOpenReq):
     (DELETE /api/source/{id} / DELETE /api/merges/{id})."""
     store().set_tab_open(source_id, body.open)
     return {"ok": True}
+
+
+class NicknameReq(BaseModel):
+    nickname: str | None = None
+
+
+@app.post("/api/source/{source_id}/nickname")
+def api_set_source_nickname(source_id: int, body: NicknameReq):
+    """Sets (or, with an empty value, clears) a source's display nickname;
+    on a merge (negative id) it renames the merge. Returns the refreshed
+    source record."""
+    try:
+        return store().set_source_nickname(source_id, body.nickname)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
 
 
 class MergeCreate(BaseModel):
