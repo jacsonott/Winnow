@@ -1484,6 +1484,50 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
   `f`/`Shift+F` pair (focus-first-filter → filter-by-this-value, plus the
   new drop-the-others variant) *only* for analysts still on the old
   defaults — a binding someone chose themselves is never touched.
+- **Table nicknames** (`sources.nickname`, `Store.set_source_nickname`,
+  `POST /api/source/{id}/nickname`) are display-only: `name` is never
+  rewritten — it's the file's identity (session hash warnings, the record
+  of what was imported), and everything that matches or fingerprints keeps
+  using it. On a merge (negative id) the same call renames `merges.name`
+  instead, since a merge's name already is analyst-chosen; clearing a
+  merge's name is refused. Old case files get the column via an
+  ALTER-if-missing in `Store.__init__` (CREATE TABLE IF NOT EXISTS can't
+  add a column). Frontend renders every user-facing source name through
+  `sourceLabel(s)` (nickname || name) with `sourceTitle(s)` keeping the
+  real file name in the hover title — new UI that prints a source name
+  should go through those, not `s.name`.
+- **Keybindings can be combinations** (`keySpecFromEvent`): a binding is
+  stored as `e.key` optionally prefixed `Ctrl+`/`Alt+`/`Meta+`/`Shift+` in
+  that fixed order. Two deliberate asymmetries: Shift never appears for a
+  printable key (e.key already arrives shifted — `'G'` *is* the
+  capital-letter binding), and for non-printable keys an unprefixed
+  binding still matches the shifted press (matchAction's fallback) — this
+  is what keeps Shift+ArrowDown reaching moveDown, whose handler reads
+  e.shiftKey to extend the selection. The settings capture handler ignores
+  modifier-only keydowns and keeps listening (it used to commit on the
+  first keydown, so pressing Ctrl for Ctrl+K bound "Control" and combos
+  were impossible). findKeyConflict also refuses the hardcoded
+  modifier shortcuts (Ctrl/Meta+C copy, Ctrl/Meta+z undo, Alt+digit tab
+  switching) since those are handled before matchAction and would shadow
+  a binding silently. Side effect worth knowing: a bare-key binding no
+  longer fires when Ctrl/Alt/Meta is held (matchAction used to look at
+  e.key alone, so Ctrl+T opened the Tables manager).
+- **Shortcuts are gated off the home screen**: the document keydown
+  listener returns early when `$('app').hidden` — every keymap action, tag
+  hotkey, Alt+digit and the copy/undo combos act on case UI that isn't on
+  screen there (`t` opened the previous case's Tables manager from home).
+  Escape stays above the gate: home has modals of its own to close.
+- **`POST /api/shutdown`** (the home screen's ⏻ button and Session → "Shut
+  down Winnow…") stops the server from the UI — the server usually lives
+  in a forgotten terminal, and closing the browser tab leaving it running
+  is how a case file stays flock'd all weekend. It answers 200 first, then
+  `_trigger_shutdown` raises SIGINT ~0.3s later via
+  `signal.raise_signal` (not `os.kill` — works on Windows too), which
+  uvicorn treats exactly like Ctrl+C: graceful shutdown, `_lifespan` runs
+  `Store.close()`, views scratch files are deleted. `_trigger_shutdown`
+  is a separate function *so tests can monkeypatch it* — calling the real
+  one under pytest kills pytest. The CSRF header gate is what stops a
+  hostile page in another tab from turning the server off.
 - The example mft_usn plugin's fixup handling encodes a real-world trap:
   extraction tools disagree about whether $MFT records arrive with NTFS's
   multi-sector fixups still stamped (KAPE/icat/RawCopy: yes; ntfscat:

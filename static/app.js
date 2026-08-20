@@ -633,6 +633,43 @@ function currentSpec() {
    Errored merges are always shown regardless of is_open — they need
    attention (fix or remove), not a place to hide. */
 
+/* The name a source shows everywhere: the analyst's nickname when one is
+   set, else the imported file's name. s.name itself is never rewritten —
+   it's the record of what was imported (session hash warnings, the Tables
+   manager's identity column), where a nickname is presentation. Merges
+   have no nickname field (their name is already analyst-chosen), so this
+   falls through to name for them. */
+function sourceLabel(s) { return (s && (s.nickname || s.name)) || ''; }
+
+/* The hover title for a nicknamed source — keeps the real file name one
+   hover away wherever the nickname replaced it. */
+function sourceTitle(s, suffix) {
+  const parts = [];
+  if (s && s.nickname) parts.push(s.name);
+  if (suffix) parts.push(suffix);
+  return parts.join(' — ');
+}
+
+/* Prompt-and-save for a source's nickname (a merge's name — merges have no
+   separate file name to fall back to). Returns true when a change was
+   saved, so callers know to re-render whatever list they came from. */
+async function editSourceNickname(s) {
+  const msg = s.is_merge
+    ? 'Rename this merge:'
+    : `Nickname for "${s.name}" — shown in place of the file name everywhere. Leave empty to go back to the file name.`;
+  const cur = s.is_merge ? s.name : (s.nickname || '');
+  const v = await promptDialog(msg, cur, { okLabel: 'Save' });
+  if (v === null) return false;
+  try {
+    await post(`/api/source/${s.id}/nickname`, { nickname: v });
+  } catch (e) {
+    toast('Could not save that: ' + e.message, 4000);
+    return false;
+  }
+  await loadSources();
+  return true;
+}
+
 /* Open tabs sorted per S.tabOrder (drag-reordered by the user) — ids not
    yet in tabOrder (a newly opened table) sort after the ones that are, in
    whatever order loadSources()'s API responses returned them. */
@@ -759,7 +796,7 @@ function renderTabs() {
       t.append(el('span', null, `⚠ ${s.name}`));
       t.title = s.error;
     } else {
-      t.append(el('span', null, (s.is_merge ? '⛓ ' : '') + s.name), el('span', 'count', s.row_count.toLocaleString()));
+      t.append(el('span', null, (s.is_merge ? '⛓ ' : '') + sourceLabel(s)), el('span', 'count', s.row_count.toLocaleString()));
     }
     const x = el('span', 'x', '✕');
     x.title = 'Close tab — stays in this case, reopen it from Tables';
@@ -771,7 +808,7 @@ function renderTabs() {
       // button that used to sit here opened a strict subset of it) — same
       // menu from the tab, the sidebar row and the openTableMenu keybind.
       t.oncontextmenu = (e) => { e.preventDefault(); openTableMenu(s.id); };
-      t.title = 'Right-click for the table menu';
+      t.title = sourceTitle(s, 'Right-click for the table menu');
     }
     wireTabDrag(t, s.id);
     tabs.append(t);
@@ -5502,10 +5539,18 @@ function buildTableActionsPanel(container, refresh) {
   dflt.onclick = () => saveDefaultLayout();
   const nick = el('button', 'btn ghost', 'Name this header set…');
   nick.onclick = () => setNicknameFor(baseColumns().map((c) => c.name), nicknameFor(baseColumns().map((c) => c.name)));
+  const nickTable = el('button', 'btn ghost', src && src.is_merge ? 'Rename this merge…' : 'Nickname this table…');
+  nickTable.title = src && src.is_merge
+    ? 'Rename this merge'
+    : 'A display name shown in place of the file name — clear it to go back';
+  nickTable.onclick = async () => {
+    if (!src) return;
+    if (await editSourceNickname(src)) refresh();
+  };
   const tables = el('button', 'btn ghost', 'Tables manager…');
   tables.title = 'Every table in the case — indexes, row counts, dropping a source';
   tables.onclick = () => openTablesManager();
-  acts.append(dflt, nick, tables);
+  acts.append(dflt, nick, nickTable, tables);
   container.append(acts);
   if (src && src.is_open) {
     const close = el('button', 'btn ghost', 'Close this tab');
@@ -5542,7 +5587,7 @@ async function openTableMenu(sourceId) {
   if (id !== S.sourceId || S.activeTab !== 'grid') await openSource(id);
   if (S.sourceId !== id) return; // openSource no-ops on an id it can't find
   const src = S.sources.find((x) => x.id === id);
-  modal(`Table — ${src ? src.name : ''}`, (b) => {
+  modal(`Table — ${src ? sourceLabel(src) : ''}`, (b) => {
     for (const section of TABLE_MENU_SECTIONS) {
       const wrap = el('div', 'table-menu-section');
       wrap.append(el('h4', null, section.title));
@@ -5635,7 +5680,7 @@ function openMergeBuilder() {
         cb.type = 'checkbox';
         cb.onchange = () => { cb.checked ? selected.add(s.id) : selected.delete(s.id); };
         boxes.push(cb);
-        lab.append(cb, el('span', null, `${s.name} (${s.row_count.toLocaleString()} rows)`));
+        lab.append(cb, el('span', null, `${sourceLabel(s)} (${s.row_count.toLocaleString()} rows)`));
         list.append(lab);
       }
       const selectAll = el('button', 'btn ghost', 'Select all');
@@ -7095,7 +7140,9 @@ function openTablesManager() {
       list.replaceChildren();
       for (const s of S.sources) {
         const row = el('div', 'row-actions session-row');
-        row.append(el('span', 'session-name', (s.is_merge ? '⛓ ' : '') + s.name + (s.error ? ' ⚠' : '')));
+        const nameSpan = el('span', 'session-name', (s.is_merge ? '⛓ ' : '') + sourceLabel(s) + (s.error ? ' ⚠' : ''));
+        nameSpan.title = sourceTitle(s);
+        row.append(nameSpan);
         row.append(el('span', 'count', s.error
           ? s.error
           : `${s.row_count.toLocaleString()} rows · ${s.tagged_row_count.toLocaleString()} tagged · ${s.note_count.toLocaleString()} notes`));
@@ -7112,11 +7159,17 @@ function openTablesManager() {
           await loadSources();
           openTablesManager();
         };
+        const nick = el('button', 'btn ghost', 'Nickname…');
+        nick.title = s.is_merge ? 'Rename this merge' : 'A display name shown in place of the file name — clear it to go back';
+        nick.onclick = async () => {
+          if (!(await editSourceNickname(s))) return;
+          openTablesManager();
+        };
         const del = el('button', 'btn ghost', 'Remove…');
         del.onclick = async () => {
           const warn = s.is_merge
-            ? `Delete merge "${s.name}"? The underlying sources are untouched.`
-            : `Remove ${s.name} from this case? Tags and notes for it are deleted too.`;
+            ? `Delete merge "${sourceLabel(s)}"? The underlying sources are untouched.`
+            : `Remove ${sourceLabel(s)} from this case? Tags and notes for it are deleted too.`;
           if (!(await confirmDialog(warn, { danger: true, okLabel: 'Remove' }))) return;
           if (s.is_merge) {
             await api(`/api/merges/${-s.id}`, { method: 'DELETE' });
@@ -7128,7 +7181,7 @@ function openTablesManager() {
           await loadSources();
           openTablesManager();
         };
-        row.append(toggle, del);
+        row.append(toggle, nick, del);
         list.append(row);
         const idxs = indexesBySource.get(s.id) || [];
         if (idxs.length) list.append(columnIndexRow(s, idxs));
@@ -7375,15 +7428,20 @@ function searchAllCountLabel(d) {
    table's total and opening it carries the whole query across. Both share
    this so the open behaviour can't drift between the two. */
 function searchAllHitRow(st, hit, term) {
+  // The label goes through the live source record so a nickname shows here
+  // too; the job's own hit.name (the file name) is the fallback for a
+  // source dropped since the sweep ran.
+  const hitSrc = S.sources.find((s) => s.id === hit.source_id);
+  const hitName = hitSrc ? sourceLabel(hitSrc) : hit.name;
   const r = el('div', 'search-all-row' + (term ? ' search-all-term-row' : ''));
   r.append(
-    el('span', 'search-all-name', term ? term.term : hit.name),
+    el('span', 'search-all-name', term ? term.term : hitName),
     el('span', 'search-all-count', searchAllCountLabel(term || hit)),
   );
   const openBtn = el('button', 'btn ghost', 'Open ↦');
   openBtn.title = term
-    ? `Open ${hit.name} filtered to "${term.term}"`
-    : `Open ${hit.name} filtered to every term`;
+    ? `Open ${hitName} filtered to "${term.term}"`
+    : `Open ${hitName} filtered to every term`;
   openBtn.onclick = async () => {
     const src = S.sources.find((s) => s.id === hit.source_id);
     if (src && !src.is_open) await post(`/api/source/${hit.source_id}/open`, { open: true });
@@ -8197,7 +8255,9 @@ function openTimelineSourceConfig() {
       const row = el('div', 'row-actions session-row');
       row.style.flexDirection = 'column';
       row.style.alignItems = 'stretch';
-      row.append(el('span', 'session-name', src.name));
+      const nameSpan = el('span', 'session-name', sourceLabel(src));
+      nameSpan.title = sourceTitle(src);
+      row.append(nameSpan);
 
       const typeInput = fieldInput(existing ? existing.type_label : '');
       typeInput.placeholder = `Source type (defaults to "${src.name}")`;
@@ -9533,7 +9593,7 @@ function sidebarRow(s, { open, index, total }) {
   // as active; #tabSql/#tabTimeline carry that highlight instead.
   const active = open && s.id === S.sourceId && S.activeTab === 'grid';
   const row = el('div', 'sidebar-row' + (active ? ' active' : ''));
-  const label = el('button', 'menu-item', (s.is_merge ? '⛓ ' : '') + s.name + (s.error ? ' ⚠' : ''));
+  const label = el('button', 'menu-item', (s.is_merge ? '⛓ ' : '') + sourceLabel(s) + (s.error ? ' ⚠' : ''));
   label.disabled = !!s.error;
   if (s.error) label.title = s.error;
   label.onclick = open ? () => openSource(s.id) : async () => {
@@ -9546,7 +9606,7 @@ function sidebarRow(s, { open, index, total }) {
     // the sidebar — including for a closed table, which openTableMenu opens
     // first (its panels all read the live S.layout/S.columns).
     row.oncontextmenu = (e) => { e.preventDefault(); openTableMenu(s.id); };
-    label.title = 'Right-click for the table menu';
+    label.title = sourceTitle(s, 'Right-click for the table menu');
     row.append(el('span', 'sidebar-row-count', s.row_count.toLocaleString()));
   }
   if (open) {
@@ -9598,6 +9658,8 @@ $('btnSession').onclick = () => dropdownMenu($('btnSession'), [
   '-',
   { label: 'Export…', onclick: openExportModal },
   { label: 'Session (save/load)…', onclick: openSessionManager },
+  '-',
+  { label: 'Shut down Winnow…', onclick: shutdownWinnow },
 ]);
 /* Row identity (source_id, rid) survives a view rebuild even though pos
    doesn't (see CLAUDE.md — positions are view-specific and get wiped on
@@ -9898,22 +9960,60 @@ function saveKeymap() {
   localStorage.setItem(KEYMAP_VERSION_KEY, String(KEYMAP_VERSION));
 }
 
+/* A binding is stored as e.key, optionally prefixed with held modifiers in
+   a fixed order: 'Ctrl+Alt+Meta+Shift+<key>'. Shift never appears for a
+   printable key — e.key already arrives shifted (Shift+g is 'G'), so 'G'
+   *is* the capital-letter binding — and appears for a non-printable key
+   only when the binding asked for it, which is how an unprefixed
+   'ArrowDown' keeps matching Shift+ArrowDown (the move handlers read
+   e.shiftKey themselves to extend the selection). Returns null for a
+   modifier pressed on its own, which is what lets the capture UI wait for
+   the rest of a combination instead of binding "Control". */
+const MODIFIER_KEYS = new Set(['Shift', 'Control', 'Alt', 'Meta', 'AltGraph', 'CapsLock', 'NumLock', 'ScrollLock']);
+function keySpecFromEvent(e) {
+  if (MODIFIER_KEYS.has(e.key)) return null;
+  let mods = '';
+  if (e.ctrlKey) mods += 'Ctrl+';
+  if (e.altKey) mods += 'Alt+';
+  if (e.metaKey) mods += 'Meta+';
+  if (e.shiftKey && e.key.length > 1) mods += 'Shift+';
+  return mods + e.key;
+}
+
 function matchAction(e) {
+  const spec = keySpecFromEvent(e);
+  if (spec == null) return null;
   for (const [action, keys] of Object.entries(S.keymap)) {
-    if (keys.includes(e.key)) return action;
+    if (keys.includes(spec)) return action;
+  }
+  // Shift on a non-printable key falls back to the unshifted binding (an
+  // explicit 'Shift+F2' binding above already won if there was one) — this
+  // is what keeps Shift+ArrowDown reaching moveDown to extend the
+  // selection. Modifiers other than Shift never fall back: Alt+j is not a
+  // request to move the cursor.
+  const bare = spec.replace('Shift+', '');
+  if (bare !== spec) {
+    for (const [action, keys] of Object.entries(S.keymap)) {
+      if (keys.includes(bare)) return action;
+    }
   }
   return null;
 }
 
 /* Returns a human-readable description of what already owns `key`, or null
    if it's free. Checked against other keymap actions, tag hotkeys (which
-   can change independently at any time via the tag editor), and Escape. */
+   can change independently at any time via the tag editor), Escape, and
+   the hardcoded modifier shortcuts the keydown listener handles before
+   the keymap (copy, tag undo, Alt+digit tab switching). */
 function findKeyConflict(key, currentAction) {
   if (key === 'Escape') return 'the always-on close/clear action';
   if (/^[1-9]$/.test(key)) {
     const t = S.tags.find((x) => x.hotkey === key);
     return `the "${t ? t.name : 'tag'}" tag hotkey`;
   }
+  if (/^(Ctrl|Meta)\+(c|C)$/.test(key)) return 'the copy shortcut';
+  if (/^(Ctrl|Meta)\+z$/.test(key)) return 'the tag-undo shortcut';
+  if (/^Alt\+[0-9]$/.test(key)) return 'tab switching (Alt+1–0)';
   for (const [action, keys] of Object.entries(S.keymap)) {
     if (action !== currentAction && keys.includes(key)) return ACTION_LABELS[action] || action;
   }
@@ -10236,7 +10336,8 @@ function openSettings() {
     secLook.append(capRow);
 
     const secKeys = settingsSection(b, 'Keyboard shortcuts');
-    secKeys.append(el('p', null, 'Tag hotkeys (1–9) are set per-tag in Edit tags. Escape always clears the selection or closes a panel.'));
+    secKeys.append(el('p', null, 'Tag hotkeys (1–9) are set per-tag in Edit tags. Escape always clears the selection or closes a panel. '
+      + '"+ key" waits for a full press — hold modifiers for a combination (e.g. Ctrl+Shift+K), or Shift+letter for a capital.'));
     const list = el('div', 'settings-keys');
 
     function renderList() {
@@ -10258,16 +10359,33 @@ function openSettings() {
         addBtn.onclick = () => {
           addBtn.textContent = 'Press a key…';
           addBtn.disabled = true;
-          const capture = (ke) => {
-            ke.preventDefault();
-            ke.stopPropagation();
+          const done = () => {
             document.removeEventListener('keydown', capture, true);
             addBtn.disabled = false;
             addBtn.textContent = '+ key';
-            if (ke.key === 'Escape') return;
-            const conflict = findKeyConflict(ke.key, action);
-            if (conflict) { toast(`"${ke.key}" is already used by ${conflict}`, 4000); return; }
-            keys.push(ke.key);
+          };
+          const capture = (ke) => {
+            ke.preventDefault();
+            ke.stopPropagation();
+            if (ke.key === 'Escape') { done(); return; }
+            const spec = keySpecFromEvent(ke);
+            if (spec == null) {
+              // A modifier on its own is the *start* of a combination, not
+              // the binding — keep listening, showing what's held so far.
+              // (This used to commit immediately, so pressing Ctrl for
+              // Ctrl+K bound "Control" and combinations were impossible.)
+              let mods = '';
+              if (ke.ctrlKey) mods += 'Ctrl+';
+              if (ke.altKey) mods += 'Alt+';
+              if (ke.metaKey) mods += 'Meta+';
+              if (ke.shiftKey) mods += 'Shift+';
+              addBtn.textContent = mods ? mods + '…' : 'Press a key…';
+              return;
+            }
+            done();
+            const conflict = findKeyConflict(spec, action);
+            if (conflict) { toast(`"${spec}" is already used by ${conflict}`, 4000); return; }
+            keys.push(spec);
             saveKeymap();
             renderList();
           };
@@ -10490,6 +10608,12 @@ document.addEventListener('keydown', (e) => {
     if (typing) { e.target.blur(); $('body').focus(); return; }
     selClear(); render(); return;
   }
+  /* Everything below acts on the case UI — the grid's cursor, its tabs, its
+     modals (Tables, Search all, the timeframe dialog). On the home screen
+     none of that is on screen, and firing anyway meant `t`/`R`/the rest
+     opened panels for a case that isn't showing. Escape (above) still
+     works — home has modals of its own to close. */
+  if ($('app').hidden) return;
   // e.code first because Alt+digit doesn't produce a digit in e.key on
   // every layout (macOS Alt+1 is '¡'), and the tag hotkeys below want the
   // same thing for the same reason.
@@ -10557,6 +10681,27 @@ function showApp() {
   $('home').hidden = true;
   $('app').hidden = false;
   applyPageTabsSize(); // first moment the bar has a real width to clamp against
+}
+
+/* The off switch — the server otherwise only ever stops when someone finds
+   the terminal it was started in. Confirmed because it's outward-facing in
+   the one way this app has (every tab pointed at this server dies), then a
+   static farewell replaces the page: there is deliberately no "restart"
+   affordance, because there's no server left to serve one. */
+async function shutdownWinnow() {
+  const go = await confirmDialog(
+    'Shut down the Winnow server?\n\nEverything is already saved in the case file on disk — tags, notes and '
+    + 'imports are never lost. This page (and any other tab using this server) will stop working until you '
+    + 'start Winnow again.',
+    { okLabel: 'Shut down', cancelLabel: 'Keep running', danger: true });
+  if (!go) return;
+  try { await post('/api/shutdown', {}); } catch { /* the server may drop before the response lands */ }
+  const note = el('div', 'shutdown-note');
+  note.append(
+    el('div', 'shutdown-note-title', 'Winnow is off'),
+    el('div', null, 'The server has shut down. You can close this tab — start Winnow again with "python server.py".'),
+  );
+  document.body.replaceChildren(note);
 }
 function showHome() { $('app').hidden = true; $('home').hidden = false; setBrandLabel(null); }
 
@@ -10953,7 +11098,10 @@ function renderHome() {
   newBtn.onclick = openNewCaseModal;
   const openBtn = el('button', 'btn ghost', 'Open existing case file…');
   openBtn.onclick = openExistingCasePrompt;
-  head.append(newBtn, openBtn);
+  const offBtn = el('button', 'btn ghost', '⏻ Shut down');
+  offBtn.title = 'Stop the Winnow server — cases stay saved on disk';
+  offBtn.onclick = shutdownWinnow;
+  head.append(newBtn, openBtn, offBtn);
   inner.append(head);
 
   if (!S.cases.length) {

@@ -104,7 +104,8 @@ CREATE TABLE IF NOT EXISTS sources (
     columns     TEXT NOT NULL,          -- json: [{name, type}]
     file_hash   TEXT,
     imported_at TEXT,
-    has_fts     INTEGER NOT NULL DEFAULT 0
+    has_fts     INTEGER NOT NULL DEFAULT 0,
+    nickname    TEXT                    -- analyst display name; `name` stays the imported file's identity
 );
 CREATE TABLE IF NOT EXISTS tag_defs (
     id     INTEGER PRIMARY KEY,
@@ -980,6 +981,10 @@ class Store:
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='open_tabs'"
             ).fetchone() is not None
             self.db.executescript(META_SCHEMA)
+            # CREATE TABLE IF NOT EXISTS can't add a column to a case file
+            # from before nicknames existed — patch those in place.
+            if not any(r[1] == "nickname" for r in self.db.execute("PRAGMA table_info(sources)")):
+                self.db.execute("ALTER TABLE sources ADD COLUMN nickname TEXT")
             if not open_tabs_existed:
                 ids = [r[0] for r in self.db.execute("SELECT id FROM sources")]
                 ids += [-r[0] for r in self.db.execute("SELECT id FROM merges")]
@@ -2742,6 +2747,31 @@ class Store:
                 self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
             else:
                 self.db.execute("DELETE FROM open_tabs WHERE source_id=?", (source_id,))
+
+    def set_source_nickname(self, source_id: int, nickname: str | None) -> dict:
+        """A display name the analyst chooses ("DC01 security log") over the
+        imported file's own name ("20240611_EvtxECmd_Output.csv"). `name`
+        is deliberately left untouched — it's the file's identity (session
+        matching, the record of what was imported), where a nickname is
+        presentation. Empty/whitespace clears it. A merge has no file
+        behind it, so its name *is* its display name — nicknaming one is
+        just a rename of merges.name."""
+        nickname = (nickname or "").strip() or None
+        if nickname and len(nickname) > 200:
+            raise ValueError("That nickname is too long")
+        if source_id < 0:
+            if not nickname:
+                raise ValueError("A merge needs a name — give it one rather than clearing it")
+            with self.lock, self.db:
+                cur = self.db.execute("UPDATE merges SET name=? WHERE id=?", (nickname, -source_id))
+                if cur.rowcount == 0:
+                    raise KeyError(f"No merge {-source_id}")
+        else:
+            with self.lock, self.db:
+                cur = self.db.execute("UPDATE sources SET nickname=? WHERE id=?", (nickname, source_id))
+                if cur.rowcount == 0:
+                    raise KeyError(f"No source {source_id}")
+        return self.get_source(source_id)
 
     def get_source(self, source_id: int) -> dict:
         """A merge is addressed as a negative source_id (merges.id=m ->
