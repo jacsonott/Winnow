@@ -361,7 +361,16 @@ async function pollJobs() {
     for (const j of d.jobs) {
       const done = j.status === 'done' || j.status === 'error' || j.status === 'cancelled';
       const prev = seenJobStatus.get(j.job_id);
-      if (done && prev && prev !== j.status) finishedNow.push(j);
+      /* `prev === undefined` is the fast-job case, and it is not rare:
+         deriving one column over a table this app considers small finishes
+         well inside a poll interval, so the first time this client ever
+         sees that job it is already done. Requiring a status *transition*
+         meant those jobs never reached the loop below — no completion
+         toast, and (the visible symptom) no auto-dismiss timer, so the
+         panel row sat there reading DONE until the analyst clicked ✕.
+         Jobs that were already finished before this client polled at all
+         are still history rather than news; that's what firstPoll is. */
+      if (done && !firstPoll && prev !== j.status) finishedNow.push(j);
       // Jobs that were already finished before this page ever polled
       // (server keeps the last 20) are history, not news — don't toast
       // them and don't fill the panel with them on load.
@@ -453,6 +462,19 @@ function jobPanelRow({ label, phase, pct, detail, indeterminate, done, onCancel,
   return row;
 }
 
+/* What a finished job's panel row says it did. An import's results carry
+   `row_count` per source; a derive's carry `rows` (the length of the pass)
+   and `parse_failures` per column, which is how a finished column build
+   came to report "0 rows" — the sum was over a key its results never had. */
+function jobDoneDetail(j) {
+  if (j.kind === 'derive') {
+    const failed = (j.result || []).reduce((a, c) => a + (c.parse_failures || 0), 0);
+    const rows = `${(j.rows_done || 0).toLocaleString()} rows`;
+    return failed ? `${rows} · ${failed.toLocaleString()} not found` : rows;
+  }
+  return `${(j.result || []).reduce((a, r) => a + (r.row_count || 0), 0).toLocaleString()} rows`;
+}
+
 function renderJobsPanel() {
   const panel = $('jobsPanel');
   if (!panel) return;
@@ -484,9 +506,7 @@ function renderJobsPanel() {
     } else {
       panel.append(jobPanelRow({
         label: j.name, phase: j.status, done: true,
-        detail: j.status === 'done'
-          ? `${(j.result || []).reduce((a, r) => a + (r.row_count || 0), 0).toLocaleString()} rows`
-          : (j.error || ''),
+        detail: j.status === 'done' ? jobDoneDetail(j) : (j.error || ''),
         onDismiss: () => { dismissedJobs.add(j.job_id); renderJobsPanel(); },
       }));
     }
