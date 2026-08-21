@@ -57,20 +57,16 @@ examples/plugins/  Committed example plugins, one per extension point — treat
                     plugins/.
 static/index.html  App shell. No framework. #home and #app are siblings; only
                     one is ever visible.
-static/app.js      Virtualized grid, filters, tagging, detail pane, SQL pane,
-                    home screen. The right-click surfaces (row menu, table
-                    menu, detail-pane menu) and the header value picker all
-                    ride one floating-menu implementation — see "Things that
-                    bite". The detail pane's JSON/XML pretty-printer builds
-                    from the parsed document rather than regexing its text,
-                    because every node it emits carries the path that
-                    addresses it; xmlSiblingSelectors is a deliberate twin of
-                    structparse._sibling_selectors and has to stay in step
-                    with it, since a path the UI offers must be one the
-                    backend can resolve.
-bench/             Performance suite — stdlib-only timing harness, seeded
-                    fixtures, baseline/`--vs-ref` comparison. Separate from
-                    tests/ on purpose; see the Performance section below.
+static/js/         The frontend, one ES module per subsystem (main.js is the
+                    entry; core.js is the only module nothing imports *into*).
+                    No build step — `<script type="module">` is native, and
+                    the plugin host already dynamic-import()s plugin modules.
+                    Modules hold declarations only; every top-level side
+                    effect lives in main.js, which is what makes their
+                    evaluation order and the cycles between them harmless.
+                    Boundaries and the rules that keep them safe are in
+                    docs/notes/frontend-modules.md — read it before moving
+                    code between modules.
 static/style.css   Token-driven theming: 4 styles (panel/phosphor/blueprint/
                     studio) x dark/light, selected via data-style/data-theme
                     on <html>, plus a user accent color. See the file's own
@@ -173,7 +169,7 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
    quoting; never f-string a raw header into SQL. Headers get sanitised and
    deduped at ingest by `sanitize_columns`.
 
-6. **Only the visible window is ever in the DOM.** `render()` in app.js builds
+6. **Only the visible window is ever in the DOM.** `render()` in `static/js/grid.js` builds
    rows for the scroll window plus overscan and positions them with a single
    `translateY`. Don't introduce per-row listeners; the grid uses event
    delegation on `#body`.
@@ -219,6 +215,7 @@ what you're about to touch:
 | --- | --- |
 | [docs/notes/store.md](docs/notes/store.md) | view building and paging, FTS/trigram and column indexes, grouping and tag counts, search-all, the reader pool, cancellable ops, `compact()` |
 | [docs/notes/ingest.md](docs/notes/ingest.md) | CSV/JSON/SQLite/folder ingest, drag-and-drop, ragged rows, background import jobs |
+| [docs/notes/frontend-modules.md](docs/notes/frontend-modules.md) | the `static/js/` module layout and the four rules that keep its import graph loadable |
 | [docs/notes/grid.md](docs/notes/grid.md) | the virtualized grid: DOM window, page cache and prefetch, row selection, the spacer cap, the gutter grid |
 | [docs/notes/ui.md](docs/notes/ui.md) | right-click menus, the filter row and value picker, saved filters, the timeframe filter, tab strips and sidebar, Settings, keybindings |
 | [docs/notes/server.md](docs/notes/server.md) | routes and middleware, one-case-one-Winnow, CSRF header, 400-vs-500, shutdown |
@@ -254,12 +251,14 @@ memory.
 
 - **Backend** (`tests/test_*.py`) — `store.py`, `server.py`, `workspace.py`.
   The bulk of it; see the coverage notes below.
-- **`tests/test_static_syntax.py`** — parses `static/app.js` with `esprima`
-  (the Python port). There's no build step between an editor and the browser,
-  so an unbalanced brace ships as a blank page and every backend test still
-  passes. esprima is ES2017, so `??`/`?.`/bare `catch {` are rewritten to
-  older equivalents before the parse; a newer syntax means a line in that
-  file's rewrite table.
+- **`tests/test_static_syntax.py`** — parses every `static/js/*.js` with
+  `esprima` (the Python port) *and* proves each module imports everything it
+  uses (`tests/jsscope.py` does the scope analysis; anything left over must be
+  a browser global). There's no build step between an editor and the browser,
+  so an unbalanced brace — or a function moved between modules without its
+  import — ships as a blank page with every backend test still green. esprima
+  is ES2017, so `??`/`?.`/bare `catch {` are rewritten before the parse; a
+  newer syntax means a line in jsscope's rewrite table.
 - **`tests/ui/`** — browser-driven, against a real uvicorn and a real
   Chromium via Playwright. This exists because the class of bug it catches is
   invisible to everything above it: a CSS change that unpinned the filter row

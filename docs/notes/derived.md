@@ -69,7 +69,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   - **Canonical output is `YYYY-MM-DD HH:MM:SS[.ffffff]`**, sub-second only
     when the source has that resolution. That exact shape is why there are
     **no new regexes to hand-sync**: `_TS_ISO_RE`/`TS_NORMALIZE`/`DAY_BUCKET`
-    and app.js's `parseTimestamp` already prefix-match it. Timezones:
+    and `tsformat.js`'s `parseTimestamp` already prefix-match it. Timezones:
     epoch-family values are UTC by definition, values carrying an explicit
     offset (ISO `Z`/`±HH:MM`, CLF, RFC 2822) are converted to UTC, and
     naive text is kept exactly as written unless the analyst sets the

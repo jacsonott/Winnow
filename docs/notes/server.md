@@ -40,7 +40,7 @@ see [docs/notes/README.md](README.md) for the whole set.
 - Static assets (`/`, `/static/*`) get an explicit `Cache-Control: no-cache`
   from a middleware in server.py — FastAPI's `StaticFiles` only sends
   `ETag`/`Last-Modified`, and without an explicit `Cache-Control` the
-  browser is free to serve a stale `style.css`/`app.js`/`index.html` from
+  browser is free to serve a stale `style.css`/`js/*.js`/`index.html` from
   its own disk cache indefinitely, surviving even a normal reload (only a
   hard refresh forces a re-check). Bit us for real: a reported layout bug
   turned out to be a stale cached stylesheet, not the actual CSS on disk.
@@ -54,7 +54,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   a malicious page on another tab silently triggering side effects (e.g. via an
   unpreflighted `multipart/form-data` upload) is server.py's
   `require_client_header` middleware, which 403s any non-GET `/api/*` request
-  missing an `X-Timeline-Lite-Client` header. `app.js`'s `api()` sets it on
+  missing an `X-Timeline-Lite-Client` header. `core.js`'s `api()` sets it on
   every non-GET call automatically — a raw `fetch()` that bypasses `api()`/
   `post()` won't have it and will get 403'd. GET stays exempt on purpose (the
   Export/session/filters download links are plain navigations, which can't set
@@ -62,7 +62,7 @@ see [docs/notes/README.md](README.md) for the whole set.
 - `api_view` maps only `ValueError`/`KeyError` to 400; everything else is a
   500. It used to catch bare `Exception`, so an internal defect surfaced as
   "Filter error: …" — blaming the analyst's filter for something they can't
-  fix and hiding the traceback. `app.js`'s `api()` attaches `err.status` so
+  fix and hiding the traceback. `core.js`'s `api()` attaches `err.status` so
   callers can tell the two apart. Nothing that a user can actually type
   reaches the 500 path: `validate_where_fragment` converts SQL errors to
   `ValueError`, and `_regexp` swallows `re.error`.

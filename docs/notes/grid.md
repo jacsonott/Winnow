@@ -1,6 +1,6 @@
 # The grid: rendering, paging, selection, geometry
 
-`static/app.js`'s virtualized grid — what's in the DOM, what's in the page
+the virtualized grid (`static/js/grid.js`) — what's in the DOM, what's in the page
 cache, how a scroll position becomes a row, and how a selection is
 represented. Invariant #6 (only the visible window is ever in the DOM) is
 the rule; these are the things that bit us enforcing it.
@@ -10,11 +10,11 @@ see [docs/notes/README.md](README.md) for the whole set.
 
 ---
 
-- **Row selection in app.js is a flag plus a Set, never a list of every
+- **Row selection (`static/js/state.js`) is a flag plus a Set, never a list of every
   selected position** — `S.selectAll` off means `S.selection` holds the
   selected view *positions*; on means it holds the *exclusions* (everything
   else in the view is selected). Nothing outside the `sel*` helper block at
-  the top of app.js touches either field directly. Positions, not rids, so
+  the `sel*` block in state.js touches either field directly. Positions, not rids, so
   it's still cleared on every view rebuild (positions no longer mean the
   same rows). The inversion isn't just to avoid allocating a 1.2M-entry Set
   for "everything": it's what lets `applyTag` *recognise* a whole-view
