@@ -1,5 +1,7 @@
 # Winnow
 
+[![CI](https://github.com/jacsonott/Winnow/actions/workflows/ci.yml/badge.svg)](https://github.com/jacsonott/Winnow/actions/workflows/ci.yml)
+
 A local web app for reading very large delimited files out of SQLite, with the
 row-tagging workflow that Timeline Explorer gets right and generic SQLite GUIs
 don't. FastAPI + SQLite on the back, vanilla JS virtualized grid on the front.
