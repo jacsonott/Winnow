@@ -2299,7 +2299,25 @@ function headerWidthFor(name) {
   const h = document.querySelector(`.hcell[data-col="${CSS.escape(name)}"]`);
   const label = h && h.querySelector('.label');
   if (!label) return 0;
-  return Math.ceil(label.scrollWidth + (h.clientWidth - label.clientWidth)) + 1;
+  // Everything in the cell that isn't the label, measured from the siblings
+  // themselves — NOT from `h.clientWidth - label.clientWidth`, which is only
+  // the chrome while the cell is exactly as wide as its contents. On a column
+  // that's wider than it needs to be, that difference is mostly slack, so the
+  // header reported needing roughly the current width and autofit could never
+  // shrink a column back to its content. (.grip is absolutely positioned and
+  // occupies no track, so it isn't counted; .label can shrink but not grow,
+  // so its scrollWidth is the text width whether it's clipped or not.)
+  const cs = getComputedStyle(h);
+  const pad = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
+  const gap = parseFloat(cs.columnGap === 'normal' ? cs.gap : cs.columnGap) || 0;
+  let extras = 0;
+  let siblings = 0;
+  for (const child of h.children) {
+    if (child === label || child.classList.contains('grip')) continue;
+    extras += child.getBoundingClientRect().width;
+    siblings += 1;
+  }
+  return Math.ceil(label.scrollWidth + extras + gap * siblings + pad) + 1;
 }
 
 function widthForLen(name, len) {
