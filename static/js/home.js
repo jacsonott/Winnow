@@ -1,0 +1,528 @@
+/* The home screen: the case registry, opening/creating cases, and boot().
+
+   Split out of the former single static/app.js — see CLAUDE.md. */
+import { $, api, el, post, toast } from './core.js';
+import { loadPlugins } from './importer.js';
+import { startJobsPoll } from './jobs.js';
+import { openImportPreview } from './merge.js';
+import { resetPluginTabMounts } from './plugins.js';
+import { loadAppSettings, loadCaseSettings, loadHeaderNicknames, loadSavedFilters } from './savedfilters.js';
+import { updateSearchAllButton } from './search.js';
+import { applyPageTabsSize, loadSources } from './sources.js';
+import { showGridTab } from './sql.js';
+import { S } from './state.js';
+import { updateTimeRangeButton } from './timeframe.js';
+import { loadTimelineTemplates } from './timeline.js';
+import { confirmDialog, modal, promptDialog } from './ui.js';
+
+/* -------------------------------------------------------------- home screen */
+
+/* Home manages "Cases" (one case.db each — recent, grouped, renamed,
+   annotated). Distinct from the existing Session feature (the Session
+   button above), which snapshots tags/notes/layout *within* one already-open
+   case — that feature is untouched. Opening a Case from here is what
+   actually swaps the server's STORE; navigating back to Home via #btnHome
+   just changes what the client is looking at. */
+
+export function showApp() {
+  $('home').hidden = true;
+  $('app').hidden = false;
+  applyPageTabsSize(); // first moment the bar has a real width to clamp against
+}
+
+/* The off switch — the server otherwise only ever stops when someone finds
+   the terminal it was started in. Confirmed because it's outward-facing in
+   the one way this app has (every tab pointed at this server dies), then a
+   static farewell replaces the page: there is deliberately no "restart"
+   affordance, because there's no server left to serve one. */
+export async function shutdownWinnow() {
+  const go = await confirmDialog(
+    'Shut down the Winnow server?\n\nEverything is already saved in the case file on disk — tags, notes and '
+    + 'imports are never lost. This page (and any other tab using this server) will stop working until you '
+    + 'start Winnow again.',
+    { okLabel: 'Shut down', cancelLabel: 'Keep running', danger: true });
+  if (!go) return;
+  try { await post('/api/shutdown', {}); } catch { /* the server may drop before the response lands */ }
+  const note = el('div', 'shutdown-note');
+  note.append(
+    el('div', 'shutdown-note-title', 'Winnow is off'),
+    el('div', null, 'The server has shut down. You can close this tab — start Winnow again with "python server.py".'),
+  );
+  document.body.replaceChildren(note);
+}
+
+export function showHome() { $('app').hidden = true; $('home').hidden = false; setBrandLabel(null); }
+
+// The brand button doubles as "which case is this" once one's open — falls
+// back to the app name on the home screen / before any case has loaded.
+export function setBrandLabel(name) {
+  $('brandLabel').textContent = name || 'Winnow';
+}
+
+/* Text for the "already open elsewhere" prompt. Deliberately says what the
+   consequence is rather than just "in use" — the analyst clicking this is
+   deciding whether their colleague's afternoon survives, and "case is
+   locked" doesn't give them anything to decide with. */
+export function describeCaseHolder(holder) {
+  const who = holder.user || 'an unknown user';
+  const where = holder.host || 'an unknown host';
+  let when = '';
+  if (holder.started_at) when = `, open since ${holder.started_at.replace('T', ' ')}`;
+  if (holder.evidence === 'unreadable') {
+    return 'A lock file sits next to this case but can\u2019t be read, so Winnow can\u2019t tell '
+      + 'whether another server has it open.';
+  }
+  const age = holder.heartbeat_age_sec;
+  const seen = (age === null || age === undefined) ? '' : ` (last seen ${Math.round(age)}s ago)`;
+  return `This case is already open in another Winnow \u2014 ${who} on ${where}${when}${seen}.\n\n`
+    + 'Opening it here too means neither server sees the other\u2019s tags, notes or imports until '
+    + 'it reloads, and a long write in one (an import, or Compact case) will start failing the '
+    + 'other. If the case file is on a network share, SQLite\u2019s locking does not work there '
+    + 'at all and the file can be corrupted.';
+}
+
+export async function openCase(path, opts = {}) {
+  let res;
+  try {
+    res = await post('/api/case/open', { path, force: !!opts.force });
+  } catch (e) {
+    if (e.status === 409 && e.detail && e.detail.error === 'case_in_use') {
+      const go = await confirmDialog(describeCaseHolder(e.detail.holder), {
+        okLabel: 'Open anyway', cancelLabel: 'Don\u2019t open', danger: true,
+      });
+      if (!go) return;
+      return openCase(path, { force: true });
+    }
+    toast('Could not open case: ' + e.message, 6000);
+    return;
+  }
+  // Source ids are small and sequential per-case, so this case's "source 1"
+  // may well collide with the id of a cached view_id from whatever case was
+  // open before — that view_id belongs to a Store instance the server just
+  // closed and can't possibly still exist. Drop the cache rather than let
+  // openSource() try it, get a 409, and rebuild anyway.
+  S.viewCache.clear();
+  S.tabOrder = [];
+  // Unlike a tab switch within the *same* case (where the timeframe filter
+  // deliberately survives — see clearAllFilters()/applyPreset()), a
+  // different case is a different investigation; a timeframe pinned in
+  // the last one has no reason to silently carry over into this one.
+  S.timeRange = { enabled: false, column: null, start: '', end: '' };
+  updateTimeRangeButton();
+  // Same reasoning for the timeline: its view_id belongs to the Store
+  // instance that just closed, and its tag-id checkboxes belong to the
+  // previous case's tag_defs — neither means anything here.
+  S.timeline = { view: null, pages: new Map(), pending: new Set(), reqId: S.timeline.reqId + 1, tagFilter: null };
+  // sql_tabs is a per-case table, so the previous case's tabs (and the
+  // in-memory results keyed by their ids) don't describe this one. Left
+  // empty rather than reloaded here — showSqlTab loads lazily.
+  S.sqlTabs = [];
+  S.sqlTabId = null;
+  S.sqlResults.clear();
+  // A Search-all job belongs to the Store instance the server just closed;
+  // its results reference source ids from the previous case.
+  S.searchAll = null;
+  updateSearchAllButton();
+  // A mounted plugin tab's UI was built from the previous case's data —
+  // tear the mounts down so the next activation rebuilds against this one.
+  resetPluginTabMounts();
+  if (S.activeTab !== 'grid') showGridTab();
+  setBrandLabel(res.name);
+  showApp();
+  // ts_format lives in the case file, so it's per-case state like sql_tabs
+  // — reload it rather than carrying the last case's setting over.
+  await loadCaseSettings();
+  await loadSources();
+}
+
+export function slugify(name) {
+  return (name || 'case').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'case';
+}
+
+export function fieldInput(value) {
+  const inp = el('input');
+  inp.value = value || '';
+  inp.style.cssText = 'flex:1;background:var(--ink);color:var(--text);border:1px solid var(--line-2);padding:5px 8px;font:inherit';
+  return inp;
+}
+
+export function groupOptionsDatalist(id) {
+  const dl = el('datalist');
+  dl.id = id;
+  for (const g of new Set(S.cases.map((c) => c.group).filter(Boolean))) {
+    const opt = document.createElement('option');
+    opt.value = g;
+    dl.append(opt);
+  }
+  return dl;
+}
+
+/* Browses the server machine's filesystem, one directory level at a time
+   — the only way to hand back a real absolute path, since a browser's own
+   folder picker (webkitdirectory / showDirectoryPicker) deliberately never
+   exposes one. Assumes server and browser are the same machine, true for
+   how this tool is actually run (see CLAUDE.md). onSelect gets the chosen
+   directory's absolute path; nothing here touches file contents. */
+export function openFolderBrowser(startPath, onSelect, onCancel) {
+  let current = null;
+  modal('Choose a folder', (b) => {
+    const pathLabel = el('div', 'note-status');
+    pathLabel.style.cssText = 'font-family:var(--mono);word-break:break-all;margin-bottom:8px';
+    b.append(pathLabel);
+    const list = el('div', 'session-list');
+    list.style.maxHeight = '46vh';
+    list.style.overflow = 'auto';
+    b.append(list);
+
+    async function load(path) {
+      let res;
+      try {
+        res = await api(`/api/browse_dir?path=${encodeURIComponent(path || '')}`);
+      } catch (e) {
+        toast('Could not list that folder: ' + e.message, 4000);
+        return;
+      }
+      current = res.path;
+      pathLabel.textContent = current;
+      list.replaceChildren();
+      if (res.parent) {
+        const up = el('button', 'btn ghost', '.. (up a level)');
+        up.style.cssText = 'justify-content:flex-start;text-align:left';
+        up.onclick = () => load(res.parent);
+        list.append(up);
+      }
+      if (!res.dirs.length) list.append(el('div', 'note-status', 'No subfolders here.'));
+      for (const d of res.dirs) {
+        const row = el('button', 'btn ghost', '📁 ' + d);
+        row.style.cssText = 'justify-content:flex-start;text-align:left;width:100%';
+        row.onclick = () => load(current + '/' + d);
+        list.append(row);
+      }
+    }
+    load(startPath);
+
+    const actions = el('div', 'row-actions');
+    const useBtn = el('button', 'btn', 'Use this folder');
+    useBtn.onclick = () => onSelect(current);
+    const cancel = el('button', 'btn ghost', 'Cancel');
+    cancel.onclick = () => { if (onCancel) onCancel(); else $('modal').hidden = true; };
+    actions.append(useBtn, cancel);
+    b.append(actions);
+  });
+}
+
+/* `state` carries everything back across a "Browse..." round trip —
+   opening the folder browser swaps this modal's content out entirely
+   (modal() replaces #modal's content in place rather than stacking), so
+   there's no surviving DOM to read values back out of afterward; the only
+   way to preserve what the analyst already typed is to snapshot it into
+   plain values and re-invoke this function with them as the new initial
+   state, same pattern openImportPreview's onConfirm/onCancel already use. */
+export function openNewCaseModal(state = {}) {
+  modal('New case', (b) => {
+    const nameInput = fieldInput(state.name || '');
+    nameInput.placeholder = 'Case name';
+    const nameRow = el('div', 'row-actions');
+    nameRow.append(nameInput);
+    b.append(el('label', null, 'Name'), nameRow);
+
+    const groupInput = fieldInput(state.group || '');
+    groupInput.placeholder = 'Group (optional) — e.g. an IR engagement name';
+    groupInput.setAttribute('list', 'home-new-case-groups');
+    const groupRow = el('div', 'row-actions');
+    groupRow.append(groupInput, groupOptionsDatalist('home-new-case-groups'));
+    b.append(el('label', null, 'Group'), groupRow);
+
+    let chosenDir = state.chosenDir || 'cases';
+    const pathInput = fieldInput(state.path || `${chosenDir}/${slugify(state.name || '')}.db`);
+    pathInput.style.fontFamily = 'var(--mono)';
+    let pathTouched = state.pathTouched || false;
+    pathInput.oninput = () => { pathTouched = true; };
+    nameInput.oninput = () => { if (!pathTouched) pathInput.value = `${chosenDir}/${slugify(nameInput.value)}.db`; };
+    const browseBtn = el('button', 'btn ghost', 'Browse…');
+    browseBtn.onclick = () => {
+      const snapshot = {
+        name: nameInput.value, group: groupInput.value, path: pathInput.value,
+        chosenDir, pathTouched, csvFile, csvFileName: csvFile ? csvFile.name : '',
+      };
+      openFolderBrowser(
+        chosenDir,
+        (dir) => openNewCaseModal({
+          ...snapshot, chosenDir: dir, pathTouched: false, path: `${dir}/${slugify(snapshot.name)}.db`,
+        }),
+        () => openNewCaseModal(snapshot),
+      );
+    };
+    const pathRow = el('div', 'row-actions');
+    pathRow.append(pathInput, browseBtn);
+    b.append(el('label', null, 'Case file path'), pathRow);
+
+    let csvFile = state.csvFile || null;
+    const csvRow = el('div', 'row-actions');
+    const csvLabel = el('label', 'btn ghost', 'Import a CSV now (optional)…');
+    const csvInput = el('input');
+    csvInput.type = 'file';
+    csvInput.accept = '.csv,.tsv,.txt,.psv';
+    csvInput.hidden = true;
+    const csvStatus = el('span', 'count', state.csvFileName || '');
+    csvInput.onchange = () => { csvFile = csvInput.files[0] || null; csvStatus.textContent = csvFile ? csvFile.name : ''; };
+    csvLabel.append(csvInput);
+    csvRow.append(csvLabel, csvStatus);
+    b.append(csvRow);
+
+    const actions = el('div', 'row-actions');
+    const create = el('button', 'btn', 'Create case');
+    create.onclick = async () => {
+      const name = nameInput.value.trim();
+      if (!name) { toast('Name the case first'); return; }
+      const path = pathInput.value.trim();
+      if (!path) { toast('Give the case file a path'); return; }
+      try {
+        await post('/api/cases', { path, name, group: groupInput.value.trim(), notes: '' });
+      } catch (e) {
+        toast('Could not create case: ' + e.message, 6000);
+        return;
+      }
+      $('modal').hidden = true;
+      await openCase(path); // shared with the home screen's "open" flow — same brand-label/view-cache handling
+      if (csvFile) openImportPreview(csvFile);
+    };
+    const cancel = el('button', 'btn ghost', 'Cancel');
+    cancel.onclick = () => { $('modal').hidden = true; };
+    actions.append(create, cancel);
+    b.append(actions);
+  });
+}
+
+export async function openExistingCasePrompt() {
+  const path = await promptDialog('Path to an existing case .db file:');
+  if (!path || !path.trim()) return;
+  const trimmed = path.trim();
+  const name = trimmed.split(/[\\/]/).pop().replace(/\.db$/i, '');
+  try {
+    await post('/api/cases', { path: trimmed, name, group: '', notes: '' });
+  } catch (e) {
+    toast('Could not register case: ' + e.message, 6000);
+    return;
+  }
+  await openCase(trimmed);
+}
+
+export function openEditCaseModal(c) {
+  modal('Edit case', (b) => {
+    const nameInput = fieldInput(c.name);
+    const nameRow = el('div', 'row-actions');
+    nameRow.append(nameInput);
+    b.append(el('label', null, 'Name'), nameRow);
+
+    const groupInput = fieldInput(c.group || '');
+    groupInput.setAttribute('list', 'home-edit-case-groups');
+    const groupRow = el('div', 'row-actions');
+    groupRow.append(groupInput, groupOptionsDatalist('home-edit-case-groups'));
+    b.append(el('label', null, 'Group'), groupRow);
+
+    const notesArea = el('textarea');
+    notesArea.rows = 4;
+    notesArea.value = c.notes || '';
+    notesArea.placeholder = 'Notes about this case…';
+    notesArea.style.width = '100%';
+    b.append(el('label', null, 'Notes'), notesArea);
+
+    b.append(el('div', 'note-status', c.path));
+
+    const actions = el('div', 'row-actions');
+    const save = el('button', 'btn', 'Save');
+    save.onclick = async () => {
+      try {
+        await api(`/api/cases/${c.id}`, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: nameInput.value.trim() || c.name, group: groupInput.value.trim(), notes: notesArea.value }),
+        });
+      } catch (e) {
+        toast('Could not save: ' + e.message, 6000);
+        return;
+      }
+      $('modal').hidden = true;
+      refreshCases();
+    };
+    const cancel = el('button', 'btn ghost', 'Cancel');
+    cancel.onclick = () => { $('modal').hidden = true; };
+    actions.append(save, cancel);
+    b.append(actions);
+  });
+}
+
+export async function removeCaseFromList(c) {
+  if (!(await confirmDialog(`Remove "${c.name}" from this list? The case file itself is left untouched on disk.`, { danger: true, okLabel: 'Remove' }))) return;
+  await api(`/api/cases/${c.id}`, { method: 'DELETE' });
+  refreshCases();
+}
+
+export async function deleteCaseFile(c) {
+  if (!(await confirmDialog(
+    `Permanently delete the case file for "${c.name}"?\n\n${c.path}\n\nThis cannot be undone — all tags, notes and imported data in it will be lost.`,
+    { danger: true, okLabel: 'Delete permanently' },
+  ))) return;
+  try {
+    await api(`/api/cases/${c.id}?delete_file=true`, { method: 'DELETE' });
+  } catch (e) {
+    toast('Could not delete: ' + e.message, 6000);
+    return;
+  }
+  refreshCases();
+}
+
+export function renderCaseRow(c) {
+  const row = el('div', 'home-case-row' + (c.exists === false ? ' missing' : ''));
+  const main = el('div', 'home-case-main');
+  const nameRow = el('div', 'home-case-name');
+  nameRow.append(el('span', null, (c.exists === false ? '⚠ ' : '') + c.name));
+  if (c.group) nameRow.append(el('span', 'home-case-group-badge', c.group));
+  main.append(nameRow);
+  const stats = c.exists === false
+    ? `${c.path} — file not found`
+    : c.error
+      ? `${c.path} — ${c.error}`
+      : `${c.path} · ${(c.source_count || 0).toLocaleString()} source${c.source_count === 1 ? '' : 's'} `
+        + `· ${(c.row_count || 0).toLocaleString()} rows` + (c.last_opened ? ` · opened ${c.last_opened}` : '');
+  main.append(el('div', 'home-case-meta', stats));
+  if (c.notes) main.append(el('div', 'home-case-notes', c.notes));
+  if (c.exists !== false) main.onclick = () => openCase(c.path);
+  row.append(main);
+
+  // Always four button slots, in the same order, even when an action
+  // doesn't apply to this row (a missing case can't be Opened or have its
+  // file Deleted) — .home-case-actions is a plain flex row with no fixed
+  // column widths, so a row with fewer buttons used to pack them flush
+  // right instead of leaving Edit/Remove from list in their usual columns,
+  // visibly zig-zagging as soon as a missing case sat next to a real one.
+  // visibility:hidden (not omitting the element) keeps the slot's width
+  // reserved without making it paintable or clickable; disabled backs
+  // that up and drops it from tab order.
+  const actions = el('div', 'home-case-actions');
+  const openBtn = el('button', 'btn ghost', 'Open');
+  if (c.exists !== false) {
+    openBtn.onclick = () => openCase(c.path);
+  } else {
+    openBtn.disabled = true;
+    openBtn.style.visibility = 'hidden';
+  }
+  const edit = el('button', 'btn ghost', 'Edit');
+  edit.onclick = () => openEditCaseModal(c);
+  const remove = el('button', 'btn ghost', 'Remove from list');
+  remove.onclick = () => removeCaseFromList(c);
+  const del = el('button', 'btn ghost', 'Delete file…');
+  if (c.exists !== false) {
+    del.title = 'Permanently delete the case file from disk';
+    del.onclick = () => deleteCaseFile(c);
+  } else {
+    del.disabled = true;
+    del.style.visibility = 'hidden';
+  }
+  actions.append(openBtn, edit, remove, del);
+  row.append(actions);
+  return row;
+}
+
+export const HOME_STALE_MS = 30 * 24 * 60 * 60 * 1000;
+
+ // 30 days
+
+export function isStaleCase(c) {
+  // Never-opened cases (just created, or from before last_opened existed)
+  // aren't "stale" — they need attention, not hiding.
+  if (!c.last_opened) return false;
+  const t = Date.parse(c.last_opened);
+  return !Number.isNaN(t) && (Date.now() - t) > HOME_STALE_MS;
+}
+
+export function renderHome() {
+  const home = $('home');
+  home.replaceChildren();
+  const inner = el('div', 'home-inner');
+
+  const head = el('div', 'home-head');
+  head.append(el('div', 'brand', 'Winnow'));
+  head.append(el('div', 'home-head-spacer'));
+  const newBtn = el('button', 'btn', '+ New case');
+  newBtn.onclick = openNewCaseModal;
+  const openBtn = el('button', 'btn ghost', 'Open existing case file…');
+  openBtn.onclick = openExistingCasePrompt;
+  const offBtn = el('button', 'btn ghost', '⏻ Shut down');
+  offBtn.title = 'Stop the Winnow server — cases stay saved on disk';
+  offBtn.onclick = shutdownWinnow;
+  head.append(newBtn, openBtn, offBtn);
+  inner.append(head);
+
+  if (!S.cases.length) {
+    inner.append(el('div', 'home-empty', 'No cases yet — create one to get started.'));
+    home.append(inner);
+    return;
+  }
+
+  const searchRow = el('div', 'home-search-row');
+  const search = el('input', 'home-search');
+  search.type = 'search';
+  search.placeholder = 'Search cases or groups…';
+  search.value = S.homeSearch;
+  searchRow.append(search);
+  inner.append(searchRow);
+
+  const listWrap = el('div', 'home-case-list');
+  inner.append(listWrap);
+
+  function renderList() {
+    listWrap.replaceChildren();
+    const q = S.homeSearch.trim().toLowerCase();
+    const matches = (c) => !q || c.name.toLowerCase().includes(q) || (c.group || '').toLowerCase().includes(q);
+    // Most-recently-opened first; a case that's never been opened (no
+    // last_opened) sorts after every case that has been, newest first.
+    const sorted = [...S.cases].sort((a, b) => (b.last_opened || '').localeCompare(a.last_opened || ''));
+    const filtered = sorted.filter(matches);
+    const visible = S.homeShowOlder ? filtered : filtered.filter((c) => !isStaleCase(c));
+    const hiddenCount = filtered.length - visible.length;
+    if (!visible.length) {
+      listWrap.append(el('div', 'home-empty', q ? 'No cases match that search.' : 'No cases to show.'));
+    } else {
+      for (const c of visible) listWrap.append(renderCaseRow(c));
+    }
+    if (hiddenCount > 0) {
+      const toggle = el('button', 'btn ghost home-show-older',
+        `Show ${hiddenCount.toLocaleString()} case${hiddenCount === 1 ? '' : 's'} not opened in over 30 days…`);
+      toggle.onclick = () => { S.homeShowOlder = true; renderList(); };
+      listWrap.append(toggle);
+    }
+  }
+  search.oninput = () => { S.homeSearch = search.value; renderList(); };
+  renderList();
+
+  home.append(inner);
+}
+
+export async function refreshCases() {
+  try { S.cases = await api('/api/cases'); } catch { S.cases = []; }
+  renderHome();
+}
+
+export async function boot() {
+  await Promise.all([loadSavedFilters(), loadHeaderNicknames(), loadTimelineTemplates(),
+                     loadPlugins(), loadAppSettings()]);
+  const cur = await api('/api/case/current').catch(() => ({ open: false }));
+  if (cur.open) {
+    setBrandLabel(cur.name);
+    showApp();
+    await loadCaseSettings();
+    await loadSources();
+    startJobsPoll(); // an import (or index build) from before a reload shows back up
+  } else {
+    showHome();
+    await refreshCases();
+  }
+}
+
+/* DOM wiring for this module, called once by main.js. Handlers can't
+   fire during load, so the order these run in doesn't matter — the
+   startup steps that DO depend on order live in main.js instead. */
+export function wireHome() {
+$('btnHome').onclick = () => { showHome(); refreshCases(); };
+}

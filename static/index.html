@@ -54,7 +54,7 @@ try {
   <nav id="sourceTabs" class="tabs" aria-label="Open files"></nav>
   <!-- Splits the bar's flexible middle between the two strips. Both scroll
        horizontally on their own, so where this sits decides which one runs
-       out of room first — see renderPageTabs/applyPageTabsSize in app.js. -->
+       out of room first — see renderPageTabs/applyPageTabsSize in static/js/sources.js. -->
   <div class="tab-split" id="tabSplit" role="separator" aria-orientation="vertical"
        title="Drag to give the page tabs more or less of the bar — double-click to reset"></div>
   <!-- SQL/Timeline start here in markup; plugin-registered tabs are appended
@@ -190,13 +190,16 @@ try {
 <button class="busy-cancel" id="busyCancel" hidden>✕ Cancel</button>
 
 <!-- Background-work panel: upload transfers, ingest jobs, index builds.
-     renderJobsPanel() in app.js owns its contents; hidden when idle. -->
+     renderJobsPanel() in static/js/jobs.js owns its contents; hidden when idle. -->
 <div class="jobs-panel" id="jobsPanel" hidden aria-live="polite"></div>
 <div class="tag-toolbar" id="tagToolbar" hidden></div>
 <div class="drop-overlay" id="dropOverlay" hidden aria-hidden="true">
   <div class="drop-overlay-card">Drop to import — CSV/TSV/JSON, or a single SQLite file</div>
 </div>
 
-<script src="/static/app.js"></script>
+<!-- type="module" so the app can be split across static/js/*.js with real
+     imports and no build step. Modules are deferred by default, which is
+     what this script tag being last already relied on. -->
+<script type="module" src="/static/js/main.js"></script>
 </body>
 </html>
