@@ -121,14 +121,42 @@ def _check_columns(src, columns):
             raise ValueError(f"No column {col!r} in {src['name']}")
 
 
-def _numeric(col):
+def _derived_names(src):
+    """The analyst's own added columns. They are NOT in `src_<id>` — they're
+    materialised in the `drv_<id>` sidecar and merged into `src["columns"]`
+    at read time — so any SQL that names one has to join that sidecar and
+    qualify the reference. Getting this wrong is silent, not loud: SQLite's
+    double-quoted-string fallback turns an unknown `"Day"` into the *string*
+    'Day', so a pivot grouped on a derived column reports one group named
+    after the column instead of failing."""
+    return {c["name"] for c in src["columns"] if c.get("derived")}
+
+
+def _from_clause(src):
+    """`src_<id> s`, plus the derived sidecar when this source has one.
+
+    LEFT JOIN, and `drv_<id>.rid` is an INTEGER PRIMARY KEY, so the join
+    matches at most one row and can't change what's being counted — the same
+    property Store._from_clause relies on."""
+    base = f"{q(src['table_name'])} s"
+    if not _derived_names(src):
+        return base
+    return f"{base} LEFT JOIN {q('drv_' + str(src['id']))} d ON d.rid = s.rid"
+
+
+def _col(src, name):
+    """A column reference for this source's FROM clause."""
+    return f"{'d' if name in _derived_names(src) else 's'}.{q(name)}"
+
+
+def _numeric(src, col):
     """CAST guarded by the same pattern ingest-time type inference uses, so
     non-numeric text aggregates as NULL rather than as 0.0."""
-    ident = q(col)
+    ident = _col(src, col)
     return f"(CASE WHEN {ident} REGEXP '{NUM_RE.pattern}' THEN CAST({ident} AS REAL) ELSE NULL END)"
 
 
-def _agg_expr(measure, coltypes):
+def _agg_expr(src, measure, coltypes):
     """SQL for one Values field. Min/Max stay textual for non-numeric columns
     on purpose: the earliest and latest value of an ISO timestamp column is
     exactly what MIN()/MAX() over its text gives you, and casting it to a
@@ -147,17 +175,32 @@ def _agg_expr(measure, coltypes):
         # the blank test has to be explicit.
         if not column:
             return "COUNT(*)"
-        return f"SUM(CASE WHEN {q(column)} IS NOT NULL AND {q(column)} != '' THEN 1 ELSE 0 END)"
+        ident = _col(src, column)
+        return f"SUM(CASE WHEN {ident} IS NOT NULL AND {ident} != '' THEN 1 ELSE 0 END)"
     if not column:
         raise ValueError(f"{AGGREGATIONS[agg][0]} needs a column")
+    ident = _col(src, column)
     if agg == "count_distinct":
-        return f"COUNT(DISTINCT {q(column)})"
+        # Blank is the absence of a value, not one more distinct value — the
+        # same call Count makes two lines up. Counting '' as a category makes
+        # "Distinct count of User" exceed "Count of User" on a column with
+        # any padding in it, which reads as a bug because it is one.
+        return f"COUNT(DISTINCT CASE WHEN {ident} IS NOT NULL AND {ident} != '' THEN {ident} END)"
     if agg in ("min", "max") and coltypes.get(column) != "number":
-        return f"{agg.upper()}({q(column)})"
-    return f"{agg.upper()}({_numeric(column)})"
+        return f"{agg.upper()}({ident})"
+    return f"{agg.upper()}({_numeric(src, column)})"
 
 
-def _where(filters, coltypes):
+def _esc_like(value):
+    """`_` and `%` are LIKE wildcards. An analyst typing `SRV_1` into a
+    contains filter means the literal underscore — without this, it also
+    matches SRVX1, which is the kind of wrong that looks like a wider search
+    rather than a bug. Same helper Winnow's own contains/starts filters use.
+    """
+    return str(value).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _where(src, filters, coltypes):
     """Compiles the Filters area into a WHERE clause plus its parameters.
 
     Values are bound, never interpolated — the identifiers are the only thing
@@ -169,7 +212,7 @@ def _where(filters, coltypes):
         col, op = f.get("column"), f.get("op", "in")
         if op not in OPERATORS:
             raise ValueError(f"Unknown filter operator {op!r}")
-        ident = q(col)
+        ident = _col(src, col)
         kind = OPERATORS[op][1]
         if kind == "many":
             vals = [v for v in (f.get("values") or [])]
@@ -187,17 +230,18 @@ def _where(filters, coltypes):
             if val in (None, ""):
                 continue
             if op == "contains":
-                clauses.append(f"{ident} LIKE ?"); params.append(f"%{val}%")
+                clauses.append(f"{ident} LIKE ? ESCAPE '\\'"); params.append(f"%{_esc_like(val)}%")
             elif op == "not_contains":
-                clauses.append(f"({ident} NOT LIKE ? OR {ident} IS NULL)"); params.append(f"%{val}%")
+                clauses.append(f"({ident} NOT LIKE ? ESCAPE '\\' OR {ident} IS NULL)")
+                params.append(f"%{_esc_like(val)}%")
             elif op == "starts":
-                clauses.append(f"{ident} LIKE ?"); params.append(f"{val}%")
+                clauses.append(f"{ident} LIKE ? ESCAPE '\\'"); params.append(f"{_esc_like(val)}%")
             else:  # gt / lt — numeric, through the same guarded cast
                 try:
                     number = float(val)
                 except (TypeError, ValueError):
                     raise ValueError(f"{OPERATORS[op][0]} needs a number, got {val!r}")
-                clauses.append(f"{_numeric(col)} {'>' if op == 'gt' else '<'} ?")
+                clauses.append(f"{_numeric(src, col)} {'>' if op == 'gt' else '<'} ?")
                 params.append(number)
         else:
             clauses.append(f"({ident} IS NULL OR {ident} = '')" if op == "empty"
@@ -210,20 +254,25 @@ def _inline(sql, params):
     through SQLite's own ''-doubling for strings, and as plain literals for
     the numbers _where() has already coerced with float().
 
-    Skipping over string literals is the load-bearing part, and it is not
-    theoretical: the numeric guard embeds NUM_RE's pattern, which contains
-    two `?` of its own. A naive scan reads those as placeholders and either
-    runs off the end of the parameter list or — worse — silently shifts
-    every subsequent value into the wrong slot. Winnow's own
-    _inline_sql_params walks literals for exactly the same reason."""
+    Skipping over quoted spans is the load-bearing part, and neither kind is
+    theoretical. Single quotes: the numeric guard embeds NUM_RE's pattern,
+    which contains two `?` of its own. Double quotes: a column name is CSV
+    header text, and `Elevated?` is a perfectly ordinary header — q() quotes
+    it, and a scan that doesn't know that reads the `?` inside the
+    identifier as a placeholder. Either way a naive scan runs off the end of
+    the parameter list or, worse, silently shifts every later value into the
+    wrong slot. Winnow's own _inline_sql_params walks literals for the same
+    reason."""
     out, i, k, n = [], 0, 0, len(sql)
     while i < n:
         ch = sql[i]
-        if ch == "'":
+        if ch in ("'", '"'):
+            # Both quoting styles double the quote to escape it, so one scan
+            # handles a string literal and a quoted identifier alike.
             j = i + 1
             while j < n:
-                if sql[j] == "'":
-                    if j + 1 < n and sql[j + 1] == "'":   # '' is an escaped quote, not the end
+                if sql[j] == ch:
+                    if j + 1 < n and sql[j + 1] == ch:
                         j += 2
                         continue
                     break
@@ -277,7 +326,7 @@ def aggregate(req):
     for m in measures:
         if m.get("column"):
             _check_columns(src, [m["column"]])
-    agg_sql = [_agg_expr(m, coltypes) for m in measures]
+    agg_sql = [_agg_expr(src, m, coltypes) for m in measures]
 
     group_sets = body.get("group_sets")
     if not isinstance(group_sets, list) or not group_sets:
@@ -291,14 +340,14 @@ def aggregate(req):
 
     for f in body.get("filters") or []:
         _check_columns(src, [f.get("column")])
-    where, params = _where(body.get("filters"), coltypes)
-    table = q(src["table_name"])
+    where, params = _where(src, body.get("filters"), coltypes)
+    frm = _from_clause(src)
 
     out = []
     for keys in group_sets:
-        key_sql = ", ".join(q(k) for k in keys)
+        key_sql = ", ".join(_col(src, k) for k in keys)
         select = ", ".join(([key_sql] if keys else []) + agg_sql)
-        sql = f"SELECT {select} FROM {table}{where}"
+        sql = f"SELECT {select} FROM {frm}{where}"
         if keys:
             sql += f" GROUP BY {', '.join(str(i + 1) for i in range(len(keys)))}"
         res = req.store.run_sql(_inline(sql, params), limit=MAX_GROUPS)
@@ -314,7 +363,7 @@ def values(req):
     column = body.get("column")
     _check_columns(src, [column])
     limit = min(int(body.get("limit") or 500), 5000)
-    sql = (f"SELECT {q(column)} AS value, COUNT(*) AS n FROM {q(src['table_name'])}"
+    sql = (f"SELECT {_col(src, column)} AS value, COUNT(*) AS n FROM {_from_clause(src)}"
            f" GROUP BY 1 ORDER BY n DESC")
     res = req.store.run_sql(sql, limit=limit)
     return {"values": [{"value": r[0], "count": r[1]} for r in res["rows"]],
@@ -346,9 +395,12 @@ def detail(req):
         filters.append({"column": pair["column"], "op": "empty"} if value in (None, "")
                        else {"column": pair["column"], "op": "in", "values": [value]})
 
-    where, params = _where(filters, coltypes)
+    where, params = _where(src, filters, coltypes)
     cols = [c["name"] for c in src["columns"]]
-    select = ", ".join(["rid"] + [q(c) for c in cols])
-    sql = f"SELECT {select} FROM {q(src['table_name'])}{where} ORDER BY rid"
+    # s.rid, not a bare rid: with the sidecar joined, an unqualified rid is
+    # ambiguous. Derived columns come from `d`, which is also why they show
+    # their real values here rather than their own name repeated.
+    select = ", ".join(["s.rid"] + [_col(src, c) for c in cols])
+    sql = f"SELECT {select} FROM {_from_clause(src)}{where} ORDER BY s.rid"
     res = req.store.run_sql(_inline(sql, params), limit=MAX_DETAIL_ROWS)
     return {"columns": ["Line"] + cols, "rows": res["rows"], "truncated": res["truncated"]}

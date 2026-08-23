@@ -47,6 +47,16 @@ Values would tell you nothing. Sum, Average and numeric Min/Max go through
 the same guarded cast the rest of Winnow uses, so a stray `N/A` in a numeric
 column becomes NULL and drops out, instead of being counted as a real zero.
 
+## Derived columns
+
+Columns you added yourself (`Add datetime column from this…`) work
+everywhere the file's own columns do — rows, columns, values, filters and
+the drill-down. They live in the `drv_<id>` sidecar rather than `src_<id>`,
+so the queries join it and qualify every reference. Naming one without that
+join doesn't fail: SQLite's double-quoted-string fallback turns `"Day"` into
+the *string* `'Day'`, and the pivot quietly reports one group named after
+the column.
+
 ## Limits
 
 | | |

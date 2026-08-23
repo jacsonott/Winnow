@@ -1177,3 +1177,109 @@ def test_pivot_meta_lists_the_vocabulary_the_ui_builds_from(pivot_client):
     assert {a["id"] for a in out["aggregations"]} >= {"count", "count_distinct", "sum", "avg", "min", "max"}
     assert {o["id"] for o in out["operators"]} >= {"in", "not_in", "empty", "contains"}
     assert out["limits"]["group_sets"] >= 4
+
+
+def test_pivot_groups_by_a_derived_column(client, store, write_csv, example_registry, monkeypatch):
+    """Derived columns are merged into src["columns"] but materialised in the
+    `drv_<id>` sidecar, so SQL that names one has to join it. Without the
+    join, SQLite's double-quoted-string fallback turns `"Day"` into the
+    literal 'Day' and every row lands in one group named after the column —
+    a wrong answer that looks like a real one."""
+    import server
+
+    monkeypatch.setattr(server, "PLUGINS", example_registry)
+    rows = [["Host", "Epoch"],
+            ["SRV1", "1700000000"],   # 2023-11-14
+            ["SRV1", "1700086400"],   # 2023-11-15
+            ["SRV2", "1700000050"]]
+    sid = store.ingest_csv(write_csv(rows, "drv.csv"), name="drv", build_fts=False)["id"]
+    res = store.add_derived_column(sid, "When", "Epoch", "unix_epoch", {})
+    store.wait_for_ingest_job(res["job_id"], timeout=30)
+
+    out = _agg(client, sid, values=[{"agg": "count"}], group_sets=[["When"]])
+    days = sorted(r[0][:10] for r in out["sets"][0]["rows"])
+    assert days == ["2023-11-14", "2023-11-14", "2023-11-15"], days
+
+    # and as a measure, and as a filter
+    out = _agg(client, sid, values=[{"agg": "count_distinct", "column": "When"}],
+               group_sets=[["Host"]],
+               filters=[{"column": "When", "op": "not_empty"}])
+    assert dict((r[0], r[1]) for r in out["sets"][0]["rows"]) == {"SRV1": 2, "SRV2": 1}
+
+
+def test_pivot_detail_shows_derived_values_not_the_column_name(client, store, write_csv,
+                                                               example_registry, monkeypatch):
+    """The drill-down selects every column the source reports, which includes
+    the derived ones — from the sidecar, or each row shows the string 'When'
+    where its timestamp should be."""
+    import server
+
+    monkeypatch.setattr(server, "PLUGINS", example_registry)
+    sid = store.ingest_csv(write_csv([["Host", "Epoch"], ["SRV1", "1700000000"]], "drv2.csv"),
+                           name="drv2", build_fts=False)["id"]
+    res = store.add_derived_column(sid, "When", "Epoch", "unix_epoch", {})
+    store.wait_for_ingest_job(res["job_id"], timeout=30)
+
+    r = client.post("/api/plugin/pivot/detail", json={
+        "source_id": sid, "cell": [{"column": "Host", "value": "SRV1"}]})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    when = out["rows"][0][out["columns"].index("When")]
+    assert when.startswith("2023-11-14"), when
+
+
+def test_pivot_handles_a_question_mark_in_a_column_name(client, store, write_csv,
+                                                        example_registry, monkeypatch):
+    """`Elevated?` is an ordinary CSV header, and q() quotes it into the SQL
+    text — where a parameter inliner that only skips *string* literals reads
+    the `?` as a placeholder and shifts every bound value one slot along."""
+    import server
+
+    monkeypatch.setattr(server, "PLUGINS", example_registry)
+    rows = [["Host", "Elevated?", "Bytes"],
+            ["SRV1", "yes", "10"],
+            ["SRV1", "no", "20"],
+            ["SRV2", "yes", "30"]]
+    sid = store.ingest_csv(write_csv(rows, "qm.csv"), name="qm", build_fts=False)["id"]
+
+    out = _agg(client, sid, values=[{"agg": "sum", "column": "Bytes"}],
+               group_sets=[["Elevated?"]],
+               filters=[{"column": "Host", "op": "in", "values": ["SRV1"]}])
+    assert dict((r[0], r[1]) for r in out["sets"][0]["rows"]) == {"yes": 10, "no": 20}
+
+    r = client.post("/api/plugin/pivot/detail", json={
+        "source_id": sid, "cell": [{"column": "Elevated?", "value": "yes"}]})
+    assert r.status_code == 200, r.text
+    assert len(r.json()["rows"]) == 2
+
+
+def test_pivot_like_filters_escape_their_own_wildcards(client, store, write_csv,
+                                                       example_registry, monkeypatch):
+    """`_` and `%` are LIKE wildcards; an analyst typing SRV_1 means the
+    underscore. Matching SRVX1 too is a silently wider search."""
+    import server
+
+    monkeypatch.setattr(server, "PLUGINS", example_registry)
+    rows = [["Host"], ["SRV_1"], ["SRVX1"], ["OTHER"]]
+    sid = store.ingest_csv(write_csv(rows, "like.csv"), name="like", build_fts=False)["id"]
+
+    out = _agg(client, sid, values=[{"agg": "count"}], group_sets=[[]],
+               filters=[{"column": "Host", "op": "contains", "value": "SRV_1"}])
+    assert out["sets"][0]["rows"][0][0] == 1
+
+    out = _agg(client, sid, values=[{"agg": "count"}], group_sets=[[]],
+               filters=[{"column": "Host", "op": "starts", "value": "SRV%"}])
+    assert out["sets"][0]["rows"][0][0] == 0
+
+
+def test_pivot_distinct_count_ignores_blanks_like_count_does(pivot_client):
+    """Blank is the absence of a value, not one more distinct value. Counting
+    '' as a category makes Distinct count exceed Count on the same column."""
+    client, source_id = pivot_client
+    out = _agg(client, source_id,
+               values=[{"agg": "count", "column": "Bytes"},
+                       {"agg": "count_distinct", "column": "Bytes"}],
+               group_sets=[[]])
+    present, distinct = out["sets"][0]["rows"][0]
+    assert present == 4                  # 100, 200, N/A, 40
+    assert distinct == 4 and distinct <= present

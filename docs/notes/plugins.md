@@ -95,6 +95,19 @@ see [docs/notes/README.md](README.md) for the whole set.
     placeholders and shifts every bound value one slot along — silently
     wrong rather than loudly broken. Winnow's own `_inline_sql_params`
     walks literals for exactly this reason.
+  - **A derived column is not in `src_<id>`.** It's merged into
+    `src["columns"]` at read time but materialised in the `drv_<id>`
+    sidecar, so plugin SQL that names one has to `LEFT JOIN` it and qualify
+    the reference. The failure mode is silent rather than loud: SQLite's
+    double-quoted-string fallback turns an unknown `"Day"` into the literal
+    `'Day'`, so a `GROUP BY` on it returns one group named after the column
+    instead of an error. Same trap for `run_sql` generally — `_base_cols`
+    exists in store.py for the paths that must *not* see derived columns.
+  - **Anything a plugin inlines into SQL has to skip quoted spans — both
+    kinds.** Single quotes because the numeric guard embeds a regex
+    containing `?`; double quotes because a CSV header can be `Elevated?`
+    and `q()` quotes it straight into the statement. Miss either and bound
+    values shift one slot along, which is wrong rather than broken.
   - **A plugin can't see a view.** `run_sql` opens a read-only connection
     to the *case file*; `v.view_N` lives in the scratch database that only
     the reader pool attaches. Any plugin that wants "what the grid is

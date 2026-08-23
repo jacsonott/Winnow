@@ -445,6 +445,12 @@ export default function mount(container, winnow) {
     return sets;
   }
 
+  /* Monotonic, for the same reason app.js has rebuildSeq: two aggregations
+     can complete out of order, and the slower earlier one would otherwise
+     index its results under a field layout that's no longer on screen —
+     which renders as an empty table with no error. */
+  let querySeq = 0;
+
   async function runQuery() {
     if (state.sourceId == null) return;
     if (!state.values.length && !state.rows.length && !state.cols.length) {
@@ -458,6 +464,7 @@ export default function mount(container, winnow) {
     }
     state.loading = true; state.error = null; render();
     const started = performance.now();
+    const seq = ++querySeq;
     try {
       const res = await post(`${winnow.base}/aggregate`, {
         source_id: state.sourceId,
@@ -465,15 +472,19 @@ export default function mount(container, winnow) {
         group_sets: sets,
         filters: state.filters,
       });
+      if (seq !== querySeq) return;   // a newer request already answered
       state.data = res;
       state.elapsed = Math.round(performance.now() - started);
       indexData(res);
     } catch (e) {
+      if (seq !== querySeq) return;
       state.data = null;
       state.error = e.message;
     } finally {
-      state.loading = false;
-      render();
+      if (seq === querySeq) {
+        state.loading = false;
+        render();
+      }
     }
   }
 
@@ -497,10 +508,16 @@ export default function mount(container, winnow) {
      prefix crossed with a column tuple, or undefined when that combination
      has no rows. */
   function lookup(rowVals, colVals) {
-    const keys = [...state.rows.slice(0, rowVals.length), ...(colVals ? state.cols : [])];
+    // `null` means the row-total column — the grouping set with no column
+    // fields at all. An empty array does NOT mean that: it's the single
+    // column group you get when Columns is empty, which still lives in the
+    // rows+cols set. `[]` is truthy in JS, so conflating them silently
+    // queried the wrong set and made sorting by Total a no-op.
+    const withCols = colVals !== null && colVals !== undefined;
+    const keys = [...state.rows.slice(0, rowVals.length), ...(withCols ? state.cols : [])];
     const set = state.index && state.index.get(JSON.stringify(keys));
     if (!set) return undefined;
-    return set.map.get(JSON.stringify([...rowVals, ...(colVals || [])]));
+    return set.map.get(JSON.stringify([...rowVals, ...(withCols ? colVals : [])]));
   }
 
   /* ------------------------------------------------------ the pivot */
@@ -610,7 +627,7 @@ export default function mount(container, winnow) {
     th.style.cursor = 'pointer';
     th.title = 'Sort rows by this column';
     th.onclick = () => {
-      if (!isSortedBy(mi, colVals)) state.sort = { measure: mi, colVals: colVals || [], dir: -1 };
+      if (!isSortedBy(mi, colVals)) state.sort = { measure: mi, colVals: colVals ?? null, dir: -1 };
       else if (state.sort.dir === -1) state.sort.dir = 1;   // biggest first, then smallest
       else state.sort = null;                               // then back to key order
       render();
@@ -689,7 +706,7 @@ export default function mount(container, winnow) {
   }
 
   const isSortedBy = (mi, colVals) => !!state.sort && state.sort.measure === mi
-    && JSON.stringify(state.sort.colVals) === JSON.stringify(colVals || []);
+    && JSON.stringify(state.sort.colVals ?? null) === JSON.stringify(colVals ?? null);
 
   function emitRows(tbody, node, depth, cols, measures) {
     for (const child of sortChildren(node, measures)) {
