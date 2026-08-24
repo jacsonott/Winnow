@@ -337,7 +337,7 @@ Plugins get three extension points:
   whatever the plugin's UI needs the server to do: query the case, run a
   computation, call an external service.
 
-Three worked examples ship in `examples/plugins/` — install any of them
+Four worked examples ship in `examples/plugins/` — install any of them
 from Settings → Plugins → "Install a plugin folder…", or `cp -r` into
 `plugins/`:
 
@@ -351,6 +351,12 @@ from Settings → Plugins → "Install a plugin folder…", or `cp -r` into
   pairs from any table (4624s, firewall logs, netflow) as a
   force-directed graph: edge width is event count, arrows show
   direction, drag to untangle. Fully offline.
+- **`pivot/`** — Excel's PivotTable over any ingested table: drag
+  fields into Rows, Columns, Values and Filters for a cross-tab with
+  subtotals and grand totals, click a cell for the rows behind it, copy
+  or export the result. Distinct counts stay correct at every subtotal
+  level because each level is aggregated from the source rather than
+  summed from the cells above it.
 - **`claude_assistant/`** — a pinned Claude chat tab that sees the
   case's *schema* (never row data) and writes ready-to-paste SQL pane
   queries. Needs network + an Anthropic API key, which is exactly why

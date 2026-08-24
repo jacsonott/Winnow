@@ -1019,3 +1019,267 @@ def test_claude_missing_sdk_is_actionable(claude_client, monkeypatch):
 def test_claude_empty_question_rejected(claude_client):
     r = claude_client.post("/api/plugin/claude_assistant/ask", json={"question": "   "})
     assert r.status_code == 400
+
+
+# ============================================================ pivot plugin
+
+PIVOT_ROWS = [
+    ["Host", "User", "Channel", "Bytes"],
+    ["SRV1", "alice", "Security", "100"],
+    ["SRV1", "alice", "System", "200"],
+    ["SRV1", "bob", "Security", ""],        # blank — not counted by COUNTA, not summed
+    ["SRV2", "alice", "Security", "N/A"],   # junk — must not aggregate as 0.0
+    ["SRV2", "carol", "System", "40"],
+]
+
+
+@pytest.fixture
+def pivot_client(client, store, write_csv, example_registry, monkeypatch):
+    import server
+
+    monkeypatch.setattr(server, "PLUGINS", example_registry)
+    rec = store.ingest_csv(write_csv(PIVOT_ROWS, "pivot.csv"), name="pivot")
+    return client, rec["id"]
+
+
+def _agg(client, source_id, **body):
+    r = client.post("/api/plugin/pivot/aggregate", json={"source_id": source_id, **body})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_pivot_distinct_count_is_right_at_every_level(pivot_client):
+    """The reason subtotals are queried per level instead of summed from the
+    cells above them: alice appears under both hosts, so adding the per-host
+    distinct counts (1 + 1 + 1) would report 3 distinct users where there are
+    3 — but the *Security* column has alice twice and bob once, and summing
+    its children would say 3 where the answer is 2."""
+    client, source_id = pivot_client
+    out = _agg(client, source_id,
+               values=[{"agg": "count_distinct", "column": "User"}],
+               group_sets=[["Host"], ["Channel"], []])
+    per_host = dict((r[0], r[1]) for r in out["sets"][0]["rows"])
+    per_channel = dict((r[0], r[1]) for r in out["sets"][1]["rows"])
+    assert per_host == {"SRV1": 2, "SRV2": 2}          # alice+bob, alice+carol
+    assert per_channel == {"Security": 2, "System": 2}  # alice+bob, alice+carol
+    assert out["sets"][2]["rows"][0][0] == 3            # alice, bob, carol — not 4
+
+
+def test_pivot_count_counts_non_blank_values_like_excel(pivot_client):
+    """Count with a field behind it is COUNTA: rows that have a value in that
+    field. Bare Count (no field) is the row count. If those two came out the
+    same, putting a specific field in Values would be pointless."""
+    client, source_id = pivot_client
+    out = _agg(client, source_id,
+               values=[{"agg": "count"}, {"agg": "count", "column": "Bytes"}],
+               group_sets=[[]])
+    rows_total, bytes_present = out["sets"][0]["rows"][0]
+    assert rows_total == 5
+    assert bytes_present == 4      # one row's Bytes is blank; "N/A" is still a value
+
+
+def test_pivot_numeric_aggregates_skip_junk_rather_than_zeroing_it(pivot_client):
+    """A bare CAST would read "N/A" as 0.0 and drag the average down; the
+    guarded cast makes it NULL, which drops out of both SUM and AVG."""
+    client, source_id = pivot_client
+    out = _agg(client, source_id,
+               values=[{"agg": "sum", "column": "Bytes"}, {"agg": "avg", "column": "Bytes"}],
+               group_sets=[[]])
+    total, mean = out["sets"][0]["rows"][0]
+    assert total == 340                      # 100 + 200 + 40
+    assert mean == pytest.approx(340 / 3)    # three numeric values, not five rows
+
+
+def test_pivot_filters_compile_and_survive_the_regex_in_the_numeric_guard(pivot_client):
+    """A Sum plus a filter is the shape that broke first: the numeric guard
+    embeds a regex containing `?`, and the parameter inliner used to read
+    those as placeholders and shift every bound value one slot along."""
+    client, source_id = pivot_client
+    out = _agg(client, source_id,
+               values=[{"agg": "sum", "column": "Bytes"}, {"agg": "count"}],
+               group_sets=[[]],
+               filters=[{"column": "Host", "op": "in", "values": ["SRV1"]}])
+    total, n = out["sets"][0]["rows"][0]
+    assert (total, n) == (300, 3)
+
+
+def test_pivot_not_in_keeps_rows_with_no_value(pivot_client):
+    """`NOT IN` never matches NULL, so excluding one value would silently
+    drop every blank cell too if the clause didn't say otherwise."""
+    client, source_id = pivot_client
+    out = _agg(client, source_id, values=[{"agg": "count"}], group_sets=[[]],
+               filters=[{"column": "Bytes", "op": "not_in", "values": ["100"]}])
+    assert out["sets"][0]["rows"][0][0] == 4
+
+
+def test_pivot_empty_filter_selection_filters_nothing(pivot_client):
+    """An untouched filter field is Excel's "(All)", not "nothing"."""
+    client, source_id = pivot_client
+    out = _agg(client, source_id, values=[{"agg": "count"}], group_sets=[[]],
+               filters=[{"column": "Host", "op": "in", "values": []}])
+    assert out["sets"][0]["rows"][0][0] == 5
+
+
+def test_pivot_detail_returns_the_rows_behind_a_cell(pivot_client):
+    client, source_id = pivot_client
+    r = client.post("/api/plugin/pivot/detail", json={
+        "source_id": source_id,
+        "cell": [{"column": "Host", "value": "SRV1"}, {"column": "Channel", "value": "Security"}],
+    })
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["columns"][0] == "Line"
+    assert [row[1:3] for row in out["rows"]] == [["SRV1", "alice"], ["SRV1", "bob"]]
+
+
+def test_pivot_detail_on_a_blank_cell_means_blank_not_empty_string(pivot_client):
+    """A cell keyed on (blank) has to find the rows with no value there —
+    which in an ingested table can be '' or NULL depending on how the row
+    was padded."""
+    client, source_id = pivot_client
+    r = client.post("/api/plugin/pivot/detail", json={
+        "source_id": source_id, "cell": [{"column": "Bytes", "value": ""}],
+    })
+    assert r.status_code == 200, r.text
+    assert [row[1:3] for row in r.json()["rows"]] == [["SRV1", "bob"]]
+
+
+# `source_id` is filled in from the fixture unless the case is about it
+# being wrong, which is what the third element says.
+@pytest.mark.parametrize("body, fragment, own_source_id", [
+    ({"values": [{"agg": "count"}], "group_sets": [[]], "source_id": -1}, "merge", True),
+    ({"values": [{"agg": "count"}], "group_sets": [[]]}, "source_id", True),
+    ({"values": [{"agg": "count"}], "group_sets": [[]], "source_id": 999}, "No source", True),
+    ({"values": [{"agg": "count"}], "group_sets": [["Nope"]]}, "No column", False),
+    ({"values": [{"agg": "nope", "column": "Host"}], "group_sets": [[]]}, "Unknown aggregation", False),
+    ({"values": [{"agg": "sum"}], "group_sets": [[]]}, "needs a column", False),
+    ({"values": [{"agg": "count"}], "group_sets": [["Host"]] * 40}, "Too many", False),
+    ({"values": [{"agg": "count"}], "group_sets": []}, "group_sets is required", False),
+    ({"values": [{"agg": "count"}], "group_sets": [[]],
+      "filters": [{"column": "Host", "op": "wat", "values": ["x"]}]}, "Unknown filter operator", False),
+    ({"values": [{"agg": "count"}], "group_sets": [[]],
+      "filters": [{"column": "Bytes", "op": "gt", "value": "abc"}]}, "needs a number", False),
+])
+def test_pivot_validation_rejects_bad_requests(pivot_client, body, fragment, own_source_id):
+    """Everything the analyst can cause is a 400 with a message they can act
+    on; nothing reaches SQL that wasn't checked against the real column list."""
+    client, source_id = pivot_client
+    if not own_source_id:
+        body = dict(body, source_id=source_id)
+    r = client.post("/api/plugin/pivot/aggregate", json=body)
+    assert r.status_code == 400, r.text
+    assert fragment.lower() in r.json()["detail"].lower()
+
+
+def test_pivot_meta_lists_the_vocabulary_the_ui_builds_from(pivot_client):
+    client, _ = pivot_client
+    out = client.get("/api/plugin/pivot/meta").json()
+    assert {a["id"] for a in out["aggregations"]} >= {"count", "count_distinct", "sum", "avg", "min", "max"}
+    assert {o["id"] for o in out["operators"]} >= {"in", "not_in", "empty", "contains"}
+    assert out["limits"]["group_sets"] >= 4
+
+
+def test_pivot_groups_by_a_derived_column(client, store, write_csv, example_registry, monkeypatch):
+    """Derived columns are merged into src["columns"] but materialised in the
+    `drv_<id>` sidecar, so SQL that names one has to join it. Without the
+    join, SQLite's double-quoted-string fallback turns `"Day"` into the
+    literal 'Day' and every row lands in one group named after the column —
+    a wrong answer that looks like a real one."""
+    import server
+
+    monkeypatch.setattr(server, "PLUGINS", example_registry)
+    rows = [["Host", "Epoch"],
+            ["SRV1", "1700000000"],   # 2023-11-14
+            ["SRV1", "1700086400"],   # 2023-11-15
+            ["SRV2", "1700000050"]]
+    sid = store.ingest_csv(write_csv(rows, "drv.csv"), name="drv", build_fts=False)["id"]
+    res = store.add_derived_column(sid, "When", "Epoch", "unix_epoch", {})
+    store.wait_for_ingest_job(res["job_id"], timeout=30)
+
+    out = _agg(client, sid, values=[{"agg": "count"}], group_sets=[["When"]])
+    days = sorted(r[0][:10] for r in out["sets"][0]["rows"])
+    assert days == ["2023-11-14", "2023-11-14", "2023-11-15"], days
+
+    # and as a measure, and as a filter
+    out = _agg(client, sid, values=[{"agg": "count_distinct", "column": "When"}],
+               group_sets=[["Host"]],
+               filters=[{"column": "When", "op": "not_empty"}])
+    assert dict((r[0], r[1]) for r in out["sets"][0]["rows"]) == {"SRV1": 2, "SRV2": 1}
+
+
+def test_pivot_detail_shows_derived_values_not_the_column_name(client, store, write_csv,
+                                                               example_registry, monkeypatch):
+    """The drill-down selects every column the source reports, which includes
+    the derived ones — from the sidecar, or each row shows the string 'When'
+    where its timestamp should be."""
+    import server
+
+    monkeypatch.setattr(server, "PLUGINS", example_registry)
+    sid = store.ingest_csv(write_csv([["Host", "Epoch"], ["SRV1", "1700000000"]], "drv2.csv"),
+                           name="drv2", build_fts=False)["id"]
+    res = store.add_derived_column(sid, "When", "Epoch", "unix_epoch", {})
+    store.wait_for_ingest_job(res["job_id"], timeout=30)
+
+    r = client.post("/api/plugin/pivot/detail", json={
+        "source_id": sid, "cell": [{"column": "Host", "value": "SRV1"}]})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    when = out["rows"][0][out["columns"].index("When")]
+    assert when.startswith("2023-11-14"), when
+
+
+def test_pivot_handles_a_question_mark_in_a_column_name(client, store, write_csv,
+                                                        example_registry, monkeypatch):
+    """`Elevated?` is an ordinary CSV header, and q() quotes it into the SQL
+    text — where a parameter inliner that only skips *string* literals reads
+    the `?` as a placeholder and shifts every bound value one slot along."""
+    import server
+
+    monkeypatch.setattr(server, "PLUGINS", example_registry)
+    rows = [["Host", "Elevated?", "Bytes"],
+            ["SRV1", "yes", "10"],
+            ["SRV1", "no", "20"],
+            ["SRV2", "yes", "30"]]
+    sid = store.ingest_csv(write_csv(rows, "qm.csv"), name="qm", build_fts=False)["id"]
+
+    out = _agg(client, sid, values=[{"agg": "sum", "column": "Bytes"}],
+               group_sets=[["Elevated?"]],
+               filters=[{"column": "Host", "op": "in", "values": ["SRV1"]}])
+    assert dict((r[0], r[1]) for r in out["sets"][0]["rows"]) == {"yes": 10, "no": 20}
+
+    r = client.post("/api/plugin/pivot/detail", json={
+        "source_id": sid, "cell": [{"column": "Elevated?", "value": "yes"}]})
+    assert r.status_code == 200, r.text
+    assert len(r.json()["rows"]) == 2
+
+
+def test_pivot_like_filters_escape_their_own_wildcards(client, store, write_csv,
+                                                       example_registry, monkeypatch):
+    """`_` and `%` are LIKE wildcards; an analyst typing SRV_1 means the
+    underscore. Matching SRVX1 too is a silently wider search."""
+    import server
+
+    monkeypatch.setattr(server, "PLUGINS", example_registry)
+    rows = [["Host"], ["SRV_1"], ["SRVX1"], ["OTHER"]]
+    sid = store.ingest_csv(write_csv(rows, "like.csv"), name="like", build_fts=False)["id"]
+
+    out = _agg(client, sid, values=[{"agg": "count"}], group_sets=[[]],
+               filters=[{"column": "Host", "op": "contains", "value": "SRV_1"}])
+    assert out["sets"][0]["rows"][0][0] == 1
+
+    out = _agg(client, sid, values=[{"agg": "count"}], group_sets=[[]],
+               filters=[{"column": "Host", "op": "starts", "value": "SRV%"}])
+    assert out["sets"][0]["rows"][0][0] == 0
+
+
+def test_pivot_distinct_count_ignores_blanks_like_count_does(pivot_client):
+    """Blank is the absence of a value, not one more distinct value. Counting
+    '' as a category makes Distinct count exceed Count on the same column."""
+    client, source_id = pivot_client
+    out = _agg(client, source_id,
+               values=[{"agg": "count", "column": "Bytes"},
+                       {"agg": "count_distinct", "column": "Bytes"}],
+               group_sets=[[]])
+    present, distinct = out["sets"][0]["rows"][0]
+    assert present == 4                  # 100, 200, N/A, 40
+    assert distinct == 4 and distinct <= present
