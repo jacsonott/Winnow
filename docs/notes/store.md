@@ -109,7 +109,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   should go through this helper, not a raw CAST.
 - Grouping (`group_summary`) buckets a `datetime` column by calendar day via
   a registered SQL function, `DAY_BUCKET(x)` (Python `_day_bucket`, same
-  ISO/US shapes `DATE_RE` and app.js's `parseTimestamp` already recognize) —
+  ISO/US shapes `DATE_RE` and `tsformat.js`'s `parseTimestamp` already recognize) —
   otherwise grouping by a full timestamp puts nearly every row in its own
   group of one. Everywhere a group's *value* gets compared back against raw
   rows (`expand_group`, `_virtual_group_where`, and therefore tag/export on
@@ -134,7 +134,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   display one.
 - **Grouping by tag** is a pseudo-column, `TAG_GROUP_COLUMN` (`"__tag__"`),
   carried through every grouping path as an ordinary column name so nothing
-  between app.js and `group_summary` needs a second notion of what a level
+  between the frontend and `group_summary` needs a second notion of what a level
   is. It's in `RESERVED_COLUMN_NAMES`, so a CSV with a literal `__tag__`
   header gets renamed at ingest and the sentinel can never be ambiguous.
   Three things about it are decisions:
@@ -146,7 +146,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   - **A group's value is a tag *id*, not its name.** `tag_defs` has no
     unique constraint on `name`, so grouping by name would silently merge
     two tags an analyst deliberately kept apart. `groupValueLabel()` in
-    app.js renders the name from `S.tags`; the untagged group's value is
+    the frontend renders the name from `S.tags`; the untagged group's value is
     `NULL`.
   - **The join order is pinned, and that's load-bearing.** `v.view_N` is
     indexed on `pos` and nothing else, so reaching a view row by `rid` is a
@@ -289,7 +289,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   *after* the new INSERT, inside the same transaction** — a cancelled
   build rolls back to a world where the old view still exists, which is
   why the frontend can keep its rows on a 499 instead of 409-rebuilding.
-  server.py maps `OpCancelled` → HTTP 499 in one exception handler; app.js
+  server.py maps `OpCancelled` → HTTP 499 in one exception handler; the frontend
   arms a cancel chip (`armOpCancel`) only after ~1.2s in flight, so fast
   rebuilds never flash it.
 - **The 2026-08 hot-path perf pass** (validated with `python3 -m bench
@@ -345,7 +345,7 @@ see [docs/notes/README.md](README.md) for the whole set.
     another source went from **1 completed call (455ms — blocked for the
     build's whole duration)** to **638 calls at 0.84ms mean**, which is
     the idle baseline. An earlier per-call-connection prototype measured
-    1.61ms here; pooling (`READER_POOL_CAP` = app.js's
+    1.61ms here; pooling (`READER_POOL_CAP` = the frontend's
     `PAGE_FETCH_CONCURRENCY`) recovered the difference.
   - `bench --vs-ref main`: paging unchanged, `grouping/summary.*` and
     `column_values` 10–30% **faster** (their aggregate no longer queues

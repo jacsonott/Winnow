@@ -53,8 +53,8 @@ def test_filter_cells_track_a_resized_column(page):
     """Same pairing, after a width actually changes: the picker button must
     give up space rather than hold the cell open."""
     page.evaluate("""() => {
-      S.layout['Host'] = { ...(S.layout['Host'] || {}), w: 70 };
-      renderHead();
+      __winnow.S.layout['Host'] = { ...(__winnow.S.layout['Host'] || {}), w: 70 };
+      __winnow.renderHead();
     }""")
     host = next(c for c in page.evaluate(MEASURE) if c["col"] == "Host")
     assert host["head"] == 70 and host["filter"] == 70, host
@@ -86,7 +86,7 @@ def test_autofit_respects_the_configured_cap(page):
     exists (rows are `width: max-content`, so one column decides how far every
     other column has to be scrolled)."""
     def fit_with(cap):
-        page.evaluate(f"() => {{ S.appearance.autofitMax = {cap}; saveAppearance(); }}")
+        page.evaluate(f"() => {{ __winnow.S.appearance.autofitMax = {cap}; __winnow.saveAppearance(); }}")
         page.click("#body")
         page.keyboard.press("=")
         page.wait_for_timeout(500)
@@ -105,8 +105,8 @@ def test_autofit_shrinks_an_over_wide_column_back(page):
     difference is mostly slack, so the header claimed to need roughly the
     current width and every fit was a no-op that looked stable."""
     page.evaluate("""() => {
-      S.layout['Host'] = { ...(S.layout['Host'] || {}), w: 600 };
-      renderHead(); render();
+      __winnow.S.layout['Host'] = { ...(__winnow.S.layout['Host'] || {}), w: 600 };
+      __winnow.renderHead(); __winnow.render();
     }""")
     assert next(c for c in page.evaluate(MEASURE) if c["col"] == "Host")["head"] == 600
     page.click("#body")
@@ -140,4 +140,4 @@ def test_resetting_the_keymap_actually_resets_it(page):
     # And the module-level defaults themselves must be unpolluted, which is
     # the actual bug — a reset that only fixes S.keymap would still pass above
     # on the first run and fail after a reload.
-    assert page.evaluate("() => DEFAULT_KEYMAP.moveDown.join(',')") == "ArrowDown,j"
+    assert page.evaluate("() => __winnow.DEFAULT_KEYMAP.moveDown.join(',')") == "ArrowDown,j"
