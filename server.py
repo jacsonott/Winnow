@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import heapq
 import json
 import os
 import shutil
@@ -435,8 +436,25 @@ def api_case_compact():
         raise HTTPException(400, str(e))  # not enough free disk
 
 
+# Entries per list (dirs and files each) in browse_dir's files mode. A
+# named constant returned in the response ("limit"), so the frontend renders
+# the number it was actually given instead of hardcoding a copy that lies
+# the day this changes. Same pattern as store.MAX_SCAN_RESULTS.
+BROWSE_LIST_CAP = 2000
+
+
+def _is_loopback(request: Request) -> bool:
+    """Whether the TCP peer is this machine. request.client comes from the
+    socket's peer address (uvicorn), never from anything the client sends,
+    so it can't be header-spoofed. "testclient" is Starlette's TestClient
+    peer name — never a real IP, so allowing it can't admit a network
+    peer."""
+    host = request.client.host if request.client else ""
+    return host in ("127.0.0.1", "::1", "testclient")
+
+
 @app.get("/api/browse_dir")
-def api_browse_dir(path: str = "", files: bool = False):
+def api_browse_dir(request: Request, path: str = "", files: bool = False):
     """One directory level — backs the "Browse..." folder picker in the
     new-case modal and, with files=true, the import modal's "Add from this
     machine…" file picker (the fast path: a picked path imports in place
@@ -450,33 +468,60 @@ def api_browse_dir(path: str = "", files: bool = False):
     a cross-origin page can still fire the request, it just can't read the
     response (no CORS headers on it), same as every other GET here.
 
-    Files come back with sizes, unfiltered by extension: what's importable
-    is the frontend's call (its extension lists + loaded plugin formats,
-    which this route can't know), and a listing that silently hides files
-    reads as "my file is missing", not "my file is filtered". Capped —
-    a listing is for picking, not for enumerating a million-entry dir."""
+    files=true is loopback-only. Folder listing has always answered any
+    peer the analyst chose to bind (--host 0.0.0.0 is on them, per the
+    no-auth model), but a disk-wide filename+size enumeration is a bigger
+    gift to a LAN scanner than a dir-name listing, and gating it costs a
+    same-machine analyst nothing.
+
+    Files come back with sizes and are NOT filtered — not by extension
+    (what's importable is the frontend's call: its extension lists plus
+    loaded plugin formats, which this route can't know) and not by dot
+    prefix (on a mounted *nix image, .bash_history and .ssh/ are exactly
+    the evidence the picker exists to reach; hiding them reads as "my
+    file is missing"). The folder picker keeps its cosmetic dot filter —
+    choosing where a case file goes is not evidence work. Both lists are
+    capped: a listing is for picking, not enumerating a million-entry dir,
+    and the cap bounds the work (heapq over the scandir iterator), not
+    just the payload.
+
+    A path that names a FILE (files mode) answers {"picked": {name, size},
+    "path": <its dir>} instead of 400 — the typed-path box hands its text
+    straight here, and os.path resolving it server-side is what makes a
+    pasted Windows path or a file past the listing cap work at all."""
+    if files and not _is_loopback(request):
+        raise HTTPException(403, "The file picker is available from this machine only")
     base = os.path.abspath(os.path.expanduser(path)) if path else str(Path.home())
+    if files and os.path.isfile(base):
+        st = os.stat(base)
+        return {"path": os.path.dirname(base), "parent": None,
+                "picked": {"name": os.path.basename(base), "size": st.st_size}}
     if not os.path.isdir(base):
         raise HTTPException(400, f"Not a directory: {base}")
+    dirs: list[str] = []
     file_entries: list[dict] = []
     truncated = False
     try:
-        entries = list(os.scandir(base))
-        dirs = sorted(
-            (e.name for e in entries if e.is_dir() and not e.name.startswith(".")),
-            key=str.lower,
-        )
+        with os.scandir(base) as it:
+            all_dirs, all_files = [], []
+            for e in it:
+                if e.is_dir():
+                    # files mode lists dot-dirs too (see docstring); the
+                    # folder picker keeps its cosmetic filter.
+                    if files or not e.name.startswith("."):
+                        all_dirs.append(e.name)
+                elif files and e.is_file():
+                    all_files.append(e)
         if files:
-            all_files = sorted(
-                (e for e in entries if e.is_file() and not e.name.startswith(".")),
-                key=lambda e: e.name.lower(),
-            )
-            truncated = len(all_files) > 2000
-            for e in all_files[:2000]:
+            truncated = len(all_dirs) > BROWSE_LIST_CAP or len(all_files) > BROWSE_LIST_CAP
+            dirs = heapq.nsmallest(BROWSE_LIST_CAP, all_dirs, key=str.lower)
+            for e in heapq.nsmallest(BROWSE_LIST_CAP, all_files, key=lambda e: e.name.lower()):
                 try:
                     file_entries.append({"name": e.name, "size": e.stat().st_size})
                 except OSError:
                     continue
+        else:
+            dirs = sorted(all_dirs, key=str.lower)
     except PermissionError:
         dirs = []
     parent = os.path.dirname(base)
@@ -484,6 +529,7 @@ def api_browse_dir(path: str = "", files: bool = False):
     if files:
         out["files"] = file_entries
         out["truncated"] = truncated
+        out["limit"] = BROWSE_LIST_CAP
     return out
 
 

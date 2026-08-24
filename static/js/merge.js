@@ -87,14 +87,16 @@ export function openMergeBuilder() {
   }, { wide: true });
 }
 
-/* `src` is a queue item's transport: {file: File} for a browser pick, or
+/* `src` is a queue item's transport: {file, name} for a browser pick, or
    {path, name} for one added from the server's own disk — previews and the
-   direct-import button branch on which field is set, never on a guess. */
+   direct-import button branch on which field is set, never on a guess.
+   `name` is always present (queueItem and every direct caller set it), so
+   nothing here reads src.file.name — one contract, one spelling. */
 export function openImportPreview(src, opts = {}) {
   let preview = null;
   let columnTypes = opts.initial && opts.initial.column_types ? opts.initial.column_types.slice() : null;
 
-  modal(`Import: ${src.name || src.file.name}`, (b) => {
+  modal(`Import: ${src.name}`, (b) => {
     const controls = el('div', 'row-actions');
     const delimSel = el('select');
     for (const [label, val] of [['Auto-detect', ''], ['Comma', ','], ['Tab', '\t'], ['Semicolon', ';'], ['Pipe', '|']]) {
@@ -205,7 +207,7 @@ export function openImportPreview(src, opts = {}) {
       // Same background pipeline as the queue: transfer with progress, then
       // an ingest job the corner panel tracks.
       try {
-        await uploadWithProgress('/api/ingest/jobs/upload', fd, src.file.name);
+        await uploadWithProgress('/api/ingest/jobs/upload', fd, src.name);
       } catch (e) {
         if (!e.cancelled) toast('Import failed: ' + e.message, 6000);
       }
@@ -230,7 +232,7 @@ export function openJsonImportPreview(src, opts = {}) {
   let flattenMode = (opts.initial && opts.initial.flatten_mode) || 'none';
   let flattenDepth = (opts.initial && opts.initial.flatten_depth) || 1;
 
-  modal(`Import: ${src.name || src.file.name}`, (b) => {
+  modal(`Import: ${src.name}`, (b) => {
     const controls = el('div', 'row-actions');
     const modeSel = el('select');
     for (const [label, val] of [["Don't flatten", 'none'], ['Flatten completely', 'full'], ['Flatten to depth…', 'depth']]) {
@@ -340,7 +342,7 @@ export function openJsonImportPreview(src, opts = {}) {
       fd.append('flatten_depth', String(flattenDepth));
       // Same background pipeline as the queue.
       try {
-        await uploadWithProgress('/api/ingest/jobs/upload', fd, src.file.name);
+        await uploadWithProgress('/api/ingest/jobs/upload', fd, src.name);
       } catch (e) {
         if (!e.cancelled) toast('Import failed: ' + e.message, 6000);
       }

@@ -267,30 +267,6 @@ def test_sqlite_job_by_path(client, store, tmp_path):
 # --------------------------------------- same-host invisible path recovery
 
 
-def test_browse_dir_lists_files_with_sizes_only_when_asked(client, tmp_path):
-    """The import modal's "Add from this machine…" picker: files come back
-    with sizes and unfiltered by extension — a listing that silently hides
-    files reads as "my file is missing", not "my file is filtered". The
-    folder-picker callers don't ask and don't pay."""
-    # A dir of our own — the autouse isolate_workspace fixture puts a
-    # workspace/ folder directly in tmp_path.
-    root = tmp_path / "browse"
-    root.mkdir()
-    (root / "evidence.csv").write_text("A,B\n1,2\n")
-    (root / "notes.xyz").write_text("x")
-    (root / ".hidden").write_text("x")
-    (root / "sub").mkdir()
-
-    plain = client.get(f"/api/browse_dir?path={root}").json()
-    assert plain["dirs"] == ["sub"] and "files" not in plain
-
-    r = client.get(f"/api/browse_dir?path={root}&files=true").json()
-    assert r["dirs"] == ["sub"]
-    assert {f["name"] for f in r["files"]} == {"evidence.csv", "notes.xyz"}
-    assert next(f for f in r["files"] if f["name"] == "evidence.csv")["size"] == 8
-    assert r["truncated"] is False
-
-
 def test_resolve_local_route_is_gone(client):
     """The fingerprint resolver is deliberately removed — imports are now
     exactly what they look like (a picked path reads in place, an upload

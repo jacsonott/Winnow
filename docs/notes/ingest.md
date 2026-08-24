@@ -99,6 +99,21 @@ see [docs/notes/README.md](README.md) for the whole set.
   mode → `browse_dir?files=true` → `queuePaths`), deliberately listed
   first: browser and server are the same machine here, so the path
   transport is the right default and the upload is the convenience.
+  files=true is loopback-gated (a disk-wide name+size enumeration is a
+  bigger gift to a LAN scanner than the folder listing ever was), lists
+  dot entries on purpose (on a mounted *nix image, `.bash_history` IS the
+  evidence), answers a typed FILE path with a `picked` stat instead of a
+  400 (server-side os.path is what makes pasted Windows paths and
+  files past the listing cap work), and caps both lists at
+  `BROWSE_LIST_CAP`, returned in the response so the truncation notice
+  can't lie. Plugin-format items route per transport: path →
+  `/api/ingest/plugin/path`, browser file → `/api/ingest/plugin/upload`
+  (jobs/upload knows csv/json/sqlite only) — and both are *synchronous*
+  ingests with no job record, so the import loop counts them and calls
+  `loadSources()` after, exactly like the directory-import loop; miss
+  that and a successful plugin import looks like a silent no-op. The
+  queue-item shape itself has one producer, `queueItem()` — per-kind
+  defaults live there and nowhere else.
   Files over `UPLOAD_ADVISORY_BYTES` (1 GB) queued through the browser
   get a toast pointing at the path route — advisory, never a gate.
 

@@ -170,35 +170,19 @@ export function groupOptionsDatalist(id) {
    import modal's "Add from this machine…", i.e. the no-upload transport.
    Both modes take a typed path too (the box at the top): analysts who
    know where the evidence sits shouldn't have to click down to it. */
-export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folder', title } = {}) {
+export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folder' } = {}) {
   const filesMode = mode === 'files';
-  let current = null;
   let listing = null;
   const picked = new Map(); // path -> {path, name, size}, insertion-ordered
-  modal(title || (filesMode ? 'Add files from this machine' : 'Choose a folder'), (b) => {
-    const pathInput = el('input');
-    pathInput.style.cssText = 'width:100%;font-family:var(--mono);background:var(--ink);color:var(--text);'
-      + 'border:1px solid var(--line-2);padding:5px 8px;font-size:12px;margin-bottom:8px';
+  modal(filesMode ? 'Add files from this machine' : 'Choose a folder', (b) => {
+    const pathInput = fieldInput('');
+    pathInput.style.cssText += ';width:100%;font-family:var(--mono);font-size:12px;margin-bottom:8px';
     pathInput.placeholder = filesMode ? 'Type a folder or file path, or browse below' : 'Type a folder path, or browse below';
-    pathInput.onkeydown = async (e) => {
+    pathInput.onkeydown = (e) => {
       if (e.key !== 'Enter') return;
       e.preventDefault();
       const typed = pathInput.value.trim();
-      if (!typed) return;
-      if (filesMode) {
-        // A typed FILE path is a complete answer, not a place to navigate
-        // to. Statting it is the browse call on its parent — which also
-        // catches a typo'd path here, where it can be fixed, instead of at
-        // import time.
-        const name = typed.replace(/\/+$/, '').split('/').pop();
-        const dir = typed.slice(0, typed.length - name.length - 1) || '/';
-        try {
-          const res = await api(`/api/browse_dir?path=${encodeURIComponent(dir)}&files=true`);
-          const hit = (res.files || []).find((f) => f.name === name);
-          if (hit) { onSelect({ dir: res.path, files: [{ path: res.path + '/' + name, name, size: hit.size }] }); return; }
-        } catch { /* not a listable parent — fall through and try it as a folder */ }
-      }
-      load(typed);
+      if (typed) load(typed);
     };
     b.append(pathInput);
     const list = el('div', 'session-list');
@@ -216,8 +200,13 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
       useBtn.textContent = picked.size ? `Add ${picked.size} file${picked.size === 1 ? '' : 's'}` : 'Add selected';
     };
     useBtn.onclick = () => {
-      if (filesMode) onSelect({ dir: current, files: [...picked.values()] });
-      else onSelect(current);
+      if (filesMode) { onSelect({ dir: listing.path, files: [...picked.values()] }); return; }
+      // The path box is editable: typed-but-not-Entered text is the
+      // analyst's most recent statement of intent, so it wins over the
+      // last listing rather than being silently discarded. The caller
+      // validates the path the moment it uses it.
+      const typed = pathInput.value.trim();
+      onSelect(typed && listing && typed !== listing.path ? typed : (listing ? listing.path : typed));
     };
     const cancel = el('button', 'btn ghost', 'Cancel');
     cancel.onclick = () => { if (onCancel) onCancel(); else $('modal').hidden = true; };
@@ -229,32 +218,41 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
       try {
         res = await api(`/api/browse_dir?path=${encodeURIComponent(path || '')}${filesMode ? '&files=true' : ''}`);
       } catch (e) {
-        toast('Could not list that folder: ' + e.message, 4000);
+        toast(filesMode ? 'No folder or file at that path: ' + e.message
+          : 'Could not list that folder: ' + e.message, 4000);
         return;
       }
-      current = res.path;
+      // A typed path that names a FILE comes back as {picked} — the server
+      // resolved it with os.path, which is what makes a pasted Windows path
+      // or a file past the listing cap work. It's a complete answer.
+      if (res.picked) {
+        onSelect({ dir: res.path, files: [{ path: res.path + '/' + res.picked.name, name: res.picked.name, size: res.picked.size }] });
+        return;
+      }
       listing = res;
-      pathInput.value = current;
+      pathInput.value = listing.path;
       paint();
     }
 
     function paint() {
-      list.replaceChildren();
+      // Built off-DOM: up to 2×BROWSE_LIST_CAP rows appended one at a time
+      // into a live scroll container re-layouts on every append.
+      const frag = document.createDocumentFragment();
       if (listing.parent) {
         const up = el('button', 'btn ghost', '.. (up a level)');
         up.style.cssText = 'justify-content:flex-start;text-align:left';
         up.onclick = () => load(listing.parent);
-        list.append(up);
+        frag.append(up);
       }
       for (const d of listing.dirs) {
         const row = el('button', 'btn ghost', '📁 ' + d);
         row.style.cssText = 'justify-content:flex-start;text-align:left;width:100%';
-        row.onclick = () => load(current + '/' + d);
-        list.append(row);
+        row.onclick = () => load(listing.path + '/' + d);
+        frag.append(row);
       }
       if (filesMode) {
         for (const f of listing.files || []) {
-          const path = current + '/' + f.name;
+          const path = listing.path + '/' + f.name;
           const row = el('label', 'session-row row-actions');
           row.style.cssText = 'cursor:pointer';
           const cb = el('input');
@@ -266,20 +264,23 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
             paintStatus();
           };
           row.append(cb, el('span', 'session-name', f.name), el('span', 'count', fmtBytes(f.size)));
-          list.append(row);
+          frag.append(row);
         }
         if (!(listing.files || []).length && !listing.dirs.length) {
-          list.append(el('div', 'note-status', 'Nothing here.'));
+          frag.append(el('div', 'note-status', 'Nothing here.'));
         }
       } else if (!listing.dirs.length) {
-        list.append(el('div', 'note-status', 'No subfolders here.'));
+        frag.append(el('div', 'note-status', 'No subfolders here.'));
       }
+      list.replaceChildren(frag);
       paintStatus();
     }
 
     function paintStatus() {
+      // The number comes from the response, so the message can't lie when
+      // the server's cap changes.
       status.textContent = filesMode && listing && listing.truncated
-        ? 'Showing the first 2,000 files — type a path to reach the rest.' : '';
+        ? `Showing the first ${listing.limit.toLocaleString()} entries — type a full path to reach anything past them.` : '';
       paintUse();
     }
 
@@ -362,7 +363,7 @@ export function openNewCaseModal(state = {}) {
       }
       $('modal').hidden = true;
       await openCase(path); // shared with the home screen's "open" flow — same brand-label/view-cache handling
-      if (csvFile) openImportPreview(csvFile);
+      if (csvFile) openImportPreview({ file: csvFile, name: csvFile.name });
     };
     const cancel = el('button', 'btn ghost', 'Cancel');
     cancel.onclick = () => { $('modal').hidden = true; };

