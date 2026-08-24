@@ -49,14 +49,14 @@ def test_row_menu_scope_follows_the_selection(page):
 
 
 def test_row_menu_filters_by_the_clicked_cell(page):
-    host_index = page.evaluate("() => visibleCols().indexOf('Host')")
+    host_index = page.evaluate("() => __winnow.visibleCols().indexOf('Host')")
     value = page.locator(".row").first.locator(".cell").nth(host_index).inner_text()
     page.locator(".row").first.locator(".cell").nth(host_index).click(button="right")
     page.wait_for_selector(".menu")
     page.click(f".menu .menu-item:has-text('Filter to {value}')")
     page.wait_for_timeout(800)
     assert page.locator('.fcell input[data-col="Host"]').input_value() == f"={value}"
-    assert page.evaluate("() => S.view.row_count") < 200
+    assert page.evaluate("() => __winnow.S.view.row_count") < 200
 
 
 def test_column_header_right_click_opens_column_options(page):
@@ -86,7 +86,7 @@ def test_value_picker_writes_a_filter_the_grid_applies(page):
     page.wait_for_timeout(900)
     raw = page.locator('.fcell input[data-col="EventId"]').input_value()
     assert "|" in raw, f"two ticked values should become an any-of filter, got {raw!r}"
-    assert page.evaluate("() => S.view.row_count") == 100  # two of four, 50 rows each
+    assert page.evaluate("() => __winnow.S.view.row_count") == 100  # two of four, 50 rows each
 
     # Ticking everything back is the same statement as no filter, and says so
     # rather than writing a filter listing every value in the column.
@@ -96,7 +96,7 @@ def test_value_picker_writes_a_filter_the_grid_applies(page):
     page.click(".vp-actions .btn:has-text('Apply')")
     page.wait_for_timeout(900)
     assert page.locator('.fcell input[data-col="EventId"]').input_value() == ""
-    assert page.evaluate("() => S.view.row_count") == 200
+    assert page.evaluate("() => __winnow.S.view.row_count") == 200
 
 
 def test_value_picker_routes_unspellable_values_to_the_filter_tree(page):
@@ -108,10 +108,10 @@ def test_value_picker_routes_unspellable_values_to_the_filter_tree(page):
     # what's under test is what the picker does with a selection it can't
     # spell, not whether this fixture happens to contain a pipe.
     applied = page.evaluate("""async () => {
-      await applyValueSelection('Host', ['H1|x', 'H2'], { clearInstead: false });
+      await __winnow.applyValueSelection('Host', ['H1|x', 'H2'], { clearInstead: false });
       return {
-        box: S.filters['Host'] || '',
-        tree: JSON.stringify(S.filterTree),
+        box: __winnow.S.filters['Host'] || '',
+        tree: JSON.stringify(__winnow.S.filterTree),
         marked: !!document.querySelector('.fcell-pick[data-col="Host"].active'),
       };
     }""")

@@ -3,8 +3,12 @@
 # pytest — which, on a repo where changes arrive as whole features, is a lot
 # to leave to memory.
 #
+# Renaming a job here is not cosmetic: the branch ruleset requires these
+# checks *by job name*, so a rename that isn't mirrored there leaves every PR
+# waiting forever on a check that never reports. Change both together.
+#
 # Two jobs, because they fail for different reasons and cost different
-# amounts: `tests` is the fast one (backend + the app.js parse, ~30s, no
+# amounts: `tests` is the fast one (backend + the static/js parse, ~30s, no
 # browser), `ui` drives a real Chromium and is where the layout/state
 # regressions get caught. Both are required; keep the UI suite deterministic
 # rather than letting it become the check people re-run until it's green.
@@ -23,7 +27,7 @@ concurrency:
 
 jobs:
   tests:
-    name: backend + app.js parse
+    name: backend + frontend parse
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

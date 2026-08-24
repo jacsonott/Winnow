@@ -1,53 +1,77 @@
-"""Parse `static/app.js` and reject a syntax error.
+"""Parse every frontend module, and prove each one imports what it uses.
 
 The frontend has no build step — nothing between an editor and the browser —
-so an unbalanced brace or a broken arrow body in an 11,000-line file ships as
-a blank page, and the backend suite passes the whole way. This is the cheapest
-possible guard against that: not a linter, not a type checker, just "does it
-parse".
+so an unbalanced brace, or a function moved to another module without an
+import to match, ships as a blank page with the whole backend suite green.
 
-`esprima` (the pure-Python port) is ES2017, so the three newer syntaxes this
-codebase uses have to be rewritten to older equivalents before parsing. That
-rewrite is deliberately dumb — it runs over the whole file, including string
-literals — because its output is thrown away and only the parse result is
-kept. Adding a syntax esprima doesn't know (optional catch binding aside)
-means adding a line here.
+Two checks, both mechanical over the whole of `static/js/`:
+
+- **it parses.** Cheapest possible guard against a typo in 11,000 lines.
+- **every identifier resolves.** For each module, the identifiers it uses but
+  doesn't define must all be either imported or a browser global (see
+  `jsscope.BROWSER_GLOBALS`). This is what makes the single-file-to-modules
+  split verifiable rather than hopeful: a missing import is otherwise a
+  ReferenceError on whichever code path happens to touch it, which may be an
+  error branch nobody runs for months.
+
+`esprima` (the pure-Python port) is ES2017, so `jsscope` rewrites the three
+newer syntaxes this codebase uses before parsing. Adding a fourth means
+adding a line to its rewrite table.
 """
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pytest
 
-esprima = pytest.importorskip("esprima", reason="pip install -r requirements-dev.txt")
+pytest.importorskip("esprima", reason="pip install -r requirements-dev.txt")
 
-APP_JS = Path(__file__).resolve().parent.parent / "static" / "app.js"
+from jsscope import BROWSER_GLOBALS, free_identifiers, parse  # noqa: E402
 
-# (pattern, replacement, what it is) — each one is syntax the browser has had
-# for years and esprima has not.
-ES2017_REWRITES = [
-    (re.compile(r"catch\s*\{"), "catch (e) {", "optional catch binding"),
-    (re.compile(r"\?\?"), "||", "nullish coalescing"),
-    (re.compile(r"\?\."), ".", "optional chaining"),
-]
+JS_DIR = Path(__file__).resolve().parent.parent / "static" / "js"
+MODULES = sorted(JS_DIR.glob("*.js"))
 
 
-def test_app_js_parses():
-    src = APP_JS.read_text(encoding="utf-8")
-    for pattern, replacement, _ in ES2017_REWRITES:
-        src = pattern.sub(replacement, src)
+def test_there_are_modules_to_check():
+    """Guards against the glob silently going empty — a rename would
+    otherwise turn both tests below into vacuous passes."""
+    assert len(MODULES) > 10, f"only found {[m.name for m in MODULES]}"
+
+
+@pytest.mark.parametrize("path", MODULES, ids=lambda p: p.name)
+def test_module_parses(path):
     try:
-        esprima.parseScript(src)
-    except Exception as e:  # esprima raises its own Error type
-        pytest.fail(f"static/app.js does not parse: {e}")
+        parse(path.read_text(encoding="utf-8"), module=True)
+    except Exception as e:
+        pytest.fail(f"{path.name} does not parse: {e}")
+
+
+@pytest.mark.parametrize("path", MODULES, ids=lambda p: p.name)
+def test_module_imports_everything_it_uses(path):
+    src = path.read_text(encoding="utf-8")
+    tree = parse(src, module=True)
+    imported = {
+        spec.local.name
+        for node in tree.body
+        if node.type == "ImportDeclaration"
+        for spec in node.specifiers
+    }
+    unresolved = sorted(free_identifiers(src, module=True) - BROWSER_GLOBALS - imported)
+    assert not unresolved, (
+        f"{path.name} uses {unresolved} without importing them "
+        f"(or they belong in jsscope.BROWSER_GLOBALS)"
+    )
 
 
 def test_index_html_references_only_files_that_exist():
     """A renamed or deleted asset is a blank page with a 404 in a console
-    nobody has open. Cheap to check while we're here."""
-    root = APP_JS.parent.parent
+    nobody has open."""
+    import re
+
+    root = JS_DIR.parent.parent
     html = (root / "static" / "index.html").read_text(encoding="utf-8")
-    for ref in re.findall(r'(?:src|href)="(/static/[^"]+)"', html):
+    refs = re.findall(r'(?:src|href)="(/static/[^"]+)"', html)
+    assert refs, "index.html stopped referencing any static asset"
+    for ref in refs:
         assert (root / ref.lstrip("/")).exists(), f"index.html references missing {ref}"

@@ -688,7 +688,7 @@ a network-dependent plugin is still testable offline, and build binary
 fixtures in the test file rather than committing evidence.
 
 For a tab's JS there's no browser test runner, but you can at least
-syntax-check it the way the repo checks `app.js` — see the Testing
+syntax-check it the way the repo checks its own frontend modules — see the Testing
 section of [`CLAUDE.md`](../CLAUDE.md).
 
 ---

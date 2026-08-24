@@ -45,7 +45,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   an ES module in the plugin folder, served via `/plugin_assets/<fs>/…`
   (enabled folder plugins only; resolved-path containment blocks
   traversal; same no-cache middleware as /static/) and dynamically
-  import()ed by `showPluginTab` in app.js with a `?v=<gen>` cache-buster
+  import()ed by `showPluginTab` (`static/js/plugins.js`) with a `?v=<gen>` cache-buster
   — `gen` is the registry load sequence, bumped on every reload, so a
   toggle-off/on picks up changed JS. One mount per tab, kept across tab
   switches, torn down on case switch (`resetPluginTabMounts`) and gen
@@ -71,7 +71,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   frontend can't resolve to a loaded format fall back to the CSV path,
   the pre-plugin behavior for analyst-added extensions) and why the
   Plugins modal's per-format picker sets no `accept` attribute. Routing
-  precedence in app.js (`pluginFormatFor`): a built-in extension always
+  precedence (`pluginFormatFor` in `static/js/importer.js`): a built-in extension always
   wins over a plugin claiming the same one. Parse errors are 400s like
   every other ingest route. Security model is Notepad++'s: a plugin is
   arbitrary local Python with the app's privileges, installed by the

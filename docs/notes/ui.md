@@ -1,6 +1,6 @@
 # UI surfaces: menus, filters, settings, tabs, keybindings
 
-Everything in `static/app.js` and `static/style.css` that isn't the grid
+Everything in `static/js/` and `static/style.css` that isn't the grid
 itself: the right-click menus, the filter row and its value picker, saved
 filters, the timeframe filter, tab strips and the sidebar, Settings, and
 the keymap.
@@ -10,7 +10,7 @@ see [docs/notes/README.md](README.md) for the whole set.
 
 ---
 
-- The **timeframe filter** (`S.timeRange` in app.js, `time_range` on
+- The **timeframe filter** (`S.timeRange`, `static/js/timeframe.js`, `time_range` on
   `ViewSpec`, compiled in `_compile_where` via the registered SQL function
   `TS_NORMALIZE`) is deliberately a separate piece of state from every
   other filter mechanism, and every place that resets "the filters" —
@@ -30,7 +30,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   filter (`workspace.SavedFilters`, cross-case) whose `col_names` happens to
   match (exactly, or "similar" per the same Jaccard/subset heuristic the old
   case-scoped `filter_presets` table used) the table just opened. The banner
-  (`checkPresets`/`matchingSavedFilters` in app.js) computes this entirely
+  (`checkPresets`/`matchingSavedFilters` in `static/js/savedfilters.js`) computes this entirely
   client-side against the already-loaded `S.savedFilters` — no request. A
   case file saved before this change may still have rows in the old
   `filter_presets` SQLite table; `Store.pop_legacy_presets()` reads and
@@ -176,7 +176,7 @@ see [docs/notes/README.md](README.md) for the whole set.
     handler re-run it.
 - **The SQL pane has named sub-tabs** (`sql_tabs`, a per-case sidecar
   table; `list/create/update/delete/reorder_sql_tabs`, `/api/sql_tabs`,
-  `renderSqlTabs` and friends in app.js). Stored in the **case file**, not
+  `renderSqlTabs` and friends in `static/js/sql.js`). Stored in the **case file**, not
   `localStorage` like `winnow.sidebar` and not `workspace/` like a saved
   filter: a worked-out query is analysis *about this evidence* ("the join
   that pulls 4624s against the RDP source"), so it should travel with the
@@ -245,7 +245,7 @@ see [docs/notes/README.md](README.md) for the whole set.
     `currentIds: sameGroupFilterIds(...)` so a drag across header sets is
     a structural no-op rather than a rule someone has to remember.
 - **The right-click surfaces** (row menu, column-header menu, table menu,
-  header value picker) all hang off one floating-menu implementation in app.js —
+  header value picker) all hang off one floating-menu implementation in `static/js/ui.js` —
   `showFloating`/`placeFloating` plus the single `openMenuEl`/`openMenuAnchor`
   pair, with `dropdownMenu` (anchored under a button), `contextMenu`
   (positioned at the pointer) and `anchoredPanel` (a card with real
