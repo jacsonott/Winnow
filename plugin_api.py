@@ -306,7 +306,8 @@ class PluginRegistry:
 
     # ------------------------------------------------------------- loading
 
-    def load(self, directories: Iterable[str | Path], disabled: Iterable[str] = ()) -> None:
+    def load(self, directories: Iterable[str | Path], disabled: Iterable[str] = (),
+             enabled_for=None, bundled_dirs: Iterable[str | Path] = ()) -> None:
         """(Re)load from scratch. Directories that don't exist are fine —
         the default plugins/ dir simply not existing yet is the common
         fresh-checkout state, not an error.
@@ -317,20 +318,38 @@ class PluginRegistry:
         in sys.modules under their unique per-load names (Python can't
         truly unload code) but nothing references them again.
 
-        `disabled` (filesystem names, from workspace.PluginPrefs) are
-        *discovered but never imported* — they appear in the listing with
-        enabled=False so the UI can offer the toggle, and their code never
-        runs, which is the entire value of an off switch on something
-        that executes with the app's privileges."""
+        A plugin the policy turns off is *discovered but never imported* —
+        it appears in the listing with enabled=False so the UI can offer
+        the switch, and its code never runs, which is the entire value of
+        an off switch on something that executes with the app's
+        privileges. The policy itself is the caller's: `enabled_for(fs_name,
+        directory) -> bool` (server.py folds the machine-level prefs and
+        the open case's overrides into one closure there). The plain
+        `disabled` set stays as the simple form of the same thing.
+
+        The same fs_name in two directories loads once, from the earliest
+        directory — that's what makes the bundled-examples dir safe to
+        append after plugins/: an analyst's installed (possibly edited)
+        copy of an example shadows the shipped one instead of both
+        loading and fighting over tab ids and routes.
+
+        `bundled_dirs` entries mark their plugins `bundled: True` in the
+        listing — presentation only ("ships with Winnow" in the panel);
+        enablement policy is entirely `enabled_for`'s business."""
         disabled = set(disabled)
+        if enabled_for is None:
+            enabled_for = lambda fs_name, directory: fs_name not in disabled  # noqa: E731
+        bundled = {str(Path(b)) for b in bundled_dirs}
         self.plugins = []
         self._formats = {}
         self._tabs = {}
         self._apis = {}
+        seen: set[str] = set()
         for directory in directories:
             d = Path(directory)
             if not d.is_dir():
                 continue
+            is_bundled = str(d) in bundled
             for candidate in sorted(d.iterdir(), key=lambda p: p.name.lower()):
                 if candidate.name.startswith((".", "_")):
                     continue
@@ -340,16 +359,20 @@ class PluginRegistry:
                     fs_name, entry = candidate.name, candidate / "__init__.py"
                 else:
                     continue
-                if fs_name in disabled:
+                if fs_name in seen:
+                    continue
+                seen.add(fs_name)
+                if not enabled_for(fs_name, str(d)):
                     self.plugins.append({
                         "name": fs_name, "fs_name": fs_name, "path": str(candidate),
                         "version": None, "description": "", "error": None,
                         "enabled": False, "gen": 0, "formats": [], "tabs": [],
+                        "bundled": is_bundled,
                     })
                 else:
-                    self._load_one(fs_name, entry, candidate)
+                    self._load_one(fs_name, entry, candidate, bundled=is_bundled)
 
-    def _load_one(self, default_name: str, entry: Path, root: Path) -> None:
+    def _load_one(self, default_name: str, entry: Path, root: Path, bundled: bool = False) -> None:
         self._seq += 1
         # Unique, never-importable-by-accident module name; the seq keeps a
         # reload (or the same plugin name in two directories) from silently
@@ -363,6 +386,7 @@ class PluginRegistry:
             # any registry reload) picks up changed JS instead of the
             # browser's cached module.
             "enabled": True, "gen": self._seq, "formats": [], "tabs": [],
+            "bundled": bundled,
         }
         self.plugins.append(record)
         try:

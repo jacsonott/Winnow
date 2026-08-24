@@ -23,7 +23,8 @@ export async function loadPlugins() {
     S.pluginFormats = r.formats || [];
     S.pluginTabs = r.tabs || [];
     S.pluginDirs = r.dirs || [];
-  } catch { S.plugins = []; S.pluginFormats = []; S.pluginTabs = []; S.pluginDirs = []; }
+    S.pluginsCaseOpen = !!r.case_open;
+  } catch { S.plugins = []; S.pluginFormats = []; S.pluginTabs = []; S.pluginDirs = []; S.pluginsCaseOpen = false; }
   renderPluginTabs();
 }
 
