@@ -87,41 +87,35 @@ see [docs/notes/README.md](README.md) for the whole set.
   detached async chain uploads sequentially (one disk, one spool at a
   time) while the jobs panel tracks everything. Don't add a second
   menu entry per format again; the queue is the router.
-  Every queue item is a picked/dropped `{file: File}`, and the no-copy
-  transport is chosen **invisibly**: before uploading, each item tries
-  `resolveLocalFile` → `POST /api/ingest/resolve_local`, and a hit
-  imports via `/api/ingest/jobs/path` reading the file **in place** — no
-  upload leg, no tempfile spool, no 50 GB copied to produce a file that
-  was already on the disk. The three configure previews run the same
-  resolve first and, on a hit, preview by path too (`POST
-  /api/ingest/preview/path` — bounded CSV sample / the path-based
-  json/sqlite store previews; this matters most for JSON, whose upload
-  preview round-trips the whole file). There is deliberately **no
-  visible control** for any of this: a server-disk file picker ("Add
-  from this machine…", `openServerFileBrowser`, `browse_dir?files=true`)
-  was built and then removed on request — one Import button, two
-  transports, and the only visible difference is the upload phase not
-  existing. Don't reintroduce a picker; directory import remains the
-  explicit path route, for folders. The
-  sandbox can't be asked for the path, but a same-host client's picked
-  file necessarily exists on the server's own disk, so the frontend sends
-  a fingerprint — name, size, mtime, first/last 64 KB via `File.slice`
-  (two tiny reads even on 50 GB) — and the server looks for it in a fixed
-  handful of candidate dirs (recently browsed/scanned dirs, dirs of
-  previous imports, registered cases' dirs, Downloads/Desktop/Documents/
-  home — stat calls, never a disk search). A hit imports by path with no
-  upload; a miss falls back to the upload silently — resolution is an
-  optimization, never a failure mode, and never a user decision. The
-  match is deliberately strict (exact name+size, mtime ±2s, byte-equal
-  head *and* tail), which is also the answer to the loopback check's one
-  hole: an SSH-tunneled remote client looks local (`request.client` is
-  the socket peer — header-spoof-proof, but a tunnel terminates locally),
-  and strict content equality means the only file it can ever be handed
-  is byte-identical at both ends anyway. Names are `basename()`d before
-  joining, so a crafted name can't traverse out of a candidate dir.
-  `_is_loopback` also admits Starlette's literal "testclient" peer —
-  never a real IP, so it can't admit a network peer, and it keeps the
-  TestClient suite honest without monkeypatching.
+  Every queue item carries its transport explicitly — `{file: File}` for
+  a browser pick/drop, `{path}` for one added from the server's own disk —
+  and the import loop, the three configure previews and the SQLite table
+  picker all branch on which field is set. A path item reads **in place**
+  (`/api/ingest/jobs/path`, `/api/ingest/preview/path` — no upload leg, no
+  tempfile spool, no 50 GB copied to produce a file already on the disk;
+  the preview half matters most for JSON, whose upload preview round-trips
+  the whole file). The visible door to the path transport is the import
+  modal's **"Add from this machine…"** (`openFolderBrowser` in files
+  mode → `browse_dir?files=true` → `queuePaths`), deliberately listed
+  first: browser and server are the same machine here, so the path
+  transport is the right default and the upload is the convenience.
+  Files over `UPLOAD_ADVISORY_BYTES` (1 GB) queued through the browser
+  get a toast pointing at the path route — advisory, never a gate.
+
+  **History, because this reversed twice and the next session shouldn't
+  re-reverse it**: the first design was a visible server-disk picker;
+  it was replaced on request by an *invisible* resolver
+  (`/api/ingest/resolve_local`) that fingerprinted every browser-picked
+  file (name+size+mtime+head/tail bytes) and searched candidate dirs for
+  a same-content file to import in place — "one Import button, two
+  transports, no user decision." That resolver is now deliberately
+  **removed**, also on request: its hit rate depended on the file
+  happening to sit in a guessable directory, and a transport that
+  silently works only sometimes made the upload path untrustworthy ("did
+  it copy or not?"). The lesson recorded here is the *pair*: implicit
+  transport selection traded a click for uncertainty, and the click won.
+  If a resolver-like idea comes back, it must be visible in the queue row
+  the way `by path ·` is now.
 - **Dragging a file from the OS onto the window** (`wireFileDrop`,
   `handleDroppedFiles`) is an alternative entry point into the *existing*
   import flows, not a new one — every dropped file (CSV/JSON *and*

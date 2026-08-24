@@ -64,6 +64,7 @@ export const S = {
   pluginFormats: [],     // plugin-registered ingest formats (extensions/patterns/options) — routes files to plugin parsers
   pluginTabs: [],        // plugin-registered pinned tabs [{id, plugin, plugin_fs, label, entry, gen}] — see showPluginTab
   pluginDirs: [],        // where the server loads plugins from — shown in the Plugins modal so "drop it where?" has an answer
+  lastBrowsePath: null,  // last dir the "Add from this machine…" picker was in — session-only convenience, not persisted
   sidebarFilter: '',      // substring filter typed into the sidebar's own search box
   timeline: {
     view: null, pages: new Map(), pending: new Set(), reqId: 0,

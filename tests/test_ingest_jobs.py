@@ -267,108 +267,36 @@ def test_sqlite_job_by_path(client, store, tmp_path):
 # --------------------------------------- same-host invisible path recovery
 
 
-def test_resolve_local_finds_file_in_recently_browsed_dir(client, tmp_path):
-    root = tmp_path / "picked_from"
+def test_browse_dir_lists_files_with_sizes_only_when_asked(client, tmp_path):
+    """The import modal's "Add from this machine…" picker: files come back
+    with sizes and unfiltered by extension — a listing that silently hides
+    files reads as "my file is missing", not "my file is filtered". The
+    folder-picker callers don't ask and don't pay."""
+    # A dir of our own — the autouse isolate_workspace fixture puts a
+    # workspace/ folder directly in tmp_path.
+    root = tmp_path / "browse"
     root.mkdir()
-    p = root / "evidence.csv"
-    p.write_text("a,b\n" + "x,y\n" * 5000)
-    # Seed the candidate list the way a real session does — the analyst
-    # browsed here (folder picker, file picker, or a dir scan).
-    client.get(f"/api/browse_dir?path={root}")
+    (root / "evidence.csv").write_text("A,B\n1,2\n")
+    (root / "notes.xyz").write_text("x")
+    (root / ".hidden").write_text("x")
+    (root / "sub").mkdir()
 
-    st = os.stat(p)
-    data = p.read_bytes()
-    r = client.post(
-        "/api/ingest/resolve_local",
-        data={"name": "evidence.csv", "size": str(st.st_size),
-              "mtime_ms": str(int(st.st_mtime * 1000))},
-        files={"head": ("head", data[:65536]), "tail": ("tail", data[-65536:])},
-    )
-    assert r.status_code == 200
-    assert r.json()["path"] == str(p)
+    plain = client.get(f"/api/browse_dir?path={root}").json()
+    assert plain["dirs"] == ["sub"] and "files" not in plain
+
+    r = client.get(f"/api/browse_dir?path={root}&files=true").json()
+    assert r["dirs"] == ["sub"]
+    assert {f["name"] for f in r["files"]} == {"evidence.csv", "notes.xyz"}
+    assert next(f for f in r["files"] if f["name"] == "evidence.csv")["size"] == 8
+    assert r["truncated"] is False
 
 
-def test_resolve_local_rejects_content_mismatch(client, tmp_path):
-    root = tmp_path / "picked_from2"
-    root.mkdir()
-    p = root / "evidence.csv"
-    p.write_text("a,b\n" + "x,y\n" * 5000)
-    client.get(f"/api/browse_dir?path={root}")
-    st = os.stat(p)
-    data = p.read_bytes()
-
-    # Same name/size/mtime but different bytes must NOT match — this is the
-    # guard that keeps a tunneled not-actually-local client (or a stale
-    # same-name file) from importing the wrong evidence.
-    wrong = bytearray(data[:65536])
-    wrong[10] ^= 0xFF
-    r = client.post(
-        "/api/ingest/resolve_local",
-        data={"name": "evidence.csv", "size": str(st.st_size),
-              "mtime_ms": str(int(st.st_mtime * 1000))},
-        files={"head": ("head", bytes(wrong)), "tail": ("tail", data[-65536:])},
-    )
-    assert r.json()["path"] is None
-
-    # Size mismatch: same story.
-    r = client.post(
-        "/api/ingest/resolve_local",
-        data={"name": "evidence.csv", "size": str(st.st_size + 1),
-              "mtime_ms": str(int(st.st_mtime * 1000))},
-        files={"head": ("head", data[:65536]), "tail": ("tail", data[-65536:])},
-    )
-    assert r.json()["path"] is None
-
-
-def test_resolve_local_finds_sibling_of_previous_import(client, store, tmp_path):
-    """The DC-02-next-to-DC-01 workflow: importing one file by path makes
-    its directory a candidate, so the next file picked from that same
-    folder resolves without any browsing."""
-    root = tmp_path / "artifacts"
-    root.mkdir()
-    first = root / "DC-01.csv"
-    first.write_text("a,b\n1,2\n")
-    r = client.post("/api/ingest/jobs/path", json={"path": str(first), "build_fts": False})
-    store.wait_for_ingest_job(r.json()["job_id"], timeout=30)
-
-    second = root / "DC-02.csv"
-    second.write_text("a,b\n3,4\n" * 100)
-    st = os.stat(second)
-    data = second.read_bytes()
-    r = client.post(
-        "/api/ingest/resolve_local",
-        data={"name": "DC-02.csv", "size": str(st.st_size),
-              "mtime_ms": str(int(st.st_mtime * 1000))},
-        files={"head": ("head", data[:65536]), "tail": ("tail", data[-65536:])},
-    )
-    assert r.json()["path"] == str(second)
-
-
-def test_resolve_local_refuses_non_loopback(client, monkeypatch, tmp_path):
-    import server
-    monkeypatch.setattr(server, "_is_loopback", lambda request: False)
-    r = client.post(
-        "/api/ingest/resolve_local",
-        data={"name": "x.csv", "size": "4", "mtime_ms": "0"},
-        files={"head": ("head", b"a,b\n"), "tail": ("tail", b"a,b\n")},
-    )
-    assert r.json()["path"] is None
-
-
-def test_resolve_local_ignores_path_walking_names(client, tmp_path):
-    root = tmp_path / "walk"
-    root.mkdir()
-    p = root / "safe.csv"
-    p.write_text("a,b\n1,2\n")
-    client.get(f"/api/browse_dir?path={root}")
-    st = os.stat(p)
-    data = p.read_bytes()
-    # A crafted name with separators is basename()d — it can only ever
-    # match "safe.csv" inside a candidate dir, never traverse out of one.
-    r = client.post(
-        "/api/ingest/resolve_local",
-        data={"name": "../../walk/safe.csv", "size": str(st.st_size),
-              "mtime_ms": str(int(st.st_mtime * 1000))},
-        files={"head": ("head", data), "tail": ("tail", data)},
-    )
-    assert r.json()["path"] == str(p)
+def test_resolve_local_route_is_gone(client):
+    """The fingerprint resolver is deliberately removed — imports are now
+    exactly what they look like (a picked path reads in place, an upload
+    uploads), never a content-match guess that worked only as often as it
+    worked. This pin keeps the route from quietly returning."""
+    r = client.post("/api/ingest/resolve_local",
+                    files={"head": ("h", b""), "tail": ("t", b"")},
+                    data={"name": "x.csv", "size": "1", "mtime_ms": "1"})
+    assert r.status_code in (404, 405)

@@ -11,6 +11,7 @@ import { updateSearchAllButton } from './search.js';
 import { applyPageTabsSize, loadSources } from './sources.js';
 import { showGridTab } from './sql.js';
 import { S } from './state.js';
+import { fmtBytes } from './tables.js';
 import { updateTimeRangeButton } from './timeframe.js';
 import { loadTimelineTemplates } from './timeline.js';
 import { confirmDialog, modal, promptDialog } from './ui.js';
@@ -163,52 +164,128 @@ export function groupOptionsDatalist(id) {
    exposes one. Assumes server and browser are the same machine, true for
    how this tool is actually run (see CLAUDE.md). onSelect gets the chosen
    directory's absolute path; nothing here touches file contents. */
-export function openFolderBrowser(startPath, onSelect, onCancel) {
+/* One browser, two modes. mode 'folder' (default): pick a directory —
+   the new-case Browse… and directory import. mode 'files': pick one or
+   more files; onSelect gets {dir, files: [{path, name, size}]} — the
+   import modal's "Add from this machine…", i.e. the no-upload transport.
+   Both modes take a typed path too (the box at the top): analysts who
+   know where the evidence sits shouldn't have to click down to it. */
+export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folder', title } = {}) {
+  const filesMode = mode === 'files';
   let current = null;
-  modal('Choose a folder', (b) => {
-    const pathLabel = el('div', 'note-status');
-    pathLabel.style.cssText = 'font-family:var(--mono);word-break:break-all;margin-bottom:8px';
-    b.append(pathLabel);
+  let listing = null;
+  const picked = new Map(); // path -> {path, name, size}, insertion-ordered
+  modal(title || (filesMode ? 'Add files from this machine' : 'Choose a folder'), (b) => {
+    const pathInput = el('input');
+    pathInput.style.cssText = 'width:100%;font-family:var(--mono);background:var(--ink);color:var(--text);'
+      + 'border:1px solid var(--line-2);padding:5px 8px;font-size:12px;margin-bottom:8px';
+    pathInput.placeholder = filesMode ? 'Type a folder or file path, or browse below' : 'Type a folder path, or browse below';
+    pathInput.onkeydown = async (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      const typed = pathInput.value.trim();
+      if (!typed) return;
+      if (filesMode) {
+        // A typed FILE path is a complete answer, not a place to navigate
+        // to. Statting it is the browse call on its parent — which also
+        // catches a typo'd path here, where it can be fixed, instead of at
+        // import time.
+        const name = typed.replace(/\/+$/, '').split('/').pop();
+        const dir = typed.slice(0, typed.length - name.length - 1) || '/';
+        try {
+          const res = await api(`/api/browse_dir?path=${encodeURIComponent(dir)}&files=true`);
+          const hit = (res.files || []).find((f) => f.name === name);
+          if (hit) { onSelect({ dir: res.path, files: [{ path: res.path + '/' + name, name, size: hit.size }] }); return; }
+        } catch { /* not a listable parent — fall through and try it as a folder */ }
+      }
+      load(typed);
+    };
+    b.append(pathInput);
     const list = el('div', 'session-list');
-    list.style.maxHeight = '46vh';
+    list.style.maxHeight = '42vh';
     list.style.overflow = 'auto';
     b.append(list);
+    const status = el('div', 'note-status', '');
+    b.append(status);
+
+    const actions = el('div', 'row-actions');
+    const useBtn = el('button', 'btn', filesMode ? 'Add selected' : 'Use this folder');
+    const paintUse = () => {
+      if (!filesMode) return;
+      useBtn.disabled = !picked.size;
+      useBtn.textContent = picked.size ? `Add ${picked.size} file${picked.size === 1 ? '' : 's'}` : 'Add selected';
+    };
+    useBtn.onclick = () => {
+      if (filesMode) onSelect({ dir: current, files: [...picked.values()] });
+      else onSelect(current);
+    };
+    const cancel = el('button', 'btn ghost', 'Cancel');
+    cancel.onclick = () => { if (onCancel) onCancel(); else $('modal').hidden = true; };
+    actions.append(useBtn, cancel);
+    b.append(actions);
 
     async function load(path) {
       let res;
       try {
-        res = await api(`/api/browse_dir?path=${encodeURIComponent(path || '')}`);
+        res = await api(`/api/browse_dir?path=${encodeURIComponent(path || '')}${filesMode ? '&files=true' : ''}`);
       } catch (e) {
         toast('Could not list that folder: ' + e.message, 4000);
         return;
       }
       current = res.path;
-      pathLabel.textContent = current;
+      listing = res;
+      pathInput.value = current;
+      paint();
+    }
+
+    function paint() {
       list.replaceChildren();
-      if (res.parent) {
+      if (listing.parent) {
         const up = el('button', 'btn ghost', '.. (up a level)');
         up.style.cssText = 'justify-content:flex-start;text-align:left';
-        up.onclick = () => load(res.parent);
+        up.onclick = () => load(listing.parent);
         list.append(up);
       }
-      if (!res.dirs.length) list.append(el('div', 'note-status', 'No subfolders here.'));
-      for (const d of res.dirs) {
+      for (const d of listing.dirs) {
         const row = el('button', 'btn ghost', '📁 ' + d);
         row.style.cssText = 'justify-content:flex-start;text-align:left;width:100%';
         row.onclick = () => load(current + '/' + d);
         list.append(row);
       }
+      if (filesMode) {
+        for (const f of listing.files || []) {
+          const path = current + '/' + f.name;
+          const row = el('label', 'session-row row-actions');
+          row.style.cssText = 'cursor:pointer';
+          const cb = el('input');
+          cb.type = 'checkbox';
+          cb.checked = picked.has(path);
+          cb.onchange = () => {
+            if (cb.checked) picked.set(path, { path, name: f.name, size: f.size });
+            else picked.delete(path);
+            paintStatus();
+          };
+          row.append(cb, el('span', 'session-name', f.name), el('span', 'count', fmtBytes(f.size)));
+          list.append(row);
+        }
+        if (!(listing.files || []).length && !listing.dirs.length) {
+          list.append(el('div', 'note-status', 'Nothing here.'));
+        }
+      } else if (!listing.dirs.length) {
+        list.append(el('div', 'note-status', 'No subfolders here.'));
+      }
+      paintStatus();
     }
-    load(startPath);
 
-    const actions = el('div', 'row-actions');
-    const useBtn = el('button', 'btn', 'Use this folder');
-    useBtn.onclick = () => onSelect(current);
-    const cancel = el('button', 'btn ghost', 'Cancel');
-    cancel.onclick = () => { if (onCancel) onCancel(); else $('modal').hidden = true; };
-    actions.append(useBtn, cancel);
-    b.append(actions);
-  });
+    function paintStatus() {
+      status.textContent = filesMode && listing && listing.truncated
+        ? 'Showing the first 2,000 files — type a path to reach the rest.' : '';
+      paintUse();
+    }
+
+    load(startPath);
+    paintUse();
+  }, { wide: true });
 }
 
 /* `state` carries everything back across a "Browse..." round trip —

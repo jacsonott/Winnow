@@ -8,7 +8,6 @@ Then browse to http://127.0.0.1:8777
 from __future__ import annotations
 
 import argparse
-import collections
 import contextlib
 import json
 import os
@@ -71,30 +70,6 @@ async def _lifespan(_app: FastAPI):
 
 app = FastAPI(title="Winnow", lifespan=_lifespan)
 STORE: Store | None = None
-
-# Directories the analyst has recently pointed the server at (folder/file
-# browser, directory-import scans) — the freshest candidates for
-# resolve_local's path recovery. In-process only, on purpose: it's a
-# convenience cache, not state worth persisting.
-RECENT_DIRS: collections.deque[str] = collections.deque(maxlen=20)
-
-
-def _note_recent_dir(path: str) -> None:
-    if path in RECENT_DIRS:
-        RECENT_DIRS.remove(path)
-    RECENT_DIRS.appendleft(path)
-
-
-def _is_loopback(request: Request) -> bool:
-    """Whether the TCP peer is this machine. request.client comes from the
-    socket's peer address (uvicorn), not from anything the client sends, so
-    it can't be header-spoofed. "testclient" is Starlette's TestClient peer
-    name — never a real IP, so allowing it can't admit a network peer. The
-    one honest caveat: an SSH-tunneled remote client also looks like
-    loopback; resolve_local's full content fingerprint is what keeps that
-    from ever importing the wrong file (see api_ingest_resolve_local)."""
-    host = request.client.host if request.client else ""
-    return host in ("127.0.0.1", "::1", "testclient")
 
 # ---------------------------------------------------------------- plugins
 
@@ -461,9 +436,11 @@ def api_case_compact():
 
 
 @app.get("/api/browse_dir")
-def api_browse_dir(path: str = ""):
-    """Directory names only, one level — backs the "Browse..." folder picker
-    in the new-case modal. A regular browser file/folder input can't hand
+def api_browse_dir(path: str = "", files: bool = False):
+    """One directory level — backs the "Browse..." folder picker in the
+    new-case modal and, with files=true, the import modal's "Add from this
+    machine…" file picker (the fast path: a picked path imports in place
+    with no upload copy). A regular browser file/folder input can't hand
     back a real filesystem path (sandboxed for security), and this is a
     local, single-analyst tool with no auth already (see CLAUDE.md) — the
     plain-text case-path field already lets the analyst create a case file
@@ -471,20 +448,43 @@ def api_browse_dir(path: str = ""):
     way to reach the same place, not a new capability. GET, like every
     other read-only route, so no CSRF header is required, but that's fine:
     a cross-origin page can still fire the request, it just can't read the
-    response (no CORS headers on it), same as every other GET here."""
+    response (no CORS headers on it), same as every other GET here.
+
+    Files come back with sizes, unfiltered by extension: what's importable
+    is the frontend's call (its extension lists + loaded plugin formats,
+    which this route can't know), and a listing that silently hides files
+    reads as "my file is missing", not "my file is filtered". Capped —
+    a listing is for picking, not for enumerating a million-entry dir."""
     base = os.path.abspath(os.path.expanduser(path)) if path else str(Path.home())
     if not os.path.isdir(base):
         raise HTTPException(400, f"Not a directory: {base}")
-    _note_recent_dir(base)
+    file_entries: list[dict] = []
+    truncated = False
     try:
+        entries = list(os.scandir(base))
         dirs = sorted(
-            (e.name for e in os.scandir(base) if e.is_dir() and not e.name.startswith(".")),
+            (e.name for e in entries if e.is_dir() and not e.name.startswith(".")),
             key=str.lower,
         )
+        if files:
+            all_files = sorted(
+                (e for e in entries if e.is_file() and not e.name.startswith(".")),
+                key=lambda e: e.name.lower(),
+            )
+            truncated = len(all_files) > 2000
+            for e in all_files[:2000]:
+                try:
+                    file_entries.append({"name": e.name, "size": e.stat().st_size})
+                except OSError:
+                    continue
     except PermissionError:
         dirs = []
     parent = os.path.dirname(base)
-    return {"path": base, "parent": parent if parent != base else None, "dirs": dirs}
+    out = {"path": base, "parent": parent if parent != base else None, "dirs": dirs}
+    if files:
+        out["files"] = file_entries
+        out["truncated"] = truncated
+    return out
 
 
 @app.get("/api/cases")
@@ -586,7 +586,6 @@ def api_ingest_dir_scan(body: DirectoryScan):
     not just once behind an explicit button."""
     if not os.path.isdir(body.root):
         raise HTTPException(400, f"Not a directory: {body.root}")
-    _note_recent_dir(os.path.abspath(body.root))
     return store().scan_import_directory(
         body.root, recursive=body.recursive, extensions=body.extensions,
         include_patterns=body.include_patterns, exclude_patterns=body.exclude_patterns,
@@ -890,79 +889,6 @@ async def api_ingest_job_upload(
         with contextlib.suppress(OSError):
             os.remove(tmp)
         raise HTTPException(400, str(e))
-
-
-def _resolve_candidate_dirs() -> list[str]:
-    """Likely homes for a just-picked file, cheapest-to-check first. Not a
-    disk search — a fixed handful of stat calls: recently browsed/scanned
-    dirs, the dirs previous imports came from (the DC-02-next-to-DC-01
-    workflow), registered case files' dirs, and the standard user dirs a
-    file dialog usually opens on."""
-    dirs: list[str] = list(RECENT_DIRS)
-    with contextlib.suppress(Exception):
-        for src in store().list_sources():
-            if src.get("path"):
-                dirs.append(os.path.dirname(src["path"]))
-    with contextlib.suppress(Exception):
-        for case in WS.cases.list():
-            if case.get("path"):
-                dirs.append(os.path.dirname(case["path"]))
-    home = Path.home()
-    dirs += [str(home / d) for d in ("Downloads", "Desktop", "Documents")]
-    dirs.append(str(home))
-    seen: set[str] = set()
-    out = []
-    for d in dirs:
-        if d and d not in seen:
-            seen.add(d)
-            out.append(d)
-    return out
-
-
-@app.post("/api/ingest/resolve_local")
-async def api_ingest_resolve_local(
-    request: Request,
-    name: str = Form(...),
-    size: int = Form(...),
-    mtime_ms: int = Form(...),
-    head: UploadFile = File(...),
-    tail: UploadFile = File(...),
-):
-    """Path recovery for a same-host pick: the browser sandbox never
-    reveals a picked file's real path, but if the client is this machine,
-    the picked file is *somewhere* on this disk — so the frontend sends a
-    fingerprint (name, size, mtime, first/last 64 KB) and this looks for
-    it in _resolve_candidate_dirs. A hit means the import can read the
-    file in place (jobs/path) instead of copying every byte through an
-    upload; a miss just means the upload happens as before. The match is
-    deliberately strict — exact name and size, mtime within 2s (FAT
-    granularity), *and* byte-equal head+tail — so a tunneled client whose
-    loopback appearance lies about locality still can't be handed the
-    wrong file: matching bytes at both ends of an identically-sized,
-    identically-stamped file is the same evidence either way."""
-    if not _is_loopback(request):
-        return {"path": None}
-    head_bytes = await head.read(65536)
-    tail_bytes = await tail.read(65536)
-    base_name = os.path.basename(name)  # never let a crafted name walk dirs
-    for d in _resolve_candidate_dirs():
-        cand = os.path.join(d, base_name)
-        try:
-            st = os.stat(cand)
-            if not os.path.isfile(cand) or st.st_size != size:
-                continue
-            if abs(st.st_mtime * 1000 - mtime_ms) > 2000:
-                continue
-            with open(cand, "rb") as f:
-                if f.read(len(head_bytes)) != head_bytes:
-                    continue
-                f.seek(max(0, st.st_size - len(tail_bytes)))
-                if f.read(len(tail_bytes)) != tail_bytes:
-                    continue
-            return {"path": cand}
-        except OSError:
-            continue
-    return {"path": None}
 
 
 @app.get("/api/ingest/jobs")
