@@ -284,18 +284,53 @@ class HeaderNicknames:
     def _load(self) -> list[dict]:
         return _read(self.FILE, {"nicknames": []})["nicknames"]
 
-    def _save(self, items: list[dict]) -> None:
-        _write(self.FILE, {"nicknames": items})
+    def _save(self, items: list[dict], seeded_version: int | None = None) -> None:
+        data = _read(self.FILE, {"nicknames": []})
+        data["nicknames"] = items
+        if seeded_version is not None:
+            data["seeded_version"] = seeded_version
+        _write(self.FILE, data)
+
+    def ensure_seeded(self) -> None:
+        """Merges header_defaults' shipped nicknames (EvtxECmd, MFTECmd,
+        Amcache, ... — see that module) into this store, once per
+        DEFAULTS_VERSION. Called lazily from the read paths rather than at
+        server import: the store writes to WORKSPACE_DIR, and at import
+        time that's the developer's real workspace even when a test has a
+        per-test dir waiting to be monkeypatched in.
+
+        Seeded records become ordinary rows — rename and delete stick,
+        because after seeding nothing distinguishes them from records the
+        analyst created. Only header sets not already present are added,
+        so an analyst's own name for the EvtxECmd shape survives every
+        version bump."""
+        import header_defaults
+
+        with _LOCK:
+            data = _read(self.FILE, {"nicknames": []})
+            if data.get("seeded_version", 0) >= header_defaults.DEFAULTS_VERSION:
+                return
+            items = data["nicknames"]
+            present = {tuple(r["col_names"]) for r in items}
+            for nickname, cols in header_defaults.DEFAULT_HEADER_NICKNAMES:
+                key = self._key(cols)
+                if tuple(key) in present:
+                    continue
+                items.append({"id": _next_id(items), "col_names": key, "nickname": nickname})
+                present.add(tuple(key))
+            self._save(items, seeded_version=header_defaults.DEFAULTS_VERSION)
 
     @staticmethod
     def _key(col_names: list[str]) -> list[str]:
         return sorted(c.strip().lower() for c in col_names)
 
     def list(self) -> list[dict]:
+        self.ensure_seeded()
         with _LOCK:
             return self._load()
 
     def find(self, col_names: list[str]) -> dict | None:
+        self.ensure_seeded()
         key = self._key(col_names)
         with _LOCK:
             for rec in self._load():
