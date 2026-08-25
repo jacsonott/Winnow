@@ -195,9 +195,15 @@ export function showFloating(node, rect, anchorEl) {
   openMenuEl = node;
   openMenuAnchor = anchorEl || null;
   if (anchorEl) anchorEl.setAttribute('aria-expanded', 'true');
+  // keydown arms NOW: the deferred attach exists so the mousedown that
+  // opened the menu can't instantly close it via onMenuOutsideClick — a
+  // self-trigger risk only a mouse event has. Deferring keydown too left a
+  // one-tick window where Escape missed the menu entirely and fell through
+  // to the app handler (clearing the selection under a still-open menu) —
+  // real on a slow machine, caught by CI's browser job.
+  document.addEventListener('keydown', onMenuKeydown, true);
   setTimeout(() => {
     document.addEventListener('mousedown', onMenuOutsideClick, true);
-    document.addEventListener('keydown', onMenuKeydown, true);
   }, 0);
 }
 

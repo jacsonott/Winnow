@@ -1,11 +1,38 @@
 # Winnow
 
-[![CI](https://github.com/jacsonott/Winnow/actions/workflows/ci.yml/badge.svg)](https://github.com/jacsonott/Winnow/actions/workflows/ci.yml)
+**A fast, local viewer for the enormous CSVs that DFIR triage produces** —
+EvtxECmd, MFTECmd, Amcache, the whole KAPE output folder — with the
+row-tagging workflow that turns a million log lines into a findings list.
+Think Timeline Explorer, rebuilt for big files: a 1.2-million-row CSV
+imports in ~8 seconds, filtering it takes milliseconds, and scrolling never
+stutters no matter how deep you are.
 
-A local web app for reading very large delimited files out of SQLite, with the
-row-tagging workflow that Timeline Explorer gets right and generic SQLite GUIs
-don't. FastAPI + SQLite on the back, vanilla JS virtualized grid on the front.
-No cloud, no CDN, no build step — it runs on an airgapped analysis box.
+![The grid mid-triage: an EvtxECmd table under the shipped Logons filter, tagged rows on the rail](docs/screenshots/grid.png)
+
+Everything runs on your machine — one Python server, no cloud, no CDN, no
+build step. It works on an airgapped analysis box, and your work (tags,
+notes, saved views) lives in a single SQLite case file you can hand to
+another analyst. The evidence files themselves are **never modified**.
+
+## What you get
+
+- **Tags with hotkeys** — press `1` to mark a row TA, `2` suspicious.
+  Tag counts live in the ribbon; a rail down the grid's edge shows where
+  your findings cluster in the whole filtered view. Undo included.
+- **Filters that keep up with you** — type `4624` or `!svchost` or
+  `>1000` straight into a column header, pick values Excel-style from the
+  header dropdown, or build AND/OR trees in the guided builder. A set of
+  **ready-made triage filters ships in the box** (logon sweeps, RDP both
+  directions, Defender tampering, persistence run keys, …) and appears
+  automatically when a matching table opens.
+- **Time navigation** — pin a timeframe that survives every filter change,
+  jump to the same timestamp across tables, derive real sortable datetime
+  columns from epochs/FILETIME/Excel serials/whatever your tool emitted.
+- **A unified timeline** of every tagged row across every table in the
+  case, in one chronological stream.
+- **Pivot tables, session bookends, NTFS parsing** and more via drop-in
+  plugins (five ship with the app), plus a read-only SQL pane when you
+  want to write the query yourself.
 
 ## Run it
 
@@ -51,46 +78,9 @@ files and merge with session files, which is what tag remap-by-name is for.
 | Full-text search across all columns | 8 ms |
 | Tag all 171k rows in a view | instant |
 
-## How it's put together
-
-**Source tables are read-only.** Each import becomes `src_<id>` with an explicit
-`rid INTEGER PRIMARY KEY`. Tags, notes, column layouts and saved views live in
-sidecar tables keyed by `(source_id, rid)`. Re-import the same file and your
-work is still there. Nothing ever writes back to the CSV.
-
-**Scrolling stays O(window).** Naive `LIMIT/OFFSET` on a filtered sort degrades
-badly once you're a few hundred thousand rows deep, because SQLite has to walk
-every skipped row. Instead, changing a filter or sort materialises the result
-once into a temp-attached table of `(pos, rid)`:
-
-```sql
-CREATE TABLE v.view_7 AS
-SELECT ROW_NUMBER() OVER (ORDER BY "Timestamp" COLLATE NOCASE ASC, rid) AS pos, rid
-FROM src_1 WHERE "Process" LIKE '%powershell%';
-```
-
-The grid then pages with `WHERE pos BETWEEN ? AND ?`, and the row count comes
-free. Views live in a temporary database deleted when the server exits, so the
-case file stays clean. Page reads (and every other pure-read path — grouping,
-exports, search counts) run on pooled read-only connections, so a multi-second
-view build or import never stalls scrolling in another tab. The pages either
-side of the viewport are warmed while the browser is idle, so crossing a page
-boundary is a cache hit rather than a visible stall.
-
-**Search** uses an external-content FTS5 table over every column, tokenized to
-keep `.`, `-`, `_`, `\`, `@` and `:` inside tokens so paths, GUIDs and account
-names survive tokenization. Bare terms are quoted before they reach the FTS
-parser; `AND` / `OR` / `NOT` / `prefix*` pass through.
-
-**Search all tables** sweeps every table in the case, open or closed, in the
-background — paste a list of IOCs, one per line, and you get a row per table
-that matched *and* a row per indicator underneath it, so you can see which of
-your 60 hashes hit and where rather than just that something did. Each row
-opens that table filtered to that term. A mixed AND/OR/NOT query from the
-Advanced builder gets the single per-table count instead: its terms constrain
-each other, so a count for one of them alone would describe a query nobody ran.
-
 ## Using it
+
+![Excel-style value picker on a column header](docs/screenshots/value-picker.png)
 
 Filters are typed straight into the box under each column header:
 
@@ -110,7 +100,9 @@ Keys: `↑↓`/`jk` move, `Shift+↑↓` extend selection, `PgUp`/`PgDn`, `g`/`G
 top and bottom, `1`–`9` toggle a tag on the selection, `Shift+1`–`9` apply a tag
 to **every** row in the current view, `/` search, `f` filters to the value in
 the cell you're on (`Shift+F` does that *and* drops every other filter — the
-timeframe filter stays), `C` the table menu, `n` note,
+timeframe filter stays), `q`/`w` cycle the saved filters (aliases `[`/`]`),
+`e` the Filter builder, `v` the value picker for the cell you're on, `a`
+toggles the timeframe filter (`A` configures it), `C` the table menu, `n` note,
 `?` help. `Ctrl`/`⌘`+`Z` undoes the last tag you applied or removed — press it
 again to keep stepping back. Undo reverses exactly the rows that op
 *changed*, so tagging a selection that overlaps rows you'd tagged earlier
@@ -173,6 +165,8 @@ which works on a collapsed group and on an outer nesting level — neither needs
 the rows paged in first.
 
 ## Tabs
+
+![The unified Timeline: every tagged row across the case, one stream](docs/screenshots/timeline.png)
 
 The header bar carries two strips: your open tables on the left, and the pages —
 SQL, Timeline, anything a plugin pinned there — on the right. Both reorder by
@@ -312,6 +306,8 @@ GROUP BY 1, 2 ORDER BY n DESC;
 
 ## Plugins
 
+![The pivot plugin: hosts by event id](docs/screenshots/pivot.png)
+
 Winnow can be extended without touching its source, Notepad++-style.
 **Settings → Plugins** manages everything — effective immediately, no
 restart. Each plugin has a scope: **on/off for all cases** (this
@@ -340,7 +336,7 @@ Plugins get three extension points:
   whatever the plugin's UI needs the server to do: query the case, run a
   computation, call an external service.
 
-Four worked examples ship in `examples/plugins/` and are already listed
+Five worked examples ship in `examples/plugins/` and are already listed
 in Settings → Plugins — no install step, switched off until you enable
 them:
 
@@ -354,6 +350,10 @@ them:
   pairs from any table (4624s, firewall logs, netflow) as a
   force-directed graph: edge width is event count, arrows show
   direction, drag to untangle. Fully offline.
+- **`first_last/`** — group events (host, user, anything) and keep each
+  group's first and last row with a templated description — "First of
+  312 | WKSTN-014 | user: jsmith" — as a new, taggable table. Turns tens
+  of thousands of logon events into a page of session bookends.
 - **`pivot/`** — Excel's PivotTable over any ingested table: drag
   fields into Rows, Columns, Values and Filters for a cross-tab with
   subtotals and grand totals, click a cell for the rows behind it, copy
@@ -377,3 +377,45 @@ A plugin is arbitrary local Python running with Winnow's own privileges —
 installing it (from the UI or by hand) is the consent step, and nothing
 is ever fetched from a network. Only install plugins you have read or
 trust.
+
+## Under the hood
+
+For the curious (nothing here is needed to use it):
+
+**Source tables are read-only.** Each import becomes `src_<id>` with an explicit
+`rid INTEGER PRIMARY KEY`. Tags, notes, column layouts and saved views live in
+sidecar tables keyed by `(source_id, rid)`. Re-import the same file and your
+work is still there. Nothing ever writes back to the CSV.
+
+**Scrolling stays O(window).** Naive `LIMIT/OFFSET` on a filtered sort degrades
+badly once you're a few hundred thousand rows deep, because SQLite has to walk
+every skipped row. Instead, changing a filter or sort materialises the result
+once into a temp-attached table of `(pos, rid)`:
+
+```sql
+CREATE TABLE v.view_7 AS
+SELECT ROW_NUMBER() OVER (ORDER BY "Timestamp" COLLATE NOCASE ASC, rid) AS pos, rid
+FROM src_1 WHERE "Process" LIKE '%powershell%';
+```
+
+The grid then pages with `WHERE pos BETWEEN ? AND ?`, and the row count comes
+free. Views live in a temporary database deleted when the server exits, so the
+case file stays clean. Page reads (and every other pure-read path — grouping,
+exports, search counts) run on pooled read-only connections, so a multi-second
+view build or import never stalls scrolling in another tab. The pages either
+side of the viewport are warmed while the browser is idle, so crossing a page
+boundary is a cache hit rather than a visible stall.
+
+**Search** uses an external-content FTS5 table over every column, tokenized to
+keep `.`, `-`, `_`, `\`, `@` and `:` inside tokens so paths, GUIDs and account
+names survive tokenization. Bare terms are quoted before they reach the FTS
+parser; `AND` / `OR` / `NOT` / `prefix*` pass through.
+
+**Search all tables** sweeps every table in the case, open or closed, in the
+background — paste a list of IOCs, one per line, and you get a row per table
+that matched *and* a row per indicator underneath it, so you can see which of
+your 60 hashes hit and where rather than just that something did. Each row
+opens that table filtered to that term. A mixed AND/OR/NOT query from the
+Advanced builder gets the single per-table count instead: its terms constrain
+each other, so a count for one of them alone would describe a query nobody ran.
+

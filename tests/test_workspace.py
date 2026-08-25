@@ -83,9 +83,11 @@ def test_saved_filters_reorder_only_touches_the_given_group():
     c = WS.filters.create("C", ["Col1"], {})
 
     # Reverse just the ["Col1"] group's order (A, B, C -> C, B, A) — X/Y
-    # must stay exactly where they were, not get pushed around.
+    # must stay exactly where they were, not get pushed around. list() also
+    # seeds the shipped TLE defaults (appended after these five, since the
+    # five were created first) — slice them off; their order isn't at issue.
     WS.filters.reorder([c["id"], b["id"], a["id"]])
-    names_in_order = [f["name"] for f in WS.filters.list()]
+    names_in_order = [f["name"] for f in WS.filters.list()][:5]
     assert names_in_order == ["C", "X", "B", "Y", "A"]
 
 
@@ -94,11 +96,16 @@ def test_saved_filters_import_merges_by_name_and_columns():
     export = WS.filters.export_all()
     assert export["format"] == "winnow-filters/1"
 
+    import filter_defaults
+    seeded = len(filter_defaults.DEFAULT_SAVED_FILTERS)
+
     # Importing the same export again (merge=True) must not duplicate —
     # same name + same column set is considered "the same filter."
+    # (export_all ran before list() ever seeded, so the export carries just
+    # the one analyst filter; counts below are relative to the seeds.)
     added = WS.filters.import_all(export, merge=True)
     assert added == 0
-    assert len(WS.filters.list()) == 1
+    assert len(WS.filters.list()) == 1 + seeded
 
     # A different column set with the same name is NOT a duplicate skip.
     export2 = {"format": "winnow-filters/1", "filters": [
@@ -106,7 +113,7 @@ def test_saved_filters_import_merges_by_name_and_columns():
     ]}
     added2 = WS.filters.import_all(export2, merge=True)
     assert added2 == 1
-    assert len(WS.filters.list()) == 2
+    assert len(WS.filters.list()) == 2 + seeded
 
 
 def test_header_nicknames_save_find_overwrites_and_delete():
@@ -269,3 +276,28 @@ def test_header_nickname_seed_version_bump_adds_only_missing(monkeypatch):
     assert len(after) == len(before) + 1
     assert hn.find(["colb", "cola"])["nickname"] == "New tool"
     assert hn.find(before[0]["col_names"])["nickname"] == "Renamed"
+
+
+
+def test_tag_template_seeds_ta_first_and_migrates_only_untouched_legacy():
+    """DEFAULT_TAGS now leads with TA (hotkey 1 — triage reaches for "this
+    is the adversary" far more than "this is fine"). A workspace whose
+    template is byte-for-byte the old Benign-first seed was never edited,
+    so it migrates; any customization is the analyst's and stays."""
+    from store import DEFAULT_TAGS
+
+    assert [n for n, _, _ in DEFAULT_TAGS] == ["TA", "Suspicious", "Benign"]
+    assert DEFAULT_TAGS[0][2] == "1"
+
+    # fresh seed: TA first
+    assert [t["name"] for t in WS.tags.get()] == ["TA", "Suspicious", "Benign"]
+
+    # untouched legacy template migrates in place
+    WS.tags._save(list(WS.TagTemplate._LEGACY_SEED))
+    assert [t["name"] for t in WS.tags.get()] == ["TA", "Suspicious", "Benign"]
+
+    # a customized template (one rename) is never rewritten
+    custom = [dict(t) for t in WS.TagTemplate._LEGACY_SEED]
+    custom[0]["name"] = "Clean"
+    WS.tags._save(custom)
+    assert [t["name"] for t in WS.tags.get()] == ["Clean", "Suspicious", "TA"]

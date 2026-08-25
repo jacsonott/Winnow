@@ -443,3 +443,16 @@ see [docs/notes/README.md](README.md) for the whole set.
   hotkey, Alt+digit and the copy/undo combos act on case UI that isn't on
   screen there (`t` opened the previous case's Tables manager from home).
   Escape stays above the gate: home has modals of its own to close.
+
+- **The 2026-08 left-hand keybind pass** is additive on purpose: q/w beside
+  [/] for saved-filter cycling (the highest-traffic key in a triage pass,
+  moved under the resting left hand), a/A beside T/R for the timeframe, and
+  two previously mouse-only surfaces gained keys (e — Filter builder, v —
+  value picker for the selected cell's column, falling back to the first
+  visible column so it always lands somewhere). KEYMAP_MIGRATIONS v2
+  appends the aliases only where the stored binding is exactly the old
+  default — a deliberate rebinding is never touched — and the two new
+  actions need no migration at all, since loadKeymap merges stored keys
+  over the defaults and a stored map has no entry for an action that
+  didn't exist. When retiring an alias later, remember both halves: the
+  DEFAULT_KEYMAP entry and a migration for maps that carry it.
