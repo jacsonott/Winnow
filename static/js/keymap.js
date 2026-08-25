@@ -1,10 +1,11 @@
 /* Keybindings: the default map, its migrations, and the action handlers.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { autofitAllColumnWidths, resetAllColumnWidths, saveDefaultLayout } from './columns.js';
+import { autofitAllColumnWidths, resetAllColumnWidths, saveDefaultLayout, visibleCols } from './columns.js';
+import { openFilterBuilder } from './filterbuilder.js';
 import { $, ROW_H } from './core.js';
 import { toggleDetailPane } from './detail.js';
-import { filterBySelectedCell } from './filters.js';
+import { filterBySelectedCell, openValuePickerForColumn, selectedCellTarget } from './filters.js';
 import { headH, moveCursor, render } from './grid.js';
 import { dropGrouping, handleCopyShortcut, toggleGrouping } from './grouping.js';
 import { cycleSavedFilter, openFilterSqlTab } from './savedfilters.js';
@@ -39,8 +40,13 @@ export const DEFAULT_KEYMAP = {
   openSettings: ['?'],
   resetColumnWidths: ['0'],
   autofitColumnWidths: ['='],
-  cyclePrevFilter: ['['],
-  cycleNextFilter: [']'],
+  // q/w beside [/]: cycling saved filters is the highest-traffic key in a
+  // triage pass, and it belongs under the resting left hand. The bracket
+  // keys stay as aliases — muscle memory is never punished.
+  cyclePrevFilter: ['[', 'q'],
+  cycleNextFilter: [']', 'w'],
+  openFilterBuilder: ['e'],
+  openValuePicker: ['v'],
   filterBySelectedCell: ['f'],
   filterBySelectedCellOnly: ['F'],
   clearFilters: ['c'],
@@ -50,8 +56,8 @@ export const DEFAULT_KEYMAP = {
   toggleDetail: ['d'],
   dropGrouping: ['x'],
   saveDefaultLayout: ['L'],
-  toggleTimeRange: ['T'],
-  openTimeRange: ['R'],
+  toggleTimeRange: ['T', 'a'],
+  openTimeRange: ['R', 'A'],
   toggleGrouping: ['X'],
   openFilterSql: ['Q'],
   openJumpTs: ['J'],
@@ -67,6 +73,8 @@ export const ACTION_LABELS = {
   resetColumnWidths: 'Reset all column widths to default',
   autofitColumnWidths: 'Autofit all column widths to content',
   cyclePrevFilter: 'Previous saved filter', cycleNextFilter: 'Next saved filter',
+  openFilterBuilder: 'Open the Filter builder (guided AND/OR conditions)',
+  openValuePicker: "Open the value picker for the selected cell's column",
   filterBySelectedCell: "Filter by selected cell's value",
   filterBySelectedCellOnly: "Filter by selected cell's value, dropping every other filter",
   clearFilters: 'Clear all filters, search and tag filter',
@@ -96,7 +104,7 @@ export const ACTION_LABELS = {
    over it on every load. */
 export const KEYMAP_VERSION_KEY = 'winnow.keymap.v';
 
-export const KEYMAP_VERSION = 1;
+export const KEYMAP_VERSION = 2;
 
 export const KEYMAP_MIGRATIONS = [
   // v1 (2026-08): the column chooser grew into the table menu, and `f`
@@ -111,6 +119,19 @@ export const KEYMAP_MIGRATIONS = [
       map.filterBySelectedCell = ['f'];
       map.filterBySelectedCellOnly = ['F'];
     }
+  },
+  // v2 (2026-08): the left-hand pass. Saved-filter cycling gains q/w, the
+  // timeframe gains a/A — additive aliases, applied only where the analyst
+  // still had the old default so a deliberate rebinding is never touched.
+  // (openFilterBuilder/openValuePicker are new actions; loadKeymap's
+  // defaults-first merge supplies e/v without migration.)
+  (map) => {
+    const wasDefault = (action, keys) =>
+      JSON.stringify((map[action] || []).slice().sort()) === JSON.stringify(keys.slice().sort());
+    if (wasDefault('cyclePrevFilter', ['['])) map.cyclePrevFilter = ['[', 'q'];
+    if (wasDefault('cycleNextFilter', [']'])) map.cycleNextFilter = [']', 'w'];
+    if (wasDefault('toggleTimeRange', ['T'])) map.toggleTimeRange = ['T', 'a'];
+    if (wasDefault('openTimeRange', ['R'])) map.openTimeRange = ['R', 'A'];
   },
 ];
 
@@ -240,6 +261,14 @@ export const ACTION_HANDLERS = {
   autofitColumnWidths: () => autofitAllColumnWidths(),
   cyclePrevFilter: () => cycleSavedFilter(-1),
   cycleNextFilter: () => cycleSavedFilter(1),
+  openFilterBuilder: () => openFilterBuilder(),
+  // The selected cell's column, else the first visible one — `v` should
+  // always land somewhere useful, not demand a cell click first.
+  openValuePicker: () => {
+    const target = selectedCellTarget();
+    const column = target ? target.column : visibleCols()[0];
+    if (column) openValuePickerForColumn(column);
+  },
   filterBySelectedCell: () => filterBySelectedCell(),
   filterBySelectedCellOnly: () => filterBySelectedCell({ only: true }),
   clearFilters: () => clearAllFilters(),

@@ -110,7 +110,9 @@ Keys: `↑↓`/`jk` move, `Shift+↑↓` extend selection, `PgUp`/`PgDn`, `g`/`G
 top and bottom, `1`–`9` toggle a tag on the selection, `Shift+1`–`9` apply a tag
 to **every** row in the current view, `/` search, `f` filters to the value in
 the cell you're on (`Shift+F` does that *and* drops every other filter — the
-timeframe filter stays), `C` the table menu, `n` note,
+timeframe filter stays), `q`/`w` cycle the saved filters (aliases `[`/`]`),
+`e` the Filter builder, `v` the value picker for the cell you're on, `a`
+toggles the timeframe filter (`A` configures it), `C` the table menu, `n` note,
 `?` help. `Ctrl`/`⌘`+`Z` undoes the last tag you applied or removed — press it
 again to keep stepping back. Undo reverses exactly the rows that op
 *changed*, so tagging a selection that overlaps rows you'd tagged earlier
