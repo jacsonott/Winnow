@@ -121,8 +121,20 @@ export function currentFilterPayload() {
    it naturally stops matching, without needing to invalidate a flag by hand. */
 export function activeSavedFilterRecord() {
   if (!S.sourceId) return null;
-  const cur = JSON.stringify(currentFilterPayload());
-  return filtersForCurrentSource().find((f) => JSON.stringify(f.payload || {}) === cur) || null;
+  const cur = currentFilterPayload();
+  // The same leniency applyPreset gives on the way in, applied on the way
+  // back: a payload without a `sort` key leaves the current sort alone when
+  // applied, so the current sort must not stop it matching (the shipped
+  // TLE defaults are exactly this shape — a filter, not a sort opinion).
+  // Compared on an explicit key list so key insertion order can't matter.
+  const KEYS = ['filter_tree', 'sort', 'search', 'search_mode', 'search_terms',
+                'group_by', 'group_sort', 'group_sort_dir'];
+  const matches = (p) => KEYS.every((k) => {
+    if (k === 'sort' && p.sort === undefined) return true;
+    if (k.startsWith('group_') && p.group_by === undefined) return cur.group_by === undefined;
+    return JSON.stringify(p[k]) === JSON.stringify(cur[k]);
+  });
+  return filtersForCurrentSource().find((f) => matches(f.payload || {})) || null;
 }
 
 /* Single merged button for Filter builder + Saved filters (dropdown menu

@@ -5,6 +5,7 @@ import { $, api, debounce, el, post, toast } from './core.js';
 import { startJobsPoll, uploadWithProgress } from './jobs.js';
 import { loadSources, sourceLabel } from './sources.js';
 import { S } from './state.js';
+import { nicknameFor } from './savedfilters.js';
 import { modal } from './ui.js';
 
 /* ---------------------------------------------------------- import preview */
@@ -36,7 +37,15 @@ export function openMergeBuilder() {
     const selected = new Set();
     eligible.forEach((group, gi) => {
       const groupHead = el('div', 'row-actions');
-      groupHead.append(el('h4', null, `Group ${gi + 1} — ${group[0].columns.map((c) => c.name).join(', ')}`));
+      // A known header set (the shipped KAPE names, or one the analyst
+      // nicknamed) reads as its name — "Event logs (EvtxECmd)" — with the
+      // raw column list demoted to the tooltip. An unknown set still shows
+      // its columns: that IS its identity until someone names it.
+      const colNames = group[0].columns.map((c) => c.name);
+      const nick = nicknameFor(colNames);
+      const head = el('h4', null, `Group ${gi + 1} — ${nick || colNames.join(', ')}`);
+      if (nick) head.title = colNames.join(', ');
+      groupHead.append(head);
       const list = el('div', 'collist');
       const boxes = [];
       for (const s of group) {

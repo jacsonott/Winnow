@@ -88,10 +88,13 @@ SQLITE_IMPORT_EXTENSIONS = {".db", ".sqlite", ".sqlite3", ".db-wal"}
 # folder.
 MAX_SCAN_RESULTS = 5000
 
+# TA first: triage reaches for "this is the adversary" far more often than
+# "this is fine", so the most-used tag sits on hotkey 1 under the left hand.
+# Order here is display order everywhere tags render (ribbon, menus, undo).
 DEFAULT_TAGS = [
-    ("Benign", "#5d8a66", "1"),
+    ("TA", "#c0392b", "1"),
     ("Suspicious", "#d68a2e", "2"),
-    ("TA", "#c0392b", "3"),
+    ("Benign", "#5d8a66", "3"),
 ]
 
 META_SCHEMA = """
