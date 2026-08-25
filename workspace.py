@@ -505,6 +505,17 @@ class TagTemplate:
 
     FILE = "tags.json"
 
+    # What the pre-2026-08 seed wrote (Benign first). A template that still
+    # reads exactly like this was never touched by the analyst, so it's safe
+    # to migrate to the current DEFAULT_TAGS order (TA first) — any edit at
+    # all (rename, recolor, rehotkey, reorder, add, remove) and it's theirs,
+    # and get() leaves it alone forever.
+    _LEGACY_SEED = [
+        {"name": "Benign", "color": "#5d8a66", "hotkey": "1"},
+        {"name": "Suspicious", "color": "#d68a2e", "hotkey": "2"},
+        {"name": "TA", "color": "#c0392b", "hotkey": "3"},
+    ]
+
     def get(self) -> list[dict]:
         with _LOCK:
             path = _ensure_dir() / self.FILE
@@ -512,7 +523,12 @@ class TagTemplate:
                 initial = [{"name": n, "color": c, "hotkey": h} for n, c, h in DEFAULT_TAGS]
                 self._save(initial)
                 return initial
-            return _read(self.FILE, [])
+            current = _read(self.FILE, [])
+            if current == self._LEGACY_SEED:
+                migrated = [{"name": n, "color": c, "hotkey": h} for n, c, h in DEFAULT_TAGS]
+                self._save(migrated)
+                return migrated
+            return current
 
     def _save(self, tags: list[dict]) -> None:
         _write(self.FILE, tags)
