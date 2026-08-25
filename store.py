@@ -2762,6 +2762,10 @@ class Store:
         if source_id < 0:
             if not nickname:
                 raise ValueError("A merge needs a name — give it one rather than clearing it")
+            # Renaming is the second door into merges.name; the uniqueness
+            # rule means nothing if it only guards the first.
+            if self._merge_name_taken(nickname, exclude_id=-source_id):
+                raise ValueError(f'A merge named "{nickname}" already exists')
             with self.lock, self.db:
                 cur = self.db.execute("UPDATE merges SET name=? WHERE id=?", (nickname, -source_id))
                 if cur.rowcount == 0:
@@ -2942,7 +2946,24 @@ class Store:
             for sid in merge["member_source_ids"]
         ]
 
+    def _merge_name_taken(self, name: str, exclude_id: int | None = None) -> bool:
+        """Case-insensitive: two merges named "EVTX" and "evtx" are one
+        typo'd reference apart in every list they'd both appear in, which is
+        the confusion a uniqueness rule exists to prevent. NOCASE is ASCII-
+        only, matching how header sets are already keyed (str.lower)."""
+        with self.lock:
+            row = self.db.execute(
+                "SELECT id FROM merges WHERE name = ? COLLATE NOCASE AND id != ?",
+                (name, exclude_id or 0),
+            ).fetchone()
+        return row is not None
+
     def create_merge(self, name: str, source_ids: list[int]) -> dict:
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("A merge needs a name")
+        if self._merge_name_taken(name):
+            raise ValueError(f'A merge named "{name}" already exists')
         if len(source_ids) < 2:
             raise ValueError("A merge needs at least 2 sources")
         sources = [self.get_source(sid) for sid in source_ids]
