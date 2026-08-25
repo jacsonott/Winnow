@@ -170,10 +170,42 @@ class SavedFilters:
     def _load(self) -> list[dict]:
         return _read(self.FILE, {"filters": []})["filters"]
 
-    def _save(self, items: list[dict]) -> None:
-        _write(self.FILE, {"filters": items})
+    def _save(self, items: list[dict], seeded_version: int | None = None) -> None:
+        data = _read(self.FILE, {"filters": []})
+        data["filters"] = items
+        if seeded_version is not None:
+            data["seeded_version"] = seeded_version
+        _write(self.FILE, data)
+
+    def ensure_seeded(self) -> None:
+        """Merges filter_defaults' shipped triage filters (the converted
+        Timeline Explorer set — EVTX/Registry/MFT) into this store, once per
+        FILTER_DEFAULTS_VERSION. Same contract as
+        HeaderNicknames.ensure_seeded, for the same reasons: lazy (called
+        from the read path so a test's WORKSPACE_DIR monkeypatch is
+        honored), and seeded rows become ordinary records afterward —
+        rename, edit, reorder, delete all stick. Identity for "already
+        present" is name + column set, matching import_all's merge rule, so
+        an analyst's edited copy of a default is never re-added beside
+        itself on a version bump."""
+        import filter_defaults
+
+        with _LOCK:
+            data = _read(self.FILE, {"filters": []})
+            if data.get("seeded_version", 0) >= filter_defaults.FILTER_DEFAULTS_VERSION:
+                return
+            items = data["filters"]
+            present = {(r["name"], tuple(r["col_names"])) for r in items}
+            for name, cols, payload in filter_defaults.DEFAULT_SAVED_FILTERS:
+                if (name, tuple(cols)) in present:
+                    continue
+                items.append({"id": _next_id(items), "name": name,
+                              "col_names": list(cols), "payload": payload,
+                              "created_at": _now()})
+            self._save(items, seeded_version=filter_defaults.FILTER_DEFAULTS_VERSION)
 
     def list(self) -> list[dict]:
+        self.ensure_seeded()
         with _LOCK:
             return self._load()
 

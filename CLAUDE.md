@@ -34,6 +34,13 @@ header_defaults.py Shipped header-set nicknames for common EZ Tools/KAPE
                     always win. Add new tool shapes as new entries (never
                     edit an old one — files from older releases persist)
                     and bump DEFAULTS_VERSION.
+filter_defaults.py Shipped saved filters: a working analyst's Timeline
+                    Explorer triage set (EVTX/Registry/MFT) converted to
+                    filter trees, bound to header_defaults' column sets,
+                    seeded once by SavedFilters.ensure_seeded — analyst
+                    edits/deletes always win. tests/test_filter_defaults.py
+                    compiles every tree on every run; add new filters there
+                    and bump FILTER_DEFAULTS_VERSION.
 workspace.py       Cross-case JSON state (case registry, saved filters, default
                     tag template) — human-readable files in workspace/, outside
                     any single case.db so they survive switching cases.
