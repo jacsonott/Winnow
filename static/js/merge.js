@@ -2,7 +2,7 @@
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { $, api, debounce, el, post, toast } from './core.js';
-import { resolveLocalFile, startJobsPoll, uploadWithProgress } from './jobs.js';
+import { startJobsPoll, uploadWithProgress } from './jobs.js';
 import { loadSources, sourceLabel } from './sources.js';
 import { S } from './state.js';
 import { modal } from './ui.js';
@@ -103,11 +103,16 @@ export function openMergeBuilder() {
   }, { wide: true });
 }
 
-export function openImportPreview(file, opts = {}) {
+/* `src` is a queue item's transport: {file, name} for a browser pick, or
+   {path, name} for one added from the server's own disk — previews and the
+   direct-import button branch on which field is set, never on a guess.
+   `name` is always present (queueItem and every direct caller set it), so
+   nothing here reads src.file.name — one contract, one spelling. */
+export function openImportPreview(src, opts = {}) {
   let preview = null;
   let columnTypes = opts.initial && opts.initial.column_types ? opts.initial.column_types.slice() : null;
 
-  modal(`Import: ${file.name}`, (b) => {
+  modal(`Import: ${src.name}`, (b) => {
     const controls = el('div', 'row-actions');
     const delimSel = el('select');
     for (const [label, val] of [['Auto-detect', ''], ['Comma', ','], ['Tab', '\t'], ['Semicolon', ';'], ['Pipe', '|']]) {
@@ -157,21 +162,20 @@ export function openImportPreview(file, opts = {}) {
       tableWrap.append(t);
     }
 
-    let resolvedPath; // undefined = not tried yet; null = tried, not local
     async function refreshPreview() {
       status.textContent = 'Loading preview…';
       try {
-        // Same invisible same-host shortcut the import itself uses: a
-        // resolve hit previews by path instead of shipping a sample over.
-        if (resolvedPath === undefined) resolvedPath = await resolveLocalFile(file);
-        if (resolvedPath) {
+        // A path-queued item (the "Add from this machine…" picker) previews
+        // in place; a browser-picked File uploads its sample. Which one is
+        // a fact about how the item arrived, not a guess about the disk.
+        if (src.path) {
           preview = await post('/api/ingest/preview/path', {
-            path: resolvedPath, kind: 'csv',
+            path: src.path, kind: 'csv',
             delimiter: delimSel.value || null, has_header: headerCb.checked,
           });
         } else {
           const fd = new FormData();
-          fd.append('file', file);
+          fd.append('file', src.file);
           if (delimSel.value) fd.append('delimiter', delimSel.value);
           fd.append('has_header', headerCb.checked ? 'true' : 'false');
           preview = await api('/api/ingest/preview', { method: 'POST', body: fd });
@@ -197,10 +201,10 @@ export function openImportPreview(file, opts = {}) {
         return;
       }
       $('modal').hidden = true;
-      if (resolvedPath) { // resolved during preview — import in place
+      if (src.path) { // added by path — import in place, no upload leg
         try {
           await post('/api/ingest/jobs/path', {
-            path: resolvedPath, name: file.name, kind: 'csv',
+            path: src.path, name: src.name, kind: 'csv',
             delimiter: settings.delimiter, has_header: settings.has_header,
             column_types: settings.column_types,
           });
@@ -211,7 +215,7 @@ export function openImportPreview(file, opts = {}) {
         return;
       }
       const fd = new FormData();
-      fd.append('file', file);
+      fd.append('file', src.file);
       fd.append('kind', 'csv');
       if (settings.delimiter) fd.append('delimiter', settings.delimiter);
       fd.append('has_header', settings.has_header ? 'true' : 'false');
@@ -219,7 +223,7 @@ export function openImportPreview(file, opts = {}) {
       // Same background pipeline as the queue: transfer with progress, then
       // an ingest job the corner panel tracks.
       try {
-        await uploadWithProgress('/api/ingest/jobs/upload', fd, file.name);
+        await uploadWithProgress('/api/ingest/jobs/upload', fd, src.name);
       } catch (e) {
         if (!e.cancelled) toast('Import failed: ' + e.message, 6000);
       }
@@ -239,12 +243,12 @@ export function openImportPreview(file, opts = {}) {
    _flatten_json's docstring for why). Single-file, not a queue — a JSON
    export is usually one file, unlike the CSV queue's "several files from
    the same collection tool" use case. */
-export function openJsonImportPreview(file, opts = {}) {
+export function openJsonImportPreview(src, opts = {}) {
   let preview = null;
   let flattenMode = (opts.initial && opts.initial.flatten_mode) || 'none';
   let flattenDepth = (opts.initial && opts.initial.flatten_depth) || 1;
 
-  modal(`Import: ${file.name}`, (b) => {
+  modal(`Import: ${src.name}`, (b) => {
     const controls = el('div', 'row-actions');
     const modeSel = el('select');
     for (const [label, val] of [["Don't flatten", 'none'], ['Flatten completely', 'full'], ['Flatten to depth…', 'depth']]) {
@@ -290,22 +294,20 @@ export function openJsonImportPreview(file, opts = {}) {
       tableWrap.append(t);
     }
 
-    let resolvedPath; // undefined = not tried yet; null = tried, not local
     async function refreshPreview() {
       status.textContent = 'Loading preview…';
       try {
-        // Resolve matters most here: a .json document can't be truncated,
-        // so the upload preview round-trips the WHOLE file — a resolve hit
-        // previews in place instead.
-        if (resolvedPath === undefined) resolvedPath = await resolveLocalFile(file);
-        if (resolvedPath) {
+        // The path branch matters most here: a .json document can't be
+        // truncated, so the upload preview round-trips the WHOLE file — a
+        // path-queued item previews in place instead.
+        if (src.path) {
           preview = await post('/api/ingest/preview/path', {
-            path: resolvedPath, kind: 'json',
+            path: src.path, kind: 'json',
             flatten_mode: flattenMode, flatten_depth: flattenDepth,
           });
         } else {
           const fd = new FormData();
-          fd.append('file', file);
+          fd.append('file', src.file);
           fd.append('flatten_mode', flattenMode);
           fd.append('flatten_depth', String(flattenDepth));
           preview = await api('/api/ingest/json/preview', { method: 'POST', body: fd });
@@ -337,10 +339,10 @@ export function openJsonImportPreview(file, opts = {}) {
         return;
       }
       $('modal').hidden = true;
-      if (resolvedPath) { // resolved during preview — import in place
+      if (src.path) { // added by path — import in place, no upload leg
         try {
           await post('/api/ingest/jobs/path', {
-            path: resolvedPath, name: file.name, kind: 'json',
+            path: src.path, name: src.name, kind: 'json',
             flatten_mode: flattenMode, flatten_depth: flattenDepth,
           });
           startJobsPoll();
@@ -350,13 +352,13 @@ export function openJsonImportPreview(file, opts = {}) {
         return;
       }
       const fd = new FormData();
-      fd.append('file', file);
+      fd.append('file', src.file);
       fd.append('kind', 'json');
       fd.append('flatten_mode', flattenMode);
       fd.append('flatten_depth', String(flattenDepth));
       // Same background pipeline as the queue.
       try {
-        await uploadWithProgress('/api/ingest/jobs/upload', fd, file.name);
+        await uploadWithProgress('/api/ingest/jobs/upload', fd, src.name);
       } catch (e) {
         if (!e.cancelled) toast('Import failed: ' + e.message, 6000);
       }

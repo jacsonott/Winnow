@@ -4,9 +4,10 @@ SQLite table picker, folder import, and OS drag-and-drop.
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { $, api, debounce, el, post, toast } from './core.js';
 import { openFolderBrowser } from './home.js';
-import { resolveLocalFile, startJobsPoll, uploadWithProgress } from './jobs.js';
+import { startJobsPoll, uploadWithProgress } from './jobs.js';
 import { RECOGNIZED_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, extOf, importKindFor, openImportPreview, openJsonImportPreview } from './merge.js';
 import { renderPluginTabs } from './plugins.js';
+import { fmtBytes } from './tables.js';
 import { loadSources } from './sources.js';
 import { S } from './state.js';
 import { confirmDialog, modal, promptDialog } from './ui.js';
@@ -86,18 +87,59 @@ export function defaultPluginOptions(fmt) {
    gated on the modal being open: S.importQueue is app-level state that
    openImportModal just happens to render, so this can be called before
    the modal even exists yet and it'll show up correctly whenever it opens. */
+/* Files this large are cheaper to add by path: the browser upload copies
+   every byte through a multipart POST and a server-side spool before the
+   import even starts, where a path import reads the file in place. */
+export const UPLOAD_ADVISORY_BYTES = 1 << 30; // 1 GB
+
+/* The ONE place a queue item's shape is built. transport is {file: File} or
+   {path: string}; routing (plugin format by name first, then extension) and
+   the per-kind defaults live here so the entry points can't drift — a
+   default that differs between a dropped file and a path-picked one is the
+   kind of bug nothing surfaces until the imports disagree. `fmt` overrides
+   name routing for the Plugins panel's explicit per-format picker. */
+export function queueItem(transport, name, fmt = pluginFormatFor(name)) {
+  if (fmt) {
+    return { ...transport, name, kind: 'plugin', format_id: fmt.id,
+             options: defaultPluginOptions(fmt), configured: false };
+  }
+  const kind = importKindFor(name);
+  return kind === 'json' ? { ...transport, name, kind, flatten_mode: 'none', flatten_depth: 1, configured: false }
+    : kind === 'sqlite' ? { ...transport, name, kind, tables: null, configured: false }
+    : { ...transport, name, kind, delimiter: null, has_header: true, column_types: null, configured: false };
+}
+
 export function queueFiles(files) {
+  let bigNamed = null, bigCount = 0;
   for (const f of files) {
-    const fmt = pluginFormatFor(f.name);
-    if (fmt) {
-      queueFilesForFormat(fmt, [f]);
-      continue;
-    }
-    const kind = importKindFor(f.name);
-    S.importQueue.push(
-      kind === 'json' ? { file: f, kind, flatten_mode: 'none', flatten_depth: 1, configured: false }
-      : kind === 'sqlite' ? { file: f, kind, tables: null, configured: false }
-      : { file: f, kind, delimiter: null, has_header: true, column_types: null, configured: false });
+    if (f.size >= UPLOAD_ADVISORY_BYTES) { bigCount++; bigNamed = bigNamed || f; }
+    S.importQueue.push(queueItem({ file: f }, f.name));
+  }
+  if (bigCount) {
+    // Advisory, never a gate — the upload still works, it's just the slow
+    // way to move a file the server can already reach.
+    const what = bigCount === 1 ? `${bigNamed.name} is ${fmtBytes(bigNamed.size)}`
+      : `${bigCount} of these files are over ${fmtBytes(UPLOAD_ADVISORY_BYTES)}`;
+    toast(`${what} — "Add from this machine…" imports by path with no upload copy, which is much faster.`, 9000);
+  }
+}
+
+/* Queue files already on the server's disk, by absolute path — the "Add
+   from this machine…" picker's entry point, and the fast transport: a path
+   item imports in place (jobs/path) with no upload leg at all. Same routing
+   rules as queueFiles (plugin format by name first, then extension), same
+   queue, same configure/preview steps — the transport is the only
+   difference, carried as {path} instead of {file}. */
+export function queuePaths(entries) {
+  // Same gate the drop handler applies (recognizedImportFile) — the server
+  // lists every file on purpose, so the filter has to live here: an
+  // unrecognized extension would otherwise fall through importKindFor's
+  // default and ingest a .zip as a CSV.
+  const known = entries.filter((e) => recognizedImportFile(e.name));
+  const skipped = entries.filter((e) => !recognizedImportFile(e.name));
+  for (const e of known) S.importQueue.push(queueItem({ path: e.path }, e.name));
+  if (skipped.length) {
+    toast(`Skipped ${skipped.length} file${skipped.length === 1 ? '' : 's'} no importer recognizes: ${skipped.map((e) => e.name).join(', ')}`, 6000);
   }
 }
 
@@ -107,10 +149,7 @@ export function queueFiles(files) {
    extension, since accept attributes can't express "$MFT"). */
 export function queueFilesForFormat(fmt, files) {
   for (const f of files) {
-    S.importQueue.push({
-      file: f, kind: 'plugin', format_id: fmt.id,
-      options: defaultPluginOptions(fmt), configured: false,
-    });
+    S.importQueue.push(queueItem({ file: f }, f.name, fmt));
   }
 }
 
@@ -145,8 +184,8 @@ export function openImportModal() {
           ? (item.configured ? `${item.tables.length} table${item.tables.length === 1 ? '' : 's'}` : 'pick tables') + ' · sqlite'
           : (item.configured ? 'configured' : 'default settings') + ` · ${kindLabel}`;
         row.append(
-          el('span', 'session-name', item.file.name),
-          el('span', 'count', stateLabel),
+          el('span', 'session-name', item.name),
+          el('span', 'count', (item.path ? 'by path · ' : '') + stateLabel),
         );
         const cfg = el('button', 'btn ghost',
           item.kind === 'sqlite' ? 'Pick tables…' : item.kind === 'plugin' ? 'Options' : 'Preview & configure');
@@ -169,7 +208,7 @@ export function openImportModal() {
           const openPreview = item.kind === 'json' ? openJsonImportPreview
             : item.kind === 'sqlite' ? openSqliteTablePicker
             : openImportPreview;
-          openPreview(item.file, {
+          openPreview(item, {
             initial: item,
             onConfirm: (settings) => {
               Object.assign(item, settings, { configured: true });
@@ -188,7 +227,22 @@ export function openImportModal() {
     b.append(queueList);
 
     const queueActs = el('div', 'row-actions');
-    const addLabel = el('label', 'btn ghost', 'Choose files…');
+    // Path first, upload second — deliberate order. Browser and server are
+    // the same machine here, so "Add from this machine…" reads the file in
+    // place (no upload copy, no spool), which is the transport you want for
+    // anything large; the browser picker stays for convenience and for the
+    // odd tunneled/remote client where it's the only one that works.
+    const pathBtn = el('button', 'btn', 'Add from this machine…');
+    pathBtn.title = 'Browse the server\'s own disk and import in place — no upload copy, fastest for big files';
+    pathBtn.onclick = () => {
+      openFolderBrowser(S.lastBrowsePath || undefined, (sel) => {
+        S.lastBrowsePath = sel.dir;
+        queuePaths(sel.files);
+        openImportModal();
+      }, () => openImportModal(), { mode: 'files', title: 'Add files from this machine' });
+    };
+    const addLabel = el('label', 'btn ghost', 'Upload from browser…');
+    addLabel.title = 'A regular browser file picker — the file is copied up to the server before importing';
     const addInput = el('input');
     addInput.type = 'file';
     addInput.accept = [...RECOGNIZED_IMPORT_EXTENSIONS, ...SQLITE_IMPORT_EXTENSIONS, ...pluginExtensions()].join(',');
@@ -208,7 +262,7 @@ export function openImportModal() {
       if (!S.importQueue.length) return;
       const unpicked = S.importQueue.find((i) => i.kind === 'sqlite' && !i.configured);
       if (unpicked) {
-        toast(`Pick which tables to import from ${unpicked.file.name} first`, 4500);
+        toast(`Pick which tables to import from ${unpicked.name} first`, 4500);
         return;
       }
       const queue = S.importQueue.slice();
@@ -220,30 +274,62 @@ export function openImportModal() {
       // keeps working; each upload resolves into a background ingest job
       // the corner panel is already tracking.
       (async () => {
+        // Plugin ingests are synchronous routes that create no background
+        // job, so nothing announces the finished source — the jobs poll
+        // only refreshes on a job transition. Counted here, refreshed after
+        // the loop; the directory-import loop does the same, for the same
+        // reason.
+        let pluginOk = 0;
         for (const item of queue) {
-          // Same-host client: try to recover the picked file's real path
-          // first — a hit imports in place with no upload at all. This is
-          // deliberately the ONLY route to the no-copy transport: one
-          // Import button, and the analyst never chooses (or sees) which
-          // transport carried a file, beyond the upload phase not existing.
-          const localPath = await resolveLocalFile(item.file);
-          if (localPath) {
+          // Two transports, chosen by how the item arrived — a path item
+          // (the "Add from this machine…" picker, directory import) reads
+          // in place with no upload leg; a browser-picked File uploads.
+          // Never a guess: the old content-fingerprint resolver that tried
+          // to recover a picked file's path is deliberately gone.
+          if (item.path) {
             try {
-              await post('/api/ingest/jobs/path', {
-                path: localPath, name: item.file.name, kind: item.kind,
-                delimiter: item.delimiter || null,
-                has_header: item.has_header !== false,
-                column_types: item.column_types || null,
-                flatten_mode: item.flatten_mode || 'none',
-                flatten_depth: item.flatten_depth || 0,
-                tables: item.tables || null,
-              });
-              startJobsPoll();
-              continue;
-            } catch { /* fall through to the upload — resolution never blocks an import */ }
+              if (item.kind === 'plugin') {
+                // 60s, not the default: this awaits the whole parse (see
+                // the directory-import loop's identical choice).
+                toast(`Importing ${item.name}…`, 60000);
+                await post('/api/ingest/plugin/path', {
+                  path: item.path, name: item.name, format_id: item.format_id,
+                  options: item.options || {},
+                });
+                pluginOk++;
+              } else {
+                await post('/api/ingest/jobs/path', {
+                  path: item.path, name: item.name, kind: item.kind,
+                  delimiter: item.delimiter || null,
+                  has_header: item.has_header !== false,
+                  column_types: item.column_types || null,
+                  flatten_mode: item.flatten_mode || 'none',
+                  flatten_depth: item.flatten_depth || 0,
+                  tables: item.tables || null,
+                });
+                startJobsPoll();
+              }
+            } catch (e) {
+              toast(`Import failed for ${item.name}: ` + e.message, 6000);
+            }
+            continue;
           }
           const fd = new FormData();
           fd.append('file', item.file);
+          if (item.kind === 'plugin') {
+            // jobs/upload's start_ingest_job knows csv/json/sqlite only —
+            // plugin uploads have their own route, which parses via the
+            // registered format and ingests synchronously (no job).
+            fd.append('format_id', item.format_id);
+            fd.append('options', JSON.stringify(item.options || {}));
+            try {
+              await uploadWithProgress('/api/ingest/plugin/upload', fd, item.name);
+              pluginOk++;
+            } catch (e) {
+              if (!e.cancelled) toast(`Upload failed for ${item.name}: ` + e.message, 6000);
+            }
+            continue;
+          }
           fd.append('kind', item.kind);
           if (item.kind === 'json') {
             fd.append('flatten_mode', item.flatten_mode || 'none');
@@ -256,14 +342,17 @@ export function openImportModal() {
             if (item.column_types) fd.append('column_types', JSON.stringify(item.column_types));
           }
           try {
-            await uploadWithProgress('/api/ingest/jobs/upload', fd, item.file.name);
+            await uploadWithProgress('/api/ingest/jobs/upload', fd, item.name);
           } catch (e) {
-            if (!e.cancelled) toast(`Upload failed for ${item.file.name}: ` + e.message, 6000);
+            if (!e.cancelled) toast(`Upload failed for ${item.name}: ` + e.message, 6000);
           }
         }
+        // Same reason as the directory-import loop's identical line: a
+        // sync plugin ingest creates no job for the poll to notice.
+        if (pluginOk) await loadSources();
       })();
     };
-    queueActs.append(addLabel, folderBtn, importAll);
+    queueActs.append(pathBtn, addLabel, folderBtn, importAll);
     b.append(queueActs);
   }, { wide: true });
 }
@@ -279,8 +368,9 @@ export function openImportModal() {
    integer. Confirm hands back {tables: [{table, timestamp_columns}]} for
    the queue item; the actual import happens later as one background job
    reading every picked table out of one uploaded spool. */
-export function openSqliteTablePicker(initialFile, { initial, onConfirm, onCancel } = {}) {
-  let file = null;
+export function openSqliteTablePicker(src, { initial, onConfirm, onCancel } = {}) {
+  // src is a queue item's transport ({file} or {path, name}) — same contract
+  // as openImportPreview/openJsonImportPreview.
   let tables = null; // [{name, row_count, columns, likely_timestamp_columns}]
   const selected = new Map(); // table name -> Set of timestamp columns to convert
   const included = new Set(); // table names checked for import
@@ -347,17 +437,15 @@ export function openSqliteTablePicker(initialFile, { initial, onConfirm, onCance
     // outside (wireFileDrop) previews identically to one picked by hand —
     // same request, same defaults, same failure handling.
     async function loadFile(f) {
-      file = f;
       pickStatus.textContent = 'Reading…';
       try {
-        // Same invisible same-host shortcut as the import: a resolve hit
-        // previews the tables by path instead of uploading the whole .db.
-        const localPath = await resolveLocalFile(file);
-        const res = localPath
-          ? await post('/api/ingest/preview/path', { path: localPath, kind: 'sqlite' })
+        // A path item previews the tables in place; a File uploads the .db
+        // once to enumerate them. Which is a fact, not a fingerprint guess.
+        const res = f.path
+          ? await post('/api/ingest/preview/path', { path: f.path, kind: 'sqlite' })
           : await (async () => {
               const fd = new FormData();
-              fd.append('file', file);
+              fd.append('file', f.file);
               return api('/api/ingest/sqlite/preview', { method: 'POST', body: fd });
             })();
         tables = res.tables;
@@ -366,7 +454,7 @@ export function openSqliteTablePicker(initialFile, { initial, onConfirm, onCance
         toast('Could not read that file: ' + e.message, 6000);
         return;
       }
-      pickStatus.textContent = file.name;
+      pickStatus.textContent = f.name;
       included.clear();
       selected.clear();
       const prior = initial && initial.tables
@@ -384,7 +472,7 @@ export function openSqliteTablePicker(initialFile, { initial, onConfirm, onCance
       }
       renderTables();
     }
-    loadFile(initialFile);
+    loadFile(src);
 
     importBtn.onclick = () => {
       const targets = [...included];
@@ -457,11 +545,18 @@ export function wireFileDrop() {
    modal "Choose files…" already uses. Unrecognized files are dropped
    silently from the queue but named in a toast — better than a mysterious
    partial import with no explanation. */
+/* Whether ANY importer will take this filename — built-in extensions or a
+   loaded plugin format. The shared gate for the two entry points that see
+   unfiltered listings: OS drops and the server-disk picker. */
+export function recognizedImportFile(name) {
+  return RECOGNIZED_IMPORT_EXTENSIONS.includes(extOf(name))
+    || SQLITE_IMPORT_EXTENSIONS.includes(extOf(name))
+    || !!pluginFormatFor(name);
+}
+
 export function handleDroppedFiles(files) {
   if (!files.length) return;
-  const known = (f) => RECOGNIZED_IMPORT_EXTENSIONS.includes(extOf(f.name))
-    || SQLITE_IMPORT_EXTENSIONS.includes(extOf(f.name))
-    || !!pluginFormatFor(f.name);
+  const known = (f) => recognizedImportFile(f.name);
   const recognized = files.filter(known);
   const skipped = files.filter((f) => !known(f));
   if (!recognized.length) {
