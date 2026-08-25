@@ -561,19 +561,50 @@ class PluginPrefs:
 
     FILE = "plugins.json"
 
+    def _data(self) -> dict:
+        d = _read(self.FILE, {"disabled": []})
+        d.setdefault("disabled", [])
+        d.setdefault("enabled_bundled", [])
+        return d
+
     def disabled(self) -> set[str]:
         with _LOCK:
-            return set(_read(self.FILE, {"disabled": []})["disabled"])
+            return set(self._data()["disabled"])
+
+    def enabled_bundled(self) -> set[str]:
+        """Bundled examples run the default the other way — present but OFF
+        until asked for (claude_assistant needs network + an API key, and
+        even the airgap-safe ones are an explicit choice) — so their
+        machine-level state is an *enabled* list, where installed plugins
+        keep the disabled list. One file, two lists, one question:
+        machine_enabled()."""
+        with _LOCK:
+            return set(self._data()["enabled_bundled"])
+
+    def machine_enabled(self, fs_name: str, default_on: bool) -> bool:
+        with _LOCK:
+            d = self._data()
+            if default_on:
+                return fs_name not in d["disabled"]
+            return fs_name in d["enabled_bundled"]
+
+    def set_machine_enabled(self, fs_name: str, enabled: bool, default_on: bool) -> None:
+        with _LOCK:
+            d = self._data()
+            key = "disabled" if default_on else "enabled_bundled"
+            names = set(d[key])
+            # membership means "off" for the disabled list, "on" for the
+            # bundled-enabled list — the write inverts accordingly.
+            wanted_in_list = (not enabled) if default_on else enabled
+            (names.add if wanted_in_list else names.discard)(fs_name)
+            d[key] = sorted(names)
+            _write(self.FILE, d)
 
     def set_enabled(self, fs_name: str, enabled: bool) -> set[str]:
-        with _LOCK:
-            names = self.disabled()
-            if enabled:
-                names.discard(fs_name)
-            else:
-                names.add(fs_name)
-            _write(self.FILE, {"disabled": sorted(names)})
-            return names
+        """Compat shim for the pre-scopes call shape (installed plugins
+        only)."""
+        self.set_machine_enabled(fs_name, enabled, default_on=True)
+        return self.disabled()
 
 
 class AppSettings:
