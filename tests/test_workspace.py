@@ -269,3 +269,28 @@ def test_header_nickname_seed_version_bump_adds_only_missing(monkeypatch):
     assert len(after) == len(before) + 1
     assert hn.find(["colb", "cola"])["nickname"] == "New tool"
     assert hn.find(before[0]["col_names"])["nickname"] == "Renamed"
+
+
+
+def test_tag_template_seeds_ta_first_and_migrates_only_untouched_legacy():
+    """DEFAULT_TAGS now leads with TA (hotkey 1 — triage reaches for "this
+    is the adversary" far more than "this is fine"). A workspace whose
+    template is byte-for-byte the old Benign-first seed was never edited,
+    so it migrates; any customization is the analyst's and stays."""
+    from store import DEFAULT_TAGS
+
+    assert [n for n, _, _ in DEFAULT_TAGS] == ["TA", "Suspicious", "Benign"]
+    assert DEFAULT_TAGS[0][2] == "1"
+
+    # fresh seed: TA first
+    assert [t["name"] for t in WS.tags.get()] == ["TA", "Suspicious", "Benign"]
+
+    # untouched legacy template migrates in place
+    WS.tags._save(list(WS.TagTemplate._LEGACY_SEED))
+    assert [t["name"] for t in WS.tags.get()] == ["TA", "Suspicious", "Benign"]
+
+    # a customized template (one rename) is never rewritten
+    custom = [dict(t) for t in WS.TagTemplate._LEGACY_SEED]
+    custom[0]["name"] = "Clean"
+    WS.tags._save(custom)
+    assert [t["name"] for t in WS.tags.get()] == ["Clean", "Suspicious", "TA"]
