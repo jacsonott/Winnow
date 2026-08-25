@@ -342,7 +342,7 @@ Plugins get three extension points:
   whatever the plugin's UI needs the server to do: query the case, run a
   computation, call an external service.
 
-Four worked examples ship in `examples/plugins/` and are already listed
+Five worked examples ship in `examples/plugins/` and are already listed
 in Settings → Plugins — no install step, switched off until you enable
 them:
 
@@ -356,6 +356,10 @@ them:
   pairs from any table (4624s, firewall logs, netflow) as a
   force-directed graph: edge width is event count, arrows show
   direction, drag to untangle. Fully offline.
+- **`first_last/`** — group events (host, user, anything) and keep each
+  group's first and last row with a templated description — "First of
+  312 | WKSTN-014 | user: jsmith" — as a new, taggable table. Turns tens
+  of thousands of logon events into a page of session bookends.
 - **`pivot/`** — Excel's PivotTable over any ingested table: drag
   fields into Rows, Columns, Values and Filters for a cross-tab with
   subtotals and grand totals, click a cell for the rows behind it, copy

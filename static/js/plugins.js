@@ -3,7 +3,7 @@
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { $, api, el, post, setBusy, toast } from './core.js';
 import { loadPlugins, openImportModal, pluginFormatById, queueFilesForFormat } from './importer.js';
-import { openSource, renderPageTabs, syncTabSelection } from './sources.js';
+import { loadSources, openSource, renderPageTabs, syncTabSelection } from './sources.js';
 import { activeSqlTab, scheduleSqlTabSave, showGridTab, syncTabChrome } from './sql.js';
 import { S } from './state.js';
 import { confirmDialog, modal, promptDialog } from './ui.js';
@@ -339,6 +339,12 @@ export function buildPluginTabContext(tab) {
     sql: (sql, limit = 5000) => post('/api/sql', { sql, limit }),
     schemaText: sqlSchemaForLLM,
     openSource,
+    // For plugins that CREATE sources (via their own routes + ingest_rows):
+    // a synchronous server-side ingest announces itself through no job, so
+    // nothing else refreshes the app's source list — the tab must, or its
+    // freshly created table is invisible until a reload. Await this, then
+    // openSource(new_id).
+    refreshSources: () => loadSources(),
     state: {
       get sources() { return S.sources; },
       get sourceId() { return S.sourceId; },

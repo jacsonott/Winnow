@@ -358,6 +358,7 @@ Prefer it to reaching into the app's globals — this is what's supported.
 | `modal(title, build, opts)` | Winnow's modal |
 | `confirmDialog(msg, opts)` / `promptDialog(msg, initial)` | Async dialogs |
 | `openSource(id)` | Switch the app to a source's grid tab |
+| `refreshSources()` | Re-fetch the app's source list — call after your backend creates a table via `ingest_rows` (a sync ingest announces itself through no job), then `openSource(new_id)` |
 | `state.sources` | Live source list (`{id, name, columns, row_count, is_merge, error}`) |
 | `state.sourceId` | Currently selected source id |
 | `state.tags` | Tag definitions |
