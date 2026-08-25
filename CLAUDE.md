@@ -27,6 +27,13 @@ structparse.py     JSON/XML field-extraction operations, registered into
                     flatten picker. Stdlib only; imports timeparse and nothing
                     else from the app. store.py imports it for the
                     registration side effect.
+header_defaults.py Shipped header-set nicknames for common EZ Tools/KAPE
+                    output shapes (EvtxECmd, MFTECmd, Amcache, ...) — data
+                    only, seeded once into workspace by
+                    HeaderNicknames.ensure_seeded; analyst renames/deletes
+                    always win. Add new tool shapes as new entries (never
+                    edit an old one — files from older releases persist)
+                    and bump DEFAULTS_VERSION.
 workspace.py       Cross-case JSON state (case registry, saved filters, default
                     tag template) — human-readable files in workspace/, outside
                     any single case.db so they survive switching cases.
