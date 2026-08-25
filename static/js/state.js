@@ -19,6 +19,7 @@ export const S = {
   search: '',
   searchMode: 'contains', // 'contains' | 'regex' | 'advanced'
   searchTerms: [],        // advanced mode: [{term, connector: 'AND'|'OR', exclude: bool}]
+  advCollapsed: null,     // advanced bar: null = auto (collapse past a handful of terms), true/false = pinned by the ▸/▴ controls
   filterTree: { type: 'group', op: 'AND', children: [] }, // guided filter builder
   tagFilter: [],        // tag ids, or ['__any__'] / ['__none__']
   view: null,           // {view_id, row_count}

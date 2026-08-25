@@ -554,11 +554,46 @@ export function renderTermChips(container, terms, onChange, opts = {}) {
     inputs[inputs.length - 1]?.focus();
   };
   container.append(add);
+  // opts.trailing appends controls after "+ term" — it has to be a hook
+  // rather than something the caller tacks on afterwards, because the
+  // add/remove handlers above re-render by calling renderTermChips
+  // directly (replaceChildren wipes the container each time).
+  if (opts.trailing) opts.trailing(container);
+}
+
+/* A saved filter like the shipped tool sweep carries 26 terms; rendered
+   as editor rows they stack taller than the viewport and the grid gets
+   nothing. Past this many terms the bar collapses to a one-line summary
+   (S.advCollapsed = null means "auto"; the ▸/▴ controls pin it). */
+const ADV_COLLAPSE_AT = 6;
+
+function advBarCollapsed() {
+  if (S.advCollapsed !== null) return S.advCollapsed;
+  return S.searchTerms.length > ADV_COLLAPSE_AT;
 }
 
 export function renderAdvancedChips() {
-  renderTermChips($('advancedSearchBar'), S.searchTerms, () => rebuildView({ keepScroll: false }), {
+  const bar = $('advancedSearchBar');
+  if (advBarCollapsed()) {
+    bar.replaceChildren();
+    const labels = S.searchTerms.map((t) => (t.exclude ? '-' : '') + (t.term || '').trim()).filter(Boolean);
+    const head = labels.slice(0, 3).join(', ');
+    const rest = labels.length > 3 ? `, +${labels.length - 3} more` : '';
+    const btn = el('button', 'btn ghost adv-summary', `${labels.length} terms: ${head}${rest} ▸`);
+    btn.title = `Expand to edit — ${labels.join(', ')}`;
+    btn.onclick = () => { S.advCollapsed = false; renderAdvancedChips(); };
+    bar.append(btn);
+    return;
+  }
+  renderTermChips(bar, S.searchTerms, () => rebuildView({ keepScroll: false }), {
     debounceMs: 220, blurTarget: $('body'), onInputBlur: collapseSearchIfEmpty,
+    trailing: (container) => {
+      if (S.searchTerms.length <= ADV_COLLAPSE_AT) return;
+      const min = el('button', 'btn ghost adv-summary', '▴ minimize');
+      min.title = 'Collapse the term list to one line';
+      min.onclick = () => { S.advCollapsed = true; renderAdvancedChips(); };
+      container.append(min);
+    },
   });
 }
 
