@@ -83,9 +83,11 @@ def test_saved_filters_reorder_only_touches_the_given_group():
     c = WS.filters.create("C", ["Col1"], {})
 
     # Reverse just the ["Col1"] group's order (A, B, C -> C, B, A) — X/Y
-    # must stay exactly where they were, not get pushed around.
+    # must stay exactly where they were, not get pushed around. list() also
+    # seeds the shipped TLE defaults (appended after these five, since the
+    # five were created first) — slice them off; their order isn't at issue.
     WS.filters.reorder([c["id"], b["id"], a["id"]])
-    names_in_order = [f["name"] for f in WS.filters.list()]
+    names_in_order = [f["name"] for f in WS.filters.list()][:5]
     assert names_in_order == ["C", "X", "B", "Y", "A"]
 
 
@@ -94,11 +96,16 @@ def test_saved_filters_import_merges_by_name_and_columns():
     export = WS.filters.export_all()
     assert export["format"] == "winnow-filters/1"
 
+    import filter_defaults
+    seeded = len(filter_defaults.DEFAULT_SAVED_FILTERS)
+
     # Importing the same export again (merge=True) must not duplicate —
     # same name + same column set is considered "the same filter."
+    # (export_all ran before list() ever seeded, so the export carries just
+    # the one analyst filter; counts below are relative to the seeds.)
     added = WS.filters.import_all(export, merge=True)
     assert added == 0
-    assert len(WS.filters.list()) == 1
+    assert len(WS.filters.list()) == 1 + seeded
 
     # A different column set with the same name is NOT a duplicate skip.
     export2 = {"format": "winnow-filters/1", "filters": [
@@ -106,7 +113,7 @@ def test_saved_filters_import_merges_by_name_and_columns():
     ]}
     added2 = WS.filters.import_all(export2, merge=True)
     assert added2 == 1
-    assert len(WS.filters.list()) == 2
+    assert len(WS.filters.list()) == 2 + seeded
 
 
 def test_header_nicknames_save_find_overwrites_and_delete():
