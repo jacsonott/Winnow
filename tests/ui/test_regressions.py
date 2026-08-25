@@ -175,3 +175,26 @@ def test_a_many_term_advanced_search_collapses_instead_of_hogging_the_toolbar(pa
     # input to land on) rather than throwing on input.select().
     page.keyboard.press("/")
     assert "adv-summary" in page.evaluate("() => document.activeElement.className")
+
+
+def test_a_select_drag_ending_on_the_backdrop_does_not_close_the_modal(page):
+    """A `click` fires on the common ancestor of its mousedown and mouseup
+    targets — so drag-selecting text inside a modal (a path in the import
+    browser, say) and releasing past the card's edge landed a click on the
+    backdrop and closed the modal mid-copy. Backdrop close must require the
+    press to have STARTED on the backdrop; a deliberate backdrop click
+    still closes."""
+    page.keyboard.press("?")
+    page.wait_for_selector("#modal:not([hidden])")
+    card = page.locator(".modal-card").bounding_box()
+
+    page.mouse.move(card["x"] + card["width"] / 2, card["y"] + 8)
+    page.mouse.down()
+    page.mouse.move(card["x"] - 60, card["y"] + 200, steps=6)  # released over the backdrop
+    page.mouse.up()
+    page.wait_for_timeout(150)
+    assert not page.locator("#modal").is_hidden(), "a select-drag out of the card closed the modal"
+
+    page.mouse.click(card["x"] - 60, card["y"] + 200)
+    page.wait_for_timeout(150)
+    assert page.locator("#modal").is_hidden(), "a real backdrop click must still close it"

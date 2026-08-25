@@ -243,13 +243,13 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
       // into a live scroll container re-layouts on every append.
       const frag = document.createDocumentFragment();
       if (listing.parent) {
-        const up = el('button', 'btn ghost', '.. (up a level)');
+        const up = el('button', 'btn ghost browse-row', '.. (up a level)');
         up.style.cssText = 'justify-content:flex-start;text-align:left';
         up.onclick = () => load(listing.parent);
         frag.append(up);
       }
       for (const d of listing.dirs) {
-        const row = el('button', 'btn ghost', '📁 ' + d);
+        const row = el('button', 'btn ghost browse-row', '📁 ' + d);
         row.style.cssText = 'justify-content:flex-start;text-align:left;width:100%';
         row.onclick = () => load(listing.path + '/' + d);
         frag.append(row);
@@ -257,7 +257,7 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
       if (filesMode) {
         for (const f of listing.files || []) {
           const path = listing.path + '/' + f.name;
-          const row = el('label', 'session-row row-actions');
+          const row = el('label', 'session-row browse-row');
           row.style.cssText = 'cursor:pointer';
           const cb = el('input');
           cb.type = 'checkbox';
