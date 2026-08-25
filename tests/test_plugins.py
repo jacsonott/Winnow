@@ -1389,3 +1389,117 @@ def test_legacy_toggle_body_still_means_everywhere(scoped_client):
     states, _ = _states(scoped_client)
     assert states["demo"]["enabled"] is False and states["demo"]["machine_enabled"] is False
     assert scoped_client.post("/api/plugins/toggle", json={"fs_name": "demo"}).status_code == 400
+
+
+# ============================================================ first_last plugin
+
+FL_ROWS = [
+    ["When", "Host", "User", "EventId"],
+    ["2026-03-14 08:00:00", "SRV1", "alice", "4624"],
+    ["2026-03-14 09:00:00", "SRV1", "alice", "4688"],
+    ["2026-03-14 17:30:00", "SRV1", "alice", "4634"],
+    ["2026-03-14 10:00:00", "SRV2", "bob", "4624"],     # single-event group
+    ["2026-03-14 11:00:00", "SRV1", "carol", "4625"],
+    ["2026-03-14 11:00:00", "SRV1", "carol", "4624"],   # timestamp tie — rid breaks it
+]
+
+
+@pytest.fixture
+def fl_client(client, store, write_csv, example_registry, monkeypatch):
+    import server
+
+    monkeypatch.setattr(server, "PLUGINS", example_registry)
+    rec = store.ingest_csv(write_csv(FL_ROWS, "fl.csv"), name="fl", build_fts=False)
+    return client, rec["id"]
+
+
+def _fl(client, route, **body):
+    r = client.post(f"/api/plugin/first_last/{route}", json=body)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_first_last_bookends_each_group_with_rendered_descriptions(fl_client):
+    client, sid = fl_client
+    out = _fl(client, "preview", source_id=sid, group_by=["Host", "User"],
+              sort_column="When", columns=["User", "EventId"],
+              template="{which} of {count} | {Host} | user: {User}")
+    assert out["columns"] == ["When", "User", "EventId", "Description"]
+    assert out["total_groups"] == 3
+    descs = [r[-1] for r in out["rows"]]
+    # alice: 3 events -> two bookends; the description reads each row's OWN
+    # values ({which}/{count} substituted, EventId from that end's row).
+    assert "First of 3 | SRV1 | user: alice" in descs
+    assert "Last of 3 | SRV1 | user: alice" in descs
+    first_alice = next(r for r in out["rows"] if r[-1].startswith("First of 3"))
+    last_alice = next(r for r in out["rows"] if r[-1].startswith("Last of 3"))
+    assert first_alice[0] == "2026-03-14 08:00:00" and first_alice[2] == "4624"
+    assert last_alice[0] == "2026-03-14 17:30:00" and last_alice[2] == "4634"
+
+
+def test_first_last_single_row_group_emits_one_row(fl_client):
+    """A one-event group is its own first and last — one row, labelled
+    First, not a duplicated pair saying nothing twice."""
+    client, sid = fl_client
+    out = _fl(client, "preview", source_id=sid, group_by=["Host", "User"],
+              sort_column="When", columns=["User"], template="{which} of {count}")
+    bob = [r for r in out["rows"] if r[1] == "bob"]
+    assert len(bob) == 1 and bob[0][-1] == "First of 1"
+
+
+def test_first_last_breaks_timestamp_ties_by_rid(fl_client):
+    """carol's two events share a timestamp — rid order (file order) decides
+    deterministically, so re-running never swaps first and last."""
+    client, sid = fl_client
+    out = _fl(client, "preview", source_id=sid, group_by=["User"],
+              sort_column="When", columns=["EventId"], template="{which}")
+    carol = [r for r in out["rows"] if r[-1] in ("First", "Last")]
+    firsts = {r[1] for r in out["rows"] if r[-1] == "First"}
+    lasts = {r[1] for r in out["rows"] if r[-1] == "Last"}
+    assert "4625" in firsts and "4624" in lasts  # file order: 4625 row came first
+
+
+def test_first_last_filters_scope_the_grouping(fl_client):
+    client, sid = fl_client
+    out = _fl(client, "preview", source_id=sid, group_by=["Host"],
+              sort_column="When", columns=[],
+              template="{which} of {count}",
+              filters=[{"column": "EventId", "op": "in", "values": ["4624"]}])
+    assert out["total_groups"] == 2  # SRV1 (2x 4624), SRV2 (1x)
+    assert {r[-1] for r in out["rows"]} == {"First of 2", "Last of 2", "First of 1"}
+
+
+def test_first_last_create_lands_a_real_source(fl_client, store):
+    client, sid = fl_client
+    out = _fl(client, "create", source_id=sid, group_by=["Host", "User"],
+              sort_column="When", columns=["User"],
+              template="{which} of {count} on {Host}", name="Sessions")
+    rec = out["source"]
+    assert rec["name"] == "Sessions" and rec["row_count"] == 5  # 2+1+2 bookends
+    src = store.get_source(rec["id"])
+    assert [c["name"] for c in src["columns"]] == ["When", "User", "Description"]
+    # and it's an ordinary source: build a view over it
+    view = store.build_view(rec["id"], {"source_id": rec["id"], "filters": [], "sort": []})
+    assert view["row_count"] == 5
+
+
+def test_first_last_template_typo_is_a_400_naming_the_placeholder(fl_client):
+    client, sid = fl_client
+    r = client.post("/api/plugin/first_last/preview", json={
+        "source_id": sid, "group_by": ["Host"], "sort_column": "When",
+        "columns": [], "template": "{which} of {Usre}"})
+    assert r.status_code == 400
+    assert "{Usre}" in r.json()["detail"]
+
+
+@pytest.mark.parametrize("body, fragment", [
+    ({"group_by": [], "sort_column": "When"}, "at least one column"),
+    ({"group_by": ["Host"]}, "orders each group"),
+    ({"group_by": ["Nope"], "sort_column": "When"}, "No column"),
+    ({"group_by": ["Host"] * 9, "sort_column": "When"}, "Too many"),
+])
+def test_first_last_validation(fl_client, body, fragment):
+    client, sid = fl_client
+    r = client.post("/api/plugin/first_last/preview", json={"source_id": sid, **body})
+    assert r.status_code == 400, r.text
+    assert fragment.lower() in r.json()["detail"].lower()

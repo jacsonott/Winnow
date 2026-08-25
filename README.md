@@ -100,7 +100,9 @@ Keys: `↑↓`/`jk` move, `Shift+↑↓` extend selection, `PgUp`/`PgDn`, `g`/`G
 top and bottom, `1`–`9` toggle a tag on the selection, `Shift+1`–`9` apply a tag
 to **every** row in the current view, `/` search, `f` filters to the value in
 the cell you're on (`Shift+F` does that *and* drops every other filter — the
-timeframe filter stays), `C` the table menu, `n` note,
+timeframe filter stays), `q`/`w` cycle the saved filters (aliases `[`/`]`),
+`e` the Filter builder, `v` the value picker for the cell you're on, `a`
+toggles the timeframe filter (`A` configures it), `C` the table menu, `n` note,
 `?` help. `Ctrl`/`⌘`+`Z` undoes the last tag you applied or removed — press it
 again to keep stepping back. Undo reverses exactly the rows that op
 *changed*, so tagging a selection that overlaps rows you'd tagged earlier
@@ -334,7 +336,7 @@ Plugins get three extension points:
   whatever the plugin's UI needs the server to do: query the case, run a
   computation, call an external service.
 
-Four worked examples ship in `examples/plugins/` and are already listed
+Five worked examples ship in `examples/plugins/` and are already listed
 in Settings → Plugins — no install step, switched off until you enable
 them:
 
@@ -348,6 +350,10 @@ them:
   pairs from any table (4624s, firewall logs, netflow) as a
   force-directed graph: edge width is event count, arrows show
   direction, drag to untangle. Fully offline.
+- **`first_last/`** — group events (host, user, anything) and keep each
+  group's first and last row with a templated description — "First of
+  312 | WKSTN-014 | user: jsmith" — as a new, taggable table. Turns tens
+  of thousands of logon events into a page of session bookends.
 - **`pivot/`** — Excel's PivotTable over any ingested table: drag
   fields into Rows, Columns, Values and Filters for a cross-tab with
   subtotals and grand totals, click a cell for the rows behind it, copy
