@@ -141,3 +141,37 @@ def test_resetting_the_keymap_actually_resets_it(page):
     # the actual bug — a reset that only fixes S.keymap would still pass above
     # on the first run and fail after a reload.
     assert page.evaluate("() => __winnow.DEFAULT_KEYMAP.moveDown.join(',')") == "ArrowDown,j"
+
+
+def test_a_many_term_advanced_search_collapses_instead_of_hogging_the_toolbar(page):
+    """Each advanced term renders as a full editor row (connector / NOT /
+    input / remove), so a saved filter carrying a long term list — the
+    shipped tool sweep is 26 — used to stack the toolbar taller than the
+    viewport and leave the grid zero visible rows. Past a handful of terms
+    the bar must collapse to a one-line summary chip, expand on demand into
+    an editor capped well short of the viewport, and minimize back."""
+    page.evaluate("""() => {
+      __winnow.S.searchMode = 'advanced';
+      __winnow.S.searchTerms = Array.from({ length: 20 }, (_, i) =>
+        ({ term: 'tool' + i, connector: 'OR', exclude: false }));
+      __winnow.renderAdvancedChips();
+      __winnow.syncSearchExpansion(true);
+    }""")
+    summary = page.locator(".adv-summary")
+    assert "20 terms" in summary.inner_text()
+    assert page.locator(".toolbar").bounding_box()["height"] < 120, "summary didn't keep the toolbar to one line"
+
+    summary.click()  # expand: the full editor, but scroll-capped
+    assert page.locator("#advancedSearchBar input").count() == 20
+    assert page.locator(".toolbar").bounding_box()["height"] < page.viewport_size["height"] / 2, (
+        "expanded editor may scroll, not shove the grid off-screen"
+    )
+
+    page.locator(".adv-summary").click()  # the trailing "▴ minimize"
+    assert page.locator("#advancedSearchBar input").count() == 0
+    assert page.locator(".toolbar").bounding_box()["height"] < 120
+
+    # `/` with the list collapsed focuses the summary chip (there is no
+    # input to land on) rather than throwing on input.select().
+    page.keyboard.press("/")
+    assert "adv-summary" in page.evaluate("() => document.activeElement.className")

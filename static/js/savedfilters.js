@@ -125,6 +125,7 @@ export function applyPreset(preset) {
   S.search = p.search || '';
   S.searchMode = p.search_mode || 'contains';
   S.searchTerms = p.search_terms || [];
+  S.advCollapsed = null;  // back to auto — a many-term preset lands as the one-line summary
   $('search').value = S.searchMode === 'advanced' ? '' : S.search;
   document.querySelectorAll('#searchModeToggle button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.mode === S.searchMode)));
   if (S.searchMode === 'advanced') renderAdvancedChips();

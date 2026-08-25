@@ -479,6 +479,7 @@ export async function openSource(id) {
   S.search = '';
   S.searchMode = 'contains';
   S.searchTerms = [];
+  S.advCollapsed = null;
   S.filterTree = { type: 'group', op: 'AND', children: [] };
   S.sort = [];
   S.tagFilter = [];
@@ -755,7 +756,7 @@ export async function clearAllFilters(seed = null) {
     await dropGrouping();
   }
   S.filters = seed ? { [seed.column]: seed.raw } : {};
-  S.search = ''; S.tagFilter = []; S.searchTerms = [];
+  S.search = ''; S.tagFilter = []; S.searchTerms = []; S.advCollapsed = null;
   S.filterTree = { type: 'group', op: 'AND', children: [] };
   updateFiltersButton();
   $('search').value = '';

@@ -415,7 +415,17 @@ html[data-style="studio"][data-theme="light"] {
 .search-mode-toggle .btn:last-child { border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
 .search-mode-toggle .btn + .btn { border-left: 0; }
 
-.advanced-search-bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+/* The max-height matters: each term is a full editor row, so a many-term
+   filter (the shipped tool sweep is 26) would otherwise stack taller than
+   the viewport and leave the grid zero rows. Collapsing to the .adv-summary
+   chip is the primary defense (renderAdvancedChips); this cap is the
+   backstop so even the expanded editor scrolls instead of hogging. */
+.advanced-search-bar {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  max-height: 33vh; overflow-y: auto;
+}
+.adv-summary { font-size: 11px; color: var(--dim); border-style: dashed; max-width: 480px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .adv-chip { display: inline-flex; align-items: center; gap: 4px; }
 .adv-chip input {
   width: 150px; background: var(--ink); color: var(--text);

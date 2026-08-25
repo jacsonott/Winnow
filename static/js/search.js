@@ -220,6 +220,7 @@ export function searchAllHitRow(st, hit, term) {
     S.searchTerms = term
       ? [{ term: term.term, connector: 'AND', exclude: false }]
       : st.terms.map((t) => ({ ...t }));
+    S.advCollapsed = null;  // a pasted IOC list can be hundreds of terms — let the bar auto-collapse
     document.querySelectorAll('#searchModeToggle button').forEach((btn) => btn.setAttribute('aria-pressed', String(btn.dataset.mode === 'advanced')));
     renderAdvancedChips();
     syncSearchExpansion(true);
@@ -356,8 +357,10 @@ export function syncSearchExpansion(forceExpand = false) {
 export function expandSearch() {
   syncSearchExpansion(true);
   if (S.searchMode === 'advanced') {
-    const i = $('advancedSearchBar').querySelector('input');
-    if (i) { i.focus(); i.select(); }
+    // When the term list is collapsed there's no input — focus the
+    // summary chip instead (Enter/Space expands it from there).
+    const i = $('advancedSearchBar').querySelector('input') || $('advancedSearchBar').querySelector('.adv-summary');
+    if (i) { i.focus(); if (i.select) i.select(); }
   } else {
     $('search').focus(); $('search').select();
   }
