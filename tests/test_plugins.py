@@ -1283,3 +1283,109 @@ def test_pivot_distinct_count_ignores_blanks_like_count_does(pivot_client):
     present, distinct = out["sets"][0]["rows"][0]
     assert present == 4                  # 100, 200, N/A, 40
     assert distinct == 4 and distinct <= present
+
+
+# ------------------------------------------------- bundled dir + scopes
+
+
+@pytest.fixture
+def scoped_client(client, plug_dir, tmp_path, monkeypatch):
+    """A registry with an installed plugin ("demo") and a bundled example
+    ("shipped"), loaded through server._reload_plugins so the effective-
+    state policy under test is the real one, not a re-implementation."""
+    import server
+
+    bundled = tmp_path / "bundled"
+    bundled.mkdir()
+    _write_plugin(plug_dir, "demo", GOOD_PLUGIN)
+    _write_plugin(bundled, "shipped", GOOD_PLUGIN.replace('"demo"', '"shipped"'))
+    reg = PluginRegistry()
+    monkeypatch.setattr(server, "PLUGINS", reg)
+    monkeypatch.setattr(server, "PLUGIN_DIRS", [plug_dir, bundled])
+    monkeypatch.setattr(server, "BUNDLED_PLUGIN_DIR", bundled)
+    server._reload_plugins()
+    return client
+
+
+def _states(client):
+    r = client.get("/api/plugins").json()
+    return {p["fs_name"]: p for p in r["plugins"]}, r
+
+
+def test_bundled_examples_are_listed_but_off_by_default(scoped_client):
+    """Presence-means-enabled is the right default for something the analyst
+    placed by hand, and the wrong one for what we shipped: an example runs
+    only once asked for (claude_assistant wants network + a key)."""
+    states, r = _states(scoped_client)
+    assert states["demo"]["enabled"] and not states["demo"]["bundled"]
+    assert states["shipped"]["bundled"] and not states["shipped"]["enabled"]
+    assert states["shipped"]["machine_enabled"] is False
+
+    scoped_client.post("/api/plugins/toggle", json={"fs_name": "shipped", "scope": "on_all"})
+    states, _ = _states(scoped_client)
+    assert states["shipped"]["enabled"] and states["shipped"]["machine_enabled"]
+
+
+def test_installed_copy_shadows_bundled_same_name(plug_dir, tmp_path, monkeypatch, client):
+    """plugins/ comes first and load() is first-directory-wins, so an
+    analyst's (possibly edited) install of an example beats the shipped
+    copy instead of both loading and fighting over tab ids."""
+    import server
+
+    bundled = tmp_path / "bundled"
+    bundled.mkdir()
+    _write_plugin(plug_dir, "demo", GOOD_PLUGIN.replace('"0.1"', '"9.9"'))
+    _write_plugin(bundled, "demo", GOOD_PLUGIN)
+    reg = PluginRegistry()
+    monkeypatch.setattr(server, "PLUGINS", reg)
+    monkeypatch.setattr(server, "PLUGIN_DIRS", [plug_dir, bundled])
+    monkeypatch.setattr(server, "BUNDLED_PLUGIN_DIR", bundled)
+    server._reload_plugins()
+    states, _ = _states(client)
+    assert len(states) == 1
+    assert states["demo"]["version"] == "9.9" and not states["demo"]["bundled"]
+
+
+def test_case_scope_overrides_travel_with_the_case(scoped_client, store):
+    """"Off in this case" lives in the case file: it must beat the machine
+    default while this case is open, survive a close/reopen of the same
+    case, and vanish from the effective state under a different case."""
+    import server
+
+    r = scoped_client.post("/api/plugins/toggle", json={"fs_name": "demo", "scope": "off_case"})
+    assert r.status_code == 200
+    states, listing = _states(scoped_client)
+    assert listing["case_open"] is True
+    assert states["demo"]["case_override"] is False
+    assert states["demo"]["enabled"] is False          # override beats machine-on
+    assert states["demo"]["machine_enabled"] is True   # ...without touching the default
+
+    # Recorded in the case file itself.
+    import json as _json
+    assert _json.loads(store.get_case_settings()["plugin_overrides"]) == {"demo": False}
+
+    # The "everywhere" scope clears the override — no silent exemption left.
+    scoped_client.post("/api/plugins/toggle", json={"fs_name": "demo", "scope": "on_all"})
+    states, _ = _states(scoped_client)
+    assert states["demo"]["case_override"] is None and states["demo"]["enabled"]
+    assert "plugin_overrides" not in store.get_case_settings()
+
+
+def test_case_scope_requires_an_open_case(scoped_client, monkeypatch):
+    import server
+
+    monkeypatch.setattr(server, "STORE", None)
+    server._reload_plugins()
+    r = scoped_client.post("/api/plugins/toggle", json={"fs_name": "demo", "scope": "on_case"})
+    assert r.status_code == 400
+    assert "case" in r.json()["detail"].lower()
+    states, listing = _states(scoped_client)
+    assert listing["case_open"] is False
+
+
+def test_legacy_toggle_body_still_means_everywhere(scoped_client):
+    r = scoped_client.post("/api/plugins/toggle", json={"fs_name": "demo", "enabled": False})
+    assert r.status_code == 200
+    states, _ = _states(scoped_client)
+    assert states["demo"]["enabled"] is False and states["demo"]["machine_enabled"] is False
+    assert scoped_client.post("/api/plugins/toggle", json={"fs_name": "demo"}).status_code == 400

@@ -56,35 +56,119 @@ export function buildPluginsPanel(b) {
     else toast(`Installed ${r.installed}`);
   }
 
+  /* "File or folder?" was the question the two old side-by-side buttons
+     made the analyst answer blind — the browser can't offer one picker
+     that takes either, so the dialog states the rule the pickers can't:
+     which one you need is decided by how the plugin arrived on disk. If a
+     folder pick contains no __init__.py, or a file pick isn't a .py, that's
+     said here rather than left to a failed install. */
+  function openInstallDialog() {
+    modal('Install a plugin', (b) => {
+      b.append(el('p', null,
+        'A plugin is either a single Python file or a folder — which one is decided by '
+        + 'how it arrived, not by preference:'));
+      const kv = el('div', 'kv');
+      kv.append(el('kbd', null, 'One .py file'), el('span', null, 'Pick the file itself.'));
+      kv.append(el('kbd', null, 'A folder'), el('span', null,
+        'Pick the folder that directly contains __init__.py (plus any ui/, README, data it ships). '
+        + 'Everything inside is copied.'));
+      b.append(kv);
+      b.append(el('p', 'note-status',
+        'Either way it lands in the first plugins directory listed above, enabled immediately. '
+        + 'The bundled examples are already listed — no install needed, just switch them on.'));
+
+      const acts = el('div', 'row-actions');
+      const fileLabel = el('label', 'btn', 'Pick a .py file…');
+      const fileInput = el('input');
+      fileInput.type = 'file';
+      fileInput.accept = '.py';
+      fileInput.hidden = true;
+      fileInput.onchange = () => {
+        const files = [...fileInput.files];
+        fileInput.value = '';
+        if (!files.length) return;
+        if (!files[0].name.endsWith('.py')) { toast('That isn\'t a .py file — for a folder plugin, use the folder button', 5000); return; }
+        $('modal').hidden = true;
+        installFiles(files, files.map((f) => f.name));
+      };
+      fileLabel.append(fileInput);
+      const folderLabel = el('label', 'btn', 'Pick a plugin folder…');
+      const folderInput = el('input');
+      folderInput.type = 'file';
+      // Folder picker: every file inside arrives with its path relative to
+      // the picked folder (webkitRelativePath), which is exactly what the
+      // install route's `paths` field wants.
+      folderInput.webkitdirectory = true;
+      folderInput.hidden = true;
+      folderInput.onchange = () => {
+        const files = [...folderInput.files];
+        folderInput.value = '';
+        if (!files.length) return;
+        // The rule stated above, enforced before any bytes move: a plugin
+        // folder is one whose top level has __init__.py.
+        const hasInit = files.some((f) => {
+          const rel = f.webkitRelativePath || f.name;
+          const parts = rel.split('/');
+          return parts.length === 2 && parts[1] === '__init__.py';
+        });
+        if (!hasInit) {
+          toast('That folder has no __init__.py at its top level — pick the plugin folder itself, not its parent or a subfolder', 6500);
+          return;
+        }
+        $('modal').hidden = true;
+        installFiles(files, files.map((f) => f.webkitRelativePath || f.name));
+      };
+      folderLabel.append(folderInput);
+      acts.append(fileLabel, folderLabel);
+      b.append(acts);
+    });
+  }
+
   function renderPanel() {
     box.replaceChildren();
     box.append(el('p', null,
-      'Drop-in extensions, Notepad++-style. Toggles and installs take effect immediately — no restart. '
-      + 'A plugin runs with the same privileges as Winnow itself, so only install plugins you trust.'));
+      'Drop-in extensions, Notepad++-style. Changes take effect immediately — no restart. '
+      + 'A plugin runs with the same privileges as Winnow itself, so only install plugins you trust. '
+      + 'The bundled examples ship with Winnow and start switched off.'));
     for (const d of S.pluginDirs) {
       const dir = el('div', 'note-status', d);
       dir.style.cssText = 'font-family:var(--mono)';
       box.append(dir);
     }
-
-    if (!S.plugins.length) {
-      box.append(el('p', 'note-status',
-        'No plugins installed. A ready-made example (raw NTFS $MFT / USN journal parsing) ships in '
-        + 'examples/plugins/mft_usn — install it below, or see plugins/README.md.'));
-    }
     for (const p of S.plugins) {
       const row = el('div', 'row-actions session-row');
-      const cb = el('input');
-      cb.type = 'checkbox';
-      cb.checked = p.enabled;
-      cb.title = p.enabled ? 'Disable — its code will no longer be loaded' : 'Enable this plugin';
-      cb.onchange = async () => {
-        cb.disabled = true;
+      // Four scopes, not a checkbox: machine default ("everywhere") plus a
+      // per-case override that lives in the case file and travels with it.
+      // The select's value is the current state's provenance, so what it
+      // shows is why the plugin is on/off, not just whether.
+      const scopeSel = el('select');
+      scopeSel.style.cssText = 'background:var(--ink);color:var(--text);border:1px solid var(--line-2);'
+        + 'padding:3px 6px;font:inherit;font-size:12px';
+      const OPTIONS = [
+        ['on_all', 'On — all cases'],
+        ['off_all', 'Off — all cases'],
+        ...(S.pluginsCaseOpen ? [
+          ['on_case', 'On — this case only'],
+          ['off_case', 'Off — this case only'],
+        ] : []),
+      ];
+      for (const [v, label] of OPTIONS) {
+        const o = el('option', null, label);
+        o.value = v;
+        scopeSel.append(o);
+      }
+      scopeSel.value = p.case_override === true ? 'on_case'
+        : p.case_override === false ? 'off_case'
+        : p.machine_enabled ? 'on_all' : 'off_all';
+      scopeSel.title = p.case_override != null
+        ? 'This case overrides the everywhere setting; other cases follow it'
+        : 'Applies to every case on this machine';
+      scopeSel.onchange = async () => {
+        scopeSel.disabled = true;
         try {
-          applyListing(await post('/api/plugins/toggle', { fs_name: p.fs_name, enabled: cb.checked }));
-          toast(cb.checked ? `Enabled ${p.name}` : `Disabled ${p.name} — its code is no longer loaded`);
+          applyListing(await post('/api/plugins/toggle', { fs_name: p.fs_name, scope: scopeSel.value }));
         } catch (e) {
-          toast('Could not toggle plugin: ' + e.message, 5000);
+          toast('Could not change the plugin: ' + e.message, 5000);
         }
         renderPanel();
       };
@@ -92,9 +176,16 @@ export function buildPluginsPanel(b) {
       if ((p.formats || []).length) parts.push(`${p.formats.length} format${p.formats.length === 1 ? '' : 's'}`);
       if ((p.tabs || []).length) parts.push(`${p.tabs.length} tab${p.tabs.length === 1 ? '' : 's'}`);
       const status = p.error ? 'failed to load'
-        : !p.enabled ? 'disabled'
+        : !p.enabled ? 'off'
         : (parts.join(', ') || 'loaded');
-      row.append(cb, el('span', 'session-name', p.name + (p.version ? ` v${p.version}` : '')), el('span', 'count', status));
+      const nameSpan = el('span', 'session-name', p.name + (p.version ? ` v${p.version}` : ''));
+      row.append(scopeSel, nameSpan);
+      if (p.bundled) {
+        const badge = el('span', 'count', 'example — ships with Winnow');
+        badge.style.cssText = 'border:1px solid var(--line-2);border-radius:var(--radius-sm);padding:0 5px';
+        row.append(badge);
+      }
+      row.append(el('span', 'count', status));
       box.append(row);
       if (p.error) {
         const err = el('div', 'note-status', p.error);
@@ -134,32 +225,9 @@ export function buildPluginsPanel(b) {
     }
 
     const acts = el('div', 'row-actions');
-    const fileLabel = el('label', 'btn ghost', 'Install a plugin file…');
-    const fileInput = el('input');
-    fileInput.type = 'file';
-    fileInput.accept = '.py';
-    fileInput.hidden = true;
-    fileInput.onchange = () => {
-      const files = [...fileInput.files];
-      fileInput.value = '';
-      installFiles(files, files.map((f) => f.name));
-    };
-    fileLabel.append(fileInput);
-    const folderLabel = el('label', 'btn ghost', 'Install a plugin folder…');
-    const folderInput = el('input');
-    folderInput.type = 'file';
-    // Folder picker: every file inside arrives with its path relative to
-    // the picked folder (webkitRelativePath), which is exactly what the
-    // install route's `paths` field wants.
-    folderInput.webkitdirectory = true;
-    folderInput.hidden = true;
-    folderInput.onchange = () => {
-      const files = [...folderInput.files];
-      folderInput.value = '';
-      installFiles(files, files.map((f) => f.webkitRelativePath || f.name));
-    };
-    folderLabel.append(folderInput);
-    acts.append(fileLabel, folderLabel);
+    const installBtn = el('button', 'btn ghost', 'Install a plugin…');
+    installBtn.onclick = openInstallDialog;
+    acts.append(installBtn);
     box.append(acts);
   }
 

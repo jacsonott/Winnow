@@ -118,3 +118,18 @@ see [docs/notes/README.md](README.md) for the whole set.
     route runs the *old* code with the *new* line numbers, which makes
     tracebacks point at unrelated lines. Toggle the plugin off and on in
     Settings → Plugins (that's what `_reload_plugins` is for) or restart.
+
+- **Plugin enablement is two-layer, and the defaults point opposite ways.**
+  Machine level (workspace/plugins.json): installed plugins are on unless
+  in the `disabled` list; bundled examples (examples/plugins/, always in
+  PLUGIN_DIRS) are off unless in `enabled_bundled` — presence-means-on is
+  right for something the analyst placed and wrong for what we shipped.
+  Case level (case_settings `plugin_overrides`, JSON {fs_name: bool}):
+  wins where set, travels with the case file on purpose. Three rules keep
+  it honest: `_reload_plugins()` runs on every case open, because "a
+  disabled plugin's code never runs" is a per-case statement now; the
+  "everywhere" scopes clear the open case's override, so the dropdown
+  can't show a state a leftover override silently exempts; and
+  `PluginRegistry.load` is first-directory-wins on fs_name, so an
+  analyst's installed copy of an example shadows the bundled one instead
+  of both loading and fighting over tab ids.

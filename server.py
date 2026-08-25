@@ -85,8 +85,16 @@ STORE: Store | None = None
 PLUGINS = plugin_api.PluginRegistry()
 
 
+BUNDLED_PLUGIN_DIR = HERE / "examples" / "plugins"
+
+
 def _plugin_dirs(extra: list[str] | None = None) -> list[Path]:
-    dirs = [HERE / "plugins"]
+    # plugins/ first: it's the install target (PLUGIN_DIRS[0]), and load()'s
+    # first-directory-wins rule means an analyst's installed copy of an
+    # example shadows the bundled one. The bundled dir makes the shipped
+    # examples appear in Settings → Plugins with no install step — default
+    # OFF (see PluginPrefs.enabled_bundled), so nothing runs unasked.
+    dirs = [HERE / "plugins", BUNDLED_PLUGIN_DIR]
     env = os.environ.get("WINNOW_PLUGINS_DIR")
     if env:
         dirs.append(Path(env))
@@ -100,11 +108,39 @@ def _plugin_dirs(extra: list[str] | None = None) -> list[Path]:
 PLUGIN_DIRS: list[Path] = _plugin_dirs()
 
 
+def _case_plugin_overrides() -> dict[str, bool]:
+    """The open case's per-plugin overrides ({fs_name: bool}), or {} when no
+    case is open. Stored in the case file (case_settings) rather than the
+    workspace on purpose: "this case needs the pivot tab" is a statement
+    about the investigation, and it should still be true when the case file
+    is handed to another analyst."""
+    if STORE is None or STORE.closed:
+        return {}
+    try:
+        raw = STORE.get_case_settings().get("plugin_overrides")
+        overrides = json.loads(raw) if raw else {}
+        return {k: bool(v) for k, v in overrides.items()} if isinstance(overrides, dict) else {}
+    except Exception:
+        return {}
+
+
 def _reload_plugins() -> None:
-    """Rescan PLUGIN_DIRS, honoring the Settings → Plugins disabled list.
-    Cheap enough (a directory listing plus importing whatever's enabled)
-    that toggles and installs just call it — no server restart involved."""
-    PLUGINS.load(PLUGIN_DIRS, disabled=WS.plugin_prefs.disabled())
+    """Rescan PLUGIN_DIRS under the effective enablement policy: the open
+    case's override wins where set, else the machine default (installed
+    plugins default on via the disabled list; bundled examples default off
+    via the enabled list). Cheap enough (a directory listing plus importing
+    whatever's enabled) that toggles, installs and case switches just call
+    it — no server restart involved. Case switches MUST call it: "a
+    disabled plugin's code never runs" is a per-case statement now."""
+    overrides = _case_plugin_overrides()
+
+    def enabled_for(fs_name: str, directory: str) -> bool:
+        if fs_name in overrides:
+            return overrides[fs_name]
+        default_on = Path(directory) != BUNDLED_PLUGIN_DIR
+        return WS.plugin_prefs.machine_enabled(fs_name, default_on)
+
+    PLUGINS.load(PLUGIN_DIRS, enabled_for=enabled_for, bundled_dirs=[BUNDLED_PLUGIN_DIR])
 
 
 _reload_plugins()
@@ -423,6 +459,11 @@ def api_case_open(body: CaseOpen):
         body.path, name=os.path.splitext(os.path.basename(body.path))[0]
     )
     WS.cases.touch_opened(rec["id"])
+    # The effective plugin set is per-case now (case_settings overrides), so
+    # a case switch is a policy change: reload so an "on in this case" tab
+    # exists the moment the case does, and an "off in this case" plugin's
+    # code is unloaded rather than merely unlisted.
+    _reload_plugins()
     return {"sources": STORE.list_sources(), "name": rec["name"]}
 
 
@@ -956,10 +997,20 @@ def api_plugins():
     Settings → Plugins can say which folder installs land in.
     Case-independent; the toggle/install routes below return this same
     shape so the panel re-renders from whichever response it just got."""
+    overrides = _case_plugin_overrides()
+    plugins = PLUGINS.describe()
+    for p in plugins:
+        # `enabled` stays the effective state (it's what gates tabs/formats
+        # and what the registry actually loaded); these two say WHY, so the
+        # panel's scope dropdown can show provenance instead of guessing.
+        p["machine_enabled"] = WS.plugin_prefs.machine_enabled(
+            p["fs_name"], default_on=not p.get("bundled"))
+        p["case_override"] = overrides.get(p["fs_name"])
     return {
         "api_version": plugin_api.PLUGIN_API_VERSION,
         "dirs": [str(d) for d in PLUGIN_DIRS],
-        "plugins": PLUGINS.describe(),
+        "case_open": STORE is not None and not STORE.closed,
+        "plugins": plugins,
         "formats": PLUGINS.list_formats(),
         "tabs": PLUGINS.list_tabs(),
     }
@@ -1019,7 +1070,8 @@ async def api_plugin_dispatch(fs_name: str, route: str, request: Request):
 
 class PluginToggle(BaseModel):
     fs_name: str   # the plugins/ entry's file/folder name — the identity that exists without importing
-    enabled: bool
+    enabled: bool | None = None          # legacy body: on/off everywhere
+    scope: str | None = None             # on_all | off_all | on_case | off_case
 
 
 @app.post("/api/plugins/toggle")
@@ -1029,9 +1081,33 @@ def api_plugins_toggle(body: PluginToggle):
     merely unrouted, it is never imported on any later load (see
     PluginRegistry.load), which is the whole value of an off switch on
     something that runs with the app's privileges."""
-    if not any(p["fs_name"] == body.fs_name for p in PLUGINS.describe()):
+    rec = next((p for p in PLUGINS.describe() if p["fs_name"] == body.fs_name), None)
+    if rec is None:
         raise HTTPException(404, f"No installed plugin named {body.fs_name}")
-    WS.plugin_prefs.set_enabled(body.fs_name, body.enabled)
+    scope = body.scope
+    if scope is None:
+        if body.enabled is None:
+            raise HTTPException(400, "Send scope (on_all/off_all/on_case/off_case) or the legacy enabled flag")
+        scope = "on_all" if body.enabled else "off_all"
+    if scope not in ("on_all", "off_all", "on_case", "off_case"):
+        raise HTTPException(400, f"Unknown scope {scope!r}")
+    default_on = not rec.get("bundled")
+    if scope in ("on_all", "off_all"):
+        # The "everywhere" scopes also clear this case's override — picking
+        # them is a statement about every case, and a leftover override
+        # silently exempting the open one would make the dropdown a liar.
+        WS.plugin_prefs.set_machine_enabled(body.fs_name, scope == "on_all", default_on)
+        if STORE is not None and not STORE.closed:
+            overrides = _case_plugin_overrides()
+            if body.fs_name in overrides:
+                del overrides[body.fs_name]
+                STORE.set_case_setting("plugin_overrides", json.dumps(overrides) if overrides else None)
+    else:
+        if STORE is None or STORE.closed:
+            raise HTTPException(400, "Open a case first — per-case scopes live in the case file")
+        overrides = _case_plugin_overrides()
+        overrides[body.fs_name] = scope == "on_case"
+        STORE.set_case_setting("plugin_overrides", json.dumps(overrides))
     _reload_plugins()
     return api_plugins()
 

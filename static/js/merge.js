@@ -61,18 +61,34 @@ export function openMergeBuilder() {
       b.append(groupHead, list);
     });
 
+    // Existing merge names, lowercased — the server enforces uniqueness
+    // (case-insensitively); this is the same rule surfaced while typing,
+    // so the collision is a hint under the box rather than a failed POST.
+    const takenNames = new Set(S.sources.filter((s2) => s2.is_merge).map((s2) => s2.name.toLowerCase()));
+    // A collision-free default, so leaving the box empty twice can't
+    // manufacture the very duplicate the rule forbids.
+    let defaultName = 'Merged view';
+    for (let n = 2; takenNames.has(defaultName.toLowerCase()); n++) defaultName = `Merged view ${n}`;
+
     const nameRow = el('div', 'row-actions');
     const nameInput = el('input');
-    nameInput.placeholder = 'Merge name';
+    nameInput.placeholder = defaultName;
     nameInput.style.cssText = 'flex:1;background:var(--ink);color:var(--text);border:1px solid var(--line-2);padding:5px 8px;font:inherit';
     nameRow.append(nameInput);
     b.append(nameRow);
+    const nameHint = el('div', 'note-status', '');
+    b.append(nameHint);
 
     const acts = el('div', 'row-actions');
     const create = el('button', 'btn', 'Create merge');
+    nameInput.oninput = () => {
+      const clash = takenNames.has(nameInput.value.trim().toLowerCase());
+      nameHint.textContent = clash ? 'A merge with this name already exists — pick another.' : '';
+      create.disabled = clash;
+    };
     create.onclick = async () => {
       if (selected.size < 2) { toast('Select at least 2 sources from the same group'); return; }
-      const name = nameInput.value.trim() || 'Merged view';
+      const name = nameInput.value.trim() || defaultName;
       try {
         const rec = await post('/api/merges', { name, source_ids: [...selected] });
         $('modal').hidden = true;

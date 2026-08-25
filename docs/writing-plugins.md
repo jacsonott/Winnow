@@ -695,10 +695,20 @@ section of [`CLAUDE.md`](../CLAUDE.md).
 
 ## 9. Installing and sharing
 
-**Install:** Settings → Plugins → *Install a plugin file…* (a `.py`) or
-*Install a plugin folder…* — it copies into `plugins/` and loads
+**Install:** Settings → Plugins → *Install a plugin…* — pick the `.py`
+file for a single-file plugin, or the folder that directly contains
+`__init__.py` for a folder plugin (the dialog states the rule and checks
+your pick before any bytes move). It copies into `plugins/` and loads
 immediately, no restart. Copying in by hand works identically; the panel
-picks it up next time it opens.
+picks it up next time it opens. The bundled examples in
+`examples/plugins/` never need installing — they're always listed, with
+a scope dropdown like any other plugin, just defaulting to off.
+
+**Scopes:** each plugin is on/off *for all cases* (machine default,
+`workspace/plugins.json`) or *for this case only* (an override stored in
+the case file's `case_settings`, so it travels with the evidence). The
+registry reloads on every case switch — per-case disablement really
+unloads the code, same guarantee as the machine-level switch.
 
 **Distribute** a folder plugin as a zip or a git repo containing the
 plugin folder. Include a README saying what it does, what it needs

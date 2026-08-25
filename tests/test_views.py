@@ -530,3 +530,28 @@ def test_find_nearest_timestamp_rejects_garbage_and_misses(ingested):
     # None case — simulate by filtering to nothing.
     empty = store.build_view(sid, {"filters": [{"column": "User", "op": "equals", "value": "nobody"}]})
     assert store.find_nearest_timestamp(empty["view_id"], "2024-01-05 10:00:00") is None
+
+
+def test_merge_names_are_unique_case_insensitively(store, write_csv):
+    """Two merges named "EVTX" and "evtx" are one typo'd reference apart in
+    every list both appear in — so the name is unique at *both* doors into
+    merges.name: creation, and rename via set_source_nickname (a merge has
+    no file behind it, so its nickname is a rename)."""
+    rows = [["A", "B"], ["1", "2"], ["3", "4"]]
+    ids = [store.ingest_csv(write_csv(rows, f"m{i}.csv"), name=f"m{i}", build_fts=False)["id"]
+           for i in range(3)]
+    first = store.create_merge("EVTX", ids[:2])
+
+    import pytest as _pytest
+    with _pytest.raises(ValueError, match="already exists"):
+        store.create_merge("evtx", [ids[0], ids[2]])
+
+    second = store.create_merge("Other", [ids[0], ids[2]])
+    with _pytest.raises(ValueError, match="already exists"):
+        store.set_source_nickname(second["id"], "EVTX")
+
+    # Renaming a merge to its own name (a no-op save) is not a collision.
+    assert store.set_source_nickname(first["id"], "EVTX")["name"] == "EVTX"
+
+    with _pytest.raises(ValueError, match="needs a name"):
+        store.create_merge("   ", ids[:2])

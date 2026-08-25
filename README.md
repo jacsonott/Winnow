@@ -313,11 +313,14 @@ GROUP BY 1, 2 ORDER BY n DESC;
 ## Plugins
 
 Winnow can be extended without touching its source, Notepad++-style.
-**Settings → Plugins** manages everything: it lists every plugin in
-`plugins/`, a checkbox per plugin toggles it on or off (a disabled
-plugin's code is never even imported), and the install buttons copy a
+**Settings → Plugins** manages everything — effective immediately, no
+restart. Each plugin has a scope: **on/off for all cases** (this
+machine's default) or **on/off for this case only** — the per-case
+choice is stored in the case file, so "this investigation needs the
+pivot tab" survives handing the case to another analyst. A disabled
+plugin's code is never even imported. "Install a plugin…" copies a
 `.py` file or a plugin folder picked from anywhere on disk into
-`plugins/` for you — all effective immediately, no restart. Dropping a
+`plugins/` for you (and explains which of the two you need); dropping a
 plugin into the folder by hand works too.
 
 Plugins get three extension points:
@@ -337,9 +340,9 @@ Plugins get three extension points:
   whatever the plugin's UI needs the server to do: query the case, run a
   computation, call an external service.
 
-Four worked examples ship in `examples/plugins/` — install any of them
-from Settings → Plugins → "Install a plugin folder…", or `cp -r` into
-`plugins/`:
+Four worked examples ship in `examples/plugins/` and are already listed
+in Settings → Plugins — no install step, switched off until you enable
+them:
 
 - **`mft_usn/`** — raw NTFS `$MFT` and USN-journal (`$J`) parsing in
   pure stdlib Python (no MFTECmd/EZTools, no .NET — airgap-friendly):

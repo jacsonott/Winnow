@@ -27,6 +27,13 @@ structparse.py     JSON/XML field-extraction operations, registered into
                     flatten picker. Stdlib only; imports timeparse and nothing
                     else from the app. store.py imports it for the
                     registration side effect.
+header_defaults.py Shipped header-set nicknames for common EZ Tools/KAPE
+                    output shapes (EvtxECmd, MFTECmd, Amcache, ...) — data
+                    only, seeded once into workspace by
+                    HeaderNicknames.ensure_seeded; analyst renames/deletes
+                    always win. Add new tool shapes as new entries (never
+                    edit an old one — files from older releases persist)
+                    and bump DEFAULTS_VERSION.
 workspace.py       Cross-case JSON state (case registry, saved filters, default
                     tag template) — human-readable files in workspace/, outside
                     any single case.db so they survive switching cases.
@@ -46,7 +53,12 @@ plugins/           Analyst-installed plugins (gitignored except its README).
                     toggles and a copy-from-disk installer, no restart —
                     dropping a folder/.py here by hand works too.
 examples/plugins/  Committed example plugins, one per extension point — treat
-                    them as the reference for writing new ones. mft_usn: raw
+                    them as the reference for writing new ones. Always in
+                    PLUGIN_DIRS (after plugins/, whose same-named entries
+                    shadow them), so they're listed in Settings → Plugins
+                    with no install step — default OFF via PluginPrefs'
+                    enabled_bundled list, the inverse of the installed
+                    dir's presence-means-on rule. mft_usn: raw
                     NTFS $MFT/$J parsing (ingest formats, stdlib-only).
                     lateral_movement: a pinned graph tab (register_tab +
                     register_api + a canvas ES module, offline).
