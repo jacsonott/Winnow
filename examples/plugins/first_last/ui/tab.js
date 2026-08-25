@@ -16,7 +16,7 @@ export default function mount(container, winnow) {
 
   state = {
     sourceId: null,
-    groupBy: [], carry: [], filters: [],
+    groupBy: [], carry: [], filters: [], tags: { mode: '', ids: [] },
     sortColumn: null,
     template: '{which} of {count}',
     meta: null, preview: null, error: null, loading: false,
@@ -62,12 +62,18 @@ export default function mount(container, winnow) {
 
   const groupBox = el('div');
   const carryBox = el('div');
-  for (const [box, cap] of [[groupBox, 'Group by'], [carryBox, 'Columns to include']]) {
+  const carryOrder = el('div');
+  carryOrder.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px';
+  for (const [box, cap] of [[groupBox, 'Group rows on'], [carryBox, 'Columns to include']]) {
     box.style.cssText = 'display:flex;flex-direction:column;gap:2px;max-height:22vh;overflow:auto';
     side.append(label(cap), box);
+    if (box === carryBox) side.append(carryOrder);
   }
 
   side.append(label('Only these rows (filters)'));
+  const tagBox = el('div');
+  tagBox.style.cssText = 'display:flex;flex-direction:column;gap:2px';
+  side.append(tagBox);
   const filterBox = el('div');
   filterBox.style.cssText = 'display:flex;flex-direction:column;gap:4px';
   side.append(filterBox);
@@ -128,6 +134,7 @@ export default function mount(container, winnow) {
       }));
       carryBox.append(checkbox(c.name, state.carry.includes(c.name), (on) => {
         state.carry = on ? [...state.carry, c.name] : state.carry.filter((n) => n !== c.name);
+        renderCarryOrder();
         schedule();
       }));
     }
@@ -141,6 +148,8 @@ export default function mount(container, winnow) {
       o.value = c.name;
       addFilterSel.append(o);
     }
+    renderTagFilter();
+    renderCarryOrder();
     addFilterSel.value = '';
     addFilterSel.onchange = () => {
       if (!addFilterSel.value) return;
@@ -168,6 +177,75 @@ export default function mount(container, winnow) {
     }
   }
 
+  /* The included columns again, as chips in RESULT order — state.carry is
+     what the backend turns into the output header, so the chips are the
+     one place that order is visible and draggable. */
+  let dragIdx = null;
+  function renderCarryOrder() {
+    carryOrder.replaceChildren();
+    if (!state.carry.length) return;
+    state.carry.forEach((name, i) => {
+      const chip = el('div', null, name);
+      chip.style.cssText = 'display:inline-flex;align-items:center;background:var(--panel-2);'
+        + 'border:1px solid var(--line);border-radius:var(--radius-sm);padding:2px 7px;'
+        + 'font:11px var(--mono);cursor:grab';
+      chip.title = 'Drag to change where this column lands in the created table';
+      chip.draggable = true;
+      chip.ondragstart = (e) => { dragIdx = i; e.dataTransfer.effectAllowed = 'move'; };
+      chip.ondragover = (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; };
+      chip.ondrop = (e) => {
+        e.preventDefault();
+        if (dragIdx === null || dragIdx === i) return;
+        const [moved] = state.carry.splice(dragIdx, 1);
+        state.carry.splice(i, 0, moved);
+        dragIdx = null;
+        renderCarryOrder();
+        schedule();
+      };
+      chip.ondragend = () => { dragIdx = null; };
+      carryOrder.append(chip);
+    });
+    const hint = el('div', 'note-status', 'result order — drag to rearrange');
+    hint.style.cssText = 'font-size:10px;align-self:center';
+    carryOrder.append(hint);
+  }
+
+  /* Tag filter — its own control rather than a column filter, because tags
+     aren't a column: they live in the app's sidecar, and "only what I've
+     tagged TA" is the most common way to scope a bookend pass. */
+  function renderTagFilter() {
+    tagBox.replaceChildren();
+    const sel = mkSel('Keep only rows with (or without) tags');
+    sel.style.maxWidth = '100%';
+    for (const [v, t] of [['', 'Tags: all rows'], ['any', 'Tags: only tagged rows'],
+                          ['none', 'Tags: only untagged rows'], ['ids', 'Tags: only these tags…']]) {
+      const o = el('option', null, t);
+      o.value = v;
+      sel.append(o);
+    }
+    sel.value = state.tags.mode;
+    sel.onchange = () => { state.tags.mode = sel.value; renderTagFilter(); schedule(); };
+    tagBox.append(sel);
+    if (state.tags.mode !== 'ids') return;
+    const tags = winnow.state.tags || [];
+    if (!tags.length) { tagBox.append(el('div', 'note-status', 'No tags in this case yet.')); return; }
+    for (const t of tags) {
+      const row = el('label');
+      row.style.cssText = 'display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer';
+      const cb = el('input');
+      cb.type = 'checkbox';
+      cb.checked = state.tags.ids.includes(t.id);
+      cb.onchange = () => {
+        state.tags.ids = cb.checked ? [...state.tags.ids, t.id] : state.tags.ids.filter((x) => x !== t.id);
+        schedule();
+      };
+      const dot = el('span');
+      dot.style.cssText = `width:10px;height:10px;border-radius:2px;background:${t.color};flex:0 0 auto`;
+      row.append(cb, dot, el('span', null, t.name));
+      tagBox.append(row);
+    }
+  }
+
   function filterSummary(f) {
     const op = state.meta.operators.find((o) => o.id === f.op);
     if (!op) return '';
@@ -192,7 +270,7 @@ export default function mount(container, winnow) {
       chip.onclick = () => openFilterEditor(f);
       filterBox.append(chip);
     });
-    if (!state.filters.length) filterBox.append(el('div', 'note-status', 'All rows'));
+    if (!state.filters.length) filterBox.append(el('div', 'note-status', 'No column filters'));
   }
 
   /* Same modal editor shape the pivot example uses — operator select plus a
@@ -278,6 +356,7 @@ export default function mount(container, winnow) {
       sort_column: state.sortColumn,
       columns: state.carry,
       filters: state.filters,
+      tags: state.tags.mode ? state.tags : null,
       template: state.template,
     };
   }
@@ -411,6 +490,7 @@ export default function mount(container, winnow) {
     state.groupBy = [];
     state.carry = [];
     state.filters = [];
+    state.tags = { mode: '', ids: [] };
     state.sortColumn = null;
     state.preview = null;
     renderControls();
