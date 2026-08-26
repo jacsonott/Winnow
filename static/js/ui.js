@@ -43,7 +43,11 @@ export function _spawnDialog(build) {
     function onKey(e) {
       if (e.key === 'Escape') { e.preventDefault(); close(build.cancelValue); }
     }
-    overlay.onclick = (e) => { if (e.target === overlay) close(build.cancelValue); };
+    // Same press-started-here rule as the #modal backdrop above — prompt()
+    // dialogs have inputs whose text gets drag-selected too.
+    let pressOnOverlay = false;
+    overlay.onmousedown = (e) => { pressOnOverlay = e.target === overlay; };
+    overlay.onclick = (e) => { if (e.target === overlay && pressOnOverlay) close(build.cancelValue); };
     build(card, close);
     overlay.append(card);
     document.body.append(overlay);
@@ -254,5 +258,14 @@ export function anchoredPanel(anchorEl, cls, build) {
 export function wireUi() {
 $('modalClose').onclick = () => ($('modal').hidden = true);
 
-$('modal').onclick = (e) => { if (e.target === $('modal')) $('modal').hidden = true; };
+/* Backdrop close must key off where the press STARTED, not where the click
+   resolves: a `click` fires on the common ancestor of its mousedown and
+   mouseup targets, so drag-selecting text in a modal input and releasing
+   past the card's edge lands the click on the backdrop — which used to
+   close the modal out from under a half-copied path. */
+let modalPressOnBackdrop = false;
+$('modal').onmousedown = (e) => { modalPressOnBackdrop = e.target === $('modal'); };
+$('modal').onclick = (e) => {
+  if (e.target === $('modal') && modalPressOnBackdrop) $('modal').hidden = true;
+};
 }
