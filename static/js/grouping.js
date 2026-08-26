@@ -365,10 +365,30 @@ export async function closeAllGroupViews() {
   }
 }
 
+/* A node's identity across rebuilds: its chain of group values from the
+   root down. Only comparable while S.groupByCols is unchanged — the caller
+   below checks that before using these keys. */
+function groupKey(g) {
+  return JSON.stringify([...g.path.map((p) => p.value), g.value]);
+}
+
+/* Guards the re-expand loop below: each await inside it is a window for a
+   newer regroupAll to start, and re-expanding into a tree that newer call
+   just replaced would splice stale children into it. */
+let regroupGen = 0;
+
 /* Rebuilds the top level of the group tree from scratch — called whenever
    the grouping columns/sort change, or the underlying view is rebuilt
    (filter/search/sort — the old group views are gone with it regardless). */
 export async function regroupAll() {
+  const gen = ++regroupGen;
+  // Which nodes are open, so a view rebuild under the SAME grouping (sort
+  // by a column, tweak a filter, type a search) reopens them instead of
+  // collapsing the tree the analyst was reading. When the grouping columns
+  // themselves changed, the old paths describe a different tree and the
+  // snapshot is dropped.
+  const prevCols = JSON.stringify(S.groupByCols);
+  const wasOpen = new Set(S.groups.filter((g) => g.expanded).map(groupKey));
   await closeAllGroupViews();
   S.groups = [];
   S.groupPages.clear();
@@ -381,11 +401,26 @@ export async function regroupAll() {
   if (!S.groupByCols.length || !S.view) { render(); drawRail(); return; }
   try {
     const top = await fetchGroupLevel([]);
+    if (gen !== regroupGen) return;
     S.groups = top.map((gr) => makeGroupNode(gr, 0, []));
   } catch (e) {
+    if (gen !== regroupGen) return;
     toast('Group-by failed: ' + e.message, 4000);
     S.groupByCols = [];
     renderGroupStrip();
+  }
+  if (wasOpen.size && JSON.stringify(S.groupByCols) === prevCols) {
+    // Walk forward so a reopened parent's freshly spliced children are
+    // themselves visited (they sit right after it) — nested open levels
+    // come back too. A group the new view no longer contains simply never
+    // matches its key and stays gone.
+    for (let gi = 0; gi < S.groups.length; gi++) {
+      const g = S.groups[gi];
+      if (!g.expanded && wasOpen.has(groupKey(g))) {
+        await toggleGroup(gi);
+        if (gen !== regroupGen) return;
+      }
+    }
   }
   render();
   drawRail();
