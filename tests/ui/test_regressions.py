@@ -211,6 +211,94 @@ def test_sorting_a_grouped_view_keeps_open_groups_open(page):
     assert page.evaluate("() => __winnow.S.groups.every((g) => !g.expanded)")
 
 
+def test_month_name_timestamps_parse_client_side(page):
+    """Same third family the server now recognizes, mirrored in
+    parseTimestamp — display formatting and the client's time math must
+    read the value the same way TS_NORMALIZE does."""
+    got = page.evaluate("() => __winnow.parseTimestamp('JUN 23 2026 00:11:00')")
+    assert got == {"y": 2026, "mo": 6, "d": 23, "h": 0, "mi": 11, "s": 0, "frac": ""}
+    assert page.evaluate("() => __winnow.parseTimestamp('June 23, 2026 5:11 PM').h") == 17
+    assert page.evaluate("() => __winnow.parseTimestamp('23 Jun 2026').d") == 23
+    assert page.evaluate("() => __winnow.parseTimestamp('Monday 23 2026')") is None
+
+
+def test_jump_to_timestamp_is_reachable_from_the_timeframe_dialog(page):
+    page.evaluate("() => __winnow.openTimeRangeModal()")
+    page.wait_for_selector("#modal:not([hidden])")
+    page.click("#modalBody .btn:has-text('Jump to timestamp…')")
+    page.wait_for_timeout(200)
+    assert page.locator("#modalTitle").inner_text().lower() == "jump to timestamp"
+    page.keyboard.press("Escape")
+
+
+def test_matching_saved_filters_ring_the_button_instead_of_a_banner(page):
+    """The suggestion banner was a whole toolbar row of chips; it's now a
+    state of the Filters button — accent ring when saved filters match the
+    open table's columns, the matches at the top of its dropdown, and both
+    quiet again once a filter is applied. The banner element itself is
+    gone from the DOM."""
+    assert page.locator("#presetBanner").count() == 0
+
+    # ui.csv's columns match no shipped filter — inject one client-side so
+    # the test never writes to the workspace on disk.
+    page.evaluate("""() => {
+      __winnow.S.savedFilters.push({ id: 9902, name: 'ui fixture filter',
+        col_names: ['Timestamp', 'EventId', 'Host', 'ExtremelyLongColumnHeaderName', 'CommandLine'],
+        payload: { filter_tree: { type: 'group', op: 'AND', children: [
+          { type: 'cond', column: 'EventId', op: 'in', value: ['4624'] }] },
+          search: '', search_mode: 'contains', search_terms: [] } });
+      __winnow.updateFiltersButton();
+    }""")
+    btn = page.locator("#btnFilters")
+    assert "suggest" in (btn.get_attribute("class") or ""), "no ring despite a matching saved filter"
+
+    btn.click()
+    page.wait_for_selector(".menu")
+    assert page.locator(".menu-header", has_text="For this table").count() == 1
+    page.locator(".menu-item", has_text="ui fixture filter").click()
+    page.wait_for_function("() => __winnow.S.view.row_count === 50")
+    assert "suggest" not in (btn.get_attribute("class") or ""), "ring must go quiet once applied"
+    assert "ui fixture filter" in btn.inner_text()
+
+    page.evaluate("""() => {
+      __winnow.S.savedFilters = __winnow.S.savedFilters.filter((f) => f.id !== 9902);
+      __winnow.S.filterTree = { type: 'group', op: 'AND', children: [] };
+      __winnow.updateFiltersButton();
+      return __winnow.rebuildView({ keepScroll: false });
+    }""")
+
+
+def test_saved_filters_modal_groups_by_header_set_and_stays_dense(page):
+    """The flat list (one row per filter, nickname button on every row,
+    ~52px pitch) drowned once the 28 shipped filters landed. Filters now
+    sit under one header per column set — which is also the unit they
+    cycle in — with the nickname control on the section, and rows dense
+    enough to scan."""
+    page.evaluate("() => __winnow.openSavedFiltersModal()")
+    page.wait_for_selector(".sf-group-head")
+    assert page.locator(".sf-group-head").count() >= 1
+    rows = page.locator(".sf-row")
+    assert rows.count() >= 2
+    b1, b2 = rows.nth(0).bounding_box(), rows.nth(1).bounding_box()
+    assert b2["y"] - b1["y"] <= 32, f"row pitch {b2['y'] - b1['y']}px — the list has bloated again"
+    page.keyboard.press("Escape")
+
+
+def test_settings_no_longer_duplicates_the_saved_filters_list(page):
+    """Settings used to render every saved filter a second time. It keeps
+    import/export and a pointer; the list lives in the Saved filters modal
+    alone."""
+    page.keyboard.press("?")
+    page.wait_for_selector("#modal:not([hidden])")
+    page.click(".settings-section-head:has-text('Saved filters')")
+    sec = page.locator(".settings-section:has(.settings-section-head:has-text('Saved filters'))")
+    assert sec.locator(".session-row, .sf-row").count() == 0
+    sec.locator(".btn", has_text="Open saved filters").click()
+    page.wait_for_selector(".sf-group-head")
+    assert page.locator("#modalTitle").inner_text().lower() == "saved filters"
+    page.keyboard.press("Escape")
+
+
 def test_shortcuts_go_inert_while_a_dialog_is_open(page):
     """With the filter builder up, q/w kept cycling saved filters
     underneath it, digits kept tagging, v opened the value picker behind

@@ -125,6 +125,16 @@ export const BULK_TAG_CONFIRM_AT = 10000;
 export async function applyTag(tag, on) {
   if (!S.view) return;
   if (!selCount()) {
+    // A rectangular cell range is also a statement of which ROWS are
+    // meant: highlighting cells across four rows and pressing a tag key
+    // should tag those four rows, not just the anchor row the cursor
+    // happens to sit on. Group headers inside the span are skipped.
+    if (S.cellRange) {
+      let positions = [];
+      for (let p = S.cellRange.r0; p <= S.cellRange.r1; p++) positions.push(p);
+      if (S.groupByCols.length) positions = positions.filter((p) => groupCoordAt(p));
+      if (positions.length) { await tagRowsAtPositions(tag, positions, on); return; }
+    }
     if (S.cursor < 0) return;
     // In grouped mode the cursor can sit on a group header, which isn't a
     // row — tag the whole group from its right-click menu instead.
