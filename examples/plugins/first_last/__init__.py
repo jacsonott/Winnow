@@ -174,6 +174,30 @@ def _where(src, filters):
     return (" WHERE " + " AND ".join(clauses)) if clauses else "", params
 
 
+def _tag_where(src, tags):
+    """The tag filter's WHERE clause, or None. Tags live in the row_tags
+    sidecar (keyed source_id, rid) in the same case file run_sql reads, so
+    membership is one IN-subquery — no join, no new privileges. Everything
+    interpolated is a validated int, so nothing here touches `params`."""
+    if not tags:
+        return None
+    mode = tags.get("mode")
+    sub = f"SELECT rid FROM row_tags WHERE source_id = {int(src['id'])}"
+    if mode == "any":
+        return f"s.rid IN ({sub})"
+    if mode == "none":
+        return f"s.rid NOT IN ({sub})"
+    if mode == "ids":
+        try:
+            ids = [int(i) for i in (tags.get("ids") or [])]
+        except (TypeError, ValueError):
+            raise ValueError("Tag ids must be integers")
+        if not ids:
+            return None
+        return f"s.rid IN ({sub} AND tag_id IN ({','.join(str(i) for i in ids)}))"
+    raise ValueError(f"Unknown tag filter mode {mode!r}")
+
+
 def _inline(sql, params):
     """run_sql takes no parameters — inline them, skipping both quoted-span
     kinds (see the pivot example: the numeric guard embeds `?` in a string
@@ -229,6 +253,9 @@ def _validated(req, body):
     for f in body.get("filters") or []:
         _check_columns(src, [f.get("column")])
     where, params = _where(src, body.get("filters"))
+    tag_clause = _tag_where(src, body.get("tags"))
+    if tag_clause:
+        where = f"{where} AND {tag_clause}" if where else f" WHERE {tag_clause}"
     template = body.get("template") or "{which} of {count}"
     return src, group_cols, sort_col, carry, where, params, template
 

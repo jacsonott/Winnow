@@ -1503,3 +1503,55 @@ def test_first_last_validation(fl_client, body, fragment):
     r = client.post("/api/plugin/first_last/preview", json={"source_id": sid, **body})
     assert r.status_code == 400, r.text
     assert fragment.lower() in r.json()["detail"].lower()
+
+
+def test_first_last_tag_filter_scopes_the_grouping(fl_client, store):
+    """Tags aren't a column — they live in the row_tags sidecar — so the
+    plugin filters on membership: specific tags, any tag, or untagged."""
+    client, sid = fl_client
+    tag = store.list_tags()[0]
+    rids = [r[0] for r in store.run_sql(
+        f'SELECT rid FROM "src_{sid}" WHERE "User" = \'alice\'')["rows"]]
+    store.set_tags(sid, rids, tag["id"], True)
+
+    out = _fl(client, "preview", source_id=sid, group_by=["User"], sort_column="When",
+              columns=[], template="{which} of {count}",
+              tags={"mode": "ids", "ids": [tag["id"]]})
+    assert out["total_groups"] == 1
+    assert {r[-1] for r in out["rows"]} == {"First of 3", "Last of 3"}
+
+    out = _fl(client, "preview", source_id=sid, group_by=["User"], sort_column="When",
+              columns=[], template="{which}", tags={"mode": "any"})
+    assert out["total_groups"] == 1
+    out = _fl(client, "preview", source_id=sid, group_by=["User"], sort_column="When",
+              columns=[], template="{which}", tags={"mode": "none"})
+    assert out["total_groups"] == 2  # bob and carol never got the tag
+
+    # ...and it ANDs with the column filters rather than replacing them.
+    out = _fl(client, "preview", source_id=sid, group_by=["User"], sort_column="When",
+              columns=[], template="{which} of {count}",
+              tags={"mode": "ids", "ids": [tag["id"]]},
+              filters=[{"column": "EventId", "op": "in", "values": ["4624"]}])
+    assert out["total_groups"] == 1
+    assert [r[-1] for r in out["rows"]] == ["First of 1"]
+
+
+def test_first_last_rejects_a_bad_tag_filter(fl_client):
+    client, sid = fl_client
+    for tags in ({"mode": "wat"}, {"mode": "ids", "ids": ["TA"]}):
+        r = client.post("/api/plugin/first_last/preview", json=dict(
+            source_id=sid, group_by=["User"], sort_column="When",
+            columns=[], template="{which}", tags=tags))
+        assert r.status_code == 400, r.text
+
+
+def test_first_last_carry_order_is_the_output_order(fl_client):
+    """The order of `columns` is the created table's column order — it's
+    what the tab's drag-to-reorder chips are editing, so it has to hold."""
+    client, sid = fl_client
+    out = _fl(client, "preview", source_id=sid, group_by=["Host"],
+              sort_column="When", columns=["EventId", "User"], template="{which}")
+    assert out["columns"] == ["When", "EventId", "User", "Description"]
+    out = _fl(client, "preview", source_id=sid, group_by=["Host"],
+              sort_column="When", columns=["User", "EventId"], template="{which}")
+    assert out["columns"] == ["When", "User", "EventId", "Description"]
