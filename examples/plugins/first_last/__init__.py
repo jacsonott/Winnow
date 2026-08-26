@@ -36,6 +36,8 @@ example rather than imported — plugins are deliberately standalone
 meant to be readable alone.
 """
 
+import json
+
 from store import q
 
 PLUGIN = {
@@ -257,16 +259,20 @@ def _validated(req, body):
     if tag_clause:
         where = f"{where} AND {tag_clause}" if where else f" WHERE {tag_clause}"
     template = body.get("template") or "{which} of {count}"
-    return src, group_cols, sort_col, carry, where, params, template
+    row_json = bool(body.get("row_json"))
+    return src, group_cols, sort_col, carry, where, params, template, row_json
 
 
-def _bookend_rows(req, src, group_cols, sort_col, carry, where, params, limit):
+def _bookend_rows(req, src, group_cols, sort_col, carry, where, params, limit, row_json=False):
     """One windowed pass: rank each row inside its group both directions,
     keep rank 1 of each. Selected values are the *row's own* — the first
     row's user, not the group's."""
-    # Every column the template or output might need, deduped, stable order.
+    # Every column the template or output might need, deduped, stable order
+    # — or the whole row when the JSON cell is requested.
+    pool = ([c["name"] for c in src["columns"]] if row_json
+            else group_cols + [sort_col] + carry)
     needed = []
-    for c in group_cols + [sort_col] + carry:
+    for c in pool:
         if c not in needed:
             needed.append(c)
     sel = ", ".join(f"{_col(src, c)} AS {q(c)}" for c in needed)
@@ -320,10 +326,15 @@ def _render(template, row, which):
     return "".join(out)
 
 
-def _emit(rows, sort_col, carry, template):
+ROW_JSON_COLUMN = "Row (JSON)"
+
+
+def _emit(rows, sort_col, carry, template, json_cols=None):
     """The output rows: one per bookend. A single-row group is both its own
     first and its last — emitted once, labelled First (a story with one
-    event has no separate ending)."""
+    event has no separate ending). `json_cols` non-None adds a cell with
+    the bookend's ENTIRE row as a JSON object — the synthetic window
+    columns (rn_first/rn_last/group_n) never appear in it."""
     out = []
     for r in rows:
         labels = []
@@ -333,7 +344,10 @@ def _emit(rows, sort_col, carry, template):
             labels.append("Last")
         for which in labels:
             desc = _render(template, r, which)
-            out.append([r.get(sort_col, "")] + [("" if r.get(c) is None else str(r.get(c))) for c in carry] + [desc])
+            row = [r.get(sort_col, "")] + [("" if r.get(c) is None else str(r.get(c))) for c in carry]
+            if json_cols is not None:
+                row.append(json.dumps({c: r.get(c) for c in json_cols}, ensure_ascii=False))
+            out.append(row + [desc])
     return out
 
 
@@ -366,28 +380,30 @@ def preview(req):
     total group count, so 'Create table' says what it will make before it
     makes it."""
     body = req.body or {}
-    src, group_cols, sort_col, carry, where, params, template = _validated(req, body)
+    src, group_cols, sort_col, carry, where, params, template, row_json = _validated(req, body)
     part = ", ".join(_col(src, c) for c in group_cols)
     count_sql = f"SELECT COUNT(*) FROM (SELECT 1 FROM {_from_clause(src)}{where} GROUP BY {part})"
     total_groups = req.store.run_sql(_inline(count_sql, params), limit=1)["rows"][0][0]
 
     rows, _ = _bookend_rows(req, src, group_cols, sort_col, carry, where, params,
-                            limit=PREVIEW_GROUPS * 2 + 2)
-    header = [sort_col] + carry + ["Description"]
-    return {"columns": header, "rows": _emit(rows, sort_col, carry, template),
+                            limit=PREVIEW_GROUPS * 2 + 2, row_json=row_json)
+    json_cols = [c["name"] for c in src["columns"]] if row_json else None
+    header = [sort_col] + carry + ([ROW_JSON_COLUMN] if row_json else []) + ["Description"]
+    return {"columns": header, "rows": _emit(rows, sort_col, carry, template, json_cols),
             "total_groups": total_groups}
 
 
 def create(req):
     """POST .../create — run the whole thing and land it as a new source."""
     body = req.body or {}
-    src, group_cols, sort_col, carry, where, params, template = _validated(req, body)
+    src, group_cols, sort_col, carry, where, params, template, row_json = _validated(req, body)
     rows, truncated = _bookend_rows(req, src, group_cols, sort_col, carry, where, params,
-                                    limit=MAX_GROUPS * 2)
+                                    limit=MAX_GROUPS * 2, row_json=row_json)
     if truncated:
         raise ValueError(f"More than {MAX_GROUPS:,} groups — narrow the grouping or add a filter")
-    out_rows = _emit(rows, sort_col, carry, template)
+    json_cols = [c["name"] for c in src["columns"]] if row_json else None
+    out_rows = _emit(rows, sort_col, carry, template, json_cols)
     name = (body.get("name") or "").strip() or f"First-Last of {src['name']}"
-    header = [sort_col] + carry + ["Description"]
+    header = [sort_col] + carry + ([ROW_JSON_COLUMN] if row_json else []) + ["Description"]
     rec = req.store.ingest_rows(header, out_rows, name=name)
     return {"source": {"id": rec["id"], "name": rec["name"], "row_count": rec["row_count"]}}
