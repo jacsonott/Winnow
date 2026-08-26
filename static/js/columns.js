@@ -99,7 +99,22 @@ export function renderHead() {
     S.cellAnchor = null;
     render();
   };
-  gh.append(selectAllCb, el('span', 'gutter-mid'), el('span', 'label', 'Line'));
+  // The Line label is the way BACK from any sort: original file order,
+  // click again for reverse. An empty sort IS line order (the view's
+  // rid-ascending default), so that state shows the ▲.
+  const lineLabel = el('span', 'label line-sort', 'Line');
+  const lineDesc = S.sort.length === 1 && S.sort[0].column === '__line__' && S.sort[0].dir === 'desc';
+  if (!S.sort.length) lineLabel.append(el('span', 'sort', '▲'));
+  else if (lineDesc) lineLabel.append(el('span', 'sort', '▼'));
+  lineLabel.title = 'Sort by original line order — click again for reverse';
+  lineLabel.style.cursor = 'pointer';
+  lineLabel.onclick = () => {
+    S.sort = S.sort.length ? [] : [{ column: '__line__', dir: 'desc' }];
+    renderHead();
+    saveLayout();
+    rebuildView({ keepScroll: false });
+  };
+  gh.append(selectAllCb, el('span', 'gutter-mid'), lineLabel);
   head.append(gh);
 
   const gf = el('div', 'fcell gutter-filter');
