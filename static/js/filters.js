@@ -7,7 +7,7 @@ import { $, api, debounce, el, toast } from './core.js';
 import { rowAt } from './grid.js';
 import { collapseSearchIfEmpty, syncSearchExpansion } from './search.js';
 import { clearAllFilters } from './sources.js';
-import { S } from './state.js';
+import { S, normalizeTree } from './state.js';
 import { updateFiltersButton } from './timeframe.js';
 import { anchoredPanel, closeMenu } from './ui.js';
 import { rebuildSoon, rebuildView } from './view.js';
@@ -48,7 +48,12 @@ export function currentSpec() {
     search: S.searchMode === 'advanced' ? '' : S.search,
     search_mode: S.searchMode,
     search_terms: S.searchMode === 'advanced' ? S.searchTerms : [],
-    filter_tree: (S.filterTree.children && S.filterTree.children.length) || S.filterTree.type === 'raw' ? S.filterTree : null,
+    // normalizeTree: a cond-root payload (seeded/imported) must not read
+    // as "no filter" here while the ★ button says it's applied.
+    filter_tree: (() => {
+      const t = normalizeTree(S.filterTree);
+      return t.type === 'raw' || (t.children && t.children.length) ? t : null;
+    })(),
     tags: S.tagFilter,
     time_range: S.timeRange,
   };

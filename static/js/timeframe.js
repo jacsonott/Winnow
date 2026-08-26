@@ -11,7 +11,7 @@ import { moveCursor, render } from './grid.js';
 import { drawRail } from './grouping.js';
 import { applyPreset, filtersForCurrentSource, headerSig, nicknameFor, setNicknameFor } from './savedfilters.js';
 import { closeTab, editSourceNickname, openSource, sourceLabel, wireDragReorder } from './sources.js';
-import { S } from './state.js';
+import { normalizeTree, S } from './state.js';
 import { openTablesManager } from './tables.js';
 import { loadTags } from './tags.js';
 import { baseColumns, columnMeta, parseTimestamp } from './tsformat.js';
@@ -132,6 +132,9 @@ export function activeSavedFilterRecord() {
   const matches = (p) => KEYS.every((k) => {
     if (k === 'sort' && p.sort === undefined) return true;
     if (k.startsWith('group_') && p.group_by === undefined) return cur.group_by === undefined;
+    // Trees compare normalized: a stored cond-root payload and the
+    // group-wrapped tree it becomes on apply are the same filter.
+    if (k === 'filter_tree') return JSON.stringify(normalizeTree(p[k])) === JSON.stringify(normalizeTree(cur[k]));
     return JSON.stringify(p[k]) === JSON.stringify(cur[k]);
   });
   return filtersForCurrentSource().find((f) => matches(f.payload || {})) || null;

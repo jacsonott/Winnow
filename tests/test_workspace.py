@@ -301,3 +301,19 @@ def test_tag_template_seeds_ta_first_and_migrates_only_untouched_legacy():
     custom[0]["name"] = "Clean"
     WS.tags._save(custom)
     assert [t["name"] for t in WS.tags.get()] == ["Clean", "Suspicious", "TA"]
+
+
+def test_saved_filters_normalize_cond_root_payloads_on_read():
+    """A record whose filter_tree root is a bare condition (the v1 seeds,
+    or an import from one) gets group-wrapped by list() and persisted, so
+    every client that reads it sees the shape the builder and spec gate
+    agree on."""
+    sf = WS.SavedFilters()
+    cond = {"type": "cond", "column": "EventId", "op": "in", "value": ["1"]}
+    rec = sf.create("condroot", ["EventId"], {
+        "filter_tree": dict(cond), "search": "", "search_mode": "contains", "search_terms": []})
+    got = next(f for f in sf.list() if f["id"] == rec["id"])
+    assert got["payload"]["filter_tree"] == {"type": "group", "op": "AND", "children": [cond]}
+    # ...and it stuck: a re-read straight from disk shows the wrapped shape.
+    got2 = next(f for f in WS.SavedFilters().list() if f["id"] == rec["id"])
+    assert got2["payload"]["filter_tree"]["type"] == "group"
