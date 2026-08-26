@@ -17,6 +17,18 @@ export const TS_ISO_RE = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{
 
 export const TS_US_RE = /^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:[ ,]+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM|am|pm)?)?/;
 
+/* Month-name family ("JUN 23 2026 00:11:00", "23 Jun 2026", "June 23,
+   2026 5:11 PM") — the word is captured loose and validated against
+   MONTH_NO below, mirroring store.py's third recognized shape. */
+export const TS_MONTH_RE = /^(?:([A-Za-z]{3,9}) +(\d{1,2})|(\d{1,2}) +([A-Za-z]{3,9})) *,? *(\d{4})(?:[ ,]+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM|am|pm)?)?/;
+
+const MONTH_NO = {
+  jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+  jul: 7, aug: 8, sep: 9, sept: 9, oct: 10, nov: 11, dec: 12,
+  january: 1, february: 2, march: 3, april: 4, june: 6,
+  july: 7, august: 8, september: 9, october: 10, november: 11, december: 12,
+};
+
 export function parseTimestamp(raw) {
   const s = String(raw).trim();
   let m = TS_ISO_RE.exec(s);
@@ -37,6 +49,16 @@ export function parseTimestamp(raw) {
     if (ampm === 'pm' && h < 12) h += 12;
     if (ampm === 'am' && h === 12) h = 0;
     return { y: +m[3], mo: +m[1], d: +m[2], h, mi: +(m[5] || 0), s: +(m[6] || 0), frac: '' };
+  }
+  m = TS_MONTH_RE.exec(s);
+  if (m) {
+    const mo = MONTH_NO[(m[1] || m[4]).toLowerCase()];
+    if (!mo) return null; // a weekday or plain word, not a month
+    let h = +(m[6] || 0);
+    const ampm = (m[9] || '').toLowerCase();
+    if (ampm === 'pm' && h < 12) h += 12;
+    if (ampm === 'am' && h === 12) h = 0;
+    return { y: +m[5], mo, d: +(m[2] || m[3]), h, mi: +(m[7] || 0), s: +(m[8] || 0), frac: '' };
   }
   return null;
 }

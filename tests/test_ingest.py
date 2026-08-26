@@ -183,3 +183,13 @@ def test_multi_batch_ingest_commits_across_chunk_boundary(store, tmp_path):
     rows = store.fetch_rows(view["view_id"], 0, 10)["rows"]
     assert len(rows) == 1
     assert rows[0]["cells"][1] == f"row{n - 1}"
+
+
+def test_month_name_timestamp_column_types_as_datetime(store, write_csv):
+    """"JUN 23 2026 00:11:00"-style values — the whole native-recognition
+    chain starts at ingest typing; without it the display format, timeframe
+    filter and day grouping never engage on the column."""
+    rows = [["When", "What"]] + [[f"JUN {i + 1} 2026 00:11:{i:02d}", "x"] for i in range(20)]
+    rec = store.ingest_csv(write_csv(rows, "mn.csv"), name="mn", build_fts=False)
+    col = next(c for c in store.get_source(rec["id"])["columns"] if c["name"] == "When")
+    assert col["type"] == "datetime"

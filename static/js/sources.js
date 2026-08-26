@@ -527,7 +527,6 @@ export async function openSource(id) {
   syncSearchExpansion(false);
   updateSearchHint();
   updateFiltersButton();
-  $('presetBanner').hidden = true;
   $('empty').hidden = true;
 
   const saved = await api(`/api/layout?source_id=${id}`).catch(() => ({}));

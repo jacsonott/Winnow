@@ -575,6 +575,32 @@ $('body').addEventListener('scroll', () => {
   if (!bodyScrollRaf) bodyScrollRaf = requestAnimationFrame(() => { bodyScrollRaf = null; render(); });
 }, { passive: true });
 
+/* Remote session mode: replace the browser's smooth pixel scrolling with
+   whole-row jumps. Smooth scrolling animates a wheel notch through a dozen
+   intermediate frames, each shifting the whole viewport a few pixels —
+   which a remote display protocol must re-encode as a full-region change
+   per frame. One quantized jump per notch is a single repaint, the same
+   thing that makes native grids feel fine over RDP. The accumulator turns
+   trackpad pixel deltas into the same discrete row steps. */
+let wheelAcc = 0;
+const REMOTE_PX_PER_ROW = 33; // ≈ one Chrome wheel notch (100px) → 3 rows, the Windows default
+$('body').addEventListener('wheel', (e) => {
+  if (!S.appearance.remoteSession) return;
+  if (e.ctrlKey || !e.deltaY) return; // browser zoom / horizontal-only: leave native
+  e.preventDefault();
+  let rows;
+  if (e.deltaMode === 1) rows = Math.round(e.deltaY);                     // lines (Firefox)
+  else if (e.deltaMode === 2) rows = Math.round(e.deltaY * (($('body').clientHeight / ROW_H) - 1)); // pages
+  else {
+    wheelAcc += e.deltaY;
+    rows = Math.trunc(wheelAcc / REMOTE_PX_PER_ROW);
+    wheelAcc -= rows * REMOTE_PX_PER_ROW;
+  }
+  if (!rows) return;
+  const b = $('body');
+  b.scrollTop = Math.max(0, Math.round(b.scrollTop / ROW_H) * ROW_H + rows * ROW_H);
+}, { passive: false });
+
 $('body').addEventListener('click', (e) => {
   const groupHeader = e.target.closest('.group-header-row');
   if (groupHeader) { toggleGroup(Number(groupHeader.dataset.groupIdx)); return; }

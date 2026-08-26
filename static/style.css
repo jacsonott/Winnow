@@ -235,41 +235,30 @@ html[data-style="studio"][data-theme="light"] {
   /* Column 1 is #sidebar alone (max-content — its own fixed width — so
      hiding it via [hidden] collapses the column to zero, nothing else
      occupies it); column 2 is the four rows every other direct child
-     (.bar, .toolbar, #presetBanner, .main-area) already lived in before
+     (.bar, .toolbar, .main-area) already lived in before
      the sidebar existed, each still one row of its own.
      One row track per that same set of 4 children. Was only 3 tracks for
      4 children for a while — the 3rd-declared track (minmax(0, 1fr),
-     meant for .main-area) landed on #presetBanner instead since it's 3rd
+     meant for .main-area) once landed on a since-removed hidden sibling
      in document order, handing it all the flexible space and leaving
      .main-area to size itself from an implicit auto-height row instead —
      invisible while the banner stayed hidden (its default state), which
      is exactly why this went unnoticed for so long. */
   grid-template-columns: max-content minmax(0, 1fr);
-  grid-template-rows: auto auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
 }
 #sidebar { grid-column: 1; grid-row: 1 / -1; }
 #sidebar[hidden] { display: none; }
-.bar, .toolbar, #presetBanner, .main-area { grid-column: 2; }
-/* Explicit row per child, not auto-placement. #presetBanner is `hidden`
-   (display: none) in its default state, and a display:none item is not
-   placed in the grid at all — so auto-placement had only three items to
-   place in column 2 and slid .main-area up into the 3rd (auto) track,
-   leaving the 4th (minmax(0, 1fr)) empty. That stayed invisible for a long
-   time because an auto track in a definite-height grid still stretches to
-   fill the leftover space, so .main-area got the right height anyway.
-   It stops being invisible once #spacerY (row_count * ROW_H) passes the
-   browser's max element height — ~33.55M px, 2^25 LayoutUnits in Blink,
-   i.e. ~1.4M rows at 24px / ~1.68M at 20px. Past that the auto track's
-   intrinsic contribution resolves to 0 rather than clamping, collapsing
-   .main-area -> #grid -> #body to zero height: correct row count in the
-   toolbar, sticky header still painted, and not one data row rendered.
-   Pinning the rows makes the banner's visibility irrelevant to where
-   .main-area lands. (The spacer is still clamped past that size — see
-   #spacerY — but a clamped spacer only costs reach, not the whole grid.) */
+.bar, .toolbar, .main-area { grid-column: 2; }
+/* Explicit row per child, not auto-placement — auto-placement once slid
+   .main-area into the wrong track when a display:none sibling (the old
+   suggestion banner) dropped out of the grid, and past ~1.4M rows that
+   collapsed the grid to zero height (see git history for the forensics).
+   The banner is gone; the explicit pins stay so a future hidden sibling
+   can't reintroduce it. */
 .bar { grid-row: 1; }
 .toolbar { grid-row: 2; }
-#presetBanner { grid-row: 3; }
-.main-area { grid-row: 4; }
+.main-area { grid-row: 3; }
 /* Grid items default to min-width:auto (their content's min-content size),
    not 0 — without this, a row wide enough to overflow (e.g. many/long tab
    names in .bar) blows out #app's implicit single column, stretching every
@@ -441,14 +430,24 @@ html[data-style="studio"][data-theme="light"] {
 .adv-not.active { background: var(--danger-bg); border-color: var(--danger-border); color: var(--danger); }
 .adv-rm { font-size: 10px; padding: 3px 6px; }
 
-.preset-banner {
-  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-  padding: 5px 10px; background: var(--panel-2); border-bottom: 1px solid var(--line);
-}
-.preset-banner-label { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; }
-.preset-chip { border-color: var(--accent-dim); }
-.preset-chip-fuzzy { border-color: var(--line-2); color: var(--dim); border-style: dashed; }
-.preset-dismiss { margin-left: auto; font-size: 10px; padding: 3px 6px; }
+/* Saved filters modal: one section per header set, dense rows — the flat
+   list with per-row nickname buttons and 16px pitch read as noise once the
+   shipped set landed (28 filters over three header sets). */
+.sf-list { display: flex; flex-direction: column; gap: 3px; margin: 4px 0 10px; }
+.sf-group-head { display: flex; align-items: center; gap: 8px; margin: 10px 0 2px; }
+.sf-group-head:first-child { margin-top: 0; }
+.sf-group-name { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--dim); }
+.sf-row { display: flex; align-items: center; gap: 4px; padding: 2px 6px; background: var(--panel-2); border-radius: var(--radius-sm); }
+.sf-apply { flex: 1 1 auto; justify-content: flex-start; text-align: left; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sf-row .btn { padding: 2px 7px; font-size: 11px; }
+.sf-mini { font-size: 10px; padding: 2px 6px; flex: 0 0 auto; }
+.sf-row.dragging { opacity: .4; }
+.sf-row.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
+.sf-row.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
+
+/* The Filters button's suggestion ring — what replaced the banner row:
+   saved filters match the open table's columns and none is applied yet. */
+#btnFilters.suggest { border-color: var(--accent-dim); box-shadow: 0 0 0 1px var(--accent-dim); }
 
 .tag-ribbon { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; }
 .tag-chip {
@@ -1457,3 +1456,18 @@ html[data-style="studio"] #search:focus, html[data-style="studio"] textarea:focu
 }
 
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+
+/* ------------------------------------------------- remote session mode */
+
+/* Settings → Appearance → "Remote session mode". RDP-class protocols
+   encode screen changes, so an infinite animation (busy sweep, job slide,
+   the SQL cursor blink) keeps the encoder busy around the clock, and the
+   row-hover repaint fires on every mousemove. Animations get the same
+   kill-switch prefers-reduced-motion uses; hover is re-asserted to each
+   row state's own motionless background (a computed no-op — no pixels
+   change, so nothing crosses the wire). The scrolling half is in grid.js. */
+html.remote * { transition: none !important; animation: none !important; }
+html.remote .row:hover { background: var(--ink); }
+html.remote .row:hover:nth-child(even) { background: var(--row-even); }
+html.remote .row.cursor:hover { background: var(--sel); }
+html.remote .row.selected:hover { background: var(--row-selected); }
