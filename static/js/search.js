@@ -4,11 +4,12 @@
 import { $, api, el, post, toast } from './core.js';
 import { openFilterBuilder } from './filterbuilder.js';
 import { renderAdvancedChips, renderTermChips, updateSearchHint } from './filters.js';
+import { applyPreset, matchingSavedFilters } from './savedfilters.js';
 import { openSettings } from './settings.js';
 import { loadSources, sourceLabel } from './sources.js';
 import { S } from './state.js';
 import { openSavedFiltersModal, openTimeRangeModal } from './timeframe.js';
-import { dropdownMenu, modal } from './ui.js';
+import { confirmDialog, dropdownMenu, modal } from './ui.js';
 import { rebuildView } from './view.js';
 
 /* Checked against every real table in the case (plain contains-mode only —
@@ -382,10 +383,30 @@ export function collapseSearchIfEmpty() {
 export function wireSearch() {
 $('btnSearchToggle').onclick = expandSearch;
 
-$('btnFilters').onclick = () => dropdownMenu($('btnFilters'), [
-  { label: 'Filter builder…', onclick: openFilterBuilder },
-  { label: 'Saved filters…', onclick: openSavedFiltersModal },
-]);
+$('btnFilters').onclick = () => dropdownMenu($('btnFilters'), () => {
+  const items = [
+    { label: 'Filter builder…', onclick: openFilterBuilder },
+    { label: 'Saved filters…', onclick: openSavedFiltersModal },
+  ];
+  // The suggestion banner's chips, relocated: saved filters matching the
+  // open table's columns apply straight from here (the button's accent
+  // ring is what says they exist — see updateFiltersButton).
+  const src = S.sources.find((x) => x.id === S.sourceId);
+  if (!src) return items;
+  const { exact, similar } = matchingSavedFilters(src.columns.map((c) => c.name));
+  if (!exact.length && !similar.length) return items;
+  items.push('-', { header: 'For this table' });
+  for (const p of exact) {
+    items.push({ label: p.name, onclick: () => applyPreset(p) });
+  }
+  for (const p of similar) {
+    const colText = (p.col_names || []).join(', ');
+    items.push({ label: `${p.name} (similar)`, onclick: async () => {
+      if (await confirmDialog(`"${p.name}" was built for a different column set (${colText}). Apply anyway?`)) applyPreset(p);
+    } });
+  }
+  return items;
+});
 
 $('btnTimeRange').onclick = openTimeRangeModal;
 

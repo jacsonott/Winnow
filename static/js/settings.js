@@ -9,10 +9,10 @@ import { headH, rScroll, render, spacerPx, vScroll } from './grid.js';
 import { drawRail, rebuildGroupPrefix, renderGrouped } from './grouping.js';
 import { ACTION_LABELS, defaultKeymap, findKeyConflict, keySpecFromEvent, saveKeymap } from './keymap.js';
 import { buildPluginsPanel } from './plugins.js';
-import { loadSavedFilters, nicknameFor } from './savedfilters.js';
+import { loadSavedFilters } from './savedfilters.js';
 import { applyPageTabsSize } from './sources.js';
 import { S, gridRowCount } from './state.js';
-import { updateFiltersButton } from './timeframe.js';
+import { openSavedFiltersModal, updateFiltersButton } from './timeframe.js';
 import { TS_FORMATS } from './tsformat.js';
 import { confirmDialog, modal, promptDialog } from './ui.js';
 
@@ -529,46 +529,12 @@ export function openSettings() {
     secFilters.append(el('p', null,
       `Cycle through filters saved for the current source's columns with `
       + `${S.keymap.cyclePrevFilter[0] || '['} / ${S.keymap.cycleNextFilter[0] || ']'}. `
-      + `A table with matching columns also suggests these on open. Save one from the Filter `
-      + `builder's "Save filter…" button; give a header set a nickname from the Saved filters menu.`));
-    const flist = el('div', 'session-list');
-    function renderFilterList() {
-      flist.replaceChildren();
-      if (!S.savedFilters.length) { flist.append(el('div', 'note-status', 'No saved filters yet.')); return; }
-      for (const f of S.savedFilters) {
-        const row = el('div', 'row-actions session-row');
-        const colText = (f.col_names || []).join(', ');
-        const headerLabel = el('span', 'count', nicknameFor(f.col_names) || colText);
-        headerLabel.title = colText;
-        row.append(el('span', 'session-name', f.name), headerLabel);
-        const ren = el('button', 'btn ghost', 'Rename');
-        ren.onclick = async () => {
-          const name = await promptDialog('New name:', f.name);
-          if (!name || !name.trim()) return;
-          await api(`/api/saved_filters/${f.id}`, {
-            method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.trim() }),
-          });
-          f.name = name.trim();
-          renderFilterList();
-          updateFiltersButton();
-        };
-        const del = el('button', 'btn ghost', '✕');
-        del.title = 'Delete this saved filter';
-        del.onclick = async () => {
-          if (!(await confirmDialog(`Delete saved filter "${f.name}"?`, { danger: true, okLabel: 'Delete' }))) return;
-          await api(`/api/saved_filters/${f.id}`, { method: 'DELETE' });
-          S.savedFilters = S.savedFilters.filter((x) => x.id !== f.id);
-          renderFilterList();
-          updateFiltersButton();
-        };
-        row.append(ren, del);
-        flist.append(row);
-      }
-    }
-    renderFilterList();
-    secFilters.append(flist);
-
+      + `Browse, apply, rename, reorder and delete them — and nickname their header sets — from `
+      + `Filters ▾ → Saved filters (also reachable from the Filter builder). Save one from the `
+      + `builder's "Save filter…" button.`));
     const fActs = el('div', 'row-actions');
+    const openBtn = el('button', 'btn', 'Open saved filters…');
+    openBtn.onclick = () => openSavedFiltersModal();
     const exp = el('button', 'btn ghost', 'Export filters…');
     exp.onclick = () => { window.location = '/api/saved_filters/export'; };
     const impLabel = el('label', 'btn ghost', 'Import filters…');
@@ -582,12 +548,11 @@ export function openSettings() {
       fd.append('merge', 'true');
       const res = await api('/api/saved_filters/import', { method: 'POST', body: fd });
       await loadSavedFilters();
-      renderFilterList();
       updateFiltersButton();
       toast(`Imported ${res.added} filter${res.added === 1 ? '' : 's'}`);
     };
     impLabel.append(impInput);
-    fActs.append(exp, impLabel);
+    fActs.append(openBtn, exp, impLabel);
     secFilters.append(fActs);
 
     const secPlugins = settingsSection(b, 'Plugins');

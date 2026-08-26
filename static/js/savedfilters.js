@@ -11,7 +11,7 @@ import { showSqlTab } from './sql.js';
 import { normalizeTree, S } from './state.js';
 import { updateFiltersButton } from './timeframe.js';
 import { baseColumns } from './tsformat.js';
-import { confirmDialog, promptDialog } from './ui.js';
+import { promptDialog } from './ui.js';
 import { rebuildView } from './view.js';
 
 /* ---------------------------------------------------------- header nicknames */
@@ -58,8 +58,6 @@ export async function setNicknameFor(colNames, currentName) {
    worth surfacing as "similar") the table that was just opened. Computed
    entirely against the already-loaded S.savedFilters, no request needed. */
 
-export const S_dismissedPresetSources = new Set();
-
 export function matchingSavedFilters(colNames) {
   const target = new Set(colNames.map((c) => c.trim().toLowerCase()));
   const exact = [];
@@ -76,44 +74,14 @@ export function matchingSavedFilters(colNames) {
   return { exact, similar };
 }
 
+/* What the suggestion banner used to do, now a state of the Filters
+   button itself: matching saved filters put an accent ring on it and the
+   matches at the top of its dropdown (see wireSearch), instead of a
+   whole toolbar row of chips. Kept as the same entry point every caller
+   already had — "something changed that could affect the suggestions". */
 export function checkPresets(sourceId) {
-  const banner = $('presetBanner');
-  if (S_dismissedPresetSources.has(sourceId)) { banner.hidden = true; return; }
-  const src = S.sources.find((s) => s.id === sourceId);
-  if (!src) return;
-  renderPresetBanner(matchingSavedFilters(src.columns.map((c) => c.name)), sourceId);
-}
-
-export function renderPresetBanner(res, sourceId) {
-  const banner = $('presetBanner');
-  const exact = res.exact || [];
-  const similar = res.similar || [];
-  if (!exact.length && !similar.length) { banner.hidden = true; return; }
-  banner.hidden = false;
-  banner.replaceChildren();
-  banner.append(el('span', 'preset-banner-label', 'Saved filters for these columns:'));
-  for (const p of exact) {
-    const chip = el('button', 'tag-chip preset-chip', p.name);
-    chip.title = `Apply "${p.name}" (exact column match)`;
-    chip.onclick = () => applyPreset(p);
-    banner.append(chip);
-  }
-  for (const p of similar) {
-    const chip = el('button', 'tag-chip preset-chip preset-chip-fuzzy', `${p.name} (similar)`);
-    const presetCols = new Set(p.col_names.map((c) => c.toLowerCase()));
-    const curCols = new Set(S.columns.map((c) => c.name.toLowerCase()));
-    const missing = [...curCols].filter((c) => !presetCols.has(c));
-    const extra = [...presetCols].filter((c) => !curCols.has(c));
-    chip.title = `Columns differ — missing: ${missing.join(', ') || 'none'}; extra: ${extra.join(', ') || 'none'}. Click to apply anyway.`;
-    chip.onclick = async () => {
-      if (await confirmDialog(`"${p.name}" was built for a different column set (${chip.title}). Apply anyway?`)) applyPreset(p);
-    };
-    banner.append(chip);
-  }
-  const dismiss = el('button', 'btn ghost preset-dismiss', '✕');
-  dismiss.title = 'Dismiss for this source';
-  dismiss.onclick = () => { S_dismissedPresetSources.add(sourceId); banner.hidden = true; };
-  banner.append(dismiss);
+  if (sourceId !== S.sourceId) return;
+  updateFiltersButton();
 }
 
 export function applyPreset(preset) {
