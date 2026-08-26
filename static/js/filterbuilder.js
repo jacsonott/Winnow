@@ -3,7 +3,7 @@
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { $, api, debounce, el, post, toast } from './core.js';
 import { checkPresets } from './savedfilters.js';
-import { S } from './state.js';
+import { S, normalizeTree } from './state.js';
 import { currentFilterPayload, openSavedFiltersModal, updateFiltersButton } from './timeframe.js';
 import { baseColumns } from './tsformat.js';
 import { modal, promptDialog } from './ui.js';
@@ -166,11 +166,13 @@ export function parseWhereFragment(text) {
 
   const tree = parseOr();
   if (!tree || pos !== toks.length) return null;
-  return tree.type === 'group' ? tree : { type: 'group', op: 'AND', children: [tree] };
+  return tree.type === 'group' ? tree : normalizeTree(tree);
 }
 
 export function hasActiveFilterTree() {
-  return S.filterTree.type === 'raw' ? !!(S.filterTree.sql || '').trim() : !!(S.filterTree.children || []).length;
+  if (S.filterTree.type === 'raw') return !!(S.filterTree.sql || '').trim();
+  if (S.filterTree.type === 'cond') return true; // a bare-condition root IS a filter
+  return !!(S.filterTree.children || []).length;
 }
 
 export function renderCondRow(node, onStructural, onPreview) {
@@ -271,6 +273,7 @@ export function renderFilterGroup(node, onStructural, onPreview, isRoot) {
    everything else, including "Save filter…" as a save-as-new escape
    hatch, behaves identically to a normal open. */
 export function openFilterBuilder(editing = null) {
+  S.filterTree = normalizeTree(S.filterTree); // a cond root would render as an empty editor
   modal(editing ? `Edit filter — ${editing.name}` : 'Filter builder', (b) => {
     const help = el('p', 'fb-help',
       'Build filters visually, or type/paste SQL directly below — edits sync both ways when the SQL is simple enough to parse back into the structured editor.');

@@ -5,6 +5,19 @@ helpers that are the only sanctioned way to touch S.selection/S.selectAll.
 import { rowAt } from './grid.js';
 import { groupCoordAt } from './grouping.js';
 
+/* A filter tree's root must be a group for every consumer here — the
+   builder renders root.children, currentSpec gates on children.length —
+   but payloads from elsewhere (seeded defaults, imports) can legally be a
+   bare condition. Wrap those; leave groups and raw-SQL roots alone. Every
+   boundary that accepts a tree from outside runs it through this, which is
+   what keeps the three consumers from disagreeing about whether a filter
+   is active (the bug where a ★ filter showed as applied but filtered
+   nothing).  */
+export function normalizeTree(tree) {
+  if (tree && tree.type === 'cond') return { type: 'group', op: 'AND', children: [tree] };
+  return tree || { type: 'group', op: 'AND', children: [] };
+}
+
 export const S = {
   sources: [],
   sourceId: null,
