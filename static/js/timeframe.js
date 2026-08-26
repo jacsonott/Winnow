@@ -599,10 +599,24 @@ export function buildColumnsPanel(container, refresh = openTableMenu) {
       refresh();
     };
     row.append(pick);
+    // Reorder from here too — the grid's header drag is invisible to
+    // anyone working from this panel, and hidden columns can ONLY be
+    // repositioned here. Same DnD vocabulary as the tab strip.
+    wireDragReorder(row, name, {
+      containerSelector: '.collist',
+      rowSelector: '.collist-row',
+      horizontal: false,
+      currentIds: () => [...S.order],
+      onReorder: (order) => {
+        S.order = order;
+        renderHead(); render(); saveLayout();
+        refresh();
+      },
+    });
     list.append(row);
   });
   container.append(list);
-  container.append(el('p', 'fb-help', 'Drag a column header in the grid to reorder it.'));
+  container.append(el('p', 'fb-help', 'Drag rows here — or the column headers in the grid — to reorder columns.'));
   const acts = el('div', 'row-actions');
   const addDerived = el('button', 'btn ghost', 'Add datetime column…');
   addDerived.onclick = () => openDerivedColumnModal();
