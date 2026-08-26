@@ -5,9 +5,9 @@ in the case.
 import { renderHead } from './columns.js';
 import { $, ROW_H, api, el, post, toast } from './core.js';
 import { derivedOps } from './derived.js';
-import { currentSpec, setSearchMode, updateSearchHint } from './filters.js';
+import { currentSpec, renderAdvancedChips, setSearchMode, updateSearchHint } from './filters.js';
 import { clearPageCache, headH, rScroll, render, rowAt, spacerPx } from './grid.js';
-import { closeAllGroupViews, drawRail, dropGrouping } from './grouping.js';
+import { closeAllGroupViews, drawRail, dropGrouping, regroupAll, setGrouping } from './grouping.js';
 import { shutdownWinnow } from './home.js';
 import { openImportModal } from './importer.js';
 import { openMergeBuilder } from './merge.js';
@@ -89,6 +89,7 @@ export function openTabsSorted() {
    action — hides the tab (stays in the case, reopen from Tables or the
    dropdown's Closed section), doesn't delete anything. */
 export async function closeTab(s) {
+  viewStateStash.delete(s.id);
   await post(`/api/source/${s.id}/open`, { open: false });
   if (S.sourceId === s.id) S.sourceId = null;
   await loadSources();
@@ -460,9 +461,39 @@ export async function loadSources(select) {
   }
 }
 
+/* "The way I left it", per table: switching tabs used to reset every
+   filter, so coming back to a table lost what the analyst was looking at.
+   Keyed by source id, in-memory only — a reload starts clean, which is
+   also the escape hatch if a stashed filter ever misbehaves. The
+   timeframe filter isn't in here because it deliberately survives
+   globally (see clearAllFilters); the layout/sort aren't because the
+   server already persists those per source. */
+const viewStateStash = new Map();
+
+export function clearViewStateStash() { viewStateStash.clear(); }
+
+function stashViewState() {
+  if (S.sourceId == null || !S.view) return;
+  viewStateStash.set(S.sourceId, {
+    filters: { ...S.filters },
+    search: S.search,
+    searchMode: S.searchMode,
+    searchTerms: S.searchTerms.map((t) => ({ ...t })),
+    advCollapsed: S.advCollapsed,
+    filterTree: JSON.parse(JSON.stringify(S.filterTree)),
+    sort: S.sort.map((x) => ({ ...x })),
+    tagFilter: [...S.tagFilter],
+    groupBy: [...S.groupByCols],
+    groupSort: S.groupSort,
+    groupSortDir: S.groupSortDir,
+    scroll: $('body').scrollTop,
+  });
+}
+
 export async function openSource(id) {
   const src = S.sources.find((s) => s.id === id);
   if (!src) return;
+  stashViewState();
   if (S.activeTab !== 'grid') showGridTab();
   S.sourceId = id;
   S.columns = src.columns;
@@ -496,7 +527,6 @@ export async function openSource(id) {
   syncSearchExpansion(false);
   updateSearchHint();
   updateFiltersButton();
-  $('presetBanner').hidden = true;
   $('empty').hidden = true;
 
   const saved = await api(`/api/layout?source_id=${id}`).catch(() => ({}));
@@ -526,6 +556,28 @@ export async function openSource(id) {
   if (dt && !saved.sort) S.sort = [{ column: dt.name, dir: 'asc' }];
   if (saved.sort) S.sort = saved.sort;
 
+  // Coming BACK to a table: reapply what was on screen when we left it.
+  // After the reset above and the layout/sort defaults, before renderHead
+  // (the header filter boxes render from S.filters).
+  const stash = viewStateStash.get(id);
+  if (stash) {
+    S.filters = { ...stash.filters };
+    S.search = stash.search;
+    S.searchMode = stash.searchMode;
+    S.searchTerms = stash.searchTerms.map((t) => ({ ...t }));
+    S.advCollapsed = stash.advCollapsed;
+    S.filterTree = JSON.parse(JSON.stringify(stash.filterTree));
+    S.sort = stash.sort.map((x) => ({ ...x }));
+    S.tagFilter = [...stash.tagFilter];
+    $('search').value = S.searchMode === 'advanced' ? '' : S.search;
+    document.querySelectorAll('#searchModeToggle button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.mode === S.searchMode)));
+    if (S.searchMode === 'advanced') renderAdvancedChips();
+    syncSearchExpansion();
+    updateSearchHint();
+    if (stash.groupBy.length) setGrouping(stash.groupBy, stash.groupSort, stash.groupSortDir);
+    updateFiltersButton();
+  }
+
   if (S.columns.some((c) => c.derived)) await derivedOps().catch(() => {});
   await loadTags();
   renderHead();
@@ -543,12 +595,18 @@ export async function openSource(id) {
     $('spacerY').style.height = spacerPx(cached.row_count) + 'px';
     $('viewStats').innerHTML =
       `<b>${cached.row_count.toLocaleString()}</b> of ${src.row_count.toLocaleString()} rows · cached`;
-    $('body').scrollTop = 0;
+    $('body').scrollTop = stash ? stash.scroll : 0;
     render();
     drawRail();
     updateFiltersButton();
+    // The cached view is flat — a restored grouping still needs its
+    // summary levels rebuilt on top of it.
+    if (S.groupByCols.length) await regroupAll();
   } else {
     await rebuildView({ keepScroll: false });
+    // Same view spec as when we left (the stash IS the spec), so the raw
+    // scrollTop still points at the same rows.
+    if (stash && !S.groupByCols.length) $('body').scrollTop = stash.scroll;
   }
   syncTabSelection(); // moves the strip highlight and the sidebar's .active row onto this table
   checkPresets(id); // fire-and-forget — a suggestion banner, not core to opening the source

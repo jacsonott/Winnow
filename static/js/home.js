@@ -8,7 +8,7 @@ import { openImportPreview } from './merge.js';
 import { resetPluginTabMounts } from './plugins.js';
 import { loadAppSettings, loadCaseSettings, loadHeaderNicknames, loadSavedFilters } from './savedfilters.js';
 import { updateSearchAllButton } from './search.js';
-import { applyPageTabsSize, loadSources } from './sources.js';
+import { clearViewStateStash, applyPageTabsSize, loadSources } from './sources.js';
 import { showGridTab } from './sql.js';
 import { S } from './state.js';
 import { fmtBytes } from './tables.js';
@@ -103,6 +103,7 @@ export async function openCase(path, opts = {}) {
   // closed and can't possibly still exist. Drop the cache rather than let
   // openSource() try it, get a 409, and rebuild anyway.
   S.viewCache.clear();
+  clearViewStateStash(); // per-tab filters describe the previous case's tables
   S.tabOrder = [];
   // Unlike a tab switch within the *same* case (where the timeframe filter
   // deliberately survives — see clearAllFilters()/applyPreset()), a
