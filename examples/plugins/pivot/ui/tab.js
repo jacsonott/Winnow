@@ -22,14 +22,25 @@ let refresh = null;
 export default function mount(container, winnow) {
   const { el, post, api, toast, modal } = winnow;
 
-  state = {
+  /* Multiple pivots, SQL-pane style: `pivots` holds one state object per
+     tab and `state` is always the ACTIVE one — every render function
+     below reads the module-level `state`, so switching tabs is just a
+     reassignment plus a re-render. In-memory for the session, like the
+     rest of a plugin tab's UI state. */
+  let sharedMeta = null;
+  const newPivotState = (name) => ({
+    name,
     sourceId: null,
     rows: [], cols: [], values: [], filters: [],
-    meta: null, data: null, index: null,
+    meta: sharedMeta, data: null, index: null,
     sort: null,               // {measure: idx, dir: 1|-1} — null = by key
     subtotals: true, grandTotals: true,
     loading: false, error: null, elapsed: 0,
-  };
+  });
+  const pivots = [newPivotState('Pivot 1')];
+  let active = 0;
+  let renamingIdx = null;
+  state = pivots[0];
 
   /* ---------------------------------------------------------- chrome */
 
@@ -60,6 +71,66 @@ export default function mount(container, winnow) {
   const status = el('span', 'note-status', '');
   status.style.cssText = 'margin-left:auto;text-align:right';
   bar.append(srcSel, subBtn, gtBtn, copyBtn, csvBtn, clearBtn, status);
+  const strip = el('div', 'sql-tabs');
+  function renderPivotTabs() {
+    strip.replaceChildren();
+    pivots.forEach((p, i) => {
+      if (i === renamingIdx) {
+        const inp = el('input');
+        inp.value = p.name;
+        inp.style.cssText = 'width:110px;font:inherit;font-size:12px;background:var(--ink);'
+          + 'color:var(--text);border:1px solid var(--accent);padding:2px 6px';
+        const commit = () => {
+          p.name = inp.value.trim() || p.name;
+          renamingIdx = null;
+          renderPivotTabs();
+        };
+        inp.onkeydown = (e) => {
+          if (e.key === 'Enter') commit();
+          if (e.key === 'Escape') { renamingIdx = null; renderPivotTabs(); }
+          e.stopPropagation();
+        };
+        inp.onblur = commit;
+        strip.append(inp);
+        setTimeout(() => { inp.focus(); inp.select(); }, 0);
+        return;
+      }
+      const t = el('button', 'sql-tab', p.name);
+      t.setAttribute('aria-selected', String(i === active));
+      t.title = 'Double-click to rename';
+      t.onclick = () => { if (i !== active) activatePivot(i); };
+      t.ondblclick = () => { renamingIdx = i; renderPivotTabs(); };
+      if (pivots.length > 1) {
+        const x = el('span', null, ' ✕');
+        x.style.cssText = 'opacity:.6;margin-left:4px';
+        x.title = 'Close this pivot';
+        x.onclick = (e) => { e.stopPropagation(); closePivot(i); };
+        t.append(x);
+      }
+      strip.append(t);
+    });
+    const add = el('button', 'sql-tab', '+');
+    add.title = 'New pivot';
+    add.onclick = () => {
+      pivots.push(newPivotState(`Pivot ${pivots.length + 1}`));
+      activatePivot(pivots.length - 1);
+    };
+    strip.append(add);
+  }
+  function activatePivot(i) {
+    active = i;
+    state = pivots[i];
+    if (state.sourceId != null) srcSel.value = String(state.sourceId);
+    renderPivotTabs();
+    fillSources();
+    renderFields();
+    render();
+  }
+  function closePivot(i) {
+    pivots.splice(i, 1);
+    activatePivot(Math.max(0, Math.min(i <= active ? active - (i < active ? 1 : 0) : active, pivots.length - 1)));
+  }
+  container.append(strip);
   container.append(bar);
 
   const body = el('div');
@@ -955,6 +1026,9 @@ export default function mount(container, winnow) {
       container.append(note('Could not load the pivot plugin backend: ' + e.message, true));
       return;
     }
+    sharedMeta = state.meta;
+    for (const p of pivots) p.meta = sharedMeta;
+    renderPivotTabs();
     fillSources();
     renderFields();
     render();
