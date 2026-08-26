@@ -117,3 +117,27 @@ def test_tool_sweep_is_an_advanced_search_with_the_xdr_exclusion(store, write_cs
 def test_powershell_filter_ships_with_its_grouping():
     p = _payload("EVTX — PowerShell")
     assert p["group_by"] == ["PayloadData1"]
+
+
+def test_every_shipped_tree_root_is_a_group():
+    """A bare-condition root compiles server-side but the client's spec
+    gate reads it as "no filter" — the v1 seeds shipped eight of those, so
+    'Sysmon present?' et al showed as applied while filtering nothing.
+    Roots must be groups, forever."""
+    for name, _, payload in fd.DEFAULT_SAVED_FILTERS:
+        tree = payload.get("filter_tree")
+        if tree:
+            assert tree["type"] == "group", name
+
+
+def test_network_share_access_actually_filters(store, write_csv):
+    """Row-level check for one of the formerly cond-rooted filters — the
+    compile-all test above can't catch a filter that silently matches
+    everything."""
+    sid = _table_for(store, write_csv, fd.EVTX, [
+        {"EventId": "5140"},   # hit
+        {"EventId": "5145"},   # hit
+        {"EventId": "4624"},   # must be excluded
+    ], "shares.csv")
+    view = _apply(store, sid, _payload("EVTX — Network share access (5140/5145)"))
+    assert view["row_count"] == 2

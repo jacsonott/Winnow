@@ -8,7 +8,7 @@ import { setGrouping } from './grouping.js';
 import { syncSearchExpansion } from './search.js';
 import { clearAllFilters } from './sources.js';
 import { showSqlTab } from './sql.js';
-import { S } from './state.js';
+import { normalizeTree, S } from './state.js';
 import { updateFiltersButton } from './timeframe.js';
 import { baseColumns } from './tsformat.js';
 import { confirmDialog, promptDialog } from './ui.js';
@@ -120,7 +120,7 @@ export function applyPreset(preset) {
   // Deliberately doesn't touch S.timeRange — applying a saved filter/
   // preset must not remove an active timeframe filter (see toggleTimeRange).
   const p = preset.payload || {};
-  S.filterTree = p.filter_tree || { type: 'group', op: 'AND', children: [] };
+  S.filterTree = normalizeTree(p.filter_tree);
   S.sort = p.sort || S.sort;
   S.search = p.search || '';
   S.searchMode = p.search_mode || 'contains';

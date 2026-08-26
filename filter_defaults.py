@@ -51,7 +51,13 @@ def _or(*children):
 
 def _tree(root):
     """A payload whose only content is the guided filter tree — the shape
-    currentFilterPayload() saves and applyPreset() restores."""
+    currentFilterPayload() saves and applyPreset() restores. The root must
+    be a GROUP: the builder renders root.children and the client's spec
+    gate checks children.length, so a bare-condition root reads as "no
+    filter" there while the ★ button says it's applied. Single conditions
+    get wrapped here (and workspace normalizes any already-seeded ones)."""
+    if root.get("type") != "group":
+        root = {"type": "group", "op": "AND", "children": [root]}
     return {"filter_tree": root, "search": "", "search_mode": "contains", "search_terms": []}
 
 
