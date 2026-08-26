@@ -211,6 +211,37 @@ def test_sorting_a_grouped_view_keeps_open_groups_open(page):
     assert page.evaluate("() => __winnow.S.groups.every((g) => !g.expanded)")
 
 
+def test_saved_filters_modal_groups_by_header_set_and_stays_dense(page):
+    """The flat list (one row per filter, nickname button on every row,
+    ~52px pitch) drowned once the 28 shipped filters landed. Filters now
+    sit under one header per column set — which is also the unit they
+    cycle in — with the nickname control on the section, and rows dense
+    enough to scan."""
+    page.evaluate("() => __winnow.openSavedFiltersModal()")
+    page.wait_for_selector(".sf-group-head")
+    assert page.locator(".sf-group-head").count() >= 1
+    rows = page.locator(".sf-row")
+    assert rows.count() >= 2
+    b1, b2 = rows.nth(0).bounding_box(), rows.nth(1).bounding_box()
+    assert b2["y"] - b1["y"] <= 32, f"row pitch {b2['y'] - b1['y']}px — the list has bloated again"
+    page.keyboard.press("Escape")
+
+
+def test_settings_no_longer_duplicates_the_saved_filters_list(page):
+    """Settings used to render every saved filter a second time. It keeps
+    import/export and a pointer; the list lives in the Saved filters modal
+    alone."""
+    page.keyboard.press("?")
+    page.wait_for_selector("#modal:not([hidden])")
+    page.click(".settings-section-head:has-text('Saved filters')")
+    sec = page.locator(".settings-section:has(.settings-section-head:has-text('Saved filters'))")
+    assert sec.locator(".session-row, .sf-row").count() == 0
+    sec.locator(".btn", has_text="Open saved filters").click()
+    page.wait_for_selector(".sf-group-head")
+    assert page.locator("#modalTitle").inner_text().lower() == "saved filters"
+    page.keyboard.press("Escape")
+
+
 def test_shortcuts_go_inert_while_a_dialog_is_open(page):
     """With the filter builder up, q/w kept cycling saved filters
     underneath it, digits kept tagging, v opened the value picker behind
