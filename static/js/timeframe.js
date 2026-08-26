@@ -10,7 +10,7 @@ import { VALUE_FILTER_AUTO_MAX, setColumnValueFilter, setValueFilterMode, valueF
 import { moveCursor, render } from './grid.js';
 import { drawRail } from './grouping.js';
 import { applyPreset, filtersForCurrentSource, headerSig, loadSavedFilters, matchingSavedFilters, nicknameFor, setNicknameFor } from './savedfilters.js';
-import { closeTab, editSourceNickname, openSource, sourceLabel, wireDragReorder } from './sources.js';
+import { clearAllFilters, closeTab, editSourceNickname, openSource, sourceLabel, wireDragReorder } from './sources.js';
 import { normalizeTree, S } from './state.js';
 import { openTablesManager } from './tables.js';
 import { loadTags } from './tags.js';
@@ -689,7 +689,16 @@ export function buildTableActionsPanel(container, refresh) {
   const tables = el('button', 'btn ghost', 'Tables manager…');
   tables.title = 'Every table in the case — indexes, row counts, dropping a source';
   tables.onclick = () => openTablesManager();
-  acts.append(dflt, nick, nickTable, tables);
+  const reset = el('button', 'btn ghost', 'Reset view');
+  reset.title = 'Back to the just-opened state: clear filters, search, tag filter and grouping, and restore the default sort. Column layout and the timeframe filter stay.';
+  reset.onclick = async () => {
+    $('modal').hidden = true;
+    const dt = S.columns.find((c) => c.type === 'datetime');
+    S.sort = dt ? [{ column: dt.name, dir: 'asc' }] : [];
+    saveLayout();
+    await clearAllFilters();
+  };
+  acts.append(dflt, nick, nickTable, tables, reset);
   container.append(acts);
   if (src && src.is_open) {
     const close = el('button', 'btn ghost', 'Close this tab');
