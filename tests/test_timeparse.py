@@ -285,3 +285,29 @@ def test_every_output_matches_the_shapes_store_already_recognizes():
         assert _TS_ISO_RE.match(out), out
         assert _ts_normalize(out) == out[:19], out
         assert _day_bucket(out) == out[:10], out
+
+
+# ------------------------------------------ month-name native recognition
+
+def test_month_name_timestamps_normalize_natively():
+    """"JUN 23 2026 00:11:00" arrived in real tooling output and wasn't
+    recognized — the third native family (no derived column needed):
+    name-first and day-first, abbreviated and full months, optional comma,
+    optional 12-hour time, case-insensitive."""
+    assert _ts_normalize("JUN 23 2026 00:11:00") == "2026-06-23 00:11:00"
+    assert _ts_normalize("23 Jun 2026") == "2026-06-23 00:00:00"
+    assert _ts_normalize("June 23, 2026 5:11 PM") == "2026-06-23 17:11:00"
+    assert _ts_normalize("23 September 2026 12:00 AM") == "2026-09-23 00:00:00"
+    assert _ts_normalize("Foo 23 2026") is None      # not a month
+    assert _ts_normalize("Monday 23 2026") is None   # a weekday isn't either
+    assert _day_bucket("JUN 23 2026 00:11:00") == "2026-06-23"
+    assert _day_bucket("23 Jun 2026 08:00:00") == "2026-06-23"
+
+
+def test_month_name_columns_type_as_datetime_at_ingest():
+    from store import DATE_RE
+
+    assert DATE_RE.match("JUN 23 2026 00:11:00")
+    assert DATE_RE.match("23 June, 2026")
+    assert not DATE_RE.match("word salad 2026")
+    assert not DATE_RE.match("mayhem 5 2026")  # 'may' must be the whole word
