@@ -231,6 +231,49 @@ def test_jump_to_timestamp_is_reachable_from_the_timeframe_dialog(page):
     page.keyboard.press("Escape")
 
 
+def test_shortcuts_go_inert_while_a_dialog_is_open(page):
+    """With the filter builder up, q/w kept cycling saved filters
+    underneath it, digits kept tagging, v opened the value picker behind
+    the card. A dialog owns the keyboard: everything but Escape stops."""
+    page.keyboard.press("e")
+    page.wait_for_selector("#modal:not([hidden])")
+    page.keyboard.press("v")
+    page.wait_for_timeout(150)
+    assert page.locator(".menu").count() == 0, "the value picker opened behind the dialog"
+    page.keyboard.press("Escape")
+    page.wait_for_selector("#modal[hidden]", state="attached")
+    page.keyboard.press("v")
+    page.wait_for_timeout(150)
+    assert page.locator(".menu").count() == 1, "v must still work once the dialog is gone"
+    page.keyboard.press("Escape")
+
+
+def test_is_any_of_renders_one_value_per_line(page):
+    """'is any of (one per line)' rendered in a single-line input, so the
+    newlines collapsed and ['6006','6008','41','1074'] displayed as the
+    run-together 60066008411074. List-valued conditions get a textarea."""
+    page.evaluate("""() => {
+      __winnow.S.filterTree = { type: 'group', op: 'AND', children: [
+        { type: 'cond', column: 'EventId', op: 'in', value: ['6006', '6008', '41', '1074'] }] };
+    }""")
+    page.keyboard.press("e")
+    page.wait_for_selector("#modal:not([hidden])")
+    box = page.locator(".fb-cond textarea")
+    assert box.count() == 1
+    assert box.input_value() == "6006\n6008\n41\n1074"
+    page.keyboard.press("Escape")
+    page.evaluate("() => { __winnow.S.filterTree = { type: 'group', op: 'AND', children: [] }; }")
+
+
+def test_saved_filters_are_reachable_from_the_builder(page):
+    page.keyboard.press("e")
+    page.wait_for_selector("#modal:not([hidden])")
+    page.click("#modalBody .btn:has-text('Saved filters…')")
+    page.wait_for_timeout(200)
+    assert page.locator("#modalTitle").inner_text().lower() == "saved filters"  # CSS uppercases it
+    page.keyboard.press("Escape")
+
+
 def test_a_cond_root_saved_filter_really_applies_and_renders(page):
     """Version 1 of the shipped filters stored several single-condition
     trees with the condition AS the root. The server compiles that shape,
