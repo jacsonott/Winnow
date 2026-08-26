@@ -1457,3 +1457,18 @@ html[data-style="studio"] #search:focus, html[data-style="studio"] textarea:focu
 }
 
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+
+/* ------------------------------------------------- remote session mode */
+
+/* Settings → Appearance → "Remote session mode". RDP-class protocols
+   encode screen changes, so an infinite animation (busy sweep, job slide,
+   the SQL cursor blink) keeps the encoder busy around the clock, and the
+   row-hover repaint fires on every mousemove. Animations get the same
+   kill-switch prefers-reduced-motion uses; hover is re-asserted to each
+   row state's own motionless background (a computed no-op — no pixels
+   change, so nothing crosses the wire). The scrolling half is in grid.js. */
+html.remote * { transition: none !important; animation: none !important; }
+html.remote .row:hover { background: var(--ink); }
+html.remote .row:hover:nth-child(even) { background: var(--row-even); }
+html.remote .row.cursor:hover { background: var(--sel); }
+html.remote .row.selected:hover { background: var(--row-selected); }
