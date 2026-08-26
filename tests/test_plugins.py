@@ -1555,3 +1555,27 @@ def test_first_last_carry_order_is_the_output_order(fl_client):
     out = _fl(client, "preview", source_id=sid, group_by=["Host"],
               sort_column="When", columns=["User", "EventId"], template="{which}")
     assert out["columns"] == ["When", "User", "EventId", "Description"]
+
+
+def test_pivot_groups_on_a_derived_column(pivot_client, store):
+    """Item from analyst feedback: custom columns (timestamp/regex derived)
+    must be usable in the pivot — the plugin's _from_clause joins the
+    drv_ sidecar, and /api/sources feeds its UI the derived names."""
+    client, source_id = pivot_client
+    res = store.add_derived_column(source_id, "HostRx", "Host", "regex_extract",
+                                    {"pattern": r"^(\w+)"})
+    store.wait_for_ingest_job(res["job_id"], timeout=30)
+    out = _agg(client, source_id, group_sets=[["HostRx"]], aggs=[{"fn": "count"}])
+    assert out["sets"][0]["rows"], "no groups came back for the derived column"
+
+
+def test_first_last_carries_a_derived_column(fl_client, store):
+    client, sid = fl_client
+    res = store.add_derived_column(sid, "UserRx", "User", "regex_extract",
+                                    {"pattern": r"^(\w)"})
+    store.wait_for_ingest_job(res["job_id"], timeout=30)
+    out = _fl(client, "preview", source_id=sid, group_by=["Host"],
+              sort_column="When", columns=["UserRx"], template="{which} | {UserRx}")
+    assert out["columns"] == ["When", "UserRx", "Description"]
+    firsts = [r for r in out["rows"] if r[-1].startswith("First")]
+    assert firsts and all(r[1] for r in firsts), "derived values missing from the carried column"

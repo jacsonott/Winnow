@@ -244,3 +244,58 @@ def test_batch_routes(client, store, write_csv):
                      "op_id": "json_field", "params": {"path": "a[["}}],
     })
     assert bad.status_code == 400
+
+
+# ------------------------------------------------------------------ regex
+
+URI_ROWS = [
+    ["Time", "Uri"],
+    ["2024-01-05 10:00:00", "https://c2.evil.example/beacon?id=7"],
+    ["2024-01-05 10:01:00", "https://cdn.vendor.com/lib.js"],
+    ["2024-01-05 10:02:00", "ftp://10.0.0.5/drop.zip"],
+    ["2024-01-05 10:03:00", "not a uri"],
+    ["2024-01-05 10:04:00", ""],
+]
+
+
+def _add_rx(store, sid, name, column, params):
+    res = store.add_derived_column(sid, name, column, "regex_extract", params)
+    store.wait_for_ingest_job(res["job_id"], timeout=30)
+    return res["definition"]["id"]
+
+
+def test_regex_extract_pulls_the_capture_into_a_column(store, write_csv):
+    """The reported use case verbatim: the base of a URI as its own
+    column, to filter and sort on."""
+    sid = _ingest(store, write_csv, URI_ROWS, "uri.csv")
+    _add_rx(store, sid, "Host", "Uri", {"pattern": r"^\w+://([^/:?]+)"})
+    assert _values(store, sid, "Host") == [
+        "c2.evil.example", "cdn.vendor.com", "10.0.0.5", None, None]
+
+
+def test_regex_extract_group_selection_and_whole_match(store, write_csv):
+    sid = _ingest(store, write_csv, URI_ROWS, "uri2.csv")
+    # No capture group: the whole match lands.
+    _add_rx(store, sid, "Scheme", "Uri", {"pattern": r"^\w+(?=://)"})
+    assert _values(store, sid, "Scheme")[:3] == ["https", "https", "ftp"]
+    # Explicit group past the first.
+    _add_rx(store, sid, "Tld", "Uri", {"pattern": r"://[^/]*?(\w+)\.(\w+)[/:?]", "group": 2})
+    assert _values(store, sid, "Tld")[:2] == ["example", "com"]
+
+
+def test_regex_extract_filters_and_sorts_like_any_other_column(store, write_csv):
+    sid = _ingest(store, write_csv, URI_ROWS, "uri3.csv")
+    _add_rx(store, sid, "Host", "Uri", {"pattern": r"^\w+://([^/:?]+)"})
+    v = store.build_view(sid, {"source_id": sid, "sort": [],
+                               "filters": [{"column": "Host", "op": "contains", "value": "evil"}]})
+    assert v["row_count"] == 1
+
+
+def test_regex_extract_rejects_bad_patterns_and_groups(store, write_csv):
+    sid = _ingest(store, write_csv, URI_ROWS, "uri4.csv")
+    with pytest.raises(ValueError):
+        store.add_derived_column(sid, "X", "Uri", "regex_extract", {"pattern": "("})
+    with pytest.raises(ValueError):
+        store.add_derived_column(sid, "X", "Uri", "regex_extract", {"pattern": "(a)", "group": 3})
+    with pytest.raises(ValueError):
+        store.add_derived_column(sid, "X", "Uri", "regex_extract", {"pattern": "a" * 600})

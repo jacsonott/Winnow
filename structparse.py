@@ -576,6 +576,83 @@ timeparse.register_op({
 })
 
 
+# ------------------------------------------------------------------ regex
+
+_REGEX_PARAM_PATTERN = {
+    "name": "pattern", "label": "Regex", "type": "text", "required": True,
+    "help": "Searched anywhere in the value (Python syntax). What lands in the column: "
+            "the first capture group if the pattern has one, else the whole match — "
+            "e.g. ^\\w+://([^/:]+) pulls the host out of a URL.",
+}
+_REGEX_PARAM_GROUP = {
+    "name": "group", "label": "Capture group", "type": "int", "required": False, "default": 0,
+    "help": "0 = automatic (group 1 when the pattern has one, else the whole match). "
+            "Set 2, 3, … to keep a different group.",
+}
+
+# Analyst-authored patterns run against their own local data, same trust
+# model as the SQL pane — but a runaway pattern shouldn't be able to be
+# arbitrarily huge, and the backfill that executes it is a cancellable
+# background job either way.
+_MAX_REGEX_LEN = 512
+
+
+def _compiled_regex(params: dict, state: dict) -> re.Pattern:
+    rx = state.get("_rx")
+    if rx is None:
+        rx = re.compile(params.get("pattern", ""))
+        state["_rx"] = rx
+    return rx
+
+
+def _extract_regex(value, params: dict, state: dict) -> str | None:
+    if value is None:
+        return None
+    s = str(value)
+    if not s:
+        return None
+    m = _compiled_regex(params, state).search(s)
+    if m is None:
+        return None
+    g = int(params.get("group") or 0)
+    if g == 0:
+        g = 1 if m.re.groups >= 1 else 0
+    try:
+        return m.group(g)  # None when the group didn't participate -> NULL
+    except IndexError:
+        return None
+
+
+def _validate_regex_params(params: dict) -> None:
+    pattern = params.get("pattern", "")
+    if len(pattern) > _MAX_REGEX_LEN:
+        raise ValueError(f"Regex too long ({len(pattern)} > {_MAX_REGEX_LEN} characters)")
+    try:
+        rx = re.compile(pattern)
+    except re.error as e:
+        raise ValueError(f"Invalid regex: {e}")
+    g = int(params.get("group") or 0)
+    if g and g > rx.groups:
+        raise ValueError(
+            f"The pattern has {rx.groups} capture group{'s' if rx.groups != 1 else ''} — group {g} doesn't exist")
+
+
+timeparse.register_op({
+    "id": "regex_extract",
+    "label": "Regex capture",
+    "description": "Extract part of this column's value with a regular expression — the host out of a URL, an ID out of a message, anything a capture group can name.",
+    "params": [_REGEX_PARAM_PATTERN, _REGEX_PARAM_GROUP],
+    "parse": _extract_regex,
+    "validate": _validate_regex_params,
+    "value_type": "text",
+    "derived_kind": "text",
+    "family": "extract",
+    "stateful": True,  # the compiled pattern is cached in `state` across the batch
+    "hidden_from_detect": True,
+})
+
+
+
 # --------------------------------------------------------------- discovery
 
 def sniff_kind(values: Iterator | list) -> str | None:

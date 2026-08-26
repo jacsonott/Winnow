@@ -80,3 +80,18 @@ def test_xlsx_export_empty_case_still_produces_a_workbook(store):
     buf = store.export_tagged_xlsx()
     wb = load_workbook(buf)
     assert wb.sheetnames == ["No tagged rows"]
+
+
+def test_csv_export_includes_derived_columns(store, write_csv):
+    """A regex/timestamp/JSON derived column is part of the table the
+    analyst sees — the export has to carry it like any base column."""
+    path = write_csv([["Uri"], ["https://a.example/x"], ["https://b.example/y"]])
+    rec = store.ingest_csv(path, name="uri.csv", build_fts=False)
+    res = store.add_derived_column(rec["id"], "Host", "Uri", "regex_extract",
+                                   {"pattern": r"^\w+://([^/]+)"})
+    store.wait_for_ingest_job(res["job_id"], timeout=30)
+    view = store.build_view(rec["id"], {"source_id": rec["id"], "filters": [], "sort": []})
+    text = _export_csv_text(store, view["view_id"])
+    lines = text.strip().splitlines()
+    assert lines[0].endswith(",Host")
+    assert lines[1].endswith(",a.example") and lines[2].endswith(",b.example")
