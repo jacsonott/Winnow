@@ -9,7 +9,7 @@ import { hasActiveFilterTree, openFilterBuilder } from './filterbuilder.js';
 import { VALUE_FILTER_AUTO_MAX, setColumnValueFilter, setValueFilterMode, valueFilterAutoOn, valueFilterEnabled } from './filters.js';
 import { moveCursor, render } from './grid.js';
 import { drawRail } from './grouping.js';
-import { applyPreset, filtersForCurrentSource, headerSig, nicknameFor, setNicknameFor } from './savedfilters.js';
+import { matchingSavedFilters, applyPreset, filtersForCurrentSource, headerSig, nicknameFor, setNicknameFor } from './savedfilters.js';
 import { closeTab, editSourceNickname, openSource, sourceLabel, wireDragReorder } from './sources.js';
 import { S } from './state.js';
 import { openTablesManager } from './tables.js';
@@ -157,6 +157,15 @@ export function updateFiltersButton() {
     btn.title = 'Filter builder and saved filters';
     btn.setAttribute('aria-pressed', 'false');
   }
+  // The accent ring that replaced the suggestion banner: saved filters
+  // exist for exactly this table's columns and none is applied yet — the
+  // dropdown lists them (wireSearch). Quiet once something IS applied.
+  const src = S.sources.find((x) => x.id === S.sourceId);
+  const m = src && !f && !hasActiveFilterTree()
+    ? matchingSavedFilters(src.columns.map((c) => c.name)) : null;
+  const n = m ? m.exact.length : 0;
+  btn.classList.toggle('suggest', n > 0);
+  if (n > 0) btn.title = `${n} saved filter${n === 1 ? '' : 's'} match${n === 1 ? 'es' : ''} this table's columns — click to apply one`;
 }
 
 /* ---------------------------------------------------------- timeframe filter */

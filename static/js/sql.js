@@ -232,7 +232,6 @@ export async function closeSqlTab(t) {
 export function syncTabChrome() {
   const isGrid = S.activeTab === 'grid';
   $('toolbar').hidden = !isGrid;
-  if (!isGrid) $('presetBanner').hidden = true;
 }
 
 export function showGridTab() {
@@ -243,7 +242,7 @@ export function showGridTab() {
   $('grid').hidden = false;
   syncTabSelection();
   syncTabChrome();
-  if (S.sourceId) checkPresets(S.sourceId); // restore the banner, hidden while on SQL/Timeline
+  if (S.sourceId) checkPresets(S.sourceId); // refresh the Filters button's suggestion state
 }
 
 export function showTimelineTab() {

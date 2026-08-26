@@ -209,3 +209,40 @@ def test_sorting_a_grouped_view_keeps_open_groups_open(page):
         "() => __winnow.S.groupByCols.length === 1 && __winnow.S.groupByCols[0] === 'Host' && __winnow.S.groups.length > 0"
     )
     assert page.evaluate("() => __winnow.S.groups.every((g) => !g.expanded)")
+
+
+def test_matching_saved_filters_ring_the_button_instead_of_a_banner(page):
+    """The suggestion banner was a whole toolbar row of chips; it's now a
+    state of the Filters button — accent ring when saved filters match the
+    open table's columns, the matches at the top of its dropdown, and both
+    quiet again once a filter is applied. The banner element itself is
+    gone from the DOM."""
+    assert page.locator("#presetBanner").count() == 0
+
+    # ui.csv's columns match no shipped filter — inject one client-side so
+    # the test never writes to the workspace on disk.
+    page.evaluate("""() => {
+      __winnow.S.savedFilters.push({ id: 9902, name: 'ui fixture filter',
+        col_names: ['Timestamp', 'EventId', 'Host', 'ExtremelyLongColumnHeaderName', 'CommandLine'],
+        payload: { filter_tree: { type: 'group', op: 'AND', children: [
+          { type: 'cond', column: 'EventId', op: 'in', value: ['4624'] }] },
+          search: '', search_mode: 'contains', search_terms: [] } });
+      __winnow.updateFiltersButton();
+    }""")
+    btn = page.locator("#btnFilters")
+    assert "suggest" in (btn.get_attribute("class") or ""), "no ring despite a matching saved filter"
+
+    btn.click()
+    page.wait_for_selector(".menu")
+    assert page.locator(".menu-header", has_text="For this table").count() == 1
+    page.locator(".menu-item", has_text="ui fixture filter").click()
+    page.wait_for_function("() => __winnow.S.view.row_count === 50")
+    assert "suggest" not in (btn.get_attribute("class") or ""), "ring must go quiet once applied"
+    assert "ui fixture filter" in btn.inner_text()
+
+    page.evaluate("""() => {
+      __winnow.S.savedFilters = __winnow.S.savedFilters.filter((f) => f.id !== 9902);
+      __winnow.S.filterTree = { type: 'group', op: 'AND', children: [] };
+      __winnow.updateFiltersButton();
+      return __winnow.rebuildView({ keepScroll: false });
+    }""")
