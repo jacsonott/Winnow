@@ -43,11 +43,13 @@ export function _spawnDialog(build) {
     function onKey(e) {
       if (e.key === 'Escape') { e.preventDefault(); close(build.cancelValue); }
     }
-    // Same press-started-here rule as the #modal backdrop above — prompt()
+    // Same both-ends-on-the-backdrop rule as #modal above — prompt()
     // dialogs have inputs whose text gets drag-selected too.
     let pressOnOverlay = false;
+    let releaseOnOverlay = false;
     overlay.onmousedown = (e) => { pressOnOverlay = e.target === overlay; };
-    overlay.onclick = (e) => { if (e.target === overlay && pressOnOverlay) close(build.cancelValue); };
+    overlay.onmouseup = (e) => { releaseOnOverlay = e.target === overlay; };
+    overlay.onclick = (e) => { if (e.target === overlay && pressOnOverlay && releaseOnOverlay) close(build.cancelValue); };
     build(card, close);
     overlay.append(card);
     document.body.append(overlay);
@@ -264,8 +266,16 @@ $('modalClose').onclick = () => ($('modal').hidden = true);
    past the card's edge lands the click on the backdrop — which used to
    close the modal out from under a half-copied path. */
 let modalPressOnBackdrop = false;
+let modalReleaseOnBackdrop = false;
 $('modal').onmousedown = (e) => { modalPressOnBackdrop = e.target === $('modal'); };
+$('modal').onmouseup = (e) => { modalReleaseOnBackdrop = e.target === $('modal'); };
 $('modal').onclick = (e) => {
-  if (e.target === $('modal') && modalPressOnBackdrop) $('modal').hidden = true;
+  // Both ends of the gesture must land on the backdrop. The press guard
+  // (see its comment above) covers a select-drag OUT of the card; a drag
+  // that STARTS on the backdrop and releases inside the card also
+  // resolves its click to the backdrop (common-ancestor rule) and used to
+  // close the Search-all modal mid-highlight. A deliberate backdrop click
+  // is down+up in place and still closes.
+  if (e.target === $('modal') && modalPressOnBackdrop && modalReleaseOnBackdrop) $('modal').hidden = true;
 };
 }

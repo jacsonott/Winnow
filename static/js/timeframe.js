@@ -9,13 +9,13 @@ import { hasActiveFilterTree, openFilterBuilder } from './filterbuilder.js';
 import { VALUE_FILTER_AUTO_MAX, setColumnValueFilter, setValueFilterMode, valueFilterAutoOn, valueFilterEnabled } from './filters.js';
 import { moveCursor, render } from './grid.js';
 import { drawRail } from './grouping.js';
-import { applyPreset, filtersForCurrentSource, headerSig, nicknameFor, setNicknameFor } from './savedfilters.js';
+import { applyPreset, filtersForCurrentSource, headerSig, loadSavedFilters, matchingSavedFilters, nicknameFor, setNicknameFor } from './savedfilters.js';
 import { closeTab, editSourceNickname, openSource, sourceLabel, wireDragReorder } from './sources.js';
 import { normalizeTree, S } from './state.js';
 import { openTablesManager } from './tables.js';
 import { loadTags } from './tags.js';
 import { baseColumns, columnMeta, parseTimestamp } from './tsformat.js';
-import { confirmDialog, modal } from './ui.js';
+import { confirmDialog, modal, promptDialog } from './ui.js';
 import { rebuildView } from './view.js';
 
 /* ------------------------------------------------------ jump to timestamp */
@@ -160,6 +160,15 @@ export function updateFiltersButton() {
     btn.title = 'Filter builder and saved filters';
     btn.setAttribute('aria-pressed', 'false');
   }
+  // The accent ring that replaced the suggestion banner: saved filters
+  // exist for exactly this table's columns and none is applied yet — the
+  // dropdown lists them (wireSearch). Quiet once something IS applied.
+  const src = S.sources.find((x) => x.id === S.sourceId);
+  const m = src && !f && !hasActiveFilterTree()
+    ? matchingSavedFilters(src.columns.map((c) => c.name)) : null;
+  const n = m ? m.exact.length : 0;
+  btn.classList.toggle('suggest', n > 0);
+  if (n > 0) btn.title = `${n} saved filter${n === 1 ? '' : 's'} match${n === 1 ? 'es' : ''} this table's columns — click to apply one`;
 }
 
 /* ---------------------------------------------------------- timeframe filter */
@@ -348,7 +357,10 @@ export function openTimeRangeModal() {
     };
     const cancel = el('button', 'btn ghost', 'Cancel');
     cancel.onclick = () => { $('modal').hidden = true; };
-    actions.append(apply, clearBtn, cancel);
+    const jumpBtn = el('button', 'btn ghost', 'Jump to timestamp…');
+    jumpBtn.title = 'Scroll the grid to a moment instead of filtering to a range';
+    jumpBtn.onclick = () => openJumpTsModal();
+    actions.append(apply, clearBtn, jumpBtn, cancel);
     b.append(actions);
   });
 }
@@ -385,88 +397,128 @@ export function openSavedFiltersModal() {
       + 'border-radius:var(--radius-sm);padding:6px 9px;font:inherit;font-size:12px;margin-bottom:10px';
     b.append(search);
 
-    const list = el('div', 'session-list');
+    const list = el('div', 'sf-list');
     b.append(list);
 
     const curCols = new Set(baseColumns().map((c) => c.name.trim().toLowerCase()));
     const active = activeSavedFilterRecord();
 
+    const groupMatchesCur = (colNames) => {
+      const cols = new Set((colNames || []).map((c) => c.trim().toLowerCase()));
+      return cols.size === curCols.size && [...cols].every((c) => curCols.has(c));
+    };
+
+    function filterRow(f, matches, colText) {
+      const row = el('div', 'sf-row');
+      const applyBtn = el('button', 'btn' + (matches ? '' : ' ghost') + ' sf-apply', f.name);
+      applyBtn.setAttribute('aria-pressed', String(!!(active && active.id === f.id)));
+      applyBtn.title = matches
+        ? `Apply "${f.name}"`
+        : `Built for different columns (${colText}) — click to apply anyway`;
+      applyBtn.onclick = async () => {
+        if (!matches && !(await confirmDialog(`"${f.name}" was built for a different column set (${colText}). Apply anyway?`))) return;
+        $('modal').hidden = true;
+        applyPreset(f);
+      };
+      // Editing routes through the real grid: apply the filter, then open
+      // the builder pre-loaded with its payload, so the match count behind
+      // the modal is live feedback on the change being made. Needs a table
+      // open to apply against — without one there's nothing to preview.
+      const editBtn = el('button', 'btn ghost sf-mini', 'Edit');
+      editBtn.title = S.sourceId
+        ? `Apply "${f.name}" to the open table and edit its conditions`
+        : 'Open a table first — editing applies the filter so you can see what it matches';
+      editBtn.disabled = !S.sourceId;
+      editBtn.onclick = async () => {
+        if (!matches && !(await confirmDialog(
+          `"${f.name}" was built for a different column set (${colText}). Edit it against the open table anyway? `
+          + `It stays saved for its original columns.`))) return;
+        $('modal').hidden = true;
+        applyPreset(f);
+        openFilterBuilder(f);
+      };
+      const renBtn = el('button', 'btn ghost sf-mini', 'Rename');
+      renBtn.onclick = async () => {
+        const name = await promptDialog('New name:', f.name);
+        if (!name || !name.trim()) return;
+        await api(`/api/saved_filters/${f.id}`, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.trim() }),
+        });
+        f.name = name.trim();
+        render();
+        updateFiltersButton();
+      };
+      const groupIds = sameGroupFilterIds(f.col_names);
+      const gIdx = groupIds.indexOf(f.id);
+      const upBtn = el('button', 'btn ghost sf-mini', '▲');
+      upBtn.title = 'Move earlier in the cycle order for this header set';
+      upBtn.disabled = gIdx <= 0;
+      upBtn.onclick = async () => { await moveSavedFilter(f, -1); render(); };
+      const downBtn = el('button', 'btn ghost sf-mini', '▼');
+      downBtn.title = 'Move later in the cycle order for this header set';
+      downBtn.disabled = gIdx >= groupIds.length - 1;
+      downBtn.onclick = async () => { await moveSavedFilter(f, 1); render(); };
+      const del = el('button', 'btn ghost sf-mini', '✕');
+      del.title = 'Delete this saved filter';
+      del.onclick = async () => {
+        if (!(await confirmDialog(`Delete saved filter "${f.name}"?`, { danger: true, okLabel: 'Delete' }))) return;
+        await api(`/api/saved_filters/${f.id}`, { method: 'DELETE' });
+        S.savedFilters = S.savedFilters.filter((x) => x.id !== f.id);
+        render();
+        updateFiltersButton();
+      };
+      row.append(applyBtn, editBtn, renBtn, upBtn, downBtn, del);
+      // Drag to reorder as well — same one DnD implementation the tab
+      // strip and SQL sub-tabs use. currentIds scopes the drop to this
+      // filter's own header set, so dragging across sets is a no-op
+      // (wireDragReorder's own from === -1 guard).
+      wireDragReorder(row, f.id, {
+        containerSelector: '.sf-list',
+        rowSelector: '.sf-row',
+        horizontal: false,
+        currentIds: () => sameGroupFilterIds(f.col_names),
+        onReorder: async (ids) => {
+          S.savedFilters = await post('/api/saved_filters/reorder', { ids });
+          render();
+        },
+      });
+      return row;
+    }
+
     function render() {
       const q = search.value.trim().toLowerCase();
       list.replaceChildren();
-      let shown = 0;
+      // One section per header set — the filters under a set cycle
+      // together, so they read together. The open table's set leads.
+      const groups = new Map();
       for (const f of S.savedFilters) {
-        const nickname = nicknameFor(f.col_names);
-        const colText = (f.col_names || []).join(', ');
-        if (q && !f.name.toLowerCase().includes(q) && !(nickname || '').toLowerCase().includes(q)
-          && !colText.toLowerCase().includes(q)) continue;
-        shown++;
-        const cols = new Set((f.col_names || []).map((c) => c.trim().toLowerCase()));
-        const matches = cols.size === curCols.size && [...cols].every((c) => curCols.has(c));
-        const row = el('div', 'row-actions session-row');
-        const applyBtn = el('button', 'btn' + (matches ? '' : ' ghost'), f.name);
-        applyBtn.setAttribute('aria-pressed', String(!!(active && active.id === f.id)));
-        applyBtn.title = matches
-          ? `Apply "${f.name}"`
-          : `Built for different columns (${colText}) — click to apply anyway`;
-        applyBtn.onclick = async () => {
-          if (!matches && !(await confirmDialog(`"${f.name}" was built for a different column set (${colText}). Apply anyway?`))) return;
-          $('modal').hidden = true;
-          applyPreset(f);
-        };
-        const headerLabel = el('span', 'count', nickname || colText);
-        headerLabel.title = nickname ? colText : '';
-        // Editing routes through the real grid: apply the filter, then open
-        // the builder pre-loaded with its payload, so the match count behind
-        // the modal is live feedback on the change being made. Needs a table
-        // open to apply against — without one there's nothing to preview.
-        const editBtn = el('button', 'btn ghost', 'Edit');
-        editBtn.title = S.sourceId
-          ? `Apply "${f.name}" to the open table and edit its conditions`
-          : 'Open a table first — editing applies the filter so you can see what it matches';
-        editBtn.disabled = !S.sourceId;
-        editBtn.onclick = async () => {
-          if (!matches && !(await confirmDialog(
-            `"${f.name}" was built for a different column set (${colText}). Edit it against the open table anyway? `
-            + `It stays saved for its original columns.`))) return;
-          $('modal').hidden = true;
-          applyPreset(f);
-          openFilterBuilder(f);
-        };
-        const nicknameBtn = el('button', 'btn ghost', nickname ? '🏷' : '🏷 name…');
-        nicknameBtn.title = nickname
-          ? `Rename this header set's nickname (used by every saved filter with these columns: ${colText})`
+        const sig = headerSig(f.col_names);
+        if (!groups.has(sig)) groups.set(sig, { colNames: f.col_names, filters: [] });
+        groups.get(sig).filters.push(f);
+      }
+      const entries = [...groups.values()];
+      entries.sort((a, z) => Number(groupMatchesCur(z.colNames)) - Number(groupMatchesCur(a.colNames)));
+      let shown = 0;
+      for (const g of entries) {
+        const nickname = nicknameFor(g.colNames);
+        const colText = (g.colNames || []).join(', ');
+        const hits = g.filters.filter((f) => !q || f.name.toLowerCase().includes(q)
+          || (nickname || '').toLowerCase().includes(q) || colText.toLowerCase().includes(q));
+        if (!hits.length) continue;
+        shown += hits.length;
+        const matches = groupMatchesCur(g.colNames);
+        const head = el('div', 'sf-group-head');
+        const title = el('span', 'sf-group-name', nickname || colText);
+        title.title = colText;
+        const nickBtn = el('button', 'btn ghost sf-mini', nickname ? '🏷' : '🏷 name…');
+        nickBtn.title = nickname
+          ? `Rename this header set's nickname (used by every filter in this section: ${colText})`
           : `Give this header set a nickname instead of showing its raw columns (${colText})`;
-        nicknameBtn.onclick = async () => {
-          await setNicknameFor(f.col_names, nickname);
-          render();
-        };
-        const groupIds = sameGroupFilterIds(f.col_names);
-        const gIdx = groupIds.indexOf(f.id);
-        const upBtn = el('button', 'btn ghost', '▲');
-        upBtn.title = 'Move earlier in the cycle order for this header set';
-        upBtn.disabled = gIdx <= 0;
-        upBtn.onclick = async () => { await moveSavedFilter(f, -1); render(); };
-        const downBtn = el('button', 'btn ghost', '▼');
-        downBtn.title = 'Move later in the cycle order for this header set';
-        downBtn.disabled = gIdx >= groupIds.length - 1;
-        downBtn.onclick = async () => { await moveSavedFilter(f, 1); render(); };
-        row.append(applyBtn, headerLabel, editBtn, nicknameBtn, upBtn, downBtn);
-        // Drag to reorder as well — same one DnD implementation the tab
-        // strip and SQL sub-tabs use. currentIds scopes the drop to this
-        // filter's own header set, so dragging across sets is a no-op
-        // (wireDragReorder's own from === -1 guard).
-        wireDragReorder(row, f.id, {
-          containerSelector: '.session-list',
-          rowSelector: '.session-row',
-          horizontal: false,
-          currentIds: () => sameGroupFilterIds(f.col_names),
-          onReorder: async (ids) => {
-            S.savedFilters = await post('/api/saved_filters/reorder', { ids });
-            render();
-          },
-        });
-        list.append(row);
+        nickBtn.onclick = async () => { await setNicknameFor(g.colNames, nickname); render(); };
+        head.append(title, nickBtn);
+        if (matches) head.append(el('span', 'count', 'open table'));
+        list.append(head);
+        for (const f of hits) list.append(filterRow(f, matches, colText));
       }
       if (!shown) list.append(el('div', 'note-status', 'No saved filters match that search.'));
     }
@@ -474,12 +526,34 @@ export function openSavedFiltersModal() {
     render();
     setTimeout(() => search.focus(), 0);
 
+    const acts = el('div', 'row-actions');
+    const exp = el('button', 'btn ghost', 'Export filters…');
+    exp.onclick = () => { window.location = '/api/saved_filters/export'; };
+    const impLabel = el('label', 'btn ghost', 'Import filters…');
+    const impInput = el('input');
+    impInput.type = 'file';
+    impInput.accept = '.json';
+    impInput.hidden = true;
+    impInput.onchange = async () => {
+      const fd = new FormData();
+      fd.append('file', impInput.files[0]);
+      fd.append('merge', 'true');
+      const res = await api('/api/saved_filters/import', { method: 'POST', body: fd });
+      await loadSavedFilters();
+      render();
+      updateFiltersButton();
+      toast(`Imported ${res.added} filter${res.added === 1 ? '' : 's'}`);
+    };
+    impLabel.append(impInput);
+    acts.append(exp, impLabel);
+    b.append(acts);
+
     b.append(el('p', null,
       `Cycle filters that match the open source's columns with `
       + `${S.keymap.cyclePrevFilter[0] || '['} / ${S.keymap.cycleNextFilter[0] || ']'} — cycling past either `
-      + `end drops the filters entirely rather than wrapping. ▲/▼ set the cycle order within a header set. `
-      + `"Edit" applies a filter to the open table and reopens it in the Filter builder, where "Update" `
-      + `saves your changes back over it. Rename, delete, import or export them from Settings.`));
+      + `end drops the filters entirely rather than wrapping. ▲/▼ (or drag) set the cycle order within a `
+      + `header set. "Edit" applies a filter to the open table and reopens it in the Filter builder, where `
+      + `"Update" saves your changes back over it.`));
   });
 }
 
@@ -525,10 +599,24 @@ export function buildColumnsPanel(container, refresh = openTableMenu) {
       refresh();
     };
     row.append(pick);
+    // Reorder from here too — the grid's header drag is invisible to
+    // anyone working from this panel, and hidden columns can ONLY be
+    // repositioned here. Same DnD vocabulary as the tab strip.
+    wireDragReorder(row, name, {
+      containerSelector: '.collist',
+      rowSelector: '.collist-row',
+      horizontal: false,
+      currentIds: () => [...S.order],
+      onReorder: (order) => {
+        S.order = order;
+        renderHead(); render(); saveLayout();
+        refresh();
+      },
+    });
     list.append(row);
   });
   container.append(list);
-  container.append(el('p', 'fb-help', 'Drag a column header in the grid to reorder it.'));
+  container.append(el('p', 'fb-help', 'Drag rows here — or the column headers in the grid — to reorder columns.'));
   const acts = el('div', 'row-actions');
   const addDerived = el('button', 'btn ghost', 'Add datetime column…');
   addDerived.onclick = () => openDerivedColumnModal();
