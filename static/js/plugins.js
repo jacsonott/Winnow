@@ -5,6 +5,7 @@ import { $, api, el, post, setBusy, toast } from './core.js';
 import { loadPlugins, openImportModal, pluginFormatById, queueFilesForFormat } from './importer.js';
 import { loadSources, openSource, renderPageTabs, syncTabSelection } from './sources.js';
 import { activeSqlTab, scheduleSqlTabSave, showGridTab, syncTabChrome } from './sql.js';
+import { sqlTagsFor, tagChips, wireSqlAssist } from './sqlassist.js';
 import { S } from './state.js';
 import { confirmDialog, modal, promptDialog } from './ui.js';
 
@@ -393,16 +394,51 @@ export async function showPluginTab(tabId) {
    when you switch back to a tab, without re-running its query. */
 export function sqlResultNodes(r) {
   const t = el('table');
-  const hr = el('tr');
-  for (const c of r.columns) hr.append(el('th', null, c));
-  t.append(hr);
-  for (const row of r.rows) {
-    const tr = el('tr');
-    for (const v of row) tr.append(el('td', null, v == null ? '' : String(v)));
-    t.append(tr);
-  }
+  const sort = { idx: null, dir: 1 };
+  const paint = () => {
+    t.replaceChildren();
+    const hr = el('tr');
+    r.columns.forEach((c, i) => {
+      const th = el('th', 'sql-th-sort', c);
+      th.title = 'Click to sort the result by this column';
+      if (sort.idx === i) th.append(el('span', 'sort', sort.dir === 1 ? ' ▲' : ' ▼'));
+      th.onclick = () => { sort.dir = sort.idx === i ? -sort.dir : 1; sort.idx = i; paint(); };
+      hr.append(th);
+    });
+    if (r.tags) hr.append(el('th', null, 'Tags'));
+    t.append(hr);
+    let rows = r.rows;
+    if (sort.idx != null) {
+      // Client-side over the (already capped) result set — numeric when
+      // both sides read as numbers, text otherwise, NULLs first.
+      const { idx, dir } = sort;
+      rows = [...rows].sort((a, b) => {
+        const x = a[idx], y = b[idx];
+        if (x == null && y == null) return 0;
+        if (x == null) return -dir;
+        if (y == null) return dir;
+        const nx = Number(x), ny = Number(y);
+        if (Number.isFinite(nx) && Number.isFinite(ny) && String(x).trim() !== '' && String(y).trim() !== '') {
+          return (nx - ny) * dir;
+        }
+        return String(x).localeCompare(String(y)) * dir;
+      });
+    }
+    for (const row of rows) {
+      const tr = el('tr');
+      for (const v of row) tr.append(el('td', null, v == null ? '' : String(v)));
+      if (r.tags) {
+        const td = el('td');
+        td.append(tagChips(r.tags.map[row[r.tags.ridIdx]]));
+        tr.append(td);
+      }
+      t.append(tr);
+    }
+  };
+  paint();
   return [
-    el('div', 'note-status', `${r.rows.length.toLocaleString()} rows · ${r.elapsed_ms} ms${r.truncated ? ' · truncated' : ''}`),
+    el('div', 'note-status', `${r.rows.length.toLocaleString()} rows · ${r.elapsed_ms} ms${r.truncated ? ' · truncated' : ''}`
+      + (r.tags ? ' · tags joined via rid' : '')),
     t,
   ];
 }
@@ -416,7 +452,12 @@ export async function runSql() {
   out.replaceChildren(el('div', null, 'Running…'));
   setBusy(true);
   try {
-    const r = await post('/api/sql', { sql: $('sqlText').value });
+    const sql = $('sqlText').value;
+    const r = await post('/api/sql', { sql });
+    // Decorate with a Tags column when the result can carry one (single
+    // src_N + a rid column) — cached WITH the result so tab switches
+    // repaint it without refetching.
+    r.tags = await sqlTagsFor(r, sql);
     S.sqlResults.set(tabId, r);
     if (S.sqlTabId === tabId) out.replaceChildren(...sqlResultNodes(r));
   } catch (e) {
@@ -432,6 +473,8 @@ export async function runSql() {
    startup steps that DO depend on order live in main.js instead. */
 export function wirePlugins() {
 $('btnRunSql').onclick = runSql;
+
+wireSqlAssist();
 
 $('sqlText').onkeydown = (e) => {
   if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); runSql(); }
