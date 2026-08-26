@@ -530,7 +530,8 @@ export function buildColumnsPanel(container, refresh = openTableMenu) {
   container.append(list);
   container.append(el('p', 'fb-help', 'Drag a column header in the grid to reorder it.'));
   const acts = el('div', 'row-actions');
-  const addDerived = el('button', 'btn ghost', 'Add datetime column…');
+  const addDerived = el('button', 'btn ghost', 'Add derived column…');
+  addDerived.title = 'Parse a timestamp, or extract part of a value — JSON/XML field or a regex capture — into its own sortable, filterable column';
   addDerived.onclick = () => openDerivedColumnModal();
   acts.append(addDerived);
   const all = el('button', 'btn ghost', 'Show all');

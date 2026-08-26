@@ -380,7 +380,7 @@ export async function openDerivedColumnModal(prefill, editing) {
   try {
     ops = await derivedOps();
   } catch (e) {
-    toast('Could not load timestamp formats: ' + e.message, 6000);
+    toast('Could not load derived-column formats: ' + e.message, 6000);
     return;
   }
   const textCols = baseColumns();
@@ -392,7 +392,7 @@ export async function openDerivedColumnModal(prefill, editing) {
     name: editing ? editing.name : '',
   };
 
-  modal(editing ? `Re-derive "${editing.name}"` : 'Add datetime column', (body) => {
+  modal(editing ? `Re-derive "${editing.name}"` : 'Add derived column', (body) => {
     const previewBox = el('div', 'derived-preview');
     const paramBox = el('div', 'derived-params');
     const nameInput = el('input');
@@ -422,6 +422,7 @@ export async function openDerivedColumnModal(prefill, editing) {
     function defaultName() {
       const op = currentOp();
       if (op && op.derived_kind === 'duration') return `${state.column} elapsed`;
+      if (op && op.derived_kind === 'text') return `${state.column} (extract)`;
       return `${state.column} (parsed)`;
     }
 
@@ -525,8 +526,16 @@ export async function openDerivedColumnModal(prefill, editing) {
     }
 
     colSelect.onchange = () => pickColumn(colSelect.value);
-    opSelect.onchange = () => { state.params = {}; buildParams(); refreshPreview(); };
-    nameInput.oninput = () => { state.name = nameInput.value; };
+    let nameTouched = false;
+    opSelect.onchange = () => {
+      state.params = {};
+      // "(parsed)" vs "(extract)" tracks the op kind — keep the suggestion
+      // current until the analyst has typed a name of their own.
+      if (!editing && !nameTouched) { nameInput.value = defaultName(); state.name = nameInput.value; }
+      buildParams();
+      refreshPreview();
+    };
+    nameInput.oninput = () => { nameTouched = true; state.name = nameInput.value; };
 
     body.append(labeledRow('Parse column', colSelect));
     body.append(suggestNote);
