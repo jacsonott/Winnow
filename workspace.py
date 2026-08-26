@@ -204,10 +204,26 @@ class SavedFilters:
                               "created_at": _now()})
             self._save(items, seeded_version=filter_defaults.FILTER_DEFAULTS_VERSION)
 
+    @staticmethod
+    def _normalize_payload(rec: dict) -> bool:
+        """Wraps a bare-condition filter_tree root in an AND group, in
+        place. Version 1 of the seeded defaults shipped several single-
+        condition filters with the condition AS the root — a shape the
+        server compiles fine but the client's spec gate read as "no
+        filter", so they showed as applied while filtering nothing."""
+        tree = (rec.get("payload") or {}).get("filter_tree")
+        if isinstance(tree, dict) and tree.get("type") == "cond":
+            rec["payload"]["filter_tree"] = {"type": "group", "op": "AND", "children": [tree]}
+            return True
+        return False
+
     def list(self) -> list[dict]:
         self.ensure_seeded()
         with _LOCK:
-            return self._load()
+            items = self._load()
+            if any([self._normalize_payload(r) for r in items]):
+                self._save(items)
+            return items
 
     def create(self, name: str, col_names: list[str], payload: dict) -> dict:
         with _LOCK:

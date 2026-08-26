@@ -209,3 +209,24 @@ def test_sorting_a_grouped_view_keeps_open_groups_open(page):
         "() => __winnow.S.groupByCols.length === 1 && __winnow.S.groupByCols[0] === 'Host' && __winnow.S.groups.length > 0"
     )
     assert page.evaluate("() => __winnow.S.groups.every((g) => !g.expanded)")
+
+
+def test_a_cond_root_saved_filter_really_applies_and_renders(page):
+    """Version 1 of the shipped filters stored several single-condition
+    trees with the condition AS the root. The server compiles that shape,
+    but the client's spec gate read it as "no filter" — so the ★ button
+    said applied while the grid showed every row, and the builder opened
+    empty with the SQL box full. Every boundary now normalizes the root
+    to a group; this drives the old payload shape end to end."""
+    total = page.evaluate("() => __winnow.S.view.row_count")
+    page.evaluate("""() => __winnow.applyPreset({ id: 9901, name: 'condroot', col_names: [],
+      payload: { filter_tree: { type: 'cond', column: 'EventId', op: 'in', value: ['4624'] },
+                 search: '', search_mode: 'contains', search_terms: [] } })""")
+    page.wait_for_function(f"() => __winnow.S.view.row_count < {total}")
+    assert page.evaluate("() => __winnow.S.view.row_count") == 50  # 200 rows, EventId cycles 4 values
+    assert page.evaluate("() => __winnow.hasActiveFilterTree()")
+
+    page.keyboard.press("e")  # the filter-builder binding
+    page.wait_for_selector("#modal:not([hidden])")
+    assert page.locator(".fb-cond").count() == 1, "the builder must show the condition, not an empty tree"
+    page.keyboard.press("Escape")
