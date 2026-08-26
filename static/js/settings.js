@@ -44,6 +44,7 @@ export function defaultAppearance() {
   return {
     style: 'panel', themeMode: 'dark', accent: STYLES.panel.defaultAccent, accentCustomized: false,
     density: 'comfortable', autofitMax: AUTOFIT_MAX_W_DEFAULT,
+    remoteSession: false,
   };
 }
 
@@ -60,6 +61,16 @@ export function contrastFg(hex) {
   const r = parseInt(c.substr(0, 2), 16), g = parseInt(c.substr(2, 2), 16), b = parseInt(c.substr(4, 2), 16);
   const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
   return lum > 0.6 ? '#14181d' : '#ffffff';
+}
+
+/* Remote session mode (RDP and friends): the remote display protocol
+   encodes screen *changes*, so every continuously-running animation keeps
+   its encoder busy even when nothing is happening, and a hover repaint on
+   every mousemove does the same. The class gates the CSS kill-switch at
+   the bottom of style.css; the row-quantized wheel scrolling half lives in
+   grid.js (wireGrid), keyed off the same setting. */
+export function paintRemote() {
+  document.documentElement.classList.toggle('remote', !!S.appearance.remoteSession);
 }
 
 export function resolveAutoTheme() {
@@ -144,6 +155,7 @@ export function initAppearance() {
   paintTheme();
   paintAccent();
   paintDensity();
+  paintRemote();
   if (window.matchMedia) {
     window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
       if (S.appearance.themeMode === 'auto') paintTheme();
@@ -298,6 +310,24 @@ export function openSettings() {
     noCapLabel.append(noCap, el('span', null, 'No limit'));
     capRow.append(capInput, el('span', 'count', 'px'), noCapLabel);
     secLook.append(capRow);
+
+    secLook.append(el('div', 'settings-sub-label', 'Remote session (RDP)'));
+    secLook.append(el('p', 'fb-help',
+      'For running Winnow inside RDP/VNC: scrolls the grid by whole rows (one repaint per wheel '
+      + 'notch, like native apps), and stops animations and hover repaints, so the remote display '
+      + 'encoder ships small deltas instead of re-encoding the viewport. Saved on this machine.'));
+    const remoteLabel = el('label');
+    remoteLabel.style.cssText = 'display:flex;align-items:center;gap:6px';
+    const remoteCb = el('input');
+    remoteCb.type = 'checkbox';
+    remoteCb.checked = !!S.appearance.remoteSession;
+    remoteCb.onchange = () => {
+      S.appearance.remoteSession = remoteCb.checked;
+      paintRemote();
+      saveAppearance();
+    };
+    remoteLabel.append(remoteCb, el('span', null, 'Remote session mode'));
+    secLook.append(remoteLabel);
 
     const secKeys = settingsSection(b, 'Keyboard shortcuts');
     secKeys.append(el('p', null, 'Tag hotkeys (1–9) are set per-tag in Edit tags. Escape always clears the selection or closes a panel. '
