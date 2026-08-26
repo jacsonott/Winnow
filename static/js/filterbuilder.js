@@ -4,7 +4,7 @@
 import { $, api, debounce, el, post, toast } from './core.js';
 import { checkPresets } from './savedfilters.js';
 import { S } from './state.js';
-import { currentFilterPayload, updateFiltersButton } from './timeframe.js';
+import { currentFilterPayload, openSavedFiltersModal, updateFiltersButton } from './timeframe.js';
 import { baseColumns } from './tsformat.js';
 import { modal, promptDialog } from './ui.js';
 import { rebuildView } from './view.js';
@@ -198,7 +198,14 @@ export function renderCondRow(node, onStructural, onPreview) {
   row.append(opSel);
 
   if (!OP_NO_VALUE.has(node.op)) {
-    const inp = el('input');
+    // 'is any of' really is one-per-line, so it needs a textarea — a
+    // single-line input collapses the newlines and four EventIds render
+    // as one run-together number.
+    const inp = node.op === 'in' ? el('textarea') : el('input');
+    if (node.op === 'in') {
+      inp.rows = Math.min(6, Math.max(2, Array.isArray(node.value) ? node.value.length : 2));
+      inp.spellcheck = false;
+    }
     inp.value = Array.isArray(node.value) ? node.value.join('\n') : (node.value || '');
     inp.placeholder = node.op === 'in' ? 'one per line' : 'value';
     inp.oninput = () => {
@@ -331,6 +338,9 @@ export function openFilterBuilder(editing = null) {
     };
     const clear = el('button', 'btn ghost', 'Clear');
     clear.onclick = () => { S.filterTree = { type: 'group', op: 'AND', children: [] }; rerenderTree(); };
+    const browse = el('button', 'btn ghost', 'Saved filters…');
+    browse.title = 'Browse, apply and manage saved filters (the builder\'s state stays as-is)';
+    browse.onclick = () => openSavedFiltersModal();
     const saveFilterAs = el('button', 'btn ghost', editing ? 'Save as new…' : 'Save filter…');
     saveFilterAs.title = `Saves for these ${S.columns.length} columns — cyclable with `
       + `${S.keymap.cyclePrevFilter[0] || '['} / ${S.keymap.cycleNextFilter[0] || ']'}, and suggested `
@@ -345,7 +355,7 @@ export function openFilterBuilder(editing = null) {
       checkPresets(S.sourceId); // this filter may now match the open table's banner
       toast(`Saved filter "${name.trim()}"`);
     };
-    actions.append(apply, clear, saveFilterAs);
+    actions.append(apply, clear, saveFilterAs, browse);
 
     if (editing) {
       // Deliberately doesn't send col_names: the header set is the filter's
