@@ -357,7 +357,10 @@ export function openTimeRangeModal() {
     };
     const cancel = el('button', 'btn ghost', 'Cancel');
     cancel.onclick = () => { $('modal').hidden = true; };
-    actions.append(apply, clearBtn, cancel);
+    const jumpBtn = el('button', 'btn ghost', 'Jump to timestamp…');
+    jumpBtn.title = 'Scroll the grid to a moment instead of filtering to a range';
+    jumpBtn.onclick = () => openJumpTsModal();
+    actions.append(apply, clearBtn, jumpBtn, cancel);
     b.append(actions);
   });
 }

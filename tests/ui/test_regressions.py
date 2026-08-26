@@ -211,6 +211,26 @@ def test_sorting_a_grouped_view_keeps_open_groups_open(page):
     assert page.evaluate("() => __winnow.S.groups.every((g) => !g.expanded)")
 
 
+def test_month_name_timestamps_parse_client_side(page):
+    """Same third family the server now recognizes, mirrored in
+    parseTimestamp — display formatting and the client's time math must
+    read the value the same way TS_NORMALIZE does."""
+    got = page.evaluate("() => __winnow.parseTimestamp('JUN 23 2026 00:11:00')")
+    assert got == {"y": 2026, "mo": 6, "d": 23, "h": 0, "mi": 11, "s": 0, "frac": ""}
+    assert page.evaluate("() => __winnow.parseTimestamp('June 23, 2026 5:11 PM').h") == 17
+    assert page.evaluate("() => __winnow.parseTimestamp('23 Jun 2026').d") == 23
+    assert page.evaluate("() => __winnow.parseTimestamp('Monday 23 2026')") is None
+
+
+def test_jump_to_timestamp_is_reachable_from_the_timeframe_dialog(page):
+    page.evaluate("() => __winnow.openTimeRangeModal()")
+    page.wait_for_selector("#modal:not([hidden])")
+    page.click("#modalBody .btn:has-text('Jump to timestamp…')")
+    page.wait_for_timeout(200)
+    assert page.locator("#modalTitle").inner_text().lower() == "jump to timestamp"
+    page.keyboard.press("Escape")
+
+
 def test_matching_saved_filters_ring_the_button_instead_of_a_banner(page):
     """The suggestion banner was a whole toolbar row of chips; it's now a
     state of the Filters button — accent ring when saved filters match the

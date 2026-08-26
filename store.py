@@ -213,7 +213,25 @@ IDENT_OK = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 NUM_RE = re.compile(r"^-?\d+(\.\d+)?$")
 # Anything that looks like a leading ISO-ish or US date; used only to pick a
 # default sort column and to hint the UI, never to rewrite the stored value.
-DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[ T]|^\d{1,2}/\d{1,2}/\d{4}")
+# Month-name timestamps ("JUN 23 2026 00:11:00", "23 Jun 2026", "June 23,
+# 2026 5:11 PM") — the third recognized family, name-first and day-first
+# both, since exporters disagree. The alternation is strict (a weekday or a
+# random word never matches) and _TS_MONTHS is the number lookup the
+# parsers share; it's a superset of the alternation only by "sept".
+_TS_MONTH_NAME = (r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?"
+                  r"|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)")
+_TS_MONTHS = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "sept": 9, "oct": 10, "nov": 11, "dec": 12,
+    "january": 1, "february": 2, "march": 3, "april": 4, "june": 6,
+    "july": 7, "august": 8, "september": 9, "october": 10,
+    "november": 11, "december": 12,
+}
+DATE_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}[ T]|^\d{1,2}/\d{1,2}/\d{4}"
+    r"|^" + _TS_MONTH_NAME + r"\s+\d{1,2}\s*,?\s*\d{4}"
+    r"|^\d{1,2}\s+" + _TS_MONTH_NAME + r"\s*,?\s*\d{4}",
+    re.IGNORECASE)
 
 
 def q(ident: str) -> str:
@@ -288,6 +306,26 @@ def _regexp(pattern: str, value: Any) -> bool:
 # module between the two, just the same two format families.
 _TS_ISO_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?")
 _TS_US_RE = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4})(?:[ ,]+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM|am|pm)?)?")
+_TS_MONTH_RE = re.compile(
+    r"^(?:(" + _TS_MONTH_NAME + r")\s+(\d{1,2})|(\d{1,2})\s+(" + _TS_MONTH_NAME + r"))"
+    r"\s*,?\s*(\d{4})"
+    r"(?:[ ,]+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM|am|pm)?)?",
+    re.IGNORECASE)
+
+
+def _month_parts(m):
+    """(y, mo, d, hh, mi, ss) from a _TS_MONTH_RE match — the AM/PM rules
+    identical to the US branch's."""
+    mo = _TS_MONTHS[(m.group(1) or m.group(4)).lower()]
+    d = int(m.group(2) or m.group(3))
+    hh = int(m.group(6) or 0)
+    ampm = m.group(9)
+    if ampm:
+        if ampm.lower() == "pm" and hh < 12:
+            hh += 12
+        if ampm.lower() == "am" and hh == 12:
+            hh = 0
+    return int(m.group(5)), mo, d, hh, int(m.group(7) or 0), int(m.group(8) or 0)
 
 
 def _day_bucket(raw: Any) -> str | None:
@@ -308,6 +346,10 @@ def _day_bucket(raw: Any) -> str | None:
     m = _TS_US_RE.match(s)
     if m:
         return f"{int(m.group(3)):04d}-{int(m.group(1)):02d}-{int(m.group(2)):02d}"
+    m = _TS_MONTH_RE.match(s)
+    if m:
+        y, mo, d, _, _, _ = _month_parts(m)
+        return f"{y:04d}-{mo:02d}-{d:02d}"
     return None
 
 
@@ -340,6 +382,10 @@ def _ts_normalize(raw: Any) -> str | None:
             if ampm.lower() == "am" and hh == 12:
                 hh = 0
         return f"{int(y):04d}-{int(mo):02d}-{int(d):02d} {hh:02d}:{int(mi or 0):02d}:{int(sec or 0):02d}"
+    m = _TS_MONTH_RE.match(s)
+    if m:
+        y, mo, d, hh, mi, sec = _month_parts(m)
+        return f"{y:04d}-{mo:02d}-{d:02d} {hh:02d}:{mi:02d}:{sec:02d}"
     return None
 
 
