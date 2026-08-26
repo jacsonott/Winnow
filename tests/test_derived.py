@@ -271,12 +271,17 @@ def test_merge_eligibility_is_unaffected_by_derived_columns(store, write_csv):
     assert store.build_view(merge["id"], {})["row_count"] == 10
 
 
-def test_derived_columns_are_refused_on_a_merge(store, write_csv):
+def test_derived_columns_on_a_merge_fan_out_to_every_member(store, write_csv):
+    """Creating "on the merge" creates the same column on each member —
+    the deeper coverage lives in test_derived_merge.py."""
     a = _ingest(store, write_csv, EPOCH_ROWS, name="a.csv")
     b = _ingest(store, write_csv, EPOCH_ROWS, name="b.csv")
     merge = store.create_merge("both", [a, b])
-    with pytest.raises(ValueError, match="merged"):
-        store.add_derived_column(merge["id"], "Timestamp", "Epoch", "unix_epoch", {})
+    res = store.add_derived_column(merge["id"], "Timestamp", "Epoch", "unix_epoch", {})
+    assert len(res["member_definitions"]) == 2
+    for jid in res["job_ids"]:
+        store.wait_for_ingest_job(jid, timeout=30)
+    assert "Timestamp" in [c["name"] for c in store.get_source(merge["id"])["columns"]]
 
 
 def test_column_max_lengths_and_values_cover_derived_columns(store, write_csv):

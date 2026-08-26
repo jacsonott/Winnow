@@ -212,7 +212,6 @@ export function suggestColumnName(path, kind) {
    the analyst just expressed would be the wrong trade. The toast carries
    the undo-shaped escape hatch instead (remove it from the header menu). */
 export async function addExtractedColumn(column, path, kind) {
-  if (S.sourceId < 0) { toast("Derived columns aren't available on merged tables", 5000); return; }
   const name = uniqueColumnName(suggestColumnName(path, kind), takenColumnNames());
   setBusy(true);
   try {
@@ -248,7 +247,6 @@ export async function showDerivedColumnsSoon() {
    column. Everything at full coverage starts ticked; the rest start
    unticked and one click away. */
 export async function openFlattenModal(column) {
-  if (S.sourceId < 0) { toast("Derived columns aren't available on merged tables", 5000); return; }
   let found;
   setBusy(true);
   try {

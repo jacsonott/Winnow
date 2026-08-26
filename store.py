@@ -2915,12 +2915,16 @@ class Store:
                 "path": None,
                 "table_name": None,
                 "row_count": sum(m["row_count"] for m in members),
-                # canonical — lowest-id (first-created) member. Base columns
-                # only: derived columns aren't available on merges in v1
-                # (each member has its own drv_ table and its own set of
-                # definitions; a UNION ALL over mismatched sets would need
-                # per-member NULL-padding nothing here does yet).
-                "columns": [c for c in members[0]["columns"] if not c.get("derived")],
+                # canonical — lowest-id (first-created) member, plus every
+                # derived column present on ALL members under the same name
+                # (each member reads it from its own drv_ sidecar; a column
+                # missing on any member would need NULL-padding nothing
+                # here does, so it simply isn't exposed until it exists
+                # everywhere).
+                "columns": ([c for c in members[0]["columns"] if not c.get("derived")]
+                            + [c for c in members[0]["columns"] if c.get("derived")
+                               and all(any(mc.get("derived") and mc["name"].lower() == c["name"].lower()
+                                           for mc in m["columns"]) for m in members[1:])]),
                 "file_hash": None,
                 "imported_at": row["created_at"],
                 "has_fts": 1 if all(m["has_fts"] for m in members) else 0,
@@ -2959,9 +2963,13 @@ class Store:
             "path": None,
             "table_name": None,
             "row_count": sum(m["row_count"] for m in members),
-            # canonical — lowest-id (first-created) member; base columns only
-            # (derived columns aren't available on merges, see _source_lite_on)
-            "columns": [c for c in members[0]["columns"] if not c.get("derived")],
+            # canonical — lowest-id (first-created) member, plus the derived
+            # columns present on every member (same intersection rule as
+            # _source_lite_on, which documents why)
+            "columns": ([c for c in members[0]["columns"] if not c.get("derived")]
+                        + [c for c in members[0]["columns"] if c.get("derived")
+                           and all(any(mc.get("derived") and mc["name"].lower() == c["name"].lower()
+                                       for mc in m["columns"]) for m in members[1:])]),
             "file_hash": None,
             "imported_at": row["created_at"],
             "has_fts": 1 if all(m["has_fts"] for m in members) else 0,
@@ -3121,11 +3129,15 @@ class Store:
                    for c in src["columns"])
 
     def _member_from(self, src: dict, m: dict, alias: str | None = None) -> str:
-        """FROM text for one member table of a (possibly merged) view. Only
-        a non-merge source can carry derived columns, so only its own member
-        ever picks up the sidecar join."""
+        """FROM text for one member table of a (possibly merged) view. A
+        plain source picks up its own sidecar join; a merge that exposes
+        derived columns (present on every member) reads each member through
+        that member's OWN sidecar — same USING(rid) shape, so bare column
+        and rid references stay legal."""
         if not src.get("is_merge") and m["source_id"] == src["id"]:
             return self._from_clause(src, alias)
+        if src.get("is_merge") and any(c.get("derived") for c in src["columns"]):
+            return self._from_clause(self._source_lite(m["source_id"]), alias)
         t = q(m["table_name"])
         return f"{t} {alias}" if alias else t
 
@@ -3137,6 +3149,19 @@ class Store:
         if src.get("is_merge") or not any(c.get("derived") for c in src["columns"]):
             return ""
         return f" LEFT JOIN {q(self._derived_table(src['id']))} {alias} ON {alias}.rid = {on_alias}.rid"
+
+    def _member_derived_join(self, src: dict, m: dict, on_alias: str) -> str:
+        """_derived_join's per-member counterpart for the view-join shapes:
+        a merge's rows resolve derived values through each member's own
+        sidecar. For a plain source it emits exactly what _derived_join
+        would."""
+        if not any(c.get("derived") for c in src["columns"]):
+            return ""
+        mid = m["source_id"]
+        msrc = src if (not src.get("is_merge") and mid == src["id"]) else self._source_lite(mid)
+        if not any(c.get("derived") for c in msrc["columns"]):
+            return ""
+        return f" LEFT JOIN {q(self._derived_table(mid))} d ON d.rid = {on_alias}.rid"
 
     @staticmethod
     def _derived_dict(row: sqlite3.Row) -> dict:
@@ -3150,6 +3175,14 @@ class Store:
         return timeparse.list_ops()
 
     def list_derived_columns(self, source_id: int) -> list[dict]:
+        if source_id < 0:
+            # A merge's derived columns are the ones its column list exposes
+            # (present on every member) — represented by the first member's
+            # definitions, since that's the canonical column source.
+            src = self._source_lite(source_id)
+            exposed = {c["name"].lower() for c in src["columns"] if c.get("derived")}
+            first = self._resolve_members(source_id)[0]["source_id"]
+            return [d for d in self.list_derived_columns(first) if d["name"].lower() in exposed]
         with self.lock:
             rows = self.db.execute(
                 "SELECT * FROM derived_columns WHERE source_id=? ORDER BY id", (source_id,)
@@ -3179,7 +3212,26 @@ class Store:
         column that either exists or doesn't. The source table itself is
         never touched (invariant #1)."""
         if source_id < 0:
-            raise ValueError("Derived columns aren't supported on merged tables")
+            # A merge has no table of its own — creating "on the merge"
+            # means creating the same column on every member, after which
+            # _source_lite's intersection rule exposes it on the merge.
+            # All-or-nothing: validate against every member before touching
+            # any, so a name collision on member 3 doesn't leave members
+            # 1-2 with a column the merge never grows.
+            members = self._resolve_members(source_id)
+            for m in members:
+                msrc = self._source_lite(m["source_id"])
+                if self._find_column(msrc, (name or "").strip()):
+                    raise ValueError(
+                        f"Member table {msrc['name']!r} already has a column called {(name or '').strip()!r}")
+                if self._find_column(msrc, input_column) is None:
+                    raise ValueError(f"Member table {msrc['name']!r} has no column {input_column!r}")
+            results = [self.add_derived_column(m["source_id"], name, input_column, op_id, params)
+                       for m in members]
+            return {"definition": results[0]["definition"],
+                    "member_definitions": [r["definition"] for r in results],
+                    "job_id": results[0]["job_id"],
+                    "job_ids": [r["job_id"] for r in results]}
         op = timeparse.OPERATIONS.get(op_id)
         if op is None:
             raise ValueError(f"Unknown operation: {op_id}")
@@ -3558,6 +3610,8 @@ class Store:
         rank by how many it reads. Ambiguous numeric ranges (Mac absolute
         vs unix seconds) legitimately return several — the caller's preview
         of actual converted values is what settles it."""
+        if source_id < 0:  # a merge samples its first (canonical) member
+            source_id = self._resolve_members(source_id)[0]["source_id"]
         src = self._source_lite(source_id)
         if self._find_column(src, column) is None:
             raise KeyError(column)
@@ -3607,6 +3661,10 @@ class Store:
         if op is None:
             raise ValueError(f"Unknown operation: {op_id}")
         params = timeparse.validate_params(op_id, params)
+        if source_id < 0:
+            # Preview against the first member — representative, and the
+            # only side with a real table to sample.
+            source_id = self._resolve_members(source_id)[0]["source_id"]
         src = self._source_lite(source_id)
         if self._find_column(src, column) is None:
             raise KeyError(column)
@@ -3687,9 +3745,11 @@ class Store:
                 msrc = self._source_lite(m["source_id"])
                 where, p = self._compile_where(m["source_id"], msrc, spec, colnames)
                 for col in sort_cols:
-                    self._ensure_sort_index_building(m["source_id"], col, msrc["table_name"])
+                    self._ensure_sort_index_building(
+                        m["source_id"], col,
+                        self._index_table_for(src, col, msrc["table_name"], m["source_id"]))
                 branches.append(
-                    f"SELECT {int(m['source_id'])} AS source_id, rid, {collist} FROM {q(m['table_name'])}"
+                    f"SELECT {int(m['source_id'])} AS source_id, rid, {collist} FROM {self._member_from(src, m)}"
                     + (f" WHERE {where}" if where else "")
                 )
                 params.extend(p)
@@ -4182,7 +4242,7 @@ class Store:
             if whole_source and not is_datetime:
                 for m in members:
                     self._ensure_column_index_building(
-                        m["source_id"], column, self._index_table_for(src, column, m["table_name"])
+                        m["source_id"], column, self._index_table_for(src, column, m["table_name"], m["source_id"])
                     )
 
         branches: list[str] = []
@@ -4199,7 +4259,7 @@ class Store:
                     scope = (
                         f"FROM v.{q(view_id)} vv "
                         f"JOIN {q(m['table_name'])} s ON s.rid = vv.rid AND vv.source_id = {int(m['source_id'])}"
-                        f"{self._derived_join(src, 's')} "
+                        f"{self._member_derived_join(src, m, 's')} "
                         f"WHERE 1=1{extra_where}"
                     )
                 branches.append(f"SELECT {_val_expr(derived_alias)} AS val, count(*) AS n {scope} GROUP BY 1")
@@ -4365,7 +4425,6 @@ class Store:
         # (bare refs), the view-join shape chains a second ON join and
         # refers to it by alias.
         d_alias = None if is_root_virtual else "d"
-        djoin = "" if is_root_virtual else self._derived_join(src, "s")
 
         def _conds(m: dict) -> tuple[str, list]:
             """This group's predicate for one member. Per member because
@@ -4392,7 +4451,7 @@ class Store:
                 else:
                     n = self.db.execute(
                         f"SELECT count(*) FROM v.{q(view_id)} vv JOIN {q(m['table_name'])} s "
-                        f"ON s.rid = vv.rid AND vv.source_id = ?{djoin} WHERE {where_sql}",
+                        f"ON s.rid = vv.rid AND vv.source_id = ?{self._member_derived_join(src, m, 's')} WHERE {where_sql}",
                         [m["source_id"], *where_params],
                     ).fetchone()[0]
                 total += n
@@ -4427,7 +4486,7 @@ class Store:
                 else:
                     branches.append(
                         f"SELECT vv.pos AS root_pos, vv.source_id, vv.rid FROM v.{q(view_id)} vv "
-                        f"JOIN {q(m['table_name'])} s ON s.rid = vv.rid AND vv.source_id = ?{djoin} "
+                        f"JOIN {q(m['table_name'])} s ON s.rid = vv.rid AND vv.source_id = ?{self._member_derived_join(src, m, 's')} "
                         f"WHERE {where_sql}"
                     )
                     params.extend([m["source_id"], *where_params])
@@ -4546,14 +4605,17 @@ class Store:
             return any(Store._tree_has_raw(c) for c in node.get("children", []))
         return False
 
-    def _index_table_for(self, src: dict, column: str, table_name: str | None = None) -> str:
+    def _index_table_for(self, src: dict, column: str, table_name: str | None = None,
+                         member_id: int | None = None) -> str:
         """Which physical table an auto-created index for this column
         belongs on — a derived column's values live in the drv_<id>
         sidecar, not in src_<id>. `table_name` is the caller's already
-        resolved member table (a merge's src has none of its own)."""
+        resolved member table (a merge's src has none of its own), and
+        `member_id` names the member whose sidecar carries a merge's
+        derived values (drv_<-3> doesn't exist)."""
         for c in src["columns"]:
             if c.get("derived") and c["name"].lower() == str(column).lower():
-                return self._derived_table(src["id"])
+                return self._derived_table(member_id if member_id is not None else src["id"])
         return table_name or src["table_name"]
 
     def _compile_tree(self, node: dict | None, colnames: dict, source_id: int, src: dict) -> tuple[str, list]:
@@ -4846,7 +4908,7 @@ class Store:
                 where, p = self._compile_where(m["source_id"], msrc, spec, colnames)
                 branches.append(
                     f"SELECT {int(m['source_id'])} AS source_id, rid, {collist}\n"
-                    f"FROM {q(m['table_name'])}"
+                    f"FROM {self._member_from(src, m)}"
                     + (f"\nWHERE {where}" if where else "")
                 )
                 params.extend(p)
@@ -5212,7 +5274,7 @@ class Store:
             members = self._resolve_members_on(ro, source_id)
             for m in members:
                 self._ensure_column_index_building(
-                    m["source_id"], column, self._index_table_for(src, column, m["table_name"])
+                    m["source_id"], column, self._index_table_for(src, column, m["table_name"], m["source_id"])
                 )
             union_sql = " UNION ALL ".join(
                 f"SELECT {q(column)} AS val FROM {self._member_from(src, m)}" for m in members
