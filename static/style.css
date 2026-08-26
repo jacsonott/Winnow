@@ -430,6 +430,21 @@ html[data-style="studio"][data-theme="light"] {
 .adv-not.active { background: var(--danger-bg); border-color: var(--danger-border); color: var(--danger); }
 .adv-rm { font-size: 10px; padding: 3px 6px; }
 
+/* Saved filters modal: one section per header set, dense rows — the flat
+   list with per-row nickname buttons and 16px pitch read as noise once the
+   shipped set landed (28 filters over three header sets). */
+.sf-list { display: flex; flex-direction: column; gap: 3px; margin: 4px 0 10px; }
+.sf-group-head { display: flex; align-items: center; gap: 8px; margin: 10px 0 2px; }
+.sf-group-head:first-child { margin-top: 0; }
+.sf-group-name { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--dim); }
+.sf-row { display: flex; align-items: center; gap: 4px; padding: 2px 6px; background: var(--panel-2); border-radius: var(--radius-sm); }
+.sf-apply { flex: 1 1 auto; justify-content: flex-start; text-align: left; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sf-row .btn { padding: 2px 7px; font-size: 11px; }
+.sf-mini { font-size: 10px; padding: 2px 6px; flex: 0 0 auto; }
+.sf-row.dragging { opacity: .4; }
+.sf-row.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
+.sf-row.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
+
 /* The Filters button's suggestion ring — what replaced the banner row:
    saved filters match the open table's columns and none is applied yet. */
 #btnFilters.suggest { border-color: var(--accent-dim); box-shadow: 0 0 0 1px var(--accent-dim); }
