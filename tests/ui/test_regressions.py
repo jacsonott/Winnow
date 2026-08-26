@@ -175,3 +175,37 @@ def test_a_many_term_advanced_search_collapses_instead_of_hogging_the_toolbar(pa
     # input to land on) rather than throwing on input.select().
     page.keyboard.press("/")
     assert "adv-summary" in page.evaluate("() => document.activeElement.className")
+
+
+def test_sorting_a_grouped_view_keeps_open_groups_open(page):
+    """Sorting (or filtering, searching) rebuilds the view, and regroupAll
+    rebuilt the group tree from scratch — every group the analyst had
+    expanded snapped shut on each header click. The expanded set must
+    survive any rebuild that keeps the same grouping columns."""
+    page.evaluate("() => __winnow.addGroupLevel('EventId')")
+    page.wait_for_function("() => __winnow.S.groups.length > 0")
+    page.evaluate("() => __winnow.toggleGroup(1)")
+    page.wait_for_function("() => __winnow.S.groups[1].expanded")
+    opened = page.evaluate("() => __winnow.S.groups[1].value")
+
+    page.evaluate("""() => {
+      __winnow.S.sort = [{ column: 'Host', dir: 'asc' }];
+      return __winnow.rebuildView({ keepScroll: false });
+    }""")
+    page.wait_for_function(
+        "() => __winnow.S.groups.length > 0 && __winnow.S.groups.some((g) => g.expanded)"
+    )
+    still_open = page.evaluate(
+        "() => __winnow.S.groups.filter((g) => g.expanded).map((g) => g.value)"
+    )
+    assert still_open == [opened], f"open group {opened!r} didn't survive the sort: {still_open}"
+    # ...and it's really open: the tree contributes data rows, not just headers.
+    assert page.evaluate("() => __winnow.S.groupTotalRows > __winnow.S.groups.length")
+
+    # Changing the grouping COLUMNS is a different tree — nothing to restore.
+    page.evaluate("() => __winnow.dropGrouping()")  # evaluate awaits the returned promise
+    page.evaluate("() => __winnow.addGroupLevel('Host')")
+    page.wait_for_function(
+        "() => __winnow.S.groupByCols.length === 1 && __winnow.S.groupByCols[0] === 'Host' && __winnow.S.groups.length > 0"
+    )
+    assert page.evaluate("() => __winnow.S.groups.every((g) => !g.expanded)")
