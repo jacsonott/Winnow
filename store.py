@@ -3673,7 +3673,14 @@ class Store:
             s.get("column") for s in (spec.get("sort") or [])
             if s.get("column") in colnames and colnames[s.get("column")] != "number"
         ]
-        has_sort = any(s.get("column") in colnames for s in (spec.get("sort") or []))
+        # __line__ asc IS the virtual root's order, so it deliberately does
+        # NOT count as a sort (keeps the no-materialize fast path); only the
+        # descending direction needs a real ORDER BY.
+        has_sort = any(
+            s.get("column") in colnames
+            or (s.get("column") == "__line__" and str(s.get("dir", "asc")).lower() == "desc")
+            for s in (spec.get("sort") or [])
+        )
 
         if src.get("is_merge"):
             if self._tree_has_raw(spec.get("filter_tree")):
@@ -4771,9 +4778,16 @@ class Store:
         parts = []
         for s in sort:
             col = s.get("column")
+            direction = "DESC" if str(s.get("dir", "asc")).lower() == "desc" else "ASC"
+            if col == "__line__":
+                # The gutter's Line header: original file order, both ways.
+                # rid IS the line order, so ascending is the no-sort default
+                # — this exists for DESC, and so the client can state line
+                # order explicitly.
+                parts.append(f"rid {direction}")
+                continue
             if col not in colnames:
                 continue
-            direction = "DESC" if str(s.get("dir", "asc")).lower() == "desc" else "ASC"
             if colnames[col] == "number":
                 parts.append(f"{_numeric_expr(q(col))} {direction}")
             else:
