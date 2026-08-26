@@ -328,6 +328,13 @@ document.addEventListener('keydown', (e) => {
 
   if (typing) return;
 
+  /* A dialog owns the keyboard. With the filter builder (or any modal /
+     confirm overlay) up, q/w kept cycling saved filters underneath it,
+     digits kept tagging, Ctrl+C hijacked copying the dialog's own text.
+     Escape already closed things above; everything else stops here. The
+     settings pane's key-capture listener is separate and unaffected. */
+  if (!$('modal').hidden || document.querySelector('.confirm-overlay')) return;
+
   if ((e.ctrlKey || e.metaKey) && (e.key === 'c' || e.key === 'C') && (S.cellRange || selCount() || S.cursor >= 0)) {
     e.preventDefault();
     handleCopyShortcut(e.shiftKey);
