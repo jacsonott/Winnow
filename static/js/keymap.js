@@ -12,7 +12,7 @@ import { cycleSavedFilter, openFilterSqlTab } from './savedfilters.js';
 import { expandSearch, openSearchAllModal } from './search.js';
 import { openSettings } from './settings.js';
 import { activateTabSlot, clearAllFilters } from './sources.js';
-import { S, gridRowCount, selClear, selCount } from './state.js';
+import { S, gridRowCount, selClear, selCount, selSetAll } from './state.js';
 import { openTablesManager } from './tables.js';
 import { applyTag, applyTagToView, undoLastTagChange } from './tags.js';
 import { doJumpTs, openJumpTsModal, openTableMenu, openTimeRangeModal, toggleTimeRange } from './timeframe.js';
@@ -50,6 +50,10 @@ export const DEFAULT_KEYMAP = {
   filterBySelectedCell: ['f'],
   filterBySelectedCellOnly: ['F'],
   clearFilters: ['c'],
+  // Ctrl+A, like everywhere else. The typing guard above the dispatcher
+  // keeps it native inside inputs; grouped mode no-ops (the header
+  // checkbox is disabled there for the same reason).
+  selectAllRows: ['Ctrl+a'],
   openTables: ['t'],
   openTableMenu: ['C'],
   openSearchAll: ['s'],
@@ -78,6 +82,7 @@ export const ACTION_LABELS = {
   filterBySelectedCell: "Filter by selected cell's value",
   filterBySelectedCellOnly: "Filter by selected cell's value, dropping every other filter",
   clearFilters: 'Clear all filters, search and tag filter',
+  selectAllRows: 'Select every row in the current view (same as the header checkbox)',
   openTables: 'Open Tables manager',
   openTableMenu: 'Open the table menu (columns, value dropdowns) — also right-click a tab',
   openSearchAll: 'Search all tables',
@@ -259,6 +264,13 @@ export const ACTION_HANDLERS = {
   openSettings: () => openSettings(),
   resetColumnWidths: () => resetAllColumnWidths(),
   autofitColumnWidths: () => autofitAllColumnWidths(),
+  selectAllRows: () => {
+    if (S.groupByCols.length || !S.view || !S.view.row_count) return;
+    selSetAll();
+    S.cellRange = null; // same mutual exclusion the header checkbox applies
+    S.cellAnchor = null;
+    render();
+  },
   cyclePrevFilter: () => cycleSavedFilter(-1),
   cycleNextFilter: () => cycleSavedFilter(1),
   openFilterBuilder: () => openFilterBuilder(),
