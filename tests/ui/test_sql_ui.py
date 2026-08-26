@@ -11,6 +11,10 @@ pytestmark = pytest.mark.ui
 def _open_sql(page):
     page.click("#tabSql")
     page.wait_for_selector("#sqlview:not([hidden])")
+    # The tab list (and the starter query it seeds into the editor) loads
+    # async — filling the editor before that lands gets overwritten.
+    page.wait_for_function(
+        "() => __winnow.S.sqlTabs.length > 0 && !document.getElementById('sqlText').disabled")
 
 
 def test_autocomplete_keywords_tables_and_columns(page):
