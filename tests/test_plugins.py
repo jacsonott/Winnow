@@ -1579,3 +1579,27 @@ def test_first_last_carries_a_derived_column(fl_client, store):
     assert out["columns"] == ["When", "UserRx", "Description"]
     firsts = [r for r in out["rows"] if r[-1].startswith("First")]
     assert firsts and all(r[1] for r in firsts), "derived values missing from the carried column"
+
+
+def test_first_last_row_json_cell_carries_the_entire_row(fl_client):
+    import json as _json
+
+    client, sid = fl_client
+    out = _fl(client, "preview", source_id=sid, group_by=["Host", "User"],
+              sort_column="When", columns=["User"], template="{which}", row_json=True)
+    assert out["columns"] == ["When", "User", "Row (JSON)", "Description"]
+    first = next(r for r in out["rows"] if r[-1] == "First" and r[1] == "alice")
+    row = _json.loads(r_json := first[2])
+    assert row == {"When": "2026-03-14 08:00:00", "Host": "SRV1",
+                   "User": "alice", "EventId": "4624"}
+    # the synthetic window columns never leak into the JSON
+    assert "rn_first" not in r_json and "group_n" not in r_json
+
+
+def test_first_last_row_json_lands_in_the_created_table(fl_client, store):
+    client, sid = fl_client
+    out = _fl(client, "create", source_id=sid, group_by=["Host", "User"],
+              sort_column="When", columns=[], template="{which}", row_json=True,
+              name="bookends-json")
+    src = store.get_source(out["source"]["id"])
+    assert "Row (JSON)" in [c["name"] for c in src["columns"]]

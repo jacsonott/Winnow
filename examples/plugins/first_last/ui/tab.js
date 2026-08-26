@@ -16,7 +16,7 @@ export default function mount(container, winnow) {
 
   state = {
     sourceId: null,
-    groupBy: [], carry: [], filters: [], tags: { mode: '', ids: [] },
+    groupBy: [], carry: [], filters: [], tags: { mode: '', ids: [] }, rowJson: false,
     sortColumn: null,
     template: '{which} of {count}',
     meta: null, preview: null, error: null, loading: false,
@@ -69,6 +69,14 @@ export default function mount(container, winnow) {
     side.append(label(cap), box);
     if (box === carryBox) side.append(carryOrder);
   }
+  const rowJsonRow = el('label');
+  rowJsonRow.style.cssText = 'display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer';
+  const rowJsonCb = el('input');
+  rowJsonCb.type = 'checkbox';
+  rowJsonCb.onchange = () => { state.rowJson = rowJsonCb.checked; schedule(); };
+  rowJsonRow.append(rowJsonCb, el('span', null, 'Add the whole row as a JSON cell'));
+  rowJsonRow.title = 'A "Row (JSON)" column holding each bookend\'s entire source row as a JSON object — every column, nothing to tick';
+  side.append(rowJsonRow);
 
   side.append(label('Only these rows (filters)'));
   const tagBox = el('div');
@@ -357,6 +365,7 @@ export default function mount(container, winnow) {
       columns: state.carry,
       filters: state.filters,
       tags: state.tags.mode ? state.tags : null,
+      row_json: state.rowJson,
       template: state.template,
     };
   }
@@ -491,6 +500,7 @@ export default function mount(container, winnow) {
     state.carry = [];
     state.filters = [];
     state.tags = { mode: '', ids: [] };
+    state.rowJson = false;
     state.sortColumn = null;
     state.preview = null;
     renderControls();
