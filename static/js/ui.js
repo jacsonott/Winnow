@@ -7,7 +7,21 @@ import { setSearchAllRepaint } from './search.js';
 
 /* ---------------------------------------------------------------- modal */
 
+/* Which keymap action "owns" the modal that is currently showing — set
+   by the openers below via markModalAction, consumed by modal(). The
+   keymap's dialog guard uses it to make every keybind-openable dialog a
+   TOGGLE: pressing C again closes the table menu, e the builder, and so
+   on, however the dialog was opened. */
+let pendingModalAction = null;
+let modalAction = null;
+
+export function markModalAction(action) { pendingModalAction = action; }
+
+export function currentModalAction() { return modalAction; }
+
 export function modal(title, build, opts = {}) {
+  modalAction = pendingModalAction;
+  pendingModalAction = null;
   $('modalTitle').textContent = title;
   document.querySelector('.modal-card').classList.toggle('wide', !!opts.wide);
   const b = $('modalBody');
