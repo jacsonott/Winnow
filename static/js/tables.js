@@ -6,7 +6,7 @@ import { writeClipboardText } from './grouping.js';
 import { sqlSchemaForLLM } from './plugins.js';
 import { editSourceNickname, loadSources, sourceLabel, sourceTitle } from './sources.js';
 import { S } from './state.js';
-import { confirmDialog, modal } from './ui.js';
+import { markModalAction, confirmDialog, modal } from './ui.js';
 
 /* Every source/merge in the case, open or not — the counterpart to the tab
    strip's now-nondestructive ✕. Open/Close just flips visibility; Remove is
@@ -69,6 +69,7 @@ export async function compactCaseFile() {
 }
 
 export function openTablesManager() {
+  markModalAction('openTables');
   modal('Tables', (b) => {
     b.dataset.kind = 'tables';
     b.append(el('p', null,
