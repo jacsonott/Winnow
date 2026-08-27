@@ -94,8 +94,6 @@ def _source(req, body):
         source_id = int(body.get("source_id"))
     except (TypeError, ValueError):
         raise ValueError("source_id is required")
-    if source_id < 0:
-        raise ValueError("Pick a real table — merged sources aren't supported here")
     try:
         return req.store.get_source(source_id)
     except KeyError:
@@ -120,7 +118,26 @@ def _from_clause(src):
     return f"{base} LEFT JOIN {q('drv_' + str(src['id']))} d ON d.rid = s.rid"
 
 
+def _scope(req, src):
+    """FROM text for reading this source's rows. A plain source is its
+    table (plus sidecar); a merge is a UNION ALL of its members aliased
+    `s`, carrying source_id, rid and every exposed column under plain
+    names — so everything downstream references `s.<col>` uniformly
+    (invariant #9: the merge path is part of the operation)."""
+    if not src.get("is_merge"):
+        return _from_clause(src)
+    cols = [c["name"] for c in src["columns"]]
+    branches = []
+    for mid in src["member_source_ids"]:
+        m = req.store.get_source(mid)
+        sel = ", ".join(f"{_col(m, c)} AS {q(c)}" for c in cols)
+        branches.append(f"SELECT {int(m['id'])} AS source_id, s.rid AS rid, {sel} FROM {_from_clause(m)}")
+    return "(" + " UNION ALL ".join(branches) + ") s"
+
+
 def _col(src, name):
+    if src.get("is_merge"):
+        return f"s.{q(name)}"  # everything sits in the union subquery's alias
     return f"{'d' if name in _derived_names(src) else 's'}.{q(name)}"
 
 
@@ -184,6 +201,21 @@ def _tag_where(src, tags):
     if not tags:
         return None
     mode = tags.get("mode")
+    if src.get("is_merge"):
+        sub = "SELECT 1 FROM row_tags rt WHERE rt.source_id = s.source_id AND rt.rid = s.rid"
+        if mode == "any":
+            return f"EXISTS ({sub})"
+        if mode == "none":
+            return f"NOT EXISTS ({sub})"
+        if mode == "ids":
+            try:
+                ids = [int(i) for i in (tags.get("ids") or [])]
+            except (TypeError, ValueError):
+                raise ValueError("Tag ids must be integers")
+            if not ids:
+                return None
+            return f"EXISTS ({sub} AND rt.tag_id IN ({','.join(str(i) for i in ids)}))"
+        raise ValueError(f"Unknown tag filter mode {mode!r}")
     sub = f"SELECT rid FROM row_tags WHERE source_id = {int(src['id'])}"
     if mode == "any":
         return f"s.rid IN ({sub})"
@@ -279,16 +311,19 @@ def _bookend_rows(req, src, group_cols, sort_col, carry, where, params, limit, r
     part = ", ".join(_col(src, c) for c in group_cols)
     # Direction must be stated PER COLUMN: "ORDER BY ts, rid DESC" flips only
     # rid, leaving the last-window ranked by ascending time — every group's
-    # "Last" would be its earliest row with the biggest rid.
+    # "Last" would be its earliest row with the biggest rid. On a merge,
+    # rid alone collides across members, so (source_id, rid) is the
+    # deterministic tie-break.
     sort_ref = _col(src, sort_col)
-    order_asc = f"{sort_ref} ASC, s.rid ASC"
-    order_desc = f"{sort_ref} DESC, s.rid DESC"
+    tie_cols = ["s.source_id", "s.rid"] if src.get("is_merge") else ["s.rid"]
+    order_asc = ", ".join([f"{sort_ref} ASC"] + [f"{t} ASC" for t in tie_cols])
+    order_desc = ", ".join([f"{sort_ref} DESC"] + [f"{t} DESC" for t in tie_cols])
     sql = (
         f"SELECT {sel},"
         f" ROW_NUMBER() OVER (PARTITION BY {part} ORDER BY {order_asc}) AS rn_first,"
         f" ROW_NUMBER() OVER (PARTITION BY {part} ORDER BY {order_desc}) AS rn_last,"
         f" COUNT(*) OVER (PARTITION BY {part}) AS group_n"
-        f" FROM {_from_clause(src)}{where}"
+        f" FROM {_scope(req, src)}{where}"
     )
     outer = (
         f"SELECT * FROM ({sql}) WHERE rn_first = 1 OR rn_last = 1"
@@ -368,7 +403,7 @@ def values(req):
     column = body.get("column")
     _check_columns(src, [column])
     limit = min(int(body.get("limit") or 500), 5000)
-    sql = (f"SELECT {_col(src, column)} AS value, COUNT(*) AS n FROM {_from_clause(src)}"
+    sql = (f"SELECT {_col(src, column)} AS value, COUNT(*) AS n FROM {_scope(req, src)}"
            f" GROUP BY 1 ORDER BY n DESC")
     res = req.store.run_sql(sql, limit=limit)
     return {"values": [{"value": r[0], "count": r[1]} for r in res["rows"]],
@@ -382,7 +417,7 @@ def preview(req):
     body = req.body or {}
     src, group_cols, sort_col, carry, where, params, template, row_json = _validated(req, body)
     part = ", ".join(_col(src, c) for c in group_cols)
-    count_sql = f"SELECT COUNT(*) FROM (SELECT 1 FROM {_from_clause(src)}{where} GROUP BY {part})"
+    count_sql = f"SELECT COUNT(*) FROM (SELECT 1 FROM {_scope(req, src)}{where} GROUP BY {part})"
     total_groups = req.store.run_sql(_inline(count_sql, params), limit=1)["rows"][0][0]
 
     rows, _ = _bookend_rows(req, src, group_cols, sort_col, carry, where, params,

@@ -478,7 +478,7 @@ export default function mount(container, winnow) {
   /* --------------------------------------------------------- sources */
 
   function fillSources() {
-    const real = winnow.state.sources.filter((s) => !s.is_merge && !s.error);
+    const real = winnow.state.sources.filter((s) => !s.error); // merges included — invariant #9
     const previous = srcSel.value;
     srcSel.replaceChildren();
     for (const s of real) {
