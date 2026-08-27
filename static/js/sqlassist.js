@@ -39,8 +39,8 @@ export function sqlSuggestions(text, word) {
     out.push({ label, insert, kind });
   };
   for (const s of S.sources) {
-    if (s.is_merge || s.error || s.id < 0) continue;
-    const table = `src_${s.id}`;
+    if (s.error) continue;
+    const table = s.is_merge || s.id < 0 ? `merge_${-s.id}` : `src_${s.id}`;
     const name = sourceLabel(s);
     if (name.toLowerCase().startsWith(w) || table.startsWith(w)) {
       push(`${name} — ${table}`, table, 'table');
@@ -48,7 +48,8 @@ export function sqlSuggestions(text, word) {
   }
   // Columns from the tables the query mentions; before any table is typed,
   // fall back to the table open in the grid.
-  const ids = referencedSourceIds(text);
+  const ids = [...referencedSourceIds(text),
+               ...[...text.matchAll(/\bmerge_(\d+)\b/g)].map((m) => -Number(m[1]))];
   const colSources = ids.length
     ? S.sources.filter((s) => ids.includes(s.id))
     : S.sources.filter((s) => s.id === S.sourceId);
@@ -197,11 +198,12 @@ export function wireSqlAssist() {
   $('btnSqlTables').onclick = () => dropdownMenu($('btnSqlTables'), () => {
     const items = [{ header: 'Click to insert at the cursor' }];
     for (const s of S.sources) {
-      if (s.is_merge || s.error || s.id < 0) continue;
+      if (s.error) continue;
+      const table = s.is_merge || s.id < 0 ? `merge_${-s.id}` : `src_${s.id}`;
       items.push({
-        label: `${sourceLabel(s)} — src_${s.id} (${(s.row_count || 0).toLocaleString()} rows)`,
+        label: `${sourceLabel(s)} — ${table} (${(s.row_count || 0).toLocaleString()} rows)`,
         onclick: () => {
-          ta.setRangeText(`src_${s.id}`, ta.selectionStart, ta.selectionEnd, 'end');
+          ta.setRangeText(table, ta.selectionStart, ta.selectionEnd, 'end');
           ta.dispatchEvent(new Event('input', { bubbles: true }));
           ta.focus();
         },
@@ -214,29 +216,96 @@ export function wireSqlAssist() {
 
 /* ------------------------------------------------------------------- tags */
 
-/* A Tags column for a result, when the result can carry one: the query
-   reads exactly one src_N and the result includes a `rid` column. Fetched
-   as a second ordinary read-only query against row_tags — same trust and
-   same cap as the query it decorates. */
-export async function sqlTagsFor(r, sql) {
+/* Row resolution for a result: which real (source_id, rid) each result
+   row names, when it names one at all. Two resolvable shapes: the result
+   carries BOTH source_id and rid columns (a merge_N view, or any join
+   that kept them), or it carries rid and the query reads exactly one
+   src_N. Aggregations resolve to nothing, which is what greys the
+   interactions off. */
+export function sqlRowRef(r, sql) {
+  const lower = r.columns.map((c) => String(c).toLowerCase());
+  const ridIdx = lower.indexOf('rid');
+  if (ridIdx === -1 || !r.rows.length) return null;
+  const sidIdx = lower.indexOf('source_id');
+  if (sidIdx !== -1) return { ridIdx, sidIdx, sid: null };
   const ids = referencedSourceIds(sql);
-  const ridIdx = r.columns.findIndex((c) => String(c).toLowerCase() === 'rid');
-  if (ids.length !== 1 || ridIdx === -1 || !r.rows.length) return null;
-  const rids = [...new Set(r.rows.map((row) => Number(row[ridIdx])).filter(Number.isInteger))];
-  if (!rids.length || rids.length > 5000) return null;
+  const mids = [...sql.matchAll(/\bmerge_(\d+)\b/g)];
+  if (ids.length === 1 && !mids.length) return { ridIdx, sidIdx: -1, sid: ids[0] };
+  return null;
+}
+
+export function sqlRowKey(ref, row) {
+  const sid = ref.sidIdx === -1 ? ref.sid : Number(row[ref.sidIdx]);
+  const rid = Number(row[ref.ridIdx]);
+  return Number.isInteger(sid) && Number.isInteger(rid) ? `${sid}:${rid}` : null;
+}
+
+/* A Tags column for a resolvable result — fetched as a second ordinary
+   read-only query against row_tags, same trust and cap as the query it
+   decorates. Returns {ref, map, sel}: tag ids keyed by "sid:rid", plus
+   the (initially empty) selection the pane's click handlers maintain. */
+export async function sqlTagsFor(r, sql) {
+  const ref = sqlRowRef(r, sql);
+  if (!ref) return null;
+  const bySid = new Map();
+  for (const row of r.rows) {
+    const key = sqlRowKey(ref, row);
+    if (!key) continue;
+    const [sid, rid] = key.split(':').map(Number);
+    if (!bySid.has(sid)) bySid.set(sid, new Set());
+    bySid.get(sid).add(rid);
+  }
+  const total = [...bySid.values()].reduce((n, x) => n + x.size, 0);
+  if (!total || total > 5000) return null;
+  const clause = [...bySid.entries()]
+    .map(([sid, rids]) => `(source_id=${sid} AND rid IN (${[...rids].join(',')}))`)
+    .join(' OR ');
   try {
     const res = await post('/api/sql', {
-      sql: `SELECT rid, GROUP_CONCAT(tag_id) FROM row_tags WHERE source_id=${ids[0]} `
-        + `AND rid IN (${rids.join(',')}) GROUP BY rid`,
+      sql: `SELECT source_id, rid, GROUP_CONCAT(tag_id) FROM row_tags WHERE ${clause} GROUP BY 1, 2`,
     });
     const map = {};
-    for (const [rid, t] of res.rows) {
-      map[rid] = String(t == null ? '' : t).split(',').filter(Boolean).map(Number);
+    for (const [sid, rid, t] of res.rows) {
+      map[`${sid}:${rid}`] = String(t == null ? '' : t).split(',').filter(Boolean).map(Number);
     }
-    return { ridIdx, map };
+    return { ref, map, sel: new Set() };
   } catch {
     return null; // decoration only — the result itself already painted fine
   }
+}
+
+/* The active result the pane is showing — plugins.js keeps this current
+   from runSql/applySqlTabToEditor so the keymap's tag hotkeys and the
+   click handlers have one place to look. */
+let activeResult = null;
+
+export function setActiveSqlResult(r) { activeResult = r; }
+
+export function sqlSelectionCount() {
+  return activeResult && activeResult.tags ? activeResult.tags.sel.size : 0;
+}
+
+/* A tag hotkey pressed on the SQL tab: apply/remove `tag` on every
+   selected result row, through the same /api/row_tags pairs path the
+   grid's merged views use — undo journaling and counts included. */
+export async function sqlTagHotkey(tag, repaint) {
+  const r = activeResult;
+  if (!r || !r.tags || !r.tags.sel.size) return;
+  const keys = [...r.tags.sel];
+  const pairs = keys.map((k) => k.split(':').map(Number));
+  // Toggle by the first selected row, same rule as the grid.
+  const on = !((r.tags.map[keys[0]] || []).includes(tag.id));
+  try {
+    await post('/api/row_tags', { pairs, tag_id: tag.id, on });
+  } catch {
+    return;
+  }
+  for (const k of keys) {
+    const cur = new Set(r.tags.map[k] || []);
+    if (on) cur.add(tag.id); else cur.delete(tag.id);
+    r.tags.map[k] = [...cur];
+  }
+  if (repaint) repaint();
 }
 
 export function tagChips(tagIds) {

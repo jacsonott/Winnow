@@ -851,11 +851,19 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .sql-tab.drop-before { box-shadow: inset 2px 0 0 var(--accent); }
 .sql-tab.drop-after { box-shadow: inset -2px 0 0 var(--accent); }
 .sql-result { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 0 8px 8px; }
-.sql-result table { border-collapse: collapse; font-family: var(--mono); font-size: 12px; }
+/* border-collapse:separate, not collapse: collapsed borders belong to the
+   TABLE and stay put while a sticky th scrolls, which is exactly the
+   "rows showing through the header" artifact — and the th needs a
+   z-index so cell content can never paint over it. */
+.sql-result table { border-collapse: separate; border-spacing: 0; font-family: var(--mono); font-size: 12px; }
 .sql-result th, .sql-result td {
-  border: 1px solid var(--line); padding: 2px 8px; text-align: left; white-space: nowrap;
+  border-right: 1px solid var(--line); border-bottom: 1px solid var(--line);
+  padding: 2px 8px; text-align: left; white-space: nowrap;
 }
-.sql-result th { background: var(--panel-2); color: var(--dim); position: sticky; top: 0; }
+.sql-result th { background: var(--panel-2); color: var(--dim); position: sticky; top: 0; z-index: 2; border-top: 1px solid var(--line); }
+.sql-result th:first-child, .sql-result td:first-child { border-left: 1px solid var(--line); }
+.sql-result tr.sql-row-sel td { background: var(--row-selected); }
+.sql-result tr td { cursor: default; }
 .sql-error { color: var(--danger); font-family: var(--mono); font-size: 12px; padding: 6px 0; }
 
 /* --------------------------------------------------------- unified timeline */

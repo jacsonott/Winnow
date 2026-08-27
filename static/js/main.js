@@ -55,7 +55,7 @@ import { wireFileDrop } from './importer.js';
 import { loadKeymap, wireKeymap } from './keymap.js';
 import { wirePlugins } from './plugins.js';
 import { wireSearch } from './search.js';
-import { initAppearance, wireSettings } from './settings.js';
+import { initAppearance, maybeOfferRemoteMode, wireSettings } from './settings.js';
 import { applyPageTabsSize, initSidebar, loadPageTabPrefs, renderPageTabs, wireSources } from './sources.js';
 import { wireSql } from './sql.js';
 import { S } from './state.js';
@@ -113,3 +113,5 @@ initSidebar();
 wireFileDrop();
 
 boot().catch((e) => toast('Could not start: ' + e.message, 8000));
+
+maybeOfferRemoteMode();
