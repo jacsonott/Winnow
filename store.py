@@ -3332,7 +3332,26 @@ class Store:
         if not specs:
             raise ValueError("Nothing to add")
         if source_id < 0:
-            raise ValueError("Derived columns aren't supported on merged tables")
+            # Same fan-out contract as add_derived_column (invariant #9):
+            # validate every spec against every member first, then create
+            # the whole batch on each member — a collision anywhere fails
+            # before anything exists anywhere.
+            members = self._resolve_members(source_id)
+            for m in members:
+                msrc = self._source_lite(m["source_id"])
+                for spec in specs:
+                    nm = (spec.get("name") or "").strip()
+                    if self._find_column(msrc, nm):
+                        raise ValueError(
+                            f"Member table {msrc['name']!r} already has a column called {nm!r}")
+                    if self._find_column(msrc, spec.get("input_column")) is None:
+                        raise ValueError(
+                            f"Member table {msrc['name']!r} has no column {spec.get('input_column')!r}")
+            results = [self.add_derived_columns(m["source_id"], specs) for m in members]
+            first = results[0]
+            return {**first,
+                    "member_results": results,
+                    "job_ids": [j for r in results for j in (r.get("job_ids") or [r.get("job_id")]) if j]}
         src = self._source_lite(source_id)
         drv = self._derived_table(source_id)
 
@@ -3741,10 +3760,6 @@ class Store:
         )
 
         if src.get("is_merge"):
-            if self._tree_has_raw(spec.get("filter_tree")):
-                raise ValueError(
-                    "Raw SQL filters aren't supported on merged sources yet — use the guided filter builder"
-                )
             collist = ", ".join(q(c) for c in colnames)
             branches = []
             params: list[Any] = []
@@ -4711,11 +4726,19 @@ class Store:
                 continue
             raise ValueError(f"Unknown identifier: {ident}")
 
+        # A merge has no table of its own: the fragment is later spliced
+        # into each member's branch, so the dry-run below must pass against
+        # every member (invariant #9 — its identifier check above already
+        # ran against the merge's exposed column set).
+        froms = ([self._from_clause(self._source_lite(m["source_id"]))
+                  for m in self._resolve_members(source_id)]
+                 if source_id < 0 else [self._from_clause(src)])
         ro = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, check_same_thread=False)
         ro.row_factory = sqlite3.Row
         ro.create_function("REGEXP", 2, _regexp, deterministic=True)
         try:
-            ro.execute(f"EXPLAIN QUERY PLAN SELECT 1 FROM {self._from_clause(src)} WHERE ({frag}) LIMIT 0")
+            for f_clause in froms:
+                ro.execute(f"EXPLAIN QUERY PLAN SELECT 1 FROM {f_clause} WHERE ({frag}) LIMIT 0")
         except sqlite3.Error as e:
             raise ValueError(f"Not a valid filter expression: {e}")
         finally:
@@ -4910,10 +4933,6 @@ class Store:
         colnames = {c["name"]: c["type"] for c in src["columns"]}
         order = self._compile_order(spec, colnames)
         if src.get("is_merge"):
-            if self._tree_has_raw(spec.get("filter_tree")):
-                raise ValueError(
-                    "Raw SQL filters aren't supported on merged sources yet — use the guided filter builder"
-                )
             collist = ", ".join(q(c) for c in colnames)
             branches = []
             params: list[Any] = []

@@ -1657,3 +1657,68 @@ def test_first_last_row_json_lands_in_the_created_table(fl_client, store):
               name="bookends-json")
     src = store.get_source(out["source"]["id"])
     assert "Row (JSON)" in [c["name"] for c in src["columns"]]
+
+
+def test_first_last_works_on_a_merge(fl_client, store, write_csv):
+    """Invariant #9: bookends over a merged table — one windowed pass over
+    a UNION ALL of the members, ties broken by (source_id, rid)."""
+    client, sid = fl_client
+    rows2 = [["When", "Host", "User", "EventId"],
+             ["2026-03-15 08:00:00", "SRV9", "erin", "4624"],
+             ["2026-03-15 17:00:00", "SRV9", "erin", "4634"]]
+    sid2 = store.ingest_csv(write_csv(rows2, "fl2.csv"), name="fl2", build_fts=False)["id"]
+    mid = store.create_merge("flm", [sid, sid2])["id"]
+
+    out = _fl(client, "preview", source_id=mid, group_by=["Host", "User"],
+              sort_column="When", columns=["User"], template="{which} of {count}")
+    assert out["total_groups"] == 4  # alice, bob, carol (+SRV1 variants) from fl, erin from fl2
+    erin = [r for r in out["rows"] if r[1] == "erin"]
+    assert {r[-1] for r in erin} == {"First of 2", "Last of 2"}
+
+    # filters and the tag filter run against the union
+    tag = store.list_tags()[0]
+    rids = [r[0] for r in store.run_sql(
+        f'SELECT rid FROM "src_{sid2}"')["rows"]]
+    store.set_tags(sid2, rids, tag["id"], True)
+    out = _fl(client, "preview", source_id=mid, group_by=["User"], sort_column="When",
+              columns=[], template="{which} of {count}",
+              tags={"mode": "ids", "ids": [tag["id"]]})
+    assert out["total_groups"] == 1  # only erin's rows carry the tag
+
+    # ...and create lands a real table from the merge
+    made = _fl(client, "create", source_id=mid, group_by=["User"], sort_column="When",
+               columns=["Host"], template="{which}", name="merge-bookends")
+    assert store.get_source(made["source"]["id"])["row_count"] > 0
+
+
+def test_first_last_merge_tie_break_is_deterministic(fl_client, store, write_csv):
+    """Identical timestamps across members: (source_id, rid) decides, so
+    reruns never swap first and last."""
+    client, sid = fl_client
+    rows2 = [["When", "Host", "User", "EventId"],
+             ["2026-03-14 11:00:00", "SRV1", "carol", "9999"]]  # ties carol's pair in member 1
+    sid2 = store.ingest_csv(write_csv(rows2, "tie2.csv"), name="tie2", build_fts=False)["id"]
+    mid = store.create_merge("tiem", [sid, sid2])["id"]
+    out = _fl(client, "preview", source_id=mid, group_by=["User"],
+              sort_column="When", columns=["User", "EventId"], template="{which}")
+    carol = [r for r in out["rows"] if r[1] == "carol"]
+    first = next(r for r in carol if r[-1] == "First")
+    last = next(r for r in carol if r[-1] == "Last")
+    # all three carol rows tie at 11:00 — member 1 (lower source_id) wins
+    # the front (its first tied row is 4625), member 2 takes the back.
+    assert first[2] == "4625"
+    assert last[2] == "9999"
+
+
+def test_first_last_merge_row_json_carries_the_exposed_columns(fl_client, store, write_csv):
+    import json as _json
+
+    client, sid = fl_client
+    sid2 = store.ingest_csv(write_csv(
+        [["When", "Host", "User", "EventId"], ["2026-03-16 08:00:00", "X", "zed", "1"]],
+        "fl3.csv"), name="fl3", build_fts=False)["id"]
+    mid = store.create_merge("flj", [sid, sid2])["id"]
+    out = _fl(client, "preview", source_id=mid, group_by=["User"], sort_column="When",
+              columns=[], template="{which}", row_json=True)
+    zed = next(r for r in out["rows"] if '"zed"' in r[1])
+    assert set(_json.loads(zed[1]).keys()) == {"When", "Host", "User", "EventId"}
