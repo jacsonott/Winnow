@@ -55,7 +55,9 @@ export function sqlSuggestions(text, word) {
     : S.sources.filter((s) => s.id === S.sourceId);
   for (const s of colSources) {
     for (const c of s.columns || []) {
-      if (c.name.toLowerCase().startsWith(w)) push(c.name, quoteIdent(c.name), 'column');
+      // 'derived' rather than 'column': your own added columns, marked —
+      // and genuinely queryable, since src_N/merge_N carry them.
+      if (c.name.toLowerCase().startsWith(w)) push(c.name, quoteIdent(c.name), c.derived ? 'derived' : 'column');
     }
   }
   for (const k of SQL_KEYWORDS) {

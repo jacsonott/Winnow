@@ -95,14 +95,21 @@ see [docs/notes/README.md](README.md) for the whole set.
     placeholders and shifts every bound value one slot along — silently
     wrong rather than loudly broken. Winnow's own `_inline_sql_params`
     walks literals for exactly this reason.
-  - **A derived column is not in `src_<id>`.** It's merged into
-    `src["columns"]` at read time but materialised in the `drv_<id>`
-    sidecar, so plugin SQL that names one has to `LEFT JOIN` it and qualify
-    the reference. The failure mode is silent rather than loud: SQLite's
-    double-quoted-string fallback turns an unknown `"Day"` into the literal
-    `'Day'`, so a `GROUP BY` on it returns one group named after the column
-    instead of an error. Same trap for `run_sql` generally — `_base_cols`
-    exists in store.py for the paths that must *not* see derived columns.
+  - **A derived column is not in the physical `src_<id>` table.** It's
+    merged into `src["columns"]` at read time but materialised in the
+    `drv_<id>` sidecar. Plugin SQL that names one must `LEFT JOIN` the
+    sidecar **and qualify every reference through the aliases**
+    (`s."col"` / `d."col"` — the `_from_clause`/`_col` pair the bundled
+    examples copy). Qualifying is now load-bearing twice over: `run_sql`
+    shadows `src_<id>` with a derived-including TEMP view when the source
+    has derived columns, so a *bare* reference next to a manual sidecar
+    join is `ambiguous column name` (loud), while a bare reference with
+    *no* join on a source without derived columns falls into SQLite's
+    double-quoted-string fallback and returns the literal column name
+    (silent). Hand-written pane queries need none of this — bare
+    `src_<id>` includes derived columns since the shadow views; `main.
+    src_<id>` is the raw table. `_base_cols` exists in store.py for the
+    paths that must *not* see derived columns.
   - **Anything a plugin inlines into SQL has to skip quoted spans — both
     kinds.** Single quotes because the numeric guard embeds a regex
     containing `?`; double quotes because a CSV header can be `Elevated?`
