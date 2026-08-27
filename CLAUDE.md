@@ -231,14 +231,15 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
    merge path is part of the feature, not a follow-up: resolve per member
    through `_member_from`/`_member_derived_join` (bare column and `rid`
    references stay legal under the `USING(rid)` join shape) and add a merge
-   case to the operation's tests. Known gaps to burn down, not add to:
-   raw-SQL filter fragments (`build_view`/`spec_sql` raise), batch derived
-   add (`add_derived_columns` — the JSON/XML flatten-all path), and the
-   bundled first_last/pivot plugins (backends raise on negative ids, UIs
-   filter merges out of the table picker). Structural exceptions worth
-   knowing: a merge has no `src_N` of its own for the SQL pane, and the
-   Timeline configures real sources (a merge's tags live on its members,
-   so they appear regardless).
+   case to the operation's tests. The original gap list (raw-SQL filter
+   fragments, batch derived add, the first_last/pivot/lateral_movement
+   plugins) was closed in #53–#55 — the plugins' `_scope()` union shape
+   is the pattern to copy for any new per-member read. Structural
+   exceptions worth knowing: a merge has no `src_N` of its own, so the
+   SQL pane and the claude_assistant plugin (which writes SQL against
+   `src_N` by name) can't address one; and the Timeline configures real
+   sources (a merge's tags live on its members, so they appear
+   regardless).
 
 ## Things that bite
 
