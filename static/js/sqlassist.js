@@ -59,6 +59,10 @@ export function sqlSuggestions(text, word) {
       // and genuinely queryable, since src_N/merge_N carry them.
       if (c.name.toLowerCase().startsWith(w)) push(c.name, quoteIdent(c.name), c.derived ? 'derived' : 'column');
     }
+    // Every pane view carries the row's tags and note as columns.
+    for (const extra of ['Tags', 'Note']) {
+      if (extra.toLowerCase().startsWith(w)) push(extra, quoteIdent(extra), 'winnow');
+    }
   }
   for (const k of SQL_KEYWORDS) {
     if (k.toLowerCase().startsWith(w)) push(k, k, 'keyword');

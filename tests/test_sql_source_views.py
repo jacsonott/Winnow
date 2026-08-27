@@ -19,9 +19,10 @@ def test_derived_columns_query_bare(store, write_csv):
     assert out["rows"] == [["evil.example"]]
 
 
-def test_select_star_is_grid_shape_plus_trailing_rowid(store, write_csv):
+def test_select_star_is_grid_shape_plus_annotations_and_rowid(store, write_csv):
     a = _mk(store, write_csv)
-    assert store.run_sql(f"SELECT * FROM src_{a} LIMIT 1")["columns"] == ["rid", "Uri", "Host", "rowid"]
+    assert store.run_sql(f"SELECT * FROM src_{a} LIMIT 1")["columns"] == [
+        "rid", "Uri", "Host", "Tags", "Note", "rowid"]
 
 
 def test_rowid_still_reads_and_joins(store, write_csv):
@@ -65,9 +66,12 @@ def test_main_prefix_is_the_raw_import(store, write_csv):
     assert store.run_sql(f"SELECT * FROM main.src_{a} LIMIT 1")["columns"] == ["rid", "Uri"]
 
 
-def test_sources_without_derived_are_untouched(store, write_csv):
+def test_sources_without_derived_still_get_annotations(store, write_csv):
+    """Every source has a pane view now — Tags/Note are universal, and the
+    raw import stays one main. prefix away."""
     b = store.ingest_csv(write_csv([["X"], ["1"]], "b.csv"), name="b", build_fts=False)["id"]
-    assert store.run_sql(f"SELECT * FROM src_{b}")["columns"] == ["rid", "X"]
+    assert store.run_sql(f"SELECT * FROM src_{b}")["columns"] == ["rid", "X", "Tags", "Note", "rowid"]
+    assert store.run_sql(f"SELECT * FROM main.src_{b}")["columns"] == ["rid", "X"]
 
 
 def test_unused_sidecar_join_is_eliminated(store, write_csv):
