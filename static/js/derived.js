@@ -129,9 +129,11 @@ export async function editExtractedPath(c) {
     `Field path for "${c.name}" (read from "${c.derived_from}"):`, current, { okLabel: 'Recompute' });
   if (next === null || next.trim() === current) return;
   try {
-    await post(`/api/derived/${c.derived_id}/rederive`, { params: { path: next.trim() } });
+    const res = await post(`/api/derived/${c.derived_id}/rederive`, { params: { path: next.trim() } });
     await showDerivedColumnsSoon();
-    toast(`Recomputing "${c.name}"…`);
+    const chain = res.cascades_to || [];
+    toast(`Recomputing "${c.name}"…`
+      + (chain.length ? ` — ${chain.join(', ')} ${chain.length === 1 ? 'is' : 'are'} derived from it and will recompute too` : ''), chain.length ? 7000 : 4000);
   } catch (e) {
     toast('Could not change the path: ' + e.message, 6000);
   }
@@ -381,7 +383,10 @@ export async function openDerivedColumnModal(prefill, editing) {
     toast('Could not load derived-column formats: ' + e.message, 6000);
     return;
   }
-  const textCols = baseColumns();
+  // Ready derived columns are inputs too — chains ("the JSON field holds
+  // XML; now take the XML apart") are a first-class shape.
+  const textCols = [...baseColumns(),
+    ...S.columns.filter((c) => c.derived && c.derived_status === 'ready')];
   if (!textCols.length) return;
   const state = {
     column: editing ? editing.derived_from : (prefill || textCols[0].name),
@@ -400,7 +405,7 @@ export async function openDerivedColumnModal(prefill, editing) {
     const suggestNote = el('div', 'fb-help');
 
     for (const c of textCols) {
-      const o = el('option', null, c.name);
+      const o = el('option', null, c.derived ? `${c.name} · derived` : c.name);
       o.value = c.name;
       colSelect.append(o);
     }
@@ -604,7 +609,9 @@ export async function openDerivedColumnModal(prefill, editing) {
         await loadSources();
         await openSource(S.sourceId);
         startJobsPoll();
-        toast(editing ? `Re-deriving "${editing.name}"…` : `Adding "${state.name}"…`);
+        const chain = (editing && res.cascades_to) || [];
+        toast((editing ? `Re-deriving "${editing.name}"…` : `Adding "${state.name}"…`)
+          + (chain.length ? ` — ${chain.join(', ')} ${chain.length === 1 ? 'is' : 'are'} derived from it and will recompute too` : ''), chain.length ? 7000 : 4000);
       } catch (e) {
         go.disabled = false;
         toast('Could not add column: ' + e.message, 8000);
