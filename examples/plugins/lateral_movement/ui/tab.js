@@ -54,7 +54,7 @@ export default function mount(container, winnow) {
   function fillSources() {
     const keep = srcSel.value;
     srcSel.replaceChildren();
-    for (const s of winnow.state.sources.filter((x) => !x.is_merge && !x.error)) {
+    for (const s of winnow.state.sources.filter((x) => !x.error)) { // merges included — invariant #9
       srcSel.append(new Option(`${s.name} (${s.row_count.toLocaleString()})`, String(s.id)));
     }
     if (keep && [...srcSel.options].some((o) => o.value === keep)) {

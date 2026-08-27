@@ -40,6 +40,43 @@ def register(api):
     api.register_api("edges", edges, methods=["POST"])
 
 
+def _derived_names(src):
+    return {c["name"] for c in src["columns"] if c.get("derived")}
+
+
+def _from_clause(src):
+    """The table plus its derived sidecar — bare q(col) references used to
+    miss the sidecar entirely, and SQLite's double-quoted-string fallback
+    made a derived src/dst column fail *silently* (one edge named after
+    the column) rather than loudly."""
+    base = f"{q(src['table_name'])} s"
+    if not _derived_names(src):
+        return base
+    return f"{base} LEFT JOIN {q('drv_' + str(src['id']))} d ON d.rid = s.rid"
+
+
+def _col(src, name):
+    if src.get("is_merge"):
+        return f"s.{q(name)}"
+    return f"{'d' if name in _derived_names(src) else 's'}.{q(name)}"
+
+
+def _scope(req, src):
+    """A plain source is its table (plus sidecar); a merge is a UNION ALL
+    of its members aliased `s` (invariant #9). Same shape as the
+    first_last/pivot examples — copied, not imported: plugins are
+    deliberately standalone."""
+    if not src.get("is_merge"):
+        return _from_clause(src)
+    cols = [c["name"] for c in src["columns"]]
+    branches = []
+    for mid in src["member_source_ids"]:
+        m = req.store.get_source(mid)
+        sel = ", ".join(f"{_col(m, c)} AS {q(c)}" for c in cols)
+        branches.append(f"SELECT s.rid AS rid, {sel} FROM {_from_clause(m)}")
+    return "(" + " UNION ALL ".join(branches) + ") s"
+
+
 def edges(req):
     """POST /api/plugin/lateral_movement/edges
     body: {source_id, src_col, dst_col, label_col?, limit?}
@@ -52,11 +89,6 @@ def edges(req):
         source_id = int(b.get("source_id"))
     except (TypeError, ValueError):
         raise ValueError("source_id is required")
-    if source_id < 0:
-        # A merge has no single backing table to aggregate — and a movement
-        # graph across differently-shaped sources needs per-source column
-        # picks anyway. Build it per source.
-        raise ValueError("Pick a real table — merges aren't supported here")
     try:
         src = req.store.get_source(source_id)
     except KeyError:
@@ -74,12 +106,13 @@ def edges(req):
     limit = min(int(b.get("limit") or 500), MAX_EDGES)
     # '' and '-' are how EVTX exports spell "not present" (e.g. 4624s with
     # no workstation name); self-loops say nothing about movement.
-    label_sel = f", COUNT(DISTINCT {q(label_col)}) AS labels" if label_col else ""
+    label_sel = f", COUNT(DISTINCT {_col(src, label_col)}) AS labels" if label_col else ""
+    sc, dc = _col(src, src_col), _col(src, dst_col)
     sql = (
-        f"SELECT {q(src_col)} AS src, {q(dst_col)} AS dst, COUNT(*) AS n{label_sel}"
-        f" FROM {q(src['table_name'])}"
-        f" WHERE {q(src_col)} NOT IN ('', '-') AND {q(dst_col)} NOT IN ('', '-')"
-        f" AND {q(src_col)} != {q(dst_col)}"
+        f"SELECT {sc} AS src, {dc} AS dst, COUNT(*) AS n{label_sel}"
+        f" FROM {_scope(req, src)}"
+        f" WHERE {sc} NOT IN ('', '-') AND {dc} NOT IN ('', '-')"
+        f" AND {sc} != {dc}"
         f" GROUP BY 1, 2 ORDER BY n DESC"
     )
     res = req.store.run_sql(sql, limit=limit)

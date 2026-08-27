@@ -903,11 +903,34 @@ def test_lateral_movement_validation(lateral_client):
     r = client.post("/api/plugin/lateral_movement/edges", json={
         "source_id": -1, "src_col": "a", "dst_col": "b",
     })
-    assert r.status_code == 400 and "merge" in r.json()["detail"].lower()
+    # merges work now (invariant #9) — -1 just doesn't exist in this case
+    assert r.status_code == 400 and "no source" in r.json()["detail"].lower()
     r = client.post("/api/plugin/lateral_movement/edges", json={
         "source_id": source_id, "src_col": "SourceHost", "dst_col": "SourceHost",
     })
     assert r.status_code == 400
+
+
+def test_lateral_movement_edges_over_a_merge(lateral_client, store, write_csv):
+    """Invariant #9: edge counts aggregate across every member of a merge."""
+    client, source_id = lateral_client
+    src = store.get_source(source_id)
+    header = [c["name"] for c in src["columns"] if not c.get("derived")]
+    row = {c: "" for c in header}
+    row.update({"SourceHost": "WKS1", "DestHost": "SRV1"})
+    other = store.ingest_csv(write_csv([header, [row[c] for c in header]], "lm2.csv"),
+                             name="lm2", build_fts=False)["id"]
+    mid = store.create_merge("lmmerge", [source_id, other])["id"]
+
+    def n_for(sid):
+        r = client.post("/api/plugin/lateral_movement/edges", json={
+            "source_id": sid, "src_col": "SourceHost", "dst_col": "DestHost"})
+        assert r.status_code == 200, r.text
+        return {(e["src"], e["dst"]): e["n"] for e in r.json()["edges"]}
+
+    single = n_for(source_id)
+    merged = n_for(mid)
+    assert merged[("WKS1", "SRV1")] == single.get(("WKS1", "SRV1"), 0) + 1
 
 
 def test_lateral_movement_tab_asset(lateral_client):
@@ -1147,7 +1170,7 @@ def test_pivot_detail_on_a_blank_cell_means_blank_not_empty_string(pivot_client)
 # `source_id` is filled in from the fixture unless the case is about it
 # being wrong, which is what the third element says.
 @pytest.mark.parametrize("body, fragment, own_source_id", [
-    ({"values": [{"agg": "count"}], "group_sets": [[]], "source_id": -1}, "merge", True),
+    ({"values": [{"agg": "count"}], "group_sets": [[]], "source_id": -1}, "no source", True),  # merges work now (invariant #9); -1 simply doesn't exist here
     ({"values": [{"agg": "count"}], "group_sets": [[]]}, "source_id", True),
     ({"values": [{"agg": "count"}], "group_sets": [[]], "source_id": 999}, "No source", True),
     ({"values": [{"agg": "count"}], "group_sets": [["Nope"]]}, "No column", False),
@@ -1389,6 +1412,37 @@ def test_legacy_toggle_body_still_means_everywhere(scoped_client):
     states, _ = _states(scoped_client)
     assert states["demo"]["enabled"] is False and states["demo"]["machine_enabled"] is False
     assert scoped_client.post("/api/plugins/toggle", json={"fs_name": "demo"}).status_code == 400
+
+
+def test_pivot_aggregates_over_a_merge(pivot_client, store, write_csv):
+    """Invariant #9: the pivot reads a merge through a UNION ALL of its
+    members — counts must cover every member."""
+    client, source_id = pivot_client
+    src = store.get_source(source_id)
+    header = [c["name"] for c in src["columns"] if not c.get("derived")]
+    other = store.ingest_csv(write_csv(
+        [header, ["mh", "mu", "7", "2024-02-01 10:00:00"][:len(header)]],
+        "pm2.csv"), name="pm2", build_fts=False)["id"]
+    mid = store.create_merge("pivmerge", [source_id, other])["id"]
+    single = _agg(client, source_id, group_sets=[[]], aggs=[{"fn": "count"}])
+    merged = _agg(client, mid, group_sets=[[]], aggs=[{"fn": "count"}])
+    total_single = single["sets"][0]["rows"][0][-1]
+    total_merged = merged["sets"][0]["rows"][0][-1]
+    assert total_merged == total_single + 1  # every member counted
+
+
+def test_pivot_detail_on_a_merge_is_deterministic(pivot_client, store, write_csv):
+    client, source_id = pivot_client
+    src = store.get_source(source_id)
+    header = [c["name"] for c in src["columns"] if not c.get("derived")]
+    other = store.ingest_csv(write_csv([header] + [["dh", "du", "3", "2024-03-01 09:00:00"][:len(header)]],
+                                       "pm3.csv"), name="pm3", build_fts=False)["id"]
+    mid = store.create_merge("pivdetail", [source_id, other])["id"]
+    r = client.post("/api/plugin/pivot/detail", json={"source_id": mid, "cell": [], "filters": []})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["columns"][0] == "Line"
+    assert len(out["rows"]) == store.get_source(mid)["row_count"]
 
 
 # ============================================================ first_last plugin
