@@ -706,6 +706,55 @@ class AppSettings:
 
 
 cases = CaseRegistry()
+class PluginBundles:
+    """Named per-machine sets of plugins — "case types". A triage bundle
+    enables lateral movement + system-info plugins, a BEC bundle the
+    user-activity ones; applying a bundle sets the OPEN CASE's per-plugin
+    overrides to exactly the bundle (server-side, one registry reload).
+    Machine-level like the rest of workspace/: which plugins exist and
+    which workflows an analyst runs are properties of the machine, not
+    evidence."""
+
+    FILE = "plugin_bundles.json"
+
+    def list(self) -> list[dict]:
+        with _LOCK:
+            return _read(self.FILE, {"bundles": []})["bundles"]
+
+    def get(self, bundle_id: int) -> dict:
+        for b in self.list():
+            if b["id"] == bundle_id:
+                return b
+        raise KeyError(f"No bundle {bundle_id}")
+
+    def save(self, name: str, plugins: list[str]) -> dict:
+        """Upsert by name — 'Triage' means one thing per machine."""
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("Name the bundle")
+        if len(name) > 100:
+            raise ValueError("Bundle name is too long")
+        plugins = sorted({str(p) for p in (plugins or [])})
+        with _LOCK:
+            data = _read(self.FILE, {"bundles": []})
+            items = data["bundles"]
+            existing = next((b for b in items if b["name"].lower() == name.lower()), None)
+            if existing:
+                existing["plugins"] = plugins
+                rec = existing
+            else:
+                rec = {"id": _next_id(items), "name": name, "plugins": plugins, "created_at": _now()}
+                items.append(rec)
+            _write(self.FILE, data)
+            return rec
+
+    def delete(self, bundle_id: int) -> None:
+        with _LOCK:
+            data = _read(self.FILE, {"bundles": []})
+            data["bundles"] = [b for b in data["bundles"] if b["id"] != bundle_id]
+            _write(self.FILE, data)
+
+
 filters = SavedFilters()
 header_nicknames = HeaderNicknames()
 timeline_templates = TimelineTemplates()
@@ -713,4 +762,5 @@ tags = TagTemplate()
 column_layouts = ColumnLayouts()
 import_profiles = ImportProfiles()
 plugin_prefs = PluginPrefs()
+plugin_bundles = PluginBundles()
 app_settings = AppSettings()

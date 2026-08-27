@@ -9,6 +9,7 @@ import { toggleDetailPane } from './detail.js';
 import { filterBySelectedCell, openValuePickerForColumn, selectedCellTarget } from './filters.js';
 import { headH, moveCursor, render } from './grid.js';
 import { dropGrouping, handleCopyShortcut, toggleGrouping } from './grouping.js';
+import { openPluginBundlesModal } from './bundles.js';
 import { cycleSavedFilter, openFilterSqlTab } from './savedfilters.js';
 import { expandSearch, openSearchAllModal } from './search.js';
 import { applySqlTabToEditor } from './sql.js';
@@ -69,6 +70,7 @@ export const DEFAULT_KEYMAP = {
   openFilterSql: ['Q'],
   openJumpTs: ['J'],
   repeatJumpTs: ['.'],
+  openPluginBundles: ['M'],
 };
 
 export const ACTION_LABELS = {
@@ -98,6 +100,7 @@ export const ACTION_LABELS = {
   openFilterSql: 'Open the current filter as a query in the SQL pane',
   openJumpTs: 'Jump to timestamp… (set the moment and column)',
   repeatJumpTs: 'Jump again to the saved timestamp (works across tables)',
+  openPluginBundles: 'Plugin bundles — named plugin sets ("case types") to apply per case',
 };
 
 /* Stored keymaps are a merge over the defaults, which means a returning
@@ -252,7 +255,7 @@ export function findKeyConflict(key, currentAction) {
    SQL pane silently tagged whatever was selected in the grid behind it,
    which the tag ribbon at least hinted at before the toolbar started
    hiding itself there (see syncTabChrome). */
-export const TAB_AGNOSTIC_ACTIONS = new Set(['openSettings', 'openTables', 'openSearchAll']);
+export const TAB_AGNOSTIC_ACTIONS = new Set(['openSettings', 'openTables', 'openSearchAll', 'openPluginBundles']);
 
 export const ACTION_HANDLERS = {
   moveDown: (e, pageRows) => moveCursor(S.cursor + 1, e.shiftKey),
@@ -298,6 +301,7 @@ export const ACTION_HANDLERS = {
   toggleGrouping: () => toggleGrouping(),
   openFilterSql: () => openFilterSqlTab(),
   openJumpTs: () => openJumpTsModal(),
+  openPluginBundles: () => openPluginBundlesModal(),
   repeatJumpTs: () => doJumpTs(),
 };
 

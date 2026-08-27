@@ -1,6 +1,7 @@
 /* The home screen: the case registry, opening/creating cases, and boot().
 
    Split out of the former single static/app.js — see CLAUDE.md. */
+import { applyBundle } from './bundles.js';
 import { $, api, el, post, toast } from './core.js';
 import { loadPlugins } from './importer.js';
 import { startJobsPoll } from './jobs.js';
@@ -327,6 +328,7 @@ export function openNewCaseModal(state = {}) {
       const snapshot = {
         name: nameInput.value, group: groupInput.value, path: pathInput.value,
         chosenDir, pathTouched, csvFile, csvFileName: csvFile ? csvFile.name : '',
+        caseType: typeSel.value,
       };
       openFolderBrowser(
         chosenDir,
@@ -339,6 +341,25 @@ export function openNewCaseModal(state = {}) {
     const pathRow = el('div', 'row-actions');
     pathRow.append(pathInput, browseBtn);
     b.append(el('label', null, 'Case file path'), pathRow);
+
+    // Case type: a plugin bundle applied right after the case opens, so
+    // a Triage case starts with the triage plugins on — no settings trip.
+    const typeSel = el('select');
+    typeSel.style.cssText = 'flex:1;background:var(--ink);color:var(--text);border:1px solid var(--line-2);padding:6px 8px;font:inherit';
+    const noneOpt = el('option', null, 'None — machine defaults');
+    noneOpt.value = '';
+    typeSel.append(noneOpt);
+    api('/api/plugin_bundles').then((bundles) => {
+      for (const bd of bundles) {
+        const o = el('option', null, `${bd.name} (${bd.plugins.length} plugin${bd.plugins.length === 1 ? '' : 's'})`);
+        o.value = String(bd.id);
+        typeSel.append(o);
+      }
+      if (state.caseType) typeSel.value = state.caseType;
+    }).catch(() => {});
+    const typeRow = el('div', 'row-actions');
+    typeRow.append(typeSel);
+    b.append(el('label', null, 'Case type'), typeRow);
 
     let csvFile = state.csvFile || null;
     const csvRow = el('div', 'row-actions');
@@ -368,6 +389,13 @@ export function openNewCaseModal(state = {}) {
       }
       $('modal').hidden = true;
       await openCase(path); // shared with the home screen's "open" flow — same brand-label/view-cache handling
+      if (typeSel.value) {
+        try {
+          await applyBundle({ id: Number(typeSel.value) });
+        } catch (e) {
+          toast('Case created, but the case-type bundle failed to apply: ' + e.message, 6000);
+        }
+      }
       if (csvFile) openImportPreview({ file: csvFile, name: csvFile.name });
     };
     const cancel = el('button', 'btn ghost', 'Cancel');
