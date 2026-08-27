@@ -11,6 +11,8 @@ import { headH, moveCursor, render } from './grid.js';
 import { dropGrouping, handleCopyShortcut, toggleGrouping } from './grouping.js';
 import { cycleSavedFilter, openFilterSqlTab } from './savedfilters.js';
 import { expandSearch, openSearchAllModal } from './search.js';
+import { applySqlTabToEditor } from './sql.js';
+import { sqlSelectionCount, sqlTagHotkey } from './sqlassist.js';
 import { openSettings } from './settings.js';
 import { activateTabSlot, clearAllFilters } from './sources.js';
 import { S, gridRowCount, selClear, selCount, selSetAll } from './state.js';
@@ -385,6 +387,13 @@ document.addEventListener('keydown', (e) => {
   if (/^[1-9]$/.test(digit) && S.activeTab === 'grid') {
     const t = S.tags.find((x) => x.hotkey === digit);
     if (t) { e.preventDefault(); e.shiftKey ? applyTagToView(t) : applyTag(t); }
+  }
+  // The SQL pane's result rows are taggable too, when the query resolves
+  // real rows and some are selected (invariant #9's spirit: same
+  // operation, same keys).
+  if (/^[1-9]$/.test(digit) && S.activeTab === 'sql' && sqlSelectionCount()) {
+    const t = S.tags.find((x) => x.hotkey === digit);
+    if (t) { e.preventDefault(); sqlTagHotkey(t, () => applySqlTabToEditor()); }
   }
 });
 }

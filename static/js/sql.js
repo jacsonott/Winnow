@@ -3,6 +3,7 @@
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { $, api, debounce, el, post, toast } from './core.js';
 import { hidePluginViews, sqlResultNodes } from './plugins.js';
+import { setActiveSqlResult } from './sqlassist.js';
 import { checkPresets } from './savedfilters.js';
 import { syncTabSelection, wireDragReorder } from './sources.js';
 import { S } from './state.js';
@@ -49,9 +50,8 @@ export function starterSql() {
   // to `SELECT * FROM src_${S.sourceId}` for one. Prefill against its first
   // member instead of emitting invalid SQL like `src_-3`.
   if (!S.sourceId) return '';
-  const src = S.sources.find((s) => s.id === S.sourceId);
-  const realId = S.sourceId > 0 ? S.sourceId : (src && src.member_source_ids && src.member_source_ids[0]);
-  return realId ? `SELECT * FROM src_${realId} LIMIT 50;` : '';
+  if (S.sourceId < 0) return `SELECT * FROM merge_${-S.sourceId} LIMIT 50;`;
+  return `SELECT * FROM src_${S.sourceId} LIMIT 50;`;
 }
 
 export async function loadSqlTabs() {
@@ -88,6 +88,7 @@ export function applySqlTabToEditor() {
   $('sqlText').disabled = !tab;
   const out = $('sqlResult');
   const cached = tab ? S.sqlResults.get(tab.id) : null;
+  setActiveSqlResult(cached && !cached.error ? cached : null);
   if (!cached) out.replaceChildren();
   else if (cached.error) out.replaceChildren(el('div', 'sql-error', cached.error));
   else out.replaceChildren(...sqlResultNodes(cached));
