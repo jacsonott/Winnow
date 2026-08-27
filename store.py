@@ -4928,7 +4928,15 @@ class Store:
         showing, not a hand-maintained approximation; the only difference
         is that bound parameters are inlined as literals so the text stands
         alone. run_sql's own connection registers REGEXP/TS_NORMALIZE/
-        DAY_BUCKET, so every compiled shape runs there unchanged."""
+        DAY_BUCKET, so every compiled shape runs there unchanged.
+
+        Table references are the PANE's names, deliberately bare: run_sql
+        shadows src_<id> with a derived-including TEMP view when the
+        source has derived columns, so `FROM "src_1"` with bare column
+        references is both correct and exactly what an analyst would
+        write. Spelling the sidecar join here instead would collide with
+        that shadow ("ambiguous column name") — the pane's names do the
+        joining now."""
         src = self._source_lite(source_id)
         colnames = {c["name"]: c["type"] for c in src["columns"]}
         order = self._compile_order(spec, colnames)
@@ -4941,7 +4949,7 @@ class Store:
                 where, p = self._compile_where(m["source_id"], msrc, spec, colnames)
                 branches.append(
                     f"SELECT {int(m['source_id'])} AS source_id, rid, {collist}\n"
-                    f"FROM {self._member_from(src, m)}"
+                    f"FROM {q(m['table_name'])}"
                     + (f"\nWHERE {where}" if where else "")
                 )
                 params.extend(p)
@@ -4949,7 +4957,7 @@ class Store:
         else:
             where, params = self._compile_where(source_id, src, spec, colnames)
             collist = ", ".join(q(c) for c in colnames)
-            sql = f"SELECT rid, {collist}\nFROM {self._from_clause(src)}"
+            sql = f"SELECT rid, {collist}\nFROM {q(src['table_name'])}"
             if where:
                 sql += f"\nWHERE {where}"
             sql += f"\n{order}"
@@ -6724,11 +6732,18 @@ class Store:
         the grid — rid, base columns, then derived, the sidecar joined on
         its PRIMARY KEY so SQLite drops the join entirely for queries that
         never touch a derived column. main.src_<id> stays reachable as the
-        byte-faithful raw import."""
+        byte-faithful raw import.
+
+        The trailing `rowid` alias is deliberate: a view has no real rowid
+        (SQLite 3.45 returns NULL for it — a join on it silently matches
+        nothing; 3.46+ errors), and pre-existing pane queries written
+        against the raw table legitimately used rowid, where it equals
+        rid. Last, so the grid-shaped columns come first."""
         src = self._source_lite_on(conn, source_id)
         sel = ", ".join(f"{self._col_ref(src, c['name'], 's', 'd')} AS {q(c['name'])}"
                         for c in src["columns"])
-        return (f"SELECT s.rid AS rid, {sel} FROM main.{q(src['table_name'])} s "
+        return (f"SELECT s.rid AS rid, {sel}, s.rid AS rowid "
+                f"FROM main.{q(src['table_name'])} s "
                 f"LEFT JOIN main.{q(self._derived_table(source_id))} d ON d.rid = s.rid")
 
     def run_sql(self, sql: str, limit: int = 5000) -> dict:

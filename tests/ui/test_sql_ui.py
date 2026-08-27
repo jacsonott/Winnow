@@ -110,25 +110,34 @@ def test_autocomplete_marks_and_completes_derived_columns(page):
       body: JSON.stringify({ source_id: 1, name: 'AcBinary', input_column: 'CommandLine',
                              op_id: 'regex_extract', params: { pattern: '\\\\\\\\([\\\\w.]+\\\\.exe)' } }) })
       .then((r) => r.json())""")
-    page.evaluate("() => __winnow.loadSources()")
-    page.wait_for_function("() => __winnow.S.sources[0].columns.some((c) => c.name === 'AcBinary')")
+    try:
+        page.evaluate("() => __winnow.loadSources()")
+        page.wait_for_function("() => __winnow.S.sources[0].columns.some((c) => c.name === 'AcBinary')")
+        # ...and for the BACKFILL, not just the definition — querying before
+        # the drv rows land would read NULL and flake.
+        page.wait_for_function("""() => fetch('/api/derived?source_id=1',
+          { headers: { 'X-Timeline-Lite-Client': '1' } }).then((r) => r.json())
+          .then((defs) => defs.some((d) => d.name === 'AcBinary' && d.status === 'ready'))""",
+          timeout=15000)
 
-    _open_sql(page)
-    ta = page.locator("#sqlText")
-    ta.click()
-    ta.fill("SELECT * FROM src_1 WHERE AcBin")
-    page.wait_for_selector(".sql-ac")
-    first = page.locator(".sql-ac .menu-item").first
-    assert "AcBinary" in first.inner_text() and "derived" in first.inner_text()
-    page.keyboard.press("Tab")
-    assert ta.input_value().endswith("WHERE AcBinary")
+        _open_sql(page)
+        ta = page.locator("#sqlText")
+        ta.click()
+        ta.fill("SELECT * FROM src_1 WHERE AcBin")
+        page.wait_for_selector(".sql-ac")
+        first = page.locator(".sql-ac .menu-item").first
+        assert "AcBinary" in first.inner_text() and "derived" in first.inner_text()
+        page.keyboard.press("Tab")
+        assert ta.input_value().endswith("WHERE AcBinary")
 
-    # ...and the completed query actually reads the derived value
-    ta.fill("SELECT AcBinary FROM src_1 WHERE rid = 1")
-    page.click("#btnRunSql")
-    page.wait_for_selector("#sqlResult table")
-    assert page.locator("#sqlResult td").nth(0).inner_text() == "powershell.exe"
-
-    page.evaluate("""(id) => fetch('/api/derived/' + id, { method: 'DELETE',
-      headers: { 'X-Timeline-Lite-Client': '1' } })""", rec["definition"]["id"])
-    page.evaluate("() => __winnow.loadSources()")
+        # ...and the completed query actually reads the derived value
+        ta.fill("SELECT AcBinary FROM src_1 WHERE rid = 1")
+        page.click("#btnRunSql")
+        page.wait_for_selector("#sqlResult table")
+        assert page.locator("#sqlResult td").nth(0).inner_text() == "powershell.exe"
+    finally:
+        # The server is session-scoped — a leaked column would haunt every
+        # later test's grid and autocomplete.
+        page.evaluate("""(id) => fetch('/api/derived/' + id, { method: 'DELETE',
+          headers: { 'X-Timeline-Lite-Client': '1' } })""", rec["definition"]["id"])
+        page.evaluate("() => __winnow.loadSources()")

@@ -19,9 +19,45 @@ def test_derived_columns_query_bare(store, write_csv):
     assert out["rows"] == [["evil.example"]]
 
 
-def test_select_star_matches_the_grid_shape(store, write_csv):
+def test_select_star_is_grid_shape_plus_trailing_rowid(store, write_csv):
     a = _mk(store, write_csv)
-    assert store.run_sql(f"SELECT * FROM src_{a} LIMIT 1")["columns"] == ["rid", "Uri", "Host"]
+    assert store.run_sql(f"SELECT * FROM src_{a} LIMIT 1")["columns"] == ["rid", "Uri", "Host", "rowid"]
+
+
+def test_rowid_still_reads_and_joins(store, write_csv):
+    """A view has no real rowid (NULL on 3.45, an error on 3.46+) — the
+    explicit alias keeps pre-existing rowid queries and joins correct."""
+    a = _mk(store, write_csv)
+    out = store.run_sql(f"SELECT rowid FROM src_{a} ORDER BY rowid")
+    assert [r[0] for r in out["rows"]] == [1, 2]
+    joined = store.run_sql(
+        f"SELECT COUNT(*) FROM src_{a} v JOIN main.src_{a} raw ON raw.rowid = v.rowid")
+    assert joined["rows"][0][0] == 2
+
+
+def test_spec_sql_runs_in_the_pane_with_derived_columns(store, write_csv):
+    """'Open filter in SQL pane' on a source with derived columns: the
+    emitted SQL references the pane's bare src_N (the shadow does the
+    joining) — spelling the sidecar join would be ambiguous against it."""
+    a = _mk(store, write_csv)
+    sql = store.spec_sql(a, {"source_id": a, "sort": [],
+                             "filters": [{"column": "Host", "op": "contains", "value": "evil"}]})
+    out = store.run_sql(sql)
+    assert len(out["rows"]) == 1
+    assert "drv_" not in sql
+
+
+def test_merge_spec_sql_runs_in_the_pane_with_derived_columns(store, write_csv):
+    a = _mk(store, write_csv)
+    b = store.ingest_csv(write_csv([["Uri"], ["https://evil.example/z"]], "m2.csv"),
+                         name="m2", build_fts=False)["id"]
+    res = store.add_derived_column(b, "Host", "Uri", "regex_extract", {"pattern": r"://([^/]+)"})
+    store.wait_for_ingest_job(res["job_id"], timeout=30)
+    mid = store.create_merge("sm", [a, b])["id"]
+    sql = store.spec_sql(mid, {"source_id": mid, "sort": [],
+                               "filters": [{"column": "Host", "op": "equals", "value": "evil.example"}]})
+    out = store.run_sql(sql)
+    assert len(out["rows"]) == 2  # one per member
 
 
 def test_main_prefix_is_the_raw_import(store, write_csv):
