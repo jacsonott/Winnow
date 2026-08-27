@@ -6699,16 +6699,37 @@ class Store:
     def _merge_union_sql(self, conn: sqlite3.Connection, merge_id: int) -> str:
         """SELECT text behind the pane's merge_<id> TEMP VIEW: a UNION ALL
         of the members carrying source_id, rid and every exposed column
-        (derived included, each member reading its own sidecar)."""
+        (derived included, each member reading its own sidecar). Every
+        table reference is main.-qualified: the pane also creates TEMP
+        views SHADOWING src_<id> (see _source_view_sql), and an unqualified
+        src_N inside this view would bind to that shadow — double-joining
+        the sidecar and making every derived name ambiguous."""
         msrc = self._source_lite_on(conn, -merge_id)
         cols = [c["name"] for c in msrc["columns"]]
         branches = []
         for mid in msrc["member_source_ids"]:
             m = self._source_lite_on(conn, mid)
-            sel = ", ".join(f"{self._col_ref(m, c)} AS {q(c)}" for c in cols)
+            has_drv = any(c.get("derived") for c in m["columns"])
+            frm = f"main.{q(m['table_name'])} s"
+            if has_drv:
+                frm += f" LEFT JOIN main.{q(self._derived_table(mid))} d ON d.rid = s.rid"
+            sel = ", ".join(f"{self._col_ref(m, c, 's', 'd')} AS {q(c)}" for c in cols)
             branches.append(
-                f"SELECT {int(mid)} AS source_id, rid, {sel} FROM {self._from_clause(m)}")
+                f"SELECT {int(mid)} AS source_id, s.rid AS rid, {sel} FROM {frm}")
         return " UNION ALL ".join(branches)
+
+    def _source_view_sql(self, conn: sqlite3.Connection, source_id: int) -> str:
+        """SELECT text behind the pane's TEMP VIEW shadowing src_<id> for a
+        source with derived columns: the table as the analyst sees it in
+        the grid — rid, base columns, then derived, the sidecar joined on
+        its PRIMARY KEY so SQLite drops the join entirely for queries that
+        never touch a derived column. main.src_<id> stays reachable as the
+        byte-faithful raw import."""
+        src = self._source_lite_on(conn, source_id)
+        sel = ", ".join(f"{self._col_ref(src, c['name'], 's', 'd')} AS {q(c['name'])}"
+                        for c in src["columns"])
+        return (f"SELECT s.rid AS rid, {sel} FROM main.{q(src['table_name'])} s "
+                f"LEFT JOIN main.{q(self._derived_table(source_id))} d ON d.rid = s.rid")
 
     def run_sql(self, sql: str, limit: int = 5000) -> dict:
         """Read-only ad-hoc query against the case file.
@@ -6750,6 +6771,21 @@ class Store:
                     continue  # one broken merge shouldn't take the pane down
         except sqlite3.Error:
             pass  # a case predating merges has no merges table to read
+        # A source WITH derived columns gets a TEMP VIEW shadowing its own
+        # src_<id> name (temp schema wins resolution), so `SELECT Host FROM
+        # src_5` reads the derived value instead of falling into SQLite's
+        # double-quoted-string trap and returning the literal 'Host'.
+        # Sources without derived columns get nothing — byte-identical to
+        # before. main.src_<id> is the explicit raw-table escape hatch.
+        try:
+            for row in ro.execute("SELECT DISTINCT source_id FROM derived_columns ORDER BY 1"):
+                try:
+                    ro.execute(f"CREATE TEMP VIEW {q('src_' + str(row[0]))} AS "
+                               + self._source_view_sql(ro, row[0]))
+                except (sqlite3.Error, KeyError):
+                    continue
+        except sqlite3.Error:
+            pass
         try:
             t0 = time.time()
             cur = ro.execute(sql)

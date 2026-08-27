@@ -99,3 +99,36 @@ def test_query_box_resizes_from_the_bar(page):
     page.mouse.up()
     h1 = page.evaluate("() => document.getElementById('sqlText').offsetHeight")
     assert h1 > h0 + 80
+
+
+def test_autocomplete_marks_and_completes_derived_columns(page):
+    """Derived columns were always suggested — before the shadow views
+    that was a trap (the query returned the literal column name). Now the
+    suggestion is real and tagged 'derived'."""
+    rec = page.evaluate("""() => fetch('/api/derived', { method: 'POST',
+      headers: { 'X-Timeline-Lite-Client': '1', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source_id: 1, name: 'AcBinary', input_column: 'CommandLine',
+                             op_id: 'regex_extract', params: { pattern: '\\\\\\\\([\\\\w.]+\\\\.exe)' } }) })
+      .then((r) => r.json())""")
+    page.evaluate("() => __winnow.loadSources()")
+    page.wait_for_function("() => __winnow.S.sources[0].columns.some((c) => c.name === 'AcBinary')")
+
+    _open_sql(page)
+    ta = page.locator("#sqlText")
+    ta.click()
+    ta.fill("SELECT * FROM src_1 WHERE AcBin")
+    page.wait_for_selector(".sql-ac")
+    first = page.locator(".sql-ac .menu-item").first
+    assert "AcBinary" in first.inner_text() and "derived" in first.inner_text()
+    page.keyboard.press("Tab")
+    assert ta.input_value().endswith("WHERE AcBinary")
+
+    # ...and the completed query actually reads the derived value
+    ta.fill("SELECT AcBinary FROM src_1 WHERE rid = 1")
+    page.click("#btnRunSql")
+    page.wait_for_selector("#sqlResult table")
+    assert page.locator("#sqlResult td").nth(0).inner_text() == "powershell.exe"
+
+    page.evaluate("""(id) => fetch('/api/derived/' + id, { method: 'DELETE',
+      headers: { 'X-Timeline-Lite-Client': '1' } })""", rec["definition"]["id"])
+    page.evaluate("() => __winnow.loadSources()")
