@@ -4,6 +4,7 @@
 import { autofitAllColumnWidths, resetAllColumnWidths, saveDefaultLayout, visibleCols } from './columns.js';
 import { openFilterBuilder } from './filterbuilder.js';
 import { $, ROW_H } from './core.js';
+import { currentModalAction } from './ui.js';
 import { toggleDetailPane } from './detail.js';
 import { filterBySelectedCell, openValuePickerForColumn, selectedCellTarget } from './filters.js';
 import { headH, moveCursor, render } from './grid.js';
@@ -343,9 +344,21 @@ document.addEventListener('keydown', (e) => {
   /* A dialog owns the keyboard. With the filter builder (or any modal /
      confirm overlay) up, q/w kept cycling saved filters underneath it,
      digits kept tagging, Ctrl+C hijacked copying the dialog's own text.
-     Escape already closed things above; everything else stops here. The
-     settings pane's key-capture listener is separate and unaffected. */
-  if (!$('modal').hidden || document.querySelector('.confirm-overlay')) return;
+     Escape already closed things above; everything else stops here — with
+     ONE opening: the keybind that opens a dialog also closes it, so C
+     toggles the table menu, e the builder, ? settings (the openers mark
+     which action owns the showing modal). The settings pane's key-capture
+     listener is separate and unaffected. */
+  if (!$('modal').hidden || document.querySelector('.confirm-overlay')) {
+    if (!$('modal').hidden && !document.querySelector('.confirm-overlay')) {
+      const toggling = matchAction(e);
+      if (toggling && toggling === currentModalAction()) {
+        e.preventDefault();
+        $('modal').hidden = true;
+      }
+    }
+    return;
+  }
 
   if ((e.ctrlKey || e.metaKey) && (e.key === 'c' || e.key === 'C') && (S.cellRange || selCount() || S.cursor >= 0)) {
     e.preventDefault();

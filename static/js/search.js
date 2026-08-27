@@ -9,7 +9,7 @@ import { openSettings } from './settings.js';
 import { loadSources, sourceLabel } from './sources.js';
 import { S } from './state.js';
 import { openSavedFiltersModal, openTimeRangeModal } from './timeframe.js';
-import { confirmDialog, dropdownMenu, modal } from './ui.js';
+import { markModalAction, confirmDialog, dropdownMenu, modal } from './ui.js';
 import { rebuildView } from './view.js';
 
 /* Checked against every real table in the case (plain contains-mode only —
@@ -233,6 +233,7 @@ export function searchAllHitRow(st, hit, term) {
 }
 
 export function openSearchAllModal() {
+  markModalAction('openSearchAll');
   const st = searchAllState();
   st.seen = true;
   updateSearchAllButton();

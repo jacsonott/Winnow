@@ -6,7 +6,7 @@ import { checkPresets } from './savedfilters.js';
 import { S, normalizeTree } from './state.js';
 import { currentFilterPayload, openSavedFiltersModal, updateFiltersButton } from './timeframe.js';
 import { baseColumns } from './tsformat.js';
-import { modal, promptDialog } from './ui.js';
+import { markModalAction, modal, promptDialog } from './ui.js';
 import { rebuildView } from './view.js';
 
 /* --------------------------------------------------------- filter builder */
@@ -273,6 +273,7 @@ export function renderFilterGroup(node, onStructural, onPreview, isRoot) {
    everything else, including "Save filter…" as a save-as-new escape
    hatch, behaves identically to a normal open. */
 export function openFilterBuilder(editing = null) {
+  markModalAction('openFilterBuilder');
   S.filterTree = normalizeTree(S.filterTree); // a cond root would render as an empty editor
   modal(editing ? `Edit filter — ${editing.name}` : 'Filter builder', (b) => {
     const help = el('p', 'fb-help',

@@ -15,7 +15,7 @@ import { normalizeTree, S } from './state.js';
 import { openTablesManager } from './tables.js';
 import { loadTags } from './tags.js';
 import { baseColumns, columnMeta, parseTimestamp } from './tsformat.js';
-import { confirmDialog, modal, promptDialog } from './ui.js';
+import { markModalAction, confirmDialog, modal, promptDialog } from './ui.js';
 import { rebuildView } from './view.js';
 
 /* ------------------------------------------------------ jump to timestamp */
@@ -25,6 +25,7 @@ import { rebuildView } from './view.js';
    the workflow this exists for is "something happened at 13:22:01; show me
    that moment in the EVTX table, now in the proxy log, now in the MFT". */
 export function openJumpTsModal() {
+  markModalAction('openJumpTs');
   if (!S.sourceId) { toast('Open a table first'); return; }
   const dtCols = S.columns.filter((c) => c.type === 'datetime').map((c) => c.name);
   modal('Jump to timestamp', (b) => {
@@ -218,6 +219,7 @@ export function toggleTimeRange() {
 }
 
 export function openTimeRangeModal() {
+  markModalAction('openTimeRange');
   modal('Timeframe filter', (b) => {
     const toggleKey = S.keymap.toggleTimeRange[0] || '(unbound)';
     const openKey = S.keymap.openTimeRange[0] || '(unbound)';
@@ -587,7 +589,11 @@ export function buildColumnsPanel(container, refresh = openTableMenu) {
     // table default changing later.
     const override = (S.layout[name] || {}).valuePicker;
     const state = override === undefined ? 'auto' : (override ? 'on' : 'off');
-    const pick = el('button', 'btn ghost collist-pick', '▾ ' + state);
+    // 'auto' alone lied when the table setting was "on for every column" —
+    // every row read auto while every dropdown was actually on. Show what
+    // auto currently RESOLVES to.
+    const label = state === 'auto' ? `auto·${valueFilterEnabled(name) ? 'on' : 'off'}` : state;
+    const pick = el('button', 'btn ghost collist-pick', '▾ ' + label);
     pick.setAttribute('aria-pressed', String(valueFilterEnabled(name)));
     pick.title = state === 'auto'
       ? `Value dropdown follows this table's setting (currently ${valueFilterEnabled(name) ? 'on' : 'off'}) — click to pin it on`
@@ -730,6 +736,7 @@ export const TABLE_MENU_SECTIONS = [
    read S.layout/S.order/S.columns (this table's live state), so opening
    that source first isn't a convenience, it's the precondition. */
 export async function openTableMenu(sourceId) {
+  markModalAction('openTableMenu');
   const id = sourceId === undefined ? S.sourceId : sourceId;
   if (id == null) { toast('Open a table first'); return; }
   if (id !== S.sourceId || S.activeTab !== 'grid') await openSource(id);
