@@ -3391,8 +3391,11 @@ class Store:
             entry = self._find_column(src, input_column)
             if entry is None:
                 raise ValueError(f"No column called {input_column!r} to read")
-            if entry.get("derived"):
-                raise ValueError(f"{input_column!r} is itself a derived column — read the original instead")
+            # Same chain policy as add_derived_column: a derived input is
+            # fine (flattening a derived JSON column is the natural second
+            # step of a chain) — it just has to be finished.
+            if entry.get("derived") and entry.get("derived_status") != "ready":
+                raise ValueError(f"{input_column!r} is still building — wait for it to finish first")
             taken.add(name.lower())
             prepared.append({
                 "name": name, "input_column": input_column, "op_id": op_id,
@@ -3479,7 +3482,19 @@ class Store:
                              "units_total": src["row_count"]},
                 )
             except Exception:
-                continue  # one broken child shouldn't stop its siblings
+                # One broken child shouldn't stop its siblings — but it must
+                # not be left stuck 'building' with no job either: 'ready'
+                # with stale-but-present values is recoverable (re-derive),
+                # a permanent 'building' blocks the whole chain below it.
+                try:
+                    with self.lock, self.db:
+                        self.db.execute(
+                            "UPDATE derived_columns SET status='ready' WHERE id=? AND status='building'",
+                            (d["id"],),
+                        )
+                except Exception:
+                    pass
+                continue
 
     def rederive_column(self, def_id: int, params: dict | None = None) -> dict:
         """Recompute a derived column in place — the path for "I set the

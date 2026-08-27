@@ -114,3 +114,32 @@ def test_chain_on_a_merge(store, write_csv):
         for j in res["job_ids"]:
             store.wait_for_ingest_job(j, timeout=30)
     assert sorted(x for x in _values(store, mid, "Addr")) == ["10.0.0.5", "10.0.0.5", "10.0.0.9", "10.0.0.9"]
+
+
+def test_flatten_batch_accepts_a_derived_input(store, write_csv):
+    """The flatten-all path is a chain move too: json_field pulled a JSON
+    blob into a column — flattening THAT column's fields must work like
+    any other derivation from it."""
+    rows = [["Payload"]] + [
+        [json.dumps({"inner": json.dumps({"a": str(i), "b": f"x{i}"})})] for i in range(3)
+    ]
+    sid = store.ingest_csv(write_csv(rows, "fb.csv"), name="fb", build_fts=False)["id"]
+    _add(store, sid, "Inner", "Payload", "json_field", {"path": "$.inner"})
+    res = store.add_derived_columns(sid, [
+        {"name": "A", "input_column": "Inner", "op_id": "json_field", "params": {"path": "$.a"}},
+        {"name": "B", "input_column": "Inner", "op_id": "json_field", "params": {"path": "$.b"}},
+    ])
+    store.wait_for_ingest_job(res["job_id"], timeout=30)
+    assert _values(store, sid, "A") == ["0", "1", "2"]
+    assert _values(store, sid, "B") == ["x0", "x1", "x2"]
+
+
+def test_flatten_batch_still_refuses_a_building_input(store, write_csv):
+    sid = store.ingest_csv(write_csv(ROWS, "fb2.csv"), name="fb2", build_fts=False)["id"]
+    res = store.add_derived_column(sid, "Config", "Payload", "json_field", {"path": "$.config"})
+    try:
+        store.add_derived_columns(sid, [
+            {"name": "X", "input_column": "Config", "op_id": "json_field", "params": {"path": "$.x"}}])
+    except ValueError as e:
+        assert "still building" in str(e)
+    store.wait_for_ingest_job(res["job_id"], timeout=30)
