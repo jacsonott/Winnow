@@ -1112,6 +1112,55 @@ def api_plugins_toggle(body: PluginToggle):
     return api_plugins()
 
 
+class PluginBundleBody(BaseModel):
+    name: str
+    plugins: list[str] = []
+
+
+@app.get("/api/plugin_bundles")
+def api_plugin_bundles():
+    return WS.plugin_bundles.list()
+
+
+@app.post("/api/plugin_bundles")
+def api_plugin_bundles_save(body: PluginBundleBody):
+    try:
+        return WS.plugin_bundles.save(body.name, body.plugins)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.delete("/api/plugin_bundles/{bundle_id}")
+def api_plugin_bundles_delete(bundle_id: int):
+    WS.plugin_bundles.delete(bundle_id)
+    return {"ok": True}
+
+
+@app.post("/api/plugin_bundles/{bundle_id}/apply")
+def api_plugin_bundles_apply(bundle_id: int):
+    """Set the open case's per-plugin overrides to exactly this bundle —
+    every installed plugin gets an explicit on/off override, so the case's
+    plugin set is the bundle regardless of machine defaults. One registry
+    reload, not one per plugin."""
+    if STORE is None or STORE.closed:
+        raise HTTPException(400, "Open a case first — per-case scopes live in the case file")
+    try:
+        bundle = WS.plugin_bundles.get(bundle_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    wanted = set(bundle["plugins"])
+    known = {p["fs_name"] for p in PLUGINS.describe()}
+    overrides = _case_plugin_overrides()
+    for fs_name in known:
+        overrides[fs_name] = fs_name in wanted
+    STORE.set_case_setting("plugin_overrides", json.dumps(overrides))
+    _reload_plugins()
+    return {"applied": bundle["name"],
+            "enabled": sorted(wanted & known),
+            "missing": sorted(wanted - known),  # in the bundle, not installed here
+            "plugins": api_plugins()}
+
+
 @app.post("/api/plugins/install")
 async def api_plugins_install(
     files: list[UploadFile] = File(...),
