@@ -14,7 +14,7 @@ import { applyPageTabsSize } from './sources.js';
 import { S, gridRowCount } from './state.js';
 import { openSavedFiltersModal, updateFiltersButton } from './timeframe.js';
 import { TS_FORMATS } from './tsformat.js';
-import { confirmDialog, modal, promptDialog } from './ui.js';
+import { markModalAction, confirmDialog, modal, promptDialog } from './ui.js';
 
  // reads S.keymap.toggleTimeRange for its tooltip — must come after the line above
 
@@ -71,6 +71,36 @@ export function contrastFg(hex) {
    grid.js (wireGrid), keyed off the same setting. */
 export function paintRemote() {
   document.documentElement.classList.toggle('remote', !!S.appearance.remoteSession);
+}
+
+/* First run on this machine (no stored appearance yet): offer Remote
+   session mode once. Winnow is routinely used inside RDP on lab boxes,
+   where the default smooth scrolling feels terrible and nothing hints
+   that a fix exists three menus deep. Asked exactly once per machine —
+   the answer (either way) is remembered, and the setting stays in
+   Settings → Appearance. */
+export async function maybeOfferRemoteMode() {
+  const SEEN = 'winnow.remotePrompt';
+  try {
+    if (localStorage.getItem(SEEN) === 'seen') return;
+    if (localStorage.getItem(APPEARANCE_KEY)) {
+      // Not a first run — this machine predates the prompt. Don't nag.
+      localStorage.setItem(SEEN, 'seen');
+      return;
+    }
+    localStorage.setItem(SEEN, 'seen');
+  } catch { return; }
+  const yes = await confirmDialog(
+    'First run on this machine — are you using Winnow through RDP or another '
+    + 'remote desktop? Remote session mode scrolls by whole rows and stops '
+    + 'animations, which remote displays handle far better. '
+    + '(Change any time in Settings → Appearance.)',
+    { okLabel: 'Enable remote mode', cancelLabel: 'No, local session' });
+  if (yes) {
+    S.appearance.remoteSession = true;
+    paintRemote();
+    saveAppearance();
+  }
 }
 
 export function resolveAutoTheme() {
@@ -199,6 +229,7 @@ export function settingsSection(parent, title, { open = false } = {}) {
 }
 
 export function openSettings() {
+  markModalAction('openSettings');
   modal('Settings', (b) => {
     const secLook = settingsSection(b, 'Appearance');
     secLook.append(el('p', null, 'Pick a look, then a theme, then (optionally) your own accent color. All three are saved on this machine.'));

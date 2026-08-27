@@ -119,6 +119,10 @@ def page(browser, server):
     appearance and sidebar state live, so sharing one would let a test that
     rebinds a key or changes the autofit cap decide the next test's outcome."""
     ctx = browser.new_context(viewport={"width": 1500, "height": 900})
+    # Every context is a "first run on this machine" — pre-answer the
+    # one-time remote-mode prompt so it can't overlay the app mid-test.
+    # test_first_run_prompt.py builds its own context without this.
+    ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen')")
     pg = ctx.new_page()
     errors: list[str] = []
     pg.on("pageerror", lambda e: errors.append(str(e)))
