@@ -14,7 +14,7 @@ import { applyPageTabsSize } from './sources.js';
 import { S, gridRowCount } from './state.js';
 import { openSavedFiltersModal, updateFiltersButton } from './timeframe.js';
 import { TS_FORMATS } from './tsformat.js';
-import { confirmDialog, modal, promptDialog } from './ui.js';
+import { markModalAction, confirmDialog, modal, promptDialog } from './ui.js';
 
  // reads S.keymap.toggleTimeRange for its tooltip — must come after the line above
 
@@ -199,6 +199,7 @@ export function settingsSection(parent, title, { open = false } = {}) {
 }
 
 export function openSettings() {
+  markModalAction('openSettings');
   modal('Settings', (b) => {
     const secLook = settingsSection(b, 'Appearance');
     secLook.append(el('p', null, 'Pick a look, then a theme, then (optionally) your own accent color. All three are saved on this machine.'));
