@@ -2541,6 +2541,13 @@ class Store:
                     job["rows_done"] = res["rows"]
                     job["source_ids"] = [res["source_id"]]
                     job["result"] = [dict(c, rows=res["rows"]) for c in res["columns"]]
+                # Chained columns: anything derived FROM a column this job
+                # just recomputed is now stale — re-derive it, which
+                # cascades down the chain one job at a time (each named
+                # for why it's running). A fresh create has no dependents
+                # (its name is new), so this only fires on re-derives.
+                self._cascade_dependent_derives(res["source_id"],
+                                                [c["name"] for c in res["columns"]])
                 return
             elif job["kind"] == "json":
                 results = [self.ingest_json(
@@ -3255,11 +3262,14 @@ class Store:
             entry = self._find_column(src, col)
             if entry is None:
                 raise ValueError(f"No column called {col!r} to use as the {label}")
-            if entry.get("derived"):
-                if not op["two_input"]:
-                    raise ValueError(f"{col!r} is itself a derived column — parse the original column instead")
-                if entry.get("derived_status") != "ready":
-                    raise ValueError(f"{col!r} is still building — wait for it to finish first")
+            # A derived input is fine — chains are how a JSON field that
+            # holds XML gets taken apart in two steps, and the backfill
+            # already reads inputs through _col_ref/_from_clause, which
+            # resolve the sidecar. It just has to be FINISHED: a
+            # still-building parent has incomplete values, and jobs are
+            # thread-per-job with no ordering to lean on.
+            if entry.get("derived") and entry.get("derived_status") != "ready":
+                raise ValueError(f"{col!r} is still building — wait for it to finish first")
             return entry
 
         _check_input(input_column, "input column")
@@ -3443,6 +3453,34 @@ class Store:
                 # reuses the orphan if the same name comes back.
                 pass
 
+    def dependent_derived_columns(self, source_id: int, names: list[str]) -> list[dict]:
+        """Definitions on this source computed from any of `names` — the
+        children a re-derive of those columns leaves stale."""
+        lower = {n.lower() for n in names}
+        out = []
+        for d in self.list_derived_columns(source_id):
+            other = str((d.get("params") or {}).get("other_column", ""))
+            if d["input_column"].lower() in lower or other.lower() in lower:
+                out.append(d)
+        return out
+
+    def _cascade_dependent_derives(self, source_id: int, names: list[str]) -> None:
+        for d in self.dependent_derived_columns(source_id, names):
+            try:
+                with self.lock, self.db:
+                    self.db.execute(
+                        "UPDATE derived_columns SET status='building', parse_failures=NULL WHERE id=?",
+                        (d["id"],),
+                    )
+                src = self._source_lite(source_id)
+                self.start_ingest_job(
+                    "derive", "", name=f"{d['name']} (recomputed — its input changed)",
+                    options={"def_id": d["id"], "drop_on_cancel": False,
+                             "units_total": src["row_count"]},
+                )
+            except Exception:
+                continue  # one broken child shouldn't stop its siblings
+
     def rederive_column(self, def_id: int, params: dict | None = None) -> dict:
         """Recompute a derived column in place — the path for "I set the
         wrong syslog year" or "these were local time, not UTC"."""
@@ -3458,7 +3496,9 @@ class Store:
             "derive", "", name=d["name"],
             options={"def_id": def_id, "drop_on_cancel": False, "units_total": src["row_count"]},
         )
-        return {"definition": self.get_derived_column(def_id), "job_id": job["job_id"]}
+        return {"definition": self.get_derived_column(def_id), "job_id": job["job_id"],
+                "cascades_to": [c["name"] for c in
+                                self.dependent_derived_columns(d["source_id"], [d["name"]])]}
 
     def backfill_derived_column(self, def_id: int, progress=None, cancel=None,
                                 drop_on_cancel: bool = False) -> dict:
@@ -6023,10 +6063,19 @@ class Store:
         # that name) is a warning, never a failure: the tags and notes are
         # the part of a session that can't be reconstructed.
         derived_added = 0
+        pending_jobs: dict[str, str] = {}  # column name -> its backfill job, for chains
         for d in session.get("derived_columns", []):
             try:
-                self.add_derived_column(source_id, d["name"], d["input_column"],
-                                        d["op_id"], d.get("params"))
+                # A chained column's parent was created a moment ago and its
+                # backfill is an async job — wait for that link, or the
+                # "still building" guard (correctly) refuses the child.
+                for inp in (d["input_column"], str((d.get("params") or {}).get("other_column", ""))):
+                    jid = pending_jobs.get(inp.lower())
+                    if jid:
+                        self.wait_for_ingest_job(jid, timeout=600)
+                res = self.add_derived_column(source_id, d["name"], d["input_column"],
+                                              d["op_id"], d.get("params"))
+                pending_jobs[d["name"].lower()] = res["job_id"]
                 derived_added += 1
             except (ValueError, KeyError) as e:
                 warnings.append(f"Derived column {d.get('name')!r} not recreated: {e}")

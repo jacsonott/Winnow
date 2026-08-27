@@ -114,11 +114,20 @@ def test_autocomplete_marks_and_completes_derived_columns(page):
         page.evaluate("() => __winnow.loadSources()")
         page.wait_for_function("() => __winnow.S.sources[0].columns.some((c) => c.name === 'AcBinary')")
         # ...and for the BACKFILL, not just the definition — querying before
-        # the drv rows land would read NULL and flake.
-        page.wait_for_function("""() => fetch('/api/derived?source_id=1',
-          { headers: { 'X-Timeline-Lite-Client': '1' } }).then((r) => r.json())
-          .then((defs) => defs.some((d) => d.name === 'AcBinary' && d.status === 'ready'))""",
-          timeout=15000)
+        # the drv rows land would read NULL and flake. Polled from Python:
+        # page.evaluate awaits promises, wait_for_function does NOT (a
+        # promise-returning predicate is truthy immediately).
+        import time as _time
+
+        deadline = _time.time() + 15
+        while _time.time() < deadline:
+            if page.evaluate("""() => fetch('/api/derived?source_id=1',
+              { headers: { 'X-Timeline-Lite-Client': '1' } }).then((r) => r.json())
+              .then((defs) => defs.some((d) => d.name === 'AcBinary' && d.status === 'ready'))"""):
+                break
+            _time.sleep(0.2)
+        else:
+            raise AssertionError("AcBinary never finished building")
 
         _open_sql(page)
         ta = page.locator("#sqlText")
