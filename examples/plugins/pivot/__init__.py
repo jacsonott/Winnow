@@ -96,16 +96,14 @@ def register(api):
 
 
 def _source(req, body):
-    """The validated source for this request. Merges are rejected: they have
-    no single backing table, and `src_<id>` is what every query below needs."""
+    """The validated source for this request — a real table or a merge
+    (which reads through _scope's UNION ALL of its members)."""
     if req.store is None:
         raise ValueError("Open a case first")
     try:
         source_id = int(body.get("source_id"))
     except (TypeError, ValueError):
         raise ValueError("source_id is required")
-    if source_id < 0:
-        raise ValueError("Pick a real table — merged sources aren't supported here")
     try:
         return req.store.get_source(source_id)
     except KeyError:
@@ -144,8 +142,27 @@ def _from_clause(src):
     return f"{base} LEFT JOIN {q('drv_' + str(src['id']))} d ON d.rid = s.rid"
 
 
+def _scope(req, src):
+    """FROM text for reading this source's rows. A plain source is its
+    table (plus sidecar); a merge is a UNION ALL of its members aliased
+    `s`, carrying source_id, rid and every exposed column under plain
+    names — so everything downstream references `s.<col>` uniformly
+    (invariant #9: the merge path is part of the operation)."""
+    if not src.get("is_merge"):
+        return _from_clause(src)
+    cols = [c["name"] for c in src["columns"]]
+    branches = []
+    for mid in src["member_source_ids"]:
+        m = req.store.get_source(mid)
+        sel = ", ".join(f"{_col(m, c)} AS {q(c)}" for c in cols)
+        branches.append(f"SELECT {int(m['id'])} AS source_id, s.rid AS rid, {sel} FROM {_from_clause(m)}")
+    return "(" + " UNION ALL ".join(branches) + ") s"
+
+
 def _col(src, name):
     """A column reference for this source's FROM clause."""
+    if src.get("is_merge"):
+        return f"s.{q(name)}"  # everything sits in the union subquery's alias
     return f"{'d' if name in _derived_names(src) else 's'}.{q(name)}"
 
 
@@ -341,7 +358,7 @@ def aggregate(req):
     for f in body.get("filters") or []:
         _check_columns(src, [f.get("column")])
     where, params = _where(src, body.get("filters"), coltypes)
-    frm = _from_clause(src)
+    frm = _scope(req, src)
 
     out = []
     for keys in group_sets:
@@ -363,7 +380,7 @@ def values(req):
     column = body.get("column")
     _check_columns(src, [column])
     limit = min(int(body.get("limit") or 500), 5000)
-    sql = (f"SELECT {_col(src, column)} AS value, COUNT(*) AS n FROM {_from_clause(src)}"
+    sql = (f"SELECT {_col(src, column)} AS value, COUNT(*) AS n FROM {_scope(req, src)}"
            f" GROUP BY 1 ORDER BY n DESC")
     res = req.store.run_sql(sql, limit=limit)
     return {"values": [{"value": r[0], "count": r[1]} for r in res["rows"]],
@@ -401,6 +418,8 @@ def detail(req):
     # ambiguous. Derived columns come from `d`, which is also why they show
     # their real values here rather than their own name repeated.
     select = ", ".join(["s.rid"] + [_col(src, c) for c in cols])
-    sql = f"SELECT {select} FROM {_from_clause(src)}{where} ORDER BY s.rid"
+    # On a merge, rid alone collides across members — order deterministically.
+    order = "s.source_id, s.rid" if src.get("is_merge") else "s.rid"
+    sql = f"SELECT {select} FROM {_scope(req, src)}{where} ORDER BY {order}"
     res = req.store.run_sql(_inline(sql, params), limit=MAX_DETAIL_ROWS)
     return {"columns": ["Line"] + cols, "rows": res["rows"], "truncated": res["truncated"]}
