@@ -223,6 +223,23 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
    portable on their own — deleting `workspace/` loses convenience state, not
    analysis.
 
+9. **Merge parity.** Any operation that works on a standard table must work
+   on a merged table — filtering (quick, tree, timeframe, tag), searching
+   (contains/regex/advanced), sorting (including `__line__`), tagging and
+   notes, grouping, the value picker, exports, derived columns — everything
+   except merging a merge into another merge. When adding an operation, the
+   merge path is part of the feature, not a follow-up: resolve per member
+   through `_member_from`/`_member_derived_join` (bare column and `rid`
+   references stay legal under the `USING(rid)` join shape) and add a merge
+   case to the operation's tests. Known gaps to burn down, not add to:
+   raw-SQL filter fragments (`build_view`/`spec_sql` raise), batch derived
+   add (`add_derived_columns` — the JSON/XML flatten-all path), and the
+   bundled first_last/pivot plugins (backends raise on negative ids, UIs
+   filter merges out of the table picker). Structural exceptions worth
+   knowing: a merge has no `src_N` of its own for the SQL pane, and the
+   Timeline configures real sources (a merge's tags live on its members,
+   so they appear regardless).
+
 ## Things that bite
 
 Split by subsystem under **[docs/notes/](docs/notes/)** — same entries, same
