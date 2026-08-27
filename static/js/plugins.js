@@ -5,7 +5,8 @@ import { $, api, el, post, setBusy, toast } from './core.js';
 import { loadPlugins, openImportModal, pluginFormatById, queueFilesForFormat } from './importer.js';
 import { loadSources, openSource, renderPageTabs, syncTabSelection } from './sources.js';
 import { activeSqlTab, scheduleSqlTabSave, showGridTab, syncTabChrome } from './sql.js';
-import { sqlTagsFor, tagChips, wireSqlAssist } from './sqlassist.js';
+import { setActiveSqlResult, sqlRowKey, sqlTagsFor, tagChips, wireSqlAssist } from './sqlassist.js';
+import { moveCursor } from './grid.js';
 import { S } from './state.js';
 import { confirmDialog, modal, promptDialog } from './ui.js';
 
@@ -395,6 +396,7 @@ export async function showPluginTab(tabId) {
 export function sqlResultNodes(r) {
   const t = el('table');
   const sort = { idx: null, dir: 1 };
+  let lastClickedKey = null; // shift-range anchor — must survive repaints
   const paint = () => {
     t.replaceChildren();
     const hr = el('tr');
@@ -428,14 +430,42 @@ export function sqlResultNodes(r) {
       const tr = el('tr');
       for (const v of row) tr.append(el('td', null, v == null ? '' : String(v)));
       if (r.tags) {
+        const key = sqlRowKey(r.tags.ref, row);
         const td = el('td');
-        td.append(tagChips(r.tags.map[row[r.tags.ridIdx]]));
+        td.append(tagChips(r.tags.map[key]));
         tr.append(td);
+        if (key) {
+          tr.classList.toggle('sql-row-sel', r.tags.sel.has(key));
+          tr.style.cursor = 'pointer';
+          tr.title = 'Click to select (Shift for a range) — tag hotkeys apply to the selection. Double-click opens the row in its table.';
+          tr.onclick = (e) => {
+            if (e.shiftKey && lastClickedKey) {
+              // Range in the DISPLAYED order, between the last click and here.
+              const keys = rows.map((rw) => sqlRowKey(r.tags.ref, rw)).filter(Boolean);
+              const a = keys.indexOf(lastClickedKey), b2 = keys.indexOf(key);
+              if (a !== -1 && b2 !== -1) {
+                for (let k = Math.min(a, b2); k <= Math.max(a, b2); k++) r.tags.sel.add(keys[k]);
+              }
+            } else if (r.tags.sel.has(key)) r.tags.sel.delete(key);
+            else r.tags.sel.add(key);
+            lastClickedKey = key;
+            paint();
+          };
+          tr.ondblclick = async () => {
+            const [sid, rid] = key.split(':').map(Number);
+            await openSource(sid);
+            try {
+              const res = await api(`/api/row_position?view_id=${S.view.view_id}&source_id=${sid}&rid=${rid}`);
+              if (res.pos != null) moveCursor(res.pos, false);
+            } catch { /* the row may be filtered out of the default view */ }
+          };
+        }
       }
       t.append(tr);
     }
   };
   paint();
+  if (r.tags) r.tags.repaint = paint;
   return [
     el('div', 'note-status', `${r.rows.length.toLocaleString()} rows · ${r.elapsed_ms} ms${r.truncated ? ' · truncated' : ''}`
       + (r.tags ? ' · tags joined via rid' : '')),
@@ -459,7 +489,10 @@ export async function runSql() {
     // repaint it without refetching.
     r.tags = await sqlTagsFor(r, sql);
     S.sqlResults.set(tabId, r);
-    if (S.sqlTabId === tabId) out.replaceChildren(...sqlResultNodes(r));
+    if (S.sqlTabId === tabId) {
+      setActiveSqlResult(r);
+      out.replaceChildren(...sqlResultNodes(r));
+    }
   } catch (e) {
     S.sqlResults.set(tabId, { error: e.message });
     if (S.sqlTabId === tabId) out.replaceChildren(el('div', 'sql-error', e.message));

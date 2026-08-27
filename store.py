@@ -6696,6 +6696,20 @@ class Store:
 
     SQL_PANE_FORBIDDEN_RE = re.compile(r"\b(attach|detach|pragma|vacuum)\b", re.IGNORECASE)
 
+    def _merge_union_sql(self, conn: sqlite3.Connection, merge_id: int) -> str:
+        """SELECT text behind the pane's merge_<id> TEMP VIEW: a UNION ALL
+        of the members carrying source_id, rid and every exposed column
+        (derived included, each member reading its own sidecar)."""
+        msrc = self._source_lite_on(conn, -merge_id)
+        cols = [c["name"] for c in msrc["columns"]]
+        branches = []
+        for mid in msrc["member_source_ids"]:
+            m = self._source_lite_on(conn, mid)
+            sel = ", ".join(f"{self._col_ref(m, c)} AS {q(c)}" for c in cols)
+            branches.append(
+                f"SELECT {int(mid)} AS source_id, rid, {sel} FROM {self._from_clause(m)}")
+        return " UNION ALL ".join(branches)
+
     def run_sql(self, sql: str, limit: int = 5000) -> dict:
         """Read-only ad-hoc query against the case file.
 
@@ -6723,6 +6737,19 @@ class Store:
         # queries anyway.
         ro.create_function("DAY_BUCKET", 1, _day_bucket, deterministic=True)
         ro.create_function("TS_NORMALIZE", 1, _ts_normalize, deterministic=True)
+        # Merges have no src_N of their own — expose each as a TEMP VIEW
+        # merge_<id> (source_id, rid, every exposed column) so the pane can
+        # query one by name (invariant #9). TEMP lives on this connection
+        # only: the case file is never written, and mode=ro stays honest.
+        try:
+            for row in ro.execute("SELECT id FROM merges ORDER BY id"):
+                try:
+                    ro.execute(f"CREATE TEMP VIEW {q('merge_' + str(row['id']))} AS "
+                               + self._merge_union_sql(ro, row["id"]))
+                except (sqlite3.Error, KeyError):
+                    continue  # one broken merge shouldn't take the pane down
+        except sqlite3.Error:
+            pass  # a case predating merges has no merges table to read
         try:
             t0 = time.time()
             cur = ro.execute(sql)
