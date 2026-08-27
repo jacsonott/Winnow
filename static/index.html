@@ -121,10 +121,12 @@ try {
       <div class="sql-head">
         <span>Read-only query against the case file</span>
         <div>
+          <button class="btn ghost" id="btnSqlTables" title="Every table's src_N name — click one to insert it at the cursor">Tables ▾</button>
           <button class="btn" id="btnRunSql">Run  ⌘⏎</button>
         </div>
       </div>
       <textarea id="sqlText" spellcheck="false" rows="5"></textarea>
+      <div class="sql-resize" id="sqlResize" title="Drag to resize the query box"></div>
       <div class="sql-result" id="sqlResult"></div>
     </section>
 
