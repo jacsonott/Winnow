@@ -407,9 +407,32 @@ export async function openDerivedColumnModal(prefill, editing) {
     colSelect.value = state.column;
     colSelect.disabled = !!editing;
 
+    // Grouped, not one flat list: with timestamps, extraction and
+    // comparisons all in the registry, thirteen timestamp formats drowned
+    // the other kinds. A two-input operation (duration) still needs a
+    // second column rather than a format guess, so it's offered but never
+    // auto-suggested.
+    const OP_GROUPS = [
+      ['Timestamps', (op) => op.family === 'datetime' && op.derived_kind !== 'duration'],
+      ['Extract part of a value', (op) => op.family === 'extract'],
+      ['Comparisons', (op) => op.derived_kind === 'duration'],
+    ];
+    const grouped = new Set();
+    for (const [label, match] of OP_GROUPS) {
+      const members = ops.filter((op) => match(op) && !grouped.has(op.id));
+      if (!members.length) continue;
+      const g = document.createElement('optgroup');
+      g.label = label;
+      for (const op of members) {
+        grouped.add(op.id);
+        const o = el('option', null, op.label);
+        o.value = op.id;
+        g.append(o);
+      }
+      opSelect.append(g);
+    }
     for (const op of ops) {
-      // A two-input operation (duration) needs a second column, not a
-      // format guess, so it's offered here too — but never auto-suggested.
+      if (grouped.has(op.id)) continue; // a future family lands ungrouped rather than invisible
       const o = el('option', null, op.label);
       o.value = op.id;
       opSelect.append(o);
