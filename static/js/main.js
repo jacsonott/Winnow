@@ -50,7 +50,7 @@ import { applyDetailPrefs, loadDetailPrefs, wireDetail } from './detail.js';
 import { wireFilters } from './filters.js';
 import { wireGrid } from './grid.js';
 import { wireGrouping } from './grouping.js';
-import { boot, wireHome } from './home.js';
+import { maybeOfferStorageDir, boot, wireHome } from './home.js';
 import { wireFileDrop } from './importer.js';
 import { loadKeymap, wireKeymap } from './keymap.js';
 import { wirePlugins } from './plugins.js';
@@ -114,4 +114,4 @@ wireFileDrop();
 
 boot().catch((e) => toast('Could not start: ' + e.message, 8000));
 
-maybeOfferRemoteMode();
+maybeOfferRemoteMode().then(() => maybeOfferStorageDir());

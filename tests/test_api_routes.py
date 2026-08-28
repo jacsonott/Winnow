@@ -623,3 +623,14 @@ def test_shutdown_route_triggers_and_responds(client, monkeypatch):
     from fastapi.testclient import TestClient
     bare = TestClient(server.app)
     assert bare.post("/api/shutdown", json={}).status_code == 403
+
+
+def test_prefs_round_trip_and_first_run_flag(client, tmp_path):
+    out = client.get("/api/prefs").json()
+    assert "cases_dir" in out and "first_run" in out
+    r = client.post("/api/prefs", json={"cases_dir": str(tmp_path / "mycases")})
+    assert r.status_code == 200
+    got = r.json()
+    assert got["cases_dir"].endswith("mycases")
+    assert got["first_run"] is False  # configured — never asked again
+    assert (tmp_path / "mycases").is_dir()  # created eagerly so the browse works

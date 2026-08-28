@@ -706,6 +706,27 @@ class AppSettings:
 
 
 cases = CaseRegistry()
+class MachinePrefs:
+    """Small per-machine app preferences that belong to the INSTALL, not a
+    case: today just cases_dir — where new case files go, asked once on
+    first run instead of silently defaulting to ./cases."""
+
+    FILE = "prefs.json"
+
+    def get(self, key: str, default=None):
+        with _LOCK:
+            return _read(self.FILE, {}).get(key, default)
+
+    def set(self, key: str, value) -> None:
+        with _LOCK:
+            data = _read(self.FILE, {})
+            if value is None:
+                data.pop(key, None)
+            else:
+                data[key] = value
+            _write(self.FILE, data)
+
+
 class PluginBundles:
     """Named per-machine sets of plugins — "case types". A triage bundle
     enables lateral movement + system-info plugins, a BEC bundle the
@@ -763,4 +784,5 @@ column_layouts = ColumnLayouts()
 import_profiles = ImportProfiles()
 plugin_prefs = PluginPrefs()
 plugin_bundles = PluginBundles()
+machine_prefs = MachinePrefs()
 app_settings = AppSettings()

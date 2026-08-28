@@ -17,7 +17,7 @@ def test_format_list_is_grouped(page):
         [g.label, [...g.querySelectorAll('option')].length]);
     }""")
     labels = [g[0] for g in groups]
-    assert labels == ["Timestamps", "Extract part of a value", "Comparisons"]
+    assert labels == ["Timestamps", "Extract part of a value", "Join from another table", "Comparisons"]
     counts = dict(groups)
     assert counts["Extract part of a value"] == 3  # JSON, XML, regex
     assert counts["Timestamps"] >= 10
