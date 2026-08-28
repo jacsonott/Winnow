@@ -603,7 +603,14 @@ $('body').addEventListener('wheel', (e) => {
 
 $('body').addEventListener('click', (e) => {
   const groupHeader = e.target.closest('.group-header-row');
-  if (groupHeader) { toggleGroup(Number(groupHeader.dataset.groupIdx)); return; }
+  if (groupHeader) {
+    // A click that ends a TEXT SELECTION is a copy gesture, not a toggle —
+    // collapsing the group under someone highlighting its value rips the
+    // thing they were copying off the screen.
+    if (!window.getSelection().isCollapsed) return;
+    toggleGroup(Number(groupHeader.dataset.groupIdx));
+    return;
+  }
   if (e.target.closest('.rowcheck')) return; // owned by the delegated `change` listener below
   // .cell clicks are handled synchronously from `mousedown` below (see the
   // comment there) — this handler is left only for gutter clicks (row
