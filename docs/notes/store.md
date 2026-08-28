@@ -228,8 +228,36 @@ see [docs/notes/README.md](README.md) for the whole set.
   disk, checked up front. It forces `temp_store=FILE` for the duration:
   `_tune` sets MEMORY, and VACUUM's scratch copy of the entire database
   obeys that pragma. WAL is checkpoint-truncated on **both** sides — after,
-  so the reclaimed bytes don't just move into a `-wal`; before, so the two
-  sizes are comparable at all.
+  so the reclaimed bytes don't just move into a `-wal`; before, so VACUUM
+  starts from a folded-in file.
+- **`wal_checkpoint(TRUNCATE)` reports failure in its RESULT ROW (busy=1),
+  not by raising** — so the obvious one-liner silently no-ops whenever a
+  reader holds an older snapshot, which is exactly why compact "didn't
+  shrink" cases with live readers. Always go through
+  `_checkpoint_truncate()`, which retries within a budget and returns
+  whether it actually completed (the two `bench/` size-measuring call
+  sites go through it too — a silent no-op there yields a size missing
+  the WAL bytes, in the one suite whose job is detecting size
+  regressions).
+- **Qualify it `main.`** — an unqualified `wal_checkpoint` checkpoints
+  *every attached* database and ORs their busy flags together, including
+  the scratch views db (invariant #3) that every pooled reader attaches.
+  Unqualified, a reader merely paging a view reports the case file's
+  checkpoint as blocked (verified: `(1,0,0)` unqualified vs `(0,0,0)` for
+  `main.` with only `v` pinned).
+- **TRUNCATE invokes the connection's busy handler**, so one blocked
+  attempt sits *inside* the pragma for the full `busy_timeout` (measured
+  5.03s at the default 5s). `_checkpoint_truncate` scopes the timeout down
+  per attempt so its own budget is the real wall-clock bound, and uses a
+  monotonic deadline — it runs under `self.lock`, so overshooting stalls
+  every writer.
+- **compact's sizes are `main + -wal` on both sides, measured before any
+  checkpoint**, which is what makes `reclaimed_bytes` honest without
+  depending on a checkpoint succeeding. A checkpoint that can't complete
+  is reported (`wal_checkpointed`, `wal_pending_bytes`), never raised:
+  the bytes are simply counted as not-reclaimed and a later passive
+  checkpoint collects them. Raising after the VACUUM would throw away
+  minutes of completed work on a large case.
 - The auto-created per-column filter indexes are surfaced per table in the
   Tables modal, with a drop. They're created behind the analyst's back and
   never expire. `list_column_indexes` works by hashing each *known* column
