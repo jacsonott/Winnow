@@ -420,6 +420,7 @@ export async function openDerivedColumnModal(prefill, editing) {
     const OP_GROUPS = [
       ['Timestamps', (op) => op.family === 'datetime' && op.derived_kind !== 'duration'],
       ['Extract part of a value', (op) => op.family === 'extract'],
+      ['Join from another table', (op) => op.family === 'lookup'],
       ['Comparisons', (op) => op.derived_kind === 'duration'],
     ];
     const grouped = new Set();
@@ -467,6 +468,33 @@ export async function openDerivedColumnModal(prefill, editing) {
             o.value = opt;
             input.append(o);
           }
+        } else if (spec.type === 'lookup_source') {
+          // The table to look values up in — real tables only (a merge has
+          // no single table behind it), the open one excluded.
+          input = el('select');
+          for (const src of S.sources.filter((x) => !x.is_merge && !x.error && x.id > 0 && x.id !== S.sourceId)) {
+            const o = el('option', null, `${src.name} (${src.row_count.toLocaleString()})`);
+            o.value = String(src.id);
+            input.append(o);
+          }
+          // Changing the table invalidates the dependent column picks.
+          input.addEventListener('change', () => {
+            state.params[spec.name] = input.value;
+            for (const other of currentOp().params) {
+              if (other.type === 'lookup_column') delete state.params[other.name];
+            }
+            buildParams();
+            refreshPreview();
+          });
+        } else if (spec.type === 'lookup_column') {
+          // A column OF THE CHOSEN LOOKUP TABLE, not of the open one.
+          input = el('select');
+          const chosen = S.sources.find((x) => String(x.id) === String(state.params.other_source_id));
+          for (const c of (chosen ? chosen.columns : [])) {
+            const o = el('option', null, c.name);
+            o.value = c.name;
+            input.append(o);
+          }
         } else if (spec.type === 'column') {
           input = el('select');
           for (const c of S.columns) {
@@ -484,6 +512,7 @@ export async function openDerivedColumnModal(prefill, editing) {
         if (existing != null && existing !== '') input.value = existing;
         else if (spec.default != null) input.value = spec.default;
         else if (spec.type === 'int' && spec.name === 'base_year') input.value = new Date().getFullYear();
+        else if (spec.type === 'lookup_source' && input.options.length) input.value = input.options[0].value;
         state.params[spec.name] = input.value;
         input.oninput = () => { state.params[spec.name] = input.value; refreshPreview(); };
         input.onchange = () => { state.params[spec.name] = input.value; refreshPreview(); };
