@@ -615,6 +615,8 @@ export function renderGroupStrip() {
   S.groupByCols.forEach((name, i) => {
     const pill = el('div', 'group-pill');
     pill.draggable = true;
+    pill.title = 'Drag to reorder the grouping levels';
+    pill.style.cursor = 'grab';
     pill.append(el('span', null, groupColLabel(name)));
     const rm = el('button', 'group-pill-rm', '✕');
     rm.title = 'Remove this grouping level';

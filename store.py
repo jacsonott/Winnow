@@ -5193,7 +5193,7 @@ class Store:
         sid = handle["source_id"]
         with self._reader() as ro, self._dropped_view_is_expired():
             src = self._source_lite_on(ro, sid)
-            cols = [c["name"] for c in src["columns"]]
+            cols = self._export_columns(ro, src)
             sel = ", ".join(q(c) for c in cols)
 
             # _from_clause adds the derived-value sidecar join only when the
@@ -6261,6 +6261,30 @@ class Store:
             return self._export_virtual_root_csv_rows(handle, tagged_only)
         return self._export_view_csv_rows(view_id, handle, tagged_only)
 
+    def _export_columns(self, conn: sqlite3.Connection, src: dict) -> list[str]:
+        """The columns an export should emit: the analyst's saved layout —
+        their column ORDER, with hidden columns excluded — rather than raw
+        storage order. What lands in the CSV/XLSX is the table as they
+        arranged it on screen. Columns the layout has never seen (a derived
+        column added since the last save) append at the end; a layout that
+        somehow hides everything falls back to all columns, because an
+        empty export helps nobody."""
+        all_names = [c["name"] for c in src["columns"]]
+        # Read on the caller's pooled connection, NEVER via get_layout: the
+        # export paths run without touching Store.lock (invariant #4 — the
+        # concurrency suite fails the moment an export blocks on a writer).
+        try:
+            row = conn.execute("SELECT payload FROM layouts WHERE source_id=?", (src["id"],)).fetchone()
+            layout = json.loads(row["payload"]) if row else {}
+        except sqlite3.Error:
+            layout = {}
+        per_col = layout.get("columns") or {}
+        known = set(all_names)
+        order = [n for n in (layout.get("order") or []) if n in known]
+        ordered = order + [n for n in all_names if n not in set(order)]
+        visible = [n for n in ordered if not (per_col.get(n) or {}).get("hidden")]
+        return visible or all_names
+
     def _export_virtual_group_csv_rows(self, handle: dict, tagged_only: bool):
         member = handle["members"][0]
         sid = member["source_id"]
@@ -6316,7 +6340,7 @@ class Store:
         with self._reader() as ro, self._dropped_view_is_expired():
             src = self._source_lite_on(ro, sid)
             table = src["table_name"]
-            cols = [c["name"] for c in src["columns"]]
+            cols = self._export_columns(ro, src)
             sel = ", ".join(q(c) for c in cols)
 
             tagnames = {r["id"]: r["name"] for r in ro.execute("SELECT id, name FROM tag_defs")}
@@ -6380,7 +6404,7 @@ class Store:
         """
         with self._reader() as ro, self._dropped_view_is_expired():
             src = self._source_lite_on(ro, handle["source_id"])
-            cols = [c["name"] for c in src["columns"]]
+            cols = self._export_columns(ro, src)
             sel = ", ".join(q(c) for c in cols)
 
             tagnames = {r["id"]: r["name"] for r in ro.execute("SELECT id, name FROM tag_defs")}
@@ -6466,9 +6490,9 @@ class Store:
             if not src.get("tagged_row_count"):
                 continue
             source_id = src["id"]
-            cols = [c["name"] for c in src["columns"]]
-            sel = ", ".join(q(c) for c in cols)
             with self._reader() as ro, self._dropped_view_is_expired():
+                cols = self._export_columns(ro, src)
+                sel = ", ".join(q(c) for c in cols)
                 rids = [r[0] for r in ro.execute(
                     "SELECT DISTINCT rid FROM row_tags WHERE source_id=? ORDER BY rid", (source_id,)
                 )]
