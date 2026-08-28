@@ -42,6 +42,7 @@ except ImportError:  # pragma: no cover - Windows
 
 import structparse  # noqa: F401 — registers the JSON/XML extraction ops into timeparse.OPERATIONS
 import timeparse
+import xlsxread
 
 BATCH = 20_000
 SAMPLE_ROWS = 500
@@ -81,6 +82,11 @@ DEFAULT_IMPORT_EXTENSIONS = {".csv", ".tsv", ".txt", ".psv", ".json", ".jsonl", 
 # preview_sqlite_tables) — so directory import ignores them while the
 # server-disk file browser still lists them.
 SQLITE_IMPORT_EXTENSIONS = {".db", ".sqlite", ".sqlite3", ".db-wal"}
+# Excel workbooks route the same way SQLite files do — which sheets to
+# import is a per-file choice (see preview_xlsx_sheets), so directory
+# import ignores them too. .xlsm is the same zip container with macros the
+# reader never executes; legacy binary .xls is out of scope (xlsxread.py).
+XLSX_IMPORT_EXTENSIONS = {".xlsx", ".xlsm"}
 # scan_import_directory stops walking once matched+excluded together hit
 # this many entries — same "cap and say so" reasoning as
 # SEARCH_ALL_COUNT_CAP, guarding against an analyst accidentally pointing
@@ -2050,6 +2056,133 @@ class Store:
         rec["rows_per_sec"] = int(total / elapsed) if elapsed > 0 else 0
         return rec
 
+    def preview_xlsx_sheets(self, path: str) -> dict:
+        """Read-only look at every data sheet in an Excel workbook, in the
+        exact shape preview_sqlite_tables returns ({"tables": [...]}) so
+        the import UI's picker renders both from one code path — a sheet
+        is to a workbook what a table is to a SQLite file: which ones to
+        import is a real per-file choice. likely_timestamp_columns is
+        always empty here because there is nothing to choose: date-styled
+        cells convert to ISO text unconditionally (the day-serial Excel
+        stores means nothing in a filter or an export — see xlsxread)."""
+        sheets = xlsxread.workbook_sheets(path)
+        return {"tables": [{
+            "name": sh["name"],
+            "row_count": sh["row_count"],
+            "columns": [{"name": c, "type": "TEXT"} for c in sh["columns"]],
+            "likely_timestamp_columns": [],
+        } for sh in sheets]}
+
+    def ingest_xlsx_sheet(
+        self,
+        path: str,
+        sheet_name: str,
+        name: str | None = None,
+        build_fts: bool = True,
+        progress=None,
+        cancel=None,
+    ) -> dict:
+        """Imports one sheet of an Excel workbook as a new source — the
+        sheet-shaped sibling of ingest_sqlite_table, on purpose: one
+        spooled file, N picked units, the same TEXT-column and
+        batched-commit conventions (self.lock held per BATCH-sized chunk,
+        never for the whole sheet), cancel drops the partial source.
+
+        The header is the sheet's first *non-empty* row (hand-made
+        workbooks put titles and blank rows above it); the table is sized
+        to the wider of that header and the sheet's declared width, so
+        data extending past the named headers lands in col_N columns
+        instead of being cut. Rows *shorter* than the header are the
+        normal Excel shape (trailing empties simply aren't stored) and
+        pad silently; only rows wider than the table count as ragged.
+        Date-styled cells arrive as ISO text rather than the raw
+        day-serial — an unconditional conversion, called out in the sheet
+        picker, not an analyst toggle like SQLite's WebKit-epoch chips,
+        because the serial has no readable meaning at all. The workbook
+        is opened read-only and never written."""
+        name = name or f"{os.path.splitext(os.path.basename(path))[0]}.{sheet_name}"
+        file_hash = self._quick_hash(path)
+        rows_hint, width_hint, rows_iter = xlsxread.sheet_reader(path, sheet_name)
+        try:
+            header = next((r for r in rows_iter if any(c.strip() for c in r)), None)
+            if header is None:
+                raise ValueError(f"Sheet {sheet_name!r} has no rows")
+            width = max(len(header), width_hint)
+            cols = sanitize_columns([c.strip() for c in header] + [""] * (width - len(header)))
+            ncols = len(cols)
+            total_rows = max(rows_hint - 1, 0)
+
+            with self.lock, self.db:
+                cur = self.db.execute(
+                    "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at)"
+                    " VALUES (?,?,?,?,?,?)",
+                    (name, os.path.abspath(path), "", "[]", file_hash, time.strftime("%Y-%m-%dT%H:%M:%S")),
+                )
+                source_id = cur.lastrowid
+                self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
+                dest_table = f"src_{source_id}"
+                coldefs = ", ".join(f"{q(c)} TEXT" for c in cols)
+                self.db.execute(f"CREATE TABLE {q(dest_table)} (rid INTEGER PRIMARY KEY, {coldefs})")
+                self.db.execute("UPDATE sources SET table_name=? WHERE id=?", (dest_table, source_id))
+
+            placeholders = ",".join("?" * ncols)
+            insert = f"INSERT INTO {q(dest_table)} ({','.join(q(c) for c in cols)}) VALUES ({placeholders})"
+
+            sample: list[list[str]] = []
+            batch: list[tuple] = []
+            total = 0
+            ragged = 0
+            t0 = time.time()
+            error: Exception | None = None
+            with self._ingest_synchronous_off():
+                try:
+                    for raw in rows_iter:
+                        if len(raw) != ncols:
+                            if len(raw) > ncols:
+                                ragged += 1
+                            raw = (raw + [""] * ncols)[:ncols]
+                        batch.append(tuple(raw))
+                        if len(sample) < SAMPLE_ROWS:
+                            sample.append(raw)
+                        if len(batch) >= BATCH:
+                            if cancel is not None and cancel():
+                                raise IngestCancelled(f"Import of {name} cancelled")
+                            total = self._commit_ingest_batch(insert, batch, source_id, total)
+                            batch.clear()
+                            if progress:
+                                progress(total, total, total_rows)
+                    if batch:
+                        total = self._commit_ingest_batch(insert, batch, source_id, total)
+                        batch.clear()
+                    if progress:
+                        progress(total, total, total_rows)
+                except IngestCancelled:
+                    # Same cancel-discards-the-partial contract as ingest_csv.
+                    self.drop_source(source_id)
+                    raise
+                except Exception as e:
+                    error = e
+        finally:
+            rows_iter.close()
+
+        types = [infer_type([r[i] for r in sample]) for i in range(ncols)] if sample else ["text"] * ncols
+        colmeta = [{"name": c, "type": t} for c, t in zip(cols, types)]
+        with self.lock, self.db:
+            self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
+
+        if error is not None:
+            raise error
+
+        if build_fts and total:
+            self._ensure_fts_building(source_id)
+
+        elapsed = time.time() - t0
+        rec = self.get_source(source_id)
+        rec["elapsed_sec"] = round(elapsed, 2)
+        rec["rows_per_sec"] = int(total / elapsed) if elapsed > 0 else 0
+        rec["ragged_rows"] = ragged
+        return rec
+
     @staticmethod
     def _json_flatten_depth(flatten_mode: str, flatten_depth: int) -> int | None:
         if flatten_mode == "full":
@@ -2461,7 +2594,7 @@ class Store:
         system because it wants exactly what this one provides — a progress
         bar over a multi-million-row pass, per-BATCH cancellation, the jobs
         panel, and close()'s cancel-and-join."""
-        if kind not in ("csv", "json", "sqlite", "derive"):
+        if kind not in ("csv", "json", "sqlite", "xlsx", "derive"):
             raise ValueError(f"Unknown ingest kind: {kind}")
         try:
             size = os.path.getsize(path)
@@ -2480,7 +2613,7 @@ class Store:
                 "units_total": size if kind == "csv" else ((options or {}).get("units_total") or 0),
                 "unit": "bytes" if kind == "csv" else ("records" if kind == "json" else "rows"),
                 "tables_done": 0,
-                "tables_total": len((options or {}).get("tables") or []) if kind == "sqlite" else 0,
+                "tables_total": len((options or {}).get("tables") or []) if kind in ("sqlite", "xlsx") else 0,
                 "current_table": None,
                 "source_ids": [],
                 "result": None,
@@ -2557,7 +2690,7 @@ class Store:
                     build_fts=opts.get("build_fts", True),
                     progress=progress, cancel=cancel,
                 )]
-            else:  # sqlite: one job, N tables out of the one spooled file
+            else:  # sqlite/xlsx: one job, N tables (sheets) out of the one spooled file
                 results = []
                 for i, t in enumerate(opts.get("tables") or []):
                     if job["cancelled"]:
@@ -2565,12 +2698,19 @@ class Store:
                     with self._ingest_jobs_lock:
                         job["current_table"] = t["table"]
                         job["tables_done"] = i
-                    results.append(self.ingest_sqlite_table(
-                        job["path"], t["table"], name=t.get("name"),
-                        build_fts=opts.get("build_fts", True),
-                        timestamp_columns=t.get("timestamp_columns"),
-                        progress=progress, cancel=cancel,
-                    ))
+                    if job["kind"] == "sqlite":
+                        results.append(self.ingest_sqlite_table(
+                            job["path"], t["table"], name=t.get("name"),
+                            build_fts=opts.get("build_fts", True),
+                            timestamp_columns=t.get("timestamp_columns"),
+                            progress=progress, cancel=cancel,
+                        ))
+                    else:
+                        results.append(self.ingest_xlsx_sheet(
+                            job["path"], t["table"], name=t.get("name"),
+                            build_fts=opts.get("build_fts", True),
+                            progress=progress, cancel=cancel,
+                        ))
                     with self._ingest_jobs_lock:
                         job["tables_done"] = i + 1
             with self._ingest_jobs_lock:

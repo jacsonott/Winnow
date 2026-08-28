@@ -392,6 +392,11 @@ export const RECOGNIZED_IMPORT_EXTENSIONS = ['.csv', '.tsv', '.txt', '.psv', '.j
    step by the unified import queue, and recognized by wireFileDrop without
    a second hand-typed copy. */
 export const SQLITE_IMPORT_EXTENSIONS = ['.db', '.sqlite', '.sqlite3', '.db-wal'];
+/* Excel workbooks route the same way — which sheets to import is a
+   per-file choice, so the queue sends these through a picker step too.
+   .xlsm is the same zip container (macros are never executed); legacy
+   binary .xls is out of scope (see xlsxread.py). */
+export const XLSX_IMPORT_EXTENSIONS = ['.xlsx', '.xlsm'];
 
 export function extOf(filename) {
   const i = filename.lastIndexOf('.');
@@ -400,6 +405,7 @@ export function extOf(filename) {
 
 export function importKindFor(filename) {
   if (SQLITE_IMPORT_EXTENSIONS.includes(extOf(filename))) return 'sqlite';
+  if (XLSX_IMPORT_EXTENSIONS.includes(extOf(filename))) return 'xlsx';
   const ext = extOf(filename).slice(1); // drop the leading '.' — json/jsonl/ndjson below are bare
   return ext === 'json' || ext === 'jsonl' || ext === 'ndjson' ? 'json' : 'csv';
 }
