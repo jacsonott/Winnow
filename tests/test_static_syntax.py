@@ -27,7 +27,7 @@ import pytest
 
 pytest.importorskip("esprima", reason="pip install -r requirements-dev.txt")
 
-from jsscope import BROWSER_GLOBALS, free_identifiers, parse  # noqa: E402
+from jsscope import BROWSER_GLOBALS, duplicate_top_level_bindings, free_identifiers, parse  # noqa: E402
 
 JS_DIR = Path(__file__).resolve().parent.parent / "static" / "js"
 MODULES = sorted(JS_DIR.glob("*.js"))
@@ -62,6 +62,16 @@ def test_module_imports_everything_it_uses(path):
         f"{path.name} uses {unresolved} without importing them "
         f"(or they belong in jsscope.BROWSER_GLOBALS)"
     )
+
+
+@pytest.mark.parametrize("path", MODULES, ids=lambda p: p.name)
+def test_module_declares_each_top_level_name_once(path):
+    """A duplicate import is a SyntaxError the browser applies to the whole
+    module — a blank app — but it parses, and every name still resolves, so
+    the import check above sails past it. Caught in review once; pinned
+    here so the next one fails a test instead of a page load."""
+    dupes = duplicate_top_level_bindings(path.read_text(encoding="utf-8"))
+    assert not dupes, f"{path.name} declares these more than once at top level: {dupes}"
 
 
 def test_index_html_references_only_files_that_exist():

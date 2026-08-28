@@ -26,6 +26,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import plugin_api
+import updater
+import version
 import workspace as WS
 from store import (SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, OpCancelled, Store, describe_case_lock,
                    probe_case_lock, sweep_orphan_views)
@@ -389,6 +391,61 @@ def _trigger_shutdown() -> None:
     import signal
     import threading
     threading.Timer(0.3, lambda: signal.raise_signal(signal.SIGINT)).start()
+
+
+class UpdateApply(BaseModel):
+    """Applying is a separate, explicit POST from checking — a check must
+    never be able to install anything as a side effect."""
+    confirm: bool = False
+
+
+@app.get("/api/version")
+def api_version():
+    """What this install is. Cheap and unauthenticated on purpose: an
+    analyst writing up a case needs to be able to state the tool version
+    without going digging."""
+    return {"version": version.VERSION}
+
+
+@app.post("/api/updates/check")
+def api_updates_check():
+    """Ask GitHub whether there's a newer release. ONLY ever runs because
+    the analyst clicked Check — Winnow has no background poll and nothing
+    at startup. The box may be airgapped, and a forensic tool that phones
+    home unasked is its own problem; the error path says how to update
+    offline instead."""
+    try:
+        return updater.check_for_update(current=version.VERSION)
+    except updater.UpdateError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/updates/apply")
+def api_updates_apply(body: UpdateApply):
+    """Download and install the latest release, backing up first.
+
+    The server keeps running the OLD code afterwards — Python already
+    imported it — so the response tells the UI to prompt for a restart
+    rather than pretending the new version is live."""
+    if not body.confirm:
+        raise HTTPException(400, "Refusing to update without confirm=true")
+    try:
+        info = updater.check_for_update(current=version.VERSION)
+        if not info["available"]:
+            raise HTTPException(400, f"Already on the latest release ({info['latest']})")
+        archive = updater.download(info["url"], Path(tempfile.gettempdir()))
+        res = updater.apply_update(archive, updater.HERE)
+        return {**res, "restart_required": True}
+    except updater.UpdateError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/updates/rollback")
+def api_updates_rollback():
+    try:
+        return {**updater.rollback(updater.HERE), "restart_required": True}
+    except updater.UpdateError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.post("/api/shutdown")

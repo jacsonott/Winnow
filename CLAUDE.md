@@ -27,6 +27,21 @@ structparse.py     JSON/XML field-extraction operations, registered into
                     flatten picker. Stdlib only; imports timeparse and nothing
                     else from the app. store.py imports it for the
                     registration side effect.
+version.py         The one place Winnow's version number lives. Nothing in
+                    it but the string, because update.py reads it out of a
+                    downloaded archive it must not execute. Bump it in the
+                    commit you tag.
+updater.py         Updating in place without losing analyst state, which all
+                    lives INSIDE the install dir (workspace/, plugins/,
+                    sessions/, often cases/). One rule: an update replaces
+                    the files Winnow ships and touches nothing else —
+                    updater.PROTECTED mirrors .gitignore's user-state
+                    section, so add to both together. Backs up before
+                    applying; rollback() undoes. Never checks on its own.
+update.py          The CLI front door to updater.py — --check, --dry-run,
+                    --from (the airgap path), --download-only, --rollback.
+                    The one that still works when a bad update has broken
+                    the UI, since it needs no running server.
 xlsxread.py        Excel .xlsx/.xlsm reading for import — a thin typed-cell→
                     TEXT layer over openpyxl's read-only mode (openpyxl is
                     already the XLSX export's writer, so this adds no
