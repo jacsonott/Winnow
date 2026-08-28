@@ -40,6 +40,7 @@ try:  # POSIX only — see sweep_orphan_views for why Windows needs no substitut
 except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
 
+import enrich  # noqa: F401 — registers the cross-table lookup op into timeparse.OPERATIONS
 import structparse  # noqa: F401 — registers the JSON/XML extraction ops into timeparse.OPERATIONS
 import timeparse
 
@@ -3319,6 +3320,8 @@ class Store:
         _check_input(input_column, "input column")
         if op["two_input"]:
             _check_input(params["other_column"], "second column")
+        if op.get("check"):
+            op["check"](self, params)  # ops that reference the case (lookup) validate NOW, not mid-backfill
 
         drv = self._derived_table(source_id)
         with self.lock, self.db:
@@ -3615,6 +3618,10 @@ class Store:
             plan = {"d": d, "op": op, "state": {}, "a": slot(d["input_column"])}
             if op["two_input"]:
                 plan["b"] = slot(d["params"]["other_column"])
+            if op.get("prepare"):
+                # e.g. lookup loading its whole mapping once — per
+                # definition, before the scan, so the scan stays dict hits
+                op["prepare"](self, d["params"], plan["state"])
             plans.append(plan)
         cols = list(slots.keys())
         # slot() keys case-insensitively but _col_ref needs the real name.
@@ -3768,6 +3775,12 @@ class Store:
     def _preview_rows(self, values: list, op_id: str, params: dict) -> list[dict]:
         op = timeparse.OPERATIONS[op_id]
         state: dict = {}
+        # The same hooks the real backfill runs: a lookup previewed without
+        # its mapping loaded would show every value as a miss.
+        if op.get("check"):
+            op["check"](self, params)
+        if op.get("prepare"):
+            op["prepare"](self, params, state)
         return [{"input": v, "output": op["parse"](v, params, state)} for v in values]
 
     def preview_derived(self, source_id: int, column: str, op_id: str,
@@ -3801,6 +3814,8 @@ class Store:
         samples = self._sample_column(src, column)
         preview = self._preview_rows(samples[:limit], op_id, params)
         state: dict = {}
+        if op.get("prepare"):
+            op["prepare"](self, params, state)
         failures = sum(1 for v in samples if op["parse"](v, params, state) is None)
         return {"preview": preview, "sampled": len(samples), "failures": failures}
 
