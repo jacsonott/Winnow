@@ -1,4 +1,4 @@
-# Ingest: CSV, JSON, SQLite, folders, drops, jobs
+# Ingest: CSV, JSON, SQLite, Excel, folders, drops, jobs
 
 Every path that turns a file on disk into a `src_<id>` table, and the
 background-job machinery all of them run through. Invariant #1 (source
@@ -22,6 +22,26 @@ see [docs/notes/README.md](README.md) for the whole set.
   values look like one, via `_webkit_to_iso`) — never automatically, and
   never in place in the source file. A BLOB value becomes `<N bytes>`
   rather than attempting to stringify binary data.
+- Excel ingest (`ingest_xlsx_sheet`/`preview_xlsx_sheets`, xlsxread.py) is
+  the sheet-shaped sibling of the SQLite path — one workbook, N picked
+  sheets, one background job, the same `{tables: [{table, name?}]}` option
+  shape and the same frontend picker (`openUnitPicker` serves both). It
+  reads through **openpyxl's read-only mode** (already a runtime dependency
+  — the XLSX *export* writes through it), not a hand-rolled parser; what
+  xlsxread.py owns is the typed-cell→TEXT conversion. Three traps worth
+  knowing: date-styled cells convert to ISO text *unconditionally* (no
+  per-column opt-in like SQLite's WebKit chips — a day-serial means
+  nothing in any downstream surface), the header is the first *non-empty*
+  row (hand-made workbooks put titles above it) with the table sized to
+  max(header, declared width) so extra data lands in `col_N` instead of
+  being cut, and a formula cell in a workbook that was never opened in
+  Excel imports as "" (data_only=True reads the cached result, and a
+  file written by a tool has no cache). Rows shorter than the header are
+  normal Excel storage (trailing empties aren't stored) and pad silently;
+  only wider rows count as ragged. `.xlsm` imports (same container,
+  macros never executed); legacy binary `.xls` is deliberately out of
+  scope. Like SQLite files, workbooks are excluded from directory import
+  — which sheets to pull is a per-file choice.
 - JSON/JSONL ingest (`ingest_json`/`preview_json_file`/`_flatten_json`) has
   no fixed header row the way CSV's first line is one, so it can't type
   columns from row 1 alone — it makes **two full passes** over the file:

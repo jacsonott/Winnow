@@ -27,7 +27,7 @@ from pydantic import BaseModel
 
 import plugin_api
 import workspace as WS
-from store import (SQLITE_IMPORT_EXTENSIONS, OpCancelled, Store, describe_case_lock,
+from store import (SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, OpCancelled, Store, describe_case_lock,
                    probe_case_lock, sweep_orphan_views)
 
 HERE = Path(__file__).parent
@@ -811,6 +811,25 @@ async def api_ingest_sqlite_upload(
             os.remove(tmp)
 
 
+@app.post("/api/ingest/xlsx/preview")
+async def api_ingest_xlsx_preview(file: UploadFile = File(...)):
+    # Same shape as the SQLite preview, for the same reason: a zip's
+    # central directory lives at the END of the file, so a workbook can't
+    # be sniffed from a truncated prefix — spool the whole file, list its
+    # sheets, remove the spool.
+    suffix = Path(file.filename or "upload.xlsx").suffix or ".xlsx"
+    fd, tmp = tempfile.mkstemp(suffix=suffix)
+    try:
+        with os.fdopen(fd, "wb") as out:
+            while chunk := await file.read(4 << 20):
+                out.write(chunk)
+        return store().preview_xlsx_sheets(tmp)
+    except Exception as e:
+        raise HTTPException(400, str(e))
+    finally:
+        os.remove(tmp)
+
+
 @app.post("/api/ingest/json/preview")
 async def api_ingest_json_preview(
     file: UploadFile = File(...),
@@ -865,6 +884,8 @@ def _ingest_kind_for_path(path: str) -> str:
     suffix = Path(path).suffix.lower()
     if suffix in SQLITE_IMPORT_EXTENSIONS:
         return "sqlite"
+    if suffix in XLSX_IMPORT_EXTENSIONS:
+        return "xlsx"
     return "json" if suffix in _JSON_INGEST_EXTS else "csv"
 
 
@@ -899,6 +920,8 @@ def api_ingest_preview_path(body: PreviewPath):
         if kind == "json":
             return store().preview_json_file(body.path, flatten_mode=body.flatten_mode,
                                              flatten_depth=body.flatten_depth)
+        if kind == "xlsx":
+            return store().preview_xlsx_sheets(body.path)
         return store().preview_sqlite_tables(body.path)
     except Exception as e:
         raise HTTPException(400, str(e))
@@ -946,6 +969,8 @@ def api_ingest_job_path(body: IngestJobPath):
     kind = body.kind or _ingest_kind_for_path(body.path)
     if kind == "sqlite" and not body.tables:
         raise HTTPException(400, "A sqlite import needs its tables picked first")
+    if kind == "xlsx" and not body.tables:
+        raise HTTPException(400, "An Excel import needs its sheets picked first")
     try:
         return store().start_ingest_job(
             kind, body.path, name=body.name,

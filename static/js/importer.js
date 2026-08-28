@@ -5,7 +5,7 @@ SQLite table picker, folder import, and OS drag-and-drop.
 import { $, api, debounce, el, post, toast } from './core.js';
 import { openFolderBrowser } from './home.js';
 import { startJobsPoll, uploadWithProgress } from './jobs.js';
-import { RECOGNIZED_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, extOf, importKindFor, openImportPreview, openJsonImportPreview } from './merge.js';
+import { RECOGNIZED_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, extOf, importKindFor, openImportPreview, openJsonImportPreview } from './merge.js';
 import { renderPluginTabs } from './plugins.js';
 import { fmtBytes } from './tables.js';
 import { loadSources } from './sources.js';
@@ -44,7 +44,7 @@ export function globMatches(pattern, name) {
 export function pluginFormatFor(filename) {
   const base = filename.split(/[\\/]/).pop();
   const ext = extOf(base);
-  if (RECOGNIZED_IMPORT_EXTENSIONS.includes(ext) || SQLITE_IMPORT_EXTENSIONS.includes(ext)) return null;
+  if (RECOGNIZED_IMPORT_EXTENSIONS.includes(ext) || SQLITE_IMPORT_EXTENSIONS.includes(ext) || XLSX_IMPORT_EXTENSIONS.includes(ext)) return null;
   return S.pluginFormats.find((f) =>
     (ext && (f.extensions || []).includes(ext))
     || (f.filename_patterns || []).some((p) => globMatches(p, base))) || null;
@@ -105,7 +105,7 @@ export function queueItem(transport, name, fmt = pluginFormatFor(name)) {
   }
   const kind = importKindFor(name);
   return kind === 'json' ? { ...transport, name, kind, flatten_mode: 'none', flatten_depth: 1, configured: false }
-    : kind === 'sqlite' ? { ...transport, name, kind, tables: null, configured: false }
+    : kind === 'sqlite' || kind === 'xlsx' ? { ...transport, name, kind, tables: null, configured: false }
     : { ...transport, name, kind, delimiter: null, has_header: true, column_types: null, configured: false };
 }
 
@@ -166,7 +166,8 @@ export function queueFilesForFormat(fmt, files) {
 export function openImportModal() {
   modal('Import', (b) => {
     b.append(el('p', null,
-      'Queue CSV/TSV, JSON/JSONL, or SQLite files (a SQLite file needs its tables picked first), '
+      'Queue CSV/TSV, JSON/JSONL, Excel, or SQLite files (a SQLite file needs its tables picked '
+      + 'first, an Excel workbook its sheets), '
       + 'then import them all — imports run in the background, so you can keep working while the '
       + 'corner panel tracks progress.'));
 
@@ -180,15 +181,17 @@ export function openImportModal() {
         const kindLabel = item.kind === 'plugin'
           ? (pluginFormatById(item.format_id)?.label || item.format_id)
           : item.kind;
-        const stateLabel = item.kind === 'sqlite'
-          ? (item.configured ? `${item.tables.length} table${item.tables.length === 1 ? '' : 's'}` : 'pick tables') + ' · sqlite'
+        const unitNoun = item.kind === 'xlsx' ? 'sheet' : 'table';
+        const stateLabel = item.kind === 'sqlite' || item.kind === 'xlsx'
+          ? (item.configured ? `${item.tables.length} ${unitNoun}${item.tables.length === 1 ? '' : 's'}` : `pick ${unitNoun}s`) + ` · ${kindLabel}`
           : (item.configured ? 'configured' : 'default settings') + ` · ${kindLabel}`;
         row.append(
           el('span', 'session-name', item.name),
           el('span', 'count', (item.path ? 'by path · ' : '') + stateLabel),
         );
         const cfg = el('button', 'btn ghost',
-          item.kind === 'sqlite' ? 'Pick tables…' : item.kind === 'plugin' ? 'Options' : 'Preview & configure');
+          item.kind === 'sqlite' ? 'Pick tables…' : item.kind === 'xlsx' ? 'Pick sheets…'
+            : item.kind === 'plugin' ? 'Options' : 'Preview & configure');
         if (item.kind === 'plugin' && !(pluginFormatById(item.format_id)?.options || []).length) {
           // Nothing to configure — the format declared no options.
           cfg.disabled = true;
@@ -207,6 +210,7 @@ export function openImportModal() {
           }
           const openPreview = item.kind === 'json' ? openJsonImportPreview
             : item.kind === 'sqlite' ? openSqliteTablePicker
+            : item.kind === 'xlsx' ? openXlsxSheetPicker
             : openImportPreview;
           openPreview(item, {
             initial: item,
@@ -245,7 +249,7 @@ export function openImportModal() {
     addLabel.title = 'A regular browser file picker — the file is copied up to the server before importing';
     const addInput = el('input');
     addInput.type = 'file';
-    addInput.accept = [...RECOGNIZED_IMPORT_EXTENSIONS, ...SQLITE_IMPORT_EXTENSIONS, ...pluginExtensions()].join(',');
+    addInput.accept = [...RECOGNIZED_IMPORT_EXTENSIONS, ...SQLITE_IMPORT_EXTENSIONS, ...XLSX_IMPORT_EXTENSIONS, ...pluginExtensions()].join(',');
     addInput.multiple = true;
     addInput.hidden = true;
     addInput.onchange = () => {
@@ -260,9 +264,9 @@ export function openImportModal() {
     const importAll = el('button', 'btn', 'Import all queued');
     importAll.onclick = () => {
       if (!S.importQueue.length) return;
-      const unpicked = S.importQueue.find((i) => i.kind === 'sqlite' && !i.configured);
+      const unpicked = S.importQueue.find((i) => (i.kind === 'sqlite' || i.kind === 'xlsx') && !i.configured);
       if (unpicked) {
-        toast(`Pick which tables to import from ${unpicked.name} first`, 4500);
+        toast(`Pick which ${unpicked.kind === 'xlsx' ? 'sheets' : 'tables'} to import from ${unpicked.name} first`, 4500);
         return;
       }
       const queue = S.importQueue.slice();
@@ -334,7 +338,7 @@ export function openImportModal() {
           if (item.kind === 'json') {
             fd.append('flatten_mode', item.flatten_mode || 'none');
             fd.append('flatten_depth', String(item.flatten_depth || 1));
-          } else if (item.kind === 'sqlite') {
+          } else if (item.kind === 'sqlite' || item.kind === 'xlsx') {
             fd.append('tables', JSON.stringify(item.tables));
           } else {
             if (item.delimiter) fd.append('delimiter', item.delimiter);
@@ -368,16 +372,47 @@ export function openImportModal() {
    integer. Confirm hands back {tables: [{table, timestamp_columns}]} for
    the queue item; the actual import happens later as one background job
    reading every picked table out of one uploaded spool. */
-export function openSqliteTablePicker(src, { initial, onConfirm, onCancel } = {}) {
+export function openSqliteTablePicker(src, hooks = {}) {
+  openUnitPicker(src, hooks, {
+    title: 'Pick SQLite tables',
+    intro: 'Choose which tables to import from this file — each becomes its own source.',
+    empty: 'No tables in this file.',
+    confirm: 'Use selected tables',
+    checkFirst: 'Check at least one table to import',
+    previewKind: 'sqlite',
+    uploadUrl: '/api/ingest/sqlite/preview',
+  });
+}
+
+/* The same picker over an Excel workbook's sheets — a sheet is to a
+   workbook what a table is to a SQLite file, so the two share one
+   implementation (openUnitPicker) and one queue-item shape ({tables}).
+   No timestamp chips here: date-styled cells convert to ISO text
+   unconditionally (the day-serial Excel stores means nothing in a filter
+   or an export — see xlsxread.py), which the intro line states instead
+   of asking. */
+export function openXlsxSheetPicker(src, hooks = {}) {
+  openUnitPicker(src, hooks, {
+    title: 'Pick Excel sheets',
+    intro: 'Choose which sheets to import from this workbook — each becomes its own source. '
+      + 'Date-formatted cells are converted to readable timestamps on import.',
+    empty: 'No data sheets in this workbook.',
+    confirm: 'Use selected sheets',
+    checkFirst: 'Check at least one sheet to import',
+    previewKind: 'xlsx',
+    uploadUrl: '/api/ingest/xlsx/preview',
+  });
+}
+
+function openUnitPicker(src, { initial, onConfirm, onCancel } = {}, cfg) {
   // src is a queue item's transport ({file} or {path, name}) — same contract
   // as openImportPreview/openJsonImportPreview.
   let tables = null; // [{name, row_count, columns, likely_timestamp_columns}]
   const selected = new Map(); // table name -> Set of timestamp columns to convert
   const included = new Set(); // table names checked for import
 
-  modal('Pick SQLite tables', (b) => {
-    b.append(el('p', null,
-      'Choose which tables to import from this file — each becomes its own source.'));
+  modal(cfg.title, (b) => {
+    b.append(el('p', null, cfg.intro));
 
     const pickRow = el('div', 'row-actions');
     const pickStatus = el('span', 'count', '');
@@ -388,7 +423,7 @@ export function openSqliteTablePicker(src, { initial, onConfirm, onCancel } = {}
     b.append(tableList);
 
     const actions = el('div', 'row-actions');
-    const importBtn = el('button', 'btn', 'Use selected tables');
+    const importBtn = el('button', 'btn', cfg.confirm);
     const cancel = el('button', 'btn ghost', 'Cancel');
     cancel.onclick = () => { if (onCancel) onCancel(); else $('modal').hidden = true; };
     actions.append(importBtn, cancel);
@@ -397,7 +432,7 @@ export function openSqliteTablePicker(src, { initial, onConfirm, onCancel } = {}
     function renderTables() {
       tableList.replaceChildren();
       if (!tables) return;
-      if (!tables.length) { tableList.append(el('div', 'note-status', 'No tables in this file.')); return; }
+      if (!tables.length) { tableList.append(el('div', 'note-status', cfg.empty)); return; }
       for (const t of tables) {
         const row = el('div', 'session-row');
         row.style.flexDirection = 'column';
@@ -442,11 +477,11 @@ export function openSqliteTablePicker(src, { initial, onConfirm, onCancel } = {}
         // A path item previews the tables in place; a File uploads the .db
         // once to enumerate them. Which is a fact, not a fingerprint guess.
         const res = f.path
-          ? await post('/api/ingest/preview/path', { path: f.path, kind: 'sqlite' })
+          ? await post('/api/ingest/preview/path', { path: f.path, kind: cfg.previewKind })
           : await (async () => {
               const fd = new FormData();
               fd.append('file', f.file);
-              return api('/api/ingest/sqlite/preview', { method: 'POST', body: fd });
+              return api(cfg.uploadUrl, { method: 'POST', body: fd });
             })();
         tables = res.tables;
       } catch (e) {
@@ -476,7 +511,7 @@ export function openSqliteTablePicker(src, { initial, onConfirm, onCancel } = {}
 
     importBtn.onclick = () => {
       const targets = [...included];
-      if (!targets.length) { toast('Check at least one table to import'); return; }
+      if (!targets.length) { toast(cfg.checkFirst); return; }
       onConfirm({
         tables: targets.map((tableName) => ({
           table: tableName,
@@ -551,6 +586,7 @@ export function wireFileDrop() {
 export function recognizedImportFile(name) {
   return RECOGNIZED_IMPORT_EXTENSIONS.includes(extOf(name))
     || SQLITE_IMPORT_EXTENSIONS.includes(extOf(name))
+    || XLSX_IMPORT_EXTENSIONS.includes(extOf(name))
     || !!pluginFormatFor(name);
 }
 

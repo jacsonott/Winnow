@@ -27,6 +27,13 @@ structparse.py     JSON/XML field-extraction operations, registered into
                     flatten picker. Stdlib only; imports timeparse and nothing
                     else from the app. store.py imports it for the
                     registration side effect.
+xlsxread.py        Excel .xlsx/.xlsm reading for import — a thin typed-cell→
+                    TEXT layer over openpyxl's read-only mode (openpyxl is
+                    already the XLSX export's writer, so this adds no
+                    dependency). Owns the analyst-visible conversions:
+                    date-styled cells to ISO text, TRUE/FALSE booleans,
+                    numbers without float noise. Legacy .xls is out of
+                    scope. See docs/notes/ingest.md.
 header_defaults.py Shipped header-set nicknames for common EZ Tools/KAPE
                     output shapes (EvtxECmd, MFTECmd, Amcache, ...) — data
                     only, seeded once into workspace by
