@@ -317,7 +317,7 @@ export function openNewCaseModal(state = {}) {
     groupRow.append(groupInput, groupOptionsDatalist('home-new-case-groups'));
     b.append(el('label', null, 'Group'), groupRow);
 
-    let chosenDir = state.chosenDir || 'cases';
+    let chosenDir = state.chosenDir || S.casesDir || 'cases';
     const pathInput = fieldInput(state.path || `${chosenDir}/${slugify(state.name || '')}.db`);
     pathInput.style.fontFamily = 'var(--mono)';
     let pathTouched = state.pathTouched || false;
@@ -403,6 +403,41 @@ export function openNewCaseModal(state = {}) {
     actions.append(create, cancel);
     b.append(actions);
   });
+}
+
+/* First run of this Winnow instance (no cases_dir configured, no cases
+   yet): ask where case files should live instead of silently defaulting
+   to ./cases. Asked once — either answer configures the instance. */
+export async function maybeOfferStorageDir() {
+  let prefs;
+  try {
+    prefs = await api('/api/prefs');
+  } catch { return; }
+  S.casesDir = prefs.cases_dir || null;
+  if (!prefs.first_run) return;
+  const pick = await confirmDialog(
+    'First run — where should Winnow keep its case files? '
+    + 'The default is a "cases" folder next to the server. You can pick any '
+    + 'folder on this machine instead.',
+    { okLabel: 'Choose a folder…', cancelLabel: 'Use the default' });
+  if (pick) {
+    openFolderBrowser(undefined, async (dir) => {
+      try {
+        const res = await post('/api/prefs', { cases_dir: dir });
+        S.casesDir = res.cases_dir;
+        toast(`Case files will be created in ${res.cases_dir}`, 6000);
+      } catch (e) {
+        toast('Could not set the folder: ' + e.message, 6000);
+      }
+      $('modal').hidden = true;
+    }, () => { $('modal').hidden = true; });
+  } else {
+    // "Use the default" is still an answer — record it so we never nag.
+    try {
+      const res = await post('/api/prefs', { cases_dir: 'cases' });
+      S.casesDir = res.cases_dir;
+    } catch { /* next launch asks again — fine */ }
+  }
 }
 
 export async function openExistingCasePrompt() {
