@@ -139,7 +139,16 @@ def check_for_update(timeout: float = 10.0, current: str | None = None,
         rel = fetch(RELEASES_API, timeout)
     except UpdateError:
         raise
-    except Exception as e:  # noqa: BLE001 — every failure here is "couldn't ask"
+    except urllib.error.HTTPError as e:
+        # Reaching GitHub and being told "no releases" is a different thing
+        # from having no network, and telling an analyst to go find a
+        # sneakernet bundle that doesn't exist would send them in circles.
+        if e.code == 404:
+            raise UpdateError(
+                "No releases have been published for Winnow yet, so there is "
+                "nothing to update to.") from e
+        raise UpdateError(f"GitHub refused the update check ({e}).") from e
+    except Exception as e:  # noqa: BLE001 — anything else here is "couldn't ask"
         raise UpdateError(
             f"Could not reach GitHub to check for updates ({e}). "
             "If this machine has no network, download the release on one that "

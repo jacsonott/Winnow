@@ -231,6 +231,19 @@ def test_a_check_with_no_network_says_what_to_do_instead():
         updater.check_for_update(current="1.0.0", _fetch=boom)
 
 
+def test_no_releases_yet_is_not_reported_as_a_network_failure():
+    """Today's actual state of the repo: reachable, but nothing published.
+    Telling the analyst to go fetch a bundle offline would send them
+    looking for a file that doesn't exist."""
+    import urllib.error
+
+    def not_found(url, timeout):
+        raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+
+    with pytest.raises(UpdateError, match="No releases have been published"):
+        updater.check_for_update(current="1.0.0", _fetch=not_found)
+
+
 def test_backups_are_pruned_but_the_newest_survive(install, tmp_path):
     for i in range(updater.KEEP_BACKUPS + 2):
         files = dict(SHIPPED)
