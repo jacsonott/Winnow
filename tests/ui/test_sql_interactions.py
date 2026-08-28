@@ -80,7 +80,36 @@ def test_selection_parity_click_ctrl_shift_escape_copy(page):
     assert page.locator(".sql-row-sel").count() == 0
 
 
+def _wait_fetch_quiet(page, quiet_ms=600, timeout_s=20):
+    """Waits until the page has made no fetches at all for `quiet_ms`.
+
+    wait_for_load_state('networkidle') is useless here — the lifecycle
+    event already fired at page load, so mid-session it resolves
+    immediately. This counts real fetch() activity instead."""
+    import time as _time
+
+    deadline = _time.time() + timeout_s
+    while _time.time() < deadline:
+        page.wait_for_function("() => window.__inflightFetches === 0")
+        seen = page.evaluate("() => window.__totalFetches")
+        page.wait_for_timeout(quiet_ms)
+        if page.evaluate("(n) => window.__inflightFetches === 0 && window.__totalFetches === n", seen):
+            return
+    raise AssertionError("page fetch activity never went quiet")
+
+
 def test_result_toolbar_and_save_as_table(page):
+    # Count fetch activity so the cleanup below can wait for true quiet.
+    page.evaluate("""() => {
+      window.__inflightFetches = 0;
+      window.__totalFetches = 0;
+      const orig = window.fetch;
+      window.fetch = (...a) => {
+        window.__inflightFetches++;
+        window.__totalFetches++;
+        return orig(...a).finally(() => window.__inflightFetches--);
+      };
+    }""")
     _run(page, "SELECT rid, EventId FROM src_1 ORDER BY rid LIMIT 5")
     assert page.locator(".sql-result-bar .btn", has_text="CSV").count() == 1
     page.locator(".sql-result-bar .btn", has_text="Save as table").click()
@@ -90,9 +119,21 @@ def test_result_toolbar_and_save_as_table(page):
     page.wait_for_function("() => __winnow.S.sources.some((s) => s.name === 'saved-from-sql')")
     sid = page.evaluate("() => __winnow.S.sources.find((s) => s.name === 'saved-from-sql').id")
     assert page.evaluate("(id) => __winnow.S.sources.find((s) => s.id === id).row_count", sid) == 5
-    # cleanup: drop the created table so later tests see the fixture case
+    # Saving ends by OPENING the new table (layout, tags, view, first page,
+    # plus fire-and-forget follow-ups). Deleting it out from under those
+    # in-flight fetches 500s as an uncaught rejection the conftest teardown
+    # rightly fails the test for — so wait for true fetch quiet, hand the
+    # grid back to the fixture table, wait again, and only then drop the
+    # saved one, when nothing can still be asking for it.
+    _wait_fetch_quiet(page)
+    page.evaluate("() => __winnow.openSource(1)")
+    page.wait_for_function("() => __winnow.S.sourceId === 1")
+    _wait_fetch_quiet(page)
     page.evaluate("""(id) => fetch('/api/source/' + id, { method: 'DELETE',
       headers: { 'X-Timeline-Lite-Client': '1' } })""", sid)
+    # A deleted source's id can be reused — same stale-view guard as the
+    # Tables manager's own remove path.
+    page.evaluate("(id) => __winnow.S.viewCache.delete(id)", sid)
     page.evaluate("() => __winnow.loadSources()")
 
 
