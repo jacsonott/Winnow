@@ -515,6 +515,10 @@ html[data-style="studio"][data-theme="light"] {
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .group-header-arrow { color: var(--dim); flex: 0 0 auto; }
+/* Selectable on purpose: the value is the thing analysts copy out of a
+   header — pairs with the click guard in grid.js that skips the toggle
+   when a selection was just made. */
+.group-header-value { user-select: text; cursor: text; }
 .group-header-col { color: var(--dim); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; flex: 0 0 auto; }
 .group-header-value { color: var(--accent); font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
 .group-header-count { color: var(--dim); font-size: 11px; margin-left: 8px; flex: 0 0 auto; }
