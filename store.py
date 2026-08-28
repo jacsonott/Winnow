@@ -5208,7 +5208,7 @@ class Store:
         sid = handle["source_id"]
         with self._reader() as ro, self._dropped_view_is_expired():
             src = self._source_lite_on(ro, sid)
-            cols = [c["name"] for c in src["columns"]]
+            cols = self._export_columns(ro, src)
             sel = ", ".join(q(c) for c in cols)
 
             # _from_clause adds the derived-value sidecar join only when the
@@ -6276,6 +6276,30 @@ class Store:
             return self._export_virtual_root_csv_rows(handle, tagged_only)
         return self._export_view_csv_rows(view_id, handle, tagged_only)
 
+    def _export_columns(self, conn: sqlite3.Connection, src: dict) -> list[str]:
+        """The columns an export should emit: the analyst's saved layout —
+        their column ORDER, with hidden columns excluded — rather than raw
+        storage order. What lands in the CSV/XLSX is the table as they
+        arranged it on screen. Columns the layout has never seen (a derived
+        column added since the last save) append at the end; a layout that
+        somehow hides everything falls back to all columns, because an
+        empty export helps nobody."""
+        all_names = [c["name"] for c in src["columns"]]
+        # Read on the caller's pooled connection, NEVER via get_layout: the
+        # export paths run without touching Store.lock (invariant #4 — the
+        # concurrency suite fails the moment an export blocks on a writer).
+        try:
+            row = conn.execute("SELECT payload FROM layouts WHERE source_id=?", (src["id"],)).fetchone()
+            layout = json.loads(row["payload"]) if row else {}
+        except sqlite3.Error:
+            layout = {}
+        per_col = layout.get("columns") or {}
+        known = set(all_names)
+        order = [n for n in (layout.get("order") or []) if n in known]
+        ordered = order + [n for n in all_names if n not in set(order)]
+        visible = [n for n in ordered if not (per_col.get(n) or {}).get("hidden")]
+        return visible or all_names
+
     def _export_virtual_group_csv_rows(self, handle: dict, tagged_only: bool):
         member = handle["members"][0]
         sid = member["source_id"]
@@ -6331,7 +6355,7 @@ class Store:
         with self._reader() as ro, self._dropped_view_is_expired():
             src = self._source_lite_on(ro, sid)
             table = src["table_name"]
-            cols = [c["name"] for c in src["columns"]]
+            cols = self._export_columns(ro, src)
             sel = ", ".join(q(c) for c in cols)
 
             tagnames = {r["id"]: r["name"] for r in ro.execute("SELECT id, name FROM tag_defs")}
@@ -6395,7 +6419,7 @@ class Store:
         """
         with self._reader() as ro, self._dropped_view_is_expired():
             src = self._source_lite_on(ro, handle["source_id"])
-            cols = [c["name"] for c in src["columns"]]
+            cols = self._export_columns(ro, src)
             sel = ", ".join(q(c) for c in cols)
 
             tagnames = {r["id"]: r["name"] for r in ro.execute("SELECT id, name FROM tag_defs")}
@@ -6481,9 +6505,9 @@ class Store:
             if not src.get("tagged_row_count"):
                 continue
             source_id = src["id"]
-            cols = [c["name"] for c in src["columns"]]
-            sel = ", ".join(q(c) for c in cols)
             with self._reader() as ro, self._dropped_view_is_expired():
+                cols = self._export_columns(ro, src)
+                sel = ", ".join(q(c) for c in cols)
                 rids = [r[0] for r in ro.execute(
                     "SELECT DISTINCT rid FROM row_tags WHERE source_id=? ORDER BY rid", (source_id,)
                 )]
@@ -6845,17 +6869,38 @@ class Store:
             if has_drv:
                 frm += f" LEFT JOIN main.{q(self._derived_table(mid))} d ON d.rid = s.rid"
             sel = ", ".join(f"{self._col_ref(m, c, 's', 'd')} AS {q(c)}" for c in cols)
+            taken = {c.lower() for c in cols}
             branches.append(
-                f"SELECT {int(mid)} AS source_id, s.rid AS rid, {sel} FROM {frm}")
+                f"SELECT {int(mid)} AS source_id, s.rid AS rid, {sel}, "
+                f"{self._annotation_cols(mid, taken)} FROM {frm}")
         return " UNION ALL ".join(branches)
 
+    @staticmethod
+    def _annotation_cols(source_id: int, taken: set[str], alias: str = "s",
+                         sid_expr: str | None = None) -> str:
+        """The Tags and Note columns every pane view carries: tag NAMES
+        comma-joined, and the row's note — correlated subselects, so they
+        cost only for the rows a query actually emits (a LIMIT stays
+        cheap). Names step aside if the file genuinely has a Tags/Note
+        column — the file's own data always wins the plain name."""
+        sid = sid_expr if sid_expr is not None else str(int(source_id))
+        tags_name = "Tags" if "tags" not in taken else "Winnow Tags"
+        note_name = "Note" if "note" not in taken else "Winnow Note"
+        return (
+            f"(SELECT GROUP_CONCAT(t.name, ', ') FROM row_tags rt "
+            f"JOIN tag_defs t ON t.id = rt.tag_id "
+            f"WHERE rt.source_id = {sid} AND rt.rid = {alias}.rid) AS {q(tags_name)}, "
+            f"(SELECT rn.note FROM row_notes rn "
+            f"WHERE rn.source_id = {sid} AND rn.rid = {alias}.rid) AS {q(note_name)}"
+        )
+
     def _source_view_sql(self, conn: sqlite3.Connection, source_id: int) -> str:
-        """SELECT text behind the pane's TEMP VIEW shadowing src_<id> for a
-        source with derived columns: the table as the analyst sees it in
-        the grid — rid, base columns, then derived, the sidecar joined on
-        its PRIMARY KEY so SQLite drops the join entirely for queries that
-        never touch a derived column. main.src_<id> stays reachable as the
-        byte-faithful raw import.
+        """SELECT text behind the pane's TEMP VIEW shadowing src_<id>: the
+        table as the analyst sees it in the grid — rid, base columns,
+        derived columns (each sidecar joined on its PRIMARY KEY, so SQLite
+        drops the join entirely for queries that never touch one), plus
+        Tags and Note. main.src_<id> stays reachable as the byte-faithful
+        raw import.
 
         The trailing `rowid` alias is deliberate: a view has no real rowid
         (SQLite 3.45 returns NULL for it — a join on it silently matches
@@ -6863,11 +6908,92 @@ class Store:
         against the raw table legitimately used rowid, where it equals
         rid. Last, so the grid-shaped columns come first."""
         src = self._source_lite_on(conn, source_id)
+        has_drv = any(c.get("derived") for c in src["columns"])
         sel = ", ".join(f"{self._col_ref(src, c['name'], 's', 'd')} AS {q(c['name'])}"
                         for c in src["columns"])
-        return (f"SELECT s.rid AS rid, {sel}, s.rid AS rowid "
-                f"FROM main.{q(src['table_name'])} s "
-                f"LEFT JOIN main.{q(self._derived_table(source_id))} d ON d.rid = s.rid")
+        taken = {c["name"].lower() for c in src["columns"]}
+        frm = f"main.{q(src['table_name'])} s"
+        if has_drv:
+            frm += f" LEFT JOIN main.{q(self._derived_table(source_id))} d ON d.rid = s.rid"
+        return (f"SELECT s.rid AS rid, {sel}, "
+                f"{self._annotation_cols(source_id, taken)}, s.rid AS rowid FROM {frm}")
+
+    def _pane_connection(self) -> sqlite3.Connection:
+        """The SQL pane's private read-only connection: the app functions
+        registered (REGEXP/DAY_BUCKET/TS_NORMALIZE — a filter opened in the
+        pane can legitimately contain them), plus the pane's TEMP views —
+        merge_<id> for every merge (invariant #9: no src_N of their own)
+        and a view SHADOWING every src_<id> (temp schema wins resolution),
+        so derived columns resolve and Tags/Note are ordinary queryable
+        columns. TEMP lives on this connection only: the case file is
+        never written, and mode=ro stays honest. Callers own the close."""
+        ro = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, check_same_thread=False)
+        ro.row_factory = sqlite3.Row
+        ro.create_function("REGEXP", 2, _regexp, deterministic=True)
+        ro.create_function("DAY_BUCKET", 1, _day_bucket, deterministic=True)
+        ro.create_function("TS_NORMALIZE", 1, _ts_normalize, deterministic=True)
+        try:
+            for row in ro.execute("SELECT id FROM merges ORDER BY id"):
+                try:
+                    ro.execute(f"CREATE TEMP VIEW {q('merge_' + str(row['id']))} AS "
+                               + self._merge_union_sql(ro, row["id"]))
+                except (sqlite3.Error, KeyError):
+                    continue  # one broken merge shouldn't take the pane down
+        except sqlite3.Error:
+            pass  # a case predating merges has no merges table to read
+        try:
+            for row in ro.execute("SELECT id FROM sources ORDER BY id"):
+                try:
+                    ro.execute(f"CREATE TEMP VIEW {q('src_' + str(row[0]))} AS "
+                               + self._source_view_sql(ro, row[0]))
+                except (sqlite3.Error, KeyError):
+                    continue
+        except sqlite3.Error:
+            pass
+        return ro
+
+    SQL_TO_TABLE_SOFT_CAP = 500_000
+
+    def sql_to_table(self, sql: str, name: str, force: bool = False) -> dict:
+        """Land a pane query's FULL result as a new source — an ordinary
+        table (taggable, timeline-able, exportable), via the same ingest
+        conventions everything else uses. Past SQL_TO_TABLE_SOFT_CAP rows
+        it stops and reports the count for a you-sure confirmation unless
+        `force` — a warning, not a wall, per the design discussion."""
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("Name the new table")
+        structural = _blank_string_literals(sql)
+        if self.SQL_PANE_FORBIDDEN_RE.search(structural):
+            raise ValueError("ATTACH, DETACH, PRAGMA and VACUUM aren't allowed in the SQL pane")
+        ro = self._pane_connection()
+        try:
+            if not force:
+                # Exact count when the query wraps cleanly; a query that
+                # defeats the wrap falls back to stream-and-stop below.
+                try:
+                    n = ro.execute(
+                        f"SELECT COUNT(*) FROM ({sql.rstrip().rstrip(';')})").fetchone()[0]
+                    if n > self.SQL_TO_TABLE_SOFT_CAP:
+                        return {"needs_confirm": True, "rows": n}
+                except sqlite3.Error:
+                    pass
+            cur = ro.execute(sql)
+            cols = [d[0] for d in cur.description] if cur.description else []
+            if not cols:
+                raise ValueError("That statement returns no rows to save")
+            rows: list[list] = []
+            while True:
+                chunk = cur.fetchmany(50_000)
+                if not chunk:
+                    break
+                rows.extend([["" if v is None else str(v) for v in r] for r in chunk])
+                if not force and len(rows) > self.SQL_TO_TABLE_SOFT_CAP:
+                    return {"needs_confirm": True, "rows": None}  # count unknowable cheaply
+        finally:
+            ro.close()
+        rec = self.ingest_rows(cols, rows, name=name)
+        return {"source": {"id": rec["id"], "name": rec["name"], "row_count": rec["row_count"]}}
 
     def run_sql(self, sql: str, limit: int = 5000) -> dict:
         """Read-only ad-hoc query against the case file.
@@ -6887,43 +7013,7 @@ class Store:
         structural = _blank_string_literals(sql)
         if self.SQL_PANE_FORBIDDEN_RE.search(structural):
             raise ValueError("ATTACH, DETACH, PRAGMA and VACUUM aren't allowed in the SQL pane")
-        ro = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, check_same_thread=False)
-        ro.row_factory = sqlite3.Row
-        ro.create_function("REGEXP", 2, _regexp, deterministic=True)
-        # The full trio, matching the writer/reader-pool connections: a
-        # filter opened in the SQL pane (spec_sql) can legitimately contain
-        # TS_NORMALIZE/DAY_BUCKET, and they're useful in hand-written pane
-        # queries anyway.
-        ro.create_function("DAY_BUCKET", 1, _day_bucket, deterministic=True)
-        ro.create_function("TS_NORMALIZE", 1, _ts_normalize, deterministic=True)
-        # Merges have no src_N of their own — expose each as a TEMP VIEW
-        # merge_<id> (source_id, rid, every exposed column) so the pane can
-        # query one by name (invariant #9). TEMP lives on this connection
-        # only: the case file is never written, and mode=ro stays honest.
-        try:
-            for row in ro.execute("SELECT id FROM merges ORDER BY id"):
-                try:
-                    ro.execute(f"CREATE TEMP VIEW {q('merge_' + str(row['id']))} AS "
-                               + self._merge_union_sql(ro, row["id"]))
-                except (sqlite3.Error, KeyError):
-                    continue  # one broken merge shouldn't take the pane down
-        except sqlite3.Error:
-            pass  # a case predating merges has no merges table to read
-        # A source WITH derived columns gets a TEMP VIEW shadowing its own
-        # src_<id> name (temp schema wins resolution), so `SELECT Host FROM
-        # src_5` reads the derived value instead of falling into SQLite's
-        # double-quoted-string trap and returning the literal 'Host'.
-        # Sources without derived columns get nothing — byte-identical to
-        # before. main.src_<id> is the explicit raw-table escape hatch.
-        try:
-            for row in ro.execute("SELECT DISTINCT source_id FROM derived_columns ORDER BY 1"):
-                try:
-                    ro.execute(f"CREATE TEMP VIEW {q('src_' + str(row[0]))} AS "
-                               + self._source_view_sql(ro, row[0]))
-                except (sqlite3.Error, KeyError):
-                    continue
-        except sqlite3.Error:
-            pass
+        ro = self._pane_connection()
         try:
             t0 = time.time()
             cur = ro.execute(sql)

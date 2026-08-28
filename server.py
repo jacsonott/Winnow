@@ -574,6 +574,29 @@ def api_browse_dir(request: Request, path: str = "", files: bool = False):
     return out
 
 
+class PrefsBody(BaseModel):
+    cases_dir: str | None = None
+
+
+@app.get("/api/prefs")
+def api_prefs():
+    return {"cases_dir": WS.machine_prefs.get("cases_dir"),
+            # first run of this INSTANCE: nothing configured and no cases yet
+            "first_run": WS.machine_prefs.get("cases_dir") is None and not WS.cases.list()}
+
+
+@app.post("/api/prefs")
+def api_prefs_set(body: PrefsBody):
+    if body.cases_dir is not None:
+        path = os.path.abspath(os.path.expanduser(body.cases_dir.strip()))
+        try:
+            os.makedirs(path, exist_ok=True)
+        except OSError as e:
+            raise HTTPException(400, f"Can't use that folder: {e}")
+        WS.machine_prefs.set("cases_dir", path)
+    return api_prefs()
+
+
 @app.get("/api/cases")
 def api_cases_list():
     out = []
@@ -2079,6 +2102,26 @@ def api_sessions_load(name: str, merge: bool = True):
 def api_sessions_delete(name: str):
     store().delete_named_session(name)
     return {"ok": True}
+
+
+class SqlToTable(BaseModel):
+    sql: str
+    name: str
+    force: bool = False
+
+
+@app.post("/api/sql/to_table")
+def api_sql_to_table(body: SqlToTable):
+    """Land a pane query's result as a new source. Soft 500k cap: over it
+    the response asks for confirmation ({needs_confirm, rows}); resend
+    with force=true to proceed."""
+    try:
+        res = store().sql_to_table(body.sql, body.name, force=body.force)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except sqlite3.Error as e:
+        raise HTTPException(400, str(e))
+    return res
 
 
 @app.get("/api/export")

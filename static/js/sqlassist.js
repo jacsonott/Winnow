@@ -5,7 +5,8 @@
    untouched; even the tags column is fetched through a second ordinary
    query against row_tags. Dependency-free by CLAUDE.md's rule, so the
    autocomplete dropdown and the caret measurement are hand-rolled. */
-import { $, el, post } from './core.js';
+import { toast, $, el, post } from './core.js';
+import { sqlSchemaForLLM } from './plugins.js';
 import { sourceLabel } from './sources.js';
 import { S } from './state.js';
 import { dropdownMenu } from './ui.js';
@@ -58,6 +59,10 @@ export function sqlSuggestions(text, word) {
       // 'derived' rather than 'column': your own added columns, marked —
       // and genuinely queryable, since src_N/merge_N carry them.
       if (c.name.toLowerCase().startsWith(w)) push(c.name, quoteIdent(c.name), c.derived ? 'derived' : 'column');
+    }
+    // Every pane view carries the row's tags and note as columns.
+    for (const extra of ['Tags', 'Note']) {
+      if (extra.toLowerCase().startsWith(w)) push(extra, quoteIdent(extra), 'winnow');
     }
   }
   for (const k of SQL_KEYWORDS) {
@@ -196,6 +201,14 @@ export function wireSqlAssist() {
     bar.addEventListener('pointerup', up);
   });
 
+  // ---- copy the whole schema (the same text the assistant plugin feeds
+  // an LLM — table names, src_N mapping, columns and types)
+  $('btnSqlSchema').onclick = () => {
+    navigator.clipboard.writeText(sqlSchemaForLLM())
+      .then(() => toast('Schema copied'))
+      .catch(() => toast('Could not copy — clipboard unavailable', 4000));
+  };
+
   // ---- "which src_N is my table?" — the insert menu
   $('btnSqlTables').onclick = () => dropdownMenu($('btnSqlTables'), () => {
     const items = [{ header: 'Click to insert at the cursor' }];
@@ -285,6 +298,43 @@ export function setActiveSqlResult(r) { activeResult = r; }
 
 export function sqlSelectionCount() {
   return activeResult && activeResult.tags ? activeResult.tags.sel.size : 0;
+}
+
+export function sqlClearSelection() {
+  if (!activeResult || !activeResult.tags || !activeResult.tags.sel.size) return false;
+  activeResult.tags.sel.clear();
+  if (activeResult.tags.repaint) activeResult.tags.repaint();
+  return true;
+}
+
+/* Ctrl+C on the SQL tab: the selected result rows as TSV with a header —
+   same shape the grid's copy produces. */
+export function sqlCopySelection() {
+  const r = activeResult;
+  if (!r || !r.tags || !r.tags.sel.size) return false;
+  const keep = [];
+  for (const row of r.rows) {
+    const key = sqlRowKey(r.tags.ref, row);
+    if (key && r.tags.sel.has(key)) keep.push(row);
+  }
+  const text = [r.columns.join('\t'), ...keep.map((row) => row.map((v) => v == null ? '' : String(v)).join('\t'))].join('\n');
+  navigator.clipboard.writeText(text).catch(() => {});
+  return true;
+}
+
+/* The current result as a CSV download — rows in DISPLAYED order (the
+   caller passes them, so a click-sorted view exports as seen). */
+export function sqlResultCsv(columns, rows, filename = 'query-results.csv') {
+  const esc = (v) => {
+    const s2 = v == null ? '' : String(v);
+    return /[",\n]/.test(s2) ? '"' + s2.replace(/"/g, '""') + '"' : s2;
+  };
+  const text = [columns.map(esc).join(','), ...rows.map((row) => row.map(esc).join(','))].join('\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], { type: 'text/csv' }));
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
 }
 
 /* A tag hotkey pressed on the SQL tab: apply/remove `tag` on every
