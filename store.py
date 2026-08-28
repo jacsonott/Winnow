@@ -6835,6 +6835,83 @@ class Store:
         return (f"SELECT s.rid AS rid, {sel}, "
                 f"{self._annotation_cols(source_id, taken)}, s.rid AS rowid FROM {frm}")
 
+    def _pane_connection(self) -> sqlite3.Connection:
+        """The SQL pane's private read-only connection: the app functions
+        registered (REGEXP/DAY_BUCKET/TS_NORMALIZE — a filter opened in the
+        pane can legitimately contain them), plus the pane's TEMP views —
+        merge_<id> for every merge (invariant #9: no src_N of their own)
+        and a view SHADOWING every src_<id> (temp schema wins resolution),
+        so derived columns resolve and Tags/Note are ordinary queryable
+        columns. TEMP lives on this connection only: the case file is
+        never written, and mode=ro stays honest. Callers own the close."""
+        ro = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, check_same_thread=False)
+        ro.row_factory = sqlite3.Row
+        ro.create_function("REGEXP", 2, _regexp, deterministic=True)
+        ro.create_function("DAY_BUCKET", 1, _day_bucket, deterministic=True)
+        ro.create_function("TS_NORMALIZE", 1, _ts_normalize, deterministic=True)
+        try:
+            for row in ro.execute("SELECT id FROM merges ORDER BY id"):
+                try:
+                    ro.execute(f"CREATE TEMP VIEW {q('merge_' + str(row['id']))} AS "
+                               + self._merge_union_sql(ro, row["id"]))
+                except (sqlite3.Error, KeyError):
+                    continue  # one broken merge shouldn't take the pane down
+        except sqlite3.Error:
+            pass  # a case predating merges has no merges table to read
+        try:
+            for row in ro.execute("SELECT id FROM sources ORDER BY id"):
+                try:
+                    ro.execute(f"CREATE TEMP VIEW {q('src_' + str(row[0]))} AS "
+                               + self._source_view_sql(ro, row[0]))
+                except (sqlite3.Error, KeyError):
+                    continue
+        except sqlite3.Error:
+            pass
+        return ro
+
+    SQL_TO_TABLE_SOFT_CAP = 500_000
+
+    def sql_to_table(self, sql: str, name: str, force: bool = False) -> dict:
+        """Land a pane query's FULL result as a new source — an ordinary
+        table (taggable, timeline-able, exportable), via the same ingest
+        conventions everything else uses. Past SQL_TO_TABLE_SOFT_CAP rows
+        it stops and reports the count for a you-sure confirmation unless
+        `force` — a warning, not a wall, per the design discussion."""
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("Name the new table")
+        structural = _blank_string_literals(sql)
+        if self.SQL_PANE_FORBIDDEN_RE.search(structural):
+            raise ValueError("ATTACH, DETACH, PRAGMA and VACUUM aren't allowed in the SQL pane")
+        ro = self._pane_connection()
+        try:
+            if not force:
+                # Exact count when the query wraps cleanly; a query that
+                # defeats the wrap falls back to stream-and-stop below.
+                try:
+                    n = ro.execute(
+                        f"SELECT COUNT(*) FROM ({sql.rstrip().rstrip(';')})").fetchone()[0]
+                    if n > self.SQL_TO_TABLE_SOFT_CAP:
+                        return {"needs_confirm": True, "rows": n}
+                except sqlite3.Error:
+                    pass
+            cur = ro.execute(sql)
+            cols = [d[0] for d in cur.description] if cur.description else []
+            if not cols:
+                raise ValueError("That statement returns no rows to save")
+            rows: list[list] = []
+            while True:
+                chunk = cur.fetchmany(50_000)
+                if not chunk:
+                    break
+                rows.extend([["" if v is None else str(v) for v in r] for r in chunk])
+                if not force and len(rows) > self.SQL_TO_TABLE_SOFT_CAP:
+                    return {"needs_confirm": True, "rows": None}  # count unknowable cheaply
+        finally:
+            ro.close()
+        rec = self.ingest_rows(cols, rows, name=name)
+        return {"source": {"id": rec["id"], "name": rec["name"], "row_count": rec["row_count"]}}
+
     def run_sql(self, sql: str, limit: int = 5000) -> dict:
         """Read-only ad-hoc query against the case file.
 
@@ -6853,42 +6930,7 @@ class Store:
         structural = _blank_string_literals(sql)
         if self.SQL_PANE_FORBIDDEN_RE.search(structural):
             raise ValueError("ATTACH, DETACH, PRAGMA and VACUUM aren't allowed in the SQL pane")
-        ro = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, check_same_thread=False)
-        ro.row_factory = sqlite3.Row
-        ro.create_function("REGEXP", 2, _regexp, deterministic=True)
-        # The full trio, matching the writer/reader-pool connections: a
-        # filter opened in the SQL pane (spec_sql) can legitimately contain
-        # TS_NORMALIZE/DAY_BUCKET, and they're useful in hand-written pane
-        # queries anyway.
-        ro.create_function("DAY_BUCKET", 1, _day_bucket, deterministic=True)
-        ro.create_function("TS_NORMALIZE", 1, _ts_normalize, deterministic=True)
-        # Merges have no src_N of their own — expose each as a TEMP VIEW
-        # merge_<id> (source_id, rid, every exposed column) so the pane can
-        # query one by name (invariant #9). TEMP lives on this connection
-        # only: the case file is never written, and mode=ro stays honest.
-        try:
-            for row in ro.execute("SELECT id FROM merges ORDER BY id"):
-                try:
-                    ro.execute(f"CREATE TEMP VIEW {q('merge_' + str(row['id']))} AS "
-                               + self._merge_union_sql(ro, row["id"]))
-                except (sqlite3.Error, KeyError):
-                    continue  # one broken merge shouldn't take the pane down
-        except sqlite3.Error:
-            pass  # a case predating merges has no merges table to read
-        # EVERY source gets a TEMP VIEW shadowing its own src_<id> name
-        # (temp schema wins resolution): derived columns resolve instead of
-        # falling into SQLite's double-quoted-string trap, and Tags/Note
-        # are ordinary queryable columns. main.src_<id> is the explicit
-        # raw-table escape hatch.
-        try:
-            for row in ro.execute("SELECT id FROM sources ORDER BY id"):
-                try:
-                    ro.execute(f"CREATE TEMP VIEW {q('src_' + str(row[0]))} AS "
-                               + self._source_view_sql(ro, row[0]))
-                except (sqlite3.Error, KeyError):
-                    continue
-        except sqlite3.Error:
-            pass
+        ro = self._pane_connection()
         try:
             t0 = time.time()
             cur = ro.execute(sql)

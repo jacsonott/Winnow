@@ -98,3 +98,32 @@ def test_sql_pane_connection_has_the_timestamp_functions(ingested):
     store, sid = ingested
     res = store.run_sql(f"SELECT DAY_BUCKET(\"Timestamp\") AS d FROM src_{sid} ORDER BY rid LIMIT 1")
     assert res["rows"][0][0] == "2024-01-05"
+
+
+def test_sql_to_table_lands_a_real_source(store, write_csv):
+    sid = store.ingest_csv(write_csv([["A"], ["x"], ["y"], ["z"]], "t.csv"),
+                           name="t", build_fts=False)["id"]
+    res = store.sql_to_table(f"SELECT A, A || '!' AS Loud FROM src_{sid} WHERE A != 'y'", "kept")
+    src = store.get_source(res["source"]["id"])
+    assert src["row_count"] == 2
+    assert [c["name"] for c in src["columns"]] == ["A", "Loud"]
+
+
+def test_sql_to_table_soft_cap_asks_then_obeys_force(store, write_csv, monkeypatch):
+    sid = store.ingest_csv(write_csv([["A"]] + [[str(i)] for i in range(50)], "c.csv"),
+                           name="c", build_fts=False)["id"]
+    monkeypatch.setattr(type(store), "SQL_TO_TABLE_SOFT_CAP", 10)
+    res = store.sql_to_table(f"SELECT A FROM src_{sid}", "big")
+    assert res == {"needs_confirm": True, "rows": 50}
+    res = store.sql_to_table(f"SELECT A FROM src_{sid}", "big", force=True)
+    assert res["source"]["row_count"] == 50
+
+
+def test_sql_to_table_rejects_writes_and_empty(store, write_csv):
+    import pytest as _pytest
+
+    store.ingest_csv(write_csv([["A"], ["x"]], "r.csv"), name="r", build_fts=False)
+    with _pytest.raises(ValueError):
+        store.sql_to_table("PRAGMA page_size", "nope")
+    with _pytest.raises(ValueError):
+        store.sql_to_table("SELECT 1", "  ")

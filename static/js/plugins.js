@@ -5,7 +5,7 @@ import { $, api, el, post, setBusy, toast } from './core.js';
 import { loadPlugins, openImportModal, pluginFormatById, queueFilesForFormat } from './importer.js';
 import { loadSources, openSource, renderPageTabs, syncTabSelection } from './sources.js';
 import { activeSqlTab, scheduleSqlTabSave, showGridTab, syncTabChrome } from './sql.js';
-import { setActiveSqlResult, sqlRowKey, sqlTagsFor, tagChips, wireSqlAssist } from './sqlassist.js';
+import { setActiveSqlResult, sqlResultCsv, sqlRowKey, sqlTagsFor, tagChips, wireSqlAssist } from './sqlassist.js';
 import { moveCursor } from './grid.js';
 import { S } from './state.js';
 import { confirmDialog, modal, promptDialog } from './ui.js';
@@ -397,6 +397,8 @@ export function sqlResultNodes(r) {
   const t = el('table');
   const sort = { idx: null, dir: 1 };
   let lastClickedKey = null; // shift-range anchor — must survive repaints
+  let displayedRows = r.rows; // what paint() last drew, for the CSV export
+  const sortedRows = () => displayedRows;
   const paint = () => {
     t.replaceChildren();
     const hr = el('tr');
@@ -426,6 +428,7 @@ export function sqlResultNodes(r) {
         return String(x).localeCompare(String(y)) * dir;
       });
     }
+    displayedRows = rows;
     for (const row of rows) {
       const tr = el('tr');
       for (const v of row) tr.append(el('td', null, v == null ? '' : String(v)));
@@ -437,18 +440,34 @@ export function sqlResultNodes(r) {
         if (key) {
           tr.classList.toggle('sql-row-sel', r.tags.sel.has(key));
           tr.style.cursor = 'pointer';
-          tr.title = 'Click to select (Shift for a range) — tag hotkeys apply to the selection. Double-click opens the row in its table.';
+          tr.title = 'Click to select · Ctrl toggles · Shift ranges — tag hotkeys and Ctrl+C act on the selection. Double-click opens the row in its table.';
+          // Shift+mousedown would EXTEND the browser's text selection,
+          // which then trips the copy-gesture guard below — suppress the
+          // native behavior so Shift means "range of rows" here.
+          tr.onmousedown = (e) => { if (e.shiftKey) e.preventDefault(); };
           tr.onclick = (e) => {
+            // Grid parity: plain click selects THIS row alone, Ctrl/Cmd
+            // toggles it in place, Shift replaces with the anchor→here
+            // range in displayed order. (A click ending a text selection
+            // is a copy gesture — leave it alone.)
+            if (!e.shiftKey && !window.getSelection().isCollapsed) return;
             if (e.shiftKey && lastClickedKey) {
-              // Range in the DISPLAYED order, between the last click and here.
               const keys = rows.map((rw) => sqlRowKey(r.tags.ref, rw)).filter(Boolean);
               const a = keys.indexOf(lastClickedKey), b2 = keys.indexOf(key);
               if (a !== -1 && b2 !== -1) {
+                r.tags.sel.clear();
                 for (let k = Math.min(a, b2); k <= Math.max(a, b2); k++) r.tags.sel.add(keys[k]);
               }
-            } else if (r.tags.sel.has(key)) r.tags.sel.delete(key);
-            else r.tags.sel.add(key);
-            lastClickedKey = key;
+            } else if (e.ctrlKey || e.metaKey) {
+              if (r.tags.sel.has(key)) r.tags.sel.delete(key);
+              else r.tags.sel.add(key);
+              lastClickedKey = key;
+            } else {
+              const only = r.tags.sel.size === 1 && r.tags.sel.has(key);
+              r.tags.sel.clear();
+              if (!only) r.tags.sel.add(key); // clicking the lone selected row deselects, like the grid's cursor toggle feel
+              lastClickedKey = key;
+            }
             paint();
           };
           tr.ondblclick = async () => {
@@ -466,11 +485,45 @@ export function sqlResultNodes(r) {
   };
   paint();
   if (r.tags) r.tags.repaint = paint;
-  return [
-    el('div', 'note-status', `${r.rows.length.toLocaleString()} rows · ${r.elapsed_ms} ms${r.truncated ? ' · truncated' : ''}`
-      + (r.tags ? ' · tags joined via rid' : '')),
-    t,
-  ];
+  const bar = el('div', 'note-status sql-result-bar');
+  bar.append(el('span', null,
+    `${r.rows.length.toLocaleString()} rows · ${r.elapsed_ms} ms${r.truncated ? ' · truncated' : ''}`
+    + (r.tags ? ' · tags joined via rid' : '')));
+  const csvBtn = el('button', 'btn ghost sf-mini', 'CSV');
+  csvBtn.title = 'Download this result as CSV, in the displayed order';
+  csvBtn.onclick = () => sqlResultCsv(r.columns, sortedRows());
+  const saveBtn = el('button', 'btn ghost sf-mini', 'Save as table…');
+  saveBtn.title = "Run the query in FULL (this preview may be truncated) and land the result as a new table in the case";
+  saveBtn.onclick = () => saveResultAsTable();
+  bar.append(csvBtn, saveBtn);
+  return [bar, t];
+}
+
+/* "Save as table…": rerun the tab's query in FULL server-side (the pane
+   preview is capped) and land it as an ordinary source. Over the soft cap
+   the server answers needs_confirm and we ask "you're about to save X
+   rows" before resending with force. */
+export async function saveResultAsTable() {
+  const sql = $('sqlText').value;
+  if (!sql.trim()) { toast('Nothing to save — run a query first'); return; }
+  const name = await promptDialog('New table name:');
+  if (!name || !name.trim()) return;
+  let res;
+  try {
+    res = await post('/api/sql/to_table', { sql, name: name.trim() });
+    if (res.needs_confirm) {
+      const n = res.rows == null ? 'more than 500,000' : res.rows.toLocaleString();
+      if (!(await confirmDialog(`You're about to save ${n} rows as a table. Are you sure?`,
+        { okLabel: 'Save them' }))) return;
+      res = await post('/api/sql/to_table', { sql, name: name.trim(), force: true });
+    }
+  } catch (e) {
+    toast('Could not save: ' + e.message, 6000);
+    return;
+  }
+  toast(`Created "${res.source.name}" · ${res.source.row_count.toLocaleString()} rows`);
+  await loadSources();
+  openSource(res.source.id);
 }
 
 export async function runSql() {

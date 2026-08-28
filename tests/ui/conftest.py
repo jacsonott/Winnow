@@ -118,7 +118,8 @@ def page(browser, server):
     """A fresh browser context per test: localStorage is where the keymap,
     appearance and sidebar state live, so sharing one would let a test that
     rebinds a key or changes the autofit cap decide the next test's outcome."""
-    ctx = browser.new_context(viewport={"width": 1500, "height": 900})
+    ctx = browser.new_context(viewport={"width": 1500, "height": 900},
+                              permissions=["clipboard-read", "clipboard-write"])
     # Every context is a "first run on this machine" — pre-answer the
     # one-time remote-mode prompt so it can't overlay the app mid-test.
     # test_first_run_prompt.py builds its own context without this.
