@@ -574,6 +574,29 @@ def api_browse_dir(request: Request, path: str = "", files: bool = False):
     return out
 
 
+class PrefsBody(BaseModel):
+    cases_dir: str | None = None
+
+
+@app.get("/api/prefs")
+def api_prefs():
+    return {"cases_dir": WS.machine_prefs.get("cases_dir"),
+            # first run of this INSTANCE: nothing configured and no cases yet
+            "first_run": WS.machine_prefs.get("cases_dir") is None and not WS.cases.list()}
+
+
+@app.post("/api/prefs")
+def api_prefs_set(body: PrefsBody):
+    if body.cases_dir is not None:
+        path = os.path.abspath(os.path.expanduser(body.cases_dir.strip()))
+        try:
+            os.makedirs(path, exist_ok=True)
+        except OSError as e:
+            raise HTTPException(400, f"Can't use that folder: {e}")
+        WS.machine_prefs.set("cases_dir", path)
+    return api_prefs()
+
+
 @app.get("/api/cases")
 def api_cases_list():
     out = []
