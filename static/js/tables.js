@@ -63,9 +63,13 @@ export async function compactCaseFile() {
   try { res = await post('/api/case/compact', {}); }
   catch (e) { toast('Compact failed: ' + e.message, 6000); return; }
   finally { setBusy(false); }
+  // Totals include the -wal file — the main .db alone can lie when data
+  // was living in the write-ahead log.
+  const totalBefore = res.before_bytes + (res.wal_before_bytes || 0);
+  const totalAfter = res.after_bytes + (res.wal_after_bytes || 0);
   toast(res.reclaimed_bytes > 0
-    ? `Compacted: ${fmtBytes(res.before_bytes)} → ${fmtBytes(res.after_bytes)}, reclaimed ${fmtBytes(res.reclaimed_bytes)}`
-    : `Compacted — nothing to reclaim (${fmtBytes(res.after_bytes)})`, 6000);
+    ? `Compacted: ${fmtBytes(totalBefore)} → ${fmtBytes(totalAfter)} on disk, reclaimed ${fmtBytes(res.reclaimed_bytes)}`
+    : `Compacted — nothing to reclaim (${fmtBytes(totalAfter)} on disk)`, 6000);
 }
 
 export function openTablesManager() {
