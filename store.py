@@ -1421,8 +1421,23 @@ class Store:
         size of one page and would show a nonsense negative reclaim."""
         with self.lock:
             self.db.commit()
-            self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            # Idle pooled readers keep mmap'd views of the file and — the
+            # actual bug this fixes — any reader mid-SELECT pins the WAL
+            # snapshot, making wal_checkpoint(TRUNCATE) return busy WITHOUT
+            # raising. The reclaimed bytes then sit in a growing -wal while
+            # the main file (the one the analyst measures) never shrinks.
+            # So: drop the idle pool (in-flight readers just open fresh
+            # connections afterwards), then RETRY the checkpoint until it
+            # actually completes, and refuse loudly rather than "succeed"
+            # with the space still parked in the WAL.
+            with self._reader_lock:
+                idle, self._reader_pool = self._reader_pool, []
+            for conn in idle:
+                with contextlib.suppress(sqlite3.Error):
+                    conn.close()
+            self._checkpoint_truncate_or_raise()
             before = os.path.getsize(self.path)
+            wal_before = self._wal_size()
             directory = os.path.dirname(os.path.abspath(self.path)) or "."
             free = shutil.disk_usage(directory).free
             needed = before + self.VACUUM_HEADROOM
@@ -1435,11 +1450,40 @@ class Store:
             self.db.execute("PRAGMA temp_store=FILE")
             try:
                 self.db.execute("VACUUM")
-                self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                self._checkpoint_truncate_or_raise()
             finally:
                 self.db.execute("PRAGMA temp_store=MEMORY")
             after = os.path.getsize(self.path)
-        return {"before_bytes": before, "after_bytes": after, "reclaimed_bytes": max(0, before - after)}
+            wal_after = self._wal_size()
+        return {"before_bytes": before, "after_bytes": after,
+                "wal_before_bytes": wal_before, "wal_after_bytes": wal_after,
+                "reclaimed_bytes": max(0, (before + wal_before) - (after + wal_after))}
+
+    def _wal_size(self) -> int:
+        try:
+            return os.path.getsize(self.path + "-wal")
+        except OSError:
+            return 0
+
+    def _checkpoint_truncate_or_raise(self, timeout_s: float = 10.0) -> None:
+        """wal_checkpoint(TRUNCATE), retried until it really completes.
+
+        The pragma reports failure in its RESULT ROW (busy=1) instead of
+        raising, so a checkpoint blocked by an in-flight reader used to
+        pass silently — the reason compact "didn't shrink" cases with live
+        readers. Retry while active readers finish; if something pins the
+        snapshot past the timeout, refuse with a message instead of
+        pretending."""
+        deadline = time.time() + timeout_s
+        while True:
+            row = self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            if row is None or row[0] == 0:
+                return
+            if time.time() >= deadline:
+                raise ValueError(
+                    "Could not checkpoint the WAL — a long-running read is holding the "
+                    "old snapshot. Let it finish (or close other clients) and compact again.")
+            time.sleep(0.1)
 
     @staticmethod
     def _tune(conn: sqlite3.Connection) -> None:
