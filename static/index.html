@@ -121,6 +121,7 @@ try {
       <div class="sql-head">
         <span>Read-only query against the case file — src_N and merge_N include your derived columns plus Tags and Note; main.src_N is the raw import</span>
         <div>
+          <button class="btn ghost" id="btnSqlSchema" title="Copy every table's definition (names, columns, types) to the clipboard — paste it into notes or an LLM">Copy schema</button>
           <button class="btn ghost" id="btnSqlTables" title="Every table's src_N name — click one to insert it at the cursor">Tables ▾</button>
           <button class="btn" id="btnRunSql">Run  ⌘⏎</button>
         </div>

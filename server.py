@@ -2104,6 +2104,26 @@ def api_sessions_delete(name: str):
     return {"ok": True}
 
 
+class SqlToTable(BaseModel):
+    sql: str
+    name: str
+    force: bool = False
+
+
+@app.post("/api/sql/to_table")
+def api_sql_to_table(body: SqlToTable):
+    """Land a pane query's result as a new source. Soft 500k cap: over it
+    the response asks for confirmation ({needs_confirm, rows}); resend
+    with force=true to proceed."""
+    try:
+        res = store().sql_to_table(body.sql, body.name, force=body.force)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except sqlite3.Error as e:
+        raise HTTPException(400, str(e))
+    return res
+
+
 @app.get("/api/export")
 def api_export(view_id: str, tagged_only: bool = False, filename: str = "timeline-export.csv"):
     try:

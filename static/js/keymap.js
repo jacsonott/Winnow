@@ -13,7 +13,7 @@ import { openPluginBundlesModal } from './bundles.js';
 import { cycleSavedFilter, openFilterSqlTab } from './savedfilters.js';
 import { expandSearch, openSearchAllModal } from './search.js';
 import { applySqlTabToEditor } from './sql.js';
-import { sqlSelectionCount, sqlTagHotkey } from './sqlassist.js';
+import { sqlClearSelection, sqlCopySelection, sqlSelectionCount, sqlTagHotkey } from './sqlassist.js';
 import { openSettings } from './settings.js';
 import { activateTabSlot, clearAllFilters } from './sources.js';
 import { S, gridRowCount, selClear, selCount, selSetAll } from './state.js';
@@ -315,6 +315,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     if (!$('modal').hidden) { $('modal').hidden = true; return; }
     if (typing) { e.target.blur(); $('body').focus(); return; }
+    if (S.activeTab === 'sql' && sqlClearSelection()) return;
     selClear(); render(); return;
   }
   /* Everything below acts on the case UI — the grid's cursor, its tabs, its
@@ -366,10 +367,19 @@ document.addEventListener('keydown', (e) => {
     return;
   }
 
-  if ((e.ctrlKey || e.metaKey) && (e.key === 'c' || e.key === 'C') && (S.cellRange || selCount() || S.cursor >= 0)) {
-    e.preventDefault();
-    handleCopyShortcut(e.shiftKey);
-    return;
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'c' || e.key === 'C')) {
+    // SQL tab first: a selected result set copies as TSV. Otherwise the
+    // grid's own copy — and if neither claims it, the browser's native
+    // copy of whatever text is highlighted proceeds untouched.
+    if (S.activeTab === 'sql' && window.getSelection().isCollapsed && sqlCopySelection()) {
+      e.preventDefault();
+      return;
+    }
+    if (S.activeTab === 'grid' && (S.cellRange || selCount() || S.cursor >= 0)) {
+      e.preventDefault();
+      handleCopyShortcut(e.shiftKey);
+      return;
+    }
   }
 
   /* Undo lives here rather than in S.keymap because matchAction only

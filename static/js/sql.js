@@ -126,9 +126,10 @@ export function renderSqlTabs() {
     const tab = el('button', 'sql-tab');
     tab.setAttribute('aria-selected', String(t.id === S.sqlTabId));
     tab.append(el('span', 'sql-tab-name', t.name));
-    tab.title = `${t.name} — double-click to rename`;
+    tab.title = `${t.name} — right-click or double-click to rename`;
     tab.onclick = () => activateSqlTab(t.id);
     tab.ondblclick = (e) => { e.preventDefault(); renameSqlTab(t); };
+    tab.oncontextmenu = (e) => { e.preventDefault(); renameSqlTab(t); };
     if (S.sqlTabs.length > 1) {
       const x = el('span', 'x', '✕');
       x.title = 'Close this query';
