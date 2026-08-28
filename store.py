@@ -6854,17 +6854,38 @@ class Store:
             if has_drv:
                 frm += f" LEFT JOIN main.{q(self._derived_table(mid))} d ON d.rid = s.rid"
             sel = ", ".join(f"{self._col_ref(m, c, 's', 'd')} AS {q(c)}" for c in cols)
+            taken = {c.lower() for c in cols}
             branches.append(
-                f"SELECT {int(mid)} AS source_id, s.rid AS rid, {sel} FROM {frm}")
+                f"SELECT {int(mid)} AS source_id, s.rid AS rid, {sel}, "
+                f"{self._annotation_cols(mid, taken)} FROM {frm}")
         return " UNION ALL ".join(branches)
 
+    @staticmethod
+    def _annotation_cols(source_id: int, taken: set[str], alias: str = "s",
+                         sid_expr: str | None = None) -> str:
+        """The Tags and Note columns every pane view carries: tag NAMES
+        comma-joined, and the row's note — correlated subselects, so they
+        cost only for the rows a query actually emits (a LIMIT stays
+        cheap). Names step aside if the file genuinely has a Tags/Note
+        column — the file's own data always wins the plain name."""
+        sid = sid_expr if sid_expr is not None else str(int(source_id))
+        tags_name = "Tags" if "tags" not in taken else "Winnow Tags"
+        note_name = "Note" if "note" not in taken else "Winnow Note"
+        return (
+            f"(SELECT GROUP_CONCAT(t.name, ', ') FROM row_tags rt "
+            f"JOIN tag_defs t ON t.id = rt.tag_id "
+            f"WHERE rt.source_id = {sid} AND rt.rid = {alias}.rid) AS {q(tags_name)}, "
+            f"(SELECT rn.note FROM row_notes rn "
+            f"WHERE rn.source_id = {sid} AND rn.rid = {alias}.rid) AS {q(note_name)}"
+        )
+
     def _source_view_sql(self, conn: sqlite3.Connection, source_id: int) -> str:
-        """SELECT text behind the pane's TEMP VIEW shadowing src_<id> for a
-        source with derived columns: the table as the analyst sees it in
-        the grid — rid, base columns, then derived, the sidecar joined on
-        its PRIMARY KEY so SQLite drops the join entirely for queries that
-        never touch a derived column. main.src_<id> stays reachable as the
-        byte-faithful raw import.
+        """SELECT text behind the pane's TEMP VIEW shadowing src_<id>: the
+        table as the analyst sees it in the grid — rid, base columns,
+        derived columns (each sidecar joined on its PRIMARY KEY, so SQLite
+        drops the join entirely for queries that never touch one), plus
+        Tags and Note. main.src_<id> stays reachable as the byte-faithful
+        raw import.
 
         The trailing `rowid` alias is deliberate: a view has no real rowid
         (SQLite 3.45 returns NULL for it — a join on it silently matches
@@ -6872,11 +6893,15 @@ class Store:
         against the raw table legitimately used rowid, where it equals
         rid. Last, so the grid-shaped columns come first."""
         src = self._source_lite_on(conn, source_id)
+        has_drv = any(c.get("derived") for c in src["columns"])
         sel = ", ".join(f"{self._col_ref(src, c['name'], 's', 'd')} AS {q(c['name'])}"
                         for c in src["columns"])
-        return (f"SELECT s.rid AS rid, {sel}, s.rid AS rowid "
-                f"FROM main.{q(src['table_name'])} s "
-                f"LEFT JOIN main.{q(self._derived_table(source_id))} d ON d.rid = s.rid")
+        taken = {c["name"].lower() for c in src["columns"]}
+        frm = f"main.{q(src['table_name'])} s"
+        if has_drv:
+            frm += f" LEFT JOIN main.{q(self._derived_table(source_id))} d ON d.rid = s.rid"
+        return (f"SELECT s.rid AS rid, {sel}, "
+                f"{self._annotation_cols(source_id, taken)}, s.rid AS rowid FROM {frm}")
 
     def run_sql(self, sql: str, limit: int = 5000) -> dict:
         """Read-only ad-hoc query against the case file.
@@ -6918,14 +6943,13 @@ class Store:
                     continue  # one broken merge shouldn't take the pane down
         except sqlite3.Error:
             pass  # a case predating merges has no merges table to read
-        # A source WITH derived columns gets a TEMP VIEW shadowing its own
-        # src_<id> name (temp schema wins resolution), so `SELECT Host FROM
-        # src_5` reads the derived value instead of falling into SQLite's
-        # double-quoted-string trap and returning the literal 'Host'.
-        # Sources without derived columns get nothing — byte-identical to
-        # before. main.src_<id> is the explicit raw-table escape hatch.
+        # EVERY source gets a TEMP VIEW shadowing its own src_<id> name
+        # (temp schema wins resolution): derived columns resolve instead of
+        # falling into SQLite's double-quoted-string trap, and Tags/Note
+        # are ordinary queryable columns. main.src_<id> is the explicit
+        # raw-table escape hatch.
         try:
-            for row in ro.execute("SELECT DISTINCT source_id FROM derived_columns ORDER BY 1"):
+            for row in ro.execute("SELECT id FROM sources ORDER BY id"):
                 try:
                     ro.execute(f"CREATE TEMP VIEW {q('src_' + str(row[0]))} AS "
                                + self._source_view_sql(ro, row[0]))
