@@ -23,9 +23,16 @@ from ..harness import benchmark
 
 def _checkpointed_size(store, path: str) -> int:
     """WAL-truncate first, or the bytes are split across two files and the
-    number depends on when the last checkpoint happened to run."""
-    store.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    return os.path.getsize(path)
+    number depends on when the last checkpoint happened to run.
+
+    Through the store's helper, not a raw pragma: the pragma reports a
+    blocked checkpoint in its result row rather than raising, so a raw
+    call can silently no-op and hand back a size missing the WAL bytes —
+    in the one suite that exists to detect size regressions. Falling back
+    to main + -wal keeps the number whole if it really can't checkpoint."""
+    if store._checkpoint_truncate():
+        return os.path.getsize(path)
+    return os.path.getsize(path) + store._wal_size()
 
 
 @benchmark("footprint/case_file",

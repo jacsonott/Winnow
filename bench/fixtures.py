@@ -275,7 +275,11 @@ def build_case(rows: int, *, verbose: bool = True) -> CaseFixture:
     # A main-source-only snapshot, taken before anything else is added, is
     # what the build_fts and compact benchmarks copy per repetition.
     pristine = os.path.join(tmpdir, "pristine.db")
-    store.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    # Must actually complete: only `path` is copied, so bytes left in the
+    # -wal by a silently-blocked checkpoint would make pristine.db a
+    # truncated fixture for every benchmark built on it.
+    if not store._checkpoint_truncate():
+        raise RuntimeError("could not checkpoint the WAL before snapshotting pristine.db")
     shutil.copyfile(path, pristine)
 
     say("ingesting no-FTS source (LIKE-fallback comparisons)")

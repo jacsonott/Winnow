@@ -1420,34 +1420,46 @@ class Store:
         obeys the same pragma, and materialising a 42 GB case in RAM is
         not a thing to find out about the hard way.
 
-        The WAL is checkpointed and truncated on both sides of the VACUUM.
-        Afterwards so the reclaimed bytes don't just move into a -wal file;
-        *before* so the two sizes are comparable at all — in WAL mode
-        recently written pages live in the -wal until a checkpoint, so a
-        case whose data has never been checkpointed reports a main-file
-        size of one page and would show a nonsense negative reclaim."""
+        Sizes are measured as **main + -wal on both sides**, which is what
+        makes the reclaim number honest without depending on a checkpoint
+        succeeding: in WAL mode recently written pages live in the -wal
+        until a checkpoint, so a case whose data has never been
+        checkpointed reports a main-file size of one page and would show a
+        nonsense negative reclaim. The WAL is still truncated on both
+        sides — before so VACUUM starts from a folded-in file, after so
+        the reclaimed bytes are returned to the OS rather than parked in a
+        -wal — but neither checkpoint is allowed to fail the operation.
+        A checkpoint that can't complete (something is holding an older
+        snapshot) leaves bytes in the WAL for a later passive checkpoint
+        to collect, and `wal_pending_bytes` says so; the accounting above
+        already counts them as not-reclaimed, so the numbers stay true
+        either way. Raising here instead would throw away a VACUUM that
+        already succeeded — minutes of work on a large case."""
         with self.lock:
             self.db.commit()
-            # Idle pooled readers keep mmap'd views of the file and — the
-            # actual bug this fixes — any reader mid-SELECT pins the WAL
-            # snapshot, making wal_checkpoint(TRUNCATE) return busy WITHOUT
-            # raising. The reclaimed bytes then sit in a growing -wal while
-            # the main file (the one the analyst measures) never shrinks.
-            # So: drop the idle pool (in-flight readers just open fresh
-            # connections afterwards), then RETRY the checkpoint until it
-            # actually completes, and refuse loudly rather than "succeed"
-            # with the space still parked in the WAL.
-            with self._reader_lock:
-                idle, self._reader_pool = self._reader_pool, []
-            for conn in idle:
-                with contextlib.suppress(sqlite3.Error):
-                    conn.close()
-            self._checkpoint_truncate_or_raise()
+            # Measured BEFORE any checkpoint, so this is the real on-disk
+            # footprint whatever the checkpoint does next.
             before = os.path.getsize(self.path)
             wal_before = self._wal_size()
+            # Idle pooled readers hold mmap'd views of the file; dropping
+            # them keeps a shrinking file from being pinned by connections
+            # nothing is using. It does NOT help with the checkpoint —
+            # a reader that blocks one is mid-statement, i.e. checked out
+            # of the pool and untouched by this (verified: an idle pooled
+            # reader does not make TRUNCATE report busy). The retry inside
+            # _checkpoint_truncate is what waits for those.
+            self._drain_idle_readers()
+            # One attempt, no waiting: folding the WAL in before the rewrite
+            # is a nicety (VACUUM works either way, and the sizes above no
+            # longer depend on it). Waiting the full budget here would just
+            # double the lock-held time on the very path — a reader pinning
+            # the snapshot — where the budget already gets spent below.
+            self._checkpoint_truncate(timeout_s=0)
             directory = os.path.dirname(os.path.abspath(self.path)) or "."
             free = shutil.disk_usage(directory).free
-            needed = before + self.VACUUM_HEADROOM
+            # main + wal: with the pre-checkpoint measured above, data still
+            # in the -wal is data VACUUM has to write out too.
+            needed = before + wal_before + self.VACUUM_HEADROOM
             if free < needed:
                 raise ValueError(
                     f"Not enough free disk space to compact: VACUUM rewrites the whole file, "
@@ -1457,13 +1469,17 @@ class Store:
             self.db.execute("PRAGMA temp_store=FILE")
             try:
                 self.db.execute("VACUUM")
-                self._checkpoint_truncate_or_raise()
+                # VACUUM commits through the WAL, so without this the
+                # rewritten (smaller) file is still sitting in the -wal and
+                # nothing has been given back to the OS yet.
+                checkpointed = self._checkpoint_truncate()
             finally:
                 self.db.execute("PRAGMA temp_store=MEMORY")
             after = os.path.getsize(self.path)
             wal_after = self._wal_size()
-        return {"before_bytes": before, "after_bytes": after,
-                "wal_before_bytes": wal_before, "wal_after_bytes": wal_after,
+        return {"before_bytes": before + wal_before, "after_bytes": after + wal_after,
+                "main_after_bytes": after, "wal_pending_bytes": wal_after,
+                "wal_checkpointed": checkpointed,
                 "reclaimed_bytes": max(0, (before + wal_before) - (after + wal_after))}
 
     def _wal_size(self) -> int:
@@ -1472,25 +1488,49 @@ class Store:
         except OSError:
             return 0
 
-    def _checkpoint_truncate_or_raise(self, timeout_s: float = 10.0) -> None:
-        """wal_checkpoint(TRUNCATE), retried until it really completes.
+    CHECKPOINT_TIMEOUT_S = 10.0
+
+    def _checkpoint_truncate(self, timeout_s: float | None = None) -> bool:
+        """wal_checkpoint(TRUNCATE) on the CASE FILE, retried until it
+        really completes. True if the WAL was truncated, False if readers
+        kept it pinned for the whole budget.
+
+        Three things this gets right that the obvious one-liner doesn't:
+
+        `main.` qualified, because an unqualified wal_checkpoint
+        checkpoints **every attached database** and ORs their busy flags
+        together — including the scratch views db (invariant #3), which
+        every pooled reader attaches. A reader merely paging a view would
+        otherwise report the case file's checkpoint as blocked (verified:
+        (1,0,0) unqualified vs (0,0,0) for main. with only `v` pinned)
+        and compact would refuse for a file it could have shrunk.
 
         The pragma reports failure in its RESULT ROW (busy=1) instead of
-        raising, so a checkpoint blocked by an in-flight reader used to
-        pass silently — the reason compact "didn't shrink" cases with live
-        readers. Retry while active readers finish; if something pins the
-        snapshot past the timeout, refuse with a message instead of
-        pretending."""
-        deadline = time.time() + timeout_s
-        while True:
-            row = self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
-            if row is None or row[0] == 0:
-                return
-            if time.time() >= deadline:
-                raise ValueError(
-                    "Could not checkpoint the WAL — a long-running read is holding the "
-                    "old snapshot. Let it finish (or close other clients) and compact again.")
-            time.sleep(0.1)
+        raising, so a checkpoint blocked by an in-flight reader passes
+        silently — the reason compact "didn't shrink" cases with live
+        readers. A missing row counts as not-complete, not as success:
+        a checkpoint we never saw confirmed is one we can't claim.
+
+        And the busy timeout is scoped down for the attempts, because
+        TRUNCATE invokes the connection's busy handler: with the default
+        5s, one blocked attempt sits *inside* the pragma for 5s (measured
+        5.03s), so a 10s budget really took ~15s and a 0.5s budget took
+        5s — all of it holding self.lock, which stalls every writer."""
+        budget = self.CHECKPOINT_TIMEOUT_S if timeout_s is None else timeout_s
+        deadline = time.monotonic() + budget  # monotonic: an NTP step must not move the deadline
+        prior = self.db.execute("PRAGMA busy_timeout").fetchone()[0]
+        # Per attempt, so the loop — not the busy handler — owns the budget.
+        self.db.execute(f"PRAGMA busy_timeout={max(1, int(budget * 1000 / 4))}")
+        try:
+            while True:
+                row = self.db.execute("PRAGMA main.wal_checkpoint(TRUNCATE)").fetchone()
+                if row is not None and row[0] == 0:
+                    return True
+                if time.monotonic() >= deadline:
+                    return False
+                time.sleep(0.05)
+        finally:
+            self.db.execute(f"PRAGMA busy_timeout={int(prior)}")
 
     @staticmethod
     def _tune(conn: sqlite3.Connection) -> None:
@@ -1528,13 +1568,21 @@ class Store:
                     self._default_tags,
                 )
 
-    def close(self) -> None:
+    def _drain_idle_readers(self, *, permanent: bool = False) -> None:
+        """Close every reader sitting idle in the pool. `permanent` also
+        latches the pool shut (close()); compact leaves it open, since the
+        store keeps serving reads afterwards. Checked-out connections are
+        never touched — they belong to a live read."""
         with self._reader_lock:
-            self._readers_closed = True
+            if permanent:
+                self._readers_closed = True
             idle, self._reader_pool = self._reader_pool, []
         for conn in idle:
             with contextlib.suppress(sqlite3.Error):
                 conn.close()
+
+    def close(self) -> None:
+        self._drain_idle_readers(permanent=True)
         # Stop any running ingest jobs before the connection goes away — a
         # worker mid-batch would otherwise die on a closed database. Cancel
         # is cooperative (checked per BATCH), so the join is bounded by one

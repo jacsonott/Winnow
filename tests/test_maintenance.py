@@ -122,8 +122,13 @@ def test_compact_reclaims_space_after_a_source_is_dropped(store, tmp_path):
     assert grown["after_bytes"] > 1_000_000
 
     store.drop_source(rec["id"])
+    # The drop's own writes are still in the -wal here — and before_bytes
+    # counts them, because compact now reports the WHOLE on-disk footprint
+    # (main + -wal) measured before it checkpoints anything. That is what
+    # makes reclaimed_bytes honest even when a checkpoint can't complete.
+    on_disk_before = os.path.getsize(store.path) + store._wal_size()
     freed = store.compact()
-    assert freed["before_bytes"] == grown["after_bytes"]  # checkpointed on both sides
+    assert freed["before_bytes"] == on_disk_before
     assert freed["after_bytes"] < grown["after_bytes"] / 2
     assert freed["reclaimed_bytes"] == freed["before_bytes"] - freed["after_bytes"]
 

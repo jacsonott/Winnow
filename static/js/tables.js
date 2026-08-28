@@ -63,13 +63,17 @@ export async function compactCaseFile() {
   try { res = await post('/api/case/compact', {}); }
   catch (e) { toast('Compact failed: ' + e.message, 6000); return; }
   finally { setBusy(false); }
-  // Totals include the -wal file — the main .db alone can lie when data
-  // was living in the write-ahead log.
-  const totalBefore = res.before_bytes + (res.wal_before_bytes || 0);
-  const totalAfter = res.after_bytes + (res.wal_after_bytes || 0);
-  toast(res.reclaimed_bytes > 0
-    ? `Compacted: ${fmtBytes(totalBefore)} → ${fmtBytes(totalAfter)} on disk, reclaimed ${fmtBytes(res.reclaimed_bytes)}`
-    : `Compacted — nothing to reclaim (${fmtBytes(totalAfter)} on disk)`, 6000);
+  // before/after_bytes are already whole-footprint (main + -wal) — the
+  // store owns that definition so this can't drift from reclaimed_bytes.
+  // A checkpoint the readers wouldn't let finish leaves the freed bytes
+  // in the WAL until a later passive one collects them; reclaimed_bytes
+  // already counts them as not-reclaimed, so the toast just says why.
+  const pending = res.wal_checkpointed === false && res.wal_pending_bytes > 0
+    ? ` · ${fmtBytes(res.wal_pending_bytes)} still in the write-ahead log (a read was holding it open); it frees up on its own shortly`
+    : '';
+  toast((res.reclaimed_bytes > 0
+    ? `Compacted: ${fmtBytes(res.before_bytes)} → ${fmtBytes(res.after_bytes)} on disk, reclaimed ${fmtBytes(res.reclaimed_bytes)}`
+    : `Compacted — nothing to reclaim (${fmtBytes(res.after_bytes)} on disk)`) + pending, 8000);
 }
 
 export function openTablesManager() {
