@@ -1230,6 +1230,30 @@ textarea:focus { border-color: var(--accent); outline: none; }
 
 /* -------------------------------------------------------- filter builder */
 
+/* Sessions panel: the "received from another analyst" marker, and the
+   diff table. Three columns of tag names with an arrow between them —
+   deliberately a table, not a list, because a reviewer reads DOWN the
+   before and after columns comparing them. */
+.session-badge {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .04em;
+  padding: 1px 5px; border-radius: var(--radius-sm);
+  background: var(--panel-3); color: var(--dim);
+}
+.session-diff { margin-top: 6px; max-height: 340px; overflow: auto; }
+.diff-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.diff-table td {
+  padding: 2px 6px; border-bottom: 1px solid var(--border-hairline);
+  vertical-align: top;
+}
+.diff-rid { color: var(--dim); font-family: var(--mono); white-space: nowrap; }
+.diff-arrow { color: var(--dim); text-align: center; width: 1.5em; }
+/* The accent carries "what the reviewer added"; danger carries "what they
+   dropped" — the two a QC pass acts on first. */
+.diff-added td:last-child { color: var(--accent); }
+.diff-removed td:nth-child(3) { color: var(--danger); }
+.diff-changed td:last-child { color: var(--accent); }
+.diff-note td { color: var(--text); }
+
 /* Settings → Updates: the release notes blob. Monospace and scrollable
    because it's markdown straight from the GitHub release, not something
    we render. */

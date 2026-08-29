@@ -2248,6 +2248,22 @@ def api_case_sessions_download(name: str):
         "Content-Disposition": f'attachment; filename="{safe}.winnow_case.json"'})
 
 
+class NewSessionReq(BaseModel):
+    """save_as is optional but strongly encouraged by the UI — clearing
+    without saving is the one irreversible move here."""
+    save_as: str | None = None
+
+
+@app.post("/api/case_sessions/new")
+def api_case_sessions_new(body: NewSessionReq):
+    """Start a fresh pass: save the current work (if named) and clear the
+    live tags and notes. Layouts, derived columns and SQL tabs stay."""
+    try:
+        return store().start_new_session(body.save_as)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 @app.get("/api/case_sessions/diff")
 def api_case_sessions_diff(left: str, right: str):
     """What changed between two sessions — the QC review. Either side may

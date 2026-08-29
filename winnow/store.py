@@ -6526,6 +6526,35 @@ class Store:
 
     LIVE_SESSION = "__live__"
 
+    def start_new_session(self, save_as: str | None = None) -> dict:
+        """Clear the live tags and notes for a fresh pass over the same
+        evidence, optionally saving what's there first.
+
+        Clears conclusions only. Layouts, saved views, derived columns, SQL
+        tabs and the tag palette all stay — they are how the evidence is
+        READ, and starting a second pass doesn't mean re-deriving timestamps
+        or re-hiding columns.
+
+        Not routed through _apply_tag_change (invariant #7) on purpose: the
+        undo journal is bounded by UNDO_ROW_BUDGET and a case with a million
+        tagged rows would blow straight through it. Saving first is the
+        undo, and it is a better one — a named session you can diff against
+        rather than a single step you can lose."""
+        saved = self.save_session(save_as) if save_as else None
+        with self.lock, self.db:
+            tags = self.db.execute("SELECT COUNT(*) FROM row_tags").fetchone()[0]
+            notes = self.db.execute("SELECT COUNT(*) FROM row_notes").fetchone()[0]
+            self.db.execute("DELETE FROM row_tags")
+            self.db.execute("DELETE FROM row_notes")
+        # The undo entries reference rows that no longer carry those tags;
+        # replaying one would reinsert assignments this deliberately cleared.
+        with self.lock:
+            for entry in self._undo:
+                with contextlib.suppress(sqlite3.Error):
+                    self.db.execute(f"DROP TABLE IF EXISTS v.{q(entry['table'])}")
+            self._undo.clear()
+        return {"saved": saved, "tags_cleared": tags, "notes_cleared": notes}
+
     def _session_tag_map(self, data: dict) -> tuple[dict, dict, dict]:
         """(tags_by_row, notes_by_row, source_labels) for a session document.
 
