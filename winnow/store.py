@@ -6341,8 +6341,15 @@ class Store:
                 derived_added += 1
             except (ValueError, KeyError) as e:
                 warnings.append(f"Derived column {d.get('name')!r} not recreated: {e}")
+        # The backfills are still running when this returns — only the ones a
+        # LATER column depended on were waited for above. Without the job ids
+        # a caller has nothing to wait on, so "derived_columns_added: 2" reads
+        # as done while the columns are still empty; anything reading values
+        # straight afterwards gets NULLs. Hand them back so the caller can
+        # decide whether to wait.
         return {"warnings": warnings, "tags_applied": len(session.get("row_tags", [])),
-                "derived_columns_added": derived_added}
+                "derived_columns_added": derived_added,
+                "derived_job_ids": list(pending_jobs.values())}
 
     # ---------------------------------------------------------- case sessions
 

@@ -101,6 +101,12 @@ def test_session_round_trip_restores_the_chain(store, write_csv):
     fresh = store.ingest_csv(write_csv(ROWS, "h2.csv"), name="h2", build_fts=False)["id"]
     out = store.import_session(fresh, session)
     assert out["derived_columns_added"] == 2, out
+    # The last column's backfill is still running when import_session
+    # returns — it only waits for links a later column depends on. Reading
+    # values without waiting is a race that usually resolves in the test's
+    # favour on two rows, and intermittently does not.
+    for jid in out["derived_job_ids"]:
+        store.wait_for_ingest_job(jid, timeout=30)
     assert _values(store, fresh, "Addr") == ["10.0.0.5", "10.0.0.9"]
 
 
