@@ -975,9 +975,21 @@ textarea:focus { border-color: var(--accent); outline: none; }
    classes — they're already self-contained, not positioning-dependent on
    .menu's own fixed/floating placement. */
 .sidebar {
-  width: 220px; height: 100%; min-height: 0;
-  display: flex; flex-direction: column;
+  width: var(--sidebar-w, 220px); height: 100%; min-height: 0;
+  display: flex; flex-direction: column; position: relative;
   background: var(--panel); border-right: 1px solid var(--line);
+}
+/* Same handle idiom as .detail-resize and .tab-split: a hit target wider
+   than the line it paints, sitting on the sidebar's own right edge and
+   overlapping the border rather than displacing it — #app's first grid
+   column is max-content, so anything that took real width here would
+   push the grid over every time. */
+.sidebar-resize {
+  position: absolute; top: 0; right: -3px; bottom: 0; width: 7px;
+  cursor: col-resize; touch-action: none; z-index: 5;
+}
+.sidebar-resize:hover::after, .sidebar-resize.dragging::after {
+  content: ""; position: absolute; inset: 0 3px; background: var(--accent-dim);
 }
 .sidebar-head { flex: 0 0 auto; padding: 8px; border-bottom: 1px solid var(--line); }
 #sidebarFilter {

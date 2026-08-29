@@ -44,11 +44,29 @@ export function sourceLabel(s) { return (s && (s.nickname || s.name)) || ''; }
 
 /* The hover title for a nicknamed source — keeps the real file name one
    hover away wherever the nickname replaced it. */
+/* The hover text for a table, wherever its name appears (tab strip,
+   sidebar, Tables manager).
+
+   It used to name the source file ONLY when a nickname was set, on the
+   reasoning that the label already showed the file name otherwise — which
+   left the common case (no nickname) with a tooltip that said nothing
+   about the table at all. What an analyst actually wants on hover is
+   which file on disk this is: names collide constantly across a triage
+   set (four hosts' worth of `Amcache_UnassociatedFileEntries.csv`), and
+   the label can't show a path without becoming unreadable. So: the
+   nickname relationship when there is one, then the full path, then the
+   import date. */
 export function sourceTitle(s, suffix) {
   const parts = [];
-  if (s && s.nickname) parts.push(s.name);
+  if (s) {
+    if (s.is_merge) parts.push(`Merge of ${(s.members || []).length || 'several'} tables`);
+    else if (s.nickname) parts.push(`${s.nickname} — from ${s.name}`);
+    else parts.push(s.name);
+    if (s.path) parts.push(s.path);
+    if (s.imported_at) parts.push(`Imported ${s.imported_at.replace('T', ' ')}`);
+  }
   if (suffix) parts.push(suffix);
-  return parts.join(' — ');
+  return parts.join('\n');
 }
 
 /* Prompt-and-save for a source's nickname (a merge's name — merges have no
@@ -756,13 +774,65 @@ export function setSidebarVisible(visible) {
   $('btnTabJump').textContent = visible ? '◀' : '▶';
   $('btnTabJump').setAttribute('aria-pressed', String(visible));
   $('btnTabJump').title = visible ? 'Hide the table list' : 'Show every table in the case';
-  localStorage.setItem(SIDEBAR_KEY, JSON.stringify({ collapsed: !visible }));
+  saveSidebarPrefs({ collapsed: !visible });
+}
+
+export const SIDEBAR_W_DEFAULT = 220;
+export const SIDEBAR_W_MIN = 140;   // narrower than this and the row counts collide with the names
+export const SIDEBAR_W_MAX = 640;
+
+export function setSidebarWidth(px) {
+  const w = Math.round(Math.min(SIDEBAR_W_MAX, Math.max(SIDEBAR_W_MIN, px)));
+  // One custom property on the root, read by .sidebar's width — so nothing
+  // has to touch inline styles on the element the CSS already owns.
+  document.documentElement.style.setProperty('--sidebar-w', w + 'px');
+  return w;
+}
+
+function saveSidebarPrefs(patch) {
+  let cur = {};
+  try { cur = JSON.parse(localStorage.getItem(SIDEBAR_KEY) || '{}'); } catch { /* start fresh */ }
+  localStorage.setItem(SIDEBAR_KEY, JSON.stringify({ ...cur, ...patch }));
 }
 
 export function initSidebar() {
-  let collapsed = false;
-  try { collapsed = JSON.parse(localStorage.getItem(SIDEBAR_KEY) || '{}').collapsed ?? false; } catch { /* default: visible */ }
-  setSidebarVisible(!collapsed);
+  let prefs = {};
+  try { prefs = JSON.parse(localStorage.getItem(SIDEBAR_KEY) || '{}'); } catch { /* defaults below */ }
+  setSidebarWidth(prefs.width || SIDEBAR_W_DEFAULT);
+  setSidebarVisible(!(prefs.collapsed ?? false));
+}
+
+/* Drag the sidebar's right edge to resize it, double-click to reset —
+   same shape as the detail pane's handle (see detail.js). Width is
+   persisted next to the collapsed flag, so it survives a reload the way
+   every other panel size here does. */
+export function wireSidebarResize() {
+  const handle = $('sidebarResize');
+  if (!handle) return;
+  handle.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = $('sidebar').getBoundingClientRect().width;
+    handle.classList.add('dragging');
+    let width = startW;
+    const move = (ev) => { width = setSidebarWidth(startW + (ev.clientX - startX)); };
+    const up = () => {
+      document.removeEventListener('mousemove', move);
+      document.removeEventListener('mouseup', up);
+      handle.classList.remove('dragging');
+      saveSidebarPrefs({ width });
+      // The grid sizes itself off the space left over, so it has to be
+      // told the viewport changed — the window 'resize' event never fires
+      // for a layout change we made ourselves.
+      window.dispatchEvent(new Event('resize'));
+    };
+    document.addEventListener('mousemove', move);
+    document.addEventListener('mouseup', up);
+  });
+  handle.addEventListener('dblclick', () => {
+    saveSidebarPrefs({ width: setSidebarWidth(SIDEBAR_W_DEFAULT) });
+    window.dispatchEvent(new Event('resize'));
+  });
 }
 
 /* Row identity (source_id, rid) survives a view rebuild even though pos
