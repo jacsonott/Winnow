@@ -318,3 +318,22 @@ def test_saved_filters_normalize_cond_root_payloads_on_read():
     # ...and it stuck: a re-read straight from disk shows the wrapped shape.
     got2 = next(f for f in WS.SavedFilters().list() if f["id"] == rec["id"])
     assert got2["payload"]["filter_tree"]["type"] == "group"
+
+
+def test_the_module_docstring_lists_every_store():
+    """This is here because the list said "eight" while there were eleven —
+    app_settings, prefs and plugin_bundles were added without it. A
+    docstring that inventories something is a docstring that goes stale, so
+    the inventory is checked rather than trusted."""
+    import inspect
+    import re
+
+    documented = set(re.findall(r"^  (\w+\.json)", WS.__doc__, re.M))
+    actual = {c.FILE for _, c in inspect.getmembers(WS, inspect.isclass)
+              if getattr(c, "FILE", "").endswith(".json")}
+    assert documented == actual, (
+        f"workspace.py's docstring and its stores disagree — "
+        f"undocumented: {sorted(actual - documented)}, "
+        f"documented but gone: {sorted(documented - actual)}")
+    # And the count in the prose has to agree with the list under it.
+    assert f"{len(actual)}" in WS.__doc__ or "Eleven" in WS.__doc__
