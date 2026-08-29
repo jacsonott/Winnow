@@ -45,7 +45,15 @@ ROOT = Path(__file__).resolve().parent.parent
 # archives are `git archive` output, which honours export-ignore, so
 # tests/ is present in the branch for CI and absent from the zip an
 # analyst installs. The branch and the artifact have different jobs.
-DEV_ONLY = ("bench", "CLAUDE.md")
+DEV_ONLY = (
+    "bench",
+    # Goes with bench/ — it imports it, so leaving it behind breaks pytest
+    # COLLECTION on the release branch, which fails the very check keeping
+    # tests/ there in the first place. Anything dropped here has to take
+    # its tests with it.
+    "tests/test_bench_harness.py",
+    "CLAUDE.md",
+)
 
 VERSION_FILE = Path("winnow/version.py")
 SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
