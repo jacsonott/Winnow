@@ -96,8 +96,8 @@ def test_saved_filters_import_merges_by_name_and_columns():
     export = WS.filters.export_all()
     assert export["format"] == "winnow-filters/1"
 
-    from winnow import filter_defaults
-    seeded = len(filter_defaults.DEFAULT_SAVED_FILTERS)
+    from winnow import defaults
+    seeded = len(defaults.filters()["filters"])
 
     # Importing the same export again (merge=True) must not duplicate —
     # same name + same column set is considered "the same filter."
@@ -127,10 +127,10 @@ def test_header_nicknames_save_find_overwrites_and_delete():
 
     # Saving again for the same set overwrites in place, not a second record.
     # (list() also carries the seeded KAPE defaults — count relative to them.)
-    from winnow import header_defaults
+    from winnow import defaults
     WS.header_nicknames.save(["A", "B"], "Renamed")
     assert WS.header_nicknames.find(["A", "B"])["nickname"] == "Renamed"
-    assert len(WS.header_nicknames.list()) == len(header_defaults.DEFAULT_HEADER_NICKNAMES) + 1
+    assert len(WS.header_nicknames.list()) == len(defaults.headers()["nicknames"]) + 1
 
     WS.header_nicknames.delete(rec["id"])
     assert WS.header_nicknames.find(["A", "B"]) is None
@@ -233,12 +233,12 @@ def test_header_nicknames_seed_from_kape_defaults():
     that's the whole value of the "database of headers": the analyst's first
     EvtxECmd import already says "Event logs (EvtxECmd)" in every place a
     header set is displayed, with nothing configured."""
-    from winnow import header_defaults
+    from winnow import defaults
 
     hn = WS.HeaderNicknames()
     recs = hn.list()
-    assert len(recs) == len(header_defaults.DEFAULT_HEADER_NICKNAMES)
-    evtx_cols = next(cols for n, cols in header_defaults.DEFAULT_HEADER_NICKNAMES
+    assert len(recs) == len(defaults.headers()["nicknames"])
+    evtx_cols = next(cols for n, cols in defaults.headers()["nicknames"]
                      if n == "Event logs (EvtxECmd)")
     # find() matches regardless of column order/case — the store's own key.
     assert hn.find(list(reversed([c.upper() for c in evtx_cols])))["nickname"] == "Event logs (EvtxECmd)"
@@ -248,7 +248,7 @@ def test_header_nickname_seed_never_overrides_or_resurrects():
     """Seeded rows are ordinary records afterward: a rename sticks, a delete
     sticks across every later read, and re-seeding (same version) adds
     nothing back."""
-    from winnow import header_defaults
+    from winnow import defaults
 
     hn = WS.HeaderNicknames()
     recs = hn.list()
@@ -264,14 +264,15 @@ def test_header_nickname_seed_never_overrides_or_resurrects():
 def test_header_nickname_seed_version_bump_adds_only_missing(monkeypatch):
     """A later Winnow adding one new default must add exactly that one —
     existing rows (including analyst renames of old defaults) untouched."""
-    from winnow import header_defaults
+    from winnow import defaults
 
     hn = WS.HeaderNicknames()
     before = hn.list()
     hn.save(list(before[0]["col_names"]), "Renamed")
-    monkeypatch.setattr(header_defaults, "DEFAULTS_VERSION", header_defaults.DEFAULTS_VERSION + 1)
-    monkeypatch.setattr(header_defaults, "DEFAULT_HEADER_NICKNAMES",
-                        header_defaults.DEFAULT_HEADER_NICKNAMES + [("New tool", ["ColA", "ColB"])])
+    shipped = defaults.headers()
+    monkeypatch.setattr(defaults, "headers", lambda: {
+        "version": shipped["version"] + 1,
+        "nicknames": shipped["nicknames"] + [("New tool", ["ColA", "ColB"])]})
     after = hn.list()
     assert len(after) == len(before) + 1
     assert hn.find(["colb", "cola"])["nickname"] == "New tool"
