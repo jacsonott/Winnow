@@ -10,7 +10,7 @@ import json
 
 import pytest
 
-import structparse as sp
+from winnow import structparse as sp
 
 EVTX = (
     '<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">'
@@ -201,7 +201,7 @@ def test_discovered_paths_all_extract():
 
 
 def test_registered_ops_are_hidden_from_timestamp_detection():
-    import timeparse
+    from winnow import timeparse
 
     ops = {o["id"]: o for o in timeparse.list_ops()}
     assert ops["json_field"]["family"] == "extract"
@@ -212,7 +212,7 @@ def test_registered_ops_are_hidden_from_timestamp_detection():
 
 
 def test_bad_paths_are_rejected_at_validation_time():
-    import timeparse
+    from winnow import timeparse
 
     with pytest.raises(ValueError):
         timeparse.validate_params("json_field", {"path": "a..b["})

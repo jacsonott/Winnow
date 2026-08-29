@@ -45,8 +45,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-import paths
-from store import DEFAULT_TAGS
+from . import paths
+from .store import DEFAULT_TAGS
 
 WORKSPACE_DIR = paths.INSTALL_ROOT / "workspace"
 
@@ -188,7 +188,7 @@ class SavedFilters:
         present" is name + column set, matching import_all's merge rule, so
         an analyst's edited copy of a default is never re-added beside
         itself on a version bump."""
-        import filter_defaults
+        from . import filter_defaults
 
         with _LOCK:
             data = _read(self.FILE, {"filters": []})
@@ -352,7 +352,7 @@ class HeaderNicknames:
         analyst created. Only header sets not already present are added,
         so an analyst's own name for the EvtxECmd shape survives every
         version bump."""
-        import header_defaults
+        from . import header_defaults
 
         with _LOCK:
             data = _read(self.FILE, {"nicknames": []})

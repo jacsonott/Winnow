@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 
-import store as store_module
+from winnow import store as store_module
 
 
 def test_sql_tabs_start_empty(store):

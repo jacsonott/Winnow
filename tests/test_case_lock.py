@@ -16,7 +16,7 @@ import time
 
 import pytest
 
-from store import (CASE_LOCK_STALE_AFTER_SEC, DEFAULT_TAGS, Store, case_lock_path,
+from winnow.store import (CASE_LOCK_STALE_AFTER_SEC, DEFAULT_TAGS, Store, case_lock_path,
                    describe_case_lock, probe_case_lock)
 
 

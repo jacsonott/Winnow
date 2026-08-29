@@ -40,10 +40,10 @@ try:  # POSIX only — see sweep_orphan_views for why Windows needs no substitut
 except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
 
-import enrich  # noqa: F401 — registers the cross-table lookup op into timeparse.OPERATIONS
-import structparse  # noqa: F401 — registers the JSON/XML extraction ops into timeparse.OPERATIONS
-import timeparse
-import xlsxread
+from . import enrich  # noqa: F401 — registers the cross-table lookup op into timeparse.OPERATIONS
+from . import structparse  # noqa: F401 — registers the JSON/XML extraction ops into timeparse.OPERATIONS
+from . import timeparse
+from . import xlsxread
 
 BATCH = 20_000
 SAMPLE_ROWS = 500

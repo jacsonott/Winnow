@@ -11,7 +11,7 @@ import sqlite3
 
 import pytest
 
-from store import WEBKIT_EPOCH_OFFSET_US, _webkit_to_iso
+from winnow.store import WEBKIT_EPOCH_OFFSET_US, _webkit_to_iso
 
 
 def _to_webkit(dt: datetime.datetime) -> int:

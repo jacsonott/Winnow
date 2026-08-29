@@ -8,7 +8,7 @@ backend endpoints — without touching Winnow's source. Drop it in
 This guide is the long form, and it stands alone — every hook, data
 shape and example you need to write a plugin is in this file, and every
 code sample in it was extracted verbatim and run before shipping. The
-enforcing contract lives in [`plugin_api.py`](../plugin_api.py)'s module
+enforcing contract lives in [`plugin_api.py`](../winnow/plugin_api.py)'s module
 docstring, and three fuller plugins live in
 [`examples/plugins/`](../examples/plugins/), but neither is required
 reading. Start with the Quickstart.
@@ -583,14 +583,30 @@ analyst findings to evidence rows.
 ### Quoting identifiers
 
 Column and table names are **user data** — they come from CSV headers.
-Never f-string one into SQL. Winnow exports the same quoting helper it
-uses internally:
+Never f-string one into SQL. Winnow hands you the same quoting helper it
+uses internally, on the `api` object:
 
 ```python
-from store import q
-
-sql = f"SELECT {q(col)} FROM {q(src['table_name'])} WHERE {q(col)} != ''"
+def register(api):
+    sql = f"SELECT {api.q(col)} FROM {api.q(src['table_name'])} WHERE {api.q(col)} != ''"
 ```
+
+`api.NUM_RE` is there too — the same "does this look numeric" test the
+grid uses for right-alignment and numeric sorting, so a plugin's tables
+agree with the rest of the app.
+
+Module-level helpers that never see `api` can import them directly
+instead; the three bundled examples that build SQL this way do exactly
+that, and it stays supported:
+
+```python
+from winnow.store import NUM_RE, q
+```
+
+Prefer `api.q` in handler code. It is the stable surface: it does not
+depend on where Winnow's modules happen to live, and plugins load by file
+path rather than as part of the package, so a direct import only resolves
+because the server was started from the install directory.
 
 Validate first, quote second: check the column is actually in
 `src["columns"]` before using it, then quote it. Values (as opposed to
@@ -657,9 +673,9 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, "/path/to/winnow")        # so `import plugin_api, store` works
-from plugin_api import PluginRequest          # noqa: E402
-from store import DEFAULT_TAGS, Store         # noqa: E402
+sys.path.insert(0, "/path/to/winnow")             # the install root, not winnow/
+from winnow.plugin_api import PluginRequest        # noqa: E402
+from winnow.store import DEFAULT_TAGS, Store       # noqa: E402
 
 import myplugin                               # your plugin package
 

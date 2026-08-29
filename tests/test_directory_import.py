@@ -12,7 +12,7 @@ import os
 
 import pytest
 
-import store as store_module
+from winnow import store as store_module
 
 
 def _write(tmp_path, rel, content="a,b\n1,2\n"):

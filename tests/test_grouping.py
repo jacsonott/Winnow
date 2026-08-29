@@ -5,7 +5,7 @@ gap fixed last session when nested grouping was added)."""
 
 from __future__ import annotations
 
-from store import TAG_GROUP_COLUMN, Store
+from winnow.store import TAG_GROUP_COLUMN, Store
 
 
 def test_group_summary_count_and_value_order(ingested):

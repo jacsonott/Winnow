@@ -13,7 +13,7 @@ connection's lock (invariant #4), and it inherits the SQL pane's
 defense-in-depth statement checks for free.
 """
 
-from store import q
+from winnow.store import q
 
 PLUGIN = {
     "name": "lateral-movement",

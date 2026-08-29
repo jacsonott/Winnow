@@ -19,10 +19,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-import paths
+from winnow import paths
 import server
-import updater
-import workspace as WS
+from winnow import updater
+from winnow import workspace as WS
 
 
 def test_install_root_is_the_directory_winnow_was_installed_into():
@@ -46,7 +46,8 @@ def test_the_workspace_lives_directly_under_the_install_root():
     fixture works. What matters is the value a real install computes."""
     out = subprocess.run(
         [sys.executable, "-c",
-         "import paths, workspace; print(workspace.WORKSPACE_DIR); print(paths.INSTALL_ROOT)"],
+         "from winnow import paths, workspace; "
+         "print(workspace.WORKSPACE_DIR); print(paths.INSTALL_ROOT)"],
         cwd=str(paths.INSTALL_ROOT), capture_output=True, text=True, check=True).stdout.split()
     workspace_dir, install_root = Path(out[0]), Path(out[1])
     assert workspace_dir.parent == install_root
