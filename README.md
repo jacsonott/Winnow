@@ -41,7 +41,13 @@ pip install fastapi "uvicorn[standard]" python-multipart
 python server.py --case case.db --open timeline.csv
 ```
 
-Opens http://127.0.0.1:8777. You can also skip `--open` and import from the UI.
+Opens http://127.0.0.1:8777 in an **app window** — a browser window with no
+address bar, tab strip or bookmarks, and its own taskbar entry, so Winnow
+looks like the application it is rather than one of your twenty tabs. It
+uses whichever Chromium-family browser it finds (Edge first on Windows,
+since it ships with the OS; Chrome first elsewhere) and falls back to an
+ordinary tab in your default browser if there isn't one. You can also skip
+`--open` and import from the UI.
 The home screen's ⏻ button (or Session → "Shut down Winnow…") stops the server
 again from the UI — everything is already saved in the case file.
 
@@ -52,6 +58,8 @@ again from the UI — everything is already saved in the case file.
 | `--no-fts` | Skip the full-text index. Roughly halves import time; search falls back to substring matching |
 | `--port`, `--host` | Defaults 8777 / 127.0.0.1 |
 | `--no-browser` | Don't auto-open a browser |
+| `--browser-tab` | Open an ordinary tab instead of an app window |
+| `--browser-profile DIR` | Give the app window its own browser profile — isolates Winnow from your extensions, but appearance, keybindings and panel sizes live in that profile, so a new one starts from defaults |
 | `--force` | Open `--case` even if another Winnow already has it open |
 
 A case file is meant to be open in **one** Winnow at a time. Each running

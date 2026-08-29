@@ -33,6 +33,13 @@ server.py          FastAPI routes, CLI entrypoint. Thin — logic lives in store
                     those two are the only ones an analyst ever runs; the
                     app itself lives in winnow/ (see paths.py before moving
                     anything between them).
+browser.py         Opening the UI as an app window (Chromium's --app) rather
+                    than a tab, with the default browser as the fallback.
+                    Deliberately passes no --user-data-dir: appearance,
+                    keybindings and panel sizes live in localStorage, which
+                    is per-profile, so a fresh one would silently reset
+                    every analyst's settings. Edge leads on Windows because
+                    it ships with the OS.
 update.py          Update this install in place. Root, for the same reason —
                     see its fuller entry below.
 winnow/            Everything the app is made of. The modules below all
