@@ -11,7 +11,7 @@ import time
 
 import pytest
 
-from store import OpCancelled
+from winnow.store import OpCancelled
 
 # A catastrophic-backtracking regex against strings of a's: each row costs
 # real CPU inside the REGEXP UDF, so the build is reliably still running

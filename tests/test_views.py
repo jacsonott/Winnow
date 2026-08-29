@@ -400,7 +400,7 @@ def test_validate_where_fragment_rejects_select_and_unknown_identifier(ingested)
 # --------------------------------------------------------------- time_range
 
 def test_ts_normalize_handles_iso_us_ampm_and_missing_time():
-    from store import _ts_normalize
+    from winnow.store import _ts_normalize
 
     assert _ts_normalize("2026-01-05") == "2026-01-05 00:00:00"
     assert _ts_normalize("2026-01-05 13:22:01") == "2026-01-05 13:22:01"

@@ -53,7 +53,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-import paths
+from . import paths
 
 # The install this updater belongs to — see paths.py for why this is
 # not computed from THIS file's location.
@@ -89,6 +89,33 @@ PROTECTED_SUFFIXES = (".db", ".db-wal", ".db-shm", ".winnow-lock", ".winnow_case
 PROTECTED_EXCEPTIONS = ("plugins/README.md",)
 
 
+# Modules that used to live in the install root and now live in winnow/.
+# An update only removes files a PREVIOUS update recorded, so an install
+# with no manifest keeps its old top-level copies alongside the new
+# package. They are inert for the app — nothing imports the bare names any
+# more — but a plugin or dev script doing `import store` would silently
+# load the stale one, which is a hard-to-see way to run half of an old
+# version.
+#
+# Note what this can and cannot do. The updater that runs an upgrade is
+# the one ALREADY INSTALLED, so the upgrade that first delivers the
+# package layout is carried out by the old, pre-package updater and this
+# sweep does not exist yet during it. The stale files therefore survive
+# that one upgrade and are cleared by the next one, when this code is the
+# code running. That is a deliberate accepted delay rather than an
+# oversight: the alternative is deleting files from the install root at
+# server startup, which is a much larger blast radius for a problem whose
+# worst case is an inert duplicate.
+#
+# Spelled out rather than globbed — removing an entry is safe, adding a
+# wrong one is not.
+MOVED_INTO_PACKAGE = (
+    "enrich.py", "filter_defaults.py", "header_defaults.py", "make_fixture.py",
+    "paths.py", "plugin_api.py", "store.py", "structparse.py", "timeparse.py",
+    "updater.py", "version.py", "workspace.py", "xlsxread.py",
+)
+
+
 class UpdateError(Exception):
     """Anything the analyst can act on — no network, a corrupt bundle, a
     backup that isn't there. Surfaces as a message, not a traceback."""
@@ -98,10 +125,16 @@ def installed_version(root: Path | None = None) -> str:
     """The version of the install at `root` (default: this one), read from
     version.py as text rather than imported — `root` may be an archive we
     have not installed and must not execute."""
-    path = (root or HERE) / "version.py"
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
+    root = Path(root or HERE)
+    # winnow/version.py since the package move; the bare root path is the
+    # pre-move layout, which an install being updated FROM still has.
+    for rel in ("winnow/version.py", "version.py"):
+        try:
+            text = (root / rel).read_text(encoding="utf-8")
+            break
+        except OSError:
+            continue
+    else:
         return "unknown"
     for line in text.splitlines():
         if line.startswith("VERSION"):
@@ -331,9 +364,13 @@ def plan_update(archive: Path, root: Path | None = None) -> dict:
 
 
 def _version_from_archive(zf: zipfile.ZipFile, prefix: str) -> str:
-    try:
-        text = zf.read(prefix + "version.py").decode("utf-8")
-    except KeyError:
+    for rel in ("winnow/version.py", "version.py"):
+        try:
+            text = zf.read(prefix + rel).decode("utf-8")
+            break
+        except KeyError:
+            continue
+    else:
         return "unknown"
     for line in text.splitlines():
         if line.startswith("VERSION"):
@@ -379,6 +416,7 @@ def apply_update(archive: Path, root: Path | None = None, source: str = "release
             for m in plan["removed"]:
                 with contextlib.suppress(OSError):
                     (root / m).unlink()
+            _sweep_moved_modules(root, incoming)
             _write_manifest(root, plan["version"], incoming, source)
         except Exception as e:  # noqa: BLE001 — a half-applied install is the one thing we can't leave behind
             restore(backup, root)
@@ -386,6 +424,25 @@ def apply_update(archive: Path, root: Path | None = None, source: str = "release
                 f"Update failed and was rolled back ({e}). Winnow is still on {before}.") from e
     _prune_backups(root)
     return {**plan, "previous_version": before, "backup": str(backup)}
+
+
+def _sweep_moved_modules(root: Path, incoming: list[str]) -> list[str]:
+    """Delete the pre-package top-level modules, once the archive proves it
+    carries the package form. Gated on winnow/store.py actually being in
+    the incoming file list so this can never fire while updating between
+    two pre-package versions."""
+    if not any(m == "winnow/store.py" for m in incoming):
+        return []
+    swept = []
+    for name in MOVED_INTO_PACKAGE:
+        stale = root / name
+        # Never touch something the new version still ships at that path.
+        if name in incoming or not stale.is_file():
+            continue
+        with contextlib.suppress(OSError):
+            stale.unlink()
+            swept.append(name)
+    return swept
 
 
 def _backup(root: Path, plan: dict, version: str) -> Path:

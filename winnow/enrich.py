@@ -18,7 +18,7 @@ modal, never auto-suggested by format detection."""
 
 from __future__ import annotations
 
-import timeparse
+from . import timeparse
 
 # A lookup table bigger than this loaded into a dict is probably a data
 # table being misused as a lookup — refuse with the reason rather than
@@ -58,7 +58,7 @@ def _check(store, params: dict) -> None:
 
 
 def _prepare(store, params: dict, state: dict) -> None:
-    from store import q  # local import — store imports this module at load
+    from .store import q  # local import — store imports this module at load
 
     other, match_col, value_col, multi = _params_ok(params)
     src = store.get_source(other)

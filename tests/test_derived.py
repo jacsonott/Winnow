@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from store import Store
+from winnow.store import Store
 
 
 EPOCH_ROWS = [

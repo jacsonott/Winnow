@@ -25,12 +25,12 @@ from fastapi.responses import StreamingResponse, FileResponse, JSONResponse, Pla
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-import paths
-import plugin_api
-import updater
-import version
-import workspace as WS
-from store import (SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, OpCancelled, Store, describe_case_lock,
+from winnow import paths
+from winnow import plugin_api
+from winnow import updater
+from winnow import version
+from winnow import workspace as WS
+from winnow.store import (SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, OpCancelled, Store, describe_case_lock,
                    probe_case_lock, sweep_orphan_views)
 
 HERE = paths.INSTALL_ROOT  # static/, plugins/, examples/plugins/ all hang off the install root

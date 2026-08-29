@@ -8,7 +8,7 @@ time an analyst clicks the suggestion banner."""
 
 from __future__ import annotations
 
-import filter_defaults as fd
+from winnow import filter_defaults as fd
 
 
 def _table_for(store, write_csv, cols, rows, name):
@@ -41,7 +41,7 @@ def test_seeded_filters_bind_to_the_shipped_header_sets():
     """Binding is what makes the suggestion banner offer these the moment an
     EvtxECmd/RECmd/MFT table opens — every col_names set must be one of
     header_defaults' sets, verbatim."""
-    import header_defaults
+    from winnow import header_defaults
 
     known = {tuple(sorted(c.strip().lower() for c in cols))
              for _, cols in header_defaults.DEFAULT_HEADER_NICKNAMES}

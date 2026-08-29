@@ -12,6 +12,14 @@ at runtime, it's the wrong change.
 
 ```
 server.py          FastAPI routes, CLI entrypoint. Thin — logic lives in store.
+                    One of only two .py files in the install root, because
+                    those two are the only ones an analyst ever runs; the
+                    app itself lives in winnow/ (see paths.py before moving
+                    anything between them).
+update.py          Update this install in place — the CLI front door to
+                    winnow/updater.py. Root, for the same reason.
+winnow/            Everything the app is made of. The modules below all
+                    live here.
 store.py           All SQLite: ingest, view materialisation, tags, sessions, export.
 timeparse.py       Timestamp-parsing operations for derived datetime columns —
                     and, since structparse.py registers into it, the registry
@@ -27,6 +35,11 @@ structparse.py     JSON/XML field-extraction operations, registered into
                     flatten picker. Stdlib only; imports timeparse and nothing
                     else from the app. store.py imports it for the
                     registration side effect.
+winnow/paths.py    INSTALL_ROOT — the one line that knows where the install
+                    root is relative to this package. workspace/, the
+                    updater's target and the server's static/ all resolve
+                    from it, so a wrong answer here is silent and
+                    expensive; tests/test_paths.py pins it. Imports nothing.
 version.py         The one place Winnow's version number lives. Nothing in
                     it but the string, because update.py reads it out of a
                     downloaded archive it must not execute. Bump it in the
@@ -465,6 +478,12 @@ python3 -m bench --save-baseline                # record; later runs diff agains
 Stdlib only, same rule `requirements-dev.txt` follows — no pytest-benchmark,
 nothing new to install. Points worth knowing before editing it:
 
+- **`--vs-ref` cannot cross the winnow/ package move.** It checks out the
+  ref as a worktree and drops today's `bench/` into it, so benchmarking
+  against a revision from before the move fails on import: today's bench
+  does `from winnow import store`, and that revision has `store.py` at the
+  top level. Inherent to comparing two layouts; compare against a
+  post-move ref, or check out the old ref and run its own `bench/`.
 - **`--vs-ref` copies today's `bench/` into the worktree it checks out.**
   Only `store.py`/`server.py`/`workspace.py` come from the ref. Comparing
   HEAD's benchmarks against whatever benchmarks existed at the ref would be

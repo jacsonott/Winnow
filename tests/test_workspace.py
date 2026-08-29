@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import pytest
 
-import workspace as WS
-from store import DEFAULT_TAGS
+from winnow import workspace as WS
+from winnow.store import DEFAULT_TAGS
 
 
 def test_case_registry_crud(tmp_path):
@@ -96,7 +96,7 @@ def test_saved_filters_import_merges_by_name_and_columns():
     export = WS.filters.export_all()
     assert export["format"] == "winnow-filters/1"
 
-    import filter_defaults
+    from winnow import filter_defaults
     seeded = len(filter_defaults.DEFAULT_SAVED_FILTERS)
 
     # Importing the same export again (merge=True) must not duplicate —
@@ -127,7 +127,7 @@ def test_header_nicknames_save_find_overwrites_and_delete():
 
     # Saving again for the same set overwrites in place, not a second record.
     # (list() also carries the seeded KAPE defaults — count relative to them.)
-    import header_defaults
+    from winnow import header_defaults
     WS.header_nicknames.save(["A", "B"], "Renamed")
     assert WS.header_nicknames.find(["A", "B"])["nickname"] == "Renamed"
     assert len(WS.header_nicknames.list()) == len(header_defaults.DEFAULT_HEADER_NICKNAMES) + 1
@@ -233,7 +233,7 @@ def test_header_nicknames_seed_from_kape_defaults():
     that's the whole value of the "database of headers": the analyst's first
     EvtxECmd import already says "Event logs (EvtxECmd)" in every place a
     header set is displayed, with nothing configured."""
-    import header_defaults
+    from winnow import header_defaults
 
     hn = WS.HeaderNicknames()
     recs = hn.list()
@@ -248,7 +248,7 @@ def test_header_nickname_seed_never_overrides_or_resurrects():
     """Seeded rows are ordinary records afterward: a rename sticks, a delete
     sticks across every later read, and re-seeding (same version) adds
     nothing back."""
-    import header_defaults
+    from winnow import header_defaults
 
     hn = WS.HeaderNicknames()
     recs = hn.list()
@@ -264,7 +264,7 @@ def test_header_nickname_seed_never_overrides_or_resurrects():
 def test_header_nickname_seed_version_bump_adds_only_missing(monkeypatch):
     """A later Winnow adding one new default must add exactly that one —
     existing rows (including analyst renames of old defaults) untouched."""
-    import header_defaults
+    from winnow import header_defaults
 
     hn = WS.HeaderNicknames()
     before = hn.list()
@@ -284,7 +284,7 @@ def test_tag_template_seeds_ta_first_and_migrates_only_untouched_legacy():
     is the adversary" far more than "this is fine"). A workspace whose
     template is byte-for-byte the old Benign-first seed was never edited,
     so it migrates; any customization is the analyst's and stays."""
-    from store import DEFAULT_TAGS
+    from winnow.store import DEFAULT_TAGS
 
     assert [n for n, _, _ in DEFAULT_TAGS] == ["TA", "Suspicious", "Benign"]
     assert DEFAULT_TAGS[0][2] == "1"

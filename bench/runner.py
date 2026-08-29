@@ -42,7 +42,7 @@ class Env:
         self._workspace_dir = tempfile.mkdtemp(prefix="tl-bench-ws-")
         # Same isolation the pytest suite's `isolate_workspace` fixture does:
         # nothing here may read or write the developer's real workspace/.
-        import workspace as WS
+        from winnow import workspace as WS
 
         WS.WORKSPACE_DIR = Path(self._workspace_dir)
 

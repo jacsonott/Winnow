@@ -38,7 +38,7 @@ meant to be readable alone.
 
 import json
 
-from store import q
+from winnow.store import q
 
 PLUGIN = {
     "name": "first-last",

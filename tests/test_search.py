@@ -5,7 +5,7 @@ search_all_sources."""
 
 from __future__ import annotations
 
-from store import _fts_like_pattern, _blob_expr, TRIGRAM_MIN_LEN, q
+from winnow.store import _fts_like_pattern, _blob_expr, TRIGRAM_MIN_LEN, q
 
 
 def _cells(store, view_id):
@@ -195,7 +195,7 @@ def test_legacy_word_tokenized_fts_gets_downgraded_on_open(store, write_csv, cas
     assert store.get_source(source_id)["has_fts"] == 1
     store.close()
 
-    from store import Store, DEFAULT_TAGS
+    from winnow.store import Store, DEFAULT_TAGS
     reopened = Store(case_path, default_tags=DEFAULT_TAGS)
     try:
         assert reopened.get_source(source_id)["has_fts"] == 0
@@ -221,7 +221,7 @@ def test_legacy_fat_trigram_fts_gets_downgraded_and_dropped_on_open(store, write
         store.db.execute("UPDATE sources SET has_fts=1 WHERE id=?", (source_id,))
     store.close()
 
-    from store import Store, DEFAULT_TAGS
+    from winnow.store import Store, DEFAULT_TAGS
     reopened = Store(case_path, default_tags=DEFAULT_TAGS)
     try:
         assert reopened.get_source(source_id)["has_fts"] == 0
@@ -333,7 +333,7 @@ def test_search_all_sources_caps_the_count(store, write_csv, monkeypatch):
     """The modal only ranks which tables hit and roughly how hard; an exact
     count over a source whose index isn't built is a full scan of every
     matching row, so it stops at the cap and says so."""
-    import store as store_module
+    from winnow import store as store_module
 
     monkeypatch.setattr(store_module, "SEARCH_ALL_COUNT_CAP", 3)
     rows = [["Process"]] + [["svchost.exe"]] * 10
@@ -344,7 +344,7 @@ def test_search_all_sources_caps_the_count(store, write_csv, monkeypatch):
 
 
 def test_search_all_sources_caps_on_the_indexed_and_advanced_paths_too(store, write_csv, monkeypatch):
-    import store as store_module
+    from winnow import store as store_module
 
     monkeypatch.setattr(store_module, "SEARCH_ALL_COUNT_CAP", 2)
     rows = [["Process"]] + [["svchost.exe"]] * 6
@@ -589,7 +589,7 @@ def test_search_all_breakdown_matches_the_indexed_path(store, write_csv):
 
 
 def test_search_all_breakdown_caps_each_term_independently(store, write_csv, monkeypatch):
-    import store as store_module
+    from winnow import store as store_module
 
     monkeypatch.setattr(store_module, "SEARCH_ALL_COUNT_CAP", 2)
     rows = [["Process"]] + [["evil.exe"]] * 5 + [["cmd.exe"]]
@@ -608,7 +608,7 @@ def test_search_all_breakdown_gives_up_on_an_absurd_term_list(store, write_csv, 
     # The breakdown costs one capped count per term on every source that
     # matched; past the ceiling it reports the union count alone rather than
     # turning one sweep into thousands of scans.
-    import store as store_module
+    from winnow import store as store_module
 
     monkeypatch.setattr(store_module, "SEARCH_ALL_TERM_BREAKDOWN_MAX", 2)
     rows = [["Process"], ["evil.exe"], ["cmd.exe"], ["notepad.exe"]]

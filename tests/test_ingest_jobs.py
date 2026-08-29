@@ -11,7 +11,7 @@ import time
 
 import pytest
 
-from store import BATCH, IngestCancelled, Store, DEFAULT_TAGS
+from winnow.store import BATCH, IngestCancelled, Store, DEFAULT_TAGS
 
 from conftest import STANDARD_ROWS
 

@@ -30,7 +30,7 @@ real zero in a total. NUM_RE gates the cast so junk becomes NULL and drops
 out of the aggregate instead of quietly dragging an average down.
 """
 
-from store import NUM_RE, q
+from winnow.store import NUM_RE, q
 
 PLUGIN = {
     "name": "pivot-table",

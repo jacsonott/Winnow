@@ -113,13 +113,18 @@ import traceback
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+# store does not import this module, so this is not a cycle. It is here so
+# PluginAPI can hand plugins the same quoting helper the app uses rather
+# than having them import app internals themselves.
+from .store import NUM_RE as _store_num_re, q as _store_q
+
 # Bumped when PluginAPI's contract changes incompatibly. A plugin may
 # declare WINNOW_API_VERSION = N (the version it was written against);
 # loading refuses a plugin that asks for a newer API than this build
 # provides, with a message that says to update Winnow — the failure mode
 # is otherwise an AttributeError deep inside register() that reads like a
 # plugin bug.
-PLUGIN_API_VERSION = 1
+PLUGIN_API_VERSION = 2
 
 FORMAT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 # API routes may nest ("chat/stream") but each segment keeps the same shape.
@@ -214,6 +219,18 @@ class PluginAPI:
     registrations are attributed to the plugin that made them."""
 
     api_version = PLUGIN_API_VERSION
+
+    #: SQL identifier quoting. Column and table names are user data — they
+    #: come from CSV headers — so they are never f-stringed into SQL.
+    #: Exposed here as of API version 2 so a plugin no longer has to reach
+    #: into the app's own modules for it: plugins load by file path, not
+    #: from the package, so `from store import q` only ever worked because
+    #: the server happened to be started from the install root.
+    q = staticmethod(_store_q)
+    #: "Does this text look numeric" — the same test the grid's own
+    #: right-alignment and numeric sorting use, so a plugin's tables agree
+    #: with the rest of the app.
+    NUM_RE = _store_num_re
 
     def __init__(self, registry: "PluginRegistry", plugin_name: str,
                  fs_name: str, root: Path):

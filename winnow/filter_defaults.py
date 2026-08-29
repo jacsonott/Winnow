@@ -27,7 +27,7 @@ Data only. Imports header_defaults for the column lists; nothing here
 executes.
 """
 
-import header_defaults
+from . import header_defaults
 
 FILTER_DEFAULTS_VERSION = 1
 

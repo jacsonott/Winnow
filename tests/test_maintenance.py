@@ -13,8 +13,8 @@ import sqlite3
 
 import pytest
 
-import store as store_module
-from store import VIEWS_PREFIX, VIEWS_SUFFIX, Store, sweep_orphan_views
+from winnow import store as store_module
+from winnow.store import VIEWS_PREFIX, VIEWS_SUFFIX, Store, sweep_orphan_views
 
 
 def test_column_index_listed_after_a_sargable_filter(ingested):

@@ -245,7 +245,7 @@ def test_case_open_migrates_legacy_presets_into_saved_filters(client, store, cas
     r = client.post("/api/case/open", json={"path": case_path})
     assert r.status_code == 200
 
-    import workspace as WS
+    from winnow import workspace as WS
     migrated = next((f for f in WS.filters.list() if f["name"] == "Legacy preset"), None)
     assert migrated is not None
     assert migrated["col_names"] == ["A", "B"]
@@ -441,7 +441,7 @@ def test_compact_route_reports_sizes(client, ingested):
 def test_compact_route_400s_when_disk_is_full(client, ingested, monkeypatch):
     import shutil as shutil_module
 
-    import store as store_module
+    from winnow import store as store_module
 
     fake = shutil_module.disk_usage(".")._replace(free=1024)
     monkeypatch.setattr(store_module.shutil, "disk_usage", lambda _p: fake)

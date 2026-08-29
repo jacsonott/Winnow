@@ -44,7 +44,7 @@ import re
 import xml.etree.ElementTree as ET
 from typing import Any, Iterator
 
-import timeparse
+from . import timeparse
 
 # A cell big enough to be a denial-of-service against the backfill rather
 # than a log field. 8 MB is far past any real EventData blob and still

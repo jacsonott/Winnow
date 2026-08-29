@@ -34,7 +34,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from store import DEFAULT_TAGS, Store  # noqa: E402
+from winnow.store import DEFAULT_TAGS, Store  # noqa: E402
 
 # Bump when a generator changes shape — it's part of every cached file's
 # name, so an old cache entry can never be silently reused against new

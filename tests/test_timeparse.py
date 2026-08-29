@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import pytest
 
-import timeparse
-from store import _TS_ISO_RE, _day_bucket, _ts_normalize
+from winnow import timeparse
+from winnow.store import _TS_ISO_RE, _day_bucket, _ts_normalize
 
 
 def parse(op_id, value, params=None, state=None):
@@ -305,7 +305,7 @@ def test_month_name_timestamps_normalize_natively():
 
 
 def test_month_name_columns_type_as_datetime_at_ingest():
-    from store import DATE_RE
+    from winnow.store import DATE_RE
 
     assert DATE_RE.match("JUN 23 2026 00:11:00")
     assert DATE_RE.match("23 June, 2026")

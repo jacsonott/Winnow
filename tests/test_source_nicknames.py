@@ -12,7 +12,7 @@ import sqlite3
 
 import pytest
 
-from store import DEFAULT_TAGS, Store
+from winnow.store import DEFAULT_TAGS, Store
 
 
 def test_nickname_set_and_clear(ingested):

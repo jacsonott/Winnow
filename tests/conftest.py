@@ -14,8 +14,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import workspace as WS  # noqa: E402
-from store import DEFAULT_TAGS, Store  # noqa: E402
+from winnow import workspace as WS  # noqa: E402
+from winnow.store import DEFAULT_TAGS, Store  # noqa: E402
 
 
 @pytest.fixture(autouse=True)

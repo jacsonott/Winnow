@@ -11,8 +11,8 @@ import pytest
 from fastapi.testclient import TestClient
 from openpyxl import Workbook
 
-import xlsxread
-from store import BATCH
+from winnow import xlsxread
+from winnow.store import BATCH
 
 
 @pytest.fixture
@@ -141,7 +141,7 @@ def test_cancel_drops_partial_sheet(store, write_xlsx):
     # More rows than one BATCH so the per-batch cancel hook actually fires.
     rows = [["N"]] + [[i] for i in range(BATCH + 50)]
     path = write_xlsx({"Big": rows})
-    from store import IngestCancelled
+    from winnow.store import IngestCancelled
     with pytest.raises(IngestCancelled):
         store.ingest_xlsx_sheet(path, "Big", build_fts=False, cancel=lambda: True)
     assert store.list_sources() == []

@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-from store import _flatten_json, _json_leaf_text
+from winnow.store import _flatten_json, _json_leaf_text
 
 
 RECORDS = [

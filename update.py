@@ -32,8 +32,8 @@ import argparse
 import sys
 from pathlib import Path
 
-import updater
-from updater import UpdateError
+from winnow import updater
+from winnow.updater import UpdateError
 
 HERE = Path(__file__).resolve().parent
 

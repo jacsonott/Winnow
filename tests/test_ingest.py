@@ -3,7 +3,7 @@ delimiter sniffing, column_types override, _quick_hash, batched commits."""
 
 from __future__ import annotations
 
-from store import BATCH, infer_type, sanitize_columns
+from winnow.store import BATCH, infer_type, sanitize_columns
 
 
 def test_sanitize_columns_dedups_and_fills_blanks():

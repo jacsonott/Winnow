@@ -18,8 +18,8 @@ from pathlib import Path
 
 import pytest
 
-import updater
-from updater import UpdateError
+from winnow import updater
+from winnow.updater import UpdateError
 
 # A minimal but honest shipped tree — apply_update refuses anything without
 # server.py, which is the guard against pointing it at an unrelated zip.
@@ -279,6 +279,54 @@ def test_a_main_sync_still_protects_analyst_state(install, tmp_path):
     assert updater.installed_version(install) == "1.0.0"
 
 
+def test_upgrading_across_the_package_move_sweeps_the_old_modules(install, tmp_path):
+    """An install that predates winnow/ has store.py etc. at the top level.
+    The normal removal path can't clear them — it only removes what a
+    previous update recorded, and a first update records nothing — so they
+    would sit there shadowing `import store` for plugins and dev scripts."""
+    (install / "store.py").write_text("# the old top-level module\n")
+    (install / "timeparse.py").write_text("# ditto\n")
+    (install / "make_fixture.py").write_text("# dev script that also moved\n")
+    _seed_user_state(install)
+
+    packaged = {
+        "server.py": "print('server v2')\n",
+        "update.py": "print('update')\n",
+        "winnow/__init__.py": "",
+        "winnow/store.py": "# store, now packaged\n",
+        "winnow/timeparse.py": "# packaged\n",
+        "winnow/version.py": 'VERSION = "2.0.0"\n',
+        "version.py": 'VERSION = "2.0.0"\n',
+        "plugins/README.md": "# drop plugins here\n",
+    }
+    updater.apply_update(_make_release(tmp_path / "pkg.zip", "2.0.0", packaged), install)
+
+    assert not (install / "store.py").exists()
+    assert not (install / "timeparse.py").exists()
+    assert not (install / "make_fixture.py").exists()
+    assert (install / "winnow" / "store.py").is_file()
+    # The sweep is not allowed to touch analyst state, same as everything else.
+    assert (install / "plugins" / "my_parser.py").is_file()
+    assert (install / "workspace" / "prefs.json").is_file()
+
+
+def test_the_sweep_never_fires_between_two_pre_package_versions(install, tmp_path):
+    """Gated on the incoming archive actually carrying winnow/store.py —
+    otherwise a routine 1.0 -> 1.1 update would delete the app."""
+    (install / "store.py").write_text("# still top-level here\n")
+    updater.apply_update(_make_release(tmp_path / "v2.zip", "1.1.0", _v2_files()), install)
+    assert (install / "store.py").read_text() == "# still top-level here\n"
+
+
+def test_the_sweep_keeps_a_module_the_new_version_still_ships_at_top_level(install, tmp_path):
+    (install / "version.py").write_text('VERSION = "1.0.0"\n')
+    packaged = {"server.py": "x\n", "winnow/__init__.py": "",
+                "winnow/store.py": "# packaged\n", "version.py": 'VERSION = "2.0.0"\n'}
+    updater.apply_update(_make_release(tmp_path / "pkg.zip", "2.0.0", packaged), install)
+    # It is in the incoming list, so it was updated rather than swept.
+    assert (install / "version.py").read_text() == 'VERSION = "2.0.0"\n'
+
+
 def test_backups_are_pruned_but_the_newest_survive(install, tmp_path):
     for i in range(updater.KEEP_BACKUPS + 2):
         files = dict(SHIPPED)
@@ -309,7 +357,7 @@ HEADERS = {"X-Timeline-Lite-Client": "1"}
 
 
 def test_version_route_reports_the_installed_version(store, monkeypatch):
-    import version as version_module
+    from winnow import version as version_module
     server, client = _client(store, monkeypatch)
     res = client.get("/api/version", headers=HEADERS)
     assert res.status_code == 200

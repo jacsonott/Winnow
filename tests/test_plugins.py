@@ -13,8 +13,8 @@ from pathlib import Path
 
 import pytest
 
-import plugin_api
-from plugin_api import PluginRegistry
+from winnow import plugin_api
+from winnow.plugin_api import PluginRegistry
 
 REPO = Path(__file__).resolve().parent.parent
 EXAMPLES = REPO / "examples" / "plugins"
@@ -310,7 +310,7 @@ def test_ingest_plugin_errors_are_400s(plugin_client, tmp_path):
 
 
 def test_workspace_plugin_prefs_roundtrip():
-    import workspace as WS
+    from winnow import workspace as WS
 
     assert WS.plugin_prefs.disabled() == set()
     WS.plugin_prefs.set_enabled("x", False)
