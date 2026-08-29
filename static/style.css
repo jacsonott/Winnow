@@ -1,0 +1,1546 @@
+/* Winnow — token-driven theming.
+   No web fonts: this has to work on an airgapped analysis box.
+
+   Every color/shape/motion value below is a CSS custom property, resolved
+   by two attributes on <html>: data-style (panel | phosphor | blueprint |
+   studio) and data-theme (dark | light). app.js's appearance module sets
+   both, plus an inline --accent/--accent-fg override for the user's chosen
+   accent color (inline styles beat the attribute-selector blocks below,
+   regardless of specificity, so the user's choice always wins over a
+   style's suggested default).
+
+   Token names were kept stable across this rewrite wherever app.js sets
+   inline styles referencing them directly (--ink, --panel, --line, --text,
+   --dim, --mono) — grep static/app.js for "var--" before renaming any of
+   those. --brass/--brass-dim (this file's only prior color names) don't
+   appear in app.js and were renamed to --accent/--accent-dim throughout.
+
+   Grid cell/row dividers (.row, .cell, .hcell, .fcell) intentionally stay a
+   literal 1px rather than following --border-w — at real row counts a
+   thick divider on every cell reads as noise, not structure, so only outer
+   chrome (buttons, tabs, panels, inputs) gets the style's border weight. */
+
+:root {
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  --ui: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --row-h: 24px;
+}
+
+* { box-sizing: border-box; }
+
+[hidden] { display: none !important; }
+
+html, body {
+  height: 100%; margin: 0;
+  background: var(--ink); color: var(--text);
+  font-family: var(--ui); font-size: 13px;
+  overflow: hidden;
+}
+
+/* ------------------------------------------------------------- appearance */
+/* Fallback (also "panel" + "dark", i.e. the original look) so a page that
+   somehow renders before app.js sets data-style/data-theme isn't unstyled. */
+:root,
+html[data-style="panel"][data-theme="dark"] {
+  --ink: #13161a; --panel: #191d23; --panel-2: #20252c; --panel-3: #262c34;
+  --line: #2b323b; --line-2: #39424e; --text: #d6dbe2; --dim: #808b99;
+  --accent: #d2a04a; --accent-dim: #8a6c33; --accent-fg: #14181d;
+  --sel: #1f2f3d; --sel-line: #3d6180;
+  --row-even: #161a1f; --row-hover: #1d232a; --row-selected: #223142; --cell-selected-bg: #2a3f52;
+  --border-hairline: #1b1f24; --text-faint: #333a43;
+  --danger: #e0796a; --danger-bg: #4a2530; --danger-border: #7a3b48;
+  --str: #9fd0a0; --num: #7fb0d8; --kw: #c98fd6;
+  --radius-sm: 2px; --radius-md: 3px; --border-w: 1px;
+  --ease: ease; --transition-fast: 120ms;
+  --shadow-tag: 0 4px 16px rgba(0,0,0,.4); --shadow-modal: 0 8px 24px rgba(0,0,0,.35);
+}
+html[data-style="panel"][data-theme="light"] {
+  --ink: #eef0f3; --panel: #ffffff; --panel-2: #f2f4f7; --panel-3: #e7eaee;
+  --line: #d8dce2; --line-2: #c3c9d1; --text: #1b222b; --dim: #667085;
+  --accent: #b8843a; --accent-dim: #8a6c33; --accent-fg: #ffffff;
+  --sel: #dce8f2; --sel-line: #6fa0c4;
+  --row-even: #f7f8fa; --row-hover: #eef1f5; --row-selected: #d9e6f0; --cell-selected-bg: #cfe0ee;
+  --border-hairline: #e1e4e9; --text-faint: #aab1bd;
+  --danger: #c0392b; --danger-bg: #fbe1de; --danger-border: #e3a89c;
+  --str: #2f8f52; --num: #2f6fa8; --kw: #8a4fa0;
+  --radius-sm: 2px; --radius-md: 3px; --border-w: 1px;
+  --ease: ease; --transition-fast: 120ms;
+  --shadow-tag: 0 4px 16px rgba(30,40,60,.15); --shadow-modal: 0 8px 24px rgba(30,40,60,.12);
+}
+
+/* Phosphor Terminal — monospace chrome (--ui overridden to --mono cascades
+   through nearly every rule in this file via inheritance from body), a
+   glow on active/selected state, faint CRT scanlines (added near the end
+   of this file, scoped to dark mode only — a scanline texture over an
+   amber paper background just looks like dirt). */
+html[data-style="phosphor"][data-theme="dark"] {
+  --ink: #060907; --panel: #0a100c; --panel-2: #0e1712; --panel-3: #142019;
+  --line: #1c2b21; --line-2: #27402f; --text: #cdf5dc; --dim: #5f8f74;
+  --accent: #39e881; --accent-dim: #1f8a4c; --accent-fg: #05130a;
+  --sel: #10241a; --sel-line: #2c5b3e;
+  --row-even: #08110c; --row-hover: #0f1a13; --row-selected: #123420; --cell-selected-bg: #17462b;
+  --border-hairline: #0e1712; --text-faint: #3c5b4a;
+  --danger: #ff6b6b; --danger-bg: #3a1414; --danger-border: #6b2323;
+  --str: #7be8a0; --num: #6fd0e0; --kw: #d9a8ff;
+  --radius-sm: 0px; --radius-md: 0px; --border-w: 1px;
+  --ease: linear; --transition-fast: 80ms;
+  --shadow-tag: 0 0 16px color-mix(in srgb, var(--accent) 35%, transparent);
+  --shadow-modal: 0 0 30px color-mix(in srgb, var(--accent) 20%, transparent);
+  --ui: var(--mono);
+  --glow: 0 0 6px color-mix(in srgb, var(--accent) 65%, transparent);
+}
+html[data-style="phosphor"][data-theme="light"] {
+  /* "paper terminal" — an amber printout, not a generic light gray */
+  --ink: #f3ecd8; --panel: #ede4cb; --panel-2: #e6dabb; --panel-3: #ddceaa;
+  --line: #cabb92; --line-2: #b3a179; --text: #2a2110; --dim: #7a6c48;
+  --accent: #39e881; --accent-dim: #1f8a4c; --accent-fg: #05130a;
+  --sel: #e6d9b0; --sel-line: #b3a179;
+  --row-even: #efe7d0; --row-hover: #e9ddc0; --row-selected: #ddd0a0; --cell-selected-bg: #d4c48a;
+  --border-hairline: #ddcda3; --text-faint: #a3936a;
+  --danger: #b23a2e; --danger-bg: #f0d9ce; --danger-border: #cf9a86;
+  --str: #2f7d46; --num: #2f6f8a; --kw: #7a4f8a;
+  --radius-sm: 0px; --radius-md: 0px; --border-w: 1px;
+  --ease: linear; --transition-fast: 80ms;
+  --shadow-tag: none; --shadow-modal: none;
+  --ui: var(--mono);
+  --glow: none;
+}
+
+/* Blueprint Brutalist — thick borders, hard offset (never blurred)
+   shadows that compress on :active, zero border-radius. */
+html[data-style="blueprint"][data-theme="dark"] {
+  --ink: #0c0d10; --panel: #131519; --panel-2: #191c22; --panel-3: #20242c;
+  --line: #33383f; --line-2: #4a515b; --text: #f2f3f5; --dim: #8b93a0;
+  --accent: #ff6a1a; --accent-dim: #c9530f; --accent-fg: #16110b;
+  --sel: #23180f; --sel-line: #ff6a1a;
+  --row-even: #16181d; --row-hover: #1b1e24; --row-selected: #22262d; --cell-selected-bg: #2a2e36;
+  --border-hairline: #33383f; --text-faint: #565c66;
+  --danger: #ff4d4d; --danger-bg: #3a1414; --danger-border: #7a2020;
+  --str: #4dd08a; --num: #4d9fff; --kw: #d685ff;
+  --radius-sm: 0px; --radius-md: 0px; --border-w: 2px;
+  --ease: ease-out; --transition-fast: 80ms;
+  --shadow-hard-c: #000000;
+  --shadow-tag: 4px 4px 0 var(--shadow-hard-c); --shadow-modal: 8px 8px 0 var(--shadow-hard-c);
+}
+html[data-style="blueprint"][data-theme="light"] {
+  --ink: #f7f5ef; --panel: #ffffff; --panel-2: #efece2; --panel-3: #e6e1d2;
+  --line: #1c1c1c; --line-2: #1c1c1c; --text: #16140f; --dim: #5c584c;
+  --accent: #ff6a1a; --accent-dim: #c9530f; --accent-fg: #16110b;
+  --sel: #ffe4d1; --sel-line: #ff6a1a;
+  --row-even: #f1eee4; --row-hover: #eae6d8; --row-selected: #ffdcc2; --cell-selected-bg: #ffcda3;
+  --border-hairline: #1c1c1c; --text-faint: #9a9484;
+  --danger: #c0392b; --danger-bg: #fbe1de; --danger-border: #1c1c1c;
+  --str: #1f7a3f; --num: #1f5f9f; --kw: #7a3f9f;
+  --radius-sm: 0px; --radius-md: 0px; --border-w: 2px;
+  --ease: ease-out; --transition-fast: 80ms;
+  --shadow-hard-c: #1c1c1c;
+  --shadow-tag: 4px 4px 0 var(--shadow-hard-c); --shadow-modal: 8px 8px 0 var(--shadow-hard-c);
+}
+
+/* Studio Soft — rounded, soft ambient shadows, smoother motion. */
+html[data-style="studio"][data-theme="dark"] {
+  --ink: #111219; --panel: #16171f; --panel-2: #1c1e28; --panel-3: #232532;
+  --line: #2a2c38; --line-2: #383a4a; --text: #e7e8ee; --dim: #8b8da0;
+  --accent: #7c6cf6; --accent-dim: #5f4fd6; --accent-fg: #ffffff;
+  --sel: #221f3a; --sel-line: #7c6cf6;
+  --row-even: #15161d; --row-hover: #1b1c26; --row-selected: #23213a; --cell-selected-bg: #2a2748;
+  --border-hairline: #23252f; --text-faint: #4a4c5c;
+  --danger: #ff6b81; --danger-bg: #3a1420; --danger-border: #6b2035;
+  --str: #6fe0b0; --num: #6fa8f0; --kw: #c69cf0;
+  --radius-sm: 8px; --radius-md: 14px; --border-w: 1px;
+  --ease: cubic-bezier(.2,.8,.2,1); --transition-fast: 150ms;
+  --shadow-tag: 0 10px 30px rgba(0,0,0,.35); --shadow-modal: 0 16px 40px rgba(0,0,0,.4);
+}
+html[data-style="studio"][data-theme="light"] {
+  --ink: #f6f6fb; --panel: #ffffff; --panel-2: #f0f0f7; --panel-3: #e9e9f3;
+  --line: #e2e2ee; --line-2: #d1d1e2; --text: #1d1e2a; --dim: #6f7288;
+  --accent: #7c6cf6; --accent-dim: #5f4fd6; --accent-fg: #ffffff;
+  --sel: #ece9fd; --sel-line: #7c6cf6;
+  --row-even: #f9f9fc; --row-hover: #f2f1fa; --row-selected: #e7e3fc; --cell-selected-bg: #ddd7fb;
+  --border-hairline: #ececf5; --text-faint: #b6b8c8;
+  --danger: #d9534f; --danger-bg: #fbe4e3; --danger-border: #eab3b0;
+  --str: #1f9a5c; --num: #1f6fd0; --kw: #9a5cd0;
+  --radius-sm: 8px; --radius-md: 14px; --border-w: 1px;
+  --ease: cubic-bezier(.2,.8,.2,1); --transition-fast: 150ms;
+  --shadow-tag: 0 16px 40px rgba(40,40,80,.12); --shadow-modal: 0 16px 40px rgba(40,40,80,.14);
+}
+
+.busy-bar {
+  position: fixed; top: 0; left: 0; right: 0; height: 2px; z-index: 9999;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  background-size: 200% 100%;
+  animation: busy-sweep 1.1s linear infinite;
+}
+@keyframes busy-sweep {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* Cancel chip for cancellable ops — sits just under the busy bar, only
+   shown by armOpCancel() once an op has run ~1.2s (a fast rebuild never
+   flashes it). */
+.busy-cancel {
+  position: fixed; top: 8px; left: 50%; transform: translateX(-50%); z-index: 9999;
+  background: var(--panel-2); color: var(--text);
+  border: var(--border-w) solid var(--accent-dim); border-radius: var(--radius-sm);
+  padding: 4px 12px; font: inherit; font-size: 12px; cursor: pointer;
+  box-shadow: var(--shadow-tag);
+}
+.busy-cancel:hover { border-color: var(--danger); color: var(--danger); }
+
+/* -------------------------------------------------------- background jobs */
+
+/* Bottom-right stack of everything running behind the analyst's back:
+   upload transfers, ingest jobs (uploadWithProgress/pollJobs in app.js),
+   and search-index builds. Below .toast's bottom-center spot; above the
+   grid. */
+.jobs-panel {
+  position: fixed; right: 14px; bottom: 14px; z-index: 55;
+  display: flex; flex-direction: column; gap: 8px;
+  width: 300px; max-height: 50vh; overflow-y: auto;
+}
+.job-row {
+  background: var(--panel-2); border: var(--border-w) solid var(--line-2);
+  border-radius: var(--radius-sm); padding: 8px 10px; font-size: 12px;
+  box-shadow: var(--shadow-tag);
+}
+.job-head { display: flex; align-items: center; gap: 8px; }
+.job-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job-phase { color: var(--dim); text-transform: uppercase; font-size: 10px; letter-spacing: .06em; }
+.job-phase.error { color: var(--danger); }
+.job-phase.done { color: var(--str); }
+.job-x {
+  background: none; border: 0; padding: 0 2px; font: inherit; color: var(--dim);
+  cursor: pointer; opacity: .6;
+}
+.job-x:hover { opacity: 1; color: var(--danger); }
+.job-bar {
+  height: 3px; margin-top: 6px; border-radius: 2px; overflow: hidden;
+  background: var(--line-2);
+}
+.job-bar-fill { height: 100%; background: var(--accent); transition: width .3s var(--ease); }
+.job-bar.indeterminate .job-bar-fill {
+  width: 40%;
+  animation: job-slide 1.2s var(--ease) infinite;
+}
+@keyframes job-slide {
+  0%   { margin-left: -40%; }
+  100% { margin-left: 100%; }
+}
+.job-detail { margin-top: 4px; color: var(--dim); font-size: 11px; }
+
+#app {
+  height: 100%;
+  display: grid;
+  /* Column 1 is #sidebar alone (max-content — its own fixed width — so
+     hiding it via [hidden] collapses the column to zero, nothing else
+     occupies it); column 2 is the four rows every other direct child
+     (.bar, .toolbar, .main-area) already lived in before
+     the sidebar existed, each still one row of its own.
+     One row track per that same set of 4 children. Was only 3 tracks for
+     4 children for a while — the 3rd-declared track (minmax(0, 1fr),
+     meant for .main-area) once landed on a since-removed hidden sibling
+     in document order, handing it all the flexible space and leaving
+     .main-area to size itself from an implicit auto-height row instead —
+     invisible while the banner stayed hidden (its default state), which
+     is exactly why this went unnoticed for so long. */
+  grid-template-columns: max-content minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
+#sidebar { grid-column: 1; grid-row: 1 / -1; }
+#sidebar[hidden] { display: none; }
+.bar, .toolbar, .main-area { grid-column: 2; }
+/* Explicit row per child, not auto-placement — auto-placement once slid
+   .main-area into the wrong track when a display:none sibling (the old
+   suggestion banner) dropped out of the grid, and past ~1.4M rows that
+   collapsed the grid to zero height (see git history for the forensics).
+   The banner is gone; the explicit pins stay so a future hidden sibling
+   can't reintroduce it. */
+.bar { grid-row: 1; }
+.toolbar { grid-row: 2; }
+.main-area { grid-row: 3; }
+/* Grid items default to min-width:auto (their content's min-content size),
+   not 0 — without this, a row wide enough to overflow (e.g. many/long tab
+   names in .bar) blows out #app's implicit single column, stretching every
+   *other* row to match. Same fix as .tabs's own min-width:0 below, one
+   level up: without it here, that inner fix never gets the chance to
+   matter because .bar itself never gets constrained to the viewport. */
+#app > * { min-width: 0; }
+
+#home {
+  height: 100%;
+  overflow: auto;
+}
+
+/* ---------------------------------------------------------------- chrome */
+
+.bar {
+  display: flex; align-items: stretch; gap: 12px;
+  background: var(--panel); border-bottom: 1px solid var(--line);
+  padding-left: 12px; height: 38px;
+}
+
+.brand {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 11px; letter-spacing: .16em; text-transform: uppercase;
+  color: var(--dim); white-space: nowrap;
+  background: none; border: 0; padding: 0; font-family: inherit; cursor: pointer;
+}
+.brand:hover { color: var(--text); }
+#brandLabel { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mark {
+  width: 3px; height: 15px; background: var(--accent);
+  box-shadow: 6px 0 0 -1px var(--accent-dim), 12px 0 0 -2px var(--line-2);
+}
+
+.tab-jump {
+  flex: 0 0 auto; display: flex; align-items: center; justify-content: center;
+  width: 24px; border: 0; border-right: 1px solid var(--line);
+  background: transparent; color: var(--dim); font-size: 10px; cursor: pointer;
+}
+.tab-jump:hover { color: var(--text); background: var(--panel-2); }
+.tabs { display: flex; align-items: stretch; overflow-x: auto; flex: 1; min-width: 0; }
+/* The bar's flexible middle is shared by two scrolling strips: #sourceTabs
+   (tables) takes whatever #pageTabs (SQL/Timeline/plugin tabs) doesn't.
+   Untouched, the page strip is content-width and never shrinks — what it
+   always was as three loose .tab-sql buttons — except for the 60% cap,
+   which stops a case with several plugin tabs from squeezing the table
+   strip down to nothing; past the cap it scrolls, exactly as the table
+   strip has always done. Drag the divider and applyPageTabsSize() sets an
+   explicit flex-basis inline instead (and clears the cap, since an
+   explicit width IS the user saying how much room this gets). */
+#pageTabs { flex: 0 0 auto; max-width: 60%; }
+/* Same handle idiom as .detail-resize: a hit target wider than the line it
+   paints, pulled back into the bar's 12px gap by a negative margin so it
+   doesn't push the strips apart. The line itself runs the full height of
+   the bar, like every other vertical rule in it (.tab/.tab-jump's 1px
+   borders) — just three times as thick, since this one separates two
+   *kinds* of tab rather than two tabs. */
+.tab-split {
+  flex: 0 0 auto; width: 9px; margin: 0 -6px; position: relative;
+  cursor: col-resize; touch-action: none;
+}
+.tab-split::after {
+  content: ""; position: absolute; inset: 0 3px;
+  background: var(--line-2);
+  transition: background var(--transition-fast) var(--ease);
+}
+.tab-split:hover::after, .tab-split.dragging::after { background: var(--accent); }
+.tab {
+  display: flex; align-items: center; gap: 8px;
+  padding: 0 14px; border: 0; border-right: 1px solid var(--line);
+  background: transparent; color: var(--dim);
+  font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap;
+  transition: background var(--transition-fast) var(--ease), color var(--transition-fast) var(--ease);
+}
+.tab:hover { color: var(--text); background: var(--panel-2); }
+.tab[aria-selected="true"] {
+  color: var(--text); background: var(--ink);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+.tab .count { color: var(--dim); font-family: var(--mono); font-size: 11px; }
+.tab-merge { box-shadow: inset 0 2px 0 var(--accent-dim); }
+.tab-merge[aria-selected="true"] { box-shadow: inset 0 2px 0 var(--accent-dim), inset 0 -2px 0 var(--accent); }
+.tab-sql { flex: 0 0 auto; border-left: 1px solid var(--line); font-family: var(--mono); color: var(--accent-dim); }
+/* First tab in the strip sits against the divider, which is separator
+   enough — the left border only ever existed to fence the page tabs off
+   from the table strip they used to share a flex row with. */
+.page-tabs .tab-sql:first-child { border-left: 0; }
+.tab-sql[aria-selected="true"] { color: var(--accent); }
+.tab .x { color: var(--dim); opacity: .5; }
+.tab .x:hover { opacity: 1; color: var(--danger); }
+.tab.dragging { opacity: .4; }
+.tab.drop-before { box-shadow: inset 2px 0 0 var(--accent); }
+.tab.drop-after { box-shadow: inset -2px 0 0 var(--accent); }
+
+.bar-actions { display: flex; align-items: center; gap: 6px; padding-right: 10px; }
+
+.btn {
+  background: var(--panel-2); color: var(--text);
+  border: var(--border-w) solid var(--line-2); border-radius: var(--radius-sm);
+  padding: 4px 10px; font: inherit; font-size: 12px; cursor: pointer;
+  transition: border-color var(--transition-fast) var(--ease), background var(--transition-fast) var(--ease), color var(--transition-fast) var(--ease);
+}
+.btn:hover { border-color: var(--accent-dim); color: var(--text); }
+.btn:active { background: var(--line); }
+.btn.ghost { background: transparent; border-color: var(--line); color: var(--dim); }
+.btn.ghost:hover { color: var(--text); border-color: var(--line-2); }
+.btn[aria-pressed="true"] { background: var(--accent-dim); border-color: var(--accent); color: var(--accent-fg); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* -------------------------------------------------------------- toolbar */
+
+/* Needed because the rule below sets display:flex, which beats the UA
+   stylesheet's `[hidden] { display: none }` (author styles always win) —
+   the same reason #sidebar[hidden] exists. Without it, hiding the toolbar
+   on the SQL/Timeline/plugin tabs would do nothing at all. Safe against
+   the grid-collapse trap documented above: every #app child pins its own
+   grid-row, so row 2 simply resolves to zero height when empty. */
+.toolbar[hidden] { display: none; }
+.toolbar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 10px; background: var(--ink);
+  border-bottom: 1px solid var(--line);
+}
+
+.search-icon-btn { font-size: 13px; line-height: 1; padding: 4px 8px; }
+
+.search-wrap { position: relative; display: flex; align-items: center; }
+#search {
+  width: 320px; background: var(--panel); color: var(--text);
+  border: var(--border-w) solid var(--line-2); border-radius: var(--radius-sm);
+  padding: 5px 74px 5px 9px; font-family: var(--mono); font-size: 12px;
+  transition: border-color var(--transition-fast) var(--ease);
+}
+#search:focus { border-color: var(--accent); outline: none; }
+.hint {
+  position: absolute; right: 7px; font-size: 10px; color: var(--dim);
+  letter-spacing: .08em; text-transform: uppercase; pointer-events: none;
+}
+
+.search-mode-toggle { display: flex; }
+.search-mode-toggle .btn { border-radius: 0; padding: 4px 8px; font-size: 11px; }
+.search-mode-toggle .btn:first-child { border-radius: var(--radius-sm) 0 0 var(--radius-sm); }
+.search-mode-toggle .btn:last-child { border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
+.search-mode-toggle .btn + .btn { border-left: 0; }
+
+/* The max-height matters: each term is a full editor row, so a many-term
+   filter (the shipped tool sweep is 26) would otherwise stack taller than
+   the viewport and leave the grid zero rows. Collapsing to the .adv-summary
+   chip is the primary defense (renderAdvancedChips); this cap is the
+   backstop so even the expanded editor scrolls instead of hogging. */
+.advanced-search-bar {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  max-height: 33vh; overflow-y: auto;
+}
+.adv-summary { font-size: 11px; color: var(--dim); border-style: dashed; max-width: 480px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.adv-chip { display: inline-flex; align-items: center; gap: 4px; }
+.adv-chip input {
+  width: 150px; background: var(--ink); color: var(--text);
+  border: var(--border-w) solid var(--line-2); border-radius: var(--radius-sm);
+  padding: 4px 7px; font-family: var(--mono); font-size: 12px;
+}
+.adv-chip input:focus { border-color: var(--accent); outline: none; }
+.adv-conn {
+  background: var(--panel); color: var(--dim); border: var(--border-w) solid var(--line-2);
+  border-radius: var(--radius-sm); padding: 3px 4px; font: inherit; font-size: 11px;
+}
+.adv-not { font-size: 10px; padding: 3px 6px; }
+.adv-not.active { background: var(--danger-bg); border-color: var(--danger-border); color: var(--danger); }
+.adv-rm { font-size: 10px; padding: 3px 6px; }
+
+/* Saved filters modal: one section per header set, dense rows — the flat
+   list with per-row nickname buttons and 16px pitch read as noise once the
+   shipped set landed (28 filters over three header sets). */
+.sf-list { display: flex; flex-direction: column; gap: 3px; margin: 4px 0 10px; }
+.sf-group-head { display: flex; align-items: center; gap: 8px; margin: 10px 0 2px; }
+.sf-group-head:first-child { margin-top: 0; }
+.sf-group-name { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--dim); }
+.sf-row { display: flex; align-items: center; gap: 4px; padding: 2px 6px; background: var(--panel-2); border-radius: var(--radius-sm); }
+.sf-apply { flex: 1 1 auto; justify-content: flex-start; text-align: left; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sf-row .btn { padding: 2px 7px; font-size: 11px; }
+.sf-mini { font-size: 10px; padding: 2px 6px; flex: 0 0 auto; }
+.sf-row.dragging { opacity: .4; }
+.sf-row.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
+.sf-row.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
+
+/* The Filters button's suggestion ring — what replaced the banner row:
+   saved filters match the open table's columns and none is applied yet. */
+#btnFilters.suggest { border-color: var(--accent-dim); box-shadow: 0 0 0 1px var(--accent-dim); }
+
+.tag-ribbon { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; }
+.tag-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: var(--border-w) solid var(--line-2); border-radius: var(--radius-sm);
+  background: var(--panel); color: var(--dim);
+  padding: 3px 8px; font-size: 11px; cursor: pointer;
+  transition: color var(--transition-fast) var(--ease), border-color var(--transition-fast) var(--ease);
+}
+.tag-chip:hover { color: var(--text); }
+.tag-chip[aria-pressed="true"] { color: var(--text); background: var(--panel-2); border-color: currentColor; }
+.tag-chip .swatch { width: 8px; height: 8px; border-radius: 1px; }
+.tag-chip .key {
+  font-family: var(--mono); font-size: 10px; color: var(--dim);
+  border: 1px solid var(--line-2); border-radius: var(--radius-sm); padding: 0 3px;
+}
+.tag-chip .n { font-family: var(--mono); font-size: 10px; }
+
+.spacer { flex: 1; }
+.stats { font-family: var(--mono); font-size: 11px; color: var(--dim); white-space: nowrap; }
+.stats b { color: var(--accent); font-weight: 600; }
+
+.group-strip {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0;
+  padding: 3px 8px; border: 1px dashed var(--line-2); border-radius: var(--radius-sm);
+  min-height: 26px; background: var(--panel); transition: border-color var(--transition-fast) var(--ease), background var(--transition-fast) var(--ease);
+}
+.group-strip.drag-over { border-color: var(--accent); border-style: solid; background: var(--sel); }
+.group-strip-label { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; white-space: nowrap; flex: 0 0 auto; }
+.group-strip-hint { font-size: 11px; color: var(--text-faint); font-style: italic; white-space: nowrap; }
+.group-strip-arrow { color: var(--dim); font-size: 12px; flex: 0 0 auto; }
+.group-pill {
+  display: flex; align-items: center; gap: 6px; flex: 0 0 auto;
+  background: var(--panel-2); border: var(--border-w) solid var(--accent-dim); border-radius: 999px;
+  padding: 2px 4px 2px 10px; font-size: 12px; color: var(--text); cursor: grab; white-space: nowrap;
+}
+.group-pill.dragging { opacity: .4; }
+.group-pill-rm {
+  background: none; border: 0; color: var(--dim); cursor: pointer; font-size: 10px;
+  border-radius: 50%; width: 16px; height: 16px; line-height: 16px; flex: 0 0 auto;
+}
+.group-pill-rm:hover { color: var(--danger); background: var(--panel-3); }
+.group-sort-btn { font-size: 11px; white-space: nowrap; margin-left: auto; flex: 0 0 auto; }
+.group-drop-btn { font-size: 11px; white-space: nowrap; flex: 0 0 auto; }
+/* The tag pseudo-column's way into the strip — it has no header to drag.
+   margin-left: auto when it's the only trailing control (nothing grouped
+   yet), so it sits with the sort/ungroup buttons rather than crowding the
+   "drag a column header here" hint. */
+.group-tag-btn { font-size: 11px; white-space: nowrap; flex: 0 0 auto; }
+.group-strip-hint + .group-tag-btn { margin-left: auto; }
+/* A tag group's colour, alongside its name in the group header — same
+   8px chip the tag ribbon and the timeline filter use. */
+.group-header-label .swatch { width: 8px; height: 8px; border-radius: 1px; flex: 0 0 auto; }
+
+.group-header-row {
+  display: flex; align-items: center; cursor: pointer;
+  background: var(--panel-2); border-bottom: 1px solid var(--line-2);
+  padding-left: calc(var(--group-level, 0) * 18px);
+}
+.group-header-row:hover { background: var(--panel-3); }
+.group-header-row[data-level="0"] { background: var(--panel-3); box-shadow: inset 2px 0 0 var(--accent-dim); }
+.group-header-label {
+  display: flex; align-items: center; gap: 6px; min-width: 0;
+  padding: 0 10px; font-family: var(--mono); font-size: 12px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.group-header-arrow { color: var(--dim); flex: 0 0 auto; }
+/* Selectable on purpose: the value is the thing analysts copy out of a
+   header — pairs with the click guard in grid.js that skips the toggle
+   when a selection was just made. */
+.group-header-value { user-select: text; cursor: text; }
+.group-header-col { color: var(--dim); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; flex: 0 0 auto; }
+.group-header-value { color: var(--accent); font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+.group-header-count { color: var(--dim); font-size: 11px; margin-left: 8px; flex: 0 0 auto; }
+
+/* ----------------------------------------------------------------- grid */
+
+/* .main-area holds the grid/SQL content plus the (optional) detail pane,
+   side by side (data-dock="right") or stacked (data-dock="bottom" —
+   default). .main-content is the flex item the grid and SQL tab share —
+   only one of #grid/#sqlview is ever visible, [hidden] removes the other
+   from flow entirely, so no explicit stacking/grid-area is needed. */
+.main-area { display: flex; flex-direction: column; min-height: 0; }
+.main-area[data-dock="right"] { flex-direction: row; }
+.main-content { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+
+.grid {
+  position: relative; min-height: 0; flex: 1 1 auto;
+  display: grid; grid-template-rows: minmax(0, 1fr);
+  background: var(--ink);
+}
+
+/* Lives INSIDE .grid-body (see index.html): sticky top pins it while
+   vertical scrolling passes under it, and horizontal scrolling moves it
+   with the columns natively on the compositor thread — the old
+   separate-container + JS translateX sync ran a frame behind composited
+   scrolling, so the header visibly lagged the rows on a fast horizontal
+   fling. Sticky also puts .gutter-head/.gutter-filter's own
+   `position: sticky; left: 0` back in business — under the old transform
+   sync a transformed ancestor kept it from ever sticking. width:
+   max-content so it spans all columns (scrollWidth includes it);
+   min-width: 100% so its background still reaches the right edge when
+   the columns are narrower than the viewport. */
+/* z-index 3: above the rows' sticky gutters (2) it scrolls over, below
+   the .rail overlay (4). The .gutter-head/.gutter-filter z-index 3 inside
+   is scoped to the stacking context this z-index creates. */
+.grid-head {
+  background: var(--panel); border-bottom: 1px solid var(--line-2);
+  position: sticky; top: 0; z-index: 3;
+  width: max-content; min-width: 100%;
+}
+.head-row, .filter-row { display: flex; width: max-content; min-width: 100%; }
+
+.hcell {
+  position: relative; display: flex; align-items: center; gap: 6px;
+  padding: 5px 8px; border-right: 1px solid var(--line);
+  font-size: 11px; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--dim); cursor: pointer; user-select: none;
+  flex: 0 0 auto; overflow: hidden;
+}
+.hcell:hover { color: var(--text); background: var(--panel-2); }
+.hcell .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hcell .sort { color: var(--accent); font-family: var(--mono); font-size: 10px; }
+.hcell .grip {
+  position: absolute; right: -3px; top: 0; bottom: 0; width: 7px;
+  cursor: col-resize; z-index: 3;
+}
+.hcell.pinned { background: var(--panel-2); box-shadow: inset 2px 0 0 var(--accent-dim); }
+/* Marks an analyst-added derived column, so it's never mistaken for a
+   field that came out of the evidence file. Dimmed-but-italic while the
+   backfill is still running (or left partial by a cancel). */
+.hcell-derived {
+  flex: 0 0 auto; padding: 0 3px; color: var(--accent);
+  font-family: var(--mono); font-size: 11px; opacity: .85;
+}
+.hcell-derived.pending { opacity: .5; font-style: italic; }
+.hcell.dragging { opacity: .4; }
+.hcell.drop-before { box-shadow: inset 2px 0 0 var(--accent); }
+.hcell.drop-after { box-shadow: inset -2px 0 0 var(--accent); }
+
+/* min-width: 0 is load-bearing, not tidying. Making this a flex container
+   (for the picker button) also made its own automatic minimum size
+   content-based, and a text input's intrinsic width is ~177px — so every
+   filter cell silently floored at 177px while its header stayed at the
+   column's real flex-basis, and the two rows stopped lining up on any
+   column narrower than that. .hcell gets the same protection from the
+   `overflow: hidden` it already had. */
+.fcell {
+  flex: 0 0 auto; min-width: 0; border-right: 1px solid var(--line); padding: 2px;
+  display: flex; align-items: center; gap: 2px;
+}
+/* The value picker's button. Always laid out (never display:none on hover)
+   — it's the affordance that says the column has one at all, and a filter
+   row that reflows as the pointer crosses it is worse than a quiet ▾. */
+.fcell-pick {
+  flex: 0 0 auto; background: none; border: 0; cursor: pointer;
+  color: var(--dim); font: inherit; font-size: 10px; padding: 2px 3px;
+  border-radius: var(--radius-sm);
+}
+.fcell-pick:hover { color: var(--accent); background: var(--panel-2); }
+.fcell-pick[aria-expanded="true"] { color: var(--accent); background: var(--panel-2); }
+.fcell-pick.active { color: var(--accent); }
+.fcell input {
+  flex: 1 1 auto; min-width: 0; background: var(--ink); color: var(--text);
+  border: 1px solid transparent; border-radius: var(--radius-sm);
+  padding: 3px 6px; font-family: var(--mono); font-size: 11px;
+}
+.fcell input:hover { border-color: var(--line); }
+.fcell input:focus { border-color: var(--accent); background: var(--panel-3); outline: none; }
+.fcell input.active { border-color: var(--accent-dim); color: var(--accent); }
+
+/* overscroll-behavior-x: none (not just contain) — contain only stops
+   scroll from chaining to an ancestor at the boundary, it doesn't stop the
+   browser's own elastic bounce past the boundary on the element itself,
+   which looks broken on a data grid. Y-axis keeps the original contain
+   (that one's about not chaining vertical scroll to the page). */
+.grid-body { position: relative; overflow: auto; outline: none; overscroll-behavior-x: none; overscroll-behavior-y: contain; }
+.spacer-y { width: 1px; }
+/* The row-width contract: render() sets an explicit pixel `width` on this
+   box — gutter + the sum of the visible columns' widths, floored at the
+   viewport via min-width — and every .row/.group-header-row (width: auto)
+   fills it exactly. Deliberately NOT width: max-content: intrinsic sizing
+   of the rows' flex content proved unreliable (an unbreakable multi-KB
+   Payload string's min-content, empty pending cells, mid-load
+   header/row width mismatches — each produced rows whose painted
+   background ended mid-screen while their cells kept going), and the
+   render pass already knows the exact total anyway. `top` is set from JS
+   to the sticky header's current height (see syncRowsTop in app.js) —
+   the header is in-flow, so the first rows would otherwise start
+   underneath it. */
+.rows { position: absolute; top: 0; left: 0; will-change: transform; min-width: 100%; }
+
+.row {
+  display: flex; height: var(--row-h); align-items: stretch;
+  border-bottom: 1px solid var(--border-hairline);
+  /* width stays auto: fills .rows, whose explicit width render() sets to
+     the exact column total (see .rows above) — so the stripe always
+     covers every cell and reaches at least the viewport edge. */
+  background: var(--ink); /* opaque base so .gutter's sticky `background: inherit` never shows scrolled-under cells through odd rows */
+}
+.row:nth-child(even) { background: var(--row-even); }
+.row:hover { background: var(--row-hover); }
+.row.cursor { background: var(--sel); box-shadow: inset 0 0 0 1px var(--sel-line); }
+.row.selected { background: var(--row-selected); }
+.row.pending .cell { color: var(--text-faint); }
+
+/* The row gutter and its header/filter counterparts share one three-slot
+   grid — checkbox | tag stripes + note mark | row number — so the checkbox
+   column and the digits line up vertically on every row no matter which
+   rows happen to be tagged or annotated. The middle slot is the only
+   flexible one (minmax(0,1fr), so a long stripe run clips instead of
+   pushing the number out of alignment); both edge slots are content-sized
+   and therefore fixed in place down the column.
+
+   These three selectors must keep the same grid-template-columns, gap and
+   horizontal padding. That's the whole contract — break it and the header
+   checkbox stops sitting above the row checkboxes, which is exactly the
+   misalignment this replaced. */
+.gutter, .gutter-head, .gutter-filter {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center; gap: 6px; padding: 0 8px;
+  flex: 0 0 auto; width: 104px; /* keep in sync with GUTTER_W in app.js */
+  border-right: 1px solid var(--line);
+  position: sticky; left: 0;
+}
+.gutter {
+  color: var(--dim); font-family: var(--mono); font-size: 11px;
+  z-index: 2; background: inherit;
+}
+/* Explicit --panel rather than `inherit`: background isn't an inherited
+   property, and .head-row/.filter-row set none of their own, so `inherit`
+   here would resolve to transparent and let scrolled-under cells show. */
+.gutter-head, .gutter-filter { z-index: 3; background: var(--panel); }
+
+/* Not a sortable column, so it opts out of .hcell's click affordance. */
+.gutter-head { cursor: default; text-transform: none; }
+.gutter-head:hover { color: var(--dim); background: var(--panel); }
+.gutter-head .label {
+  justify-self: end; font-size: 11px; letter-spacing: .06em; text-transform: uppercase;
+}
+
+.gutter-mid { display: flex; align-items: center; gap: 2px; overflow: hidden; min-width: 0; }
+.gutter .stripe { width: 4px; height: 12px; border-radius: 1px; flex: 0 0 auto; }
+.gutter .has-note { color: var(--accent); }
+/* Explicit grid-column: 3 rather than relying on sibling order — a row
+   still painting in (no cells resolved yet) has an empty middle slot, and a
+   rid placed by flow would land in column 1 and stop lining up with its
+   neighbours. tabular-nums so rids of differing digit counts right-align
+   cleanly. */
+.gutter .rid { grid-column: 3; justify-self: end; font-variant-numeric: tabular-nums; }
+
+.gutter input.rowcheck, .hcell input.select-all-rows {
+  width: 12px; height: 12px; accent-color: var(--accent);
+  flex: 0 0 auto; margin: 0; cursor: pointer;
+}
+.gutter input.rowcheck { opacity: .55; transition: opacity var(--transition-fast) var(--ease); }
+.row:hover .rowcheck, .row.selected .rowcheck, .rowcheck:checked, .rowcheck:focus-visible { opacity: 1; }
+.hcell input.select-all-rows:disabled { cursor: default; opacity: .35; }
+
+.tag-toolbar {
+  position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 8px;
+  background: var(--panel-2); border: var(--border-w) solid var(--accent-dim); border-radius: var(--radius-md);
+  padding: 8px 12px; z-index: 55; box-shadow: var(--shadow-tag);
+}
+.tag-toolbar-count { font-family: var(--mono); font-size: 11px; color: var(--dim); margin-right: 4px; white-space: nowrap; }
+
+.cell {
+  flex: 0 0 auto; padding: 0 8px; line-height: calc(var(--row-h) - 1px);
+  font-family: var(--mono); font-size: 12px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  border-right: 1px solid var(--border-hairline);
+}
+.cell.num { text-align: right; }
+.cell mark { background: transparent; color: var(--accent); font-weight: 600; }
+.cell { user-select: none; }
+.cell-selected { background: var(--cell-selected-bg); box-shadow: inset 0 0 0 1px var(--sel-line); }
+
+.rail {
+  position: absolute; top: 0; right: 0; width: 14px; height: 100%;
+  background: rgba(0,0,0,.25); border-left: 1px solid var(--line);
+  pointer-events: none; z-index: 4;
+}
+
+.empty {
+  position: absolute; inset: 0; display: grid; place-content: center;
+  gap: 6px; text-align: center; color: var(--dim); background: var(--ink);
+  /* Above the sticky .grid-head (3) and the .rail (4) — with the header
+     now inside #body, a z-indexed element would otherwise paint through
+     this whole-grid cover. */
+  z-index: 6;
+}
+.empty-title { color: var(--text); font-size: 15px; margin: 0; }
+.empty p { margin: 0; }
+code { font-family: var(--mono); color: var(--accent); background: var(--panel); padding: 1px 5px; }
+
+/* --------------------------------------------------------------- detail */
+
+.detail {
+  background: var(--panel); display: flex; flex-direction: column;
+  flex: 0 0 auto; min-height: 0; min-width: 0;
+}
+.main-area[data-dock="bottom"] .detail { border-top: 1px solid var(--line-2); width: 100%; height: 34vh; }
+.main-area[data-dock="right"] .detail { border-left: 1px solid var(--line-2); height: 100%; width: 380px; }
+.detail-head, .sql-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 5px 10px; border-bottom: 1px solid var(--line);
+  font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim);
+}
+.detail-actions { display: flex; gap: 6px; }
+.detail-body { display: grid; grid-template-columns: 1fr 300px; gap: 14px; overflow: auto; padding: 10px; }
+.main-area[data-dock="right"] .detail-body { grid-template-columns: 1fr; grid-auto-rows: min-content; }
+
+.detail-resize { flex: 0 0 auto; position: relative; z-index: 5; }
+.main-area[data-dock="bottom"] .detail-resize { height: 6px; margin: -3px 0; cursor: row-resize; }
+.main-area[data-dock="right"] .detail-resize { width: 6px; margin: 0 -3px; cursor: col-resize; }
+.detail-resize:hover, .detail-resize.dragging { background: var(--accent-dim); }
+.detail-body dl { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 2px 14px; align-content: start; }
+.detail-body dt {
+  font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .05em;
+  white-space: nowrap; padding-top: 2px;
+}
+.detail-body dd { margin: 0; font-family: var(--mono); font-size: 12px; word-break: break-all; }
+.detail-body dd:empty::after { content: "—"; color: var(--text-faint); }
+
+.detail-pretty { margin: 0; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+.jtok-key { color: var(--accent); }
+.jtok-str { color: var(--str); }
+.jtok-num { color: var(--num); }
+.jtok-bool, .jtok-null { color: var(--kw); }
+.xtok-tag { color: var(--accent); }
+.xtok-attr { color: var(--num); }
+.xtok-attrval { color: var(--str); }
+.xtok-text { color: var(--text); }
+
+/* A node of a parsed JSON/XML document, i.e. one the detail menu can turn
+   into a column or filter on. The hover underline is the only affordance
+   saying "there is something here to right-click" — deliberately quiet,
+   since in a large document nearly every token is one of these. */
+.struct-node { border-radius: 2px; }
+.struct-node:hover {
+  background: var(--accent-dim);
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+  cursor: context-menu;
+}
+
+/* The flatten picker: one row per discovered field, with how much of the
+   sample carried it and an example value. Sized so ~8 rows are visible
+   before it scrolls — enough to judge a column set without the modal
+   growing past the viewport. */
+.flatten-list {
+  max-height: 42vh; overflow: auto; border: var(--border-w) solid var(--line-2);
+  border-radius: var(--radius-sm); margin-top: 8px;
+}
+.flatten-row {
+  display: grid; grid-template-columns: 22px minmax(140px, 1.2fr) 66px minmax(120px, 1.5fr);
+  gap: 8px; align-items: center; padding: 5px 8px; border-bottom: var(--border-w) solid var(--line-1);
+}
+.flatten-name { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.flatten-row:last-child { border-bottom: none; }
+.flatten-row:hover { background: var(--row-hover); }
+.flatten-path { font-family: var(--mono); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.flatten-cov { font-size: 11px; color: var(--dim); text-align: right; align-self: start; padding-top: 5px; font-variant-numeric: tabular-nums; }
+.flatten-sample { font-family: var(--mono); font-size: 11px; color: var(--dim); align-self: start; padding-top: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.flatten-row input[type="text"] { font-size: 11px; padding: 2px 5px; width: 100%; }
+.flatten-head { display: flex; gap: 8px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+
+.note-box { display: flex; flex-direction: column; gap: 5px; }
+.note-box label { font-size: 11px; text-transform: uppercase; letter-spacing: .1em; color: var(--dim); }
+textarea {
+  background: var(--ink); color: var(--text); border: var(--border-w) solid var(--line-2);
+  border-radius: var(--radius-sm); padding: 7px; font-family: var(--mono); font-size: 12px; resize: vertical;
+}
+textarea:focus { border-color: var(--accent); outline: none; }
+.note-status { font-size: 11px; color: var(--dim); min-height: 14px; }
+
+/* The SQL result bar: status on the left, actions hard against the right
+   edge. Was a .note-status text line with two buttons appended straight
+   after the text, so they collided with it and read as part of the
+   sentence; this makes it a row with the same button grouping as the
+   toolbar above the editor. */
+.sql-result-bar {
+  display: flex; align-items: center; gap: 12px;
+  padding: 4px 2px 6px; border-bottom: 1px solid var(--line);
+  margin-bottom: 6px;
+}
+.sql-result-bar > .note-status { flex: 1 1 auto; min-width: 0; }
+.sql-result-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; }
+
+/* ------------------------------------------------------------- sql pane */
+
+.sqlview { flex: 1 1 auto; min-height: 0; background: var(--ink); display: flex; flex-direction: column; }
+#sqlText { margin: 8px; flex: 0 0 auto; }
+
+/* Sub-tab strip for the SQL pane's named queries. Deliberately reads as a
+   second, quieter level than the main .tabs strip (smaller, mono, no
+   uppercase) — it switches queries inside one pinned tab, not top-level
+   views. */
+.sql-tabs {
+  display: flex; align-items: stretch; flex: 0 0 auto;
+  overflow-x: auto; background: var(--panel); border-bottom: 1px solid var(--line-2);
+}
+.sql-tab {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 10px; border: 0; border-right: 1px solid var(--line);
+  background: transparent; color: var(--dim);
+  font: inherit; font-family: var(--mono); font-size: 11px;
+  cursor: pointer; white-space: nowrap; flex: 0 0 auto;
+  transition: background var(--transition-fast) var(--ease), color var(--transition-fast) var(--ease);
+}
+.sql-tab:hover { color: var(--text); background: var(--panel-2); }
+.sql-tab[aria-selected="true"] { color: var(--accent); background: var(--ink); box-shadow: inset 0 -2px 0 var(--accent); }
+.sql-tab .x { opacity: .45; }
+.sql-tab .x:hover { opacity: 1; color: var(--danger); }
+.sql-tab-add { color: var(--dim); font-size: 13px; padding: 5px 12px; }
+.sql-tab.dragging { opacity: .4; }
+.sql-tab.drop-before { box-shadow: inset 2px 0 0 var(--accent); }
+.sql-tab.drop-after { box-shadow: inset -2px 0 0 var(--accent); }
+.sql-result { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 0 8px 8px; }
+/* border-collapse:separate, not collapse: collapsed borders belong to the
+   TABLE and stay put while a sticky th scrolls, which is exactly the
+   "rows showing through the header" artifact — and the th needs a
+   z-index so cell content can never paint over it. */
+.sql-result table { border-collapse: separate; border-spacing: 0; font-family: var(--mono); font-size: 12px; }
+.sql-result th, .sql-result td {
+  border-right: 1px solid var(--line); border-bottom: 1px solid var(--line);
+  padding: 2px 8px; text-align: left; white-space: nowrap;
+}
+.sql-result th { background: var(--panel-2); color: var(--dim); position: sticky; top: 0; z-index: 2; border-top: 1px solid var(--line); }
+.sql-result th:first-child, .sql-result td:first-child { border-left: 1px solid var(--line); }
+.sql-result tr.sql-row-sel td { background: var(--row-selected); }
+.sql-result tr td { cursor: default; }
+.sql-error { color: var(--danger); font-family: var(--mono); font-size: 12px; padding: 6px 0; }
+
+/* --------------------------------------------------------- unified timeline */
+
+.timelineview { flex: 1 1 auto; min-height: 0; background: var(--ink); display: flex; flex-direction: column; }
+/* A plugin tab's mount container (see showPluginTab in app.js) — same
+   fill-the-main-area shape as .sqlview/.timelineview; everything inside
+   is the plugin's own DOM. */
+.pluginview { flex: 1 1 auto; min-height: 0; background: var(--ink); display: flex; flex-direction: column; overflow: auto; }
+.timeline-head {
+  display: flex; align-items: center; gap: 10px; padding: 6px 10px;
+  border-bottom: 1px solid var(--line); background: var(--panel);
+}
+.timeline-head-label { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim); }
+.timeline-tagfilter { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.timeline-tagfilter label {
+  display: inline-flex; align-items: center; gap: 5px; font-size: 12px; cursor: pointer; user-select: none;
+}
+.timeline-tagfilter .swatch { width: 8px; height: 8px; border-radius: 1px; flex: 0 0 auto; }
+.timeline-cols {
+  display: flex; background: var(--panel); border-bottom: 1px solid var(--line-2);
+  font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--dim);
+}
+.timeline-cols > div { padding: 5px 10px; border-right: 1px solid var(--line); }
+.tl-col-ts { flex: 0 0 170px; }
+.tl-col-type { flex: 0 0 180px; }
+.tl-col-body { flex: 1 1 auto; }
+.timeline-body { position: relative; flex: 1 1 auto; min-height: 0; overflow: auto; outline: none; }
+.timeline-spacer-y { width: 1px; }
+.timeline-rows { position: absolute; top: 0; left: 0; right: 0; will-change: transform; }
+.timeline-row {
+  display: flex; height: var(--row-h); align-items: stretch; cursor: pointer;
+  border-bottom: 1px solid var(--border-hairline);
+}
+.timeline-row:nth-child(even) { background: var(--row-even); }
+.timeline-row:hover { background: var(--row-hover); }
+.timeline-row > div { padding: 0 10px; display: flex; align-items: center; overflow: hidden; }
+.timeline-row .tl-col-ts { font-family: var(--mono); font-size: 11px; color: var(--dim); }
+.timeline-row .tl-col-type { font-size: 11px; }
+.timeline-row .tl-col-type .type-badge {
+  border: 1px solid var(--line-2); border-radius: var(--radius-sm); padding: 1px 6px;
+  background: var(--panel-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.timeline-row .tl-col-body {
+  font-family: var(--mono); font-size: 12px; white-space: nowrap; text-overflow: ellipsis; gap: 6px;
+}
+.timeline-row .tl-tag-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
+.timeline-empty { padding: 40px 20px; text-align: center; color: var(--dim); font-size: 13px; }
+
+/* --------------------------------------------------------------- dropdown */
+
+.menu {
+  position: fixed; z-index: 56; min-width: 170px; max-width: 440px; max-height: 70vh;
+  background: var(--panel); border: var(--border-w) solid var(--line-2); border-radius: var(--radius-md);
+  box-shadow: var(--shadow-modal); padding: 4px; display: flex; flex-direction: column; gap: 1px;
+  overflow-y: auto;
+}
+.menu-item {
+  flex: 0 0 auto;
+  text-align: left; background: none; border: 0; border-radius: var(--radius-sm);
+  color: var(--text); font: inherit; font-size: 12px; padding: 7px 10px; cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.menu-item:hover { background: var(--panel-2); }
+.menu-item:disabled { color: var(--dim); cursor: default; background: none; }
+.menu-item-row { flex: 0 0 auto; display: flex; align-items: stretch; gap: 1px; }
+.menu-item-row .menu-item { flex: 1 1 auto; min-width: 0; }
+.menu-item-action {
+  flex: 0 0 auto;
+  background: none; border: 0; border-radius: var(--radius-sm);
+  color: var(--dim); font: inherit; font-size: 11px; padding: 7px 6px; cursor: pointer;
+}
+.menu-item-action:hover { background: var(--panel-2); color: var(--text); }
+.menu-item-action:disabled { color: var(--text-faint); cursor: default; background: none; }
+.menu-item-flex { display: flex; align-items: center; gap: 6px; }
+.menu-item-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Fixed width so labels line up whether or not their row is ticked. */
+.menu-check { flex: 0 0 10px; color: var(--accent); font-size: 11px; }
+.menu-swatch { flex: 0 0 auto; width: 9px; height: 9px; border-radius: 2px; }
+.menu-item-hint {
+  flex: 0 0 auto; color: var(--dim); font-family: var(--mono); font-size: 10px;
+  border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 0 4px;
+}
+.menu-sep { flex: 0 0 auto; height: 1px; background: var(--line); margin: 4px 2px; }
+.menu-header {
+  flex: 0 0 auto;
+  font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--dim);
+  padding: 6px 10px 3px;
+}
+/* A header that is a value rather than a label — a JSON/XML field path.
+   Uppercasing one is actively wrong: paths are case-sensitive, so
+   `$.USER.NAME` names a field that isn't there. */
+.menu-header.menu-header-literal {
+  text-transform: none; letter-spacing: 0; font-family: var(--mono); font-size: 11px;
+}
+
+/* ---------------------------------------------------------------- sidebar */
+
+/* Replaces the old "jump to a table" dropdown (openTabJumpMenu) with a
+   persistent, collapsible panel — the horizontal open-tabs strip (.tabs)
+   is untouched, this is purely an alternate way to reach any table
+   (open or closed) without reopening a menu for every click. Rows reuse
+   .menu-item/.menu-item-row/.menu-item-action/.menu-header verbatim (see
+   the dropdown section above) rather than a parallel set of near-identical
+   classes — they're already self-contained, not positioning-dependent on
+   .menu's own fixed/floating placement. */
+.sidebar {
+  width: var(--sidebar-w, 220px); height: 100%; min-height: 0;
+  display: flex; flex-direction: column; position: relative;
+  background: var(--panel); border-right: 1px solid var(--line);
+}
+/* Same handle idiom as .detail-resize and .tab-split: a hit target wider
+   than the line it paints, sitting on the sidebar's own right edge and
+   overlapping the border rather than displacing it — #app's first grid
+   column is max-content, so anything that took real width here would
+   push the grid over every time. */
+.sidebar-resize {
+  position: absolute; top: 0; right: -3px; bottom: 0; width: 7px;
+  cursor: col-resize; touch-action: none; z-index: 5;
+}
+.sidebar-resize:hover::after, .sidebar-resize.dragging::after {
+  content: ""; position: absolute; inset: 0 3px; background: var(--accent-dim);
+}
+.sidebar-head { flex: 0 0 auto; padding: 8px; border-bottom: 1px solid var(--line); }
+#sidebarFilter {
+  width: 100%; background: var(--ink); color: var(--text);
+  border: var(--border-w) solid var(--line-2); border-radius: var(--radius-sm);
+  padding: 5px 8px; font: inherit; font-size: 12px;
+}
+.sidebar-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 4px; display: flex; flex-direction: column; gap: 1px; }
+.sidebar-row { display: flex; align-items: stretch; gap: 1px; border-radius: var(--radius-sm); }
+.sidebar-row.active { background: var(--ink); box-shadow: inset 2px 0 0 var(--accent); }
+.sidebar-row.active .menu-item { color: var(--accent); }
+.sidebar-row .menu-item { flex: 1 1 auto; min-width: 0; }
+/* A row count sitting as its own flex sibling, not floated inside the
+   label button — .menu-item already truncates its own text with
+   overflow:hidden/text-overflow:ellipsis, which a floated child inside
+   that same truncating box wouldn't reliably coexist with. */
+.sidebar-row-count {
+  flex: 0 0 auto; align-self: center;
+  color: var(--dim); font-family: var(--mono); font-size: 11px; padding-right: 8px;
+}
+.sidebar-row-actions { flex: 0 0 auto; display: none; align-items: stretch; gap: 1px; }
+.sidebar-row:hover .sidebar-row-actions { display: flex; }
+/* Drag-to-reorder (wireSidebarRowDrag/wireDragReorder) — same technique
+   and same S.tabOrder as the horizontal tab strip's own .tab.dragging/
+   .drop-before/.drop-after, just a top/bottom edge instead of left/right
+   since this list is vertical. */
+.sidebar-row.dragging { opacity: .4; }
+.sidebar-row.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
+.sidebar-row.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
+
+/* ---------------------------------------------------------------- modal */
+
+.modal { position: fixed; inset: 0; background: rgba(8,10,12,.7); display: grid; place-items: center; z-index: 50; }
+.modal-card {
+  background: var(--panel); border: var(--border-w) solid var(--line-2); border-radius: var(--radius-md);
+  box-shadow: var(--shadow-modal);
+  width: min(680px, 92vw); max-height: 82vh; display: flex; flex-direction: column;
+}
+.modal-card.wide { width: min(920px, 96vw); }
+
+/* confirm()/prompt() replacements — a separate overlay (not the #modal
+   singleton) so one can be triggered from inside an already-open modal
+   (e.g. deleting a row from a list) and stack visibly above it. */
+.confirm-overlay {
+  position: fixed; inset: 0; background: rgba(8,10,12,.7);
+  display: grid; place-items: center; z-index: 65;
+}
+.confirm-card {
+  background: var(--panel); border: var(--border-w) solid var(--line-2); border-radius: var(--radius-md);
+  box-shadow: var(--shadow-modal); width: min(420px, 92vw); padding: 16px;
+  display: flex; flex-direction: column; gap: 12px;
+}
+.confirm-message { margin: 0; font-size: 13px; line-height: 1.5; white-space: pre-line; }
+.confirm-input {
+  background: var(--ink); color: var(--text); border: var(--border-w) solid var(--line-2);
+  border-radius: var(--radius-sm); padding: 6px 9px; font: inherit; font-size: 13px;
+}
+.confirm-input:focus { border-color: var(--accent); outline: none; }
+.confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.btn.danger { background: var(--danger-bg); border-color: var(--danger-border); color: var(--danger); }
+.btn.danger:hover { border-color: var(--danger); }
+.modal-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 9px 12px; border-bottom: 1px solid var(--line);
+  font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim);
+}
+.modal-body { padding: 12px; overflow: auto; }
+.modal-body h4 { margin: 14px 0 6px; font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--accent); }
+.modal-body h4:first-child { margin-top: 0; }
+.kv { display: grid; grid-template-columns: 150px 1fr; gap: 3px 12px; font-size: 12px; }
+.kv kbd {
+  font-family: var(--mono); font-size: 11px; background: var(--ink);
+  border: 1px solid var(--line-2); border-radius: var(--radius-sm); padding: 1px 5px; justify-self: start;
+}
+.collist { display: grid; gap: 2px; max-height: 46vh; overflow: auto; }
+.collist-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.collist-row.dragging { opacity: .4; }
+.collist-row.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
+.collist-row.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
+.collist-row:hover { background: var(--panel-2); }
+.collist label { display: flex; align-items: center; gap: 8px; padding: 3px 4px; font-family: var(--mono); font-size: 12px; flex: 1; min-width: 0; }
+.modal-body .row-actions { display: flex; gap: 6px; margin-top: 12px; align-items: center; }
+.modal-body .row-actions h4 { flex: 1; margin: 0; }
+
+/* ---------------------------------------------------------- value picker */
+
+/* The Excel-style header dropdown. Rides .menu's own positioning/shadow
+   (it's opened through the same anchoredPanel machinery) and only adds the
+   internals — a fixed width so the list doesn't resize as values load, and
+   its own scroll region so the search box and Apply stay put. */
+.value-picker { width: 320px; max-width: 92vw; padding: 8px; gap: 6px; }
+.vp-search {
+  flex: 0 0 auto; width: 100%; background: var(--ink); color: var(--text);
+  border: 1px solid var(--line-2); border-radius: var(--radius-sm);
+  padding: 4px 7px; font: inherit; font-size: 12px;
+}
+.vp-search:focus { border-color: var(--accent); outline: none; }
+.vp-toggles { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; justify-content: space-between; }
+.vp-seg { display: flex; gap: 2px; flex-wrap: wrap; }
+.vp-seg .btn { font-size: 11px; padding: 3px 7px; }
+.vp-seg .btn[aria-pressed="true"] { color: var(--accent); border-color: var(--accent-dim); }
+.vp-list {
+  flex: 1 1 auto; min-height: 60px; max-height: 40vh; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 1px;
+  border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 4px 0;
+}
+.vp-row {
+  display: flex; align-items: center; gap: 6px; padding: 2px 4px;
+  border-radius: var(--radius-sm); cursor: pointer;
+}
+.vp-row:hover { background: var(--panel-2); }
+/* white-space: pre, not nowrap — a value whose edges are spaces is one the
+   header filter box can't hold (see quickFilterTextForValues), so the list
+   has to show the padding rather than let HTML collapse it away. */
+.vp-value {
+  flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: pre;
+  font-family: var(--mono); font-size: 11px;
+}
+.vp-empty { color: var(--dim); font-style: italic; }
+.vp-count { flex: 0 0 auto; color: var(--dim); font-family: var(--mono); font-size: 10px; }
+.vp-status { flex: 0 0 auto; color: var(--dim); font-size: 11px; display: grid; gap: 3px; }
+/* --accent, not --danger: a capped list or an expired view is something to
+   know about, not something that went wrong. */
+.vp-warn { color: var(--accent); }
+.vp-note { color: var(--dim); font-size: 12px; padding: 8px 4px; }
+.vp-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; }
+.vp-actions .btn { font-size: 11px; padding: 3px 8px; }
+
+/* ------------------------------------------------------------ table menu */
+
+/* Sections of the table menu modal (TABLE_MENU_SECTIONS in app.js) — one
+   rule for all of them so a new section needs no CSS of its own. */
+.table-menu-section + .table-menu-section { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 6px; }
+.table-menu-section h4 { margin: 10px 0 8px; }
+.collist-pick { flex: 0 0 auto; font-size: 10px; padding: 2px 6px; font-family: var(--mono); }
+.collist-pick[aria-pressed="true"] { color: var(--accent); border-color: var(--accent-dim); }
+
+/* --------------------------------------------------------------- sessions */
+
+.session-list, .session-queue { display: grid; gap: 4px; margin: 6px 0 12px; }
+.session-row { justify-content: flex-start; padding: 5px 8px; background: var(--panel-2); border-radius: var(--radius-sm); }
+/* Drag-to-reorder feedback for saved-filter rows (wireDragReorder) — same
+   vocabulary the tab strip and column headers use, on the vertical axis. */
+.session-row.dragging { opacity: .4; }
+.session-row.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
+.session-row.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
+.session-name { font-family: var(--mono); font-size: 12px; color: var(--text); }
+/* Folder-browser entries. The file rows once borrowed .row-actions for its
+   flex layout, and its 12px modal margin came with it — every file sat 16px
+   from the last. A file picker wants density; this also tightens the folder
+   buttons to the same pitch. */
+.browse-row { display: flex; gap: 8px; align-items: center; margin: 0; padding: 3px 8px; }
+.session-row .count { color: var(--dim); font-size: 11px; margin-right: auto; }
+
+.index-status {
+  font-family: var(--mono); font-size: 11px; white-space: nowrap;
+  border: var(--border-w) solid var(--line-2); border-radius: var(--radius-sm); padding: 2px 7px;
+}
+.index-status-ready { color: var(--str); border-color: var(--str); }
+.index-status-building { color: var(--accent); border-color: var(--accent-dim); }
+.index-status-idle { color: var(--dim); }
+
+/* Per-column filter indexes, listed under their table in the Tables modal.
+   A secondary line under the source row, not a column in it — most tables
+   have none, and it wraps to as many as the analyst has filtered on. */
+.source-indexes { flex-wrap: wrap; gap: 4px; padding: 0 4px 8px 12px; margin-top: -4px; }
+.index-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-family: var(--mono); font-size: 11px; color: var(--dim);
+  border: var(--border-w) solid var(--line-2); border-radius: var(--radius-sm); padding: 1px 4px 1px 7px;
+}
+.index-chip.building { color: var(--accent); border-color: var(--accent-dim); padding-right: 7px; }
+.index-chip-drop {
+  background: none; border: none; cursor: pointer; padding: 0 3px;
+  color: var(--dim); font-family: var(--mono); font-size: 11px; line-height: 1;
+}
+.index-chip-drop:hover { color: var(--danger); }
+
+/* ---------------------------------------------------------- search all */
+
+.search-all-paste {
+  width: 100%; resize: vertical; min-height: 120px; margin-bottom: 12px;
+  background: var(--ink); color: var(--text); border: var(--border-w) solid var(--line-2);
+  border-radius: var(--radius-sm); padding: 8px 10px; font-family: var(--mono); font-size: 12px;
+}
+.search-all-paste:focus { border-color: var(--accent); outline: none; }
+.search-all-terms { margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+.search-all-results { display: grid; gap: 4px; max-height: 50vh; overflow: auto; }
+.search-all-row {
+  display: flex; align-items: center; gap: 12px;
+  background: var(--panel-2); border-radius: var(--radius-sm); padding: 8px 10px;
+}
+/* A per-term row under its table: indented, quieter, and monospaced,
+   since the thing being named is a literal search term (a hash, a path, an
+   IP) rather than a file name. The left rule is what makes a run of them
+   read as belonging to the table above rather than as more tables. */
+.search-all-term-row {
+  margin-left: 20px; background: none;
+  border-left: 2px solid var(--line-2); border-radius: 0;
+  padding-top: 4px; padding-bottom: 4px;
+}
+.search-all-term-row .search-all-name { font-family: var(--mono); font-size: 12px; color: var(--dim); }
+.search-all-name { font-size: 13px; color: var(--text); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.search-all-count { font-family: var(--mono); font-size: 11px; color: var(--accent); white-space: nowrap; }
+.search-all-progress { font-family: var(--mono); font-size: 11px; color: var(--dim); }
+
+/* The toolbar button while a sweep runs behind a closed modal — the only
+   on-screen sign the job is still going, so it gets the accent rather than
+   blending into the other ghost buttons. */
+#btnSearchAll[aria-busy="true"] { color: var(--accent); border-color: var(--accent-dim); }
+
+/* --------------------------------------------------------- import preview */
+
+.preview-table-wrap { overflow: auto; max-height: 46vh; margin-top: 8px; border: 1px solid var(--line); }
+.preview-tbl { border-collapse: collapse; font-family: var(--mono); font-size: 11px; width: 100%; }
+.preview-tbl th, .preview-tbl td {
+  border: 1px solid var(--line); padding: 3px 7px; text-align: left; white-space: nowrap;
+}
+.preview-tbl th { background: var(--panel-2); position: sticky; top: 0; }
+.preview-colname { color: var(--accent); margin-bottom: 3px; }
+.preview-tbl th select {
+  background: var(--ink); color: var(--dim); border: 1px solid var(--line-2);
+  border-radius: var(--radius-sm); padding: 1px 3px; font: inherit; font-size: 10px;
+}
+
+/* -------------------------------------------------------- filter builder */
+
+/* Settings → Updates: the release notes blob. Monospace and scrollable
+   because it's markdown straight from the GitHub release, not something
+   we render. */
+.update-notes {
+  margin: 6px 0;
+  padding: 8px;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font: 12px/1.45 var(--mono);
+  color: var(--dim);
+  background: var(--panel-2);
+  border: var(--border-w) solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.fb-help { margin: 0 0 10px; font-size: 12px; color: var(--dim); }
+.fb-tree { border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 8px; margin-bottom: 10px; }
+.fb-group { display: flex; flex-direction: column; gap: 6px; }
+.fb-group .fb-group { border-left: 2px solid var(--line-2); padding-left: 10px; margin-left: 2px; }
+.fb-group-head { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; }
+.fb-group-op { background: var(--ink); color: var(--accent); border: 1px solid var(--line-2); border-radius: var(--radius-sm); padding: 2px 4px; font: inherit; font-size: 11px; }
+.fb-children { display: flex; flex-direction: column; gap: 4px; }
+.fb-row { display: flex; align-items: center; gap: 6px; }
+.fb-row > .fb-group { flex: 1; }
+.fb-cond { display: flex; align-items: center; gap: 6px; flex: 1; }
+.fb-cond select, .fb-cond input {
+  background: var(--ink); color: var(--text); border: 1px solid var(--line-2);
+  border-radius: var(--radius-sm); padding: 3px 6px; font-family: var(--mono); font-size: 11px;
+}
+.fb-cond input { flex: 1; min-width: 100px; }
+.fb-rm { font-size: 10px; padding: 3px 6px; flex: 0 0 auto; }
+.fb-actions { display: flex; gap: 6px; margin-top: 2px; }
+.fb-sql-label { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 4px; }
+.fb-sql {
+  width: 100%; background: var(--ink); color: var(--text); border: 1px solid var(--line-2);
+  border-radius: var(--radius-sm); padding: 7px; font-family: var(--mono); font-size: 12px; resize: vertical;
+}
+.fb-sql:focus { border-color: var(--accent); outline: none; }
+.fb-status { font-size: 11px; min-height: 14px; margin-top: 4px; }
+.fb-status.ok { color: var(--str); }
+.fb-status.err { color: var(--danger); }
+.fb-raw-banner { font-size: 12px; color: var(--dim); margin-bottom: 8px; }
+
+/* ----------------------------------------------------------- settings */
+
+.settings-keys { display: grid; gap: 8px; margin-top: 8px; }
+.settings-key-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.settings-key-label { font-size: 12px; color: var(--text); }
+.settings-key-chips { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
+.settings-key-chip {
+  display: inline-flex; align-items: center; gap: 3px;
+  background: var(--panel-2); border: 1px solid var(--line-2); border-radius: var(--radius-sm); padding: 2px 4px;
+}
+.settings-key-chip .btn { font-size: 9px; padding: 1px 4px; }
+
+.appearance-styles { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; margin-top: 8px; }
+.style-card {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 4px;
+  background: var(--panel-2); border: var(--border-w) solid var(--line-2); border-radius: var(--radius-md);
+  padding: 10px 12px; cursor: pointer; text-align: left; font: inherit; color: var(--text);
+  transition: border-color var(--transition-fast) var(--ease), transform var(--transition-fast) var(--ease);
+}
+.style-card:hover { border-color: var(--accent-dim); }
+.style-card[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.style-card .style-name { font-size: 12.5px; font-weight: 600; }
+.style-card .style-desc { font-size: 11px; color: var(--dim); line-height: 1.4; }
+.style-swatch { display: flex; gap: 3px; margin-bottom: 2px; }
+.style-swatch span { width: 14px; height: 14px; border-radius: 3px; border: 1px solid var(--line-2); }
+
+.segmented { display: flex; border: var(--border-w) solid var(--line-2); border-radius: var(--radius-sm); overflow: hidden; margin-top: 8px; width: fit-content; }
+.segmented button {
+  background: var(--panel-2); border: 0; border-right: var(--border-w) solid var(--line-2); color: var(--dim);
+  padding: 6px 14px; font: inherit; font-size: 12px; cursor: pointer;
+}
+.segmented button:last-child { border-right: 0; }
+.segmented button[aria-pressed="true"] { background: var(--accent); color: var(--accent-fg); }
+
+.accent-picker { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.accent-swatch { width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--line-2); background: var(--sw); cursor: pointer; padding: 0; }
+.accent-swatch[aria-pressed="true"] { box-shadow: 0 0 0 2px var(--panel), 0 0 0 3px var(--sw); }
+#appearanceAccentCustom { width: 24px; height: 24px; border: 1px solid var(--line-2); border-radius: var(--radius-sm); background: none; padding: 0; cursor: pointer; }
+/* Collapsible Settings sections. The header carries .modal-body h4's own
+   type treatment (accent, uppercase, tracked) so collapsing them didn't
+   change what a section *looks* like, only whether it's open. */
+.settings-section { border-top: 1px solid var(--line); }
+.settings-section:first-child { border-top: 0; }
+.settings-section-head {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  background: none; border: 0; cursor: pointer; text-align: left;
+  padding: 10px 4px; color: var(--accent); font: inherit;
+  font-size: 11px; letter-spacing: .1em; text-transform: uppercase;
+  border-radius: var(--radius-sm);
+}
+.settings-section-head:hover { background: var(--panel-2); }
+.settings-section-caret { flex: 0 0 auto; font-size: 9px; color: var(--dim); }
+.settings-section-head[aria-expanded="true"] .settings-section-caret { color: var(--accent); }
+.settings-section-body { padding: 0 4px 14px; }
+
+.settings-sub-label { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; margin-top: 14px; }
+.settings-sub-label:first-of-type { margin-top: 0; }
+
+/* ------------------------------------------------------------------ home */
+
+.home-inner { max-width: 920px; margin: 0 auto; padding: 40px 20px 60px; }
+.home-head { display: flex; align-items: center; gap: 12px; margin-bottom: 28px; flex-wrap: wrap; }
+.home-head .brand { font-size: 13px; }
+.home-head-spacer { flex: 1; }
+.home-empty { color: var(--dim); font-size: 13px; padding: 30px 0; text-align: center; }
+.home-search-row { margin-bottom: 16px; }
+.home-search {
+  width: 100%; background: var(--panel); color: var(--text);
+  border: var(--border-w) solid var(--line-2); border-radius: var(--radius-sm);
+  padding: 8px 12px; font: inherit; font-size: 13px;
+}
+.home-search:focus { border-color: var(--accent); outline: none; }
+/* minmax(0, 1fr): a bare `display:grid` with no grid-template-columns
+   gives the single implicit column an `auto` track, which sizes to the
+   widest row's max-content (here, a long unbroken path/stats line) rather
+   than the container's actual available width -- and since nothing clips
+   it, every row silently overflows past the search box/header above it by
+   however much that longest row needed. 1fr caps the column at the
+   container's real width; min-width:0 on .home-case-main already handles
+   truncating that long text via text-overflow:ellipsis once the column
+   stops handing it unlimited room to grow into. */
+.home-case-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
+.home-case-row {
+  display: flex; align-items: center; gap: 14px;
+  background: var(--panel); border: var(--border-w) solid var(--line); border-radius: var(--radius-md);
+  padding: 10px 12px;
+  transition: border-color var(--transition-fast) var(--ease), transform var(--transition-fast) var(--ease);
+}
+.home-case-row:hover { border-color: var(--line-2); }
+.home-case-row.missing { opacity: .6; border-style: dashed; }
+.home-case-main { flex: 1; min-width: 0; cursor: pointer; }
+.home-case-name { font-size: 13px; color: var(--text); display: flex; align-items: center; gap: 8px; }
+.home-case-group-badge {
+  font-size: 10px; letter-spacing: .04em; text-transform: uppercase; color: var(--dim);
+  border: 1px solid var(--line-2); border-radius: var(--radius-sm); padding: 1px 6px;
+  font-family: var(--mono);
+}
+.home-case-meta {
+  font-family: var(--mono); font-size: 11px; color: var(--dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px;
+}
+.home-case-notes { font-size: 11px; color: var(--dim); margin-top: 3px; max-width: 640px; }
+.home-case-actions { display: flex; gap: 6px; flex: 0 0 auto; }
+.home-show-older { margin-top: 4px; width: 100%; }
+
+/* The page shutdownWinnow leaves behind once the server is gone — plain
+   static text, since nothing dynamic can be served anymore. */
+.shutdown-note {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  height: 100vh; gap: 10px; padding: 40px; text-align: center;
+  color: var(--dim); font-size: 13px;
+}
+.shutdown-note-title { color: var(--text); font-size: 16px; letter-spacing: .02em; }
+
+.toast {
+  position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
+  background: var(--panel-2); border: var(--border-w) solid var(--accent-dim); border-radius: var(--radius-sm);
+  padding: 7px 14px; font-size: 12px; z-index: 60; box-shadow: var(--shadow-tag);
+  display: flex; align-items: center; gap: 10px;
+}
+.toast-action {
+  background: var(--accent-dim); color: var(--text); border: var(--border-w) solid var(--accent);
+  border-radius: var(--radius-sm); padding: 3px 9px; font: inherit; font-size: 11px; cursor: pointer;
+}
+.toast-action:hover { background: var(--accent); }
+
+/* Add/re-derive datetime column modal (openDerivedColumnModal). */
+.derived-row { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
+.derived-row-label { flex: 0 0 150px; font-size: 12px; color: var(--text-dim); }
+.derived-row select, .derived-row input {
+  flex: 1; background: var(--ink); color: var(--text);
+  border: 1px solid var(--line-2); border-radius: var(--radius-sm); padding: 5px 8px; font: inherit;
+}
+.derived-params { margin: 4px 0 10px; }
+.derived-param { display: flex; align-items: center; gap: 10px; margin: 6px 0; }
+.derived-param-label { flex: 0 0 150px; font-size: 12px; color: var(--text-dim); }
+.derived-param select, .derived-param input {
+  flex: 0 0 160px; background: var(--ink); color: var(--text);
+  border: 1px solid var(--line-2); border-radius: var(--radius-sm); padding: 5px 8px; font: inherit;
+}
+.derived-param-help { flex: 1; min-width: 0; margin: 0; }
+.derived-preview-title { font-size: 12px; color: var(--text-dim); margin-top: 12px; }
+.derived-preview {
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  padding: 8px 10px; margin-top: 4px; max-height: 240px; overflow: auto;
+}
+.derived-preview-row { display: flex; align-items: baseline; gap: 8px; font-family: var(--mono); font-size: 11px; }
+.derived-in { flex: 0 1 auto; max-width: 45%; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.derived-arrow { flex: 0 0 auto; color: var(--text-dim); }
+.derived-out { flex: 1 1 auto; min-width: 0; }
+.derived-out.bad, .fb-help.bad { color: var(--danger, #c0392b); }
+.derived-verdict { margin: 8px 0 0; }
+.derived-name { font-family: var(--mono); }
+
+/* Shown while dragging OS files over the window (wireFileDrop in app.js) —
+   above .modal's own z-index so it's visible even if a modal happens to be
+   open underneath (dropping a file works regardless of what's on screen,
+   same as "Import files…" always being available from the Session menu). */
+.drop-overlay {
+  position: fixed; inset: 0; z-index: 70;
+  background: rgba(8,10,12,.82); display: grid; place-items: center;
+  pointer-events: none; /* the real dragenter/dragover/drop listeners are on the window, not this card */
+}
+.drop-overlay-card {
+  border: 2px dashed var(--accent); border-radius: var(--radius-md);
+  color: var(--accent); background: var(--panel); box-shadow: var(--shadow-modal);
+  padding: 28px 40px; font-size: 15px;
+}
+
+/* ------------------------------------------------------- style flourishes */
+/* Everything above is the shared token system every style already gets for
+   free. Below are the small number of extra rules that give each style its
+   signature character, scoped to the highest-traffic chrome (header, tabs,
+   buttons, modal shell, row selection) rather than every modal in the app —
+   those still pick up the right colors/radius/border-weight/motion from
+   the tokens above, just without a bespoke per-modal treatment. */
+
+/* Phosphor: glow on the active tab + brand mark, blinking tab cursor,
+   faint scanlines (dark mode only). */
+html[data-style="phosphor"] .tab[aria-selected="true"] { color: var(--accent); text-shadow: var(--glow); }
+html[data-style="phosphor"] .mark { box-shadow: var(--glow); }
+html[data-style="phosphor"][data-theme="dark"] .tab[aria-selected="true"]::after {
+  content: "▌"; margin-left: 2px; font-size: 10px; animation: phosphor-blink 1s step-end infinite;
+}
+@keyframes phosphor-blink { 50% { opacity: .2; } }
+html[data-style="phosphor"] .row.selected { box-shadow: inset 3px 0 0 var(--accent); }
+html[data-style="phosphor"] .detail-head, html[data-style="phosphor"] .sql-head, html[data-style="phosphor"] .modal-head { color: var(--accent); text-shadow: var(--glow); }
+html[data-style="phosphor"][data-theme="dark"] body::after {
+  content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 9998;
+  background: repeating-linear-gradient(to bottom, rgba(255,255,255,.5) 0px, rgba(255,255,255,.5) 1px, transparent 1px, transparent 3px);
+  opacity: .04; mix-blend-mode: overlay;
+}
+
+/* Blueprint: buttons/tabs/tag-toolbar/modal get a hard offset shadow that
+   compresses to nothing on :active — a tactile "press" rather than a hover
+   fade. A faint drafting-grid texture behind the whole app. */
+html[data-style="blueprint"] #app {
+  background-image: linear-gradient(var(--line) 1px, transparent 1px), linear-gradient(90deg, var(--line) 1px, transparent 1px);
+  background-size: 28px 28px; background-position: -1px -1px;
+}
+html[data-style="blueprint"][data-theme="dark"] #app { opacity: 1; }
+html[data-style="blueprint"] .btn, html[data-style="blueprint"] .tab, html[data-style="blueprint"] .tag-chip {
+  box-shadow: 2px 2px 0 var(--shadow-hard-c);
+}
+html[data-style="blueprint"] .btn:hover, html[data-style="blueprint"] .tab:hover, html[data-style="blueprint"] .tag-chip:hover {
+  transform: translate(-1px,-1px); box-shadow: 3px 3px 0 var(--shadow-hard-c);
+}
+html[data-style="blueprint"] .btn:active, html[data-style="blueprint"] .tag-chip:active {
+  transform: translate(2px,2px); box-shadow: 0 0 0 var(--shadow-hard-c);
+}
+html[data-style="blueprint"] .tab[aria-selected="true"] {
+  background: var(--accent); color: var(--accent-fg); box-shadow: 1px 1px 0 var(--shadow-hard-c); transform: translate(1px,1px);
+}
+html[data-style="blueprint"] .row.selected { box-shadow: inset 5px 0 0 0 var(--accent); }
+html[data-style="blueprint"] .detail-head, html[data-style="blueprint"] .sql-head, html[data-style="blueprint"] .modal-head {
+  background: var(--accent); color: var(--accent-fg); text-transform: uppercase; font-weight: 700;
+}
+
+/* Studio: gentle lift on hover instead of a color swap, pill-shaped active
+   tab, a softer backdrop behind modals. */
+html[data-style="studio"] .tab {
+  border-radius: 999px; margin: 6px 2px;
+}
+html[data-style="studio"] .tab[aria-selected="true"] {
+  background: color-mix(in srgb, var(--accent) 16%, var(--panel)); color: var(--accent); box-shadow: none; font-weight: 600;
+}
+html[data-style="studio"] .btn:hover, html[data-style="studio"] .tag-chip:hover { transform: translateY(-1px); box-shadow: var(--shadow-tag); }
+html[data-style="studio"] .tag-chip { border-radius: 999px; }
+html[data-style="studio"] .row.selected { box-shadow: inset 3px 0 0 var(--accent); }
+html[data-style="studio"] .modal { backdrop-filter: blur(3px); }
+html[data-style="studio"] #search, html[data-style="studio"] textarea, html[data-style="studio"] .fcell input {
+  transition: box-shadow var(--transition-fast) var(--ease), border-color var(--transition-fast) var(--ease);
+}
+html[data-style="studio"] #search:focus, html[data-style="studio"] textarea:focus {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+
+/* ------------------------------------------------- remote session mode */
+
+/* Settings → Appearance → "Remote session mode". RDP-class protocols
+   encode screen changes, so an infinite animation (busy sweep, job slide,
+   the SQL cursor blink) keeps the encoder busy around the clock, and the
+   row-hover repaint fires on every mousemove. Animations get the same
+   kill-switch prefers-reduced-motion uses; hover is re-asserted to each
+   row state's own motionless background (a computed no-op — no pixels
+   change, so nothing crosses the wire). The scrolling half is in grid.js. */
+html.remote * { transition: none !important; animation: none !important; }
+html.remote .row:hover { background: var(--ink); }
+html.remote .row:hover:nth-child(even) { background: var(--row-even); }
+html.remote .row.cursor:hover { background: var(--sel); }
+html.remote .row.selected:hover { background: var(--row-selected); }
+
+/* ------------------------------------------------------ SQL pane assists */
+
+.sql-resize {
+  height: 7px; cursor: ns-resize; flex: 0 0 auto;
+  border-bottom: 1px solid var(--line-2); touch-action: none;
+}
+.sql-resize:hover { background: var(--panel-2); border-bottom-color: var(--accent-dim); }
+.sql-ac { min-width: 220px; max-width: 420px; }
+.sql-ac .menu-item { display: flex; justify-content: space-between; gap: 12px; font-family: var(--mono); font-size: 12px; }
+.sql-ac-active { background: var(--panel-2); box-shadow: inset 2px 0 0 var(--accent); }
+.sql-th-sort { cursor: pointer; user-select: none; }
+.sql-tag-cell { display: inline-flex; gap: 4px; }
+.sql-tag-chip {
+  font-size: 10px; padding: 1px 6px; border-radius: var(--radius-sm);
+  color: #fff; white-space: nowrap;
+}

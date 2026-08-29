@@ -1,0 +1,43 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Case files and evidence — never commit these
+*.db
+*.db-wal
+*.db-shm
+# Advisory "this case is open" markers (store._CaseLock) — per-process,
+# meaningless on another machine, and stale the moment the server exits.
+*.winnow-lock
+*.csv
+*.tsv
+*.winnow_case.json
+
+# Machine-local workflow state (case registry, saved filters, tag template) —
+# see CLAUDE.md: human-readable, but not source and not portable across machines
+workspace/
+
+# Named session exports (Store.save_named_session) — a per-installation
+# artifact next to whatever case file made them, not source.
+sessions/
+
+# Benchmark fixture inputs (regenerated from a fixed seed on demand) and
+# recorded baselines (per machine — a baseline from another CPU is worse
+# than none). Commit a baselines/*.json deliberately if you want one
+# machine's numbers tracked over time.
+bench/.cache/
+bench/baselines/
+
+# Updater bookkeeping: the backup of the previous version (update.py
+# --rollback restores it) and the record of which files this install
+# received, both per-install and both meaningless in the repo.
+.winnow-backup/
+.winnow-install.json
+
+# Installed plugins are per-machine, like workspace/ — the folder itself
+# (with its README) is source; what an analyst drops into it is not.
+# examples/plugins/ IS committed — copy one in here to enable it.
+plugins/*
+!plugins/README.md

@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html data-theme="dark" data-density="comfortable">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Style 2 — Blueprint Brutalist · Winnow redesign</title>
+<script>window.TL_MOCK_ID = 'blueprint'; window.TL_DEFAULT_ACCENT = '#ff6a1a'; window.TL_DEFAULT_THEME = 'dark';</script>
+<style>
+:root {
+  --accent: #ff6a1a;
+  --accent-fg: #16110b;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  --ui: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --bw: 2px; /* the one rule that gives this style its identity: thick, visible borders everywhere */
+}
+html[data-theme="dark"] {
+  --bg: #0c0d10; --panel: #131519; --panel-2: #191c22; --panel-3: #20242c;
+  --line: #33383f; --line-2: #4a515b; --text: #f2f3f5; --dim: #8b93a0;
+  --shadow-c: #000000;
+  --grid-line: rgba(255,255,255,.035);
+}
+html[data-theme="light"] {
+  --bg: #f7f5ef; --panel: #ffffff; --panel-2: #efece2; --panel-3: #e6e1d2;
+  --line: #1c1c1c; --line-2: #1c1c1c; --text: #16140f; --dim: #5c584c;
+  --shadow-c: #1c1c1c;
+  --grid-line: rgba(0,0,0,.05);
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--text); font-family: var(--ui); font-size: 13px; }
+
+.intro { max-width: 900px; margin: 0 auto; padding: 22px 20px 8px; }
+.intro .back { color: var(--dim); text-decoration: none; font-size: 12px; font-weight: 700; }
+.intro .back:hover { color: var(--accent); }
+.intro h1 { font-size: 19px; margin: 10px 0 4px; font-weight: 800; letter-spacing: -.01em; }
+.intro p { color: var(--dim); line-height: 1.55; margin: 0 0 16px; max-width: 720px; }
+
+.stage { max-width: 1240px; margin: 0 auto 40px; border: var(--bw) solid var(--line); box-shadow: 8px 8px 0 var(--shadow-c); }
+.app {
+  height: 640px; display: grid; grid-template-rows: auto auto 1fr auto; position: relative; background: var(--bg);
+  background-image: linear-gradient(var(--grid-line) 1px, transparent 1px), linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+/* ---------------------------------------------------------------- chrome */
+.bar { display: flex; align-items: stretch; gap: 10px; background: var(--panel); border-bottom: var(--bw) solid var(--line); padding-left: 14px; height: 44px; }
+.brand { display: flex; align-items: center; gap: 8px; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; font-weight: 800; white-space: nowrap; }
+.mark { width: 12px; height: 12px; background: var(--accent); border: var(--bw) solid var(--line); }
+.case-name { display: flex; align-items: center; color: var(--dim); font-family: var(--mono); font-size: 11px; font-weight: 700; padding-right: 8px; border-right: var(--bw) solid var(--line); white-space: nowrap; }
+
+.tabs { display: flex; align-items: stretch; overflow-x: auto; flex: 1; min-width: 0; gap: 8px; padding: 6px 0; }
+.tab { display: flex; align-items: center; gap: 8px; padding: 0 12px; border: var(--bw) solid var(--line); background: var(--panel-2); color: var(--dim); font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; white-space: nowrap; box-shadow: 3px 3px 0 var(--shadow-c); transition: transform .08s ease, box-shadow .08s ease; }
+.tab:hover { color: var(--text); transform: translate(-1px,-1px); box-shadow: 4px 4px 0 var(--shadow-c); }
+.tab[aria-selected="true"] { color: var(--accent-fg); background: var(--accent); border-color: var(--line); transform: translate(1px,1px); box-shadow: 1px 1px 0 var(--shadow-c); }
+.tab .count { color: inherit; opacity: .7; font-family: var(--mono); font-size: 10px; }
+.tab.merge::before { content: "⛓ "; }
+.tab-more { border: var(--bw) dashed var(--line-2); background: transparent; color: var(--dim); font: inherit; font-size: 12px; font-weight: 700; padding: 0 12px; cursor: pointer; }
+.tab-more:hover { color: var(--text); border-style: solid; }
+
+.bar-actions { display: flex; align-items: center; gap: 8px; padding: 0 12px; position: relative; }
+.icon-btn { width: 30px; height: 28px; display: grid; place-items: center; background: var(--panel-2); border: var(--bw) solid var(--line); color: var(--text); cursor: pointer; font-size: 14px; box-shadow: 2px 2px 0 var(--shadow-c); }
+.icon-btn:hover { transform: translate(-1px,-1px); box-shadow: 3px 3px 0 var(--shadow-c); }
+.icon-btn:active { transform: translate(1px,1px); box-shadow: 0 0 0 var(--shadow-c); }
+.menu { position: absolute; top: 38px; right: 12px; background: var(--panel-3); border: var(--bw) solid var(--line); box-shadow: 5px 5px 0 var(--shadow-c); display: flex; flex-direction: column; min-width: 190px; z-index: 20; }
+.menu button { text-align: left; background: none; border: 0; border-bottom: 1px solid var(--line); color: var(--text); font: inherit; font-size: 12px; font-weight: 600; padding: 10px 14px; cursor: pointer; }
+.menu button:last-child { border-bottom: 0; }
+.menu button:hover { background: var(--accent); color: var(--accent-fg); }
+
+/* -------------------------------------------------------------- toolbar */
+.toolbar { display: flex; align-items: center; gap: 14px; background: var(--panel-2); border-bottom: var(--bw) solid var(--line); padding: 10px 14px; flex-wrap: wrap; }
+.group { display: flex; align-items: center; gap: 8px; }
+.search-group { flex: 0 0 320px; position: relative; }
+.search-group input { width: 100%; background: var(--panel); border: var(--bw) solid var(--line); color: var(--text); padding: 7px 60px 7px 10px; font: inherit; font-size: 12px; font-weight: 600; }
+.search-group input:focus { outline: none; border-color: var(--accent); box-shadow: 2px 2px 0 var(--shadow-c); }
+.search-group .hint { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); color: var(--dim); font-size: 10px; text-transform: uppercase; font-weight: 800; }
+
+.tag-ribbon { display: flex; gap: 6px; flex-wrap: wrap; }
+.tag-chip { display: flex; align-items: center; gap: 6px; border: var(--bw) solid var(--line); background: var(--c); color: #fff; padding: 3px 9px; font: inherit; font-size: 11px; font-weight: 800; cursor: pointer; text-shadow: 0 1px 1px rgba(0,0,0,.35); }
+.tag-chip span { opacity: .85; }
+.tag-chip:hover { transform: translate(-1px,-1px); box-shadow: 2px 2px 0 var(--shadow-c); }
+
+.spacer { flex: 1; }
+.view-group { display: flex; align-items: center; gap: 6px; }
+.btn { background: var(--panel); color: var(--text); border: var(--bw) solid var(--line); padding: 6px 10px; font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; }
+.btn.ghost:hover { transform: translate(-1px,-1px); box-shadow: 2px 2px 0 var(--shadow-c); border-color: var(--accent); }
+.sep { width: var(--bw); align-self: stretch; background: var(--line); margin: 0 2px; }
+.group-by { background: var(--panel); color: var(--text); border: var(--bw) solid var(--line); font: inherit; font-size: 12px; font-weight: 700; padding: 6px; }
+
+/* ------------------------------------------------------------------ grid */
+.grid-wrap { position: relative; min-height: 0; overflow: hidden; }
+.grid { position: absolute; inset: 0; overflow: auto; }
+.grid-head { display: flex; position: sticky; top: 0; background: var(--panel); border-bottom: var(--bw) solid var(--line); z-index: 2; }
+.hcell { padding: 8px 10px; font-size: 11px; color: var(--text); font-weight: 800; text-transform: uppercase; letter-spacing: .04em; border-right: 1px solid var(--line); white-space: nowrap; flex: 1 0 140px; }
+.hcell.gutter { flex: 0 0 84px; }
+.hcell.w-time { flex: 0 0 160px; }
+.hcell.w-proc { flex: 0 0 120px; }
+.hcell.w-user { flex: 0 0 140px; }
+.hcell.w-cmd { flex: 1 0 320px; }
+[data-density="compact"] .hcell { padding: 4px 8px; }
+
+.row { display: flex; border-bottom: 1px solid var(--line); cursor: pointer; font-family: var(--mono); font-size: 12px; background: var(--panel); }
+[data-density="compact"] .cell { padding: 2px 8px; }
+.row:hover { background: var(--panel-2); }
+.row.selected { background: var(--panel-2); box-shadow: inset 5px 0 0 var(--accent); }
+.cell { padding: 7px 10px; border-right: 1px solid var(--line); flex: 1 0 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.cell.gutter { flex: 0 0 84px; display: flex; align-items: center; gap: 6px; color: var(--dim); font-weight: 700; }
+.cell.gutter .stripe { width: 10px; height: 10px; border: 1px solid var(--line); }
+.cell.gutter .note { color: var(--accent); font-weight: 900; }
+.cell.w-time { flex: 0 0 160px; color: var(--dim); }
+.cell.w-proc { flex: 0 0 120px; font-weight: 700; }
+.cell.w-user { flex: 0 0 140px; color: var(--dim); }
+.cell.w-cmd { flex: 1 0 320px; }
+
+/* ---------------------------------------------------------------- status */
+.status { display: flex; align-items: center; gap: 8px; background: var(--panel); border-top: var(--bw) solid var(--line); padding: 6px 14px; font-size: 11px; color: var(--dim); font-family: var(--mono); font-weight: 700; }
+.status .sep { width: var(--bw); background: var(--line-2); }
+.status b { color: var(--accent); }
+
+/* ------------------------------------------------------------- detail */
+.detail { position: absolute; top: 0; right: 0; bottom: 0; width: 320px; background: var(--panel); border-left: var(--bw) solid var(--line); box-shadow: -8px 0 0 -6px var(--shadow-c); transform: translateX(100%); transition: transform .15s ease; display: flex; flex-direction: column; z-index: 15; }
+.detail.open { transform: translateX(0); }
+.detail-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; border-bottom: var(--bw) solid var(--line); font-size: 12px; font-weight: 800; background: var(--accent); color: var(--accent-fg); }
+.detail-head button { background: none; border: 0; color: inherit; cursor: pointer; font-size: 14px; font-weight: 800; }
+.detail dl { padding: 12px 14px; margin: 0; overflow: auto; flex: 1; font-size: 12px; font-family: var(--mono); }
+.detail dt { color: var(--dim); font-size: 10px; text-transform: uppercase; font-weight: 800; margin-top: 10px; }
+.detail dd { margin: 2px 0 0; color: var(--text); word-break: break-word; }
+.note-box { padding: 12px 14px; border-top: var(--bw) solid var(--line); }
+.note-box label { display: block; font-size: 10px; color: var(--dim); text-transform: uppercase; font-weight: 800; margin-bottom: 6px; }
+.note-box textarea { width: 100%; background: var(--panel-2); border: var(--bw) solid var(--line); color: var(--text); font: inherit; font-size: 12px; padding: 6px; resize: vertical; }
+.note-box textarea:focus { outline: none; border-color: var(--accent); }
+
+/* ------------------------------------------------------------- settings modal */
+.modal-scrim { position: absolute; inset: 0; background: rgba(0,0,0,.6); z-index: 50; display: flex; align-items: center; justify-content: center; }
+.modal { width: 360px; background: var(--panel); border: var(--bw) solid var(--line); box-shadow: 8px 8px 0 var(--shadow-c); }
+.modal-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: var(--bw) solid var(--line); font-size: 13px; font-weight: 800; text-transform: uppercase; background: var(--accent); color: var(--accent-fg); }
+.modal-head button { background: none; border: 0; color: inherit; cursor: pointer; font-size: 15px; font-weight: 800; }
+.modal-body { padding: 16px; display: flex; flex-direction: column; gap: 18px; }
+.setting-row label { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: .06em; font-weight: 800; color: var(--dim); margin-bottom: 8px; }
+.segmented { display: flex; border: var(--bw) solid var(--line); }
+.segmented button { flex: 1; background: var(--panel-2); border: 0; border-right: var(--bw) solid var(--line); color: var(--text); padding: 7px; font: inherit; font-size: 11px; font-weight: 800; cursor: pointer; text-transform: uppercase; }
+.segmented button:last-child { border-right: 0; }
+.segmented button[aria-pressed="true"] { background: var(--accent); color: var(--accent-fg); }
+.accent-picker { display: flex; align-items: center; gap: 8px; }
+.accent-swatch { width: 22px; height: 22px; border: var(--bw) solid var(--line); background: var(--sw); cursor: pointer; padding: 0; }
+.accent-swatch[aria-pressed="true"] { box-shadow: 3px 3px 0 var(--shadow-c); }
+#accentCustom { width: 26px; height: 26px; border: var(--bw) solid var(--line); background: none; padding: 0; cursor: pointer; }
+</style>
+</head>
+<body>
+
+<div class="intro">
+  <a class="back" href="index.html">&larr; All options</a>
+  <h1>Style 2 — Blueprint Brutalist</h1>
+  <p>Same skeleton, opposite personality: thick borders, hard offset shadows that compress on click (try clicking a tab or the gear icon), zero border-radius, a faint drafting-grid texture. Tags read as solid evidence-tag stickers instead of soft pills. Confident and tactile rather than quiet — built to feel decisive under pressure. Settings live behind the gear icon.</p>
+</div>
+
+<div class="stage">
+<div class="app" id="app">
+  <header class="bar">
+    <div class="brand"><span class="mark"></span>TIMELINE LITE</div>
+    <div class="case-name">acme_incident_0311.db</div>
+    <nav class="tabs" id="tabs">
+      <button class="tab" aria-selected="true">auth_logs.csv <span class="count">2,000</span></button>
+      <button class="tab" aria-selected="false">process_events.csv <span class="count">1,500</span></button>
+      <button class="tab merge" aria-selected="false">Combined timeline <span class="count">3,500</span></button>
+      <button class="tab-more">+2 more</button>
+    </nav>
+    <div class="bar-actions">
+      <button class="icon-btn" id="settingsBtn" title="Settings">⚙</button>
+      <button class="icon-btn" id="moreMenuBtn" title="Case actions">⋯</button>
+      <div class="menu" id="moreMenu" hidden>
+        <button>Merge sources…</button>
+        <button>SQL</button>
+        <button>Tables</button>
+        <button>Search all</button>
+        <button>Session</button>
+        <button>Export</button>
+        <button>Help</button>
+      </div>
+    </div>
+  </header>
+
+  <section class="toolbar">
+    <div class="group search-group">
+      <input type="search" placeholder="Search all columns — press /">
+      <span class="hint">full-text</span>
+    </div>
+    <div class="group tag-ribbon">
+      <button class="tag-chip" style="--c:#e0603a">Suspicious <span>3</span></button>
+      <button class="tag-chip" style="--c:#c8384f">Confirmed evil <span>1</span></button>
+      <button class="tag-chip" style="--c:#4a7fa5">Pivot point <span>2</span></button>
+    </div>
+    <div class="spacer"></div>
+    <div class="group view-group">
+      <button class="btn ghost">Columns</button>
+      <button class="btn ghost">Filter builder</button>
+      <button class="btn ghost">Saved filters</button>
+      <span class="sep"></span>
+      <select class="group-by"><option>Group by…</option></select>
+      <span class="sep"></span>
+      <button class="btn ghost">Clear filters</button>
+    </div>
+  </section>
+
+  <div class="grid-wrap">
+    <main class="grid">
+      <div class="grid-head">
+        <div class="hcell gutter">Line</div>
+        <div class="hcell w-time">Timestamp</div>
+        <div class="hcell w-proc">Process</div>
+        <div class="hcell w-user">User</div>
+        <div class="hcell w-user">Computer</div>
+        <div class="hcell w-cmd">CommandLine</div>
+        <div class="hcell">Details</div>
+      </div>
+      <div class="rows" id="rows"></div>
+    </main>
+
+    <aside class="detail" id="detail">
+      <div class="detail-head"><span id="detailTitle">Line —</span><button id="detailClose">✕</button></div>
+      <dl id="detailFields"></dl>
+      <div class="note-box"><label>Note</label><textarea placeholder="Why does this row matter?"></textarea></div>
+    </aside>
+  </div>
+
+  <footer class="status">
+    <span><b>2,000</b> of 2,000 rows · 4 ms</span>
+    <span class="sep"></span>
+    <span>3 tagged</span>
+    <span class="spacer"></span>
+    <span id="statusSel">CLICK A ROW TO INSPECT IT</span>
+  </footer>
+
+  <div class="modal-scrim" id="settingsScrim" hidden>
+    <div class="modal" role="dialog" aria-label="Settings">
+      <div class="modal-head"><span>Settings</span><button id="settingsClose">✕</button></div>
+      <div class="modal-body">
+        <div class="setting-row">
+          <label>Theme</label>
+          <div class="segmented" id="themeSegmented">
+            <button data-theme="dark">Dark</button>
+            <button data-theme="light">Light</button>
+            <button data-theme="auto">Auto</button>
+          </div>
+        </div>
+        <div class="setting-row">
+          <label>Accent color</label>
+          <div class="accent-picker">
+            <button class="accent-swatch" data-accent="#ff6a1a" style="--sw:#ff6a1a" title="Safety orange"></button>
+            <button class="accent-swatch" data-accent="#2e6bff" style="--sw:#2e6bff" title="Blueprint blue"></button>
+            <button class="accent-swatch" data-accent="#ffd400" style="--sw:#ffd400" title="Caution yellow"></button>
+            <button class="accent-swatch" data-accent="#ff2e63" style="--sw:#ff2e63" title="Alert red"></button>
+            <button class="accent-swatch" data-accent="#20c997" style="--sw:#20c997" title="Signal green"></button>
+            <input type="color" id="accentCustom" title="Custom accent" value="#ff6a1a">
+          </div>
+        </div>
+        <div class="setting-row">
+          <label>Density</label>
+          <div class="segmented" id="densitySegmented">
+            <button data-density="comfortable">Comfortable</button>
+            <button data-density="compact">Compact</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<script src="theme2.js"></script>
+<script>
+const ROWS = [
+  { rid:1, ts:'08:00:00', ev:'4688', ch:'Security', comp:'WKSTN-014', user:'ACME\\jsmith', proc:'svchost.exe', cmd:'C:\\Windows\\System32\\svchost.exe -k netsvcs', ip:'10.0.2.14', bytes:'8123', details:'Routine', tag:null, note:null },
+  { rid:2, ts:'08:00:04', ev:'4688', ch:'Sysmon',   comp:'WKSTN-014', user:'ACME\\jsmith', proc:'explorer.exe', cmd:'C:\\Windows\\explorer.exe', ip:'10.0.2.14', bytes:'2044', details:'Routine', tag:null, note:null },
+  { rid:3, ts:'08:00:07', ev:'4104', ch:'Sysmon',   comp:'WKSTN-014', user:'ACME\\jsmith', proc:'powershell.exe', cmd:'powershell -enc JABzAD0ATgBlAHcALQBP…', ip:'10.0.2.14', bytes:'512', details:'encoded command detected — base64 IEX', tag:{n:'Confirmed evil',c:'#c8384f'}, note:'Matches known dropper pattern from prior IR' },
+  { rid:4, ts:'08:00:11', ev:'4625', ch:'Security', comp:'SRV-DC01',  user:'ACME\\admin',  proc:'lsass.exe', cmd:'C:\\Windows\\System32\\lsass.exe',  ip:'10.0.0.4', bytes:'992',  details:'Failed logon', tag:{n:'Suspicious',c:'#e0603a'}, note:null },
+  { rid:5, ts:'08:00:15', ev:'1',    ch:'Sysmon',   comp:'SRV-DC01',  user:'NT AUTHORITY\\SYSTEM', proc:'rundll32.exe', cmd:'rundll32.exe C:\\Users\\Public\\a.dll,Entry', ip:'10.0.0.4', bytes:'12044', details:'Suspicious DLL path', tag:{n:'Suspicious',c:'#e0603a'}, note:null },
+  { rid:6, ts:'08:00:19', ev:'4688', ch:'Security', comp:'SRV-FS02',  user:'ACME\\bkupsvc', proc:'wmiprvse.exe', cmd:'C:\\Windows\\System32\\wbem\\wmiprvse.exe', ip:'10.0.1.9', bytes:'1023', details:'Routine', tag:null, note:null },
+  { rid:7, ts:'08:00:23', ev:'4688', ch:'Security', comp:'WKSTN-002', user:'ACME\\jdoe',   proc:'chrome.exe', cmd:'C:\\Program Files\\Google\\Chrome\\chrome.exe', ip:'10.0.2.31', bytes:'40213', details:'Routine', tag:null, note:null },
+  { rid:8, ts:'08:00:27', ev:'4104', ch:'Sysmon',   comp:'WKSTN-002', user:'ACME\\jdoe',   proc:'powershell.exe', cmd:'powershell -nop -w hidden -enc SQBFAFgA…', ip:'10.0.2.31', bytes:'488', details:'encoded command detected — base64 IEX', tag:{n:'Pivot point',c:'#4a7fa5'}, note:null },
+  { rid:9, ts:'08:00:31', ev:'4688', ch:'Security', comp:'WKSTN-002', user:'ACME\\jdoe',   proc:'cmd.exe', cmd:'C:\\Windows\\System32\\cmd.exe /c whoami', ip:'10.0.2.31', bytes:'201', details:'Routine', tag:null, note:null },
+  { rid:10, ts:'08:00:36', ev:'7045', ch:'System',  comp:'SRV-DC01',  user:'ACME\\admin',  proc:'svchost.exe', cmd:'C:\\Windows\\System32\\svchost.exe -k netsvcs', ip:'10.0.0.4', bytes:'1877', details:'New service installed', tag:null, note:null },
+  { rid:11, ts:'08:00:40', ev:'4688', ch:'Security', comp:'SRV-DC01', user:'ACME\\admin',  proc:'cmd.exe', cmd:'C:\\Windows\\System32\\cmd.exe /c net user', ip:'10.0.0.4', bytes:'322', details:'Routine', tag:null, note:null },
+  { rid:12, ts:'08:00:44', ev:'4625', ch:'Security', comp:'SRV-DC01', user:'ACME\\svc-sql', proc:'lsass.exe', cmd:'C:\\Windows\\System32\\lsass.exe', ip:'10.0.0.4', bytes:'992', details:'Failed logon x3', tag:null, note:null },
+];
+
+const rowsEl = document.getElementById('rows');
+ROWS.forEach((r) => {
+  const div = document.createElement('div');
+  div.className = 'row';
+  div.dataset.rid = r.rid;
+  div.innerHTML = `
+    <div class="cell gutter">${r.tag ? `<span class="stripe" style="background:${r.tag.c}"></span>` : ''}${r.note ? '<span class="note">✎</span>' : ''}<span>${r.rid}</span></div>
+    <div class="cell w-time">${r.ts}</div>
+    <div class="cell w-proc">${r.proc}</div>
+    <div class="cell w-user">${r.user}</div>
+    <div class="cell w-user">${r.comp}</div>
+    <div class="cell w-cmd">${r.cmd}</div>
+    <div class="cell">${r.details}</div>`;
+  rowsEl.appendChild(div);
+});
+
+const detail = document.getElementById('detail');
+function openDetail(r) {
+  document.querySelectorAll('.row').forEach((el) => el.classList.toggle('selected', Number(el.dataset.rid) === r.rid));
+  document.getElementById('detailTitle').textContent = 'LINE ' + r.rid;
+  document.getElementById('statusSel').textContent = `SELECTED ROW ${r.rid} OF 2,000`;
+  const fields = document.getElementById('detailFields');
+  const rows = [['Timestamp','2026-03-14 '+r.ts],['EventId',r.ev],['Channel',r.ch],['Computer',r.comp],['User',r.user],['Process',r.proc],['CommandLine',r.cmd],['SourceIp',r.ip],['Bytes',r.bytes],['Details',r.details]];
+  fields.innerHTML = rows.map(([k,v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+  detail.querySelector('textarea').value = r.note || '';
+  detail.classList.add('open');
+}
+document.querySelectorAll('.row').forEach((el) => el.addEventListener('click', () => openDetail(ROWS.find((r) => r.rid === Number(el.dataset.rid)))));
+document.getElementById('detailClose').addEventListener('click', () => detail.classList.remove('open'));
+
+document.querySelectorAll('#tabs .tab').forEach((t) => t.addEventListener('click', () => {
+  document.querySelectorAll('#tabs .tab').forEach((o) => o.setAttribute('aria-selected', 'false'));
+  t.setAttribute('aria-selected', 'true');
+}));
+
+const moreBtn = document.getElementById('moreMenuBtn');
+const moreMenu = document.getElementById('moreMenu');
+moreBtn.addEventListener('click', (e) => { e.stopPropagation(); moreMenu.hidden = !moreMenu.hidden; });
+document.addEventListener('click', () => { moreMenu.hidden = true; });
+</script>
+</body>
+</html>

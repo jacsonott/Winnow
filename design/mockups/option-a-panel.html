@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Option A — Refined Instrument Panel · Winnow redesign</title>
+<style>
+/* ---- tokens (same contract across all three option pages) ---- */
+:root {
+  --accent: #d2a04a;
+  --accent-fg: #14181d;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  --ui: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+html[data-theme="dark"] {
+  --bg: #13161a; --panel: #191d23; --panel-2: #20252c; --panel-3: #262b33;
+  --line: #2b323b; --line-2: #39424e; --text: #d6dbe2; --dim: #808b99;
+}
+html[data-theme="light"] {
+  --bg: #f3f4f6; --panel: #ffffff; --panel-2: #eef0f3; --panel-3: #e4e7ec;
+  --line: #dde1e6; --line-2: #c7cdd6; --text: #1b222b; --dim: #626c7a;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { height: 100%; margin: 0; }
+body {
+  background: var(--bg); color: var(--text); font-family: var(--ui); font-size: 13px;
+}
+.intro {
+  max-width: 900px; margin: 0 auto; padding: 22px 20px 8px;
+}
+.intro .back { color: var(--dim); text-decoration: none; font-size: 12px; }
+.intro .back:hover { color: var(--text); }
+.intro h1 { font-size: 18px; margin: 10px 0 4px; }
+.intro p { color: var(--dim); line-height: 1.5; margin: 0 0 16px; max-width: 720px; }
+
+.stage {
+  max-width: 1240px; margin: 0 auto 40px; border: 1px solid var(--line);
+  border-radius: 8px; overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,.25);
+}
+.app { height: 640px; display: grid; grid-template-rows: auto auto 1fr auto; position: relative; background: var(--bg); }
+
+/* ---------------------------------------------------------------- chrome */
+.bar {
+  display: flex; align-items: stretch; gap: 10px;
+  background: var(--panel); border-bottom: 1px solid var(--line);
+  padding-left: 14px; height: 40px;
+}
+.brand { display: flex; align-items: center; gap: 8px; font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--dim); white-space: nowrap; }
+.mark { width: 3px; height: 15px; background: var(--accent); }
+.case-name { display: flex; align-items: center; color: var(--dim); font-family: var(--mono); font-size: 11px; padding-right: 8px; border-right: 1px solid var(--line); white-space: nowrap; }
+
+.tabs { display: flex; align-items: stretch; overflow-x: auto; flex: 1; min-width: 0; }
+.tab {
+  display: flex; align-items: center; gap: 8px; padding: 0 14px; border: 0; border-right: 1px solid var(--line);
+  background: transparent; color: var(--dim); font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap;
+}
+.tab:hover { color: var(--text); background: var(--panel-2); }
+.tab[aria-selected="true"] { color: var(--text); background: var(--bg); box-shadow: inset 0 -2px 0 var(--accent); }
+.tab .count { color: var(--dim); font-family: var(--mono); font-size: 11px; }
+.tab.merge { box-shadow: inset 0 2px 0 color-mix(in srgb, var(--accent) 45%, transparent); }
+.tab.merge[aria-selected="true"] { box-shadow: inset 0 2px 0 color-mix(in srgb, var(--accent) 45%, transparent), inset 0 -2px 0 var(--accent); }
+.tab-more { border: 0; background: transparent; color: var(--dim); font: inherit; font-size: 12px; padding: 0 14px; cursor: pointer; white-space: nowrap; }
+.tab-more:hover { color: var(--text); }
+
+.bar-actions { display: flex; align-items: center; gap: 8px; padding: 0 12px; position: relative; }
+.icon-btn {
+  width: 26px; height: 26px; display: grid; place-items: center; border-radius: 4px;
+  background: var(--panel-2); border: 1px solid var(--line-2); color: var(--text); cursor: pointer; font-size: 13px;
+}
+.icon-btn:hover { border-color: var(--accent); }
+
+.accent-picker { display: flex; align-items: center; gap: 5px; padding: 0 4px; }
+.accent-swatch {
+  width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--line-2); background: var(--sw); cursor: pointer; padding: 0;
+}
+.accent-swatch[aria-pressed="true"] { box-shadow: 0 0 0 2px var(--bg), 0 0 0 3px var(--sw); }
+#accentCustom { width: 20px; height: 20px; border: 1px solid var(--line-2); border-radius: 4px; background: none; padding: 0; cursor: pointer; }
+
+.menu-btn { background: var(--panel-2); border: 1px solid var(--line-2); color: var(--text); border-radius: 4px; width: 30px; height: 26px; cursor: pointer; font-size: 15px; }
+.menu-btn:hover { border-color: var(--accent); }
+.menu {
+  position: absolute; top: 34px; right: 12px; background: var(--panel); border: 1px solid var(--line-2);
+  border-radius: 6px; box-shadow: 0 10px 30px rgba(0,0,0,.3); display: flex; flex-direction: column; min-width: 190px; z-index: 20; overflow: hidden;
+}
+.menu button { text-align: left; background: none; border: 0; color: var(--text); font: inherit; font-size: 12px; padding: 9px 14px; cursor: pointer; }
+.menu button:hover { background: var(--panel-2); color: var(--accent); }
+
+/* -------------------------------------------------------------- toolbar */
+.toolbar { display: flex; align-items: center; gap: 14px; background: var(--panel-2); border-bottom: 1px solid var(--line); padding: 8px 14px; flex-wrap: wrap; }
+.group { display: flex; align-items: center; gap: 8px; }
+.search-group { flex: 0 0 320px; position: relative; }
+.search-group input {
+  width: 100%; background: var(--bg); border: 1px solid var(--line-2); border-radius: 5px; color: var(--text);
+  padding: 6px 60px 6px 10px; font: inherit; font-size: 12px;
+}
+.search-group input:focus { outline: none; border-color: var(--accent); }
+.search-group .hint { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); color: var(--dim); font-size: 10px; text-transform: uppercase; letter-spacing: .06em; }
+
+.tag-ribbon { display: flex; gap: 6px; flex-wrap: wrap; }
+.tag-chip {
+  display: flex; align-items: center; gap: 5px; border: 1px solid var(--line-2); background: var(--panel);
+  color: var(--text); border-radius: 999px; padding: 3px 10px 3px 8px; font: inherit; font-size: 11px; cursor: pointer;
+}
+.tag-chip::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--c); }
+.tag-chip span { color: var(--dim); font-family: var(--mono); }
+.tag-chip:hover { border-color: var(--c); }
+
+.spacer { flex: 1; }
+
+.view-group { display: flex; align-items: center; gap: 6px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 4px; }
+.btn {
+  background: transparent; color: var(--text); border: 1px solid transparent; border-radius: 4px;
+  padding: 5px 10px; font: inherit; font-size: 12px; cursor: pointer;
+}
+.btn.ghost:hover { background: var(--panel-2); border-color: var(--line-2); }
+.sep { width: 1px; align-self: stretch; background: var(--line); margin: 2px 2px; }
+.group-by { background: transparent; color: var(--dim); border: 0; font: inherit; font-size: 12px; }
+
+/* ------------------------------------------------------------------ grid */
+.grid-wrap { position: relative; min-height: 0; overflow: hidden; }
+.grid { position: absolute; inset: 0; overflow: auto; background: var(--bg); }
+.grid-head { display: flex; position: sticky; top: 0; background: var(--panel); border-bottom: 1px solid var(--line-2); z-index: 2; }
+.hcell { padding: 7px 10px; font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .04em; border-right: 1px solid var(--line); white-space: nowrap; flex: 1 0 140px; }
+.hcell.gutter { flex: 0 0 84px; }
+.hcell.w-time { flex: 0 0 160px; }
+.hcell.w-proc { flex: 0 0 120px; }
+.hcell.w-user { flex: 0 0 140px; }
+.hcell.w-cmd { flex: 1 0 320px; }
+
+.row { display: flex; border-bottom: 1px solid var(--line); cursor: pointer; font-family: var(--mono); font-size: 12px; }
+.row:hover { background: var(--panel-2); }
+.row.selected { background: color-mix(in srgb, var(--accent) 14%, var(--bg)); border-left: 3px solid var(--accent); }
+.row.selected .cell:first-of-type { padding-left: 7px; }
+.cell { padding: 6px 10px; border-right: 1px solid var(--line); flex: 1 0 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.cell.gutter { flex: 0 0 84px; display: flex; align-items: center; gap: 6px; color: var(--dim); }
+.cell.gutter .stripe { width: 3px; height: 14px; border-radius: 2px; }
+.cell.gutter .note { color: var(--accent); }
+.cell.w-time { flex: 0 0 160px; color: var(--dim); }
+.cell.w-proc { flex: 0 0 120px; }
+.cell.w-user { flex: 0 0 140px; color: var(--dim); }
+.cell.w-cmd { flex: 1 0 320px; }
+.tagged-red { color: #e0603a; }
+
+/* ----------------------------------------------------------------status */
+.status { display: flex; align-items: center; gap: 8px; background: var(--panel); border-top: 1px solid var(--line); padding: 4px 14px; font-size: 11px; color: var(--dim); font-family: var(--mono); }
+.status .sep { color: var(--line-2); }
+
+/* ------------------------------------------------------------- detail */
+.detail {
+  position: absolute; top: 0; right: 0; bottom: 0; width: 320px; background: var(--panel);
+  border-left: 1px solid var(--line-2); box-shadow: -12px 0 30px rgba(0,0,0,.25);
+  transform: translateX(100%); transition: transform .18s ease; display: flex; flex-direction: column; z-index: 15;
+}
+.detail.open { transform: translateX(0); }
+.detail-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--dim); }
+.detail-head button { background: none; border: 0; color: var(--dim); cursor: pointer; font-size: 13px; }
+.detail-head button:hover { color: var(--text); }
+.detail dl { padding: 10px 14px; margin: 0; overflow: auto; flex: 1; font-size: 12px; }
+.detail dt { color: var(--dim); font-size: 10px; text-transform: uppercase; letter-spacing: .05em; margin-top: 10px; }
+.detail dd { margin: 2px 0 0; color: var(--text); font-family: var(--mono); word-break: break-word; }
+.note-box { padding: 10px 14px; border-top: 1px solid var(--line); }
+.note-box label { display: block; font-size: 10px; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 6px; }
+.note-box textarea { width: 100%; background: var(--bg); border: 1px solid var(--line-2); border-radius: 4px; color: var(--text); font: inherit; font-size: 12px; padding: 6px; resize: vertical; }
+
+kbd { font-family: var(--mono); background: var(--panel-2); border: 1px solid var(--line-2); border-radius: 3px; padding: 1px 5px; font-size: 10px; }
+</style>
+</head>
+<body>
+
+<div class="intro">
+  <a class="back" href="index.html">← All options</a>
+  <h1>Option A — Refined Instrument Panel</h1>
+  <p>The lowest-risk direction: same skeleton you already know (top tabs, a toolbar row, a grid), but decluttered. Related controls are visually grouped, the eight always-visible header buttons collapse into one "⋯" menu, and the detail pane becomes a slide-in panel instead of permanently reserving screen width. Click a row, click the accent dots, try the light/dark toggle.</p>
+</div>
+
+<div class="stage">
+<div class="app" id="app">
+  <header class="bar">
+    <div class="brand"><span class="mark"></span>Timeline&nbsp;Lite</div>
+    <div class="case-name">acme_incident_0311.db</div>
+    <nav class="tabs" id="tabs">
+      <button class="tab" aria-selected="true">auth_logs.csv <span class="count">2,000</span></button>
+      <button class="tab" aria-selected="false">process_events.csv <span class="count">1,500</span></button>
+      <button class="tab merge" aria-selected="false">⛓ Combined timeline <span class="count">3,500</span></button>
+      <button class="tab-more">+2 more ▾</button>
+    </nav>
+    <div class="bar-actions">
+      <button class="icon-btn" id="themeToggle" aria-pressed="false" title="Switch to light mode">◐</button>
+      <div class="accent-picker">
+        <button class="accent-swatch" data-accent="#d2a04a" style="--sw:#d2a04a" title="Brass"></button>
+        <button class="accent-swatch" data-accent="#4a90d9" style="--sw:#4a90d9" title="Blue"></button>
+        <button class="accent-swatch" data-accent="#4caf7d" style="--sw:#4caf7d" title="Green"></button>
+        <button class="accent-swatch" data-accent="#b768d1" style="--sw:#b768d1" title="Violet"></button>
+        <button class="accent-swatch" data-accent="#d9534f" style="--sw:#d9534f" title="Red"></button>
+        <input type="color" id="accentCustom" title="Custom accent" value="#d2a04a">
+      </div>
+      <button class="menu-btn" id="moreMenuBtn" title="Case actions">⋯</button>
+      <div class="menu" id="moreMenu" hidden>
+        <button>Merge sources…</button>
+        <button>SQL</button>
+        <button>Tables</button>
+        <button>Search all</button>
+        <button>Session</button>
+        <button>Export</button>
+        <button>Settings</button>
+        <button>Help</button>
+      </div>
+    </div>
+  </header>
+
+  <section class="toolbar">
+    <div class="group search-group">
+      <input type="search" placeholder="Search all columns — press /">
+      <span class="hint">full-text</span>
+    </div>
+    <div class="group tag-ribbon">
+      <button class="tag-chip" style="--c:#e0603a">Suspicious <span>3</span></button>
+      <button class="tag-chip" style="--c:#c8384f">Confirmed evil <span>1</span></button>
+      <button class="tag-chip" style="--c:#4a7fa5">Pivot point <span>2</span></button>
+    </div>
+    <div class="spacer"></div>
+    <div class="group view-group">
+      <button class="btn ghost">Columns</button>
+      <button class="btn ghost">Filter builder</button>
+      <button class="btn ghost">Saved filters</button>
+      <span class="sep"></span>
+      <select class="group-by"><option>Group by…</option></select>
+      <span class="sep"></span>
+      <button class="btn ghost">Clear filters</button>
+    </div>
+  </section>
+
+  <div class="grid-wrap">
+    <main class="grid">
+      <div class="grid-head">
+        <div class="hcell gutter">Line</div>
+        <div class="hcell w-time">Timestamp</div>
+        <div class="hcell w-proc">Process</div>
+        <div class="hcell w-user">User</div>
+        <div class="hcell w-user">Computer</div>
+        <div class="hcell w-cmd">CommandLine</div>
+        <div class="hcell">Details</div>
+      </div>
+      <div class="rows" id="rows"><!-- injected --></div>
+    </main>
+
+    <aside class="detail" id="detail">
+      <div class="detail-head"><span id="detailTitle">Line —</span><button id="detailClose">✕</button></div>
+      <dl id="detailFields"></dl>
+      <div class="note-box"><label>Note</label><textarea placeholder="Why does this row matter?"></textarea></div>
+    </aside>
+  </div>
+
+  <footer class="status">
+    <span>2,000 of 2,000 rows · 4 ms</span>
+    <span class="sep">·</span>
+    <span>3 tagged</span>
+    <span class="spacer"></span>
+    <span id="statusSel">Click a row to inspect it</span>
+  </footer>
+</div>
+</div>
+
+<script src="theme.js"></script>
+<script>
+const ROWS = [
+  { rid:1, ts:'08:00:00', ev:'4688', ch:'Security', comp:'WKSTN-014', user:'ACME\\jsmith', proc:'svchost.exe', cmd:'C:\\Windows\\System32\\svchost.exe -k netsvcs', ip:'10.0.2.14', bytes:'8123', details:'Routine', tag:null, note:null },
+  { rid:2, ts:'08:00:04', ev:'4688', ch:'Sysmon',   comp:'WKSTN-014', user:'ACME\\jsmith', proc:'explorer.exe', cmd:'C:\\Windows\\explorer.exe', ip:'10.0.2.14', bytes:'2044', details:'Routine', tag:null, note:null },
+  { rid:3, ts:'08:00:07', ev:'4104', ch:'Sysmon',   comp:'WKSTN-014', user:'ACME\\jsmith', proc:'powershell.exe', cmd:'powershell -enc JABzAD0ATgBlAHcALQBP…', ip:'10.0.2.14', bytes:'512', details:'encoded command detected — base64 IEX', tag:{n:'Confirmed evil',c:'#c8384f'}, note:'Matches known dropper pattern from prior IR' },
+  { rid:4, ts:'08:00:11', ev:'4625', ch:'Security', comp:'SRV-DC01',  user:'ACME\\admin',  proc:'lsass.exe', cmd:'C:\\Windows\\System32\\lsass.exe',  ip:'10.0.0.4', bytes:'992',  details:'Failed logon', tag:{n:'Suspicious',c:'#e0603a'}, note:null },
+  { rid:5, ts:'08:00:15', ev:'1',    ch:'Sysmon',   comp:'SRV-DC01',  user:'NT AUTHORITY\\SYSTEM', proc:'rundll32.exe', cmd:'rundll32.exe C:\\Users\\Public\\a.dll,Entry', ip:'10.0.0.4', bytes:'12044', details:'Suspicious DLL path', tag:{n:'Suspicious',c:'#e0603a'}, note:null },
+  { rid:6, ts:'08:00:19', ev:'4688', ch:'Security', comp:'SRV-FS02',  user:'ACME\\bkupsvc', proc:'wmiprvse.exe', cmd:'C:\\Windows\\System32\\wbem\\wmiprvse.exe', ip:'10.0.1.9', bytes:'1023', details:'Routine', tag:null, note:null },
+  { rid:7, ts:'08:00:23', ev:'4688', ch:'Security', comp:'WKSTN-002', user:'ACME\\jdoe',   proc:'chrome.exe', cmd:'C:\\Program Files\\Google\\Chrome\\chrome.exe', ip:'10.0.2.31', bytes:'40213', details:'Routine', tag:null, note:null },
+  { rid:8, ts:'08:00:27', ev:'4104', ch:'Sysmon',   comp:'WKSTN-002', user:'ACME\\jdoe',   proc:'powershell.exe', cmd:'powershell -nop -w hidden -enc SQBFAFgA…', ip:'10.0.2.31', bytes:'488', details:'encoded command detected — base64 IEX', tag:{n:'Pivot point',c:'#4a7fa5'}, note:null },
+  { rid:9, ts:'08:00:31', ev:'4688', ch:'Security', comp:'WKSTN-002', user:'ACME\\jdoe',   proc:'cmd.exe', cmd:'C:\\Windows\\System32\\cmd.exe /c whoami', ip:'10.0.2.31', bytes:'201', details:'Routine', tag:null, note:null },
+  { rid:10, ts:'08:00:36', ev:'7045', ch:'System',  comp:'SRV-DC01',  user:'ACME\\admin',  proc:'svchost.exe', cmd:'C:\\Windows\\System32\\svchost.exe -k netsvcs', ip:'10.0.0.4', bytes:'1877', details:'New service installed', tag:null, note:null },
+  { rid:11, ts:'08:00:40', ev:'4688', ch:'Security', comp:'SRV-DC01', user:'ACME\\admin',  proc:'cmd.exe', cmd:'C:\\Windows\\System32\\cmd.exe /c net user', ip:'10.0.0.4', bytes:'322', details:'Routine', tag:null, note:null },
+  { rid:12, ts:'08:00:44', ev:'4625', ch:'Security', comp:'SRV-DC01', user:'ACME\\svc-sql', proc:'lsass.exe', cmd:'C:\\Windows\\System32\\lsass.exe', ip:'10.0.0.4', bytes:'992', details:'Failed logon x3', tag:null, note:null },
+];
+
+const rowsEl = document.getElementById('rows');
+ROWS.forEach((r) => {
+  const div = document.createElement('div');
+  div.className = 'row';
+  div.dataset.rid = r.rid;
+  div.innerHTML = `
+    <div class="cell gutter">${r.tag ? `<span class="stripe" style="background:${r.tag.c}"></span>` : ''}${r.note ? '<span class="note">✎</span>' : ''}<span>${r.rid}</span></div>
+    <div class="cell w-time">${r.ts}</div>
+    <div class="cell w-proc">${r.proc}</div>
+    <div class="cell w-user">${r.user}</div>
+    <div class="cell w-user">${r.comp}</div>
+    <div class="cell w-cmd">${r.cmd}</div>
+    <div class="cell">${r.details}</div>`;
+  rowsEl.appendChild(div);
+});
+
+const detail = document.getElementById('detail');
+function openDetail(r) {
+  document.querySelectorAll('.row').forEach((el) => el.classList.toggle('selected', Number(el.dataset.rid) === r.rid));
+  document.getElementById('detailTitle').textContent = 'Line ' + r.rid;
+  document.getElementById('statusSel').textContent = `Selected row ${r.rid} of 2,000`;
+  const fields = document.getElementById('detailFields');
+  const rows = [['Timestamp','2026-03-14 '+r.ts],['EventId',r.ev],['Channel',r.ch],['Computer',r.comp],['User',r.user],['Process',r.proc],['CommandLine',r.cmd],['SourceIp',r.ip],['Bytes',r.bytes],['Details',r.details]];
+  fields.innerHTML = rows.map(([k,v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+  detail.querySelector('textarea').value = r.note || '';
+  detail.classList.add('open');
+}
+function closeDetail() { detail.classList.remove('open'); }
+document.querySelectorAll('.row').forEach((el) => el.addEventListener('click', () => openDetail(ROWS.find((r) => r.rid === Number(el.dataset.rid)))));
+document.getElementById('detailClose').addEventListener('click', closeDetail);
+
+document.querySelectorAll('#tabs .tab').forEach((t) => t.addEventListener('click', () => {
+  document.querySelectorAll('#tabs .tab').forEach((o) => o.setAttribute('aria-selected', 'false'));
+  t.setAttribute('aria-selected', 'true');
+}));
+
+const moreBtn = document.getElementById('moreMenuBtn');
+const moreMenu = document.getElementById('moreMenu');
+moreBtn.addEventListener('click', (e) => { e.stopPropagation(); moreMenu.hidden = !moreMenu.hidden; });
+document.addEventListener('click', () => { moreMenu.hidden = true; });
+</script>
+</body>
+</html>

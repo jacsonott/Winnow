@@ -1,0 +1,5 @@
+-r requirements.txt
+pytest
+httpx2
+esprima      # parses static/app.js in tests/test_static_syntax.py — no build step to catch a syntax error otherwise
+playwright   # tests/ui only; needs `playwright install chromium` once. Never a runtime dependency: the airgapped target ships without it

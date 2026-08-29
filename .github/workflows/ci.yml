@@ -1,0 +1,66 @@
+# Every PR into main runs the suite. Before this existed, the only thing
+# standing between a broken merge and main was somebody remembering to run
+# pytest — which, on a repo where changes arrive as whole features, is a lot
+# to leave to memory.
+#
+# Renaming a job here is not cosmetic: the branch ruleset requires these
+# checks *by job name*, so a rename that isn't mirrored there leaves every PR
+# waiting forever on a check that never reports. Change both together.
+#
+# Two jobs, because they fail for different reasons and cost different
+# amounts: `tests` is the fast one (backend + the static/js parse, ~30s, no
+# browser), `ui` drives a real Chromium and is where the layout/state
+# regressions get caught. Both are required; keep the UI suite deterministic
+# rather than letting it become the check people re-run until it's green.
+name: CI
+
+on:
+  # develop is where features land, so that is where CI matters most.
+  # main is still covered: a release snapshot is code nobody has run in
+  # that exact shape before, even though every commit in it passed on
+  # develop first.
+  pull_request:
+    branches: [develop, main]
+  push:
+    branches: [develop, main]
+
+# A second push to a PR makes the first run irrelevant — don't pay for both.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: backend + frontend parse
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      # tests/ui is excluded here rather than left to skip on a missing
+      # browser: a silent skip in the fast job is how a suite quietly stops
+      # running at all.
+      - run: pytest -q --ignore=tests/ui
+
+  ui:
+    name: browser
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      # --with-deps pulls the shared libraries Chromium needs on a bare
+      # runner; without it the browser installs and then fails to launch.
+      - run: playwright install --with-deps chromium
+      # No artifact upload step: when a UI test fails it's almost always the
+      # server behind it, and the conftest fixture already folds the server's
+      # stdout into the failure report.
+      - run: pytest -q tests/ui

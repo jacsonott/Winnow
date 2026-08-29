@@ -1,0 +1,142 @@
+# Plugins: the extension host and the example plugins
+
+`plugin_api.py`, `plugins/`, `examples/plugins/` (mft_usn, lateral_movement,
+pivot, claude_assistant). The authoring contract
+lives in `plugin_api.py`'s module docstring and
+[docs/writing-plugins.md](../writing-plugins.md); this is what bites the
+*host*.
+
+Part of the working notes split out of [CLAUDE.md](../../CLAUDE.md) —
+see [docs/notes/README.md](README.md) for the whole set.
+
+---
+
+- **Plugins** (plugin_api.py, `plugins/`, Settings → Plugins) are
+  Notepad++-style drop-in extensions, first loaded at server *import* (so
+  `uvicorn server:app` gets them, not just `python server.py`;
+  `--plugins-dir` / `$WINNOW_PLUGINS_DIR` add directories) and reloaded
+  live by `_reload_plugins()` whenever Settings → Plugins toggles or
+  installs one — `PluginRegistry.load` is written to be safely re-run on
+  a live server (registry rebuilt wholesale; superseded modules linger in
+  sys.modules under unique per-load names because Python can't truly
+  unload code, but nothing references them again). Enabled/disabled state
+  is `workspace/plugins.json` (`PluginPrefs`) — machine-level workflow
+  state, stored as a *disabled* list so presence in plugins/ means on by
+  default, keyed by filesystem name because that's the only identity that
+  exists without importing (a disabled plugin is discovered for the
+  listing but its code never runs — the point of the off switch).
+  `POST /api/plugins/install` copies an uploaded .py or folder (from the
+  panel's webkitdirectory picker) into `PLUGIN_DIRS[0]`, rejecting
+  absolute/`..` paths so an upload can't write outside the plugins dir; a
+  name collision is a 409 the frontend confirms into `overwrite=true`,
+  and an install whose *load* then fails still keeps the files and
+  reports the error (same standing as a hand-copied broken plugin).
+  Three extension points on PluginAPI:
+  `register_ingest_format` parses a file into columns + a row iterable
+  that feeds `Store.ingest_rows` — the generic sibling of `ingest_csv`
+  with every one of its conventions (all-TEXT via `sanitize_columns`,
+  contiguous rid from 1, per-BATCH lock/commit, ragged pad-and-count,
+  sampled types with an explicit `column_types` override, background FTS)
+  — so invariants #1/#2 hold for plugin sources with no extra work, and a
+  plugin source is a completely normal source afterward.
+  `register_tab` adds a page tab (a true SQL/Timeline sibling — ordered
+  among them by the analyst, not pinned after them; see the two-strips
+  entry in [ui.md](ui.md)): the entry is
+  an ES module in the plugin folder, served via `/plugin_assets/<fs>/…`
+  (enabled folder plugins only; resolved-path containment blocks
+  traversal; same no-cache middleware as /static/) and dynamically
+  import()ed by `showPluginTab` (`static/js/plugins.js`) with a `?v=<gen>` cache-buster
+  — `gen` is the registry load sequence, bumped on every reload, so a
+  toggle-off/on picks up changed JS. One mount per tab, kept across tab
+  switches, torn down on case switch (`resetPluginTabMounts`) and gen
+  change; the module's default export gets `(container, winnow)` where
+  `winnow` is `buildPluginTabContext`'s stable surface (api/post/el/
+  modal helpers, `sql()` → run_sql's own RO connection, `schemaText()`,
+  live state getters); optional onShow/onHide exports fire per switch.
+  `register_api` registers backend routes dispatched at request time by
+  the one catch-all `/api/plugin/{fs}/{route}` handler — deliberately
+  not real FastAPI routes, so a Settings toggle's registry reload is
+  instantly authoritative with no stale route objects. Handlers get a
+  plain `PluginRequest` (method/route/query/body/store — None when no
+  case is open) and return JSON-ables; ValueError → 400, same split as
+  api_view; the CSRF middleware already covers non-GET. Plugin backends
+  should read via `req.store.run_sql` (own RO connection — never holds
+  invariant #4's lock). A plugin that
+  fails to import/register is recorded with its error and skipped, never
+  fatal; `GET /api/plugins` carries the reason to the Plugins modal.
+  Format matching is extension OR bare-filename fnmatch — the latter
+  because the files plugins exist for ("$MFT", "$J") *have* no extension;
+  that's also why `scan_import_directory` grew `filename_patterns` (a
+  second way past its extension gate, marked kind `"plugin"`; kinds the
+  frontend can't resolve to a loaded format fall back to the CSV path,
+  the pre-plugin behavior for analyst-added extensions) and why the
+  Plugins modal's per-format picker sets no `accept` attribute. Routing
+  precedence (`pluginFormatFor` in `static/js/importer.js`): a built-in extension always
+  wins over a plugin claiming the same one. Parse errors are 400s like
+  every other ingest route. Security model is Notepad++'s: a plugin is
+  arbitrary local Python with the app's privileges, installed by the
+  analyst physically placing it — never fetched, so the airgap rule holds.
+- The example mft_usn plugin's fixup handling encodes a real-world trap:
+  extraction tools disagree about whether $MFT records arrive with NTFS's
+  multi-sector fixups still stamped (KAPE/icat/RawCopy: yes; ntfscat:
+  already un-applied — verified against a real mkntfs volume, where the
+  strict all-stamped check silently produced 0 rows). `_apply_fixups`
+  therefore distinguishes all-stamped (un-stamp), none-stamped (parse
+  as-is), and mixed (genuinely torn → skip the record).
+
+- **The pivot example is the one that exercises `run_sql`'s edges**, and
+  three of them bit during its build — worth knowing before writing
+  another aggregating plugin:
+  - `run_sql` takes **no parameters**, so a plugin building a WHERE clause
+    has to inline its own values, and inlining has to walk string literals.
+    The numeric guard (`_numeric_expr`'s pattern, which any plugin
+    aggregating a TEXT column needs to copy) embeds `NUM_RE`, and that
+    regex contains two `?` of its own. A naive inliner reads them as
+    placeholders and shifts every bound value one slot along — silently
+    wrong rather than loudly broken. Winnow's own `_inline_sql_params`
+    walks literals for exactly this reason.
+  - **A derived column is not in the physical `src_<id>` table.** It's
+    merged into `src["columns"]` at read time but materialised in the
+    `drv_<id>` sidecar. Plugin SQL that names one must `LEFT JOIN` the
+    sidecar **and qualify every reference through the aliases**
+    (`s."col"` / `d."col"` — the `_from_clause`/`_col` pair the bundled
+    examples copy). Qualifying is now load-bearing twice over: `run_sql`
+    shadows `src_<id>` with a derived-including TEMP view when the source
+    has derived columns, so a *bare* reference next to a manual sidecar
+    join is `ambiguous column name` (loud), while a bare reference with
+    *no* join on a source without derived columns falls into SQLite's
+    double-quoted-string fallback and returns the literal column name
+    (silent). Hand-written pane queries need none of this — bare
+    `src_<id>` includes derived columns since the shadow views; `main.
+    src_<id>` is the raw table. `_base_cols` exists in store.py for the
+    paths that must *not* see derived columns.
+  - **Anything a plugin inlines into SQL has to skip quoted spans — both
+    kinds.** Single quotes because the numeric guard embeds a regex
+    containing `?`; double quotes because a CSV header can be `Elevated?`
+    and `q()` quotes it straight into the statement. Miss either and bound
+    values shift one slot along, which is wrong rather than broken.
+  - **A plugin can't see a view.** `run_sql` opens a read-only connection
+    to the *case file*; `v.view_N` lives in the scratch database that only
+    the reader pool attaches. Any plugin that wants "what the grid is
+    showing" has to be handed the filter spec and recompile it, or do what
+    the pivot does and own its filtering outright.
+  - **Iterating on a plugin's Python needs a reload.** The module is
+    imported once at server import; editing the file and re-requesting a
+    route runs the *old* code with the *new* line numbers, which makes
+    tracebacks point at unrelated lines. Toggle the plugin off and on in
+    Settings → Plugins (that's what `_reload_plugins` is for) or restart.
+
+- **Plugin enablement is two-layer, and the defaults point opposite ways.**
+  Machine level (workspace/plugins.json): installed plugins are on unless
+  in the `disabled` list; bundled examples (examples/plugins/, always in
+  PLUGIN_DIRS) are off unless in `enabled_bundled` — presence-means-on is
+  right for something the analyst placed and wrong for what we shipped.
+  Case level (case_settings `plugin_overrides`, JSON {fs_name: bool}):
+  wins where set, travels with the case file on purpose. Three rules keep
+  it honest: `_reload_plugins()` runs on every case open, because "a
+  disabled plugin's code never runs" is a per-case statement now; the
+  "everywhere" scopes clear the open case's override, so the dropdown
+  can't show a state a leftover override silently exempts; and
+  `PluginRegistry.load` is first-directory-wins on fs_name, so an
+  analyst's installed copy of an example shadows the bundled one instead
+  of both loading and fighting over tab ids.

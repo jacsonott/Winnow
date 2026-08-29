@@ -1,0 +1,20 @@
+# Keep development-only material out of `git archive` output — which is
+# what GitHub's branch and release downloads are, and therefore what
+# `update.py --dev` installs on a beta tester's machine. They need the
+# application, not the suite that tests it.
+#
+# This applies to release archives cut from main as well, and that is the
+# point: main keeps tests/ so CI can actually verify a release snapshot,
+# while the zip an analyst downloads still doesn't carry them. The branch
+# needs the suite; the artifact does not.
+#
+# Deliberately NOT applied to docs/ or .github/: a downloaded tree that
+# can't tell you how it's meant to work is a worse artifact than a
+# slightly larger one.
+.claude/            export-ignore
+scripts/release.py   export-ignore
+tests/test_release_script.py export-ignore
+tests/               export-ignore
+bench/               export-ignore
+CLAUDE.md            export-ignore
+requirements-dev.txt export-ignore
