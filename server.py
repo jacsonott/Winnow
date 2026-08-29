@@ -16,7 +16,6 @@ import shutil
 import sqlite3
 import sys
 import tempfile
-import webbrowser
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +24,7 @@ from fastapi.responses import StreamingResponse, FileResponse, JSONResponse, Pla
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from winnow import browser
 from winnow import paths
 from winnow import plugin_api
 from winnow import updater
@@ -2333,7 +2333,17 @@ def main() -> None:
                     help="Open --case even if another Winnow already has it open")
     ap.add_argument("--port", type=int, default=8777)
     ap.add_argument("--no-fts", action="store_true", help="Skip full-text index (faster import)")
-    ap.add_argument("--no-browser", action="store_true")
+    ap.add_argument("--no-browser", action="store_true",
+                    help="don't open a window at all")
+    ap.add_argument("--browser-tab", action="store_true",
+                    help="open an ordinary browser tab instead of an app window "
+                         "(the pre-app-mode behaviour)")
+    ap.add_argument("--browser-profile", metavar="DIR", default=None,
+                    help="give the app window its own browser profile directory. "
+                         "Isolates Winnow from your extensions and gives it a "
+                         "separate taskbar entry — but appearance, keybindings and "
+                         "panel sizes live in that profile's localStorage, so the "
+                         "first run with a new one starts from defaults")
     ap.add_argument("--plugins-dir", action="append", default=[], metavar="DIR",
                     help="Extra plugin directory (plugins/ next to server.py and $WINNOW_PLUGINS_DIR are always scanned; repeatable)")
     args = ap.parse_args()
@@ -2396,10 +2406,12 @@ def main() -> None:
     else:
         print(f"Winnow on {url}  (home screen — no case open)")
     if not args.no_browser:
-        try:
-            webbrowser.open(url)
-        except Exception:
-            pass
+        # Opened from a thread that waits for the port, rather than before
+        # uvicorn.run() as this used to be — that raced, and an app window
+        # landing on a connection error has no address bar to retry from.
+        browser.open_when_ready(url, args.host, args.port,
+                                app_mode=not args.browser_tab,
+                                profile_dir=args.browser_profile)
 
     import uvicorn
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
