@@ -121,6 +121,8 @@ PROTECTED_EXCEPTIONS = ("plugins/README.md",)
 # Spelled out rather than globbed — removing an entry is safe, adding a
 # wrong one is not.
 MOVED_INTO_PACKAGE = (
+    # filter_defaults.py and header_defaults.py became defaults/*.json and
+    # are gone entirely, so they need sweeping wherever they still sit.
     "enrich.py", "filter_defaults.py", "header_defaults.py", "make_fixture.py",
     "paths.py", "plugin_api.py", "store.py", "structparse.py", "timeparse.py",
     "updater.py", "version.py", "workspace.py", "xlsxread.py",

@@ -148,20 +148,19 @@ xlsxread.py        Excel .xlsx/.xlsm reading for import — a thin typed-cell→
                     date-styled cells to ISO text, TRUE/FALSE booleans,
                     numbers without float noise. Legacy .xls is out of
                     scope. See docs/notes/ingest.md.
-header_defaults.py Shipped header-set nicknames for common EZ Tools/KAPE
-                    output shapes (EvtxECmd, MFTECmd, Amcache, ...) — data
-                    only, seeded once into workspace by
-                    HeaderNicknames.ensure_seeded; analyst renames/deletes
-                    always win. Add new tool shapes as new entries (never
-                    edit an old one — files from older releases persist)
-                    and bump DEFAULTS_VERSION.
-filter_defaults.py Shipped saved filters: a working analyst's Timeline
-                    Explorer triage set (EVTX/Registry/MFT) converted to
-                    filter trees, bound to header_defaults' column sets,
-                    seeded once by SavedFilters.ensure_seeded — analyst
-                    edits/deletes always win. tests/test_filter_defaults.py
-                    compiles every tree on every run; add new filters there
-                    and bump FILTER_DEFAULTS_VERSION.
+defaults/          The defaults Winnow ships, as JSON rather than Python:
+                    headers.json names the header sets common tools emit
+                    (EvtxECmd, MFTECmd, Amcache, ...); filters.json is a
+                    working analyst's Timeline Explorer triage set as filter
+                    trees. Both are seeded once into workspace/ by
+                    ensure_seeded, where they become ordinary records —
+                    analyst renames and deletes always win. A filter names
+                    its header set and __init__.py resolves it, so the two
+                    cannot describe different columns; an unresolvable name
+                    fails loudly there and in tests/test_filter_defaults.py.
+                    Add entries and bump the file's `version`; never edit an
+                    existing header set in place, since files from older tool
+                    releases still have to match it.
 workspace.py       Cross-case JSON state (case registry, saved filters, default
                     tag template) — human-readable files in workspace/, outside
                     any single case.db so they survive switching cases.

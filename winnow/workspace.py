@@ -178,7 +178,7 @@ class SavedFilters:
         _write(self.FILE, data)
 
     def ensure_seeded(self) -> None:
-        """Merges filter_defaults' shipped triage filters (the converted
+        """Merges the shipped triage filters (defaults/filters.json — the converted
         Timeline Explorer set — EVTX/Registry/MFT) into this store, once per
         FILTER_DEFAULTS_VERSION. Same contract as
         HeaderNicknames.ensure_seeded, for the same reasons: lazy (called
@@ -188,21 +188,22 @@ class SavedFilters:
         present" is name + column set, matching import_all's merge rule, so
         an analyst's edited copy of a default is never re-added beside
         itself on a version bump."""
-        from . import filter_defaults
+        from . import defaults
 
         with _LOCK:
             data = _read(self.FILE, {"filters": []})
-            if data.get("seeded_version", 0) >= filter_defaults.FILTER_DEFAULTS_VERSION:
+            shipped = defaults.filters()
+            if data.get("seeded_version", 0) >= shipped["version"]:
                 return
             items = data["filters"]
             present = {(r["name"], tuple(r["col_names"])) for r in items}
-            for name, cols, payload in filter_defaults.DEFAULT_SAVED_FILTERS:
+            for name, cols, payload in shipped["filters"]:
                 if (name, tuple(cols)) in present:
                     continue
                 items.append({"id": _next_id(items), "name": name,
                               "col_names": list(cols), "payload": payload,
                               "created_at": _now()})
-            self._save(items, seeded_version=filter_defaults.FILTER_DEFAULTS_VERSION)
+            self._save(items, seeded_version=shipped["version"])
 
     @staticmethod
     def _normalize_payload(rec: dict) -> bool:
@@ -340,7 +341,7 @@ class HeaderNicknames:
         _write(self.FILE, data)
 
     def ensure_seeded(self) -> None:
-        """Merges header_defaults' shipped nicknames (EvtxECmd, MFTECmd,
+        """Merges the shipped nicknames (defaults/headers.json — EvtxECmd, MFTECmd,
         Amcache, ... — see that module) into this store, once per
         DEFAULTS_VERSION. Called lazily from the read paths rather than at
         server import: the store writes to WORKSPACE_DIR, and at import
@@ -352,21 +353,22 @@ class HeaderNicknames:
         analyst created. Only header sets not already present are added,
         so an analyst's own name for the EvtxECmd shape survives every
         version bump."""
-        from . import header_defaults
+        from . import defaults
 
         with _LOCK:
             data = _read(self.FILE, {"nicknames": []})
-            if data.get("seeded_version", 0) >= header_defaults.DEFAULTS_VERSION:
+            shipped = defaults.headers()
+            if data.get("seeded_version", 0) >= shipped["version"]:
                 return
             items = data["nicknames"]
             present = {tuple(r["col_names"]) for r in items}
-            for nickname, cols in header_defaults.DEFAULT_HEADER_NICKNAMES:
+            for nickname, cols in shipped["nicknames"]:
                 key = self._key(cols)
                 if tuple(key) in present:
                     continue
                 items.append({"id": _next_id(items), "col_names": key, "nickname": nickname})
                 present.add(tuple(key))
-            self._save(items, seeded_version=header_defaults.DEFAULTS_VERSION)
+            self._save(items, seeded_version=shipped["version"])
 
     @staticmethod
     def _key(col_names: list[str]) -> list[str]:
