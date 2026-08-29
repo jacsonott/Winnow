@@ -1,9 +1,12 @@
-"""Cross-case application state, stored as human-readable JSON next to
-server.py — independent of any single case.db, so it survives switching
-between cases and travels with the app folder (airgapped/portable, same
-spirit as CLAUDE.md's no-CDN rule).
+"""Cross-case application state, stored as human-readable JSON in
+workspace/ under the install root (paths.INSTALL_ROOT) — independent of
+any single case.db, so it survives switching between cases and travels
+with the app folder (airgapped/portable, same spirit as CLAUDE.md's
+no-CDN rule).
 
-Eight small stores, each backed by its own JSON file under workspace/:
+Eleven small stores, each backed by its own JSON file under workspace/.
+Adding one means adding it here too — this list read "eight" for three
+stores longer than it was true:
   cases.json              the home screen's case registry
   filters.json            saved/cyclable filters ([ and ] in the grid) — also
                            the one mechanism behind the "suggested filter"
@@ -32,8 +35,19 @@ Eight small stores, each backed by its own JSON file under workspace/:
                            freshly dropped-in plugin is on by default and
                            deleting workspace/ re-enables everything rather
                            than silently turning it all off
+  plugin_bundles.json     named sets of plugins ("case types") applied
+                           together from Settings → Plugins
+  app_settings.json       app-wide display preferences, e.g. the default
+                           timestamp format for cases that don't set their
+                           own — a case's own choice lives in the case
+                           file's case_settings, so it travels with the case
+  prefs.json              per-INSTALL machine preferences, today just
+                           cases_dir: where new case files go, asked once on
+                           first run rather than silently defaulting
 
-Never holds evidence data — only UI/workflow bookkeeping.
+Never holds evidence data — only UI/workflow bookkeeping. Analyst work
+(tags, notes, layouts, saved views) lives in the case file instead, so it
+travels with the evidence; that split is deliberate.
 """
 
 from __future__ import annotations

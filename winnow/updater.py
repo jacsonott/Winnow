@@ -85,7 +85,11 @@ KEEP_BACKUPS = 3
 PROTECTED = (
     "workspace/",     # case registry, saved filters, tag template, prefs.json
     "plugins/",       # installed plugins (plugins/README.md is shipped; see _is_protected)
-    "sessions/",      # named session exports
+    # Named session exports. Note these normally live beside the CASE file
+    # (Store._sessions_dir), not here — this entry only matters when the
+    # analyst kept their cases inside the install directory, which the
+    # first-run cases_dir prompt steers away from. Harmless either way.
+    "sessions/",
     "cases/",         # the default home for case files
     ".venv/", "venv/",
     "bench/.cache/", "bench/baselines/",
