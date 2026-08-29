@@ -25,10 +25,21 @@ gh pr create --base develop --title ... --body ...
 A PR that targets `main` is not a small mistake to fix later: `main` is
 protected against non-fast-forward pushes and holds a different set of
 files, so merging feature work there puts the two branches into a state
-only a release can resolve. `main` holds one commit per release and nothing else — no merge
-commits, no feature history — and it does not carry `tests/`, `bench/`,
-`CLAUDE.md` or `requirements-dev.txt`, because an analyst downloading
-Winnow needs the application, not the suite that tests it.
+only a release can resolve. `main` holds one commit per release and nothing else — no merge commits,
+no feature history — minus `bench/` and this file.
+
+It *does* keep `tests/`, and that is deliberate: main runs the same
+required status checks as develop, those checks are `pytest`, and pytest
+on a tree with no `tests/` exits 5 ("no tests collected") and fails the
+job. Tests also cannot run without `requirements-dev.txt`, since CI
+installs from it. A release branch that cannot pass its own checks is
+worse than one carrying a few files users never look at.
+
+**What users download is trimmed separately, by `.gitattributes`.**
+Release archives are `git archive` output, which honours `export-ignore`,
+so `tests/` is present in the branch for CI and absent from the zip an
+analyst installs. The branch and the artifact have different jobs; don't
+collapse them.
 
 **A release does not merge develop into main, it replaces main's tree
 with develop's** (`scripts/release.py`). That is not a stylistic

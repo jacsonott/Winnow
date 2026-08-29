@@ -67,8 +67,14 @@ def test_first_release_orphans_main_and_drops_dev_files(repo):
 
     files = _tracked(repo, "main")
     assert "server.py" in files and "winnow/store.py" in files
-    for dev in ("tests/test_a.py", "bench/run.py", "CLAUDE.md", "requirements-dev.txt"):
+    for dev in ("bench/run.py", "CLAUDE.md"):
         assert dev not in files, f"{dev} should not be on the release branch"
+    # tests/ and its dependency list stay: main runs the same required
+    # status checks as develop, and pytest on a tree with no tests exits 5
+    # and fails the job. What users download is trimmed by .gitattributes
+    # instead — see test_release_archive_excludes_the_suite below.
+    assert "tests/test_a.py" in files
+    assert "requirements-dev.txt" in files
     # One commit, no history carried over — the "fresh start".
     assert _git(repo, "rev-list", "--count", "main") == "1"
     assert _git(repo, "tag", "-l") == "v0.1.0"
@@ -98,7 +104,7 @@ def test_a_second_release_needs_no_merge_and_cannot_conflict(repo):
 
     files = _tracked(repo, "main")
     assert "winnow/newthing.py" in files, "the new feature has to reach the release"
-    assert "tests/test_b.py" not in files, "the new tests must not"
+    assert "bench/run.py" not in files, "development-only material must not"
     assert 'VERSION = "0.2.0"' in _git(repo, "show", "main:winnow/version.py")
     # One commit per release, no merge commits, and the second one is an
     # ordinary descendant — so pushing it needs no force.
@@ -149,3 +155,29 @@ def test_a_failure_puts_the_branch_back(repo, monkeypatch):
     assert res.returncode == 2
     assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD") == before
     assert _git(repo, "status", "--porcelain") == ""
+
+
+def test_the_release_archive_excludes_the_suite_even_though_main_carries_it(repo):
+    """The two halves of the arrangement: tests/ is ON the release branch
+    so CI can verify it, and OUT of the archive an analyst downloads.
+    `git archive` is what GitHub serves for a tag, and it honours
+    export-ignore."""
+    # On develop — that is the tree the release copies, and `git archive`
+    # reads .gitattributes from the tree it is archiving.
+    _git(repo, "checkout", "-q", "develop")
+    (repo / ".gitattributes").write_text(
+        "tests/               export-ignore\n"
+        "requirements-dev.txt export-ignore\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "add export rules")
+    _git(repo, "update-ref", "refs/remotes/origin/develop", "refs/heads/develop")
+    assert _release(repo, "0.1.0", "--write", "--orphan").returncode == 0
+
+    assert "tests/test_a.py" in _tracked(repo, "main"), "the branch keeps them for CI"
+    archived = subprocess.run(["git", "archive", "--format=tar", "main"], cwd=repo,
+                              capture_output=True, check=True).stdout
+    names = subprocess.run(["tar", "-t"], input=archived, capture_output=True,
+                           check=True).stdout.decode().split()
+    assert not [n for n in names if n.startswith("tests/")], "the download must not"
+    assert "requirements-dev.txt" not in names
+    assert "server.py" in names and "winnow/store.py" in names

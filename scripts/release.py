@@ -32,12 +32,20 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# Development-only material: everything needed to *work on* Winnow but not
-# to *run* it. Kept out of the release tree so what an analyst downloads is
-# the application and nothing else. .github/ deliberately stays, so CI can
-# still verify the release snapshot rather than only the develop commit it
-# came from.
-DEV_ONLY = ("tests", "bench", "CLAUDE.md", "requirements-dev.txt")
+# Material dropped from the release branch.
+#
+# Shorter than you might expect, and the reason is a chain: main runs the
+# same required status checks as develop, those checks are `pytest`, and
+# pytest on a tree with no tests/ exits 5 ("no tests collected") and fails
+# the job — so main keeps tests/. Tests cannot run without their
+# dependency list either (CI does `pip install -r requirements-dev.txt`),
+# so that stays too, and .github/ stays so the checks exist at all.
+#
+# What users download is kept lean by .gitattributes instead: release
+# archives are `git archive` output, which honours export-ignore, so
+# tests/ is present in the branch for CI and absent from the zip an
+# analyst installs. The branch and the artifact have different jobs.
+DEV_ONLY = ("bench", "CLAUDE.md")
 
 VERSION_FILE = Path("winnow/version.py")
 SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
