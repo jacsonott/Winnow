@@ -8,6 +8,23 @@ Built for DFIR analysts. Assume the target machine may be **airgapped**: no CDN,
 no npm, no build step, no web fonts. If a change would add a network dependency
 at runtime, it's the wrong change.
 
+## Merging is the maintainer's call, always
+
+**Never merge a PR into main without being asked to.** Open it, push it,
+wait for CI, say what it does — then stop. The merge is a separate
+instruction every time.
+
+Two things that look like permission and are not. An earlier "merge the
+PRs" covers the PRs that existed when it was said, not ones created
+afterwards. And approving a *plan* that involves merging is not approval
+to merge any particular PR — a plan is agreement about what to build.
+
+The reason is narrow: merging is the only irreversible, outward-facing
+step in this workflow. It ships, other installs pull it, and the PR is
+the one place the maintainer gets to review before that happens. Everything
+short of the merge is cheap to undo, so bias toward doing the work
+unprompted and stopping at the gate.
+
 ## Layout
 
 ```
@@ -16,8 +33,8 @@ server.py          FastAPI routes, CLI entrypoint. Thin — logic lives in store
                     those two are the only ones an analyst ever runs; the
                     app itself lives in winnow/ (see paths.py before moving
                     anything between them).
-update.py          Update this install in place — the CLI front door to
-                    winnow/updater.py. Root, for the same reason.
+update.py          Update this install in place. Root, for the same reason —
+                    see its fuller entry below.
 winnow/            Everything the app is made of. The modules below all
                     live here.
 store.py           All SQLite: ingest, view materialisation, tags, sessions, export.
@@ -35,7 +52,7 @@ structparse.py     JSON/XML field-extraction operations, registered into
                     flatten picker. Stdlib only; imports timeparse and nothing
                     else from the app. store.py imports it for the
                     registration side effect.
-winnow/paths.py    INSTALL_ROOT — the one line that knows where the install
+paths.py           INSTALL_ROOT — the one line that knows where the install
                     root is relative to this package. workspace/, the
                     updater's target and the server's static/ all resolve
                     from it, so a wrong answer here is silent and
