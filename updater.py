@@ -53,7 +53,11 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
+import paths
+
+# The install this updater belongs to — see paths.py for why this is
+# not computed from THIS file's location.
+HERE = paths.INSTALL_ROOT
 
 REPO = "jacsonott/Winnow"
 RELEASES_API = f"https://api.github.com/repos/{REPO}/releases/latest"

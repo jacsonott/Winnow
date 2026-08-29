@@ -45,10 +45,10 @@ import time
 from pathlib import Path
 from typing import Any
 
+import paths
 from store import DEFAULT_TAGS
 
-HERE = Path(__file__).parent
-WORKSPACE_DIR = HERE / "workspace"
+WORKSPACE_DIR = paths.INSTALL_ROOT / "workspace"
 
 _LOCK = threading.RLock()
 
