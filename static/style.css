@@ -1205,6 +1205,22 @@ textarea:focus { border-color: var(--accent); outline: none; }
 
 /* -------------------------------------------------------- filter builder */
 
+/* Settings → Updates: the release notes blob. Monospace and scrollable
+   because it's markdown straight from the GitHub release, not something
+   we render. */
+.update-notes {
+  margin: 6px 0;
+  padding: 8px;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font: 12px/1.45 var(--mono);
+  color: var(--dim);
+  background: var(--panel-2);
+  border: var(--border-w) solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
 .fb-help { margin: 0 0 10px; font-size: 12px; color: var(--dim); }
 .fb-tree { border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 8px; margin-bottom: 10px; }
 .fb-group { display: flex; flex-direction: column; gap: 6px; }

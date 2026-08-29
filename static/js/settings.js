@@ -588,7 +588,96 @@ export function openSettings() {
 
     const secPlugins = settingsSection(b, 'Plugins');
     buildPluginsPanel(secPlugins);
+
+    const secUpdates = settingsSection(b, 'Updates');
+    buildUpdatesPanel(secUpdates);
   });
+}
+
+/* Settings → Updates. Shows what this install is, and checks for a newer
+   release ONLY when the analyst presses the button — Winnow has no
+   startup ping and no background poll, deliberately: the analysis box may
+   be airgapped (CLAUDE.md), and a forensic tool that reaches out to the
+   internet unasked is its own problem regardless.
+
+   Updating replaces the files Winnow ships and nothing else — workspace/,
+   installed plugins, sessions and case files are never touched (see
+   updater.PROTECTED) — and the previous version is backed up first, so a
+   bad update is one button (or `python update.py --rollback`) away from
+   undone. */
+export function buildUpdatesPanel(b) {
+  const status = el('div', 'fb-help');
+  const notes = el('pre', 'update-notes');
+  notes.hidden = true;
+  const acts = el('div', 'row-actions');
+  const checkBtn = el('button', 'btn ghost', 'Check for updates');
+  const installBtn = el('button', 'btn', 'Install update');
+  installBtn.hidden = true;
+  acts.append(checkBtn, installBtn);
+
+  const version = el('div', 'fb-help', 'Version: …');
+  api('/api/version')
+    .then((r) => { version.textContent = `Winnow ${r.version}`; })
+    .catch(() => { version.textContent = 'Version: unknown'; });
+
+  b.append(version, acts, status, notes,
+    el('div', 'fb-help',
+      'Checking contacts GitHub — nothing is sent, and Winnow never checks on its own. '
+      + 'Updating keeps your saved filters, tags, plugins, case list and case files. '
+      + 'On a machine with no network, download the release elsewhere and run '
+      + '"python update.py --from <file>.zip" in the Winnow folder.'));
+
+  let latest = null;
+  checkBtn.onclick = async () => {
+    checkBtn.disabled = true;
+    status.textContent = 'Checking…';
+    notes.hidden = true;
+    try {
+      const info = await post('/api/updates/check', {});
+      latest = info;
+      if (!info.available) {
+        status.textContent = `Winnow ${info.current} is up to date (latest release is ${info.latest}).`;
+        installBtn.hidden = true;
+        return;
+      }
+      status.textContent = `Winnow ${info.latest} is available — you have ${info.current}.`;
+      if (info.notes) {
+        notes.textContent = info.notes.split('\n').slice(0, 40).join('\n');
+        notes.hidden = false;
+      }
+      installBtn.hidden = false;
+    } catch (e) {
+      // The offline case is the expected one on an analysis box, not an error
+      // to feel bad about — the message from the server says what to do.
+      status.textContent = e.message;
+    } finally {
+      checkBtn.disabled = false;
+    }
+  };
+
+  installBtn.onclick = async () => {
+    if (!latest) return;
+    const ok = await confirmDialog(
+      `Install Winnow ${latest.latest}?\n\n`
+      + 'Your saved filters, tags, installed plugins, case list and case files are kept — '
+      + 'only the program files are replaced, and the current version is backed up first.\n\n'
+      + 'Winnow has to be restarted afterwards to run the new version.',
+      { okLabel: `Install ${latest.latest}` });
+    if (!ok) return;
+    installBtn.disabled = true;
+    status.textContent = 'Downloading and installing…';
+    let res;
+    try {
+      res = await post('/api/updates/apply', { confirm: true });
+    } catch (e) {
+      status.textContent = 'Update failed: ' + e.message;
+      installBtn.disabled = false;
+      return;
+    }
+    installBtn.hidden = true;
+    status.textContent = `Updated ${res.previous_version} → ${res.version}. Restart Winnow to run it.`;
+    toast(`Updated to ${res.version} — restart Winnow to run the new version`, 12000);
+  };
 }
 
 /* DOM wiring for this module, called once by main.js. Handlers can't

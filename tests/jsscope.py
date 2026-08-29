@@ -124,6 +124,49 @@ def _children(node):
             yield key, value
 
 
+def duplicate_top_level_bindings(src: str) -> list[str]:
+    """Names bound more than once at a module's top level.
+
+    A second `import { confirmDialog } from './ui.js'` alongside an
+    existing one is a SyntaxError the browser refuses the whole module
+    for — the app renders as a blank page — but it parses fine and every
+    name it uses still resolves, so free_identifiers can't see it. That
+    is precisely the failure this file exists to stop shipping, and it
+    shipped once (settings.js, the Updates panel), so it gets its own
+    check.
+
+    Top level only: shadowing inside a function is legal JavaScript and
+    routine here."""
+    tree = parse(src, module=True)
+    seen: dict[str, int] = {}
+
+    def bind(name):
+        seen[name] = seen.get(name, 0) + 1
+
+    for stmt in tree.body:
+        node = stmt
+        if node.type in ("ExportNamedDeclaration", "ExportDefaultDeclaration"):
+            if getattr(node, "declaration", None) is None:
+                continue
+            node = node.declaration
+        t = node.type
+        if t == "ImportDeclaration":
+            for spec in node.specifiers:
+                bind(spec.local.name)
+        elif t in ("FunctionDeclaration", "ClassDeclaration") and node.id:
+            bind(node.id.name)
+        elif t == "VariableDeclaration":
+            # `var` may legally repeat; let and const may not.
+            if node.kind == "var":
+                continue
+            for d in node.declarations:
+                names: list[str] = []
+                _pattern_names(d.id, names)
+                for n in names:
+                    bind(n)
+    return sorted(n for n, count in seen.items() if count > 1)
+
+
 def free_identifiers(src: str, module: bool = False) -> set[str]:
     """Identifiers referenced by `src` that nothing in it declares."""
     tree = parse(src, module=module)

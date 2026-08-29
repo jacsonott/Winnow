@@ -65,6 +65,42 @@ share, don't — SQLite's WAL journalling needs shared memory that SMB and NFS
 don't provide. Two analysts on one investigation should work in separate case
 files and merge with session files, which is what tag remap-by-name is for.
 
+## Updating
+
+Winnow keeps your work *inside its own folder* — saved filters, tag
+templates, the case list, your `cases` folder setting, installed plugins,
+session exports. So "download the new one and replace the folder" throws
+all of that away. Update instead:
+
+**From the app** — Settings → Updates → *Check for updates*. It tells you
+what's available and installs it on request. Winnow never checks on its
+own: no startup ping, no background poll.
+
+**From a terminal**, in the Winnow folder:
+
+```bash
+python update.py --check      # what's available, changes nothing
+python update.py              # check, show the plan, install
+python update.py --rollback   # undo the last update
+```
+
+**On an airgapped analysis box**, fetch it on a machine that has network:
+
+```bash
+python update.py --download-only --dest /media/usb
+```
+
+then carry it over and apply it in place:
+
+```bash
+python update.py --from /media/usb/winnow-1.1.0.zip
+```
+
+Either way, only the program files are replaced. `workspace/`, `plugins/`,
+`sessions/` and every case file are never read, written or deleted, and
+the version you were on is backed up first. Restart Winnow afterwards —
+the running server keeps executing the code it already loaded.
+
 ## Measured on this machine
 
 1.2M rows × 10 columns (169 MB CSV):
