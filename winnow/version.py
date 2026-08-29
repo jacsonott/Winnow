@@ -11,4 +11,4 @@ analyst who has to state their tooling in a report shouldn't have to go
 digging in git for it.
 """
 
-VERSION = "1.0.0"
+VERSION = "0.1.0"
