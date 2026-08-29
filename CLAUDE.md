@@ -39,7 +39,9 @@ updater.py         Updating in place without losing analyst state, which all
                     section, so add to both together. Backs up before
                     applying; rollback() undoes. Never checks on its own.
 update.py          The CLI front door to updater.py — --check, --dry-run,
-                    --from (the airgap path), --download-only, --rollback.
+                    --from (the airgap path), --download-only, --rollback,
+                    and --main (development: sync to the branch tip rather
+                    than a release; the install records main@<sha>).
                     The one that still works when a bad update has broken
                     the UI, since it needs no running server.
 xlsxread.py        Excel .xlsx/.xlsm reading for import — a thin typed-cell→

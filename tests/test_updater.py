@@ -244,6 +244,41 @@ def test_no_releases_yet_is_not_reported_as_a_network_failure():
         updater.check_for_update(current="1.0.0", _fetch=not_found)
 
 
+def test_check_main_reports_the_tip_without_a_version_comparison(install):
+    """main isn't a version, so there is no available/up-to-date answer to
+    give — just what the tip currently is."""
+    commit = {"sha": "abc1234def5678", "commit": {
+        "message": "Resizable sidebar\n\nlonger body", "committer": {"date": "2026-08-29T10:00:00Z"}}}
+    tip = updater.check_main(_fetch=lambda u, t: commit)
+    assert tip["short"] == "abc1234"
+    assert tip["message"] == "Resizable sidebar"   # subject only
+    assert tip["url"].endswith("refs/heads/main.zip")
+    assert "available" not in tip
+
+
+def test_a_main_sync_is_recorded_as_such(install, tmp_path):
+    """A box synced to main is running code no release was cut from —
+    worth being able to tell after the fact."""
+    assert updater.installed_source(install) == "release"
+    archive = _make_release(tmp_path / "main.zip", "1.1.0", _v2_files(), prefix="Winnow-main/")
+    updater.apply_update(archive, install, source="main@abc1234def")
+    assert updater.installed_source(install) == "main@abc1234def"
+    # And it is an ordinary update in every other respect.
+    assert updater.installed_version(install) == "1.1.0"
+    assert updater.list_backups(install)
+
+
+def test_a_main_sync_still_protects_analyst_state(install, tmp_path):
+    state = _seed_user_state(install)
+    archive = _make_release(tmp_path / "main.zip", "1.1.0", _v2_files(), prefix="Winnow-main/")
+    updater.apply_update(archive, install, source="main@deadbeef")
+    for rel, text in state.items():
+        assert (install / rel).read_text(encoding="utf-8") == text, f"{rel} was modified"
+    # ...and rolling back a main sync works the same way.
+    updater.rollback(install)
+    assert updater.installed_version(install) == "1.0.0"
+
+
 def test_backups_are_pruned_but_the_newest_survive(install, tmp_path):
     for i in range(updater.KEEP_BACKUPS + 2):
         files = dict(SHIPPED)

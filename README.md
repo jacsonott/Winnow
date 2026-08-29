@@ -96,6 +96,13 @@ then carry it over and apply it in place:
 python update.py --from /media/usb/winnow-1.1.0.zip
 ```
 
+**Working on Winnow itself?** `python update.py --main` syncs to the tip of
+the main branch instead of the latest release — unreleased code, with the
+same backup, the same protected paths and the same `--rollback`. The
+install records that it came from main (in `.winnow-install.json`),
+because a box running code no release was cut from is a thing to know
+before quoting a version number in a report.
+
 Either way, only the program files are replaced. `workspace/`, `plugins/`,
 `sessions/` and every case file are never read, written or deleted, and
 the version you were on is backed up first. Restart Winnow afterwards —
