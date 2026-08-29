@@ -6,10 +6,12 @@
    query against row_tags. Dependency-free by CLAUDE.md's rule, so the
    autocomplete dropdown and the caret measurement are hand-rolled. */
 import { toast, $, el, post } from './core.js';
+import { writeClipboardText } from './grouping.js';
 import { sqlSchemaForLLM } from './plugins.js';
 import { sourceLabel } from './sources.js';
+import { activeSqlTab } from './sql.js';
 import { S } from './state.js';
-import { dropdownMenu } from './ui.js';
+import { dropdownMenu, promptDialog } from './ui.js';
 
 const SQL_KEYWORDS = [
   'SELECT', 'FROM', 'WHERE', 'GROUP BY', 'ORDER BY', 'LIMIT', 'OFFSET',
@@ -320,6 +322,46 @@ export function sqlCopySelection() {
   const text = [r.columns.join('\t'), ...keep.map((row) => row.map((v) => v == null ? '' : String(v)).join('\t'))].join('\n');
   navigator.clipboard.writeText(text).catch(() => {});
   return true;
+}
+
+/* Copy the result to the clipboard as TSV with a header row — the
+   selected rows if there is a selection, the whole result otherwise.
+   Selection-first because that's what Ctrl+C already does on this pane
+   (and in the grid); the button adds the "all of it" case Ctrl+C has no
+   way to ask for. TSV rather than CSV because the destination is nearly
+   always a spreadsheet or a ticket, both of which take tabs cleanly and
+   neither of which needs quoting rules. */
+export function sqlCopyResult(columns, rows) {
+  const r = activeResult;
+  let out = rows;
+  let what = 'result';
+  if (r && r.tags && r.tags.sel.size) {
+    const keep = [];
+    for (const row of rows) {
+      const key = sqlRowKey(r.tags.ref, row);
+      if (key && r.tags.sel.has(key)) keep.push(row);
+    }
+    if (keep.length) { out = keep; what = 'selected rows'; }
+  }
+  const text = [columns.join('\t'),
+    ...out.map((row) => row.map((v) => (v == null ? '' : String(v))).join('\t'))].join('\n');
+  writeClipboardText(Promise.resolve(text),
+    `Copied ${out.length.toLocaleString()} ${what === 'result' ? 'rows' : 'selected rows'} with headers`);
+}
+
+/* "CSV…": ask for the file name first, defaulting to the query tab's own
+   name. Downloading straight to "query-results.csv" meant every export
+   from every tab collided in the downloads folder, and the tab name is
+   already the analyst's label for what this query IS. */
+export async function sqlDownloadCsv(columns, rows) {
+  const tab = activeSqlTab();
+  const suggested = ((tab && tab.name) || 'query-results').trim();
+  const name = await promptDialog(
+    `Save ${rows.length.toLocaleString()} rows as CSV — file name:`,
+    suggested, { okLabel: 'Save' });
+  if (name == null) return;
+  const clean = (name.trim() || suggested).replace(/[\\/:*?"<>|]/g, '_');
+  sqlResultCsv(columns, rows, clean.toLowerCase().endsWith('.csv') ? clean : clean + '.csv');
 }
 
 /* The current result as a CSV download — rows in DISPLAYED order (the

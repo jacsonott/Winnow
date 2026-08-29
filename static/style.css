@@ -825,6 +825,19 @@ textarea {
 textarea:focus { border-color: var(--accent); outline: none; }
 .note-status { font-size: 11px; color: var(--dim); min-height: 14px; }
 
+/* The SQL result bar: status on the left, actions hard against the right
+   edge. Was a .note-status text line with two buttons appended straight
+   after the text, so they collided with it and read as part of the
+   sentence; this makes it a row with the same button grouping as the
+   toolbar above the editor. */
+.sql-result-bar {
+  display: flex; align-items: center; gap: 12px;
+  padding: 4px 2px 6px; border-bottom: 1px solid var(--line);
+  margin-bottom: 6px;
+}
+.sql-result-bar > .note-status { flex: 1 1 auto; min-width: 0; }
+.sql-result-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; }
+
 /* ------------------------------------------------------------- sql pane */
 
 .sqlview { flex: 1 1 auto; min-height: 0; background: var(--ink); display: flex; flex-direction: column; }
