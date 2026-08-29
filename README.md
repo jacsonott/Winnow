@@ -104,10 +104,11 @@ then carry it over and apply it in place:
 python update.py --from /media/usb/winnow-1.1.0.zip
 ```
 
-**Working on Winnow itself?** `python update.py --main` syncs to the tip of
-the main branch instead of the latest release — unreleased code, with the
-same backup, the same protected paths and the same `--rollback`. The
-install records that it came from main (in `.winnow-install.json`),
+**Beta testing, or working on Winnow itself?** `python update.py --dev`
+syncs to the tip of the `develop` branch instead of the latest release —
+unreleased code, with the same backup, the same protected paths and the
+same `--rollback`. The install records that it came from develop (in
+`.winnow-install.json`) and Settings → Updates shows the build it is on,
 because a box running code no release was cut from is a thing to know
 before quoting a version number in a report.
 

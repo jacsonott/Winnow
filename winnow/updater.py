@@ -61,8 +61,19 @@ HERE = paths.INSTALL_ROOT
 
 REPO = "jacsonott/Winnow"
 RELEASES_API = f"https://api.github.com/repos/{REPO}/releases/latest"
-MAIN_API = f"https://api.github.com/repos/{REPO}/commits/main"
-MAIN_ZIP = f"https://github.com/{REPO}/archive/refs/heads/main.zip"
+
+# The branch beta testers and developers track. main is release-only —
+# one squashed snapshot per release — so "the latest changes" means
+# develop, not main. See CLAUDE.md's branch model.
+DEV_BRANCH = "develop"
+
+
+def branch_api(branch: str = DEV_BRANCH) -> str:
+    return f"https://api.github.com/repos/{REPO}/commits/{branch}"
+
+
+def branch_zip(branch: str = DEV_BRANCH) -> str:
+    return f"https://github.com/{REPO}/archive/refs/heads/{branch}.zip"
 
 # Where the updater keeps its own bookkeeping, inside the install.
 BACKUP_DIR = ".winnow-backup"
@@ -216,29 +227,37 @@ def _fetch_json(url: str, timeout: float) -> dict:
         return json.loads(r.read().decode("utf-8"))
 
 
-def check_main(timeout: float = 10.0, _fetch=None) -> dict:
-    """The tip of main, for the development path (`update.py --main`).
+def check_branch(branch: str = DEV_BRANCH, timeout: float = 10.0, _fetch=None) -> dict:
+    """The tip of a branch, for the development path (`update.py --dev`).
 
-    Deliberately NOT part of check_for_update: main is not a version, so
-    there is nothing to compare against and no "are you up to date"
-    answer to give — you either want main's current state or you don't.
-    Returns {sha, short, message, committed_at, url} so the update can say
-    what it landed on; on a branch there is no tag to name it by."""
+    Deliberately NOT part of check_for_update: a branch is not a version,
+    so there is nothing to compare against and no "are you up to date"
+    answer to give — you either want that branch's current state or you
+    don't. Returns {branch, sha, short, message, committed_at, url} so the
+    sync can say what it landed on; a branch has no tag to name it by."""
     fetch = _fetch or _fetch_json
     try:
-        c = fetch(MAIN_API, timeout)
+        c = fetch(branch_api(branch), timeout)
     except UpdateError:
         raise
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            raise UpdateError(
+                f"There is no {branch!r} branch in {REPO}. If the repository has "
+                "not been restructured yet, use a release instead: python update.py"
+            ) from e
+        raise UpdateError(f"GitHub refused the branch lookup ({e}).") from e
     except Exception as e:  # noqa: BLE001
-        raise UpdateError(f"Could not reach GitHub to read main ({e}).") from e
+        raise UpdateError(f"Could not reach GitHub to read {branch} ({e}).") from e
     sha = c.get("sha") or ""
     commit = c.get("commit") or {}
     return {
+        "branch": branch,
         "sha": sha,
         "short": sha[:7],
         "message": (commit.get("message") or "").splitlines()[0] if commit.get("message") else "",
         "committed_at": ((commit.get("committer") or {}).get("date") or ""),
-        "url": MAIN_ZIP,
+        "url": branch_zip(branch),
     }
 
 

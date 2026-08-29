@@ -244,16 +244,29 @@ def test_no_releases_yet_is_not_reported_as_a_network_failure():
         updater.check_for_update(current="1.0.0", _fetch=not_found)
 
 
-def test_check_main_reports_the_tip_without_a_version_comparison(install):
-    """main isn't a version, so there is no available/up-to-date answer to
-    give — just what the tip currently is."""
+def test_check_branch_reports_the_tip_without_a_version_comparison(install):
+    """A branch isn't a version, so there is no available/up-to-date answer
+    to give — just what the tip currently is."""
     commit = {"sha": "abc1234def5678", "commit": {
         "message": "Resizable sidebar\n\nlonger body", "committer": {"date": "2026-08-29T10:00:00Z"}}}
-    tip = updater.check_main(_fetch=lambda u, t: commit)
+    tip = updater.check_branch(_fetch=lambda u, t: commit)
+    assert tip["branch"] == "develop"      # the channel beta testers track
     assert tip["short"] == "abc1234"
     assert tip["message"] == "Resizable sidebar"   # subject only
-    assert tip["url"].endswith("refs/heads/main.zip")
+    assert tip["url"].endswith("refs/heads/develop.zip")
     assert "available" not in tip
+
+
+def test_a_missing_dev_branch_says_so_rather_than_blaming_the_network(install):
+    """Until the repository is restructured there is no develop branch,
+    and 'could not reach GitHub' would send someone debugging their VPN."""
+    import urllib.error
+
+    def not_found(url, timeout):
+        raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+
+    with pytest.raises(UpdateError, match="no 'develop' branch"):
+        updater.check_branch(_fetch=not_found)
 
 
 def test_a_main_sync_is_recorded_as_such(install, tmp_path):
@@ -361,7 +374,19 @@ def test_version_route_reports_the_installed_version(store, monkeypatch):
     server, client = _client(store, monkeypatch)
     res = client.get("/api/version", headers=HEADERS)
     assert res.status_code == 200
-    assert res.json() == {"version": version_module.VERSION}
+    body = res.json()
+    assert body["version"] == version_module.VERSION
+    assert body["is_release"] is True   # no manifest in a dev checkout
+
+
+def test_version_route_distinguishes_a_develop_build(store, monkeypatch):
+    """version.py on develop still reads as the last released number, so
+    the number alone describes a build nobody can reproduce."""
+    server, client = _client(store, monkeypatch)
+    monkeypatch.setattr(server.updater, "installed_source", lambda *a: "develop@abc1234")
+    body = client.get("/api/version", headers=HEADERS).json()
+    assert body["source"] == "develop@abc1234"
+    assert body["is_release"] is False
 
 
 def test_check_route_surfaces_an_offline_box_as_a_400(store, monkeypatch):

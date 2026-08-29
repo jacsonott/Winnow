@@ -404,8 +404,16 @@ class UpdateApply(BaseModel):
 def api_version():
     """What this install is. Cheap and unauthenticated on purpose: an
     analyst writing up a case needs to be able to state the tool version
-    without going digging."""
-    return {"version": version.VERSION}
+    without going digging.
+
+    `source` distinguishes a release from a develop-branch sync. It
+    matters because version.py on develop still reads as the last
+    released number while the code around it has moved on — so a beta
+    tester who reported only "0.1.0" would be describing a build nobody
+    can reproduce."""
+    src = updater.installed_source()
+    return {"version": version.VERSION, "source": src,
+            "is_release": src == "release"}
 
 
 @app.post("/api/updates/check")

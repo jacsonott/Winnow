@@ -1,0 +1,16 @@
+# Keep development-only material out of `git archive` output — which is
+# what GitHub's branch and release downloads are, and therefore what
+# `update.py --dev` installs on a beta tester's machine. They need the
+# application, not the suite that tests it.
+#
+# Release archives cut from main don't need this (main doesn't carry
+# these paths at all — see scripts/release.py); this is what keeps the
+# develop-branch download lean for the same reason.
+#
+# Deliberately NOT applied to docs/ or .github/: a downloaded tree that
+# can't tell you how it's meant to work is a worse artifact than a
+# slightly larger one.
+tests/               export-ignore
+bench/               export-ignore
+CLAUDE.md            export-ignore
+requirements-dev.txt export-ignore

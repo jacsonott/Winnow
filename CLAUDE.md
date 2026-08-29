@@ -8,6 +8,42 @@ Built for DFIR analysts. Assume the target machine may be **airgapped**: no CDN,
 no npm, no build step, no web fonts. If a change would add a network dependency
 at runtime, it's the wrong change.
 
+## Branches: develop is where work lands, main is releases only
+
+**Open every PR against `develop`.** That is the integration branch and
+the default; it carries the full history and all the development
+material. `main` holds one commit per release and nothing else — no merge
+commits, no feature history — and it does not carry `tests/`, `bench/`,
+`CLAUDE.md` or `requirements-dev.txt`, because an analyst downloading
+Winnow needs the application, not the suite that tests it.
+
+**A release does not merge develop into main, it replaces main's tree
+with develop's** (`scripts/release.py`). That is not a stylistic
+preference. `main` is orphaned at the first release, so it shares no
+ancestor with `develop`; `git merge develop` refuses outright, and with
+`--allow-unrelated-histories` it three-way merges against an empty base
+and conflicts on every file in the repository, every release, forever.
+Replacing the tree has no merge base to disagree with — which is also
+what makes "main holds fewer files" free rather than a permanent
+re-deletion chore.
+
+To cut one: bump `winnow/version.py` on develop in the commit you want
+released, then
+
+```
+python scripts/release.py 0.2.0            # dry run, prints the plan
+python scripts/release.py 0.2.0 --write    # commit + tag, still local
+```
+
+It refuses a dirty tree, a version that disagrees with `version.py`, a
+tag that already exists, and a missing source branch; on any failure it
+puts you back on the branch you started from. It never pushes — that is
+left as commands for a person to type.
+
+**Beta testers and developers track develop**, via `python update.py
+--dev`, which syncs to the branch tip and records `develop@<sha>` in the
+install manifest. `main` is not a channel anyone follows; releases are.
+
 ## Merging is the maintainer's call, always
 
 **Never merge a PR into main without being asked to.** Open it, push it,

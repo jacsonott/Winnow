@@ -617,7 +617,14 @@ export function buildUpdatesPanel(b) {
 
   const version = el('div', 'fb-help', 'Version: …');
   api('/api/version')
-    .then((r) => { version.textContent = `Winnow ${r.version}`; })
+    .then((r) => {
+      // A develop sync keeps the last released version number, so the
+      // number alone would describe a build nobody can reproduce — show
+      // the branch and commit it actually came from.
+      version.textContent = r.is_release
+        ? `Winnow ${r.version}`
+        : `Winnow ${r.version} — ${r.source.replace('@', ' build ').slice(0, 26)}`;
+    })
     .catch(() => { version.textContent = 'Version: unknown'; });
 
   b.append(version, acts, status, notes,
