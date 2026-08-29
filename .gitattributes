@@ -11,6 +11,9 @@
 # Deliberately NOT applied to docs/ or .github/: a downloaded tree that
 # can't tell you how it's meant to work is a worse artifact than a
 # slightly larger one.
+.claude/            export-ignore
+scripts/release.py   export-ignore
+tests/test_release_script.py export-ignore
 tests/               export-ignore
 bench/               export-ignore
 CLAUDE.md            export-ignore

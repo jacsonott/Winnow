@@ -34,6 +34,12 @@ ROOT = Path(__file__).resolve().parent.parent
 
 # Material dropped from the release branch.
 #
+# THE PAIRING RULE: anything dropped here must take its tests with it.
+# main runs the same pytest checks as develop, so a test left behind that
+# imports or reads a dropped path fails the release branch's own required
+# check. This has bitten twice — bench/ and this script — so when adding
+# an entry, grep tests/ for it first.
+#
 # Shorter than you might expect, and the reason is a chain: main runs the
 # same required status checks as develop, those checks are `pytest`, and
 # pytest on a tree with no tests/ exits 5 ("no tests collected") and fails
@@ -46,6 +52,7 @@ ROOT = Path(__file__).resolve().parent.parent
 # tests/ is present in the branch for CI and absent from the zip an
 # analyst installs. The branch and the artifact have different jobs.
 DEV_ONLY = (
+    ".claude",          # editor/agent launch config
     "bench",
     # Goes with bench/ — it imports it, so leaving it behind breaks pytest
     # COLLECTION on the release branch, which fails the very check keeping
@@ -53,6 +60,11 @@ DEV_ONLY = (
     # its tests with it.
     "tests/test_bench_harness.py",
     "CLAUDE.md",
+    # Cuts releases FROM a develop checkout; a release tree is the wrong
+    # place to run it from. Its test reads the script off disk, so — same
+    # pairing rule as bench above — it has to go too.
+    "scripts/release.py",
+    "tests/test_release_script.py",
 )
 
 VERSION_FILE = Path("winnow/version.py")
@@ -162,8 +174,15 @@ def main(argv: list[str] | None = None) -> int:
         _fail(f"release aborted, returned to {started_on}:\n{e}")
 
     new = git("rev-parse", "HEAD")
+    # Back to where you were. The commit and tag are refs; you do not have
+    # to be standing on them to push. Staying on the release branch would
+    # leave you in a tree with no bench/, no CLAUDE.md and — since it is
+    # dropped too — no scripts/release.py, which is a confusing place to
+    # be handed back control.
+    git("checkout", "-q", started_on)
     print(f"\nCreated {args.target} {new[:7]} and tag v{args.version} "
           f"(dropped: {', '.join(dropped) or 'nothing'}).")
+    print(f"You are back on {started_on}; the release is on {args.target}.")
     print("\nReview it, then push:")
     force = " --force-with-lease" if args.orphan else ""
     print(f"  git push{force} origin {args.target}")

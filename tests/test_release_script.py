@@ -54,6 +54,11 @@ def repo(tmp_path):
     _git(r, "commit", "-q", "--allow-empty", "-m", "a feature")
     _git(r, "branch", "-f", "develop")
     _git(r, "update-ref", "refs/remotes/origin/develop", "refs/heads/develop")
+    # Releases are cut from develop, and the script returns you to the
+    # branch you started on — so starting anywhere else would leave the
+    # working tree on the release branch, where scripts/release.py has
+    # been dropped and a second invocation cannot find it.
+    _git(r, "checkout", "-q", "develop")
     return r
 
 
@@ -89,9 +94,6 @@ def test_a_second_release_needs_no_merge_and_cannot_conflict(repo):
     Replacing the tree has to keep working release after release."""
     assert _release(repo, "0.1.0", "--write", "--orphan").returncode == 0
 
-    # Back to develop first: the release left the working tree on main,
-    # where tests/ does not exist.
-    _git(repo, "checkout", "-q", "develop")
     (repo / "winnow" / "newthing.py").write_text("# new\n")
     (repo / "winnow" / "version.py").write_text('VERSION = "0.2.0"\n')
     (repo / "tests" / "test_b.py").write_text("# more tests\n")
@@ -181,3 +183,14 @@ def test_the_release_archive_excludes_the_suite_even_though_main_carries_it(repo
     assert not [n for n in names if n.startswith("tests/")], "the download must not"
     assert "requirements-dev.txt" not in names
     assert "server.py" in names and "winnow/store.py" in names
+
+
+def test_it_leaves_you_on_the_branch_you_started_from(repo):
+    """The release branch has no scripts/release.py — it is dropped like
+    the rest of the development material — so being left standing there
+    means the next invocation cannot even find the script."""
+    assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD") == "develop"
+    assert _release(repo, "0.1.0", "--write", "--orphan").returncode == 0
+    assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD") == "develop"
+    assert (repo / "scripts" / "release.py").is_file()
+    assert (repo / "CLAUDE.md").is_file(), "develop keeps everything"
