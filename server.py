@@ -12,6 +12,7 @@ import contextlib
 import heapq
 import json
 import os
+import re
 import shutil
 import sqlite3
 import sys
@@ -2169,6 +2170,92 @@ async def api_case_session_import(file: UploadFile = File(...), merge: bool = Fo
 
 class SessionSaveReq(BaseModel):
     name: str
+
+
+class CaseSessionSave(BaseModel):
+    name: str
+
+
+class CaseSessionRename(BaseModel):
+    name: str
+
+
+class CaseSessionAdopt(BaseModel):
+    """A session file received from another analyst. Recording it and
+    applying it are separate calls on purpose — taking someone's work into
+    your case is a decision, not a side effect of opening their file."""
+    name: str
+    session: dict
+
+
+@app.get("/api/case_sessions")
+def api_case_sessions_list():
+    """Sessions stored IN the case file. These travel with the .db; the
+    older /api/sessions writes files beside it."""
+    return {"sessions": store().list_sessions()}
+
+
+@app.post("/api/case_sessions")
+def api_case_sessions_save(body: CaseSessionSave):
+    try:
+        return store().save_session(body.name)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/case_sessions/{name}/load")
+def api_case_sessions_load(name: str, merge: bool = True):
+    try:
+        return store().load_session(name, merge=merge)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/case_sessions/adopt")
+def api_case_sessions_adopt(body: CaseSessionAdopt):
+    try:
+        return store().adopt_session(body.name, body.session)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/case_sessions/{name}/rename")
+def api_case_sessions_rename(name: str, body: CaseSessionRename):
+    try:
+        return store().rename_session(name, body.name)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.delete("/api/case_sessions/{name}")
+def api_case_sessions_delete(name: str):
+    store().delete_session(name)
+    return {"ok": True}
+
+
+@app.get("/api/case_sessions/{name}/download")
+def api_case_sessions_download(name: str):
+    """The hand-off: a stored session as a file, for sending to another
+    analyst. The only reason a session file exists now."""
+    try:
+        data = store().get_session(name)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("_") or "session"
+    return JSONResponse(data, headers={
+        "Content-Disposition": f'attachment; filename="{safe}.winnow_case.json"'})
+
+
+@app.get("/api/case_sessions/diff")
+def api_case_sessions_diff(left: str, right: str):
+    """What changed between two sessions — the QC review. Either side may
+    be the live case (`__live__`)."""
+    try:
+        return JSONResponse(store().diff_sessions(left, right))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
 
 
 @app.get("/api/sessions")

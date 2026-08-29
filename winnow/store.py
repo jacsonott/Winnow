@@ -206,6 +206,30 @@ CREATE TABLE IF NOT EXISTS derived_columns (
 -- more file than it could ever save. The lookup IS on a hot path
 -- (_source_lite_on, once per page fetch) — it's just a hot path over a
 -- table that fits in a single page.
+-- Named session snapshots, IN the case file rather than beside it.
+--
+-- A session is a point-in-time copy of the analysis layer — tags, notes,
+-- layouts, saved views, derived-column definitions — for every open
+-- source. Keeping them here means work an analyst saved (or received from
+-- someone else and loaded) travels with the case instead of living in a
+-- sessions/ directory that gets left behind the moment the .db is copied
+-- anywhere. A JSON file is now only produced when handing work to another
+-- analyst, which is the one case that genuinely needs a separate artifact.
+--
+-- Deliberately a SNAPSHOT table, not a session dimension on row_tags. Tags
+-- stay single-valued per (source_id, rid, tag_id) — that is a WITHOUT
+-- ROWID primary key, so adding a session column would rewrite the physical
+-- layout of the hottest table in the case and every one of the ~70 places
+-- that read it. Diffing does not need it: a snapshot already contains the
+-- full tag set, so two of them can be compared by reading them.
+CREATE TABLE IF NOT EXISTS sessions (
+    id       INTEGER PRIMARY KEY,
+    name     TEXT NOT NULL UNIQUE,
+    saved_at TEXT NOT NULL,
+    origin   TEXT,                     -- 'saved' here, or 'imported' from a file
+    payload  TEXT NOT NULL             -- a winnow-case-session/1 document
+);
+
 -- Per-case settings (first key: ts_format, the case-level datetime display
 -- default). In the case file, not workspace/, because "how this case's
 -- timestamps read" should travel with the case when it's handed to
@@ -6415,6 +6439,183 @@ class Store:
     def _session_path(self, name: str) -> str:
         safe = self._SESSION_NAME_RE.sub("_", name).strip() or "session"
         return os.path.join(self._sessions_dir(), f"{safe}.winnow_case.json")
+
+    # ------------------------------------------------- sessions in the case
+
+    def save_session(self, name: str) -> dict:
+        """Snapshot the current analysis layer under `name`, in the case
+        file. Saving over an existing name replaces it — the alternative is
+        a pile of "triage-2-final-v3" and no way to tell them apart."""
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("A session needs a name")
+        data = self.export_case_session()
+        return self._write_session(name, data, origin="saved")
+
+    def _write_session(self, name: str, data: dict, origin: str) -> dict:
+        blob = json.dumps(data)
+        with self.lock, self.db:
+            self.db.execute(
+                "INSERT INTO sessions(name, saved_at, origin, payload) VALUES (?,?,?,?) "
+                "ON CONFLICT(name) DO UPDATE SET saved_at=excluded.saved_at, "
+                "origin=excluded.origin, payload=excluded.payload",
+                (name, data.get("exported_at") or time.strftime("%Y-%m-%dT%H:%M:%S"),
+                 origin, blob))
+        return self._session_summary(name)
+
+    def _session_summary(self, name: str) -> dict:
+        with self._reader() as ro:
+            row = ro.execute(
+                "SELECT id, name, saved_at, origin, payload FROM sessions WHERE name=?",
+                (name,)).fetchone()
+        if not row:
+            raise KeyError(f"No session named {name!r}")
+        data = json.loads(row["payload"])
+        srcs = data.get("sources", [])
+        return {
+            "id": row["id"], "name": row["name"], "saved_at": row["saved_at"],
+            "origin": row["origin"], "source_count": len(srcs),
+            "tagged_rows": sum(len(s.get("row_tags") or []) for s in srcs),
+            "notes": sum(len(s.get("row_notes") or []) for s in srcs),
+        }
+
+    def list_sessions(self) -> list[dict]:
+        """Newest first — a session list is read to find recent work, not
+        to browse alphabetically."""
+        with self._reader() as ro:
+            names = [r["name"] for r in ro.execute(
+                "SELECT name FROM sessions ORDER BY saved_at DESC, id DESC")]
+        return [self._session_summary(n) for n in names]
+
+    def get_session(self, name: str) -> dict:
+        with self._reader() as ro:
+            row = ro.execute("SELECT payload FROM sessions WHERE name=?", (name,)).fetchone()
+        if not row:
+            raise KeyError(f"No session named {name!r}")
+        return json.loads(row["payload"])
+
+    def load_session(self, name: str, merge: bool = True) -> dict:
+        """Apply a stored session to the live case. merge=False replaces the
+        current tags and notes; merge=True adds to them."""
+        return self.import_case_session(self.get_session(name), merge=merge)
+
+    def delete_session(self, name: str) -> None:
+        with self.lock, self.db:
+            self.db.execute("DELETE FROM sessions WHERE name=?", (name,))
+
+    def rename_session(self, name: str, new_name: str) -> dict:
+        new_name = (new_name or "").strip()
+        if not new_name:
+            raise ValueError("A session needs a name")
+        with self.lock, self.db:
+            if self.db.execute("SELECT 1 FROM sessions WHERE name=?", (new_name,)).fetchone():
+                raise ValueError(f"A session named {new_name!r} already exists")
+            cur = self.db.execute("UPDATE sessions SET name=? WHERE name=?", (new_name, name))
+            if not cur.rowcount:
+                raise KeyError(f"No session named {name!r}")
+        return self._session_summary(new_name)
+
+    def adopt_session(self, name: str, data: dict) -> dict:
+        """Record a session that arrived as a FILE from another analyst, so
+        it travels with the case from now on. Applying it is a separate
+        step — receiving someone's work and merging it into your own are
+        different decisions."""
+        if data.get("format") != "winnow-case-session/1":
+            raise ValueError("That file isn't a Winnow case session")
+        return self._write_session(name, data, origin="imported")
+
+    LIVE_SESSION = "__live__"
+
+    def _session_tag_map(self, data: dict) -> tuple[dict, dict, dict]:
+        """(tags_by_row, notes_by_row, source_labels) for a session document.
+
+        Keyed by (file_hash or name, rid) rather than source_id, because two
+        cases number their sources differently — a QC review is usually the
+        reviewer's case against the analyst's file, and matching on the
+        evidence's own fingerprint is what makes that work at all.
+        """
+        tags: dict = {}
+        notes: dict = {}
+        labels: dict = {}
+        for src in data.get("sources", []):
+            meta = src.get("source") or {}
+            key = meta.get("file_hash") or meta.get("name") or ""
+            labels[key] = meta.get("name") or key
+            names = {t["id"]: t["name"] for t in (src.get("tag_defs") or [])}
+            for rt in src.get("row_tags") or []:
+                tags.setdefault((key, rt["rid"]), set()).add(
+                    names.get(rt["tag_id"], f"tag:{rt['tag_id']}"))
+            for rn in src.get("row_notes") or []:
+                notes[(key, rn["rid"])] = rn.get("note") or ""
+        return tags, notes, labels
+
+    def diff_sessions(self, left: str, right: str, limit: int = 2000) -> dict:
+        """What changed between two sessions — the QC question: "what did
+        the reviewer tag that I didn't, and what did I tag that they
+        removed?"
+
+        Either side may be LIVE_SESSION to compare against the case's
+        current state, which is the common review shape: a stored session
+        from the first analyst against what the reviewer has now.
+
+        Tags are compared BY NAME, not by tag_id: two analysts' cases
+        number their tags independently, so "TA-1" in one is rarely id 3 in
+        the other. Comparing ids would report every row as different.
+        """
+        def _load(which):
+            return self.export_case_session() if which == self.LIVE_SESSION else self.get_session(which)
+
+        lt, ln, llab = self._session_tag_map(_load(left))
+        rt, rn, rlab = self._session_tag_map(_load(right))
+        labels = {**rlab, **llab}
+
+        added, removed, changed, note_changes = [], [], [], []
+        for key in sorted(set(lt) | set(rt), key=lambda k: (str(k[0]), k[1])):
+            a, b = lt.get(key, set()), rt.get(key, set())
+            if a == b:
+                continue
+            row = {"source": labels.get(key[0], key[0]), "rid": key[1],
+                   "left": sorted(a), "right": sorted(b)}
+            if not a:
+                added.append(row)
+            elif not b:
+                removed.append(row)
+            else:
+                changed.append(row)
+        for key in sorted(set(ln) | set(rn), key=lambda k: (str(k[0]), k[1])):
+            a, b = ln.get(key), rn.get(key)
+            if a != b:
+                note_changes.append({"source": labels.get(key[0], key[0]), "rid": key[1],
+                                     "left": a, "right": b})
+
+        def _cap(rows):
+            return rows[:limit]
+
+        return {
+            "left": left, "right": right,
+            # "only in right" reads as added when right is the later pass,
+            # which is how a review is run: left = what was handed over.
+            "added": _cap(added), "removed": _cap(removed), "changed": _cap(changed),
+            "note_changes": _cap(note_changes),
+            "counts": {"added": len(added), "removed": len(removed),
+                       "changed": len(changed), "note_changes": len(note_changes)},
+            "truncated": max(len(added), len(removed), len(changed), len(note_changes)) > limit,
+            # A shared source is one both sides have evidence for; anything
+            # else means the two sessions are describing different cases and
+            # the numbers above are not a like-for-like comparison.
+            "shared_sources": sorted(set(llab) & set(rlab)),
+            "only_left_sources": sorted(set(llab) - set(rlab)),
+            "only_right_sources": sorted(set(rlab) - set(llab)),
+        }
+
+    def export_session_file(self, name: str, path: str) -> dict:
+        """Write a stored session out as JSON — the hand-off to another
+        analyst, and now the only reason a session file exists at all."""
+        data = self.get_session(name)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        return {"name": name, "path": os.path.abspath(path),
+                "bytes": os.path.getsize(path)}
 
     def save_named_session(self, name: str) -> dict:
         data = self.export_case_session()

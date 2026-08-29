@@ -361,6 +361,29 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
    sources (a merge's tags live on its members, so they appear
    regardless).
 
+10. **A session is a snapshot, not a dimension.** Named sessions live in
+   the case file's `sessions` table as whole `winnow-case-session/1`
+   documents — so work an analyst saved, or received from someone else and
+   adopted, travels with the `.db` instead of being left behind in a
+   `sessions/` directory. A JSON *file* is now only produced to hand work
+   to another analyst.
+
+   The live tags and notes stay single-valued: `row_tags` is `WITHOUT
+   ROWID` keyed `(source_id, rid, tag_id)`, so adding a session column
+   would rewrite the physical layout of the hottest table in the case and
+   every one of the ~70 places that read it. Saving snapshots the live
+   state; loading restores it. Do not add a session dimension to `row_tags`
+   without a reason that survives that cost — diffing, the thing that
+   looked like it needed one, does not: a snapshot already holds the full
+   tag set, so two of them are compared by reading them.
+
+   **`diff_sessions` matches on `file_hash` and tag NAME, never ids.** Two
+   analysts' cases number sources and tags independently, and a QC review
+   is precisely the case where the two sides came from different cases —
+   comparing ids reports every row as differing even when they agree
+   completely. There is a test for exactly that.
+
+
 ## Things that bite
 
 Split by subsystem under **[docs/notes/](docs/notes/)** — same entries, same
