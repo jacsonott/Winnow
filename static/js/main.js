@@ -56,7 +56,7 @@ import { loadKeymap, wireKeymap } from './keymap.js';
 import { wirePlugins } from './plugins.js';
 import { wireSearch } from './search.js';
 import { initAppearance, maybeOfferRemoteMode, wireSettings } from './settings.js';
-import { applyPageTabsSize, initSidebar, loadPageTabPrefs, renderPageTabs, wireSources } from './sources.js';
+import { applyPageTabsSize, initSidebar, wireSidebarResize, loadPageTabPrefs, renderPageTabs, wireSources } from './sources.js';
 import { wireSql } from './sql.js';
 import { S } from './state.js';
 import { updateTimeRangeButton } from './timeframe.js';
@@ -109,6 +109,7 @@ updateTimeRangeButton();
 initAppearance();
 
 initSidebar();
+wireSidebarResize();
 
 wireFileDrop();
 
