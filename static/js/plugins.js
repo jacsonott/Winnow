@@ -5,7 +5,7 @@ import { $, api, el, post, setBusy, toast } from './core.js';
 import { loadPlugins, openImportModal, pluginFormatById, queueFilesForFormat } from './importer.js';
 import { loadSources, openSource, renderPageTabs, syncTabSelection } from './sources.js';
 import { activeSqlTab, scheduleSqlTabSave, showGridTab, syncTabChrome } from './sql.js';
-import { setActiveSqlResult, sqlResultCsv, sqlRowKey, sqlTagsFor, tagChips, wireSqlAssist } from './sqlassist.js';
+import { setActiveSqlResult, sqlCopyResult, sqlDownloadCsv, sqlRowKey, sqlTagsFor, tagChips, wireSqlAssist } from './sqlassist.js';
 import { moveCursor } from './grid.js';
 import { S } from './state.js';
 import { confirmDialog, modal, promptDialog } from './ui.js';
@@ -485,17 +485,26 @@ export function sqlResultNodes(r) {
   };
   paint();
   if (r.tags) r.tags.repaint = paint;
-  const bar = el('div', 'note-status sql-result-bar');
-  bar.append(el('span', null,
+  // Status on the left, actions pushed to the right edge — the same shape
+  // as the toolbar above the editor (Copy schema / Tables ▾ / Run), so the
+  // two ends can never collide however long the status line gets.
+  const bar = el('div', 'sql-result-bar');
+  bar.append(el('span', 'note-status',
     `${r.rows.length.toLocaleString()} rows · ${r.elapsed_ms} ms${r.truncated ? ' · truncated' : ''}`
     + (r.tags ? ' · tags joined via rid' : '')));
-  const csvBtn = el('button', 'btn ghost sf-mini', 'CSV');
-  csvBtn.title = 'Download this result as CSV, in the displayed order';
-  csvBtn.onclick = () => sqlResultCsv(r.columns, sortedRows());
-  const saveBtn = el('button', 'btn ghost sf-mini', 'Save as table…');
+  const acts = el('div', 'sql-result-actions');
+  const copyBtn = el('button', 'btn ghost', 'Copy');
+  copyBtn.title = 'Copy to the clipboard with a header row — the selected rows, '
+    + 'or the whole result when nothing is selected';
+  copyBtn.onclick = () => sqlCopyResult(r.columns, sortedRows());
+  const csvBtn = el('button', 'btn ghost', 'CSV…');
+  csvBtn.title = 'Save this result as a CSV file, in the displayed order';
+  csvBtn.onclick = () => sqlDownloadCsv(r.columns, sortedRows());
+  const saveBtn = el('button', 'btn ghost', 'Save as table…');
   saveBtn.title = "Run the query in FULL (this preview may be truncated) and land the result as a new table in the case";
   saveBtn.onclick = () => saveResultAsTable();
-  bar.append(csvBtn, saveBtn);
+  acts.append(copyBtn, csvBtn, saveBtn);
+  bar.append(acts);
   return [bar, t];
 }
 
