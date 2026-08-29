@@ -6,10 +6,10 @@
     python update.py --dry-run                  show the plan and stop
     python update.py --rollback                 undo the last update
 
-Developing on Winnow itself? Sync to the tip of main instead of the
-latest release:
+Beta testing, or developing on Winnow itself? Sync to the tip of the
+develop branch instead of the latest release:
 
-    python update.py --main
+    python update.py --dev
 
 Airgapped analysis box? Fetch on a machine that has network:
 
@@ -64,9 +64,12 @@ def main(argv: list[str] | None = None) -> int:
                    help="fetch the latest release archive and exit, to carry to another machine")
     p.add_argument("--dest", metavar="DIR", default=".",
                    help="where --download-only writes (default: here)")
-    p.add_argument("--main", action="store_true",
-                   help="development: sync to the tip of the main branch rather than "
-                        "the latest release (unreleased code — same backup and rollback)")
+    p.add_argument("--dev", action="store_true",
+                   help="sync to the tip of the develop branch rather than the latest "
+                        "release — unreleased code, for beta testers and development "
+                        "(same backup, protected paths and rollback as any update)")
+    p.add_argument("--branch", metavar="NAME", default=None,
+                   help="with --dev, track this branch instead of develop")
     p.add_argument("--rollback", action="store_true", help="restore the version before the last update")
     p.add_argument("-y", "--yes", action="store_true", help="don't ask for confirmation")
     args = p.parse_args(argv)
@@ -78,17 +81,17 @@ def main(argv: list[str] | None = None) -> int:
             print("Restart Winnow to run it.")
             return 0
 
-        if args.main:
+        if args.dev:
             if args.from_file:
-                p.error("--main and --from are different sources; pick one")
-            tip = updater.check_main()
-            print(f"main is at {tip['short']}"
+                p.error("--dev and --from are different sources; pick one")
+            tip = updater.check_branch(args.branch or updater.DEV_BRANCH)
+            print(f"{tip['branch']} is at {tip['short']}"
                   + (f" — {tip['message']}" if tip["message"] else "")
                   + (f" ({tip['committed_at'][:10]})" if tip["committed_at"] else ""))
             if args.check:
-                print("Run `python update.py --main` to sync to it.")
+                print("Run `python update.py --dev` to sync to it.")
                 return 0
-            dest = Path(args.dest) / f"winnow-main-{tip['short']}.zip"
+            dest = Path(args.dest) / f"winnow-{tip['branch']}-{tip['short']}.zip"
             if args.download_only:
                 out = updater.download(tip["url"], dest)
                 print(f"Downloaded {out} ({out.stat().st_size / 1e6:.1f} MB).")
@@ -104,8 +107,9 @@ def main(argv: list[str] | None = None) -> int:
             if not args.yes and input("\nApply it? [y/N] ").strip().lower() not in ("y", "yes"):
                 print("Cancelled — nothing was changed.")
                 return 1
-            res = updater.apply_update(archive, HERE, source=f"main@{tip['sha']}")
-            print(f"\nSynced to main@{tip['short']} (version.py says {res['version']}).")
+            res = updater.apply_update(archive, HERE, source=f"{tip['branch']}@{tip['sha']}")
+            print(f"\nSynced to {tip['branch']}@{tip['short']} "
+                  f"(version.py says {res['version']}).")
             print(f"Backup of what was here: {res['backup']}")
             print("Undo with: python update.py --rollback")
             print("Restart Winnow to run it.")
