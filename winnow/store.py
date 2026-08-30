@@ -469,6 +469,24 @@ TAG_GROUP_COLUMN = "__tag__"
 RESERVED_COLUMN_NAMES = {"rid", "rank", "rowid", TAG_GROUP_COLUMN}
 
 
+def sniff_text_encoding(path: str) -> str:
+    """The encoding to open a text evidence file with — utf-8-sig unless a
+    UTF-16 byte-order mark says otherwise. Windows PowerShell 5.1's
+    Out-File and `>` write UTF-16LE by default, so UTF-16 CSVs are routine
+    DFIR inputs; decoded as UTF-8-with-replacement they turn into headers
+    full of NULs (which used to kill CREATE TABLE with "the query contains
+    a null character") and unreadable cells. BOM-less UTF-16 is left
+    alone — guessing without a BOM mislabels legitimate binary-ish text."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(2)
+    except OSError:
+        return "utf-8-sig"
+    if head in (b"\xff\xfe", b"\xfe\xff"):
+        return "utf-16"   # codec reads the BOM itself and picks LE/BE
+    return "utf-8-sig"
+
+
 def sanitize_columns(raw: list[str]) -> list[str]:
     """Make header names unique and safe to quote. Blank headers become col_N.
 
@@ -483,7 +501,12 @@ def sanitize_columns(raw: list[str]) -> list[str]:
     seen: dict[str, int] = {}
     used: set[str] = set()
     for i, name in enumerate(raw):
-        clean = (name or "").strip().lstrip("\ufeff") or f"col_{i + 1}"
+        # Strip C0 control characters (NUL and friends): they reach here
+        # from mis-decoded files, and a NUL in a header aborts CREATE TABLE
+        # with an error no analyst can act on. errors="replace" cells are
+        # data and stay as-is; a *name* must be printable and quotable.
+        name = "".join(ch for ch in (name or "") if ch >= " " or ch in "\t")
+        clean = name.strip().lstrip("\ufeff") or f"col_{i + 1}"
         if clean.lower() in RESERVED_COLUMN_NAMES:
             clean = f"{clean}_1"
         base = clean
@@ -558,7 +581,7 @@ def _flatten_json(obj: dict, max_depth: int | None) -> dict[str, str]:
     return out
 
 
-def _iter_json_records(path: str) -> Iterable[dict]:
+def _iter_json_records(path: str, bad: dict | None = None) -> Iterable[dict]:
     """Yields one dict per record. `.jsonl`/`.ndjson` (one JSON value per
     line — the genuinely streamable shape, never loaded fully into memory)
     vs a single `.json` document (a JSON array of records, a single record
@@ -572,15 +595,30 @@ def _iter_json_records(path: str) -> Iterable[dict]:
     without extra tooling)."""
     ext = os.path.splitext(path)[1].lower()
     if ext in (".jsonl", ".ndjson"):
-        with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
-            for line in f:
+        with open(path, "r", encoding=sniff_text_encoding(path), errors="replace") as f:
+            for lineno, line in enumerate(f, start=1):
                 line = line.strip()
                 if not line:
                     continue
-                obj = json.loads(line)
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError as e:
+                    # Same philosophy as CSV's ragged rows: one broken line
+                    # (a truncated write, a log rotation seam) must not cost
+                    # the analyst the million good lines around it. Counted
+                    # and reported, never silent — and if the CALLER passes
+                    # no collector (bad=None), the old raise stands, with
+                    # the FILE line number the analyst needs rather than
+                    # json's useless "line 1" of the single line.
+                    if bad is None:
+                        raise ValueError(f"Line {lineno}: {e.msg}") from e
+                    bad["count"] += 1
+                    if bad["count"] == 1:
+                        bad["first_line"], bad["first_error"] = lineno, e.msg
+                    continue
                 yield obj if isinstance(obj, dict) else {"value": obj}
         return
-    with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
+    with open(path, "r", encoding=sniff_text_encoding(path), errors="replace") as f:
         data = json.load(f)
     if isinstance(data, list):
         for obj in data:
@@ -1850,7 +1888,8 @@ class Store:
 
         # 1 MB read buffer: the default 8 KB means a 20 GB file is ~2.5M
         # read() syscalls before the csv layer even sees a byte.
-        fh = open(path, "r", encoding="utf-8-sig", errors="replace", newline="", buffering=1 << 20)
+        fh = open(path, "r", encoding=sniff_text_encoding(path), errors="replace",
+                  newline="", buffering=1 << 20)
         head = fh.read(64 * 1024)
         fh.seek(0)
         if delimiter is None:
@@ -1893,6 +1932,7 @@ class Store:
         total = 0
         ragged = 0
         t0 = time.time()
+        suspect_quotes = 0
         error: Exception | None = None
 
         # This per-row append loop is deliberate: a chunked
@@ -1903,11 +1943,26 @@ class Store:
         rows_iter = ([leftover_row] if leftover_row is not None else [])
         with self._ingest_synchronous_off():
             try:
+                prev_line = 0
                 for row in itertools.chain(rows_iter, reader):
                     if len(row) != ncols:
                         # Ragged row: pad or trim rather than dropping evidence.
                         ragged += 1
                         row = (row + [""] * ncols)[:ncols]
+                    # An unbalanced quote makes csv silently swallow every
+                    # following line into one field until the next quote (or
+                    # a hard error at the 128KB field limit) — dozens of
+                    # evidence lines vanish from the grid with the ragged
+                    # counter reading zero. The reader's line_num counts
+                    # PHYSICAL lines consumed, so a row that swallowed its
+                    # neighbours shows as a jump — one int compare per row
+                    # (a per-cell newline scan here benchmarked ingest 11%
+                    # slower). Legitimate quoted multi-line payloads (EVTX
+                    # XML) sit under the threshold; counted, not judged.
+                    line = reader.line_num
+                    if line - prev_line >= 10:
+                        suspect_quotes += 1
+                    prev_line = line
                     batch.append(tuple(row))
                     if len(sample) < SAMPLE_ROWS:
                         sample.append(row)
@@ -1940,7 +1995,22 @@ class Store:
                 self.drop_source(source_id)
                 raise
             except Exception as e:
-                error = e
+                # The rows in the pending batch parsed fine — the FAILURE is
+                # the line after them. Losing them made "keep what
+                # committed" quietly mean "lose up to a batch (20k rows) of
+                # good data before the bad line". Best-effort: if the
+                # failure was the commit itself (disk full), this second
+                # attempt fails too and what committed still stands.
+                if batch:
+                    with contextlib.suppress(Exception):
+                        total = self._commit_ingest_batch(insert, batch, source_id, total)
+                        batch.clear()
+                line = getattr(reader, "line_num", 0)
+                where = f"Line {line:,}: " if line else ""
+                kept = (f" — import stopped there; the {total:,} rows before it were kept"
+                        if total else "")
+                error = ValueError(f"{where}{e}{kept}")
+                error.__cause__ = e
             finally:
                 fh.close()
 
@@ -1958,6 +2028,10 @@ class Store:
             self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
 
         if error is not None:
+            if total == 0:
+                # Nothing ever committed: a zero-row source in the table
+                # list is pure noise that looks like a real (empty) import.
+                self.drop_source(source_id)
             raise error
 
         if build_fts and total:
@@ -1973,6 +2047,7 @@ class Store:
         rec["elapsed_sec"] = round(elapsed, 2)
         rec["rows_per_sec"] = int(total / elapsed) if elapsed > 0 else 0
         rec["ragged_rows"] = ragged
+        rec["suspect_quote_rows"] = suspect_quotes
         return rec
 
     def _commit_ingest_batch(self, insert_sql: str, batch: list[tuple], source_id: int, total: int) -> int:
@@ -2322,9 +2397,10 @@ class Store:
         max_depth = self._json_flatten_depth(flatten_mode, flatten_depth)
         seen_cols: list[str] = []
         seen_set: set[str] = set()
+        bad_prev = {"count": 0, "first_line": 0, "first_error": ""}
         sample_flat: list[dict[str, str]] = []
         record_count = 0
-        for rec in _iter_json_records(path):
+        for rec in _iter_json_records(path, bad=bad_prev):
             flat = _flatten_json(rec, max_depth)
             for k in flat:
                 if k not in seen_set:
@@ -2334,12 +2410,18 @@ class Store:
                 sample_flat.append(flat)
             record_count += 1
         if record_count == 0:
+            if bad_prev["count"]:
+                raise ValueError(
+                    f"File has no readable records — {bad_prev['count']} unreadable line(s), "
+                    f"first at line {bad_prev['first_line']}: {bad_prev['first_error']}")
             raise ValueError("File has no records")
         cols = sanitize_columns(seen_cols)
         key_by_col = dict(zip(cols, seen_cols))
         sample_rows = [[flat.get(key_by_col[c], "") for c in cols] for flat in sample_flat]
         types = [infer_type([r[i] for r in sample_rows]) for i in range(len(cols))] if sample_rows else ["text"] * len(cols)
-        return {"columns": cols, "sample_rows": sample_rows, "inferred_types": types, "record_count": record_count}
+        return {"columns": cols, "sample_rows": sample_rows, "inferred_types": types,
+                "record_count": record_count, "bad_records": bad_prev["count"],
+                "first_bad_line": bad_prev["first_line"]}
 
     def ingest_json(
         self,
@@ -2371,7 +2453,8 @@ class Store:
         seen_cols: list[str] = []
         seen_set: set[str] = set()
         record_count = 0
-        for rec in _iter_json_records(path):
+        bad_scan = {"count": 0, "first_line": 0, "first_error": ""}
+        for rec in _iter_json_records(path, bad=bad_scan):
             for k in _flatten_json(rec, max_depth):
                 if k not in seen_set:
                     seen_set.add(k)
@@ -2382,6 +2465,10 @@ class Store:
             if cancel is not None and record_count % 50_000 == 0 and cancel():
                 raise IngestCancelled(f"Import of {name or os.path.basename(path)} cancelled")
         if record_count == 0:
+            if bad_scan["count"]:
+                raise ValueError(
+                    f"File has no readable records — {bad_scan['count']} unreadable line(s), "
+                    f"first at line {bad_scan['first_line']}: {bad_scan['first_error']}")
             raise ValueError("File has no records")
 
         cols = sanitize_columns(seen_cols)
@@ -2408,10 +2495,14 @@ class Store:
         batch: list[tuple] = []
         total = 0
         t0 = time.time()
+        # Bad lines were already counted by the column scan; count again
+        # here (fresh collector) because THIS pass is the one that decides
+        # what actually lands in the table.
+        bad = {"count": 0, "first_line": 0, "first_error": ""}
         error: Exception | None = None
         with self._ingest_synchronous_off():
             try:
-                for rec in _iter_json_records(path):
+                for rec in _iter_json_records(path, bad=bad):
                     flat = _flatten_json(rec, max_depth)
                     row = [flat.get(key_by_col[c], "") for c in cols]
                     batch.append(tuple(row))
@@ -2436,7 +2527,15 @@ class Store:
                 self.drop_source(source_id)
                 raise
             except Exception as e:
-                error = e
+                # Keep the parsed-but-uncommitted batch, as in ingest_csv.
+                if batch:
+                    with contextlib.suppress(Exception):
+                        total = self._commit_ingest_batch(insert, batch, source_id, total)
+                        batch.clear()
+                kept = (f" — import stopped; the {total:,} records before the failure were kept"
+                        if total else "")
+                error = ValueError(f"{e}{kept}")
+                error.__cause__ = e
 
         types = [infer_type([r[i] for r in sample]) for i in range(ncols)] if sample else ["text"] * ncols
         colmeta = [{"name": c, "type": t} for c, t in zip(cols, types)]
@@ -2444,6 +2543,8 @@ class Store:
             self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
 
         if error is not None:
+            if total == 0:
+                self.drop_source(source_id)   # same no-husk rule as ingest_csv
             raise error
 
         if build_fts and total:
@@ -2453,6 +2554,8 @@ class Store:
         rec = self.get_source(source_id)
         rec["elapsed_sec"] = round(elapsed, 2)
         rec["rows_per_sec"] = int(total / elapsed) if elapsed > 0 else 0
+        rec["bad_records"] = bad["count"]
+        rec["first_bad_line"] = bad["first_line"]
         return rec
 
     def ingest_rows(
@@ -2835,7 +2938,9 @@ class Store:
                 job["rows_done"] = sum(r.get("row_count") or 0 for r in results)
                 job["source_ids"] = [r["id"] for r in results]
                 job["result"] = [
-                    {k: r.get(k) for k in ("id", "name", "row_count", "elapsed_sec", "rows_per_sec", "ragged_rows")}
+                    {k: r.get(k) for k in ("id", "name", "row_count", "elapsed_sec", "rows_per_sec",
+                                           "ragged_rows", "suspect_quote_rows", "bad_records",
+                                           "first_bad_line")}
                     for r in results
                 ]
         except IngestCancelled:

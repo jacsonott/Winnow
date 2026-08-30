@@ -828,7 +828,9 @@ def api_assoc_open(request: Request, body: AssocOpenBody):
     for f in files:
         try:
             started.append(_assoc_ingest(f))
-        except ValueError as e:
+        except Exception as e:  # noqa: BLE001 — a corrupt .db raises
+            # sqlite3.DatabaseError and a truncated .xlsx BadZipFile, not
+            # ValueError; one unreadable file must skip, not 500 the open.
             skipped.append({"file": os.path.basename(f), "reason": str(e)})
     return {"case": STORE.path, "temp": True, "started": started, "skipped": skipped}
 
@@ -1362,6 +1364,15 @@ async def api_ingest_upload(
             os.remove(tmp)
 
 
+def _decode_preview_bytes(raw: bytes) -> str:
+    # Same UTF-16 BOM handling as the real ingest (store.sniff_text_encoding)
+    # so the preview an analyst approves is the table they actually get —
+    # PowerShell's UTF-16LE exports were previewing as NUL-riddled noise.
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return raw.decode("utf-16", errors="replace")
+    return raw.decode("utf-8-sig", errors="replace")
+
+
 @app.post("/api/ingest/preview")
 async def api_ingest_preview(
     file: UploadFile = File(...),
@@ -1369,7 +1380,7 @@ async def api_ingest_preview(
     has_header: bool = Form(True),
 ):
     raw = await file.read(512 * 1024)  # bounded sample — full parse happens at real ingest time
-    text = raw.decode("utf-8-sig", errors="replace")
+    text = _decode_preview_bytes(raw)
     try:
         return store().preview_csv_text(text, delimiter=delimiter or None, has_header=has_header)
     except Exception as e:
@@ -1526,7 +1537,7 @@ def api_ingest_preview_path(body: PreviewPath):
             # Same bounded sample the upload preview reads — never the file.
             with open(body.path, "rb") as f:
                 raw = f.read(512 * 1024)
-            text = raw.decode("utf-8-sig", errors="replace")
+            text = _decode_preview_bytes(raw)
             return store().preview_csv_text(text, delimiter=body.delimiter or None,
                                             has_header=body.has_header)
         if kind == "json":
@@ -3165,7 +3176,9 @@ def main() -> None:
             try:
                 job = _assoc_ingest(f)
                 print(f"Quick-look import queued: {job['file']} ({job['kind']})", flush=True)
-            except ValueError as e:
+            except Exception as e:  # noqa: BLE001 — same reasoning as the
+                # /api/assoc/open loop: a corrupt double-clicked file must
+                # not crash the server the analyst is waiting on.
                 print(f"Skipped {os.path.basename(f)}: {e}", flush=True)
         for f in args.open_files:
             print(f"Importing {f} ...", flush=True)
@@ -3173,6 +3186,9 @@ def main() -> None:
             print(f"  {rec['row_count']:,} rows in {rec['elapsed_sec']}s ({rec['rows_per_sec']:,}/s)")
             if rec.get("ragged_rows"):
                 print(f"  {rec['ragged_rows']:,} row(s) had the wrong column count and were padded/trimmed to fit")
+            if rec.get("suspect_quote_rows"):
+                print(f"  {rec['suspect_quote_rows']:,} row(s) contain very long multi-line fields — "
+                      "check for a stray quote if the row count looks low")
         print(f"Winnow on {url}  (case: {os.path.abspath(case_path)})")
     else:
         print(f"Winnow on {url}  (home screen — no case open)")
