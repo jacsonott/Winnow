@@ -358,3 +358,39 @@ def test_malformed_mimeapps_maps_to_400_not_500(client, tmp_path, monkeypatch):
     r = c.post("/api/assoc/register", json={"exts": [".csv"]}, headers=HEADERS)
     assert r.status_code == 400
     assert "malformed" in r.json()["detail"]
+
+
+def test_the_winnow_case_type_is_in_the_catalogue_and_default_ok():
+    """The one builtin that may be the double-click DEFAULT: nothing else
+    owns .db-winnow, so claiming it can't steal a file from another app."""
+    types = {t["ext"]: t for t in assoc.supported_types()}
+    case = types[".db-winnow"]
+    assert case["default_ok"] is True
+    assert case["mime"] == "application/x-winnow-case"
+    # And the generic .db is now handler-only evidence, not "Winnow case".
+    assert types[".db"]["default_ok"] is False
+    assert "case" not in types[".db"]["label"].lower()
+
+
+def test_icon_files_exist_for_each_platform_flavour():
+    for kind in ("ico", "png", "svg"):
+        assert Path(assoc.icon_file(kind)).is_file(), kind
+
+
+def test_linux_register_installs_the_desktop_and_mime_icon(lin, tmp_path, monkeypatch):
+    monkeypatch.setattr(assoc.shutil, "which", lambda n: None)  # no theme-cache refresher
+    case, cat = _cat(".db-winnow")
+    lin.register(case, cat)
+    desktop = (tmp_path / "share/applications/winnow.desktop").read_text()
+    assert "Icon=" in desktop and "winnow-icon-256.png" in desktop
+    icon = tmp_path / "share/icons/hicolor/scalable/mimetypes/application-x-winnow-case.svg"
+    assert icon.is_file(), "the case mime should get a file-manager icon"
+    lin.unregister(case, cat)
+    assert not icon.exists(), "the mime icon goes when the type is unregistered"
+
+
+def test_windows_register_sets_a_default_icon(win):
+    case, cat = _cat(".db-winnow")
+    win.register(case, cat)
+    di = win.reg.keys["Software\\Classes\\Winnow.File\\DefaultIcon"][None]
+    assert di.endswith("winnow.ico,0")

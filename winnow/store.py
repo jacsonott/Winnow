@@ -82,6 +82,18 @@ DEFAULT_IMPORT_EXTENSIONS = {".csv", ".tsv", ".txt", ".psv", ".json", ".jsonl", 
 # blind — which tables to pull out is a per-file choice (see
 # preview_sqlite_tables) — so directory import ignores them while the
 # server-disk file browser still lists them.
+# Winnow's own case files. A distinct extension is what lets an OS
+# association, a file manager, and the launcher tell "a case to open" from
+# "a SQLite database to ingest as evidence" (a Chromium History.db and a
+# Winnow case are both SQLite; only the association target differs). It
+# still IS an ordinary SQLite file — a curious analyst can rename it to
+# `.db` and open it in any SQLite tool — the suffix is a label, not a
+# format. Deliberately NOT in SQLITE_IMPORT_EXTENSIONS: opening a case as
+# if it were evidence to import is exactly the confusion this separates.
+# Historic cases are `.db`; those still open (the launcher sniffs content,
+# is_winnow_case_file), only NEW cases take this suffix. One definition,
+# imported everywhere a case file is created or recognised.
+CASE_SUFFIX = ".db-winnow"
 SQLITE_IMPORT_EXTENSIONS = {".db", ".sqlite", ".sqlite3", ".db-wal"}
 # Excel workbooks route the same way SQLite files do — which sheets to
 # import is a per-file choice (see preview_xlsx_sheets), so directory

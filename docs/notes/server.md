@@ -150,3 +150,22 @@ see [docs/notes/README.md](README.md) for the whole set.
   touching the panel relies on conftest pointing the spawned server's
   `XDG_DATA_HOME`/`XDG_CONFIG_HOME` at tmp, or a green test would edit
   the developer's real ~/.config/mimeapps.list.
+
+- **A Winnow case is `.db-winnow`, evidence to import is `.db`.** New
+  case files (new-case, save-as, quick-looks) take `store.CASE_SUFFIX`
+  (`.db-winnow`) so an OS association, a file manager and the launcher
+  can tell "a case to OPEN" from "a SQLite database to INGEST as
+  evidence" — a Chromium `History.db` and a Winnow case are both
+  SQLite, and only the double-click target differs. It is still an
+  ordinary SQLite file; the suffix is a label, not a format. The
+  extension lives in ONE constant imported everywhere a case file is
+  named. Backward compatibility is by design: historic `.db` cases open
+  unchanged, because `is_winnow_case_file` and the open path sniff
+  CONTENT (SQLite header + the sources/tag_defs/row_tags tables), never
+  the extension — only NEW cases take the new suffix, nothing is
+  migrated. In the association catalogue `.db-winnow` is the one builtin
+  type that is `default_ok`: nothing else owns it, so making Winnow its
+  default can't steal a file from Excel or a DB browser the way claiming
+  `.db`/`.xlsx` would. The wheat icon rides the same association —
+  DefaultIcon on the Windows ProgId, the `.desktop` Icon= and a
+  hicolor `application-x-winnow-case` mimetype icon on Linux.

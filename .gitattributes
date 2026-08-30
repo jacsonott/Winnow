@@ -18,3 +18,7 @@ tests/               export-ignore
 bench/               export-ignore
 CLAUDE.md            export-ignore
 requirements-dev.txt export-ignore
+
+# Brand icons are binary — never line-ending-convert or diff them as text.
+*.png binary
+*.ico binary

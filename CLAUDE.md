@@ -204,6 +204,13 @@ examples/plugins/  Committed example plugins, one per extension point — treat
                     plugins/.
 static/index.html  App shell. No framework. #home and #app are siblings; only
                     one is ever visible.
+static/icons/      The brand mark (a wheat stalk — winnowing) as SVG, PNGs
+                    and a multi-resolution winnow.ico. Serves the favicon
+                    and is what OS file associations point at:
+                    DefaultIcon on Windows, the .desktop Icon= and the
+                    application-x-winnow-case mimetype icon on Linux (see
+                    winnow/assoc.py). Ships in the release archive (static/
+                    is not export-ignored); PNG/ICO are marked binary.
 static/js/         The frontend, one ES module per subsystem (main.js is the
                     entry; core.js is the only module nothing imports *into*).
                     No build step — `<script type="module">` is native, and
@@ -238,7 +245,7 @@ static/style.css   Token-driven theming: 5 styles (panel/phosphor/blueprint/
 ```
 
 Run: `python server.py` opens the home screen (recent cases, no case loaded
-yet). `python server.py --case case.db --open sample.csv` still jumps
+yet). `python server.py --case case.db-winnow --open sample.csv` still jumps
 straight into a case, unchanged — that's the documented smoke-test flow below.
 
 ## Invariants — don't break these

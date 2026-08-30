@@ -95,6 +95,9 @@ def test_save_as_moves_the_file_and_registers_it(client, tmp_path):
     assert not os.path.exists(old_path), "the quicklook file moved, not copied"
     assert os.path.isfile(saved["path"])
     assert "quicklook" not in saved["path"]
+    # A saved case takes Winnow's own extension, not a bare .db.
+    from winnow.store import CASE_SUFFIX
+    assert saved["path"].endswith(CASE_SUFFIX)
     # Registered under the analyst's name, data intact through the
     # close→rename→reopen dance.
     rec = WS.cases.find_by_path(saved["path"])
@@ -286,3 +289,26 @@ def test_save_as_refuses_while_an_import_runs(client, tmp_path, monkeypatch):
     # The quick-look is untouched — still open, still temp.
     assert c.get("/api/case/current", headers=HEADERS).json()["temp"] is True
     server.STORE.close()
+
+
+def test_a_legacy_dot_db_case_still_opens(client, tmp_path):
+    """Existing cases created before the .db-winnow switch are plain .db.
+    The launcher/open path sniffs content, not extension, so they must
+    keep opening unchanged — the extension is for NEW cases only."""
+    from winnow.store import Store
+    server, c = client
+    legacy = tmp_path / "old_investigation.db"
+    Store(str(legacy)).close()          # a real winnow case with the old suffix
+    server.STORE = None
+    res = c.post("/api/case/open", json={"path": str(legacy)}, headers=HEADERS)
+    assert res.status_code == 200
+    cur = c.get("/api/case/current", headers=HEADERS).json()
+    assert cur["name"] == "old_investigation"
+    assert cur["temp"] is False
+    server.STORE.close()
+
+
+def test_new_quicklook_path_uses_the_winnow_suffix(client):
+    from winnow.store import CASE_SUFFIX
+    server, c = client
+    assert server._new_temp_case_path().endswith(CASE_SUFFIX)
