@@ -3427,7 +3427,11 @@ class Store:
     def delete_merge(self, merge_id: int) -> None:
         with self.lock, self.db:
             self.db.execute("DELETE FROM merges WHERE id=?", (merge_id,))
-            self.db.execute("DELETE FROM open_tabs WHERE source_id=?", (-merge_id,))
+            # Everything keyed by the merge's NEGATIVE source id. Tags and
+            # notes aren't here because a merge has none of its own — they
+            # live on the member rows (invariant #9) and survive on purpose.
+            for t in ("open_tabs", "layouts", "saved_views"):
+                self.db.execute(f"DELETE FROM {t} WHERE source_id=?", (-merge_id,))
 
     def drop_source(self, source_id: int) -> None:
         src = self.get_source(source_id)
