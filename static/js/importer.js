@@ -528,7 +528,7 @@ function openUnitPicker(src, { initial, onConfirm, onCancel } = {}, cfg) {
    this file (see wireFileDrop()'s call site) — active whenever a case is
    open ($('app') visible), regardless of which tab/modal is currently
    showing, same as "Import files…" always being reachable from the
-   Session menu.
+   Case menu.
 
    dataTransfer.types.includes('Files') is the gate on every one of these
    listeners — an OS file drag carries a 'Files' type; an in-page drag
