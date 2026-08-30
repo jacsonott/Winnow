@@ -26,6 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from winnow import browser
+from winnow import instances
 from winnow import paths
 from winnow import plugin_api
 from winnow import updater
@@ -64,6 +65,10 @@ async def _lifespan(_app: FastAPI):
     try:
         yield
     finally:
+        # Take this server out of the instance registry FIRST, so a launcher
+        # racing our shutdown doesn't pick a server that is mid-teardown.
+        with contextlib.suppress(Exception):
+            instances.unregister()
         old, STORE = STORE, None
         if old is not None:
             # Also cancels and joins running ingest jobs (bounded by one
@@ -526,6 +531,10 @@ def api_case_open(body: CaseOpen):
         body.path, name=os.path.splitext(os.path.basename(body.path))[0]
     )
     WS.cases.touch_opened(rec["id"])
+    # The instance registry is how an association-launch decides whether this
+    # server is reusable; a case opening here is what makes it not-idle.
+    with contextlib.suppress(Exception):
+        instances.set_case(body.path)
     # The effective plugin set is per-case now (case_settings overrides), so
     # a case switch is a policy change: reload so an "on in this case" tab
     # exists the moment the case does, and an "off in this case" plugin's
@@ -2567,6 +2576,14 @@ def main() -> None:
         browser.open_when_ready(url, args.host, args.port,
                                 app_mode=not args.browser_tab,
                                 profile_dir=args.browser_profile)
+
+    # Registered before uvicorn blocks, not in the lifespan: the lifespan
+    # doesn't know the port (uvicorn owns it by then), and a launcher that
+    # probes an entry a moment before bind completes just gets a failed
+    # probe and moves on — running() treats the file as a hint, the port as
+    # the truth.
+    with contextlib.suppress(Exception):
+        instances.register(args.port, case_path if case_path else None)
 
     import uvicorn
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")

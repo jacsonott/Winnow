@@ -64,7 +64,75 @@ from .store import DEFAULT_TAGS
 
 WORKSPACE_DIR = paths.INSTALL_ROOT / "workspace"
 
-_LOCK = threading.RLock()
+class _WorkspaceLock:
+    """The workspace lock, upgraded from in-process to cross-process.
+
+    It was a bare threading.RLock, which was correct while exactly one
+    server ever touched workspace/ — and quietly wrong the moment file
+    associations made a second instance a supported flow. Two servers
+    doing read-modify-write on the same cases.json can interleave: both
+    read, both write, and the last writer silently drops the other's
+    entry. The analyst's case vanishes from the home screen with no error
+    anywhere.
+
+    So every `with _LOCK:` now also holds an advisory lock on
+    workspace/.lock for the OUTERMOST acquisition (re-entrant, like the
+    RLock it wraps — depth is tracked per-thread so nested `with` blocks
+    don't deadlock or release early). fcntl.flock on POSIX, msvcrt.locking
+    on Windows; both advisory, which is fine — the only writers are Winnow
+    processes, which all come through here.
+
+    The lock file lives inside WORKSPACE_DIR, resolved at acquire time
+    rather than import time so the test suite's per-test WORKSPACE_DIR
+    monkeypatch is honoured."""
+
+    def __init__(self):
+        self._rlock = threading.RLock()
+        self._depth = threading.local()
+        self._fd = threading.local()
+
+    def __enter__(self):
+        self._rlock.acquire()
+        depth = getattr(self._depth, "n", 0)
+        if depth == 0:
+            lock_path = _ensure_dir() / ".lock"
+            fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+            try:
+                if os.name == "posix":
+                    import fcntl
+                    fcntl.flock(fd, fcntl.LOCK_EX)
+                else:  # pragma: no cover - Windows
+                    import msvcrt
+                    msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+            except OSError:
+                # A filesystem without advisory locks degrades to the old
+                # single-process behaviour rather than failing every save.
+                pass
+            self._fd.fd = fd
+        self._depth.n = depth + 1
+        return self
+
+    def __exit__(self, *exc):
+        depth = self._depth.n = getattr(self._depth, "n", 1) - 1
+        if depth == 0:
+            fd = getattr(self._fd, "fd", None)
+            if fd is not None:
+                try:
+                    if os.name == "posix":
+                        import fcntl
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                    else:  # pragma: no cover - Windows
+                        import msvcrt
+                        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    pass
+                os.close(fd)
+                self._fd.fd = None
+        self._rlock.release()
+        return False
+
+
+_LOCK = _WorkspaceLock()
 
 
 def _ensure_dir() -> Path:
