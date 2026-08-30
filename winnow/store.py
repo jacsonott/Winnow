@@ -6440,6 +6440,167 @@ class Store:
         safe = self._SESSION_NAME_RE.sub("_", name).strip() or "session"
         return os.path.join(self._sessions_dir(), f"{safe}.winnow_case.json")
 
+    # ------------------------------------------------ copying into another case
+
+    def copy_sources_to(self, target_path: str, source_ids: list[int]) -> dict:
+        """Copy sources — rows, tags, notes, layout, saved views, derived
+        columns and their values — from this case into another case file.
+
+        The flow this serves: a file opened by double-click lands in a
+        temporary quick-look case, the analyst tags a few rows, then wants
+        that work in the real investigation's case. No re-parse: the rows
+        are already TEXT in src_N, so ATTACH + INSERT..SELECT moves them at
+        SQLite speed, rid-for-rid — and rid preservation is what keeps the
+        copied tags and notes pointing at the same evidence rows
+        (invariant #1's contiguity guarantee survives because the table is
+        copied whole).
+
+        The mechanics run THROUGH THE TARGET, not the source: the target is
+        opened as a full Store — which is what runs its schema migrations,
+        so a case created by an older Winnow gains any missing tables
+        before anything writes — and this case's file is ATTACHed to the
+        target's writer connection read-only-by-discipline (no statement
+        here ever writes through the attachment; WAL makes the concurrent
+        read of our live file safe). Opening the target as a Store also
+        takes its case lock, which is the exclusivity that makes writing
+        into it correct at all — and why a target that is OPEN IN ANOTHER
+        WINNOW is refused up front with the holder named, rather than
+        risking two servers' in-memory state disagreeing about one file.
+
+        Tags are matched into the target BY NAME, never id — the same rule
+        session import and the QC diff use, for the same reason: two cases
+        number their tags independently. Missing names are created with
+        the source's colour and hotkey (hotkey dropped on collision).
+
+        FTS is deliberately not copied; has_fts lands 0 and the target
+        rebuilds in the background when opened. Merges are refused: their
+        member ids are meaningless in the target."""
+        target_path = os.path.abspath(target_path)
+        if target_path == os.path.abspath(self.path):
+            raise ValueError("That is this case — pick a different one to copy into")
+        if not os.path.isfile(target_path):
+            raise ValueError(f"No case file at {target_path}")
+        for sid in source_ids:
+            if sid < 0:
+                raise ValueError("Merges can't be copied — their member tables can be, individually")
+        holder = probe_case_lock(target_path)
+        if holder:
+            raise ValueError(
+                f"That case is open in another Winnow — {describe_case_lock(holder)}. "
+                "Close it there first.")
+
+        t = Store(target_path)
+        try:
+            return self._copy_sources_into(t, source_ids)
+        finally:
+            t.close()
+
+    def _copy_sources_into(self, t: "Store", source_ids: list[int]) -> dict:
+        src_rows = {}
+        with self.lock:
+            self.db.commit()   # everything tagged a moment ago is visible to the attach
+            for sid in source_ids:
+                row = self.db.execute("SELECT * FROM sources WHERE id=?", (sid,)).fetchone()
+                if not row:
+                    raise KeyError(f"No source {sid}")
+                src_rows[sid] = dict(row)
+            tag_defs = [dict(r) for r in self.db.execute("SELECT * FROM tag_defs ORDER BY id")]
+
+        copied = []
+        with t.lock, t.db:
+            t.db.execute("ATTACH ? AS srccase", (self.path,))
+            try:
+                tag_map = t._map_tags_by_name(tag_defs)
+                shared_cols = [c for c in ("name", "path", "table_name", "row_count",
+                                           "columns", "file_hash", "imported_at", "nickname")]
+                for sid in source_ids:
+                    src = src_rows[sid]
+                    cur = t.db.execute(
+                        f"INSERT INTO sources({','.join(shared_cols)}, has_fts) "
+                        f"VALUES ({','.join('?' * len(shared_cols))}, 0)",
+                        [src.get(c) for c in shared_cols])
+                    new_id = cur.lastrowid
+                    new_table = f"src_{new_id}"
+                    # Recreate the table from the source's own DDL rather than
+                    # rebuilding from the column list — preserves exact quoting
+                    # and column order for any header sanitize_columns produced.
+                    ddl = t.db.execute(
+                        "SELECT sql FROM srccase.sqlite_master WHERE type='table' AND name=?",
+                        (src["table_name"],)).fetchone()[0]
+                    t.db.execute(ddl.replace(f'"{src["table_name"]}"', f'"{new_table}"', 1)
+                                 .replace(src["table_name"], new_table, 1))
+                    t.db.execute("UPDATE sources SET table_name=? WHERE id=?", (new_table, new_id))
+                    t.db.execute(f"INSERT INTO {q(new_table)} SELECT * FROM srccase.{q(src['table_name'])}")
+
+                    stats = {"tags": 0, "notes": 0, "derived": 0}
+                    for old_tag, new_tag in tag_map.items():
+                        stats["tags"] += t.db.execute(
+                            "INSERT OR IGNORE INTO row_tags(source_id, rid, tag_id) "
+                            "SELECT ?, rid, ? FROM srccase.row_tags WHERE source_id=? AND tag_id=?",
+                            (new_id, new_tag, sid, old_tag)).rowcount
+                    stats["notes"] = t.db.execute(
+                        "INSERT OR IGNORE INTO row_notes(source_id, rid, note) "
+                        "SELECT ?, rid, note FROM srccase.row_notes WHERE source_id=?",
+                        (new_id, sid)).rowcount
+                    t.db.execute(
+                        "INSERT OR REPLACE INTO layouts(source_id, payload) "
+                        "SELECT ?, payload FROM srccase.layouts WHERE source_id=?",
+                        (new_id, sid))
+                    t.db.execute(
+                        "INSERT INTO saved_views(source_id, name, payload, saved_at) "
+                        "SELECT ?, name, payload, saved_at FROM srccase.saved_views WHERE source_id=?",
+                        (new_id, sid))
+
+                    # Derived columns: definitions re-pointed, values table
+                    # copied whole. Same DDL-rewrite trick as the source table.
+                    drv_old, drv_new = f"drv_{sid}", f"drv_{new_id}"
+                    drv_ddl = t.db.execute(
+                        "SELECT sql FROM srccase.sqlite_master WHERE type='table' AND name=?",
+                        (drv_old,)).fetchone()
+                    if drv_ddl:
+                        t.db.execute(drv_ddl[0].replace(f'"{drv_old}"', f'"{drv_new}"', 1)
+                                     .replace(drv_old, drv_new, 1))
+                        t.db.execute(f"INSERT INTO {q(drv_new)} SELECT * FROM srccase.{q(drv_old)}")
+                    dcols = t.db.execute(
+                        "SELECT * FROM srccase.derived_columns WHERE source_id=? ORDER BY id",
+                        (sid,)).fetchall()
+                    for d in dcols:
+                        dd = dict(d)
+                        t.db.execute(
+                            "INSERT INTO derived_columns(source_id, name, input_column, op_id, "
+                            " params, status, parse_failures, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                            (new_id, dd["name"], dd["input_column"], dd["op_id"], dd["params"],
+                             dd["status"], dd.get("parse_failures"), dd.get("created_at")))
+                    stats["derived"] = len(dcols)
+
+                    t.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (new_id,))
+                    copied.append({"id": new_id, "name": src["name"],
+                                   "rows": src["row_count"], **stats})
+            finally:
+                with contextlib.suppress(sqlite3.Error):
+                    t.db.execute("DETACH srccase")
+        return {"target": t.path, "copied": copied}
+
+    def _map_tags_by_name(self, incoming_defs: list[dict]) -> dict:
+        """{incoming tag id -> this case's tag id}, creating what's missing.
+        Caller holds self.lock inside a transaction."""
+        mine = {r["name"]: r["id"] for r in self.db.execute("SELECT id, name FROM tag_defs")}
+        taken_keys = {r[0] for r in self.db.execute(
+            "SELECT hotkey FROM tag_defs WHERE hotkey IS NOT NULL")}
+        out = {}
+        for d in incoming_defs:
+            if d["name"] in mine:
+                out[d["id"]] = mine[d["name"]]
+                continue
+            hotkey = d.get("hotkey") if d.get("hotkey") not in taken_keys else None
+            if hotkey:
+                taken_keys.add(hotkey)
+            cur = self.db.execute(
+                "INSERT INTO tag_defs(name, color, hotkey) VALUES (?,?,?)",
+                (d["name"], d.get("color") or "#888888", hotkey))
+            mine[d["name"]] = out[d["id"]] = cur.lastrowid
+        return out
+
     # ------------------------------------------------- sessions in the case
 
     def save_session(self, name: str) -> dict:

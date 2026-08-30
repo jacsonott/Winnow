@@ -670,6 +670,26 @@ def api_case_open(body: CaseOpen):
     return {"sources": STORE.list_sources(), "name": rec["name"]}
 
 
+class CopySourcesBody(BaseModel):
+    target_path: str
+    source_ids: list[int]
+
+
+@app.post("/api/case/copy_sources")
+def api_case_copy_sources(body: CopySourcesBody):
+    """Copy sources from the open case into another case file — the "save
+    these quick-look tables into my real case" flow. A target open in
+    another Winnow is refused with the holder named (409, same contract as
+    opening a locked case)."""
+    try:
+        return store().copy_sources_to(body.target_path, body.source_ids)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        code = 409 if "another Winnow" in str(e) else 400
+        raise HTTPException(code, str(e))
+
+
 @app.post("/api/case/compact")
 def api_case_compact():
     """VACUUM the open case file. Long-running and explicitly analyst-
