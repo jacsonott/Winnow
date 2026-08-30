@@ -32,13 +32,16 @@ def test_the_default_policy_is_in_the_catalogue():
         assert types[ext]["default_ok"] is True, ext
 
 
-def test_plugin_extensions_join_the_catalogue_handler_only():
+def test_plugin_extensions_join_the_catalogue_default_eligible():
     fmts = [{"plugin": "mft_usn", "label": "NTFS $MFT", "extensions": [".mft", ".MFT"]},
             {"plugin": "weird", "label": "No ext", "extensions": [], "filename_patterns": ["$J"]},
             {"plugin": "greedy", "label": "CSV again", "extensions": [".csv"]}]
     types = {t["ext"]: t for t in assoc.supported_types(fmts)}
     assert types[".mft"]["source"] == "mft_usn"
-    assert types[".mft"]["default_ok"] is False       # unvetted, never default
+    # Default-ELIGIBLE — but only ever via an explicit analyst choice
+    # (the new-extension launch prompt, or the panel button); nothing
+    # claims a default silently.
+    assert types[".mft"]["default_ok"] is True
     assert types[".csv"]["source"] == "builtin"        # builtin wins a clash
     # Pattern-only formats ($MFT, $J) contribute nothing — extensionless
     # files can't be associated on either OS.
@@ -537,3 +540,33 @@ def test_windows_icon_refresh_fires_only_on_a_changed_icon(tmp_path, monkeypatch
     assert w.refresh_icons(cat) is True
     assert pokes, "a changed icon must poke Explorer"
     assert w.refresh_icons(cat) is False        # hash re-recorded: settled
+
+
+# ---------------------------------------------------------- launch prompt
+
+
+def test_types_carry_the_prompted_flag_and_the_route_records_it(client):
+    server, c = client
+    t0 = {t["ext"]: t for t in c.get("/api/assoc/types", headers=HEADERS).json()["types"]}
+    assert t0[".csv"]["prompted"] is False
+    assert c.post("/api/assoc/prompted", json={"exts": [".csv", ".tsv"]},
+                  headers=HEADERS).status_code == 200
+    t1 = {t["ext"]: t for t in c.get("/api/assoc/types", headers=HEADERS).json()["types"]}
+    assert t1[".csv"]["prompted"] is True and t1[".tsv"]["prompted"] is True
+    assert t1[".jsonl"]["prompted"] is False   # only what was answered
+
+
+def test_an_explicit_default_answers_the_prompt_for_that_extension(client):
+    server, c = client
+    c.post("/api/assoc/default", json={"exts": [".csv"]}, headers=HEADERS)
+    t = {x["ext"]: x for x in c.get("/api/assoc/types", headers=HEADERS).json()["types"]}
+    assert t[".csv"]["prompted"] is True
+
+
+def test_a_plugin_extension_may_become_default_with_consent(client, monkeypatch):
+    import server as srv
+    monkeypatch.setattr(srv, "_assoc_catalogue", lambda: assoc.supported_types(
+        [{"plugin": "mft_usn", "label": "NTFS $MFT", "extensions": [".mft"]}]))
+    server, c = client
+    r = c.post("/api/assoc/default", json={"exts": [".mft"]}, headers=HEADERS)
+    assert r.status_code == 200

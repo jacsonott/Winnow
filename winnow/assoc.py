@@ -98,7 +98,12 @@ def supported_types(plugin_formats: list[dict] | None = None) -> list[dict]:
                 # No standard mime resolves for a novel extension, so
                 # Linux needs the glob from our mime package (below).
                 "mime": f"application/x-winnow{ext.replace('.', '-')}",
-                "default_ok": False,
+                # Default-ELIGIBLE, but never default silently: a plugin
+                # extension only becomes the double-click default through
+                # an explicit analyst choice (the new-extension launch
+                # prompt, or the panel's button). That consent is what the
+                # old blanket handler-only rule stood in for.
+                "default_ok": True,
                 "source": fmt.get("plugin", "plugin"),
             })
     return out

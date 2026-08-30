@@ -138,8 +138,13 @@ see [docs/notes/README.md](README.md) for the whole set.
   extensions may become the DEFAULT app (`default_ok`) versus Open With
   handler only — .txt/.json/.db/.xlsx/.xlsm/.sqlite* have real owners
   (Excel, editors, DB tools) and stealing their double-click is how a
-  tool gets uninstalled. Plugin extensions are handler-only because they
-  aren't vetted (a plugin may claim .zip). `/api/assoc/default` refuses
+  tool gets uninstalled. Plugin extensions are default-ELIGIBLE but only
+  ever via explicit consent — the new-extension launch prompt (fires
+  once per extension the first boot after the catalogue grows, only on
+  machines with at least one registered type; any answer including "Not
+  now" is recorded in assoc_prompted_exts and only new extensions ask
+  again) or the panel's own button. Nothing claims a default silently,
+  which is what the old blanket handler-only rule stood in for. `/api/assoc/default` refuses
   non-default_ok types with a 400 — the UI not offering the button is
   not enforcement. All `/api/assoc/*` registration routes are
   loopback-only, like `/api/assoc/open`. Two platform honesty rules:

@@ -5,8 +5,8 @@
    posts back choices. On macOS the panel says why it's empty instead of
    pretending. */
 
-import { api, el, post, toast } from './core.js';
-import { confirmDialog } from './ui.js';
+import { $, api, el, post, toast } from './core.js';
+import { confirmDialog, modal } from './ui.js';
 
 async function types() {
   return api('/api/assoc/types');
@@ -80,6 +80,56 @@ export function buildAssocPanel(b) {
     }
   }
   paint();
+}
+
+/* On launch: when the catalogue has grown extensions nobody was ever
+   asked about — a Winnow update adding a type, or a newly installed
+   plugin — ask once whether Winnow should be their default. Only on a
+   machine that actually uses associations (something is registered);
+   any answer, including Not now, is recorded and only genuinely NEW
+   extensions raise this again. */
+export async function maybeOfferDefaultPrompt() {
+  let info;
+  try { info = await types(); } catch { return; }
+  if (!PLATFORM_LABEL[info.platform]) return;
+  if (!info.types.some((t) => t.registered)) return;
+  const fresh = info.types.filter((t) => t.default_ok && !t.prompted && !t.default);
+  if (!fresh.length) return;
+  const exts = fresh.map((t) => t.ext);
+  const names = exts.join(', ');
+  await new Promise((resolve) => {
+    modal('New file types', (b) => {
+      b.append(el('p', null,
+        `Winnow can now open ${names} files. Should it become the DEFAULT app for them `
+        + '(double-click opens Winnow), just appear in the Open With menu, or leave them alone? '
+        + 'You can change any of this later in Settings → File associations.'));
+      const acts = el('div', 'row-actions');
+      const finish = async (route) => {
+        try {
+          if (route) {
+            const r = await post(route, { exts });
+            if ((r.userchoice || []).length) {
+              toast(`Windows guards the default for ${r.userchoice.join(', ')} — right-click such a file, `
+                + 'choose Open With → Choose another app, pick Winnow and tick Always.', 12000);
+            }
+          }
+          await post('/api/assoc/prompted', { exts });
+        } catch (e) {
+          toast('Could not update associations: ' + e.message, 6000);
+        }
+        $('modal').hidden = true;
+        resolve();
+      };
+      const def = el('button', 'btn', 'Make Winnow the default');
+      def.onclick = () => finish('/api/assoc/default');
+      const handler = el('button', 'btn ghost', 'Open With only');
+      handler.onclick = () => finish('/api/assoc/register');
+      const skip = el('button', 'btn ghost', 'Not now');
+      skip.onclick = () => finish(null);
+      acts.append(def, handler, skip);
+      b.append(acts);
+    });
+  });
 }
 
 /* After an import: offer — once per type, ever — to register Winnow for
