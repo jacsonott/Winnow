@@ -800,7 +800,12 @@ export function initSidebar() {
   let prefs = {};
   try { prefs = JSON.parse(localStorage.getItem(SIDEBAR_KEY) || '{}'); } catch { /* defaults below */ }
   setSidebarWidth(prefs.width || SIDEBAR_W_DEFAULT);
-  setSidebarVisible(!(prefs.collapsed ?? false));
+  // Collapsed by DEFAULT: a case should open showing the evidence, not a
+  // panel of navigation. The tab strip already names the open tables; the
+  // sidebar is one ` (or the ◀ button) away when the analyst wants the
+  // full list — and once they choose to keep it open, that choice
+  // persists like every other panel preference here.
+  setSidebarVisible(!(prefs.collapsed ?? true));
 }
 
 /* Drag the sidebar's right edge to resize it, double-click to reset —
