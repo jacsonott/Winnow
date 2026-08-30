@@ -466,3 +466,71 @@ def test_background_route_is_loopback_only(client, monkeypatch):
     monkeypatch.setattr(server, "_is_loopback", lambda req: False)
     assert c.post("/api/assoc/background", json={"enabled": True},
                   headers=HEADERS).status_code == 403
+
+
+# --------------------------------------------------------- icon refresh
+
+
+def test_linux_mime_icon_follows_an_icon_update(lin, tmp_path, monkeypatch):
+    """The theme copy used to be written only when missing — an update
+    that replaced the committed icon in place left every file manager
+    showing the old design forever (the reported bug)."""
+    monkeypatch.setattr(assoc.shutil, "which", lambda n: None)
+    src = tmp_path / "mark.svg"
+    src.write_text("<svg>v1</svg>")
+    monkeypatch.setattr(assoc, "icon_file", lambda kind="png": str(src))
+    case, cat = _cat(".db-winnow")
+    lin.register(case, cat)
+    dest = tmp_path / "share/icons/hicolor/scalable/mimetypes/application-x-winnow-case.svg"
+    assert dest.read_text() == "<svg>v1</svg>"
+
+    src.write_text("<svg>v2</svg>")             # the update replaced the icon
+    assert lin.refresh_icons(cat) is True
+    assert dest.read_text() == "<svg>v2</svg>"
+    assert lin.refresh_icons(cat) is False      # settled: nothing to do
+
+
+def test_linux_refresh_is_a_noop_when_never_registered(lin, tmp_path):
+    _, cat = _cat(".db-winnow")
+    assert lin.refresh_icons(cat) is False
+    assert not (tmp_path / "share/icons").exists()
+
+
+def test_windows_registration_pokes_explorers_icon_cache(tmp_path, monkeypatch):
+    """Explorer caches association icons; SHCNE_ASSOCCHANGED is the only
+    thing that makes it look again. Every mutation must fire it."""
+    pokes = []
+    w = assoc.WindowsAssoc(reg=FakeReg(), notify=lambda: pokes.append(1))
+    picked, cat = _cat(".csv")
+    w.register(picked, cat)
+    assert pokes, "register must notify"
+    n = len(pokes)
+    w.make_default(picked, cat)
+    assert len(pokes) > n, "make_default must notify"
+    n = len(pokes)
+    w.unregister(picked, cat)
+    assert len(pokes) > n, "unregister must notify"
+
+
+def test_windows_icon_refresh_fires_only_on_a_changed_icon(tmp_path, monkeypatch):
+    ico = tmp_path / "winnow.ico"
+    ico.write_bytes(b"v1-icon-bytes")
+    monkeypatch.setattr(assoc, "icon_file", lambda kind="png": str(ico))
+    pokes = []
+    reg = FakeReg()
+    w = assoc.WindowsAssoc(reg=reg, notify=lambda: pokes.append(1))
+    picked, cat = _cat(".csv")
+
+    # Never registered: refresh must not create keys or poke anything.
+    assert w.refresh_icons(cat) is False
+    assert "Software\\Classes\\Winnow.File" not in reg.keys
+
+    w.register(picked, cat)
+    pokes.clear()
+    assert w.refresh_icons(cat) is False        # same icon: quiet
+    assert pokes == []
+
+    ico.write_bytes(b"v2-icon-bytes")           # the update replaced the icon
+    assert w.refresh_icons(cat) is True
+    assert pokes, "a changed icon must poke Explorer"
+    assert w.refresh_icons(cat) is False        # hash re-recorded: settled
