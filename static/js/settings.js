@@ -36,7 +36,7 @@ export const STYLES = {
   phosphor:  { label: 'Phosphor',  desc: 'Retro CRT terminal — glow, monospace chrome.', defaultAccent: '#39e881', preview: ['#060907', '#39e881'] },
   blueprint: { label: 'Blueprint', desc: 'Bold borders, hard offset shadows.', defaultAccent: '#ff6a1a', preview: ['#0c0d10', '#ff6a1a'] },
   studio:    { label: 'Studio',    desc: 'Rounded, soft shadows, calm motion.', defaultAccent: '#7c6cf6', preview: ['#111219', '#7c6cf6'] },
-  harvest:   { label: 'Harvest',   desc: 'Grain and chaff — straw gold on warm dark, parchment in light.', defaultAccent: '#e0a94a', preview: ['#0d0b08', '#e0a94a'] },
+  harvest:   { label: 'Harvest',   desc: 'Grain and chaff — wheat gold on near-black, parchment in light.', defaultAccent: '#d9a441', preview: ['#0a0c0b', '#d9a441'] },
 };
 
 export const ACCENT_PRESETS = ['#d2a04a', '#39e881', '#ff6a1a', '#7c6cf6', '#4a90d9', '#d9534f'];

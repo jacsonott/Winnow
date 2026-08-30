@@ -219,7 +219,11 @@ static/js/splash.js The launch animation — winnowing, which is what the app
                     for the shared page fixture — a full-viewport overlay
                     would make every click in every other test wait it out.
 static/style.css   Token-driven theming: 5 styles (panel/phosphor/blueprint/
-                    studio/harvest) x dark/light, selected via data-style/data-theme
+                    studio/harvest) x dark/light, selected via data-style/data-theme.
+                    Harvest's dark is the loading screen's own palette
+                    verbatim — green-cast greys, not brown; a warm-grey
+                    version read as muddy against the gold, because a warm
+                    accent on warm greys leaves nothing to separate.
                     on <html>, plus a user accent color. See the file's own
                     header comment for the token contract before adding
                     hardcoded colors.

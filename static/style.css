@@ -149,18 +149,24 @@ html[data-style="blueprint"][data-theme="light"] {
    #e0a94a on cream is about 1.9:1 against text-sized foreground — fine as
    a fill behind dark text (tag chips), unreadable as text itself, which is
    where an accent spends most of its life. */
+/* Dark is the loading screen's own palette, verbatim where it has an
+   opinion: --ink #0a0c0b, grain #d9a441, chaff #7c8578, text #c9cdc4,
+   faint #565c53. Those greys are green-cast, not brown — an earlier
+   brown-tinted version of this read as muddy against the gold, because
+   warm greys and a warm accent leave nothing for the eye to separate.
+   The cool cast is what makes the grain look like grain. */
 html[data-style="harvest"][data-theme="dark"] {
-  --ink: #0d0b08; --panel: #15120d; --panel-2: #1d1913; --panel-3: #262019;
-  --line: #2b251b; --line-2: #3a3226; --text: #cfc8b8; --dim: #8a8172;
-  --accent: #e0a94a; --accent-dim: #9c7530; --accent-fg: #14110b;
-  --sel: #241d10; --sel-line: #7a5f2a;
-  --row-even: #100e0a; --row-hover: #1a160f; --row-selected: #241d10; --cell-selected-bg: #33280f;
-  --border-hairline: #17140e; --text-faint: #46402f;
-  --danger: #e08a6a; --danger-bg: #3a2318; --danger-border: #6b3d28;
-  --str: #b7c98a; --num: #d8b46a; --kw: #c9a0d0;
+  --ink: #0a0c0b; --panel: #101312; --panel-2: #171b19; --panel-3: #1e2320;
+  --line: #242a26; --line-2: #333a35; --text: #c9cdc4; --dim: #7c8578;
+  --accent: #d9a441; --accent-dim: #8a6a2a; --accent-fg: #0a0c0b;
+  --sel: #16201b; --sel-line: #5c7a4e;
+  --row-even: #0c0f0e; --row-hover: #141816; --row-selected: #16201b; --cell-selected-bg: #1e2c24;
+  --border-hairline: #121615; --text-faint: #565c53;
+  --danger: #e0836a; --danger-bg: #331e1a; --danger-border: #64382c;
+  --str: #a9c48f; --num: #d9a441; --kw: #b79ad0;
   --radius-sm: 2px; --radius-md: 3px; --border-w: 1px;
   --ease: ease; --transition-fast: 120ms;
-  --shadow-tag: 0 4px 16px rgba(0,0,0,.5); --shadow-modal: 0 8px 24px rgba(0,0,0,.45);
+  --shadow-tag: 0 4px 16px rgba(0,0,0,.55); --shadow-modal: 0 8px 24px rgba(0,0,0,.5);
 }
 html[data-style="harvest"][data-theme="light"] {
   --ink: #faf6ea; --panel: #fffdf5; --panel-2: #f2ecdb; --panel-3: #e9e1cb;

@@ -79,7 +79,7 @@ def test_it_takes_the_theme_it_is_launched_in(browser, server):
     """A light install must not get a black rectangle thrown at it."""
     shades = {}
     for mode in ("dark", "light"):
-        ctx = _ctx(browser, f'{{ "style": "harvest", "themeMode": "{mode}", "accent": "#e0a94a" }}')
+        ctx = _ctx(browser, f'{{ "style": "harvest", "themeMode": "{mode}", "accent": "#d9a441" }}')
         pg = ctx.new_page()
         try:
             pg.goto(server)
@@ -103,7 +103,7 @@ def test_it_wears_the_skin_that_is_actually_applied(browser, server):
     palette of its own — launching into Phosphor should not flash a wheat
     field first."""
     seen = {}
-    for style, accent in (("phosphor", "#39e881"), ("harvest", "#e0a94a")):
+    for style, accent in (("phosphor", "#39e881"), ("harvest", "#d9a441")):
         ctx = _ctx(browser, f'{{ "style": "{style}", "themeMode": "dark", "accent": "{accent}" }}')
         pg = ctx.new_page()
         try:
@@ -119,7 +119,7 @@ def test_it_wears_the_skin_that_is_actually_applied(browser, server):
     # Each skin's own background, and its own accent for the grain.
     assert seen["phosphor"]["bg"] != seen["harvest"]["bg"], seen
     assert seen["phosphor"]["accent"].lower().startswith("#39e881")
-    assert seen["harvest"]["accent"].lower().startswith("#e0a94a")
+    assert seen["harvest"]["accent"].lower().startswith("#d9a441")
 
 
 def test_the_finished_wordmark_is_held_before_handing_over(browser, server):
