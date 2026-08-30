@@ -839,7 +839,12 @@ def api_assoc_open(request: Request, body: AssocOpenBody):
             # sqlite3.DatabaseError and a truncated .xlsx BadZipFile, not
             # ValueError; one unreadable file must skip, not 500 the open.
             skipped.append({"file": os.path.basename(f), "reason": str(e)})
-    return {"case": STORE.path, "temp": True, "started": started, "skipped": skipped}
+    # `connected` tells the LAUNCHER whether anyone is actually looking at
+    # this server (live presence streams). A hand-off to a window the
+    # analyst closed used to show nothing at all — the launcher uses this
+    # to decide whether the association still owes them a window.
+    return {"case": STORE.path, "temp": True, "started": started, "skipped": skipped,
+            "connected": PRESENCE.streams > 0}
 
 
 def _assoc_ingest(path: str) -> dict:
@@ -3079,8 +3084,24 @@ def _run_assoc(files: list[str], no_browser: bool = False) -> int | None:
         return None   # become the server, opening this case
 
     recent = _recent_temp_instance(alive)
-    if recent and _assoc_post(recent["port"], "/api/assoc/open", {"files": files}) is not None:
-        return 0   # its window is already up; the tables appear in it
+    if recent:
+        resp = _assoc_post(recent["port"], "/api/assoc/open", {"files": files})
+        if resp is not None:
+            # "Its window is already up" is only TRUE for the multi-select
+            # burst (five files → five launcher invocations inside a couple
+            # of seconds, the first one's window still opening). A join
+            # minutes later — new file, same still-alive quick-look — used
+            # to show nothing: the analyst double-clicked and no window
+            # appeared. Age says whether the burst excuse applies; the
+            # server's own presence count says whether anyone is looking.
+            try:
+                started = time.mktime(time.strptime(recent["started_at"], "%Y-%m-%dT%H:%M:%S"))
+                age = time.time() - started
+            except (KeyError, ValueError):
+                age = 0.0
+            if not no_browser and age > 10 and not resp.get("connected"):
+                browser.open_when_ready(f"http://127.0.0.1:{recent['port']}", "127.0.0.1", recent["port"])
+            return 0
     idle = instances.find_idle()
     if idle and _assoc_post(idle["port"], "/api/assoc/open", {"files": files}) is not None:
         if not no_browser:

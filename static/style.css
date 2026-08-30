@@ -30,6 +30,17 @@
 
 [hidden] { display: none !important; }
 
+/* Scrollbars in the theme's own quiet border tone instead of the OS
+   default — a bright grey OS scrollbar down a dark grid was the one
+   surface the token system didn't reach. `scrollbar-color` INHERITS, so
+   the single html rule covers every scroller in every skin (the tokens
+   live on <html>); `scrollbar-width` does not inherit, hence the
+   universal rule. Standard CSS Scrollbars (Firefox, Chromium 121+) —
+   deliberately no ::-webkit-scrollbar rules, which modern Chromium
+   ignores once scrollbar-color is set. */
+* { scrollbar-width: thin; }
+html { scrollbar-color: var(--line-2) transparent; }
+
 html, body {
   height: 100%; margin: 0;
   background: var(--ink); color: var(--text);

@@ -166,6 +166,6 @@ see [docs/notes/README.md](README.md) for the whole set.
   migrated. In the association catalogue `.db-winnow` is the one builtin
   type that is `default_ok`: nothing else owns it, so making Winnow its
   default can't steal a file from Excel or a DB browser the way claiming
-  `.db`/`.xlsx` would. The wheat icon rides the same association —
+  `.db`/`.xlsx` would. The brand icon rides the same association —
   DefaultIcon on the Windows ProgId, the `.desktop` Icon= and a
   hicolor `application-x-winnow-case` mimetype icon on Linux.
