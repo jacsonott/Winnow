@@ -119,6 +119,14 @@ structparse.py     JSON/XML field-extraction operations, registered into
                     flatten picker. Stdlib only; imports timeparse and nothing
                     else from the app. store.py imports it for the
                     registration side effect.
+assoc.py           OS file associations: the catalogue of types Winnow can
+                    claim (handler for everything it ingests, "make default"
+                    only for types nothing else owns), plus per-user
+                    adapters — HKCU registry on Windows (UserChoice honesty
+                    included), .desktop + mimeapps.list + a shared-mime-info
+                    package on Linux. macOS is out of scope (needs an .app
+                    bundle). server.py's /api/assoc/* registration routes
+                    and Settings → File associations sit on top of it.
 paths.py           INSTALL_ROOT — the one line that knows where the install
                     root is relative to this package. workspace/, the
                     updater's target and the server's static/ all resolve

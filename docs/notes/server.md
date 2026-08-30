@@ -128,3 +128,25 @@ see [docs/notes/README.md](README.md) for the whole set.
   suite sets `WINNOW_WORKSPACE_DIR` (read in `workspace.py` at import)
   and, where cases get written, `WINNOW_CASES_DIR`; do the same in any
   new one.
+
+- **The association-default policy lives in the catalogue, and the API
+  enforces it.** `winnow/assoc.py`'s `BUILTIN_TYPES` marks which
+  extensions may become the DEFAULT app (`default_ok`) versus Open With
+  handler only — .txt/.json/.db/.xlsx/.xlsm/.sqlite* have real owners
+  (Excel, editors, DB tools) and stealing their double-click is how a
+  tool gets uninstalled. Plugin extensions are handler-only because they
+  aren't vetted (a plugin may claim .zip). `/api/assoc/default` refuses
+  non-default_ok types with a 400 — the UI not offering the button is
+  not enforcement. All `/api/assoc/*` registration routes are
+  loopback-only, like `/api/assoc/open`. Two platform honesty rules:
+  Windows' hash-protected UserChoice key wins over anything we can
+  write, so `make_default` reports the blocked extensions and the UI
+  walks the analyst through Open With → Always instead of claiming
+  success; on Linux a plugin extension resolves to no MIME type at all
+  until our shared-mime-info package supplies the glob, so registering
+  one writes `mime/packages/winnow.xml` and best-effort runs
+  `update-mime-database`. Tests build both adapters against fake
+  environments (a dict-backed winreg, tmp XDG dirs) — and any UI test
+  touching the panel relies on conftest pointing the spawned server's
+  `XDG_DATA_HOME`/`XDG_CONFIG_HOME` at tmp, or a green test would edit
+  the developer's real ~/.config/mimeapps.list.

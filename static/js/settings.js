@@ -9,6 +9,7 @@ import { headH, rScroll, render, spacerPx, vScroll } from './grid.js';
 import { drawRail, rebuildGroupPrefix, renderGrouped } from './grouping.js';
 import { ACTION_LABELS, defaultKeymap, findKeyConflict, keySpecFromEvent, saveKeymap } from './keymap.js';
 import { buildPluginsPanel } from './plugins.js';
+import { buildAssocPanel } from './assoc.js';
 import { loadSavedFilters } from './savedfilters.js';
 import { applyPageTabsSize } from './sources.js';
 import { S, gridRowCount } from './state.js';
@@ -705,6 +706,9 @@ export function openSettings() {
 
     const secPlugins = settingsSection(b, 'Plugins');
     buildPluginsPanel(secPlugins);
+
+    const secAssoc = settingsSection(b, 'File associations');
+    buildAssocPanel(secAssoc);
 
     const secUpdates = settingsSection(b, 'Updates');
     buildUpdatesPanel(secUpdates);

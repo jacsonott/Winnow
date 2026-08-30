@@ -28,6 +28,7 @@ from fastapi.responses import StreamingResponse, FileResponse, JSONResponse, Pla
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from winnow import assoc as file_assoc
 from winnow import browser
 from winnow import instances
 from winnow import paths
@@ -853,6 +854,111 @@ def _assoc_ingest(path: str) -> dict:
         opts["tables"] = [{"table": t["name"]} for t in keep]
     job = store().start_ingest_job(kind, path, options=opts)
     return {"file": os.path.basename(path), "job_id": job["job_id"], "kind": kind}
+
+
+# ------------------------------------------------- association registration
+#
+# Settings → File associations (and the one-time after-import offer) talk
+# to these. All loopback-only: they change per-user OS state, which a
+# hostile page in another tab has no business touching — same reasoning
+# as /api/assoc/open. The catalogue is winnow/assoc.py's builtins plus
+# whatever extensions the currently loaded plugins claim, so a new ingest
+# plugin shows up in the panel with no code change here.
+
+_ASSOC_ASKED_KEY = "assoc_asked_exts"
+
+
+class AssocExtsBody(BaseModel):
+    exts: list[str]
+
+
+def _assoc_catalogue() -> list[dict]:
+    return file_assoc.supported_types(PLUGINS.list_formats())
+
+
+def _assoc_pick(exts: list[str], catalogue: list[dict]) -> list[dict]:
+    by_ext = {t["ext"]: t for t in catalogue}
+    picked = []
+    for e in exts:
+        e = e.lower()
+        if not e.startswith("."):
+            e = "." + e
+        t = by_ext.get(e)
+        if t is None:
+            raise HTTPException(400, f"Winnow has no importer for {e}")
+        picked.append(t)
+    return picked
+
+
+def _assoc_adapter(request: Request):
+    if not _is_loopback(request):
+        raise HTTPException(403, "association changes are loopback-only")
+    a = file_assoc.adapter()
+    if a is None:
+        raise HTTPException(400, "file associations aren't supported on this platform")
+    return a
+
+
+def _mark_asked(exts: list[str]) -> None:
+    asked = set(WS.machine_prefs.get(_ASSOC_ASKED_KEY) or [])
+    asked.update(e.lower() for e in exts)
+    WS.machine_prefs.set(_ASSOC_ASKED_KEY, sorted(asked))
+
+
+@app.get("/api/assoc/types")
+def api_assoc_types(request: Request):
+    if not _is_loopback(request):
+        raise HTTPException(403, "association status is loopback-only")
+    catalogue = _assoc_catalogue()
+    a = file_assoc.adapter()
+    st = a.status(catalogue) if a else {}
+    asked = set(WS.machine_prefs.get(_ASSOC_ASKED_KEY) or [])
+    return {"platform": file_assoc.platform_name(),
+            "types": [{**t, **st.get(t["ext"], {"registered": False, "default": False}),
+                       "asked": t["ext"] in asked} for t in catalogue]}
+
+
+@app.post("/api/assoc/register")
+def api_assoc_register(request: Request, body: AssocExtsBody):
+    a = _assoc_adapter(request)
+    catalogue = _assoc_catalogue()
+    a.register(_assoc_pick(body.exts, catalogue), catalogue)
+    _mark_asked(body.exts)   # an explicit yes is also an answer
+    return {"ok": True}
+
+
+@app.post("/api/assoc/unregister")
+def api_assoc_unregister(request: Request, body: AssocExtsBody):
+    a = _assoc_adapter(request)
+    catalogue = _assoc_catalogue()
+    a.unregister(_assoc_pick(body.exts, catalogue), catalogue)
+    return {"ok": True}
+
+
+@app.post("/api/assoc/default")
+def api_assoc_default(request: Request, body: AssocExtsBody):
+    a = _assoc_adapter(request)
+    catalogue = _assoc_catalogue()
+    picked = _assoc_pick(body.exts, catalogue)
+    refused = [t["ext"] for t in picked if not t["default_ok"]]
+    if refused:
+        # Handler-only types have real owners (Excel, editors, DB tools);
+        # the catalogue is the policy and the API enforces it — the UI
+        # not offering the button is not enough.
+        raise HTTPException(400, f"{', '.join(refused)} can only be a handler, not the default")
+    result = a.make_default(picked, catalogue) or {}
+    _mark_asked(body.exts)
+    return {"ok": True, **result}
+
+
+@app.post("/api/assoc/asked")
+def api_assoc_asked(request: Request, body: AssocExtsBody):
+    # "No" is an answer to remember too — the offer fires once per type.
+    if not _is_loopback(request):
+        raise HTTPException(403, "loopback-only")
+    _assoc_pick(body.exts, _assoc_catalogue())
+    _mark_asked(body.exts)
+    return {"ok": True}
 
 
 class CaseSaveAsBody(BaseModel):
