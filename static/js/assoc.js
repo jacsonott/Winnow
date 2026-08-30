@@ -34,32 +34,6 @@ export function buildAssocPanel(b) {
         + 'On macOS, associations require an app bundle, which a run-from-source tool doesn’t have.'));
       return;
     }
-    if (info.platform === 'windows') {
-      // Only Windows launches associations through a console interpreter;
-      // Linux .desktop entries already run terminal-less.
-      const bgRow = el('div', 'assoc-row assoc-bg-row');
-      const bgCb = el('input');
-      bgCb.type = 'checkbox';
-      bgCb.checked = !!info.background;
-      bgCb.onchange = async () => {
-        try {
-          const r = await post('/api/assoc/background', { enabled: bgCb.checked });
-          toast(bgCb.checked
-            ? (r.applied ? 'Winnow will start hidden when a file is opened'
-                         : 'Saved — takes effect when Winnow is registered for a type')
-            : 'Winnow will show its console when a file is opened');
-        } catch (e) {
-          toast('Could not change the setting: ' + e.message, 6000);
-        }
-        paint();
-      };
-      const bgLbl = el('label', 'assoc-label');
-      bgLbl.append(bgCb, el('span', 'assoc-desc',
-        'Start Winnow hidden when a file is opened — no console window. '
-        + 'Leave off if you need to see the server log while troubleshooting.'));
-      bgRow.append(bgLbl);
-      list.append(bgRow);
-    }
     for (const t of info.types) {
       const row = el('div', 'assoc-row');
       const cb = el('input');

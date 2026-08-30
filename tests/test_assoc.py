@@ -452,13 +452,16 @@ def test_refresh_command_rewrites_only_an_existing_progid(tmp_path, monkeypatch)
 
 def test_background_route_stores_and_reports_the_setting(client):
     server, c = client
-    assert c.get("/api/assoc/types", headers=HEADERS).json()["background"] is False
-    r = c.post("/api/assoc/background", json={"enabled": True}, headers=HEADERS)
-    assert r.status_code == 200
-    assert r.json()["background"] is True
+    # ON by default — no console window riding along with a double-click.
     assert c.get("/api/assoc/types", headers=HEADERS).json()["background"] is True
-    assert c.post("/api/assoc/background", json={"enabled": False},
-                  headers=HEADERS).json()["background"] is False
+    r = c.post("/api/assoc/background", json={"enabled": False}, headers=HEADERS)
+    assert r.status_code == 200
+    assert r.json()["background"] is False
+    # False is STORED, not dropped: with the default on, deleting the key
+    # would silently re-enable the setting.
+    assert c.get("/api/assoc/types", headers=HEADERS).json()["background"] is False
+    assert c.post("/api/assoc/background", json={"enabled": True},
+                  headers=HEADERS).json()["background"] is True
 
 
 def test_background_route_is_loopback_only(client, monkeypatch):
