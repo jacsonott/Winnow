@@ -84,6 +84,55 @@ const lerp = (a, b, t) => a + (b - a) * t;
 let raf = null;
 let onDone = null;
 
+/* The settled wordmark, drawn once and static — the same dot field the
+   animation ends on, so the home screen carries the mark the launch just
+   assembled rather than a differently-shaped piece of text.
+
+   Sampled rather than drawn as a font: the dots ARE the idea (grain,
+   separated out), and rendering "WINNOW" in a bold monospace would be a
+   picture of the wrong thing. */
+export function drawWordmark(canvas, { text = 'WINNOW', color, fontSize = 44 } = {}) {
+  const DPR = Math.min(window.devicePixelRatio || 1, 2);
+  const pad = Math.round(fontSize * 0.25);
+  const off = document.createElement('canvas');
+  const octx = off.getContext('2d');
+  const font = `700 ${fontSize}px ui-monospace, "JetBrains Mono", Menlo, monospace`;
+  octx.font = font;
+  const w = Math.ceil(octx.measureText(text).width) + pad * 2;
+  const h = Math.ceil(fontSize * 1.35);
+  off.width = w;
+  off.height = h;
+  const o2 = off.getContext('2d');
+  o2.font = font;
+  o2.fillStyle = '#fff';
+  o2.textAlign = 'center';
+  o2.textBaseline = 'middle';
+  o2.fillText(text, w / 2, h / 2);
+
+  canvas.width = w * DPR;
+  canvas.height = h * DPR;
+  canvas.style.width = w + 'px';
+  canvas.style.height = h + 'px';
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+
+  const stride = Math.max(2, Math.round(fontSize / 22));
+  const img = o2.getImageData(0, 0, w, h).data;
+  const r = Math.max(0.9, stride * 0.42);
+  ctx.fillStyle = color;
+  for (let y = 0; y < h; y += stride) {
+    for (let x = 0; x < w; x += stride) {
+      if (img[(y * w + x) * 4 + 3] > 128) {
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+  return { width: w, height: h };
+}
+
 export function splashEnabled(appearance) {
   // Default on, but an explicit false in the saved appearance wins — and
   // reduced-motion is treated as "off" rather than "play it faster".

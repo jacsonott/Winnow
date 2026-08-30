@@ -32,18 +32,22 @@ import { markModalAction, confirmDialog, modal, promptDialog } from './ui.js';
 export const APPEARANCE_KEY = 'winnow.appearance';
 
 export const STYLES = {
-  panel:     { label: 'Panel',     desc: "Today's look.", defaultAccent: '#d2a04a', preview: ['#13161a', '#d2a04a'] },
+  // Harvest first because it is the default — the list is a menu, and the
+  // one you are on should be the one you read first.
+  harvest:   { label: 'Harvest',   desc: 'Grain and chaff — wheat gold on near-black, parchment in light.', defaultAccent: '#d9a441', preview: ['#0a0c0b', '#d9a441'] },
+  panel:     { label: 'Panel',     desc: 'The older look — cooler greys, amber accent.', defaultAccent: '#d2a04a', preview: ['#13161a', '#d2a04a'] },
   phosphor:  { label: 'Phosphor',  desc: 'Retro CRT terminal — glow, monospace chrome.', defaultAccent: '#39e881', preview: ['#060907', '#39e881'] },
   blueprint: { label: 'Blueprint', desc: 'Bold borders, hard offset shadows.', defaultAccent: '#ff6a1a', preview: ['#0c0d10', '#ff6a1a'] },
   studio:    { label: 'Studio',    desc: 'Rounded, soft shadows, calm motion.', defaultAccent: '#7c6cf6', preview: ['#111219', '#7c6cf6'] },
-  harvest:   { label: 'Harvest',   desc: 'Grain and chaff — wheat gold on near-black, parchment in light.', defaultAccent: '#d9a441', preview: ['#0a0c0b', '#d9a441'] },
 };
 
 export const ACCENT_PRESETS = ['#d2a04a', '#39e881', '#ff6a1a', '#7c6cf6', '#4a90d9', '#d9534f'];
 
 export function defaultAppearance() {
   return {
-    style: 'panel', themeMode: 'dark', accent: STYLES.panel.defaultAccent, accentCustomized: false,
+    // Harvest is the default look. An install that already has a saved
+    // appearance keeps it — this only decides what a first run gets.
+    style: 'harvest', themeMode: 'dark', accent: STYLES.harvest.defaultAccent, accentCustomized: false,
     density: 'comfortable', autofitMax: AUTOFIT_MAX_W_DEFAULT,
     remoteSession: false,
     // On unless turned off. `splash: undefined` on an install that predates
@@ -116,9 +120,23 @@ export function paintTheme() {
   document.documentElement.setAttribute('data-theme', S.appearance.themeMode === 'auto' ? resolveAutoTheme() : S.appearance.themeMode);
 }
 
+/* An inline --accent beats the stylesheet, so writing one unconditionally
+   made every skin's LIGHT-mode accent dead code: each skin defines a
+   darker accent for light, because the dark-mode colour that reads well on
+   near-black is washed out on parchment — and none of them ever applied.
+
+   So the inline value is written only when the analyst picked a colour
+   themselves. Otherwise the skin's own per-theme accent is left to win,
+   which is what those values are for. */
 export function paintAccent() {
-  document.documentElement.style.setProperty('--accent', S.appearance.accent);
-  document.documentElement.style.setProperty('--accent-fg', contrastFg(S.appearance.accent));
+  const root = document.documentElement;
+  if (S.appearance.accentCustomized) {
+    root.style.setProperty('--accent', S.appearance.accent);
+    root.style.setProperty('--accent-fg', contrastFg(S.appearance.accent));
+  } else {
+    root.style.removeProperty('--accent');
+    root.style.removeProperty('--accent-fg');
+  }
 }
 
 /* Each style has a signature accent (the color it showed in the design
@@ -276,6 +294,47 @@ export function openSkinPicker(onPicked) {
     acts.append(done);
     b.append(acts);
   }, { wide: true });
+}
+
+/* Settings that belong to the OPEN CASE rather than to this machine —
+   they live in the case file and travel with it when it is handed to
+   another analyst. Kept out of the main Settings modal because that one
+   is reachable from the home screen, where there is no case for a "this
+   case" control to describe. */
+export function openCaseSettings() {
+  markModalAction('openCaseSettings');
+  modal('Case settings', (b) => {
+    b.append(el('p', null,
+      'These are stored in the case file, so they follow it to whoever you hand it to — '
+      + 'unlike Settings, which is about this machine.'));
+
+    b.append(el('div', 'settings-sub-label', 'Timestamps'));
+    b.append(el('p', 'fb-help',
+      'How datetime columns are displayed in this case. Presentation only — the stored and '
+      + 'exported value is always the text the file came with. A format picked on an individual '
+      + "column (right-click its header) beats this, which beats the machine-wide default."));
+
+    const sel = el('select');
+    const inherit = el('option', null, 'Use the machine-wide default');
+    inherit.value = '';
+    sel.append(inherit);
+    for (const [key, label] of Object.entries(TS_FORMATS)) {
+      const o = el('option', null, label);
+      o.value = key;
+      sel.append(o);
+    }
+    sel.value = S.caseSettings.ts_format || '';
+    sel.onchange = async () => {
+      try {
+        S.caseSettings = await post('/api/case_settings', { ts_format: sel.value });
+        render();
+        toast('Case timestamp format saved');
+      } catch (e) {
+        toast('Could not save: ' + e.message, 5000);
+      }
+    };
+    b.append(labeledRow('Timestamp format', sel));
+  });
 }
 
 export function openSettings() {
@@ -567,27 +626,11 @@ export function openSettings() {
     };
     secTs.append(labeledRow('Every case on this machine', tsSystemSel));
 
-    const tsCaseSel = el('select');
-    const inherit = el('option', null, 'Use the system-wide default');
-    inherit.value = '';
-    tsCaseSel.append(inherit);
-    for (const [key, label] of Object.entries(TS_FORMATS)) {
-      const o = el('option', null, label);
-      o.value = key;
-      tsCaseSel.append(o);
-    }
-    tsCaseSel.value = S.caseSettings.ts_format || '';
-    tsCaseSel.disabled = !S.sources.length && !S.sourceId;
-    tsCaseSel.onchange = async () => {
-      try {
-        S.caseSettings = await post('/api/case_settings', { ts_format: tsCaseSel.value });
-        render();
-        toast('Case timestamp format saved');
-      } catch (e) {
-        toast('Could not save: ' + e.message, 5000);
-      }
-    };
-    secTs.append(labeledRow('This case', tsCaseSel));
+    // The per-case override lives in Session → Case settings. Settings is
+    // reachable from the home screen now, where there is no case for a
+    // "this case" control to mean anything about.
+    secTs.append(el('p', 'fb-help',
+      'This case can override it — Case menu → Case settings.'));
 
     const secTags = settingsSection(b, 'Default tags for new cases');
     secTags.append(el('p', null,

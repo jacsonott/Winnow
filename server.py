@@ -561,6 +561,50 @@ def _is_loopback(request: Request) -> bool:
     return host in ("127.0.0.1", "::1", "testclient")
 
 
+class MakeDirBody(BaseModel):
+    parent: str
+    name: str
+
+
+@app.post("/api/browse_dir/new")
+def api_browse_dir_new(request: Request, body: MakeDirBody):
+    """Create one directory inside `parent` — the folder picker's "New
+    folder", so an analyst filing a case somewhere that doesn't exist yet
+    doesn't have to leave and come back.
+
+    LOOPBACK ONLY, unlike the folder listing beside it. Listing answers any
+    peer the analyst chose to bind (the no-auth model is theirs to accept),
+    but this WRITES, and "read a directory name" and "create a directory
+    anywhere the server user can" are not the same risk.
+
+    `name` is one path segment, checked rather than trusted: no separators,
+    no `..`, nothing that resolves outside `parent`. The analyst can
+    already type any path they like into the case-path box — this is a
+    convenience over the same ground, not a new reach."""
+    if not _is_loopback(request):
+        raise HTTPException(403, "Creating folders is only allowed from this machine")
+    name = (body.name or "").strip().strip(".")
+    if not name:
+        raise HTTPException(400, "Give the folder a name")
+    if os.sep in name or (os.altsep and os.altsep in name) or name in (".", ".."):
+        raise HTTPException(400, "A folder name can't contain a path separator")
+    parent = os.path.abspath(os.path.expanduser(body.parent or ""))
+    if not os.path.isdir(parent):
+        raise HTTPException(400, f"No folder at {parent}")
+    target = os.path.abspath(os.path.join(parent, name))
+    # Belt and braces over the name check: whatever the string did, the
+    # result has to sit directly inside the folder being browsed.
+    if os.path.dirname(target) != parent:
+        raise HTTPException(400, "That name would create a folder somewhere else")
+    if os.path.exists(target):
+        raise HTTPException(400, f"{name!r} already exists here")
+    try:
+        os.mkdir(target)
+    except OSError as e:
+        raise HTTPException(400, f"Could not create it: {e}")
+    return {"path": target, "name": name}
+
+
 @app.get("/api/browse_dir")
 def api_browse_dir(request: Request, path: str = "", files: bool = False):
     """One directory level — backs the "Browse..." folder picker in the
