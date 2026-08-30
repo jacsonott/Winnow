@@ -716,22 +716,28 @@ export async function refreshCases() {
    screen); Add copies every table into a case picked from the registry
    via copy_sources_to; Discard deletes the temp case outright. */
 export function paintTempBanner(on) {
+  S.tempCase = !!on;   // the one flag the home-navigation guard reads
   $('tempBanner').hidden = !on;
 }
 
-function wireTempBanner() {
-  $('tempSaveBtn').onclick = async () => {
-    const name = await promptDialog('Save this as a case named:');
-    if (!name || !name.trim()) return;
-    let res;
-    try { res = await post('/api/case/save_as', { name: name.trim() }); }
-    catch (e) { toast(e.message, 6000); return; }
-    paintTempBanner(false);
-    setBrandLabel(res.name);
-    toast(`Saved — "${res.name}" is on the home screen now`, 6000);
-  };
+/* The three ways out of a quick look, shared by the banner's buttons and
+   the leave-guard dialog (openQuickLookExitDialog). Each returns whether
+   it actually happened, so the guard knows if navigation may proceed. */
 
-  $('tempCopyBtn').onclick = async () => {
+export async function tempSaveAs() {
+  const name = await promptDialog('Save this as a case named:');
+  if (!name || !name.trim()) return false;
+  let res;
+  try { res = await post('/api/case/save_as', { name: name.trim() }); }
+  catch (e) { toast(e.message, 6000); return false; }
+  paintTempBanner(false);
+  setBrandLabel(res.name);
+  toast(`Saved — "${res.name}" is on the home screen now`, 6000);
+  return true;
+}
+
+export function tempCopyModal({ thenDiscard = false } = {}) {
+  (async () => {
     let cases;
     try { cases = (await api('/api/cases')).filter((c) => !c.missing); }
     catch (e) { toast(e.message, 5000); return; }
@@ -739,7 +745,9 @@ function wireTempBanner() {
     modal('Add these tables to a case', (b) => {
       b.append(el('p', null,
         'Every table here — rows, tags and notes included — is copied into the case you pick. '
-        + 'This quick look stays as it is; discard it afterwards if you are done with it.'));
+        + (thenDiscard
+          ? 'The quick look is discarded once the copy lands, and you go back to the case list.'
+          : 'This quick look stays as it is; discard it afterwards if you are done with it.')));
       const list = el('div', 'session-list');
       for (const c of cases) {
         const row = el('div', 'row-actions session-row');
@@ -756,25 +764,58 @@ function wireTempBanner() {
           finally { setBusy(false); }
           $('modal').hidden = true;
           toast(`Copied ${res.copied.length} table${res.copied.length === 1 ? '' : 's'} into "${c.name}"`, 8000);
+          if (thenDiscard) await tempDiscard({ confirm: false });
         };
         row.append(go);
         list.append(row);
       }
       b.append(list);
     }, { wide: true });
-  };
+  })();
+}
 
-  $('tempDiscardBtn').onclick = async () => {
-    if (!(await confirmDialog(
-      'Discard this quick look?\n\nIts tables, tags and notes are deleted. '
-      + 'Anything you copied into a real case stays there.',
-      { danger: true, okLabel: 'Discard' }))) return;
-    try { await post('/api/case/discard', {}); }
-    catch (e) { toast(e.message, 6000); return; }
-    paintTempBanner(false);
-    showHome();
-    await refreshCases();
-  };
+export async function tempDiscard({ confirm = true } = {}) {
+  if (confirm && !(await confirmDialog(
+    'Discard this quick look?\n\nIts tables, tags and notes are deleted. '
+    + 'Anything you copied into a real case stays there.',
+    { danger: true, okLabel: 'Discard' }))) return false;
+  try { await post('/api/case/discard', {}); }
+  catch (e) { toast(e.message, 6000); return false; }
+  paintTempBanner(false);
+  showHome();
+  await refreshCases();
+  return true;
+}
+
+/* A quick look is deliberately OFF the case registry, so the home screen
+   has no way back to it — navigating there mid-quick-look stranded the
+   case (reported). The brand button now asks for one of the three real
+   exits first; "Stay" is always available. */
+export function openQuickLookExitDialog() {
+  modal("This quick look isn't saved", (b) => {
+    b.append(el('p', null,
+      'Quick looks never appear in the case list, so there is no way back to this one '
+      + 'from the home screen. Choose what happens to it first:'));
+    const acts = el('div', 'row-actions');
+    const save = el('button', 'btn', 'Save as a case…');
+    save.onclick = async () => {
+      if (await tempSaveAs()) { $('modal').hidden = true; showHome(); await refreshCases(); }
+    };
+    const copy = el('button', 'btn ghost', 'Add to an existing case…');
+    copy.onclick = () => tempCopyModal({ thenDiscard: true });
+    const discard = el('button', 'btn ghost danger', 'Discard');
+    discard.onclick = () => tempDiscard();
+    const stay = el('button', 'btn ghost', 'Stay here');
+    stay.onclick = () => { $('modal').hidden = true; };
+    acts.append(save, copy, discard, stay);
+    b.append(acts);
+  });
+}
+
+function wireTempBanner() {
+  $('tempSaveBtn').onclick = () => tempSaveAs();
+  $('tempCopyBtn').onclick = () => tempCopyModal();
+  $('tempDiscardBtn').onclick = () => tempDiscard();
 }
 
 export async function boot() {
@@ -799,5 +840,8 @@ export async function boot() {
    startup steps that DO depend on order live in main.js instead. */
 export function wireHome() {
 wireTempBanner();
-$('btnHome').onclick = () => { showHome(); refreshCases(); };
+$('btnHome').onclick = () => {
+  if (S.tempCase) { openQuickLookExitDialog(); return; }
+  showHome(); refreshCases();
+};
 }
