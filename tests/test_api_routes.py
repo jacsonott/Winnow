@@ -634,3 +634,25 @@ def test_prefs_round_trip_and_first_run_flag(client, tmp_path):
     assert got["cases_dir"].endswith("mycases")
     assert got["first_run"] is False  # configured — never asked again
     assert (tmp_path / "mycases").is_dir()  # created eagerly so the browse works
+
+
+def test_updates_rollback_route_maps_success_and_failure(client, monkeypatch):
+    """The HTTP layer over updater.rollback — the module itself is tested
+    in test_updater.py, but this route had no coverage at all, and it's
+    the button an analyst reaches for when an update just broke the UI."""
+    import server
+
+    monkeypatch.setattr(server.updater, "rollback",
+                        lambda root: {"restored_from": "backup-0.1.0"})
+    r = client.post("/api/updates/rollback", json={})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["restored_from"] == "backup-0.1.0"
+    assert body["restart_required"] is True   # the UI must say "restart now"
+
+    def boom(root):
+        raise server.updater.UpdateError("No backup to roll back to")
+    monkeypatch.setattr(server.updater, "rollback", boom)
+    r = client.post("/api/updates/rollback", json={})
+    assert r.status_code == 400
+    assert "No backup" in r.json()["detail"]
