@@ -960,7 +960,11 @@ $('sidebarFilter').oninput = () => { S.sidebarFilter = $('sidebarFilter').value;
 
 $('btnTabJump').onclick = () => setSidebarVisible($('sidebar').hidden);
 
-$('btnSession').onclick = () => dropdownMenu($('btnSession'), [
+/* Everything scoped to the OPEN CASE. Called "Session" until the word
+   was needed for something else: a session is now a named snapshot of the
+   analysis, stored in the case file, and this menu is one entry among
+   several here rather than the thing itself. */
+$('btnCase').onclick = () => dropdownMenu($('btnCase'), [
   { label: 'Import…', onclick: openImportModal },
   { label: 'Merge sources…', onclick: openMergeBuilder },
   { label: 'Tables…', onclick: openTablesManager },
@@ -977,6 +981,6 @@ $('btnSession').onclick = () => dropdownMenu($('btnSession'), [
 $('btnReset').onclick = () => clearAllFilters();
 
 // The empty-case state's one useful next action, right where the eye lands —
-// the same openImportModal the Session menu's "Import…" entry opens.
+// the same openImportModal the Case menu's "Import…" entry opens.
 $('emptyImportBtn').onclick = () => openImportModal();
 }

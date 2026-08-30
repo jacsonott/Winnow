@@ -612,7 +612,7 @@ export function openSettings() {
     // reachable from the home screen now, where there is no case for a
     // "this case" control to mean anything about.
     secTs.append(el('p', 'fb-help',
-      'This case can override it — Session menu → Case settings.'));
+      'This case can override it — Case menu → Case settings.'));
 
     const secTags = settingsSection(b, 'Default tags for new cases');
     secTags.append(el('p', null,

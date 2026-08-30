@@ -1,5 +1,5 @@
 """Where settings live: machine-wide ones reachable without a case, and
-case-scoped ones on the Session menu.
+case-scoped ones on the Case menu.
 
 The split matters because Settings is now openable from the home screen,
 where there is no case for a "this case" control to describe."""
@@ -29,7 +29,7 @@ def test_settings_opens_from_the_case_list(page):
     page.evaluate("() => __winnow.showApp()")
     page.evaluate("(id) => __winnow.openSource(id)", page.evaluate("() => __winnow.S.sources[0].id"))
     page.wait_for_function("() => __winnow.S.view")
-    page.wait_for_selector("#btnSession", state="visible")
+    page.wait_for_selector("#btnCase", state="visible")
 
 
 def test_settings_has_no_case_scoped_controls_left(page):
@@ -48,8 +48,8 @@ def test_settings_has_no_case_scoped_controls_left(page):
     page.keyboard.press("Escape")
 
 
-def test_case_settings_is_on_the_session_menu_and_saves(page):
-    page.click("#btnSession")
+def test_case_settings_is_on_the_case_menu_and_saves(page):
+    page.click("#btnCase")
     page.wait_for_selector(".menu")
     page.locator(".menu-item", has_text="Case settings").click()
     page.wait_for_selector("#modal:not([hidden])")
