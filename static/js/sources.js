@@ -2,6 +2,7 @@
 in the case.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
+import { recordTabVisit } from './tabhistory.js';
 import { renderHead } from './columns.js';
 import { $, ROW_H, api, el, post, toast } from './core.js';
 import { derivedOps } from './derived.js';
@@ -512,6 +513,7 @@ function stashViewState() {
 export async function openSource(id) {
   const src = S.sources.find((s) => s.id === id);
   if (!src) return;
+  recordTabVisit({ kind: 'source', id });
   stashViewState();
   if (S.activeTab !== 'grid') showGridTab();
   S.sourceId = id;

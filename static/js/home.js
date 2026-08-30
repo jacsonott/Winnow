@@ -9,6 +9,7 @@ import { resetPluginTabMounts } from './plugins.js';
 import { loadAppSettings, loadCaseSettings, loadHeaderNicknames, loadSavedFilters } from './savedfilters.js';
 import { updateSearchAllButton } from './search.js';
 import { clearViewStateStash, applyPageTabsSize, loadSources } from './sources.js';
+import { clearTabHistory } from './tabhistory.js';
 import { showGridTab } from './sql.js';
 import { openSettings } from './settings.js';
 import { drawWordmark } from './splash.js';
@@ -112,6 +113,8 @@ export async function openCase(path, opts = {}) {
   S.viewCache.clear();
   clearViewStateStash(); // per-tab filters describe the previous case's tables
   S.tabOrder = [];
+  // Another case's tab history points at ids that mean nothing here.
+  clearTabHistory();
   // Unlike a tab switch within the *same* case (where the timeframe filter
   // deliberately survives — see clearAllFilters()/applyPreset()), a
   // different case is a different investigation; a timeframe pinned in
