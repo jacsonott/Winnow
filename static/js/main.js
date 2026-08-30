@@ -20,6 +20,7 @@ import * as core from './core.js';
 import * as state from './state.js';
 import * as jobs from './jobs.js';
 import * as filters from './filters.js';
+import * as splash from './splash.js';
 import * as sources from './sources.js';
 import * as view from './view.js';
 import * as columns from './columns.js';
@@ -70,7 +71,7 @@ import { wireUi } from './ui.js';
    spread would freeze the value of a rebindable export like ROW_H at boot.
    Collision-free by construction — these names all shared one scope until
    the file was split. Not an API; nothing in the app reads it. */
-const NAMESPACES = { core, state, jobs, filters, sources, view, columns, tsformat, derived, grid, grouping, tags, detail, ui, filterbuilder, savedfilters, timeframe, merge, importer, tables, plugins, search, session, sql, timeline, rowmenu, keymap, settings, home };
+const NAMESPACES = { splash, core, state, jobs, filters, sources, view, columns, tsformat, derived, grid, grouping, tags, detail, ui, filterbuilder, savedfilters, timeframe, merge, importer, tables, plugins, search, session, sql, timeline, rowmenu, keymap, settings, home };
 window.__winnow = {};
 for (const ns of Object.values(NAMESPACES)) {
   for (const key of Object.keys(ns)) {
@@ -113,6 +114,14 @@ wireSidebarResize();
 
 wireFileDrop();
 
+/* The splash and boot run TOGETHER, not in sequence. boot() renders the
+   case list behind the overlay, so when the animation finishes it fades
+   onto a screen that is already there — the transition is a reveal, not a
+   second load. It also means a slow case list waits behind something worth
+   looking at rather than an empty page. */
+if (splash.splashEnabled(S.appearance)) {
+  splash.runSplash({ theme: document.documentElement.getAttribute('data-theme') || 'dark' });
+}
 boot().catch((e) => toast('Could not start: ' + e.message, 8000));
 
 maybeOfferRemoteMode().then(() => maybeOfferStorageDir());

@@ -121,9 +121,14 @@ def page(browser, server):
     ctx = browser.new_context(viewport={"width": 1500, "height": 900},
                               permissions=["clipboard-read", "clipboard-write"])
     # Every context is a "first run on this machine" — pre-answer the
-    # one-time remote-mode prompt so it can't overlay the app mid-test.
-    # test_first_run_prompt.py builds its own context without this.
-    ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen')")
+    # one-time remote-mode prompt so it can't overlay the app mid-test, and
+    # turn the launch animation off. The splash covers the whole viewport
+    # for several seconds, which every click in every test would otherwise
+    # wait out. test_first_run_prompt.py and test_splash.py build their own
+    # contexts without this.
+    ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen');"
+                        "localStorage.setItem('winnow.appearance',"
+                        " JSON.stringify({ splash: false }))")
     pg = ctx.new_page()
     errors: list[str] = []
     pg.on("pageerror", lambda e: errors.append(str(e)))

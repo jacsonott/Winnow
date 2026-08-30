@@ -36,6 +36,15 @@ try {
 
 <div id="busyBar" class="busy-bar" hidden aria-hidden="true"></div>
 
+<!-- The launch animation. Above everything, removed once it finishes or is
+     skipped; see static/js/splash.js. The tagline is the only text — the
+     original mock carried a shell prompt, which is the wrong thing to show
+     someone who has evidently already launched the application. -->
+<div id="splash" class="splash" hidden aria-hidden="true">
+  <canvas id="splashCanvas"></canvas>
+  <div id="splashTagline" class="splash-tagline">separate the signal from the noise</div>
+</div>
+
 <div id="home" class="home" hidden></div>
 
 <div id="app" hidden>

@@ -206,8 +206,20 @@ static/js/         The frontend, one ES module per subsystem (main.js is the
                     Boundaries and the rules that keep them safe are in
                     docs/notes/frontend-modules.md — read it before moving
                     code between modules.
-static/style.css   Token-driven theming: 4 styles (panel/phosphor/blueprint/
-                    studio) x dark/light, selected via data-style/data-theme
+static/js/splash.js The launch animation — winnowing, which is what the app
+                    is named for: chaff (DFIR noise tokens) blows off the
+                    right edge, grain drops out of the toss and lands as the
+                    wordmark. Standalone: draws to its own canvas, imports
+                    nothing from the app, so it can run before the case list
+                    exists and can't be what breaks startup. Runs CONCURRENTLY
+                    with boot(), so it fades onto a screen that is already
+                    populated. Skippable by any key/click, off via Settings →
+                    Appearance, and skipped entirely under
+                    prefers-reduced-motion. tests/ui/conftest.py disables it
+                    for the shared page fixture — a full-viewport overlay
+                    would make every click in every other test wait it out.
+static/style.css   Token-driven theming: 5 styles (panel/phosphor/blueprint/
+                    studio/harvest) x dark/light, selected via data-style/data-theme
                     on <html>, plus a user accent color. See the file's own
                     header comment for the token contract before adding
                     hardcoded colors.
