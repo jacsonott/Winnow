@@ -623,7 +623,27 @@ html[data-style="studio"][data-theme="light"] {
   position: absolute; right: -3px; top: 0; bottom: 0; width: 7px;
   cursor: col-resize; z-index: 3;
 }
-.hcell.pinned { background: var(--panel-2); box-shadow: inset 2px 0 0 var(--accent-dim); }
+/* Pinned columns stay put while the rest scroll under them. The `left`
+   offset and `position: sticky` are set inline per column (see
+   columns.pinnedOffsets) because they depend on the widths in front; what
+   belongs here is the part that is the same for all of them.
+
+   OPAQUE BACKGROUNDS ARE LOAD-BEARING: a transparent pinned cell shows the
+   columns sliding underneath straight through it. Each state needs its own
+   opaque colour for the same reason, which is why selected and hovered
+   rows are repeated here rather than inherited.
+
+   z-index 1 puts them above ordinary cells and below the gutter (2) and
+   the header (3), which pin to the left of everything. */
+.collist-pin { flex: 0 0 auto; font-size: 11px; }
+.hcell.pinned, .fcell.pinned, .cell.pinned { z-index: 1; }
+.hcell.pinned { background: var(--panel-2); box-shadow: inset -1px 0 0 var(--line-2); }
+.fcell.pinned { background: var(--panel); box-shadow: inset -1px 0 0 var(--line-2); }
+.cell.pinned { background: var(--ink); box-shadow: inset -1px 0 0 var(--line); }
+.row:nth-child(even) .cell.pinned { background: var(--row-even); }
+.row:hover .cell.pinned { background: var(--row-hover); }
+.row.selected .cell.pinned { background: var(--row-selected); }
+.cell.pinned.cell-selected { background: var(--cell-selected-bg); }
 /* Marks an analyst-added derived column, so it's never mistaken for a
    field that came out of the evidence file. Dimmed-but-italic while the
    backfill is still running (or left partial by a cancel). */
