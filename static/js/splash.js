@@ -41,6 +41,24 @@ const TOKENS = [
    "this matters", --dim its subordinate text. That maps onto background,
    grain and chaff exactly, in every skin, in both modes, including a
    custom accent the analyst picked themselves. */
+/* The brand mark's three bars (static/icons/winnow-mark.svg), in unit
+   coordinates — grain kept, chaff fading. Drawn as dots beside the
+   wordmark so the logo and the file icon are visibly the same mark.
+   The colors are the icon's own, not theme tokens: this is the brand,
+   identical in every skin. */
+export const MARK_BARS = [
+  { x: 56 / 512, y: 44 / 512, w: 125 / 512, h: 424 / 512, color: [184, 132, 58] },
+  { x: 237 / 512, y: 80 / 512, w: 94 / 512, h: 351 / 512, color: [138, 108, 51] },
+  { x: 388 / 512, y: 117 / 512, w: 68 / 512, h: 279 / 512, color: [195, 201, 209] },
+];
+
+function barAt(nx, ny) {
+  for (const b of MARK_BARS) {
+    if (nx >= b.x && nx <= b.x + b.w && ny >= b.y && ny <= b.y + b.h) return b;
+  }
+  return null;
+}
+
 function readPalette() {
   const cs = getComputedStyle(document.documentElement);
   const tok = (name, fallback) => (cs.getPropertyValue(name) || '').trim() || fallback;
@@ -109,28 +127,45 @@ export function drawWordmark(canvas, { text = 'WINNOW', color, fontSize = 44 } =
   o2.textBaseline = 'middle';
   o2.fillText(text, w / 2, h / 2);
 
-  canvas.width = w * DPR;
+  // The three-bar brand mark leads the word, in the icon's own colors —
+  // the same dots, so mark and word read as one object.
+  const markBox = Math.round(h * 0.92);
+  const gap = Math.round(fontSize * 0.3);
+  const total = markBox + gap + w;
+
+  canvas.width = total * DPR;
   canvas.height = h * DPR;
-  canvas.style.width = w + 'px';
+  canvas.style.width = total + 'px';
   canvas.style.height = h + 'px';
   const ctx = canvas.getContext('2d');
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-  ctx.clearRect(0, 0, w, h);
+  ctx.clearRect(0, 0, total, h);
 
   const stride = Math.max(2, Math.round(fontSize / 22));
   const img = o2.getImageData(0, 0, w, h).data;
   const r = Math.max(0.9, stride * 0.42);
+  const markY = Math.round((h - markBox) / 2);
+  for (let y = 0; y < markBox; y += stride) {
+    for (let x = 0; x < markBox; x += stride) {
+      const b = barAt(x / markBox, y / markBox);
+      if (!b) continue;
+      ctx.fillStyle = `rgb(${b.color.join(',')})`;
+      ctx.beginPath();
+      ctx.arc(x, markY + y, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
   ctx.fillStyle = color;
   for (let y = 0; y < h; y += stride) {
     for (let x = 0; x < w; x += stride) {
       if (img[(y * w + x) * 4 + 3] > 128) {
         ctx.beginPath();
-        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.arc(markBox + gap + x, y, r, 0, Math.PI * 2);
         ctx.fill();
       }
     }
   }
-  return { width: w, height: h };
+  return { width: total, height: h };
 }
 
 export function splashEnabled(appearance) {
@@ -210,17 +245,24 @@ function start(canvas, colors, done) {
   }
   resize();
 
-  // Sample the wordmark into a field of landing spots.
+  // Sample the mark + wordmark into a field of landing spots. The grain
+  // settles into the same composite the case menu shows: the three-bar
+  // brand mark leading the word, bar points carrying the icon's own
+  // colors (see MARK_BARS) while the letters take the skin's accent.
   function computeTargets() {
     const off = document.createElement('canvas');
     off.width = W; off.height = H;
     const octx = off.getContext('2d');
     const fontSize = Math.max(48, Math.min(W * 0.13, 190));
     octx.fillStyle = '#fff';
-    octx.textAlign = 'center';
+    octx.textAlign = 'left';
     octx.textBaseline = 'middle';
     octx.font = `700 ${fontSize}px ui-monospace, "JetBrains Mono", Menlo, monospace`;
-    octx.fillText('WINNOW', W / 2, H * 0.44);
+    const textW = octx.measureText('WINNOW').width;
+    const markBox = fontSize * 1.05;
+    const gap = fontSize * 0.34;
+    const left = (W - (markBox + gap + textW)) / 2;
+    octx.fillText('WINNOW', left + markBox + gap, H * 0.44);
     const stride = Math.max(3, Math.round(fontSize / 26));
     const img = octx.getImageData(0, 0, W, H).data;
     const pts = [];
@@ -229,11 +271,18 @@ function start(canvas, colors, done) {
         if (img[(y * W + x) * 4 + 3] > 128) pts.push({ x, y });
       }
     }
+    const markTop = H * 0.44 - markBox / 2;
+    for (let y = 0; y < markBox; y += stride) {
+      for (let x = 0; x < markBox; x += stride) {
+        const b = barAt(x / markBox, y / markBox);
+        if (b) pts.push({ x: left + x, y: markTop + y, rgb: b.color });
+      }
+    }
     for (let i = pts.length - 1; i > 0; i--) {
       const j = (Math.random() * (i + 1)) | 0;
       [pts[i], pts[j]] = [pts[j], pts[i]];
     }
-    return pts.length > 650 ? pts.slice(0, 650) : pts;
+    return pts.length > 780 ? pts.slice(0, 780) : pts;
   }
 
   const targets = computeTargets();
@@ -351,9 +400,10 @@ function start(canvas, colors, done) {
           ctx.fillStyle = CHAFF_RGB;
           ctx.fillText(p.token, p.x, p.y);
         }
-        const rr = Math.round(lerp(colors.chaff[0], colors.grain[0], mix));
-        const gg = Math.round(lerp(colors.chaff[1], colors.grain[1], mix));
-        const bb = Math.round(lerp(colors.chaff[2], colors.grain[2], mix));
+        const to = p.target.rgb || colors.grain;   // bar points keep the icon's colors
+        const rr = Math.round(lerp(colors.chaff[0], to[0], mix));
+        const gg = Math.round(lerp(colors.chaff[1], to[1], mix));
+        const bb = Math.round(lerp(colors.chaff[2], to[2], mix));
         ctx.globalAlpha = 0.3 + 0.7 * Math.min(1, mix * 1.6);
         ctx.fillStyle = `rgb(${rr},${gg},${bb})`;
         ctx.beginPath();

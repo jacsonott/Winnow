@@ -94,3 +94,28 @@ def test_harvest_is_the_default_look(browser, server):
         assert pg.evaluate("() => Object.keys(__winnow.STYLES)[0]") == "harvest"
     finally:
         ctx.close()
+
+
+def test_the_brand_mark_leads_the_word_in_its_own_colors(browser, server):
+    """The three-bar icon (grain kept, chaff fading) now fronts the
+    wordmark — brand colors from the icon itself, NOT theme tokens, so
+    the logo and the OS file icon are visibly the same mark in every
+    skin. Pinned by sampling the canvas for the bronze and the grey."""
+    ctx, pg = _home(browser, server, '{ "splash": false }')
+    try:
+        pg.wait_for_function(
+            """() => {
+              const c = document.querySelector('.home-brand-mark');
+              if (!c || !c.width) return false;
+              const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+              let bronze = false, grey = false;
+              for (let i = 0; i < d.length; i += 4) {
+                if (d[i + 3] < 100) continue;   // dots this small are all antialias edge
+                if (Math.abs(d[i] - 184) < 12 && Math.abs(d[i + 1] - 132) < 12) bronze = true;
+                if (Math.abs(d[i] - 195) < 12 && Math.abs(d[i + 1] - 201) < 12) grey = true;
+                if (bronze && grey) return true;
+              }
+              return false;
+            }""", timeout=10_000)
+    finally:
+        ctx.close()
