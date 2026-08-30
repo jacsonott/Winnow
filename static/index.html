@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" data-style="panel" data-theme="dark">
+<html lang="en" data-style="harvest" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -15,14 +15,16 @@
    break page load. */
 try {
   var a = JSON.parse(localStorage.getItem('winnow.appearance') || '{}');
-  var style = a.style || 'panel';
+  var style = a.style || 'harvest';   // keep in step with defaultAppearance()
   var mode = a.themeMode || 'dark';
   var theme = mode === 'auto'
     ? (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
     : mode;
   document.documentElement.setAttribute('data-style', style);
   document.documentElement.setAttribute('data-theme', theme);
-  if (a.accent) {
+  // Only a CUSTOM accent is pre-painted. An uncustomised one would override
+  // the skin's own per-theme accent — see settings.js paintAccent().
+  if (a.accent && a.accentCustomized) {
     document.documentElement.style.setProperty('--accent', a.accent);
     var c = a.accent.replace('#', '');
     var r = parseInt(c.substr(0, 2), 16), g = parseInt(c.substr(2, 2), 16), bch = parseInt(c.substr(4, 2), 16);
