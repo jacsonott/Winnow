@@ -11,6 +11,7 @@ import { loadAppSettings, loadCaseSettings, loadHeaderNicknames, loadSavedFilter
 import { updateSearchAllButton } from './search.js';
 import { clearViewStateStash, applyPageTabsSize, loadSources } from './sources.js';
 import { showGridTab } from './sql.js';
+import { drawWordmark } from './splash.js';
 import { S } from './state.js';
 import { fmtBytes } from './tables.js';
 import { updateTimeRangeButton } from './timeframe.js';
@@ -588,7 +589,17 @@ export function renderHome() {
   const inner = el('div', 'home-inner');
 
   const head = el('div', 'home-head');
-  head.append(el('div', 'brand', 'Winnow'));
+  // The wordmark, not the word: the same dot field the launch animation
+  // settles into, in the accent colour. Redrawn on open rather than cached
+  // because the accent follows the skin, and a stale canvas would be the
+  // one element that ignored a theme change.
+  const brand = el('div', 'home-brand');
+  const mark = el('canvas', 'home-brand-mark');
+  brand.append(mark);
+  head.append(brand);
+  drawWordmark(mark, {
+    color: getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#d9a441',
+  });
   head.append(el('div', 'home-head-spacer'));
   const newBtn = el('button', 'btn', '+ New case');
   newBtn.onclick = openNewCaseModal;
