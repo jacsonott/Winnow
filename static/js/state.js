@@ -91,6 +91,8 @@ export const S = {
   homeShowOlder: false,    // reveals cases not opened in >30 days once toggled
   activeTab: 'grid',       // 'grid' or a page tab's key ('sql' | 'timeline' | 'plugin:<id>') — which of #grid/#sqlview/#timelineview/.pluginview is up
   tabOrder: [],            // source/merge ids, drag-reordered — ids not listed here sort after, in loadSources() order
+  tabHistory: [],          // recently visited page tabs, mouse back/forward — see tabhistory.js
+  tabHistoryPos: -1,
   pageTabPrefs: null,      // {order, width} for the page-tab strip, from localStorage — set below, see loadPageTabPrefs
   sqlTabs: [],             // [{id, name, sql, pos}] from the case file's sql_tabs table (see showSqlTab)
   sqlTabId: null,          // which sql tab the editor/result pane is currently showing
