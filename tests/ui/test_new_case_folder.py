@@ -3,6 +3,8 @@ being gone from it."""
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 pytestmark = pytest.mark.ui
@@ -52,12 +54,31 @@ def test_the_folder_picker_can_make_a_folder(page, tmp_path):
         page.locator(".confirm-overlay input").fill("Intrusion 2026")
         page.locator(".confirm-card .btn", has_text="OK").first.click()
 
-        # Created on disk, and the picker stepped into it — which is where
-        # the analyst was going.
+        # Assert the real outcome first — the folder on disk — so a failure
+        # says whether the POST worked, rather than only that the UI didn't
+        # move. The toast carries the server's message when it didn't.
         made = tmp_path / "Intrusion 2026"
-        page.wait_for_function("(p) => document.querySelector('#modalBody input').value === p",
-                               arg=str(made), timeout=10_000)
-        assert made.is_dir()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not made.is_dir():
+            time.sleep(0.1)
+        assert made.is_dir(), (
+            "folder was not created; toast said: "
+            + (page.locator("#toast").inner_text() or "<nothing>"))
+
+        # ...and the picker stepped into it, which is where the analyst was
+        # going. Compared with the path the SERVER returned: it round-trips
+        # through os.path.abspath, which can normalise a symlinked temp dir
+        # (/tmp -> /private/tmp and friends) into something that is the same
+        # folder but not the same string.
+        # Waited for, not read once: stepping in is a second async fetch that
+        # starts only after the create resolves, so the folder exists on disk
+        # a moment before the picker has moved. Matched by suffix rather than
+        # equality — the server's path round-trips through os.path.abspath,
+        # which can normalise a symlinked temp dir into the same folder under
+        # a different string.
+        page.wait_for_function(
+            "() => document.querySelector('#modalBody input').value.endsWith('Intrusion 2026')",
+            timeout=10_000)
     finally:
         _back_to_app(page)
 
