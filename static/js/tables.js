@@ -1,6 +1,7 @@
 /* The Tables manager — row counts, indexes, dropping a source, compacting.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
+import { openTableMenu } from './timeframe.js';
 import { $, api, el, post, setBusy, toast } from './core.js';
 import { writeClipboardText } from './grouping.js';
 import { sqlSchemaForLLM } from './plugins.js';
@@ -151,6 +152,10 @@ export function openTablesManager() {
           await loadSources();
           openTablesManager();
         };
+        const menuBtn = el('button', 'btn ghost', 'Settings…');
+        menuBtn.title = 'The table menu — columns, pinning, exports, everything per-table';
+        menuBtn.onclick = () => openTableMenu(s.id);   // opens the table itself first if it was closed
+        if (!s.error) row.append(menuBtn);
         const nick = el('button', 'btn ghost', 'Nickname…');
         nick.title = s.is_merge ? 'Rename this merge' : 'A display name shown in place of the file name — clear it to go back';
         nick.onclick = async () => {
