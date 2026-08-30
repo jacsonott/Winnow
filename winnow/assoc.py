@@ -103,11 +103,33 @@ def supported_types(plugin_formats: list[dict] | None = None) -> list[dict]:
     return out
 
 
-def launch_command() -> list[str]:
+def _hidden_interpreter(executable: str) -> str:
+    """The console-less flavour of an interpreter, when one exists beside
+    it. CPython on Windows ships pythonw.exe next to python.exe: same
+    interpreter, no console window — which is the whole difference
+    between "double-click a file, Winnow opens" and "double-click a
+    file, a PowerShell-looking box also opens and sits there for the
+    server's lifetime". Purely a sibling-file check, no platform sniff,
+    so it's testable anywhere and a no-op on Linux (no pythonw exists)."""
+    p = Path(executable)
+    name = p.name.lower()
+    if name.startswith("python") and not name.startswith("pythonw"):
+        w = p.with_name("pythonw" + p.name[len("python"):])
+        if w.is_file():
+            return str(w)
+    return executable
+
+
+def launch_command(background: bool = False) -> list[str]:
     """What the OS should run to open files with Winnow — this install's
     interpreter against this install's server.py, resolved now so a
-    moved install re-registers rather than silently pointing at air."""
-    return [sys.executable, str(paths.INSTALL_ROOT / "server.py"), "--assoc"]
+    moved install re-registers rather than silently pointing at air.
+    `background` swaps in the console-less interpreter where one exists
+    (see _hidden_interpreter) — an analyst-facing setting, because the
+    hidden flavour also hides the server log, which is exactly what you
+    do NOT want while troubleshooting an association that won't open."""
+    exe = _hidden_interpreter(sys.executable) if background else sys.executable
+    return [exe, str(paths.INSTALL_ROOT / "server.py"), "--assoc"]
 
 
 _ICON_DIR = paths.INSTALL_ROOT / "static" / "icons"
@@ -384,10 +406,11 @@ class WindowsAssoc:
 
     PROGID = "Winnow.File"
 
-    def __init__(self, reg=None):
+    def __init__(self, reg=None, background: bool = False):
         if reg is None:
             import winreg as reg  # pragma: no cover - windows only
         self.reg = reg
+        self.background = background
 
     def _hkcu(self):
         return self.reg.HKEY_CURRENT_USER
@@ -442,12 +465,24 @@ class WindowsAssoc:
     def _ensure_progid(self) -> None:
         base = f"Software\\Classes\\{self.PROGID}"
         self._set(base, None, "Winnow")
-        # DefaultIcon is what puts the wheat mark on the Open With → Winnow
+        # DefaultIcon is what puts the brand mark on the Open With → Winnow
         # menu entry and on any file type Winnow is the default for (a
         # .db-winnow case, above all). ",0" = the first icon in the .ico.
         self._set(f"{base}\\DefaultIcon", None, f"{icon_file('ico')},0")
         self._set(f"{base}\\shell\\open\\command", None,
-                  subprocess.list2cmdline(launch_command()) + ' "%1"')
+                  subprocess.list2cmdline(launch_command(self.background)) + ' "%1"')
+
+    def refresh_command(self) -> bool:
+        """Rewrite the ProgId's open command to match the current
+        background setting — the one registry value every registered
+        extension shares, so a toggle takes effect immediately without
+        re-registering each type. No-op (False) when Winnow was never
+        registered: creating the ProgId as a side effect of a settings
+        toggle would be registration by surprise."""
+        if self._get(f"Software\\Classes\\{self.PROGID}", None) is None:
+            return False
+        self._ensure_progid()
+        return True
 
     def _userchoice_present(self, ext: str) -> bool:
         path = ("Software\\Microsoft\\Windows\\CurrentVersion\\Explorer"
@@ -506,10 +541,12 @@ def platform_name() -> str:
     return "unsupported"
 
 
-def adapter():
+def adapter(background: bool = False):
     name = platform_name()
     if name == "windows":
-        return WindowsAssoc()
+        return WindowsAssoc(background=background)
     if name == "linux":
+        # Terminal=false in the .desktop entry already means no console on
+        # Linux; the flag has nothing to change there.
         return LinuxAssoc()
     return None

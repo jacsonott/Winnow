@@ -145,7 +145,13 @@ see [docs/notes/README.md](README.md) for the whole set.
   success; on Linux a plugin extension resolves to no MIME type at all
   until our shared-mime-info package supplies the glob, so registering
   one writes `mime/packages/winnow.xml` and best-effort runs
-  `update-mime-database`. Tests build both adapters against fake
+  `update-mime-database`. The `assoc_background` machine pref launches
+  associations through pythonw.exe (no console window) — a toggle, not
+  the default, because the hidden interpreter also hides the server log,
+  and the day an association won't open is the day that log matters. The
+  toggle rewrites the ProgId's shared open command in place
+  (`refresh_command`), never creating the ProgId on a machine where
+  Winnow was never registered. Tests build both adapters against fake
   environments (a dict-backed winreg, tmp XDG dirs) — and any UI test
   touching the panel relies on conftest pointing the spawned server's
   `XDG_DATA_HOME`/`XDG_CONFIG_HOME` at tmp, or a green test would edit
