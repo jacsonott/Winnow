@@ -10,6 +10,28 @@ see [docs/notes/README.md](README.md) for the whole set.
 
 ---
 
+---
+
+- **Pinned columns are `position: sticky`, not a second pane.** A column
+  the analyst pinned (Alt-click its header, or the columns panel) keeps its
+  place in the flex row and gets `left: <gutter + widths of the pinned
+  columns before it>`; `columns.pinnedOffsets()` computes that once per
+  render and the three sites that draw cells — header, filter row, body —
+  all place them through `applyPin`. Columns are deliberately NOT reordered
+  to pin them: sticky keeps an element in flow until it would scroll past
+  its offset, so an unpinned column between two pinned ones simply slides
+  underneath, and reordering would also have silently changed export column
+  order, which follows the arrangement.
+- **A pinned column is not immovable.** It scrolls with everything else
+  until it reaches its offset, then holds — so a test asserting "it did not
+  move" is only right once it has parked. Assert across two scrolls, with
+  the first derived from the column's own `offsetLeft` rather than a fixed
+  number: where a column sits depends on the order, which the layout
+  remembers.
+- **Opaque backgrounds on pinned cells are load-bearing.** A transparent
+  one shows the columns sliding underneath straight through it, and each
+  row state (even, hover, selected, cell-selected) needs its own opaque
+  colour for the same reason.
 - **Row selection (`static/js/state.js`) is a flag plus a Set, never a list of every
   selected position** — `S.selectAll` off means `S.selection` holds the
   selected view *positions*; on means it holds the *exclusions* (everything

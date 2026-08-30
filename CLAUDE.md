@@ -412,7 +412,7 @@ what you're about to touch:
 | [docs/notes/store.md](docs/notes/store.md) | view building and paging, FTS/trigram and column indexes, grouping and tag counts, search-all, the reader pool, cancellable ops, `compact()` |
 | [docs/notes/ingest.md](docs/notes/ingest.md) | CSV/JSON/SQLite/folder ingest, drag-and-drop, ragged rows, background import jobs |
 | [docs/notes/frontend-modules.md](docs/notes/frontend-modules.md) | the `static/js/` module layout and the four rules that keep its import graph loadable |
-| [docs/notes/grid.md](docs/notes/grid.md) | the virtualized grid: DOM window, page cache and prefetch, row selection, the spacer cap, the gutter grid |
+| [docs/notes/grid.md](docs/notes/grid.md) | the virtualized grid: DOM window, page cache and prefetch, row selection, the spacer cap, the gutter grid, pinned columns |
 | [docs/notes/ui.md](docs/notes/ui.md) | right-click menus, the filter row and value picker, saved filters, the timeframe filter, tab strips and sidebar, Settings, keybindings |
 | [docs/notes/server.md](docs/notes/server.md) | routes and middleware, one-case-one-Winnow, CSRF header, 400-vs-500, shutdown |
 | [docs/notes/derived.md](docs/notes/derived.md) | derived datetime columns end to end |

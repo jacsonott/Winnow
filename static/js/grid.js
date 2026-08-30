@@ -1,7 +1,7 @@
 /* The virtualized grid: paging, prefetch, painting, and cell-range selection.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { colWidth, visibleCols } from './columns.js';
+import { applyPin, colWidth, pinnedOffsets, visibleCols } from './columns.js';
 import { $, GUTTER_W, MAX_SPACER_PX, OVERSCAN, PAGE, ROW_H, api, el } from './core.js';
 import { maybeShowDetail, showDetail } from './detail.js';
 import { ensureGroupPage, findGroupAt, groupCoordAt, groupDataRowAt, isLeafLevel, renderGrouped, toggleGroup } from './grouping.js';
@@ -360,6 +360,10 @@ export function rowPaintContext() {
     idx: Object.fromEntries(S.columns.map((c, i) => [c.name, i])),
     tagColor: Object.fromEntries(S.tags.map((t) => [t.id, t.color])),
     widths: Object.fromEntries(cols.map((name) => [name, colWidth(name)])),
+    // Hoisted with the widths: pinned placement is identical for every row
+    // in a pass, and recomputing it per row would walk the column list once
+    // per painted row.
+    pins: pinnedOffsets(),
     needle: S.search.trim().toLowerCase(),
   };
 }
@@ -371,7 +375,7 @@ export function rowPaintContext() {
    reduced copy of it precisely so that selection, tag stripes, the note
    mark and the cell-range highlight can't be present in one mode and
    quietly missing in the other. */
-export function buildDataRow(pos, r, { cols, colMeta, idx, tagColor, widths, needle }) {
+export function buildDataRow(pos, r, { cols, colMeta, idx, tagColor, widths, pins, needle }) {
   const row = el('div', 'row' + (r ? '' : ' pending'));
   row.dataset.pos = pos;
   if (pos === S.cursor) row.classList.add('cursor');
@@ -403,6 +407,7 @@ export function buildDataRow(pos, r, { cols, colMeta, idx, tagColor, widths, nee
   cols.forEach((name, ci) => {
     const c = el('div', 'cell' + (colMeta[name] && colMeta[name].type === 'number' ? ' num' : ''));
     c.style.flexBasis = widths[name] + 'px';
+    applyPin(c, name, pins);
     c.dataset.col = ci;
     if (cellInRange(pos, ci)) c.classList.add('cell-selected');
     const val = r ? r.cells[idx[name]] : '';
