@@ -41,6 +41,9 @@ def test_assoc_open_creates_a_quicklook_case_and_ingests(client, tmp_path):
     assert server.STORE.list_sources()[0]["row_count"] == 2
     # Off the home screen until saved — that's what temporary means.
     assert WS.cases.find_by_path(body["case"]) is None
+    # The hand-off contract: the response says whether anyone is watching
+    # this server, so the launcher knows if it still owes a window.
+    assert body["connected"] is False
     # And no first-run setup prompt on top of the file the analyst just
     # opened: a brand-new install's quick look must not open with the
     # cases-dir dialog stacked over it.
@@ -312,3 +315,48 @@ def test_new_quicklook_path_uses_the_winnow_suffix(client):
     from winnow.store import CASE_SUFFIX
     server, c = client
     assert server._new_temp_case_path().endswith(CASE_SUFFIX)
+
+
+def _fake_recent(monkeypatch, server, age_s, connected, tmp_path):
+    """Wire _run_assoc's world: one recent temp instance, a server that
+    accepts the join, and a spy on the window-opener."""
+    import time as _t
+    started = _t.strftime("%Y-%m-%dT%H:%M:%S", _t.localtime(_t.time() - age_s))
+    inst = {"pid": 1, "port": 59999, "started_at": started,
+            "case_path": str(tmp_path / "cases" / "quicklook" / "q.db-winnow")}
+    monkeypatch.setattr(server.instances, "running", lambda: [inst])
+    monkeypatch.setattr(server, "_assoc_post",
+                        lambda port, route, payload, timeout=30.0: {"connected": connected})
+    opened = []
+    monkeypatch.setattr(server.browser, "open_when_ready",
+                        lambda url, host, port: opened.append(url))
+    return opened
+
+
+def test_a_join_to_an_unwatched_quicklook_opens_a_window(client, tmp_path, monkeypatch):
+    """Double-click a file while a minutes-old quick-look server is still
+    alive but its window is closed: the join used to land invisibly —
+    the analyst double-clicked and nothing appeared."""
+    server, c = client
+    opened = _fake_recent(monkeypatch, server, age_s=60, connected=False, tmp_path=tmp_path)
+    assert server._run_assoc([_csv(tmp_path)]) == 0
+    assert opened == ["http://127.0.0.1:59999"]
+
+
+def test_a_burst_join_does_not_open_a_second_window(client, tmp_path, monkeypatch):
+    """Multi-select: five files arrive as five launcher invocations in a
+    couple of seconds, and the first one's window is still starting —
+    the later joins must not stack four more windows on top of it."""
+    server, c = client
+    opened = _fake_recent(monkeypatch, server, age_s=2, connected=False, tmp_path=tmp_path)
+    assert server._run_assoc([_csv(tmp_path)]) == 0
+    assert opened == []
+
+
+def test_a_join_to_a_watched_quicklook_opens_nothing(client, tmp_path, monkeypatch):
+    """Someone is looking at the quick-look (live presence stream): the
+    new table appears in THAT window; a duplicate would just split them."""
+    server, c = client
+    opened = _fake_recent(monkeypatch, server, age_s=60, connected=True, tmp_path=tmp_path)
+    assert server._run_assoc([_csv(tmp_path)]) == 0
+    assert opened == []

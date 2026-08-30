@@ -204,7 +204,8 @@ examples/plugins/  Committed example plugins, one per extension point — treat
                     plugins/.
 static/index.html  App shell. No framework. #home and #app are siblings; only
                     one is ever visible.
-static/icons/      The brand mark (a wheat stalk — winnowing) as SVG, PNGs
+static/icons/      The brand mark (three thinning bars — grain kept, chaff
+                    fading; winnowing) as SVG, PNGs
                     and a multi-resolution winnow.ico. Serves the favicon
                     and is what OS file associations point at:
                     DefaultIcon on Windows, the .desktop Icon= and the
