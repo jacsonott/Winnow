@@ -94,7 +94,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   `S.savedFilters`/`S.tags`/etc., has no earlier source-open-triggered load
   point to piggyback on, so it just awaits a fresh copy before building the
   profile `<select>` at all.
-- **There is one import entry point** — the Session menu's "Import…" →
+- **There is one import entry point** — the Case menu's "Import…" →
   `openImportModal`, whose queue now takes CSV/TSV, JSON/JSONL *and*
   SQLite files (`importKindFor` routes by extension; a sqlite item's
   "Pick tables…" opens `openSqliteTablePicker`, the old standalone
