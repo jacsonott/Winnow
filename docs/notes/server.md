@@ -84,3 +84,18 @@ see [docs/notes/README.md](README.md) for the whole set.
   is a separate function *so tests can monkeypatch it* — calling the real
   one under pytest kills pytest. The CSRF header gate is what stops a
   hostile page in another tab from turning the server off.
+
+- **Idle shutdown rides the presence stream, not request traffic.** An
+  analyst reading the grid makes no requests for hours, so "last request
+  time" would reap a live session; instead every page holds an EventSource
+  open to `/api/presence` and the count of live streams is the signal.
+  Three holds stop it destroying work: open streams, in-flight HTTP
+  (counted in the no-cache middleware, `/api/presence` itself excluded or
+  it would read busy forever — a CSV download outliving its tab is exactly
+  what this hold protects), and running/queued ingest jobs. A server
+  nothing ever connected to gets a 15-minute fuse rather than the 2-minute
+  one — `--no-browser` plus a slow manual visit is legitimate, but an
+  association-spawned server whose window failed to open still gets
+  reaped. `--no-idle-shutdown` (or the `WINNOW_*_EXIT_S` env overrides the
+  tests use) turns it off. Graces are compared on `time.monotonic()` — a
+  suspended laptop must not wake up to an instant shutdown.

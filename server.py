@@ -8,6 +8,7 @@ Then browse to http://127.0.0.1:8777
 from __future__ import annotations
 
 import argparse
+import asyncio
 import contextlib
 import heapq
 import json
@@ -17,6 +18,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +38,91 @@ from winnow.store import (SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, OpCa
                    probe_case_lock, sweep_orphan_views)
 
 HERE = paths.INSTALL_ROOT  # static/, plugins/, examples/plugins/ all hang off the install root
+
+
+# ------------------------------------------------------------ idle shutdown
+#
+# A server whose browser windows are all gone shuts itself down. Two things
+# made this necessary at once: file associations spawn extra instances on
+# ephemeral ports (see winnow/instances.py), which nobody will ever find a
+# terminal for, and the long-standing failure mode the ⏻ button exists for —
+# a forgotten server holding a case lock all weekend — stops requiring the
+# analyst to remember anything.
+#
+# "A browser is connected" cannot be inferred from request traffic: an
+# analyst reading the grid makes no requests at all, sometimes for hours.
+# So every page holds open an EventSource to /api/presence, and the signal
+# is the count of live streams — connection-oriented, immune to background-
+# tab timer throttling, and torn down by the browser the moment a window
+# closes. Zero streams sustained past a grace period, with nothing else
+# going on, means nobody is here.
+#
+# Three holds keep this from ever destroying work:
+#  - any live stream (the grace period also covers a reload's brief dip
+#    to zero);
+#  - in-flight HTTP (a multi-minute CSV export keeps downloading after its
+#    tab closes — that connection counts until it finishes);
+#  - running or queued ingest jobs (auto-exit closing the store would drop
+#    a partial import, which is exactly what close() is documented to do).
+#
+# A server nothing ever connected to gets a much longer fuse: --no-browser
+# plus a manual visit is a legitimate flow, and so is a launcher whose
+# browser failed to open — the long fuse is what still reaps that one.
+
+IDLE_EXIT_S = float(os.environ.get("WINNOW_IDLE_EXIT_S", "120"))
+NEVER_CONNECTED_EXIT_S = float(os.environ.get("WINNOW_NEVER_CONNECTED_EXIT_S", "900"))
+IDLE_TICK_S = float(os.environ.get("WINNOW_IDLE_TICK_S", "10"))
+
+
+class _Presence:
+    def __init__(self):
+        self.streams = 0            # open /api/presence connections
+        self.inflight = 0           # other HTTP requests mid-flight
+        self.ever_connected = False
+        self.started = time.monotonic()
+        self.last_zero = time.monotonic()
+        self.enabled = True         # main() clears this for --no-idle-shutdown
+
+
+PRESENCE = _Presence()
+
+
+def _jobs_running() -> bool:
+    if STORE is None or STORE.closed:
+        return False
+    try:
+        return any(j["status"] in ("running", "queued") for j in STORE.list_ingest_jobs())
+    except Exception:  # noqa: BLE001 — a store mid-close must read as "not busy"
+        return False
+
+
+def _idle_exit_reason(now: float, p: _Presence, busy: bool) -> str | None:
+    """Why this server should exit right now, or None. Pure on its inputs —
+    the monitor passes live state, the tests pass constructed ones."""
+    if not p.enabled or p.streams > 0 or busy:
+        return None
+    if p.ever_connected:
+        idle = now - p.last_zero
+        if idle >= IDLE_EXIT_S:
+            return (f"no browser has been connected for {int(idle)}s — "
+                    "shutting down (disable with --no-idle-shutdown)")
+    else:
+        up = now - p.started
+        if up >= NEVER_CONNECTED_EXIT_S:
+            return (f"no browser ever connected in {int(up)}s — "
+                    "shutting down (disable with --no-idle-shutdown)")
+    return None
+
+
+async def _idle_monitor():
+    while True:
+        await asyncio.sleep(IDLE_TICK_S)
+        reason = _idle_exit_reason(time.monotonic(), PRESENCE,
+                                   PRESENCE.inflight > 0 or _jobs_running())
+        if reason:
+            print(reason, flush=True)
+            _trigger_shutdown()
+            return
 
 
 @contextlib.asynccontextmanager
@@ -62,9 +149,11 @@ async def _lifespan(_app: FastAPI):
     if swept["removed"]:
         print(f"Cleaned up {swept['removed']} orphaned temp file(s) from previous runs "
               f"({swept['bytes_freed'] / (1 << 20):.1f} MB)")
+    monitor = asyncio.create_task(_idle_monitor())
     try:
         yield
     finally:
+        monitor.cancel()
         # Take this server out of the instance registry FIRST, so a launcher
         # racing our shutdown doesn't pick a server that is mid-teardown.
         with contextlib.suppress(Exception):
@@ -220,6 +309,24 @@ async def require_client_header(request: Request, call_next):
 
 @app.middleware("http")
 async def no_cache_static(request: Request, call_next):
+    # Piggybacked in-flight counting for idle shutdown — this middleware
+    # already wraps every request, so the marginal cost is two increments.
+    # /api/presence is excluded: its response streams for the LIFETIME of a
+    # page, so counting it would read as "busy" forever; it has its own
+    # stream counter. A download that outlives its tab (a multi-minute CSV
+    # export) counts here until the body finishes, which is the hold that
+    # keeps auto-exit from killing it.
+    counted = request.url.path != "/api/presence"
+    if counted:
+        PRESENCE.inflight += 1
+    try:
+        return await _no_cache_static_inner(request, call_next)
+    finally:
+        if counted:
+            PRESENCE.inflight -= 1
+
+
+async def _no_cache_static_inner(request: Request, call_next):
     """StaticFiles sends Last-Modified/ETag but no Cache-Control, which
     leaves the browser free to serve a stale index.html/app.js/style.css
     from its own disk cache for an unbounded time — even across a normal
@@ -404,6 +511,26 @@ class UpdateApply(BaseModel):
     """Applying is a separate, explicit POST from checking — a check must
     never be able to install anything as a side effect."""
     confirm: bool = False
+
+
+@app.get("/api/presence")
+async def api_presence():
+    """The connection every page holds open so the server knows a browser
+    is attached. EventSource on the client, a comment-ping stream here —
+    no data ever flows, the CONNECTION is the message. Disconnect is
+    noticed at the next ping (≤15s), which is well inside the idle grace."""
+    async def stream():
+        PRESENCE.streams += 1
+        PRESENCE.ever_connected = True
+        try:
+            while True:
+                yield ": ping\n\n"
+                await asyncio.sleep(15)
+        finally:
+            PRESENCE.streams -= 1
+            if PRESENCE.streams == 0:
+                PRESENCE.last_zero = time.monotonic()
+    return StreamingResponse(stream(), media_type="text/event-stream")
 
 
 @app.get("/api/version")
@@ -2497,6 +2624,9 @@ def main() -> None:
                     help="Open --case even if another Winnow already has it open")
     ap.add_argument("--port", type=int, default=8777)
     ap.add_argument("--no-fts", action="store_true", help="Skip full-text index (faster import)")
+    ap.add_argument("--no-idle-shutdown", action="store_true",
+                    help="keep running even with no browser connected — for driving "
+                         "the API from scripts")
     ap.add_argument("--no-browser", action="store_true",
                     help="don't open a window at all")
     ap.add_argument("--browser-tab", action="store_true",
@@ -2576,6 +2706,9 @@ def main() -> None:
         browser.open_when_ready(url, args.host, args.port,
                                 app_mode=not args.browser_tab,
                                 profile_dir=args.browser_profile)
+
+    if args.no_idle_shutdown:
+        PRESENCE.enabled = False
 
     # Registered before uvicorn blocks, not in the lifespan: the lifespan
     # doesn't know the port (uvicorn owns it by then), and a launcher that
