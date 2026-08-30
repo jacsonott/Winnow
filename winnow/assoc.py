@@ -36,7 +36,7 @@ import os
 import shutil
 import subprocess
 import sys
-from configparser import ConfigParser
+from configparser import ConfigParser, Error
 from pathlib import Path
 
 from . import paths
@@ -128,7 +128,17 @@ class LinuxAssoc:
         cp.optionxform = str  # mime types are case-sensitive keys
         p = self._mimeapps_path()
         if p.exists():
-            cp.read(p, encoding="utf-8")
+            # mimeapps.list is a hand-editable file shared by every desktop
+            # app; a stray line or a corrupt write must surface as a
+            # fixable message, not a 500 — and register() must NOT press on
+            # with an empty parse, or writing back would erase every other
+            # application's associations.
+            try:
+                cp.read(p, encoding="utf-8")
+            except (UnicodeDecodeError, Error) as e:
+                raise ValueError(
+                    f"{p} is malformed ({e.__class__.__name__}) — fix or remove it, "
+                    "then try again") from e
         for sec in ("Default Applications", "Added Associations", "Removed Associations"):
             if not cp.has_section(sec):
                 cp.add_section(sec)
@@ -180,7 +190,9 @@ class LinuxAssoc:
         p = self._desktop_path()
         if not p.exists():
             return set()
-        for line in p.read_text(encoding="utf-8").splitlines():
+        # OUR file: if something corrupted it, "no mimes" is the honest
+        # reading, and the next register() rewrites it wholesale anyway.
+        for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
             if line.startswith("MimeType="):
                 return {m for m in line[len("MimeType="):].split(";") if m}
         return set()
@@ -265,7 +277,13 @@ class LinuxAssoc:
         self._write_mime_package(ours)
 
     def status(self, catalogue: list[dict]) -> dict[str, dict]:
-        cp = self._read_mimeapps()
+        try:
+            cp = self._read_mimeapps()
+        except ValueError:
+            # Reporting must never take the Settings panel down; a
+            # malformed mimeapps.list reads as "nothing registered", and
+            # the actionable message arrives when a CHANGE is attempted.
+            return {t["ext"]: {"registered": False, "default": False} for t in catalogue}
         mimes = self._desktop_mimes()
 
         def _in(section, mime):

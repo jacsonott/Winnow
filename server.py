@@ -782,6 +782,11 @@ def api_case_copy_sources(body: CopySourcesBody):
     these quick-look tables into my real case" flow. A target open in
     another Winnow is refused with the holder named (409, same contract as
     opening a locked case)."""
+    if _jobs_running():
+        # A source mid-ingest has an accurate-but-growing row_count; the
+        # ATTACH copy would snapshot whatever happened to be committed
+        # and file it in the target as a complete table.
+        raise HTTPException(409, "Still importing — copy again when the import finishes")
     try:
         return store().copy_sources_to(body.target_path, body.source_ids)
     except KeyError as e:
@@ -924,7 +929,10 @@ def api_assoc_types(request: Request):
 def api_assoc_register(request: Request, body: AssocExtsBody):
     a = _assoc_adapter(request)
     catalogue = _assoc_catalogue()
-    a.register(_assoc_pick(body.exts, catalogue), catalogue)
+    try:
+        a.register(_assoc_pick(body.exts, catalogue), catalogue)
+    except ValueError as e:   # a malformed mimeapps.list, with the fix named
+        raise HTTPException(400, str(e))
     _mark_asked(body.exts)   # an explicit yes is also an answer
     return {"ok": True}
 
@@ -933,7 +941,10 @@ def api_assoc_register(request: Request, body: AssocExtsBody):
 def api_assoc_unregister(request: Request, body: AssocExtsBody):
     a = _assoc_adapter(request)
     catalogue = _assoc_catalogue()
-    a.unregister(_assoc_pick(body.exts, catalogue), catalogue)
+    try:
+        a.unregister(_assoc_pick(body.exts, catalogue), catalogue)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     return {"ok": True}
 
 
@@ -948,7 +959,10 @@ def api_assoc_default(request: Request, body: AssocExtsBody):
         # the catalogue is the policy and the API enforces it — the UI
         # not offering the button is not enough.
         raise HTTPException(400, f"{', '.join(refused)} can only be a handler, not the default")
-    result = a.make_default(picked, catalogue) or {}
+    try:
+        result = a.make_default(picked, catalogue) or {}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     _mark_asked(body.exts)
     return {"ok": True, **result}
 
@@ -982,6 +996,13 @@ def api_case_save_as(body: CaseSaveAsBody):
     if not _is_temp_case(STORE.path):
         raise HTTPException(400, "Only a quick-look case can be saved this way — "
                                  "this one already has a home")
+    if _jobs_running():
+        # Closing the store cancels running ingest jobs, and a cancelled
+        # ingest DROPS its partial source (the cancel contract) — so
+        # "save while the file is still importing" would quietly produce
+        # an empty saved case. Natural timing, too: double-click a big
+        # file, banner appears, analyst clicks Save immediately.
+        raise HTTPException(409, "Still importing — save again when the import finishes")
     name = (body.name or "").strip()
     if not name:
         raise HTTPException(400, "Give the case a name")

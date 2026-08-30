@@ -168,6 +168,38 @@ def test_an_archive_carrying_user_paths_cannot_overwrite_them(install, tmp_path)
     assert (install / "plugins/README.md").read_text() == "# drop plugins here (v1)\n"
 
 
+def test_a_zip_slip_archive_is_refused_before_anything_is_written(install, tmp_path):
+    """A member path that climbs out of the install root with `..` is a
+    zip-slip: `root / member` would write wherever the traversal points.
+    An archive is untrusted input (a downloaded release, or something
+    handed to `update.py --from`), so the whole archive is refused and
+    nothing outside the root is ever created."""
+    import zipfile as _zip
+    outside = tmp_path / "OUTSIDE_THE_ROOT.txt"
+    assert not outside.exists()
+    archive = tmp_path / "slip.zip"
+    with _zip.ZipFile(archive, "w") as zf:
+        for rel, text in SHIPPED.items():
+            zf.writestr("Winnow-abc/" + rel, text)
+        # After the "Winnow-abc/" prefix is stripped this climbs back out
+        # to tmp_path/OUTSIDE_THE_ROOT.txt — a sibling of the install.
+        zf.writestr("Winnow-abc/x/../../OUTSIDE_THE_ROOT.txt", "pwned")
+
+    with pytest.raises(UpdateError, match="unsafe path"):
+        updater.apply_update(archive, install)
+    assert not outside.exists()
+    assert updater.installed_version(install) == "1.0.0"
+
+    # An ABSOLUTE member is refused the same way.
+    archive2 = tmp_path / "abs.zip"
+    with _zip.ZipFile(archive2, "w") as zf:
+        for rel, text in SHIPPED.items():
+            zf.writestr("Winnow-abc/" + rel, text)
+        zf.writestr("Winnow-abc//etc/winnow_pwned", "pwned")
+    with pytest.raises(UpdateError, match="unsafe path"):
+        updater.plan_update(archive2, install)
+
+
 def test_a_damaged_archive_is_refused_before_anything_is_written(install, tmp_path):
     archive = _make_release(tmp_path / "v2.zip", "1.1.0", _v2_files())
     raw = bytearray(archive.read_bytes())

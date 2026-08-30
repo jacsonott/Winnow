@@ -39,6 +39,14 @@ Design notes worth keeping:
   Case files are deliberately NOT part of it: a case opened by the newer
   version has already migrated itself, and silently reverting evidence
   state is far worse than the version mismatch it would paper over.
+- **The archive is untrusted input, so member paths are validated
+  before any write** (`_safe_member` / `_archive_members`). A member
+  that is absolute or contains a `..` component is a zip-slip: `root /
+  member` would write wherever the traversal points, outside the
+  install. Integrity CRCs prove a file arrived intact, not that it is
+  benign — a hostile or tampered archive passes `testzip()` fine. Any
+  unsafe member refuses the whole archive rather than skipping the one
+  entry, since a partially-applied traversal is worse than no update.
 """
 
 from __future__ import annotations
@@ -314,6 +322,21 @@ def _unusable(archive: Path, e: Exception) -> UpdateError:
         "it may be damaged or not a Winnow release. Download it again.")
 
 
+def _safe_member(rel: str) -> bool:
+    """A member path is safe to write under the install root only if it
+    stays there. An archive is untrusted input — a downloaded release, or
+    a hand-rolled zip — and `root / rel` with a `rel` of `../../etc/x` or
+    `/etc/x` writes wherever the traversal points (a real zip-slip: a
+    crafted release could plant files anywhere the analyst can write, or
+    overwrite their own data outside the install). Absolute paths and any
+    `..` component are refused; everything the extractor, planner and
+    manifest touch goes through here."""
+    if not rel or rel.startswith(("/", "\\")):
+        return False
+    parts = rel.replace("\\", "/").split("/")
+    return ".." not in parts and not (len(parts[0]) == 2 and parts[0][1] == ":")
+
+
 def _archive_members(zf: zipfile.ZipFile) -> tuple[str, list[str]]:
     """(prefix, [paths relative to it]). GitHub's generated archives nest
     everything under a single `Winnow-<sha>/` directory; a hand-rolled zip
@@ -324,8 +347,17 @@ def _archive_members(zf: zipfile.ZipFile) -> tuple[str, list[str]]:
     tops = {n.split("/", 1)[0] for n in names}
     if len(tops) == 1 and all("/" in n for n in names):
         prefix = tops.pop() + "/"
-        return prefix, [n[len(prefix):] for n in names]
-    return "", names
+        rels = [n[len(prefix):] for n in names]
+    else:
+        prefix, rels = "", names
+    # Refuse the whole archive if any member would escape the install root:
+    # a partially-applied traversal is worse than a refused update.
+    escapes = [r for r in rels if not _safe_member(r)]
+    if escapes:
+        raise UpdateError(
+            f"That archive contains an unsafe path ({escapes[0]!r}) and was refused — "
+            "it is not a genuine Winnow release")
+    return prefix, rels
 
 
 def _read_manifest(root: Path) -> list[str]:

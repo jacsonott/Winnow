@@ -269,3 +269,20 @@ def test_a_real_assoc_launch_becomes_a_quicklook_server(tmp_path):
             proc.wait(timeout=15)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+
+def test_save_as_refuses_while_an_import_runs(client, tmp_path, monkeypatch):
+    """Closing the store cancels running ingest jobs, and a cancelled
+    ingest drops its partial source — so save-mid-import would quietly
+    produce an EMPTY saved case. The natural timing, too: double-click a
+    big file, the banner appears, Save gets clicked immediately."""
+    server, c = client
+    res = c.post("/api/assoc/open", json={"files": [_csv(tmp_path)]}, headers=HEADERS)
+    server.STORE.wait_for_ingest_job(res.json()["started"][0]["job_id"], timeout=30)
+    monkeypatch.setattr(server, "_jobs_running", lambda: True)
+    r = c.post("/api/case/save_as", json={"name": "Too soon"}, headers=HEADERS)
+    assert r.status_code == 409
+    assert "importing" in r.json()["detail"].lower()
+    # The quick-look is untouched — still open, still temp.
+    assert c.get("/api/case/current", headers=HEADERS).json()["temp"] is True
+    server.STORE.close()

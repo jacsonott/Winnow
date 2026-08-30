@@ -313,3 +313,48 @@ def test_registration_routes_are_loopback_only(client, monkeypatch):
                   "/api/assoc/default", "/api/assoc/asked"):
         assert c.post(route, json={"exts": [".csv"]}, headers=HEADERS).status_code == 403
     assert c.get("/api/assoc/types", headers=HEADERS).status_code == 403
+
+
+def test_a_malformed_mimeapps_degrades_instead_of_raising(lin, tmp_path):
+    """mimeapps.list is hand-editable and shared by every desktop app. A
+    stray line must not take the Settings panel down (status reads as
+    nothing-registered) — and register must REFUSE with the fix named,
+    never parse-as-empty and write back, which would erase every other
+    application's associations."""
+    cfg = tmp_path / "config"
+    cfg.mkdir(parents=True)
+    (cfg / "mimeapps.list").write_text("no section header here\nkey=val\n")
+    picked, cat = _cat(".csv")
+    st = lin.status(cat)
+    assert st[".csv"] == {"registered": False, "default": False}
+    with pytest.raises(ValueError, match="malformed"):
+        lin.register(picked, cat)
+    # Untouched: the refusal is what protects the other apps' entries.
+    assert "no section header here" in (cfg / "mimeapps.list").read_text()
+
+    (cfg / "mimeapps.list").write_bytes(b"\xff\x8f" + b"\x00" * 40)
+    assert lin.status(cat)[".csv"]["registered"] is False
+    with pytest.raises(ValueError, match="malformed"):
+        lin.register(picked, cat)
+
+
+def test_a_corrupt_desktop_file_reads_as_no_mimes(lin, tmp_path):
+    apps = tmp_path / "share" / "applications"
+    apps.mkdir(parents=True)
+    (apps / "winnow.desktop").write_bytes(b"\xff\xfegarbage\x00")
+    picked, cat = _cat(".csv")
+    assert lin.status(cat)[".csv"]["registered"] is False
+    # And registering rewrites our file wholesale, recovering it.
+    lin.register(picked, cat)
+    assert lin.status(cat)[".csv"]["registered"] is True
+
+
+def test_malformed_mimeapps_maps_to_400_not_500(client, tmp_path, monkeypatch):
+    server, c = client
+    (tmp_path / "config").mkdir(exist_ok=True)
+    (tmp_path / "config" / "mimeapps.list").write_text("garbage\n")
+    r = c.get("/api/assoc/types", headers=HEADERS)
+    assert r.status_code == 200          # status degrades, panel stays up
+    r = c.post("/api/assoc/register", json={"exts": [".csv"]}, headers=HEADERS)
+    assert r.status_code == 400
+    assert "malformed" in r.json()["detail"]
