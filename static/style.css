@@ -138,6 +138,43 @@ html[data-style="blueprint"][data-theme="light"] {
 }
 
 /* Studio Soft — rounded, soft ambient shadows, smoother motion. */
+/* Harvest — the winnowing metaphor the app is named for, and the palette
+   the launch animation is drawn in. Brown-tinted darks rather than the
+   green-black of the other dark skins, straw gold for the accent (the
+   grain), warm greys for everything else (the chaff). Light mode is
+   deliberately parchment rather than white: this is the one skin where a
+   cool white would fight the accent.
+
+   The light-mode accent is DARKENED from the dark-mode gold, not shared.
+   #e0a94a on cream is about 1.9:1 against text-sized foreground — fine as
+   a fill behind dark text (tag chips), unreadable as text itself, which is
+   where an accent spends most of its life. */
+html[data-style="harvest"][data-theme="dark"] {
+  --ink: #0d0b08; --panel: #15120d; --panel-2: #1d1913; --panel-3: #262019;
+  --line: #2b251b; --line-2: #3a3226; --text: #cfc8b8; --dim: #8a8172;
+  --accent: #e0a94a; --accent-dim: #9c7530; --accent-fg: #14110b;
+  --sel: #241d10; --sel-line: #7a5f2a;
+  --row-even: #100e0a; --row-hover: #1a160f; --row-selected: #241d10; --cell-selected-bg: #33280f;
+  --border-hairline: #17140e; --text-faint: #46402f;
+  --danger: #e08a6a; --danger-bg: #3a2318; --danger-border: #6b3d28;
+  --str: #b7c98a; --num: #d8b46a; --kw: #c9a0d0;
+  --radius-sm: 2px; --radius-md: 3px; --border-w: 1px;
+  --ease: ease; --transition-fast: 120ms;
+  --shadow-tag: 0 4px 16px rgba(0,0,0,.5); --shadow-modal: 0 8px 24px rgba(0,0,0,.45);
+}
+html[data-style="harvest"][data-theme="light"] {
+  --ink: #faf6ea; --panel: #fffdf5; --panel-2: #f2ecdb; --panel-3: #e9e1cb;
+  --line: #e0d7c0; --line-2: #cec2a5; --text: #2e2920; --dim: #7e766a;
+  --accent: #b07a1f; --accent-dim: #8f6314; --accent-fg: #fffdf5;
+  --sel: #f3e9cf; --sel-line: #b07a1f;
+  --row-even: #fcf9f0; --row-hover: #f5efdf; --row-selected: #f3e9cf; --cell-selected-bg: #ecdfbb;
+  --border-hairline: #efe9d8; --text-faint: #b6ab93;
+  --danger: #a5442b; --danger-bg: #f7e2da; --danger-border: #dfb8a8;
+  --str: #4f6b2a; --num: #8f6314; --kw: #7a4e86;
+  --radius-sm: 2px; --radius-md: 3px; --border-w: 1px;
+  --ease: ease; --transition-fast: 120ms;
+  --shadow-tag: 0 4px 16px rgba(90,70,30,.16); --shadow-modal: 0 8px 24px rgba(90,70,30,.18);
+}
 html[data-style="studio"][data-theme="dark"] {
   --ink: #111219; --panel: #16171f; --panel-2: #1c1e28; --panel-3: #232532;
   --line: #2a2c38; --line-2: #383a4a; --text: #e7e8ee; --dim: #8b8da0;
@@ -1229,6 +1266,30 @@ textarea:focus { border-color: var(--accent); outline: none; }
 }
 
 /* -------------------------------------------------------- filter builder */
+
+/* The launch animation (static/js/splash.js). Fixed and above everything,
+   including modals, because it covers the whole app while it runs. Its
+   background is set inline from the palette rather than a token: it has to
+   be painted before the case list decides anything, and it is the one
+   surface that is deliberately the same in every skin. */
+.splash {
+  position: fixed; inset: 0; z-index: 999;
+  display: flex; align-items: center; justify-content: center;
+  transition: opacity .4s ease;
+}
+.splash canvas { position: absolute; inset: 0; display: block; }
+.splash-out { opacity: 0; pointer-events: none; }
+.splash-tagline {
+  position: absolute; left: 0; right: 0; bottom: 16%;
+  text-align: center; font-family: var(--mono);
+  font-size: 12px; letter-spacing: .32em; text-transform: uppercase;
+  opacity: 0; transition: opacity 1.1s ease, transform 1.1s ease;
+  transform: translateY(6px);
+}
+.splash-tagline.visible { opacity: .85; transform: translateY(0); }
+@media (prefers-reduced-motion: reduce) {
+  .splash, .splash-tagline { transition: none; }
+}
 
 /* Sessions panel: the "received from another analyst" marker, and the
    diff table. Three columns of tag names with an arrow between them —

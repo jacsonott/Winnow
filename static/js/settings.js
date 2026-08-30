@@ -36,6 +36,7 @@ export const STYLES = {
   phosphor:  { label: 'Phosphor',  desc: 'Retro CRT terminal — glow, monospace chrome.', defaultAccent: '#39e881', preview: ['#060907', '#39e881'] },
   blueprint: { label: 'Blueprint', desc: 'Bold borders, hard offset shadows.', defaultAccent: '#ff6a1a', preview: ['#0c0d10', '#ff6a1a'] },
   studio:    { label: 'Studio',    desc: 'Rounded, soft shadows, calm motion.', defaultAccent: '#7c6cf6', preview: ['#111219', '#7c6cf6'] },
+  harvest:   { label: 'Harvest',   desc: 'Grain and chaff — straw gold on warm dark, parchment in light.', defaultAccent: '#e0a94a', preview: ['#0d0b08', '#e0a94a'] },
 };
 
 export const ACCENT_PRESETS = ['#d2a04a', '#39e881', '#ff6a1a', '#7c6cf6', '#4a90d9', '#d9534f'];
@@ -45,6 +46,10 @@ export function defaultAppearance() {
     style: 'panel', themeMode: 'dark', accent: STYLES.panel.defaultAccent, accentCustomized: false,
     density: 'comfortable', autofitMax: AUTOFIT_MAX_W_DEFAULT,
     remoteSession: false,
+    // On unless turned off. `splash: undefined` on an install that predates
+    // this therefore reads as on, which is what a new feature should do for
+    // someone who has never seen the switch.
+    splash: true,
   };
 }
 
@@ -359,6 +364,24 @@ export function openSettings() {
     };
     remoteLabel.append(remoteCb, el('span', null, 'Remote session mode'));
     secLook.append(remoteLabel);
+
+    /* The winnowing animation on launch. On by default and skippable with
+       any key or click while it runs — this switch is for someone who opens
+       Winnow all day and doesn't want it at all. prefers-reduced-motion is
+       honoured without needing this turned off. */
+    const splashLabel = el('label');
+    splashLabel.style.cssText = 'display:flex;align-items:center;gap:6px';
+    const splashCb = el('input');
+    splashCb.type = 'checkbox';
+    splashCb.checked = S.appearance.splash !== false;
+    splashCb.onchange = () => {
+      S.appearance.splash = splashCb.checked;
+      saveAppearance();
+    };
+    splashLabel.append(splashCb, el('span', null, 'Launch animation'));
+    secLook.append(splashLabel);
+    secLook.append(el('p', 'fb-help',
+      'The winnowing animation Winnow starts with. Any key or click skips it.'));
 
     const secKeys = settingsSection(b, 'Keyboard shortcuts');
     secKeys.append(el('p', null, 'Tag hotkeys (1–9) are set per-tag in Edit tags. Escape always clears the selection or closes a panel. '
