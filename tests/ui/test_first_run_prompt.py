@@ -2,9 +2,25 @@
 
 from __future__ import annotations
 
+import json
+import urllib.request
+
 import pytest
 
 pytestmark = pytest.mark.ui
+
+
+@pytest.fixture(autouse=True)
+def reset_remote_setting(server):
+    """Accepting the offer persists remote mode MACHINE-side now — reset
+    it after each test or the next test's prompt never fires (the offer
+    honours an already-answered machine)."""
+    yield
+    req = urllib.request.Request(
+        server.rstrip("/") + "/api/settings/app",
+        data=json.dumps({"remote_session": False}).encode(),
+        headers={"Content-Type": "application/json", "X-Timeline-Lite-Client": "1"})
+    urllib.request.urlopen(req, timeout=5).read()
 
 
 def _fresh_page(browser, server):
@@ -21,7 +37,8 @@ def test_first_run_offers_remote_mode_once(browser, server):
     assert "remote desktop" in pg.locator(".confirm-card").inner_text().lower()
     pg.locator(".confirm-card .btn", has_text="Enable remote mode").click()
     pg.wait_for_function("() => document.documentElement.classList.contains('remote')")
-    assert pg.evaluate("() => JSON.parse(localStorage.getItem('winnow.appearance')).remoteSession")
+    # Stored machine-side now, not in localStorage (which kept resetting).
+    pg.wait_for_function("() => __winnow.S.appSettings.remote_session === true")
     # answered once — a reload must not ask again
     pg.reload(wait_until="networkidle")
     pg.wait_for_selector(".row")
