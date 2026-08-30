@@ -114,7 +114,11 @@ see [docs/notes/README.md](README.md) for the whole set.
   data file goes to a just-started temp instance (<120s — multi-select
   spawns one server, not five), else an idle registered instance, else
   this process becomes the server on a free port. `/api/assoc/open` is
-  loopback-only, and `/api/prefs` reports `first_run: false` inside a temp
+  loopback-only; its ingest tries PLUGIN formats first (the import
+  modal's own precedence) so a registered plugin extension actually uses
+  the plugin's parser instead of falling through to the CSV sniffer —
+  plugin ingests are synchronous, so those entries carry a source_id,
+  not a job_id. `/api/prefs` reports `first_run: false` inside a temp
   case — a fresh install's first double-click must not stack the
   cases-dir setup prompt on top of the file the analyst opened.
 
