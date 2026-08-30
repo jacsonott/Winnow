@@ -5,7 +5,6 @@ import { applyBundle } from './bundles.js';
 import { $, api, el, post, toast } from './core.js';
 import { loadPlugins } from './importer.js';
 import { startJobsPoll } from './jobs.js';
-import { openImportPreview } from './merge.js';
 import { resetPluginTabMounts } from './plugins.js';
 import { loadAppSettings, loadCaseSettings, loadHeaderNicknames, loadSavedFilters } from './savedfilters.js';
 import { updateSearchAllButton } from './search.js';
@@ -216,14 +215,51 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
     };
     const cancel = el('button', 'btn ghost', 'Cancel');
     cancel.onclick = () => { if (onCancel) onCancel(); else $('modal').hidden = true; };
-    actions.append(useBtn, cancel);
+    actions.append(useBtn);
+    if (!filesMode) {
+      // Filing a case somewhere that doesn't exist yet shouldn't mean
+      // leaving Winnow to make the folder and coming back.
+      const mk = el('button', 'btn ghost', 'New folder…');
+      mk.onclick = async () => {
+        const parent = (listing && listing.path) || pathInput.value.trim();
+        if (!parent) { toast('Browse to where the folder should go first'); return; }
+        const name = await promptDialog(`New folder inside:\n${parent}`, '');
+        if (name === null || !name.trim()) return;
+        let res;
+        try {
+          res = await post('/api/browse_dir/new', { parent, name: name.trim() });
+        } catch (e) {
+          toast(e.message, 5000);
+          return;
+        }
+        toast(`Created ${res.name}`);
+        load(res.path);   // step into it — it's where they're going
+      };
+      actions.append(mk);
+    }
+    actions.append(cancel);
     b.append(actions);
 
-    async function load(path) {
+    async function load(path, { fallback = false } = {}) {
       let res;
       try {
         res = await api(`/api/browse_dir?path=${encodeURIComponent(path || '')}${filesMode ? '&files=true' : ''}`);
       } catch (e) {
+        // The configured cases folder often doesn't exist yet — which is
+        // exactly when someone reaches for "New folder". Opening onto an
+        // error with nothing listed leaves them nowhere to create it FROM,
+        // so the first load walks up to the nearest folder that does
+        // exist. Only on open: a typed path that's wrong should say so
+        // rather than silently landing somewhere else.
+        if (fallback) {
+          // Walk up to the nearest folder that does exist. A path with no
+          // separator is the RELATIVE default ('cases', resolved against
+          // the server's cwd) — stripping a segment leaves it unchanged, so
+          // that case falls back to the server's own default listing
+          // instead of looping.
+          const up = /[\\/]/.test(path || '') ? path.replace(/[\\/][^\\/]*$/, '') : '';
+          if (up !== path) { load(up, { fallback: up !== '' }); return; }
+        }
         toast(filesMode ? 'No folder or file at that path: ' + e.message
           : 'Could not list that folder: ' + e.message, 4000);
         return;
@@ -290,7 +326,7 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
       paintUse();
     }
 
-    load(startPath);
+    load(startPath, { fallback: true });
     paintUse();
   }, { wide: true });
 }
@@ -327,7 +363,7 @@ export function openNewCaseModal(state = {}) {
     browseBtn.onclick = () => {
       const snapshot = {
         name: nameInput.value, group: groupInput.value, path: pathInput.value,
-        chosenDir, pathTouched, csvFile, csvFileName: csvFile ? csvFile.name : '',
+        chosenDir, pathTouched,
         caseType: typeSel.value,
       };
       openFolderBrowser(
@@ -361,18 +397,6 @@ export function openNewCaseModal(state = {}) {
     typeRow.append(typeSel);
     b.append(el('label', null, 'Case type'), typeRow);
 
-    let csvFile = state.csvFile || null;
-    const csvRow = el('div', 'row-actions');
-    const csvLabel = el('label', 'btn ghost', 'Import a CSV now (optional)…');
-    const csvInput = el('input');
-    csvInput.type = 'file';
-    csvInput.accept = '.csv,.tsv,.txt,.psv';
-    csvInput.hidden = true;
-    const csvStatus = el('span', 'count', state.csvFileName || '');
-    csvInput.onchange = () => { csvFile = csvInput.files[0] || null; csvStatus.textContent = csvFile ? csvFile.name : ''; };
-    csvLabel.append(csvInput);
-    csvRow.append(csvLabel, csvStatus);
-    b.append(csvRow);
 
     const actions = el('div', 'row-actions');
     const create = el('button', 'btn', 'Create case');
@@ -396,7 +420,6 @@ export function openNewCaseModal(state = {}) {
           toast('Case created, but the case-type bundle failed to apply: ' + e.message, 6000);
         }
       }
-      if (csvFile) openImportPreview({ file: csvFile, name: csvFile.name });
     };
     const cancel = el('button', 'btn ghost', 'Cancel');
     cancel.onclick = () => { $('modal').hidden = true; };
