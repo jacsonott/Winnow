@@ -852,6 +852,21 @@ def _assoc_ingest(path: str) -> dict:
     standing at an import modal. SQLite files and workbooks normally get a
     picker; a quick-look takes EVERYTHING (all tables, all sheets), which
     is what "just show me the file" means."""
+    # Plugin formats first, matching the import modal's own precedence
+    # (importer.js queues a file under its plugin format when one claims
+    # it) — without this, a double-clicked file of a plugin-registered
+    # type fell through to the CSV sniffer and ingested as garbage. This
+    # is also what makes plugin file ASSOCIATIONS real: registering a
+    # plugin's extension (Settings → File associations) hands the file to
+    # this path, which must then actually use the plugin's parser.
+    fmt = PLUGINS.format_for_filename(os.path.basename(path))
+    if fmt is not None:
+        # Synchronous, like every plugin ingest (no background job): the
+        # source exists by the time this returns, so there is no job_id
+        # for the caller to poll — the page's normal source load sees it.
+        rec = _ingest_via_plugin(path, fmt.id, None, {}, True)
+        return {"file": os.path.basename(path), "kind": f"plugin:{fmt.id}",
+                "source_id": rec["id"], "rows": rec.get("row_count", 0)}
     kind = _ingest_kind_for_path(path)
     opts = {"build_fts": True}
     if kind == "sqlite":

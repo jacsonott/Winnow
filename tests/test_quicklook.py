@@ -360,3 +360,34 @@ def test_a_join_to_a_watched_quicklook_opens_nothing(client, tmp_path, monkeypat
     opened = _fake_recent(monkeypatch, server, age_s=60, connected=True, tmp_path=tmp_path)
     assert server._run_assoc([_csv(tmp_path)]) == 0
     assert opened == []
+
+
+def test_a_plugin_format_file_ingests_via_the_plugin(client, tmp_path, monkeypatch):
+    """Registering a plugin's extension as an association is only real if
+    the assoc path then USES the plugin's parser — this used to fall
+    through to the CSV sniffer and ingest binary garbage as one column."""
+    server, c = client
+
+    class FakeFmt:
+        id = "myplug.evtx"
+        def resolve_options(self, values):
+            return {}
+        def parse(self, path, opts):
+            return {"columns": ["EventId", "Msg"], "rows": [["4624", "logon"], ["4688", "proc"]]}
+
+    fmt = FakeFmt()
+    monkeypatch.setattr(server.PLUGINS, "format_for_filename",
+                        lambda name: fmt if name.endswith(".evtxfake") else None)
+    monkeypatch.setattr(server.PLUGINS, "get_format", lambda fid: fmt)
+
+    dropped = tmp_path / "security.evtxfake"
+    dropped.write_bytes(b"\x00\x01binary-not-csv\x02")
+    res = c.post("/api/assoc/open", json={"files": [str(dropped)]}, headers=HEADERS)
+    assert res.status_code == 200
+    started = res.json()["started"][0]
+    assert started["kind"] == "plugin:myplug.evtx"
+    assert started["rows"] == 2
+    src = server.STORE.list_sources()[0]
+    assert [col["name"] for col in src["columns"]] == ["EventId", "Msg"]
+    assert src["row_count"] == 2
+    server.STORE.close()
