@@ -89,3 +89,41 @@ def test_banner_shows_and_save_as_promotes(browser, quicklook_server, tmp_path):
         assert not errors, errors
     finally:
         ctx.close()
+
+
+def test_home_navigation_is_guarded_in_a_quicklook(browser, quicklook_server, tmp_path):
+    """A quick look never appears in the case list, so the home screen
+    has no way back to it — clicking the brand used to strand the case
+    (reported). The guard offers the three real exits, and Stay works."""
+    ctx = browser.new_context(viewport={"width": 1200, "height": 700})
+    ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen');"
+                        "localStorage.setItem('winnow.appearance', JSON.stringify({ splash: false }))")
+    pg = ctx.new_page()
+    try:
+        pg.goto(f"http://127.0.0.1:{quicklook_server}/")
+        pg.wait_for_selector("#tempBanner:not([hidden])", timeout=20_000)
+
+        pg.locator("#btnHome").click()
+        pg.wait_for_selector("#modal:not([hidden])")
+        assert "isn't saved" in pg.locator("#modalTitle").inner_text().lower().replace("’", "'")
+        assert pg.evaluate("() => document.getElementById('home').hidden"), \
+            "the guard must hold navigation, not race it"
+
+        pg.locator("#modal button", has_text="Stay here").click()
+        pg.wait_for_selector("#modal[hidden]", state="attached")
+        assert pg.evaluate("() => document.getElementById('home').hidden")
+        assert not pg.evaluate("() => document.getElementById('tempBanner').hidden")
+
+        # Discard from the guard lands on the home screen with the
+        # quick look gone for good.
+        pg.locator("#btnHome").click()
+        pg.wait_for_selector("#modal:not([hidden])")
+        pg.locator("#modal button", has_text="Discard").click()
+        pg.wait_for_selector(".confirm-overlay")
+        pg.locator(".confirm-card .btn", has_text="Discard").click()
+        pg.wait_for_selector("#home:not([hidden])", timeout=15_000)
+        cur = pg.evaluate("""() => fetch('/api/case/current',
+          { headers: { 'X-Timeline-Lite-Client': '1' } }).then((r) => r.json())""")
+        assert cur["open"] is False
+    finally:
+        ctx.close()
