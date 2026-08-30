@@ -64,7 +64,7 @@ export const DEFAULT_KEYMAP = {
   toggleDetail: ['d'],
   dropGrouping: ['x'],
   saveDefaultLayout: ['L'],
-  toggleTimeRange: ['T', 'a'],
+  toggleTimeRange: ['r', 'a'],
   openTimeRange: ['R', 'A'],
   toggleGrouping: ['X'],
   openFilterSql: ['Q'],
@@ -115,7 +115,7 @@ export const ACTION_LABELS = {
    over it on every load. */
 export const KEYMAP_VERSION_KEY = 'winnow.keymap.v';
 
-export const KEYMAP_VERSION = 2;
+export const KEYMAP_VERSION = 3;
 
 export const KEYMAP_MIGRATIONS = [
   // v1 (2026-08): the column chooser grew into the table menu, and `f`
@@ -143,6 +143,15 @@ export const KEYMAP_MIGRATIONS = [
     if (wasDefault('cycleNextFilter', [']'])) map.cycleNextFilter = [']', 'w'];
     if (wasDefault('toggleTimeRange', ['T'])) map.toggleTimeRange = ['T', 'a'];
     if (wasDefault('openTimeRange', ['R'])) map.openTimeRange = ['R', 'A'];
+  },
+  // v3 (2026-08): toggle moves T → r so the timeframe pair sits on one
+  // letter — r toggles it, Shift+R opens the dialog. Same key, shift is
+  // "the bigger version of the action", which is how the pair reads
+  // naturally. `a`/`A` aliases stay.
+  (map) => {
+    const wasDefault = (action, keys) =>
+      JSON.stringify((map[action] || []).slice().sort()) === JSON.stringify(keys.slice().sort());
+    if (wasDefault('toggleTimeRange', ['T', 'a'])) map.toggleTimeRange = ['r', 'a'];
   },
 ];
 
