@@ -32,18 +32,50 @@ const TOKENS = [
   'A0F3', 'PID', '80', 'ESTAB', 'pwsh', 'curl', 'ttl=64', '5985', 'MFT', 'cmd.exe',
 ];
 
-/* Harvest, in both themes. The dark values are the skin's; the light ones
-   darken the grain and lift the chaff, because gold-on-parchment and a
-   dim grey both vanish otherwise. */
-const PALETTE = {
-  dark:  { bg: '#0d0b08', chaff: [110, 102, 88], grain: [246, 205, 119], ink: '#cfc8b8' },
-  light: { bg: '#faf6ea', chaff: [150, 140, 120], grain: [176, 122, 31], ink: '#2e2920' },
-};
+/* The animation wears whatever skin and mode the app is currently in,
+   read live from the document's own custom properties rather than a
+   palette of its own. Launching into Phosphor should not flash a wheat
+   field first — the splash is the app's front door, not a separate brand.
+
+   --ink is the app's deepest surface, --accent the colour it uses to mean
+   "this matters", --dim its subordinate text. That maps onto background,
+   grain and chaff exactly, in every skin, in both modes, including a
+   custom accent the analyst picked themselves. */
+function readPalette() {
+  const cs = getComputedStyle(document.documentElement);
+  const tok = (name, fallback) => (cs.getPropertyValue(name) || '').trim() || fallback;
+  const bg = tok('--ink', '#0d0b08');
+  return {
+    bg,
+    ink: tok('--text', '#cfc8b8'),
+    chaff: toRgb(tok('--dim', '#8a8172')),
+    // Each skin's light mode already darkens its own accent to stay legible
+    // on a pale surface, so this needs no adjustment of its own.
+    grain: toRgb(tok('--accent', '#e0a94a')),
+  };
+}
+
+/* '#rgb', '#rrggbb' and 'rgb(r, g, b)' — the three forms a custom property
+   can hold once a browser has resolved it. */
+function toRgb(v) {
+  if (v.startsWith('rgb')) {
+    const n = v.slice(v.indexOf('(') + 1, v.indexOf(')')).split(',');
+    return [parseInt(n[0], 10) || 0, parseInt(n[1], 10) || 0, parseInt(n[2], 10) || 0];
+  }
+  let h = v.replace('#', '');
+  if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+  if (h.length < 6) return [128, 128, 128];
+  return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+}
+
 
 const LAUNCH_START = 8;
 const GRAIN_GRAVITY = 0.085;
 const CHAFF_GRAVITY = 0.018;
 const NOISE_FONT = '10px ui-monospace, monospace';
+/* How long the completed wordmark stays up. Any key or click cuts it
+   short, so this is a ceiling on the patient case, not a toll on anyone. */
+const SETTLE_HOLD_MS = 2200;
 
 const rand = (a, b) => a + Math.random() * (b - a);
 const pick = (a) => a[(Math.random() * a.length) | 0];
@@ -66,13 +98,13 @@ export function splashEnabled(appearance) {
 /* Runs the animation over the whole viewport and resolves when it's done
    or skipped. Always resolves — a splash that can hang is a splash that
    can stop the app from ever appearing. */
-export function runSplash({ theme = 'dark' } = {}) {
+export function runSplash() {
   return new Promise((resolve) => {
     const root = $('splash');
     const canvas = $('splashCanvas');
     if (!root || !canvas || !canvas.getContext) { resolve(); return; }
 
-    const colors = PALETTE[theme === 'light' ? 'light' : 'dark'];
+    const colors = readPalette();
     root.hidden = false;
     root.style.background = colors.bg;
     $('splashTagline').style.color = colors.ink;
@@ -99,9 +131,12 @@ export function runSplash({ theme = 'dark' } = {}) {
     window.addEventListener('touchstart', skip, true, { passive: true });
 
     start(canvas, colors, () => {
-      // A beat on the finished wordmark before handing over, so it reads
-      // as an arrival rather than a flicker.
-      setTimeout(finish, 900);
+      // Hold on the finished wordmark before handing over. The grain
+      // settling is the payoff, and cutting away the moment the last one
+      // lands throws it away — the eye needs time to read WINNOW as a word
+      // rather than as the debris it just watched arrive. Skippable
+      // throughout, so this costs an impatient analyst nothing.
+      setTimeout(finish, SETTLE_HOLD_MS);
     });
   });
 }

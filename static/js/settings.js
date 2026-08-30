@@ -233,30 +233,81 @@ export function settingsSection(parent, title, { open = false } = {}) {
   return body;
 }
 
+/* One skin as a card. Used twice: as the read-only "this is what you're
+   on" tile in Settings, and as the pickable tile in the skin panel. */
+export function styleCard(key, { interactive = true } = {}) {
+  const meta = STYLES[key];
+  const card = el(interactive ? 'button' : 'div', 'style-card' + (interactive ? '' : ' style-card-static'));
+  if (interactive) card.setAttribute('aria-pressed', String(S.appearance.style === key));
+  const sw = el('div', 'style-swatch');
+  sw.append(el('span', null, null), el('span', null, null));
+  sw.children[0].style.background = meta.preview[0];
+  sw.children[1].style.background = meta.preview[1];
+  card.append(sw, el('span', 'style-name', meta.label), el('span', 'style-desc', meta.desc));
+  return card;
+}
+
+/* Every skin, in its own panel. Applying one takes effect IMMEDIATELY and
+   the panel stays open — a skin is judged by looking at it, and a picker
+   that made you close it to see the result would have you opening it five
+   times to compare four options. `onPicked` lets Settings repaint the
+   card it is showing underneath. */
+export function openSkinPicker(onPicked) {
+  markModalAction('openSkinPicker');
+  modal('Skins', (b) => {
+    b.append(el('p', null,
+      'Applied as you click, so you can see each one. The theme and accent you have set '
+      + 'carry across — close this when you have the one you want.'));
+    const grid = el('div', 'appearance-styles');
+    for (const key of Object.keys(STYLES)) {
+      const card = styleCard(key);
+      card.onclick = () => {
+        applyStyle(key);
+        grid.querySelectorAll('.style-card').forEach((c, i) =>
+          c.setAttribute('aria-pressed', String(Object.keys(STYLES)[i] === key)));
+        if (onPicked) onPicked();
+      };
+      grid.append(card);
+    }
+    b.append(grid);
+    const acts = el('div', 'row-actions');
+    const done = el('button', 'btn', 'Done');
+    done.onclick = () => openSettings();   // back where they came from
+    acts.append(done);
+    b.append(acts);
+  }, { wide: true });
+}
+
 export function openSettings() {
   markModalAction('openSettings');
   modal('Settings', (b) => {
     const secLook = settingsSection(b, 'Appearance');
-    secLook.append(el('p', null, 'Pick a look, then a theme, then (optionally) your own accent color. All three are saved on this machine.'));
+    secLook.append(el('p', null, 'Your skin, theme and accent colour, all saved on this machine.'));
 
-    const styleGrid = el('div', 'appearance-styles');
-    for (const [key, meta] of Object.entries(STYLES)) {
-      const card = el('button', 'style-card');
-      card.setAttribute('aria-pressed', String(S.appearance.style === key));
-      const sw = el('div', 'style-swatch');
-      sw.append(el('span', null, null), el('span', null, null));
-      sw.children[0].style.background = meta.preview[0];
-      sw.children[1].style.background = meta.preview[1];
-      card.append(sw, el('span', 'style-name', meta.label), el('span', 'style-desc', meta.desc));
-      card.onclick = () => {
-        applyStyle(key);
-        styleGrid.querySelectorAll('.style-card').forEach((c, i) => c.setAttribute('aria-pressed', String(Object.keys(STYLES)[i] === key)));
-        accentGrid.querySelectorAll('.accent-swatch').forEach((sw2) => sw2.setAttribute('aria-pressed', String(sw2.dataset.accent.toLowerCase() === S.appearance.accent.toLowerCase())));
-        customAccent.value = S.appearance.accent;
-      };
-      styleGrid.append(card);
+    /* Only the skin in use, plus a way to see the rest. Appearance had
+       every style laid out permanently, which is a lot of cards to scroll
+       past to reach the theme toggle and the accent — and choosing a skin
+       is something an analyst does once, while the settings below it get
+       revisited. */
+    const currentRow = el('div', 'appearance-current');
+    const currentCard = styleCard(S.appearance.style, { interactive: false });
+    const browse = el('button', 'btn ghost', 'Change skin…');
+    browse.onclick = () => openSkinPicker(() => {
+      // Repaint in place: the analyst comes back to Settings, not to a
+      // closed modal, so the card and the accent row have to agree with
+      // what they just picked.
+      currentRow.replaceChildren(styleCard(S.appearance.style, { interactive: false }), browse);
+      syncAccentUi();
+    });
+    currentRow.append(currentCard, browse);
+    secLook.append(currentRow);
+
+    function syncAccentUi() {
+      accentGrid.querySelectorAll('.accent-swatch').forEach((sw) =>
+        sw.setAttribute('aria-pressed',
+                        String(sw.dataset.accent.toLowerCase() === S.appearance.accent.toLowerCase())));
+      customAccent.value = S.appearance.accent;
     }
-    secLook.append(styleGrid);
 
     secLook.append(el('div', 'settings-sub-label', 'Theme'));
     const themeSeg = el('div', 'segmented');
