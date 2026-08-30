@@ -398,3 +398,17 @@ see [docs/notes/README.md](README.md) for the whole set.
     why the pool returns connections on the happy path but *closes* them
     on any exception (a connection whose last statement died mid-view-drop
     is cheaper to replace than to prove clean).
+
+- **`copy_sources_to` runs through the TARGET, with the source attached.**
+  The target opens as a full Store — which is what migrates an older
+  case's schema before anything writes, and whose case lock is the
+  exclusivity that makes the write correct; a target open in another
+  Winnow is refused with the holder named. Our own live file is ATTACHed
+  to the target's writer read-only-by-discipline (WAL makes the concurrent
+  read safe). Rids copy byte-for-byte — they are what tags and notes point
+  at — and tags map by NAME, the session-import rule, because two cases
+  number their tags independently. FTS never copies (has_fts lands 0,
+  target rebuilds); merges are refused, their member ids being meaningless
+  elsewhere. One trap: `create_merge` returns the SIGNED id (negative), so
+  callers must not re-negate it — a double negation lands on a real
+  source id and copies the wrong table without an error.
