@@ -31,12 +31,20 @@ def test_the_wordmark_is_drawn_in_the_accent(browser, server):
         # Bigger than the 13px text it replaced, and actually painted.
         assert box["height"] > 30, box
         assert box["width"] > 100, box
+        # Sample from the RIGHT half — the letters. The left of the canvas
+        # is the brand mark, which is deliberately NOT in the accent (its
+        # colors are the icon's own), so a first-lit-pixel scan would grab
+        # a bronze bar dot and fail for the wrong reason.
         painted = pg.evaluate("""() => {
           const c = document.querySelector('.home-brand-mark');
-          const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+          const w = c.width, h = c.height;
+          const d = c.getContext('2d').getImageData(0, 0, w, h).data;
           let lit = 0, sample = null;
-          for (let i = 3; i < d.length; i += 4) {
-            if (d[i] > 128) { lit++; if (!sample) sample = [d[i - 3], d[i - 2], d[i - 1]]; }
+          for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+              const i = (y * w + x) * 4;
+              if (d[i + 3] > 128) { lit++; if (!sample && x > w * 0.55) sample = [d[i], d[i + 1], d[i + 2]]; }
+            }
           }
           return { lit, sample };
         }""")
@@ -117,5 +125,48 @@ def test_the_brand_mark_leads_the_word_in_its_own_colors(browser, server):
               }
               return false;
             }""", timeout=10_000)
+    finally:
+        ctx.close()
+
+
+def test_the_mark_and_the_letters_share_their_ink_height(browser, server):
+    """The reported misalignment: box-based sizing left the bars towering
+    over the letters. Both are dot fields on one canvas, so alignment is
+    checkable directly — the mark region's ink and the text region's ink
+    must share top and bottom within a dot-stride."""
+    ctx, pg = _home(browser, server, '{ "splash": false }')
+    try:
+        spans = pg.evaluate(
+            """() => {
+              const c = document.querySelector('.home-brand-mark');
+              const w = c.width, h = c.height;
+              const d = c.getContext('2d').getImageData(0, 0, w, h).data;
+              const colInk = new Array(w).fill(false);
+              const span = (x0, x1) => {
+                let top = h, bot = 0;
+                for (let y = 0; y < h; y++) {
+                  for (let x = x0; x < x1; x++) {
+                    if (d[(y * w + x) * 4 + 3] > 100) { top = Math.min(top, y); bot = Math.max(bot, y); break; }
+                  }
+                }
+                return [top, bot];
+              };
+              for (let x = 0; x < w; x++) {
+                for (let y = 0; y < h; y++) {
+                  if (d[(y * w + x) * 4 + 3] > 100) { colInk[x] = true; break; }
+                }
+              }
+              // The gap between mark and word is the widest empty column run.
+              let best = { len: 0, end: 0 }, run = 0;
+              for (let x = 0; x < w; x++) {
+                run = colInk[x] ? 0 : run + 1;
+                if (run > best.len) best = { len: run, end: x };
+              }
+              const split = best.end - best.len / 2;
+              return { mark: span(0, split), text: span(split, w), h };
+            }""")
+        tol = spans["h"] * 0.06   # about one dot-stride
+        assert abs(spans["mark"][0] - spans["text"][0]) <= tol, spans
+        assert abs(spans["mark"][1] - spans["text"][1]) <= tol, spans
     finally:
         ctx.close()
