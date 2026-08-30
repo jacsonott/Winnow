@@ -41,6 +41,12 @@ def test_the_folder_picker_can_make_a_folder(page, tmp_path):
         _open_new_case(page)
         page.locator("#modalBody .btn", has_text="Browse").click()
         page.wait_for_selector("#modalBody .btn:has-text('New folder')")
+        # Let the picker finish opening before navigating. It walks up to
+        # the nearest existing folder on open, which is a chain of async
+        # loads; typing into the box mid-chain is a race the app now guards
+        # against, but a test should not be the thing proving it wins.
+        page.wait_for_function(
+            "() => document.querySelector('#modalBody input').value !== ''", timeout=15_000)
 
         # Point the browser at a directory this test owns.
         path_input = page.locator("#modalBody input").first
@@ -89,6 +95,8 @@ def test_a_duplicate_folder_name_is_reported_not_swallowed(page, tmp_path):
         _open_new_case(page)
         page.locator("#modalBody .btn", has_text="Browse").click()
         page.wait_for_selector("#modalBody .btn:has-text('New folder')")
+        page.wait_for_function(
+            "() => document.querySelector('#modalBody input').value !== ''", timeout=15_000)
         path_input = page.locator("#modalBody input").first
         path_input.fill(str(tmp_path))
         path_input.press("Enter")

@@ -240,7 +240,15 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
     actions.append(cancel);
     b.append(actions);
 
+    /* Loads are async and can overtake each other — the walk-up on open
+       fires a chain of them, and an analyst typing a path while that is
+       still resolving would have their navigation overwritten by an older
+       answer arriving late. Same stale-response guard as the derived
+       preview: only the newest load may paint. */
+    let loadSeq = 0;
+
     async function load(path, { fallback = false } = {}) {
+      const seq = ++loadSeq;
       let res;
       try {
         res = await api(`/api/browse_dir?path=${encodeURIComponent(path || '')}${filesMode ? '&files=true' : ''}`);
@@ -251,6 +259,7 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
         // so the first load walks up to the nearest folder that does
         // exist. Only on open: a typed path that's wrong should say so
         // rather than silently landing somewhere else.
+        if (seq !== loadSeq) return;   // superseded while we waited
         if (fallback) {
           // Walk up to the nearest folder that does exist. A path with no
           // separator is the RELATIVE default ('cases', resolved against
@@ -267,6 +276,7 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
       // A typed path that names a FILE comes back as {picked} — the server
       // resolved it with os.path, which is what makes a pasted Windows path
       // or a file past the listing cap work. It's a complete answer.
+      if (seq !== loadSeq) return;   // a newer navigation won
       if (res.picked) {
         onSelect({ dir: res.path, files: [{ path: res.path + '/' + res.picked.name, name: res.picked.name, size: res.picked.size }] });
         return;
