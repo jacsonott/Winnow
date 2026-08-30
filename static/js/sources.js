@@ -16,6 +16,7 @@ import { checkPresets } from './savedfilters.js';
 import { syncSearchExpansion } from './search.js';
 import { openSessionManager } from './session.js';
 import { showGridTab, showSqlTab, showTimelineTab } from './sql.js';
+import { openCaseSettings } from './settings.js';
 import { S, selClear, selCount, selFirst, specKey } from './state.js';
 import { openTablesManager } from './tables.js';
 import { loadTags, renderTagRibbon } from './tags.js';
@@ -965,7 +966,8 @@ $('btnSession').onclick = () => dropdownMenu($('btnSession'), [
   { label: 'Tables…', onclick: openTablesManager },
   '-',
   { label: 'Export…', onclick: openExportModal },
-  { label: 'Session (save/load)…', onclick: openSessionManager },
+  { label: 'Sessions…', onclick: openSessionManager },
+  { label: 'Case settings…', onclick: openCaseSettings },
   '-',
   { label: 'Shut down Winnow…', onclick: shutdownWinnow },
 ]);

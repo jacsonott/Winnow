@@ -278,6 +278,47 @@ export function openSkinPicker(onPicked) {
   }, { wide: true });
 }
 
+/* Settings that belong to the OPEN CASE rather than to this machine —
+   they live in the case file and travel with it when it is handed to
+   another analyst. Kept out of the main Settings modal because that one
+   is reachable from the home screen, where there is no case for a "this
+   case" control to describe. */
+export function openCaseSettings() {
+  markModalAction('openCaseSettings');
+  modal('Case settings', (b) => {
+    b.append(el('p', null,
+      'These are stored in the case file, so they follow it to whoever you hand it to — '
+      + 'unlike Settings, which is about this machine.'));
+
+    b.append(el('div', 'settings-sub-label', 'Timestamps'));
+    b.append(el('p', 'fb-help',
+      'How datetime columns are displayed in this case. Presentation only — the stored and '
+      + 'exported value is always the text the file came with. A format picked on an individual '
+      + "column (right-click its header) beats this, which beats the machine-wide default."));
+
+    const sel = el('select');
+    const inherit = el('option', null, 'Use the machine-wide default');
+    inherit.value = '';
+    sel.append(inherit);
+    for (const [key, label] of Object.entries(TS_FORMATS)) {
+      const o = el('option', null, label);
+      o.value = key;
+      sel.append(o);
+    }
+    sel.value = S.caseSettings.ts_format || '';
+    sel.onchange = async () => {
+      try {
+        S.caseSettings = await post('/api/case_settings', { ts_format: sel.value });
+        render();
+        toast('Case timestamp format saved');
+      } catch (e) {
+        toast('Could not save: ' + e.message, 5000);
+      }
+    };
+    b.append(labeledRow('Timestamp format', sel));
+  });
+}
+
 export function openSettings() {
   markModalAction('openSettings');
   modal('Settings', (b) => {
@@ -567,27 +608,11 @@ export function openSettings() {
     };
     secTs.append(labeledRow('Every case on this machine', tsSystemSel));
 
-    const tsCaseSel = el('select');
-    const inherit = el('option', null, 'Use the system-wide default');
-    inherit.value = '';
-    tsCaseSel.append(inherit);
-    for (const [key, label] of Object.entries(TS_FORMATS)) {
-      const o = el('option', null, label);
-      o.value = key;
-      tsCaseSel.append(o);
-    }
-    tsCaseSel.value = S.caseSettings.ts_format || '';
-    tsCaseSel.disabled = !S.sources.length && !S.sourceId;
-    tsCaseSel.onchange = async () => {
-      try {
-        S.caseSettings = await post('/api/case_settings', { ts_format: tsCaseSel.value });
-        render();
-        toast('Case timestamp format saved');
-      } catch (e) {
-        toast('Could not save: ' + e.message, 5000);
-      }
-    };
-    secTs.append(labeledRow('This case', tsCaseSel));
+    // The per-case override lives in Session → Case settings. Settings is
+    // reachable from the home screen now, where there is no case for a
+    // "this case" control to mean anything about.
+    secTs.append(el('p', 'fb-help',
+      'This case can override it — Session menu → Case settings.'));
 
     const secTags = settingsSection(b, 'Default tags for new cases');
     secTags.append(el('p', null,

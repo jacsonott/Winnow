@@ -11,6 +11,7 @@ import { loadAppSettings, loadCaseSettings, loadHeaderNicknames, loadSavedFilter
 import { updateSearchAllButton } from './search.js';
 import { clearViewStateStash, applyPageTabsSize, loadSources } from './sources.js';
 import { showGridTab } from './sql.js';
+import { openSettings } from './settings.js';
 import { S } from './state.js';
 import { fmtBytes } from './tables.js';
 import { updateTimeRangeButton } from './timeframe.js';
@@ -594,10 +595,18 @@ export function renderHome() {
   newBtn.onclick = openNewCaseModal;
   const openBtn = el('button', 'btn ghost', 'Open existing case file…');
   openBtn.onclick = openExistingCasePrompt;
+  // Settings is reachable from here, not only from inside a case. Theme,
+  // keybindings, default tags for new cases and the update check are all
+  // things you might want to change BEFORE opening anything — and the gear
+  // that used to be the only way in lives on the app bar, which the home
+  // screen doesn't have.
+  const setBtn = el('button', 'btn ghost', '⚙ Settings');
+  setBtn.title = 'Appearance, keyboard shortcuts, default tags, plugins, updates';
+  setBtn.onclick = openSettings;
   const offBtn = el('button', 'btn ghost', '⏻ Shut down');
   offBtn.title = 'Stop the Winnow server — cases stay saved on disk';
   offBtn.onclick = shutdownWinnow;
-  head.append(newBtn, openBtn, offBtn);
+  head.append(newBtn, openBtn, setBtn, offBtn);
   inner.append(head);
 
   if (!S.cases.length) {
