@@ -497,6 +497,37 @@ export function openSettings() {
     remoteLabel.append(remoteCb, el('span', null, 'Remote session mode'));
     secLook.append(remoteLabel);
 
+    /* Hidden association launches (Windows): pythonw.exe instead of a
+       console window riding along with every double-clicked file. Lives
+       here rather than in File associations because it's about how the
+       app LOOKS when it starts, and this is where people hunt for that.
+       Only rendered where it means something — Linux .desktop launches
+       are already terminal-less — and quietly absent when the loopback-
+       only status route refuses (a remote browser). */
+    (async () => {
+      let info;
+      try { info = await api('/api/assoc/types'); } catch { return; }
+      if (info.platform !== 'windows') return;
+      const bgLabel = el('label');
+      const bgCb = el('input');
+      bgCb.type = 'checkbox';
+      bgCb.checked = !!info.background;
+      bgCb.onchange = async () => {
+        try {
+          const r = await post('/api/assoc/background', { enabled: bgCb.checked });
+          toast(bgCb.checked
+            ? (r.applied ? 'Winnow will start hidden when a file is opened'
+                         : 'Saved — takes effect when Winnow is registered for a type')
+            : 'Winnow will show its console when a file is opened');
+        } catch (e) {
+          toast('Could not change the setting: ' + e.message, 6000);
+        }
+      };
+      bgLabel.append(bgCb, el('span', null,
+        'Start Winnow hidden when a file is opened (no console window — the server log stays hidden too)'));
+      remoteLabel.after(bgLabel);
+    })();
+
     /* The winnowing animation on launch. On by default and skippable with
        any key or click while it runs — this switch is for someone who opens
        Winnow all day and doesn't want it at all. prefers-reduced-motion is

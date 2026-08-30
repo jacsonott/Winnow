@@ -146,9 +146,12 @@ see [docs/notes/README.md](README.md) for the whole set.
   until our shared-mime-info package supplies the glob, so registering
   one writes `mime/packages/winnow.xml` and best-effort runs
   `update-mime-database`. The `assoc_background` machine pref launches
-  associations through pythonw.exe (no console window) — a toggle, not
-  the default, because the hidden interpreter also hides the server log,
-  and the day an association won't open is the day that log matters. The
+  associations through pythonw.exe (no console window) — ON by default
+  (a console riding along with a double-click is the wrong first
+  impression), OFF-able from Settings → Appearance for the day an
+  association won't open and the hidden server log suddenly matters;
+  False is stored explicitly, since with an on-default a deleted key
+  would silently re-enable it. The
   toggle rewrites the ProgId's shared open command in place
   (`refresh_command`), never creating the ProgId on a machine where
   Winnow was never registered. Tests build both adapters against fake

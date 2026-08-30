@@ -889,7 +889,12 @@ _ASSOC_BACKGROUND_KEY = "assoc_background"
 
 
 def _assoc_background() -> bool:
-    return bool(WS.machine_prefs.get(_ASSOC_BACKGROUND_KEY))
+    # ON unless turned off: a console window riding along with every
+    # double-clicked file is the wrong default experience, and the
+    # Appearance toggle (with the server-log caveat spelled out there)
+    # is where the analyst who needs the console goes to get it back.
+    val = WS.machine_prefs.get(_ASSOC_BACKGROUND_KEY)
+    return True if val is None else bool(val)
 
 
 class AssocExtsBody(BaseModel):
@@ -997,7 +1002,9 @@ def api_assoc_background(request: Request, body: AssocBackgroundBody):
     un-register and re-register every type to pick the change up."""
     if not _is_loopback(request):
         raise HTTPException(403, "loopback-only")
-    WS.machine_prefs.set(_ASSOC_BACKGROUND_KEY, bool(body.enabled) or None)
+    # False must be STORED, not dropped — with the default now on,
+    # deleting the key would silently turn the setting back on.
+    WS.machine_prefs.set(_ASSOC_BACKGROUND_KEY, bool(body.enabled))
     a = file_assoc.adapter(background=bool(body.enabled))
     applied = bool(a and getattr(a, "refresh_command", None) and a.refresh_command())
     return {"ok": True, "background": bool(body.enabled), "applied": applied}
