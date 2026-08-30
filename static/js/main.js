@@ -122,6 +122,13 @@ wireFileDrop();
 if (splash.splashEnabled(S.appearance)) {
   splash.runSplash();   // takes its colours from the live skin, not an argument
 }
+/* Presence: the open connection is how the server knows a browser is
+   still attached — it shuts itself down once every window is gone (see
+   server.py's idle-shutdown block). EventSource reconnects on its own
+   after a server restart, and no handlers are needed because no data ever
+   flows; the connection is the message. */
+new EventSource('/api/presence');
+
 boot().catch((e) => toast('Could not start: ' + e.message, 8000));
 
 maybeOfferRemoteMode().then(() => maybeOfferStorageDir());
