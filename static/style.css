@@ -1686,3 +1686,11 @@ html.remote .row.selected:hover { background: var(--row-selected); }
   font-size: 10px; padding: 1px 6px; border-radius: var(--radius-sm);
   color: #fff; white-space: nowrap;
 }
+
+/* Settings → File associations */
+.assoc-list { display: flex; flex-direction: column; gap: 4px; }
+.assoc-row { display: flex; align-items: center; gap: 10px; padding: 3px 0; }
+.assoc-label { display: flex; align-items: center; gap: 8px; cursor: pointer; flex: 1; min-width: 0; }
+.assoc-ext { font-family: var(--mono, monospace); min-width: 4.5em; }
+.assoc-desc { color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.assoc-handleronly { color: var(--dim); font-size: 0.85em; }

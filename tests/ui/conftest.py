@@ -94,7 +94,12 @@ def server(tmp_path_factory, ui_csv):
         # monkeypatch, so isolate it by env — otherwise every UI run
         # registers this throwaway case in the developer's real registry.
         env={**os.environ,
-             "WINNOW_WORKSPACE_DIR": str(tmp_path_factory.mktemp("ws"))},
+             "WINNOW_WORKSPACE_DIR": str(tmp_path_factory.mktemp("ws")),
+             # Same idea for the association adapters' target dirs: a
+             # Settings → File associations test must never write the
+             # developer's real ~/.local/share or ~/.config.
+             "XDG_DATA_HOME": str(tmp_path_factory.mktemp("xdg-data")),
+             "XDG_CONFIG_HOME": str(tmp_path_factory.mktemp("xdg-config"))},
     )
     base = f"http://127.0.0.1:{port}"
     deadline = time.time() + 45
