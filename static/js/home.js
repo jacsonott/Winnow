@@ -2,7 +2,7 @@
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { applyBundle } from './bundles.js';
-import { $, api, el, post, toast } from './core.js';
+import { $, api, el, post, setBusy, toast } from './core.js';
 import { loadPlugins } from './importer.js';
 import { startJobsPoll } from './jobs.js';
 import { resetPluginTabMounts } from './plugins.js';
@@ -703,12 +703,79 @@ export async function refreshCases() {
   renderHome();
 }
 
+/* The quick-look banner and its three exits. Save promotes the temp case
+   to a real one (the file moves out of quicklook/ and lands on the home
+   screen); Add copies every table into a case picked from the registry
+   via copy_sources_to; Discard deletes the temp case outright. */
+export function paintTempBanner(on) {
+  $('tempBanner').hidden = !on;
+}
+
+function wireTempBanner() {
+  $('tempSaveBtn').onclick = async () => {
+    const name = await promptDialog('Save this as a case named:');
+    if (!name || !name.trim()) return;
+    let res;
+    try { res = await post('/api/case/save_as', { name: name.trim() }); }
+    catch (e) { toast(e.message, 6000); return; }
+    paintTempBanner(false);
+    setBrandLabel(res.name);
+    toast(`Saved — "${res.name}" is on the home screen now`, 6000);
+  };
+
+  $('tempCopyBtn').onclick = async () => {
+    let cases;
+    try { cases = (await api('/api/cases')).filter((c) => !c.missing); }
+    catch (e) { toast(e.message, 5000); return; }
+    if (!cases.length) { toast('No saved cases yet — use "Save as a case…" instead', 6000); return; }
+    modal('Add these tables to a case', (b) => {
+      b.append(el('p', null,
+        'Every table here — rows, tags and notes included — is copied into the case you pick. '
+        + 'This quick look stays as it is; discard it afterwards if you are done with it.'));
+      const list = el('div', 'session-list');
+      for (const c of cases) {
+        const row = el('div', 'row-actions session-row');
+        row.append(el('span', 'session-name', c.name),
+                   el('span', 'count', c.path));
+        const go = el('button', 'btn ghost', 'Copy into this case');
+        go.onclick = async () => {
+          const ids = S.sources.filter((s) => s.id > 0 && !s.error).map((s) => s.id);
+          if (!ids.length) { toast('Nothing here to copy yet'); return; }
+          setBusy(true);
+          let res;
+          try { res = await post('/api/case/copy_sources', { target_path: c.path, source_ids: ids }); }
+          catch (e) { toast(e.message, 8000); return; }
+          finally { setBusy(false); }
+          $('modal').hidden = true;
+          toast(`Copied ${res.copied.length} table${res.copied.length === 1 ? '' : 's'} into "${c.name}"`, 8000);
+        };
+        row.append(go);
+        list.append(row);
+      }
+      b.append(list);
+    }, { wide: true });
+  };
+
+  $('tempDiscardBtn').onclick = async () => {
+    if (!(await confirmDialog(
+      'Discard this quick look?\n\nIts tables, tags and notes are deleted. '
+      + 'Anything you copied into a real case stays there.',
+      { danger: true, okLabel: 'Discard' }))) return;
+    try { await post('/api/case/discard', {}); }
+    catch (e) { toast(e.message, 6000); return; }
+    paintTempBanner(false);
+    showHome();
+    await refreshCases();
+  };
+}
+
 export async function boot() {
   await Promise.all([loadSavedFilters(), loadHeaderNicknames(), loadTimelineTemplates(),
                      loadPlugins(), loadAppSettings()]);
   const cur = await api('/api/case/current').catch(() => ({ open: false }));
   if (cur.open) {
-    setBrandLabel(cur.name);
+    setBrandLabel(cur.temp ? 'Quick look' : cur.name);
+    paintTempBanner(!!cur.temp);
     showApp();
     await loadCaseSettings();
     await loadSources();
@@ -723,5 +790,6 @@ export async function boot() {
    fire during load, so the order these run in doesn't matter — the
    startup steps that DO depend on order live in main.js instead. */
 export function wireHome() {
+wireTempBanner();
 $('btnHome').onclick = () => { showHome(); refreshCases(); };
 }

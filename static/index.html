@@ -59,6 +59,15 @@ try {
   <div id="sidebarResize" class="sidebar-resize" title="Drag to resize · double-click to reset"></div>
 </aside>
 
+<div id="tempBanner" class="temp-banner" hidden>
+  <span>Quick look — this case is temporary and isn't saved anywhere yet.</span>
+  <span class="temp-banner-actions">
+    <button class="btn" id="tempSaveBtn">Save as a case…</button>
+    <button class="btn ghost" id="tempCopyBtn">Add tables to an existing case…</button>
+    <button class="btn ghost" id="tempDiscardBtn">Discard…</button>
+  </span>
+</div>
+
 <header class="bar">
   <button class="brand" id="btnHome" title="Back to home screen"><span class="mark"></span><span id="brandLabel">Winnow</span></button>
 

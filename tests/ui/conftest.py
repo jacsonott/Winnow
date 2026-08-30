@@ -18,6 +18,7 @@ covered.
 
 from __future__ import annotations
 
+import os
 import socket
 import subprocess
 import sys
@@ -89,6 +90,11 @@ def server(tmp_path_factory, ui_csv):
          "--open", str(ui_csv), "--port", str(port), "--host", "127.0.0.1",
          "--no-browser", "--no-fts"],
         cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        # A subprocess can't be reached by the isolate_workspace
+        # monkeypatch, so isolate it by env — otherwise every UI run
+        # registers this throwaway case in the developer's real registry.
+        env={**os.environ,
+             "WINNOW_WORKSPACE_DIR": str(tmp_path_factory.mktemp("ws"))},
     )
     base = f"http://127.0.0.1:{port}"
     deadline = time.time() + 45
