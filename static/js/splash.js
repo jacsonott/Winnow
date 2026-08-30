@@ -52,6 +52,12 @@ export const MARK_BARS = [
   { x: 388 / 512, y: 117 / 512, w: 68 / 512, h: 279 / 512, color: [195, 201, 209] },
 ];
 
+/* The mark's INK bounds inside its unit box — the bars span x 56..456,
+   y 44..468 of 512. Alignment must use these, not the box: sizing the
+   box to the text made the bars tower over the letters (the tallest bar
+   is 83% of the box) and the box's empty margins padded the gap. */
+export const MARK_INK = { x0: 56 / 512, x1: 456 / 512, y0: 44 / 512, y1: 468 / 512 };
+
 function barAt(nx, ny) {
   for (const b of MARK_BARS) {
     if (nx >= b.x && nx <= b.x + b.w && ny >= b.y && ny <= b.y + b.h) return b;
@@ -128,10 +134,19 @@ export function drawWordmark(canvas, { text = 'WINNOW', color, fontSize = 44 } =
   o2.fillText(text, w / 2, h / 2);
 
   // The three-bar brand mark leads the word, in the icon's own colors —
-  // the same dots, so mark and word read as one object.
-  const markBox = Math.round(h * 0.92);
+  // the same dots, so mark and word read as one object. Sized and
+  // positioned by INK, not boxes: the tallest bar's ink matches the
+  // letters' ink height, their vertical centers coincide, and the gap
+  // is measured from the bars' last pixel to the letters' first.
+  const tm = o2.measureText(text);
+  const inkH = (tm.actualBoundingBoxAscent + tm.actualBoundingBoxDescent) || fontSize * 0.72;
+  const inkCY = h / 2 + ((tm.actualBoundingBoxDescent - tm.actualBoundingBoxAscent) / 2 || 0);
+  const markBox = inkH / (MARK_INK.y1 - MARK_INK.y0);
+  const markW = markBox * (MARK_INK.x1 - MARK_INK.x0);
+  const markX = -markBox * MARK_INK.x0;                       // ink starts at 0
+  const markY = inkCY - inkH / 2 - markBox * MARK_INK.y0;     // ink centers on the letters
   const gap = Math.round(fontSize * 0.3);
-  const total = markBox + gap + w;
+  const total = Math.ceil(markW + gap + w);
 
   canvas.width = total * DPR;
   canvas.height = h * DPR;
@@ -144,14 +159,13 @@ export function drawWordmark(canvas, { text = 'WINNOW', color, fontSize = 44 } =
   const stride = Math.max(2, Math.round(fontSize / 22));
   const img = o2.getImageData(0, 0, w, h).data;
   const r = Math.max(0.9, stride * 0.42);
-  const markY = Math.round((h - markBox) / 2);
   for (let y = 0; y < markBox; y += stride) {
     for (let x = 0; x < markBox; x += stride) {
       const b = barAt(x / markBox, y / markBox);
       if (!b) continue;
       ctx.fillStyle = `rgb(${b.color.join(',')})`;
       ctx.beginPath();
-      ctx.arc(x, markY + y, r, 0, Math.PI * 2);
+      ctx.arc(markX + x, markY + y, r, 0, Math.PI * 2);
       ctx.fill();
     }
   }
@@ -160,7 +174,7 @@ export function drawWordmark(canvas, { text = 'WINNOW', color, fontSize = 44 } =
     for (let x = 0; x < w; x += stride) {
       if (img[(y * w + x) * 4 + 3] > 128) {
         ctx.beginPath();
-        ctx.arc(markBox + gap + x, y, r, 0, Math.PI * 2);
+        ctx.arc(markW + gap + x, y, r, 0, Math.PI * 2);
         ctx.fill();
       }
     }
@@ -258,11 +272,18 @@ function start(canvas, colors, done) {
     octx.textAlign = 'left';
     octx.textBaseline = 'middle';
     octx.font = `700 ${fontSize}px ui-monospace, "JetBrains Mono", Menlo, monospace`;
-    const textW = octx.measureText('WINNOW').width;
-    const markBox = fontSize * 1.05;
-    const gap = fontSize * 0.34;
-    const left = (W - (markBox + gap + textW)) / 2;
-    octx.fillText('WINNOW', left + markBox + gap, H * 0.44);
+    // Same ink-based layout as drawWordmark: the tallest bar's ink
+    // matches the letters' ink height, centers coincide, and the gap is
+    // ink-to-ink — box-based sizing left the bars towering over the
+    // letters with a padded gap (they visibly disagreed on screen).
+    const tm = octx.measureText('WINNOW');
+    const inkH = (tm.actualBoundingBoxAscent + tm.actualBoundingBoxDescent) || fontSize * 0.72;
+    const inkCY = H * 0.44 + ((tm.actualBoundingBoxDescent - tm.actualBoundingBoxAscent) / 2 || 0);
+    const markBox = inkH / (MARK_INK.y1 - MARK_INK.y0);
+    const markW = markBox * (MARK_INK.x1 - MARK_INK.x0);
+    const gap = fontSize * 0.3;
+    const left = (W - (markW + gap + tm.width)) / 2;
+    octx.fillText('WINNOW', left + markW + gap, H * 0.44);
     const stride = Math.max(3, Math.round(fontSize / 26));
     const img = octx.getImageData(0, 0, W, H).data;
     const pts = [];
@@ -271,11 +292,12 @@ function start(canvas, colors, done) {
         if (img[(y * W + x) * 4 + 3] > 128) pts.push({ x, y });
       }
     }
-    const markTop = H * 0.44 - markBox / 2;
+    const markX = left - markBox * MARK_INK.x0;
+    const markTop = inkCY - inkH / 2 - markBox * MARK_INK.y0;
     for (let y = 0; y < markBox; y += stride) {
       for (let x = 0; x < markBox; x += stride) {
         const b = barAt(x / markBox, y / markBox);
-        if (b) pts.push({ x: left + x, y: markTop + y, rgb: b.color });
+        if (b) pts.push({ x: markX + x, y: markTop + y, rgb: b.color });
       }
     }
     for (let i = pts.length - 1; i > 0; i--) {
