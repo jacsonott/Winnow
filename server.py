@@ -880,6 +880,16 @@ def _assoc_ingest(path: str) -> dict:
 # plugin shows up in the panel with no code change here.
 
 _ASSOC_ASKED_KEY = "assoc_asked_exts"
+# Start the association-launched server with the console-less interpreter
+# (pythonw.exe) so double-clicking a file doesn't also open a terminal
+# window. Off by default: the hidden flavour hides the server log too,
+# which matters the day an association won't open. Windows-only in effect;
+# Linux .desktop entries already run with Terminal=false.
+_ASSOC_BACKGROUND_KEY = "assoc_background"
+
+
+def _assoc_background() -> bool:
+    return bool(WS.machine_prefs.get(_ASSOC_BACKGROUND_KEY))
 
 
 class AssocExtsBody(BaseModel):
@@ -907,7 +917,7 @@ def _assoc_pick(exts: list[str], catalogue: list[dict]) -> list[dict]:
 def _assoc_adapter(request: Request):
     if not _is_loopback(request):
         raise HTTPException(403, "association changes are loopback-only")
-    a = file_assoc.adapter()
+    a = file_assoc.adapter(background=_assoc_background())
     if a is None:
         raise HTTPException(400, "file associations aren't supported on this platform")
     return a
@@ -928,6 +938,7 @@ def api_assoc_types(request: Request):
     st = a.status(catalogue) if a else {}
     asked = set(WS.machine_prefs.get(_ASSOC_ASKED_KEY) or [])
     return {"platform": file_assoc.platform_name(),
+            "background": _assoc_background(),
             "types": [{**t, **st.get(t["ext"], {"registered": False, "default": False}),
                        "asked": t["ext"] in asked} for t in catalogue]}
 
@@ -972,6 +983,24 @@ def api_assoc_default(request: Request, body: AssocExtsBody):
         raise HTTPException(400, str(e))
     _mark_asked(body.exts)
     return {"ok": True, **result}
+
+
+class AssocBackgroundBody(BaseModel):
+    enabled: bool
+
+
+@app.post("/api/assoc/background")
+def api_assoc_background(request: Request, body: AssocBackgroundBody):
+    """Toggle console-less association launches. Applies immediately: the
+    ProgId's open command is the ONE registry value every registered
+    extension shares, so rewriting it here beats making the analyst
+    un-register and re-register every type to pick the change up."""
+    if not _is_loopback(request):
+        raise HTTPException(403, "loopback-only")
+    WS.machine_prefs.set(_ASSOC_BACKGROUND_KEY, bool(body.enabled) or None)
+    a = file_assoc.adapter(background=bool(body.enabled))
+    applied = bool(a and getattr(a, "refresh_command", None) and a.refresh_command())
+    return {"ok": True, "background": bool(body.enabled), "applied": applied}
 
 
 @app.post("/api/assoc/asked")

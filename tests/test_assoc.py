@@ -263,7 +263,7 @@ def client(store, monkeypatch, tmp_path):
     import server
     fake = assoc.LinuxAssoc(data_home=str(tmp_path / "share"),
                             config_home=str(tmp_path / "config"))
-    monkeypatch.setattr(server.file_assoc, "adapter", lambda: fake)
+    monkeypatch.setattr(server.file_assoc, "adapter", lambda background=False: fake)
     monkeypatch.setattr(server.file_assoc, "platform_name", lambda: "linux")
     return server, TestClient(server.app)
 
@@ -394,3 +394,75 @@ def test_windows_register_sets_a_default_icon(win):
     win.register(case, cat)
     di = win.reg.keys["Software\\Classes\\Winnow.File\\DefaultIcon"][None]
     assert di.endswith("winnow.ico,0")
+
+
+# ------------------------------------------------------- background launch
+
+
+def test_hidden_interpreter_maps_to_pythonw_when_it_exists(tmp_path):
+    """The whole Windows story as a pure sibling-file check — testable on
+    any OS: python.exe → pythonw.exe iff pythonw.exe is really there."""
+    py = tmp_path / "python.exe"
+    py.write_text("")
+    assert assoc._hidden_interpreter(str(py)) == str(py)   # no pythonw yet
+    pyw = tmp_path / "pythonw.exe"
+    pyw.write_text("")
+    assert assoc._hidden_interpreter(str(py)) == str(pyw)
+    # Already the hidden one, or not a python at all: untouched.
+    assert assoc._hidden_interpreter(str(pyw)) == str(pyw)
+    other = tmp_path / "ruby.exe"; other.write_text("")
+    assert assoc._hidden_interpreter(str(other)) == str(other)
+
+
+def test_background_register_writes_the_consoleless_command(tmp_path, monkeypatch):
+    py = tmp_path / "python.exe"; py.write_text("")
+    pyw = tmp_path / "pythonw.exe"; pyw.write_text("")
+    monkeypatch.setattr(assoc.sys, "executable", str(py))
+    picked, cat = _cat(".csv")
+
+    w = assoc.WindowsAssoc(reg=FakeReg(), background=True)
+    w.register(picked, cat)
+    cmd = w.reg.keys["Software\\Classes\\Winnow.File\\shell\\open\\command"][None]
+    assert "pythonw.exe" in cmd
+
+    w2 = assoc.WindowsAssoc(reg=FakeReg(), background=False)
+    w2.register(picked, cat)
+    cmd2 = w2.reg.keys["Software\\Classes\\Winnow.File\\shell\\open\\command"][None]
+    assert "pythonw.exe" not in cmd2 and "python.exe" in cmd2
+
+
+def test_refresh_command_rewrites_only_an_existing_progid(tmp_path, monkeypatch):
+    """A settings toggle must update every registered type at once (they
+    share the one ProgId command) — and must NOT create the ProgId as a
+    side effect on a machine where Winnow was never registered."""
+    py = tmp_path / "python.exe"; py.write_text("")
+    pyw = tmp_path / "pythonw.exe"; pyw.write_text("")
+    monkeypatch.setattr(assoc.sys, "executable", str(py))
+    picked, cat = _cat(".csv")
+
+    reg = FakeReg()
+    assert assoc.WindowsAssoc(reg=reg, background=True).refresh_command() is False
+    assert "Software\\Classes\\Winnow.File" not in reg.keys
+
+    assoc.WindowsAssoc(reg=reg, background=False).register(picked, cat)
+    assert assoc.WindowsAssoc(reg=reg, background=True).refresh_command() is True
+    cmd = reg.keys["Software\\Classes\\Winnow.File\\shell\\open\\command"][None]
+    assert "pythonw.exe" in cmd
+
+
+def test_background_route_stores_and_reports_the_setting(client):
+    server, c = client
+    assert c.get("/api/assoc/types", headers=HEADERS).json()["background"] is False
+    r = c.post("/api/assoc/background", json={"enabled": True}, headers=HEADERS)
+    assert r.status_code == 200
+    assert r.json()["background"] is True
+    assert c.get("/api/assoc/types", headers=HEADERS).json()["background"] is True
+    assert c.post("/api/assoc/background", json={"enabled": False},
+                  headers=HEADERS).json()["background"] is False
+
+
+def test_background_route_is_loopback_only(client, monkeypatch):
+    server, c = client
+    monkeypatch.setattr(server, "_is_loopback", lambda req: False)
+    assert c.post("/api/assoc/background", json={"enabled": True},
+                  headers=HEADERS).status_code == 403
