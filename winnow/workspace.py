@@ -773,7 +773,7 @@ class AppSettings:
     small document, read whole, written whole."""
 
     FILE = "app_settings.json"
-    DEFAULTS = {"default_ts_format": "iso"}
+    DEFAULTS = {"default_ts_format": "iso", "remote_session": False}
     # Mirrors app.js's TS_FORMATS. A value outside this set would silently
     # fall through formatTimestamp's switch and render raw, so it's
     # rejected here rather than stored and quietly ignored.
@@ -787,10 +787,19 @@ class AppSettings:
         fmt = values.get("default_ts_format")
         if fmt is not None and fmt not in self.TS_FORMATS:
             raise ValueError(f"Unknown timestamp format: {fmt}")
+        if "remote_session" in values:
+            # Whether THIS MACHINE is reached over RDP is a machine fact,
+            # which is why it lives here and not in localStorage: browser
+            # storage is per-profile AND per-origin, so an update restart,
+            # a different port (association quick-looks), or a different
+            # browser silently reset it — reported as exactly that bug.
+            values["remote_session"] = bool(values["remote_session"])
         with _LOCK:
             current = {**self.DEFAULTS, **_read(self.FILE, {})}
             if fmt is not None:
                 current["default_ts_format"] = fmt
+            if "remote_session" in values:
+                current["remote_session"] = values["remote_session"]
             _write(self.FILE, current)
             return current
 

@@ -64,7 +64,11 @@ export function loadAppearance() {
   } catch { return defaultAppearance(); }
 }
 
-export function saveAppearance() { localStorage.setItem(APPEARANCE_KEY, JSON.stringify(S.appearance)); }
+export function saveAppearance() {
+  // remoteSession lives server-side now (see loadAppSettings) — persisting
+  // it here would resurrect a stale value and fight the machine setting.
+  localStorage.setItem(APPEARANCE_KEY, JSON.stringify({ ...S.appearance, remoteSession: undefined }));
+}
 
 export function contrastFg(hex) {
   const c = hex.replace('#', '');
@@ -91,6 +95,18 @@ export function paintRemote() {
    Settings → Appearance. */
 export async function maybeOfferRemoteMode() {
   const SEEN = 'winnow.remotePrompt';
+  // The machine may already have answered (the setting is server-side and
+  // survives fresh browser profiles/origins) — never re-ask what
+  // workspace/app_settings.json already knows.
+  try {
+    const app = await api('/api/settings/app');
+    if (app && app.remote_session) {
+      S.appearance.remoteSession = true;
+      paintRemote();
+      localStorage.setItem(SEEN, 'seen');
+      return;
+    }
+  } catch { /* server unreachable: fall through to the local gate */ }
   try {
     if (localStorage.getItem(SEEN) === 'seen') return;
     if (localStorage.getItem(APPEARANCE_KEY)) {
@@ -109,7 +125,8 @@ export async function maybeOfferRemoteMode() {
   if (yes) {
     S.appearance.remoteSession = true;
     paintRemote();
-    saveAppearance();
+    try { S.appSettings = await post('/api/settings/app', { remote_session: true }); }
+    catch { /* offered again never — but the toggle in Settings still works */ }
   }
 }
 
@@ -468,10 +485,14 @@ export function openSettings() {
     const remoteCb = el('input');
     remoteCb.type = 'checkbox';
     remoteCb.checked = !!S.appearance.remoteSession;
-    remoteCb.onchange = () => {
+    remoteCb.onchange = async () => {
       S.appearance.remoteSession = remoteCb.checked;
       paintRemote();
-      saveAppearance();
+      // Machine setting, saved server-side — localStorage proved fragile
+      // (per-origin AND per-profile, so update restarts and quick-look
+      // ports kept resetting it).
+      try { S.appSettings = await post('/api/settings/app', { remote_session: remoteCb.checked }); }
+      catch (e) { toast('Could not save Remote session mode: ' + e.message, 6000); }
     };
     remoteLabel.append(remoteCb, el('span', null, 'Remote session mode'));
     secLook.append(remoteLabel);

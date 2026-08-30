@@ -2322,6 +2322,7 @@ def api_default_tags_save(body: DefaultTagsWrite):
 
 class AppSettingsWrite(BaseModel):
     default_ts_format: str | None = None
+    remote_session: bool | None = None
 
 
 @app.get("/api/settings/app")

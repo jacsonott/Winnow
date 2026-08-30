@@ -656,3 +656,16 @@ def test_updates_rollback_route_maps_success_and_failure(client, monkeypatch):
     r = client.post("/api/updates/rollback", json={})
     assert r.status_code == 400
     assert "No backup" in r.json()["detail"]
+
+
+def test_remote_session_is_a_machine_setting(client):
+    """Moved out of localStorage deliberately: browser storage is
+    per-profile AND per-origin, so update restarts and association
+    quick-looks (random ports) kept silently resetting it."""
+    assert client.get("/api/settings/app").json()["remote_session"] is False
+    r = client.post("/api/settings/app", json={"remote_session": 1})
+    assert r.status_code == 200
+    assert r.json()["remote_session"] is True   # coerced to a real bool
+    assert client.get("/api/settings/app").json()["remote_session"] is True
+    client.post("/api/settings/app", json={"remote_session": False})
+    assert client.get("/api/settings/app").json()["remote_session"] is False
