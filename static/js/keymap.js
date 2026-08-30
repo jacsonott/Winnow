@@ -15,7 +15,7 @@ import { expandSearch, openSearchAllModal } from './search.js';
 import { applySqlTabToEditor } from './sql.js';
 import { sqlClearSelection, sqlCopySelection, sqlSelectionCount, sqlTagHotkey } from './sqlassist.js';
 import { openSettings } from './settings.js';
-import { activateTabSlot, clearAllFilters } from './sources.js';
+import { activateTabSlot, clearAllFilters, setSidebarVisible } from './sources.js';
 import { S, gridRowCount, selClear, selCount, selSetAll } from './state.js';
 import { openTablesManager } from './tables.js';
 import { applyTag, applyTagToView, undoLastTagChange } from './tags.js';
@@ -59,6 +59,7 @@ export const DEFAULT_KEYMAP = {
   // checkbox is disabled there for the same reason).
   selectAllRows: ['Ctrl+a'],
   openTables: ['t'],
+  toggleSidebar: ['`'],
   openTableMenu: ['C'],
   openSearchAll: ['s'],
   toggleDetail: ['d'],
@@ -89,6 +90,7 @@ export const ACTION_LABELS = {
   clearFilters: 'Clear all filters, search and tag filter',
   selectAllRows: 'Select every row in the current view (same as the header checkbox)',
   openTables: 'Open Tables manager',
+  toggleSidebar: 'Show/hide the table sidebar',
   openTableMenu: 'Open the table menu (columns, value dropdowns) — also right-click a tab',
   openSearchAll: 'Search all tables',
   toggleDetail: 'Open/close the detail pane',
@@ -264,7 +266,7 @@ export function findKeyConflict(key, currentAction) {
    SQL pane silently tagged whatever was selected in the grid behind it,
    which the tag ribbon at least hinted at before the toolbar started
    hiding itself there (see syncTabChrome). */
-export const TAB_AGNOSTIC_ACTIONS = new Set(['openSettings', 'openTables', 'openSearchAll', 'openPluginBundles']);
+export const TAB_AGNOSTIC_ACTIONS = new Set(['openSettings', 'openTables', 'openSearchAll', 'openPluginBundles', 'toggleSidebar']);
 
 export const ACTION_HANDLERS = {
   moveDown: (e, pageRows) => moveCursor(S.cursor + 1, e.shiftKey),
@@ -300,6 +302,7 @@ export const ACTION_HANDLERS = {
   filterBySelectedCellOnly: () => filterBySelectedCell({ only: true }),
   clearFilters: () => clearAllFilters(),
   openTables: () => openTablesManager(),
+  toggleSidebar: () => setSidebarVisible($('sidebar').hidden),
   openTableMenu: () => openTableMenu(),
   toggleDetail: () => toggleDetailPane(),
   openSearchAll: () => openSearchAllModal(),

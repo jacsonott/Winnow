@@ -139,7 +139,12 @@ def page(browser, server):
     # contexts without this.
     ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen');"
                         "localStorage.setItem('winnow.appearance',"
-                        " JSON.stringify({ splash: false }))")
+                        " JSON.stringify({ splash: false }));"
+                        # The sidebar defaults CLOSED now; most tests predate
+                        # that and address rows in it, so the shared context
+                        # models an analyst who chose to keep it open.
+                        "localStorage.setItem('winnow.sidebar',"
+                        " JSON.stringify({ collapsed: false }))")
     pg = ctx.new_page()
     errors: list[str] = []
     pg.on("pageerror", lambda e: errors.append(str(e)))
