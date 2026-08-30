@@ -20,6 +20,11 @@ import { confirmDialog, modal, promptDialog } from './ui.js';
 
 /* -------------------------------------------------------------- home screen */
 
+// Winnow's own case-file extension — mirrors store.CASE_SUFFIX. Only the
+// default filename a new case is proposed under; an analyst who types a
+// path keeps whatever they typed, and existing ".db" cases open unchanged.
+const CASE_EXT = '.db-winnow';
+
 /* Home manages "Cases" (one case.db each — recent, grouped, renamed,
    annotated). Distinct from the existing Session feature (the Session
    button above), which snapshots tags/notes/layout *within* one already-open
@@ -366,11 +371,11 @@ export function openNewCaseModal(state = {}) {
     b.append(el('label', null, 'Group'), groupRow);
 
     let chosenDir = state.chosenDir || S.casesDir || 'cases';
-    const pathInput = fieldInput(state.path || `${chosenDir}/${slugify(state.name || '')}.db`);
+    const pathInput = fieldInput(state.path || `${chosenDir}/${slugify(state.name || '')}${CASE_EXT}`);
     pathInput.style.fontFamily = 'var(--mono)';
     let pathTouched = state.pathTouched || false;
     pathInput.oninput = () => { pathTouched = true; };
-    nameInput.oninput = () => { if (!pathTouched) pathInput.value = `${chosenDir}/${slugify(nameInput.value)}.db`; };
+    nameInput.oninput = () => { if (!pathTouched) pathInput.value = `${chosenDir}/${slugify(nameInput.value)}${CASE_EXT}`; };
     const browseBtn = el('button', 'btn ghost', 'Browse…');
     browseBtn.onclick = () => {
       const snapshot = {
@@ -381,7 +386,7 @@ export function openNewCaseModal(state = {}) {
       openFolderBrowser(
         chosenDir,
         (dir) => openNewCaseModal({
-          ...snapshot, chosenDir: dir, pathTouched: false, path: `${dir}/${slugify(snapshot.name)}.db`,
+          ...snapshot, chosenDir: dir, pathTouched: false, path: `${dir}/${slugify(snapshot.name)}${CASE_EXT}`,
         }),
         () => openNewCaseModal(snapshot),
       );
@@ -476,10 +481,10 @@ export async function maybeOfferStorageDir() {
 }
 
 export async function openExistingCasePrompt() {
-  const path = await promptDialog('Path to an existing case .db file:');
+  const path = await promptDialog('Path to an existing case file:');
   if (!path || !path.trim()) return;
   const trimmed = path.trim();
-  const name = trimmed.split(/[\\/]/).pop().replace(/\.db$/i, '');
+  const name = trimmed.split(/[\\/]/).pop().replace(/\.db-winnow$|\.db$/i, '');
   try {
     await post('/api/cases', { path: trimmed, name, group: '', notes: '' });
   } catch (e) {

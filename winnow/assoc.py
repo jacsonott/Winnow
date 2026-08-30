@@ -32,6 +32,7 @@ testable on any platform; only the two-line defaults touch the real OS.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import subprocess
@@ -47,14 +48,28 @@ from . import paths
 # desktop actually RESOLVES for such a file (shared-mime-info sniffs
 # SQLite by magic, so extensionless-looking .db files still land on
 # vnd.sqlite3); an entry under a mime nothing resolves to would be dead.
+# The Winnow case type gets its own mime so a Linux desktop can carry a
+# distinct file icon for it (application/x-winnow-case, glob *.db-winnow,
+# supplied by our shared-mime-info package). It is the one builtin type
+# that IS default_ok: nothing else on the system owns .db-winnow, so
+# making Winnow its default double-click can't steal a file from Excel,
+# an editor or a DB browser the way claiming .db/.xlsx would.
+CASE_TYPE: dict = {"ext": ".db-winnow", "label": "Winnow case",
+                   "mime": "application/x-winnow-case", "default_ok": True, "is_case": True}
+
 BUILTIN_TYPES: list[dict] = [
+    CASE_TYPE,
     {"ext": ".csv", "label": "Comma-separated values", "mime": "text/csv", "default_ok": True},
     {"ext": ".tsv", "label": "Tab-separated values", "mime": "text/tab-separated-values", "default_ok": True},
     {"ext": ".txt", "label": "Delimited text", "mime": "text/plain", "default_ok": False},
     {"ext": ".json", "label": "JSON table", "mime": "application/json", "default_ok": False},
     {"ext": ".jsonl", "label": "JSON lines", "mime": "application/json", "default_ok": True},
     {"ext": ".ndjson", "label": "Newline-delimited JSON", "mime": "application/json", "default_ok": True},
-    {"ext": ".db", "label": "SQLite database / Winnow case", "mime": "application/vnd.sqlite3", "default_ok": False},
+    # SQLite databases the analyst IMPORTS as evidence (Chromium History.db
+    # and the like). Handler-only — a DB browser or the OS may own these,
+    # and a Winnow case now has its own extension above, so this no longer
+    # doubles as "Winnow case".
+    {"ext": ".db", "label": "SQLite database", "mime": "application/vnd.sqlite3", "default_ok": False},
     {"ext": ".sqlite", "label": "SQLite database", "mime": "application/vnd.sqlite3", "default_ok": False},
     {"ext": ".sqlite3", "label": "SQLite database", "mime": "application/vnd.sqlite3", "default_ok": False},
     {"ext": ".xlsx", "label": "Excel workbook", "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "default_ok": False},
@@ -93,6 +108,20 @@ def launch_command() -> list[str]:
     interpreter against this install's server.py, resolved now so a
     moved install re-registers rather than silently pointing at air."""
     return [sys.executable, str(paths.INSTALL_ROOT / "server.py"), "--assoc"]
+
+
+_ICON_DIR = paths.INSTALL_ROOT / "static" / "icons"
+
+
+def icon_file(kind: str = "png") -> str:
+    """The committed brand icon, by flavour. `ico` for Windows (the
+    multi-resolution file Explorer and the Open With menu want), `svg`
+    for the scalable Linux mime-type icon, `png` for a `.desktop`
+    Icon= that even an older file manager renders."""
+    return str(_ICON_DIR / {
+        "ico": "winnow.ico",
+        "svg": "winnow-mark.svg",
+    }.get(kind, "winnow-icon-256.png"))
 
 
 # ------------------------------------------------------------------- linux
@@ -179,6 +208,7 @@ class LinuxAssoc:
             f"Exec={exe} %F\n"
             "Terminal=false\n"
             "NoDisplay=true\n"          # a file handler, not a launcher-menu app
+            f"Icon={icon_file('png')}\n"  # absolute path: no install-into-theme step needed for the app icon
             f"MimeType={';'.join(sorted(mimes))};\n"
             "Categories=Utility;\n"
         )
@@ -275,6 +305,40 @@ class LinuxAssoc:
         ours = [t for t in catalogue
                 if t["mime"].startswith("application/x-winnow") and t["mime"] in live_mimes]
         self._write_mime_package(ours)
+        self._sync_mime_icons(ours)
+
+    def _mime_icon_path(self, mime: str) -> Path:
+        # freedesktop convention: a mimetype icon is named after the mime
+        # with the slash turned into a dash, under the theme's mimetypes/.
+        return (self.data / "icons" / "hicolor" / "scalable" / "mimetypes"
+                / f"{mime.replace('/', '-')}.svg")
+
+    def _sync_mime_icons(self, our_types: list[dict]) -> None:
+        """Give our own mime types a file icon in the icon theme, so a file
+        manager shows the wheat mark on a .db-winnow case rather than a
+        generic page. Only our x-winnow mimes get one — a standard mime
+        (text/csv) already has a themed icon we must not shadow."""
+        wanted = {self._mime_icon_path(t["mime"]) for t in our_types}
+        src = Path(icon_file("svg"))
+        refresh = False
+        for dest in wanted:
+            if src.is_file() and not dest.exists():
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(src, dest)
+                refresh = True
+        # Drop icons for mimes we no longer register (e.g. after unregister).
+        icon_dir = self.data / "icons" / "hicolor" / "scalable" / "mimetypes"
+        if icon_dir.is_dir():
+            for f in icon_dir.glob("application-x-winnow*.svg"):
+                if f not in wanted:
+                    f.unlink()
+                    refresh = True
+        if refresh:
+            exe = shutil.which("gtk-update-icon-cache")
+            if exe:
+                with contextlib.suppress(OSError):
+                    subprocess.run([exe, "-f", "-t", str(self.data / "icons" / "hicolor")],
+                                   capture_output=True, timeout=30)
 
     def status(self, catalogue: list[dict]) -> dict[str, dict]:
         try:
@@ -378,6 +442,10 @@ class WindowsAssoc:
     def _ensure_progid(self) -> None:
         base = f"Software\\Classes\\{self.PROGID}"
         self._set(base, None, "Winnow")
+        # DefaultIcon is what puts the wheat mark on the Open With → Winnow
+        # menu entry and on any file type Winnow is the default for (a
+        # .db-winnow case, above all). ",0" = the first icon in the .ico.
+        self._set(f"{base}\\DefaultIcon", None, f"{icon_file('ico')},0")
         self._set(f"{base}\\shell\\open\\command", None,
                   subprocess.list2cmdline(launch_command()) + ' "%1"')
 

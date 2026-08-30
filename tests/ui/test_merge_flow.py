@@ -23,18 +23,29 @@ def test_merge_builder_creates_and_opens_a_merge(page, tmp_path):
              { path, name: 'twin.csv', kind: 'csv' })
            .then(() => __winnow.startJobsPoll())""",
         str(twin))
+    # Wait for the twin BY NAME, not just for a +1 count: on a loaded CI
+    # runner a stale background job from an earlier test can satisfy the
+    # count while the twin itself isn't in S.sources yet, and the merge
+    # builder would then find no eligible pair and render no button.
     page.wait_for_function(
-        """(n) => __winnow.loadSources().then(() => __winnow.S.sources.length === n + 1)""",
-        arg=before, timeout=15_000)
+        """() => __winnow.loadSources().then(() =>
+             __winnow.S.sources.some((s) => s.name === 'twin.csv'))""",
+        timeout=20_000)
 
     merge_id = None
     try:
         page.evaluate("() => __winnow.openMergeBuilder()")
         page.wait_for_selector("#modal:not([hidden])")
+        # The eligible group (ui_csv + twin, same columns) must have
+        # rendered its checkboxes; assert it rather than let a missing
+        # "Create merge" button time out with no explanation.
+        page.wait_for_selector("#modal input[type=checkbox]", timeout=10_000)
         boxes = page.locator("#modal input[type=checkbox]")
         for i in range(boxes.count()):
             boxes.nth(i).check()
-        page.locator("#modal button", has_text="Create merge").click()
+        create = page.locator("#modal button", has_text="Create merge")
+        assert create.count() == 1, "the merge builder offered no eligible source group"
+        create.click()
 
         page.wait_for_selector(".tab-merge", timeout=10_000)
         merge = page.evaluate(

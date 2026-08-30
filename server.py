@@ -1,6 +1,6 @@
 """Winnow — a local web app for reading very large CSVs out of SQLite.
 
-    python server.py --case case.db --open sample.csv
+    python server.py --case case.db-winnow --open sample.csv
 
 Then browse to http://127.0.0.1:8777
 """
@@ -36,8 +36,8 @@ from winnow import plugin_api
 from winnow import updater
 from winnow import version
 from winnow import workspace as WS
-from winnow.store import (SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, OpCancelled, Store, describe_case_lock,
-                   probe_case_lock, sweep_orphan_views)
+from winnow.store import (CASE_SUFFIX, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, OpCancelled, Store,
+                   describe_case_lock, probe_case_lock, sweep_orphan_views)
 
 HERE = paths.INSTALL_ROOT  # static/, plugins/, examples/plugins/ all hang off the install root
 
@@ -529,10 +529,10 @@ def _new_temp_case_path() -> str:
     d = os.path.join(_cases_dir(), QUICKLOOK_DIRNAME)
     os.makedirs(d, exist_ok=True)
     stamp = __import__("datetime").datetime.now().strftime("%Y%m%d-%H%M%S")
-    path = os.path.join(d, f"quicklook-{stamp}.db")
+    path = os.path.join(d, f"quicklook-{stamp}{CASE_SUFFIX}")
     n = 1
     while os.path.exists(path):
-        path = os.path.join(d, f"quicklook-{stamp}-{n}.db")
+        path = os.path.join(d, f"quicklook-{stamp}-{n}{CASE_SUFFIX}")
         n += 1
     return path
 
@@ -567,7 +567,9 @@ def _sweep_quicklook(max_age_days: int = 7) -> int:
     cutoff = __import__("time").time() - max_age_days * 86400
     removed = 0
     for fn in os.listdir(d):
-        if not fn.endswith(".db"):
+        # New quick-looks are CASE_SUFFIX; ".db" keeps sweeping the ones a
+        # pre-change build left in this directory.
+        if not (fn.endswith(CASE_SUFFIX) or fn.endswith(".db")):
             continue
         path = os.path.join(d, fn)
         try:
@@ -1007,7 +1009,7 @@ def api_case_save_as(body: CaseSaveAsBody):
     if not name:
         raise HTTPException(400, "Give the case a name")
     slug = re.sub(r"[^A-Za-z0-9._ -]+", "_", name).strip() or "case"
-    dest = os.path.join(_cases_dir(), f"{slug}.db")
+    dest = os.path.join(_cases_dir(), f"{slug}{CASE_SUFFIX}")
     if os.path.exists(dest):
         raise HTTPException(400, f"A case file named {os.path.basename(dest)} already exists")
 
@@ -3166,7 +3168,7 @@ def main() -> None:
             # through the kind-aware quick-look ingest after the store opens.
             args.assoc_ingest = list(args.assoc)
 
-    case_path = args.case or ("case.db" if args.open_files else None)
+    case_path = args.case or (f"case{CASE_SUFFIX}" if args.open_files else None)
     url = f"http://{args.host}:{args.port}"
     if case_path:
         # Refuse rather than warn: this entrypoint is scriptable, a warning
