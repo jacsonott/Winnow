@@ -62,7 +62,13 @@ from typing import Any
 from . import paths
 from .store import DEFAULT_TAGS
 
-WORKSPACE_DIR = paths.INSTALL_ROOT / "workspace"
+# WINNOW_WORKSPACE_DIR relocates the registry/prefs/lock directory for one
+# process. The install's own workspace stays the default; the override
+# exists for spawned servers that must not share it — tests launching real
+# server.py subprocesses (the in-process monkeypatch can't reach them), and
+# nothing else so far. An override is applied at import, not per-call, so a
+# process is entirely in one workspace or entirely in another.
+WORKSPACE_DIR = Path(os.environ.get("WINNOW_WORKSPACE_DIR") or (paths.INSTALL_ROOT / "workspace"))
 
 class _WorkspaceLock:
     """The workspace lock, upgraded from in-process to cross-process.

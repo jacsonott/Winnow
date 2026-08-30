@@ -293,20 +293,25 @@ html[data-style="studio"][data-theme="light"] {
      invisible while the banner stayed hidden (its default state), which
      is exactly why this went unnoticed for so long. */
   grid-template-columns: max-content minmax(0, 1fr);
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto minmax(0, 1fr);
 }
 #sidebar { grid-column: 1; grid-row: 1 / -1; }
 #sidebar[hidden] { display: none; }
-.bar, .toolbar, .main-area { grid-column: 2; }
+.temp-banner, .bar, .toolbar, .main-area { grid-column: 2; }
 /* Explicit row per child, not auto-placement — auto-placement once slid
    .main-area into the wrong track when a display:none sibling (the old
    suggestion banner) dropped out of the grid, and past ~1.4M rows that
    collapsed the grid to zero height (see git history for the forensics).
    The banner is gone; the explicit pins stay so a future hidden sibling
    can't reintroduce it. */
-.bar { grid-row: 1; }
-.toolbar { grid-row: 2; }
-.main-area { grid-row: 3; }
+/* The quick-look banner is the returned hidden sibling that comment is
+   about — which is why it gets an explicit track like everything else,
+   and why the track count above grew with it. Hidden, its auto track
+   collapses to zero and the pins keep everyone else where they belong. */
+.temp-banner { grid-row: 1; }
+.bar { grid-row: 2; }
+.toolbar { grid-row: 3; }
+.main-area { grid-row: 4; }
 /* Grid items default to min-width:auto (their content's min-content size),
    not 0 — without this, a row wide enough to overflow (e.g. many/long tab
    names in .bar) blows out #app's implicit single column, stretching every
@@ -1327,6 +1332,18 @@ textarea:focus { border-color: var(--accent); outline: none; }
 @media (prefers-reduced-motion: reduce) {
   .splash, .splash-tagline { transition: none; }
 }
+
+/* The quick-look banner: a file opened by double-click lives in a
+   temporary case until the analyst decides otherwise, and that fact should
+   be impossible to miss without shouting. Accent-tinted, not danger —
+   nothing is wrong, something is just undecided. */
+.temp-banner {
+  grid-column: 2; display: flex; align-items: center; gap: 12px;
+  padding: 6px 12px; font-size: 12px;
+  background: var(--sel); border-bottom: 1px solid var(--accent-dim);
+  color: var(--text);
+}
+.temp-banner-actions { margin-left: auto; display: flex; gap: 6px; }
 
 /* Sessions panel: the "received from another analyst" marker, and the
    diff table. Three columns of tag names with an arrow between them —

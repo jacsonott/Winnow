@@ -15,6 +15,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import sqlite3
 import sys
 import tempfile
@@ -146,6 +147,10 @@ async def _lifespan(_app: FastAPI):
     than in main() so `uvicorn server:app` gets both too."""
     global STORE
     swept = sweep_orphan_views()
+    with contextlib.suppress(Exception):
+        gone = _sweep_quicklook()
+        if gone:
+            print(f"Cleaned up {gone} abandoned quick-look case(s)")
     if swept["removed"]:
         print(f"Cleaned up {swept['removed']} orphaned temp file(s) from previous runs "
               f"({swept['bytes_freed'] / (1 << 20):.1f} MB)")
@@ -490,7 +495,102 @@ def _case_display_name(path: str) -> str:
 def api_case_current():
     if STORE is None:
         return {"open": False}
-    return {"open": True, "path": STORE.path, "name": _case_display_name(STORE.path)}
+    return {"open": True, "path": STORE.path, "name": _case_display_name(STORE.path),
+            "temp": _is_temp_case(STORE.path)}
+
+
+# ------------------------------------------------------------ quick-look cases
+#
+# A file opened through an OS file association lands in a TEMPORARY case:
+# the analyst is looking at one artifact, and making them name and file a
+# case first is exactly the friction the association exists to remove. A
+# temp case is an ordinary case file in <cases_dir>/quicklook/ — temp-ness
+# is a fact about the path, not a flag anywhere, so it survives restarts
+# and needs no state. It stays out of the home screen's registry until the
+# analyst saves it; from the banner they can name it (the file moves out of
+# quicklook/ and registers), push its tables into an existing case
+# (copy_sources_to), or discard it.
+
+def _cases_dir() -> str:
+    configured = os.environ.get("WINNOW_CASES_DIR") or WS.machine_prefs.get("cases_dir")
+    base = configured or str(paths.INSTALL_ROOT / "cases")
+    return os.path.abspath(os.path.expanduser(base))
+
+
+QUICKLOOK_DIRNAME = "quicklook"
+
+
+def _is_temp_case(path: str) -> bool:
+    return os.path.basename(os.path.dirname(os.path.abspath(path))) == QUICKLOOK_DIRNAME
+
+
+def _new_temp_case_path() -> str:
+    d = os.path.join(_cases_dir(), QUICKLOOK_DIRNAME)
+    os.makedirs(d, exist_ok=True)
+    stamp = __import__("datetime").datetime.now().strftime("%Y%m%d-%H%M%S")
+    path = os.path.join(d, f"quicklook-{stamp}.db")
+    n = 1
+    while os.path.exists(path):
+        path = os.path.join(d, f"quicklook-{stamp}-{n}.db")
+        n += 1
+    return path
+
+
+def is_winnow_case_file(path: str) -> bool:
+    """Distinguish a Winnow case from a generic SQLite file — double-
+    clicking a case should OPEN it, not ingest it as data. Read-only,
+    tolerant of anything unreadable."""
+    try:
+        with open(path, "rb") as f:
+            if f.read(16) != b"SQLite format 3\x00":
+                return False
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            names = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+        finally:
+            conn.close()
+        return {"sources", "tag_defs", "row_tags"} <= names
+    except Exception:  # noqa: BLE001 — unreadable means "not a case"
+        return False
+
+
+def _sweep_quicklook(max_age_days: int = 7) -> int:
+    """Delete abandoned quick-look cases: old, unlocked, and holding no
+    analysis (no tags, no notes, no saved sessions). Anything with work in
+    it is kept forever — a janitor that can eat findings is worse than the
+    disk it saves."""
+    d = os.path.join(_cases_dir(), QUICKLOOK_DIRNAME)
+    if not os.path.isdir(d):
+        return 0
+    cutoff = __import__("time").time() - max_age_days * 86400
+    removed = 0
+    for fn in os.listdir(d):
+        if not fn.endswith(".db"):
+            continue
+        path = os.path.join(d, fn)
+        try:
+            if os.path.getmtime(path) > cutoff or probe_case_lock(path):
+                continue
+            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            try:
+                busy = any(
+                    conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+                    for t in ("row_tags", "row_notes", "sessions")
+                    if conn.execute("SELECT 1 FROM sqlite_master WHERE name=?", (t,)).fetchone())
+            finally:
+                conn.close()
+            if busy:
+                continue
+            for suffix in ("", "-wal", "-shm"):
+                with contextlib.suppress(OSError):
+                    os.remove(path + suffix)
+            with contextlib.suppress(OSError):
+                os.remove(path + ".winnow-lock")
+            removed += 1
+        except OSError:
+            continue
+    return removed
 
 
 def _trigger_shutdown() -> None:
@@ -690,6 +790,138 @@ def api_case_copy_sources(body: CopySourcesBody):
         raise HTTPException(code, str(e))
 
 
+class AssocOpenBody(BaseModel):
+    files: list[str]
+
+
+@app.post("/api/assoc/open")
+def api_assoc_open(request: Request, body: AssocOpenBody):
+    """A file-association launch landing on an already-running server.
+
+    Loopback-only: it creates cases and ingests files by path, both
+    write-shaped powers that stay local. Three states, three answers:
+    no case open — create a fresh quick-look case and ingest into it; a
+    QUICK-LOOK case open — add to it (five files double-clicked together
+    arrive as five launcher invocations, and they belong in one case); a
+    real case open — 409, the launcher spawns its own instance instead,
+    because switching this server's case would yank every window the
+    analyst has open."""
+    global STORE
+    if not _is_loopback(request):
+        raise HTTPException(403, "Association opens are only accepted from this machine")
+    files = [os.path.abspath(f) for f in body.files]
+    missing = [f for f in files if not os.path.isfile(f)]
+    if missing:
+        raise HTTPException(400, f"No file at {missing[0]}")
+
+    if STORE is not None and not STORE.closed and not _is_temp_case(STORE.path):
+        raise HTTPException(409, "A case is open here — spawn a fresh instance instead")
+    if STORE is None or STORE.closed:
+        temp = _new_temp_case_path()
+        STORE = _open_store(temp)
+        with contextlib.suppress(Exception):
+            instances.set_case(temp)
+        _reload_plugins()
+
+    started, skipped = [], []
+    for f in files:
+        try:
+            started.append(_assoc_ingest(f))
+        except ValueError as e:
+            skipped.append({"file": os.path.basename(f), "reason": str(e)})
+    return {"case": STORE.path, "temp": True, "started": started, "skipped": skipped}
+
+
+def _assoc_ingest(path: str) -> dict:
+    """Queue one associated file into the open case, headless — nobody is
+    standing at an import modal. SQLite files and workbooks normally get a
+    picker; a quick-look takes EVERYTHING (all tables, all sheets), which
+    is what "just show me the file" means."""
+    kind = _ingest_kind_for_path(path)
+    opts = {"build_fts": True}
+    if kind == "sqlite":
+        tables = store().preview_sqlite_tables(path)["tables"]
+        if not tables:
+            raise ValueError("no tables in this SQLite file")
+        opts["tables"] = [{"table": t["name"],
+                           "timestamp_columns": t["likely_timestamp_columns"]} for t in tables]
+    elif kind == "xlsx":
+        sheets = store().preview_xlsx_sheets(path)["tables"]
+        keep = [t for t in sheets if t["row_count"] > 0]
+        if not keep:
+            raise ValueError("no data sheets in this workbook")
+        opts["tables"] = [{"table": t["name"]} for t in keep]
+    job = store().start_ingest_job(kind, path, options=opts)
+    return {"file": os.path.basename(path), "job_id": job["job_id"], "kind": kind}
+
+
+class CaseSaveAsBody(BaseModel):
+    name: str
+
+
+@app.post("/api/case/save_as")
+def api_case_save_as(body: CaseSaveAsBody):
+    """Promote the open quick-look case to a real one: move the file out of
+    quicklook/, register it on the home screen under the given name.
+
+    The close→rename→reopen dance is not optional: Windows refuses to
+    rename a file with open handles, so the store must genuinely release
+    it first. The window where STORE is closed is the same one every case
+    switch already has — in-flight requests get the same 409."""
+    global STORE
+    if STORE is None or STORE.closed:
+        raise HTTPException(400, "No case is open")
+    if not _is_temp_case(STORE.path):
+        raise HTTPException(400, "Only a quick-look case can be saved this way — "
+                                 "this one already has a home")
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(400, "Give the case a name")
+    slug = re.sub(r"[^A-Za-z0-9._ -]+", "_", name).strip() or "case"
+    dest = os.path.join(_cases_dir(), f"{slug}.db")
+    if os.path.exists(dest):
+        raise HTTPException(400, f"A case file named {os.path.basename(dest)} already exists")
+
+    old_path = STORE.path
+    STORE.close()
+    try:
+        os.replace(old_path, dest)
+    except OSError as e:
+        STORE = _open_store(old_path)   # failed rename leaves everything as it was
+        raise HTTPException(400, f"Could not move the case file: {e}")
+    for suffix in ("-wal", "-shm", ".winnow-lock"):
+        with contextlib.suppress(OSError):
+            os.remove(old_path + suffix)
+    STORE = _open_store(dest)
+    rec = WS.cases.create(dest, name=name)
+    WS.cases.touch_opened(rec["id"])
+    with contextlib.suppress(Exception):
+        instances.set_case(dest)
+    return {"path": dest, "name": name, "temp": False}
+
+
+@app.post("/api/case/discard")
+def api_case_discard():
+    """Throw a quick-look case away. Refused for real cases — deleting
+    those goes through the home screen, where it says what it is doing."""
+    global STORE
+    if STORE is None or STORE.closed:
+        raise HTTPException(400, "No case is open")
+    if not _is_temp_case(STORE.path):
+        raise HTTPException(400, "Only a quick-look case can be discarded — "
+                                 "delete a real case from the home screen")
+    path = STORE.path
+    old, STORE = STORE, None
+    with contextlib.suppress(Exception):
+        old.close()
+    for suffix in ("", "-wal", "-shm", ".winnow-lock"):
+        with contextlib.suppress(OSError):
+            os.remove(path + suffix)
+    with contextlib.suppress(Exception):
+        instances.set_case(None)
+    return {"ok": True}
+
+
 @app.post("/api/case/compact")
 def api_case_compact():
     """VACUUM the open case file. Long-running and explicitly analyst-
@@ -847,9 +1079,16 @@ class PrefsBody(BaseModel):
 
 @app.get("/api/prefs")
 def api_prefs():
+    # A quick-look opened on a brand-new install would otherwise get the
+    # first-run setup prompt stacked on top of the file the analyst just
+    # double-clicked — the exact friction the association exists to remove.
+    # Nothing is being filed anywhere yet; the cases-dir question can wait
+    # until Save-as-a-case, or until they launch Winnow itself.
+    quicklook = STORE is not None and _is_temp_case(STORE.path)
     return {"cases_dir": WS.machine_prefs.get("cases_dir"),
             # first run of this INSTANCE: nothing configured and no cases yet
-            "first_run": WS.machine_prefs.get("cases_dir") is None and not WS.cases.list()}
+            "first_run": (WS.machine_prefs.get("cases_dir") is None
+                          and not WS.cases.list() and not quicklook)}
 
 
 @app.post("/api/prefs")
@@ -2634,6 +2873,88 @@ def index():
 app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
 
 
+def _assoc_post(port: int, route: str, payload: dict, timeout: float = 30.0) -> dict | None:
+    """POST to a sibling instance; None means it declined or died — the
+    launcher just falls through to the next option."""
+    import urllib.request
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}{route}",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "X-Timeline-Lite-Client": "1"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except Exception:  # noqa: BLE001 — any failure means "this instance won't take it"
+        return None
+
+
+def _recent_temp_instance(alive: list[dict], max_age_s: float = 120.0) -> dict | None:
+    """A just-started quick-look instance — where the rest of a multi-file
+    double-click belongs. Windows delivers one launcher process per
+    selected file, so five files selected together arrive as five
+    invocations within a second or two; without this they would open five
+    windows on five cases."""
+    now = time.time()
+    for i in alive:
+        case = i.get("case_path") or ""
+        if not case or not _is_temp_case(case):
+            continue
+        try:
+            started = time.mktime(time.strptime(i["started_at"], "%Y-%m-%dT%H:%M:%S"))
+        except (KeyError, ValueError):
+            continue
+        if now - started <= max_age_s:
+            return i
+    return None
+
+
+def _run_assoc(files: list[str], no_browser: bool = False) -> int | None:
+    """The file-association launch. Returns an exit code when the work was
+    handed to an existing instance, or None when this process should carry
+    on and BECOME the server (main() falls through with the right args).
+
+    Order of preference: a case file opens as a case wherever possible; a
+    fresh quick-look joins a seconds-old one (multi-select), else lands on
+    an idle instance, else this process spawns. A busy instance is never
+    touched — its windows belong to whatever the analyst is doing there."""
+    files = [os.path.abspath(f) for f in files]
+    for f in files:
+        if not os.path.isfile(f):
+            print(f"No file at {f}", file=sys.stderr)
+            return 2
+    alive = instances.running()
+
+    if len(files) == 1 and is_winnow_case_file(files[0]):
+        case = files[0]
+        for i in alive:   # already open somewhere — just show that window
+            if i.get("case_path") and os.path.abspath(i["case_path"]) == case:
+                if not no_browser:
+                    browser.open_when_ready(f"http://127.0.0.1:{i['port']}", "127.0.0.1", i["port"])
+                return 0
+        idle = instances.find_idle()
+        if idle and _assoc_post(idle["port"], "/api/case/open", {"path": case}) is not None:
+            if not no_browser:
+                browser.open_when_ready(f"http://127.0.0.1:{idle['port']}", "127.0.0.1", idle["port"])
+            return 0
+        return None   # become the server, opening this case
+
+    recent = _recent_temp_instance(alive)
+    if recent and _assoc_post(recent["port"], "/api/assoc/open", {"files": files}) is not None:
+        return 0   # its window is already up; the tables appear in it
+    idle = instances.find_idle()
+    if idle and _assoc_post(idle["port"], "/api/assoc/open", {"files": files}) is not None:
+        if not no_browser:
+            browser.open_when_ready(f"http://127.0.0.1:{idle['port']}", "127.0.0.1", idle["port"])
+        return 0
+    return None   # become the server
+
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
 def main() -> None:
     global STORE
     ap = argparse.ArgumentParser(description="Winnow")
@@ -2644,6 +2965,10 @@ def main() -> None:
                     help="Open --case even if another Winnow already has it open")
     ap.add_argument("--port", type=int, default=8777)
     ap.add_argument("--no-fts", action="store_true", help="Skip full-text index (faster import)")
+    ap.add_argument("--assoc", nargs="+", metavar="FILE",
+                    help="opened via a file association: reuse a running Winnow when "
+                         "that is safe, otherwise become one on a free port, and land "
+                         "data files in a temporary quick-look case")
     ap.add_argument("--no-idle-shutdown", action="store_true",
                     help="keep running even with no browser connected — for driving "
                          "the API from scripts")
@@ -2686,6 +3011,23 @@ def main() -> None:
             file=sys.stderr,
         )
 
+    if args.assoc:
+        handed_off = _run_assoc(args.assoc, no_browser=args.no_browser)
+        if handed_off is not None:
+            time.sleep(1.5)   # let the sibling's window launch before we vanish
+            sys.exit(handed_off)
+        # Nobody could take it — this process becomes the server, on its own
+        # port so it can never collide with a Winnow already listening.
+        args.port = _free_port()
+        if len(args.assoc) == 1 and is_winnow_case_file(args.assoc[0]):
+            args.case = args.assoc[0]
+        else:
+            args.case = _new_temp_case_path()
+            # NOT via --open: that startup loop is ingest_csv only, and an
+            # associated file may be a workbook or a SQLite db. These go
+            # through the kind-aware quick-look ingest after the store opens.
+            args.assoc_ingest = list(args.assoc)
+
     case_path = args.case or ("case.db" if args.open_files else None)
     url = f"http://{args.host}:{args.port}"
     if case_path:
@@ -2708,8 +3050,17 @@ def main() -> None:
         legacy_presets = STORE.pop_legacy_presets()
         if legacy_presets:
             WS.filters.import_all({"filters": legacy_presets}, merge=True)
-        WS.cases.create(case_path, name=os.path.splitext(os.path.basename(case_path))[0])
-        WS.cases.touch_opened(WS.cases.find_by_path(case_path)["id"])
+        if not _is_temp_case(case_path):
+            # Quick-look cases stay OFF the home screen until the analyst
+            # saves them — an unregistered temp case is the whole point.
+            WS.cases.create(case_path, name=os.path.splitext(os.path.basename(case_path))[0])
+            WS.cases.touch_opened(WS.cases.find_by_path(case_path)["id"])
+        for f in getattr(args, "assoc_ingest", []):
+            try:
+                job = _assoc_ingest(f)
+                print(f"Quick-look import queued: {job['file']} ({job['kind']})", flush=True)
+            except ValueError as e:
+                print(f"Skipped {os.path.basename(f)}: {e}", flush=True)
         for f in args.open_files:
             print(f"Importing {f} ...", flush=True)
             rec = STORE.ingest_csv(f, build_fts=not args.no_fts)

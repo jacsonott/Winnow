@@ -99,3 +99,32 @@ see [docs/notes/README.md](README.md) for the whole set.
   reaped. `--no-idle-shutdown` (or the `WINNOW_*_EXIT_S` env overrides the
   tests use) turns it off. Graces are compared on `time.monotonic()` — a
   suspended laptop must not wake up to an instant shutdown.
+
+- **A quick-look case is temporary because of where it lives, not what it
+  is.** `_is_temp_case` asks one question — is the file's parent directory
+  named `quicklook/`? — so temp-ness survives restarts with no flag to
+  persist, and `save_as` converts to a real case by *moving the file* out
+  of that directory (close → `os.replace` → reopen; on a failed rename the
+  old file reopens, never leaving the server storeless). Quick-looks stay
+  out of the case registry until saved, which is also why the startup
+  `_sweep_quicklook` janitor is safe: it only eats files that are old,
+  unlocked, and carry zero tags/notes/sessions — touched work is never
+  reaped. The `--assoc` launcher resolves in a fixed order: a dropped
+  *case file* (SQLite header + the three winnow tables) opens as itself; a
+  data file goes to a just-started temp instance (<120s — multi-select
+  spawns one server, not five), else an idle registered instance, else
+  this process becomes the server on a free port. `/api/assoc/open` is
+  loopback-only, and `/api/prefs` reports `first_run: false` inside a temp
+  case — a fresh install's first double-click must not stack the
+  cases-dir setup prompt on top of the file the analyst opened.
+
+- **Tests that spawn a real `server.py` must isolate it by env, not
+  fixture.** The autouse `isolate_workspace` monkeypatch can't reach a
+  subprocess, so a spawned server sees the real `INSTALL_ROOT` and will
+  happily register throwaway cases in the developer's actual
+  `workspace/cases.json` and drop quicklook files in the real `cases/` —
+  state that outlives the test and collides on the next run (found as a
+  UI test that passed exactly once). Every `Popen` of `server.py` in the
+  suite sets `WINNOW_WORKSPACE_DIR` (read in `workspace.py` at import)
+  and, where cases get written, `WINNOW_CASES_DIR`; do the same in any
+  new one.
