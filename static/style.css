@@ -1267,6 +1267,12 @@ textarea:focus { border-color: var(--accent); outline: none; }
 
 /* -------------------------------------------------------- filter builder */
 
+/* Appearance now shows only the skin in use, beside the button that opens
+   the full picker — the grid of every style moved into its own panel. */
+.appearance-current { display: flex; align-items: center; gap: 10px; margin: 6px 0; }
+.appearance-current .style-card { flex: 0 0 auto; min-width: 180px; }
+.style-card-static { cursor: default; }
+
 /* The launch animation (static/js/splash.js). Fixed and above everything,
    including modals, because it covers the whole app while it runs. Its
    background is set inline from the palette rather than a token: it has to

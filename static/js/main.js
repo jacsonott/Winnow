@@ -120,7 +120,7 @@ wireFileDrop();
    second load. It also means a slow case list waits behind something worth
    looking at rather than an empty page. */
 if (splash.splashEnabled(S.appearance)) {
-  splash.runSplash({ theme: document.documentElement.getAttribute('data-theme') || 'dark' });
+  splash.runSplash();   // takes its colours from the live skin, not an argument
 }
 boot().catch((e) => toast('Could not start: ' + e.message, 8000));
 
