@@ -251,3 +251,46 @@ def test_an_unnamed_session_is_a_400_not_a_500(store, monkeypatch):
     client = _client(store, monkeypatch)
     assert client.post("/api/case_sessions", json={"name": " "},
                        headers=HEADERS).status_code == 400
+
+
+def test_starting_a_new_session_saves_then_clears(store, write_csv):
+    sid = _case(store, write_csv)
+    _tag(store, sid, [1, 2, 3], "TA")
+    store.set_note(sid, 1, "looks like beaconing") if hasattr(store, "set_note") else None
+
+    res = store.start_new_session(save_as="first pass")
+
+    assert res["tags_cleared"] == 3
+    assert res["saved"]["name"] == "first pass"
+    assert store.db.execute("SELECT COUNT(*) FROM row_tags").fetchone()[0] == 0
+    # The saved work is intact and restorable.
+    assert store.get_session("first pass")["sources"][0]["row_tags"]
+    store.load_session("first pass", merge=False)
+    assert store.db.execute("SELECT COUNT(*) FROM row_tags").fetchone()[0] == 3
+
+
+def test_a_new_session_keeps_how_you_read_the_evidence(store, write_csv):
+    """Layouts and derived columns are not conclusions — a second pass over
+    the same evidence shouldn't mean re-deriving timestamps."""
+    sid = _case(store, write_csv)
+    store.save_layout(sid, {"order": ["User", "Host"], "columns": {"Host": {"w": 120}}})
+    store.add_derived_column(sid, "Upper", "Host", "regex_extract", {"pattern": "(h.)"})
+    _tag(store, sid, [1], "TA")
+
+    store.start_new_session(save_as="pass one")
+
+    assert store.get_layout(sid)["order"] == ["User", "Host"]
+    assert [d["name"] for d in store.list_derived_columns(sid)] == ["Upper"]
+    assert [t["name"] for t in store.list_tags()], "the tag palette survives too"
+
+
+def test_clearing_drops_undo_entries_that_would_resurrect_tags(store, write_csv):
+    """An undo entry replayed after a clear would reinsert assignments the
+    analyst deliberately cleared."""
+    sid = _case(store, write_csv)
+    _tag(store, sid, [1, 2], "TA")
+    assert store.undo_depth() > 0 if hasattr(store, "undo_depth") else True
+
+    store.start_new_session(save_as="before")
+    assert not store._undo
+    assert store.db.execute("SELECT COUNT(*) FROM row_tags").fetchone()[0] == 0
