@@ -43,8 +43,9 @@ def test_remote_mode_scrolls_by_whole_rows_and_stops_animations(page):
     _enable_via_settings(page)
     assert page.evaluate("() => document.documentElement.classList.contains('remote')")
     # Server-side now — localStorage deliberately does NOT carry the key
-    # anymore (it kept getting reset by origin/profile changes).
-    assert page.evaluate("() => __winnow.S.appSettings.remote_session")
+    # anymore (it kept getting reset by origin/profile changes). The
+    # toggle's POST is async; wait for the response to land.
+    page.wait_for_function("() => __winnow.S.appSettings.remote_session === true", timeout=10_000)
     assert not page.evaluate(
         "() => 'remoteSession' in JSON.parse(localStorage.getItem('winnow.appearance') || '{}')")
 
