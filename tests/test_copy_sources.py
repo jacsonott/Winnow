@@ -229,3 +229,21 @@ def test_the_route_maps_refusals_to_the_right_codes(store, write_csv, target, mo
     res = client.post("/api/case/copy_sources", headers=headers,
                       json={"target_path": target_path, "source_ids": [999]})
     assert res.status_code == 404
+
+
+def test_copy_refuses_while_an_import_runs(store, write_csv, target, monkeypatch):
+    """A source mid-ingest has an accurate-but-growing row_count; the
+    ATTACH copy would snapshot whatever was committed and file it in the
+    target as a complete table."""
+    import server
+    from fastapi.testclient import TestClient
+    monkeypatch.setattr(server, "STORE", store)
+    monkeypatch.setattr(server, "_jobs_running", lambda: True)
+    client = TestClient(server.app)
+    sid = _fill(store, write_csv)
+    target_path = target.path
+    target.close()
+    r = client.post("/api/case/copy_sources", headers={"X-Timeline-Lite-Client": "1"},
+                    json={"target_path": target_path, "source_ids": [sid]})
+    assert r.status_code == 409
+    assert "importing" in r.json()["detail"].lower()

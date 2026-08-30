@@ -566,8 +566,15 @@ def _flatten_json(obj: dict, max_depth: int | None) -> dict[str, str]:
     (a further-nested object) as one JSON-text column."""
     out: dict[str, str] = {}
 
+    # 64: far past any real log format, far short of the interpreter's
+    # recursion limit — a pathological 3,000-level document used to walk
+    # off the stack as a RecursionError instead of ingesting. Below the
+    # cap the remainder is stringified, same as "depth N" mode's leftovers.
+    FULL_DEPTH_CAP = 64
+
     def walk(value: Any, key_path: str, depth: int) -> None:
-        if isinstance(value, dict) and (max_depth is None or depth < max_depth):
+        if isinstance(value, dict) and (depth < max_depth if max_depth is not None
+                                        else depth < FULL_DEPTH_CAP):
             if not value:
                 out[key_path] = "{}"
                 return
