@@ -181,4 +181,10 @@ see [docs/notes/README.md](README.md) for the whole set.
   default can't steal a file from Excel or a DB browser the way claiming
   `.db`/`.xlsx` would. The brand icon rides the same association —
   DefaultIcon on the Windows ProgId, the `.desktop` Icon= and a
-  hicolor `application-x-winnow-case` mimetype icon on Linux.
+  hicolor `application-x-winnow-case` mimetype icon on Linux. **An icon
+  replaced in place does not show up on its own**: Explorer caches
+  association icons until SHCNE_ASSOCCHANGED (every registry mutation
+  fires it, and startup re-stamps + pokes when the recorded IconHash
+  differs from the .ico on disk), and the Linux theme copy is re-synced
+  by content comparison, not only-when-missing — the only-if-missing
+  version pinned the first-registered design forever.

@@ -152,6 +152,14 @@ async def _lifespan(_app: FastAPI):
         gone = _sweep_quicklook()
         if gone:
             print(f"Cleaned up {gone} abandoned quick-look case(s)")
+    # An update can replace the brand icon in place; the OS keeps showing
+    # the old one (Explorer caches association icons, and the Linux theme
+    # copy was a one-time copy) until someone re-syncs. Cheap no-op when
+    # Winnow isn't registered or the icon didn't change.
+    with contextlib.suppress(Exception):
+        a = file_assoc.adapter(background=_assoc_background())
+        if a and a.refresh_icons(_assoc_catalogue()):
+            print("File-association icon refreshed after an icon update")
     if swept["removed"]:
         print(f"Cleaned up {swept['removed']} orphaned temp file(s) from previous runs "
               f"({swept['bytes_freed'] / (1 << 20):.1f} MB)")

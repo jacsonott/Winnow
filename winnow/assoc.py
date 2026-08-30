@@ -33,6 +33,7 @@ testable on any platform; only the two-line defaults touch the real OS.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
 import shutil
 import subprocess
@@ -133,6 +134,17 @@ def launch_command(background: bool = False) -> list[str]:
 
 
 _ICON_DIR = paths.INSTALL_ROOT / "static" / "icons"
+
+
+def _icon_hash() -> str:
+    """A fingerprint of the committed .ico, recorded at registration so a
+    later start can tell 'same path, different icon' — the case Explorer's
+    cache can't see on its own."""
+    try:
+        with open(icon_file("ico"), "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()[:16]
+    except OSError:
+        return ""
 
 
 def icon_file(kind: str = "png") -> str:
@@ -335,16 +347,25 @@ class LinuxAssoc:
         return (self.data / "icons" / "hicolor" / "scalable" / "mimetypes"
                 / f"{mime.replace('/', '-')}.svg")
 
-    def _sync_mime_icons(self, our_types: list[dict]) -> None:
+    def _sync_mime_icons(self, our_types: list[dict]) -> bool:
         """Give our own mime types a file icon in the icon theme, so a file
-        manager shows the wheat mark on a .db-winnow case rather than a
+        manager shows the brand mark on a .db-winnow case rather than a
         generic page. Only our x-winnow mimes get one — a standard mime
-        (text/csv) already has a themed icon we must not shadow."""
+        (text/csv) already has a themed icon we must not shadow.
+
+        Copies when the COPY differs, not just when it's missing: the
+        source icon is a committed file an update replaces in place, and
+        the only-if-missing version pinned the theme copy to whatever the
+        icon looked like on first registration, forever (reported as
+        associated files keeping the old icon after an update)."""
         wanted = {self._mime_icon_path(t["mime"]) for t in our_types}
         src = Path(icon_file("svg"))
+        src_bytes = src.read_bytes() if src.is_file() else None
         refresh = False
         for dest in wanted:
-            if src.is_file() and not dest.exists():
+            if src_bytes is None:
+                continue
+            if not dest.exists() or dest.read_bytes() != src_bytes:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(src, dest)
                 refresh = True
@@ -361,6 +382,18 @@ class LinuxAssoc:
                 with contextlib.suppress(OSError):
                     subprocess.run([exe, "-f", "-t", str(self.data / "icons" / "hicolor")],
                                    capture_output=True, timeout=30)
+        return refresh
+
+    def refresh_icons(self, catalogue: list[dict]) -> bool:
+        """Re-sync the theme copies against the committed icon — called at
+        server startup so an update that changed the icon propagates
+        without the analyst re-registering anything. A no-op on a machine
+        where Winnow was never registered (no .desktop entry)."""
+        if not self._desktop_path().exists():
+            return False
+        return self._sync_mime_icons(
+            [t for t in catalogue
+             if t["mime"].startswith("application/x-winnow") and t["mime"] in self._desktop_mimes()])
 
     def status(self, catalogue: list[dict]) -> dict[str, dict]:
         try:
@@ -396,6 +429,19 @@ def _desktop_quote(arg: str) -> str:
 # ----------------------------------------------------------------- windows
 
 
+def _shell_assoc_changed() -> None:  # pragma: no cover - windows only
+    """SHChangeNotify(SHCNE_ASSOCCHANGED): tell Explorer the association
+    world changed, which is also what flushes its ICON cache for
+    associated types. Without it, an icon replaced in place at the same
+    path (exactly what an update does to winnow.ico) keeps showing its
+    old cached bitmap indefinitely."""
+    try:
+        import ctypes
+        ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x0000, None, None)
+    except Exception:  # noqa: BLE001 — cosmetic refresh, never worth failing over
+        pass
+
+
 class WindowsAssoc:
     """Per-user Windows registration under HKCU\\Software\\Classes: one
     ProgId holding the open command, OpenWithProgids per extension for
@@ -406,11 +452,13 @@ class WindowsAssoc:
 
     PROGID = "Winnow.File"
 
-    def __init__(self, reg=None, background: bool = False):
+    def __init__(self, reg=None, background: bool = False, notify=None):
         if reg is None:
             import winreg as reg  # pragma: no cover - windows only
         self.reg = reg
         self.background = background
+        # Injectable for tests; the real one pokes Explorer's icon cache.
+        self._notify = _shell_assoc_changed if notify is None else notify
 
     def _hkcu(self):
         return self.reg.HKEY_CURRENT_USER
@@ -469,8 +517,27 @@ class WindowsAssoc:
         # menu entry and on any file type Winnow is the default for (a
         # .db-winnow case, above all). ",0" = the first icon in the .ico.
         self._set(f"{base}\\DefaultIcon", None, f"{icon_file('ico')},0")
+        self._set(base, "IconHash", _icon_hash())
         self._set(f"{base}\\shell\\open\\command", None,
                   subprocess.list2cmdline(launch_command(self.background)) + ' "%1"')
+
+    def refresh_icons(self, catalogue: list[dict]) -> bool:
+        """Explorer caches association icons by path, so replacing
+        winnow.ico in place (an update) changes nothing on screen until
+        something says SHCNE_ASSOCCHANGED. Compare the recorded hash of
+        the icon we registered with what's on disk now; on a change,
+        re-stamp and poke Explorer. No-op where Winnow was never
+        registered — a startup must not create registry keys."""
+        base = f"Software\\Classes\\{self.PROGID}"
+        if self._get(base, None) is None:
+            return False
+        current = _icon_hash()
+        if self._get(base, "IconHash") == current:
+            return False
+        self._set(f"{base}\\DefaultIcon", None, f"{icon_file('ico')},0")
+        self._set(base, "IconHash", current)
+        self._notify()
+        return True
 
     def refresh_command(self) -> bool:
         """Rewrite the ProgId's open command to match the current
@@ -482,6 +549,7 @@ class WindowsAssoc:
         if self._get(f"Software\\Classes\\{self.PROGID}", None) is None:
             return False
         self._ensure_progid()
+        self._notify()
         return True
 
     def _userchoice_present(self, ext: str) -> bool:
@@ -498,6 +566,7 @@ class WindowsAssoc:
         self._ensure_progid()
         for t in types:
             self._set(f"Software\\Classes\\{t['ext']}\\OpenWithProgids", self.PROGID, "")
+        self._notify()
 
     def unregister(self, types: list[dict], catalogue: list[dict]) -> None:
         for t in types:
@@ -508,6 +577,7 @@ class WindowsAssoc:
         still = any(v["registered"] for v in self.status(catalogue).values())
         if not still:
             self._delete_tree(f"Software\\Classes\\{self.PROGID}")
+        self._notify()
 
     def make_default(self, types: list[dict], catalogue: list[dict]) -> dict:
         self.register(types, catalogue)
@@ -516,6 +586,7 @@ class WindowsAssoc:
             self._set(f"Software\\Classes\\{t['ext']}", None, self.PROGID)
             if self._userchoice_present(t["ext"]):
                 blocked.append(t["ext"])
+        self._notify()
         return {"userchoice": blocked}
 
     def status(self, catalogue: list[dict]) -> dict[str, dict]:
