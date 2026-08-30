@@ -159,8 +159,13 @@ html[data-style="harvest"][data-theme="dark"] {
   --ink: #0a0c0b; --panel: #101312; --panel-2: #171b19; --panel-3: #1e2320;
   --line: #242a26; --line-2: #333a35; --text: #c9cdc4; --dim: #7c8578;
   --accent: #d9a441; --accent-dim: #8a6a2a; --accent-fg: #0a0c0b;
-  --sel: #16201b; --sel-line: #5c7a4e;
-  --row-even: #0c0f0e; --row-hover: #141816; --row-selected: #16201b; --cell-selected-bg: #1e2c24;
+  /* Selection is the GRAIN, not the field: washes of the accent over the
+     background, so a highlighted row reads as bronze. The green cast
+     belongs in the neutrals (panels, lines, dim text) — putting it in the
+     highlight as well left the one colour that is supposed to mean
+     "this one" agreeing with everything around it. */
+  --sel: #221e11; --sel-line: #d9a441;
+  --row-even: #0c0f0e; --row-hover: #141816; --row-selected: #221e11; --cell-selected-bg: #312815;
   --border-hairline: #121615; --text-faint: #565c53;
   --danger: #e0836a; --danger-bg: #331e1a; --danger-border: #64382c;
   --str: #a9c48f; --num: #d9a441; --kw: #b79ad0;
