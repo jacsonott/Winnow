@@ -183,11 +183,17 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\nCreated {args.target} {new[:7]} and tag v{args.version} "
           f"(dropped: {', '.join(dropped) or 'nothing'}).")
     print(f"You are back on {started_on}; the release is on {args.target}.")
-    print("\nReview it, then push:")
-    force = " --force-with-lease" if args.orphan else ""
-    print(f"  git push{force} origin {args.target}")
+    print("\nReview it, then ship (main takes releases via PR — its rulesets")
+    print("require one, and CI then validates the snapshot itself):")
     print(f"  git push origin v{args.version}")
     print(f"  gh release create v{args.version} --title 'Winnow {args.version}'")
+    print(f"  git branch -f release/v{args.version} {new[:7]}")
+    print(f"  git push origin release/v{args.version}")
+    print(f"  gh pr create --base {args.target} --head release/v{args.version}"
+          f" --title 'Release {args.version}'")
+    print("Merge that PR with a MERGE COMMIT only — squash/rebase rewrite the")
+    print("SHA and orphan the tag. Delete release/* after; the tag keeps the")
+    print("commit. (A direct `git push origin main` needs the rulesets off.)")
     return 0
 
 

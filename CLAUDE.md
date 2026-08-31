@@ -55,14 +55,42 @@ To cut one: bump `winnow/version.py` on develop in the commit you want
 released, then
 
 ```
-python scripts/release.py 0.2.0            # dry run, prints the plan
-python scripts/release.py 0.2.0 --write    # commit + tag, still local
+python scripts/release.py 0.3.0            # dry run, prints the plan
+python scripts/release.py 0.3.0 --write    # commit + tag, still local
 ```
 
 It refuses a dirty tree, a version that disagrees with `version.py`, a
 tag that already exists, and a missing source branch; on any failure it
 puts you back on the branch you started from. It never pushes — that is
 left as commands for a person to type.
+
+**The snapshot lands on main via a PR, not a direct push** (the flow
+v0.2.0 established). main's rulesets require a pull request and passing
+status checks, and rather than toggling them off per release, the PR
+satisfies both — CI validates the release snapshot itself, and the
+maintainer gets an approval gate:
+
+```
+git push origin v0.3.0
+gh release create v0.3.0 --title 'Winnow 0.3.0'   # updaters pull from the release
+git branch -f release/v0.3.0 <snapshot-sha>       # the commit --write printed
+git push origin release/v0.3.0
+gh pr create --base main --head release/v0.3.0 --title 'Release 0.3.0' ...
+```
+
+Merge that PR with **"Create a merge commit" only** — squash and rebase
+both rewrite the SHA, orphaning the tag main is supposed to contain.
+This loosens main's shape to one snapshot + one merge commit per
+release; the tagged snapshot stays in main's history, and the next
+release commit stacks on the merge commit fine. Delete the release/*
+branch after merging — the tag keeps the commit reachable. Note the tag
+and the GitHub RELEASE can go out before the PR merges: update.py
+follows releases, not main.
+
+The develop-based PR you might reach for instead cannot work: develop
+and main share no ancestor (below), so that PR conflicts on every file.
+The release/* branch works precisely because --write builds the
+snapshot commit on top of main's own tip.
 
 **Beta testers and developers track develop**, via `python update.py
 --dev`, which syncs to the branch tip and records `develop@<sha>` in the
