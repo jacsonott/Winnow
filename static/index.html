@@ -1,9 +1,12 @@
 <!DOCTYPE html>
-<html lang="en" data-style="panel" data-theme="dark">
+<html lang="en" data-style="harvest" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Winnow</title>
+<link rel="icon" href="/static/icons/winnow-mark.svg" type="image/svg+xml">
+<link rel="alternate icon" href="/static/icons/winnow-favicon-32.png" sizes="32x32">
+<link rel="apple-touch-icon" href="/static/icons/winnow-icon-256.png">
 <link rel="stylesheet" href="/static/style.css">
 <script>
 /* Blocking, deliberately tiny: paints the saved style/theme/accent before
@@ -15,14 +18,16 @@
    break page load. */
 try {
   var a = JSON.parse(localStorage.getItem('winnow.appearance') || '{}');
-  var style = a.style || 'panel';
+  var style = a.style || 'harvest';   // keep in step with defaultAppearance()
   var mode = a.themeMode || 'dark';
   var theme = mode === 'auto'
     ? (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
     : mode;
   document.documentElement.setAttribute('data-style', style);
   document.documentElement.setAttribute('data-theme', theme);
-  if (a.accent) {
+  // Only a CUSTOM accent is pre-painted. An uncustomised one would override
+  // the skin's own per-theme accent — see settings.js paintAccent().
+  if (a.accent && a.accentCustomized) {
     document.documentElement.style.setProperty('--accent', a.accent);
     var c = a.accent.replace('#', '');
     var r = parseInt(c.substr(0, 2), 16), g = parseInt(c.substr(2, 2), 16), bch = parseInt(c.substr(4, 2), 16);
@@ -36,6 +41,15 @@ try {
 
 <div id="busyBar" class="busy-bar" hidden aria-hidden="true"></div>
 
+<!-- The launch animation. Above everything, removed once it finishes or is
+     skipped; see static/js/splash.js. The tagline is the only text — the
+     original mock carried a shell prompt, which is the wrong thing to show
+     someone who has evidently already launched the application. -->
+<div id="splash" class="splash" hidden aria-hidden="true">
+  <canvas id="splashCanvas"></canvas>
+  <div id="splashTagline" class="splash-tagline">separate the signal from the noise</div>
+</div>
+
 <div id="home" class="home" hidden></div>
 
 <div id="app" hidden>
@@ -47,6 +61,15 @@ try {
   <div id="sidebarList" class="sidebar-list"></div>
   <div id="sidebarResize" class="sidebar-resize" title="Drag to resize · double-click to reset"></div>
 </aside>
+
+<div id="tempBanner" class="temp-banner" hidden>
+  <span>Quick look — this case is temporary and isn't saved anywhere yet.</span>
+  <span class="temp-banner-actions">
+    <button class="btn" id="tempSaveBtn">Save as a case…</button>
+    <button class="btn ghost" id="tempCopyBtn">Add tables to an existing case…</button>
+    <button class="btn ghost" id="tempDiscardBtn">Discard…</button>
+  </span>
+</div>
 
 <header class="bar">
   <button class="brand" id="btnHome" title="Back to home screen"><span class="mark"></span><span id="brandLabel">Winnow</span></button>
@@ -67,7 +90,7 @@ try {
 
   <div class="bar-actions">
     <button class="btn ghost" id="btnSearchAll" title="Search every table in this case">Search all</button>
-    <button class="btn" id="btnSession" aria-haspopup="true" aria-expanded="false">Session ▾</button>
+    <button class="btn" id="btnCase" aria-haspopup="true" aria-expanded="false" title="Import, merge, export, sessions and settings for the open case">Case ▾</button>
     <button class="btn" id="btnSettings" title="Settings — also has keyboard shortcuts and filter syntax help">⚙</button>
   </div>
 </header>
@@ -113,7 +136,6 @@ try {
       <div class="empty" id="empty">
         <p class="empty-title">No file open</p>
         <p><button class="btn" id="emptyImportBtn">Import files…</button></p>
-        <p>or start the server with <code>--open timeline.csv</code>.</p>
       </div>
     </main>
 

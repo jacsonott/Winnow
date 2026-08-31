@@ -1,9 +1,12 @@
-"""Cross-case application state, stored as human-readable JSON next to
-server.py — independent of any single case.db, so it survives switching
-between cases and travels with the app folder (airgapped/portable, same
-spirit as CLAUDE.md's no-CDN rule).
+"""Cross-case application state, stored as human-readable JSON in
+workspace/ under the install root (paths.INSTALL_ROOT) — independent of
+any single case.db, so it survives switching between cases and travels
+with the app folder (airgapped/portable, same spirit as CLAUDE.md's
+no-CDN rule).
 
-Eight small stores, each backed by its own JSON file under workspace/:
+Eleven small stores, each backed by its own JSON file under workspace/.
+Adding one means adding it here too — this list read "eight" for three
+stores longer than it was true:
   cases.json              the home screen's case registry
   filters.json            saved/cyclable filters ([ and ] in the grid) — also
                            the one mechanism behind the "suggested filter"
@@ -32,8 +35,19 @@ Eight small stores, each backed by its own JSON file under workspace/:
                            freshly dropped-in plugin is on by default and
                            deleting workspace/ re-enables everything rather
                            than silently turning it all off
+  plugin_bundles.json     named sets of plugins ("case types") applied
+                           together from Settings → Plugins
+  app_settings.json       app-wide display preferences, e.g. the default
+                           timestamp format for cases that don't set their
+                           own — a case's own choice lives in the case
+                           file's case_settings, so it travels with the case
+  prefs.json              per-INSTALL machine preferences, today just
+                           cases_dir: where new case files go, asked once on
+                           first run rather than silently defaulting
 
-Never holds evidence data — only UI/workflow bookkeeping.
+Never holds evidence data — only UI/workflow bookkeeping. Analyst work
+(tags, notes, layouts, saved views) lives in the case file instead, so it
+travels with the evidence; that split is deliberate.
 """
 
 from __future__ import annotations
@@ -48,9 +62,83 @@ from typing import Any
 from . import paths
 from .store import DEFAULT_TAGS
 
-WORKSPACE_DIR = paths.INSTALL_ROOT / "workspace"
+# WINNOW_WORKSPACE_DIR relocates the registry/prefs/lock directory for one
+# process. The install's own workspace stays the default; the override
+# exists for spawned servers that must not share it — tests launching real
+# server.py subprocesses (the in-process monkeypatch can't reach them), and
+# nothing else so far. An override is applied at import, not per-call, so a
+# process is entirely in one workspace or entirely in another.
+WORKSPACE_DIR = Path(os.environ.get("WINNOW_WORKSPACE_DIR") or (paths.INSTALL_ROOT / "workspace"))
 
-_LOCK = threading.RLock()
+class _WorkspaceLock:
+    """The workspace lock, upgraded from in-process to cross-process.
+
+    It was a bare threading.RLock, which was correct while exactly one
+    server ever touched workspace/ — and quietly wrong the moment file
+    associations made a second instance a supported flow. Two servers
+    doing read-modify-write on the same cases.json can interleave: both
+    read, both write, and the last writer silently drops the other's
+    entry. The analyst's case vanishes from the home screen with no error
+    anywhere.
+
+    So every `with _LOCK:` now also holds an advisory lock on
+    workspace/.lock for the OUTERMOST acquisition (re-entrant, like the
+    RLock it wraps — depth is tracked per-thread so nested `with` blocks
+    don't deadlock or release early). fcntl.flock on POSIX, msvcrt.locking
+    on Windows; both advisory, which is fine — the only writers are Winnow
+    processes, which all come through here.
+
+    The lock file lives inside WORKSPACE_DIR, resolved at acquire time
+    rather than import time so the test suite's per-test WORKSPACE_DIR
+    monkeypatch is honoured."""
+
+    def __init__(self):
+        self._rlock = threading.RLock()
+        self._depth = threading.local()
+        self._fd = threading.local()
+
+    def __enter__(self):
+        self._rlock.acquire()
+        depth = getattr(self._depth, "n", 0)
+        if depth == 0:
+            lock_path = _ensure_dir() / ".lock"
+            fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+            try:
+                if os.name == "posix":
+                    import fcntl
+                    fcntl.flock(fd, fcntl.LOCK_EX)
+                else:  # pragma: no cover - Windows
+                    import msvcrt
+                    msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+            except OSError:
+                # A filesystem without advisory locks degrades to the old
+                # single-process behaviour rather than failing every save.
+                pass
+            self._fd.fd = fd
+        self._depth.n = depth + 1
+        return self
+
+    def __exit__(self, *exc):
+        depth = self._depth.n = getattr(self._depth, "n", 1) - 1
+        if depth == 0:
+            fd = getattr(self._fd, "fd", None)
+            if fd is not None:
+                try:
+                    if os.name == "posix":
+                        import fcntl
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                    else:  # pragma: no cover - Windows
+                        import msvcrt
+                        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    pass
+                os.close(fd)
+                self._fd.fd = None
+        self._rlock.release()
+        return False
+
+
+_LOCK = _WorkspaceLock()
 
 
 def _ensure_dir() -> Path:
@@ -178,7 +266,7 @@ class SavedFilters:
         _write(self.FILE, data)
 
     def ensure_seeded(self) -> None:
-        """Merges filter_defaults' shipped triage filters (the converted
+        """Merges the shipped triage filters (defaults/filters.json — the converted
         Timeline Explorer set — EVTX/Registry/MFT) into this store, once per
         FILTER_DEFAULTS_VERSION. Same contract as
         HeaderNicknames.ensure_seeded, for the same reasons: lazy (called
@@ -188,21 +276,22 @@ class SavedFilters:
         present" is name + column set, matching import_all's merge rule, so
         an analyst's edited copy of a default is never re-added beside
         itself on a version bump."""
-        from . import filter_defaults
+        from . import defaults
 
         with _LOCK:
             data = _read(self.FILE, {"filters": []})
-            if data.get("seeded_version", 0) >= filter_defaults.FILTER_DEFAULTS_VERSION:
+            shipped = defaults.filters()
+            if data.get("seeded_version", 0) >= shipped["version"]:
                 return
             items = data["filters"]
             present = {(r["name"], tuple(r["col_names"])) for r in items}
-            for name, cols, payload in filter_defaults.DEFAULT_SAVED_FILTERS:
+            for name, cols, payload in shipped["filters"]:
                 if (name, tuple(cols)) in present:
                     continue
                 items.append({"id": _next_id(items), "name": name,
                               "col_names": list(cols), "payload": payload,
                               "created_at": _now()})
-            self._save(items, seeded_version=filter_defaults.FILTER_DEFAULTS_VERSION)
+            self._save(items, seeded_version=shipped["version"])
 
     @staticmethod
     def _normalize_payload(rec: dict) -> bool:
@@ -340,7 +429,7 @@ class HeaderNicknames:
         _write(self.FILE, data)
 
     def ensure_seeded(self) -> None:
-        """Merges header_defaults' shipped nicknames (EvtxECmd, MFTECmd,
+        """Merges the shipped nicknames (defaults/headers.json — EvtxECmd, MFTECmd,
         Amcache, ... — see that module) into this store, once per
         DEFAULTS_VERSION. Called lazily from the read paths rather than at
         server import: the store writes to WORKSPACE_DIR, and at import
@@ -352,21 +441,22 @@ class HeaderNicknames:
         analyst created. Only header sets not already present are added,
         so an analyst's own name for the EvtxECmd shape survives every
         version bump."""
-        from . import header_defaults
+        from . import defaults
 
         with _LOCK:
             data = _read(self.FILE, {"nicknames": []})
-            if data.get("seeded_version", 0) >= header_defaults.DEFAULTS_VERSION:
+            shipped = defaults.headers()
+            if data.get("seeded_version", 0) >= shipped["version"]:
                 return
             items = data["nicknames"]
             present = {tuple(r["col_names"]) for r in items}
-            for nickname, cols in header_defaults.DEFAULT_HEADER_NICKNAMES:
+            for nickname, cols in shipped["nicknames"]:
                 key = self._key(cols)
                 if tuple(key) in present:
                     continue
                 items.append({"id": _next_id(items), "col_names": key, "nickname": nickname})
                 present.add(tuple(key))
-            self._save(items, seeded_version=header_defaults.DEFAULTS_VERSION)
+            self._save(items, seeded_version=shipped["version"])
 
     @staticmethod
     def _key(col_names: list[str]) -> list[str]:
@@ -683,7 +773,7 @@ class AppSettings:
     small document, read whole, written whole."""
 
     FILE = "app_settings.json"
-    DEFAULTS = {"default_ts_format": "iso"}
+    DEFAULTS = {"default_ts_format": "iso", "remote_session": False}
     # Mirrors app.js's TS_FORMATS. A value outside this set would silently
     # fall through formatTimestamp's switch and render raw, so it's
     # rejected here rather than stored and quietly ignored.
@@ -697,10 +787,19 @@ class AppSettings:
         fmt = values.get("default_ts_format")
         if fmt is not None and fmt not in self.TS_FORMATS:
             raise ValueError(f"Unknown timestamp format: {fmt}")
+        if "remote_session" in values:
+            # Whether THIS MACHINE is reached over RDP is a machine fact,
+            # which is why it lives here and not in localStorage: browser
+            # storage is per-profile AND per-origin, so an update restart,
+            # a different port (association quick-looks), or a different
+            # browser silently reset it — reported as exactly that bug.
+            values["remote_session"] = bool(values["remote_session"])
         with _LOCK:
             current = {**self.DEFAULTS, **_read(self.FILE, {})}
             if fmt is not None:
                 current["default_ts_format"] = fmt
+            if "remote_session" in values:
+                current["remote_session"] = values["remote_session"]
             _write(self.FILE, current)
             return current
 

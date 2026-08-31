@@ -1,6 +1,7 @@
 /* The SQL pane and its named sub-tabs.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
+import { recordTabVisit } from './tabhistory.js';
 import { $, api, debounce, el, post, toast } from './core.js';
 import { hidePluginViews, sqlResultNodes } from './plugins.js';
 import { setActiveSqlResult } from './sqlassist.js';
@@ -17,6 +18,7 @@ import { confirmDialog, promptDialog } from './ui.js';
    #timelineview occupies the main content area, the same way opening a
    different source tab swaps the visible grid. */
 export function showSqlTab() {
+  recordTabVisit({ kind: 'page', key: 'sql' });
   S.activeTab = 'sql';
   $('grid').hidden = true;
   $('timelineview').hidden = true;
@@ -248,6 +250,7 @@ export function showGridTab() {
 }
 
 export function showTimelineTab() {
+  recordTabVisit({ kind: 'page', key: 'timeline' });
   S.activeTab = 'timeline';
   $('grid').hidden = true;
   $('sqlview').hidden = true;

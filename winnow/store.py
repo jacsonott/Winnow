@@ -82,6 +82,18 @@ DEFAULT_IMPORT_EXTENSIONS = {".csv", ".tsv", ".txt", ".psv", ".json", ".jsonl", 
 # blind — which tables to pull out is a per-file choice (see
 # preview_sqlite_tables) — so directory import ignores them while the
 # server-disk file browser still lists them.
+# Winnow's own case files. A distinct extension is what lets an OS
+# association, a file manager, and the launcher tell "a case to open" from
+# "a SQLite database to ingest as evidence" (a Chromium History.db and a
+# Winnow case are both SQLite; only the association target differs). It
+# still IS an ordinary SQLite file — a curious analyst can rename it to
+# `.db` and open it in any SQLite tool — the suffix is a label, not a
+# format. Deliberately NOT in SQLITE_IMPORT_EXTENSIONS: opening a case as
+# if it were evidence to import is exactly the confusion this separates.
+# Historic cases are `.db`; those still open (the launcher sniffs content,
+# is_winnow_case_file), only NEW cases take this suffix. One definition,
+# imported everywhere a case file is created or recognised.
+CASE_SUFFIX = ".db-winnow"
 SQLITE_IMPORT_EXTENSIONS = {".db", ".sqlite", ".sqlite3", ".db-wal"}
 # Excel workbooks route the same way SQLite files do — which sheets to
 # import is a per-file choice (see preview_xlsx_sheets), so directory
@@ -206,6 +218,30 @@ CREATE TABLE IF NOT EXISTS derived_columns (
 -- more file than it could ever save. The lookup IS on a hot path
 -- (_source_lite_on, once per page fetch) — it's just a hot path over a
 -- table that fits in a single page.
+-- Named session snapshots, IN the case file rather than beside it.
+--
+-- A session is a point-in-time copy of the analysis layer — tags, notes,
+-- layouts, saved views, derived-column definitions — for every open
+-- source. Keeping them here means work an analyst saved (or received from
+-- someone else and loaded) travels with the case instead of living in a
+-- sessions/ directory that gets left behind the moment the .db is copied
+-- anywhere. A JSON file is now only produced when handing work to another
+-- analyst, which is the one case that genuinely needs a separate artifact.
+--
+-- Deliberately a SNAPSHOT table, not a session dimension on row_tags. Tags
+-- stay single-valued per (source_id, rid, tag_id) — that is a WITHOUT
+-- ROWID primary key, so adding a session column would rewrite the physical
+-- layout of the hottest table in the case and every one of the ~70 places
+-- that read it. Diffing does not need it: a snapshot already contains the
+-- full tag set, so two of them can be compared by reading them.
+CREATE TABLE IF NOT EXISTS sessions (
+    id       INTEGER PRIMARY KEY,
+    name     TEXT NOT NULL UNIQUE,
+    saved_at TEXT NOT NULL,
+    origin   TEXT,                     -- 'saved' here, or 'imported' from a file
+    payload  TEXT NOT NULL             -- a winnow-case-session/1 document
+);
+
 -- Per-case settings (first key: ts_format, the case-level datetime display
 -- default). In the case file, not workspace/, because "how this case's
 -- timestamps read" should travel with the case when it's handed to
@@ -445,6 +481,24 @@ TAG_GROUP_COLUMN = "__tag__"
 RESERVED_COLUMN_NAMES = {"rid", "rank", "rowid", TAG_GROUP_COLUMN}
 
 
+def sniff_text_encoding(path: str) -> str:
+    """The encoding to open a text evidence file with — utf-8-sig unless a
+    UTF-16 byte-order mark says otherwise. Windows PowerShell 5.1's
+    Out-File and `>` write UTF-16LE by default, so UTF-16 CSVs are routine
+    DFIR inputs; decoded as UTF-8-with-replacement they turn into headers
+    full of NULs (which used to kill CREATE TABLE with "the query contains
+    a null character") and unreadable cells. BOM-less UTF-16 is left
+    alone — guessing without a BOM mislabels legitimate binary-ish text."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(2)
+    except OSError:
+        return "utf-8-sig"
+    if head in (b"\xff\xfe", b"\xfe\xff"):
+        return "utf-16"   # codec reads the BOM itself and picks LE/BE
+    return "utf-8-sig"
+
+
 def sanitize_columns(raw: list[str]) -> list[str]:
     """Make header names unique and safe to quote. Blank headers become col_N.
 
@@ -459,7 +513,12 @@ def sanitize_columns(raw: list[str]) -> list[str]:
     seen: dict[str, int] = {}
     used: set[str] = set()
     for i, name in enumerate(raw):
-        clean = (name or "").strip().lstrip("\ufeff") or f"col_{i + 1}"
+        # Strip C0 control characters (NUL and friends): they reach here
+        # from mis-decoded files, and a NUL in a header aborts CREATE TABLE
+        # with an error no analyst can act on. errors="replace" cells are
+        # data and stay as-is; a *name* must be printable and quotable.
+        name = "".join(ch for ch in (name or "") if ch >= " " or ch in "\t")
+        clean = name.strip().lstrip("\ufeff") or f"col_{i + 1}"
         if clean.lower() in RESERVED_COLUMN_NAMES:
             clean = f"{clean}_1"
         base = clean
@@ -519,8 +578,15 @@ def _flatten_json(obj: dict, max_depth: int | None) -> dict[str, str]:
     (a further-nested object) as one JSON-text column."""
     out: dict[str, str] = {}
 
+    # 64: far past any real log format, far short of the interpreter's
+    # recursion limit — a pathological 3,000-level document used to walk
+    # off the stack as a RecursionError instead of ingesting. Below the
+    # cap the remainder is stringified, same as "depth N" mode's leftovers.
+    FULL_DEPTH_CAP = 64
+
     def walk(value: Any, key_path: str, depth: int) -> None:
-        if isinstance(value, dict) and (max_depth is None or depth < max_depth):
+        if isinstance(value, dict) and (depth < max_depth if max_depth is not None
+                                        else depth < FULL_DEPTH_CAP):
             if not value:
                 out[key_path] = "{}"
                 return
@@ -534,7 +600,7 @@ def _flatten_json(obj: dict, max_depth: int | None) -> dict[str, str]:
     return out
 
 
-def _iter_json_records(path: str) -> Iterable[dict]:
+def _iter_json_records(path: str, bad: dict | None = None) -> Iterable[dict]:
     """Yields one dict per record. `.jsonl`/`.ndjson` (one JSON value per
     line — the genuinely streamable shape, never loaded fully into memory)
     vs a single `.json` document (a JSON array of records, a single record
@@ -548,15 +614,30 @@ def _iter_json_records(path: str) -> Iterable[dict]:
     without extra tooling)."""
     ext = os.path.splitext(path)[1].lower()
     if ext in (".jsonl", ".ndjson"):
-        with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
-            for line in f:
+        with open(path, "r", encoding=sniff_text_encoding(path), errors="replace") as f:
+            for lineno, line in enumerate(f, start=1):
                 line = line.strip()
                 if not line:
                     continue
-                obj = json.loads(line)
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError as e:
+                    # Same philosophy as CSV's ragged rows: one broken line
+                    # (a truncated write, a log rotation seam) must not cost
+                    # the analyst the million good lines around it. Counted
+                    # and reported, never silent — and if the CALLER passes
+                    # no collector (bad=None), the old raise stands, with
+                    # the FILE line number the analyst needs rather than
+                    # json's useless "line 1" of the single line.
+                    if bad is None:
+                        raise ValueError(f"Line {lineno}: {e.msg}") from e
+                    bad["count"] += 1
+                    if bad["count"] == 1:
+                        bad["first_line"], bad["first_error"] = lineno, e.msg
+                    continue
                 yield obj if isinstance(obj, dict) else {"value": obj}
         return
-    with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
+    with open(path, "r", encoding=sniff_text_encoding(path), errors="replace") as f:
         data = json.load(f)
     if isinstance(data, list):
         for obj in data:
@@ -1826,7 +1907,8 @@ class Store:
 
         # 1 MB read buffer: the default 8 KB means a 20 GB file is ~2.5M
         # read() syscalls before the csv layer even sees a byte.
-        fh = open(path, "r", encoding="utf-8-sig", errors="replace", newline="", buffering=1 << 20)
+        fh = open(path, "r", encoding=sniff_text_encoding(path), errors="replace",
+                  newline="", buffering=1 << 20)
         head = fh.read(64 * 1024)
         fh.seek(0)
         if delimiter is None:
@@ -1869,6 +1951,7 @@ class Store:
         total = 0
         ragged = 0
         t0 = time.time()
+        suspect_quotes = 0
         error: Exception | None = None
 
         # This per-row append loop is deliberate: a chunked
@@ -1879,11 +1962,26 @@ class Store:
         rows_iter = ([leftover_row] if leftover_row is not None else [])
         with self._ingest_synchronous_off():
             try:
+                prev_line = 0
                 for row in itertools.chain(rows_iter, reader):
                     if len(row) != ncols:
                         # Ragged row: pad or trim rather than dropping evidence.
                         ragged += 1
                         row = (row + [""] * ncols)[:ncols]
+                    # An unbalanced quote makes csv silently swallow every
+                    # following line into one field until the next quote (or
+                    # a hard error at the 128KB field limit) — dozens of
+                    # evidence lines vanish from the grid with the ragged
+                    # counter reading zero. The reader's line_num counts
+                    # PHYSICAL lines consumed, so a row that swallowed its
+                    # neighbours shows as a jump — one int compare per row
+                    # (a per-cell newline scan here benchmarked ingest 11%
+                    # slower). Legitimate quoted multi-line payloads (EVTX
+                    # XML) sit under the threshold; counted, not judged.
+                    line = reader.line_num
+                    if line - prev_line >= 10:
+                        suspect_quotes += 1
+                    prev_line = line
                     batch.append(tuple(row))
                     if len(sample) < SAMPLE_ROWS:
                         sample.append(row)
@@ -1916,7 +2014,22 @@ class Store:
                 self.drop_source(source_id)
                 raise
             except Exception as e:
-                error = e
+                # The rows in the pending batch parsed fine — the FAILURE is
+                # the line after them. Losing them made "keep what
+                # committed" quietly mean "lose up to a batch (20k rows) of
+                # good data before the bad line". Best-effort: if the
+                # failure was the commit itself (disk full), this second
+                # attempt fails too and what committed still stands.
+                if batch:
+                    with contextlib.suppress(Exception):
+                        total = self._commit_ingest_batch(insert, batch, source_id, total)
+                        batch.clear()
+                line = getattr(reader, "line_num", 0)
+                where = f"Line {line:,}: " if line else ""
+                kept = (f" — import stopped there; the {total:,} rows before it were kept"
+                        if total else "")
+                error = ValueError(f"{where}{e}{kept}")
+                error.__cause__ = e
             finally:
                 fh.close()
 
@@ -1934,6 +2047,10 @@ class Store:
             self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
 
         if error is not None:
+            if total == 0:
+                # Nothing ever committed: a zero-row source in the table
+                # list is pure noise that looks like a real (empty) import.
+                self.drop_source(source_id)
             raise error
 
         if build_fts and total:
@@ -1949,6 +2066,7 @@ class Store:
         rec["elapsed_sec"] = round(elapsed, 2)
         rec["rows_per_sec"] = int(total / elapsed) if elapsed > 0 else 0
         rec["ragged_rows"] = ragged
+        rec["suspect_quote_rows"] = suspect_quotes
         return rec
 
     def _commit_ingest_batch(self, insert_sql: str, batch: list[tuple], source_id: int, total: int) -> int:
@@ -2298,9 +2416,10 @@ class Store:
         max_depth = self._json_flatten_depth(flatten_mode, flatten_depth)
         seen_cols: list[str] = []
         seen_set: set[str] = set()
+        bad_prev = {"count": 0, "first_line": 0, "first_error": ""}
         sample_flat: list[dict[str, str]] = []
         record_count = 0
-        for rec in _iter_json_records(path):
+        for rec in _iter_json_records(path, bad=bad_prev):
             flat = _flatten_json(rec, max_depth)
             for k in flat:
                 if k not in seen_set:
@@ -2310,12 +2429,18 @@ class Store:
                 sample_flat.append(flat)
             record_count += 1
         if record_count == 0:
+            if bad_prev["count"]:
+                raise ValueError(
+                    f"File has no readable records — {bad_prev['count']} unreadable line(s), "
+                    f"first at line {bad_prev['first_line']}: {bad_prev['first_error']}")
             raise ValueError("File has no records")
         cols = sanitize_columns(seen_cols)
         key_by_col = dict(zip(cols, seen_cols))
         sample_rows = [[flat.get(key_by_col[c], "") for c in cols] for flat in sample_flat]
         types = [infer_type([r[i] for r in sample_rows]) for i in range(len(cols))] if sample_rows else ["text"] * len(cols)
-        return {"columns": cols, "sample_rows": sample_rows, "inferred_types": types, "record_count": record_count}
+        return {"columns": cols, "sample_rows": sample_rows, "inferred_types": types,
+                "record_count": record_count, "bad_records": bad_prev["count"],
+                "first_bad_line": bad_prev["first_line"]}
 
     def ingest_json(
         self,
@@ -2347,7 +2472,8 @@ class Store:
         seen_cols: list[str] = []
         seen_set: set[str] = set()
         record_count = 0
-        for rec in _iter_json_records(path):
+        bad_scan = {"count": 0, "first_line": 0, "first_error": ""}
+        for rec in _iter_json_records(path, bad=bad_scan):
             for k in _flatten_json(rec, max_depth):
                 if k not in seen_set:
                     seen_set.add(k)
@@ -2358,6 +2484,10 @@ class Store:
             if cancel is not None and record_count % 50_000 == 0 and cancel():
                 raise IngestCancelled(f"Import of {name or os.path.basename(path)} cancelled")
         if record_count == 0:
+            if bad_scan["count"]:
+                raise ValueError(
+                    f"File has no readable records — {bad_scan['count']} unreadable line(s), "
+                    f"first at line {bad_scan['first_line']}: {bad_scan['first_error']}")
             raise ValueError("File has no records")
 
         cols = sanitize_columns(seen_cols)
@@ -2384,10 +2514,14 @@ class Store:
         batch: list[tuple] = []
         total = 0
         t0 = time.time()
+        # Bad lines were already counted by the column scan; count again
+        # here (fresh collector) because THIS pass is the one that decides
+        # what actually lands in the table.
+        bad = {"count": 0, "first_line": 0, "first_error": ""}
         error: Exception | None = None
         with self._ingest_synchronous_off():
             try:
-                for rec in _iter_json_records(path):
+                for rec in _iter_json_records(path, bad=bad):
                     flat = _flatten_json(rec, max_depth)
                     row = [flat.get(key_by_col[c], "") for c in cols]
                     batch.append(tuple(row))
@@ -2412,7 +2546,15 @@ class Store:
                 self.drop_source(source_id)
                 raise
             except Exception as e:
-                error = e
+                # Keep the parsed-but-uncommitted batch, as in ingest_csv.
+                if batch:
+                    with contextlib.suppress(Exception):
+                        total = self._commit_ingest_batch(insert, batch, source_id, total)
+                        batch.clear()
+                kept = (f" — import stopped; the {total:,} records before the failure were kept"
+                        if total else "")
+                error = ValueError(f"{e}{kept}")
+                error.__cause__ = e
 
         types = [infer_type([r[i] for r in sample]) for i in range(ncols)] if sample else ["text"] * ncols
         colmeta = [{"name": c, "type": t} for c, t in zip(cols, types)]
@@ -2420,6 +2562,8 @@ class Store:
             self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
 
         if error is not None:
+            if total == 0:
+                self.drop_source(source_id)   # same no-husk rule as ingest_csv
             raise error
 
         if build_fts and total:
@@ -2429,6 +2573,8 @@ class Store:
         rec = self.get_source(source_id)
         rec["elapsed_sec"] = round(elapsed, 2)
         rec["rows_per_sec"] = int(total / elapsed) if elapsed > 0 else 0
+        rec["bad_records"] = bad["count"]
+        rec["first_bad_line"] = bad["first_line"]
         return rec
 
     def ingest_rows(
@@ -2811,7 +2957,9 @@ class Store:
                 job["rows_done"] = sum(r.get("row_count") or 0 for r in results)
                 job["source_ids"] = [r["id"] for r in results]
                 job["result"] = [
-                    {k: r.get(k) for k in ("id", "name", "row_count", "elapsed_sec", "rows_per_sec", "ragged_rows")}
+                    {k: r.get(k) for k in ("id", "name", "row_count", "elapsed_sec", "rows_per_sec",
+                                           "ragged_rows", "suspect_quote_rows", "bad_records",
+                                           "first_bad_line")}
                     for r in results
                 ]
         except IngestCancelled:
@@ -3298,7 +3446,11 @@ class Store:
     def delete_merge(self, merge_id: int) -> None:
         with self.lock, self.db:
             self.db.execute("DELETE FROM merges WHERE id=?", (merge_id,))
-            self.db.execute("DELETE FROM open_tabs WHERE source_id=?", (-merge_id,))
+            # Everything keyed by the merge's NEGATIVE source id. Tags and
+            # notes aren't here because a merge has none of its own — they
+            # live on the member rows (invariant #9) and survive on purpose.
+            for t in ("open_tabs", "layouts", "saved_views"):
+                self.db.execute(f"DELETE FROM {t} WHERE source_id=?", (-merge_id,))
 
     def drop_source(self, source_id: int) -> None:
         src = self.get_source(source_id)
@@ -6415,6 +6567,373 @@ class Store:
     def _session_path(self, name: str) -> str:
         safe = self._SESSION_NAME_RE.sub("_", name).strip() or "session"
         return os.path.join(self._sessions_dir(), f"{safe}.winnow_case.json")
+
+    # ------------------------------------------------ copying into another case
+
+    def copy_sources_to(self, target_path: str, source_ids: list[int]) -> dict:
+        """Copy sources — rows, tags, notes, layout, saved views, derived
+        columns and their values — from this case into another case file.
+
+        The flow this serves: a file opened by double-click lands in a
+        temporary quick-look case, the analyst tags a few rows, then wants
+        that work in the real investigation's case. No re-parse: the rows
+        are already TEXT in src_N, so ATTACH + INSERT..SELECT moves them at
+        SQLite speed, rid-for-rid — and rid preservation is what keeps the
+        copied tags and notes pointing at the same evidence rows
+        (invariant #1's contiguity guarantee survives because the table is
+        copied whole).
+
+        The mechanics run THROUGH THE TARGET, not the source: the target is
+        opened as a full Store — which is what runs its schema migrations,
+        so a case created by an older Winnow gains any missing tables
+        before anything writes — and this case's file is ATTACHed to the
+        target's writer connection read-only-by-discipline (no statement
+        here ever writes through the attachment; WAL makes the concurrent
+        read of our live file safe). Opening the target as a Store also
+        takes its case lock, which is the exclusivity that makes writing
+        into it correct at all — and why a target that is OPEN IN ANOTHER
+        WINNOW is refused up front with the holder named, rather than
+        risking two servers' in-memory state disagreeing about one file.
+
+        Tags are matched into the target BY NAME, never id — the same rule
+        session import and the QC diff use, for the same reason: two cases
+        number their tags independently. Missing names are created with
+        the source's colour and hotkey (hotkey dropped on collision).
+
+        FTS is deliberately not copied; has_fts lands 0 and the target
+        rebuilds in the background when opened. Merges are refused: their
+        member ids are meaningless in the target."""
+        target_path = os.path.abspath(target_path)
+        if target_path == os.path.abspath(self.path):
+            raise ValueError("That is this case — pick a different one to copy into")
+        if not os.path.isfile(target_path):
+            raise ValueError(f"No case file at {target_path}")
+        for sid in source_ids:
+            if sid < 0:
+                raise ValueError("Merges can't be copied — their member tables can be, individually")
+        holder = probe_case_lock(target_path)
+        if holder:
+            raise ValueError(
+                f"That case is open in another Winnow — {describe_case_lock(holder)}. "
+                "Close it there first.")
+
+        t = Store(target_path)
+        try:
+            return self._copy_sources_into(t, source_ids)
+        finally:
+            t.close()
+
+    def _copy_sources_into(self, t: "Store", source_ids: list[int]) -> dict:
+        src_rows = {}
+        with self.lock:
+            self.db.commit()   # everything tagged a moment ago is visible to the attach
+            for sid in source_ids:
+                row = self.db.execute("SELECT * FROM sources WHERE id=?", (sid,)).fetchone()
+                if not row:
+                    raise KeyError(f"No source {sid}")
+                src_rows[sid] = dict(row)
+            tag_defs = [dict(r) for r in self.db.execute("SELECT * FROM tag_defs ORDER BY id")]
+
+        copied = []
+        with t.lock, t.db:
+            t.db.execute("ATTACH ? AS srccase", (self.path,))
+            try:
+                tag_map = t._map_tags_by_name(tag_defs)
+                shared_cols = [c for c in ("name", "path", "table_name", "row_count",
+                                           "columns", "file_hash", "imported_at", "nickname")]
+                for sid in source_ids:
+                    src = src_rows[sid]
+                    cur = t.db.execute(
+                        f"INSERT INTO sources({','.join(shared_cols)}, has_fts) "
+                        f"VALUES ({','.join('?' * len(shared_cols))}, 0)",
+                        [src.get(c) for c in shared_cols])
+                    new_id = cur.lastrowid
+                    new_table = f"src_{new_id}"
+                    # Recreate the table from the source's own DDL rather than
+                    # rebuilding from the column list — preserves exact quoting
+                    # and column order for any header sanitize_columns produced.
+                    ddl = t.db.execute(
+                        "SELECT sql FROM srccase.sqlite_master WHERE type='table' AND name=?",
+                        (src["table_name"],)).fetchone()[0]
+                    t.db.execute(ddl.replace(f'"{src["table_name"]}"', f'"{new_table}"', 1)
+                                 .replace(src["table_name"], new_table, 1))
+                    t.db.execute("UPDATE sources SET table_name=? WHERE id=?", (new_table, new_id))
+                    t.db.execute(f"INSERT INTO {q(new_table)} SELECT * FROM srccase.{q(src['table_name'])}")
+
+                    stats = {"tags": 0, "notes": 0, "derived": 0}
+                    for old_tag, new_tag in tag_map.items():
+                        stats["tags"] += t.db.execute(
+                            "INSERT OR IGNORE INTO row_tags(source_id, rid, tag_id) "
+                            "SELECT ?, rid, ? FROM srccase.row_tags WHERE source_id=? AND tag_id=?",
+                            (new_id, new_tag, sid, old_tag)).rowcount
+                    stats["notes"] = t.db.execute(
+                        "INSERT OR IGNORE INTO row_notes(source_id, rid, note) "
+                        "SELECT ?, rid, note FROM srccase.row_notes WHERE source_id=?",
+                        (new_id, sid)).rowcount
+                    t.db.execute(
+                        "INSERT OR REPLACE INTO layouts(source_id, payload) "
+                        "SELECT ?, payload FROM srccase.layouts WHERE source_id=?",
+                        (new_id, sid))
+                    t.db.execute(
+                        "INSERT INTO saved_views(source_id, name, payload, saved_at) "
+                        "SELECT ?, name, payload, saved_at FROM srccase.saved_views WHERE source_id=?",
+                        (new_id, sid))
+
+                    # Derived columns: definitions re-pointed, values table
+                    # copied whole. Same DDL-rewrite trick as the source table.
+                    drv_old, drv_new = f"drv_{sid}", f"drv_{new_id}"
+                    drv_ddl = t.db.execute(
+                        "SELECT sql FROM srccase.sqlite_master WHERE type='table' AND name=?",
+                        (drv_old,)).fetchone()
+                    if drv_ddl:
+                        t.db.execute(drv_ddl[0].replace(f'"{drv_old}"', f'"{drv_new}"', 1)
+                                     .replace(drv_old, drv_new, 1))
+                        t.db.execute(f"INSERT INTO {q(drv_new)} SELECT * FROM srccase.{q(drv_old)}")
+                    dcols = t.db.execute(
+                        "SELECT * FROM srccase.derived_columns WHERE source_id=? ORDER BY id",
+                        (sid,)).fetchall()
+                    for d in dcols:
+                        dd = dict(d)
+                        t.db.execute(
+                            "INSERT INTO derived_columns(source_id, name, input_column, op_id, "
+                            " params, status, parse_failures, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                            (new_id, dd["name"], dd["input_column"], dd["op_id"], dd["params"],
+                             dd["status"], dd.get("parse_failures"), dd.get("created_at")))
+                    stats["derived"] = len(dcols)
+
+                    t.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (new_id,))
+                    copied.append({"id": new_id, "name": src["name"],
+                                   "rows": src["row_count"], **stats})
+            finally:
+                with contextlib.suppress(sqlite3.Error):
+                    t.db.execute("DETACH srccase")
+        return {"target": t.path, "copied": copied}
+
+    def _map_tags_by_name(self, incoming_defs: list[dict]) -> dict:
+        """{incoming tag id -> this case's tag id}, creating what's missing.
+        Caller holds self.lock inside a transaction."""
+        mine = {r["name"]: r["id"] for r in self.db.execute("SELECT id, name FROM tag_defs")}
+        taken_keys = {r[0] for r in self.db.execute(
+            "SELECT hotkey FROM tag_defs WHERE hotkey IS NOT NULL")}
+        out = {}
+        for d in incoming_defs:
+            if d["name"] in mine:
+                out[d["id"]] = mine[d["name"]]
+                continue
+            hotkey = d.get("hotkey") if d.get("hotkey") not in taken_keys else None
+            if hotkey:
+                taken_keys.add(hotkey)
+            cur = self.db.execute(
+                "INSERT INTO tag_defs(name, color, hotkey) VALUES (?,?,?)",
+                (d["name"], d.get("color") or "#888888", hotkey))
+            mine[d["name"]] = out[d["id"]] = cur.lastrowid
+        return out
+
+    # ------------------------------------------------- sessions in the case
+
+    def save_session(self, name: str) -> dict:
+        """Snapshot the current analysis layer under `name`, in the case
+        file. Saving over an existing name replaces it — the alternative is
+        a pile of "triage-2-final-v3" and no way to tell them apart."""
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("A session needs a name")
+        data = self.export_case_session()
+        return self._write_session(name, data, origin="saved")
+
+    def _write_session(self, name: str, data: dict, origin: str) -> dict:
+        blob = json.dumps(data)
+        with self.lock, self.db:
+            self.db.execute(
+                "INSERT INTO sessions(name, saved_at, origin, payload) VALUES (?,?,?,?) "
+                "ON CONFLICT(name) DO UPDATE SET saved_at=excluded.saved_at, "
+                "origin=excluded.origin, payload=excluded.payload",
+                (name, data.get("exported_at") or time.strftime("%Y-%m-%dT%H:%M:%S"),
+                 origin, blob))
+        return self._session_summary(name)
+
+    def _session_summary(self, name: str) -> dict:
+        with self._reader() as ro:
+            row = ro.execute(
+                "SELECT id, name, saved_at, origin, payload FROM sessions WHERE name=?",
+                (name,)).fetchone()
+        if not row:
+            raise KeyError(f"No session named {name!r}")
+        data = json.loads(row["payload"])
+        srcs = data.get("sources", [])
+        return {
+            "id": row["id"], "name": row["name"], "saved_at": row["saved_at"],
+            "origin": row["origin"], "source_count": len(srcs),
+            "tagged_rows": sum(len(s.get("row_tags") or []) for s in srcs),
+            "notes": sum(len(s.get("row_notes") or []) for s in srcs),
+        }
+
+    def list_sessions(self) -> list[dict]:
+        """Newest first — a session list is read to find recent work, not
+        to browse alphabetically."""
+        with self._reader() as ro:
+            names = [r["name"] for r in ro.execute(
+                "SELECT name FROM sessions ORDER BY saved_at DESC, id DESC")]
+        return [self._session_summary(n) for n in names]
+
+    def get_session(self, name: str) -> dict:
+        with self._reader() as ro:
+            row = ro.execute("SELECT payload FROM sessions WHERE name=?", (name,)).fetchone()
+        if not row:
+            raise KeyError(f"No session named {name!r}")
+        return json.loads(row["payload"])
+
+    def load_session(self, name: str, merge: bool = True) -> dict:
+        """Apply a stored session to the live case. merge=False replaces the
+        current tags and notes; merge=True adds to them."""
+        return self.import_case_session(self.get_session(name), merge=merge)
+
+    def delete_session(self, name: str) -> None:
+        with self.lock, self.db:
+            self.db.execute("DELETE FROM sessions WHERE name=?", (name,))
+
+    def rename_session(self, name: str, new_name: str) -> dict:
+        new_name = (new_name or "").strip()
+        if not new_name:
+            raise ValueError("A session needs a name")
+        with self.lock, self.db:
+            if self.db.execute("SELECT 1 FROM sessions WHERE name=?", (new_name,)).fetchone():
+                raise ValueError(f"A session named {new_name!r} already exists")
+            cur = self.db.execute("UPDATE sessions SET name=? WHERE name=?", (new_name, name))
+            if not cur.rowcount:
+                raise KeyError(f"No session named {name!r}")
+        return self._session_summary(new_name)
+
+    def adopt_session(self, name: str, data: dict) -> dict:
+        """Record a session that arrived as a FILE from another analyst, so
+        it travels with the case from now on. Applying it is a separate
+        step — receiving someone's work and merging it into your own are
+        different decisions."""
+        if data.get("format") != "winnow-case-session/1":
+            raise ValueError("That file isn't a Winnow case session")
+        return self._write_session(name, data, origin="imported")
+
+    LIVE_SESSION = "__live__"
+
+    def start_new_session(self, save_as: str | None = None) -> dict:
+        """Clear the live tags and notes for a fresh pass over the same
+        evidence, optionally saving what's there first.
+
+        Clears conclusions only. Layouts, saved views, derived columns, SQL
+        tabs and the tag palette all stay — they are how the evidence is
+        READ, and starting a second pass doesn't mean re-deriving timestamps
+        or re-hiding columns.
+
+        Not routed through _apply_tag_change (invariant #7) on purpose: the
+        undo journal is bounded by UNDO_ROW_BUDGET and a case with a million
+        tagged rows would blow straight through it. Saving first is the
+        undo, and it is a better one — a named session you can diff against
+        rather than a single step you can lose."""
+        saved = self.save_session(save_as) if save_as else None
+        with self.lock, self.db:
+            tags = self.db.execute("SELECT COUNT(*) FROM row_tags").fetchone()[0]
+            notes = self.db.execute("SELECT COUNT(*) FROM row_notes").fetchone()[0]
+            self.db.execute("DELETE FROM row_tags")
+            self.db.execute("DELETE FROM row_notes")
+        # The undo entries reference rows that no longer carry those tags;
+        # replaying one would reinsert assignments this deliberately cleared.
+        with self.lock:
+            for entry in self._undo:
+                with contextlib.suppress(sqlite3.Error):
+                    self.db.execute(f"DROP TABLE IF EXISTS v.{q(entry['table'])}")
+            self._undo.clear()
+        return {"saved": saved, "tags_cleared": tags, "notes_cleared": notes}
+
+    def _session_tag_map(self, data: dict) -> tuple[dict, dict, dict]:
+        """(tags_by_row, notes_by_row, source_labels) for a session document.
+
+        Keyed by (file_hash or name, rid) rather than source_id, because two
+        cases number their sources differently — a QC review is usually the
+        reviewer's case against the analyst's file, and matching on the
+        evidence's own fingerprint is what makes that work at all.
+        """
+        tags: dict = {}
+        notes: dict = {}
+        labels: dict = {}
+        for src in data.get("sources", []):
+            meta = src.get("source") or {}
+            key = meta.get("file_hash") or meta.get("name") or ""
+            labels[key] = meta.get("name") or key
+            names = {t["id"]: t["name"] for t in (src.get("tag_defs") or [])}
+            for rt in src.get("row_tags") or []:
+                tags.setdefault((key, rt["rid"]), set()).add(
+                    names.get(rt["tag_id"], f"tag:{rt['tag_id']}"))
+            for rn in src.get("row_notes") or []:
+                notes[(key, rn["rid"])] = rn.get("note") or ""
+        return tags, notes, labels
+
+    def diff_sessions(self, left: str, right: str, limit: int = 2000) -> dict:
+        """What changed between two sessions — the QC question: "what did
+        the reviewer tag that I didn't, and what did I tag that they
+        removed?"
+
+        Either side may be LIVE_SESSION to compare against the case's
+        current state, which is the common review shape: a stored session
+        from the first analyst against what the reviewer has now.
+
+        Tags are compared BY NAME, not by tag_id: two analysts' cases
+        number their tags independently, so "TA-1" in one is rarely id 3 in
+        the other. Comparing ids would report every row as different.
+        """
+        def _load(which):
+            return self.export_case_session() if which == self.LIVE_SESSION else self.get_session(which)
+
+        lt, ln, llab = self._session_tag_map(_load(left))
+        rt, rn, rlab = self._session_tag_map(_load(right))
+        labels = {**rlab, **llab}
+
+        added, removed, changed, note_changes = [], [], [], []
+        for key in sorted(set(lt) | set(rt), key=lambda k: (str(k[0]), k[1])):
+            a, b = lt.get(key, set()), rt.get(key, set())
+            if a == b:
+                continue
+            row = {"source": labels.get(key[0], key[0]), "rid": key[1],
+                   "left": sorted(a), "right": sorted(b)}
+            if not a:
+                added.append(row)
+            elif not b:
+                removed.append(row)
+            else:
+                changed.append(row)
+        for key in sorted(set(ln) | set(rn), key=lambda k: (str(k[0]), k[1])):
+            a, b = ln.get(key), rn.get(key)
+            if a != b:
+                note_changes.append({"source": labels.get(key[0], key[0]), "rid": key[1],
+                                     "left": a, "right": b})
+
+        def _cap(rows):
+            return rows[:limit]
+
+        return {
+            "left": left, "right": right,
+            # "only in right" reads as added when right is the later pass,
+            # which is how a review is run: left = what was handed over.
+            "added": _cap(added), "removed": _cap(removed), "changed": _cap(changed),
+            "note_changes": _cap(note_changes),
+            "counts": {"added": len(added), "removed": len(removed),
+                       "changed": len(changed), "note_changes": len(note_changes)},
+            "truncated": max(len(added), len(removed), len(changed), len(note_changes)) > limit,
+            # A shared source is one both sides have evidence for; anything
+            # else means the two sessions are describing different cases and
+            # the numbers above are not a like-for-like comparison.
+            "shared_sources": sorted(set(llab) & set(rlab)),
+            "only_left_sources": sorted(set(llab) - set(rlab)),
+            "only_right_sources": sorted(set(rlab) - set(llab)),
+        }
+
+    def export_session_file(self, name: str, path: str) -> dict:
+        """Write a stored session out as JSON — the hand-off to another
+        analyst, and now the only reason a session file exists at all."""
+        data = self.get_session(name)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        return {"name": name, "path": os.path.abspath(path),
+                "bytes": os.path.getsize(path)}
 
     def save_named_session(self, name: str) -> dict:
         data = self.export_case_session()

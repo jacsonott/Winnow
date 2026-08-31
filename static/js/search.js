@@ -258,6 +258,38 @@ export function openSearchAllModal() {
     b.append(chips);
 
     const searchActs = el('div', 'row-actions');
+    // A pasted IOC list usually EXISTS as a file already (an intel feed
+    // export, a colleague's indicator list) — read it straight in rather
+    // than round-tripping through an editor.
+    const impLabel = el('label', 'btn ghost', 'Import terms from file…');
+    const impInput = el('input');
+    impInput.type = 'file';
+    impInput.accept = '.txt,.csv,.list,.ioc,text/plain';
+    impInput.hidden = true;
+    impInput.onchange = async () => {
+      const f = impInput.files[0];
+      if (!f) return;
+      let text;
+      try { text = await f.text(); } catch (e) { toast('Could not read that file: ' + e.message, 6000); return; }
+      impInput.value = '';   // same file again re-fires onchange
+      // One term per line; blank lines and #-comments (routine in shared
+      // IOC lists) are noise, not indicators.
+      const incoming = text.split(/\r?\n/).map((l) => l.trim())
+        .filter((l) => l && !l.startsWith('#'));
+      if (!incoming.length) { toast('No terms in that file'); return; }
+      const have = new Set(st.pasteText.split('\n').map((l) => l.trim()).filter(Boolean));
+      const merged = [...new Set([...have, ...incoming])];   // dedupes the file against itself too
+      const added = { length: merged.length - have.size };
+      st.pasteText = merged.join('\n');
+      st.mode = 'paste';                 // the terms land in the paste pane
+      textarea.value = st.pasteText;
+      syncMode();
+      const dupes = incoming.length - added.length;
+      toast(added.length
+        ? `${added.length} term${added.length === 1 ? '' : 's'} imported${dupes > 0 ? ` · ${dupes} duplicate${dupes === 1 ? '' : 's'} skipped` : ''}`
+        : 'All of those terms are already in the list');
+    };
+    impLabel.append(impInput);
     const searchBtn = el('button', 'btn', 'Search  ⌘⏎');
     const cancelBtn = el('button', 'btn ghost', 'Stop');
     cancelBtn.title = 'Stop the sweep — tables already counted keep their results';
@@ -266,7 +298,7 @@ export function openSearchAllModal() {
       try { await post(`/api/search_all/cancel?job_id=${st.jobId}`, {}); } catch { /* already gone */ }
     };
     const progress = el('span', 'search-all-progress');
-    searchActs.append(searchBtn, cancelBtn, progress);
+    searchActs.append(searchBtn, impLabel, cancelBtn, progress);
     b.append(searchActs);
 
     const results = el('div', 'search-all-results');

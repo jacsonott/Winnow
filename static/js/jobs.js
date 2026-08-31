@@ -79,6 +79,15 @@ export function startJobsPoll() {
   if (!jobsPollTimer) pollJobs();
 }
 
+/* Jobs that finished before this page existed are history, not news.
+   "Before this page existed" used to be approximated as "before this
+   client ever saw a job" (seenJobStatus empty), which misfired on a
+   fresh page: the very first import, failing instantly (an empty file),
+   was already done by the first poll and got dismissed with NO toast —
+   the analyst's failed import just silently didn't appear. The page's
+   own load time is the real boundary. */
+const PAGE_START = Date.now() / 1000;
+
 export async function pollJobs() {
   jobsPollTimer = null;
   const firstPoll = seenJobStatus.size === 0;
@@ -97,11 +106,13 @@ export async function pollJobs() {
          panel row sat there reading DONE until the analyst clicked ✕.
          Jobs that were already finished before this client polled at all
          are still history rather than news; that's what firstPoll is. */
-      if (done && !firstPoll && prev !== j.status) finishedNow.push(j);
-      // Jobs that were already finished before this page ever polled
-      // (server keeps the last 20) are history, not news — don't toast
-      // them and don't fill the panel with them on load.
-      if (done && firstPoll) dismissedJobs.add(j.job_id);
+      const history = done && firstPoll && (j.started_at || 0) < PAGE_START;
+      if (done && !history && prev !== j.status) finishedNow.push(j);
+      // Jobs that were already finished before this page loaded (server
+      // keeps the last 20) are history, not news — don't toast them and
+      // don't fill the panel with them on load. A job STARTED after the
+      // page loaded is this page's own work however fast it finished.
+      if (history) dismissedJobs.add(j.job_id);
       seenJobStatus.set(j.job_id, j.status);
     }
     ingestJobs = d.jobs;
@@ -128,7 +139,16 @@ export async function pollJobs() {
     if (j.status === 'done') {
       const total = (j.result || []).reduce((a, r) => a + (r.row_count || 0), 0);
       const ragged = (j.result || []).reduce((a, r) => a + (r.ragged_rows || 0), 0);
-      toast(`${j.name}: ${total.toLocaleString()} rows imported${ragged ? ` · ${ragged.toLocaleString()} ragged rows padded/trimmed` : ''}`, ragged ? 6000 : 3500);
+      const badRecs = (j.result || []).reduce((a, r) => a + (r.bad_records || 0), 0);
+      const suspect = (j.result || []).reduce((a, r) => a + (r.suspect_quote_rows || 0), 0);
+      const warn = ragged || badRecs || suspect;
+      toast(`${j.name}: ${total.toLocaleString()} rows imported`
+        + (ragged ? ` · ${ragged.toLocaleString()} ragged rows padded/trimmed` : '')
+        + (badRecs ? ` · ${badRecs.toLocaleString()} unreadable record${badRecs === 1 ? '' : 's'} skipped` : '')
+        // Many-newline fields are the signature of an unbalanced quote
+        // swallowing the lines after it — a warning, not a verdict.
+        + (suspect ? ` · ${suspect.toLocaleString()} row${suspect === 1 ? '' : 's'} with very long multi-line fields — check for a stray quote if the row count looks low` : ''),
+        warn ? 8000 : 3500);
       setTimeout(() => { dismissedJobs.add(j.job_id); renderJobsPanel(); }, 8000);
       for (const sid of j.source_ids || []) offerTimestampColumns(sid);
     } else if (j.status === 'error') {

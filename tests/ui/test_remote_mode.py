@@ -9,9 +9,25 @@ tail (see the multi-PR conflict lesson)."""
 
 from __future__ import annotations
 
+import json
+import urllib.request
+
 import pytest
 
 pytestmark = pytest.mark.ui
+
+
+@pytest.fixture(autouse=True)
+def reset_remote_setting(server):
+    """Remote mode is a MACHINE setting now (workspace app_settings), so a
+    test that turns it on would decide every later test's outcome — turn
+    it back off server-side after each one."""
+    yield
+    req = urllib.request.Request(
+        server.rstrip("/") + "/api/settings/app",
+        data=json.dumps({"remote_session": False}).encode(),
+        headers={"Content-Type": "application/json", "X-Timeline-Lite-Client": "1"})
+    urllib.request.urlopen(req, timeout=5).read()
 
 
 def _enable_via_settings(page):
@@ -26,7 +42,12 @@ def _enable_via_settings(page):
 def test_remote_mode_scrolls_by_whole_rows_and_stops_animations(page):
     _enable_via_settings(page)
     assert page.evaluate("() => document.documentElement.classList.contains('remote')")
-    assert page.evaluate("() => JSON.parse(localStorage.getItem('winnow.appearance')).remoteSession")
+    # Server-side now — localStorage deliberately does NOT carry the key
+    # anymore (it kept getting reset by origin/profile changes). The
+    # toggle's POST is async; wait for the response to land.
+    page.wait_for_function("() => __winnow.S.appSettings.remote_session === true", timeout=10_000)
+    assert not page.evaluate(
+        "() => 'remoteSession' in JSON.parse(localStorage.getItem('winnow.appearance') || '{}')")
 
     row_h = page.evaluate("() => __winnow.ROW_H")
     page.mouse.move(700, 500)
@@ -70,3 +91,41 @@ def test_native_scrolling_is_untouched_when_off(page):
     page.wait_for_timeout(250)
     # 100px of native scroll — not quantized to the 24/20px row grid.
     assert page.evaluate("() => document.getElementById('body').scrollTop") == 100
+
+
+def test_remote_mode_survives_a_fresh_browser_context(page, browser, server):
+    """The reported bug: the setting lived in per-origin, per-profile
+    localStorage, so an update restart (or a quick-look's random port)
+    reset it. Machine-side storage means a completely fresh browser
+    context — no localStorage at all — still comes up in remote mode."""
+    _enable_via_settings(page)
+    ctx = browser.new_context()
+    ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen');"
+                        "localStorage.setItem('winnow.appearance', JSON.stringify({ splash: false }))")
+    pg = ctx.new_page()
+    try:
+        pg.goto(server, wait_until="networkidle")
+        pg.wait_for_function("() => document.documentElement.classList.contains('remote')",
+                             timeout=10_000)
+    finally:
+        ctx.close()
+
+
+def test_a_pre_move_localstorage_value_migrates_up_once(browser, server):
+    """An install that had remote mode on under the old localStorage
+    scheme: the first boot pushes it to the server and drops the local
+    key, so the machine keeps the analyst's answer."""
+    ctx = browser.new_context()
+    ctx.add_init_script(
+        "localStorage.setItem('winnow.remotePrompt', 'seen');"
+        "localStorage.setItem('winnow.appearance',"
+        " JSON.stringify({ splash: false, remoteSession: true }))")
+    pg = ctx.new_page()
+    try:
+        pg.goto(server, wait_until="networkidle")
+        pg.wait_for_function("() => __winnow.S.appSettings.remote_session === true", timeout=10_000)
+        assert pg.evaluate("() => document.documentElement.classList.contains('remote')")
+        assert not pg.evaluate(
+            "() => 'remoteSession' in JSON.parse(localStorage.getItem('winnow.appearance') || '{}')")
+    finally:
+        ctx.close()

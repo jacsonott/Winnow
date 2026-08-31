@@ -15,7 +15,7 @@ import { expandSearch, openSearchAllModal } from './search.js';
 import { applySqlTabToEditor } from './sql.js';
 import { sqlClearSelection, sqlCopySelection, sqlSelectionCount, sqlTagHotkey } from './sqlassist.js';
 import { openSettings } from './settings.js';
-import { activateTabSlot, clearAllFilters } from './sources.js';
+import { activateTabSlot, clearAllFilters, setSidebarVisible } from './sources.js';
 import { S, gridRowCount, selClear, selCount, selSetAll } from './state.js';
 import { openTablesManager } from './tables.js';
 import { applyTag, applyTagToView, undoLastTagChange } from './tags.js';
@@ -59,12 +59,13 @@ export const DEFAULT_KEYMAP = {
   // checkbox is disabled there for the same reason).
   selectAllRows: ['Ctrl+a'],
   openTables: ['t'],
+  toggleSidebar: ['`'],
   openTableMenu: ['C'],
   openSearchAll: ['s'],
   toggleDetail: ['d'],
   dropGrouping: ['x'],
   saveDefaultLayout: ['L'],
-  toggleTimeRange: ['T', 'a'],
+  toggleTimeRange: ['r', 'a'],
   openTimeRange: ['R', 'A'],
   toggleGrouping: ['X'],
   openFilterSql: ['Q'],
@@ -89,6 +90,7 @@ export const ACTION_LABELS = {
   clearFilters: 'Clear all filters, search and tag filter',
   selectAllRows: 'Select every row in the current view (same as the header checkbox)',
   openTables: 'Open Tables manager',
+  toggleSidebar: 'Show/hide the table sidebar',
   openTableMenu: 'Open the table menu (columns, value dropdowns) — also right-click a tab',
   openSearchAll: 'Search all tables',
   toggleDetail: 'Open/close the detail pane',
@@ -115,7 +117,7 @@ export const ACTION_LABELS = {
    over it on every load. */
 export const KEYMAP_VERSION_KEY = 'winnow.keymap.v';
 
-export const KEYMAP_VERSION = 2;
+export const KEYMAP_VERSION = 3;
 
 export const KEYMAP_MIGRATIONS = [
   // v1 (2026-08): the column chooser grew into the table menu, and `f`
@@ -143,6 +145,15 @@ export const KEYMAP_MIGRATIONS = [
     if (wasDefault('cycleNextFilter', [']'])) map.cycleNextFilter = [']', 'w'];
     if (wasDefault('toggleTimeRange', ['T'])) map.toggleTimeRange = ['T', 'a'];
     if (wasDefault('openTimeRange', ['R'])) map.openTimeRange = ['R', 'A'];
+  },
+  // v3 (2026-08): toggle moves T → r so the timeframe pair sits on one
+  // letter — r toggles it, Shift+R opens the dialog. Same key, shift is
+  // "the bigger version of the action", which is how the pair reads
+  // naturally. `a`/`A` aliases stay.
+  (map) => {
+    const wasDefault = (action, keys) =>
+      JSON.stringify((map[action] || []).slice().sort()) === JSON.stringify(keys.slice().sort());
+    if (wasDefault('toggleTimeRange', ['T', 'a'])) map.toggleTimeRange = ['r', 'a'];
   },
 ];
 
@@ -255,7 +266,7 @@ export function findKeyConflict(key, currentAction) {
    SQL pane silently tagged whatever was selected in the grid behind it,
    which the tag ribbon at least hinted at before the toolbar started
    hiding itself there (see syncTabChrome). */
-export const TAB_AGNOSTIC_ACTIONS = new Set(['openSettings', 'openTables', 'openSearchAll', 'openPluginBundles']);
+export const TAB_AGNOSTIC_ACTIONS = new Set(['openSettings', 'openTables', 'openSearchAll', 'openPluginBundles', 'toggleSidebar']);
 
 export const ACTION_HANDLERS = {
   moveDown: (e, pageRows) => moveCursor(S.cursor + 1, e.shiftKey),
@@ -291,6 +302,7 @@ export const ACTION_HANDLERS = {
   filterBySelectedCellOnly: () => filterBySelectedCell({ only: true }),
   clearFilters: () => clearAllFilters(),
   openTables: () => openTablesManager(),
+  toggleSidebar: () => setSidebarVisible($('sidebar').hidden),
   openTableMenu: () => openTableMenu(),
   toggleDetail: () => toggleDetailPane(),
   openSearchAll: () => openSearchAllModal(),

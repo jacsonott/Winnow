@@ -84,3 +84,112 @@ see [docs/notes/README.md](README.md) for the whole set.
   is a separate function *so tests can monkeypatch it* — calling the real
   one under pytest kills pytest. The CSRF header gate is what stops a
   hostile page in another tab from turning the server off.
+
+- **Idle shutdown rides the presence stream, not request traffic.** An
+  analyst reading the grid makes no requests for hours, so "last request
+  time" would reap a live session; instead every page holds an EventSource
+  open to `/api/presence` and the count of live streams is the signal.
+  Three holds stop it destroying work: open streams, in-flight HTTP
+  (counted in the no-cache middleware, `/api/presence` itself excluded or
+  it would read busy forever — a CSV download outliving its tab is exactly
+  what this hold protects), and running/queued ingest jobs. A server
+  nothing ever connected to gets a 15-minute fuse rather than the 2-minute
+  one — `--no-browser` plus a slow manual visit is legitimate, but an
+  association-spawned server whose window failed to open still gets
+  reaped. `--no-idle-shutdown` (or the `WINNOW_*_EXIT_S` env overrides the
+  tests use) turns it off. Graces are compared on `time.monotonic()` — a
+  suspended laptop must not wake up to an instant shutdown.
+
+- **A quick-look case is temporary because of where it lives, not what it
+  is.** `_is_temp_case` asks one question — is the file's parent directory
+  named `quicklook/`? — so temp-ness survives restarts with no flag to
+  persist, and `save_as` converts to a real case by *moving the file* out
+  of that directory (close → `os.replace` → reopen; on a failed rename the
+  old file reopens, never leaving the server storeless). Quick-looks stay
+  out of the case registry until saved, which is also why the startup
+  `_sweep_quicklook` janitor is safe: it only eats files that are old,
+  unlocked, and carry zero tags/notes/sessions — touched work is never
+  reaped. The `--assoc` launcher resolves in a fixed order: a dropped
+  *case file* (SQLite header + the three winnow tables) opens as itself; a
+  data file goes to a just-started temp instance (<120s — multi-select
+  spawns one server, not five), else an idle registered instance, else
+  this process becomes the server on a free port. `/api/assoc/open` is
+  loopback-only; its ingest tries PLUGIN formats first (the import
+  modal's own precedence) so a registered plugin extension actually uses
+  the plugin's parser instead of falling through to the CSV sniffer —
+  plugin ingests are synchronous, so those entries carry a source_id,
+  not a job_id. `/api/prefs` reports `first_run: false` inside a temp
+  case — a fresh install's first double-click must not stack the
+  cases-dir setup prompt on top of the file the analyst opened.
+
+- **Tests that spawn a real `server.py` must isolate it by env, not
+  fixture.** The autouse `isolate_workspace` monkeypatch can't reach a
+  subprocess, so a spawned server sees the real `INSTALL_ROOT` and will
+  happily register throwaway cases in the developer's actual
+  `workspace/cases.json` and drop quicklook files in the real `cases/` —
+  state that outlives the test and collides on the next run (found as a
+  UI test that passed exactly once). Every `Popen` of `server.py` in the
+  suite sets `WINNOW_WORKSPACE_DIR` (read in `workspace.py` at import)
+  and, where cases get written, `WINNOW_CASES_DIR`; do the same in any
+  new one.
+
+- **The association-default policy lives in the catalogue, and the API
+  enforces it.** `winnow/assoc.py`'s `BUILTIN_TYPES` marks which
+  extensions may become the DEFAULT app (`default_ok`) versus Open With
+  handler only — .txt/.json/.db/.xlsx/.xlsm/.sqlite* have real owners
+  (Excel, editors, DB tools) and stealing their double-click is how a
+  tool gets uninstalled. Plugin extensions are default-ELIGIBLE but only
+  ever via explicit consent — the new-extension launch prompt (fires
+  once per extension the first boot after the catalogue grows, only on
+  machines with at least one registered type; any answer including "Not
+  now" is recorded in assoc_prompted_exts and only new extensions ask
+  again) or the panel's own button. Nothing claims a default silently,
+  which is what the old blanket handler-only rule stood in for. `/api/assoc/default` refuses
+  non-default_ok types with a 400 — the UI not offering the button is
+  not enforcement. All `/api/assoc/*` registration routes are
+  loopback-only, like `/api/assoc/open`. Two platform honesty rules:
+  Windows' hash-protected UserChoice key wins over anything we can
+  write, so `make_default` reports the blocked extensions and the UI
+  walks the analyst through Open With → Always instead of claiming
+  success; on Linux a plugin extension resolves to no MIME type at all
+  until our shared-mime-info package supplies the glob, so registering
+  one writes `mime/packages/winnow.xml` and best-effort runs
+  `update-mime-database`. The `assoc_background` machine pref launches
+  associations through pythonw.exe (no console window) — ON by default
+  (a console riding along with a double-click is the wrong first
+  impression), OFF-able from Settings → Appearance for the day an
+  association won't open and the hidden server log suddenly matters;
+  False is stored explicitly, since with an on-default a deleted key
+  would silently re-enable it. The
+  toggle rewrites the ProgId's shared open command in place
+  (`refresh_command`), never creating the ProgId on a machine where
+  Winnow was never registered. Tests build both adapters against fake
+  environments (a dict-backed winreg, tmp XDG dirs) — and any UI test
+  touching the panel relies on conftest pointing the spawned server's
+  `XDG_DATA_HOME`/`XDG_CONFIG_HOME` at tmp, or a green test would edit
+  the developer's real ~/.config/mimeapps.list.
+
+- **A Winnow case is `.db-winnow`, evidence to import is `.db`.** New
+  case files (new-case, save-as, quick-looks) take `store.CASE_SUFFIX`
+  (`.db-winnow`) so an OS association, a file manager and the launcher
+  can tell "a case to OPEN" from "a SQLite database to INGEST as
+  evidence" — a Chromium `History.db` and a Winnow case are both
+  SQLite, and only the double-click target differs. It is still an
+  ordinary SQLite file; the suffix is a label, not a format. The
+  extension lives in ONE constant imported everywhere a case file is
+  named. Backward compatibility is by design: historic `.db` cases open
+  unchanged, because `is_winnow_case_file` and the open path sniff
+  CONTENT (SQLite header + the sources/tag_defs/row_tags tables), never
+  the extension — only NEW cases take the new suffix, nothing is
+  migrated. In the association catalogue `.db-winnow` is the one builtin
+  type that is `default_ok`: nothing else owns it, so making Winnow its
+  default can't steal a file from Excel or a DB browser the way claiming
+  `.db`/`.xlsx` would. The brand icon rides the same association —
+  DefaultIcon on the Windows ProgId, the `.desktop` Icon= and a
+  hicolor `application-x-winnow-case` mimetype icon on Linux. **An icon
+  replaced in place does not show up on its own**: Explorer caches
+  association icons until SHCNE_ASSOCCHANGED (every registry mutation
+  fires it, and startup re-stamps + pokes when the recorded IconHash
+  differs from the .ico on disk), and the Linux theme copy is re-synced
+  by content comparison, not only-when-missing — the only-if-missing
+  version pinned the first-registered design forever.

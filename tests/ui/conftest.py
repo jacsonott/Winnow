@@ -18,6 +18,7 @@ covered.
 
 from __future__ import annotations
 
+import os
 import socket
 import subprocess
 import sys
@@ -89,6 +90,16 @@ def server(tmp_path_factory, ui_csv):
          "--open", str(ui_csv), "--port", str(port), "--host", "127.0.0.1",
          "--no-browser", "--no-fts"],
         cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        # A subprocess can't be reached by the isolate_workspace
+        # monkeypatch, so isolate it by env — otherwise every UI run
+        # registers this throwaway case in the developer's real registry.
+        env={**os.environ,
+             "WINNOW_WORKSPACE_DIR": str(tmp_path_factory.mktemp("ws")),
+             # Same idea for the association adapters' target dirs: a
+             # Settings → File associations test must never write the
+             # developer's real ~/.local/share or ~/.config.
+             "XDG_DATA_HOME": str(tmp_path_factory.mktemp("xdg-data")),
+             "XDG_CONFIG_HOME": str(tmp_path_factory.mktemp("xdg-config"))},
     )
     base = f"http://127.0.0.1:{port}"
     deadline = time.time() + 45
@@ -121,9 +132,19 @@ def page(browser, server):
     ctx = browser.new_context(viewport={"width": 1500, "height": 900},
                               permissions=["clipboard-read", "clipboard-write"])
     # Every context is a "first run on this machine" — pre-answer the
-    # one-time remote-mode prompt so it can't overlay the app mid-test.
-    # test_first_run_prompt.py builds its own context without this.
-    ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen')")
+    # one-time remote-mode prompt so it can't overlay the app mid-test, and
+    # turn the launch animation off. The splash covers the whole viewport
+    # for several seconds, which every click in every test would otherwise
+    # wait out. test_first_run_prompt.py and test_splash.py build their own
+    # contexts without this.
+    ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen');"
+                        "localStorage.setItem('winnow.appearance',"
+                        " JSON.stringify({ splash: false }));"
+                        # The sidebar defaults CLOSED now; most tests predate
+                        # that and address rows in it, so the shared context
+                        # models an analyst who chose to keep it open.
+                        "localStorage.setItem('winnow.sidebar',"
+                        " JSON.stringify({ collapsed: false }))")
     pg = ctx.new_page()
     errors: list[str] = []
     pg.on("pageerror", lambda e: errors.append(str(e)))

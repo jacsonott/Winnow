@@ -2,15 +2,17 @@
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { applyBundle } from './bundles.js';
-import { $, api, el, post, toast } from './core.js';
+import { $, api, el, post, setBusy, toast } from './core.js';
 import { loadPlugins } from './importer.js';
 import { startJobsPoll } from './jobs.js';
-import { openImportPreview } from './merge.js';
 import { resetPluginTabMounts } from './plugins.js';
 import { loadAppSettings, loadCaseSettings, loadHeaderNicknames, loadSavedFilters } from './savedfilters.js';
 import { updateSearchAllButton } from './search.js';
 import { clearViewStateStash, applyPageTabsSize, loadSources } from './sources.js';
+import { clearTabHistory } from './tabhistory.js';
 import { showGridTab } from './sql.js';
+import { openSettings } from './settings.js';
+import { drawWordmark } from './splash.js';
 import { S } from './state.js';
 import { fmtBytes } from './tables.js';
 import { updateTimeRangeButton } from './timeframe.js';
@@ -18,6 +20,11 @@ import { loadTimelineTemplates } from './timeline.js';
 import { confirmDialog, modal, promptDialog } from './ui.js';
 
 /* -------------------------------------------------------------- home screen */
+
+// Winnow's own case-file extension — mirrors store.CASE_SUFFIX. Only the
+// default filename a new case is proposed under; an analyst who types a
+// path keeps whatever they typed, and existing ".db" cases open unchanged.
+const CASE_EXT = '.db-winnow';
 
 /* Home manages "Cases" (one case.db each — recent, grouped, renamed,
    annotated). Distinct from the existing Session feature (the Session
@@ -106,6 +113,8 @@ export async function openCase(path, opts = {}) {
   S.viewCache.clear();
   clearViewStateStash(); // per-tab filters describe the previous case's tables
   S.tabOrder = [];
+  // Another case's tab history points at ids that mean nothing here.
+  clearTabHistory();
   // Unlike a tab switch within the *same* case (where the timeframe filter
   // deliberately survives — see clearAllFilters()/applyPreset()), a
   // different case is a different investigation; a timeframe pinned in
@@ -216,14 +225,60 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
     };
     const cancel = el('button', 'btn ghost', 'Cancel');
     cancel.onclick = () => { if (onCancel) onCancel(); else $('modal').hidden = true; };
-    actions.append(useBtn, cancel);
+    actions.append(useBtn);
+    if (!filesMode) {
+      // Filing a case somewhere that doesn't exist yet shouldn't mean
+      // leaving Winnow to make the folder and coming back.
+      const mk = el('button', 'btn ghost', 'New folder…');
+      mk.onclick = async () => {
+        const parent = (listing && listing.path) || pathInput.value.trim();
+        if (!parent) { toast('Browse to where the folder should go first'); return; }
+        const name = await promptDialog(`New folder inside:\n${parent}`, '');
+        if (name === null || !name.trim()) return;
+        let res;
+        try {
+          res = await post('/api/browse_dir/new', { parent, name: name.trim() });
+        } catch (e) {
+          toast(e.message, 5000);
+          return;
+        }
+        toast(`Created ${res.name}`);
+        load(res.path);   // step into it — it's where they're going
+      };
+      actions.append(mk);
+    }
+    actions.append(cancel);
     b.append(actions);
 
-    async function load(path) {
+    /* Loads are async and can overtake each other — the walk-up on open
+       fires a chain of them, and an analyst typing a path while that is
+       still resolving would have their navigation overwritten by an older
+       answer arriving late. Same stale-response guard as the derived
+       preview: only the newest load may paint. */
+    let loadSeq = 0;
+
+    async function load(path, { fallback = false } = {}) {
+      const seq = ++loadSeq;
       let res;
       try {
         res = await api(`/api/browse_dir?path=${encodeURIComponent(path || '')}${filesMode ? '&files=true' : ''}`);
       } catch (e) {
+        // The configured cases folder often doesn't exist yet — which is
+        // exactly when someone reaches for "New folder". Opening onto an
+        // error with nothing listed leaves them nowhere to create it FROM,
+        // so the first load walks up to the nearest folder that does
+        // exist. Only on open: a typed path that's wrong should say so
+        // rather than silently landing somewhere else.
+        if (seq !== loadSeq) return;   // superseded while we waited
+        if (fallback) {
+          // Walk up to the nearest folder that does exist. A path with no
+          // separator is the RELATIVE default ('cases', resolved against
+          // the server's cwd) — stripping a segment leaves it unchanged, so
+          // that case falls back to the server's own default listing
+          // instead of looping.
+          const up = /[\\/]/.test(path || '') ? path.replace(/[\\/][^\\/]*$/, '') : '';
+          if (up !== path) { load(up, { fallback: up !== '' }); return; }
+        }
         toast(filesMode ? 'No folder or file at that path: ' + e.message
           : 'Could not list that folder: ' + e.message, 4000);
         return;
@@ -231,6 +286,7 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
       // A typed path that names a FILE comes back as {picked} — the server
       // resolved it with os.path, which is what makes a pasted Windows path
       // or a file past the listing cap work. It's a complete answer.
+      if (seq !== loadSeq) return;   // a newer navigation won
       if (res.picked) {
         onSelect({ dir: res.path, files: [{ path: res.path + '/' + res.picked.name, name: res.picked.name, size: res.picked.size }] });
         return;
@@ -290,7 +346,7 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
       paintUse();
     }
 
-    load(startPath);
+    load(startPath, { fallback: true });
     paintUse();
   }, { wide: true });
 }
@@ -318,22 +374,22 @@ export function openNewCaseModal(state = {}) {
     b.append(el('label', null, 'Group'), groupRow);
 
     let chosenDir = state.chosenDir || S.casesDir || 'cases';
-    const pathInput = fieldInput(state.path || `${chosenDir}/${slugify(state.name || '')}.db`);
+    const pathInput = fieldInput(state.path || `${chosenDir}/${slugify(state.name || '')}${CASE_EXT}`);
     pathInput.style.fontFamily = 'var(--mono)';
     let pathTouched = state.pathTouched || false;
     pathInput.oninput = () => { pathTouched = true; };
-    nameInput.oninput = () => { if (!pathTouched) pathInput.value = `${chosenDir}/${slugify(nameInput.value)}.db`; };
+    nameInput.oninput = () => { if (!pathTouched) pathInput.value = `${chosenDir}/${slugify(nameInput.value)}${CASE_EXT}`; };
     const browseBtn = el('button', 'btn ghost', 'Browse…');
     browseBtn.onclick = () => {
       const snapshot = {
         name: nameInput.value, group: groupInput.value, path: pathInput.value,
-        chosenDir, pathTouched, csvFile, csvFileName: csvFile ? csvFile.name : '',
+        chosenDir, pathTouched,
         caseType: typeSel.value,
       };
       openFolderBrowser(
         chosenDir,
         (dir) => openNewCaseModal({
-          ...snapshot, chosenDir: dir, pathTouched: false, path: `${dir}/${slugify(snapshot.name)}.db`,
+          ...snapshot, chosenDir: dir, pathTouched: false, path: `${dir}/${slugify(snapshot.name)}${CASE_EXT}`,
         }),
         () => openNewCaseModal(snapshot),
       );
@@ -361,18 +417,6 @@ export function openNewCaseModal(state = {}) {
     typeRow.append(typeSel);
     b.append(el('label', null, 'Case type'), typeRow);
 
-    let csvFile = state.csvFile || null;
-    const csvRow = el('div', 'row-actions');
-    const csvLabel = el('label', 'btn ghost', 'Import a CSV now (optional)…');
-    const csvInput = el('input');
-    csvInput.type = 'file';
-    csvInput.accept = '.csv,.tsv,.txt,.psv';
-    csvInput.hidden = true;
-    const csvStatus = el('span', 'count', state.csvFileName || '');
-    csvInput.onchange = () => { csvFile = csvInput.files[0] || null; csvStatus.textContent = csvFile ? csvFile.name : ''; };
-    csvLabel.append(csvInput);
-    csvRow.append(csvLabel, csvStatus);
-    b.append(csvRow);
 
     const actions = el('div', 'row-actions');
     const create = el('button', 'btn', 'Create case');
@@ -396,7 +440,6 @@ export function openNewCaseModal(state = {}) {
           toast('Case created, but the case-type bundle failed to apply: ' + e.message, 6000);
         }
       }
-      if (csvFile) openImportPreview({ file: csvFile, name: csvFile.name });
     };
     const cancel = el('button', 'btn ghost', 'Cancel');
     cancel.onclick = () => { $('modal').hidden = true; };
@@ -441,10 +484,10 @@ export async function maybeOfferStorageDir() {
 }
 
 export async function openExistingCasePrompt() {
-  const path = await promptDialog('Path to an existing case .db file:');
+  const path = await promptDialog('Path to an existing case file:');
   if (!path || !path.trim()) return;
   const trimmed = path.trim();
-  const name = trimmed.split(/[\\/]/).pop().replace(/\.db$/i, '');
+  const name = trimmed.split(/[\\/]/).pop().replace(/\.db-winnow$|\.db$/i, '');
   try {
     await post('/api/cases', { path: trimmed, name, group: '', notes: '' });
   } catch (e) {
@@ -588,16 +631,34 @@ export function renderHome() {
   const inner = el('div', 'home-inner');
 
   const head = el('div', 'home-head');
-  head.append(el('div', 'brand', 'Winnow'));
+  // The wordmark, not the word: the same dot field the launch animation
+  // settles into, in the accent colour. Redrawn on open rather than cached
+  // because the accent follows the skin, and a stale canvas would be the
+  // one element that ignored a theme change.
+  const brand = el('div', 'home-brand');
+  const mark = el('canvas', 'home-brand-mark');
+  brand.append(mark);
+  head.append(brand);
+  drawWordmark(mark, {
+    color: getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#d9a441',
+  });
   head.append(el('div', 'home-head-spacer'));
   const newBtn = el('button', 'btn', '+ New case');
   newBtn.onclick = openNewCaseModal;
   const openBtn = el('button', 'btn ghost', 'Open existing case file…');
   openBtn.onclick = openExistingCasePrompt;
+  // Settings is reachable from here, not only from inside a case. Theme,
+  // keybindings, default tags for new cases and the update check are all
+  // things you might want to change BEFORE opening anything — and the gear
+  // that used to be the only way in lives on the app bar, which the home
+  // screen doesn't have.
+  const setBtn = el('button', 'btn ghost', '⚙ Settings');
+  setBtn.title = 'Appearance, keyboard shortcuts, default tags, plugins, updates';
+  setBtn.onclick = openSettings;
   const offBtn = el('button', 'btn ghost', '⏻ Shut down');
   offBtn.title = 'Stop the Winnow server — cases stay saved on disk';
   offBtn.onclick = shutdownWinnow;
-  head.append(newBtn, openBtn, offBtn);
+  head.append(newBtn, openBtn, setBtn, offBtn);
   inner.append(head);
 
   if (!S.cases.length) {
@@ -650,12 +711,120 @@ export async function refreshCases() {
   renderHome();
 }
 
+/* The quick-look banner and its three exits. Save promotes the temp case
+   to a real one (the file moves out of quicklook/ and lands on the home
+   screen); Add copies every table into a case picked from the registry
+   via copy_sources_to; Discard deletes the temp case outright. */
+export function paintTempBanner(on) {
+  S.tempCase = !!on;   // the one flag the home-navigation guard reads
+  $('tempBanner').hidden = !on;
+}
+
+/* The three ways out of a quick look, shared by the banner's buttons and
+   the leave-guard dialog (openQuickLookExitDialog). Each returns whether
+   it actually happened, so the guard knows if navigation may proceed. */
+
+export async function tempSaveAs() {
+  const name = await promptDialog('Save this as a case named:');
+  if (!name || !name.trim()) return false;
+  let res;
+  try { res = await post('/api/case/save_as', { name: name.trim() }); }
+  catch (e) { toast(e.message, 6000); return false; }
+  paintTempBanner(false);
+  setBrandLabel(res.name);
+  toast(`Saved — "${res.name}" is on the home screen now`, 6000);
+  return true;
+}
+
+export function tempCopyModal({ thenDiscard = false } = {}) {
+  (async () => {
+    let cases;
+    try { cases = (await api('/api/cases')).filter((c) => !c.missing); }
+    catch (e) { toast(e.message, 5000); return; }
+    if (!cases.length) { toast('No saved cases yet — use "Save as a case…" instead', 6000); return; }
+    modal('Add these tables to a case', (b) => {
+      b.append(el('p', null,
+        'Every table here — rows, tags and notes included — is copied into the case you pick. '
+        + (thenDiscard
+          ? 'The quick look is discarded once the copy lands, and you go back to the case list.'
+          : 'This quick look stays as it is; discard it afterwards if you are done with it.')));
+      const list = el('div', 'session-list');
+      for (const c of cases) {
+        const row = el('div', 'row-actions session-row');
+        row.append(el('span', 'session-name', c.name),
+                   el('span', 'count', c.path));
+        const go = el('button', 'btn ghost', 'Copy into this case');
+        go.onclick = async () => {
+          const ids = S.sources.filter((s) => s.id > 0 && !s.error).map((s) => s.id);
+          if (!ids.length) { toast('Nothing here to copy yet'); return; }
+          setBusy(true);
+          let res;
+          try { res = await post('/api/case/copy_sources', { target_path: c.path, source_ids: ids }); }
+          catch (e) { toast(e.message, 8000); return; }
+          finally { setBusy(false); }
+          $('modal').hidden = true;
+          toast(`Copied ${res.copied.length} table${res.copied.length === 1 ? '' : 's'} into "${c.name}"`, 8000);
+          if (thenDiscard) await tempDiscard({ confirm: false });
+        };
+        row.append(go);
+        list.append(row);
+      }
+      b.append(list);
+    }, { wide: true });
+  })();
+}
+
+export async function tempDiscard({ confirm = true } = {}) {
+  if (confirm && !(await confirmDialog(
+    'Discard this quick look?\n\nIts tables, tags and notes are deleted. '
+    + 'Anything you copied into a real case stays there.',
+    { danger: true, okLabel: 'Discard' }))) return false;
+  try { await post('/api/case/discard', {}); }
+  catch (e) { toast(e.message, 6000); return false; }
+  paintTempBanner(false);
+  showHome();
+  await refreshCases();
+  return true;
+}
+
+/* A quick look is deliberately OFF the case registry, so the home screen
+   has no way back to it — navigating there mid-quick-look stranded the
+   case (reported). The brand button now asks for one of the three real
+   exits first; "Stay" is always available. */
+export function openQuickLookExitDialog() {
+  modal("This quick look isn't saved", (b) => {
+    b.append(el('p', null,
+      'Quick looks never appear in the case list, so there is no way back to this one '
+      + 'from the home screen. Choose what happens to it first:'));
+    const acts = el('div', 'row-actions');
+    const save = el('button', 'btn', 'Save as a case…');
+    save.onclick = async () => {
+      if (await tempSaveAs()) { $('modal').hidden = true; showHome(); await refreshCases(); }
+    };
+    const copy = el('button', 'btn ghost', 'Add to an existing case…');
+    copy.onclick = () => tempCopyModal({ thenDiscard: true });
+    const discard = el('button', 'btn ghost danger', 'Discard');
+    discard.onclick = () => tempDiscard();
+    const stay = el('button', 'btn ghost', 'Stay here');
+    stay.onclick = () => { $('modal').hidden = true; };
+    acts.append(save, copy, discard, stay);
+    b.append(acts);
+  });
+}
+
+function wireTempBanner() {
+  $('tempSaveBtn').onclick = () => tempSaveAs();
+  $('tempCopyBtn').onclick = () => tempCopyModal();
+  $('tempDiscardBtn').onclick = () => tempDiscard();
+}
+
 export async function boot() {
   await Promise.all([loadSavedFilters(), loadHeaderNicknames(), loadTimelineTemplates(),
                      loadPlugins(), loadAppSettings()]);
   const cur = await api('/api/case/current').catch(() => ({ open: false }));
   if (cur.open) {
-    setBrandLabel(cur.name);
+    setBrandLabel(cur.temp ? 'Quick look' : cur.name);
+    paintTempBanner(!!cur.temp);
     showApp();
     await loadCaseSettings();
     await loadSources();
@@ -670,5 +839,9 @@ export async function boot() {
    fire during load, so the order these run in doesn't matter — the
    startup steps that DO depend on order live in main.js instead. */
 export function wireHome() {
-$('btnHome').onclick = () => { showHome(); refreshCases(); };
+wireTempBanner();
+$('btnHome').onclick = () => {
+  if (S.tempCase) { openQuickLookExitDialog(); return; }
+  showHome(); refreshCases();
+};
 }

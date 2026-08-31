@@ -117,7 +117,7 @@ export function promptDialog(message, defaultValue = '', opts = {}) {
 
    Three surfaces share this machinery, differing only in what they're
    positioned against and what they hold: `dropdownMenu` (under a button —
-   the Session menu, a column's ▾), `contextMenu` (at the pointer — the
+   the Case menu, a column's ▾), `contextMenu` (at the pointer — the
    right-click menus on a row, a tab, a sidebar row) and `anchoredPanel` (a
    card with real controls in it — the header value picker). One
    implementation is what makes "only one of these is ever open, and Escape

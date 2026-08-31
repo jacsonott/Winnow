@@ -3,6 +3,7 @@ SQLite table picker, folder import, and OS drag-and-drop.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { $, api, debounce, el, post, toast } from './core.js';
+import { maybeOfferAssociation } from './assoc.js';
 import { openFolderBrowser } from './home.js';
 import { startJobsPoll, uploadWithProgress } from './jobs.js';
 import { RECOGNIZED_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, extOf, importKindFor, openImportPreview, openJsonImportPreview } from './merge.js';
@@ -354,6 +355,9 @@ export function openImportModal() {
         // Same reason as the directory-import loop's identical line: a
         // sync plugin ingest creates no job for the poll to notice.
         if (pluginOk) await loadSources();
+        // The analyst just opened these types with Winnow — the moment
+        // the one-time Open With offer is actually justified.
+        maybeOfferAssociation(queue.map((i) => i.name));
       })();
     };
     queueActs.append(pathBtn, addLabel, folderBtn, importAll);
@@ -528,7 +532,7 @@ function openUnitPicker(src, { initial, onConfirm, onCancel } = {}, cfg) {
    this file (see wireFileDrop()'s call site) — active whenever a case is
    open ($('app') visible), regardless of which tab/modal is currently
    showing, same as "Import files…" always being reachable from the
-   Session menu.
+   Case menu.
 
    dataTransfer.types.includes('Files') is the gate on every one of these
    listeners — an OS file drag carries a 'Files' type; an in-page drag

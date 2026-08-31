@@ -9,6 +9,7 @@ import { headH, rScroll, render, spacerPx, vScroll } from './grid.js';
 import { drawRail, rebuildGroupPrefix, renderGrouped } from './grouping.js';
 import { ACTION_LABELS, defaultKeymap, findKeyConflict, keySpecFromEvent, saveKeymap } from './keymap.js';
 import { buildPluginsPanel } from './plugins.js';
+import { buildAssocPanel } from './assoc.js';
 import { loadSavedFilters } from './savedfilters.js';
 import { applyPageTabsSize } from './sources.js';
 import { S, gridRowCount } from './state.js';
@@ -32,7 +33,10 @@ import { markModalAction, confirmDialog, modal, promptDialog } from './ui.js';
 export const APPEARANCE_KEY = 'winnow.appearance';
 
 export const STYLES = {
-  panel:     { label: 'Panel',     desc: "Today's look.", defaultAccent: '#d2a04a', preview: ['#13161a', '#d2a04a'] },
+  // Harvest first because it is the default — the list is a menu, and the
+  // one you are on should be the one you read first.
+  harvest:   { label: 'Harvest',   desc: 'Grain and chaff — wheat gold on near-black, parchment in light.', defaultAccent: '#d9a441', preview: ['#0a0c0b', '#d9a441'] },
+  panel:     { label: 'Panel',     desc: 'The older look — cooler greys, amber accent.', defaultAccent: '#d2a04a', preview: ['#13161a', '#d2a04a'] },
   phosphor:  { label: 'Phosphor',  desc: 'Retro CRT terminal — glow, monospace chrome.', defaultAccent: '#39e881', preview: ['#060907', '#39e881'] },
   blueprint: { label: 'Blueprint', desc: 'Bold borders, hard offset shadows.', defaultAccent: '#ff6a1a', preview: ['#0c0d10', '#ff6a1a'] },
   studio:    { label: 'Studio',    desc: 'Rounded, soft shadows, calm motion.', defaultAccent: '#7c6cf6', preview: ['#111219', '#7c6cf6'] },
@@ -42,9 +46,15 @@ export const ACCENT_PRESETS = ['#d2a04a', '#39e881', '#ff6a1a', '#7c6cf6', '#4a9
 
 export function defaultAppearance() {
   return {
-    style: 'panel', themeMode: 'dark', accent: STYLES.panel.defaultAccent, accentCustomized: false,
+    // Harvest is the default look. An install that already has a saved
+    // appearance keeps it — this only decides what a first run gets.
+    style: 'harvest', themeMode: 'dark', accent: STYLES.harvest.defaultAccent, accentCustomized: false,
     density: 'comfortable', autofitMax: AUTOFIT_MAX_W_DEFAULT,
     remoteSession: false,
+    // On unless turned off. `splash: undefined` on an install that predates
+    // this therefore reads as on, which is what a new feature should do for
+    // someone who has never seen the switch.
+    splash: true,
   };
 }
 
@@ -54,7 +64,11 @@ export function loadAppearance() {
   } catch { return defaultAppearance(); }
 }
 
-export function saveAppearance() { localStorage.setItem(APPEARANCE_KEY, JSON.stringify(S.appearance)); }
+export function saveAppearance() {
+  // remoteSession lives server-side now (see loadAppSettings) — persisting
+  // it here would resurrect a stale value and fight the machine setting.
+  localStorage.setItem(APPEARANCE_KEY, JSON.stringify({ ...S.appearance, remoteSession: undefined }));
+}
 
 export function contrastFg(hex) {
   const c = hex.replace('#', '');
@@ -81,6 +95,18 @@ export function paintRemote() {
    Settings → Appearance. */
 export async function maybeOfferRemoteMode() {
   const SEEN = 'winnow.remotePrompt';
+  // The machine may already have answered (the setting is server-side and
+  // survives fresh browser profiles/origins) — never re-ask what
+  // workspace/app_settings.json already knows.
+  try {
+    const app = await api('/api/settings/app');
+    if (app && app.remote_session) {
+      S.appearance.remoteSession = true;
+      paintRemote();
+      localStorage.setItem(SEEN, 'seen');
+      return;
+    }
+  } catch { /* server unreachable: fall through to the local gate */ }
   try {
     if (localStorage.getItem(SEEN) === 'seen') return;
     if (localStorage.getItem(APPEARANCE_KEY)) {
@@ -99,7 +125,8 @@ export async function maybeOfferRemoteMode() {
   if (yes) {
     S.appearance.remoteSession = true;
     paintRemote();
-    saveAppearance();
+    try { S.appSettings = await post('/api/settings/app', { remote_session: true }); }
+    catch { /* offered again never — but the toggle in Settings still works */ }
   }
 }
 
@@ -111,9 +138,23 @@ export function paintTheme() {
   document.documentElement.setAttribute('data-theme', S.appearance.themeMode === 'auto' ? resolveAutoTheme() : S.appearance.themeMode);
 }
 
+/* An inline --accent beats the stylesheet, so writing one unconditionally
+   made every skin's LIGHT-mode accent dead code: each skin defines a
+   darker accent for light, because the dark-mode colour that reads well on
+   near-black is washed out on parchment — and none of them ever applied.
+
+   So the inline value is written only when the analyst picked a colour
+   themselves. Otherwise the skin's own per-theme accent is left to win,
+   which is what those values are for. */
 export function paintAccent() {
-  document.documentElement.style.setProperty('--accent', S.appearance.accent);
-  document.documentElement.style.setProperty('--accent-fg', contrastFg(S.appearance.accent));
+  const root = document.documentElement;
+  if (S.appearance.accentCustomized) {
+    root.style.setProperty('--accent', S.appearance.accent);
+    root.style.setProperty('--accent-fg', contrastFg(S.appearance.accent));
+  } else {
+    root.style.removeProperty('--accent');
+    root.style.removeProperty('--accent-fg');
+  }
 }
 
 /* Each style has a signature accent (the color it showed in the design
@@ -228,30 +269,122 @@ export function settingsSection(parent, title, { open = false } = {}) {
   return body;
 }
 
+/* One skin as a card. Used twice: as the read-only "this is what you're
+   on" tile in Settings, and as the pickable tile in the skin panel. */
+export function styleCard(key, { interactive = true } = {}) {
+  const meta = STYLES[key];
+  const card = el(interactive ? 'button' : 'div', 'style-card' + (interactive ? '' : ' style-card-static'));
+  if (interactive) card.setAttribute('aria-pressed', String(S.appearance.style === key));
+  const sw = el('div', 'style-swatch');
+  sw.append(el('span', null, null), el('span', null, null));
+  sw.children[0].style.background = meta.preview[0];
+  sw.children[1].style.background = meta.preview[1];
+  card.append(sw, el('span', 'style-name', meta.label), el('span', 'style-desc', meta.desc));
+  return card;
+}
+
+/* Every skin, in its own panel. Applying one takes effect IMMEDIATELY and
+   the panel stays open — a skin is judged by looking at it, and a picker
+   that made you close it to see the result would have you opening it five
+   times to compare four options. `onPicked` lets Settings repaint the
+   card it is showing underneath. */
+export function openSkinPicker(onPicked) {
+  markModalAction('openSkinPicker');
+  modal('Skins', (b) => {
+    b.append(el('p', null,
+      'Applied as you click, so you can see each one. The theme and accent you have set '
+      + 'carry across — close this when you have the one you want.'));
+    const grid = el('div', 'appearance-styles');
+    for (const key of Object.keys(STYLES)) {
+      const card = styleCard(key);
+      card.onclick = () => {
+        applyStyle(key);
+        grid.querySelectorAll('.style-card').forEach((c, i) =>
+          c.setAttribute('aria-pressed', String(Object.keys(STYLES)[i] === key)));
+        if (onPicked) onPicked();
+      };
+      grid.append(card);
+    }
+    b.append(grid);
+    const acts = el('div', 'row-actions');
+    const done = el('button', 'btn', 'Done');
+    done.onclick = () => openSettings();   // back where they came from
+    acts.append(done);
+    b.append(acts);
+  }, { wide: true });
+}
+
+/* Settings that belong to the OPEN CASE rather than to this machine —
+   they live in the case file and travel with it when it is handed to
+   another analyst. Kept out of the main Settings modal because that one
+   is reachable from the home screen, where there is no case for a "this
+   case" control to describe. */
+export function openCaseSettings() {
+  markModalAction('openCaseSettings');
+  modal('Case settings', (b) => {
+    b.append(el('p', null,
+      'These are stored in the case file, so they follow it to whoever you hand it to — '
+      + 'unlike Settings, which is about this machine.'));
+
+    b.append(el('div', 'settings-sub-label', 'Timestamps'));
+    b.append(el('p', 'fb-help',
+      'How datetime columns are displayed in this case. Presentation only — the stored and '
+      + 'exported value is always the text the file came with. A format picked on an individual '
+      + "column (right-click its header) beats this, which beats the machine-wide default."));
+
+    const sel = el('select');
+    const inherit = el('option', null, 'Use the machine-wide default');
+    inherit.value = '';
+    sel.append(inherit);
+    for (const [key, label] of Object.entries(TS_FORMATS)) {
+      const o = el('option', null, label);
+      o.value = key;
+      sel.append(o);
+    }
+    sel.value = S.caseSettings.ts_format || '';
+    sel.onchange = async () => {
+      try {
+        S.caseSettings = await post('/api/case_settings', { ts_format: sel.value });
+        render();
+        toast('Case timestamp format saved');
+      } catch (e) {
+        toast('Could not save: ' + e.message, 5000);
+      }
+    };
+    b.append(labeledRow('Timestamp format', sel));
+  });
+}
+
 export function openSettings() {
   markModalAction('openSettings');
   modal('Settings', (b) => {
     const secLook = settingsSection(b, 'Appearance');
-    secLook.append(el('p', null, 'Pick a look, then a theme, then (optionally) your own accent color. All three are saved on this machine.'));
+    secLook.append(el('p', null, 'Your skin, theme and accent colour, all saved on this machine.'));
 
-    const styleGrid = el('div', 'appearance-styles');
-    for (const [key, meta] of Object.entries(STYLES)) {
-      const card = el('button', 'style-card');
-      card.setAttribute('aria-pressed', String(S.appearance.style === key));
-      const sw = el('div', 'style-swatch');
-      sw.append(el('span', null, null), el('span', null, null));
-      sw.children[0].style.background = meta.preview[0];
-      sw.children[1].style.background = meta.preview[1];
-      card.append(sw, el('span', 'style-name', meta.label), el('span', 'style-desc', meta.desc));
-      card.onclick = () => {
-        applyStyle(key);
-        styleGrid.querySelectorAll('.style-card').forEach((c, i) => c.setAttribute('aria-pressed', String(Object.keys(STYLES)[i] === key)));
-        accentGrid.querySelectorAll('.accent-swatch').forEach((sw2) => sw2.setAttribute('aria-pressed', String(sw2.dataset.accent.toLowerCase() === S.appearance.accent.toLowerCase())));
-        customAccent.value = S.appearance.accent;
-      };
-      styleGrid.append(card);
+    /* Only the skin in use, plus a way to see the rest. Appearance had
+       every style laid out permanently, which is a lot of cards to scroll
+       past to reach the theme toggle and the accent — and choosing a skin
+       is something an analyst does once, while the settings below it get
+       revisited. */
+    const currentRow = el('div', 'appearance-current');
+    const currentCard = styleCard(S.appearance.style, { interactive: false });
+    const browse = el('button', 'btn ghost', 'Change skin…');
+    browse.onclick = () => openSkinPicker(() => {
+      // Repaint in place: the analyst comes back to Settings, not to a
+      // closed modal, so the card and the accent row have to agree with
+      // what they just picked.
+      currentRow.replaceChildren(styleCard(S.appearance.style, { interactive: false }), browse);
+      syncAccentUi();
+    });
+    currentRow.append(currentCard, browse);
+    secLook.append(currentRow);
+
+    function syncAccentUi() {
+      accentGrid.querySelectorAll('.accent-swatch').forEach((sw) =>
+        sw.setAttribute('aria-pressed',
+                        String(sw.dataset.accent.toLowerCase() === S.appearance.accent.toLowerCase())));
+      customAccent.value = S.appearance.accent;
     }
-    secLook.append(styleGrid);
 
     secLook.append(el('div', 'settings-sub-label', 'Theme'));
     const themeSeg = el('div', 'segmented');
@@ -352,13 +485,66 @@ export function openSettings() {
     const remoteCb = el('input');
     remoteCb.type = 'checkbox';
     remoteCb.checked = !!S.appearance.remoteSession;
-    remoteCb.onchange = () => {
+    remoteCb.onchange = async () => {
       S.appearance.remoteSession = remoteCb.checked;
       paintRemote();
-      saveAppearance();
+      // Machine setting, saved server-side — localStorage proved fragile
+      // (per-origin AND per-profile, so update restarts and quick-look
+      // ports kept resetting it).
+      try { S.appSettings = await post('/api/settings/app', { remote_session: remoteCb.checked }); }
+      catch (e) { toast('Could not save Remote session mode: ' + e.message, 6000); }
     };
     remoteLabel.append(remoteCb, el('span', null, 'Remote session mode'));
     secLook.append(remoteLabel);
+
+    /* Hidden association launches (Windows): pythonw.exe instead of a
+       console window riding along with every double-clicked file. Lives
+       here rather than in File associations because it's about how the
+       app LOOKS when it starts, and this is where people hunt for that.
+       Only rendered where it means something — Linux .desktop launches
+       are already terminal-less — and quietly absent when the loopback-
+       only status route refuses (a remote browser). */
+    (async () => {
+      let info;
+      try { info = await api('/api/assoc/types'); } catch { return; }
+      if (info.platform !== 'windows') return;
+      const bgLabel = el('label');
+      const bgCb = el('input');
+      bgCb.type = 'checkbox';
+      bgCb.checked = !!info.background;
+      bgCb.onchange = async () => {
+        try {
+          const r = await post('/api/assoc/background', { enabled: bgCb.checked });
+          toast(bgCb.checked
+            ? (r.applied ? 'Winnow will start hidden when a file is opened'
+                         : 'Saved — takes effect when Winnow is registered for a type')
+            : 'Winnow will show its console when a file is opened');
+        } catch (e) {
+          toast('Could not change the setting: ' + e.message, 6000);
+        }
+      };
+      bgLabel.append(bgCb, el('span', null,
+        'Start Winnow hidden when a file is opened (no console window — the server log stays hidden too)'));
+      remoteLabel.after(bgLabel);
+    })();
+
+    /* The winnowing animation on launch. On by default and skippable with
+       any key or click while it runs — this switch is for someone who opens
+       Winnow all day and doesn't want it at all. prefers-reduced-motion is
+       honoured without needing this turned off. */
+    const splashLabel = el('label');
+    splashLabel.style.cssText = 'display:flex;align-items:center;gap:6px';
+    const splashCb = el('input');
+    splashCb.type = 'checkbox';
+    splashCb.checked = S.appearance.splash !== false;
+    splashCb.onchange = () => {
+      S.appearance.splash = splashCb.checked;
+      saveAppearance();
+    };
+    splashLabel.append(splashCb, el('span', null, 'Launch animation'));
+    secLook.append(splashLabel);
+    secLook.append(el('p', 'fb-help',
+      'The winnowing animation Winnow starts with. Any key or click skips it.'));
 
     const secKeys = settingsSection(b, 'Keyboard shortcuts');
     secKeys.append(el('p', null, 'Tag hotkeys (1–9) are set per-tag in Edit tags. Escape always clears the selection or closes a panel. '
@@ -493,27 +679,11 @@ export function openSettings() {
     };
     secTs.append(labeledRow('Every case on this machine', tsSystemSel));
 
-    const tsCaseSel = el('select');
-    const inherit = el('option', null, 'Use the system-wide default');
-    inherit.value = '';
-    tsCaseSel.append(inherit);
-    for (const [key, label] of Object.entries(TS_FORMATS)) {
-      const o = el('option', null, label);
-      o.value = key;
-      tsCaseSel.append(o);
-    }
-    tsCaseSel.value = S.caseSettings.ts_format || '';
-    tsCaseSel.disabled = !S.sources.length && !S.sourceId;
-    tsCaseSel.onchange = async () => {
-      try {
-        S.caseSettings = await post('/api/case_settings', { ts_format: tsCaseSel.value });
-        render();
-        toast('Case timestamp format saved');
-      } catch (e) {
-        toast('Could not save: ' + e.message, 5000);
-      }
-    };
-    secTs.append(labeledRow('This case', tsCaseSel));
+    // The per-case override lives in Session → Case settings. Settings is
+    // reachable from the home screen now, where there is no case for a
+    // "this case" control to mean anything about.
+    secTs.append(el('p', 'fb-help',
+      'This case can override it — Case menu → Case settings.'));
 
     const secTags = settingsSection(b, 'Default tags for new cases');
     secTags.append(el('p', null,
@@ -588,6 +758,9 @@ export function openSettings() {
 
     const secPlugins = settingsSection(b, 'Plugins');
     buildPluginsPanel(secPlugins);
+
+    const secAssoc = settingsSection(b, 'File associations');
+    buildAssocPanel(secAssoc);
 
     const secUpdates = settingsSection(b, 'Updates');
     buildUpdatesPanel(secUpdates);

@@ -2,7 +2,7 @@
 navigation that survive everything else being cleared.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { renderHead, saveDefaultLayout, saveLayout } from './columns.js';
+import { isPinned, renderHead, saveDefaultLayout, saveLayout, togglePin } from './columns.js';
 import { $, api, el, post, toast } from './core.js';
 import { openDerivedColumnModal } from './derived.js';
 import { hasActiveFilterTree, openFilterBuilder } from './filterbuilder.js';
@@ -579,9 +579,25 @@ export function buildColumnsPanel(container, refresh = openTableMenu) {
       renderHead(); render(); saveLayout();
     };
     lab.append(cb, el('span', null, name));
+    // Pinning sits beside visibility: both are decisions about where a
+    // column is, rather than what it contains.
+    // Its own class, not collist-pick: that one is the value-picker
+    // override, and sharing it made "the row's pick control" ambiguous to
+    // anything selecting by class.
+    const pin = el('button', 'btn ghost collist-pin');
+    const paintPin = () => {
+      const on = isPinned(name);
+      pin.textContent = on ? '📌 pinned' : 'pin';
+      pin.setAttribute('aria-pressed', String(on));
+      pin.title = on
+        ? `"${name}" stays put when you scroll sideways — click to unpin`
+        : `Keep "${name}" visible while scrolling sideways`;
+    };
+    paintPin();
+    pin.onclick = () => { togglePin(name); paintPin(); };
     const c = columnMeta(name);
     lab.append(el('span', 'count', ' ' + (c ? c.type : '') + (c && c.derived ? ' · derived' : '')));
-    row.append(lab);
+    row.append(lab, pin);
     // Per-column value-picker override, in the same row as the visibility
     // box because they're the same kind of decision about the same column.
     // Three states, not two: following the table's setting is distinct from

@@ -1,6 +1,7 @@
 /* The plugin host's frontend: the Plugins settings panel and plugin tabs.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
+import { recordTabVisit } from './tabhistory.js';
 import { $, api, el, post, setBusy, toast } from './core.js';
 import { loadPlugins, openImportModal, pluginFormatById, queueFilesForFormat } from './importer.js';
 import { loadSources, openSource, renderPageTabs, syncTabSelection } from './sources.js';
@@ -356,6 +357,7 @@ export function buildPluginTabContext(tab) {
 }
 
 export async function showPluginTab(tabId) {
+  recordTabVisit({ kind: 'page', key: tabId });
   const tab = pluginTabById(tabId);
   if (!tab) return;
   S.activeTab = 'plugin:' + tabId;

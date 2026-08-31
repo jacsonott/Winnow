@@ -94,7 +94,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   `S.savedFilters`/`S.tags`/etc., has no earlier source-open-triggered load
   point to piggyback on, so it just awaits a fresh copy before building the
   profile `<select>` at all.
-- **There is one import entry point** — the Session menu's "Import…" →
+- **There is one import entry point** — the Case menu's "Import…" →
   `openImportModal`, whose queue now takes CSV/TSV, JSON/JSONL *and*
   SQLite files (`importKindFor` routes by extension; a sqlite item's
   "Pick tables…" opens `openSqliteTablePicker`, the old standalone
@@ -206,3 +206,47 @@ see [docs/notes/README.md](README.md) for the whole set.
   builds used to be invisible, and a server restart kills one silently
   (`_build_fts_worker` swallows everything; the next search retries).
   `boot()` restarts the poll so a reload mid-import picks the job back up.
+
+- **Keep-what-committed is really keep-what-PARSED.** When a bad line
+  hard-stops the csv reader mid-file, the rows sitting in the pending
+  batch parsed fine — the failure is the line *after* them — so the error
+  path commits them before re-raising (best-effort: if the failure *was*
+  the commit, what already landed still stands). Before this, an error at
+  row N silently discarded up to BATCH−1 (19,999) good rows immediately
+  before it. The raised error names the file line and the kept count
+  ("Line 1,010,002: … — the 1,010,000 rows before it were kept"), and if
+  *nothing* committed the source row is dropped entirely — a 0-row husk
+  in the table list reads as a real empty import. Pinned by
+  tests/test_ingest_broken.py.
+
+- **UTF-16 is a routine input, not an edge case.** Windows PowerShell
+  5.1's `Out-File`/`>` write UTF-16LE by default. Decoded as
+  utf-8-sig-with-replacement, the header becomes NUL-riddled garbage and
+  CREATE TABLE aborts with "the query contains a null character".
+  `sniff_text_encoding` checks the two-byte BOM and opens UTF-16 files
+  properly (csv, jsonl, and both server preview paths via
+  `_decode_preview_bytes`); `sanitize_columns` also strips C0 control
+  characters from header NAMES as a backstop — cells keep whatever bytes
+  they had, names must be quotable. BOM-less UTF-16 is deliberately left
+  alone: guessing without a BOM mislabels legitimate files.
+
+- **An unbalanced quote swallows lines silently, and ragged can't see
+  it.** A stray `"` folds every following line into one field until the
+  next quote (or the 128KB field-limit error). The rows vanish from the
+  grid, `ragged_rows` reads 0, and nothing errored. `suspect_quote_rows`
+  counts rows where a single field holds ≥10 embedded newlines — the
+  swallow's signature — and the jobs toast / CLI print a check-your-file
+  warning. Legitimate multi-line payloads (EVTX XML) sit under the
+  threshold. It's a heuristic on purpose: csv's parse is *correct* for
+  properly-quoted multi-line fields, so this can only ever be a warning.
+
+- **One broken JSONL line costs one line, not the file.** ingest_json's
+  two-pass shape used to make any malformed line an all-or-nothing
+  failure — a million good lines refused because line 1,000,001 was cut
+  off mid-write — with json's own "line 1" (the position inside the one
+  line) as the reported location. `_iter_json_records` now takes a `bad`
+  collector: malformed lines are skipped and counted (`bad_records`,
+  `first_bad_line`, surfaced in the jobs toast), and when a caller passes
+  no collector the raise carries the real FILE line number. A truncated
+  `.json` *document* is still a hard error — half of one JSON value is
+  not a partial table.

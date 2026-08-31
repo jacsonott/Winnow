@@ -2,6 +2,7 @@
 in the case.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
+import { recordTabVisit } from './tabhistory.js';
 import { renderHead } from './columns.js';
 import { $, ROW_H, api, el, post, toast } from './core.js';
 import { derivedOps } from './derived.js';
@@ -16,6 +17,7 @@ import { checkPresets } from './savedfilters.js';
 import { syncSearchExpansion } from './search.js';
 import { openSessionManager } from './session.js';
 import { showGridTab, showSqlTab, showTimelineTab } from './sql.js';
+import { openCaseSettings } from './settings.js';
 import { S, selClear, selCount, selFirst, specKey } from './state.js';
 import { openTablesManager } from './tables.js';
 import { loadTags, renderTagRibbon } from './tags.js';
@@ -511,6 +513,7 @@ function stashViewState() {
 export async function openSource(id) {
   const src = S.sources.find((s) => s.id === id);
   if (!src) return;
+  recordTabVisit({ kind: 'source', id });
   stashViewState();
   if (S.activeTab !== 'grid') showGridTab();
   S.sourceId = id;
@@ -799,7 +802,12 @@ export function initSidebar() {
   let prefs = {};
   try { prefs = JSON.parse(localStorage.getItem(SIDEBAR_KEY) || '{}'); } catch { /* defaults below */ }
   setSidebarWidth(prefs.width || SIDEBAR_W_DEFAULT);
-  setSidebarVisible(!(prefs.collapsed ?? false));
+  // Collapsed by DEFAULT: a case should open showing the evidence, not a
+  // panel of navigation. The tab strip already names the open tables; the
+  // sidebar is one ` (or the ◀ button) away when the analyst wants the
+  // full list — and once they choose to keep it open, that choice
+  // persists like every other panel preference here.
+  setSidebarVisible(!(prefs.collapsed ?? true));
 }
 
 /* Drag the sidebar's right edge to resize it, double-click to reset —
@@ -959,13 +967,18 @@ $('sidebarFilter').oninput = () => { S.sidebarFilter = $('sidebarFilter').value;
 
 $('btnTabJump').onclick = () => setSidebarVisible($('sidebar').hidden);
 
-$('btnSession').onclick = () => dropdownMenu($('btnSession'), [
+/* Everything scoped to the OPEN CASE. Called "Session" until the word
+   was needed for something else: a session is now a named snapshot of the
+   analysis, stored in the case file, and this menu is one entry among
+   several here rather than the thing itself. */
+$('btnCase').onclick = () => dropdownMenu($('btnCase'), [
   { label: 'Import…', onclick: openImportModal },
   { label: 'Merge sources…', onclick: openMergeBuilder },
   { label: 'Tables…', onclick: openTablesManager },
   '-',
   { label: 'Export…', onclick: openExportModal },
-  { label: 'Session (save/load)…', onclick: openSessionManager },
+  { label: 'Sessions…', onclick: openSessionManager },
+  { label: 'Case settings…', onclick: openCaseSettings },
   '-',
   { label: 'Shut down Winnow…', onclick: shutdownWinnow },
 ]);
@@ -975,6 +988,6 @@ $('btnSession').onclick = () => dropdownMenu($('btnSession'), [
 $('btnReset').onclick = () => clearAllFilters();
 
 // The empty-case state's one useful next action, right where the eye lands —
-// the same openImportModal the Session menu's "Import…" entry opens.
+// the same openImportModal the Case menu's "Import…" entry opens.
 $('emptyImportBtn').onclick = () => openImportModal();
 }
