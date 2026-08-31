@@ -5,12 +5,15 @@ force-graph of hosts touching hosts, built from **movement events** you
 select out of your ingested tables.
 
 A *movement event* maps a source-host column to a destination-host column,
-optionally within conditions (`EventId = 4624 AND LogonType 3`). The
-plugin ships a set of defaults shaped against real KAPE/EvtxECmd triage
+optionally within conditions (`EventId = 4624 AND LogonType 3`), and is
+**tied to a header set** — one of the app's named column sets
+(`Event logs (EvtxECmd)`, `NTFS $MFT (MFTECmd)`, …). It only offers
+itself on a table that IS that artifact, exactly the way a filter default
+binds to its header set, so an EVTX event never shows up on a firewall
+table. The plugin ships defaults shaped against real KAPE/EvtxECmd triage
 output — remote logons (4624 type 3/10), failed logons (4625), explicit
 credentials (4648), RDP sessions (21/24/25 and 1149), and share access
-(5140/5145) — and each binds automatically to any table carrying the
-columns it needs.
+(5140/5145) — all tied to the EvtxECmd set.
 
 What you can do:
 
@@ -25,9 +28,11 @@ What you can do:
 - **Jump to the evidence.** Double-click a host to open its source table
   filtered to that host's rows.
 - **Define your own events** with **+ New event type** (right in the
-  panel header) — the editor pre-guesses the source/destination/label/time
-  columns from your table's names, so you usually just name it and add a
-  condition (e.g. `EventId equals 5985`). Saved on this machine (via
+  panel header) — pick the header set it applies to (which scopes the
+  column dropdowns to that artifact's own column names), and the editor
+  pre-guesses source/destination/label/time, so you usually just name it
+  and add a condition (e.g. `EventId equals 5985`). Or leave the header
+  set as "any table with the chosen columns". Saved on this machine (via
   `req.storage`), surviving case switches and updates like the app's own
   saved filters. **Events…** manages the full set.
 - **Collapse the event list** with the header caret when the graph needs

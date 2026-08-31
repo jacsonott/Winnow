@@ -23,6 +23,7 @@ defense-in-depth statement checks — and its TS_NORMALIZE() — for free.
 import json
 import os
 
+from winnow import defaults
 from winnow.store import q
 
 PLUGIN = {
@@ -69,6 +70,14 @@ def _shipped_defaults():
     return data.get("events", [])
 
 
+def _header_sets():
+    """The app's shipped header-set nicknames (EvtxECmd, MFTECmd, ...) —
+    a movement event ties to one by name, so it only offers itself on a
+    table that actually IS that artifact, the same way a filter default
+    binds to its header set. {name: [columns]}."""
+    return {name: cols for name, cols in defaults.headers()["nicknames"]}
+
+
 def defs(req):
     """GET  -> {shipped: [...], saved: [...]}
     POST {saved: [...]} -> same — replaces the analyst's saved definitions
@@ -76,7 +85,8 @@ def defs(req):
     exactly like the app's own saved filters)."""
     if req.method == "GET":
         saved = (req.storage.get() if req.storage else {}).get("saved", [])
-        return {"shipped": _shipped_defaults(), "saved": saved}
+        return {"shipped": _shipped_defaults(), "saved": saved,
+                "header_sets": _header_sets()}
     saved = (req.body or {}).get("saved")
     if not isinstance(saved, list):
         raise ValueError("Body must be {saved: [event definitions]}")
@@ -94,6 +104,12 @@ def _validate_def_shape(d):
     for k in ("src_col", "dst_col"):
         if not d.get(k):
             raise ValueError(f"Definition {d.get('name')!r} needs {k}")
+    hs = d.get("header_set")
+    if hs and hs not in _header_sets():
+        # Same failure mode as an unresolvable filter header_set — a
+        # definition bound to a set that doesn't exist would never appear
+        # on any table, silently.
+        raise ValueError(f"Definition {d['name']!r} names an unknown header set {hs!r}")
     for c in d.get("conditions") or []:
         if c.get("op") not in set(OPS) | {"in", "not_in"}:
             raise ValueError(f"Unknown condition op {c.get('op')!r}")

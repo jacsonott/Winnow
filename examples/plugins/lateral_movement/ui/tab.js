@@ -95,7 +95,15 @@ export default function mount(container, winnow) {
   function eventsForSource(src) {
     const cols = new Set(src.columns.map((c) => c.name));
     const all = [...S.defs.shipped, ...S.defs.saved];
-    return all.filter((d) => (d.requires || [d.src_col, d.dst_col]).every((c) => cols.has(c)));
+    return all.filter((d) => {
+      // Tied to a header set: only bind on a table that IS that artifact
+      // (has every column the set defines) — a filter default binds the
+      // same way. A set that isn't present (older defs) falls back to the
+      // explicit column list.
+      const hs = d.header_set && S.defs.header_sets && S.defs.header_sets[d.header_set];
+      if (hs) return hs.every((c) => cols.has(c));
+      return (d.requires || [d.src_col, d.dst_col]).every((c) => cols.has(c));
+    });
   }
   const selKey = (sourceId, name) => `${sourceId}::${name}`;
 
@@ -459,19 +467,30 @@ async function saveDefs(winnow) {
 
 function openEventEditor(winnow, onSave) {
   const { el, modal, toast } = winnow;
-  const cols = [...new Set(winnow.state.sources.flatMap((s) => s.columns.map((c) => c.name)))].sort();
+  const allCols = [...new Set(winnow.state.sources.flatMap((s) => s.columns.map((c) => c.name)))].sort();
+  const headerSets = S.defs.header_sets || {};
+  // The column vocabulary the dropdowns offer: a chosen header set's
+  // columns (so you pick from the RIGHT names for that artifact), else
+  // every column across the open tables.
+  let pool = allCols;
+  const colSelects = [];
   const mkColSel = (val) => {
     const s = el('select');
     s.style.cssText = 'background:var(--ink);color:var(--text);border:1px solid var(--line-2);padding:4px 6px;font:inherit';
-    s.append(new Option('(column)', ''));
-    for (const c of cols) s.append(new Option(c, c));
-    if (val) s.value = val;
+    const fill = (keep) => {
+      s.replaceChildren(new Option('(column)', ''));
+      for (const c of pool) s.append(new Option(c, c));
+      if (keep && pool.includes(keep)) s.value = keep;
+    };
+    fill(val);
+    s._fill = fill;
+    colSelects.push(s);
     return s;
   };
   // Guess the four columns from their names — the hard part for someone
   // staring at a fresh export. Same spirit as the app's header
   // nicknames; the analyst can override any of them.
-  const guess = (re) => cols.find((c) => re.test(c)) || '';
+  const guess = (re) => allCols.find((c) => re.test(c)) || '';
   const gSrc = guess(/source|src|remote(host)?|workstation|client|from|caller/i);
   const gDst = guess(/dest|dst|target|computer|host\b|to\b|server/i);
   const gLabel = guess(/user|account|subject|logon|principal/i);
@@ -482,7 +501,17 @@ function openEventEditor(winnow, onSave) {
       + 'from the names in your tables — change any that are wrong. Conditions '
       + '(optional) narrow it to specific events, e.g. EventId equals 4624.'));
     const name = el('input'); name.className = 'confirm-input'; name.placeholder = 'Name (e.g. WinRM logons)';
+    const hsSel = el('select');
+    hsSel.style.cssText = 'background:var(--ink);color:var(--text);border:1px solid var(--line-2);padding:4px 6px;font:inherit;max-width:100%';
+    hsSel.append(new Option('Any table with the chosen columns', ''));
+    for (const hn of Object.keys(headerSets).sort()) hsSel.append(new Option(hn, hn));
+    hsSel.onchange = () => {
+      // Re-scope every column dropdown to the header set (or back to all).
+      pool = hsSel.value && headerSets[hsSel.value] ? headerSets[hsSel.value].slice().sort() : allCols;
+      for (const cs of colSelects) { const keep = cs.value; cs._fill(keep); }
+    };
     const src = mkColSel(gSrc), dst = mkColSel(gDst), label = mkColSel(gLabel), time = mkColSel(gTime);
+    b.append(el('label', null, 'Applies to (header set)'), hsSel);
     b.append(el('label', null, 'Name'), name);
     b.append(el('label', null, 'Source host column'), src);
     b.append(el('label', null, 'Destination host column'), dst);
@@ -516,6 +545,9 @@ function openEventEditor(winnow, onSave) {
       const def = {
         name: name.value.trim(), src_col: src.value, dst_col: dst.value,
         label_col: label.value || null, time_col: time.value || null,
+        // Tied to the header set when one is chosen — it binds only on
+        // that artifact; requires stays as the fallback column list.
+        header_set: hsSel.value || null,
         requires: [src.value, dst.value, ...(time.value ? [time.value] : [])],
         conditions: rows.map((r) => ({ column: r.col.value, op: r.op.value, value: r.val.value })).filter((c) => c.column),
         color: '#4ac7c7',

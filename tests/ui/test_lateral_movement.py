@@ -13,10 +13,25 @@ import pytest
 
 pytestmark = pytest.mark.ui
 
-LOGONS = ("SourceHost,DestHost,User,EventId,Channel,RemoteHost,Computer,UserName,TimeCreated,PayloadData2\n"
-          "10.0.0.9,DC01,alice,4624,Security,10.0.0.9,DC01,alice,2026-03-14 08:00:00,LogonType 3\n"
-          "10.0.0.9,DC01,bob,4624,Security,10.0.0.9,DC01,bob,2026-03-14 09:00:00,LogonType 3\n"
-          "10.0.0.5,DC01,alice,4624,Security,10.0.0.5,DC01,alice,2026-03-15 10:00:00,LogonType 10\n")
+# A real EvtxECmd export shape — the full header set, so the shipped
+# defaults (tied to "Event logs (EvtxECmd)") bind to it.
+_EVTX_COLS = ("RecordNumber,EventRecordId,TimeCreated,EventId,Level,Provider,Channel,ProcessId,"
+              "ThreadId,Computer,ChunkNumber,UserId,MapDescription,UserName,RemoteHost,PayloadData1,"
+              "PayloadData2,PayloadData3,PayloadData4,PayloadData5,PayloadData6,ExecutableInfo,"
+              "HiddenRecord,SourceFile,Keywords,ExtraDataOffset,Payload")
+
+
+def _evtx_row(rn, ts, eid, comp, user, remote, p2):
+    vals = {"RecordNumber": rn, "TimeCreated": ts, "EventId": eid, "Channel": "Security",
+            "Computer": comp, "UserName": user, "RemoteHost": remote, "PayloadData2": p2}
+    return ",".join(str(vals.get(c, "")) for c in _EVTX_COLS.split(","))
+
+
+LOGONS = _EVTX_COLS + "\n" + "\n".join([
+    _evtx_row(1, "2026-03-14 08:00:00", 4624, "DC01", "alice", "10.0.0.9", "LogonType 3"),
+    _evtx_row(2, "2026-03-14 09:00:00", 4624, "DC01", "bob", "10.0.0.9", "LogonType 3"),
+    _evtx_row(3, "2026-03-15 10:00:00", 4624, "DC01", "alice", "10.0.0.5", "LogonType 10"),
+]) + "\n"
 
 
 def _post(server, route, body):
@@ -80,12 +95,16 @@ def test_lateral_movement_tab_mounts_binds_defaults_and_builds(browser, server, 
         pg.locator("button", has_text="+ New event type").click()
         pg.wait_for_selector("#modal:not([hidden])")
         pg.locator("#modal .confirm-input").first.fill("My custom hop")
-        # source/dest are pre-guessed from the logon table's column names.
-        assert pg.locator("#modal select").first.input_value() != "", "source column should be pre-guessed"
+        # source/dest are pre-guessed from the table's column names. The
+        # first select is the header-set picker; the source column is next.
+        assert pg.locator("#modal select").nth(1).input_value() != "", "source column should be pre-guessed"
         pg.locator("#modal button", has_text="Save event").click()
         pg.wait_for_function(
             "(n) => document.querySelectorAll('.lm-events .lm-event').length > n", arg=before)
         assert any("My custom hop" in t for t in pg.locator(".lm-event-name").all_inner_texts())
+        # The header-set picker offered the app's EvtxECmd nickname.
+        hs_opts = pg.evaluate("() => [...document.querySelectorAll('#modal select')].length")
+        assert hs_opts >= 5  # header_set, src, dst, label, time
         assert not errors, errors
     finally:
         ctx.close()

@@ -1006,17 +1006,23 @@ def test_lateral_movement_time_bucketing_and_filter(timed_client):
     assert {(e["src"], e["dst"]) for e in edges} == {("WS1", "SRV1")}
 
 
-def test_lateral_movement_defaults_ship_and_bind(lateral_client, store, write_csv):
-    """The shipped KAPE defaults are served, and one binds to a table only
-    when it carries the columns the definition requires."""
+def test_lateral_movement_defaults_ship_tied_to_a_header_set(lateral_client):
+    """The shipped KAPE defaults are served, each tied to a header set
+    (the app's own EvtxECmd nickname) so it only offers itself on a real
+    EVTX table — same binding a filter default uses."""
     client, _ = lateral_client
     r = client.get("/api/plugin/lateral_movement/defs")
     assert r.status_code == 200, r.text
-    shipped = r.json()["shipped"]
-    names = [d["name"] for d in shipped]
-    assert any("4624" in n for n in names)
+    body = r.json()
+    shipped = body["shipped"]
+    assert any("4624" in d["name"] for d in shipped)
     for d in shipped:
-        assert d["src_col"] and d["dst_col"] and d.get("requires")
+        assert d["src_col"] and d["dst_col"]
+        assert d["header_set"] == "Event logs (EvtxECmd)"
+    # The header sets are served so the UI can offer and resolve them.
+    assert "Event logs (EvtxECmd)" in body["header_sets"]
+    evtx = body["header_sets"]["Event logs (EvtxECmd)"]
+    assert "EventId" in evtx and "RemoteHost" in evtx
 
 
 def test_lateral_movement_saved_defs_persist_machine_side(lateral_client):
@@ -1031,6 +1037,15 @@ def test_lateral_movement_saved_defs_persist_machine_side(lateral_client):
     # A malformed definition is refused as a 400, not stored.
     bad = client.post("/api/plugin/lateral_movement/defs", json={"saved": [{"name": "x"}]})
     assert bad.status_code == 400
+    # A definition bound to a header set that doesn't exist is refused —
+    # it would otherwise never appear on any table, silently.
+    ghost = client.post("/api/plugin/lateral_movement/defs", json={"saved": [
+        {"name": "Ghost", "src_col": "a", "dst_col": "b", "header_set": "No such set"}]})
+    assert ghost.status_code == 400 and "header set" in ghost.json()["detail"].lower()
+    # A valid header set is accepted.
+    ok = client.post("/api/plugin/lateral_movement/defs", json={"saved": [
+        {"name": "Real", "src_col": "a", "dst_col": "b", "header_set": "Event logs (EvtxECmd)"}]})
+    assert ok.status_code == 200
 
 
 # ================================================== claude_assistant plugin
