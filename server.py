@@ -903,6 +903,19 @@ def _assoc_ingest(path: str) -> dict:
 # plugin shows up in the panel with no code change here.
 
 _ASSOC_ASKED_KEY = "assoc_asked_exts"
+# Extensions the make-it-the-default launch prompt has covered. Separate
+# from asked_exts (the after-import HANDLER offer): this one gates the
+# one-shot default question a launch raises when the catalogue grows a
+# new extension — a Winnow update adding a type, or a newly installed
+# plugin. Any answer records here; only genuinely new extensions re-raise
+# the prompt.
+_ASSOC_PROMPTED_KEY = "assoc_prompted_exts"
+
+
+def _mark_prompted(exts: list[str]) -> None:
+    done = set(WS.machine_prefs.get(_ASSOC_PROMPTED_KEY) or [])
+    done.update(e.lower() for e in exts)
+    WS.machine_prefs.set(_ASSOC_PROMPTED_KEY, sorted(done))
 # Start the association-launched server with the console-less interpreter
 # (pythonw.exe) so double-clicking a file doesn't also open a terminal
 # window. Off by default: the hidden flavour hides the server log too,
@@ -965,10 +978,12 @@ def api_assoc_types(request: Request):
     a = file_assoc.adapter()
     st = a.status(catalogue) if a else {}
     asked = set(WS.machine_prefs.get(_ASSOC_ASKED_KEY) or [])
+    prompted = set(WS.machine_prefs.get(_ASSOC_PROMPTED_KEY) or [])
     return {"platform": file_assoc.platform_name(),
             "background": _assoc_background(),
             "types": [{**t, **st.get(t["ext"], {"registered": False, "default": False}),
-                       "asked": t["ext"] in asked} for t in catalogue]}
+                       "asked": t["ext"] in asked,
+                       "prompted": t["ext"] in prompted} for t in catalogue]}
 
 
 @app.post("/api/assoc/register")
@@ -1010,6 +1025,7 @@ def api_assoc_default(request: Request, body: AssocExtsBody):
     except ValueError as e:
         raise HTTPException(400, str(e))
     _mark_asked(body.exts)
+    _mark_prompted(body.exts)   # an explicit default IS the answer
     return {"ok": True, **result}
 
 
@@ -1031,6 +1047,17 @@ def api_assoc_background(request: Request, body: AssocBackgroundBody):
     a = file_assoc.adapter(background=bool(body.enabled))
     applied = bool(a and getattr(a, "refresh_command", None) and a.refresh_command())
     return {"ok": True, "background": bool(body.enabled), "applied": applied}
+
+
+@app.post("/api/assoc/prompted")
+def api_assoc_prompted(request: Request, body: AssocExtsBody):
+    # Any answer to the launch prompt — including "not now" — is final for
+    # these extensions; only NEW extensions raise the prompt again.
+    if not _is_loopback(request):
+        raise HTTPException(403, "loopback-only")
+    _assoc_pick(body.exts, _assoc_catalogue())
+    _mark_prompted(body.exts)
+    return {"ok": True}
 
 
 @app.post("/api/assoc/asked")

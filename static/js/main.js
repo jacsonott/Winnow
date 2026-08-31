@@ -18,6 +18,7 @@
 
 import * as core from './core.js';
 import * as state from './state.js';
+import { maybeOfferDefaultPrompt } from './assoc.js';
 import * as jobs from './jobs.js';
 import * as tabhistory from './tabhistory.js';
 import * as filters from './filters.js';
@@ -136,4 +137,4 @@ new EventSource('/api/presence');
 
 boot().catch((e) => toast('Could not start: ' + e.message, 8000));
 
-maybeOfferRemoteMode().then(() => maybeOfferStorageDir());
+maybeOfferRemoteMode().then(() => maybeOfferStorageDir()).then(() => maybeOfferDefaultPrompt());
