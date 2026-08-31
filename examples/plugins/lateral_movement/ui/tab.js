@@ -291,22 +291,29 @@ export default function mount(container, winnow) {
       + (S.brush ? ' · brushed (click to clear)' : '');
   }
 
-  let brushStart = null;
+  // Drag across the histogram to brush a time window; a plain click (no
+  // drag) clears an existing brush. brushMoved separates the two — the
+  // click event that trails every drag would otherwise clear the brush
+  // the drag just set.
+  let brushStart = null, brushMoved = false;
   const histBucketAt = (ev) => {
     const r = histCanvas.getBoundingClientRect();
     const g = S.graph; if (!g || !g.hist.length) return null;
     const i = Math.floor(((ev.clientX - r.left) / r.width) * g.hist.length);
     return g.hist[Math.max(0, Math.min(g.hist.length - 1, i))][0];
   };
-  histCanvas.onmousedown = (ev) => { brushStart = histBucketAt(ev); };
+  histCanvas.onmousedown = (ev) => { brushStart = histBucketAt(ev); brushMoved = false; };
   histCanvas.onmousemove = (ev) => {
     if (brushStart == null) return;
+    brushMoved = true;
     const cur = histBucketAt(ev);
     S.brush = brushStart <= cur ? [brushStart, cur] : [cur, brushStart];
     drawHist(); draw();
   };
-  histCanvas.onclick = () => { if (brushStart == null && S.brush) { S.brush = null; drawHist(); draw(); } };
-  window.addEventListener('mouseup', () => { brushStart = null; });
+  window.addEventListener('mouseup', () => {
+    if (brushStart != null && !brushMoved && S.brush) { S.brush = null; drawHist(); draw(); }
+    brushStart = null;
+  });
 
   // ===== graph interaction ================================================
   const toWorld = (ev) => {
