@@ -64,6 +64,28 @@ def test_lateral_movement_tab_mounts_binds_defaults_and_builds(browser, server, 
             "() => document.querySelector('.lm-legend') && document.querySelector('.lm-legend').style.display !== 'none'",
             timeout=10_000)
         assert "host" in pg.locator(".lm-bar .note-status").inner_text().lower()
+
+        # The event panel collapses (it can be tall), and the header keeps
+        # a selection summary so state is still visible when hidden.
+        assert not pg.evaluate("() => document.querySelector('.lm-events').hidden")
+        pg.locator(".lm-caret").click()
+        pg.wait_for_function("() => document.querySelector('.lm-events').hidden")
+        assert "selected" in pg.locator(".lm-panel-summary").inner_text()
+        pg.locator(".lm-caret").click()
+        pg.wait_for_function("() => !document.querySelector('.lm-events').hidden")
+
+        # A new movement type can be defined right from the panel — the
+        # editor pre-guesses columns, so this only needs a name and Save.
+        before = pg.locator(".lm-events .lm-event").count()
+        pg.locator("button", has_text="+ New event type").click()
+        pg.wait_for_selector("#modal:not([hidden])")
+        pg.locator("#modal .confirm-input").first.fill("My custom hop")
+        # source/dest are pre-guessed from the logon table's column names.
+        assert pg.locator("#modal select").first.input_value() != "", "source column should be pre-guessed"
+        pg.locator("#modal button", has_text="Save event").click()
+        pg.wait_for_function(
+            "(n) => document.querySelectorAll('.lm-events .lm-event').length > n", arg=before)
+        assert any("My custom hop" in t for t in pg.locator(".lm-event-name").all_inner_texts())
         assert not errors, errors
     finally:
         ctx.close()

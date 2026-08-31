@@ -33,3 +33,14 @@
 .lm-root select, .lm-root input[type="text"] {
   background: var(--ink); color: var(--text); border: 1px solid var(--line-2);
   padding: 5px 8px; font: inherit; max-width: 220px; }
+
+/* collapsible event panel header */
+.lm-panel-head { display: flex; gap: 8px; align-items: center;
+  padding: 5px 8px; border-bottom: 1px solid var(--line-2); flex: 0 0 auto; }
+.lm-caret { background: none; border: none; color: var(--dim); cursor: pointer;
+  font: inherit; padding: 0 2px; width: 18px; }
+.lm-caret:hover { color: var(--text); }
+.lm-panel-title { color: var(--text); font-weight: 600; }
+.lm-panel-summary { color: var(--dim); flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lm-events[hidden] { display: none; }

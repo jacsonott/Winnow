@@ -19,7 +19,8 @@ export default function mount(container, winnow) {
   ctx = winnow;
   const { el, post, toast } = winnow;
   S = { defs: { shipped: [], saved: [] }, selections: [], graph: null,
-        bucket: 'day', brush: null, sim: null, view: { x: 0, y: 0, k: 1 }, pan: false };
+        bucket: 'day', brush: null, sim: null, view: { x: 0, y: 0, k: 1 }, pan: false,
+        panelOpen: S && S.panelOpen !== undefined ? S.panelOpen : true };
 
   const link = el('link'); link.rel = 'stylesheet';
   link.href = `${winnow.assets}/ui/tab.css`;
@@ -41,9 +42,39 @@ export default function mount(container, winnow) {
   bar.append(build, manage, useTf, status);
   root.append(bar);
 
-  // ---- event-selection panel --------------------------------------------
+  // ---- event-selection panel (collapsible) ------------------------------
+  const panelHead = el('div', 'lm-panel-head');
+  const caret = el('button', 'lm-caret');
+  caret.title = 'Show/hide the event list';
+  const summary = el('span', 'lm-panel-summary');
+  const newBtn = el('button', 'btn ghost', '+ New event type');
+  newBtn.title = 'Define a movement event mapped to your own columns';
+  newBtn.onclick = () => openEventEditor(winnow, async (def) => {
+    S.defs.saved.push(def); await saveDefs(winnow); renderPanel();
+    // A freshly defined type is usually the one you want next — tick it
+    // wherever it binds, so Build is one click away.
+    for (const src of winnow.state.sources.filter((x) => !x.error)) {
+      if ((def.requires || [def.src_col, def.dst_col]).every((c) => src.columns.some((col) => col.name === c))
+          && !S.selections.some((sl) => sl.key === selKey(src.id, def.name))) {
+        S.selections.push({ key: selKey(src.id, def.name), source_id: src.id, def, color: null });
+      }
+    }
+    recolor();
+  });
+  panelHead.append(caret, el('span', 'lm-panel-title', 'Movement events'), summary, newBtn);
+  root.append(panelHead);
   const panel = el('div', 'lm-events');
   root.append(panel);
+
+  function paintPanelHead() {
+    caret.textContent = S.panelOpen ? '▾' : '▸';
+    panel.hidden = !S.panelOpen;
+    const n = S.selections.length;
+    summary.textContent = n
+      ? `${n} event${n === 1 ? '' : 's'} selected`
+      : 'none selected';
+  }
+  caret.onclick = () => { S.panelOpen = !S.panelOpen; paintPanelHead(); };
 
   // ---- graph stage -------------------------------------------------------
   const stage = el('div', 'lm-stage');
@@ -107,6 +138,7 @@ export default function mount(container, winnow) {
   function recolor() {
     S.selections.forEach((s, i) => { s.color = EVENT_COLORS[i % EVENT_COLORS.length]; });
     renderPanel();
+    paintPanelHead();
   }
 
   // ===== build ============================================================
@@ -374,8 +406,9 @@ export default function mount(container, winnow) {
 
   new ResizeObserver(() => { kick(); drawHist(); }).observe(stage);
 
-  manage.onclick = () => openEventManager(winnow, renderPanel);
-  loadDefs().then(renderPanel);
+  manage.onclick = () => openEventManager(winnow, () => { renderPanel(); paintPanelHead(); });
+  paintPanelHead();
+  loadDefs().then(() => { renderPanel(); paintPanelHead(); });
 }
 
 async function loadDefs() {
@@ -435,9 +468,21 @@ function openEventEditor(winnow, onSave) {
     if (val) s.value = val;
     return s;
   };
+  // Guess the four columns from their names — the hard part for someone
+  // staring at a fresh export. Same spirit as the app's header
+  // nicknames; the analyst can override any of them.
+  const guess = (re) => cols.find((c) => re.test(c)) || '';
+  const gSrc = guess(/source|src|remote(host)?|workstation|client|from|caller/i);
+  const gDst = guess(/dest|dst|target|computer|host\b|to\b|server/i);
+  const gLabel = guess(/user|account|subject|logon|principal/i);
+  const gTime = guess(/time|created|date|when|timestamp|utc/i);
   modal('New movement event', (b) => {
+    b.append(el('p', 'note-status',
+      'Map the columns that describe a hop. The dropdowns are pre-guessed '
+      + 'from the names in your tables — change any that are wrong. Conditions '
+      + '(optional) narrow it to specific events, e.g. EventId equals 4624.'));
     const name = el('input'); name.className = 'confirm-input'; name.placeholder = 'Name (e.g. WinRM logons)';
-    const src = mkColSel(), dst = mkColSel(), label = mkColSel(), time = mkColSel();
+    const src = mkColSel(gSrc), dst = mkColSel(gDst), label = mkColSel(gLabel), time = mkColSel(gTime);
     b.append(el('label', null, 'Name'), name);
     b.append(el('label', null, 'Source host column'), src);
     b.append(el('label', null, 'Destination host column'), dst);

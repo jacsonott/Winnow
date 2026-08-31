@@ -24,9 +24,14 @@ What you can do:
   tables tab applies here too (toggle "Apply case timeframe").
 - **Jump to the evidence.** Double-click a host to open its source table
   filtered to that host's rows.
-- **Define your own events** under **Events…** — mapped to your columns,
-  saved on this machine (via `req.storage`), surviving case switches and
-  updates like the app's own saved filters.
+- **Define your own events** with **+ New event type** (right in the
+  panel header) — the editor pre-guesses the source/destination/label/time
+  columns from your table's names, so you usually just name it and add a
+  condition (e.g. `EventId equals 5985`). Saved on this machine (via
+  `req.storage`), surviving case switches and updates like the app's own
+  saved filters. **Events…** manages the full set.
+- **Collapse the event list** with the header caret when the graph needs
+  the room — the header keeps a count of what's selected.
 
 Edge width is event count, arrows show direction, node size is total
 events; drag nodes to untangle, scroll to zoom, drag the background to
