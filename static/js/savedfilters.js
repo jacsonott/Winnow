@@ -3,6 +3,7 @@
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { renderHead } from './columns.js';
 import { $, api, el, post, toast } from './core.js';
+import { paintRemote } from './settings.js';
 import { currentSpec, renderAdvancedChips, updateSearchHint } from './filters.js';
 import { setGrouping } from './grouping.js';
 import { syncSearchExpansion } from './search.js';
@@ -118,7 +119,28 @@ export async function loadSavedFilters() {
 }
 
 export async function loadAppSettings() {
-  try { S.appSettings = await api('/api/settings/app'); } catch { S.appSettings = {}; }
+  try { S.appSettings = await api('/api/settings/app'); } catch { S.appSettings = {}; return; }
+  // Remote-session mode is a MACHINE setting now (workspace/, survives
+  // updates and port changes) — the server value is the truth. A value in
+  // the STORED localStorage blob from before the move migrates up exactly
+  // once, then the local copy is dropped so it can never fight the
+  // server. Deliberately reads the raw blob, not S.appearance: the
+  // defaults always contain the key, and writing the merged object back
+  // on a pristine browser would make every context look like a returning
+  // install (which silently killed the first-run prompt).
+  let stored = null;
+  try { stored = JSON.parse(localStorage.getItem('winnow.appearance') || 'null'); } catch { stored = null; }
+  if (stored && stored.remoteSession === true && S.appSettings.remote_session !== true) {
+    try {
+      S.appSettings = await post('/api/settings/app', { remote_session: true });
+    } catch { /* keep the local value for this session; retry next boot */ }
+  }
+  if (stored && 'remoteSession' in stored) {
+    delete stored.remoteSession;
+    try { localStorage.setItem('winnow.appearance', JSON.stringify(stored)); } catch { /* full/blocked */ }
+  }
+  S.appearance.remoteSession = !!S.appSettings.remote_session;
+  paintRemote();
 }
 
 export async function loadCaseSettings() {

@@ -25,6 +25,52 @@ export function colWidth(name) {
 
 export const visibleCols = () => S.order.filter((n) => !(S.layout[n] || {}).hidden);
 
+export const isPinned = (name) => !!(S.layout[name] || {}).pinned;
+
+/* Where each pinned column sticks: the gutter's width plus the widths of
+   the pinned columns before it. Returns {name: leftPx} for pinned columns
+   only, so the three render sites (header, filter row, body cells) all
+   place them identically.
+
+   Columns are NOT reordered to pin them. `position: sticky` keeps an
+   element in flow until it would scroll past its offset, so an unpinned
+   column between two pinned ones simply slides underneath — which is the
+   behaviour you want and costs nothing. Reordering would also have
+   silently changed export column order, which follows the arrangement. */
+export function pinnedOffsets() {
+  const out = {};
+  let left = GUTTER_W;
+  for (const name of visibleCols()) {
+    if (!isPinned(name)) continue;
+    out[name] = left;
+    left += colWidth(name);
+  }
+  return out;
+}
+
+/* Applies (or clears) the sticky placement on one rendered cell. z-index
+   sits above ordinary cells so the columns scrolling under a pin are
+   covered, and below the gutter, which pins to the left of everything. */
+export function applyPin(node, name, offsets) {
+  const left = offsets[name];
+  if (left === undefined) return false;
+  node.classList.add('pinned');
+  node.style.position = 'sticky';
+  node.style.left = left + 'px';
+  return true;
+}
+
+/* Pin or unpin, then re-render. Pinning is a layout property, so it is
+   saved with the rest of the layout and comes back with the table. */
+export function togglePin(name) {
+  const now = !isPinned(name);
+  S.layout[name] = { ...(S.layout[name] || {}), pinned: now };
+  renderHead();
+  render();
+  saveLayout();
+  return now;
+}
+
 /* ----------------------------------------------------------- column drag */
 
 /* Native HTML5 drag-and-drop, reordering S.order directly. draggedCol is
@@ -121,10 +167,12 @@ export function renderHead() {
   gf.style.flexBasis = GUTTER_W + 'px';
   filt.append(gf);
 
+  const pins = pinnedOffsets();
   for (const name of visibleCols()) {
     const w = colWidth(name);
-    const h = el('div', 'hcell' + ((S.layout[name] || {}).pinned ? ' pinned' : ''));
+    const h = el('div', 'hcell');
     h.style.flexBasis = w + 'px';
+    applyPin(h, name, pins);
     h.draggable = true;
     h.dataset.col = name;
     wireColumnDrag(h, name);
@@ -156,9 +204,17 @@ export function renderHead() {
         e.stopPropagation();
         contextMenu(e, columnMenuItems(name));
       };
-      h.title = 'Click to sort · Shift-click to add a sort · Right-click for column options';
+      h.title = 'Click to sort · Shift-click to add a sort · Alt-click to pin · Right-click for column options';
     }
     h.onclick = (e) => {
+      // Alt-click pins rather than sorts. Sorting is the header's primary
+      // job and keeps the bare click; pinning is the same "about this
+      // column" gesture with a modifier, like Shift-click for multi-sort.
+      if (e.altKey) {
+        e.preventDefault();
+        toast(togglePin(name) ? `Pinned "${name}"` : `Unpinned "${name}"`);
+        return;
+      }
       const cur = S.sort.find((s) => s.column === name);
       const dir = cur && cur.dir === 'asc' ? 'desc' : 'asc';
       if (e.shiftKey) {
@@ -179,6 +235,7 @@ export function renderHead() {
     head.append(h);
 
     const f = el('div', 'fcell');
+  applyPin(f, name, pins);
     f.style.flexBasis = w + 'px';
     const inp = el('input');
     inp.value = S.filters[name] || '';

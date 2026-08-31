@@ -18,8 +18,11 @@
 
 import * as core from './core.js';
 import * as state from './state.js';
+import { maybeOfferDefaultPrompt } from './assoc.js';
 import * as jobs from './jobs.js';
+import * as tabhistory from './tabhistory.js';
 import * as filters from './filters.js';
+import * as splash from './splash.js';
 import * as sources from './sources.js';
 import * as view from './view.js';
 import * as columns from './columns.js';
@@ -70,13 +73,17 @@ import { wireUi } from './ui.js';
    spread would freeze the value of a rebindable export like ROW_H at boot.
    Collision-free by construction — these names all shared one scope until
    the file was split. Not an API; nothing in the app reads it. */
-const NAMESPACES = { core, state, jobs, filters, sources, view, columns, tsformat, derived, grid, grouping, tags, detail, ui, filterbuilder, savedfilters, timeframe, merge, importer, tables, plugins, search, session, sql, timeline, rowmenu, keymap, settings, home };
+const NAMESPACES = { splash, core, state, jobs, tabhistory, filters, sources, view, columns, tsformat, derived, grid, grouping, tags, detail, ui, filterbuilder, savedfilters, timeframe, merge, importer, tables, plugins, search, session, sql, timeline, rowmenu, keymap, settings, home };
 window.__winnow = {};
 for (const ns of Object.values(NAMESPACES)) {
   for (const key of Object.keys(ns)) {
     Object.defineProperty(window.__winnow, key, { get: () => ns[key], configurable: true });
   }
 }
+
+// Mouse thumb buttons walk the recent-tab history (tabhistory.js). On
+// mouseup, where browsers fire their own history navigation from.
+window.addEventListener('mouseup', tabhistory.onMouseNav);
 
 wireSources();
 wireGrouping();
@@ -113,6 +120,21 @@ wireSidebarResize();
 
 wireFileDrop();
 
+/* The splash and boot run TOGETHER, not in sequence. boot() renders the
+   case list behind the overlay, so when the animation finishes it fades
+   onto a screen that is already there — the transition is a reveal, not a
+   second load. It also means a slow case list waits behind something worth
+   looking at rather than an empty page. */
+if (splash.splashEnabled(S.appearance)) {
+  splash.runSplash();   // takes its colours from the live skin, not an argument
+}
+/* Presence: the open connection is how the server knows a browser is
+   still attached — it shuts itself down once every window is gone (see
+   server.py's idle-shutdown block). EventSource reconnects on its own
+   after a server restart, and no handlers are needed because no data ever
+   flows; the connection is the message. */
+new EventSource('/api/presence');
+
 boot().catch((e) => toast('Could not start: ' + e.message, 8000));
 
-maybeOfferRemoteMode().then(() => maybeOfferStorageDir());
+maybeOfferRemoteMode().then(() => maybeOfferStorageDir()).then(() => maybeOfferDefaultPrompt());

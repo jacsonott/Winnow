@@ -1,6 +1,6 @@
 """Winnow — a local web app for reading very large CSVs out of SQLite.
 
-    python server.py --case case.db --open sample.csv
+    python server.py --case case.db-winnow --open sample.csv
 
 Then browse to http://127.0.0.1:8777
 """
@@ -8,14 +8,18 @@ Then browse to http://127.0.0.1:8777
 from __future__ import annotations
 
 import argparse
+import asyncio
 import contextlib
 import heapq
 import json
 import os
+import re
 import shutil
+import socket
 import sqlite3
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -24,16 +28,103 @@ from fastapi.responses import StreamingResponse, FileResponse, JSONResponse, Pla
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from winnow import assoc as file_assoc
 from winnow import browser
+from winnow import instances
 from winnow import paths
 from winnow import plugin_api
 from winnow import updater
 from winnow import version
 from winnow import workspace as WS
-from winnow.store import (SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, OpCancelled, Store, describe_case_lock,
-                   probe_case_lock, sweep_orphan_views)
+from winnow.store import (CASE_SUFFIX, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, OpCancelled, Store,
+                   describe_case_lock, probe_case_lock, sweep_orphan_views)
 
 HERE = paths.INSTALL_ROOT  # static/, plugins/, examples/plugins/ all hang off the install root
+
+
+# ------------------------------------------------------------ idle shutdown
+#
+# A server whose browser windows are all gone shuts itself down. Two things
+# made this necessary at once: file associations spawn extra instances on
+# ephemeral ports (see winnow/instances.py), which nobody will ever find a
+# terminal for, and the long-standing failure mode the ⏻ button exists for —
+# a forgotten server holding a case lock all weekend — stops requiring the
+# analyst to remember anything.
+#
+# "A browser is connected" cannot be inferred from request traffic: an
+# analyst reading the grid makes no requests at all, sometimes for hours.
+# So every page holds open an EventSource to /api/presence, and the signal
+# is the count of live streams — connection-oriented, immune to background-
+# tab timer throttling, and torn down by the browser the moment a window
+# closes. Zero streams sustained past a grace period, with nothing else
+# going on, means nobody is here.
+#
+# Three holds keep this from ever destroying work:
+#  - any live stream (the grace period also covers a reload's brief dip
+#    to zero);
+#  - in-flight HTTP (a multi-minute CSV export keeps downloading after its
+#    tab closes — that connection counts until it finishes);
+#  - running or queued ingest jobs (auto-exit closing the store would drop
+#    a partial import, which is exactly what close() is documented to do).
+#
+# A server nothing ever connected to gets a much longer fuse: --no-browser
+# plus a manual visit is a legitimate flow, and so is a launcher whose
+# browser failed to open — the long fuse is what still reaps that one.
+
+IDLE_EXIT_S = float(os.environ.get("WINNOW_IDLE_EXIT_S", "120"))
+NEVER_CONNECTED_EXIT_S = float(os.environ.get("WINNOW_NEVER_CONNECTED_EXIT_S", "900"))
+IDLE_TICK_S = float(os.environ.get("WINNOW_IDLE_TICK_S", "10"))
+
+
+class _Presence:
+    def __init__(self):
+        self.streams = 0            # open /api/presence connections
+        self.inflight = 0           # other HTTP requests mid-flight
+        self.ever_connected = False
+        self.started = time.monotonic()
+        self.last_zero = time.monotonic()
+        self.enabled = True         # main() clears this for --no-idle-shutdown
+
+
+PRESENCE = _Presence()
+
+
+def _jobs_running() -> bool:
+    if STORE is None or STORE.closed:
+        return False
+    try:
+        return any(j["status"] in ("running", "queued") for j in STORE.list_ingest_jobs())
+    except Exception:  # noqa: BLE001 — a store mid-close must read as "not busy"
+        return False
+
+
+def _idle_exit_reason(now: float, p: _Presence, busy: bool) -> str | None:
+    """Why this server should exit right now, or None. Pure on its inputs —
+    the monitor passes live state, the tests pass constructed ones."""
+    if not p.enabled or p.streams > 0 or busy:
+        return None
+    if p.ever_connected:
+        idle = now - p.last_zero
+        if idle >= IDLE_EXIT_S:
+            return (f"no browser has been connected for {int(idle)}s — "
+                    "shutting down (disable with --no-idle-shutdown)")
+    else:
+        up = now - p.started
+        if up >= NEVER_CONNECTED_EXIT_S:
+            return (f"no browser ever connected in {int(up)}s — "
+                    "shutting down (disable with --no-idle-shutdown)")
+    return None
+
+
+async def _idle_monitor():
+    while True:
+        await asyncio.sleep(IDLE_TICK_S)
+        reason = _idle_exit_reason(time.monotonic(), PRESENCE,
+                                   PRESENCE.inflight > 0 or _jobs_running())
+        if reason:
+            print(reason, flush=True)
+            _trigger_shutdown()
+            return
 
 
 @contextlib.asynccontextmanager
@@ -57,12 +148,30 @@ async def _lifespan(_app: FastAPI):
     than in main() so `uvicorn server:app` gets both too."""
     global STORE
     swept = sweep_orphan_views()
+    with contextlib.suppress(Exception):
+        gone = _sweep_quicklook()
+        if gone:
+            print(f"Cleaned up {gone} abandoned quick-look case(s)")
+    # An update can replace the brand icon in place; the OS keeps showing
+    # the old one (Explorer caches association icons, and the Linux theme
+    # copy was a one-time copy) until someone re-syncs. Cheap no-op when
+    # Winnow isn't registered or the icon didn't change.
+    with contextlib.suppress(Exception):
+        a = file_assoc.adapter(background=_assoc_background())
+        if a and a.refresh_icons(_assoc_catalogue()):
+            print("File-association icon refreshed after an icon update")
     if swept["removed"]:
         print(f"Cleaned up {swept['removed']} orphaned temp file(s) from previous runs "
               f"({swept['bytes_freed'] / (1 << 20):.1f} MB)")
+    monitor = asyncio.create_task(_idle_monitor())
     try:
         yield
     finally:
+        monitor.cancel()
+        # Take this server out of the instance registry FIRST, so a launcher
+        # racing our shutdown doesn't pick a server that is mid-teardown.
+        with contextlib.suppress(Exception):
+            instances.unregister()
         old, STORE = STORE, None
         if old is not None:
             # Also cancels and joins running ingest jobs (bounded by one
@@ -214,6 +323,24 @@ async def require_client_header(request: Request, call_next):
 
 @app.middleware("http")
 async def no_cache_static(request: Request, call_next):
+    # Piggybacked in-flight counting for idle shutdown — this middleware
+    # already wraps every request, so the marginal cost is two increments.
+    # /api/presence is excluded: its response streams for the LIFETIME of a
+    # page, so counting it would read as "busy" forever; it has its own
+    # stream counter. A download that outlives its tab (a multi-minute CSV
+    # export) counts here until the body finishes, which is the hold that
+    # keeps auto-exit from killing it.
+    counted = request.url.path != "/api/presence"
+    if counted:
+        PRESENCE.inflight += 1
+    try:
+        return await _no_cache_static_inner(request, call_next)
+    finally:
+        if counted:
+            PRESENCE.inflight -= 1
+
+
+async def _no_cache_static_inner(request: Request, call_next):
     """StaticFiles sends Last-Modified/ETag but no Cache-Control, which
     leaves the browser free to serve a stale index.html/app.js/style.css
     from its own disk cache for an unbounded time — even across a normal
@@ -377,7 +504,104 @@ def _case_display_name(path: str) -> str:
 def api_case_current():
     if STORE is None:
         return {"open": False}
-    return {"open": True, "path": STORE.path, "name": _case_display_name(STORE.path)}
+    return {"open": True, "path": STORE.path, "name": _case_display_name(STORE.path),
+            "temp": _is_temp_case(STORE.path)}
+
+
+# ------------------------------------------------------------ quick-look cases
+#
+# A file opened through an OS file association lands in a TEMPORARY case:
+# the analyst is looking at one artifact, and making them name and file a
+# case first is exactly the friction the association exists to remove. A
+# temp case is an ordinary case file in <cases_dir>/quicklook/ — temp-ness
+# is a fact about the path, not a flag anywhere, so it survives restarts
+# and needs no state. It stays out of the home screen's registry until the
+# analyst saves it; from the banner they can name it (the file moves out of
+# quicklook/ and registers), push its tables into an existing case
+# (copy_sources_to), or discard it.
+
+def _cases_dir() -> str:
+    configured = os.environ.get("WINNOW_CASES_DIR") or WS.machine_prefs.get("cases_dir")
+    base = configured or str(paths.INSTALL_ROOT / "cases")
+    return os.path.abspath(os.path.expanduser(base))
+
+
+QUICKLOOK_DIRNAME = "quicklook"
+
+
+def _is_temp_case(path: str) -> bool:
+    return os.path.basename(os.path.dirname(os.path.abspath(path))) == QUICKLOOK_DIRNAME
+
+
+def _new_temp_case_path() -> str:
+    d = os.path.join(_cases_dir(), QUICKLOOK_DIRNAME)
+    os.makedirs(d, exist_ok=True)
+    stamp = __import__("datetime").datetime.now().strftime("%Y%m%d-%H%M%S")
+    path = os.path.join(d, f"quicklook-{stamp}{CASE_SUFFIX}")
+    n = 1
+    while os.path.exists(path):
+        path = os.path.join(d, f"quicklook-{stamp}-{n}{CASE_SUFFIX}")
+        n += 1
+    return path
+
+
+def is_winnow_case_file(path: str) -> bool:
+    """Distinguish a Winnow case from a generic SQLite file — double-
+    clicking a case should OPEN it, not ingest it as data. Read-only,
+    tolerant of anything unreadable."""
+    try:
+        with open(path, "rb") as f:
+            if f.read(16) != b"SQLite format 3\x00":
+                return False
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            names = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+        finally:
+            conn.close()
+        return {"sources", "tag_defs", "row_tags"} <= names
+    except Exception:  # noqa: BLE001 — unreadable means "not a case"
+        return False
+
+
+def _sweep_quicklook(max_age_days: int = 7) -> int:
+    """Delete abandoned quick-look cases: old, unlocked, and holding no
+    analysis (no tags, no notes, no saved sessions). Anything with work in
+    it is kept forever — a janitor that can eat findings is worse than the
+    disk it saves."""
+    d = os.path.join(_cases_dir(), QUICKLOOK_DIRNAME)
+    if not os.path.isdir(d):
+        return 0
+    cutoff = __import__("time").time() - max_age_days * 86400
+    removed = 0
+    for fn in os.listdir(d):
+        # New quick-looks are CASE_SUFFIX; ".db" keeps sweeping the ones a
+        # pre-change build left in this directory.
+        if not (fn.endswith(CASE_SUFFIX) or fn.endswith(".db")):
+            continue
+        path = os.path.join(d, fn)
+        try:
+            if os.path.getmtime(path) > cutoff or probe_case_lock(path):
+                continue
+            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            try:
+                busy = any(
+                    conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+                    for t in ("row_tags", "row_notes", "sessions")
+                    if conn.execute("SELECT 1 FROM sqlite_master WHERE name=?", (t,)).fetchone())
+            finally:
+                conn.close()
+            if busy:
+                continue
+            for suffix in ("", "-wal", "-shm"):
+                with contextlib.suppress(OSError):
+                    os.remove(path + suffix)
+            with contextlib.suppress(OSError):
+                os.remove(path + ".winnow-lock")
+            removed += 1
+        except OSError:
+            continue
+    return removed
 
 
 def _trigger_shutdown() -> None:
@@ -398,6 +622,26 @@ class UpdateApply(BaseModel):
     """Applying is a separate, explicit POST from checking — a check must
     never be able to install anything as a side effect."""
     confirm: bool = False
+
+
+@app.get("/api/presence")
+async def api_presence():
+    """The connection every page holds open so the server knows a browser
+    is attached. EventSource on the client, a comment-ping stream here —
+    no data ever flows, the CONNECTION is the message. Disconnect is
+    noticed at the next ping (≤15s), which is well inside the idle grace."""
+    async def stream():
+        PRESENCE.streams += 1
+        PRESENCE.ever_connected = True
+        try:
+            while True:
+                yield ": ping\n\n"
+                await asyncio.sleep(15)
+        finally:
+            PRESENCE.streams -= 1
+            if PRESENCE.streams == 0:
+                PRESENCE.last_zero = time.monotonic()
+    return StreamingResponse(stream(), media_type="text/event-stream")
 
 
 @app.get("/api/version")
@@ -525,12 +769,379 @@ def api_case_open(body: CaseOpen):
         body.path, name=os.path.splitext(os.path.basename(body.path))[0]
     )
     WS.cases.touch_opened(rec["id"])
+    # The instance registry is how an association-launch decides whether this
+    # server is reusable; a case opening here is what makes it not-idle.
+    with contextlib.suppress(Exception):
+        instances.set_case(body.path)
     # The effective plugin set is per-case now (case_settings overrides), so
     # a case switch is a policy change: reload so an "on in this case" tab
     # exists the moment the case does, and an "off in this case" plugin's
     # code is unloaded rather than merely unlisted.
     _reload_plugins()
     return {"sources": STORE.list_sources(), "name": rec["name"]}
+
+
+class CopySourcesBody(BaseModel):
+    target_path: str
+    source_ids: list[int]
+
+
+@app.post("/api/case/copy_sources")
+def api_case_copy_sources(body: CopySourcesBody):
+    """Copy sources from the open case into another case file — the "save
+    these quick-look tables into my real case" flow. A target open in
+    another Winnow is refused with the holder named (409, same contract as
+    opening a locked case)."""
+    if _jobs_running():
+        # A source mid-ingest has an accurate-but-growing row_count; the
+        # ATTACH copy would snapshot whatever happened to be committed
+        # and file it in the target as a complete table.
+        raise HTTPException(409, "Still importing — copy again when the import finishes")
+    try:
+        return store().copy_sources_to(body.target_path, body.source_ids)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        code = 409 if "another Winnow" in str(e) else 400
+        raise HTTPException(code, str(e))
+
+
+class AssocOpenBody(BaseModel):
+    files: list[str]
+
+
+@app.post("/api/assoc/open")
+def api_assoc_open(request: Request, body: AssocOpenBody):
+    """A file-association launch landing on an already-running server.
+
+    Loopback-only: it creates cases and ingests files by path, both
+    write-shaped powers that stay local. Three states, three answers:
+    no case open — create a fresh quick-look case and ingest into it; a
+    QUICK-LOOK case open — add to it (five files double-clicked together
+    arrive as five launcher invocations, and they belong in one case); a
+    real case open — 409, the launcher spawns its own instance instead,
+    because switching this server's case would yank every window the
+    analyst has open."""
+    global STORE
+    if not _is_loopback(request):
+        raise HTTPException(403, "Association opens are only accepted from this machine")
+    files = [os.path.abspath(f) for f in body.files]
+    missing = [f for f in files if not os.path.isfile(f)]
+    if missing:
+        raise HTTPException(400, f"No file at {missing[0]}")
+
+    if STORE is not None and not STORE.closed and not _is_temp_case(STORE.path):
+        raise HTTPException(409, "A case is open here — spawn a fresh instance instead")
+    if STORE is None or STORE.closed:
+        temp = _new_temp_case_path()
+        STORE = _open_store(temp)
+        with contextlib.suppress(Exception):
+            instances.set_case(temp)
+        _reload_plugins()
+
+    started, skipped = [], []
+    for f in files:
+        try:
+            started.append(_assoc_ingest(f))
+        except Exception as e:  # noqa: BLE001 — a corrupt .db raises
+            # sqlite3.DatabaseError and a truncated .xlsx BadZipFile, not
+            # ValueError; one unreadable file must skip, not 500 the open.
+            skipped.append({"file": os.path.basename(f), "reason": str(e)})
+    # `connected` tells the LAUNCHER whether anyone is actually looking at
+    # this server (live presence streams). A hand-off to a window the
+    # analyst closed used to show nothing at all — the launcher uses this
+    # to decide whether the association still owes them a window.
+    return {"case": STORE.path, "temp": True, "started": started, "skipped": skipped,
+            "connected": PRESENCE.streams > 0}
+
+
+def _assoc_ingest(path: str) -> dict:
+    """Queue one associated file into the open case, headless — nobody is
+    standing at an import modal. SQLite files and workbooks normally get a
+    picker; a quick-look takes EVERYTHING (all tables, all sheets), which
+    is what "just show me the file" means."""
+    # Plugin formats first, matching the import modal's own precedence
+    # (importer.js queues a file under its plugin format when one claims
+    # it) — without this, a double-clicked file of a plugin-registered
+    # type fell through to the CSV sniffer and ingested as garbage. This
+    # is also what makes plugin file ASSOCIATIONS real: registering a
+    # plugin's extension (Settings → File associations) hands the file to
+    # this path, which must then actually use the plugin's parser.
+    fmt = PLUGINS.format_for_filename(os.path.basename(path))
+    if fmt is not None:
+        # Synchronous, like every plugin ingest (no background job): the
+        # source exists by the time this returns, so there is no job_id
+        # for the caller to poll — the page's normal source load sees it.
+        rec = _ingest_via_plugin(path, fmt.id, None, {}, True)
+        return {"file": os.path.basename(path), "kind": f"plugin:{fmt.id}",
+                "source_id": rec["id"], "rows": rec.get("row_count", 0)}
+    kind = _ingest_kind_for_path(path)
+    opts = {"build_fts": True}
+    if kind == "sqlite":
+        tables = store().preview_sqlite_tables(path)["tables"]
+        if not tables:
+            raise ValueError("no tables in this SQLite file")
+        opts["tables"] = [{"table": t["name"],
+                           "timestamp_columns": t["likely_timestamp_columns"]} for t in tables]
+    elif kind == "xlsx":
+        sheets = store().preview_xlsx_sheets(path)["tables"]
+        keep = [t for t in sheets if t["row_count"] > 0]
+        if not keep:
+            raise ValueError("no data sheets in this workbook")
+        opts["tables"] = [{"table": t["name"]} for t in keep]
+    job = store().start_ingest_job(kind, path, options=opts)
+    return {"file": os.path.basename(path), "job_id": job["job_id"], "kind": kind}
+
+
+# ------------------------------------------------- association registration
+#
+# Settings → File associations (and the one-time after-import offer) talk
+# to these. All loopback-only: they change per-user OS state, which a
+# hostile page in another tab has no business touching — same reasoning
+# as /api/assoc/open. The catalogue is winnow/assoc.py's builtins plus
+# whatever extensions the currently loaded plugins claim, so a new ingest
+# plugin shows up in the panel with no code change here.
+
+_ASSOC_ASKED_KEY = "assoc_asked_exts"
+# Extensions the make-it-the-default launch prompt has covered. Separate
+# from asked_exts (the after-import HANDLER offer): this one gates the
+# one-shot default question a launch raises when the catalogue grows a
+# new extension — a Winnow update adding a type, or a newly installed
+# plugin. Any answer records here; only genuinely new extensions re-raise
+# the prompt.
+_ASSOC_PROMPTED_KEY = "assoc_prompted_exts"
+
+
+def _mark_prompted(exts: list[str]) -> None:
+    done = set(WS.machine_prefs.get(_ASSOC_PROMPTED_KEY) or [])
+    done.update(e.lower() for e in exts)
+    WS.machine_prefs.set(_ASSOC_PROMPTED_KEY, sorted(done))
+# Start the association-launched server with the console-less interpreter
+# (pythonw.exe) so double-clicking a file doesn't also open a terminal
+# window. Off by default: the hidden flavour hides the server log too,
+# which matters the day an association won't open. Windows-only in effect;
+# Linux .desktop entries already run with Terminal=false.
+_ASSOC_BACKGROUND_KEY = "assoc_background"
+
+
+def _assoc_background() -> bool:
+    # ON unless turned off: a console window riding along with every
+    # double-clicked file is the wrong default experience, and the
+    # Appearance toggle (with the server-log caveat spelled out there)
+    # is where the analyst who needs the console goes to get it back.
+    val = WS.machine_prefs.get(_ASSOC_BACKGROUND_KEY)
+    return True if val is None else bool(val)
+
+
+class AssocExtsBody(BaseModel):
+    exts: list[str]
+
+
+def _assoc_catalogue() -> list[dict]:
+    return file_assoc.supported_types(PLUGINS.list_formats())
+
+
+def _assoc_pick(exts: list[str], catalogue: list[dict]) -> list[dict]:
+    by_ext = {t["ext"]: t for t in catalogue}
+    picked = []
+    for e in exts:
+        e = e.lower()
+        if not e.startswith("."):
+            e = "." + e
+        t = by_ext.get(e)
+        if t is None:
+            raise HTTPException(400, f"Winnow has no importer for {e}")
+        picked.append(t)
+    return picked
+
+
+def _assoc_adapter(request: Request):
+    if not _is_loopback(request):
+        raise HTTPException(403, "association changes are loopback-only")
+    a = file_assoc.adapter(background=_assoc_background())
+    if a is None:
+        raise HTTPException(400, "file associations aren't supported on this platform")
+    return a
+
+
+def _mark_asked(exts: list[str]) -> None:
+    asked = set(WS.machine_prefs.get(_ASSOC_ASKED_KEY) or [])
+    asked.update(e.lower() for e in exts)
+    WS.machine_prefs.set(_ASSOC_ASKED_KEY, sorted(asked))
+
+
+@app.get("/api/assoc/types")
+def api_assoc_types(request: Request):
+    if not _is_loopback(request):
+        raise HTTPException(403, "association status is loopback-only")
+    catalogue = _assoc_catalogue()
+    a = file_assoc.adapter()
+    st = a.status(catalogue) if a else {}
+    asked = set(WS.machine_prefs.get(_ASSOC_ASKED_KEY) or [])
+    prompted = set(WS.machine_prefs.get(_ASSOC_PROMPTED_KEY) or [])
+    return {"platform": file_assoc.platform_name(),
+            "background": _assoc_background(),
+            "types": [{**t, **st.get(t["ext"], {"registered": False, "default": False}),
+                       "asked": t["ext"] in asked,
+                       "prompted": t["ext"] in prompted} for t in catalogue]}
+
+
+@app.post("/api/assoc/register")
+def api_assoc_register(request: Request, body: AssocExtsBody):
+    a = _assoc_adapter(request)
+    catalogue = _assoc_catalogue()
+    try:
+        a.register(_assoc_pick(body.exts, catalogue), catalogue)
+    except ValueError as e:   # a malformed mimeapps.list, with the fix named
+        raise HTTPException(400, str(e))
+    _mark_asked(body.exts)   # an explicit yes is also an answer
+    return {"ok": True}
+
+
+@app.post("/api/assoc/unregister")
+def api_assoc_unregister(request: Request, body: AssocExtsBody):
+    a = _assoc_adapter(request)
+    catalogue = _assoc_catalogue()
+    try:
+        a.unregister(_assoc_pick(body.exts, catalogue), catalogue)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True}
+
+
+@app.post("/api/assoc/default")
+def api_assoc_default(request: Request, body: AssocExtsBody):
+    a = _assoc_adapter(request)
+    catalogue = _assoc_catalogue()
+    picked = _assoc_pick(body.exts, catalogue)
+    refused = [t["ext"] for t in picked if not t["default_ok"]]
+    if refused:
+        # Handler-only types have real owners (Excel, editors, DB tools);
+        # the catalogue is the policy and the API enforces it — the UI
+        # not offering the button is not enough.
+        raise HTTPException(400, f"{', '.join(refused)} can only be a handler, not the default")
+    try:
+        result = a.make_default(picked, catalogue) or {}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    _mark_asked(body.exts)
+    _mark_prompted(body.exts)   # an explicit default IS the answer
+    return {"ok": True, **result}
+
+
+class AssocBackgroundBody(BaseModel):
+    enabled: bool
+
+
+@app.post("/api/assoc/background")
+def api_assoc_background(request: Request, body: AssocBackgroundBody):
+    """Toggle console-less association launches. Applies immediately: the
+    ProgId's open command is the ONE registry value every registered
+    extension shares, so rewriting it here beats making the analyst
+    un-register and re-register every type to pick the change up."""
+    if not _is_loopback(request):
+        raise HTTPException(403, "loopback-only")
+    # False must be STORED, not dropped — with the default now on,
+    # deleting the key would silently turn the setting back on.
+    WS.machine_prefs.set(_ASSOC_BACKGROUND_KEY, bool(body.enabled))
+    a = file_assoc.adapter(background=bool(body.enabled))
+    applied = bool(a and getattr(a, "refresh_command", None) and a.refresh_command())
+    return {"ok": True, "background": bool(body.enabled), "applied": applied}
+
+
+@app.post("/api/assoc/prompted")
+def api_assoc_prompted(request: Request, body: AssocExtsBody):
+    # Any answer to the launch prompt — including "not now" — is final for
+    # these extensions; only NEW extensions raise the prompt again.
+    if not _is_loopback(request):
+        raise HTTPException(403, "loopback-only")
+    _assoc_pick(body.exts, _assoc_catalogue())
+    _mark_prompted(body.exts)
+    return {"ok": True}
+
+
+@app.post("/api/assoc/asked")
+def api_assoc_asked(request: Request, body: AssocExtsBody):
+    # "No" is an answer to remember too — the offer fires once per type.
+    if not _is_loopback(request):
+        raise HTTPException(403, "loopback-only")
+    _assoc_pick(body.exts, _assoc_catalogue())
+    _mark_asked(body.exts)
+    return {"ok": True}
+
+
+class CaseSaveAsBody(BaseModel):
+    name: str
+
+
+@app.post("/api/case/save_as")
+def api_case_save_as(body: CaseSaveAsBody):
+    """Promote the open quick-look case to a real one: move the file out of
+    quicklook/, register it on the home screen under the given name.
+
+    The close→rename→reopen dance is not optional: Windows refuses to
+    rename a file with open handles, so the store must genuinely release
+    it first. The window where STORE is closed is the same one every case
+    switch already has — in-flight requests get the same 409."""
+    global STORE
+    if STORE is None or STORE.closed:
+        raise HTTPException(400, "No case is open")
+    if not _is_temp_case(STORE.path):
+        raise HTTPException(400, "Only a quick-look case can be saved this way — "
+                                 "this one already has a home")
+    if _jobs_running():
+        # Closing the store cancels running ingest jobs, and a cancelled
+        # ingest DROPS its partial source (the cancel contract) — so
+        # "save while the file is still importing" would quietly produce
+        # an empty saved case. Natural timing, too: double-click a big
+        # file, banner appears, analyst clicks Save immediately.
+        raise HTTPException(409, "Still importing — save again when the import finishes")
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(400, "Give the case a name")
+    slug = re.sub(r"[^A-Za-z0-9._ -]+", "_", name).strip() or "case"
+    dest = os.path.join(_cases_dir(), f"{slug}{CASE_SUFFIX}")
+    if os.path.exists(dest):
+        raise HTTPException(400, f"A case file named {os.path.basename(dest)} already exists")
+
+    old_path = STORE.path
+    STORE.close()
+    try:
+        os.replace(old_path, dest)
+    except OSError as e:
+        STORE = _open_store(old_path)   # failed rename leaves everything as it was
+        raise HTTPException(400, f"Could not move the case file: {e}")
+    for suffix in ("-wal", "-shm", ".winnow-lock"):
+        with contextlib.suppress(OSError):
+            os.remove(old_path + suffix)
+    STORE = _open_store(dest)
+    rec = WS.cases.create(dest, name=name)
+    WS.cases.touch_opened(rec["id"])
+    with contextlib.suppress(Exception):
+        instances.set_case(dest)
+    return {"path": dest, "name": name, "temp": False}
+
+
+@app.post("/api/case/discard")
+def api_case_discard():
+    """Throw a quick-look case away. Refused for real cases — deleting
+    those goes through the home screen, where it says what it is doing."""
+    global STORE
+    if STORE is None or STORE.closed:
+        raise HTTPException(400, "No case is open")
+    if not _is_temp_case(STORE.path):
+        raise HTTPException(400, "Only a quick-look case can be discarded — "
+                                 "delete a real case from the home screen")
+    path = STORE.path
+    old, STORE = STORE, None
+    with contextlib.suppress(Exception):
+        old.close()
+    for suffix in ("", "-wal", "-shm", ".winnow-lock"):
+        with contextlib.suppress(OSError):
+            os.remove(path + suffix)
+    with contextlib.suppress(Exception):
+        instances.set_case(None)
+    return {"ok": True}
 
 
 @app.post("/api/case/compact")
@@ -558,6 +1169,50 @@ def _is_loopback(request: Request) -> bool:
     peer."""
     host = request.client.host if request.client else ""
     return host in ("127.0.0.1", "::1", "testclient")
+
+
+class MakeDirBody(BaseModel):
+    parent: str
+    name: str
+
+
+@app.post("/api/browse_dir/new")
+def api_browse_dir_new(request: Request, body: MakeDirBody):
+    """Create one directory inside `parent` — the folder picker's "New
+    folder", so an analyst filing a case somewhere that doesn't exist yet
+    doesn't have to leave and come back.
+
+    LOOPBACK ONLY, unlike the folder listing beside it. Listing answers any
+    peer the analyst chose to bind (the no-auth model is theirs to accept),
+    but this WRITES, and "read a directory name" and "create a directory
+    anywhere the server user can" are not the same risk.
+
+    `name` is one path segment, checked rather than trusted: no separators,
+    no `..`, nothing that resolves outside `parent`. The analyst can
+    already type any path they like into the case-path box — this is a
+    convenience over the same ground, not a new reach."""
+    if not _is_loopback(request):
+        raise HTTPException(403, "Creating folders is only allowed from this machine")
+    name = (body.name or "").strip().strip(".")
+    if not name:
+        raise HTTPException(400, "Give the folder a name")
+    if os.sep in name or (os.altsep and os.altsep in name) or name in (".", ".."):
+        raise HTTPException(400, "A folder name can't contain a path separator")
+    parent = os.path.abspath(os.path.expanduser(body.parent or ""))
+    if not os.path.isdir(parent):
+        raise HTTPException(400, f"No folder at {parent}")
+    target = os.path.abspath(os.path.join(parent, name))
+    # Belt and braces over the name check: whatever the string did, the
+    # result has to sit directly inside the folder being browsed.
+    if os.path.dirname(target) != parent:
+        raise HTTPException(400, "That name would create a folder somewhere else")
+    if os.path.exists(target):
+        raise HTTPException(400, f"{name!r} already exists here")
+    try:
+        os.mkdir(target)
+    except OSError as e:
+        raise HTTPException(400, f"Could not create it: {e}")
+    return {"path": target, "name": name}
 
 
 @app.get("/api/browse_dir")
@@ -646,9 +1301,16 @@ class PrefsBody(BaseModel):
 
 @app.get("/api/prefs")
 def api_prefs():
+    # A quick-look opened on a brand-new install would otherwise get the
+    # first-run setup prompt stacked on top of the file the analyst just
+    # double-clicked — the exact friction the association exists to remove.
+    # Nothing is being filed anywhere yet; the cases-dir question can wait
+    # until Save-as-a-case, or until they launch Winnow itself.
+    quicklook = STORE is not None and _is_temp_case(STORE.path)
     return {"cases_dir": WS.machine_prefs.get("cases_dir"),
             # first run of this INSTANCE: nothing configured and no cases yet
-            "first_run": WS.machine_prefs.get("cases_dir") is None and not WS.cases.list()}
+            "first_run": (WS.machine_prefs.get("cases_dir") is None
+                          and not WS.cases.list() and not quicklook)}
 
 
 @app.post("/api/prefs")
@@ -816,6 +1478,15 @@ async def api_ingest_upload(
             os.remove(tmp)
 
 
+def _decode_preview_bytes(raw: bytes) -> str:
+    # Same UTF-16 BOM handling as the real ingest (store.sniff_text_encoding)
+    # so the preview an analyst approves is the table they actually get —
+    # PowerShell's UTF-16LE exports were previewing as NUL-riddled noise.
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return raw.decode("utf-16", errors="replace")
+    return raw.decode("utf-8-sig", errors="replace")
+
+
 @app.post("/api/ingest/preview")
 async def api_ingest_preview(
     file: UploadFile = File(...),
@@ -823,7 +1494,7 @@ async def api_ingest_preview(
     has_header: bool = Form(True),
 ):
     raw = await file.read(512 * 1024)  # bounded sample — full parse happens at real ingest time
-    text = raw.decode("utf-8-sig", errors="replace")
+    text = _decode_preview_bytes(raw)
     try:
         return store().preview_csv_text(text, delimiter=delimiter or None, has_header=has_header)
     except Exception as e:
@@ -980,7 +1651,7 @@ def api_ingest_preview_path(body: PreviewPath):
             # Same bounded sample the upload preview reads — never the file.
             with open(body.path, "rb") as f:
                 raw = f.read(512 * 1024)
-            text = raw.decode("utf-8-sig", errors="replace")
+            text = _decode_preview_bytes(raw)
             return store().preview_csv_text(text, delimiter=body.delimiter or None,
                                             has_header=body.has_header)
         if kind == "json":
@@ -1708,6 +2379,7 @@ def api_default_tags_save(body: DefaultTagsWrite):
 
 class AppSettingsWrite(BaseModel):
     default_ts_format: str | None = None
+    remote_session: bool | None = None
 
 
 @app.get("/api/settings/app")
@@ -2171,6 +2843,108 @@ class SessionSaveReq(BaseModel):
     name: str
 
 
+class CaseSessionSave(BaseModel):
+    name: str
+
+
+class CaseSessionRename(BaseModel):
+    name: str
+
+
+class CaseSessionAdopt(BaseModel):
+    """A session file received from another analyst. Recording it and
+    applying it are separate calls on purpose — taking someone's work into
+    your case is a decision, not a side effect of opening their file."""
+    name: str
+    session: dict
+
+
+@app.get("/api/case_sessions")
+def api_case_sessions_list():
+    """Sessions stored IN the case file. These travel with the .db; the
+    older /api/sessions writes files beside it."""
+    return {"sessions": store().list_sessions()}
+
+
+@app.post("/api/case_sessions")
+def api_case_sessions_save(body: CaseSessionSave):
+    try:
+        return store().save_session(body.name)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/case_sessions/{name}/load")
+def api_case_sessions_load(name: str, merge: bool = True):
+    try:
+        return store().load_session(name, merge=merge)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/case_sessions/adopt")
+def api_case_sessions_adopt(body: CaseSessionAdopt):
+    try:
+        return store().adopt_session(body.name, body.session)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/case_sessions/{name}/rename")
+def api_case_sessions_rename(name: str, body: CaseSessionRename):
+    try:
+        return store().rename_session(name, body.name)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.delete("/api/case_sessions/{name}")
+def api_case_sessions_delete(name: str):
+    store().delete_session(name)
+    return {"ok": True}
+
+
+@app.get("/api/case_sessions/{name}/download")
+def api_case_sessions_download(name: str):
+    """The hand-off: a stored session as a file, for sending to another
+    analyst. The only reason a session file exists now."""
+    try:
+        data = store().get_session(name)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("_") or "session"
+    return JSONResponse(data, headers={
+        "Content-Disposition": f'attachment; filename="{safe}.winnow_case.json"'})
+
+
+class NewSessionReq(BaseModel):
+    """save_as is optional but strongly encouraged by the UI — clearing
+    without saving is the one irreversible move here."""
+    save_as: str | None = None
+
+
+@app.post("/api/case_sessions/new")
+def api_case_sessions_new(body: NewSessionReq):
+    """Start a fresh pass: save the current work (if named) and clear the
+    live tags and notes. Layouts, derived columns and SQL tabs stay."""
+    try:
+        return store().start_new_session(body.save_as)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/case_sessions/diff")
+def api_case_sessions_diff(left: str, right: str):
+    """What changed between two sessions — the QC review. Either side may
+    be the live case (`__live__`)."""
+    try:
+        return JSONResponse(store().diff_sessions(left, right))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+
+
 @app.get("/api/sessions")
 def api_sessions_list():
     return store().list_named_sessions()
@@ -2331,6 +3105,104 @@ def index():
 app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
 
 
+def _assoc_post(port: int, route: str, payload: dict, timeout: float = 30.0) -> dict | None:
+    """POST to a sibling instance; None means it declined or died — the
+    launcher just falls through to the next option."""
+    import urllib.request
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}{route}",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "X-Timeline-Lite-Client": "1"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except Exception:  # noqa: BLE001 — any failure means "this instance won't take it"
+        return None
+
+
+def _recent_temp_instance(alive: list[dict], max_age_s: float = 120.0) -> dict | None:
+    """A just-started quick-look instance — where the rest of a multi-file
+    double-click belongs. Windows delivers one launcher process per
+    selected file, so five files selected together arrive as five
+    invocations within a second or two; without this they would open five
+    windows on five cases."""
+    now = time.time()
+    for i in alive:
+        case = i.get("case_path") or ""
+        if not case or not _is_temp_case(case):
+            continue
+        try:
+            started = time.mktime(time.strptime(i["started_at"], "%Y-%m-%dT%H:%M:%S"))
+        except (KeyError, ValueError):
+            continue
+        if now - started <= max_age_s:
+            return i
+    return None
+
+
+def _run_assoc(files: list[str], no_browser: bool = False) -> int | None:
+    """The file-association launch. Returns an exit code when the work was
+    handed to an existing instance, or None when this process should carry
+    on and BECOME the server (main() falls through with the right args).
+
+    Order of preference: a case file opens as a case wherever possible; a
+    fresh quick-look joins a seconds-old one (multi-select), else lands on
+    an idle instance, else this process spawns. A busy instance is never
+    touched — its windows belong to whatever the analyst is doing there."""
+    files = [os.path.abspath(f) for f in files]
+    for f in files:
+        if not os.path.isfile(f):
+            print(f"No file at {f}", file=sys.stderr)
+            return 2
+    alive = instances.running()
+
+    if len(files) == 1 and is_winnow_case_file(files[0]):
+        case = files[0]
+        for i in alive:   # already open somewhere — just show that window
+            if i.get("case_path") and os.path.abspath(i["case_path"]) == case:
+                if not no_browser:
+                    browser.open_when_ready(f"http://127.0.0.1:{i['port']}", "127.0.0.1", i["port"])
+                return 0
+        idle = instances.find_idle()
+        if idle and _assoc_post(idle["port"], "/api/case/open", {"path": case}) is not None:
+            if not no_browser:
+                browser.open_when_ready(f"http://127.0.0.1:{idle['port']}", "127.0.0.1", idle["port"])
+            return 0
+        return None   # become the server, opening this case
+
+    recent = _recent_temp_instance(alive)
+    if recent:
+        resp = _assoc_post(recent["port"], "/api/assoc/open", {"files": files})
+        if resp is not None:
+            # "Its window is already up" is only TRUE for the multi-select
+            # burst (five files → five launcher invocations inside a couple
+            # of seconds, the first one's window still opening). A join
+            # minutes later — new file, same still-alive quick-look — used
+            # to show nothing: the analyst double-clicked and no window
+            # appeared. Age says whether the burst excuse applies; the
+            # server's own presence count says whether anyone is looking.
+            try:
+                started = time.mktime(time.strptime(recent["started_at"], "%Y-%m-%dT%H:%M:%S"))
+                age = time.time() - started
+            except (KeyError, ValueError):
+                age = 0.0
+            if not no_browser and age > 10 and not resp.get("connected"):
+                browser.open_when_ready(f"http://127.0.0.1:{recent['port']}", "127.0.0.1", recent["port"])
+            return 0
+    idle = instances.find_idle()
+    if idle and _assoc_post(idle["port"], "/api/assoc/open", {"files": files}) is not None:
+        if not no_browser:
+            browser.open_when_ready(f"http://127.0.0.1:{idle['port']}", "127.0.0.1", idle["port"])
+        return 0
+    return None   # become the server
+
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
 def main() -> None:
     global STORE
     ap = argparse.ArgumentParser(description="Winnow")
@@ -2341,6 +3213,13 @@ def main() -> None:
                     help="Open --case even if another Winnow already has it open")
     ap.add_argument("--port", type=int, default=8777)
     ap.add_argument("--no-fts", action="store_true", help="Skip full-text index (faster import)")
+    ap.add_argument("--assoc", nargs="+", metavar="FILE",
+                    help="opened via a file association: reuse a running Winnow when "
+                         "that is safe, otherwise become one on a free port, and land "
+                         "data files in a temporary quick-look case")
+    ap.add_argument("--no-idle-shutdown", action="store_true",
+                    help="keep running even with no browser connected — for driving "
+                         "the API from scripts")
     ap.add_argument("--no-browser", action="store_true",
                     help="don't open a window at all")
     ap.add_argument("--browser-tab", action="store_true",
@@ -2380,7 +3259,24 @@ def main() -> None:
             file=sys.stderr,
         )
 
-    case_path = args.case or ("case.db" if args.open_files else None)
+    if args.assoc:
+        handed_off = _run_assoc(args.assoc, no_browser=args.no_browser)
+        if handed_off is not None:
+            time.sleep(1.5)   # let the sibling's window launch before we vanish
+            sys.exit(handed_off)
+        # Nobody could take it — this process becomes the server, on its own
+        # port so it can never collide with a Winnow already listening.
+        args.port = _free_port()
+        if len(args.assoc) == 1 and is_winnow_case_file(args.assoc[0]):
+            args.case = args.assoc[0]
+        else:
+            args.case = _new_temp_case_path()
+            # NOT via --open: that startup loop is ingest_csv only, and an
+            # associated file may be a workbook or a SQLite db. These go
+            # through the kind-aware quick-look ingest after the store opens.
+            args.assoc_ingest = list(args.assoc)
+
+    case_path = args.case or (f"case{CASE_SUFFIX}" if args.open_files else None)
     url = f"http://{args.host}:{args.port}"
     if case_path:
         # Refuse rather than warn: this entrypoint is scriptable, a warning
@@ -2402,14 +3298,28 @@ def main() -> None:
         legacy_presets = STORE.pop_legacy_presets()
         if legacy_presets:
             WS.filters.import_all({"filters": legacy_presets}, merge=True)
-        WS.cases.create(case_path, name=os.path.splitext(os.path.basename(case_path))[0])
-        WS.cases.touch_opened(WS.cases.find_by_path(case_path)["id"])
+        if not _is_temp_case(case_path):
+            # Quick-look cases stay OFF the home screen until the analyst
+            # saves them — an unregistered temp case is the whole point.
+            WS.cases.create(case_path, name=os.path.splitext(os.path.basename(case_path))[0])
+            WS.cases.touch_opened(WS.cases.find_by_path(case_path)["id"])
+        for f in getattr(args, "assoc_ingest", []):
+            try:
+                job = _assoc_ingest(f)
+                print(f"Quick-look import queued: {job['file']} ({job['kind']})", flush=True)
+            except Exception as e:  # noqa: BLE001 — same reasoning as the
+                # /api/assoc/open loop: a corrupt double-clicked file must
+                # not crash the server the analyst is waiting on.
+                print(f"Skipped {os.path.basename(f)}: {e}", flush=True)
         for f in args.open_files:
             print(f"Importing {f} ...", flush=True)
             rec = STORE.ingest_csv(f, build_fts=not args.no_fts)
             print(f"  {rec['row_count']:,} rows in {rec['elapsed_sec']}s ({rec['rows_per_sec']:,}/s)")
             if rec.get("ragged_rows"):
                 print(f"  {rec['ragged_rows']:,} row(s) had the wrong column count and were padded/trimmed to fit")
+            if rec.get("suspect_quote_rows"):
+                print(f"  {rec['suspect_quote_rows']:,} row(s) contain very long multi-line fields — "
+                      "check for a stray quote if the row count looks low")
         print(f"Winnow on {url}  (case: {os.path.abspath(case_path)})")
     else:
         print(f"Winnow on {url}  (home screen — no case open)")
@@ -2420,6 +3330,17 @@ def main() -> None:
         browser.open_when_ready(url, args.host, args.port,
                                 app_mode=not args.browser_tab,
                                 profile_dir=args.browser_profile)
+
+    if args.no_idle_shutdown:
+        PRESENCE.enabled = False
+
+    # Registered before uvicorn blocks, not in the lifespan: the lifespan
+    # doesn't know the port (uvicorn owns it by then), and a launcher that
+    # probes an entry a moment before bind completes just gets a failed
+    # probe and moves on — running() treats the file as a hint, the port as
+    # the truth.
+    with contextlib.suppress(Exception):
+        instances.register(args.port, case_path if case_path else None)
 
     import uvicorn
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")

@@ -50,6 +50,10 @@ ordinary tab in your default browser if there isn't one. You can also skip
 `--open` and import from the UI.
 The home screen's ⏻ button (or Session → "Shut down Winnow…") stops the server
 again from the UI — everything is already saved in the case file.
+A server whose browser windows have all been closed shuts itself down after
+a couple of minutes on its own (once nothing is importing and no download is
+still running) — so a forgotten Winnow no longer holds a case lock all
+weekend. `--no-idle-shutdown` keeps it running for script-driven use.
 
 | flag | meaning |
 | --- | --- |

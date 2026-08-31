@@ -125,3 +125,17 @@ def test_preview_json_file_matches_ingest_columns_and_reports_record_count(store
     assert preview["record_count"] == 3
     assert preview["columns"] == ["id", "user.name", "user.address.city", "user.address.zip", "tags", "note"]
     assert len(preview["sample_rows"]) == 3
+
+
+def test_pathologically_deep_json_ingests_instead_of_recursing_out(store, tmp_path):
+    """A 2,000-level nested document used to walk _flatten_json off the
+    interpreter stack (RecursionError). Full flatten now caps at 64
+    object levels and stringifies the remainder — same convention as
+    "depth N" mode's leftovers."""
+    p = tmp_path / "deep.json"
+    p.write_text('{"a":' * 2000 + '1' + '}' * 2000, encoding="utf-8")
+    rec = store.ingest_json(str(p), flatten_mode="full", build_fts=False)
+    assert rec["row_count"] == 1
+    assert len(rec["columns"]) == 1
+    name = rec["columns"][0]["name"]
+    assert name.count(".") == 64    # capped unfold, remainder is one cell
