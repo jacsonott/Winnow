@@ -4,7 +4,9 @@
 import { recordTabVisit } from './tabhistory.js';
 import { $, api, el, post, setBusy, toast } from './core.js';
 import { loadPlugins, openImportModal, pluginFormatById, queueFilesForFormat } from './importer.js';
-import { loadSources, openSource, renderPageTabs, syncTabSelection } from './sources.js';
+import { clearAllFilters, loadSources, openSource, renderPageTabs, syncTabSelection } from './sources.js';
+import { setColumnFilter, valueFilterText } from './filters.js';
+import { rebuildView } from './view.js';
 import { activeSqlTab, scheduleSqlTabSave, showGridTab, syncTabChrome } from './sql.js';
 import { setActiveSqlResult, sqlCopyResult, sqlDownloadCsv, sqlRowKey, sqlTagsFor, tagChips, wireSqlAssist } from './sqlassist.js';
 import { moveCursor } from './grid.js';
@@ -352,6 +354,23 @@ export function buildPluginTabContext(tab) {
       get sources() { return S.sources; },
       get sourceId() { return S.sourceId; },
       get tags() { return S.tags; },
+      // The case timeframe filter, verbatim — {enabled, column, start, end}.
+      // A plugin honouring it is what makes "the timeframe applies
+      // everywhere" true for plugin tabs too.
+      get timeRange() { return S.timeRange; },
+    },
+    // Jump from a plugin's visualization to the EVIDENCE: open the source
+    // and exact-filter it to the given column values (clearing whatever
+    // filters were there — this is a navigation, not a refinement).
+    openFiltered: async (sourceId, pairs) => {
+      await openSource(sourceId);
+      await clearAllFilters();
+      let applied = 0;
+      for (const { column, value } of pairs || []) {
+        const raw = valueFilterText(value);
+        if (raw !== null) { setColumnFilter(column, raw); applied++; }
+      }
+      if (applied) await rebuildView({ keepScroll: false });
     },
   };
 }

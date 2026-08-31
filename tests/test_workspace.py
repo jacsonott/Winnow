@@ -337,3 +337,24 @@ def test_the_module_docstring_lists_every_store():
         f"documented but gone: {sorted(documented - actual)}")
     # And the count in the prose has to agree with the list under it.
     assert f"{len(actual)}" in WS.__doc__ or "Eleven" in WS.__doc__
+
+
+def test_plugin_data_roundtrips_and_is_traversal_safe(tmp_path, monkeypatch):
+    """req.storage: a plugin's machine-level persistent dict, one JSON
+    file per plugin under workspace/plugin_data/. The fs name becomes a
+    filename, so it must never escape that directory."""
+    import winnow.workspace as WS
+    monkeypatch.setattr(WS, "WORKSPACE_DIR", tmp_path / "ws")
+    store = WS.PluginData("lateral_movement")
+    assert store.get() == {}
+    store.set({"saved": [{"name": "WinRM"}]})
+    assert WS.PluginData("lateral_movement").get() == {"saved": [{"name": "WinRM"}]}
+    # Two plugins keep separate documents.
+    WS.PluginData("other").set({"x": 1})
+    assert WS.PluginData("lateral_movement").get()["saved"][0]["name"] == "WinRM"
+    # A traversing fs name is sanitized to a filename, not a path.
+    WS.PluginData("../../etc/evil").set({"pwned": True})
+    assert not (tmp_path / "etc").exists()
+    import pytest
+    with pytest.raises(ValueError):
+        WS.PluginData("x").set(["not a dict"])

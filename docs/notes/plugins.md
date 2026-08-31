@@ -52,14 +52,14 @@ see [docs/notes/README.md](README.md) for the whole set.
   change; the module's default export gets `(container, winnow)` where
   `winnow` is `buildPluginTabContext`'s stable surface (api/post/el/
   modal helpers, `sql()` → run_sql's own RO connection, `schemaText()`,
-  live state getters); optional onShow/onHide exports fire per switch.
+  live state getters incl. state.timeRange, plus openFiltered(source_id, [{column, value}]) to jump to the evidence); optional onShow/onHide exports fire per switch.
   `register_api` registers backend routes dispatched at request time by
   the one catch-all `/api/plugin/{fs}/{route}` handler — deliberately
   not real FastAPI routes, so a Settings toggle's registry reload is
   instantly authoritative with no stale route objects. Handlers get a
   plain `PluginRequest` (method/route/query/body/store — None when no
-  case is open) and return JSON-ables; ValueError → 400, same split as
-  api_view; the CSRF middleware already covers non-GET. Plugin backends
+  case is open — and `storage`, the plugin's own persistent dict) and return JSON-ables; ValueError → 400, same split as
+  api_view; the CSRF middleware already covers non-GET. `req.storage.get()/set(dict)` is one JSON document per plugin under workspace/plugin_data/ (machine level, in updater.PROTECTED) — cross-case state like a plugin's saved definitions, parallel to the app's saved filters. Plugin backends
   should read via `req.store.run_sql` (own RO connection — never holds
   invariant #4's lock). A plugin that
   fails to import/register is recorded with its error and skipped, never

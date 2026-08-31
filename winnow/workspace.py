@@ -159,6 +159,7 @@ def _read(name: str, default: Any) -> Any:
 
 def _write(name: str, data: Any) -> None:
     path = _ensure_dir() / name
+    path.parent.mkdir(parents=True, exist_ok=True)   # plugin_data/<name>.json nests one level
     tmp = path.with_suffix(path.suffix + ".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
@@ -824,6 +825,35 @@ class MachinePrefs:
             else:
                 data[key] = value
             _write(self.FILE, data)
+
+
+class PluginData:
+    """Per-plugin persistent state, one JSON document per plugin fs name —
+    the machine-level storage a plugin's routes see as `req.storage`.
+    workspace/ because it's workflow state exactly like saved filters:
+    a plugin's saved defaults should survive case switches and updates
+    (workspace/ is in updater.PROTECTED), and must never live inside a
+    case file another analyst will receive."""
+
+    DIR = "plugin_data"
+
+    def __init__(self, fs_name: str):
+        # The fs name comes from a directory listing, but belt-and-braces:
+        # it becomes a filename, so it must never traverse.
+        safe = "".join(ch for ch in fs_name if ch.isalnum() or ch in "-_.") or "plugin"
+        self._file = f"{self.DIR}/{safe}.json"
+
+    def get(self) -> dict:
+        with _LOCK:
+            data = _read(self._file, {})
+            return data if isinstance(data, dict) else {}
+
+    def set(self, data: dict) -> dict:
+        if not isinstance(data, dict):
+            raise ValueError("Plugin storage holds one JSON object")
+        with _LOCK:
+            _write(self._file, data)
+        return data
 
 
 class PluginBundles:

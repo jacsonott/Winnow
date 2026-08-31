@@ -879,35 +879,67 @@ def lateral_client(client, store, write_csv, example_registry, monkeypatch):
     return client, rec["id"]
 
 
+def _sel(source_id, **kw):
+    return {"source_id": source_id, "src_col": "SourceHost", "dst_col": "DestHost", **kw}
+
+
 def test_lateral_movement_edges(lateral_client):
     client, source_id = lateral_client
     r = client.post("/api/plugin/lateral_movement/edges", json={
-        "source_id": source_id, "src_col": "SourceHost", "dst_col": "DestHost",
-        "label_col": "User",
+        "selections": [_sel(source_id, label_col="User")],
     })
     assert r.status_code == 200, r.text
     out = r.json()
     assert out["truncated"] is False
+    # k tags the selection; no time_col here, so t is None.
     assert out["edges"] == [
-        {"src": "WS1", "dst": "SRV1", "n": 2, "labels": 2},
-        {"src": "WS2", "dst": "SRV1", "n": 1, "labels": 1},
+        {"k": 0, "src": "WS1", "dst": "SRV1", "t": None, "n": 2, "labels": 2},
+        {"k": 0, "src": "WS2", "dst": "SRV1", "t": None, "n": 1, "labels": 1},
     ]
+
+
+def test_lateral_movement_multiple_selections_carry_their_index(lateral_client):
+    """Two events out of one table land on one graph, each edge tagged with
+    the selection (k) that produced it — that's how the UI colors them."""
+    client, source_id = lateral_client
+    r = client.post("/api/plugin/lateral_movement/edges", json={
+        "selections": [
+            _sel(source_id),
+            _sel(source_id, conditions=[{"column": "User", "op": "equals", "value": "alice"}]),
+        ],
+    })
+    assert r.status_code == 200, r.text
+    edges = r.json()["edges"]
+    assert {e["k"] for e in edges} == {0, 1}
+    # selection 1 is alice-only: WS1->SRV1 once, WS2->SRV1 once.
+    k1 = {(e["src"], e["dst"]): e["n"] for e in edges if e["k"] == 1}
+    assert k1 == {("WS1", "SRV1"): 1, ("WS2", "SRV1"): 1}
+
+
+def test_lateral_movement_conditions_filter(lateral_client):
+    client, source_id = lateral_client
+    r = client.post("/api/plugin/lateral_movement/edges", json={
+        "selections": [_sel(source_id, conditions=[
+            {"column": "User", "op": "in", "value": "bob,carol"}])],
+    })
+    assert r.status_code == 200, r.text
+    # only bob's WS1->SRV1 survives (carol's row is a filtered '-' source)
+    assert r.json()["edges"] == [
+        {"k": 0, "src": "WS1", "dst": "SRV1", "t": None, "n": 1, "labels": None}]
 
 
 def test_lateral_movement_validation(lateral_client):
     client, source_id = lateral_client
+    r = client.post("/api/plugin/lateral_movement/edges", json={"selections": []})
+    assert r.status_code == 400 and "at least one" in r.json()["detail"].lower()
     r = client.post("/api/plugin/lateral_movement/edges", json={
-        "source_id": source_id, "src_col": "SourceHost", "dst_col": "Nope",
-    })
+        "selections": [_sel(source_id, dst_col="Nope")]})
     assert r.status_code == 400 and "Nope" in r.json()["detail"]
     r = client.post("/api/plugin/lateral_movement/edges", json={
-        "source_id": -1, "src_col": "a", "dst_col": "b",
-    })
-    # merges work now (invariant #9) — -1 just doesn't exist in this case
+        "selections": [_sel(-1)]})
     assert r.status_code == 400 and "no source" in r.json()["detail"].lower()
     r = client.post("/api/plugin/lateral_movement/edges", json={
-        "source_id": source_id, "src_col": "SourceHost", "dst_col": "SourceHost",
-    })
+        "selections": [_sel(source_id, dst_col="SourceHost")]})
     assert r.status_code == 400
 
 
@@ -924,7 +956,7 @@ def test_lateral_movement_edges_over_a_merge(lateral_client, store, write_csv):
 
     def n_for(sid):
         r = client.post("/api/plugin/lateral_movement/edges", json={
-            "source_id": sid, "src_col": "SourceHost", "dst_col": "DestHost"})
+            "selections": [{"source_id": sid, "src_col": "SourceHost", "dst_col": "DestHost"}]})
         assert r.status_code == 200, r.text
         return {(e["src"], e["dst"]): e["n"] for e in r.json()["edges"]}
 
@@ -937,6 +969,68 @@ def test_lateral_movement_tab_asset(lateral_client):
     client, _ = lateral_client
     r = client.get("/plugin_assets/lateral_movement/ui/tab.js")
     assert r.status_code == 200 and "export default" in r.text
+
+
+TIMED_ROWS = [
+    ["SourceHost", "DestHost", "User", "When"],
+    ["WS1", "SRV1", "alice", "2026-03-14 08:00:00"],
+    ["WS1", "SRV1", "bob", "2026-03-14 08:30:00"],
+    ["WS2", "SRV1", "alice", "2026-03-15 09:00:00"],
+]
+
+
+@pytest.fixture
+def timed_client(client, store, write_csv, example_registry, monkeypatch):
+    import server
+    monkeypatch.setattr(server, "PLUGINS", example_registry)
+    rec = store.ingest_csv(write_csv(TIMED_ROWS, "timed.csv"), name="timed")
+    return client, rec["id"]
+
+
+def test_lateral_movement_time_bucketing_and_filter(timed_client):
+    client, sid = timed_client
+    sel = {"source_id": sid, "src_col": "SourceHost", "dst_col": "DestHost",
+           "time_col": "When", "label_col": "User"}
+    # Full range: every edge carries a bucket key, chosen from the span.
+    r = client.post("/api/plugin/lateral_movement/edges", json={"selections": [sel]})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["bucket"] in ("minute", "hour", "day")
+    assert all(e["t"] for e in out["edges"])
+
+    # The case timeframe passes straight through and cuts the 15th.
+    r = client.post("/api/plugin/lateral_movement/edges", json={
+        "selections": [sel], "time": {"start": "2026-03-14 00:00:00", "end": "2026-03-14 23:59:59"}})
+    assert r.status_code == 200, r.text
+    edges = r.json()["edges"]
+    assert {(e["src"], e["dst"]) for e in edges} == {("WS1", "SRV1")}
+
+
+def test_lateral_movement_defaults_ship_and_bind(lateral_client, store, write_csv):
+    """The shipped KAPE defaults are served, and one binds to a table only
+    when it carries the columns the definition requires."""
+    client, _ = lateral_client
+    r = client.get("/api/plugin/lateral_movement/defs")
+    assert r.status_code == 200, r.text
+    shipped = r.json()["shipped"]
+    names = [d["name"] for d in shipped]
+    assert any("4624" in n for n in names)
+    for d in shipped:
+        assert d["src_col"] and d["dst_col"] and d.get("requires")
+
+
+def test_lateral_movement_saved_defs_persist_machine_side(lateral_client):
+    client, _ = lateral_client
+    mine = {"name": "WinRM", "src_col": "SourceHost", "dst_col": "DestHost",
+            "conditions": [{"column": "User", "op": "equals", "value": "svc"}]}
+    r = client.post("/api/plugin/lateral_movement/defs", json={"saved": [mine]})
+    assert r.status_code == 200, r.text
+    assert [d["name"] for d in r.json()["saved"]] == ["WinRM"]
+    # A fresh GET (new request, same machine storage) still has it.
+    assert client.get("/api/plugin/lateral_movement/defs").json()["saved"][0]["name"] == "WinRM"
+    # A malformed definition is refused as a 400, not stored.
+    bad = client.post("/api/plugin/lateral_movement/defs", json={"saved": [{"name": "x"}]})
+    assert bad.status_code == 400
 
 
 # ================================================== claude_assistant plugin
