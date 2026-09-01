@@ -15,15 +15,22 @@ def test_r_toggles_timeframe_and_a_jumps_to_timestamp(page):
     assert sorted(page.evaluate("() => __winnow.S.keymap.openTimeRange")) == ["R"]
     assert sorted(page.evaluate("() => __winnow.S.keymap.openJumpTs")) == ["J", "a"]
 
+    # Global keybinds fire off document keydown — keep focus on the grid so
+    # keypresses land on the app, not a leftover focused control from a
+    # previous step (the source of load-dependent flakiness here).
+    def press(key):
+        page.locator("#body").focus()
+        page.keyboard.press(key)
+
     # Shift+R opens the timeframe dialog…
-    page.keyboard.press("R")
+    press("R")
     page.wait_for_selector("#modal:not([hidden])")
     assert page.locator("#modalTitle").inner_text().lower() == "timeframe filter"
     page.keyboard.press("Escape")
     page.wait_for_selector("#modal[hidden]", state="attached")
 
     # …`a` opens jump-to-timestamp, NOT the timeframe filter.
-    page.keyboard.press("a")
+    press("a")
     page.wait_for_selector("#modal:not([hidden])")
     assert page.locator("#modalTitle").inner_text().lower() == "jump to timestamp"
     page.keyboard.press("Escape")
@@ -33,10 +40,10 @@ def test_r_toggles_timeframe_and_a_jumps_to_timestamp(page):
     page.evaluate(
         """() => { __winnow.S.timeRange = { enabled: false, column: 'Timestamp',
                     start: '2026-03-14 08:00:00', end: '2026-03-14 09:00:00' }; }""")
-    page.keyboard.press("r")
+    press("r")
     page.wait_for_function("() => __winnow.S.timeRange.enabled === true")
     assert page.evaluate("() => document.getElementById('modal').hidden")
-    page.keyboard.press("r")
+    press("r")
     page.wait_for_function("() => __winnow.S.timeRange.enabled === false")
 
 
