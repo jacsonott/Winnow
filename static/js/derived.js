@@ -2,6 +2,7 @@
 own additions to a source's column set.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
+import { openStack } from './stack.js';
 import { saveLayout } from './columns.js';
 import { $, api, el, post, setBusy, toast, toastAction } from './core.js';
 import { ellipsize } from './filters.js';
@@ -71,6 +72,7 @@ export function columnMenuItems(name) {
     }
   }
   if (items.length) items.push('-');
+  items.push({ label: 'Stack values (rarest first)…', onclick: () => openStack(name) });
   items.push({ label: 'Add datetime column from this…', onclick: () => openDerivedColumnModal(name) });
   // Offered on any base column rather than only ones that sniff as
   // structured: the check costs a sample scan, the menu is built

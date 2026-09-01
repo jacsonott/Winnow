@@ -456,3 +456,5 @@ see [docs/notes/README.md](README.md) for the whole set.
   over the defaults and a stored map has no entry for an action that
   didn't exist. When retiring an alias later, remember both halves: the
   DEFAULT_KEYMAP entry and a migration for maps that carry it.
+
+- **Stack view** (stack.js) — the column-header menu's "Stack values (rarest first)…" opens a modal of the current view's distinct values by count (via group_summary, order=count direction=asc), drawn with charts.js. Click a bar to filter the grid to that value. Least-frequency-of-occurrence triage. See docs/design/analysis-suite.md.
