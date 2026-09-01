@@ -1829,3 +1829,4 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 .dash-empty { grid-column: span 4; color: var(--dim); padding: 24px; text-align: center; }
 .dash-sql { width: 100%; background: var(--ink); color: var(--text); border: 1px solid var(--line-2);
   font: 12px var(--mono); padding: 6px 8px; resize: vertical; }
+.bundle-shipped { margin-left: 8px; font-size: 10px; color: var(--accent); border: 1px solid var(--accent-dim, var(--line-2)); border-radius: 8px; padding: 0 6px; text-transform: uppercase; letter-spacing: .06em; }

@@ -1,0 +1,186 @@
+{
+  "version": 1,
+  "comment": "Shipped analysis profiles. A profile is 'how I analyze this kind of case' — the plugins to enable, an optional starter watchlist, and a dashboard of widgets. SQL widgets use {{evtx}} / {{header_set:Name}} placeholders that bind to whichever table matches that header set in the open case, so the dashboard is portable. Shipped profiles are read-only; Save-as-profile creates editable copies.",
+  "profiles": [
+    {
+      "name": "KAPE triage",
+      "description": "Windows host triage from KAPE/EvtxECmd output — logon movement, failed-logon spikes, RDP and explicit-credential use, host facts, log-tampering signals, and (if a RECmd batch is imported) registry persistence. Seeds a starter IOC watchlist.",
+      "plugins": [
+        "lateral_movement"
+      ],
+      "watchlist": [
+        {
+          "value": "rclone",
+          "kind": "filename"
+        },
+        {
+          "value": "psexec",
+          "kind": "filename"
+        },
+        {
+          "value": "mimikatz",
+          "kind": "filename"
+        },
+        {
+          "value": "anydesk",
+          "kind": "filename"
+        },
+        {
+          "value": "cobaltstrike",
+          "kind": "filename"
+        }
+      ],
+      "dashboard": [
+        {
+          "title": "Watchlist hits",
+          "source": "watchlist",
+          "render": "stat",
+          "sub": "IOC matches across all tables",
+          "span": 1
+        },
+        {
+          "title": "Tagged findings",
+          "source": "tags",
+          "render": "stat",
+          "sub": "rows you have marked",
+          "span": 1
+        },
+        {
+          "title": "Remote logon peers",
+          "source": "sql",
+          "render": "stat",
+          "span": 1,
+          "sub": "distinct hosts in 4624s",
+          "query": {
+            "sql": "SELECT COUNT(DISTINCT RemoteHost) FROM {{evtx}} WHERE EventId='4624' AND RemoteHost NOT IN ('-','','- (-)')"
+          }
+        },
+        {
+          "title": "Failed logons (4625)",
+          "source": "sql",
+          "render": "stat",
+          "span": 1,
+          "tone": "warn",
+          "query": {
+            "sql": "SELECT COUNT(*) FROM {{evtx}} WHERE EventId='4625'"
+          }
+        },
+        {
+          "title": "Logon volume over time (4624/4625/4648)",
+          "source": "sql",
+          "render": "histogram",
+          "span": 2,
+          "query": {
+            "sql": "SELECT strftime('%Y-%m-%d %H', TS_NORMALIZE(TimeCreated)) AS hr, COUNT(*) c FROM {{evtx}} WHERE Channel='Security' AND EventId IN ('4624','4625','4648') AND TimeCreated <> '' GROUP BY hr ORDER BY hr"
+          }
+        },
+        {
+          "title": "Top remote hosts (4624)",
+          "source": "sql",
+          "render": "bar",
+          "span": 2,
+          "query": {
+            "sql": "SELECT RemoteHost, COUNT(*) c FROM {{evtx}} WHERE EventId='4624' AND RemoteHost NOT IN ('-','','- (-)') GROUP BY RemoteHost ORDER BY c DESC LIMIT 8"
+          }
+        },
+        {
+          "title": "Rarest logon accounts (long tail)",
+          "source": "sql",
+          "render": "list",
+          "span": 2,
+          "query": {
+            "sql": "SELECT UserName, COUNT(*) c FROM {{evtx}} WHERE EventId='4624' AND UserName <> '' GROUP BY UserName ORDER BY c ASC LIMIT 10"
+          }
+        },
+        {
+          "title": "RDP sessions (21/24/25)",
+          "source": "sql",
+          "render": "stat",
+          "span": 1,
+          "query": {
+            "sql": "SELECT COUNT(*) FROM {{evtx}} WHERE Channel LIKE '%TerminalServices-LocalSessionManager%' AND EventId IN ('21','24','25')"
+          }
+        },
+        {
+          "title": "Explicit credentials (4648)",
+          "source": "sql",
+          "render": "stat",
+          "span": 1,
+          "tone": "warn",
+          "query": {
+            "sql": "SELECT COUNT(*) FROM {{evtx}} WHERE EventId='4648'"
+          }
+        },
+        {
+          "title": "Computers seen",
+          "source": "sql",
+          "render": "stat",
+          "span": 1,
+          "sub": "distinct hosts in the logs",
+          "query": {
+            "sql": "SELECT COUNT(DISTINCT Computer) FROM {{evtx}} WHERE Computer NOT IN ('','-')"
+          }
+        },
+        {
+          "title": "Distinct accounts",
+          "source": "sql",
+          "render": "stat",
+          "span": 1,
+          "sub": "distinct UserName values",
+          "query": {
+            "sql": "SELECT COUNT(DISTINCT UserName) FROM {{evtx}} WHERE UserName NOT IN ('','-')"
+          }
+        },
+        {
+          "title": "Activity window",
+          "source": "sql",
+          "render": "kv",
+          "span": 2,
+          "query": {
+            "sql": "SELECT 'First event' AS k, MIN(TS_NORMALIZE(TimeCreated)) AS v FROM {{evtx}} UNION ALL SELECT 'Last event', MAX(TS_NORMALIZE(TimeCreated)) FROM {{evtx}}"
+          }
+        },
+        {
+          "title": "Event logs cleared (1102)",
+          "source": "sql",
+          "render": "stat",
+          "span": 1,
+          "tone": "warn",
+          "sub": "log tampering",
+          "query": {
+            "sql": "SELECT COUNT(*) FROM {{evtx}} WHERE EventId='1102'"
+          }
+        },
+        {
+          "title": "Audit policy changed (4719)",
+          "source": "sql",
+          "render": "stat",
+          "span": 1,
+          "tone": "warn",
+          "query": {
+            "sql": "SELECT COUNT(*) FROM {{evtx}} WHERE EventId='4719'"
+          }
+        },
+        {
+          "title": "Run / service registry entries",
+          "source": "sql",
+          "render": "stat",
+          "span": 1,
+          "sub": "autostart persistence (RECmd)",
+          "query": {
+            "sql": "SELECT COUNT(*) FROM {{registry}} WHERE KeyPath LIKE '%\\Run' OR KeyPath LIKE '%\\RunOnce' OR KeyPath LIKE '%\\Services%' OR Category LIKE '%Run%' OR Category LIKE '%Service%'"
+          }
+        },
+        {
+          "title": "Registry entries by category",
+          "source": "sql",
+          "render": "bar",
+          "span": 2,
+          "query": {
+            "sql": "SELECT Category AS label, COUNT(*) c FROM {{registry}} WHERE Category NOT IN ('','-') GROUP BY Category ORDER BY c DESC LIMIT 10"
+          }
+        }
+      ]
+    }
+  ]
+}
