@@ -180,17 +180,20 @@ try {
 
     <section class="watchlistview" id="watchlistview" hidden>
       <div class="wl-add">
-        <input id="wlValue" placeholder="Indicator (hash, IP, domain, filename)…" />
-        <select id="wlKind">
+        <input id="wlValue" placeholder="Add an indicator — hash, IP, domain, filename…" />
+        <select id="wlKind" title="Indicator type (sets the row's colour)">
           <option value="other">other</option><option value="hash">hash</option>
           <option value="ip">ip</option><option value="domain">domain</option>
           <option value="filename">filename</option>
         </select>
-        <select id="wlAutoTag"><option value="">no auto-tag</option></select>
+        <select id="wlAutoTag" title="Auto-tag rows that match this indicator"><option value="">no auto-tag</option></select>
         <button class="btn" id="wlAdd">Add</button>
-        <button class="btn ghost" id="wlImport">Import list…</button>
-        <button class="btn ghost" id="wlScan">Scan all tables</button>
-        <span class="note-status" id="wlStatus"></span>
+        <span class="wl-tools">
+          <button class="btn ghost" id="wlImport" title="Import indicators from a text or CSV list">Import…</button>
+          <button class="btn ghost" id="wlExport" title="Export the watchlist as CSV">Export…</button>
+          <button class="btn ghost" id="wlScan" title="Re-scan every table for all indicators">Scan all</button>
+          <span class="note-status" id="wlStatus"></span>
+        </span>
         <input id="wlImportFile" type="file" accept=".txt,.csv,.ioc,.list,text/plain" hidden />
       </div>
       <div class="wl-body">

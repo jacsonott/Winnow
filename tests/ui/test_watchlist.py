@@ -45,3 +45,25 @@ def test_watchlist_add_autoscan_and_hits(page, server, tmp_path):
             urllib.request.urlopen(urllib.request.Request(
                 server.rstrip("/") + f"/api/watchlist/{ind['id']}",
                 method="DELETE", headers={"X-Timeline-Lite-Client": "1"})).read()
+
+
+def test_watchlist_export_downloads_csv(page):
+    """The Export button downloads the indicators as CSV, client-side."""
+    page.locator("#tabWatchlist").click()
+    page.wait_for_selector("#watchlistview:not([hidden])")
+    try:
+        page.locator("#wlValue").fill("evil.example.com")
+        page.locator("#wlKind").select_option("domain")
+        page.locator("#wlAdd").click()
+        page.wait_for_selector(".wl-val:has-text('evil.example.com')")
+        with page.expect_download() as dl:
+            page.locator("#wlExport").click()
+        content = open(dl.value.path(), encoding="utf-8").read()
+        assert content.splitlines()[0] == "value,kind,note,hits"
+        assert "evil.example.com,domain" in content
+    finally:
+        page.evaluate("""async () => {
+          const h = { 'X-Timeline-Lite-Client': '1' };
+          for (const i of await fetch('/api/watchlist', { headers: h }).then(r => r.json()))
+            await fetch('/api/watchlist/' + i.id, { method: 'DELETE', headers: h });
+        }""")

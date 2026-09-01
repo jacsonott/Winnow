@@ -1728,22 +1728,37 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 
 /* IOC watchlist tab */
 .watchlistview { display: flex; flex-direction: column; min-height: 0; }
-.wl-add { display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
-  padding: 8px 12px; border-bottom: 1px solid var(--line-2); flex: 0 0 auto; }
-.wl-add input[type=text], .wl-add #wlValue { background: var(--ink); color: var(--text);
-  border: 1px solid var(--line-2); padding: 5px 8px; font: inherit; min-width: 280px; }
-.wl-add select { background: var(--ink); color: var(--text); border: 1px solid var(--line-2); padding: 5px 6px; font: inherit; }
-.wl-body { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: 340px 1fr; }
+.wl-add { display: flex; gap: 8px; align-items: center;
+  padding: 10px 12px; border-bottom: 1px solid var(--line-2); flex: 0 0 auto; }
+.wl-add input[type=text], .wl-add #wlValue { flex: 1 1 260px; min-width: 200px;
+  background: var(--ink); color: var(--text);
+  border: 1px solid var(--line-2); border-radius: var(--radius-sm); padding: 6px 9px; font: inherit; }
+.wl-add select { background: var(--ink); color: var(--text); border: 1px solid var(--line-2);
+  border-radius: var(--radius-sm); padding: 6px 7px; font: inherit; }
+.wl-add #wlValue:focus, .wl-add select:focus { outline: none; border-color: var(--accent); }
+/* Secondary actions grouped to the right, apart from the primary Add. */
+.wl-tools { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+.wl-body { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: 360px 1fr; }
 .wl-list { border-right: 1px solid var(--line-2); overflow: auto; }
-.wl-row { display: flex; align-items: center; gap: 8px; padding: 6px 12px;
+.wl-listhead { color: var(--dim); text-transform: uppercase; letter-spacing: .07em;
+  font-size: 10px; padding: 8px 12px 6px; }
+.wl-row { display: flex; align-items: center; gap: 10px; padding: 7px 12px;
   border-bottom: 1px solid var(--line); cursor: pointer; }
 .wl-row:hover { background: var(--panel-2); }
-.wl-row.active { background: var(--panel-3); border-left: 2px solid var(--accent); }
-.wl-swatch { width: 9px; height: 9px; border-radius: 2px; flex: 0 0 auto; }
+.wl-row.active { background: var(--panel-3); box-shadow: inset 2px 0 0 var(--accent); }
+/* Kind badge — a short uppercase label tinted by KIND_COLOR, clearer than
+   the bare colour swatch it replaced. */
+.wl-kind { flex: 0 0 auto; width: 46px; font-family: var(--mono); font-size: 9px;
+  font-weight: 700; letter-spacing: .06em; text-align: center;
+  border: 1px solid currentColor; border-radius: 8px; padding: 1px 0; opacity: .85; }
 .wl-val { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.wl-count { color: var(--dim); min-width: 2em; text-align: right; }
-.wl-count.hot { color: var(--accent); font-weight: 600; }
-.wl-del { background: none; border: none; color: var(--line-2); cursor: pointer; font: inherit; }
+.wl-count { flex: 0 0 auto; min-width: 2.2em; text-align: center; color: var(--dim);
+  font-family: var(--mono); font-size: 11px; }
+.wl-count.hot { color: var(--bg); background: var(--accent); font-weight: 600;
+  border-radius: 9px; padding: 1px 7px; }
+.wl-del { flex: 0 0 auto; background: none; border: none; color: var(--line-2);
+  cursor: pointer; font: inherit; visibility: hidden; }
+.wl-row:hover .wl-del { visibility: visible; }
 .wl-del:hover { color: var(--danger); }
 .wl-hits { overflow: auto; }
 .wl-hits-head { color: var(--dim); text-transform: uppercase; letter-spacing: .07em;
