@@ -731,7 +731,7 @@ def api_case_open(body: CaseOpen):
             body.path, name=os.path.splitext(os.path.basename(body.path))[0]
         )
         WS.cases.touch_opened(rec["id"])
-        return {"sources": STORE.list_sources(), "name": rec["name"]}
+        return {"sources": STORE.list_sources(), "name": rec["name"], "temp": _is_temp_case(STORE.path)}
     if not body.force:
         holder = probe_case_lock(body.path)
         if holder:
@@ -779,7 +779,7 @@ def api_case_open(body: CaseOpen):
     # exists the moment the case does, and an "off in this case" plugin's
     # code is unloaded rather than merely unlisted.
     _reload_plugins()
-    return {"sources": STORE.list_sources(), "name": rec["name"]}
+    return {"sources": STORE.list_sources(), "name": rec["name"], "temp": _is_temp_case(STORE.path)}
 
 
 class CopySourcesBody(BaseModel):
@@ -805,6 +805,20 @@ def api_case_copy_sources(body: CopySourcesBody):
     except ValueError as e:
         code = 409 if "another Winnow" in str(e) else 400
         raise HTTPException(code, str(e))
+
+
+@app.post("/api/case/quicklook/new")
+def api_quicklook_new(request: Request):
+    """Create a fresh, empty quick-look case file and return its path — the
+    home screen's drag-and-drop into no particular case (drop the files,
+    then open this path and import). Loopback-only, like the association
+    open: it writes a file. The temp case stays out of the registry until
+    the analyst saves it, same as an association-opened one."""
+    if not _is_loopback(request):
+        raise HTTPException(403, "Quick-look cases are only created from this machine")
+    temp = _new_temp_case_path()
+    _open_store(temp).close()   # materialise an empty case file with the schema
+    return {"path": temp}
 
 
 class AssocOpenBody(BaseModel):
