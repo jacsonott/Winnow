@@ -555,3 +555,23 @@ def test_merge_names_are_unique_case_insensitively(store, write_csv):
 
     with _pytest.raises(ValueError, match="needs a name"):
         store.create_merge("   ", ids[:2])
+
+
+def test_root_virtual_pages_in_source_order_ignoring_saved_layout(store, write_csv):
+    """Regression: an unsorted/unfiltered view (root_virtual) must page in
+    SOURCE column order, because the grid maps each cell by its column's
+    index in S.columns (source order). A saved layout that reorders or hides
+    columns is display/export metadata — it must NOT permute or drop the
+    cells the grid receives, which put values under the wrong headers
+    ('opening a table with a custom layout showed the wrong column content').
+    _export_columns is for CSV/XLSX, which emit the on-screen arrangement on
+    purpose; the grid does its own ordering client-side."""
+    path = write_csv([["A", "B", "C"], ["A0", "B0", "C0"], ["A1", "B1", "C1"]], "grid.csv")
+    sid = store.ingest_csv(path, name="grid.csv", build_fts=False)["id"]
+    # a "custom layout": reordered display order + a hidden column + no sort
+    store.save_layout(sid, {"order": ["C", "A"], "columns": {"B": {"hidden": True}}, "sort": []})
+    view = store.build_view(sid, {})            # no filter/sort -> the root_virtual carve-out
+    assert view["kind"] == "root_virtual"
+    rows = store.fetch_rows(view["view_id"], 0, 10)["rows"]
+    # source order, hidden column included — NOT the layout's ["C","A"]
+    assert [r["cells"] for r in rows] == [["A0", "B0", "C0"], ["A1", "B1", "C1"]]
