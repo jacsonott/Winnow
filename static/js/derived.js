@@ -414,37 +414,31 @@ export async function openDerivedColumnModal(prefill, editing) {
     colSelect.value = state.column;
     colSelect.disabled = !!editing;
 
-    // Grouped, not one flat list: with timestamps, extraction and
-    // comparisons all in the registry, thirteen timestamp formats drowned
-    // the other kinds. A two-input operation (duration) still needs a
-    // second column rather than a format guess, so it's offered but never
-    // auto-suggested.
-    const OP_GROUPS = [
-      ['Timestamps', (op) => op.family === 'datetime' && op.derived_kind !== 'duration'],
+    // TYPE first, then the specific op. As one grouped dropdown, thirteen
+    // timestamp formats filled the visible list and the extract/join/
+    // compare kinds read as if they weren't there — an optgroup you had to
+    // scroll past. The type picker surfaces the four kinds up front; the op
+    // picker below then shows only the chosen kind's ops. A two-input
+    // operation (duration/compare) still needs a second column, so it's
+    // offered but never auto-suggested.
+    const typeSelect = el('select');
+    const OP_TYPES = [
+      ['Timestamp', (op) => op.family === 'datetime' && op.derived_kind !== 'duration'],
       ['Extract part of a value', (op) => op.family === 'extract'],
       ['Join from another table', (op) => op.family === 'lookup'],
-      ['Comparisons', (op) => op.derived_kind === 'duration'],
+      ['Compare (elapsed time)', (op) => op.derived_kind === 'duration'],
     ];
-    const grouped = new Set();
-    for (const [label, match] of OP_GROUPS) {
-      const members = ops.filter((op) => match(op) && !grouped.has(op.id));
-      if (!members.length) continue;
-      const g = document.createElement('optgroup');
-      g.label = label;
-      for (const op of members) {
-        grouped.add(op.id);
-        const o = el('option', null, op.label);
-        o.value = op.id;
-        g.append(o);
-      }
-      opSelect.append(g);
+    const typeOf = (op) => { for (const [label, m] of OP_TYPES) if (m(op)) return label; return 'Other'; };
+    // Only offer types that actually have ops (a future family lands under
+    // "Other" rather than vanishing).
+    const typeLabels = OP_TYPES.map(([l]) => l).concat('Other')
+      .filter((label) => ops.some((op) => typeOf(op) === label));
+    for (const label of typeLabels) typeSelect.append(new Option(label, label));
+    function fillOpSelect(type) {
+      opSelect.replaceChildren();
+      for (const op of ops) if (typeOf(op) === type) opSelect.append(new Option(op.label, op.id));
     }
-    for (const op of ops) {
-      if (grouped.has(op.id)) continue; // a future family lands ungrouped rather than invisible
-      const o = el('option', null, op.label);
-      o.value = op.id;
-      opSelect.append(o);
-    }
+    fillOpSelect(typeSelect.value);   // the first type by default
 
     function currentOp() { return ops.find((o) => o.id === opSelect.value); }
 
@@ -572,6 +566,8 @@ export async function openDerivedColumnModal(prefill, editing) {
         suggestNote.textContent =
           `Suggested: ${best.label} — ${Math.round(best.confidence * 100)}% of sampled values parse.`;
         if (!editing) {
+          const bop = ops.find((o) => o.id === best.op_id);
+          if (bop) { typeSelect.value = typeOf(bop); fillOpSelect(typeSelect.value); }
           opSelect.value = best.op_id;
           state.params = Object.assign({}, best.params);
         }
@@ -584,19 +580,23 @@ export async function openDerivedColumnModal(prefill, editing) {
 
     colSelect.onchange = () => pickColumn(colSelect.value);
     let nameTouched = false;
-    opSelect.onchange = () => {
+    function onOpChanged() {
       state.params = {};
       // "(parsed)" vs "(extract)" tracks the op kind — keep the suggestion
       // current until the analyst has typed a name of their own.
       if (!editing && !nameTouched) { nameInput.value = defaultName(); state.name = nameInput.value; }
       buildParams();
       refreshPreview();
-    };
+    }
+    opSelect.onchange = onOpChanged;
+    // Switching type repopulates the op list, then behaves like an op change.
+    typeSelect.onchange = () => { fillOpSelect(typeSelect.value); onOpChanged(); };
     nameInput.oninput = () => { nameTouched = true; state.name = nameInput.value; };
 
     body.append(labeledRow('Parse column', colSelect));
     body.append(suggestNote);
-    body.append(labeledRow('Format', opSelect));
+    body.append(labeledRow('Type', typeSelect));
+    body.append(labeledRow('Operation', opSelect));
     body.append(paramBox);
     if (!editing) {
       nameInput.value = defaultName();
@@ -608,7 +608,10 @@ export async function openDerivedColumnModal(prefill, editing) {
 
     if (editing) {
       state.opId = editing.derived_op;
+      const eop = ops.find((o) => o.id === editing.derived_op);
+      if (eop) { typeSelect.value = typeOf(eop); fillOpSelect(typeSelect.value); }
       opSelect.value = editing.derived_op;
+      typeSelect.disabled = true;
       opSelect.disabled = true;
       api(`/api/derived?source_id=${S.sourceId}`).then((defs) => {
         const d = defs.find((x) => x.id === editing.derived_id);
