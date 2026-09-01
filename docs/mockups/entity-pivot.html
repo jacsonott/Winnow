@@ -1,0 +1,79 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Entity pivot — mockup</title>
+<style>
+  :root{--ink:#0b0b0c;--panel:#101312;--panel2:#171b19;--panel3:#1e2320;--line:#242a26;--line2:#333a35;
+        --text:#c9cdc4;--dim:#7c8578;--accent:#d9a441;--accent2:#8a6c33;--danger:#e0836a;--good:#a9c48f;
+        --mono:'JetBrains Mono',ui-monospace,Menlo,monospace;}
+  *{box-sizing:border-box}body{margin:0;background:var(--ink);color:var(--text);font:13px/1.5 var(--mono)}
+  .bar{display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--line2);background:var(--panel)}
+  .bar .pill{border:1px solid var(--line2);border-radius:2px;padding:3px 9px;color:var(--dim)}
+  .bar .entity{color:var(--accent);border-color:var(--accent2)}
+  .bar input{background:var(--ink);border:1px solid var(--line2);color:var(--text);font:inherit;padding:5px 8px;width:240px}
+  .bar .kind{color:var(--dim)}
+  .wrap{display:grid;grid-template-columns:320px 1fr;height:calc(100vh - 42px)}
+  .left{border-right:1px solid var(--line2);overflow:auto}
+  .srcrow{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-bottom:1px solid var(--line);cursor:pointer}
+  .srcrow:hover{background:var(--panel2)}.srcrow.active{background:var(--panel3);border-left:2px solid var(--accent)}
+  .srcrow .n{color:var(--text)}.srcrow .c{color:var(--accent);font-weight:600}
+  .srchead{color:var(--dim);text-transform:uppercase;letter-spacing:.08em;font-size:11px;padding:10px 12px 4px}
+  .right{display:flex;flex-direction:column;min-width:0}
+  .timeline{height:120px;border-bottom:1px solid var(--line2);position:relative;padding:10px 12px}
+  .tl-label{color:var(--dim);font-size:11px}
+  .bars{position:absolute;inset:34px 12px 22px;display:flex;align-items:flex-end;gap:2px}
+  .b{flex:1;background:var(--accent2)}.b.hot{background:var(--accent)}.b.fail{background:var(--danger)}
+  .axis{position:absolute;left:12px;right:12px;bottom:6px;display:flex;justify-content:space-between;color:var(--dim);font-size:10px}
+  .rows{flex:1;overflow:auto}
+  table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:6px 12px;border-bottom:1px solid var(--line)}
+  th{color:var(--dim);font-weight:500;position:sticky;top:0;background:var(--panel);font-size:11px;text-transform:uppercase;letter-spacing:.06em}
+  td .tag{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:6px;vertical-align:middle}
+  .hl{color:var(--accent);background:rgba(217,164,65,.14);padding:0 2px}
+  .src-tag{color:var(--dim);font-size:11px}
+  .foot{padding:6px 12px;border-top:1px solid var(--line2);color:var(--dim);display:flex;gap:16px}
+  .foot b{color:var(--text)}
+</style></head><body>
+  <div class="bar">
+    <span class="pill entity">⌖ WKS07</span>
+    <span class="kind">host · resolved as RemoteHost / Computer / Workstation across 6 tables</span>
+    <span style="flex:1"></span>
+    <span class="kind">pivot on</span><input value="WKS07" />
+    <span class="pill">Tag all hits ▾</span>
+    <span class="pill">Add to watchlist</span>
+  </div>
+  <div class="wrap">
+    <div class="left">
+      <div class="srchead">Appears in — 1,204 rows</div>
+      <div class="srcrow active"><span class="n">EvtxECmd — Security</span><span class="c">612</span></div>
+      <div class="srcrow"><span class="n">EvtxECmd — Terminal Services</span><span class="c">188</span></div>
+      <div class="srcrow"><span class="n">MFTECmd $J (USN)</span><span class="c">201</span></div>
+      <div class="srcrow"><span class="n">Amcache — program entries</span><span class="c">14</span></div>
+      <div class="srcrow"><span class="n">PECmd (Prefetch)</span><span class="c">173</span></div>
+      <div class="srcrow"><span class="n">firewall.csv</span><span class="c">16</span></div>
+      <div class="srchead">Seen as</div>
+      <div class="srcrow"><span class="n">source (initiated)</span><span class="c">english → 41 dsts</span></div>
+      <div class="srcrow"><span class="n">destination (targeted)</span><span class="c">←  9 srcs</span></div>
+    </div>
+    <div class="right">
+      <div class="timeline">
+        <div class="tl-label">Activity for <b style="color:var(--accent)">WKS07</b> across all tables · per hour · <span style="color:var(--danger)">red = failed logons</span></div>
+        <div class="bars">
+          <div class="b" style="height:12%"></div><div class="b" style="height:18%"></div><div class="b" style="height:9%"></div>
+          <div class="b" style="height:22%"></div><div class="b" style="height:14%"></div><div class="b" style="height:30%"></div>
+          <div class="b fail" style="height:88%"></div><div class="b fail" style="height:74%"></div><div class="b hot" style="height:64%"></div>
+          <div class="b hot" style="height:52%"></div><div class="b" style="height:20%"></div><div class="b" style="height:16%"></div>
+          <div class="b" style="height:10%"></div><div class="b" style="height:24%"></div><div class="b" style="height:12%"></div>
+        </div>
+        <div class="axis"><span>Mar 14 08:00</span><span>Mar 15 14:00 — spray + pivot</span><span>Mar 16 17:00</span></div>
+      </div>
+      <div class="rows">
+        <table>
+          <tr><th>Time</th><th>Table</th><th>EventId</th><th>Field</th><th>Detail</th></tr>
+          <tr><td>2026-03-15 14:03:11</td><td class="src-tag">Security</td><td>4625</td><td>RemoteHost</td><td><span class="tag" style="background:var(--danger)"></span>Failed logon — <span class="hl">WKS07</span> → FILESRV01 (admin)</td></tr>
+          <tr><td>2026-03-15 14:18:44</td><td class="src-tag">Security</td><td>4624</td><td>RemoteHost</td><td><span class="tag" style="background:var(--accent)"></span>Logon type 3 — <span class="hl">WKS07</span> → FILESRV01 (svc_backup)</td></tr>
+          <tr><td>2026-03-15 14:19:02</td><td class="src-tag">Term Svc</td><td>21</td><td>RemoteHost</td><td>RDP session — <span class="hl">WKS07</span> → FILESRV01</td></tr>
+          <tr><td>2026-03-15 14:22:57</td><td class="src-tag">USN $J</td><td>—</td><td>ParentPath</td><td>rclone.exe written under <span class="hl">WKS07</span>\ProgramData</td></tr>
+          <tr><td>2026-03-15 14:31:10</td><td class="src-tag">Prefetch</td><td>—</td><td>ExecutableName</td><td>PSEXESVC.EXE first run on <span class="hl">WKS07</span></td></tr>
+        </table>
+      </div>
+      <div class="foot"><span>Double-click a row → open that table filtered to it</span><span>·</span><span><b>1,204</b> rows · <b>6</b> tables · <b>41</b> outbound peers</span></div>
+    </div>
+  </div>
+</body></html>
