@@ -41,12 +41,32 @@
 * { scrollbar-width: thin; }
 html { scrollbar-color: var(--line-2) transparent; }
 
+/* Tell the UA which palette its native controls live in, so the parts CSS
+   can't reach — the <select> option popup, date pickers, the scrollbar
+   fallback — follow the theme instead of flashing a white OS menu on a
+   dark app. Keyed on the theme, so it flips with the toggle. */
+html[data-theme="dark"] { color-scheme: dark; }
+html[data-theme="light"] { color-scheme: light; }
+
 html, body {
   height: 100%; margin: 0;
   background: var(--ink); color: var(--text);
   font-family: var(--ui); font-size: 13px;
   overflow: hidden;
 }
+
+/* Themed <select> by default — THE rule for any new dropdown/menu, so one
+   never ships with the bare white OS look (the widget editor's selects
+   did). Contextual rules (.fb-cond select, .wl-add select, …) still win
+   where they set more; this is the floor everything inherits. The option
+   popup itself is UA-drawn, but color-scheme above makes it match. */
+select {
+  background: var(--ink); color: var(--text);
+  border: var(--border-w) solid var(--line-2); border-radius: var(--radius-sm);
+  padding: 5px 7px; font: inherit;
+}
+select:focus { outline: none; border-color: var(--accent); }
+select:disabled { color: var(--text-faint); }
 
 /* ------------------------------------------------------------- appearance */
 /* Fallback (also "panel" + "dark", i.e. the original look) so a page that

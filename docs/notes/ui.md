@@ -10,6 +10,15 @@ see [docs/notes/README.md](README.md) for the whole set.
 
 ---
 
+- **Theming rule for controls.** `<select>` has a global themed base rule in
+  `static/style.css` (dark `--ink`/`--line-2`, accent focus), and each theme
+  sets `color-scheme` on `<html>` so the parts CSS can't reach — the native
+  option popup, date pickers, the scrollbar fallback — follow the theme
+  instead of flashing a white OS menu on a dark app. **Any new dropdown/menu
+  inherits this by default; never ship a bare `el('select')` that looks
+  unthemed** (the widget editor did before this). Contextual rules
+  (`.fb-cond select`, `.wl-add select`, …) still win where they set more.
+
 - The **timeframe filter** (`S.timeRange`, `static/js/timeframe.js`, `time_range` on
   `ViewSpec`, compiled in `_compile_where` via the registered SQL function
   `TS_NORMALIZE`) is deliberately a separate piece of state from every
