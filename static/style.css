@@ -1088,14 +1088,41 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .sidebar-resize:hover::after, .sidebar-resize.dragging::after {
   content: ""; position: absolute; inset: 0 3px; background: var(--accent-dim);
 }
-.sidebar-head { flex: 0 0 auto; padding: 8px; border-bottom: 1px solid var(--line); }
+.sidebar-head { flex: 0 0 auto; padding: 8px; border-bottom: 1px solid var(--line); display: flex; gap: 6px; align-items: center; }
 #sidebarFilter {
-  width: 100%; background: var(--ink); color: var(--text);
+  flex: 1 1 auto; min-width: 0; background: var(--ink); color: var(--text);
   border: var(--border-w) solid var(--line-2); border-radius: var(--radius-sm);
   padding: 5px 8px; font: inherit; font-size: 12px;
 }
+.sidebar-newfolder {
+  flex: 0 0 auto; background: var(--ink); color: var(--dim);
+  border: var(--border-w) solid var(--line-2); border-radius: var(--radius-sm);
+  padding: 4px 7px; font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap;
+}
+.sidebar-newfolder:hover { color: var(--text); border-color: var(--accent); }
 .sidebar-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 4px; display: flex; flex-direction: column; gap: 1px; }
-.sidebar-row { display: flex; align-items: stretch; gap: 1px; border-radius: var(--radius-sm); }
+.sidebar-row { display: flex; align-items: stretch; gap: 1px; border-radius: var(--radius-sm); padding-left: calc(var(--depth, 0) * 12px); }
+
+/* Folder header rows in the table tree — depth indent via --depth (set per
+   row in renderSidebar), a disclosure twisty, and a drop-into highlight
+   when a table is dragged over. */
+.sidebar-folder { display: flex; align-items: stretch; gap: 1px; border-radius: var(--radius-sm); padding-left: calc(var(--depth, 0) * 12px); }
+.sidebar-folder:hover { background: var(--panel-2); }
+.sidebar-folder .folder-twisty {
+  flex: 0 0 auto; width: 16px; background: none; border: 0; color: var(--dim);
+  cursor: pointer; font: inherit; font-size: 10px; padding: 0;
+}
+.sidebar-folder .folder-name { flex: 1 1 auto; min-width: 0; font-weight: 600; }
+.sidebar-folder.drop-into, .sidebar-rootzone.drop-into,
+.sidebar-open-header.drop-into, .sidebar-openrow.drop-into {
+  background: var(--ink); box-shadow: inset 0 0 0 1px var(--accent); color: var(--accent);
+}
+.sidebar-rootzone {
+  margin: 4px 2px 2px; padding: 6px 8px; text-align: center; font-size: 11px;
+  color: var(--text-faint); border: 1px dashed var(--line-2); border-radius: var(--radius-sm);
+}
+/* The Open section header doubles as a drop target for opening a table. */
+.sidebar-open-header { border-radius: var(--radius-sm); }
 .sidebar-row.active { background: var(--ink); box-shadow: inset 2px 0 0 var(--accent); }
 .sidebar-row.active .menu-item { color: var(--accent); }
 .sidebar-row .menu-item { flex: 1 1 auto; min-width: 0; }
@@ -1108,14 +1135,12 @@ textarea:focus { border-color: var(--accent); outline: none; }
   color: var(--dim); font-family: var(--mono); font-size: 11px; padding-right: 8px;
 }
 .sidebar-row-actions { flex: 0 0 auto; display: none; align-items: stretch; gap: 1px; }
-.sidebar-row:hover .sidebar-row-actions { display: flex; }
-/* Drag-to-reorder (wireSidebarRowDrag/wireDragReorder) — same technique
-   and same S.tabOrder as the horizontal tab strip's own .tab.dragging/
-   .drop-before/.drop-after, just a top/bottom edge instead of left/right
-   since this list is vertical. */
+.sidebar-row:hover .sidebar-row-actions,
+.sidebar-folder:hover .sidebar-row-actions { display: flex; }
+/* A table row mid-drag (wireTableDrag) — fades while it's being dragged
+   onto a folder header or the root drop zone (both light up via
+   .drop-into above). */
 .sidebar-row.dragging { opacity: .4; }
-.sidebar-row.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
-.sidebar-row.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
 
 /* ---------------------------------------------------------------- modal */
 

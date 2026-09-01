@@ -81,6 +81,8 @@ export const S = {
   lastBrowsePath: null,  // last dir the "Add from this machine…" picker was in — session-only convenience, not persisted
   pluginsCaseOpen: false, // whether /api/plugins was answered with a case open — gates the per-case scope options in Settings → Plugins
   sidebarFilter: '',      // substring filter typed into the sidebar's own search box
+  folders: [],            // sidebar folder tree [{id, name, parent_id, pos}], from the case file (see sources.js)
+  collapsedFolders: new Set(), // folder ids collapsed in the sidebar — a per-browser view pref (localStorage)
   timeline: {
     view: null, pages: new Map(), pending: new Set(), reqId: 0,
     tagFilter: null, // tag ids currently checked; null = not yet initialized (defaults to "every known tag" on first load)

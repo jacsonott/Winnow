@@ -671,6 +671,54 @@ def test_remote_session_is_a_machine_setting(client):
     assert client.get("/api/settings/app").json()["remote_session"] is False
 
 
+# ---------------------------------------------------------------- folders
+
+def test_folder_routes_crud_and_source_assignment(client, store, write_csv):
+    # create → list
+    a = client.post("/api/folders", json={"name": "Registry"}).json()
+    b = client.post("/api/folders", json={"name": "Users", "parent_id": a["id"]}).json()
+    assert {f["id"] for f in client.get("/api/folders").json()} == {a["id"], b["id"]}
+
+    # rename + move + reorder
+    assert client.post(f"/api/folders/{b['id']}/rename", json={"name": "Accounts"}).status_code == 200
+    c = client.post("/api/folders", json={"name": "Logs"}).json()
+    assert client.post("/api/folders/reorder",
+                       json={"parent_id": None, "ordered_ids": [c["id"], a["id"]]}).status_code == 200
+    assert client.post(f"/api/folders/{c['id']}/move",
+                       json={"parent_id": a["id"]}).status_code == 200
+
+    # assign a table, then read it back on /api/sources
+    rid = store.ingest_csv(write_csv([["A"], ["1"]], "evt.csv"), name="evt.csv", build_fts=False)["id"]
+    assert client.post(f"/api/source/{rid}/folder", json={"folder_id": a["id"]}).status_code == 200
+    src = next(s for s in client.get("/api/sources").json() if s["id"] == rid)
+    assert src["folder_id"] == a["id"]
+
+    # delete is non-destructive to the source
+    assert client.delete(f"/api/folders/{a['id']}").status_code == 200
+    assert a["id"] not in {f["id"] for f in client.get("/api/folders").json()}
+    src = next(s for s in client.get("/api/sources").json() if s["id"] == rid)
+    assert src["folder_id"] is None            # a was top-level → table drops to root
+
+
+def test_folder_create_rejects_blank_name(client):
+    assert client.post("/api/folders", json={"name": "   "}).status_code == 400
+
+
+def test_folder_move_cycle_is_rejected(client):
+    a = client.post("/api/folders", json={"name": "a"}).json()
+    b = client.post("/api/folders", json={"name": "b", "parent_id": a["id"]}).json()
+    assert client.post(f"/api/folders/{a['id']}/move", json={"parent_id": b["id"]}).status_code == 400
+
+
+def test_folder_routes_need_the_csrf_header(store, monkeypatch):
+    import server
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(server, "STORE", store)
+    bare = TestClient(server.app)
+    assert bare.post("/api/folders", json={"name": "X"}).status_code == 403
+
+
 def test_case_notes_roundtrip_and_persist(client, store):
     """The case narrative lives in the .db so it travels with the case."""
     assert client.get("/api/case/notes").json()["body"] == ""
