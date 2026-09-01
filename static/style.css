@@ -1705,3 +1705,23 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 .assoc-ext { font-family: var(--mono, monospace); min-width: 4.5em; }
 .assoc-desc { color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .assoc-handleronly { color: var(--dim); font-size: 0.85em; }
+
+/* Case notes tab */
+.notesview { display: flex; flex-direction: column; min-height: 0; }
+.notes-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+  border-bottom: 1px solid var(--line-2); flex: 0 0 auto; }
+.notes-head .notes-label { color: var(--dim); text-transform: uppercase;
+  letter-spacing: .07em; font-size: 11px; }
+.notes-head .spacer { flex: 1; }
+.notes-editor { flex: 1 1 auto; min-height: 0; width: 100%; resize: none;
+  background: var(--panel); color: var(--text); border: none; outline: none;
+  padding: 16px 18px; font: 13px/1.6 var(--mono); }
+.notes-preview { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 8px 22px 40px;
+  color: var(--text); max-width: 82ch; }
+.notes-preview h1, .notes-preview h2, .notes-preview h3, .notes-preview h4 {
+  color: var(--text); border-bottom: 1px solid var(--line); padding-bottom: 3px; }
+.notes-preview a { color: var(--accent); }
+.notes-preview code { background: var(--panel-3); padding: 1px 4px; border-radius: 2px; }
+.notes-preview pre { background: var(--panel-3); padding: 10px 12px; overflow: auto; }
+.notes-preview pre code { background: none; padding: 0; }
+.notes-preview li { margin: 2px 0; }

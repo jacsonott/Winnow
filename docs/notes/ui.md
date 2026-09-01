@@ -458,3 +458,5 @@ see [docs/notes/README.md](README.md) for the whole set.
   DEFAULT_KEYMAP entry and a migration for maps that carry it.
 
 - **Stack view** (stack.js) — the column-header menu's "Stack values (rarest first)…" opens a modal of the current view's distinct values by count (via group_summary, order=count direction=asc), drawn with charts.js. Click a bar to filter the grid to that value. Least-frequency-of-occurrence triage. See docs/design/analysis-suite.md.
+
+- **Case notes tab** (notes.js) — a free-form Markdown scratchpad for the investigation narrative, stored in the case file (Store.case_notes) so it travels with the .db, distinct from per-row notes. Edit/preview toggle, debounced autosave, a tiny dependency-free Markdown renderer (airgap). Page tabs now route visibility through sql.js's showMainView(id)/MAIN_VIEWS registry so adding a tab is a one-place edit. See docs/design/analysis-suite.md.

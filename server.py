@@ -2414,6 +2414,20 @@ def api_case_settings_save(body: CaseSettingWrite):
     return store().get_case_settings()
 
 
+class CaseNotesWrite(BaseModel):
+    body: str = ""
+
+
+@app.get("/api/case/notes")
+def api_case_notes_get():
+    return store().get_case_notes()
+
+
+@app.post("/api/case/notes")
+def api_case_notes_save(body: CaseNotesWrite):
+    return store().set_case_notes(body.body)
+
+
 # ------------------------------------------------------------ derived columns
 
 
