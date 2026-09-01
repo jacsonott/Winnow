@@ -51,16 +51,19 @@ def test_shipped_kape_profile_is_readonly_and_applies(page):
     row.locator(".btn", has_text="Apply to this case").click()
     page.wait_for_selector("#modal[hidden]", state="attached")
 
-    # the dashboard now carries the shipped widgets
-    page.locator("#tabDashboard").click()
+    # applying creates a NAMED "KAPE triage" dashboard in the sidebar; open it
+    page.evaluate("() => __winnow.renderSidebar()")
+    page.wait_for_selector("#sidebarList .sidebar-row:has-text('KAPE triage')")
+    page.locator("#sidebarList .sidebar-row", has_text="KAPE triage").locator(".menu-item").click()
     page.wait_for_selector("#dashboardview:not([hidden])")
     page.wait_for_function(
-        "() => document.querySelectorAll('.dash-card:not(.dash-add)').length === 16", timeout=10_000)
+        "() => document.querySelectorAll('#dashGrid .dash-card:not(.dash-add)').length === 16", timeout=10_000)
 
     # cleanup: leave the shared case as we found it
     page.evaluate("""async () => {
       const h = { 'Content-Type':'application/json', 'X-Timeline-Lite-Client':'1' };
-      await fetch('/api/dashboard', { method:'POST', headers:h, body: JSON.stringify({ widgets: [] }) });
+      for (const d of await fetch('/api/dashboards', { headers:h }).then(r=>r.json()))
+        await fetch('/api/dashboards/' + d.id, { method:'DELETE', headers:h });
       const wl = await fetch('/api/watchlist', { headers:h }).then(r=>r.json());
       for (const i of (wl.indicators||wl)) await fetch('/api/watchlist/' + i.id, { method:'DELETE', headers:h });
     }""")

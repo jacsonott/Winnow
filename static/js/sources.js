@@ -19,7 +19,7 @@ import { openSessionManager } from './session.js';
 import { showGridTab, showSqlTab, showTimelineTab } from './sql.js';
 import { showNotesTab } from './notes.js';
 import { showWatchlistTab } from './watchlist.js';
-import { showDashboardTab } from './dashboard.js';
+import { loadDashboards, renderDashboardsInto } from './dashboard.js';
 import { openCaseSettings } from './settings.js';
 import { S, selClear, selCount, selFirst, specKey } from './state.js';
 import { openTablesManager } from './tables.js';
@@ -299,7 +299,6 @@ export function pageTabs() {
     { key: 'timeline', label: 'Timeline', title: 'Unified timeline of every tagged row across the case', node: () => $('tabTimeline'), show: showTimelineTab },
     { key: 'notes', label: 'Notes', title: 'Case narrative — a Markdown scratchpad saved in the case file', node: () => $('tabNotes'), show: showNotesTab },
     { key: 'watchlist', label: 'Watchlist', title: 'IOC watchlist — indicators scanned across every table', node: () => $('tabWatchlist'), show: showWatchlistTab },
-    { key: 'dashboard', label: 'Dashboard', title: 'Case dashboard — widgets summarizing the case', node: () => $('tabDashboard'), show: showDashboardTab },
     ...S.pluginTabs.map((t) => ({
       key: 'plugin:' + t.id,
       label: t.label,
@@ -469,6 +468,7 @@ export async function loadSources(select) {
   ]);
   S.sources = [...sources, ...merges];
   S.folders = folders;
+  await loadDashboards();   // populates S.dashboards for the sidebar's Dashboards section
   const openTabs = renderTabs();
   // select/S.sourceId are only trustworthy if they actually name a tab
   // that's open right now — S.sourceId in particular is never reset on a
@@ -797,6 +797,11 @@ export function renderSidebar() {
     list.append(el('div', 'menu-header', 'Pages'));
     for (const t of shownPages) list.append(pageSidebarRow(t, pages.indexOf(t), pages.length));
   }
+
+  // Dashboards are a section here, not a top-strip tab — a dashboard is a
+  // function (build several named boards), not one page. dashboard.js owns
+  // the rows (open/rename/delete + "New dashboard").
+  if (S.sources.length) renderDashboardsInto(list);
 }
 
 /* A folder in the tree: disclosure + name + recursive table count, the

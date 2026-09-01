@@ -5,7 +5,7 @@
    (home.js). */
 import { $, api, el, post, toast } from './core.js';
 import { loadPlugins } from './importer.js';
-import { renderPageTabs } from './sources.js';
+import { loadSources, renderPageTabs } from './sources.js';
 import { S } from './state.js';
 import { confirmDialog, markModalAction, modal, promptDialog } from './ui.js';
 
@@ -17,6 +17,10 @@ export async function applyBundle(bundle) {
   const res = await post(`/api/plugin_bundles/${bundle.id}/apply`, {});
   await loadPlugins();
   renderPageTabs();
+  // A profile can add a named dashboard and seed the watchlist — reload the
+  // case state so the sidebar's Dashboards section and the watchlist reflect
+  // it without a manual refresh.
+  await loadSources();
   const missing = res.missing || [];
   toast(`Applied "${res.applied}" — ${res.enabled.length} plugin${res.enabled.length === 1 ? '' : 's'} on`
     + (missing.length ? ` (${missing.length} in the bundle not installed here: ${missing.join(', ')})` : ''), 6000);

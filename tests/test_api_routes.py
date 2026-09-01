@@ -794,20 +794,22 @@ def test_dashboard_widgets_and_profile(client, store, write_csv):
     assert "rows" in client.post("/api/dashboard/widget/preview", json={"source": "watchlist", "query": {}}).json()
     assert client.post("/api/dashboard/widget/preview", json={"source": "nope", "query": {}}).status_code == 400
 
-    # persist a dashboard
+    # create + persist a NAMED dashboard
+    d = client.post("/api/dashboards", json={"name": "Board"}).json()
     w = [{"title": "Hosts", "source": "sql", "render": "stat",
           "query": {"sql": f"SELECT COUNT(*) FROM src_{sid}"}}]
-    client.post("/api/dashboard", json={"widgets": w})
-    assert client.get("/api/dashboard").json()["widgets"][0]["title"] == "Hosts"
+    client.post(f"/api/dashboards/{d['id']}", json={"widgets": w})
+    assert client.get(f"/api/dashboards/{d['id']}").json()["widgets"][0]["title"] == "Hosts"
+    assert next(x for x in client.get("/api/dashboards").json() if x["id"] == d["id"])["widget_count"] == 1
 
-    # a profile carrying a dashboard applies it on apply
+    # a profile carrying a dashboard applies it as a NAMED board on apply
     prof = client.post("/api/plugin_bundles", json={"name": "KAPE triage", "plugins": [],
         "dashboard": [{"title": "Findings", "source": "tags", "render": "stat"}]})
-    bid = prof.json()["id"]
-    client.post("/api/dashboard", json={"widgets": []})   # clear
-    ap = client.post(f"/api/plugin_bundles/{bid}/apply")
+    ap = client.post(f"/api/plugin_bundles/{prof.json()['id']}/apply")
     assert ap.status_code == 200 and ap.json()["dashboard_applied"] is True
-    assert client.get("/api/dashboard").json()["widgets"][0]["title"] == "Findings"
+    boards = {b["name"]: b for b in client.get("/api/dashboards").json()}
+    assert "KAPE triage" in boards
+    assert client.get(f"/api/dashboards/{boards['KAPE triage']['id']}").json()["widgets"][0]["title"] == "Findings"
 
 
 def test_close_all_tabs_route(client, store, write_csv):

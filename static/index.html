@@ -89,7 +89,6 @@ try {
     <button class="tab tab-sql" id="tabTimeline" aria-selected="false" title="Unified timeline of every tagged row across the case">Timeline</button>
     <button class="tab tab-sql" id="tabNotes" aria-selected="false" title="Case narrative — a Markdown scratchpad saved in the case file">Notes</button>
     <button class="tab tab-sql" id="tabWatchlist" aria-selected="false" title="IOC watchlist — indicators scanned across every table">Watchlist</button>
-    <button class="tab tab-sql" id="tabDashboard" aria-selected="false" title="Case dashboard — widgets summarizing the case">Dashboard</button>
   </nav>
 
   <div class="bar-actions">
@@ -181,12 +180,7 @@ try {
     </section>
 
     <section class="dashboardview" id="dashboardview" hidden>
-      <div class="dash-bar">
-        <span class="dash-title">Case dashboard</span>
-        <div class="spacer"></div>
-        <button class="btn" id="dashAddTop">＋ Add widget</button>
-        <button class="btn ghost" id="dashSaveProfile">Save as profile…</button>
-      </div>
+      <div class="dash-bar" id="dashBar"></div>
       <div class="dash-grid" id="dashGrid"></div>
     </section>
 

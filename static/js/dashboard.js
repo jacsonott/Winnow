@@ -1,43 +1,152 @@
-/* Case dashboard — a grid of widgets that summarize the open case. Every
-   widget is a saved query + a render kind: SQL runs through the read-only
-   run_sql path, watchlist/tags read case state. That makes a dashboard
-   DATA, not code — build a query, pick a render, done. The layout lives
-   in the case .db and can be saved into a PROFILE (a plugin bundle + a
-   dashboard) to reuse across cases of the same type. See
+/* Case dashboards — a case holds several NAMED boards ("KAPE triage", a
+   lateral-movement board), each a grid of widgets. Boards live under the
+   sidebar's Dashboards section, not as a top-strip tab: a dashboard is a
+   function, not one page. A widget is a data source (read-only SQL, the
+   watchlist, or tag totals) rendered a chosen way — number, chart, list,
+   chips. A board can be saved into a PROFILE (a plugin bundle + a named
+   dashboard) and reused across cases of the same type. See
    docs/design/analysis-suite.md. */
 
 import { drawBars, drawHistogram } from './charts.js';
 import { $, api, el, post, toast } from './core.js';
 import { recordTabVisit } from './tabhistory.js';
-import { showMainView, syncTabChrome } from './sql.js';
-import { syncTabSelection } from './sources.js';
+import { renderSidebar, syncTabSelection } from './sources.js';
+import { showGridTab, showMainView, syncTabChrome } from './sql.js';
 import { S } from './state.js';
 import { modal, promptDialog, confirmDialog } from './ui.js';
 
-let widgets = [];
-let loaded = false;
+let widgets = [];   // the CURRENT board's widgets (the one with S.dashboardId)
 
 const num = (v) => (typeof v === 'number' ? v : (parseFloat(String(v).replace(/,/g, '')) || 0));
 
-async function load() {
-  try { widgets = (await api('/api/dashboard')).widgets || []; } catch { widgets = []; }
-  loaded = true;
-  render();
+/* ------------------------------------------------------------ data */
+
+// Fetched into S.dashboards by loadSources so the sidebar can render the
+// Dashboards section alongside everything else.
+export async function loadDashboards() {
+  try { S.dashboards = await api('/api/dashboards'); }
+  catch { S.dashboards = []; }
+}
+
+async function loadWidgets(id) {
+  try { widgets = (await api(`/api/dashboards/${id}`)).widgets || []; }
+  catch { widgets = []; }
 }
 
 async function persist() {
-  try { await post('/api/dashboard', { widgets }); } catch (e) { toast('Could not save dashboard: ' + e.message, 6000); }
+  if (S.dashboardId == null) return;
+  try { await post(`/api/dashboards/${S.dashboardId}`, { widgets }); }
+  catch (e) { toast('Could not save dashboard: ' + e.message, 6000); }
+}
+
+/* --------------------------------------------------------- show a board */
+
+export async function showDashboard(id) {
+  recordTabVisit({ kind: 'page', key: 'dashboard:' + id });
+  S.activeTab = 'dashboard';
+  S.dashboardId = id;
+  showMainView('dashboardview');
+  syncTabSelection();
+  syncTabChrome();
+  await loadWidgets(id);
+  render();
+}
+
+/* ---------------------------------------- sidebar "Dashboards" section */
+
+/* Rendered into #sidebarList by renderSidebar — one row per board (click to
+   open, double-click to rename, ✕ to delete) plus "+ New dashboard". */
+export function renderDashboardsInto(list) {
+  list.append(el('div', 'menu-header', 'Dashboards'));
+  for (const d of (S.dashboards || [])) {
+    const active = S.activeTab === 'dashboard' && S.dashboardId === d.id;
+    const row = el('div', 'sidebar-row' + (active ? ' active' : ''));
+    const label = el('button', 'menu-item', d.name);
+    label.title = `${d.widget_count} widget${d.widget_count === 1 ? '' : 's'} · double-click to rename`;
+    label.onclick = () => showDashboard(d.id);
+    label.ondblclick = (e) => { e.preventDefault(); renameDashboard(d); };
+    row.append(label, el('span', 'sidebar-row-count', String(d.widget_count)));
+    const acts = el('div', 'sidebar-row-actions');
+    const del = el('button', 'menu-item-action', '✕');
+    del.title = 'Delete this dashboard';
+    del.onclick = (e) => { e.stopPropagation(); deleteDashboard(d); };
+    acts.append(del);
+    row.append(acts);
+    list.append(row);
+  }
+  const add = el('div', 'sidebar-row sidebar-dash-new');
+  const addBtn = el('button', 'menu-item', '＋ New dashboard');
+  addBtn.onclick = () => createDashboard();
+  add.append(addBtn);
+  list.append(add);
+}
+
+export async function createDashboard() {
+  const name = await promptDialog('New dashboard name:', '', { okLabel: 'Create' });
+  if (!name || !name.trim()) return;
+  try {
+    const d = await post('/api/dashboards', { name: name.trim() });
+    await loadDashboards();
+    renderSidebar();
+    await showDashboard(d.id);
+  } catch (e) { toast('Could not create dashboard: ' + e.message, 6000); }
+}
+
+async function renameDashboard(d) {
+  const name = await promptDialog('Rename dashboard:', d.name, { okLabel: 'Rename' });
+  if (!name || !name.trim() || name.trim() === d.name) return;
+  try {
+    await post(`/api/dashboards/${d.id}`, { name: name.trim() });
+    await loadDashboards();
+    renderSidebar();
+    if (S.dashboardId === d.id) renderBar();
+  } catch (e) { toast('Could not rename dashboard: ' + e.message, 6000); }
+}
+
+async function deleteDashboard(d) {
+  if (!(await confirmDialog(`Delete dashboard “${d.name}”? Its widgets go with it; the case data is untouched.`,
+    { danger: true, okLabel: 'Delete dashboard' }))) return;
+  try {
+    await api(`/api/dashboards/${d.id}`, { method: 'DELETE' });
+    const wasShowing = S.dashboardId === d.id;
+    await loadDashboards();
+    renderSidebar();
+    if (wasShowing) {
+      const other = (S.dashboards || [])[0];
+      if (other) await showDashboard(other.id);
+      else { S.dashboardId = null; widgets = []; showGridTab(); }   // nothing left to show
+    }
+  } catch (e) { toast('Could not delete dashboard: ' + e.message, 6000); }
+}
+
+/* --------------------------------------------------------------- render */
+
+function renderBar() {
+  const bar = $('dashBar');
+  bar.replaceChildren();
+  const d = (S.dashboards || []).find((x) => x.id === S.dashboardId);
+  const title = el('span', 'dash-title', d ? d.name : 'Dashboard');
+  title.title = 'Double-click to rename';
+  if (d) title.ondblclick = () => renameDashboard(d);
+  bar.append(title, el('div', 'spacer'));
+  const add = el('button', 'btn', '＋ Add widget');
+  add.onclick = () => openWidgetEditor(null);
+  const prof = el('button', 'btn ghost', 'Save as profile…');
+  prof.title = 'Save this dashboard + the enabled plugins as a reusable profile';
+  prof.onclick = saveAsProfile;
+  bar.append(add, prof);
 }
 
 function render() {
+  renderBar();
   const grid = $('dashGrid');
   grid.replaceChildren();
   if (!widgets.length) {
     const e = el('div', 'dash-empty');
     e.append(el('p', null, 'No widgets yet. A dashboard is a grid of small summaries of the case.'));
     e.append(el('p', null, 'Click “＋ Add widget”, pick a template (row count, top values, events '
-      + 'over time…) and a table, and it writes the query for you — tweak it, choose how it '
-      + 'renders (number, chart, list, chips), and save.'));
+      + 'over time…) and a table, and it writes the query for you — tweak it, preview it, choose how '
+      + 'it renders (number, chart, list, chips), and save.'));
     e.append(el('p', null, 'Built one you like? “Save as profile…” keeps this dashboard (plus the '
       + 'enabled plugins) to apply on the next case of the same type — the shipped KAPE triage '
       + 'profile is exactly that.'));
@@ -49,13 +158,49 @@ function render() {
   grid.append(add);
 }
 
+let dragIdx = null;
+function wireWidgetDrag(cardEl, i) {
+  cardEl.draggable = true;
+  cardEl.addEventListener('dragstart', (e) => {
+    dragIdx = i;
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', String(i));
+    cardEl.classList.add('dragging');
+  });
+  cardEl.addEventListener('dragend', () => {
+    dragIdx = null;
+    document.querySelectorAll('.dash-card.dragging, .dash-card.drop-target')
+      .forEach((n) => n.classList.remove('dragging', 'drop-target'));
+  });
+  cardEl.addEventListener('dragover', (e) => {
+    if (dragIdx == null || dragIdx === i) return;
+    e.preventDefault();
+    cardEl.classList.add('drop-target');
+  });
+  cardEl.addEventListener('dragleave', () => cardEl.classList.remove('drop-target'));
+  cardEl.addEventListener('drop', async (e) => {
+    if (dragIdx == null || dragIdx === i) return;
+    e.preventDefault();
+    cardEl.classList.remove('drop-target');
+    const [moved] = widgets.splice(dragIdx, 1);
+    widgets.splice(i, 0, moved);
+    await persist();
+    render();
+  });
+}
+
 function card(w, i) {
   const c = el('div', 'dash-card' + (w.span ? ` span${Math.min(4, w.span)}` : ''));
+  wireWidgetDrag(c, i);   // drag to reorder
   const head = el('div', 'dash-head');
   head.append(el('h4', null, w.title || '(untitled)'));
+  const edit = el('button', 'dash-edit', '✎');
+  edit.title = 'Edit widget';
+  edit.onclick = () => openWidgetEditor(w);
   const rm = el('button', 'dash-rm', '✕');
+  rm.title = 'Remove widget';
   rm.onclick = async () => { widgets.splice(i, 1); await persist(); render(); };
-  head.append(rm);
+  head.append(edit, rm);
   c.append(head);
   const body = el('div', 'dash-widget-body');
   c.append(body);
@@ -187,6 +332,14 @@ function openWidgetEditor(existing) {
     templ.onchange = applyTemplate;
     tableSel.onchange = () => { if (templ.value !== 'blank') applyTemplate(); };
 
+    // Build the widget object from the current field values — shared by
+    // Preview and Save so they can't disagree about what "this widget" is.
+    const draft = () => ({
+      title: title.value.trim() || '(untitled)', source: source.value, render: renderSel.value,
+      span: Number(span.value), sub: sub.value.trim() || undefined,
+      query: source.value === 'sql' ? { sql: sql.value.trim() } : {},
+    });
+
     b.append(el('p', 'fb-help', 'A widget is a data source rendered a chosen way. '
       + 'SQL is read-only against the case; watchlist and tags read case state. '
       + 'stat/kv/chips/list/bar/histogram interpret the returned columns.'));
@@ -202,47 +355,54 @@ function openWidgetEditor(existing) {
     mk('Render as', renderSel); mk('Sub-label (optional, for stat)', sub); mk('Width', span);
     const syncSql = () => { sqlWrap.style.display = source.value === 'sql' ? '' : 'none'; };
     source.onchange = syncSql; syncSql();
+
+    // Live preview — see the widget's output before committing it.
+    const previewWrap = el('div', 'dash-preview-wrap');
+    previewWrap.append(el('label', null, 'Preview'));
+    const previewCard = el('div', 'dash-card dash-preview');
+    const previewBody = el('div', 'dash-widget-body');
+    previewCard.append(previewBody);
+    previewWrap.append(previewCard);
+    b.append(previewWrap);
+
     const acts = el('div', 'row-actions');
+    const previewBtn = el('button', 'btn ghost', 'Preview');
+    previewBtn.onclick = () => {
+      if (source.value === 'sql' && !sql.value.trim()) { toast('SQL widget needs a query'); return; }
+      runWidget(draft(), previewBody);
+    };
     const save = el('button', 'btn', 'Save widget');
     save.onclick = async () => {
       if (!title.value.trim()) { toast('Give the widget a title'); return; }
       if (source.value === 'sql' && !sql.value.trim()) { toast('SQL widget needs a query'); return; }
-      const w = { title: title.value.trim(), source: source.value, render: renderSel.value,
-                  span: Number(span.value), sub: sub.value.trim() || undefined,
-                  query: source.value === 'sql' ? { sql: sql.value.trim() } : {} };
+      const w = draft();
+      w.title = title.value.trim();   // draft() defaulted to "(untitled)"; keep the real one on save
       if (existing) Object.assign(existing, w); else widgets.push(w);
       await persist();
       document.getElementById('modal').hidden = true;
       render();
     };
-    acts.append(save); b.append(acts);
+    acts.append(previewBtn, save);
+    b.append(acts);
   }, { wide: true });
 }
 
-export function wireDashboard() {
-  $('tabDashboard').onclick = showDashboardTab;
-  $('dashAddTop').onclick = () => openWidgetEditor(null);
-  $('dashSaveProfile').onclick = async () => {
-    const name = await promptDialog('Save the current plugins + this dashboard as a profile named:');
-    if (!name || !name.trim()) return;
-    // The profile's plugins = whatever's enabled for this case now.
-    const enabled = (S.pluginTabs || []).map((t) => t.plugin_fs);
-    const plugins = [...new Set((S.plugins || []).filter((p) => p.enabled).map((p) => p.fs_name).concat(enabled))];
-    try {
-      await post('/api/plugin_bundles', { name: name.trim(), plugins, dashboard: widgets });
-      toast(`Profile "${name.trim()}" saved — apply it from the ⚙ Plugins menu on a new case`, 7000);
-    } catch (e) { toast(e.message, 6000); }
-  };
+async function saveAsProfile() {
+  const name = await promptDialog('Save the current plugins + this dashboard as a profile named:');
+  if (!name || !name.trim()) return;
+  // The profile's plugins = whatever's enabled for this case now.
+  const enabled = (S.pluginTabs || []).map((t) => t.plugin_fs);
+  const plugins = [...new Set((S.plugins || []).filter((p) => p.enabled).map((p) => p.fs_name).concat(enabled))];
+  try {
+    await post('/api/plugin_bundles', { name: name.trim(), plugins, dashboard: widgets });
+    toast(`Profile "${name.trim()}" saved — apply it from the Plugin bundles menu on a new case`, 7000);
+  } catch (e) { toast(e.message, 6000); }
 }
 
-// Dashboard lives in the case; a switch reloads it.
-export function resetDashboard() { loaded = false; widgets = []; }
+// Kept as an export for main.js's wiring call; the dashboard bar is built
+// per-board in renderBar (its buttons carry their own handlers), so there's
+// no static chrome left to wire here.
+export function wireDashboard() {}
 
-export async function showDashboardTab() {
-  recordTabVisit({ kind: 'page', key: 'dashboard' });
-  S.activeTab = 'dashboard';
-  showMainView('dashboardview');
-  syncTabSelection();
-  syncTabChrome();
-  if (!loaded) await load(); else render();
-}
+// Dashboards live in the case; a case switch reloads them.
+export function resetDashboard() { widgets = []; S.dashboardId = null; S.dashboards = []; }

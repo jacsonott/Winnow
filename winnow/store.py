@@ -308,6 +308,17 @@ CREATE TABLE IF NOT EXISTS dashboard (
     id      INTEGER PRIMARY KEY CHECK (id = 1),
     widgets TEXT NOT NULL DEFAULT '[]'
 );
+-- Named dashboards: "Dashboard" was one page; now it's a function, and a
+-- case can hold several named boards (a KAPE-triage board, a lateral-
+-- movement board). The single-row `dashboard` above is kept only as a
+-- one-way migration source for case files from before this — its contents
+-- become one "Dashboard" entry here on next open (see _migrate_dashboards).
+CREATE TABLE IF NOT EXISTS dashboards (
+    id      INTEGER PRIMARY KEY,
+    name    TEXT NOT NULL,
+    widgets TEXT NOT NULL DEFAULT '[]',
+    pos     INTEGER NOT NULL DEFAULT 0
+);
 """
 
 IDENT_OK = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -1182,6 +1193,15 @@ class Store:
             # from before nicknames existed — patch those in place.
             if not any(r[1] == "nickname" for r in self.db.execute("PRAGMA table_info(sources)")):
                 self.db.execute("ALTER TABLE sources ADD COLUMN nickname TEXT")
+            # The single-row `dashboard` becomes one named "Dashboard" entry
+            # the first time a case with that older shape is opened.
+            has_named = self.db.execute("SELECT 1 FROM dashboards LIMIT 1").fetchone()
+            if not has_named:
+                old = self.db.execute("SELECT widgets FROM dashboard WHERE id=1").fetchone()
+                if old and old["widgets"] and old["widgets"] != "[]":
+                    self.db.execute(
+                        "INSERT INTO dashboards(name, widgets, pos) VALUES ('Dashboard', ?, 0)",
+                        (old["widgets"],))
             if not open_tabs_existed:
                 ids = [r[0] for r in self.db.execute("SELECT id FROM sources")]
                 ids += [-r[0] for r in self.db.execute("SELECT id FROM merges")]
@@ -6795,23 +6815,89 @@ class Store:
 
     # ------------------------------------------------------------ dashboard
 
-    def get_dashboard(self) -> list:
-        with self.lock:
-            row = self.db.execute("SELECT widgets FROM dashboard WHERE id=1").fetchone()
+    # ---- named dashboards (a case holds several) ----
+
+    @staticmethod
+    def _loads_widgets(text) -> list:
         try:
-            return json.loads(row["widgets"]) if row else []
+            w = json.loads(text)
+            return w if isinstance(w, list) else []
         except (TypeError, ValueError):
             return []
 
-    def set_dashboard(self, widgets: list) -> list:
+    def list_dashboards(self) -> list[dict]:
+        """Each named dashboard with its widget count — the sidebar's
+        Dashboards section. Widgets themselves are fetched per-board."""
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT id, name, widgets, pos FROM dashboards ORDER BY pos, id").fetchall()
+        return [{"id": r["id"], "name": r["name"], "pos": r["pos"],
+                 "widget_count": len(self._loads_widgets(r["widgets"]))} for r in rows]
+
+    def get_dashboard(self, dashboard_id: int) -> list:
+        with self.lock:
+            row = self.db.execute("SELECT widgets FROM dashboards WHERE id=?", (dashboard_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"No dashboard {dashboard_id}")
+        return self._loads_widgets(row["widgets"])
+
+    def set_dashboard_widgets(self, dashboard_id: int, widgets: list) -> list:
         if not isinstance(widgets, list):
-            raise ValueError("Dashboard is a list of widgets")
+            raise ValueError("A dashboard is a list of widgets")
         with self.lock, self.db:
-            self.db.execute(
-                "INSERT INTO dashboard(id, widgets) VALUES (1, ?)"
-                " ON CONFLICT(id) DO UPDATE SET widgets=excluded.widgets",
-                (json.dumps(widgets),))
+            cur = self.db.execute(
+                "UPDATE dashboards SET widgets=? WHERE id=?", (json.dumps(widgets), dashboard_id))
+            if cur.rowcount == 0:
+                raise KeyError(f"No dashboard {dashboard_id}")
         return widgets
+
+    def create_dashboard(self, name: str, widgets: list | None = None) -> dict:
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("A dashboard needs a name")
+        if len(name) > 200:
+            raise ValueError("That dashboard name is too long")
+        with self.lock, self.db:
+            pos = self.db.execute("SELECT COALESCE(MAX(pos), -1) + 1 FROM dashboards").fetchone()[0]
+            cur = self.db.execute(
+                "INSERT INTO dashboards(name, widgets, pos) VALUES (?,?,?)",
+                (name, json.dumps(widgets or []), pos))
+            did = cur.lastrowid
+        return {"id": did, "name": name, "pos": pos, "widget_count": len(widgets or [])}
+
+    def rename_dashboard(self, dashboard_id: int, name: str) -> None:
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("A dashboard needs a name")
+        if len(name) > 200:
+            raise ValueError("That dashboard name is too long")
+        with self.lock, self.db:
+            if self.db.execute("UPDATE dashboards SET name=? WHERE id=?",
+                               (name, dashboard_id)).rowcount == 0:
+                raise KeyError(f"No dashboard {dashboard_id}")
+
+    def delete_dashboard(self, dashboard_id: int) -> None:
+        with self.lock, self.db:
+            self.db.execute("DELETE FROM dashboards WHERE id=?", (dashboard_id,))
+
+    def reorder_dashboards(self, ordered_ids: list[int]) -> None:
+        with self.lock, self.db:
+            known = {r[0] for r in self.db.execute("SELECT id FROM dashboards")}
+            for i, did in enumerate([d for d in ordered_ids if d in known]):
+                self.db.execute("UPDATE dashboards SET pos=? WHERE id=?", (i, did))
+
+    def upsert_dashboard_by_name(self, name: str, widgets: list) -> dict:
+        """Create-or-replace a dashboard by name — how a profile applies its
+        board (a second apply of the same profile refreshes rather than
+        duplicates)."""
+        with self.lock, self.db:
+            row = self.db.execute(
+                "SELECT id FROM dashboards WHERE name=? COLLATE NOCASE", (name,)).fetchone()
+            if row:
+                self.db.execute("UPDATE dashboards SET widgets=? WHERE id=?",
+                               (json.dumps(widgets), row["id"]))
+                return {"id": row["id"], "name": name}
+        return self.create_dashboard(name, widgets)
 
     # Shorthands a SHIPPED dashboard uses so its SQL is portable across
     # cases — the table's src_<id> varies, but its header set doesn't.

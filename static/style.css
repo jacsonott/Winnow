@@ -1864,6 +1864,16 @@ html.remote .row.selected:hover { background: var(--row-selected); }
   letter-spacing: .07em; font-weight: 500; flex: 1; }
 .dash-rm { background: none; border: none; color: var(--line-2); cursor: pointer; font: inherit; }
 .dash-rm:hover { color: var(--danger); }
+.dash-edit { background: none; border: none; color: var(--line-2); cursor: pointer; font: inherit; margin-right: 2px; }
+.dash-edit:hover { color: var(--accent); }
+.dash-card { cursor: default; }
+.dash-card[draggable="true"] { cursor: grab; }
+.dash-card.dragging { opacity: .4; }
+.dash-card.drop-target { box-shadow: inset 0 0 0 2px var(--accent); }
+/* Preview pane in the widget editor — one card's worth of output before
+   committing it. */
+.dash-preview-wrap { margin-top: 8px; }
+.dash-card.dash-preview { cursor: default; min-height: 60px; }
 .dash-widget-body { flex: 1 1 auto; min-height: 0; }
 .dash-stat { font-size: 34px; color: var(--accent); line-height: 1; }
 .dash-stat.warn { color: var(--danger); } .dash-stat.ok { color: var(--good); }

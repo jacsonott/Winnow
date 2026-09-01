@@ -1862,7 +1862,9 @@ def test_kape_profile_ships_and_applies(client, store, write_csv, example_regist
     body = ap.json()
     assert body["dashboard_applied"] is True and body["watchlist_seeded"] == 5
 
-    widgets = client.get("/api/dashboard").json()["widgets"]
+    boards = {b["name"]: b for b in client.get("/api/dashboards").json()}
+    assert "KAPE triage" in boards
+    widgets = client.get(f"/api/dashboards/{boards['KAPE triage']['id']}").json()["widgets"]
     assert len(widgets) == 16
     # a {{evtx}}-placeholder SQL widget resolves and returns data
     peers = next(w for w in widgets if w["title"] == "Remote logon peers")
