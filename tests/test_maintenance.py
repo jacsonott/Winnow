@@ -276,3 +276,36 @@ def test_lifespan_shutdown_closes_the_open_case(views_in, case_path):
             store.db.execute("SELECT 1")
     finally:
         server.STORE = None
+
+
+def test_fts_builds_are_concurrency_capped(store, monkeypatch):
+    """A broad action (a search-all sweep over many unindexed sources) calls
+    _ensure_fts_building for every one; each build holds the writer lock in
+    chunks, so an unbounded swarm starves an interactive build_view (a preset
+    apply that 'wouldn't work at all' while a sweep ran). At most
+    FTS_BUILD_CONCURRENCY may build at once."""
+    import threading
+    import time
+
+    live = 0
+    peak = 0
+    lock = threading.Lock()
+
+    def fake_build(_sid):
+        nonlocal live, peak
+        with lock:
+            live += 1
+            peak = max(peak, live)
+        time.sleep(0.05)
+        with lock:
+            live -= 1
+
+    monkeypatch.setattr(store, "build_fts", fake_build)
+    threads = [threading.Thread(target=store._build_fts_worker, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert peak >= 1                                   # builds actually ran
+    assert peak <= store.FTS_BUILD_CONCURRENCY         # never more than the cap at once

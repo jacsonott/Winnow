@@ -1085,6 +1085,8 @@ def _current_user() -> str:
 
 
 class Store:
+    FTS_BUILD_CONCURRENCY = 2  # trigram builds are CPU/writer-bound; more just thrash
+
     def __init__(self, path: str, default_tags: list[tuple] | None = None):
         self.path = path
         self._default_tags = default_tags or DEFAULT_TAGS
@@ -1199,6 +1201,14 @@ class Store:
         self._maxlen_cache: dict[int, tuple[int, dict[str, int]]] = {}
         self._fts_threads: dict[int, threading.Thread] = {}
         self._index_threads: dict[tuple[int, str], threading.Thread] = {}
+        # Caps how many trigram builds run at once. A broad action — a
+        # search-all sweep over a case with many unindexed sources — calls
+        # _ensure_fts_building for every one of them, and each build holds
+        # the writer lock in chunks; unbounded, that swarm starves an
+        # interactive build_view (a preset apply "not working at all" while
+        # a sweep ran). Bounded like ingest (CPU-bound work; more just
+        # thrashes), so at most FTS_BUILD_CONCURRENCY compete for the writer.
+        self._fts_build_sem = threading.Semaphore(self.FTS_BUILD_CONCURRENCY)
         # Guards the two thread registries above — its own lock, not
         # self.lock, for the same reason as _search_job_lock: the ensure-*
         # helpers are called from read paths (group_summary, column_values,
@@ -1332,10 +1342,16 @@ class Store:
         t.start()
 
     def _build_fts_worker(self, source_id: int) -> None:
-        try:
-            self.build_fts(source_id)
-        except Exception:
-            pass  # best-effort background upgrade — the next search attempt retries
+        # The thread is registered (so _is_fts_building sees it and the
+        # per-source dedup holds) before it waits here for a build slot —
+        # bounding writer contention when many builds are requested at once
+        # (the search-all sweep). The heavy, lock-holding build_fts runs
+        # only once a slot is free.
+        with self._fts_build_sem:
+            try:
+                self.build_fts(source_id)
+            except Exception:
+                pass  # best-effort background upgrade — the next search attempt retries
 
     def _is_fts_building(self, source_id: int) -> bool:
         with self._threads_lock:
@@ -5789,7 +5805,14 @@ class Store:
         sid = handle["source_id"]
         with self._reader() as ro, self._dropped_view_is_expired():
             src = self._source_lite_on(ro, sid)
-            cols = self._export_columns(ro, src)
+            # Source-column order (same as the materialised fetch_rows path),
+            # NOT _export_columns: the client maps each cell by its column's
+            # index in S.columns (source order), so paging in the saved
+            # layout's display order — with hidden columns dropped — scrambles
+            # values under headers whenever a custom layout reorders/hides a
+            # column. _export_columns is for CSV/XLSX, which emit the on-screen
+            # arrangement on purpose; the grid does its own ordering client-side.
+            cols = [c["name"] for c in src["columns"]]
             sel = ", ".join(q(c) for c in cols)
 
             # _from_clause adds the derived-value sidecar join only when the
