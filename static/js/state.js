@@ -81,6 +81,8 @@ export const S = {
   lastBrowsePath: null,  // last dir the "Add from this machine…" picker was in — session-only convenience, not persisted
   pluginsCaseOpen: false, // whether /api/plugins was answered with a case open — gates the per-case scope options in Settings → Plugins
   sidebarFilter: '',      // substring filter typed into the sidebar's own search box
+  dashboards: [],         // [{id, name, pos, widget_count}] named dashboards, from the case file (see dashboard.js)
+  dashboardId: null,      // which named dashboard is currently showing
   folders: [],            // sidebar folder tree [{id, name, parent_id, pos}], from the case file (see sources.js)
   collapsedFolders: new Set(), // folder ids collapsed in the sidebar — a per-browser view pref (localStorage)
   timeline: {

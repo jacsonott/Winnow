@@ -1963,11 +1963,12 @@ def api_plugin_bundles_apply(bundle_id: int):
         overrides[fs_name] = fs_name in wanted
     STORE.set_case_setting("plugin_overrides", json.dumps(overrides))
     _reload_plugins()
-    # A profile's dashboard becomes the case's dashboard on apply (only if
-    # the profile carries one — applying a plain plugin bundle leaves the
-    # case's own dashboard untouched).
+    # A profile's dashboard becomes a NAMED dashboard on apply, keyed by the
+    # profile name (a second apply refreshes it rather than duplicating).
+    # Applying a plain plugin bundle (no dashboard) leaves the case's own
+    # dashboards untouched.
     if bundle.get("dashboard"):
-        STORE.set_dashboard(bundle["dashboard"])
+        STORE.upsert_dashboard_by_name(bundle["name"], bundle["dashboard"])
     # A profile can seed a starter watchlist: add its indicators (dedup by
     # value) and scan the case, so the IOC rollups have data immediately.
     seeded = 0
@@ -2657,8 +2658,18 @@ def api_entity_pivot(body: EntityPivotBody):
         raise HTTPException(400, str(e))
 
 
-class DashboardBody(BaseModel):
-    widgets: list = []
+class DashboardCreate(BaseModel):
+    name: str
+    widgets: list | None = None
+
+
+class DashboardUpdate(BaseModel):
+    name: str | None = None
+    widgets: list | None = None
+
+
+class DashboardReorder(BaseModel):
+    ordered_ids: list[int]
 
 
 class WidgetPreviewBody(BaseModel):
@@ -2666,14 +2677,51 @@ class WidgetPreviewBody(BaseModel):
     query: dict = {}
 
 
-@app.get("/api/dashboard")
-def api_dashboard_get():
-    return {"widgets": store().get_dashboard()}
+@app.get("/api/dashboards")
+def api_dashboards_list():
+    return store().list_dashboards()
 
 
-@app.post("/api/dashboard")
-def api_dashboard_save(body: DashboardBody):
-    return {"widgets": store().set_dashboard(body.widgets)}
+@app.post("/api/dashboards")
+def api_dashboards_create(body: DashboardCreate):
+    try:
+        return store().create_dashboard(body.name, body.widgets or [])
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/dashboards/reorder")
+def api_dashboards_reorder(body: DashboardReorder):
+    store().reorder_dashboards(body.ordered_ids)
+    return {"ok": True}
+
+
+@app.get("/api/dashboards/{dashboard_id}")
+def api_dashboard_widgets_get(dashboard_id: int):
+    try:
+        return {"widgets": store().get_dashboard(dashboard_id)}
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/dashboards/{dashboard_id}")
+def api_dashboard_update(dashboard_id: int, body: DashboardUpdate):
+    try:
+        if body.name is not None:
+            store().rename_dashboard(dashboard_id, body.name)
+        if body.widgets is not None:
+            store().set_dashboard_widgets(dashboard_id, body.widgets)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    return {"ok": True}
+
+
+@app.delete("/api/dashboards/{dashboard_id}")
+def api_dashboard_delete(dashboard_id: int):
+    store().delete_dashboard(dashboard_id)
+    return {"ok": True}
 
 
 @app.post("/api/dashboard/widget/preview")
