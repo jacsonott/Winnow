@@ -140,3 +140,5 @@ see [docs/notes/README.md](README.md) for the whole set.
   `PluginRegistry.load` is first-directory-wins on fs_name, so an
   analyst's installed copy of an example shadows the bundled one instead
   of both loading and fighting over tab ids.
+
+- **Bundles are profiles.** A plugin bundle (PluginBundles, workspace/plugin_bundles.json) now carries an optional `dashboard` (a list of widget definitions) alongside its plugins. Applying a bundle whose profile has a dashboard also sets the open case's dashboard (Store.set_dashboard). So a profile is 'how I analyze this kind of case' — plugins + a dashboard — one saveable, shareable JSON thing. See docs/design/analysis-suite.md.

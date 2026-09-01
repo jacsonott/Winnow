@@ -884,15 +884,22 @@ export async function openDirectoryImportModal(state = {}) {
         // built-in kinds. A scan-matched extension no loaded plugin claims
         // falls through to the delimited parser, the pre-plugin behavior.
         const fmt = m.kind === 'plugin' ? pluginFormatFor(m.path) : null;
+        // Reproduce the on-disk tree in the sidebar: the file's basename is
+        // the table name, and its nested directory (posix, "" at the scan
+        // root) becomes the folder the server files it under. This replaces
+        // the old behaviour of stuffing the whole rel_path into the name.
+        const slash = m.rel_path.lastIndexOf('/');
+        const base = slash === -1 ? m.rel_path : m.rel_path.slice(slash + 1);
+        const folder_path = slash === -1 ? '' : m.rel_path.slice(0, slash);
         try {
           if (fmt) {
             toast(`Importing ${m.rel_path}…`, 60000);
             await post('/api/ingest/plugin/path', {
-              path: m.path, name: m.rel_path, format_id: fmt.id, options: defaultPluginOptions(fmt),
+              path: m.path, name: base, folder_path, format_id: fmt.id, options: defaultPluginOptions(fmt),
             });
             pluginOk++;
           } else {
-            await post('/api/ingest/jobs/path', { path: m.path, name: m.rel_path, kind: m.kind === 'json' ? 'json' : 'csv' });
+            await post('/api/ingest/jobs/path', { path: m.path, name: base, folder_path, kind: m.kind === 'json' ? 'json' : 'csv' });
           }
           ok++;
         } catch (e) {

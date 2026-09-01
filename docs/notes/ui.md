@@ -71,13 +71,35 @@ see [docs/notes/README.md](README.md) for the whole set.
   only direct children (`.bar`/`.toolbar`/`#presetBanner`/`.main-area`) all
   moved to `grid-column: 2` — so hiding it (`[hidden]`) collapses that
   column to zero width for free, nothing else occupies it. `renderSidebar`
-  is called from inside `renderTabs()` itself (every one of `renderTabs`'s
-  three callers — `loadSources`, `moveTab`, the tab-strip's own drag-drop
-  handler — means `S.sources`/`S.tabOrder` just changed), not from a
-  parallel set of call sites that could drift out of sync. It lists page tabs
-  too, in a third section (Pages) under Open/Closed — same rows, same
-  drag/▲/▼ reorder, just against the other strip; see the two-strips entry
-  below. Its active-row highlight isn't simply `s.id === S.sourceId`:
+  is called from inside `renderTabs()` itself (both of `renderTabs`'s
+  callers — `loadSources` and the tab strip's own drag-drop handler —
+  mean `S.sources`/`S.tabOrder` just changed), not from a
+  parallel set of call sites that could drift out of sync. The table list
+  has two parts. An **Open** section at the top is the working set — the
+  tables with a tab open, in `S.tabOrder`, reorderable by ▲/▼ or drag
+  (`openSidebarRow`, which still uses `wireDragReorder`/`moveTab`); drag a
+  table from the tree onto it (`wireOpenDrop`) to open one. Below it, **All
+  tables** is a **folder tree**: every table sits at the root or inside a
+  folder (`source_folders`/`source_folder_map` in the case file — see
+  store.py), open or not — so an open table appears in *both* (the Open
+  section is your tabs, the tree is the whole library). This replaced a
+  first cut that had folders *replace* the old Open/Closed split entirely;
+  the working-set section came back because reordering and closing tabs
+  from the sidebar is worth keeping. Folders are created/renamed/
+  reordered/deleted from their header rows (`.sidebar-folder`, a class
+  distinct from `.sidebar-row` — so its actions need their own
+  `:hover .sidebar-row-actions` rule, which is easy to forget) and from the
+  header's ＋; a table is filed by dragging its row onto a folder (or the
+  row's "Move to a folder" button) and dragged back out via the root drop
+  zone. A directory import reproduces the on-disk tree here (importer.js
+  sends the file's subfolder as `folder_path`, the ingest job creates the
+  folders via `ensure_folder_path`). Folder membership is keyed by the
+  *signed* source id, so a merge folds like any table. Folder collapse
+  state is per-browser `localStorage` (`FOLDERS_KEY`), but the folders
+  themselves are case data that travels with the `.db`. Page tabs still get
+  their own Pages section below the tree — same rows, same drag/▲/▼
+  reorder against the other strip; see the two-strips entry below. Its
+  active-row highlight isn't simply `s.id === S.sourceId`:
   `S.sourceId` is never cleared while a page tab is showing (there's no
   single "a source is open" flag to unset), so `sidebarRow` also requires
   `S.activeTab === 'grid'` — the same condition `syncTabSelection` applies
@@ -90,13 +112,11 @@ see [docs/notes/README.md](README.md) for the whole set.
   its rows' `.menu-item`/`.menu-item-action` classes live on, reused as-is
   by the sidebar's own rows. Drag-to-reorder (`wireDragReorder`, factored
   out of what used to be `wireTabDrag` alone) is shared by the horizontal
-  strip and the sidebar's vertical list — same native-HTML5-DnD technique,
-  same `S.tabOrder`, just measured along a different axis (tab strip:
-  pointer left/right of the dragged node's horizontal midpoint; sidebar:
-  above/below its vertical midpoint). `draggedTabId` is one shared closure
-  variable rather than one per axis on purpose: a drag started on a tab and
-  dropped on a sidebar row (or vice versa) still reorders correctly, since
-  both surfaces render from the same `openTabsSorted()`.
+  strip and the SQL pane's sub-tab strip — same native-HTML5-DnD technique
+  and `S.tabOrder`/`S.sqlTabs`. The sidebar's table rows once used it too,
+  but they drag differently now: a sidebar drag *files a table into a
+  folder* (`wireTableDrag` + `wireFolderDrop`, its own `draggedTableId`),
+  not reorders the strip.
 - **Editing a saved filter** goes through the real grid, not a
   self-contained dialog: the Saved filters modal's "Edit" applies that
   filter (`applyPreset`) and *then* opens `openFilterBuilder(f)` with the
@@ -456,3 +476,13 @@ see [docs/notes/README.md](README.md) for the whole set.
   over the defaults and a stored map has no entry for an action that
   didn't exist. When retiring an alias later, remember both halves: the
   DEFAULT_KEYMAP entry and a migration for maps that carry it.
+
+- **Stack view** (stack.js) — the column-header menu's "Stack values (rarest first)…" opens a modal of the current view's distinct values by count (via group_summary, order=count direction=asc), drawn with charts.js. Click a bar to filter the grid to that value. Least-frequency-of-occurrence triage. See docs/design/analysis-suite.md.
+
+- **Case notes tab** (notes.js) — a free-form Markdown scratchpad for the investigation narrative, stored in the case file (Store.case_notes) so it travels with the .db, distinct from per-row notes. Edit/preview toggle, debounced autosave, a tiny dependency-free Markdown renderer (airgap). Page tabs now route visibility through sql.js's showMainView(id)/MAIN_VIEWS registry so adding a tab is a one-place edit. See docs/design/analysis-suite.md.
+
+- **IOC watchlist tab** (watchlist.js) — case-level indicators (Store.watchlist / watchlist_hits, in the .db) scanned across every table via the blob substring search-all uses; matches are counted, listed, and optionally auto-tagged through the normal tag path. Auto-scans new imports (jobs.js source-done hook). Import a list / paste / scan-all. See docs/design/analysis-suite.md.
+
+- **Entity pivot tab** (entity.js) — pick any value and see everywhere it appears across every table: per-source counts, which columns it landed in, a merged time histogram (charts.js) and a chronological evidence stream. Reachable from any cell's right-click ('Pivot on X'), the watchlist, or the tab's search box. Backend entity_pivot reuses the blob search + TS_NORMALIZE (shared with a future super-timeline). See docs/design/analysis-suite.md.
+
+- **Case dashboard tab** (dashboard.js) — a grid of widgets, each a saved query + a render kind (stat/kv/chips/list/bar/histogram). Sources: sql (read-only run_sql), watchlist, tags. Layout lives in the case .db (Store.dashboard) so it travels with the case; 'Save as profile' extends a plugin bundle with the dashboard, so applying that profile on a new case lays it out. This is what gives plugin bundles ('profiles') their purpose. See docs/design/analysis-suite.md.

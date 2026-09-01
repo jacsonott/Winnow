@@ -7,7 +7,7 @@ import { loadPlugins, openImportModal, pluginFormatById, queueFilesForFormat } f
 import { clearAllFilters, loadSources, openSource, renderPageTabs, syncTabSelection } from './sources.js';
 import { setColumnFilter, valueFilterText } from './filters.js';
 import { rebuildView } from './view.js';
-import { activeSqlTab, scheduleSqlTabSave, showGridTab, syncTabChrome } from './sql.js';
+import { activeSqlTab, hideMainViews, scheduleSqlTabSave, showGridTab, syncTabChrome } from './sql.js';
 import { setActiveSqlResult, sqlCopyResult, sqlDownloadCsv, sqlRowKey, sqlTagsFor, tagChips, wireSqlAssist } from './sqlassist.js';
 import { moveCursor } from './grid.js';
 import { S } from './state.js';
@@ -380,9 +380,7 @@ export async function showPluginTab(tabId) {
   const tab = pluginTabById(tabId);
   if (!tab) return;
   S.activeTab = 'plugin:' + tabId;
-  $('grid').hidden = true;
-  $('sqlview').hidden = true;
-  $('timelineview').hidden = true;
+  hideMainViews();
   hidePluginViews();
   syncTabSelection();
   syncTabChrome();

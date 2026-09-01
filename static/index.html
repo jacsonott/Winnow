@@ -57,6 +57,7 @@ try {
 <aside id="sidebar" class="sidebar">
   <div class="sidebar-head">
     <input id="sidebarFilter" type="search" placeholder="Filter tables and pages…" autocomplete="off" spellcheck="false">
+    <button id="btnNewFolder" class="sidebar-newfolder" title="New folder">🗀+</button>
   </div>
   <div id="sidebarList" class="sidebar-list"></div>
   <div id="sidebarResize" class="sidebar-resize" title="Drag to resize · double-click to reset"></div>
@@ -86,6 +87,10 @@ try {
   <nav id="pageTabs" class="tabs page-tabs" aria-label="Pages">
     <button class="tab tab-sql" id="tabSql" aria-selected="false" title="Read-only SQL against the case file">SQL</button>
     <button class="tab tab-sql" id="tabTimeline" aria-selected="false" title="Unified timeline of every tagged row across the case">Timeline</button>
+    <button class="tab tab-sql" id="tabNotes" aria-selected="false" title="Case narrative — a Markdown scratchpad saved in the case file">Notes</button>
+    <button class="tab tab-sql" id="tabWatchlist" aria-selected="false" title="IOC watchlist — indicators scanned across every table">Watchlist</button>
+    <button class="tab tab-sql" id="tabEntity" aria-selected="false" title="Occurrences — everywhere a value appears across all tables">Occurrences</button>
+    <button class="tab tab-sql" id="tabDashboard" aria-selected="false" title="Case dashboard — widgets summarizing the case">Dashboard</button>
   </nav>
 
   <div class="bar-actions">
@@ -174,6 +179,76 @@ try {
       <div class="timeline-empty" id="timelineEmpty" hidden>
         No tagged rows yet — tag some rows in any table, then come back here.
       </div>
+    </section>
+
+    <section class="dashboardview" id="dashboardview" hidden>
+      <div class="dash-bar">
+        <span class="dash-title">Case dashboard</span>
+        <div class="spacer"></div>
+        <button class="btn" id="dashAddTop">＋ Add widget</button>
+        <button class="btn ghost" id="dashSaveProfile">Save as profile…</button>
+      </div>
+      <div class="dash-grid" id="dashGrid"></div>
+    </section>
+
+    <section class="entityview" id="entityview" hidden>
+      <div class="ent-bar">
+        <span class="ent-mark">⌖</span>
+        <input id="entValue" placeholder="Find a value — host, user, hash, IP…" />
+        <button class="btn" id="entGo">Find</button>
+        <span class="note-status" id="entStatus"></span>
+      </div>
+      <div class="ent-body-wrap">
+        <div class="ent-rail"><div class="ent-rail-head">Appears in</div><div id="entSources"></div></div>
+        <div class="ent-main">
+          <div class="ent-hist-wrap"><canvas id="entHist"></canvas></div>
+          <div class="ent-rows" id="entRows"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="watchlistview" id="watchlistview" hidden>
+      <div class="wl-add">
+        <input id="wlValue" placeholder="Add an indicator — hash, IP, domain, filename…" />
+        <select id="wlKind" title="Indicator type (sets the row's colour)">
+          <option value="other">other</option><option value="hash">hash</option>
+          <option value="ip">ip</option><option value="domain">domain</option>
+          <option value="filename">filename</option>
+        </select>
+        <select id="wlAutoTag" title="Auto-tag rows that match this indicator"><option value="">no auto-tag</option></select>
+        <button class="btn" id="wlAdd">Add</button>
+        <span class="wl-tools">
+          <button class="btn ghost" id="wlImport" title="Import indicators from a text or CSV list">Import…</button>
+          <button class="btn ghost" id="wlExport" title="Export the watchlist as CSV">Export…</button>
+          <button class="btn ghost" id="wlScan" title="Re-scan every table for all indicators">Scan all</button>
+          <span class="note-status" id="wlStatus"></span>
+        </span>
+        <input id="wlImportFile" type="file" accept=".txt,.csv,.ioc,.list,text/plain" hidden />
+      </div>
+      <div class="wl-body">
+        <div class="wl-list" id="wlList"></div>
+        <div class="wl-hits" id="wlHits"><div class="note-status" style="padding:12px">Select an indicator to see its hits.</div></div>
+      </div>
+    </section>
+
+    <section class="notesview" id="notesview" hidden>
+      <div class="notes-head">
+        <span class="notes-label">Case notes</span>
+        <button class="btn ghost" id="btnNotesEdit" aria-pressed="true">Edit</button>
+        <button class="btn ghost" id="btnNotesPreview" aria-pressed="false">Preview</button>
+        <div class="spacer"></div>
+        <span class="note-status" id="notesSaved"></span>
+      </div>
+      <textarea class="notes-editor" id="notesEditor" spellcheck="true"
+        placeholder="The story of this investigation — Markdown. Saved in the case file and travels with it.
+
+# Timeline
+- 2026-03-15 14:03 — spray from WKS07
+- 2026-03-15 14:18 — first success onto FILESRV01 as svc_backup
+
+## Leads
+- rclone.exe under \ProgramData"></textarea>
+      <div class="notes-preview" id="notesPreview" hidden></div>
     </section>
   </div>
 

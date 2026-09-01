@@ -1831,3 +1831,57 @@ def test_first_last_merge_row_json_carries_the_exposed_columns(fl_client, store,
               columns=[], template="{which}", row_json=True)
     zed = next(r for r in out["rows"] if '"zed"' in r[1])
     assert set(_json.loads(zed[1]).keys()) == {"When", "Host", "User", "EventId"}
+
+
+# ============================================= shipped KAPE profile
+
+def test_kape_profile_ships_and_applies(client, store, write_csv, example_registry, monkeypatch):
+    """The KAPE-triage default profile is listed (read-only), and applying
+    it sets the dashboard, seeds the watchlist, and its SQL widgets resolve
+    the {{evtx}} placeholder against a real EvtxECmd table."""
+    import server
+    from winnow import defaults
+    monkeypatch.setattr(server, "PLUGINS", example_registry)
+
+    evtx_cols = dict(defaults.headers()["nicknames"])["Event logs (EvtxECmd)"]
+    def row(**kw):
+        d = {c: "" for c in evtx_cols}; d.update(kw); return [d[c] for c in evtx_cols]
+    rows = [evtx_cols,
+            row(EventId="4624", Channel="Security", RemoteHost="WKS07", UserName="alice"),
+            row(EventId="4624", Channel="Security", RemoteHost="WKS01", UserName="bob"),
+            row(EventId="4625", Channel="Security", RemoteHost="WKS07", UserName="admin")]
+    store.ingest_csv(write_csv(rows, "evtx.csv"), name="evtx", build_fts=False)
+
+    listed = {b["name"]: b for b in client.get("/api/plugin_bundles").json()}
+    assert "KAPE triage" in listed
+    kape = listed["KAPE triage"]
+    assert kape["id"] < 0 and kape["shipped"] is True and kape["dashboard"]
+
+    ap = client.post(f"/api/plugin_bundles/{kape['id']}/apply")
+    assert ap.status_code == 200
+    body = ap.json()
+    assert body["dashboard_applied"] is True and body["watchlist_seeded"] == 5
+
+    widgets = client.get("/api/dashboard").json()["widgets"]
+    assert len(widgets) == 16
+    # a {{evtx}}-placeholder SQL widget resolves and returns data
+    peers = next(w for w in widgets if w["title"] == "Remote logon peers")
+    pv = client.post("/api/dashboard/widget/preview", json={"source": "sql", "query": peers["query"]})
+    assert pv.status_code == 200 and pv.json()["rows"][0][0] == 2   # WKS07, WKS01
+
+    # a host-facts widget (also {{evtx}}) resolves — distinct accounts here
+    accts = next(w for w in widgets if w["title"] == "Distinct accounts")
+    av = client.post("/api/dashboard/widget/preview", json={"source": "sql", "query": accts["query"]})
+    assert av.status_code == 200 and av.json()["rows"][0][0] >= 1
+
+    # the registry-persistence widget resolves its {{registry}} placeholder to
+    # a friendly empty state (this case has EVTX only, no RECmd batch), not a
+    # SQL error — the whole point of shipping widgets a case may not fill
+    reg = next(w for w in widgets if w["title"] == "Run / service registry entries")
+    rv = client.post("/api/dashboard/widget/preview", json={"source": "sql", "query": reg["query"]})
+    assert rv.status_code == 400 and "table" in rv.json()["detail"].lower()
+
+    # a placeholder with no matching table gives a friendly 400, not a SQL error
+    miss = client.post("/api/dashboard/widget/preview",
+                       json={"source": "sql", "query": {"sql": "SELECT * FROM {{mft}}"}})
+    assert miss.status_code == 400 and "table" in miss.json()["detail"].lower()

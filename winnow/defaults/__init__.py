@@ -34,6 +34,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 HEADERS_FILE = HERE / "headers.json"
 FILTERS_FILE = HERE / "filters.json"
+PROFILES_FILE = HERE / "profiles.json"
 
 
 class DefaultsError(RuntimeError):
@@ -65,6 +66,21 @@ def headers() -> dict:
     if not out:
         raise DefaultsError("headers.json lists no header sets")
     return {"version": int(data.get("version") or 0), "nicknames": out}
+
+
+@lru_cache(maxsize=1)
+def profiles() -> list[dict]:
+    """Shipped analysis profiles (plugins + optional watchlist + a
+    dashboard). Read-only; surfaced alongside the analyst's saved bundles
+    with negative ids. Widget SQL may use {{evtx}}-style placeholders the
+    store resolves per case."""
+    data = _load(PROFILES_FILE)
+    out = []
+    for i, rec in enumerate(data.get("profiles") or []):
+        if not rec.get("name"):
+            raise DefaultsError(f"profiles.json entry {i} needs a name")
+        out.append(rec)
+    return out
 
 
 @lru_cache(maxsize=1)

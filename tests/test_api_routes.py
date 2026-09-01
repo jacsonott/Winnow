@@ -669,3 +669,142 @@ def test_remote_session_is_a_machine_setting(client):
     assert client.get("/api/settings/app").json()["remote_session"] is True
     client.post("/api/settings/app", json={"remote_session": False})
     assert client.get("/api/settings/app").json()["remote_session"] is False
+
+
+# ---------------------------------------------------------------- folders
+
+def test_folder_routes_crud_and_source_assignment(client, store, write_csv):
+    # create → list
+    a = client.post("/api/folders", json={"name": "Registry"}).json()
+    b = client.post("/api/folders", json={"name": "Users", "parent_id": a["id"]}).json()
+    assert {f["id"] for f in client.get("/api/folders").json()} == {a["id"], b["id"]}
+
+    # rename + move + reorder
+    assert client.post(f"/api/folders/{b['id']}/rename", json={"name": "Accounts"}).status_code == 200
+    c = client.post("/api/folders", json={"name": "Logs"}).json()
+    assert client.post("/api/folders/reorder",
+                       json={"parent_id": None, "ordered_ids": [c["id"], a["id"]]}).status_code == 200
+    assert client.post(f"/api/folders/{c['id']}/move",
+                       json={"parent_id": a["id"]}).status_code == 200
+
+    # assign a table, then read it back on /api/sources
+    rid = store.ingest_csv(write_csv([["A"], ["1"]], "evt.csv"), name="evt.csv", build_fts=False)["id"]
+    assert client.post(f"/api/source/{rid}/folder", json={"folder_id": a["id"]}).status_code == 200
+    src = next(s for s in client.get("/api/sources").json() if s["id"] == rid)
+    assert src["folder_id"] == a["id"]
+
+    # delete is non-destructive to the source
+    assert client.delete(f"/api/folders/{a['id']}").status_code == 200
+    assert a["id"] not in {f["id"] for f in client.get("/api/folders").json()}
+    src = next(s for s in client.get("/api/sources").json() if s["id"] == rid)
+    assert src["folder_id"] is None            # a was top-level → table drops to root
+
+
+def test_folder_create_rejects_blank_name(client):
+    assert client.post("/api/folders", json={"name": "   "}).status_code == 400
+
+
+def test_folder_move_cycle_is_rejected(client):
+    a = client.post("/api/folders", json={"name": "a"}).json()
+    b = client.post("/api/folders", json={"name": "b", "parent_id": a["id"]}).json()
+    assert client.post(f"/api/folders/{a['id']}/move", json={"parent_id": b["id"]}).status_code == 400
+
+
+def test_folder_routes_need_the_csrf_header(store, monkeypatch):
+    import server
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(server, "STORE", store)
+    bare = TestClient(server.app)
+    assert bare.post("/api/folders", json={"name": "X"}).status_code == 403
+
+
+def test_case_notes_roundtrip_and_persist(client, store):
+    """The case narrative lives in the .db so it travels with the case."""
+    assert client.get("/api/case/notes").json()["body"] == ""
+    r = client.post("/api/case/notes", json={"body": "# Lead\n- WKS07 patient zero"})
+    assert r.status_code == 200
+    assert r.json()["body"].startswith("# Lead")
+    assert r.json()["updated_at"]
+    assert "WKS07" in client.get("/api/case/notes").json()["body"]
+
+
+def test_watchlist_add_scan_autotag_and_hits(client, store, write_csv):
+    """Add an indicator with auto-tag, scan a table, and confirm hits are
+    counted, tagged, and listable."""
+    sid = store.ingest_csv(write_csv(
+        [["Host", "Cmd"], ["WKS07", "rclone.exe copy"], ["WKS01", "notepad"]], "e.csv"),
+        build_fts=False)["id"]
+    tag = store.list_tags()[0]["id"]
+    r = client.post("/api/watchlist", json={"value": "rclone", "kind": "filename", "auto_tag_id": tag})
+    assert r.status_code == 200
+    wid = r.json()["id"]
+    scan = client.post(f"/api/watchlist/scan?source_id={sid}")
+    assert scan.status_code == 200
+    assert scan.json()["matched"][str(wid)] == 1
+    listed = {i["value"]: i for i in client.get("/api/watchlist").json()}
+    assert listed["rclone"]["hit_count"] == 1
+    hits = client.get(f"/api/watchlist/hits?watchlist_id={wid}").json()
+    assert hits[0]["source_id"] == sid and hits[0]["rid"] == 1
+    # auto-tag landed on the matching row
+    n = store.db.execute("SELECT COUNT(*) c FROM row_tags WHERE source_id=? AND tag_id=?",
+                         (sid, tag)).fetchone()["c"]
+    assert n == 1
+    # import dedupes; delete removes it and its hits
+    imp = client.post("/api/watchlist/import", json={"text": "rclone\n# c\nmimikatz\n"})
+    assert imp.json()["added"] == 1  # rclone already present
+    client.delete(f"/api/watchlist/{wid}")
+    assert all(i["value"] != "rclone" for i in client.get("/api/watchlist").json())
+
+
+def test_entity_pivot_across_sources(client, store, write_csv):
+    """A value found in two tables comes back with per-source counts, the
+    columns it landed in, and a merged time-bucketed stream."""
+    store.ingest_csv(write_csv(
+        [["TimeCreated", "RemoteHost", "Computer"],
+         ["2026-03-15 14:03:00", "WKS07", "FILESRV01"],
+         ["2026-03-15 14:18:00", "WKS07", "DC01"]], "sec.csv"), name="sec", build_fts=False)
+    store.ingest_csv(write_csv(
+        [["When", "Src", "Dst"], ["2026-03-15 14:05:00", "WKS07", "8.8.8.8"]], "fw.csv"),
+        name="fw", build_fts=False)
+    r = client.post("/api/entity/pivot", json={"value": "WKS07"})
+    assert r.status_code == 200
+    out = r.json()
+    byname = {s["source_name"]: s for s in out["sources"]}
+    assert byname["sec"]["count"] == 2 and byname["fw"]["count"] == 1
+    assert "RemoteHost" in byname["sec"]["columns"] and "Src" in byname["fw"]["columns"]
+    assert len(out["rows"]) == 3
+    assert out["buckets"] and out["buckets"][0][0] == "2026-03-15"
+    # empty value is a 400
+    assert client.post("/api/entity/pivot", json={"value": "  "}).status_code == 400
+
+
+def test_dashboard_widgets_and_profile(client, store, write_csv):
+    """Widget preview for each source, dashboard persistence, and a profile
+    (bundle + dashboard) applying its dashboard to the case."""
+    sid = store.ingest_csv(write_csv(
+        [["Host", "Cmd"], ["WKS07", "rclone"], ["WKS01", "x"], ["WKS07", "y"]], "e.csv"),
+        build_fts=False)["id"]
+    store.set_tags(sid, [1], store.list_tags()[0]["id"], True)
+
+    sqlw = client.post("/api/dashboard/widget/preview",
+                       json={"source": "sql", "query": {"sql": f"SELECT COUNT(DISTINCT Host) h FROM src_{sid}"}})
+    assert sqlw.json()["rows"] == [[2]]
+    assert client.post("/api/dashboard/widget/preview", json={"source": "tags", "query": {}}).json()["total"] == 1
+    assert "rows" in client.post("/api/dashboard/widget/preview", json={"source": "watchlist", "query": {}}).json()
+    assert client.post("/api/dashboard/widget/preview", json={"source": "nope", "query": {}}).status_code == 400
+
+    # persist a dashboard
+    w = [{"title": "Hosts", "source": "sql", "render": "stat",
+          "query": {"sql": f"SELECT COUNT(*) FROM src_{sid}"}}]
+    client.post("/api/dashboard", json={"widgets": w})
+    assert client.get("/api/dashboard").json()["widgets"][0]["title"] == "Hosts"
+
+    # a profile carrying a dashboard applies it on apply
+    prof = client.post("/api/plugin_bundles", json={"name": "KAPE triage", "plugins": [],
+        "dashboard": [{"title": "Findings", "source": "tags", "render": "stat"}]})
+    bid = prof.json()["id"]
+    client.post("/api/dashboard", json={"widgets": []})   # clear
+    ap = client.post(f"/api/plugin_bundles/{bid}/apply")
+    assert ap.status_code == 200 and ap.json()["dashboard_applied"] is True
+    assert client.get("/api/dashboard").json()["widgets"][0]["title"] == "Findings"

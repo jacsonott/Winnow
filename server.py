@@ -451,6 +451,7 @@ class IngestPluginPath(BaseModel):
     name: str | None = None
     options: dict = {}      # values for the format's declared options
     build_fts: bool = True
+    folder_path: str | None = None   # directory import: the on-disk subfolder to file this under
 
 
 class DirectoryScan(BaseModel):
@@ -1685,18 +1686,24 @@ class IngestJobPath(BaseModel):
     flatten_depth: int = 0
     # sqlite options
     tables: list[dict] | None = None  # [{table, name?, timestamp_columns?}]
+    # directory import: the file's on-disk subfolder, reproduced as a sidebar
+    # folder the new table is filed under ("" / None leaves it ungrouped)
+    folder_path: str | None = None
 
 
 def _ingest_job_options(kind: str, *, build_fts: bool, delimiter=None, has_header=True,
                         column_types=None, flatten_mode="none", flatten_depth=0,
-                        tables=None) -> dict:
+                        tables=None, folder_path=None) -> dict:
+    # folder_path rides along on every kind — the job worker files each new
+    # source under it when the ingest completes (directory import).
+    base = {"folder_path": folder_path} if folder_path else {}
     if kind == "csv":
-        return {"build_fts": build_fts, "delimiter": delimiter,
+        return {**base, "build_fts": build_fts, "delimiter": delimiter,
                 "has_header": has_header, "column_types": column_types}
     if kind == "json":
-        return {"build_fts": build_fts, "flatten_mode": flatten_mode,
+        return {**base, "build_fts": build_fts, "flatten_mode": flatten_mode,
                 "flatten_depth": flatten_depth}
-    return {"build_fts": build_fts, "tables": tables or []}
+    return {**base, "build_fts": build_fts, "tables": tables or []}
 
 
 @app.post("/api/ingest/jobs/path")
@@ -1715,7 +1722,7 @@ def api_ingest_job_path(body: IngestJobPath):
                 kind, build_fts=body.build_fts, delimiter=body.delimiter,
                 has_header=body.has_header, column_types=body.column_types,
                 flatten_mode=body.flatten_mode, flatten_depth=body.flatten_depth,
-                tables=body.tables,
+                tables=body.tables, folder_path=body.folder_path,
             ),
         )
     except ValueError as e:
@@ -1901,6 +1908,7 @@ def api_plugins_toggle(body: PluginToggle):
 class PluginBundleBody(BaseModel):
     name: str
     plugins: list[str] = []
+    dashboard: list | None = None   # profile: an optional dashboard layout
 
 
 @app.get("/api/plugin_bundles")
@@ -1911,7 +1919,7 @@ def api_plugin_bundles():
 @app.post("/api/plugin_bundles")
 def api_plugin_bundles_save(body: PluginBundleBody):
     try:
-        return WS.plugin_bundles.save(body.name, body.plugins)
+        return WS.plugin_bundles.save(body.name, body.plugins, body.dashboard)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -1941,9 +1949,30 @@ def api_plugin_bundles_apply(bundle_id: int):
         overrides[fs_name] = fs_name in wanted
     STORE.set_case_setting("plugin_overrides", json.dumps(overrides))
     _reload_plugins()
+    # A profile's dashboard becomes the case's dashboard on apply (only if
+    # the profile carries one — applying a plain plugin bundle leaves the
+    # case's own dashboard untouched).
+    if bundle.get("dashboard"):
+        STORE.set_dashboard(bundle["dashboard"])
+    # A profile can seed a starter watchlist: add its indicators (dedup by
+    # value) and scan the case, so the IOC rollups have data immediately.
+    seeded = 0
+    if bundle.get("watchlist"):
+        have = {i["value"] for i in STORE.list_indicators()}
+        for ind in bundle["watchlist"]:
+            val = (ind.get("value") or "").strip()
+            if val and val not in have:
+                STORE.add_indicator(val, ind.get("kind", "other"), ind.get("note"), ind.get("auto_tag_id"))
+                have.add(val)
+                seeded += 1
+        if seeded:
+            with contextlib.suppress(Exception):
+                STORE.scan_all()
     return {"applied": bundle["name"],
             "enabled": sorted(wanted & known),
             "missing": sorted(wanted - known),  # in the bundle, not installed here
+            "dashboard_applied": bool(bundle.get("dashboard")),
+            "watchlist_seeded": seeded,
             "plugins": api_plugins()}
 
 
@@ -2055,7 +2084,14 @@ def api_ingest_plugin_path(body: IngestPluginPath):
     if not os.path.isfile(body.path):
         raise HTTPException(400, f"No file at {body.path}")
     try:
-        return _ingest_via_plugin(body.path, body.format_id, body.name, body.options, body.build_fts)
+        rec = _ingest_via_plugin(body.path, body.format_id, body.name, body.options, body.build_fts)
+        # Directory import files this table under the folder mirroring its
+        # on-disk path (synchronous here, unlike the backgrounded job path).
+        if body.folder_path:
+            fid = store().ensure_folder_path(body.folder_path)
+            if fid is not None:
+                store().set_source_folder(rec["id"], fid)
+        return rec
     except Exception as e:  # surface the real parser error to the UI, same as the other ingest routes
         raise HTTPException(400, str(e))
 
@@ -2115,6 +2151,99 @@ def api_set_source_nickname(source_id: int, body: NicknameReq):
         raise HTTPException(400, str(e))
     except KeyError as e:
         raise HTTPException(404, str(e))
+
+
+# ------------------------------------------------------------------ folders
+#
+# Sidebar folders an analyst sorts tables into (and a directory import
+# reproduces from disk). Organizational metadata in the case file — see
+# Store's folder methods and META_SCHEMA. All behind the CSRF header gate
+# like every other mutating route.
+
+class FolderCreate(BaseModel):
+    name: str
+    parent_id: int | None = None
+
+
+class FolderRename(BaseModel):
+    name: str
+
+
+class FolderMove(BaseModel):
+    parent_id: int | None = None   # None = top level
+    pos: int | None = None
+
+
+class FolderReorder(BaseModel):
+    parent_id: int | None = None
+    ordered_ids: list[int]
+
+
+class SourceFolderReq(BaseModel):
+    folder_id: int | None = None   # None = back to the root (ungrouped)
+    pos: int | None = None
+
+
+@app.get("/api/folders")
+def api_folders_list():
+    return store().list_folders()
+
+
+@app.post("/api/folders")
+def api_folders_create(body: FolderCreate):
+    try:
+        return store().create_folder(body.name, body.parent_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/folders/reorder")
+def api_folders_reorder(body: FolderReorder):
+    store().reorder_folders(body.parent_id, body.ordered_ids)
+    return {"ok": True}
+
+
+@app.post("/api/folders/{folder_id}/rename")
+def api_folder_rename(folder_id: int, body: FolderRename):
+    try:
+        store().rename_folder(folder_id, body.name)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    return {"ok": True}
+
+
+@app.post("/api/folders/{folder_id}/move")
+def api_folder_move(folder_id: int, body: FolderMove):
+    try:
+        store().move_folder(folder_id, body.parent_id, body.pos)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    return {"ok": True}
+
+
+@app.delete("/api/folders/{folder_id}")
+def api_folder_delete(folder_id: int):
+    try:
+        store().delete_folder(folder_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    return {"ok": True}
+
+
+@app.post("/api/source/{source_id}/folder")
+def api_set_source_folder(source_id: int, body: SourceFolderReq):
+    """Put a table (real source or, via a negative id, a merge) in a folder,
+    or with folder_id=null back at the root. Organizational only — never
+    touches the source's data."""
+    try:
+        store().set_source_folder(source_id, body.folder_id, body.pos)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True}
 
 
 class MergeCreate(BaseModel):
@@ -2413,6 +2542,123 @@ def api_case_settings_save(body: CaseSettingWrite):
         raise HTTPException(400, f"Unknown timestamp format: {body.ts_format}")
     store().set_case_setting("ts_format", body.ts_format)
     return store().get_case_settings()
+
+
+class CaseNotesWrite(BaseModel):
+    body: str = ""
+
+
+@app.get("/api/case/notes")
+def api_case_notes_get():
+    return store().get_case_notes()
+
+
+@app.post("/api/case/notes")
+def api_case_notes_save(body: CaseNotesWrite):
+    return store().set_case_notes(body.body)
+
+
+class IndicatorBody(BaseModel):
+    value: str
+    kind: str = "other"
+    note: str | None = None
+    auto_tag_id: int | None = None
+
+
+class WatchlistImportBody(BaseModel):
+    text: str = ""
+    kind: str = "other"
+    auto_tag_id: int | None = None
+
+
+@app.get("/api/watchlist")
+def api_watchlist_list():
+    return store().list_indicators()
+
+
+@app.post("/api/watchlist")
+def api_watchlist_add(body: IndicatorBody):
+    try:
+        return store().add_indicator(body.value, body.kind, body.note, body.auto_tag_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/watchlist/import")
+def api_watchlist_import(body: WatchlistImportBody):
+    """One indicator per line; blanks and #-comments dropped; optional
+    'value,kind' per line overrides the body default. Deduped against
+    what's already in the list."""
+    have = {i["value"] for i in store().list_indicators()}
+    added = 0
+    for line in (body.text or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        value, _, kind = line.partition(",")
+        value = value.strip()
+        if not value or value in have:
+            continue
+        store().add_indicator(value, (kind.strip() or body.kind), None, body.auto_tag_id)
+        have.add(value)
+        added += 1
+    return {"added": added, "indicators": store().list_indicators()}
+
+
+@app.delete("/api/watchlist/{wid}")
+def api_watchlist_delete(wid: int):
+    store().delete_indicator(wid)
+    return {"ok": True}
+
+
+@app.post("/api/watchlist/scan")
+def api_watchlist_scan(source_id: int | None = None):
+    return store().scan_source(source_id) if source_id is not None else store().scan_all()
+
+
+@app.get("/api/watchlist/hits")
+def api_watchlist_hits(watchlist_id: int):
+    return store().indicator_hits(watchlist_id)
+
+
+class EntityPivotBody(BaseModel):
+    value: str
+    limit: int = 60
+
+
+@app.post("/api/entity/pivot")
+def api_entity_pivot(body: EntityPivotBody):
+    try:
+        return store().entity_pivot(body.value, body.limit)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+class DashboardBody(BaseModel):
+    widgets: list = []
+
+
+class WidgetPreviewBody(BaseModel):
+    source: str
+    query: dict = {}
+
+
+@app.get("/api/dashboard")
+def api_dashboard_get():
+    return {"widgets": store().get_dashboard()}
+
+
+@app.post("/api/dashboard")
+def api_dashboard_save(body: DashboardBody):
+    return {"widgets": store().set_dashboard(body.widgets)}
+
+
+@app.post("/api/dashboard/widget/preview")
+def api_dashboard_widget_preview(body: WidgetPreviewBody):
+    try:
+        return store().dashboard_widget_preview(body.source, body.query)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 # ------------------------------------------------------------ derived columns

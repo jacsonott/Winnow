@@ -6,6 +6,10 @@ import { $, api, el, post, setBusy, toast } from './core.js';
 import { loadPlugins } from './importer.js';
 import { startJobsPoll } from './jobs.js';
 import { resetPluginTabMounts } from './plugins.js';
+import { resetNotes } from './notes.js';
+import { resetWatchlist } from './watchlist.js';
+import { resetEntity } from './entity.js';
+import { resetDashboard } from './dashboard.js';
 import { loadAppSettings, loadCaseSettings, loadHeaderNicknames, loadSavedFilters } from './savedfilters.js';
 import { updateSearchAllButton } from './search.js';
 import { clearViewStateStash, applyPageTabsSize, loadSources } from './sources.js';
@@ -138,6 +142,10 @@ export async function openCase(path, opts = {}) {
   // A mounted plugin tab's UI was built from the previous case's data —
   // tear the mounts down so the next activation rebuilds against this one.
   resetPluginTabMounts();
+  resetNotes();   // another case's narrative isn't this one's
+  resetWatchlist();
+  resetEntity();
+  resetDashboard();
   // The effective plugin set is per-case (case_settings overrides beat the
   // machine default), and the server reloaded its registry when this case
   // opened — refetch so tabs/formats/panel reflect THIS case's plugins.
