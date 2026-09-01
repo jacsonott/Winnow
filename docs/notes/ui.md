@@ -75,10 +75,17 @@ see [docs/notes/README.md](README.md) for the whole set.
   callers — `loadSources` and the tab strip's own drag-drop handler —
   mean `S.sources`/`S.tabOrder` just changed), not from a
   parallel set of call sites that could drift out of sync. The table list
-  is a **folder tree** now, not the old Open/Closed split: every table sits
-  at the root or inside a folder (`source_folders`/`source_folder_map` in
-  the case file — see store.py), open state reduced to a per-row treatment
-  (the active highlight and the ✕ close). Folders are created/renamed/
+  has two parts. An **Open** section at the top is the working set — the
+  tables with a tab open, in `S.tabOrder`, reorderable by ▲/▼ or drag
+  (`openSidebarRow`, which still uses `wireDragReorder`/`moveTab`); drag a
+  table from the tree onto it (`wireOpenDrop`) to open one. Below it, **All
+  tables** is a **folder tree**: every table sits at the root or inside a
+  folder (`source_folders`/`source_folder_map` in the case file — see
+  store.py), open or not — so an open table appears in *both* (the Open
+  section is your tabs, the tree is the whole library). This replaced a
+  first cut that had folders *replace* the old Open/Closed split entirely;
+  the working-set section came back because reordering and closing tabs
+  from the sidebar is worth keeping. Folders are created/renamed/
   reordered/deleted from their header rows (`.sidebar-folder`, a class
   distinct from `.sidebar-row` — so its actions need their own
   `:hover .sidebar-row-actions` rule, which is easy to forget) and from the

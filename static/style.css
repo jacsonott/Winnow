@@ -1113,13 +1113,16 @@ textarea:focus { border-color: var(--accent); outline: none; }
   cursor: pointer; font: inherit; font-size: 10px; padding: 0;
 }
 .sidebar-folder .folder-name { flex: 1 1 auto; min-width: 0; font-weight: 600; }
-.sidebar-folder.drop-into, .sidebar-rootzone.drop-into {
+.sidebar-folder.drop-into, .sidebar-rootzone.drop-into,
+.sidebar-open-header.drop-into, .sidebar-openrow.drop-into {
   background: var(--ink); box-shadow: inset 0 0 0 1px var(--accent); color: var(--accent);
 }
 .sidebar-rootzone {
   margin: 4px 2px 2px; padding: 6px 8px; text-align: center; font-size: 11px;
   color: var(--text-faint); border: 1px dashed var(--line-2); border-radius: var(--radius-sm);
 }
+/* The Open section header doubles as a drop target for opening a table. */
+.sidebar-open-header { border-radius: var(--radius-sm); }
 .sidebar-row.active { background: var(--ink); box-shadow: inset 2px 0 0 var(--accent); }
 .sidebar-row.active .menu-item { color: var(--accent); }
 .sidebar-row .menu-item { flex: 1 1 auto; min-width: 0; }

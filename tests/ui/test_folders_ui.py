@@ -22,7 +22,7 @@ def _new_folder(page, name):
 
 def test_create_file_reorder_and_delete(page):
     # a fresh case has one ungrouped table (ui.csv) — remember it
-    table = page.locator("#sidebarList .sidebar-row .menu-item").first.inner_text()
+    table = page.locator("#sidebarList .sidebar-row:not(.sidebar-openrow) .menu-item").first.inner_text()
     assert table
 
     # create two folders from the sidebar header
@@ -43,7 +43,7 @@ def test_create_file_reorder_and_delete(page):
         ".map(e => e.textContent).join(',') === 'Logs,Registry'")
 
     # file the table into Registry via the row's move menu
-    row = page.locator("#sidebarList .sidebar-row", has_text=table)
+    row = page.locator("#sidebarList .sidebar-row:not(.sidebar-openrow)", has_text=table)
     row.hover()
     row.locator('.menu-item-action[title="Move to a folder"]').click()
     page.wait_for_selector(".menu")
@@ -64,7 +64,7 @@ def test_create_file_reorder_and_delete(page):
         "() => ![...document.querySelectorAll('#sidebarList .sidebar-folder .folder-name')]"
         ".some(e => e.textContent === 'Registry')")
     # the table is still there
-    assert page.locator("#sidebarList .sidebar-row", has_text=table).count() == 1
+    assert page.locator("#sidebarList .sidebar-row:not(.sidebar-openrow)", has_text=table).count() == 1
     # and the server agrees it is ungrouped again
     fid = page.evaluate(
         "(name) => (__winnow.S.sources.find(s => (s.nickname||s.name) === name) || {}).folder_id",
@@ -78,3 +78,28 @@ def test_create_file_reorder_and_delete(page):
         await fetch('/api/folders/' + f.id, { method: 'DELETE', headers: h });
       await __winnow.loadSources();
     }""")
+
+
+def test_open_section_lists_and_closes_tables(page):
+    """The Open section is the working set: the open table shows there with
+    its own row, and closing it removes it from Open while it stays under
+    All tables."""
+    table = page.locator("#sidebarList .sidebar-row:not(.sidebar-openrow) .menu-item").first.inner_text()
+    # an Open header, and the table has an Open-section row
+    assert page.locator("#sidebarList .sidebar-open-header").count() == 1
+    assert page.locator("#sidebarList .sidebar-openrow", has_text=table).count() == 1
+    # ▲/▼ reorder controls live on the open row
+    openrow = page.locator("#sidebarList .sidebar-openrow", has_text=table)
+    openrow.hover()
+    assert openrow.locator(".menu-item-action", has_text="▼").count() == 1
+
+    # close it from the Open section → gone from Open, still in the tree
+    openrow.locator(".menu-item-action", has_text="✕").click()
+    page.wait_for_function(
+        "(t) => !document.querySelector('#sidebarList .sidebar-openrow')",
+        arg=table)
+    assert page.locator("#sidebarList .sidebar-row:not(.sidebar-openrow)", has_text=table).count() == 1
+
+    # reopen by clicking its tree row, so the shared case is left as found
+    page.locator("#sidebarList .sidebar-row:not(.sidebar-openrow)", has_text=table).locator(".menu-item").click()
+    page.wait_for_selector("#sidebarList .sidebar-openrow")

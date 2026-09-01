@@ -115,6 +115,19 @@ export async function closeTab(s) {
   await loadSources();
 }
 
+/* Moves an open tab earlier/later in S.tabOrder — the same state
+   wireDragReorder's drop handler mutates, just via the Open section's ▲/▼
+   instead of a drag. No-ops at either end rather than wrapping. */
+export function moveTab(id, dir) {
+  const ids = openTabsSorted().map((s) => s.id);
+  const idx = ids.indexOf(id);
+  const swapIdx = idx + dir;
+  if (swapIdx < 0 || swapIdx >= ids.length) return;
+  [ids[idx], ids[swapIdx]] = [ids[swapIdx], ids[idx]];
+  S.tabOrder = ids;
+  renderTabs();
+}
+
 /* Native HTML5 drag-and-drop, same technique as wireColumnDrag above —
    draggedTabId tracked in a closure var since dataTransfer.getData isn't
    readable during dragover in most browsers. Reordering only touches
@@ -625,15 +638,18 @@ export async function openSource(id) {
    ingest auto-opens its tab), and reopening a dropdown that many times
    over doesn't scale the way clicking down a standing list does.
 
-   The table list is a FOLDER TREE, not the old Open/Closed split: every
-   table sits at the root or inside a folder (created by hand, or by a
-   directory import reproducing its on-disk structure — see importer.js).
-   Open state is a per-row treatment now — the active highlight and the ✕
-   close action — rather than a section of its own. Pages stays its own
-   standing list for the *other* strip (SQL, Timeline, plugin tabs). Rows
-   reuse the dropdown's .menu-item/.menu-item-action classes. Filtered by
-   S.sidebarFilter — a client-side substring match; while a filter is
-   active, folders that contain a match are shown and force-expanded.
+   Two parts. An OPEN section at the top is the working set — the tables
+   with a tab open, in tab-strip order, reorderable by ▲/▼ or drag
+   (openSidebarRow); drag a table from the tree onto it to open one. Below
+   it, ALL TABLES is a FOLDER TREE: every table sits at the root or inside
+   a folder (created by hand, or by a directory import reproducing its
+   on-disk structure — see importer.js), open or not. So an open table
+   shows in both — the Open section is the tabs you're working with, the
+   tree is the whole library. Pages stays its own standing list for the
+   *other* strip (SQL, Timeline, plugin tabs). Rows reuse the dropdown's
+   .menu-item/.menu-item-action classes. Filtered by S.sidebarFilter — a
+   client-side substring match; while a filter is active, folders that
+   contain a match are shown and force-expanded.
 
    Folders: ▸/▾ collapse (persisted per-browser in FOLDERS_KEY), ▲/▼ to
    reorder among siblings, ＋ for a subfolder, ✕ to delete (tables move to
@@ -652,11 +668,10 @@ function saveCollapsedFolders() {
   localStorage.setItem(FOLDERS_KEY, JSON.stringify([...S.collapsedFolders]));
 }
 
-/* Case-insensitive label sort, open tables first — the sidebar is now
-   organized by folder, so within a container "what's open" is the only
-   ordering hint left worth keeping. */
+/* Within a folder, tables sort alphabetically by label — "what's open" is
+   the Open section's job now, so it's no longer a sort key here. */
 function cmpTables(a, b) {
-  return (b.is_open ? 1 : 0) - (a.is_open ? 1 : 0) || sourceLabel(a).localeCompare(sourceLabel(b));
+  return sourceLabel(a).localeCompare(sourceLabel(b));
 }
 
 /* Folders indexed by parent (null → 'root'), each sibling list ordered by
@@ -725,9 +740,28 @@ export function renderSidebar() {
     for (const s of (tablesIn.get(key) || [])) list.append(sidebarRow(s, { depth }));
   }
 
+  // OPEN — the working set. Reorder within it (drag or ▲/▼) is the tab-strip
+  // order; drag a table from the tree below onto it to open one.
+  const openSrcs = openTabsSorted().filter((s) => !q || tableText(s).includes(q));
+  if (S.sources.length) {
+    const oh = el('div', 'menu-header sidebar-open-header', 'Open');
+    wireOpenDrop(oh);
+    list.append(oh);
+    if (openSrcs.length) {
+      openSrcs.forEach((s, i) => list.append(openSidebarRow(s, i, openSrcs.length)));
+    } else {
+      const z = el('div', 'sidebar-rootzone sidebar-openzone', 'drag a table here to open it');
+      wireOpenDrop(z);
+      list.append(z);
+    }
+  }
+
+  // ALL TABLES — every table in the case, organized into folders whether or
+  // not it's currently open.
   if (!tables.length && !S.folders.length) {
     list.append(el('div', 'note-status', q ? 'No matching tables.' : 'No tables in this case yet.'));
   } else {
+    if (S.sources.length) list.append(el('div', 'menu-header', 'All tables'));
     renderInto('root', 0);
     if (S.folders.length) list.append(rootDropZone());  // drag a table back out of a folder
   }
@@ -890,6 +924,62 @@ function wireFolderDrop(node, folderId) {
   });
 }
 
+/* A drop target in the Open section: a table dragged out of the tree
+   (draggedTableId) is opened. Kept distinct from wireFolderDrop so the same
+   tree-row drag can mean "file into a folder" or "open", by where it lands. */
+function wireOpenDrop(node) {
+  node.addEventListener('dragover', (e) => {
+    if (draggedTableId == null) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    node.classList.add('drop-into');
+  });
+  node.addEventListener('dragleave', () => node.classList.remove('drop-into'));
+  node.addEventListener('drop', async (e) => {
+    if (draggedTableId == null) return;
+    e.preventDefault();
+    const id = draggedTableId;
+    node.classList.remove('drop-into');
+    await post(`/api/source/${id}/open`, { open: true });
+    await loadSources(id);
+  });
+}
+
+/* A row in the Open section — the working set. Reorder with ▲/▼ or drag
+   (that IS the horizontal tab strip's order), close with ✕. The table also
+   still appears in its folder in the tree below; this is just the tabs you
+   have open, in the order you want them. */
+export function openSidebarRow(s, index, total) {
+  const active = s.id === S.sourceId && S.activeTab === 'grid';
+  const row = el('div', 'sidebar-row sidebar-openrow' + (active ? ' active' : ''));
+  const label = el('button', 'menu-item', (s.is_merge ? '⛓ ' : '') + sourceLabel(s) + (s.error ? ' ⚠' : ''));
+  label.disabled = !!s.error;
+  label.title = s.error || sourceTitle(s, 'Right-click for the table menu');
+  label.onclick = () => openSource(s.id);
+  if (!s.error) row.oncontextmenu = (e) => { e.preventDefault(); openTableMenu(s.id); };
+  row.append(label);
+  if (!s.error) row.append(el('span', 'sidebar-row-count', s.row_count.toLocaleString()));
+  const acts = el('div', 'sidebar-row-actions');
+  const up = el('button', 'menu-item-action', '▲');
+  up.title = 'Move earlier';
+  up.disabled = index === 0;
+  up.onclick = () => moveTab(s.id, -1);
+  const down = el('button', 'menu-item-action', '▼');
+  down.title = 'Move later';
+  down.disabled = index === total - 1;
+  down.onclick = () => moveTab(s.id, 1);
+  const x = el('button', 'menu-item-action', '✕');
+  x.title = 'Close tab — stays in the case, still listed under All tables below';
+  x.onclick = async () => { await closeTab(s); };
+  acts.append(up, down, x);
+  row.append(acts);
+  wireDragReorder(row, s.id, {
+    containerSelector: '#sidebarList', rowSelector: '.sidebar-openrow', horizontal: false,
+  });
+  wireOpenDrop(row);   // a tree row dropped on an open row opens it too
+  return row;
+}
+
 /* A page tab's row: click to show it, ▲/▼ or drag to reorder. No ✕ —
    unlike a table tab, a page tab isn't something you can close and reopen
    (SQL and Timeline are always there; a plugin tab comes and goes with its
@@ -950,12 +1040,6 @@ export function sidebarRow(s, { depth = 0 } = {}) {
     mv.title = 'Move to a folder';
     mv.onclick = (e) => openMoveMenu(e.currentTarget, s);
     acts.append(mv);
-    if (open) {
-      const x = el('button', 'menu-item-action', '✕');
-      x.title = 'Close tab — stays in this case, reopen it from here';
-      x.onclick = async () => { await closeTab(s); };
-      acts.append(x);
-    }
     row.append(acts);
     wireTableDrag(row, s.id);
   }
