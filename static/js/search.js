@@ -290,6 +290,23 @@ export function openSearchAllModal() {
         : 'All of those terms are already in the list');
     };
     impLabel.append(impInput);
+    // The terms you're about to sweep for are usually exactly the IOCs
+    // worth watching as new data lands — add them to the watchlist in one
+    // click (it dedupes against what's already there, then scans).
+    const wlBtn = el('button', 'btn ghost', 'Add to watchlist');
+    wlBtn.title = 'Add these terms to the case watchlist and scan every table for them';
+    wlBtn.onclick = async () => {
+      const terms = searchAllTerms(st).filter((t) => !t.exclude).map((t) => t.term.trim()).filter(Boolean);
+      if (!terms.length) { toast('Enter a term or two first'); return; }
+      try {
+        const r = await post('/api/watchlist/import', { text: terms.join('\n'), kind: 'other' });
+        await post('/api/watchlist/scan', {});
+        const dupes = terms.length - r.added;
+        toast(r.added
+          ? `${r.added} added to the watchlist${dupes > 0 ? ` · ${dupes} already there` : ''}`
+          : 'All of those are already on the watchlist', 5000);
+      } catch (e) { toast('Could not add to the watchlist: ' + e.message, 6000); }
+    };
     const searchBtn = el('button', 'btn', 'Search  ⌘⏎');
     const cancelBtn = el('button', 'btn ghost', 'Stop');
     cancelBtn.title = 'Stop the sweep — tables already counted keep their results';
@@ -298,7 +315,7 @@ export function openSearchAllModal() {
       try { await post(`/api/search_all/cancel?job_id=${st.jobId}`, {}); } catch { /* already gone */ }
     };
     const progress = el('span', 'search-all-progress');
-    searchActs.append(searchBtn, impLabel, cancelBtn, progress);
+    searchActs.append(searchBtn, impLabel, wlBtn, cancelBtn, progress);
     b.append(searchActs);
 
     const results = el('div', 'search-all-results');

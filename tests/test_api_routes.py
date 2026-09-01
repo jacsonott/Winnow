@@ -818,3 +818,15 @@ def test_close_all_tabs_route(client, store, write_csv):
     assert r.status_code == 200
     srcs = {s["id"]: s for s in client.get("/api/sources").json()}
     assert srcs[a]["is_open"] is False and srcs[b]["is_open"] is False
+
+
+def test_quicklook_new_creates_a_temp_case_loopback_only(client, tmp_path, monkeypatch):
+    import os
+    import server
+    monkeypatch.setattr(server, "_cases_dir", lambda: str(tmp_path))   # don't touch the real cases dir
+    r = client.post("/api/case/quicklook/new")
+    assert r.status_code == 200
+    path = r.json()["path"]
+    assert "quicklook" in path and os.path.isfile(path)   # a real, empty case file
+    monkeypatch.setattr(server, "_is_loopback", lambda request: False)
+    assert client.post("/api/case/quicklook/new").status_code == 403

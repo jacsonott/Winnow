@@ -3,7 +3,7 @@
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { applyBundle } from './bundles.js';
 import { $, api, el, post, setBusy, toast } from './core.js';
-import { loadPlugins } from './importer.js';
+import { loadPlugins, openImportModal, queueFiles } from './importer.js';
 import { startJobsPoll } from './jobs.js';
 import { resetPluginTabMounts } from './plugins.js';
 import { resetNotes } from './notes.js';
@@ -151,6 +151,10 @@ export async function openCase(path, opts = {}) {
   if (S.activeTab !== 'grid') showGridTab();
   setBrandLabel(res.name);
   showApp();
+  // A quick-look (temp) case — e.g. one made by dropping files on the home
+  // screen — surfaces its banner so it can be saved or discarded, the same
+  // as one opened at boot (only boot painted this before).
+  paintTempBanner(!!res.temp);
   // ts_format lives in the case file, so it's per-case state like sql_tabs
   // — reload it rather than carrying the last case's setting over.
   await loadCaseSettings();
@@ -567,8 +571,39 @@ export async function deleteCaseFile(c) {
   refreshCases();
 }
 
+/* Home-screen drag-and-drop import. Dropping files on a case row imports
+   into THAT case; dropping on the home screen but not on any case makes a
+   fresh quick-look (temp) case. Both open the target and hand the files to
+   the normal import modal — so the analyst still configures/reviews before
+   ingest, exactly like an in-app drop. */
+const isFileDrag = (e) => !!(e.dataTransfer && [...(e.dataTransfer.types || [])].includes('Files'));
+
+async function importDroppedFiles(files, casePath) {
+  try {
+    const path = casePath || (await post('/api/case/quicklook/new', {})).path;
+    await openCase(path);        // switches to the app and opens the case
+    queueFiles(files);
+    openImportModal();
+  } catch (e) { toast('Could not start the import: ' + e.message, 6000); }
+}
+
 export function renderCaseRow(c) {
   const row = el('div', 'home-case-row' + (c.exists === false ? ' missing' : ''));
+  if (c.exists !== false) {
+    row.addEventListener('dragover', (e) => {
+      if (!isFileDrag(e)) return;
+      e.preventDefault(); e.stopPropagation();
+      row.classList.add('home-case-drop');
+    });
+    row.addEventListener('dragleave', () => row.classList.remove('home-case-drop'));
+    row.addEventListener('drop', (e) => {
+      if (!isFileDrag(e)) return;
+      e.preventDefault(); e.stopPropagation();   // don't let the home-area handler also fire
+      row.classList.remove('home-case-drop');
+      const files = [...e.dataTransfer.files];
+      if (files.length) importDroppedFiles(files, c.path);
+    });
+  }
   const main = el('div', 'home-case-main');
   const nameRow = el('div', 'home-case-name');
   nameRow.append(el('span', null, (c.exists === false ? '⚠ ' : '') + c.name));
@@ -850,4 +885,21 @@ $('btnHome').onclick = () => {
   if (S.tempCase) { openQuickLookExitDialog(); return; }
   showHome(); refreshCases();
 };
+// Drop files anywhere on the home screen that ISN'T a case row → a fresh
+// quick-look case. Case rows stopPropagation on their own drop (above), so
+// this only fires for the "no particular case" gesture.
+const home = $('home');
+home.addEventListener('dragover', (e) => {
+  if (!isFileDrag(e)) return;
+  e.preventDefault();
+  home.classList.add('home-drop');
+});
+home.addEventListener('dragleave', (e) => { if (e.target === home) home.classList.remove('home-drop'); });
+home.addEventListener('drop', (e) => {
+  if (!isFileDrag(e)) return;
+  e.preventDefault(); e.stopPropagation();
+  home.classList.remove('home-drop');
+  const files = [...e.dataTransfer.files];
+  if (files.length) importDroppedFiles(files, null);   // null → new quick-look case
+});
 }

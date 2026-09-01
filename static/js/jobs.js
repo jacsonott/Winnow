@@ -241,27 +241,45 @@ export function renderJobsPanel() {
     }));
     count++;
   }
-  for (const j of ingestJobs) {
-    if (dismissedJobs.has(j.job_id)) continue;
-    const running = j.status === 'running' || j.status === 'queued';
+  // Directory imports queue dozens of files at once. Show the ones
+  // actually importing right now, roll the rest into one "N queued" row so
+  // the in-progress files aren't buried below a long waiting list, and keep
+  // finished/errored rows (they auto-dismiss). Running first, then the
+  // queued summary, then the completed — so what's happening stays on top.
+  const active = ingestJobs.filter((j) => !dismissedJobs.has(j.job_id) && j.status === 'running');
+  const queued = ingestJobs.filter((j) => !dismissedJobs.has(j.job_id) && j.status === 'queued');
+  const finished = ingestJobs.filter((j) => !dismissedJobs.has(j.job_id)
+    && j.status !== 'running' && j.status !== 'queued');
+  for (const j of active) {
     const label = j.tables_total > 1
       ? `${j.name} — ${Math.min(j.tables_done + 1, j.tables_total)}/${j.tables_total}${j.current_table ? `: ${j.current_table}` : ''}`
       : j.name;
-    if (running) {
-      panel.append(jobPanelRow({
-        label, phase: j.status === 'queued' ? 'queued' : 'importing',
-        pct: j.units_total ? j.units_done / j.units_total : 0,
-        indeterminate: !j.units_total,
-        detail: j.rows_done ? `${j.rows_done.toLocaleString()} rows` : '',
-        onCancel: () => post(`/api/ingest/jobs/${j.job_id}/cancel`, {}).then(startJobsPoll).catch(() => {}),
-      }));
-    } else {
-      panel.append(jobPanelRow({
-        label: j.name, phase: j.status, done: true,
-        detail: j.status === 'done' ? jobDoneDetail(j) : (j.error || ''),
-        onDismiss: () => { dismissedJobs.add(j.job_id); renderJobsPanel(); },
-      }));
-    }
+    panel.append(jobPanelRow({
+      label, phase: 'importing',
+      pct: j.units_total ? j.units_done / j.units_total : 0,
+      indeterminate: !j.units_total,
+      detail: j.rows_done ? `${j.rows_done.toLocaleString()} rows` : '',
+      onCancel: () => post(`/api/ingest/jobs/${j.job_id}/cancel`, {}).then(startJobsPoll).catch(() => {}),
+    }));
+    count++;
+  }
+  if (queued.length) {
+    panel.append(jobPanelRow({
+      label: `${queued.length} queued`, phase: 'queued', indeterminate: false,
+      detail: 'waiting to import',
+      // Cancel the whole waiting batch at once — the common "I didn't mean
+      // to import that many" recovery.
+      onCancel: () => Promise.allSettled(
+        queued.map((j) => post(`/api/ingest/jobs/${j.job_id}/cancel`, {}))).then(startJobsPoll),
+    }));
+    count++;
+  }
+  for (const j of finished) {
+    panel.append(jobPanelRow({
+      label: j.name, phase: j.status, done: true,
+      detail: j.status === 'done' ? jobDoneDetail(j) : (j.error || ''),
+      onDismiss: () => { dismissedJobs.add(j.job_id); renderJobsPanel(); },
+    }));
     count++;
   }
   for (const src of S.sources || []) {
