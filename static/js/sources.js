@@ -20,6 +20,7 @@ import { showGridTab, showSqlTab, showTimelineTab } from './sql.js';
 import { showNotesTab } from './notes.js';
 import { showWatchlistTab } from './watchlist.js';
 import { showEntityTab } from './entity.js';
+import { showDashboardTab } from './dashboard.js';
 import { openCaseSettings } from './settings.js';
 import { S, selClear, selCount, selFirst, specKey } from './state.js';
 import { openTablesManager } from './tables.js';
@@ -300,6 +301,7 @@ export function pageTabs() {
     { key: 'notes', label: 'Notes', title: 'Case narrative — a Markdown scratchpad saved in the case file', node: () => $('tabNotes'), show: showNotesTab },
     { key: 'watchlist', label: 'Watchlist', title: 'IOC watchlist — indicators scanned across every table', node: () => $('tabWatchlist'), show: showWatchlistTab },
     { key: 'entity', label: 'Occurrences', title: 'Occurrences — everywhere a value appears across all tables', node: () => $('tabEntity'), show: showEntityTab },
+    { key: 'dashboard', label: 'Dashboard', title: 'Case dashboard — widgets summarizing the case', node: () => $('tabDashboard'), show: showDashboardTab },
     ...S.pluginTabs.map((t) => ({
       key: 'plugin:' + t.id,
       label: t.label,

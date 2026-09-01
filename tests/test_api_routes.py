@@ -729,3 +729,34 @@ def test_entity_pivot_across_sources(client, store, write_csv):
     assert out["buckets"] and out["buckets"][0][0] == "2026-03-15"
     # empty value is a 400
     assert client.post("/api/entity/pivot", json={"value": "  "}).status_code == 400
+
+
+def test_dashboard_widgets_and_profile(client, store, write_csv):
+    """Widget preview for each source, dashboard persistence, and a profile
+    (bundle + dashboard) applying its dashboard to the case."""
+    sid = store.ingest_csv(write_csv(
+        [["Host", "Cmd"], ["WKS07", "rclone"], ["WKS01", "x"], ["WKS07", "y"]], "e.csv"),
+        build_fts=False)["id"]
+    store.set_tags(sid, [1], store.list_tags()[0]["id"], True)
+
+    sqlw = client.post("/api/dashboard/widget/preview",
+                       json={"source": "sql", "query": {"sql": f"SELECT COUNT(DISTINCT Host) h FROM src_{sid}"}})
+    assert sqlw.json()["rows"] == [[2]]
+    assert client.post("/api/dashboard/widget/preview", json={"source": "tags", "query": {}}).json()["total"] == 1
+    assert "rows" in client.post("/api/dashboard/widget/preview", json={"source": "watchlist", "query": {}}).json()
+    assert client.post("/api/dashboard/widget/preview", json={"source": "nope", "query": {}}).status_code == 400
+
+    # persist a dashboard
+    w = [{"title": "Hosts", "source": "sql", "render": "stat",
+          "query": {"sql": f"SELECT COUNT(*) FROM src_{sid}"}}]
+    client.post("/api/dashboard", json={"widgets": w})
+    assert client.get("/api/dashboard").json()["widgets"][0]["title"] == "Hosts"
+
+    # a profile carrying a dashboard applies it on apply
+    prof = client.post("/api/plugin_bundles", json={"name": "KAPE triage", "plugins": [],
+        "dashboard": [{"title": "Findings", "source": "tags", "render": "stat"}]})
+    bid = prof.json()["id"]
+    client.post("/api/dashboard", json={"widgets": []})   # clear
+    ap = client.post(f"/api/plugin_bundles/{bid}/apply")
+    assert ap.status_code == 200 and ap.json()["dashboard_applied"] is True
+    assert client.get("/api/dashboard").json()["widgets"][0]["title"] == "Findings"

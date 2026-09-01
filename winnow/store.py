@@ -278,6 +278,14 @@ CREATE TABLE IF NOT EXISTS watchlist_hits (
     rid          INTEGER NOT NULL,
     PRIMARY KEY (watchlist_id, source_id, rid)
 ) WITHOUT ROWID;
+
+-- The case's dashboard: one JSON document (a list of widget definitions).
+-- In the case .db so a dashboard travels with the case it summarises; a
+-- PROFILE (workspace) is the reusable template a dashboard is applied from.
+CREATE TABLE IF NOT EXISTS dashboard (
+    id      INTEGER PRIMARY KEY CHECK (id = 1),
+    widgets TEXT NOT NULL DEFAULT '[]'
+);
 """
 
 IDENT_OK = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -6544,6 +6552,53 @@ class Store:
         return {"value": value, "sources": sources,
                 "rows": rows[:limit],
                 "buckets": sorted(buckets.items())}
+
+    # ------------------------------------------------------------ dashboard
+
+    def get_dashboard(self) -> list:
+        with self.lock:
+            row = self.db.execute("SELECT widgets FROM dashboard WHERE id=1").fetchone()
+        try:
+            return json.loads(row["widgets"]) if row else []
+        except (TypeError, ValueError):
+            return []
+
+    def set_dashboard(self, widgets: list) -> list:
+        if not isinstance(widgets, list):
+            raise ValueError("Dashboard is a list of widgets")
+        with self.lock, self.db:
+            self.db.execute(
+                "INSERT INTO dashboard(id, widgets) VALUES (1, ?)"
+                " ON CONFLICT(id) DO UPDATE SET widgets=excluded.widgets",
+                (json.dumps(widgets),))
+        return widgets
+
+    def dashboard_widget_preview(self, source: str, query: dict, limit: int = 200) -> dict:
+        """Run one widget's data source and return normalized tabular data
+        the client renders per the widget's kind. SQL rides the read-only
+        run_sql path (own connection, statement checks) — so a dashboard is
+        data, not code. watchlist / tags read the case's own state."""
+        query = query or {}
+        if source == "sql":
+            sql = (query.get("sql") or "").strip()
+            if not sql:
+                raise ValueError("SQL widget needs a query")
+            res = self.run_sql(sql, limit=min(int(query.get("limit") or limit), 1000))
+            return {"columns": res["columns"], "rows": res["rows"], "truncated": res.get("truncated", False)}
+        if source == "watchlist":
+            inds = self.list_indicators()
+            return {"columns": ["indicator", "hits"],
+                    "rows": [[i["value"], i["hit_count"]] for i in inds],
+                    "total": sum(i["hit_count"] for i in inds)}
+        if source == "tags":
+            with self.lock:
+                rows = self.db.execute(
+                    "SELECT td.name AS name, COUNT(rt.rid) AS n FROM tag_defs td"
+                    " LEFT JOIN row_tags rt ON rt.tag_id = td.id"
+                    " GROUP BY td.id ORDER BY n DESC").fetchall()
+            return {"columns": ["tag", "count"], "rows": [[r["name"], r["n"]] for r in rows],
+                    "total": sum(r["n"] for r in rows)}
+        raise ValueError(f"Unknown widget source {source!r}")
 
     def pop_legacy_presets(self) -> list[dict]:
         """filter_presets used to be this case's own SQLite-backed table of
