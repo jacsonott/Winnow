@@ -41,6 +41,11 @@ pip install fastapi "uvicorn[standard]" python-multipart
 python server.py --case case.db --open timeline.csv
 ```
 
+Prefer not to touch a terminal? The `launch/` folder has double-click
+launchers — `winnow.sh` (Linux), `winnow.command` (macOS), `winnow.bat` /
+`winnow.vbs` (Windows) — that find Python and start it for you. See
+[launch/README.md](launch/README.md).
+
 Opens http://127.0.0.1:8777 in an **app window** — a browser window with no
 address bar, tab strip or bookmarks, and its own taskbar entry, so Winnow
 looks like the application it is rather than one of your twenty tabs. It

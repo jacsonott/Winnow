@@ -832,3 +832,13 @@ def test_quicklook_new_creates_a_temp_case_loopback_only(client, tmp_path, monke
     assert "quicklook" in path and os.path.isfile(path)   # a real, empty case file
     monkeypatch.setattr(server, "_is_loopback", lambda request: False)
     assert client.post("/api/case/quicklook/new").status_code == 403
+
+
+def test_error_log_route_records_and_returns(client):
+    import server
+    before = client.get("/api/log").json()
+    server.record_log("error", "unit-test boom")
+    after = client.get("/api/log").json()
+    assert after["seq"] > before["seq"]
+    last = after["entries"][-1]
+    assert last["message"] == "unit-test boom" and last["level"] == "error" and last["ts"]

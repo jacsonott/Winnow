@@ -277,6 +277,49 @@ _reload_plugins()
 CSRF_HEADER = "X-Timeline-Lite-Client"
 
 
+# ------------------------------------------------------------ error log
+#
+# Errors used to go only to the terminal Winnow was started from, which an
+# analyst rarely has in front of them. Capture them into a bounded ring the
+# UI can show (Case menu -> Error log). record_log ALSO prints, so the
+# terminal behaviour is unchanged for anyone watching it.
+import collections as _collections
+import datetime as _datetime
+import threading as _threading
+
+_ERRLOG: "_collections.deque" = _collections.deque(maxlen=500)
+_ERRLOG_LOCK = _threading.Lock()
+_errlog_seq = 0
+
+
+def record_log(level: str, message) -> None:
+    global _errlog_seq
+    with _ERRLOG_LOCK:
+        _errlog_seq += 1
+        _ERRLOG.append({
+            "seq": _errlog_seq,
+            "ts": _datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "level": level,
+            "message": str(message),
+        })
+    print(f"[{level}] {message}", file=sys.stderr, flush=True)
+
+
+@app.get("/api/log")
+def api_log():
+    with _ERRLOG_LOCK:
+        return {"entries": list(_ERRLOG), "seq": _errlog_seq}
+
+
+@app.exception_handler(Exception)
+async def _unhandled_error_handler(request: Request, exc: Exception):
+    # Any route error that isn't an HTTPException / the two specific handlers
+    # below lands here: record it (so it's visible in the app, not just the
+    # terminal) and answer a clean 500 rather than a raw traceback.
+    record_log("error", f"{request.method} {request.url.path} — {type(exc).__name__}: {exc}")
+    return JSONResponse({"detail": f"Internal error: {exc}"}, status_code=500)
+
+
 # A request that was already executing against the previous case's Store
 # when a case switch closed it can't be salvaged — sqlite3 raises
 # ProgrammingError("Cannot operate on a closed database") from whatever
@@ -3559,7 +3602,7 @@ def main() -> None:
         _reload_plugins()
     for p in PLUGINS.describe():
         if p["error"]:
-            print(f"Plugin FAILED: {p['name']} ({p['path']}): {p['error']}", file=sys.stderr)
+            record_log("error", f"Plugin FAILED: {p['name']} ({p['path']}): {p['error']}")
         elif not p["enabled"]:
             print(f"Plugin disabled: {p['name']} (toggle in Settings → Plugins)")
         else:

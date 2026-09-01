@@ -21,6 +21,7 @@ import { showNotesTab } from './notes.js';
 import { showWatchlistTab } from './watchlist.js';
 import { loadDashboards, renderDashboardsInto } from './dashboard.js';
 import { openCaseSettings } from './settings.js';
+import { openErrorLog } from './errlog.js';
 import { S, selClear, selCount, selFirst, specKey } from './state.js';
 import { openTablesManager } from './tables.js';
 import { loadTags, renderTagRibbon } from './tags.js';
@@ -1293,6 +1294,7 @@ $('btnCase').onclick = () => dropdownMenu($('btnCase'), [
   { label: 'Sessions…', onclick: openSessionManager },
   { label: 'Case settings…', onclick: openCaseSettings },
   '-',
+  { label: 'Error log…', onclick: openErrorLog },
   { label: 'Shut down Winnow…', onclick: shutdownWinnow },
 ]);
 
