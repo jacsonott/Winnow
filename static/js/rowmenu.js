@@ -1,7 +1,6 @@
 /* The row right-click menu — a section registry, not a fixed list.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { openEntityPivot } from './entity.js';
 import { displayValue, ellipsize, filterByValue, openValuePickerForColumn } from './filters.js';
 import { rowAt } from './grid.js';
 import { copyRowsAsText, writeClipboardText } from './grouping.js';
@@ -85,9 +84,6 @@ export function rowMenuCellItems(ctx) {
       onclick: () => filterByValue(ctx.colName, ctx.value, { only: true }),
     },
     { label: `Exclude ${shown}`, onclick: () => filterByValue(ctx.colName, ctx.value, { exclude: true }) },
-    { label: `Occurrences of ${shown} across all tables`,
-      title: 'Everywhere this value appears, in every table, with a merged timeline',
-      onclick: () => openEntityPivot(ctx.value) },
     {
       // The way in when the column's own picker button is switched off for
       // size (see valueFilterEnabled) — an explicit click is consent to pay

@@ -89,7 +89,6 @@ try {
     <button class="tab tab-sql" id="tabTimeline" aria-selected="false" title="Unified timeline of every tagged row across the case">Timeline</button>
     <button class="tab tab-sql" id="tabNotes" aria-selected="false" title="Case narrative — a Markdown scratchpad saved in the case file">Notes</button>
     <button class="tab tab-sql" id="tabWatchlist" aria-selected="false" title="IOC watchlist — indicators scanned across every table">Watchlist</button>
-    <button class="tab tab-sql" id="tabEntity" aria-selected="false" title="Occurrences — everywhere a value appears across all tables">Occurrences</button>
     <button class="tab tab-sql" id="tabDashboard" aria-selected="false" title="Case dashboard — widgets summarizing the case">Dashboard</button>
   </nav>
 
@@ -189,22 +188,6 @@ try {
         <button class="btn ghost" id="dashSaveProfile">Save as profile…</button>
       </div>
       <div class="dash-grid" id="dashGrid"></div>
-    </section>
-
-    <section class="entityview" id="entityview" hidden>
-      <div class="ent-bar">
-        <span class="ent-mark">⌖</span>
-        <input id="entValue" placeholder="Find a value — host, user, hash, IP…" />
-        <button class="btn" id="entGo">Find</button>
-        <span class="note-status" id="entStatus"></span>
-      </div>
-      <div class="ent-body-wrap">
-        <div class="ent-rail"><div class="ent-rail-head">Appears in</div><div id="entSources"></div></div>
-        <div class="ent-main">
-          <div class="ent-hist-wrap"><canvas id="entHist"></canvas></div>
-          <div class="ent-rows" id="entRows"></div>
-        </div>
-      </div>
     </section>
 
     <section class="watchlistview" id="watchlistview" hidden>

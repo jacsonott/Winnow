@@ -25,7 +25,6 @@ import * as charts from './charts.js';
 import * as stack from './stack.js';
 import * as notes from './notes.js';
 import * as watchlist from './watchlist.js';
-import * as entity from './entity.js';
 import * as dashboard from './dashboard.js';
 import * as filters from './filters.js';
 import * as splash from './splash.js';
@@ -79,7 +78,7 @@ import { wireUi } from './ui.js';
    spread would freeze the value of a rebindable export like ROW_H at boot.
    Collision-free by construction — these names all shared one scope until
    the file was split. Not an API; nothing in the app reads it. */
-const NAMESPACES = { splash, core, state, jobs, tabhistory, charts, stack, notes, watchlist, entity, dashboard, filters, sources, view, columns, tsformat, derived, grid, grouping, tags, detail, ui, filterbuilder, savedfilters, timeframe, merge, importer, tables, plugins, search, session, sql, timeline, rowmenu, keymap, settings, home };
+const NAMESPACES = { splash, core, state, jobs, tabhistory, charts, stack, notes, watchlist, dashboard, filters, sources, view, columns, tsformat, derived, grid, grouping, tags, detail, ui, filterbuilder, savedfilters, timeframe, merge, importer, tables, plugins, search, session, sql, timeline, rowmenu, keymap, settings, home };
 window.__winnow = {};
 for (const ns of Object.values(NAMESPACES)) {
   for (const key of Object.keys(ns)) {
@@ -93,7 +92,6 @@ window.addEventListener('mouseup', tabhistory.onMouseNav);
 
 notes.wireNotes();
 watchlist.wireWatchlist();
-entity.wireEntity();
 dashboard.wireDashboard();
 wireSources();
 wireGrouping();

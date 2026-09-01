@@ -2086,11 +2086,13 @@ def api_ingest_plugin_path(body: IngestPluginPath):
     try:
         rec = _ingest_via_plugin(body.path, body.format_id, body.name, body.options, body.build_fts)
         # Directory import files this table under the folder mirroring its
-        # on-disk path (synchronous here, unlike the backgrounded job path).
+        # on-disk path and brings it in closed (same as the job path — a
+        # folder import shouldn't open a tab per file).
         if body.folder_path:
             fid = store().ensure_folder_path(body.folder_path)
             if fid is not None:
                 store().set_source_folder(rec["id"], fid)
+            store().set_tab_open(rec["id"], False)
         return rec
     except Exception as e:  # surface the real parser error to the UI, same as the other ingest routes
         raise HTTPException(400, str(e))
@@ -2133,6 +2135,13 @@ def api_set_tab_open(source_id: int, body: TabOpenReq):
     underlying data. Hard delete is a separate, explicit action
     (DELETE /api/source/{id} / DELETE /api/merges/{id})."""
     store().set_tab_open(source_id, body.open)
+    return {"ok": True}
+
+
+@app.post("/api/tabs/close_all")
+def api_close_all_tabs():
+    """Close every open tab at once (the tables stay in the case)."""
+    store().close_all_tabs()
     return {"ok": True}
 
 
