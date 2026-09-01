@@ -2428,6 +2428,69 @@ def api_case_notes_save(body: CaseNotesWrite):
     return store().set_case_notes(body.body)
 
 
+class IndicatorBody(BaseModel):
+    value: str
+    kind: str = "other"
+    note: str | None = None
+    auto_tag_id: int | None = None
+
+
+class WatchlistImportBody(BaseModel):
+    text: str = ""
+    kind: str = "other"
+    auto_tag_id: int | None = None
+
+
+@app.get("/api/watchlist")
+def api_watchlist_list():
+    return store().list_indicators()
+
+
+@app.post("/api/watchlist")
+def api_watchlist_add(body: IndicatorBody):
+    try:
+        return store().add_indicator(body.value, body.kind, body.note, body.auto_tag_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/watchlist/import")
+def api_watchlist_import(body: WatchlistImportBody):
+    """One indicator per line; blanks and #-comments dropped; optional
+    'value,kind' per line overrides the body default. Deduped against
+    what's already in the list."""
+    have = {i["value"] for i in store().list_indicators()}
+    added = 0
+    for line in (body.text or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        value, _, kind = line.partition(",")
+        value = value.strip()
+        if not value or value in have:
+            continue
+        store().add_indicator(value, (kind.strip() or body.kind), None, body.auto_tag_id)
+        have.add(value)
+        added += 1
+    return {"added": added, "indicators": store().list_indicators()}
+
+
+@app.delete("/api/watchlist/{wid}")
+def api_watchlist_delete(wid: int):
+    store().delete_indicator(wid)
+    return {"ok": True}
+
+
+@app.post("/api/watchlist/scan")
+def api_watchlist_scan(source_id: int | None = None):
+    return store().scan_source(source_id) if source_id is not None else store().scan_all()
+
+
+@app.get("/api/watchlist/hits")
+def api_watchlist_hits(watchlist_id: int):
+    return store().indicator_hits(watchlist_id)
+
+
 # ------------------------------------------------------------ derived columns
 
 

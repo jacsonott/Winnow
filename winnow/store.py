@@ -260,6 +260,24 @@ CREATE TABLE IF NOT EXISTS case_notes (
     body       TEXT NOT NULL DEFAULT '',
     updated_at TEXT
 );
+
+-- IOC watchlist: indicators the case is scanned for, and the materialised
+-- hits (so they survive, are countable, and are taggable/exportable).
+-- Evidence-adjacent findings, so they live in the case .db, not workspace/.
+CREATE TABLE IF NOT EXISTS watchlist (
+    id          INTEGER PRIMARY KEY,
+    value       TEXT NOT NULL,
+    kind        TEXT NOT NULL DEFAULT 'other',   -- hash|ip|domain|filename|other (advisory: sets colour)
+    note        TEXT,
+    auto_tag_id INTEGER,                          -- if set, matching rows get this tag on scan
+    created_at  TEXT
+);
+CREATE TABLE IF NOT EXISTS watchlist_hits (
+    watchlist_id INTEGER NOT NULL,
+    source_id    INTEGER NOT NULL,
+    rid          INTEGER NOT NULL,
+    PRIMARY KEY (watchlist_id, source_id, rid)
+) WITHOUT ROWID;
 """
 
 IDENT_OK = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -6384,6 +6402,89 @@ class Store:
                 " ON CONFLICT(id) DO UPDATE SET body=excluded.body, updated_at=excluded.updated_at",
                 (body or "", ts))
         return {"body": body or "", "updated_at": ts}
+
+    # ------------------------------------------------------------ watchlist
+
+    def add_indicator(self, value: str, kind: str = "other",
+                      note: str | None = None, auto_tag_id: int | None = None) -> dict:
+        value = (value or "").strip()
+        if not value:
+            raise ValueError("An indicator needs a value")
+        with self.lock, self.db:
+            cur = self.db.execute(
+                "INSERT INTO watchlist(value, kind, note, auto_tag_id, created_at)"
+                " VALUES (?,?,?,?,?)",
+                (value, kind or "other", note, auto_tag_id, time.strftime("%Y-%m-%dT%H:%M:%S")))
+        return self._indicator(cur.lastrowid)
+
+    def _indicator(self, wid: int) -> dict:
+        with self.lock:
+            r = self.db.execute("SELECT * FROM watchlist WHERE id=?", (wid,)).fetchone()
+            n = self.db.execute("SELECT COUNT(*) c FROM watchlist_hits WHERE watchlist_id=?", (wid,)).fetchone()["c"]
+        return {"id": r["id"], "value": r["value"], "kind": r["kind"], "note": r["note"],
+                "auto_tag_id": r["auto_tag_id"], "hit_count": n}
+
+    def list_indicators(self) -> list[dict]:
+        with self.lock:
+            rows = self.db.execute("SELECT id FROM watchlist ORDER BY id").fetchall()
+        return [self._indicator(r["id"]) for r in rows]
+
+    def delete_indicator(self, wid: int) -> None:
+        with self.lock, self.db:
+            self.db.execute("DELETE FROM watchlist WHERE id=?", (wid,))
+            self.db.execute("DELETE FROM watchlist_hits WHERE watchlist_id=?", (wid,))
+
+    def scan_source(self, source_id: int) -> dict:
+        """Scan one source for every indicator: find matching rids (a
+        substring match over all columns, the same blob search-all uses),
+        record them in watchlist_hits, and — for indicators with an
+        auto_tag_id — tag those rows through the normal tag path (undoable,
+        on the rail). Idempotent: a source's hits for a watchlist are
+        replaced each scan. Returns per-indicator match counts."""
+        src = self.get_source(source_id)
+        if src.get("is_merge"):
+            return {"source_id": source_id, "matched": {}}   # merges have no src_N of their own
+        blob = _blob_expr([c["name"] for c in self._base_cols(src)])
+        table = q(src["table_name"])
+        indicators = self.list_indicators()
+        matched: dict[int, int] = {}
+        for ind in indicators:
+            wid = ind["id"]
+            with self.lock:
+                rids = [r["rid"] for r in self.db.execute(
+                    f"SELECT rid FROM {table} WHERE instr(lower({blob}), lower(?)) > 0",
+                    (ind["value"],)).fetchall()]
+            with self.lock, self.db:
+                self.db.execute(
+                    "DELETE FROM watchlist_hits WHERE watchlist_id=? AND source_id=?", (wid, source_id))
+                self.db.executemany(
+                    "INSERT OR IGNORE INTO watchlist_hits(watchlist_id, source_id, rid) VALUES (?,?,?)",
+                    [(wid, source_id, rid) for rid in rids])
+            matched[wid] = len(rids)
+            if ind["auto_tag_id"] and rids:
+                self.set_tags(source_id, rids, int(ind["auto_tag_id"]), True)
+        return {"source_id": source_id, "matched": matched}
+
+    def scan_all(self) -> dict:
+        total: dict[int, int] = {}
+        for s in self.list_sources():
+            if s.get("is_merge") or s.get("error"):
+                continue
+            for wid, n in self.scan_source(s["id"])["matched"].items():
+                total[wid] = total.get(wid, 0) + n
+        return {"matched": total}
+
+    def indicator_hits(self, wid: int, limit: int = 500) -> list[dict]:
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT source_id, rid FROM watchlist_hits WHERE watchlist_id=? LIMIT ?",
+                (wid, limit)).fetchall()
+        names = {s["id"]: s["name"] for s in self.list_sources()}
+        out = []
+        for r in rows:
+            out.append({"source_id": r["source_id"], "rid": r["rid"],
+                        "source_name": names.get(r["source_id"], f"source {r['source_id']}")})
+        return out
 
     def pop_legacy_presets(self) -> list[dict]:
         """filter_presets used to be this case's own SQLite-backed table of

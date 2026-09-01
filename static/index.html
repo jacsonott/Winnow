@@ -87,6 +87,7 @@ try {
     <button class="tab tab-sql" id="tabSql" aria-selected="false" title="Read-only SQL against the case file">SQL</button>
     <button class="tab tab-sql" id="tabTimeline" aria-selected="false" title="Unified timeline of every tagged row across the case">Timeline</button>
     <button class="tab tab-sql" id="tabNotes" aria-selected="false" title="Case narrative — a Markdown scratchpad saved in the case file">Notes</button>
+    <button class="tab tab-sql" id="tabWatchlist" aria-selected="false" title="IOC watchlist — indicators scanned across every table">Watchlist</button>
   </nav>
 
   <div class="bar-actions">
@@ -174,6 +175,27 @@ try {
       </div>
       <div class="timeline-empty" id="timelineEmpty" hidden>
         No tagged rows yet — tag some rows in any table, then come back here.
+      </div>
+    </section>
+
+    <section class="watchlistview" id="watchlistview" hidden>
+      <div class="wl-add">
+        <input id="wlValue" placeholder="Indicator (hash, IP, domain, filename)…" />
+        <select id="wlKind">
+          <option value="other">other</option><option value="hash">hash</option>
+          <option value="ip">ip</option><option value="domain">domain</option>
+          <option value="filename">filename</option>
+        </select>
+        <select id="wlAutoTag"><option value="">no auto-tag</option></select>
+        <button class="btn" id="wlAdd">Add</button>
+        <button class="btn ghost" id="wlImport">Import list…</button>
+        <button class="btn ghost" id="wlScan">Scan all tables</button>
+        <span class="note-status" id="wlStatus"></span>
+        <input id="wlImportFile" type="file" accept=".txt,.csv,.ioc,.list,text/plain" hidden />
+      </div>
+      <div class="wl-body">
+        <div class="wl-list" id="wlList"></div>
+        <div class="wl-hits" id="wlHits"><div class="note-status" style="padding:12px">Select an indicator to see its hits.</div></div>
       </div>
     </section>
 

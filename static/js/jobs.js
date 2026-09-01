@@ -4,6 +4,7 @@ progress, and armOpCancel.
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { $, api, el, post, toast } from './core.js';
 import { offerTimestampColumns } from './derived.js';
+import { scanWatchlistForSources } from './watchlist.js';
 import { loadSources } from './sources.js';
 import { S } from './state.js';
 import { refreshSourcesQuietly } from './tables.js';
@@ -151,6 +152,10 @@ export async function pollJobs() {
         warn ? 8000 : 3500);
       setTimeout(() => { dismissedJobs.add(j.job_id); renderJobsPanel(); }, 8000);
       for (const sid of j.source_ids || []) offerTimestampColumns(sid);
+      // A freshly imported table is scanned against the case's IOC
+      // watchlist (auto-tagging matches); fire-and-forget, the watchlist
+      // tab and the rail reflect it.
+      scanWatchlistForSources(j.source_ids || []);
     } else if (j.status === 'error') {
       toast(`Import failed for ${j.name}: ${j.error}`, 8000);
     } else {
