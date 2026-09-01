@@ -86,7 +86,10 @@ export async function showNotesTab() {
   if (!loaded) {
     try {
       const r = await api('/api/case/notes');
-      $('notesEditor').value = r.body || '';
+      // Don't clobber text the analyst has already typed: the load is async,
+      // so typing into a just-opened Notes tab can race ahead of it. Only
+      // seed the editor from the saved body when it's still empty.
+      if (!$('notesEditor').value) $('notesEditor').value = r.body || '';
       loaded = true;
     } catch { /* leave whatever's there */ }
   }
