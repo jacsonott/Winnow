@@ -1853,6 +1853,7 @@ async def api_plugin_dispatch(fs_name: str, route: str, request: Request):
             raise HTTPException(400, "Request body must be JSON")
     req = plugin_api.PluginRequest(
         request.method, route, dict(request.query_params), body, STORE,
+        storage=WS.PluginData(fs_name),
     )
     try:
         return JSONResponse(entry["handler"](req))

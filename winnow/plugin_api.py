@@ -137,14 +137,24 @@ class PluginRequest:
     """What a register_api handler receives — a deliberately plain shape
     (no FastAPI types) so the contract stays stable across framework
     versions and handlers are trivially testable. `store` is the currently
-    open Store, or None when no case is open."""
+    open Store, or None when no case is open.
 
-    def __init__(self, method: str, route: str, query: dict, body: Any, store: Any):
+    `storage` is the plugin's own persistent dict — machine-level (it
+    lives in workspace/, beside the case registry, not in any case file),
+    so a plugin can keep cross-case state the way the app keeps saved
+    filters: get() the whole dict, set() the whole dict. The server
+    supplies it scoped to THIS plugin's fs name; a handler constructed in
+    a test may pass any object with get()/set(). None when the host chose
+    not to provide one."""
+
+    def __init__(self, method: str, route: str, query: dict, body: Any, store: Any,
+                 storage: Any = None):
         self.method = method
         self.route = route
         self.query = query
         self.body = body
         self.store = store
+        self.storage = storage
 
 
 class IngestFormat:

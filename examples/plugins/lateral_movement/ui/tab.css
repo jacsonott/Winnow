@@ -1,0 +1,46 @@
+/* Lateral-movement tab — Winnow's own tokens throughout, so every skin
+   and theme paints this tab like the rest of the app. */
+.lm-root { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.lm-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  padding: 6px 8px; border-bottom: 1px solid var(--line-2); flex: 0 0 auto; }
+.lm-events { flex: 0 0 auto; max-height: 30%; overflow: auto;
+  border-bottom: 1px solid var(--line-2); padding: 4px 8px; }
+.lm-src-head { color: var(--dim); font-size: 11px; text-transform: uppercase;
+  letter-spacing: .06em; margin: 6px 0 2px; }
+.lm-event { display: flex; gap: 8px; align-items: center; padding: 2px 0; cursor: pointer; }
+.lm-event input, .lm-toggle input { accent-color: var(--accent); }
+.lm-toggle { display: flex; gap: 6px; align-items: center; color: var(--text); }
+.lm-swatch { width: 10px; height: 10px; border-radius: 2px; flex: 0 0 auto;
+  border: 1px solid var(--line-2); }
+.lm-event-name { color: var(--text); }
+.lm-event-desc { color: var(--dim); overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; flex: 1; min-width: 0; }
+.lm-stage { position: relative; flex: 1 1 auto; min-height: 0; }
+.lm-stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.lm-tip { position: absolute; pointer-events: none; background: var(--panel-3);
+  color: var(--text); border: 1px solid var(--line-2); padding: 3px 7px;
+  font: 12px var(--mono); display: none; z-index: 2; max-width: 340px; }
+.lm-legend { position: absolute; top: 8px; right: 8px; background: var(--panel-3);
+  border: 1px solid var(--line-2); padding: 6px 9px; font-size: 11.5px;
+  color: var(--text); z-index: 2; max-width: 260px; }
+.lm-legend div { display: flex; gap: 6px; align-items: center; padding: 1px 0; }
+.lm-hist { flex: 0 0 84px; border-top: 1px solid var(--line-2); position: relative; }
+.lm-hist canvas { position: absolute; inset: 0; width: 100%; height: 100%; cursor: crosshair; }
+.lm-hist-label { position: absolute; right: 8px; top: 4px; color: var(--dim);
+  font: 11px var(--mono); pointer-events: none; }
+.lm-conditions { display: flex; flex-direction: column; gap: 4px; }
+.lm-cond-row { display: flex; gap: 6px; align-items: center; }
+.lm-root select, .lm-root input[type="text"] {
+  background: var(--ink); color: var(--text); border: 1px solid var(--line-2);
+  padding: 5px 8px; font: inherit; max-width: 220px; }
+
+/* collapsible event panel header */
+.lm-panel-head { display: flex; gap: 8px; align-items: center;
+  padding: 5px 8px; border-bottom: 1px solid var(--line-2); flex: 0 0 auto; }
+.lm-caret { background: none; border: none; color: var(--dim); cursor: pointer;
+  font: inherit; padding: 0 2px; width: 18px; }
+.lm-caret:hover { color: var(--text); }
+.lm-panel-title { color: var(--text); font-weight: 600; }
+.lm-panel-summary { color: var(--dim); flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lm-events[hidden] { display: none; }

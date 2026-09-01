@@ -1,0 +1,204 @@
+{
+  "version": 1,
+  "comment": "Shipped movement-event definitions, shaped against real KAPE triage output (EvtxECmd CSVs). Each ties to a header_set (a named column set from the app's defaults/headers.json) so it only offers itself on a table that IS that artifact; requires is the fallback column list for events with no header_set. Conditions are ANDed; op is equals | not_equals | contains | not_contains | in | not_in (comma list).",
+  "events": [
+    {
+      "name": "Remote logons (4624 type 3/10)",
+      "description": "Successful network and RDP logons \u2014 the canonical movement edge. LogonType 3 is network (SMB, WinRM, WMI), 10 is interactive RDP.",
+      "header_set": "Event logs (EvtxECmd)",
+      "requires": [
+        "EventId",
+        "Channel",
+        "RemoteHost",
+        "Computer",
+        "UserName",
+        "TimeCreated",
+        "PayloadData2"
+      ],
+      "src_col": "RemoteHost",
+      "dst_col": "Computer",
+      "label_col": "UserName",
+      "time_col": "TimeCreated",
+      "conditions": [
+        {
+          "column": "Channel",
+          "op": "equals",
+          "value": "Security"
+        },
+        {
+          "column": "EventId",
+          "op": "equals",
+          "value": "4624"
+        },
+        {
+          "column": "PayloadData2",
+          "op": "in",
+          "value": "LogonType 3,LogonType 10"
+        }
+      ],
+      "color": "#d9a441"
+    },
+    {
+      "name": "Failed logons (4625)",
+      "description": "Failed logons by remote host \u2014 password spraying and brute force draw this as a fan.",
+      "header_set": "Event logs (EvtxECmd)",
+      "requires": [
+        "EventId",
+        "Channel",
+        "RemoteHost",
+        "Computer",
+        "UserName",
+        "TimeCreated"
+      ],
+      "src_col": "RemoteHost",
+      "dst_col": "Computer",
+      "label_col": "UserName",
+      "time_col": "TimeCreated",
+      "conditions": [
+        {
+          "column": "Channel",
+          "op": "equals",
+          "value": "Security"
+        },
+        {
+          "column": "EventId",
+          "op": "equals",
+          "value": "4625"
+        }
+      ],
+      "color": "#d9534f"
+    },
+    {
+      "name": "Explicit credentials (4648)",
+      "description": "Logons attempted with explicit credentials (runas, scheduled lateral tools) \u2014 the machine reaching OUT, so the edge runs Computer \u2192 TargetServerName.",
+      "header_set": "Event logs (EvtxECmd)",
+      "requires": [
+        "EventId",
+        "Channel",
+        "Computer",
+        "UserName",
+        "TimeCreated",
+        "PayloadData1",
+        "PayloadData2"
+      ],
+      "src_col": "Computer",
+      "dst_col": "PayloadData2",
+      "label_col": "PayloadData1",
+      "time_col": "TimeCreated",
+      "strip_prefix": true,
+      "conditions": [
+        {
+          "column": "Channel",
+          "op": "equals",
+          "value": "Security"
+        },
+        {
+          "column": "EventId",
+          "op": "equals",
+          "value": "4648"
+        },
+        {
+          "column": "PayloadData2",
+          "op": "not_in",
+          "value": "TargetServerName: localhost,TargetServerName: -,-"
+        }
+      ],
+      "color": "#7c6cf6"
+    },
+    {
+      "name": "RDP sessions (21/24/25)",
+      "description": "Terminal Services session logon / disconnect / reconnect, by source address.",
+      "header_set": "Event logs (EvtxECmd)",
+      "requires": [
+        "EventId",
+        "Channel",
+        "RemoteHost",
+        "Computer",
+        "UserName",
+        "TimeCreated"
+      ],
+      "src_col": "RemoteHost",
+      "dst_col": "Computer",
+      "label_col": "UserName",
+      "time_col": "TimeCreated",
+      "conditions": [
+        {
+          "column": "Channel",
+          "op": "equals",
+          "value": "Microsoft-Windows-TerminalServices-LocalSessionManager/Operational"
+        },
+        {
+          "column": "EventId",
+          "op": "in",
+          "value": "21,24,25"
+        },
+        {
+          "column": "RemoteHost",
+          "op": "not_in",
+          "value": "LOCAL,-"
+        }
+      ],
+      "color": "#39a8e8"
+    },
+    {
+      "name": "RDP connection attempts (1149)",
+      "description": "RemoteConnectionManager: user authentication succeeded \u2014 fires before the session exists, so it survives wiped session logs.",
+      "header_set": "Event logs (EvtxECmd)",
+      "requires": [
+        "EventId",
+        "Channel",
+        "RemoteHost",
+        "Computer",
+        "UserName",
+        "TimeCreated"
+      ],
+      "src_col": "RemoteHost",
+      "dst_col": "Computer",
+      "label_col": "UserName",
+      "time_col": "TimeCreated",
+      "conditions": [
+        {
+          "column": "Channel",
+          "op": "equals",
+          "value": "Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational"
+        },
+        {
+          "column": "EventId",
+          "op": "equals",
+          "value": "1149"
+        }
+      ],
+      "color": "#39e881"
+    },
+    {
+      "name": "Share access (5140/5145)",
+      "description": "Network share objects accessed \u2014 ADMIN$/C$ traffic is how tools and payloads travel.",
+      "header_set": "Event logs (EvtxECmd)",
+      "requires": [
+        "EventId",
+        "Channel",
+        "RemoteHost",
+        "Computer",
+        "UserName",
+        "TimeCreated"
+      ],
+      "src_col": "RemoteHost",
+      "dst_col": "Computer",
+      "label_col": "UserName",
+      "time_col": "TimeCreated",
+      "conditions": [
+        {
+          "column": "Channel",
+          "op": "equals",
+          "value": "Security"
+        },
+        {
+          "column": "EventId",
+          "op": "in",
+          "value": "5140,5145"
+        }
+      ],
+      "color": "#b8843a"
+    }
+  ]
+}
