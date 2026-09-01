@@ -1893,3 +1893,18 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 .dash-sql { width: 100%; background: var(--ink); color: var(--text); border: 1px solid var(--line-2);
   font: 12px var(--mono); padding: 6px 8px; resize: vertical; }
 .bundle-shipped { margin-left: 8px; font-size: 10px; color: var(--accent); border: 1px solid var(--accent-dim, var(--line-2)); border-radius: 8px; padding: 0 6px; text-transform: uppercase; letter-spacing: .06em; }
+
+/* Error log (Case menu → Error log) + its unseen-errors dot on the Case
+   button. Errors that used to print only to the terminal show here. */
+#btnCase.has-errors { position: relative; }
+#btnCase.has-errors::after {
+  content: ''; position: absolute; top: 3px; right: 3px;
+  width: 6px; height: 6px; border-radius: 50%; background: var(--danger);
+}
+.errlog-list { max-height: 60vh; overflow: auto; font-family: var(--mono); font-size: 12px; }
+.errlog-row { display: grid; grid-template-columns: 150px 56px 1fr; gap: 8px;
+  padding: 5px 4px; border-bottom: 1px solid var(--line); align-items: start; }
+.errlog-ts { color: var(--dim); }
+.errlog-lvl { color: var(--dim); font-size: 10px; letter-spacing: .06em; }
+.errlog-row.errlog-error .errlog-lvl { color: var(--danger); }
+.errlog-msg { color: var(--text); white-space: pre-wrap; word-break: break-word; }

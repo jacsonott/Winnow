@@ -76,6 +76,21 @@ export function uploadWithProgress(url, fd, name) {
 }
 
 
+/* A short list of operations still running, for the shutdown guard — empty
+   when the server is idle. Reads the same live state the corner panel does
+   plus the search-all job and the cancellable-op token. */
+export function inFlightWork() {
+  const bits = [];
+  const imports = ingestJobs.filter((j) => j.status === 'running' || j.status === 'queued').length
+    + activeUploads.size;
+  if (imports) bits.push(`${imports} import${imports === 1 ? '' : 's'} in progress`);
+  if (S.searchAll && S.searchAll.running) bits.push('a Search-all sweep');
+  const indexing = (S.sources || []).filter((s) => s.fts_building).length;
+  if (indexing) bits.push(`${indexing} index build${indexing === 1 ? '' : 's'}`);
+  if (opCancelCurrent) bits.push('a running query');
+  return bits;
+}
+
 export function startJobsPoll() {
   if (!jobsPollTimer) pollJobs();
 }

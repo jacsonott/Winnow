@@ -4,7 +4,7 @@
 import { applyBundle } from './bundles.js';
 import { $, api, el, post, setBusy, toast } from './core.js';
 import { loadPlugins, openImportModal, queueFiles } from './importer.js';
-import { startJobsPoll } from './jobs.js';
+import { inFlightWork, startJobsPoll } from './jobs.js';
 import { resetPluginTabMounts } from './plugins.js';
 import { resetNotes } from './notes.js';
 import { resetWatchlist } from './watchlist.js';
@@ -48,11 +48,19 @@ export function showApp() {
    static farewell replaces the page: there is deliberately no "restart"
    affordance, because there's no server left to serve one. */
 export async function shutdownWinnow() {
+  // Warn if work is still running — committed data is safe, but an
+  // in-flight import/sweep/build/query would be interrupted.
+  const busy = inFlightWork();
+  const warn = busy.length
+    ? `\n\n\u26a0 Still running: ${busy.join(', ')}. Shutting down now interrupts ${busy.length === 1 ? 'it' : 'them'} — `
+      + 'anything already committed is saved, but unfinished work is not.'
+    : '';
   const go = await confirmDialog(
-    'Shut down the Winnow server?\n\nEverything is already saved in the case file on disk — tags, notes and '
+    'Shut down the Winnow server?' + warn
+    + '\n\nEverything already committed is saved in the case file on disk — tags, notes and finished '
     + 'imports are never lost. This page (and any other tab using this server) will stop working until you '
     + 'start Winnow again.',
-    { okLabel: 'Shut down', cancelLabel: 'Keep running', danger: true });
+    { okLabel: busy.length ? 'Shut down anyway' : 'Shut down', cancelLabel: 'Keep running', danger: true });
   if (!go) return;
   try { await post('/api/shutdown', {}); } catch { /* the server may drop before the response lands */ }
   const note = el('div', 'shutdown-note');
