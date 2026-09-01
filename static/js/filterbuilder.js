@@ -3,6 +3,7 @@
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { $, api, debounce, el, post, toast } from './core.js';
 import { checkPresets } from './savedfilters.js';
+import { setGrouping } from './grouping.js';
 import { S, normalizeTree } from './state.js';
 import { currentFilterPayload, openSavedFiltersModal, updateFiltersButton } from './timeframe.js';
 import { baseColumns } from './tsformat.js';
@@ -323,12 +324,58 @@ export function openFilterBuilder(editing = null) {
       validateLive(text);
     };
 
-    b.append(help, treeContainer, sqlLabel, sqlBox, status);
+    // Group by — editable here so a filter can carry a grouping the way the
+    // shipped defaults do (currentFilterPayload serializes S.groupByCols when
+    // set; applying a saved filter restores it via setGrouping). Local until
+    // Apply, then setGrouping + the doApply rebuild lay it on the grid.
+    let gbCols = [...S.groupByCols];
+    let gbSort = S.groupSort;
+    let gbDir = S.groupSortDir;
+    const gbWrap = el('div', 'fb-groupby');
+    function renderGroupBy() {
+      gbWrap.replaceChildren();
+      gbWrap.append(el('div', 'fb-groupby-label', 'Group by'));
+      const chips = el('div', 'fb-groupby-chips');
+      gbCols.forEach((name, i) => {
+        const chip = el('span', 'fb-groupby-chip', name);
+        const rm = el('button', 'fb-groupby-rm', '✕');
+        rm.title = 'Remove from grouping';
+        rm.onclick = () => { gbCols.splice(i, 1); renderGroupBy(); };
+        chip.append(rm);
+        chips.append(chip);
+      });
+      const add = el('select', 'fb-groupby-add');
+      add.append(new Option(gbCols.length ? '+ nested level…' : '(no grouping)', ''));
+      for (const c of S.columns) if (!gbCols.includes(c.name)) add.append(new Option(c.name, c.name));
+      add.onchange = () => { if (add.value) { gbCols.push(add.value); renderGroupBy(); } };
+      chips.append(add);
+      gbWrap.append(chips);
+      if (gbCols.length) {
+        const sortRow = el('div', 'fb-groupby-sort');
+        sortRow.append(el('span', 'fb-groupby-sublabel', 'order groups'));
+        const by = el('select');
+        for (const [v, l] of [['count', 'by count'], ['value', 'by value']]) by.append(new Option(l, v));
+        by.value = gbSort;
+        by.onchange = () => { gbSort = by.value; };
+        const dir = el('select');
+        for (const [v, l] of [['desc', 'high → low'], ['asc', 'low → high']]) dir.append(new Option(l, v));
+        dir.value = gbDir;
+        dir.onchange = () => { gbDir = dir.value; };
+        sortRow.append(by, dir);
+        gbWrap.append(sortRow);
+      }
+    }
+    renderGroupBy();
+
+    b.append(help, treeContainer, sqlLabel, sqlBox, status, gbWrap);
 
     const actions = el('div', 'row-actions');
     const apply = el('button', 'btn', 'Apply');
     apply.onclick = () => {
       const doApply = () => {
+        // Grouping first — setGrouping only updates state; the rebuild below
+        // (its regroupAll) is what lays it on the grid.
+        setGrouping(gbCols, gbSort, gbDir);
         $('modal').hidden = true;
         updateFiltersButton();
         rebuildView({ keepScroll: false });

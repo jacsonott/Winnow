@@ -1,29 +1,35 @@
-"""The timeframe pair on one letter: r toggles the filter, Shift+R opens
-the dialog — shift as "the bigger version of the action". Moved off T in
-keymap v3; a stored default from before migrates, a deliberate custom
-binding does not."""
+"""Timeframe on r/R (r toggles, Shift+R opens the dialog), and `a` on
+jump-to-timestamp. `a`/`A` moved OFF the timeframe filter in keymap v4 (it
+already lives on r/R) and ONTO jump-to-timestamp; a stored default from
+before migrates, a deliberate custom binding does not."""
 
 from __future__ import annotations
-
-import json
 
 import pytest
 
 pytestmark = pytest.mark.ui
 
 
-def test_r_toggles_and_shift_r_opens(page):
-    assert sorted(page.evaluate("() => __winnow.S.keymap.toggleTimeRange")) == ["a", "r"]
-    assert sorted(page.evaluate("() => __winnow.S.keymap.openTimeRange")) == ["A", "R"]
-    # Shift+R opens the dialog…
+def test_r_toggles_timeframe_and_a_jumps_to_timestamp(page):
+    assert sorted(page.evaluate("() => __winnow.S.keymap.toggleTimeRange")) == ["r"]
+    assert sorted(page.evaluate("() => __winnow.S.keymap.openTimeRange")) == ["R"]
+    assert sorted(page.evaluate("() => __winnow.S.keymap.openJumpTs")) == ["J", "a"]
+
+    # Shift+R opens the timeframe dialog…
     page.keyboard.press("R")
     page.wait_for_selector("#modal:not([hidden])")
-    assert "timeframe" in page.locator("#modal").inner_text().lower()
+    assert page.locator("#modalTitle").inner_text().lower() == "timeframe filter"
     page.keyboard.press("Escape")
     page.wait_for_selector("#modal[hidden]", state="attached")
-    # …while plain r is the TOGGLE. With a range configured it flips the
-    # filter without opening any dialog. (With NO range it opens the
-    # dialog as a courtesy — that behavior predates this binding.)
+
+    # …`a` opens jump-to-timestamp, NOT the timeframe filter.
+    page.keyboard.press("a")
+    page.wait_for_selector("#modal:not([hidden])")
+    assert page.locator("#modalTitle").inner_text().lower() == "jump to timestamp"
+    page.keyboard.press("Escape")
+    page.wait_for_selector("#modal[hidden]", state="attached")
+
+    # plain r is the TOGGLE (no dialog when a range is configured).
     page.evaluate(
         """() => { __winnow.S.timeRange = { enabled: false, column: 'Timestamp',
                     start: '2026-03-14 08:00:00', end: '2026-03-14 09:00:00' }; }""")
@@ -34,23 +40,25 @@ def test_r_toggles_and_shift_r_opens(page):
     page.wait_for_function("() => __winnow.S.timeRange.enabled === false")
 
 
-def test_v3_migration_moves_only_the_default(page, browser, server):
+def test_migration_moves_a_off_timeframe_onto_jump(page, browser, server):
+    # A v2-era install with the old default migrates all the way through v4:
+    # ['T','a'] -> ['r','a'] (v3) -> ['r'] (v4), and jump-ts picks up 'a'.
     ctx = browser.new_context()
     ctx.add_init_script(
         "localStorage.setItem('winnow.remotePrompt', 'seen');"
         "localStorage.setItem('winnow.appearance', JSON.stringify({ splash: false }));"
-        # Simulate a v2-era install: stored map at version 2 with the old default.
         "localStorage.setItem('winnow.keymap', JSON.stringify({ toggleTimeRange: ['T', 'a'] }));"
         "localStorage.setItem('winnow.keymap.v', '2');")
     pg = ctx.new_page()
     try:
         pg.goto(server, wait_until="networkidle")
         pg.wait_for_selector(".row")
-        keys = pg.evaluate("() => __winnow.S.keymap.toggleTimeRange")
-        assert sorted(keys) == ["a", "r"]
+        assert sorted(pg.evaluate("() => __winnow.S.keymap.toggleTimeRange")) == ["r"]
+        assert sorted(pg.evaluate("() => __winnow.S.keymap.openJumpTs")) == ["J", "a"]
     finally:
         ctx.close()
 
+    # A deliberate rebinding is never migrated over.
     ctx2 = browser.new_context()
     ctx2.add_init_script(
         "localStorage.setItem('winnow.remotePrompt', 'seen');"
@@ -61,7 +69,6 @@ def test_v3_migration_moves_only_the_default(page, browser, server):
     try:
         pg2.goto(server, wait_until="networkidle")
         pg2.wait_for_selector(".row")
-        keys = pg2.evaluate("() => __winnow.S.keymap.toggleTimeRange")
-        assert keys == ["x"], "a deliberate rebinding must never be migrated over"
+        assert pg2.evaluate("() => __winnow.S.keymap.toggleTimeRange") == ["x"]
     finally:
         ctx2.close()
