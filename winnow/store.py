@@ -3028,12 +3028,17 @@ class Store:
                         job["tables_done"] = i + 1
             # Directory import: drop each new table into the folder that
             # mirrors its on-disk path (created once, shared across the
-            # tree). folder_path is "" for a file at the scan root.
+            # tree), and bring it in CLOSED — a folder import can be dozens
+            # of files, and opening a tab per file buries the working set.
+            # They're one click away in the folder tree. folder_path is ""
+            # for a file at the scan root, which stays open like a single
+            # import.
             if opts.get("folder_path"):
                 fid = self.ensure_folder_path(opts["folder_path"])
-                if fid is not None:
-                    for r in results:
+                for r in results:
+                    if fid is not None:
                         self.set_source_folder(r["id"], fid)
+                    self.set_tab_open(r["id"], False)
             with self._ingest_jobs_lock:
                 job["status"] = "done"
                 job["rows_done"] = sum(r.get("row_count") or 0 for r in results)
@@ -3439,6 +3444,13 @@ class Store:
                 self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
             else:
                 self.db.execute("DELETE FROM open_tabs WHERE source_id=?", (source_id,))
+
+    def close_all_tabs(self) -> None:
+        """Close every open tab in one shot — the tables stay in the case
+        (and the folder tree); only their open flag clears. Cheaper and
+        atomic vs one round trip per tab from the client."""
+        with self.lock, self.db:
+            self.db.execute("DELETE FROM open_tabs")
 
     def set_source_nickname(self, source_id: int, nickname: str | None) -> dict:
         """A display name the analyst chooses ("DC01 security log") over the

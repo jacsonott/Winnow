@@ -19,7 +19,6 @@ import { openSessionManager } from './session.js';
 import { showGridTab, showSqlTab, showTimelineTab } from './sql.js';
 import { showNotesTab } from './notes.js';
 import { showWatchlistTab } from './watchlist.js';
-import { showEntityTab } from './entity.js';
 import { showDashboardTab } from './dashboard.js';
 import { openCaseSettings } from './settings.js';
 import { S, selClear, selCount, selFirst, specKey } from './state.js';
@@ -117,6 +116,18 @@ export async function closeTab(s) {
   await post(`/api/source/${s.id}/open`, { open: false });
   if (S.sourceId === s.id) S.sourceId = null;
   await loadSources();
+}
+
+/* Close every open tab in one call — the tables stay in the case (and the
+   folder tree); only their tabs go. The sidebar's Open-section header
+   offers this once more than one tab is open. */
+export async function closeAllTabs() {
+  try {
+    await post('/api/tabs/close_all', {});
+    viewStateStash.clear();
+    S.sourceId = null;
+    await loadSources();
+  } catch (e) { toast('Could not close tabs: ' + e.message, 6000); }
 }
 
 /* Moves an open tab earlier/later in S.tabOrder — the same state
@@ -288,7 +299,6 @@ export function pageTabs() {
     { key: 'timeline', label: 'Timeline', title: 'Unified timeline of every tagged row across the case', node: () => $('tabTimeline'), show: showTimelineTab },
     { key: 'notes', label: 'Notes', title: 'Case narrative — a Markdown scratchpad saved in the case file', node: () => $('tabNotes'), show: showNotesTab },
     { key: 'watchlist', label: 'Watchlist', title: 'IOC watchlist — indicators scanned across every table', node: () => $('tabWatchlist'), show: showWatchlistTab },
-    { key: 'entity', label: 'Occurrences', title: 'Occurrences — everywhere a value appears across all tables', node: () => $('tabEntity'), show: showEntityTab },
     { key: 'dashboard', label: 'Dashboard', title: 'Case dashboard — widgets summarizing the case', node: () => $('tabDashboard'), show: showDashboardTab },
     ...S.pluginTabs.map((t) => ({
       key: 'plugin:' + t.id,
@@ -752,7 +762,14 @@ export function renderSidebar() {
   // order; drag a table from the tree below onto it to open one.
   const openSrcs = openTabsSorted().filter((s) => !q || tableText(s).includes(q));
   if (S.sources.length) {
-    const oh = el('div', 'menu-header sidebar-open-header', 'Open');
+    const oh = el('div', 'menu-header sidebar-open-header');
+    oh.append(el('span', 'sidebar-open-label', 'Open'));
+    if (openSrcs.length > 1) {
+      const closeAll = el('button', 'sidebar-closeall', 'close all');
+      closeAll.title = 'Close every open tab — the tables stay in the case, under All tables';
+      closeAll.onclick = (e) => { e.stopPropagation(); closeAllTabs(); };
+      oh.append(closeAll);
+    }
     wireOpenDrop(oh);
     list.append(oh);
     if (openSrcs.length) {

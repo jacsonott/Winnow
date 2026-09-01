@@ -266,3 +266,16 @@ def test_directory_import_shares_one_folder_across_files(tmp_path, store):
     assert srcs[id1]["folder_id"] == srcs[id2]["folder_id"] is not None
     assert sum(f["name"] == "Logs" for f in store.list_folders()) == 1
 
+
+
+def test_directory_import_files_come_in_closed(tmp_path, store):
+    """A folder import can be dozens of files; they land CLOSED (in the
+    folder tree, not as an open tab each). A file at the scan root (no
+    folder_path) stays open like a single import."""
+    nested = _write(tmp_path, "Logs/security.csv")
+    root = _write(tmp_path, "top.csv")
+    nid = _run_dir_import(store, str(nested), "Logs")
+    rid = _run_dir_import(store, str(root), "")
+    by_id = {s["id"]: s for s in store.list_sources()}
+    assert by_id[nid]["is_open"] is False    # foldered import → closed
+    assert by_id[rid]["is_open"] is True      # scan-root file → open

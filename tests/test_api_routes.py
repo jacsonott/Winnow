@@ -808,3 +808,13 @@ def test_dashboard_widgets_and_profile(client, store, write_csv):
     ap = client.post(f"/api/plugin_bundles/{bid}/apply")
     assert ap.status_code == 200 and ap.json()["dashboard_applied"] is True
     assert client.get("/api/dashboard").json()["widgets"][0]["title"] == "Findings"
+
+
+def test_close_all_tabs_route(client, store, write_csv):
+    a = store.ingest_csv(write_csv([["A"], ["1"]], "a.csv"), name="a.csv", build_fts=False)["id"]
+    b = store.ingest_csv(write_csv([["A"], ["1"]], "b.csv"), name="b.csv", build_fts=False)["id"]
+    assert all(s["is_open"] for s in client.get("/api/sources").json())
+    r = client.post("/api/tabs/close_all")
+    assert r.status_code == 200
+    srcs = {s["id"]: s for s in client.get("/api/sources").json()}
+    assert srcs[a]["is_open"] is False and srcs[b]["is_open"] is False
