@@ -239,7 +239,7 @@ export function syncTabChrome() {
    the analysis-suite tabs). Each new page tab adds its view id here and
    routes through showMainView, so no show-function has to know about the
    others — the trap that made adding a tab an N-place edit. */
-export const MAIN_VIEWS = ['grid', 'sqlview', 'timelineview', 'notesview', 'watchlistview'];
+export const MAIN_VIEWS = ['grid', 'sqlview', 'timelineview', 'notesview', 'watchlistview', 'entityview'];
 export function hideMainViews() {
   for (const v of MAIN_VIEWS) { const e = $(v); if (e) e.hidden = true; }
 }

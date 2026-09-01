@@ -2491,6 +2491,19 @@ def api_watchlist_hits(watchlist_id: int):
     return store().indicator_hits(watchlist_id)
 
 
+class EntityPivotBody(BaseModel):
+    value: str
+    limit: int = 60
+
+
+@app.post("/api/entity/pivot")
+def api_entity_pivot(body: EntityPivotBody):
+    try:
+        return store().entity_pivot(body.value, body.limit)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 # ------------------------------------------------------------ derived columns
 
 

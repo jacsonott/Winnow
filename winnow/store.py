@@ -6486,6 +6486,65 @@ class Store:
                         "source_name": names.get(r["source_id"], f"source {r['source_id']}")})
         return out
 
+    # --------------------------------------------------------- entity pivot
+
+    def entity_pivot(self, value: str, limit: int = 60) -> dict:
+        """Everywhere a value appears across every table: per-source match
+        counts, which columns it landed in, and a merged, time-bucketed
+        evidence stream. The counted scan is the same all-columns blob
+        search-all uses; the timeline reuses TS_NORMALIZE so it lines up
+        with the grid's own datetime handling — the same normalization a
+        super-timeline would share. See docs/design/analysis-suite.md."""
+        value = (value or "").strip()
+        if not value:
+            raise ValueError("Pivot needs a value")
+        sources: list[dict] = []
+        rows: list[dict] = []
+        buckets: dict[str, int] = {}
+        for meta in self.list_sources():
+            if meta.get("is_merge") or meta.get("error"):
+                continue
+            src = self.get_source(meta["id"])
+            base = self._base_cols(src)
+            names = [c["name"] for c in base]
+            blob = _blob_expr(names)
+            table = q(src["table_name"])
+            match = f"instr(lower({blob}), lower(?)) > 0"
+            with self.lock:
+                n = self.db.execute(
+                    f"SELECT COUNT(*) c FROM {table} WHERE {match}", (value,)).fetchone()["c"]
+            if not n:
+                continue
+            # Which columns held it — a general stand-in for "seen as
+            # source / destination" that needs no per-tool hardcoding.
+            in_cols = []
+            for c in names:
+                with self.lock:
+                    hit = self.db.execute(
+                        f"SELECT 1 FROM {table} WHERE instr(lower({q(c)}), lower(?)) > 0 LIMIT 1",
+                        (value,)).fetchone()
+                if hit:
+                    in_cols.append(c)
+            tcol = next((c["name"] for c in base if c.get("type") == "datetime"), None)
+            sources.append({"source_id": src["id"], "source_name": src["name"],
+                            "count": n, "columns": in_cols, "time_col": tcol})
+            # A capped, time-ordered sample per source, merged client-side.
+            ts_expr = f"TS_NORMALIZE({q(tcol)})" if tcol else "NULL"
+            with self.lock:
+                sample = self.db.execute(
+                    f"SELECT rid, {ts_expr} AS ts, substr({blob}, 1, 200) AS preview"
+                    f" FROM {table} WHERE {match} ORDER BY ts LIMIT ?", (value, limit)).fetchall()
+            for r in sample:
+                rows.append({"source_id": src["id"], "source_name": src["name"],
+                             "rid": r["rid"], "ts": r["ts"], "preview": r["preview"]})
+                if r["ts"]:
+                    day = str(r["ts"])[:10]
+                    buckets[day] = buckets.get(day, 0) + 1
+        rows.sort(key=lambda r: (r["ts"] or "￿"))
+        return {"value": value, "sources": sources,
+                "rows": rows[:limit],
+                "buckets": sorted(buckets.items())}
+
     def pop_legacy_presets(self) -> list[dict]:
         """filter_presets used to be this case's own SQLite-backed table of
         saved filters, scoped to just this case file. Presets are saved

@@ -707,3 +707,25 @@ def test_watchlist_add_scan_autotag_and_hits(client, store, write_csv):
     assert imp.json()["added"] == 1  # rclone already present
     client.delete(f"/api/watchlist/{wid}")
     assert all(i["value"] != "rclone" for i in client.get("/api/watchlist").json())
+
+
+def test_entity_pivot_across_sources(client, store, write_csv):
+    """A value found in two tables comes back with per-source counts, the
+    columns it landed in, and a merged time-bucketed stream."""
+    store.ingest_csv(write_csv(
+        [["TimeCreated", "RemoteHost", "Computer"],
+         ["2026-03-15 14:03:00", "WKS07", "FILESRV01"],
+         ["2026-03-15 14:18:00", "WKS07", "DC01"]], "sec.csv"), name="sec", build_fts=False)
+    store.ingest_csv(write_csv(
+        [["When", "Src", "Dst"], ["2026-03-15 14:05:00", "WKS07", "8.8.8.8"]], "fw.csv"),
+        name="fw", build_fts=False)
+    r = client.post("/api/entity/pivot", json={"value": "WKS07"})
+    assert r.status_code == 200
+    out = r.json()
+    byname = {s["source_name"]: s for s in out["sources"]}
+    assert byname["sec"]["count"] == 2 and byname["fw"]["count"] == 1
+    assert "RemoteHost" in byname["sec"]["columns"] and "Src" in byname["fw"]["columns"]
+    assert len(out["rows"]) == 3
+    assert out["buckets"] and out["buckets"][0][0] == "2026-03-15"
+    # empty value is a 400
+    assert client.post("/api/entity/pivot", json={"value": "  "}).status_code == 400
