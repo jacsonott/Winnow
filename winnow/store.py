@@ -250,6 +250,16 @@ CREATE TABLE IF NOT EXISTS case_settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- The case narrative: a single free-form Markdown scratchpad, distinct
+-- from per-row notes. In the case file (not workspace/) because the story
+-- of the investigation must travel with the .db to whoever receives it,
+-- same portability argument as sessions.
+CREATE TABLE IF NOT EXISTS case_notes (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    body       TEXT NOT NULL DEFAULT '',
+    updated_at TEXT
+);
 """
 
 IDENT_OK = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -6359,6 +6369,21 @@ class Store:
         return self.list_sql_tabs()
 
     # ------------------------------------------ legacy filter-preset migration
+
+    def get_case_notes(self) -> dict:
+        """The case narrative Markdown. One row, read whole."""
+        with self.lock:
+            row = self.db.execute("SELECT body, updated_at FROM case_notes WHERE id=1").fetchone()
+        return {"body": row["body"] if row else "", "updated_at": row["updated_at"] if row else None}
+
+    def set_case_notes(self, body: str) -> dict:
+        ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+        with self.lock, self.db:
+            self.db.execute(
+                "INSERT INTO case_notes(id, body, updated_at) VALUES (1, ?, ?)"
+                " ON CONFLICT(id) DO UPDATE SET body=excluded.body, updated_at=excluded.updated_at",
+                (body or "", ts))
+        return {"body": body or "", "updated_at": ts}
 
     def pop_legacy_presets(self) -> list[dict]:
         """filter_presets used to be this case's own SQLite-backed table of

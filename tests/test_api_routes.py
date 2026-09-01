@@ -669,3 +669,13 @@ def test_remote_session_is_a_machine_setting(client):
     assert client.get("/api/settings/app").json()["remote_session"] is True
     client.post("/api/settings/app", json={"remote_session": False})
     assert client.get("/api/settings/app").json()["remote_session"] is False
+
+
+def test_case_notes_roundtrip_and_persist(client, store):
+    """The case narrative lives in the .db so it travels with the case."""
+    assert client.get("/api/case/notes").json()["body"] == ""
+    r = client.post("/api/case/notes", json={"body": "# Lead\n- WKS07 patient zero"})
+    assert r.status_code == 200
+    assert r.json()["body"].startswith("# Lead")
+    assert r.json()["updated_at"]
+    assert "WKS07" in client.get("/api/case/notes").json()["body"]
