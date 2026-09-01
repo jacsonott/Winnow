@@ -88,3 +88,5 @@ name any import you didn't add. Then check the module you moved *from* still
 compiles without it, and that you haven't given `core.js` an import (rule 2).
 The browser tests in `tests/ui/` are the backstop, but they exercise a
 fraction of the surface; the static check covers all of it.
+
+- **charts.js** — dependency-free canvas charts (`drawBars`, `drawHistogram`, `pickBar`), the shared visualization surface for the stack view, entity pivot and dashboard widgets. Declarations only; reads CSS tokens at draw time so a theme switch repaints. No chart library (airgap). See docs/design/analysis-suite.md.

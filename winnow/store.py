@@ -272,6 +272,42 @@ CREATE TABLE IF NOT EXISTS source_folder_map (
     folder_id INTEGER NOT NULL,
     pos       INTEGER NOT NULL DEFAULT 0    -- order within the folder
 );
+
+-- The case narrative: a single free-form Markdown scratchpad, distinct
+-- from per-row notes. In the case file (not workspace/) because the story
+-- of the investigation must travel with the .db to whoever receives it,
+-- same portability argument as sessions.
+CREATE TABLE IF NOT EXISTS case_notes (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    body       TEXT NOT NULL DEFAULT '',
+    updated_at TEXT
+);
+
+-- IOC watchlist: indicators the case is scanned for, and the materialised
+-- hits (so they survive, are countable, and are taggable/exportable).
+-- Evidence-adjacent findings, so they live in the case .db, not workspace/.
+CREATE TABLE IF NOT EXISTS watchlist (
+    id          INTEGER PRIMARY KEY,
+    value       TEXT NOT NULL,
+    kind        TEXT NOT NULL DEFAULT 'other',   -- hash|ip|domain|filename|other (advisory: sets colour)
+    note        TEXT,
+    auto_tag_id INTEGER,                          -- if set, matching rows get this tag on scan
+    created_at  TEXT
+);
+CREATE TABLE IF NOT EXISTS watchlist_hits (
+    watchlist_id INTEGER NOT NULL,
+    source_id    INTEGER NOT NULL,
+    rid          INTEGER NOT NULL,
+    PRIMARY KEY (watchlist_id, source_id, rid)
+) WITHOUT ROWID;
+
+-- The case's dashboard: one JSON document (a list of widget definitions).
+-- In the case .db so a dashboard travels with the case it summarises; a
+-- PROFILE (workspace) is the reusable template a dashboard is applied from.
+CREATE TABLE IF NOT EXISTS dashboard (
+    id      INTEGER PRIMARY KEY CHECK (id = 1),
+    widgets TEXT NOT NULL DEFAULT '[]'
+);
 """
 
 IDENT_OK = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -6564,6 +6600,259 @@ class Store:
         return self.list_sql_tabs()
 
     # ------------------------------------------ legacy filter-preset migration
+
+    def get_case_notes(self) -> dict:
+        """The case narrative Markdown. One row, read whole."""
+        with self.lock:
+            row = self.db.execute("SELECT body, updated_at FROM case_notes WHERE id=1").fetchone()
+        return {"body": row["body"] if row else "", "updated_at": row["updated_at"] if row else None}
+
+    def set_case_notes(self, body: str) -> dict:
+        ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+        with self.lock, self.db:
+            self.db.execute(
+                "INSERT INTO case_notes(id, body, updated_at) VALUES (1, ?, ?)"
+                " ON CONFLICT(id) DO UPDATE SET body=excluded.body, updated_at=excluded.updated_at",
+                (body or "", ts))
+        return {"body": body or "", "updated_at": ts}
+
+    # ------------------------------------------------------------ watchlist
+
+    def add_indicator(self, value: str, kind: str = "other",
+                      note: str | None = None, auto_tag_id: int | None = None) -> dict:
+        value = (value or "").strip()
+        if not value:
+            raise ValueError("An indicator needs a value")
+        with self.lock, self.db:
+            cur = self.db.execute(
+                "INSERT INTO watchlist(value, kind, note, auto_tag_id, created_at)"
+                " VALUES (?,?,?,?,?)",
+                (value, kind or "other", note, auto_tag_id, time.strftime("%Y-%m-%dT%H:%M:%S")))
+        return self._indicator(cur.lastrowid)
+
+    def _indicator(self, wid: int) -> dict:
+        with self.lock:
+            r = self.db.execute("SELECT * FROM watchlist WHERE id=?", (wid,)).fetchone()
+            n = self.db.execute("SELECT COUNT(*) c FROM watchlist_hits WHERE watchlist_id=?", (wid,)).fetchone()["c"]
+        return {"id": r["id"], "value": r["value"], "kind": r["kind"], "note": r["note"],
+                "auto_tag_id": r["auto_tag_id"], "hit_count": n}
+
+    def list_indicators(self) -> list[dict]:
+        with self.lock:
+            rows = self.db.execute("SELECT id FROM watchlist ORDER BY id").fetchall()
+        return [self._indicator(r["id"]) for r in rows]
+
+    def delete_indicator(self, wid: int) -> None:
+        with self.lock, self.db:
+            self.db.execute("DELETE FROM watchlist WHERE id=?", (wid,))
+            self.db.execute("DELETE FROM watchlist_hits WHERE watchlist_id=?", (wid,))
+
+    def scan_source(self, source_id: int) -> dict:
+        """Scan one source for every indicator: find matching rids (a
+        substring match over all columns, the same blob search-all uses),
+        record them in watchlist_hits, and — for indicators with an
+        auto_tag_id — tag those rows through the normal tag path (undoable,
+        on the rail). Idempotent: a source's hits for a watchlist are
+        replaced each scan. Returns per-indicator match counts."""
+        src = self.get_source(source_id)
+        if src.get("is_merge"):
+            return {"source_id": source_id, "matched": {}}   # merges have no src_N of their own
+        blob = _blob_expr([c["name"] for c in self._base_cols(src)])
+        table = q(src["table_name"])
+        indicators = self.list_indicators()
+        matched: dict[int, int] = {}
+        for ind in indicators:
+            wid = ind["id"]
+            with self.lock:
+                rids = [r["rid"] for r in self.db.execute(
+                    f"SELECT rid FROM {table} WHERE instr(lower({blob}), lower(?)) > 0",
+                    (ind["value"],)).fetchall()]
+            with self.lock, self.db:
+                self.db.execute(
+                    "DELETE FROM watchlist_hits WHERE watchlist_id=? AND source_id=?", (wid, source_id))
+                self.db.executemany(
+                    "INSERT OR IGNORE INTO watchlist_hits(watchlist_id, source_id, rid) VALUES (?,?,?)",
+                    [(wid, source_id, rid) for rid in rids])
+            matched[wid] = len(rids)
+            if ind["auto_tag_id"] and rids:
+                self.set_tags(source_id, rids, int(ind["auto_tag_id"]), True)
+        return {"source_id": source_id, "matched": matched}
+
+    def scan_all(self) -> dict:
+        total: dict[int, int] = {}
+        for s in self.list_sources():
+            if s.get("is_merge") or s.get("error"):
+                continue
+            for wid, n in self.scan_source(s["id"])["matched"].items():
+                total[wid] = total.get(wid, 0) + n
+        return {"matched": total}
+
+    def indicator_hits(self, wid: int, limit: int = 500) -> list[dict]:
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT source_id, rid FROM watchlist_hits WHERE watchlist_id=? LIMIT ?",
+                (wid, limit)).fetchall()
+        names = {s["id"]: s["name"] for s in self.list_sources()}
+        out = []
+        for r in rows:
+            out.append({"source_id": r["source_id"], "rid": r["rid"],
+                        "source_name": names.get(r["source_id"], f"source {r['source_id']}")})
+        return out
+
+    # --------------------------------------------------------- entity pivot
+
+    def entity_pivot(self, value: str, limit: int = 60) -> dict:
+        """Everywhere a value appears across every table: per-source match
+        counts, which columns it landed in, and a merged, time-bucketed
+        evidence stream. The counted scan is the same all-columns blob
+        search-all uses; the timeline reuses TS_NORMALIZE so it lines up
+        with the grid's own datetime handling — the same normalization a
+        super-timeline would share. See docs/design/analysis-suite.md."""
+        value = (value or "").strip()
+        if not value:
+            raise ValueError("Pivot needs a value")
+        sources: list[dict] = []
+        rows: list[dict] = []
+        buckets: dict[str, int] = {}
+        for meta in self.list_sources():
+            if meta.get("is_merge") or meta.get("error"):
+                continue
+            src = self.get_source(meta["id"])
+            base = self._base_cols(src)
+            names = [c["name"] for c in base]
+            blob = _blob_expr(names)
+            table = q(src["table_name"])
+            match = f"instr(lower({blob}), lower(?)) > 0"
+            with self.lock:
+                n = self.db.execute(
+                    f"SELECT COUNT(*) c FROM {table} WHERE {match}", (value,)).fetchone()["c"]
+            if not n:
+                continue
+            # Which columns held it — a general stand-in for "seen as
+            # source / destination" that needs no per-tool hardcoding.
+            in_cols = []
+            for c in names:
+                with self.lock:
+                    hit = self.db.execute(
+                        f"SELECT 1 FROM {table} WHERE instr(lower({q(c)}), lower(?)) > 0 LIMIT 1",
+                        (value,)).fetchone()
+                if hit:
+                    in_cols.append(c)
+            tcol = next((c["name"] for c in base if c.get("type") == "datetime"), None)
+            sources.append({"source_id": src["id"], "source_name": src["name"],
+                            "count": n, "columns": in_cols, "time_col": tcol})
+            # A capped, time-ordered sample per source, merged client-side.
+            ts_expr = f"TS_NORMALIZE({q(tcol)})" if tcol else "NULL"
+            with self.lock:
+                sample = self.db.execute(
+                    f"SELECT rid, {ts_expr} AS ts, substr({blob}, 1, 200) AS preview"
+                    f" FROM {table} WHERE {match} ORDER BY ts LIMIT ?", (value, limit)).fetchall()
+            for r in sample:
+                rows.append({"source_id": src["id"], "source_name": src["name"],
+                             "rid": r["rid"], "ts": r["ts"], "preview": r["preview"]})
+                if r["ts"]:
+                    day = str(r["ts"])[:10]
+                    buckets[day] = buckets.get(day, 0) + 1
+        rows.sort(key=lambda r: (r["ts"] or "￿"))
+        return {"value": value, "sources": sources,
+                "rows": rows[:limit],
+                "buckets": sorted(buckets.items())}
+
+    # ------------------------------------------------------------ dashboard
+
+    def get_dashboard(self) -> list:
+        with self.lock:
+            row = self.db.execute("SELECT widgets FROM dashboard WHERE id=1").fetchone()
+        try:
+            return json.loads(row["widgets"]) if row else []
+        except (TypeError, ValueError):
+            return []
+
+    def set_dashboard(self, widgets: list) -> list:
+        if not isinstance(widgets, list):
+            raise ValueError("Dashboard is a list of widgets")
+        with self.lock, self.db:
+            self.db.execute(
+                "INSERT INTO dashboard(id, widgets) VALUES (1, ?)"
+                " ON CONFLICT(id) DO UPDATE SET widgets=excluded.widgets",
+                (json.dumps(widgets),))
+        return widgets
+
+    # Shorthands a SHIPPED dashboard uses so its SQL is portable across
+    # cases — the table's src_<id> varies, but its header set doesn't.
+    _TABLE_SHORTHANDS = {
+        "evtx": "Event logs (EvtxECmd)",
+        "mft": "NTFS $MFT (MFTECmd)",
+        "usn": "USN journal $J (MFTECmd)",
+        "registry": "Registry (RECmd batch)",
+        "amcache": "Amcache — program entries",
+        "prefetch": "Prefetch (PECmd)",
+    }
+
+    def _source_for_header_set(self, hs_name: str):
+        """The first non-merge source whose columns carry every column the
+        named header set defines — the same content binding lateral
+        movement's defaults use. None if this case has no such table."""
+        from . import defaults
+        sets = dict(defaults.headers()["nicknames"])
+        want = sets.get(hs_name)
+        if not want:
+            return None
+        for meta in self.list_sources():
+            if meta.get("is_merge") or meta.get("error"):
+                continue
+            cols = {c["name"] for c in self._base_cols(self.get_source(meta["id"]))}
+            if all(c in cols for c in want):
+                return meta
+        return None
+
+    def _resolve_table_placeholders(self, sql: str) -> str:
+        """Substitute {{evtx}} / {{header_set:Full Name}} in a widget's SQL
+        with the matching source's src_<id> table. A placeholder for a
+        table this case doesn't have raises a friendly error the widget
+        renders as an empty state — better than a SQL error."""
+        import re
+
+        def repl(m):
+            key = m.group(1).strip()
+            if key.lower().startswith("header_set:"):
+                hs = key[len("header_set:"):].strip()
+            else:
+                hs = self._TABLE_SHORTHANDS.get(key.lower(), key)
+            src = self._source_for_header_set(hs)
+            if not src:
+                raise ValueError(f"No \u201c{hs}\u201d table in this case yet")
+            return q(src["table_name"])
+
+        return re.sub(r"\{\{([^}]+)\}\}", repl, sql)
+
+    def dashboard_widget_preview(self, source: str, query: dict, limit: int = 200) -> dict:
+        """Run one widget's data source and return normalized tabular data
+        the client renders per the widget's kind. SQL rides the read-only
+        run_sql path (own connection, statement checks) — so a dashboard is
+        data, not code. watchlist / tags read the case's own state."""
+        query = query or {}
+        if source == "sql":
+            sql = (query.get("sql") or "").strip()
+            if not sql:
+                raise ValueError("SQL widget needs a query")
+            sql = self._resolve_table_placeholders(sql)   # {{evtx}} -> src_<id>
+            res = self.run_sql(sql, limit=min(int(query.get("limit") or limit), 1000))
+            return {"columns": res["columns"], "rows": res["rows"], "truncated": res.get("truncated", False)}
+        if source == "watchlist":
+            inds = self.list_indicators()
+            return {"columns": ["indicator", "hits"],
+                    "rows": [[i["value"], i["hit_count"]] for i in inds],
+                    "total": sum(i["hit_count"] for i in inds)}
+        if source == "tags":
+            with self.lock:
+                rows = self.db.execute(
+                    "SELECT td.name AS name, COUNT(rt.rid) AS n FROM tag_defs td"
+                    " LEFT JOIN row_tags rt ON rt.tag_id = td.id"
+                    " GROUP BY td.id ORDER BY n DESC").fetchall()
+            return {"columns": ["tag", "count"], "rows": [[r["name"], r["n"]] for r in rows],
+                    "total": sum(r["n"] for r in rows)}
+        raise ValueError(f"Unknown widget source {source!r}")
 
     def pop_legacy_presets(self) -> list[dict]:
         """filter_presets used to be this case's own SQLite-backed table of

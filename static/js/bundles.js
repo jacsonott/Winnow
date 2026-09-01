@@ -27,9 +27,9 @@ export function openPluginBundlesModal() {
   markModalAction('openPluginBundles');
   modal('Plugin bundles', async (b) => {
     b.append(el('p', 'fb-help',
-      'Named sets of plugins for a kind of work — a Triage bundle, a BEC bundle. Saved on this '
-      + 'machine; applying one sets THIS case’s plugins to exactly the bundle. New cases can '
-      + 'pick one as their case type.'));
+      'Profiles for a kind of work — plugins, an optional dashboard, and a starter watchlist. '
+      + 'Shipped profiles (like KAPE triage) are read-only; applying one sets THIS case’s plugins, '
+      + 'loads its dashboard, and seeds its indicators. Save your own with the button below.'));
 
     const list = el('div', 'session-list');
     b.append(list);
@@ -53,7 +53,12 @@ export function openPluginBundlesModal() {
       for (const bd of bundles) {
         const row = el('div', 'session-row browse-row');
         const name = el('span', 'session-name', bd.name);
-        const plugins = el('span', 'count', bd.plugins.join(', ') || '(empty)');
+        if (bd.shipped) name.append(el('span', 'bundle-shipped', 'shipped'));
+        const bits = [bd.plugins.join(', ') || (bd.shipped ? '' : '(empty)')];
+        if (bd.dashboard && bd.dashboard.length) bits.push(`dashboard · ${bd.dashboard.length} widgets`);
+        if (bd.watchlist && bd.watchlist.length) bits.push(`${bd.watchlist.length} IOCs`);
+        const plugins = el('span', 'count', bd.shipped ? (bd.description || bits.filter(Boolean).join(' · ')) : bits.filter(Boolean).join(' · '));
+        plugins.title = bits.filter(Boolean).join(' · ');
         plugins.style.cssText = 'flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
         const apply = el('button', 'btn', 'Apply to this case');
         apply.disabled = !caseOpen;
@@ -68,15 +73,18 @@ export function openPluginBundlesModal() {
             toast('Could not apply: ' + e.message, 6000);
           }
         };
-        const del = el('button', 'btn ghost', '✕');
-        del.title = 'Delete this bundle (cases it was applied to keep their plugins)';
-        del.onclick = async () => {
-          if (!(await confirmDialog(`Delete bundle "${bd.name}"?`, { danger: true, okLabel: 'Delete' }))) return;
-          await api(`/api/plugin_bundles/${bd.id}`, { method: 'DELETE' });
-          bundles = bundles.filter((x) => x.id !== bd.id);
-          render();
-        };
-        row.append(name, plugins, apply, del);
+        row.append(name, plugins, apply);
+        if (!bd.shipped) {
+          const del = el('button', 'btn ghost', '✕');
+          del.title = 'Delete this profile (cases it was applied to keep their plugins)';
+          del.onclick = async () => {
+            if (!(await confirmDialog(`Delete profile "${bd.name}"?`, { danger: true, okLabel: 'Delete' }))) return;
+            await api(`/api/plugin_bundles/${bd.id}`, { method: 'DELETE' });
+            bundles = bundles.filter((x) => x.id !== bd.id);
+            render();
+          };
+          row.append(del);
+        }
         list.append(row);
       }
     }

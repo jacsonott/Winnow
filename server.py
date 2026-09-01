@@ -1907,6 +1907,7 @@ def api_plugins_toggle(body: PluginToggle):
 class PluginBundleBody(BaseModel):
     name: str
     plugins: list[str] = []
+    dashboard: list | None = None   # profile: an optional dashboard layout
 
 
 @app.get("/api/plugin_bundles")
@@ -1917,7 +1918,7 @@ def api_plugin_bundles():
 @app.post("/api/plugin_bundles")
 def api_plugin_bundles_save(body: PluginBundleBody):
     try:
-        return WS.plugin_bundles.save(body.name, body.plugins)
+        return WS.plugin_bundles.save(body.name, body.plugins, body.dashboard)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -1947,9 +1948,30 @@ def api_plugin_bundles_apply(bundle_id: int):
         overrides[fs_name] = fs_name in wanted
     STORE.set_case_setting("plugin_overrides", json.dumps(overrides))
     _reload_plugins()
+    # A profile's dashboard becomes the case's dashboard on apply (only if
+    # the profile carries one — applying a plain plugin bundle leaves the
+    # case's own dashboard untouched).
+    if bundle.get("dashboard"):
+        STORE.set_dashboard(bundle["dashboard"])
+    # A profile can seed a starter watchlist: add its indicators (dedup by
+    # value) and scan the case, so the IOC rollups have data immediately.
+    seeded = 0
+    if bundle.get("watchlist"):
+        have = {i["value"] for i in STORE.list_indicators()}
+        for ind in bundle["watchlist"]:
+            val = (ind.get("value") or "").strip()
+            if val and val not in have:
+                STORE.add_indicator(val, ind.get("kind", "other"), ind.get("note"), ind.get("auto_tag_id"))
+                have.add(val)
+                seeded += 1
+        if seeded:
+            with contextlib.suppress(Exception):
+                STORE.scan_all()
     return {"applied": bundle["name"],
             "enabled": sorted(wanted & known),
             "missing": sorted(wanted - known),  # in the bundle, not installed here
+            "dashboard_applied": bool(bundle.get("dashboard")),
+            "watchlist_seeded": seeded,
             "plugins": api_plugins()}
 
 
@@ -2519,6 +2541,123 @@ def api_case_settings_save(body: CaseSettingWrite):
         raise HTTPException(400, f"Unknown timestamp format: {body.ts_format}")
     store().set_case_setting("ts_format", body.ts_format)
     return store().get_case_settings()
+
+
+class CaseNotesWrite(BaseModel):
+    body: str = ""
+
+
+@app.get("/api/case/notes")
+def api_case_notes_get():
+    return store().get_case_notes()
+
+
+@app.post("/api/case/notes")
+def api_case_notes_save(body: CaseNotesWrite):
+    return store().set_case_notes(body.body)
+
+
+class IndicatorBody(BaseModel):
+    value: str
+    kind: str = "other"
+    note: str | None = None
+    auto_tag_id: int | None = None
+
+
+class WatchlistImportBody(BaseModel):
+    text: str = ""
+    kind: str = "other"
+    auto_tag_id: int | None = None
+
+
+@app.get("/api/watchlist")
+def api_watchlist_list():
+    return store().list_indicators()
+
+
+@app.post("/api/watchlist")
+def api_watchlist_add(body: IndicatorBody):
+    try:
+        return store().add_indicator(body.value, body.kind, body.note, body.auto_tag_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/watchlist/import")
+def api_watchlist_import(body: WatchlistImportBody):
+    """One indicator per line; blanks and #-comments dropped; optional
+    'value,kind' per line overrides the body default. Deduped against
+    what's already in the list."""
+    have = {i["value"] for i in store().list_indicators()}
+    added = 0
+    for line in (body.text or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        value, _, kind = line.partition(",")
+        value = value.strip()
+        if not value or value in have:
+            continue
+        store().add_indicator(value, (kind.strip() or body.kind), None, body.auto_tag_id)
+        have.add(value)
+        added += 1
+    return {"added": added, "indicators": store().list_indicators()}
+
+
+@app.delete("/api/watchlist/{wid}")
+def api_watchlist_delete(wid: int):
+    store().delete_indicator(wid)
+    return {"ok": True}
+
+
+@app.post("/api/watchlist/scan")
+def api_watchlist_scan(source_id: int | None = None):
+    return store().scan_source(source_id) if source_id is not None else store().scan_all()
+
+
+@app.get("/api/watchlist/hits")
+def api_watchlist_hits(watchlist_id: int):
+    return store().indicator_hits(watchlist_id)
+
+
+class EntityPivotBody(BaseModel):
+    value: str
+    limit: int = 60
+
+
+@app.post("/api/entity/pivot")
+def api_entity_pivot(body: EntityPivotBody):
+    try:
+        return store().entity_pivot(body.value, body.limit)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+class DashboardBody(BaseModel):
+    widgets: list = []
+
+
+class WidgetPreviewBody(BaseModel):
+    source: str
+    query: dict = {}
+
+
+@app.get("/api/dashboard")
+def api_dashboard_get():
+    return {"widgets": store().get_dashboard()}
+
+
+@app.post("/api/dashboard")
+def api_dashboard_save(body: DashboardBody):
+    return {"widgets": store().set_dashboard(body.widgets)}
+
+
+@app.post("/api/dashboard/widget/preview")
+def api_dashboard_widget_preview(body: WidgetPreviewBody):
+    try:
+        return store().dashboard_widget_preview(body.source, body.query)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 # ------------------------------------------------------------ derived columns

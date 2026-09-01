@@ -476,3 +476,13 @@ see [docs/notes/README.md](README.md) for the whole set.
   over the defaults and a stored map has no entry for an action that
   didn't exist. When retiring an alias later, remember both halves: the
   DEFAULT_KEYMAP entry and a migration for maps that carry it.
+
+- **Stack view** (stack.js) — the column-header menu's "Stack values (rarest first)…" opens a modal of the current view's distinct values by count (via group_summary, order=count direction=asc), drawn with charts.js. Click a bar to filter the grid to that value. Least-frequency-of-occurrence triage. See docs/design/analysis-suite.md.
+
+- **Case notes tab** (notes.js) — a free-form Markdown scratchpad for the investigation narrative, stored in the case file (Store.case_notes) so it travels with the .db, distinct from per-row notes. Edit/preview toggle, debounced autosave, a tiny dependency-free Markdown renderer (airgap). Page tabs now route visibility through sql.js's showMainView(id)/MAIN_VIEWS registry so adding a tab is a one-place edit. See docs/design/analysis-suite.md.
+
+- **IOC watchlist tab** (watchlist.js) — case-level indicators (Store.watchlist / watchlist_hits, in the .db) scanned across every table via the blob substring search-all uses; matches are counted, listed, and optionally auto-tagged through the normal tag path. Auto-scans new imports (jobs.js source-done hook). Import a list / paste / scan-all. See docs/design/analysis-suite.md.
+
+- **Entity pivot tab** (entity.js) — pick any value and see everywhere it appears across every table: per-source counts, which columns it landed in, a merged time histogram (charts.js) and a chronological evidence stream. Reachable from any cell's right-click ('Pivot on X'), the watchlist, or the tab's search box. Backend entity_pivot reuses the blob search + TS_NORMALIZE (shared with a future super-timeline). See docs/design/analysis-suite.md.
+
+- **Case dashboard tab** (dashboard.js) — a grid of widgets, each a saved query + a render kind (stat/kv/chips/list/bar/histogram). Sources: sql (read-only run_sql), watchlist, tags. Layout lives in the case .db (Store.dashboard) so it travels with the case; 'Save as profile' extends a plugin bundle with the dashboard, so applying that profile on a new case lays it out. This is what gives plugin bundles ('profiles') their purpose. See docs/design/analysis-suite.md.
