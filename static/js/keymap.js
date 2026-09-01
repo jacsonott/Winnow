@@ -65,11 +65,11 @@ export const DEFAULT_KEYMAP = {
   toggleDetail: ['d'],
   dropGrouping: ['x'],
   saveDefaultLayout: ['L'],
-  toggleTimeRange: ['r', 'a'],
-  openTimeRange: ['R', 'A'],
+  toggleTimeRange: ['r'],
+  openTimeRange: ['R'],
   toggleGrouping: ['X'],
   openFilterSql: ['Q'],
-  openJumpTs: ['J'],
+  openJumpTs: ['J', 'a'],
   repeatJumpTs: ['.'],
   openPluginBundles: ['M'],
 };
@@ -117,7 +117,7 @@ export const ACTION_LABELS = {
    over it on every load. */
 export const KEYMAP_VERSION_KEY = 'winnow.keymap.v';
 
-export const KEYMAP_VERSION = 3;
+export const KEYMAP_VERSION = 4;
 
 export const KEYMAP_MIGRATIONS = [
   // v1 (2026-08): the column chooser grew into the table menu, and `f`
@@ -154,6 +154,17 @@ export const KEYMAP_MIGRATIONS = [
     const wasDefault = (action, keys) =>
       JSON.stringify((map[action] || []).slice().sort()) === JSON.stringify(keys.slice().sort());
     if (wasDefault('toggleTimeRange', ['T', 'a'])) map.toggleTimeRange = ['r', 'a'];
+  },
+  // v4 (2026-09): `a`/`A` move OFF the timeframe filter (it already lives on
+  // r/R) and ONTO jump-to-timestamp, so `a` jumps to a moment rather than
+  // toggling a filter. Only rewrites keymaps still on the v3 defaults —
+  // a customised binding is left alone.
+  (map) => {
+    const wasDefault = (action, keys) =>
+      JSON.stringify((map[action] || []).slice().sort()) === JSON.stringify(keys.slice().sort());
+    if (wasDefault('toggleTimeRange', ['r', 'a'])) map.toggleTimeRange = ['r'];
+    if (wasDefault('openTimeRange', ['R', 'A'])) map.openTimeRange = ['R'];
+    if (wasDefault('openJumpTs', ['J'])) map.openJumpTs = ['J', 'a'];
   },
 ];
 
