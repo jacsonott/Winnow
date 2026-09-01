@@ -1946,10 +1946,25 @@ def api_plugin_bundles_apply(bundle_id: int):
     # case's own dashboard untouched).
     if bundle.get("dashboard"):
         STORE.set_dashboard(bundle["dashboard"])
+    # A profile can seed a starter watchlist: add its indicators (dedup by
+    # value) and scan the case, so the IOC rollups have data immediately.
+    seeded = 0
+    if bundle.get("watchlist"):
+        have = {i["value"] for i in STORE.list_indicators()}
+        for ind in bundle["watchlist"]:
+            val = (ind.get("value") or "").strip()
+            if val and val not in have:
+                STORE.add_indicator(val, ind.get("kind", "other"), ind.get("note"), ind.get("auto_tag_id"))
+                have.add(val)
+                seeded += 1
+        if seeded:
+            with contextlib.suppress(Exception):
+                STORE.scan_all()
     return {"applied": bundle["name"],
             "enabled": sorted(wanted & known),
             "missing": sorted(wanted - known),  # in the bundle, not installed here
             "dashboard_applied": bool(bundle.get("dashboard")),
+            "watchlist_seeded": seeded,
             "plugins": api_plugins()}
 
 

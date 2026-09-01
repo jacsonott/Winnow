@@ -6573,6 +6573,54 @@ class Store:
                 (json.dumps(widgets),))
         return widgets
 
+    # Shorthands a SHIPPED dashboard uses so its SQL is portable across
+    # cases — the table's src_<id> varies, but its header set doesn't.
+    _TABLE_SHORTHANDS = {
+        "evtx": "Event logs (EvtxECmd)",
+        "mft": "NTFS $MFT (MFTECmd)",
+        "usn": "USN journal $J (MFTECmd)",
+        "registry": "Registry (RECmd batch)",
+        "amcache": "Amcache — program entries",
+        "prefetch": "Prefetch (PECmd)",
+    }
+
+    def _source_for_header_set(self, hs_name: str):
+        """The first non-merge source whose columns carry every column the
+        named header set defines — the same content binding lateral
+        movement's defaults use. None if this case has no such table."""
+        from . import defaults
+        sets = dict(defaults.headers()["nicknames"])
+        want = sets.get(hs_name)
+        if not want:
+            return None
+        for meta in self.list_sources():
+            if meta.get("is_merge") or meta.get("error"):
+                continue
+            cols = {c["name"] for c in self._base_cols(self.get_source(meta["id"]))}
+            if all(c in cols for c in want):
+                return meta
+        return None
+
+    def _resolve_table_placeholders(self, sql: str) -> str:
+        """Substitute {{evtx}} / {{header_set:Full Name}} in a widget's SQL
+        with the matching source's src_<id> table. A placeholder for a
+        table this case doesn't have raises a friendly error the widget
+        renders as an empty state — better than a SQL error."""
+        import re
+
+        def repl(m):
+            key = m.group(1).strip()
+            if key.lower().startswith("header_set:"):
+                hs = key[len("header_set:"):].strip()
+            else:
+                hs = self._TABLE_SHORTHANDS.get(key.lower(), key)
+            src = self._source_for_header_set(hs)
+            if not src:
+                raise ValueError(f"No \u201c{hs}\u201d table in this case yet")
+            return q(src["table_name"])
+
+        return re.sub(r"\{\{([^}]+)\}\}", repl, sql)
+
     def dashboard_widget_preview(self, source: str, query: dict, limit: int = 200) -> dict:
         """Run one widget's data source and return normalized tabular data
         the client renders per the widget's kind. SQL rides the read-only
@@ -6583,6 +6631,7 @@ class Store:
             sql = (query.get("sql") or "").strip()
             if not sql:
                 raise ValueError("SQL widget needs a query")
+            sql = self._resolve_table_placeholders(sql)   # {{evtx}} -> src_<id>
             res = self.run_sql(sql, limit=min(int(query.get("limit") or limit), 1000))
             return {"columns": res["columns"], "rows": res["rows"], "truncated": res.get("truncated", False)}
         if source == "watchlist":

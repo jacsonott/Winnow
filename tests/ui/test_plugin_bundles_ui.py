@@ -35,3 +35,33 @@ def test_save_list_and_delete_a_bundle(page):
       { headers: { 'X-Timeline-Lite-Client': '1' } }).then((r) => r.json())""")
     assert all(b["id"] != rec["id"] for b in bundles)
     page.keyboard.press("Escape")
+
+
+def test_shipped_kape_profile_is_readonly_and_applies(page):
+    """The shipped KAPE-triage profile shows in the menu with a 'shipped'
+    badge and no delete button, and applying it loads its 9-widget dashboard."""
+    page.keyboard.press("M")
+    page.wait_for_selector(".session-row:has-text('KAPE triage')")
+    row = page.locator(".session-row", has_text="KAPE triage")
+    # read-only: a shipped badge, no delete control
+    assert row.locator(".bundle-shipped").count() == 1
+    assert row.locator(".btn", has_text="✕").count() == 0
+    assert row.locator(".btn", has_text="Apply to this case").is_enabled()
+
+    row.locator(".btn", has_text="Apply to this case").click()
+    page.wait_for_selector("#modal[hidden]", state="attached")
+
+    # the dashboard now carries the shipped widgets
+    page.locator("#tabDashboard").click()
+    page.wait_for_selector("#dashboardview:not([hidden])")
+    page.wait_for_function(
+        "() => document.querySelectorAll('.dash-card:not(.dash-add)').length === 16", timeout=10_000)
+
+    # cleanup: leave the shared case as we found it
+    page.evaluate("""async () => {
+      const h = { 'Content-Type':'application/json', 'X-Timeline-Lite-Client':'1' };
+      await fetch('/api/dashboard', { method:'POST', headers:h, body: JSON.stringify({ widgets: [] }) });
+      const wl = await fetch('/api/watchlist', { headers:h }).then(r=>r.json());
+      for (const i of (wl.indicators||wl)) await fetch('/api/watchlist/' + i.id, { method:'DELETE', headers:h });
+    }""")
+    page.keyboard.press("Escape")

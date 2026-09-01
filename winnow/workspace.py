@@ -837,9 +837,29 @@ class PluginBundles:
 
     FILE = "plugin_bundles.json"
 
+    @staticmethod
+    def _shipped() -> list[dict]:
+        """Shipped default profiles (defaults/profiles.json), given negative
+        ids and a shipped flag so they list alongside saved bundles but
+        can't be overwritten in place — Save-as makes an editable copy."""
+        from . import defaults
+        out = []
+        for i, prof in enumerate(defaults.profiles()):
+            out.append({"id": -(i + 1), "shipped": True, "name": prof["name"],
+                        "description": prof.get("description", ""),
+                        "plugins": list(prof.get("plugins") or []),
+                        "watchlist": list(prof.get("watchlist") or []),
+                        "dashboard": list(prof.get("dashboard") or [])})
+        return out
+
     def list(self) -> list[dict]:
         with _LOCK:
-            return _read(self.FILE, {"bundles": []})["bundles"]
+            saved = _read(self.FILE, {"bundles": []})["bundles"]
+        try:
+            shipped = self._shipped()
+        except Exception:  # noqa: BLE001 — a broken profiles.json must not hide saved bundles
+            shipped = []
+        return shipped + saved
 
     def get(self, bundle_id: int) -> dict:
         for b in self.list():
