@@ -451,6 +451,7 @@ class IngestPluginPath(BaseModel):
     name: str | None = None
     options: dict = {}      # values for the format's declared options
     build_fts: bool = True
+    folder_path: str | None = None   # directory import: the on-disk subfolder to file this under
 
 
 class DirectoryScan(BaseModel):
@@ -1685,18 +1686,24 @@ class IngestJobPath(BaseModel):
     flatten_depth: int = 0
     # sqlite options
     tables: list[dict] | None = None  # [{table, name?, timestamp_columns?}]
+    # directory import: the file's on-disk subfolder, reproduced as a sidebar
+    # folder the new table is filed under ("" / None leaves it ungrouped)
+    folder_path: str | None = None
 
 
 def _ingest_job_options(kind: str, *, build_fts: bool, delimiter=None, has_header=True,
                         column_types=None, flatten_mode="none", flatten_depth=0,
-                        tables=None) -> dict:
+                        tables=None, folder_path=None) -> dict:
+    # folder_path rides along on every kind — the job worker files each new
+    # source under it when the ingest completes (directory import).
+    base = {"folder_path": folder_path} if folder_path else {}
     if kind == "csv":
-        return {"build_fts": build_fts, "delimiter": delimiter,
+        return {**base, "build_fts": build_fts, "delimiter": delimiter,
                 "has_header": has_header, "column_types": column_types}
     if kind == "json":
-        return {"build_fts": build_fts, "flatten_mode": flatten_mode,
+        return {**base, "build_fts": build_fts, "flatten_mode": flatten_mode,
                 "flatten_depth": flatten_depth}
-    return {"build_fts": build_fts, "tables": tables or []}
+    return {**base, "build_fts": build_fts, "tables": tables or []}
 
 
 @app.post("/api/ingest/jobs/path")
@@ -1715,7 +1722,7 @@ def api_ingest_job_path(body: IngestJobPath):
                 kind, build_fts=body.build_fts, delimiter=body.delimiter,
                 has_header=body.has_header, column_types=body.column_types,
                 flatten_mode=body.flatten_mode, flatten_depth=body.flatten_depth,
-                tables=body.tables,
+                tables=body.tables, folder_path=body.folder_path,
             ),
         )
     except ValueError as e:
@@ -2054,7 +2061,14 @@ def api_ingest_plugin_path(body: IngestPluginPath):
     if not os.path.isfile(body.path):
         raise HTTPException(400, f"No file at {body.path}")
     try:
-        return _ingest_via_plugin(body.path, body.format_id, body.name, body.options, body.build_fts)
+        rec = _ingest_via_plugin(body.path, body.format_id, body.name, body.options, body.build_fts)
+        # Directory import files this table under the folder mirroring its
+        # on-disk path (synchronous here, unlike the backgrounded job path).
+        if body.folder_path:
+            fid = store().ensure_folder_path(body.folder_path)
+            if fid is not None:
+                store().set_source_folder(rec["id"], fid)
+        return rec
     except Exception as e:  # surface the real parser error to the UI, same as the other ingest routes
         raise HTTPException(400, str(e))
 
@@ -2114,6 +2128,99 @@ def api_set_source_nickname(source_id: int, body: NicknameReq):
         raise HTTPException(400, str(e))
     except KeyError as e:
         raise HTTPException(404, str(e))
+
+
+# ------------------------------------------------------------------ folders
+#
+# Sidebar folders an analyst sorts tables into (and a directory import
+# reproduces from disk). Organizational metadata in the case file — see
+# Store's folder methods and META_SCHEMA. All behind the CSRF header gate
+# like every other mutating route.
+
+class FolderCreate(BaseModel):
+    name: str
+    parent_id: int | None = None
+
+
+class FolderRename(BaseModel):
+    name: str
+
+
+class FolderMove(BaseModel):
+    parent_id: int | None = None   # None = top level
+    pos: int | None = None
+
+
+class FolderReorder(BaseModel):
+    parent_id: int | None = None
+    ordered_ids: list[int]
+
+
+class SourceFolderReq(BaseModel):
+    folder_id: int | None = None   # None = back to the root (ungrouped)
+    pos: int | None = None
+
+
+@app.get("/api/folders")
+def api_folders_list():
+    return store().list_folders()
+
+
+@app.post("/api/folders")
+def api_folders_create(body: FolderCreate):
+    try:
+        return store().create_folder(body.name, body.parent_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/folders/reorder")
+def api_folders_reorder(body: FolderReorder):
+    store().reorder_folders(body.parent_id, body.ordered_ids)
+    return {"ok": True}
+
+
+@app.post("/api/folders/{folder_id}/rename")
+def api_folder_rename(folder_id: int, body: FolderRename):
+    try:
+        store().rename_folder(folder_id, body.name)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    return {"ok": True}
+
+
+@app.post("/api/folders/{folder_id}/move")
+def api_folder_move(folder_id: int, body: FolderMove):
+    try:
+        store().move_folder(folder_id, body.parent_id, body.pos)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    return {"ok": True}
+
+
+@app.delete("/api/folders/{folder_id}")
+def api_folder_delete(folder_id: int):
+    try:
+        store().delete_folder(folder_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    return {"ok": True}
+
+
+@app.post("/api/source/{source_id}/folder")
+def api_set_source_folder(source_id: int, body: SourceFolderReq):
+    """Put a table (real source or, via a negative id, a merge) in a folder,
+    or with folder_id=null back at the root. Organizational only — never
+    touches the source's data."""
+    try:
+        store().set_source_folder(source_id, body.folder_id, body.pos)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True}
 
 
 class MergeCreate(BaseModel):

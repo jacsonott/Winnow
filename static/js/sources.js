@@ -23,7 +23,7 @@ import { openTablesManager } from './tables.js';
 import { loadTags, renderTagRibbon } from './tags.js';
 import { openTableMenu, updateFiltersButton } from './timeframe.js';
 import { baseColumns } from './tsformat.js';
-import { dropdownMenu, modal, promptDialog } from './ui.js';
+import { confirmDialog, dropdownMenu, modal, promptDialog } from './ui.js';
 import { rebuildView } from './view.js';
 
 /* --------------------------------------------------------------- sources */
@@ -115,40 +115,19 @@ export async function closeTab(s) {
   await loadSources();
 }
 
-/* Moves an open tab earlier/later in S.tabOrder — the same state
-   wireTabDrag's drop handler mutates, just via a menu action instead of a
-   drag gesture. No-ops silently at either end (dir would move it past the
-   first/last position) rather than wrapping. */
-export function moveTab(id, dir) {
-  const ids = openTabsSorted().map((s) => s.id);
-  const idx = ids.indexOf(id);
-  const swapIdx = idx + dir;
-  if (swapIdx < 0 || swapIdx >= ids.length) return;
-  [ids[idx], ids[swapIdx]] = [ids[swapIdx], ids[idx]];
-  S.tabOrder = ids;
-  renderTabs();
-}
-
 /* Native HTML5 drag-and-drop, same technique as wireColumnDrag above —
    draggedTabId tracked in a closure var since dataTransfer.getData isn't
    readable during dragover in most browsers. Reordering only touches
    S.tabOrder + a re-render, no server round trip.
 
-   Shared by the horizontal tab strip (wireTabDrag) and the sidebar's
-   vertical list (wireSidebarRowDrag) — same reorder semantics, just
-   measured along a different axis (tab strip: left/right of the pointer
-   vs. the node's horizontal midpoint; sidebar: above/below its vertical
-   midpoint). draggedTabId is deliberately one shared variable rather than
-   a copy per axis: starting a drag on a tab and dropping it on a sidebar
-   row (or vice versa) still reorders correctly, since both render from
-   the same openTabsSorted() and mutate the same S.tabOrder.
-
-   `currentIds`/`onReorder` default to the source-tab behaviour so the two
-   original callers stay one-liners; the SQL pane's sub-tab strip passes
-   its own pair to reorder S.sqlTabs (and persist to the case file)
-   instead. draggedTabId staying shared across all three surfaces is
-   harmless — a cross-surface drop can't resolve an id the target's own
-   currentIds() doesn't contain, so it no-ops. */
+   Used by the horizontal tab strip (wireTabDrag) and the SQL pane's
+   sub-tab strip (which passes its own currentIds/onReorder to reorder
+   S.sqlTabs and persist to the case file). The sidebar's own table rows
+   drag differently now — dragging one files it into a folder rather than
+   reordering the strip (see wireTableDrag) — so they don't go through
+   here. draggedTabId staying shared across surfaces is harmless: a
+   cross-surface drop can't resolve an id the target's own currentIds()
+   doesn't contain, so it no-ops. */
 export let draggedTabId = null;
 
 export function wireDragReorder(node, id, {
@@ -199,10 +178,6 @@ export function wireTabDrag(t, id) {
   wireDragReorder(t, id, { containerSelector: '#sourceTabs', rowSelector: '.tab', horizontal: true });
 }
 
-export function wireSidebarRowDrag(row, id) {
-  wireDragReorder(row, id, { containerSelector: '#sidebarList', rowSelector: '.sidebar-row', horizontal: false });
-}
-
 export function renderTabs() {
   const openTabs = openTabsSorted();
   const tabs = $('sourceTabs');
@@ -235,7 +210,7 @@ export function renderTabs() {
     wireTabDrag(t, s.id);
     tabs.append(t);
   }
-  renderSidebar(); // every caller here (loadSources, moveTab, the drag-drop handler) means S.sources or S.tabOrder just changed
+  renderSidebar(); // every caller here (loadSources, the tab drag-drop handler) means S.sources or S.tabOrder just changed
   return openTabs;
 }
 
@@ -458,8 +433,11 @@ export function applyPageTabsSize() {
  // paints the saved order onto SQL/Timeline before plugins load
 
 export async function loadSources(select) {
-  const [sources, merges] = await Promise.all([api('/api/sources'), api('/api/merges')]);
+  const [sources, merges, folders] = await Promise.all([
+    api('/api/sources'), api('/api/merges'), api('/api/folders'),
+  ]);
   S.sources = [...sources, ...merges];
+  S.folders = folders;
   const openTabs = renderTabs();
   // select/S.sourceId are only trustworthy if they actually name a tab
   // that's open right now — S.sourceId in particular is never reset on a
@@ -647,48 +625,269 @@ export async function openSource(id) {
    ingest auto-opens its tab), and reopening a dropdown that many times
    over doesn't scale the way clicking down a standing list does.
 
-   Three sections. Open/Closed match the tab strip's own "shown vs not"
-   rule (an errored source is always shown, bucketed with Open rather than
-   a section of its own); Pages is the same standing list for the *other*
-   strip — SQL, Timeline and any plugin tabs — and exists for the same
-   reason the table sections do, since that strip scrolls too once a few
-   plugin tabs are installed or the divider is dragged in. Rows reuse the
-   dropdown's own .menu-item/.menu-item-action classes (see style.css)
-   rather than a parallel set of near-identical ones. Filtered by
-   S.sidebarFilter — a plain client-side substring match over both kinds,
-   not a network round trip, since S.sources/S.pluginTabs are already in
-   memory and this can be retyped on every keystroke.
+   The table list is a FOLDER TREE, not the old Open/Closed split: every
+   table sits at the root or inside a folder (created by hand, or by a
+   directory import reproducing its on-disk structure — see importer.js).
+   Open state is a per-row treatment now — the active highlight and the ✕
+   close action — rather than a section of its own. Pages stays its own
+   standing list for the *other* strip (SQL, Timeline, plugin tabs). Rows
+   reuse the dropdown's .menu-item/.menu-item-action classes. Filtered by
+   S.sidebarFilter — a client-side substring match; while a filter is
+   active, folders that contain a match are shown and force-expanded.
 
-   Open rows also get ▲/▼/✕, and page rows ▲/▼ — the same reorder/close
-   each strip offers via drag-and-drop and its own ✕, kept here for when a
-   strip is scrolled out of view or a standing list is just easier to act
-   on. */
+   Folders: ▸/▾ collapse (persisted per-browser in FOLDERS_KEY), ▲/▼ to
+   reorder among siblings, ＋ for a subfolder, ✕ to delete (tables move to
+   the parent — a folder is a label, never an owner of evidence). A table
+   is filed by dragging its row onto a folder header, via the "Move to a
+   folder" button on the row, and dragged back out via the root drop
+   zone. */
+
+export const FOLDERS_KEY = 'winnow.folders';   // collapsed folder ids, per browser
+
+export function loadCollapsedFolders() {
+  try { return new Set(JSON.parse(localStorage.getItem(FOLDERS_KEY) || '[]')); }
+  catch { return new Set(); }
+}
+function saveCollapsedFolders() {
+  localStorage.setItem(FOLDERS_KEY, JSON.stringify([...S.collapsedFolders]));
+}
+
+/* Case-insensitive label sort, open tables first — the sidebar is now
+   organized by folder, so within a container "what's open" is the only
+   ordering hint left worth keeping. */
+function cmpTables(a, b) {
+  return (b.is_open ? 1 : 0) - (a.is_open ? 1 : 0) || sourceLabel(a).localeCompare(sourceLabel(b));
+}
+
+/* Folders indexed by parent (null → 'root'), each sibling list ordered by
+   pos then name — the shape both the tree render and the move-menu walk. */
+function foldersByParent() {
+  const kids = new Map();
+  for (const f of S.folders) {
+    const k = f.parent_id ?? 'root';
+    if (!kids.has(k)) kids.set(k, []);
+    kids.get(k).push(f);
+  }
+  for (const arr of kids.values()) arr.sort((a, b) => a.pos - b.pos || a.name.localeCompare(b.name));
+  return kids;
+}
+
+/* Every folder as a flat list with a "Parent / Child" path label, tree
+   order — for the row's "Move to a folder" menu. */
+function foldersFlattened() {
+  const kids = foldersByParent();
+  const out = [];
+  (function walk(key, prefix) {
+    for (const f of (kids.get(key) || [])) {
+      const pathLabel = prefix ? prefix + ' / ' + f.name : f.name;
+      out.push({ id: f.id, pathLabel });
+      walk(f.id, pathLabel);
+    }
+  })('root', '');
+  return out;
+}
+
 export function renderSidebar() {
   const list = $('sidebarList');
   list.replaceChildren();
   const q = S.sidebarFilter.trim().toLowerCase();
-  const match = (s) => !q || s.name.toLowerCase().includes(q);
-  const openSrcs = openTabsSorted().filter(match);
-  const closedSrcs = S.sources.filter((s) => !s.error && !s.is_open).filter(match);
-  // Indices for ▲/▼ come from the *unfiltered* order, so the arrows move a
-  // page where it actually is rather than where the filter makes it look.
+  const tableText = (s) => (sourceLabel(s) + ' ' + (s.name || '')).toLowerCase();
+  const tables = S.sources.filter((s) => !q || tableText(s).includes(q));
+
+  const tablesIn = new Map();                 // folder id (null→'root') → [tables]
+  for (const s of tables) {
+    const k = s.folder_id ?? 'root';
+    if (!tablesIn.has(k)) tablesIn.set(k, []);
+    tablesIn.get(k).push(s);
+  }
+  for (const arr of tablesIn.values()) arr.sort(cmpTables);
+  const childFolders = foldersByParent();
+
+  // Under a filter, keep a folder only if it (or a descendant) holds a match.
+  function folderShown(fid) {
+    if (!q) return true;
+    if ((tablesIn.get(fid) || []).length) return true;
+    return (childFolders.get(fid) || []).some((c) => folderShown(c.id));
+  }
+  function tableCount(fid) {
+    let n = (tablesIn.get(fid) || []).length;
+    for (const c of (childFolders.get(fid) || [])) n += tableCount(c.id);
+    return n;
+  }
+
+  function renderInto(key, depth) {
+    const folders = (childFolders.get(key) || []).filter((f) => folderShown(f.id));
+    folders.forEach((f, i) => {
+      list.append(folderHeaderRow(f, depth, folders, i, tableCount(f.id)));
+      const collapsed = S.collapsedFolders.has(f.id) && !q;   // a filter forces open
+      if (!collapsed) renderInto(f.id, depth + 1);
+    });
+    for (const s of (tablesIn.get(key) || [])) list.append(sidebarRow(s, { depth }));
+  }
+
+  if (!tables.length && !S.folders.length) {
+    list.append(el('div', 'note-status', q ? 'No matching tables.' : 'No tables in this case yet.'));
+  } else {
+    renderInto('root', 0);
+    if (S.folders.length) list.append(rootDropZone());  // drag a table back out of a folder
+  }
+
   const pages = pageTabsSorted();
   const shownPages = pages.filter((t) => !q || t.label.toLowerCase().includes(q));
-  if (!openSrcs.length && !closedSrcs.length) {
-    list.append(el('div', 'note-status', q ? 'No matching tables.' : 'No tables in this case yet.'));
-  }
-  if (openSrcs.length) {
-    list.append(el('div', 'menu-header', 'Open'));
-    openSrcs.forEach((s, i) => list.append(sidebarRow(s, { open: true, index: i, total: openSrcs.length })));
-  }
-  if (closedSrcs.length) {
-    list.append(el('div', 'menu-header', 'Closed'));
-    for (const s of closedSrcs) list.append(sidebarRow(s, { open: false }));
-  }
   if (shownPages.length) {
     list.append(el('div', 'menu-header', 'Pages'));
     for (const t of shownPages) list.append(pageSidebarRow(t, pages.indexOf(t), pages.length));
   }
+}
+
+/* A folder in the tree: disclosure + name + recursive table count, the
+   ▲/▼/＋/✕ actions, and a drop target (a table dragged onto it joins). */
+export function folderHeaderRow(f, depth, siblings, index, count) {
+  const collapsed = S.collapsedFolders.has(f.id) && !S.sidebarFilter.trim();
+  const row = el('div', 'sidebar-folder');
+  row.style.setProperty('--depth', String(depth));
+  const tw = el('button', 'folder-twisty', collapsed ? '▸' : '▾');
+  tw.title = collapsed ? 'Expand' : 'Collapse';
+  tw.onclick = () => toggleFolderCollapsed(f.id);
+  const name = el('button', 'menu-item folder-name', f.name);
+  name.title = 'Click to collapse or expand · double-click to rename';
+  name.onclick = () => toggleFolderCollapsed(f.id);
+  name.ondblclick = (e) => { e.preventDefault(); renameFolder(f); };
+  const cnt = el('span', 'sidebar-row-count', String(count));
+  const acts = el('div', 'sidebar-row-actions');
+  const up = el('button', 'menu-item-action', '▲');
+  up.title = 'Move folder up';
+  up.disabled = index === 0;
+  up.onclick = () => reorderFolder(f, siblings, -1);
+  const down = el('button', 'menu-item-action', '▼');
+  down.title = 'Move folder down';
+  down.disabled = index === siblings.length - 1;
+  down.onclick = () => reorderFolder(f, siblings, 1);
+  const add = el('button', 'menu-item-action', '＋');
+  add.title = 'New subfolder';
+  add.onclick = () => createFolder(f.id);
+  const del = el('button', 'menu-item-action', '✕');
+  del.title = 'Delete folder — its tables move out, nothing is deleted';
+  del.onclick = () => deleteFolder(f);
+  acts.append(up, down, add, del);
+  row.append(tw, name, cnt, acts);
+  wireFolderDrop(row, f.id);
+  return row;
+}
+
+function rootDropZone() {
+  const z = el('div', 'sidebar-rootzone', 'drop here to remove from folder');
+  wireFolderDrop(z, null);
+  return z;
+}
+
+function toggleFolderCollapsed(id) {
+  if (S.collapsedFolders.has(id)) S.collapsedFolders.delete(id);
+  else S.collapsedFolders.add(id);
+  saveCollapsedFolders();
+  renderSidebar();
+}
+
+export async function createFolder(parentId = null) {
+  const name = await promptDialog(parentId ? 'New subfolder name:' : 'New folder name:', '', { okLabel: 'Create' });
+  if (!name || !name.trim()) return;
+  try {
+    await post('/api/folders', { name: name.trim(), parent_id: parentId });
+    if (parentId != null) S.collapsedFolders.delete(parentId);  // reveal the new child
+    saveCollapsedFolders();
+    await loadSources(S.sourceId);
+  } catch (e) { toast('Could not create folder: ' + e.message, 6000); }
+}
+
+async function renameFolder(f) {
+  const name = await promptDialog('Rename folder:', f.name, { okLabel: 'Rename' });
+  if (!name || !name.trim() || name.trim() === f.name) return;
+  try { await post(`/api/folders/${f.id}/rename`, { name: name.trim() }); await loadSources(S.sourceId); }
+  catch (e) { toast('Could not rename folder: ' + e.message, 6000); }
+}
+
+async function deleteFolder(f) {
+  if (!(await confirmDialog(`Delete folder “${f.name}”? Its tables move out of it; nothing is deleted.`,
+    { danger: true, okLabel: 'Delete folder' }))) return;
+  try { await api(`/api/folders/${f.id}`, { method: 'DELETE' }); await loadSources(S.sourceId); }
+  catch (e) { toast('Could not delete folder: ' + e.message, 6000); }
+}
+
+async function reorderFolder(f, siblings, dir) {
+  const ids = siblings.map((x) => x.id);
+  const i = ids.indexOf(f.id);
+  const j = i + dir;
+  if (j < 0 || j >= ids.length) return;
+  [ids[i], ids[j]] = [ids[j], ids[i]];
+  try {
+    await post('/api/folders/reorder', { parent_id: f.parent_id ?? null, ordered_ids: ids });
+    await loadSources(S.sourceId);
+  } catch (e) { toast('Could not reorder folders: ' + e.message, 6000); }
+}
+
+async function moveTableToFolder(sourceId, folderId) {
+  try { await post(`/api/source/${sourceId}/folder`, { folder_id: folderId }); await loadSources(S.sourceId); }
+  catch (e) { toast('Could not move table: ' + e.message, 6000); }
+}
+
+/* The row's "Move to a folder" button — the keyboard/click path to the
+   same thing dragging does, and the only way to reach a collapsed or
+   scrolled-away target. */
+function openMoveMenu(anchor, s) {
+  const items = [{ header: 'Move to a folder' }];
+  if (s.folder_id != null) items.push({ label: '↥ Remove from folder', onclick: () => moveTableToFolder(s.id, null) });
+  items.push({
+    label: '＋ New folder…',
+    onclick: async () => {
+      const name = await promptDialog('New folder name:', '', { okLabel: 'Create' });
+      if (!name || !name.trim()) return;
+      try {
+        const f = await post('/api/folders', { name: name.trim(), parent_id: null });
+        await moveTableToFolder(s.id, f.id);
+      } catch (e) { toast('Could not create folder: ' + e.message, 6000); }
+    },
+  });
+  const flat = foldersFlattened().filter((f) => f.id !== s.folder_id);
+  if (flat.length) items.push('-');
+  for (const f of flat) items.push({ label: '🗀 ' + f.pathLabel, onclick: () => moveTableToFolder(s.id, f.id) });
+  dropdownMenu(anchor, items);
+}
+
+/* Dragging a table row files it into a folder. Its own drag var, separate
+   from the tab strip's draggedTabId (wireTabDrag) — the two never share a
+   node, and a sidebar drag means "move to folder", not "reorder the strip". */
+let draggedTableId = null;
+
+function wireTableDrag(row, id) {
+  row.draggable = true;
+  row.addEventListener('dragstart', (e) => {
+    draggedTableId = id;
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', String(id));   // Firefox won't start a drag without data
+    row.classList.add('dragging');
+  });
+  row.addEventListener('dragend', () => {
+    draggedTableId = null;
+    document.querySelectorAll('#sidebarList .drop-into').forEach((n) => n.classList.remove('drop-into'));
+    row.classList.remove('dragging');
+  });
+}
+
+function wireFolderDrop(node, folderId) {
+  node.addEventListener('dragover', (e) => {
+    if (draggedTableId == null) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    node.classList.add('drop-into');
+  });
+  node.addEventListener('dragleave', () => node.classList.remove('drop-into'));
+  node.addEventListener('drop', (e) => {
+    if (draggedTableId == null) return;
+    e.preventDefault();
+    const id = draggedTableId;
+    node.classList.remove('drop-into');
+    moveTableToFolder(id, folderId);
+  });
 }
 
 /* A page tab's row: click to show it, ▲/▼ or drag to reorder. No ✕ —
@@ -722,13 +921,15 @@ export function pageSidebarRow(t, index, total) {
   return row;
 }
 
-export function sidebarRow(s, { open, index, total }) {
+export function sidebarRow(s, { depth = 0 } = {}) {
+  const open = s.is_open;
   // S.activeTab !== 'grid' means SQL/Timeline is showing — S.sourceId is
   // still the last-open source in that state (nothing clears it), but
   // nothing in the sidebar represents SQL/Timeline, so no row should read
   // as active; #tabSql/#tabTimeline carry that highlight instead.
   const active = open && s.id === S.sourceId && S.activeTab === 'grid';
   const row = el('div', 'sidebar-row' + (active ? ' active' : ''));
+  row.style.setProperty('--depth', String(depth));
   const label = el('button', 'menu-item', (s.is_merge ? '⛓ ' : '') + sourceLabel(s) + (s.error ? ' ⚠' : ''));
   label.disabled = !!s.error;
   if (s.error) label.title = s.error;
@@ -744,23 +945,19 @@ export function sidebarRow(s, { open, index, total }) {
     row.oncontextmenu = (e) => { e.preventDefault(); openTableMenu(s.id); };
     label.title = sourceTitle(s, 'Right-click for the table menu');
     row.append(el('span', 'sidebar-row-count', s.row_count.toLocaleString()));
-  }
-  if (open) {
     const acts = el('div', 'sidebar-row-actions');
-    const up = el('button', 'menu-item-action', '▲');
-    up.title = 'Move earlier';
-    up.disabled = index === 0;
-    up.onclick = () => moveTab(s.id, -1);
-    const down = el('button', 'menu-item-action', '▼');
-    down.title = 'Move later';
-    down.disabled = index === total - 1;
-    down.onclick = () => moveTab(s.id, 1);
-    const x = el('button', 'menu-item-action', '✕');
-    x.title = 'Close tab — stays in this case, reopen it from here';
-    x.onclick = async () => { await closeTab(s); };
-    acts.append(up, down, x);
+    const mv = el('button', 'menu-item-action', '🗀');
+    mv.title = 'Move to a folder';
+    mv.onclick = (e) => openMoveMenu(e.currentTarget, s);
+    acts.append(mv);
+    if (open) {
+      const x = el('button', 'menu-item-action', '✕');
+      x.title = 'Close tab — stays in this case, reopen it from here';
+      x.onclick = async () => { await closeTab(s); };
+      acts.append(x);
+    }
     row.append(acts);
-    wireSidebarRowDrag(row, s.id);
+    wireTableDrag(row, s.id);
   }
   return row;
 }
@@ -802,6 +999,7 @@ export function initSidebar() {
   let prefs = {};
   try { prefs = JSON.parse(localStorage.getItem(SIDEBAR_KEY) || '{}'); } catch { /* defaults below */ }
   setSidebarWidth(prefs.width || SIDEBAR_W_DEFAULT);
+  S.collapsedFolders = loadCollapsedFolders();
   // Collapsed by DEFAULT: a case should open showing the evidence, not a
   // panel of navigation. The tab strip already names the open tables; the
   // sidebar is one ` (or the ◀ button) away when the analyst wants the
@@ -964,6 +1162,7 @@ $('tabSplit').ondblclick = () => {
 };
 
 $('sidebarFilter').oninput = () => { S.sidebarFilter = $('sidebarFilter').value; renderSidebar(); };
+$('btnNewFolder').onclick = () => createFolder(null);
 
 $('btnTabJump').onclick = () => setSidebarVisible($('sidebar').hidden);
 

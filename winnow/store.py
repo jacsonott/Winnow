@@ -250,6 +250,28 @@ CREATE TABLE IF NOT EXISTS case_settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- Sidebar folders: a per-case tree an analyst sorts tables into, and which
+-- a directory import reproduces from the on-disk folder structure. Case
+-- data, not a UI preference — it organizes *this* evidence and should
+-- travel with the .db, same reasoning as sql_tabs/sessions above (only the
+-- collapsed/expanded state is a per-browser localStorage preference).
+-- Purely organizational: source_folder_map keys by the SIGNED source id
+-- (negative = merge, the convention open_tabs uses) so merges fold with no
+-- extra machinery, and a table with no map row is simply "ungrouped" (root
+-- level). Deleting a folder reparents its tables and never drops a source
+-- (invariant #1 — the import record is untouched).
+CREATE TABLE IF NOT EXISTS source_folders (
+    id        INTEGER PRIMARY KEY,
+    name      TEXT NOT NULL,
+    parent_id INTEGER,                      -- NULL = top level
+    pos       INTEGER NOT NULL DEFAULT 0    -- order among siblings
+);
+CREATE TABLE IF NOT EXISTS source_folder_map (
+    source_id INTEGER PRIMARY KEY,          -- signed: negative = merge id
+    folder_id INTEGER NOT NULL,
+    pos       INTEGER NOT NULL DEFAULT 0    -- order within the folder
+);
 """
 
 IDENT_OK = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -2952,6 +2974,14 @@ class Store:
                         ))
                     with self._ingest_jobs_lock:
                         job["tables_done"] = i + 1
+            # Directory import: drop each new table into the folder that
+            # mirrors its on-disk path (created once, shared across the
+            # tree). folder_path is "" for a file at the scan root.
+            if opts.get("folder_path"):
+                fid = self.ensure_folder_path(opts["folder_path"])
+                if fid is not None:
+                    for r in results:
+                        self.set_source_folder(r["id"], fid)
             with self._ingest_jobs_lock:
                 job["status"] = "done"
                 job["rows_done"] = sum(r.get("row_count") or 0 for r in results)
@@ -3139,6 +3169,176 @@ class Store:
 
     # ----------------------------------------------------------------- sources
 
+    # ------------------------------------------------------------ folders
+    #
+    # A per-case tree an analyst sorts tables into (and a directory import
+    # reproduces from disk). Folders are organizational only: nothing here
+    # ever touches a source table, and delete_folder reparents rather than
+    # drops (invariant #1). Membership is keyed by the SIGNED source id so a
+    # merge folds like any other table.
+
+    def list_folders(self) -> list[dict]:
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT id, name, parent_id, pos FROM source_folders "
+                "ORDER BY (parent_id IS NULL) DESC, parent_id, pos, id"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def _source_folder(self, source_id: int) -> tuple[int | None, int]:
+        """(folder_id, pos) for one signed source id — (None, 0) if it sits
+        at the root (no map row)."""
+        with self.lock:
+            r = self.db.execute(
+                "SELECT folder_id, pos FROM source_folder_map WHERE source_id=?",
+                (source_id,)).fetchone()
+        return (r["folder_id"], r["pos"]) if r else (None, 0)
+
+    def _folder_exists(self, folder_id: int) -> bool:
+        return self.db.execute(
+            "SELECT 1 FROM source_folders WHERE id=?", (folder_id,)).fetchone() is not None
+
+    def create_folder(self, name: str, parent_id: int | None = None) -> dict:
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("A folder needs a name")
+        if len(name) > 200:
+            raise ValueError("That folder name is too long")
+        with self.lock, self.db:
+            if parent_id is not None and not self._folder_exists(parent_id):
+                raise ValueError("That parent folder no longer exists")
+            pos = (self.db.execute(
+                "SELECT COALESCE(MAX(pos), -1) + 1 FROM source_folders WHERE parent_id IS ?",
+                (parent_id,)).fetchone()[0])
+            cur = self.db.execute(
+                "INSERT INTO source_folders(name, parent_id, pos) VALUES (?,?,?)",
+                (name, parent_id, pos))
+            fid = cur.lastrowid
+        return {"id": fid, "name": name, "parent_id": parent_id, "pos": pos}
+
+    def rename_folder(self, folder_id: int, name: str) -> None:
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("A folder needs a name")
+        if len(name) > 200:
+            raise ValueError("That folder name is too long")
+        with self.lock, self.db:
+            if not self._folder_exists(folder_id):
+                raise KeyError(f"No folder {folder_id}")
+            self.db.execute("UPDATE source_folders SET name=? WHERE id=?", (name, folder_id))
+
+    def _descendant_ids(self, folder_id: int) -> set[int]:
+        """folder_id and every folder beneath it — used to reject a move
+        that would make a folder its own ancestor."""
+        seen = {folder_id}
+        frontier = [folder_id]
+        while frontier:
+            kids = self.db.execute(
+                "SELECT id FROM source_folders WHERE parent_id=?", (frontier.pop(),)).fetchall()
+            for (kid,) in kids:
+                if kid not in seen:
+                    seen.add(kid)
+                    frontier.append(kid)
+        return seen
+
+    def move_folder(self, folder_id: int, parent_id: int | None, pos: int | None = None) -> None:
+        """Reparent and/or reorder a folder. A move into the folder's own
+        subtree (including itself) is refused — that would orphan a cycle."""
+        with self.lock, self.db:
+            if not self._folder_exists(folder_id):
+                raise KeyError(f"No folder {folder_id}")
+            if parent_id is not None:
+                if not self._folder_exists(parent_id):
+                    raise ValueError("That parent folder no longer exists")
+                if parent_id in self._descendant_ids(folder_id):
+                    raise ValueError("A folder can't be moved inside itself")
+            if pos is None:
+                pos = (self.db.execute(
+                    "SELECT COALESCE(MAX(pos), -1) + 1 FROM source_folders WHERE parent_id IS ?",
+                    (parent_id,)).fetchone()[0])
+            self.db.execute(
+                "UPDATE source_folders SET parent_id=?, pos=? WHERE id=?",
+                (parent_id, pos, folder_id))
+
+    def reorder_folders(self, parent_id: int | None, ordered_ids: list[int]) -> None:
+        """Set sibling order under one parent from a full id list (index =
+        pos). Ids not actually children of parent_id are ignored."""
+        with self.lock, self.db:
+            kids = {r[0] for r in self.db.execute(
+                "SELECT id FROM source_folders WHERE parent_id IS ?", (parent_id,))}
+            for i, fid in enumerate([f for f in ordered_ids if f in kids]):
+                self.db.execute("UPDATE source_folders SET pos=? WHERE id=?", (i, fid))
+
+    def delete_folder(self, folder_id: int) -> None:
+        """Delete a folder, reparenting its child folders and member tables
+        to its own parent (root when it was top-level). Never deletes a
+        source — a folder is a label, not a container that owns evidence."""
+        with self.lock, self.db:
+            row = self.db.execute(
+                "SELECT parent_id FROM source_folders WHERE id=?", (folder_id,)).fetchone()
+            if row is None:
+                raise KeyError(f"No folder {folder_id}")
+            parent = row["parent_id"]
+            self.db.execute(
+                "UPDATE source_folders SET parent_id=? WHERE parent_id=?", (parent, folder_id))
+            if parent is None:
+                # tables land at the root — the root is "no map row" at all
+                self.db.execute(
+                    "DELETE FROM source_folder_map WHERE folder_id=?", (folder_id,))
+            else:
+                self.db.execute(
+                    "UPDATE source_folder_map SET folder_id=? WHERE folder_id=?",
+                    (parent, folder_id))
+            self.db.execute("DELETE FROM source_folders WHERE id=?", (folder_id,))
+
+    def set_source_folder(self, source_id: int, folder_id: int | None, pos: int | None = None) -> None:
+        """Put a table in a folder (or, with folder_id=None, back at the
+        root — which is simply the absence of a map row)."""
+        with self.lock, self.db:
+            if folder_id is None:
+                self.db.execute("DELETE FROM source_folder_map WHERE source_id=?", (source_id,))
+                return
+            if not self._folder_exists(folder_id):
+                raise ValueError("That folder no longer exists")
+            if pos is None:
+                pos = (self.db.execute(
+                    "SELECT COALESCE(MAX(pos), -1) + 1 FROM source_folder_map WHERE folder_id=?",
+                    (folder_id,)).fetchone()[0])
+            self.db.execute(
+                "INSERT INTO source_folder_map(source_id, folder_id, pos) VALUES (?,?,?) "
+                "ON CONFLICT(source_id) DO UPDATE SET folder_id=excluded.folder_id, pos=excluded.pos",
+                (source_id, folder_id, pos))
+
+    def ensure_folder_path(self, path: str, parent_id: int | None = None) -> int | None:
+        """Find-or-create a nested folder chain from a posix path
+        ("RegistryHives/Users"), returning the leaf folder's id. Empty path
+        (a file at the scan root) returns None — the caller leaves the
+        source ungrouped. Reused across a directory import so a tree of
+        files lands in one shared folder structure, not a folder per file."""
+        parts = [p.strip() for p in (path or "").replace("\\", "/").split("/")]
+        parts = [p for p in parts if p and p not in (".", "..")]
+        if not parts:
+            return parent_id
+        cur = parent_id
+        # One transaction for the whole chain: two directory-import jobs
+        # (MAX_CONCURRENT_INGESTS=2) that share a folder would otherwise both
+        # miss the find and both insert a duplicate.
+        with self.lock, self.db:
+            for part in parts:
+                row = self.db.execute(
+                    "SELECT id FROM source_folders WHERE parent_id IS ? AND name=? COLLATE NOCASE",
+                    (cur, part)).fetchone()
+                if row:
+                    cur = row["id"]
+                else:
+                    pos = (self.db.execute(
+                        "SELECT COALESCE(MAX(pos), -1) + 1 FROM source_folders WHERE parent_id IS ?",
+                        (cur,)).fetchone()[0])
+                    cur = self.db.execute(
+                        "INSERT INTO source_folders(name, parent_id, pos) VALUES (?,?,?)",
+                        (part, cur, pos)).lastrowid
+        return cur
+
     def list_sources(self) -> list[dict]:
         """Bulk per-source annotation (is_open / tagged_row_count /
         note_count) in one locked pass — a per-source query here would be an
@@ -3153,6 +3353,8 @@ class Store:
             derived = self.db.execute(
                 "SELECT * FROM derived_columns ORDER BY source_id, id"
             ).fetchall()
+            folder = {r[0]: (r[1], r[2]) for r in self.db.execute(
+                "SELECT source_id, folder_id, pos FROM source_folder_map")}
         by_src: dict[int, list] = {}
         for r in derived:
             by_src.setdefault(r["source_id"], []).append(r)
@@ -3163,6 +3365,7 @@ class Store:
                 d["columns"].append(self._derived_col_entry(dr))
                 d["has_derived"] = True
             d["is_open"] = d["id"] in open_ids
+            d["folder_id"], d["folder_pos"] = folder.get(d["id"], (None, 0))
             d["tagged_row_count"] = tagged.get(d["id"], 0)
             d["note_count"] = notes.get(d["id"], 0)
             d["fts_building"] = self._is_fts_building(d["id"])
@@ -3365,6 +3568,8 @@ class Store:
             "is_merge": True,
             "member_source_ids": member_ids,
             "is_open": self._tab_meta(-merge_id)["is_open"],
+            "folder_id": self._source_folder(-merge_id)[0],
+            "folder_pos": self._source_folder(-merge_id)[1],
             "tagged_row_count": sum(m["tagged_row_count"] for m in members),
             "note_count": sum(m["note_count"] for m in members),
         }

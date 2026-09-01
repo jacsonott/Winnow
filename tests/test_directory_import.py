@@ -214,3 +214,55 @@ def test_import_profile_routes_crud(client):
     r = client.delete(f"/api/import_profiles/{created['id']}")
     assert r.status_code == 200
     assert client.get("/api/import_profiles").json() == []
+
+
+# ---------------------------------------------------------------- folders
+#
+# A directory import reproduces the on-disk tree as sidebar folders: the
+# table is named by its basename, and nested files land in folders that
+# mirror their path (replacing the old behaviour of concatenating the whole
+# rel_path into the source name). Folder assignment happens in the ingest
+# job worker, driven here through the same server-path route the UI uses.
+
+def _run_dir_import(store, path, folder_path):
+    job = store.start_ingest_job(
+        "csv", path, name=os.path.basename(path),
+        options={"build_fts": False, "folder_path": folder_path})
+    done = store.wait_for_ingest_job(job["job_id"], timeout=30)
+    assert done["status"] == "done", done.get("error")
+    return done["source_ids"][0]
+
+
+def test_directory_import_files_nested_tables_into_matching_folders(kape_tree, store):
+    scan = store.scan_import_directory(kape_tree)
+    matched = {m["rel_path"]: m for m in scan["matched"]}
+
+    # a file at the scan root: basename name, no folder
+    root_file = matched["DESKTOP01_EvtxECmd_Output.csv"]
+    rid = _run_dir_import(store, root_file["path"], "")
+    root_src = next(s for s in store.list_sources() if s["id"] == rid)
+    assert root_src["name"] == "DESKTOP01_EvtxECmd_Output.csv"
+    assert root_src["folder_id"] is None
+
+    # a nested file: basename name, filed under a folder mirroring its dir
+    nested = matched["RegistryHives/SYSTEM.csv"]
+    slash = nested["rel_path"].rfind("/")
+    base, folder_path = nested["rel_path"][slash + 1:], nested["rel_path"][:slash]
+    nid = _run_dir_import(store, nested["path"], folder_path)
+    nsrc = next(s for s in store.list_sources() if s["id"] == nid)
+    assert nsrc["name"] == "SYSTEM.csv"                 # basename, NOT the rel_path
+    folder = next(f for f in store.list_folders() if f["id"] == nsrc["folder_id"])
+    assert folder["name"] == "RegistryHives" and folder["parent_id"] is None
+
+
+def test_directory_import_shares_one_folder_across_files(tmp_path, store):
+    """Two files in the same on-disk folder land in the SAME sidebar folder,
+    not one folder per file."""
+    p1 = _write(tmp_path, "Logs/one.csv")
+    p2 = _write(tmp_path, "Logs/two.csv")
+    id1 = _run_dir_import(store, str(p1), "Logs")
+    id2 = _run_dir_import(store, str(p2), "Logs")
+    srcs = {s["id"]: s for s in store.list_sources()}
+    assert srcs[id1]["folder_id"] == srcs[id2]["folder_id"] is not None
+    assert sum(f["name"] == "Logs" for f in store.list_folders()) == 1
+
