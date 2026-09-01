@@ -1900,6 +1900,7 @@ def api_plugins_toggle(body: PluginToggle):
 class PluginBundleBody(BaseModel):
     name: str
     plugins: list[str] = []
+    dashboard: list | None = None   # profile: an optional dashboard layout
 
 
 @app.get("/api/plugin_bundles")
@@ -1910,7 +1911,7 @@ def api_plugin_bundles():
 @app.post("/api/plugin_bundles")
 def api_plugin_bundles_save(body: PluginBundleBody):
     try:
-        return WS.plugin_bundles.save(body.name, body.plugins)
+        return WS.plugin_bundles.save(body.name, body.plugins, body.dashboard)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -1940,9 +1941,15 @@ def api_plugin_bundles_apply(bundle_id: int):
         overrides[fs_name] = fs_name in wanted
     STORE.set_case_setting("plugin_overrides", json.dumps(overrides))
     _reload_plugins()
+    # A profile's dashboard becomes the case's dashboard on apply (only if
+    # the profile carries one — applying a plain plugin bundle leaves the
+    # case's own dashboard untouched).
+    if bundle.get("dashboard"):
+        STORE.set_dashboard(bundle["dashboard"])
     return {"applied": bundle["name"],
             "enabled": sorted(wanted & known),
             "missing": sorted(wanted - known),  # in the bundle, not installed here
+            "dashboard_applied": bool(bundle.get("dashboard")),
             "plugins": api_plugins()}
 
 
@@ -2500,6 +2507,33 @@ class EntityPivotBody(BaseModel):
 def api_entity_pivot(body: EntityPivotBody):
     try:
         return store().entity_pivot(body.value, body.limit)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+class DashboardBody(BaseModel):
+    widgets: list = []
+
+
+class WidgetPreviewBody(BaseModel):
+    source: str
+    query: dict = {}
+
+
+@app.get("/api/dashboard")
+def api_dashboard_get():
+    return {"widgets": store().get_dashboard()}
+
+
+@app.post("/api/dashboard")
+def api_dashboard_save(body: DashboardBody):
+    return {"widgets": store().set_dashboard(body.widgets)}
+
+
+@app.post("/api/dashboard/widget/preview")
+def api_dashboard_widget_preview(body: WidgetPreviewBody):
+    try:
+        return store().dashboard_widget_preview(body.source, body.query)
     except ValueError as e:
         raise HTTPException(400, str(e))
 

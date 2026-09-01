@@ -847,8 +847,11 @@ class PluginBundles:
                 return b
         raise KeyError(f"No bundle {bundle_id}")
 
-    def save(self, name: str, plugins: list[str]) -> dict:
-        """Upsert by name — 'Triage' means one thing per machine."""
+    def save(self, name: str, plugins: list[str], dashboard: list | None = None) -> dict:
+        """Upsert by name — 'Triage' means one thing per machine. A bundle
+        is a PROFILE: its plugins plus an optional dashboard (a list of
+        widget definitions), so 'how I analyze this kind of case' is one
+        saveable, shareable thing (see docs/design/analysis-suite.md)."""
         name = (name or "").strip()
         if not name:
             raise ValueError("Name the bundle")
@@ -861,9 +864,12 @@ class PluginBundles:
             existing = next((b for b in items if b["name"].lower() == name.lower()), None)
             if existing:
                 existing["plugins"] = plugins
+                if dashboard is not None:
+                    existing["dashboard"] = dashboard
                 rec = existing
             else:
-                rec = {"id": _next_id(items), "name": name, "plugins": plugins, "created_at": _now()}
+                rec = {"id": _next_id(items), "name": name, "plugins": plugins,
+                       "dashboard": dashboard or [], "created_at": _now()}
                 items.append(rec)
             _write(self.FILE, data)
             return rec
