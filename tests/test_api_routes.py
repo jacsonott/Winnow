@@ -679,3 +679,31 @@ def test_case_notes_roundtrip_and_persist(client, store):
     assert r.json()["body"].startswith("# Lead")
     assert r.json()["updated_at"]
     assert "WKS07" in client.get("/api/case/notes").json()["body"]
+
+
+def test_watchlist_add_scan_autotag_and_hits(client, store, write_csv):
+    """Add an indicator with auto-tag, scan a table, and confirm hits are
+    counted, tagged, and listable."""
+    sid = store.ingest_csv(write_csv(
+        [["Host", "Cmd"], ["WKS07", "rclone.exe copy"], ["WKS01", "notepad"]], "e.csv"),
+        build_fts=False)["id"]
+    tag = store.list_tags()[0]["id"]
+    r = client.post("/api/watchlist", json={"value": "rclone", "kind": "filename", "auto_tag_id": tag})
+    assert r.status_code == 200
+    wid = r.json()["id"]
+    scan = client.post(f"/api/watchlist/scan?source_id={sid}")
+    assert scan.status_code == 200
+    assert scan.json()["matched"][str(wid)] == 1
+    listed = {i["value"]: i for i in client.get("/api/watchlist").json()}
+    assert listed["rclone"]["hit_count"] == 1
+    hits = client.get(f"/api/watchlist/hits?watchlist_id={wid}").json()
+    assert hits[0]["source_id"] == sid and hits[0]["rid"] == 1
+    # auto-tag landed on the matching row
+    n = store.db.execute("SELECT COUNT(*) c FROM row_tags WHERE source_id=? AND tag_id=?",
+                         (sid, tag)).fetchone()["c"]
+    assert n == 1
+    # import dedupes; delete removes it and its hits
+    imp = client.post("/api/watchlist/import", json={"text": "rclone\n# c\nmimikatz\n"})
+    assert imp.json()["added"] == 1  # rclone already present
+    client.delete(f"/api/watchlist/{wid}")
+    assert all(i["value"] != "rclone" for i in client.get("/api/watchlist").json())
