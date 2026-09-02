@@ -174,6 +174,17 @@ export function resolveAutoTheme() {
 
 export function paintTheme() {
   document.documentElement.setAttribute('data-theme', S.appearance.themeMode === 'auto' ? resolveAutoTheme() : S.appearance.themeMode);
+  announceAppearance();
+}
+
+/* Canvases don't inherit CSS: anything that painted with a token (the
+   rail, a plugin panel's bars) has to redraw when the look changes.
+   Fired by every theme/accent/skin paint; plugins subscribe through
+   winnow.onAppearanceChange. */
+function announceAppearance() {
+  document.dispatchEvent(new CustomEvent('winnow:appearance', {
+    detail: { style: S.appearance.style, themeMode: S.appearance.themeMode, accent: S.appearance.accent },
+  }));
 }
 
 /* An inline --accent beats the stylesheet, so writing one unconditionally
@@ -193,6 +204,7 @@ export function paintAccent() {
     root.style.removeProperty('--accent');
     root.style.removeProperty('--accent-fg');
   }
+  announceAppearance();
 }
 
 /* Each style has a signature accent (the color it showed in the design
@@ -204,6 +216,7 @@ export function applyStyle(styleName) {
   S.appearance.style = styleName;
   document.documentElement.setAttribute('data-style', styleName);
   if (!S.appearance.accentCustomized) applyAccent(STYLES[styleName].defaultAccent, false);
+  else announceAppearance();   // applyAccent announces on the other branch
   saveAppearance();
 }
 

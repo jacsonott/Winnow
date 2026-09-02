@@ -398,8 +398,10 @@ class PluginAPI:
         `winnow` context is a tab's plus `onViewChange(cb)` (fires after
         every grid rebuild — filter, sort, search, timeframe, table
         switch; returns an unsubscribe), `state.view` (the current view's
-        {view_id, row_count}), and `setTimeRange({column, start, end})` /
-        `clearTimeRange()` to drive the case timeframe filter. The toggle
+        {view_id, row_count}), `setTimeRange({column, start, end})` /
+        `clearTimeRange()` to drive the case timeframe filter, and
+        `onAppearanceChange(cb)` so a canvas painted with the accent can
+        redraw when the look changes. The toggle
         state persists per browser; the strip hides with the toolbar on
         page tabs."""
         if not FORMAT_ID_RE.match(id or ""):

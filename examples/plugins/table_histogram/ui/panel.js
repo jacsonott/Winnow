@@ -201,6 +201,8 @@ export default function mount(container, winnow) {
   function schedule() { clearTimeout(timer); timer = setTimeout(load, REFRESH_MS); }
 
   winnow.onViewChange(() => schedule());
+  // Tokens are read at draw time, so a skin/accent change is one redraw.
+  winnow.onAppearanceChange(() => draw());
   window.addEventListener('resize', () => draw());
   refresh = load;
   load();

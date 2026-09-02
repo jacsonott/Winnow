@@ -374,6 +374,15 @@ export function buildPluginTabContext(tab) {
       document.addEventListener('winnow:viewchange', h);
       return () => document.removeEventListener('winnow:viewchange', h);
     },
+    // Fires after every skin / theme / accent change with {style, themeMode,
+    // accent}. Canvases don't inherit CSS — a panel that painted with the
+    // accent redraws here, or it keeps the old colour until the next view
+    // change. Returns an unsubscribe.
+    onAppearanceChange: (cb) => {
+      const h = (e) => cb(e.detail);
+      document.addEventListener('winnow:appearance', h);
+      return () => document.removeEventListener('winnow:appearance', h);
+    },
     // Drive the case timeframe filter (the toolbar's ⏱) from a plugin —
     // the same object the Timeframe dialog writes, so the button, the
     // toggle key and every other consumer see it as if typed there.

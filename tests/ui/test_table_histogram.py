@@ -85,3 +85,48 @@ def test_histogram_panel_follows_filters_and_sets_the_timeframe(page, server):
         page.evaluate("() => localStorage.removeItem('winnow.panels')")
         _post(server, "/api/plugins/toggle", {"fs_name": "table_histogram", "scope": "off_all"})
         page.evaluate("() => __winnow.loadPlugins()")
+
+
+def _bar_colour(page):
+    """The colour of a bar on the panel canvas, sampled at the baseline of
+    the tallest bar."""
+    return page.evaluate("""() => {
+      const c = document.querySelector('.plugin-panel canvas.th-canvas');
+      const ctx = c.getContext('2d');
+      const dpr = window.devicePixelRatio || 1;
+      // scan the row just above the baseline for the first painted pixel
+      const y = Math.round((c.height / dpr - 17) * dpr);
+      const row = ctx.getImageData(0, y, c.width, 1).data;
+      for (let x = 0; x < c.width; x++) {
+        const i = x * 4;
+        if (row[i + 3] > 200) return [row[i], row[i + 1], row[i + 2]];
+      }
+      return null;
+    }""")
+
+
+def test_bars_follow_the_accent_colour_live(page, server):
+    _post(server, "/api/plugins/toggle", {"fs_name": "table_histogram", "scope": "on_all"})
+    try:
+        page.evaluate("() => __winnow.loadPlugins()")
+        page.locator("#pluginToolbarButtons .plugin-panel-btn", has_text="Histogram").click()
+        page.wait_for_selector("#pluginPanels:not([hidden]) canvas.th-canvas", timeout=10_000)
+        page.wait_for_function("() => /200 rows/.test(document.querySelector('.plugin-panel').textContent)", timeout=10_000)
+        before = _bar_colour(page)
+        assert before is not None
+        # A custom accent, applied while the panel is open — no view change.
+        page.evaluate("() => __winnow.applyAccent('#3aa0ff', true)")
+        page.wait_for_function("""(b) => {
+          const c = document.querySelector('.plugin-panel canvas.th-canvas');
+          const ctx = c.getContext('2d'); const dpr = window.devicePixelRatio || 1;
+          const y = Math.round((c.height / dpr - 17) * dpr);
+          const row = ctx.getImageData(0, y, c.width, 1).data;
+          for (let x = 0; x < c.width; x++) { const i = x * 4; if (row[i+3] > 200) return row[i] !== b[0] || row[i+2] !== b[2]; }
+          return false; }""", arg=before, timeout=5_000)
+        after = _bar_colour(page)
+        assert after[2] > after[0]          # bluish now, not the skin's gold
+    finally:
+        page.evaluate("() => { __winnow.S.appearance.accentCustomized = false; __winnow.applyAccent('#d9a441', false); }")
+        page.evaluate("() => localStorage.removeItem('winnow.panels')")
+        _post(server, "/api/plugins/toggle", {"fs_name": "table_histogram", "scope": "off_all"})
+        page.evaluate("() => __winnow.loadPlugins()")

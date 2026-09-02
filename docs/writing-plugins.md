@@ -541,6 +541,11 @@ export default function mount(container, winnow) {
   write the case timeframe filter — the toolbar's ⏱ — as if typed into
   its dialog, so the button, the toggle key and every other consumer
   agree. The rebuild that follows fires `onViewChange` again.
+- `winnow.onAppearanceChange(cb)` fires after every skin / theme / accent
+  change. A canvas doesn't inherit CSS: read the tokens you paint with
+  (`getComputedStyle(document.documentElement).getPropertyValue('--accent')`
+  and friends) at draw time and redraw here, and your panel follows the
+  analyst's look — including a custom accent — like the rest of the app.
 
 `table_histogram/` is the worked example: bars per time bucket of a
 datetime column, a drag on them becomes the timeframe filter, and the
@@ -939,7 +944,7 @@ Module: `export default function mount(container, winnow)`, plus optional
 `onShow(container)` / `onHide(container)`. Context additions:
 `winnow.onViewChange(cb) -> unsubscribe`, `winnow.state.view`,
 `winnow.setTimeRange({column, start, end, enabled=true})`,
-`winnow.clearTimeRange()`.
+`winnow.clearTimeRange()`, `winnow.onAppearanceChange(cb) -> unsubscribe`.
 
 ### `register_row_action(*, id, label, handler, description="", max_rows=1000)`
 
