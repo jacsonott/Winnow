@@ -49,6 +49,17 @@ launchers — `winnow.sh` (Linux), `winnow.command` (macOS), `winnow.bat` /
 `winnow.vbs` (Windows) — that find Python and start it for you. See
 [launch/README.md](launch/README.md).
 
+**Settings → File associations** puts Winnow in the OS's Open With menu
+for the types it reads (per-user, no admin rights). If the automatic
+registration doesn't stick — Windows guards double-click defaults, and
+some Linux desktops cache MIME handlers — the panel's *"Not working? Set
+it manually"* section walks through the manual route: on Windows,
+right-click a file → *Open with → Choose another app* → Winnow → *Always*
+(browse to `launch\winnow.bat` if Winnow isn't offered); on Linux,
+`xdg-mime default winnow.desktop text/csv` or the same right-click →
+*Open With → Always use* in your file manager. The panel shows the exact
+command your install registers, for hand-writing an entry anywhere else.
+
 Opens http://127.0.0.1:8777 in an **app window** — a browser window with no
 address bar, tab strip or bookmarks, and its own taskbar entry, so Winnow
 looks like the application it is rather than one of your twenty tabs. It

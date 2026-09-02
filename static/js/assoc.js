@@ -78,8 +78,51 @@ export function buildAssocPanel(b) {
       }
       list.append(row);
     }
+    list.append(manualHelp(info));
   }
   paint();
+}
+
+/* The registration written above is per-user OS state a desktop can still
+   ignore (Explorer's guarded UserChoice, a desktop that never re-reads
+   mimeapps.list, a moved install) — so the panel spells out the manual
+   path instead of leaving the analyst to reverse-engineer it. Collapsed
+   by default; the command shown is THIS install's real one. */
+function manualHelp(info) {
+  const d = el('details', 'assoc-manual');
+  d.append(el('summary', null, 'Not working? Set it manually'));
+  const body = el('div', 'assoc-manual-body');
+  const li = (html) => { const n = el('li'); n.append(html); return n; };
+  const mono = (text) => { const c = el('code', null, text); return c; };
+  const steps = el('ol');
+  if (info.platform === 'windows') {
+    steps.append(
+      li(frag('Tick the type above once — that writes the per-user Open With entry (HKCU, no admin rights).')),
+      li(frag('Right-click the file → ', mono('Open with → Choose another app'), ' → pick Winnow → tick ', mono('Always'), '. Windows guards double-click defaults behind exactly this dialog, so this step is the supported way to make it stick.')),
+      li(frag('If Winnow isn’t offered there at all: ', mono('Choose another app → More apps → Look for another app on this PC'), ' and browse to ', mono('launch\\winnow.bat'), ' in the install folder — it forwards the file to Winnow.')),
+    );
+  } else {
+    steps.append(
+      li(frag('Tick the type above once — that writes ', mono('~/.local/share/applications/winnow.desktop'), ' and Open With entries in ', mono('~/.config/mimeapps.list'), '.')),
+      li(frag('Make it the default from a terminal: ', mono('xdg-mime default winnow.desktop text/csv'), ' (swap in the file’s MIME type), or in your file manager: right-click → Open With → Winnow → ', mono('Always use'), '.')),
+      li(frag('Or hand-edit ', mono('~/.config/mimeapps.list'), ': add ', mono('text/csv=winnow.desktop'), ' under ', mono('[Default Applications]'), '.')),
+    );
+  }
+  body.append(steps);
+  if (info.command) {
+    body.append(el('p', 'fb-help', 'Whatever the route, the command the OS should run for this install is:'));
+    const cmd = el('code', 'assoc-cmd', info.command + (info.platform === 'windows' ? ' "%1"' : ' %F'));
+    body.append(cmd);
+  }
+  d.append(body);
+  return d;
+}
+
+/* A tiny fragment builder: mixed text/code children without innerHTML. */
+function frag(...parts) {
+  const f = document.createDocumentFragment();
+  for (const part of parts) f.append(part);
+  return f;
 }
 
 /* On launch: when the catalogue has grown extensions nobody was ever

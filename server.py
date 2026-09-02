@@ -1039,6 +1039,10 @@ def api_assoc_types(request: Request):
     prompted = set(WS.machine_prefs.get(_ASSOC_PROMPTED_KEY) or [])
     return {"platform": file_assoc.platform_name(),
             "background": _assoc_background(),
+            # The exact command the OS is told to run — surfaced so the
+            # panel's manual-setup help can show THIS install's paths
+            # rather than a placeholder the analyst has to reconstruct.
+            "command": " ".join(file_assoc.launch_command(_assoc_background())),
             "types": [{**t, **st.get(t["ext"], {"registered": False, "default": False}),
                        "asked": t["ext"] in asked,
                        "prompted": t["ext"] in prompted} for t in catalogue]}
