@@ -397,6 +397,9 @@ export const SQLITE_IMPORT_EXTENSIONS = ['.db', '.sqlite', '.sqlite3', '.db-wal'
    .xlsm is the same zip container (macros are never executed); legacy
    binary .xls is out of scope (see xlsxread.py). */
 export const XLSX_IMPORT_EXTENSIONS = ['.xlsx', '.xlsm'];
+/* Plaso storage files import as one flat timeline table (no picker, no
+   options) — see winnow/plasoread.py. */
+export const PLASO_IMPORT_EXTENSIONS = ['.plaso'];
 
 export function extOf(filename) {
   const i = filename.lastIndexOf('.');
@@ -406,6 +409,7 @@ export function extOf(filename) {
 export function importKindFor(filename) {
   if (SQLITE_IMPORT_EXTENSIONS.includes(extOf(filename))) return 'sqlite';
   if (XLSX_IMPORT_EXTENSIONS.includes(extOf(filename))) return 'xlsx';
+  if (PLASO_IMPORT_EXTENSIONS.includes(extOf(filename))) return 'plaso';
   const ext = extOf(filename).slice(1); // drop the leading '.' — json/jsonl/ndjson below are bare
   return ext === 'json' || ext === 'jsonl' || ext === 'ndjson' ? 'json' : 'csv';
 }

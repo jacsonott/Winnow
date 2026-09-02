@@ -30,6 +30,9 @@ another analyst. The evidence files themselves are **never modified**.
   columns from epochs/FILETIME/Excel serials/whatever your tool emitted.
 - **A unified timeline** of every tagged row across every table in the
   case, in one chronological stream.
+- **Plaso timelines** — drop a `.plaso` storage file in and the whole
+  log2timeline output lands as one flat, filterable timeline table
+  (both storage generations; no plaso install needed).
 - **Pivot tables, session bookends, NTFS parsing** and more via drop-in
   plugins (five ship with the app), plus a read-only SQL pane when you
   want to write the query yourself.
