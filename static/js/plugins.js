@@ -10,6 +10,7 @@ import { rebuildView } from './view.js';
 import { activeSqlTab, hideMainViews, scheduleSqlTabSave, showGridTab, syncTabChrome } from './sql.js';
 import { setActiveSqlResult, sqlCopyResult, sqlDownloadCsv, sqlRowKey, sqlTagsFor, tagChips, wireSqlAssist } from './sqlassist.js';
 import { moveCursor } from './grid.js';
+import { loadCaseVariables } from './savedfilters.js';
 import { S } from './state.js';
 import { confirmDialog, modal, promptDialog } from './ui.js';
 import { updateTimeRangeButton } from './timeframe.js';
@@ -365,6 +366,14 @@ export function buildPluginTabContext(tab) {
       // table_histogram example's Store.time_histogram) to describe
       // exactly the rows on screen.
       get view() { return S.view ? { view_id: S.view.view_id, row_count: S.view.row_count } : null; },
+      // The case's variables as {name: value} — engagement name, API base
+      // URL, a document link. Case data, never secrets.
+      get variables() { return Object.fromEntries((S.caseVariables || []).map((v) => [v.name, v.value])); },
+    },
+    // Write a case variable (upsert) and refresh the local copy.
+    setVariable: async (name, value) => {
+      await post('/api/case/variables', { name, value: String(value ?? '') });
+      await loadCaseVariables();
     },
     // Fires after every grid rebuild — filter, sort, search, timeframe,
     // table switch — with {sourceId, viewId, rowCount}. Returns an

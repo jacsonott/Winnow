@@ -320,6 +320,20 @@ CREATE TABLE IF NOT EXISTS dashboard (
 -- movement board). The single-row `dashboard` above is kept only as a
 -- one-way migration source for case files from before this — its contents
 -- become one "Dashboard" entry here on next open (see _migrate_dashboards).
+-- Case variables: named values a case carries for the plugins and people
+-- working it — the engagement name, a backend API base URL, a link to the
+-- scoping document. Case data (they travel with the .db), NOT secrets:
+-- tokens belong in WINNOW_* environment variables, never here. A profile
+-- can declare variables (some required) that seed on apply and that the
+-- new-case dialog insists on.
+CREATE TABLE IF NOT EXISTS case_variables (
+    name        TEXT PRIMARY KEY,
+    value       TEXT NOT NULL DEFAULT '',
+    description TEXT,
+    required    INTEGER NOT NULL DEFAULT 0,
+    updated_at  TEXT
+);
+
 CREATE TABLE IF NOT EXISTS dashboards (
     id      INTEGER PRIMARY KEY,
     name    TEXT NOT NULL,
@@ -7032,6 +7046,66 @@ class Store:
             return w if isinstance(w, list) else []
         except (TypeError, ValueError):
             return []
+
+    # ------------------------------------------------------- case variables
+
+    VARIABLE_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
+
+    def list_variables(self) -> list[dict]:
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT name, value, description, required FROM case_variables ORDER BY required DESC, name").fetchall()
+        return [{"name": r["name"], "value": r["value"], "description": r["description"] or "",
+                 "required": bool(r["required"])} for r in rows]
+
+    def get_variables(self) -> dict:
+        """{name: value} — the shape a plugin reads (req.variables)."""
+        return {v["name"]: v["value"] for v in self.list_variables()}
+
+    def set_variable(self, name: str, value: str | None = None, description: str | None = None,
+                     required: bool | None = None) -> dict:
+        """Upsert. Omitted fields keep their stored value, so a plugin
+        setting a value never clears the description a profile gave it."""
+        name = (name or "").strip()
+        if not self.VARIABLE_NAME_RE.match(name):
+            raise ValueError("A variable name is a letter followed by letters, digits, _ . or - (max 64)")
+        if value is not None and len(str(value)) > 4000:
+            raise ValueError("Variable values are capped at 4000 characters")
+        with self.lock, self.db:
+            row = self.db.execute("SELECT value, description, required FROM case_variables WHERE name=?",
+                                  (name,)).fetchone()
+            self.db.execute(
+                "INSERT OR REPLACE INTO case_variables(name, value, description, required, updated_at)"
+                " VALUES (?,?,?,?,?)",
+                (name,
+                 str(value) if value is not None else (row["value"] if row else ""),
+                 description if description is not None else (row["description"] if row else None),
+                 int(bool(required)) if required is not None else (row["required"] if row else 0),
+                 time.strftime("%Y-%m-%dT%H:%M:%S")))
+        return next(v for v in self.list_variables() if v["name"] == name)
+
+    def delete_variable(self, name: str) -> None:
+        with self.lock, self.db:
+            self.db.execute("DELETE FROM case_variables WHERE name=?", (name,))
+
+    def seed_variables(self, defs: list[dict]) -> list[str]:
+        """A profile's declared variables land as rows — created with the
+        declared default when absent, description/required refreshed when
+        present, an existing VALUE never overwritten (re-applying a profile
+        must not wipe what the analyst typed). Returns the names that are
+        required and still empty, for the caller to prompt for."""
+        for d in defs or []:
+            if not isinstance(d, dict):
+                continue
+            name = str(d.get("name") or "").strip()
+            if not self.VARIABLE_NAME_RE.match(name):
+                continue
+            with self.lock:
+                exists = self.db.execute("SELECT 1 FROM case_variables WHERE name=?", (name,)).fetchone()
+            self.set_variable(name, None if exists else (d.get("default") or ""),
+                              description=d.get("description") or d.get("label") or "",
+                              required=bool(d.get("required")))
+        return [v["name"] for v in self.list_variables() if v["required"] and not v["value"]]
 
     def list_dashboards(self) -> list[dict]:
         """Each named dashboard with its widget count — the sidebar's

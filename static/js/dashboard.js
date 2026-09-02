@@ -497,8 +497,12 @@ async function saveAsProfile() {
   // The profile's plugins = whatever's enabled for this case now.
   const enabled = (S.pluginTabs || []).map((t) => t.plugin_fs);
   const plugins = [...new Set((S.plugins || []).filter((p) => p.enabled).map((p) => p.fs_name).concat(enabled))];
+  // Variable DEFINITIONS travel with the profile (name/description/required),
+  // never the values — a profile is a template for the next case.
+  const variables = (S.caseVariables || []).map((v) => ({
+    name: v.name, description: v.description || '', required: !!v.required }));
   try {
-    await post('/api/plugin_bundles', { name: name.trim(), plugins, dashboard: widgets });
+    await post('/api/plugin_bundles', { name: name.trim(), plugins, dashboard: widgets, variables });
     toast(`Profile "${name.trim()}" saved — apply it from the Plugin bundles menu on a new case`, 7000);
   } catch (e) { toast(e.message, 6000); }
 }

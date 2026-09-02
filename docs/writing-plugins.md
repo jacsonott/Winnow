@@ -367,6 +367,8 @@ Prefer it to reaching into the app's globals — this is what's supported.
 | `state.sources` | Live source list (`{id, name, columns, row_count, is_merge, error}`) |
 | `state.sourceId` | Currently selected source id |
 | `state.tags` | Tag definitions |
+| `state.variables` | The case's variables as `{name: value}` — see [Case variables](#case-variables) |
+| `setVariable(name, value)` | Set one case variable (creates it if new) |
 
 **Always call your backend through `winnow.api` / `winnow.post`.** A raw
 `fetch()` won't carry the `X-Timeline-Lite-Client` header that Winnow's
@@ -753,6 +755,53 @@ result is a completely normal source.
 contract — that's what makes re-import non-destructive and sessions
 portable. Derive a new table instead.
 
+### Case variables
+
+A case carries a small set of named values — the engagement name, the
+base URL of a backend your plugin talks to, a link to the scoping
+document — that the analyst edits under **Case ▾ → Case settings →
+Variables**. Plugins read and write the same set:
+
+```python
+def report_handler(req):
+    base = req.variables.get("report_api")        # {} when no case is open
+    if not base:
+        raise ValueError("Set the `report_api` variable in Case settings")
+    req.set_variable("last_report", datetime.now().isoformat())
+    ...
+```
+
+- `req.variables` is a plain `{name: value}` dict of strings; it never
+  raises.
+- `req.set_variable(name, value)` creates or updates one. Names are
+  `[A-Za-z][A-Za-z0-9_.-]*` (up to 64 chars); values are capped at 4000
+  characters. `ValueError` when no case is open or the name is bad.
+- Tabs and toolbar panels get the same through `winnow.state.variables`
+  and `winnow.setVariable(name, value)`.
+
+A **profile** (case type) can declare the variables its plugins expect,
+so the analyst is asked once, at case creation, rather than discovering
+a missing setting mid-investigation:
+
+```json
+"variables": [
+  {"name": "engagement", "label": "Engagement name", "required": true,
+   "description": "Used in report titles"},
+  {"name": "report_api", "label": "Report API base URL", "default": "http://reports.local"}
+]
+```
+
+Required ones gate the **New case** dialog; applying a profile to an
+existing case seeds any that are absent (never overwriting a value the
+analyst already set) and prompts for the required ones still empty.
+Saving a profile from a case carries its variable *definitions* along —
+never the values.
+
+**Variables live in the case file and travel with it.** They are for
+configuration, not secrets: a token or password belongs in the
+environment (see [Security model](#12-security-model)), never in a
+variable.
+
 ---
 
 ## 10. Testing a plugin
@@ -894,7 +943,8 @@ What that leaves to you, as an author:
   outside the case. Analysts run these on evidence machines.
 - Treat everything from `req.body` and `req.query` as hostile input.
 - Don't log or persist secrets; read credentials from the environment
-  rather than a file in the plugin folder.
+  rather than a file in the plugin folder — and never from a case
+  variable, which is case data and travels with the file.
 - Keep the airgap in mind — if your plugin needs the internet, make that
   the headline of your README, the way `claude_assistant` does.
 
@@ -952,6 +1002,20 @@ Module: `export default function mount(container, winnow)`, plus optional
 `{"source_id", "column", "value", "rows": [{"rid", "source_id", "cells"}]}`.
 Optional return keys `message` / `open_url` / `show_tab`. `ValueError` → 400.
 
+### `PluginRequest`
+
+What every API-route and row-action handler receives:
+
+| Member | What it is |
+| --- | --- |
+| `method`, `route` | HTTP method and the route as registered |
+| `query` | `dict[str, str]` from the query string |
+| `body` | Parsed JSON body, or `None` |
+| `store` | The open `Store`, or `None` when no case is open |
+| `storage` | Plain-JSON dict persisted per plugin in the workspace (`plugin_data/<fs_name>.json`) — not case data, and readable on disk, so not for secrets |
+| `variables` | The case's variables as `{name: value}` (`{}` with no case) |
+| `set_variable(name, value)` | Create or update one case variable |
+
 ### HTTP surface
 
 | Endpoint | Purpose |
@@ -964,6 +1028,9 @@ Optional return keys `message` / `open_url` / `show_tab`. `ValueError` → 400.
 | `GET /plugin_assets/<fs_name>/<path>` | A plugin's own files |
 | `* /api/plugin/<fs_name>/<route>` | A plugin's registered routes |
 | `POST /api/plugins/row_action/<fs_name>/<id>` | Runs a row action on `{source_id, pairs: [[source_id, rid]…], column?, value?}` |
+| `GET /api/case/variables` | `[{name, value, description, required}]` for the open case |
+| `POST /api/case/variables` | `{name, value?, description?, required?}` — create or update one |
+| `DELETE /api/case/variables/<name>` | Remove one |
 
 The path/upload ingest routes are also the scripting entry point — you
 can drive a plugin parser from `curl` without touching the UI.

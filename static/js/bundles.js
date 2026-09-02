@@ -6,6 +6,7 @@
 import { $, api, el, post, toast } from './core.js';
 import { loadPlugins } from './importer.js';
 import { loadSources, renderPageTabs } from './sources.js';
+import { promptForVariables } from './settings.js';
 import { S } from './state.js';
 import { confirmDialog, markModalAction, modal, promptDialog } from './ui.js';
 
@@ -24,6 +25,13 @@ export async function applyBundle(bundle) {
   const missing = res.missing || [];
   toast(`Applied "${res.applied}" — ${res.enabled.length} plugin${res.enabled.length === 1 ? '' : 's'} on`
     + (missing.length ? ` (${missing.length} in the bundle not installed here: ${missing.join(', ')})` : ''), 6000);
+  // Required variables the case doesn't have yet: ask now, in one dialog.
+  const need = res.variables_missing || [];
+  if (need.length) {
+    const defs = (bundle.variables || (await api('/api/plugin_bundles')).find((b) => b.id === bundle.id)?.variables || [])
+      .filter((d) => need.includes(d.name));
+    if (defs.length) await promptForVariables(defs, { title: `“${res.applied}” needs a few values` });
+  }
   return res;
 }
 

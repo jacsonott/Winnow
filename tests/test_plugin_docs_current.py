@@ -45,3 +45,26 @@ def test_guide_extension_point_count_matches():
 
 def test_api_version_is_noted_in_the_guide():
     assert f"current plugin API version is **{plugin_api.PLUGIN_API_VERSION}**" in GUIDE
+
+
+def _request_members():
+    """Public data members and methods a handler can reach on PluginRequest
+    (what __init__ assigns, plus properties and methods)."""
+    names = set()
+    src = inspect.getsource(plugin_api.PluginRequest.__init__)
+    names.update(re.findall(r"self\.([a-z_]+)\s*=", src))
+    for n, _ in inspect.getmembers(plugin_api.PluginRequest):
+        if not n.startswith("_"):
+            names.add(n)
+    return sorted(names)
+
+
+def test_every_pluginrequest_member_is_in_the_guide():
+    """Adding a field or method to PluginRequest means documenting it — in
+    the module docstring's handler example and in the guide's Reference."""
+    assert "### `PluginRequest`" in GUIDE
+    ref = GUIDE.split("### `PluginRequest`", 1)[1].split("\n### ", 1)[0]
+    doc = plugin_api.__doc__ or ""
+    for name in _request_members():
+        assert f"`{name}`" in ref or f"`{name}(" in ref, f"PluginRequest.{name} has no Reference row"
+        assert re.search(rf"\b{name}\b", doc), f"PluginRequest.{name} is not in plugin_api's module docstring"

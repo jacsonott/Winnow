@@ -103,6 +103,7 @@ export const S = {
   pageTabPrefs: null,      // {order, closed, width} for the page-tab strip, from localStorage — set below, see loadPageTabPrefs
   dashboardLibrary: [],    // machine-wide saved boards [{id, name, widget_count}] — workspace/dashboards.json
   watchlistNewHits: 0,     // hits landed since the analyst last looked at the Watchlist tab — the tab pill
+  caseVariables: [],       // the open case's variables [{name, value, description, required}] — Case settings → Variables
   sqlTabs: [],             // [{id, name, sql, pos}] from the case file's sql_tabs table (see showSqlTab)
   sqlTabId: null,          // which sql tab the editor/result pane is currently showing
   sqlResults: new Map(),   // sql tab id -> last {columns, rows, elapsed_ms, truncated} | {error}, in memory only

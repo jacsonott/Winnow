@@ -2071,6 +2071,7 @@ class PluginBundleBody(BaseModel):
     name: str
     plugins: list[str] = []
     dashboard: list | None = None   # profile: an optional dashboard layout
+    variables: list | None = None   # profile: variable DEFINITIONS the case should carry
 
 
 @app.get("/api/plugin_bundles")
@@ -2081,7 +2082,7 @@ def api_plugin_bundles():
 @app.post("/api/plugin_bundles")
 def api_plugin_bundles_save(body: PluginBundleBody):
     try:
-        return WS.plugin_bundles.save(body.name, body.plugins, body.dashboard)
+        return WS.plugin_bundles.save(body.name, body.plugins, body.dashboard, body.variables)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -2131,7 +2132,11 @@ def api_plugin_bundles_apply(bundle_id: int):
         if seeded:
             with contextlib.suppress(Exception):
                 STORE.scan_all()
+    # A profile's variable definitions seed rows (values never overwritten);
+    # the required ones still empty come back so the UI can ask for them.
+    variables_missing = STORE.seed_variables(bundle.get("variables") or [])
     return {"applied": bundle["name"],
+            "variables_missing": variables_missing,
             "enabled": sorted(wanted & known),
             "missing": sorted(wanted - known),  # in the bundle, not installed here
             "dashboard_applied": bool(bundle.get("dashboard")),
@@ -2715,6 +2720,34 @@ def api_case_settings_save(body: CaseSettingWrite):
         raise HTTPException(400, f"Unknown timestamp format: {body.ts_format}")
     store().set_case_setting("ts_format", body.ts_format)
     return store().get_case_settings()
+
+
+# ------------------------------------------------------------ case variables
+
+class CaseVariableWrite(BaseModel):
+    name: str
+    value: str | None = None
+    description: str | None = None
+    required: bool | None = None
+
+
+@app.get("/api/case/variables")
+def api_case_variables():
+    return store().list_variables()
+
+
+@app.post("/api/case/variables")
+def api_case_variable_set(body: CaseVariableWrite):
+    try:
+        return store().set_variable(body.name, body.value, body.description, body.required)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.delete("/api/case/variables/{name}")
+def api_case_variable_delete(name: str):
+    store().delete_variable(name)
+    return {"ok": True}
 
 
 class CaseNotesWrite(BaseModel):

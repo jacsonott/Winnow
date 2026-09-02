@@ -403,6 +403,7 @@ export function openNewCaseModal(state = {}) {
         name: nameInput.value, group: groupInput.value, path: pathInput.value,
         chosenDir, pathTouched,
         caseType: typeSel.value,
+        vars: Object.fromEntries([...varInputs].map(([k, inp]) => [k, inp.value])),
       };
       openFolderBrowser(
         chosenDir,
@@ -423,17 +424,48 @@ export function openNewCaseModal(state = {}) {
     const noneOpt = el('option', null, 'None — machine defaults');
     noneOpt.value = '';
     typeSel.append(noneOpt);
+    let bundlesById = new Map();
+    const varsBox = el('div', 'case-vars new-case-vars');
+    varsBox.hidden = true;
+    const varInputs = new Map();     // variable name -> input, for the chosen profile
+    // A profile can declare variables the case should carry (the
+    // engagement name, an API base URL…); required ones are asked for
+    // here, before the case exists, rather than as a surprise afterwards.
+    const renderProfileVars = () => {
+      varsBox.replaceChildren();
+      varInputs.clear();
+      const bd = bundlesById.get(Number(typeSel.value));
+      const defs = (bd && bd.variables) || [];
+      varsBox.hidden = !defs.length;
+      if (!defs.length) return;
+      varsBox.append(el('div', 'fb-help', `“${bd.name}” asks for:`));
+      for (const d of defs) {
+        const row = el('div', 'case-var-row');
+        const name = el('span', 'case-var-name', (d.label || d.name) + (d.required ? ' *' : ''));
+        name.title = d.name;
+        const inp = el('input', 'case-var-value');
+        inp.dataset.var = d.name;
+        inp.value = state.vars && state.vars[d.name] != null ? state.vars[d.name] : (d.default || '');
+        inp.placeholder = d.required ? 'required' : 'optional';
+        row.append(name, inp, el('span', 'case-var-desc', d.description || ''), el('span'));
+        varInputs.set(d.name, inp);
+        varsBox.append(row);
+      }
+    };
     api('/api/plugin_bundles').then((bundles) => {
+      bundlesById = new Map(bundles.map((bd) => [bd.id, bd]));
       for (const bd of bundles) {
         const o = el('option', null, `${bd.name} (${bd.plugins.length} plugin${bd.plugins.length === 1 ? '' : 's'})`);
         o.value = String(bd.id);
         typeSel.append(o);
       }
       if (state.caseType) typeSel.value = state.caseType;
+      renderProfileVars();
     }).catch(() => {});
+    typeSel.onchange = renderProfileVars;
     const typeRow = el('div', 'row-actions');
     typeRow.append(typeSel);
-    b.append(el('label', null, 'Case type'), typeRow);
+    b.append(el('label', null, 'Case type'), typeRow, varsBox);
 
 
     const actions = el('div', 'row-actions');
@@ -443,6 +475,13 @@ export function openNewCaseModal(state = {}) {
       if (!name) { toast('Name the case first'); return; }
       const path = pathInput.value.trim();
       if (!path) { toast('Give the case file a path'); return; }
+      const bd = bundlesById.get(Number(typeSel.value));
+      const missing = ((bd && bd.variables) || []).filter((d) => d.required && !(varInputs.get(d.name)?.value || '').trim());
+      if (missing.length) {
+        toast(`“${bd.name}” needs: ${missing.map((d) => d.label || d.name).join(', ')}`, 5000);
+        varInputs.get(missing[0].name).focus();
+        return;
+      }
       try {
         await post('/api/cases', { path, name, group: groupInput.value.trim(), notes: '' });
       } catch (e) {
@@ -453,6 +492,11 @@ export function openNewCaseModal(state = {}) {
       await openCase(path); // shared with the home screen's "open" flow — same brand-label/view-cache handling
       if (typeSel.value) {
         try {
+          // Values typed above land first, so applying the profile (which
+          // seeds definitions without overwriting values) finds them filled.
+          for (const [vname, inp] of varInputs) {
+            if (inp.value.trim()) await post('/api/case/variables', { name: vname, value: inp.value.trim() });
+          }
           await applyBundle({ id: Number(typeSel.value) });
         } catch (e) {
           toast('Case created, but the case-type bundle failed to apply: ' + e.message, 6000);
