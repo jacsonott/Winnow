@@ -423,9 +423,15 @@ export function openCaseSettings() {
    it's for), required ones flagged while empty, plus an add row. Saves
    on change through the same route plugins use. */
 export function renderCaseVariables(box) {
-  box.replaceChildren();
+  // The add row is built once per box and never detached — a repaint
+  // landing mid-typing (the re-fetch on open) must not steal focus or
+  // text from it. Only the listed rows are replaced.
+  if (!box._addRow) box._addRow = buildCaseVariableAddRow(box);
+  if (!box._addRow.isConnected) box.append(box._addRow);
+  for (const c of [...box.children]) if (c !== box._addRow) c.remove();
   const list = S.caseVariables || [];
-  if (!list.length) box.append(el('div', 'note-status', 'No variables yet.'));
+  const rows = [];
+  if (!list.length) rows.push(el('div', 'note-status', 'No variables yet.'));
   for (const v of list) {
     const row = el('div', 'case-var-row' + (v.required && !v.value ? ' missing' : ''));
     const name = el('span', 'case-var-name', v.name);
@@ -445,30 +451,29 @@ export function renderCaseVariables(box) {
       catch (e) { toast('Could not remove: ' + e.message, 5000); }
     };
     row.append(name, val, desc, del);
-    box.append(row);
+    rows.push(row);
   }
-  // The add row is built once per box and re-attached on every repaint,
-  // so a refresh landing mid-typing (the re-fetch on open) can't wipe it.
-  if (!box._addRow) {
-    const add = el('div', 'case-var-row case-var-add');
-    const nameIn = el('input', 'case-var-name-in');
-    nameIn.placeholder = 'name (e.g. engagement)';
-    const valIn = el('input', 'case-var-value');
-    valIn.placeholder = 'value';
-    const addBtn = el('button', 'btn ghost', 'Add');
-    addBtn.onclick = async () => {
-      if (!nameIn.value.trim()) { toast('Name the variable'); return; }
-      try {
-        await post('/api/case/variables', { name: nameIn.value.trim(), value: valIn.value });
-        nameIn.value = ''; valIn.value = '';
-        await loadCaseVariables();
-        renderCaseVariables(box);
-      } catch (e) { toast('Could not add: ' + e.message, 5000); }
-    };
-    add.append(nameIn, valIn, el('span', 'case-var-desc', ''), addBtn);
-    box._addRow = add;
-  }
-  box.append(box._addRow);
+  for (const r of rows) box.insertBefore(r, box._addRow);
+}
+
+function buildCaseVariableAddRow(box) {
+  const add = el('div', 'case-var-row case-var-add');
+  const nameIn = el('input', 'case-var-name-in');
+  nameIn.placeholder = 'name (e.g. engagement)';
+  const valIn = el('input', 'case-var-value');
+  valIn.placeholder = 'value';
+  const addBtn = el('button', 'btn ghost', 'Add');
+  addBtn.onclick = async () => {
+    if (!nameIn.value.trim()) { toast('Name the variable'); return; }
+    try {
+      await post('/api/case/variables', { name: nameIn.value.trim(), value: valIn.value });
+      nameIn.value = ''; valIn.value = '';
+      await loadCaseVariables();
+      renderCaseVariables(box);
+    } catch (e) { toast('Could not add: ' + e.message, 5000); }
+  };
+  add.append(nameIn, valIn, el('span', 'case-var-desc', ''), addBtn);
+  return add;
 }
 
 /* A profile's required variables, asked for in one dialog — used after
