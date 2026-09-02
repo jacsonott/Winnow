@@ -35,6 +35,7 @@ from winnow import paths
 from winnow import plugin_api
 from winnow import updater
 from winnow import version
+from winnow import archive
 from winnow import workspace as WS
 from winnow.store import (CASE_SUFFIX, PLASO_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, OpCancelled, Store,
                    describe_case_lock, probe_case_lock, sweep_orphan_views)
@@ -1688,6 +1689,49 @@ def _ingest_kind_for_path(path: str) -> str:
     if suffix in PLASO_IMPORT_EXTENSIONS:
         return "plaso"
     return "json" if suffix in _JSON_INGEST_EXTS else "csv"
+
+
+class ArchiveExpandBody(BaseModel):
+    path: str
+
+
+@app.post("/api/ingest/archive/expand")
+def api_ingest_archive_expand(body: ArchiveExpandBody):
+    """Expand a zip/tar/tgz/gz evidence archive (support bundle, UAC
+    collection) — recursively, nested archives included — into a fresh
+    directory beside it. The response's root feeds the directory-import
+    modal; nothing is ingested here."""
+    if not os.path.isfile(body.path):
+        raise HTTPException(400, f"No file at {body.path}")
+    try:
+        return archive.expand_archive(body.path)
+    except archive.ArchiveError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/ingest/archive/upload")
+async def api_ingest_archive_upload(file: UploadFile = File(...)):
+    """Upload-then-expand: the archive spools to a tempfile, expands into a
+    directory beside the CASE file (the one durable, analyst-visible place
+    an upload has), and the spool is removed either way."""
+    suffix = Path(file.filename or "upload.zip").suffix or ".zip"
+    fd, tmp = tempfile.mkstemp(suffix=suffix)
+    try:
+        with os.fdopen(fd, "wb") as out:
+            while chunk := await file.read(4 << 20):
+                out.write(chunk)
+        dest_root = os.path.dirname(os.path.abspath(store().path))
+        # Name the extraction after the UPLOADED file, not the tempfile.
+        named = os.path.join(os.path.dirname(tmp), os.path.basename(file.filename or "archive.zip"))
+        os.replace(tmp, named)
+        tmp = named
+        try:
+            return archive.expand_archive(tmp, dest_root=dest_root)
+        except archive.ArchiveError as e:
+            raise HTTPException(400, str(e))
+    finally:
+        with contextlib.suppress(OSError):
+            os.remove(tmp)
 
 
 class PreviewPath(BaseModel):

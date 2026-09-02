@@ -6,7 +6,7 @@ import { $, api, debounce, el, post, toast } from './core.js';
 import { maybeOfferAssociation } from './assoc.js';
 import { openFolderBrowser } from './home.js';
 import { startJobsPoll, uploadWithProgress } from './jobs.js';
-import { PLASO_IMPORT_EXTENSIONS, RECOGNIZED_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, extOf, importKindFor, openImportPreview, openJsonImportPreview } from './merge.js';
+import { ARCHIVE_IMPORT_EXTENSIONS, PLASO_IMPORT_EXTENSIONS, RECOGNIZED_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, extOf, importKindFor, openImportPreview, openJsonImportPreview } from './merge.js';
 import { renderPluginTabs } from './plugins.js';
 import { fmtBytes } from './tables.js';
 import { loadSources } from './sources.js';
@@ -45,7 +45,7 @@ export function globMatches(pattern, name) {
 export function pluginFormatFor(filename) {
   const base = filename.split(/[\\/]/).pop();
   const ext = extOf(base);
-  if (RECOGNIZED_IMPORT_EXTENSIONS.includes(ext) || SQLITE_IMPORT_EXTENSIONS.includes(ext) || XLSX_IMPORT_EXTENSIONS.includes(ext) || PLASO_IMPORT_EXTENSIONS.includes(ext)) return null;
+  if (RECOGNIZED_IMPORT_EXTENSIONS.includes(ext) || SQLITE_IMPORT_EXTENSIONS.includes(ext) || XLSX_IMPORT_EXTENSIONS.includes(ext) || PLASO_IMPORT_EXTENSIONS.includes(ext) || ARCHIVE_IMPORT_EXTENSIONS.includes(ext)) return null;
   return S.pluginFormats.find((f) =>
     (ext && (f.extensions || []).includes(ext))
     || (f.filename_patterns || []).some((p) => globMatches(p, base))) || null;
@@ -109,6 +109,8 @@ export function queueItem(transport, name, fmt = pluginFormatFor(name)) {
     : kind === 'sqlite' || kind === 'xlsx' ? { ...transport, name, kind, tables: null, configured: false }
     // A .plaso is one file → one timeline table with nothing to configure.
     : kind === 'plaso' ? { ...transport, name, kind, configured: true }
+    // An archive expands on import, then you pick files from its contents.
+    : kind === 'archive' ? { ...transport, name, kind, configured: true }
     : { ...transport, name, kind, delimiter: null, has_header: true, column_types: null, configured: false };
 }
 
@@ -204,6 +206,10 @@ export function openImportModal() {
           cfg.disabled = true;
           cfg.title = 'A Plaso storage file imports as one flat timeline table — nothing to configure';
         }
+        if (item.kind === 'archive') {
+          cfg.disabled = true;
+          cfg.title = 'Expands on import (nested archives included) — you pick the files from its contents next';
+        }
         cfg.onclick = () => {
           if (item.kind === 'plugin') {
             openPluginOptionsForm(item, {
@@ -256,7 +262,7 @@ export function openImportModal() {
     addLabel.title = 'A regular browser file picker — the file is copied up to the server before importing';
     const addInput = el('input');
     addInput.type = 'file';
-    addInput.accept = [...RECOGNIZED_IMPORT_EXTENSIONS, ...SQLITE_IMPORT_EXTENSIONS, ...XLSX_IMPORT_EXTENSIONS, ...PLASO_IMPORT_EXTENSIONS, ...pluginExtensions()].join(',');
+    addInput.accept = [...RECOGNIZED_IMPORT_EXTENSIONS, ...SQLITE_IMPORT_EXTENSIONS, ...XLSX_IMPORT_EXTENSIONS, ...PLASO_IMPORT_EXTENSIONS, ...ARCHIVE_IMPORT_EXTENSIONS, ...pluginExtensions()].join(',');
     addInput.multiple = true;
     addInput.hidden = true;
     addInput.onchange = () => {
@@ -291,7 +297,27 @@ export function openImportModal() {
         // the loop; the directory-import loop does the same, for the same
         // reason.
         let pluginOk = 0;
+        const expanded = [];   // archive expansion reports, handed to directory import below
         for (const item of queue) {
+          if (item.kind === 'archive') {
+            toast(`Expanding ${item.name}\u2026`, 60000);
+            try {
+              const rep = item.path
+                ? await post('/api/ingest/archive/expand', { path: item.path })
+                : await (() => {
+                  const fd = new FormData();
+                  fd.append('file', item.file);
+                  return uploadWithProgress('/api/ingest/archive/upload', fd, item.name);
+                })();
+              expanded.push({ name: item.name, ...rep });
+              toast(`Expanded ${item.name}: ${rep.files.toLocaleString()} file${rep.files === 1 ? '' : 's'}`
+                + (rep.archives > 1 ? ` from ${rep.archives} nested archives` : '')
+                + (rep.truncated ? ' (stopped at a safety cap — partial)' : ''), 6000);
+            } catch (e) {
+              if (!e.cancelled) toast(`Could not expand ${item.name}: ` + e.message, 8000);
+            }
+            continue;
+          }
           // Two transports, chosen by how the item arrived — a path item
           // (the "Add from this machine…" picker, directory import) reads
           // in place with no upload leg; a browser-picked File uploads.
@@ -364,6 +390,14 @@ export function openImportModal() {
         // The analyst just opened these types with Winnow — the moment
         // the one-time Open With offer is actually justified.
         maybeOfferAssociation(queue.map((i) => i.name));
+        // Expanded archives hand off to directory import — the flow that
+        // already owns extension gates, include/exclude and the sidebar
+        // folder mirror. One modal, rooted at the first expansion; other
+        // roots are announced for a follow-up pass.
+        if (expanded.length) {
+          for (const r of expanded.slice(1)) toast(`Also expanded to ${r.root} — import it via Case \u2192 Import \u2192 folder`, 10000);
+          openDirectoryImportModal({ root: expanded[0].root });
+        }
       })();
     };
     queueActs.append(pathBtn, addLabel, folderBtn, importAll);
@@ -598,6 +632,7 @@ export function recognizedImportFile(name) {
     || SQLITE_IMPORT_EXTENSIONS.includes(extOf(name))
     || XLSX_IMPORT_EXTENSIONS.includes(extOf(name))
     || PLASO_IMPORT_EXTENSIONS.includes(extOf(name))
+    || ARCHIVE_IMPORT_EXTENSIONS.includes(extOf(name))
     || !!pluginFormatFor(name);
 }
 
