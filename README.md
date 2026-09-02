@@ -9,151 +9,105 @@ stutters no matter how deep you are.
 
 ![The grid mid-triage: an EvtxECmd table under the shipped Logons filter, tagged rows on the rail](docs/screenshots/grid.png)
 
-Everything runs on your machine — one Python server, no cloud, no CDN, no
-build step. It works on an airgapped analysis box, and your work (tags,
-notes, saved views) lives in a single SQLite case file you can hand to
+Everything runs on your machine — one Python server, no cloud, no build
+step, works on an airgapped analysis box. Your work (tags, notes, saved
+views, the watchlist) lives in a single SQLite case file you can hand to
 another analyst. The evidence files themselves are **never modified**.
 
 ## What you get
 
-- **Tags with hotkeys** — press `1` to mark a row TA, `2` suspicious.
-  Tag counts live in the ribbon; a rail down the grid's edge shows where
-  your findings cluster in the whole filtered view. Undo included.
-- **Filters that keep up with you** — type `4624` or `!svchost` or
-  `>1000` straight into a column header, pick values Excel-style from the
-  header dropdown, or build AND/OR trees in the guided builder. A set of
-  **ready-made triage filters ships in the box** (logon sweeps, RDP both
-  directions, Defender tampering, persistence run keys, …) and appears
-  automatically when a matching table opens.
+- **Tags with hotkeys** — press `1` to mark a row TA, `2` suspicious. Tag
+  counts live in the ribbon, a rail down the grid's edge shows where your
+  findings cluster in the whole filtered view, and undo steps back through
+  exactly what each tag operation changed.
+- **Filters that keep up with you** — type `4624` or `!svchost` or `>1000`
+  straight into a column header, pick values Excel-style from the header
+  dropdown, or build AND/OR trees in the guided builder. **Ready-made
+  triage filters ship in the box** (logon sweeps, RDP both directions,
+  Defender tampering, persistence run keys, …) and appear automatically
+  when a matching table opens.
 - **Time navigation** — pin a timeframe that survives every filter change,
   jump to the same timestamp across tables, derive real sortable datetime
   columns from epochs/FILETIME/Excel serials/whatever your tool emitted.
-- **A unified timeline** of every tagged row across every table in the
-  case, in one chronological stream.
-- **Plaso timelines** — drop a `.plaso` storage file in and the whole
-  log2timeline output lands as one flat, filterable timeline table
-  (both storage generations; no plaso install needed).
-- **Pivot tables, session bookends, NTFS parsing** and more via drop-in
-  plugins (five ship with the app), plus a read-only SQL pane when you
-  want to write the query yourself.
+- **Case-wide pages** — a unified Timeline of everything you've tagged, an
+  IOC watchlist scanned across every table, Markdown case notes that link
+  back into the evidence, and named dashboards (a ready-made KAPE triage
+  profile included).
+- **Plaso timelines** — drop a `.plaso` file in and the whole log2timeline
+  output lands as one flat, filterable table. No plaso install needed.
+- **Pivot tables, session bookends, raw NTFS parsing** and more via
+  drop-in plugins (five ship with the app), plus a read-only SQL pane when
+  you want to write the query yourself.
 
-## Run it
+## Get started
 
 ```bash
 pip install fastapi "uvicorn[standard]" python-multipart
-python server.py --case case.db --open timeline.csv
+python server.py
 ```
 
+That opens the home screen at http://127.0.0.1:8777 in an **app window** —
+no address bar or tab strip, its own taskbar entry — falling back to an
+ordinary browser tab if no Chromium-family browser is around. Create a
+case, then import files from the UI, drag-and-drop them onto the window,
+or skip ahead with `python server.py --case case.db --open timeline.csv`.
+
 Prefer not to touch a terminal? The `launch/` folder has double-click
-launchers — `winnow.sh` (Linux), `winnow.command` (macOS), `winnow.bat` /
-`winnow.vbs` (Windows) — that find Python and start it for you. See
-[launch/README.md](launch/README.md).
-
-**Settings → File associations** puts Winnow in the OS's Open With menu
-for the types it reads (per-user, no admin rights). If the automatic
-registration doesn't stick — Windows guards double-click defaults, and
-some Linux desktops cache MIME handlers — the panel's *"Not working? Set
-it manually"* section walks through the manual route: on Windows,
-right-click a file → *Open with → Choose another app* → Winnow → *Always*
-(browse to `launch\winnow.bat` if Winnow isn't offered); on Linux,
-`xdg-mime default winnow.desktop text/csv` or the same right-click →
-*Open With → Always use* in your file manager. The panel shows the exact
-command your install registers, for hand-writing an entry anywhere else.
-
-Opens http://127.0.0.1:8777 in an **app window** — a browser window with no
-address bar, tab strip or bookmarks, and its own taskbar entry, so Winnow
-looks like the application it is rather than one of your twenty tabs. It
-uses whichever Chromium-family browser it finds (Edge first on Windows,
-since it ships with the OS; Chrome first elsewhere) and falls back to an
-ordinary tab in your default browser if there isn't one. You can also skip
-`--open` and import from the UI.
-The home screen's ⏻ button (or Session → "Shut down Winnow…") stops the server
-again from the UI — everything is already saved in the case file.
-A server whose browser windows have all been closed shuts itself down after
-a couple of minutes on its own (once nothing is importing and no download is
-still running) — so a forgotten Winnow no longer holds a case lock all
-weekend. `--no-idle-shutdown` keeps it running for script-driven use.
+launchers for Linux, macOS and Windows — see
+[launch/README.md](launch/README.md). And **Settings → File associations**
+puts Winnow in the OS's Open With menu for the types it reads (per-user,
+no admin rights). If the automatic registration doesn't stick — Windows
+guards double-click defaults, some Linux desktops cache MIME handlers —
+the panel's *"Not working? Set it manually"* section walks through the
+manual route and shows the exact command your install registers.
 
 | flag | meaning |
 | --- | --- |
-| `--case FILE` | SQLite case file, created if missing. Everything lives here. |
+| `--case FILE` | SQLite case file, created if missing |
 | `--open A.csv B.csv` | Ingest files at startup |
-| `--no-fts` | Skip the full-text index. Roughly halves import time; search falls back to substring matching |
+| `--no-fts` | Skip the full-text index — roughly halves import time; search falls back to substring scanning |
 | `--port`, `--host` | Defaults 8777 / 127.0.0.1 |
-| `--no-browser` | Don't auto-open a browser |
-| `--browser-tab` | Open an ordinary tab instead of an app window |
-| `--browser-profile DIR` | Give the app window its own browser profile — isolates Winnow from your extensions, but appearance, keybindings and panel sizes live in that profile, so a new one starts from defaults |
-| `--force` | Open `--case` even if another Winnow already has it open |
+| `--no-browser` / `--browser-tab` | Don't auto-open a window / open a plain tab instead |
+| `--force` | Open a case another Winnow still holds |
 
-A case file is meant to be open in **one** Winnow at a time. Each running
-server leaves a `<case>.winnow-lock` marker beside its case file, and opening
-a case another server still holds tells you who has it (user, host, when) and
-asks before continuing — the CLI refuses outright, and `--force` overrides.
-Going ahead anyway is supported but nothing merges the two: neither server
-sees the other's tags, notes or imports until it reloads, and a long write in
-one starts failing writes in the other. If the case file lives on a network
-share, don't — SQLite's WAL journalling needs shared memory that SMB and NFS
-don't provide. Two analysts on one investigation should work in separate case
-files and merge with session files, which is what tag remap-by-name is for.
+A case file is meant to be open in **one** Winnow at a time — opening a
+case another server holds tells you who has it and asks first. Don't put
+case files on a network share: SQLite's journalling doesn't survive
+SMB/NFS. Two analysts on one investigation should work in separate case
+files and merge with session files. When you're done, the ⏻ button shuts
+the server down from the UI; a server whose windows have all been closed
+shuts itself down after a couple of idle minutes anyway.
 
-## Updating
+### Updating
 
-Winnow keeps your work *inside its own folder* — saved filters, tag
-templates, the case list, your `cases` folder setting, installed plugins,
-session exports. So "download the new one and replace the folder" throws
-all of that away. Update instead:
+Your work lives *inside the Winnow folder* (workspace, plugins, sessions,
+often cases), so don't replace the folder — update in place. Nothing in
+that list is ever touched, the old version is backed up first, and Winnow
+never phones home on its own:
 
-**From the app** — Settings → Updates → *Check for updates*. It tells you
-what's available and installs it on request. Winnow never checks on its
-own: no startup ping, no background poll.
+- **From the app:** Settings → Updates → *Check for updates*.
+- **From a terminal:** `python update.py --check`, then `python update.py`
+  (and `--rollback` to undo).
+- **Airgapped:** `python update.py --download-only --dest /media/usb` on a
+  connected machine, then `python update.py --from /media/usb/winnow-*.zip`
+  on the analysis box.
+- **Beta channel:** `python update.py --dev` tracks the develop branch;
+  Settings → Updates shows the exact build.
 
-**From a terminal**, in the Winnow folder:
+## How fast?
 
-```bash
-python update.py --check      # what's available, changes nothing
-python update.py              # check, show the plan, install
-python update.py --rollback   # undo the last update
-```
-
-**On an airgapped analysis box**, fetch it on a machine that has network:
-
-```bash
-python update.py --download-only --dest /media/usb
-```
-
-then carry it over and apply it in place:
-
-```bash
-python update.py --from /media/usb/winnow-1.1.0.zip
-```
-
-**Beta testing, or working on Winnow itself?** `python update.py --dev`
-syncs to the tip of the `develop` branch instead of the latest release —
-unreleased code, with the same backup, the same protected paths and the
-same `--rollback`. The install records that it came from develop (in
-`.winnow-install.json`) and Settings → Updates shows the build it is on,
-because a box running code no release was cut from is a thing to know
-before quoting a version number in a report.
-
-Either way, only the program files are replaced. `workspace/`, `plugins/`,
-`sessions/` and every case file are never read, written or deleted, and
-the version you were on is backed up first. Restart Winnow afterwards —
-the running server keeps executing the code it already loaded.
-
-## Measured on this machine
-
-1.2M rows × 10 columns (169 MB CSV):
+1.2M rows × 10 columns (169 MB CSV), measured on an ordinary laptop:
 
 | | |
 | --- | --- |
 | Import | 8.2 s (~147k rows/s) |
-| FTS5 index build | 8.8 s |
+| Full-text index build | 8.8 s |
 | Filter + sort 171k matching rows | 0.6 s |
 | Fetch a page 150,000 rows deep | 1 ms |
 | Full-text search across all columns | 8 ms |
 | Tag all 171k rows in a view | instant |
 
-## Using it
+## Everyday triage
 
 ![Excel-style value picker on a column header](docs/screenshots/value-picker.png)
 
@@ -165,211 +119,138 @@ Filters are typed straight into the box under each column header:
 | `!svchost` | does not contain |
 | `=4624` | exact |
 | `^C:\Users` | starts with |
-| `>1000` | greater than (numeric columns cast to REAL) |
+| `>1000` | greater than (numeric) |
 | `/re/` | regular expression |
-| `""` | empty |
-| `*` | not empty |
+| `""` / `*` | empty / not empty |
 | `a\|b\|c` | any of |
 
-Keys: `↑↓`/`jk` move, `Shift+↑↓` extend selection, `PgUp`/`PgDn`, `g`/`G` for
-top and bottom, `1`–`9` toggle a tag on the selection, `Shift+1`–`9` apply a tag
-to **every** row in the current view, `/` search, `f` filters to the value in
-the cell you're on (`Shift+F` does that *and* drops every other filter — the
-timeframe filter stays), `q`/`w` cycle the saved filters (aliases `[`/`]`),
-`e` the Filter builder, `v` the value picker for the cell you're on, `a`
-toggles the timeframe filter (`A` configures it), `C` the table menu, `n` note,
-`?` help. `Ctrl`/`⌘`+`Z` undoes the last tag you applied or removed — press it
-again to keep stepping back. Undo reverses exactly the rows that op
-*changed*, so tagging a selection that overlaps rows you'd tagged earlier
-and then undoing leaves the earlier ones alone. `Alt`+`1`–`0` switches tabs: `Alt`+`1` is whichever table you were
-last in, `Alt`+`2` onward are the page tabs in strip order (so they follow a
-reorder rather than being nailed to SQL/Timeline). `J` jumps to the row nearest
-a timestamp you type — the moment is remembered across tables, so `.` jumps
-straight to it again in whichever table you're looking at. `X` toggles the
-current grouping off and back on without touching the filters (`x` drops it
-outright). `Q` opens the current
-filter/sort/search as a ready-made query in the SQL pane.
+The `▾` on each filter box opens that column's values — every distinct
+value with a count, ticked or unticked, like Excel's header dropdown.
+Click a column header to sort, `Shift`-click for a secondary sort.
+**Right-click** does the obvious thing everywhere: a row (tag, filter to
+the cell, copy), a group header (tag the whole group), a column header
+(formats, datetime/flatten extraction), a tab or sidebar entry (the table
+menu).
 
-Saved filters can carry a grouping: save while grouped and applying the filter
-brings the grouping back; clearing filters (`c`) clears the grouping with them.
-Reorder a header set's saved filters with ▲/▼ or by dragging rows in the Saved
-filters list — that order is the `[` / `]` cycle order. The Timeframe filter
-dialog can fill its range from your tagged rows — earliest to latest across any
-tag, or just the tags you toggle on.
+The keys you'll actually use — `?` shows the full list, and everything is
+rebindable in Settings:
 
-The `▾` on each filter box opens that column's values — every distinct value
-with a count, ticked or unticked, the way Excel's header dropdown works — and
-applies what you tick as an ordinary filter. Reading those values is a scan, so
-it's on by default only under 250,000 rows; the table menu turns it on or off
-for the whole table or one column, and a row's right-click menu offers it for
-any column regardless.
+| keys | do |
+| --- | --- |
+| `↑↓` / `jk`, `g` / `G` | move; jump to top / bottom |
+| `1`–`9` | toggle a tag on the selection (`Shift`: on **every** row in view) |
+| `Ctrl+Z` | undo the last tag change, step by step |
+| `/` | search all columns (substring, regex or advanced) |
+| `f` / `F` | filter to the selected cell's value (`F` drops other filters too) |
+| `v`, `e` | value picker; filter builder |
+| `q` / `w` | cycle the saved filters (also `[` / `]`) |
+| `r` / `R` | toggle / configure the timeframe filter |
+| `a`, `.` | jump to a timestamp; jump to the same moment in another table |
+| `d`, `n` | detail pane; row note |
+| `x` / `X` | drop grouping / toggle it off-and-back |
+| `t`, `s`, `C` | Tables manager; Search all; table menu |
+| `Alt+1`–`0` | switch tabs (`Alt+1` = the table you were last in) |
+| `Q` | open the current filter/sort/search as SQL |
 
-**Right-click** does the obvious thing in five places: a row (tag it, filter to
-or exclude the cell you clicked, copy), a group header (tag or untag every row
-in the group in one go, without expanding it), a column header (display format,
-add a datetime column from it, flatten JSON/XML out of it, the derived-column
-actions), the detail pane (see below), a tab or a sidebar table name (the table
-menu — columns, value dropdowns, layout defaults; also on `C`).
-
-Click a column header to sort, `Shift`-click to add a secondary sort.
-
-The narrow strip down the right edge of the grid is a rail showing where tagged
-rows sit in the whole filtered view — so you can see clustering in a 200k-row
-result without scrolling through it. The count on each tag in the ribbon is
-scoped to what you're looking at — filter or search and it becomes "how many of
-*these* are tagged", with the whole-table number in the tooltip.
+Saved filters can carry a grouping, cycle in the order you arrange them,
+and the timeframe dialog can fill its range from your tagged rows.
 
 ## Grouping
 
-Drag a column header into the **Group by** strip to bucket the view by it —
-counts per value, expand a group to see its rows. Drag in a second column for a
-nested breakdown (Process, then User within each process); drag the pills to
-reorder the nesting, and the strip's Sort button orders groups by count or by
-value. A datetime column groups by calendar day.
+Drag a column header into the **Group by** strip to bucket the view —
+counts per value, expand a group for its rows, drag in a second column for
+a nested breakdown, reorder by dragging the pills. A datetime column
+groups by calendar day. **+ Tag** adds a level that buckets by the tags on
+the rows — one group per tag plus everything untagged, nested either way
+round. Grouped rows are ordinary rows: select, tag, right-click; a group
+header's menu tags or untags the whole group without expanding it.
 
-**+ Tag** adds a level that buckets by the tags on the rows instead: one group
-per tag, plus everything untagged. It's the one grouping whose counts can add
-up to more than the view holds — a row with two tags is in both groups, which
-is the point. It nests either way round, so "Lateral movement, broken down by
-Computer" and "each Computer, broken down by tag" are both a two-pill grouping.
+## Tables, pages and the sidebar
 
-Grouped rows are ordinary rows: click, `Ctrl`-click and `Shift`-click to
-select, right-click for the row menu, tag with `1`–`9`, open the detail pane,
-copy. A group header's own menu tags or untags the whole group server-side,
-which works on a collapsed group and on an outer nesting level — neither needs
-the rows paged in first.
+The header bar carries your open tables on the left and the pages — SQL,
+Timeline, Notes, Watchlist, anything a plugin adds — on the right. Both
+strips reorder by dragging; both kinds of tab close with ✕ (a closed
+table stays in the case; a closed page reopens from the sidebar). The
+sidebar lists everything — every table open or closed, sortable into
+folders, every page, every dashboard — and directory import recreates the
+evidence folder tree there automatically.
 
-## Tabs
+## The case pages
 
 ![The unified Timeline: every tagged row across the case, one stream](docs/screenshots/timeline.png)
 
-The header bar carries two strips: your open tables on the left, and the pages —
-SQL, Timeline, anything a plugin pinned there — on the right. Both reorder by
-dragging a tab along its strip, both scroll when there are more tabs than room,
-and the divider between them sets how much of the bar each gets (double-click it
-to go back to sizing itself). The sidebar down the left lists all of it as a
-standing list — every table in the case, open or closed, and every page — with
-▲/▼ on each row for when dragging a strip that's scrolled out of view is more
-trouble than it's worth. Tab order and the divider are remembered per browser.
-`Alt`+`1`–`0` switches between them from the keyboard — `Alt`+`1` back to the
-table you were last in, `Alt`+`2` onward down the page strip.
+- **Timeline** — every tagged row across every table, one chronological
+  stream. Tag it and it's on the timeline; that's the whole model.
+- **Search all** (`s`) — sweep every table in the case, open or closed.
+  Paste a list of IOCs one per line and get per-indicator, per-table hit
+  counts; a click opens that table filtered to the term.
+- **Watchlist** — case-level indicators (hashes, IPs, domains, filenames)
+  scanned across every table, with per-indicator hit counts, optional
+  auto-tagging, import/export, and a dot on the tab when new hits land.
+- **Notes** — a Markdown scratchpad saved in the case file. Links like
+  `[the 4624 sweep](winnow:table/3)` navigate to tables, queries and
+  dashboards from the preview — the Link ▾ button writes them for you.
+- **Dashboards** — named boards of widgets (counts, charts, top-N lists)
+  built from templates or your own SQL, with live preview before saving.
+  A board plus your enabled plugins saves as a **profile** you can apply
+  to the next case of the same type — the shipped **KAPE triage** profile
+  is exactly that: logon movement, RDP, tampering signals, registry
+  persistence, and a starter watchlist.
 
 ## Timestamps
 
-Logs arrive with whatever timestamp shape the tool that wrote them felt like.
-Right-clicking a column header opens its options, including **Add datetime
-column from this…**, which reads the column and adds a *new* one holding a
-real, sortable datetime — the original is never modified, and neither is the
-file on disk.
-
-Winnow samples the column and suggests a format, with a live preview of what
-each value becomes before you commit to it. It reads Unix epochs (seconds
-through nanoseconds, auto-ranged), Windows FILETIME (decimal or hex),
-WebKit/Chrome timestamps, Mac absolute/Cocoa time, .NET ticks, Excel serial
-dates, ISO 8601 (with or without fraction and offset), `dd Mmm yyyy`,
-`MM/DD/YYYY` with AM/PM, compact `YYYYMMDDhhmmss`, Apache access-log and
-RFC 2822 dates — and old BSD syslog (`Mmm dd hh:mm:ss`), which carries no year:
-you give it the year of the first line and it rolls forward on its own when the
-file crosses New Year.
-
-Values with an explicit offset are converted to UTC. Values without one are
-kept exactly as written unless you set the source's fixed UTC offset. Anything
-that can't be parsed is left empty and counted, and the column's menu offers
-**Show N unparsed rows** so you can look at what didn't convert rather than
-wonder. A second operation computes the **duration between two datetime
-columns**, in case you want dwell time or clock skew as a sortable number.
+Right-click a column header → **Add datetime column from this…** and
+Winnow samples the column, suggests a format with a live preview, and adds
+a *new*, genuinely sortable datetime column — the original is never
+modified. It reads Unix epochs (seconds through nanoseconds), Windows
+FILETIME, WebKit/Chrome, Mac absolute, .NET ticks, Excel serials, ISO
+8601, US dates with AM/PM, Apache and RFC 2822 dates, and year-less BSD
+syslog (you supply the starting year; it rolls over New Year on its own).
+Values with an explicit offset convert to UTC; values without one are kept
+as written unless you set the source's offset. Unparsable values stay
+empty and are counted, with a one-click view of what didn't convert.
 
 Derived columns sort, filter, group, feed the timeframe filter and the
-Timeline, and appear in exports, like any other column. They're marked `ƒ` in
-the header. Session files carry the *definition*, not the values — importing
-one against the same evidence recomputes it.
-
-Display format is separate from all of that, and is presentation only: the
-stored and exported value is always the text the file came with. Set it per
-column by right-clicking its header, or set a default for the case and for
-every case on this machine under **Settings → Timestamps**. The default is
-`YYYY-MM-DD HH:MM:SS`; "As stored" is still there if you want the raw text.
+Timeline, and export like any other column (marked `ƒ`). Display format is
+separate and presentation-only — the stored and exported value is always
+the text the file came with (Settings → Timestamps sets defaults).
 
 ## Nested JSON and XML
 
-Plenty of logs put a whole document in one cell — EVTX `EventData`, cloud
-audit `requestParameters`, EDR telemetry blobs. The grid can only show that
-as one long unreadable string, and you can't sort, filter or group by
-something buried inside it.
-
-Double-click a row to open the **detail pane**, and any field holding JSON or
-XML is pretty-printed and syntax-coloured. Every node in it is addressable:
-right-click one and **Add as a column** builds a real column holding that
-field from every row. No path syntax to learn — the path comes from the node
-you clicked.
-
-**Flatten JSON/XML into columns…** (a column header's right-click menu, or the
-detail pane's node menu) does the whole document at once. It samples the
-column, lists every field it finds with what fraction of the sample carried it
-and an example value, and builds a column per field you tick — all in one pass
-over the table rather than one pass each. Fields present in every sampled row
-start ticked; ones that are present but always empty (a `<TimeCreated
-SystemTime="…"/>` container, whose value is really on the attribute) sort to
-the bottom and start unticked.
-
-Extracted columns are ordinary derived columns: they sort, filter, group, feed
-the Timeline, appear in exports, are marked `ƒ`, and travel in session files as
-a *definition* that recomputes against the same evidence. The source table is
-never touched. Rows where the field wasn't there are empty and counted — the
-column's menu offers **Show N rows without this field**.
-
-Paths are written the way you'd expect, and you can edit one by hand
-(**Change the field path…** on the column's menu):
+Logs love to put a whole document in one cell — EVTX `EventData`, cloud
+audit `requestParameters`. Double-click a row for the **detail pane**,
+where JSON/XML is pretty-printed and every node is addressable:
+right-click one and **Add as a column** builds a real column from that
+field, no path syntax to learn. **Flatten JSON/XML into columns…** does
+the whole document at once — it samples the column, lists every field
+with coverage and an example, and builds the ones you tick in a single
+pass. Paths read the way you'd expect when you do want to edit one:
 
 | | |
 | --- | --- |
-| `$.user.name` | a JSON field — the leading `$` is optional |
-| `items[0].id` | into an array |
-| `["odd.key"].v` | for a key containing a dot |
+| `$.user.name`, `items[0].id` | JSON fields and arrays |
 | `Event/System/EventID` | an XML element's text |
 | `Provider@Name` | an XML attribute |
-| `Data[@Name='LogonType']` | the repeated element with that attribute |
-| `Data[2]` | the third same-named sibling |
+| `Data[@Name='LogonType']` | the repeated element with that attribute — why EVTX comes out useful |
 
-That `[@Name='…']` form is why Windows event logs come out useful:
-`EventData` is a run of identical `<Data Name="…">` elements, and addressing
-them by name gives you a `LogonType` column that means the same thing in every
-row, where addressing them by position would give you a `Data[4]` that doesn't.
+The detail pane's right-click also works on highlighted text: copy it,
+filter the column to it, exclude it, or search every column for it.
 
-XML that declares a `<!DOCTYPE>` is not parsed at all — evidence is untrusted
-input and entity expansion isn't a risk worth taking for a shape no log field
-has. Malformed or truncated XML still renders (unhighlighted), it just has
-nothing addressable in it.
+## Sessions and export
 
-## The detail pane
-
-Double-click a row (or press `d`) for the full-value view of every field, plus
-the note box. Right-clicking in it gives you whichever of two things you're
-pointing at, and often both:
-
-- **Highlighted text** — copy it, filter the column to it, filter to it and
-  drop everything else, exclude it, or search every column for it. A selection
-  out of the middle of a document is a fragment, so it filters as *contains*
-  rather than as an exact match.
-- **A node of a parsed JSON/XML document** — add it as a column, filter the
-  column to that value, copy the value or the path, or open the flatten picker.
-
-## Sessions
-
-**Session → Save session file** writes a small JSON containing tag definitions,
-every tag assignment, notes, column layout and saved views, plus a hash of the
-source file. Load it against the same evidence on another machine and it warns
-you if the hash doesn't match. Tags are remapped by name on import, so two
-analysts who both invented a "Lateral movement" tag end up merged rather than
-duplicated.
-
-**Export** writes the current view — filters, sort and search applied — as CSV
-with `Line`, `Tags` and `Note` columns prepended, or just the tagged rows.
+**Session → Save session file** writes a small JSON of tag definitions,
+assignments, notes, layout and saved views, plus a hash of the source
+files — load it against the same evidence elsewhere and it warns on a
+mismatch. Tags merge by *name*, so two analysts who both invented
+"Lateral movement" end up merged, not duplicated. **Export** writes the
+current view — filters, sort and search applied — as CSV or XLSX, with
+`Line`, `Tags` and `Note` columns prepended, or just the tagged rows.
 
 ## SQL pane
 
-Opens a read-only connection to the case file. `src_1`, `src_2`… are your data;
-`row_tags`, `row_notes`, `tag_defs` are the sidecars. So this works:
+A read-only connection to the case file, with named query tabs. `src_1`,
+`src_2`… are your tables; `row_tags`, `row_notes`, `tag_defs` are the
+sidecars — so joining your findings against the data is one query:
 
 ```sql
 SELECT t.name, s.Process, count(*) n
@@ -383,114 +264,34 @@ GROUP BY 1, 2 ORDER BY n DESC;
 
 ![The pivot plugin: hosts by event id](docs/screenshots/pivot.png)
 
-Winnow can be extended without touching its source, Notepad++-style.
-**Settings → Plugins** manages everything — effective immediately, no
-restart. Each plugin has a scope: **on/off for all cases** (this
-machine's default) or **on/off for this case only** — the per-case
-choice is stored in the case file, so "this investigation needs the
-pivot tab" survives handing the case to another analyst. A disabled
-plugin's code is never even imported. "Install a plugin…" copies a
-`.py` file or a plugin folder picked from anywhere on disk into
-`plugins/` for you (and explains which of the two you need); dropping a
-plugin into the folder by hand works too.
+**Settings → Plugins** manages everything — on/off per machine or per
+case, effective immediately, no restart. Five examples ship with the app,
+listed there and switched off until you enable them:
 
-Plugins get three extension points:
+- **`pivot/`** — Excel's PivotTable over any table: drag fields into
+  Rows/Columns/Values/Filters, click a cell for the rows behind it.
+- **`first_last/`** — collapse tens of thousands of events into per-group
+  session bookends ("First of 312 | WKSTN-014 | user: jsmith") as a new,
+  taggable table.
+- **`mft_usn/`** — raw NTFS `$MFT` and `$J` parsing in pure Python: full
+  paths, `$SI`/`$FN` side by side with a timestomp flag, decoded USN
+  reasons. No EZTools or .NET needed.
+- **`lateral_movement/`** — source→destination logon pairs as a
+  force-directed graph. Fully offline.
+- **`claude_assistant/`** — a Claude chat tab that sees the case *schema*
+  (never row data) and writes SQL pane queries. Needs network and an API
+  key, which is exactly why it's an opt-in plugin.
 
-- **Ingest formats** — parsers for file formats the app doesn't natively
-  read, which then behave like built-ins everywhere: drag-and-drop,
-  Import files…, folder import, and a per-format picker in the same
-  Settings panel, with rows flowing into the same read-only `src_`
-  tables as any CSV (so tagging, views, FTS, sessions and the SQL pane
-  all just work).
-- **Tabs** — a page tab alongside SQL and Timeline, reorderable with
-  them like any other tab, whose content is entirely the plugin's own
-  UI: an ES module the plugin ships, mounted into the main content area
-  with a stable context object (API helpers, read-only SQL against the
-  case, live source/tag state, the app's own theming).
-- **API routes** — backend endpoints under `/api/plugin/<name>/…` for
-  whatever the plugin's UI needs the server to do: query the case, run a
-  computation, call an external service.
+A plugin is local Python running with Winnow's own privileges, and nothing
+is ever fetched from a network — installing one is the consent step, so
+only install plugins you have read or trust. Writing your own (ingest
+formats, tabs, API routes) is covered in
+[docs/writing-plugins.md](docs/writing-plugins.md); a minimal format is
+~20 lines.
 
-Five worked examples ship in `examples/plugins/` and are already listed
-in Settings → Plugins — no install step, switched off until you enable
-them:
+---
 
-- **`mft_usn/`** — raw NTFS `$MFT` and USN-journal (`$J`) parsing in
-  pure stdlib Python (no MFTECmd/EZTools, no .NET — airgap-friendly):
-  full paths reconstructed from parent references, `$SI`/`$FN`
-  timestamps side by side with an `SI<FN Created` timestomp flag, USN
-  reason flags decoded, and MFT entry/sequence numbers that let the two
-  tables join in the SQL pane.
-- **`lateral_movement/`** — a pinned tab that draws source→destination
-  pairs from any table (4624s, firewall logs, netflow) as a
-  force-directed graph: edge width is event count, arrows show
-  direction, drag to untangle. Fully offline.
-- **`first_last/`** — group events (host, user, anything) and keep each
-  group's first and last row with a templated description — "First of
-  312 | WKSTN-014 | user: jsmith" — as a new, taggable table. Turns tens
-  of thousands of logon events into a page of session bookends.
-- **`pivot/`** — Excel's PivotTable over any ingested table: drag
-  fields into Rows, Columns, Values and Filters for a cross-tab with
-  subtotals and grand totals, click a cell for the rows behind it, copy
-  or export the result. Distinct counts stay correct at every subtotal
-  level because each level is aggregated from the source rather than
-  summed from the cells above it.
-- **`claude_assistant/`** — a pinned Claude chat tab that sees the
-  case's *schema* (never row data) and writes ready-to-paste SQL pane
-  queries. Needs network + an Anthropic API key, which is exactly why
-  it's an opt-in plugin rather than a feature — see its README.
-
-**[docs/writing-plugins.md](docs/writing-plugins.md) is the developer
-guide** — quickstart, all three hooks, the tab context object, testing,
-and troubleshooting. The contract itself is also documented at the top of
-[`plugin_api.py`](plugin_api.py); a minimal format is ~20 lines. Extra
-plugin directories: `--plugins-dir DIR` or `$WINNOW_PLUGINS_DIR`. A
-plugin that fails to load is listed with its error (Settings → Plugins
-and the startup output) and skipped, never fatal.
-
-A plugin is arbitrary local Python running with Winnow's own privileges —
-installing it (from the UI or by hand) is the consent step, and nothing
-is ever fetched from a network. Only install plugins you have read or
-trust.
-
-## Under the hood
-
-For the curious (nothing here is needed to use it):
-
-**Source tables are read-only.** Each import becomes `src_<id>` with an explicit
-`rid INTEGER PRIMARY KEY`. Tags, notes, column layouts and saved views live in
-sidecar tables keyed by `(source_id, rid)`. Re-import the same file and your
-work is still there. Nothing ever writes back to the CSV.
-
-**Scrolling stays O(window).** Naive `LIMIT/OFFSET` on a filtered sort degrades
-badly once you're a few hundred thousand rows deep, because SQLite has to walk
-every skipped row. Instead, changing a filter or sort materialises the result
-once into a temp-attached table of `(pos, rid)`:
-
-```sql
-CREATE TABLE v.view_7 AS
-SELECT ROW_NUMBER() OVER (ORDER BY "Timestamp" COLLATE NOCASE ASC, rid) AS pos, rid
-FROM src_1 WHERE "Process" LIKE '%powershell%';
-```
-
-The grid then pages with `WHERE pos BETWEEN ? AND ?`, and the row count comes
-free. Views live in a temporary database deleted when the server exits, so the
-case file stays clean. Page reads (and every other pure-read path — grouping,
-exports, search counts) run on pooled read-only connections, so a multi-second
-view build or import never stalls scrolling in another tab. The pages either
-side of the viewport are warmed while the browser is idle, so crossing a page
-boundary is a cache hit rather than a visible stall.
-
-**Search** uses an external-content FTS5 table over every column, tokenized to
-keep `.`, `-`, `_`, `\`, `@` and `:` inside tokens so paths, GUIDs and account
-names survive tokenization. Bare terms are quoted before they reach the FTS
-parser; `AND` / `OR` / `NOT` / `prefix*` pass through.
-
-**Search all tables** sweeps every table in the case, open or closed, in the
-background — paste a list of IOCs, one per line, and you get a row per table
-that matched *and* a row per indicator underneath it, so you can see which of
-your 60 hashes hit and where rather than just that something did. Each row
-opens that table filtered to that term. A mixed AND/OR/NOT query from the
-Advanced builder gets the single per-table count instead: its terms constrain
-each other, so a count for one of them alone would describe a query nobody ran.
-
+Curious how it works inside — the read-only source tables, the
+materialised views that keep deep scrolling at 1 ms, the reader pool, the
+tokenizer that keeps paths and GUIDs searchable? The per-subsystem working
+notes live in [docs/notes/](docs/notes/).
