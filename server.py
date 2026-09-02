@@ -38,7 +38,7 @@ from winnow import version
 from winnow import archive
 from winnow import workspace as WS
 from winnow.store import (CASE_SUFFIX, PLASO_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, OpCancelled, Store,
-                   describe_case_lock, probe_case_lock, sweep_orphan_views)
+                   describe_case_lock, probe_case_lock, q, sweep_orphan_views)
 
 HERE = paths.INSTALL_ROOT  # static/, plugins/, examples/plugins/ all hang off the install root
 
@@ -1914,6 +1914,7 @@ def api_plugins():
         "plugins": plugins,
         "formats": PLUGINS.list_formats(),
         "tabs": PLUGINS.list_tabs(),
+        "row_actions": PLUGINS.list_row_actions(),
     }
 
 
@@ -1968,6 +1969,57 @@ async def api_plugin_dispatch(fs_name: str, route: str, request: Request):
         return JSONResponse(entry["handler"](req))
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+
+class RowActionBody(BaseModel):
+    """The row menu's selection: (source_id, rid) pairs — a merged view's
+    rows carry their member source ids, a plain table's carry its own —
+    plus the right-clicked cell, when the click landed on one."""
+    source_id: int
+    pairs: list[list[int]]
+    column: str | None = None
+    value: str | None = None
+
+
+@app.post("/api/plugins/row_action/{fs_name}/{action_id}")
+def api_plugin_row_action(fs_name: str, action_id: str, body: RowActionBody):
+    """Resolve the selected rows to full cells and hand them to the
+    plugin's handler (see PluginAPI.register_row_action). Rows are read
+    per real source through run_sql — the read-only path — so a slow
+    handler never touches the writer lock; the per-action max_rows cap is
+    enforced here, not trusted from the client."""
+    action = PLUGINS.get_row_action(fs_name, action_id)
+    if action is None:
+        raise HTTPException(404, f"No row action {fs_name}/{action_id}")
+    st = store()
+    pairs = [(int(a), int(b)) for a, b in body.pairs][: action["max_rows"] + 1]
+    if len(pairs) > action["max_rows"]:
+        raise HTTPException(400, f"{action['label']} takes at most {action['max_rows']} rows")
+    by_source: dict[int, list[int]] = {}
+    for sid, rid in pairs:
+        by_source.setdefault(sid, []).append(rid)
+    rows = []
+    for sid, rids in by_source.items():
+        try:
+            src = st.get_source(sid)
+        except KeyError:
+            raise HTTPException(400, f"No source {sid}")
+        cols = [c["name"] for c in src["columns"] if not c.get("derived")]
+        sel = ", ".join(q(c) for c in cols)
+        marks = ",".join(str(int(r)) for r in rids)
+        res = st.run_sql(f"SELECT rid, {sel} FROM {q(src['table_name'])} WHERE rid IN ({marks})",
+                         limit=len(rids))
+        for r in res["rows"]:
+            rows.append({"rid": r[0], "source_id": sid, "cells": dict(zip(cols, r[1:]))})
+    req = plugin_api.PluginRequest(
+        "POST", f"row_action/{action_id}", {},
+        {"source_id": body.source_id, "column": body.column, "value": body.value, "rows": rows},
+        STORE, storage=WS.PluginData(fs_name))
+    try:
+        out = action["handler"](req)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return JSONResponse(out if out is not None else {"ok": True})
 
 
 class PluginToggle(BaseModel):

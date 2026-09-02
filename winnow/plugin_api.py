@@ -28,6 +28,11 @@ plugin needing to change):
   /api/plugin/<fs_name>/<route>, for whatever the plugin's UI (or a
   script) needs the server to do — query the case, call an external
   service, run a computation. Folder plugins only, same as tabs.
+- **Row actions** (register_row_action): an entry in every table view's
+  row right-click menu that hands the selected rows to a handler — a
+  VirusTotal lookup on the highlighted hashes, an enrichment that lands
+  a new table, anything that operates on "these rows". Works from a
+  single-file plugin.
 
 A plugin module provides:
 
@@ -83,6 +88,24 @@ A tab plus its backend route, the full custom-UI shape:
     #
     #   export default function mount(container, winnow) { ... }
 
+    api.register_row_action(
+        id="vt",                          # unique within this plugin
+        label="Look up on VirusTotal",    # the menu entry
+        handler=vt_lookup,
+        description="Query VT for the selected cell's hash",
+        max_rows=50,                      # entry is disabled past this many rows
+    )
+
+    def vt_lookup(req):
+        # req.body: {"source_id", "column", "value", "rows": [{"rid",
+        # "source_id", "cells": {col: val}}, ...]} — the right-clicked
+        # cell's column/value plus every selected row's full cells.
+        # Return JSON; three keys the UI acts on: "message" (toast),
+        # "open_url" (opens in a new browser tab), "show_tab" (switches
+        # to one of this plugin's registered tabs).
+        hashes = {r["cells"].get(req.body["column"]) for r in req.body["rows"]}
+        return {"message": f"{len(hashes)} hashes queued"}
+
     def edges_handler(req):
         # req: PluginRequest — method, route, query (dict of str), body
         # (parsed JSON or None), and store (the open Store, or None when no
@@ -124,7 +147,7 @@ from .store import NUM_RE as _store_num_re, q as _store_q
 # provides, with a message that says to update Winnow — the failure mode
 # is otherwise an AttributeError deep inside register() that reads like a
 # plugin bug.
-PLUGIN_API_VERSION = 2
+PLUGIN_API_VERSION = 3
 
 FORMAT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 # API routes may nest ("chat/stream") but each segment keeps the same shape.
@@ -314,6 +337,44 @@ class PluginAPI:
         self._registry._add_api(self._fs, route, handler, methods)
 
 
+    def register_row_action(self, *, id: str, label: str, handler: Callable[[PluginRequest], Any],
+                            description: str = "", max_rows: int = 1000) -> None:
+        """An entry in the row right-click menu of every table view. When
+        chosen, the server resolves the selected rows (full cells, by
+        (source_id, rid) — merges included) and calls
+        `handler(PluginRequest)` with them in `req.body`:
+
+            {"source_id": int, "column": str|None, "value": str|None,
+             "rows": [{"rid": int, "source_id": int, "cells": {col: val}}, ...]}
+
+        The return value is JSON-able; the UI acts on three optional keys
+        — "message" (toast), "open_url" (new browser tab), "show_tab"
+        (activate one of this plugin's tabs) — and toasts "done"
+        otherwise. ValueError → 400 with the message. `max_rows` caps the
+        selection the entry accepts (it's disabled past that) so a
+        network-bound lookup can't be pointed at a million rows."""
+        if not FORMAT_ID_RE.match(id or ""):
+            raise ValueError(f"Row action id {id!r} must be lowercase [a-z0-9_-]")
+        if not label or not callable(handler):
+            raise ValueError("register_row_action needs a label and a callable handler")
+        try:
+            max_rows = int(max_rows)
+        except (TypeError, ValueError):
+            raise ValueError("max_rows must be an integer")
+        if max_rows < 1:
+            raise ValueError("max_rows must be at least 1")
+        self._registry._add_row_action({
+            "id": f"{self._plugin}.{id}",
+            "local_id": id,
+            "plugin": self._plugin,
+            "plugin_fs": self._fs,
+            "label": label,
+            "description": description,
+            "max_rows": max_rows,
+            "handler": handler,
+        })
+
+
 class PluginRegistry:
     """Discovers, imports and indexes plugins. One module-level instance
     lives in server.py; tests build their own against tmp dirs.
@@ -329,6 +390,7 @@ class PluginRegistry:
         self._formats: dict[str, IngestFormat] = {}
         self._tabs: dict[str, dict] = {}                 # namespaced tab id -> tab dict (see PluginAPI.register_tab)
         self._apis: dict[tuple[str, str], dict] = {}     # (fs_name, route) -> {handler, methods}
+        self._row_actions: dict[str, dict] = {}          # namespaced action id -> see register_row_action
         self._seq = 0  # unique module names across load() calls / same-named plugins in two dirs
 
     # ------------------------------------------------------------- loading
@@ -371,6 +433,7 @@ class PluginRegistry:
         self._formats = {}
         self._tabs = {}
         self._apis = {}
+        self._row_actions = {}
         seen: set[str] = set()
         for directory in directories:
             d = Path(directory)
@@ -462,6 +525,11 @@ class PluginRegistry:
             raise ValueError(f"Duplicate tab id: {tab['id']}")
         self._tabs[tab["id"]] = tab
 
+    def _add_row_action(self, action: dict) -> None:
+        if action["id"] in self._row_actions:
+            raise ValueError(f"Duplicate row action id: {action['id']}")
+        self._row_actions[action["id"]] = action
+
     def _add_api(self, fs_name: str, route: str, handler: Callable, methods: set[str]) -> None:
         if (fs_name, route) in self._apis:
             raise ValueError(f"Duplicate API route: {route}")
@@ -496,6 +564,15 @@ class PluginRegistry:
 
     def get_api(self, fs_name: str, route: str) -> dict | None:
         return self._apis.get((fs_name, route))
+
+    def list_row_actions(self) -> list[dict]:
+        """Every registered row action, minus the handler (the UI only
+        needs label/description/max_rows and where to POST)."""
+        return [{k: v for k, v in a.items() if k != "handler"} for a in self._row_actions.values()]
+
+    def get_row_action(self, fs_name: str, local_id: str) -> dict | None:
+        return next((a for a in self._row_actions.values()
+                     if a["plugin_fs"] == fs_name and a["local_id"] == local_id), None)
 
     def describe(self) -> list[dict]:
         return [dict(p) for p in self.plugins]

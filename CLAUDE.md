@@ -487,6 +487,18 @@ A new trap goes in the file for its subsystem, not back here — see
    the frontend calls them yet.
 6. `.tle_sess` import, so existing Timeline Explorer sessions carry over.
 
+## Plugin-facing changes ship with their docs
+
+Anything a plugin author can call or receive — a new `PluginAPI`
+method, a new key on `PluginRequest`, a new field the `winnow` tab
+context exposes, a new option type — lands in the same commit as its
+documentation: the `plugin_api.py` module docstring (the contract) AND
+`docs/writing-plugins.md` (the guide, including its Reference section).
+`tests/test_plugin_docs_current.py` enforces the method half mechanically
+(every public `register_*` on `PluginAPI` must appear in both places), so
+a hook without docs fails CI rather than shipping as folklore. Bump
+`PLUGIN_API_VERSION` when the surface grows, and note it in the guide.
+
 ## Testing
 
 `tests/` is a `pytest` suite in three layers, and **CI

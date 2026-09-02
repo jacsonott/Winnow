@@ -35,7 +35,7 @@ reading. Start with the Quickstart.
 
 ---
 
-## 1. The three extension points
+## 1. The four extension points
 
 Everything a plugin does, it does by calling methods on the `api` object
 handed to its `register()` function:
@@ -45,12 +45,14 @@ handed to its `register()` function:
 | `api.register_ingest_format(...)` | A file parser | Formats Winnow can't read: raw `$MFT`, EVTX, prefetch, a vendor's export |
 | `api.register_tab(...)` | A pinned tab with your own UI | A whole feature surface: a graph, a dashboard, an assistant, a report builder |
 | `api.register_api(route, handler)` | A backend endpoint | Whatever your tab (or a script) needs the server to do |
+| `api.register_row_action(...)` | An entry in the row right-click menu | Anything that operates on the selected rows: a VirusTotal lookup on the highlighted hashes, an enrichment, a hand-off to another tool |
 
-They compose: a tab usually pairs with one or more routes. Ingest
-formats work in a single-file plugin; tabs need a folder plugin (there
+They compose: a tab usually pairs with one or more routes; a row action
+often pairs with a tab that shows its results. Ingest formats and row
+actions work in a single-file plugin; tabs need a folder plugin (there
 has to be somewhere to serve the JS from).
 
-The three shipped examples map one-to-one onto these:
+The shipped examples map onto these:
 
 | Example | Demonstrates |
 | --- | --- |
@@ -527,7 +529,57 @@ below).
 
 ---
 
-## 7. Talking to the case
+## 7. Hook: row actions
+
+```python
+api.register_row_action(
+    id="vt",                          # unique within this plugin
+    label="Look up on VirusTotal",    # the menu entry
+    handler=vt_lookup,
+    description="Query VT for the selected cell's hash",
+    max_rows=50,                      # the entry is disabled past this many rows
+)
+```
+
+Right-clicking a row (or a selection) in any table view shows a
+**Plugins** section listing every registered action. Choosing one has
+the server resolve the selected rows to their full cells — by
+`(source_id, rid)`, so a merged view hands you each member's own row —
+and call your handler.
+
+### The handler
+
+```python
+def vt_lookup(req):
+    # req.body = {
+    #   "source_id": int,            # the table (or merge) the analyst is in
+    #   "column": str | None,        # the right-clicked cell's column…
+    #   "value":  str | None,        # …and its value, when the click hit a cell
+    #   "rows": [{"rid": int, "source_id": int, "cells": {col: val, ...}}, ...],
+    # }
+    hashes = {r["cells"].get(req.body["column"]) for r in req.body["rows"]}
+    ...
+    return {"message": f"{len(hashes)} hashes queued"}
+```
+
+The return value is JSON-able. Three optional keys drive the UI:
+
+| key | effect |
+| --- | --- |
+| `message` | Shown as a toast (default: "*label*: done") |
+| `open_url` | Opened in a new browser tab — hand off to a web console |
+| `show_tab` | Activates one of this plugin's registered tabs (namespaced id, e.g. `"vt-plugin.results"`) — for results too rich for a toast |
+
+`raise ValueError("…")` → 400 with the message, same as API routes.
+`max_rows` is enforced server-side as well as greying the menu entry, so a
+network-bound lookup can never be pointed at a million rows. `req.store`
+and `req.storage` are available exactly as for API routes — an action can
+land its results as a new table with `ingest_rows` (see *Writing tables
+from a plugin*).
+
+---
+
+## 8. Talking to the case
 
 `req.store` is Winnow's `Store`. The safe, supported way to read from it:
 
@@ -635,7 +687,7 @@ portable. Derive a new table instead.
 
 ---
 
-## 8. Testing a plugin
+## 9. Testing a plugin
 
 Plugins are ordinary Python, so ordinary tests work. Two levels:
 
@@ -710,7 +762,7 @@ section of [`CLAUDE.md`](../CLAUDE.md).
 
 ---
 
-## 9. Installing and sharing
+## 10. Installing and sharing
 
 **Install:** Settings → Plugins → *Install a plugin…* — pick the `.py`
 file for a single-file plugin, or the folder that directly contains
@@ -743,14 +795,15 @@ python server.py --plugins-dir ~/src/my-winnow-plugins
 
 Installs from the UI always land in the first directory (`plugins/`).
 
-**Versioning:** set `WINNOW_API_VERSION` to the API version you built
-against. If a future Winnow's API version is lower than yours, it
+**Versioning:** the current plugin API version is **3** (row actions
+arrived in 3; `api.q`/`NUM_RE` in 2). Set `WINNOW_API_VERSION` to the
+API version you built against. If a future Winnow's API version is lower than yours, it
 refuses to load your plugin with a "update Winnow" message rather than
 failing mysteriously somewhere inside `register()`.
 
 ---
 
-## 10. Security model
+## 11. Security model
 
 **A plugin is arbitrary Python running with Winnow's privileges.** It can
 read any file the analyst can, open sockets, and touch the case. There is
@@ -778,7 +831,7 @@ What that leaves to you, as an author:
 
 ---
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 | Symptom | Cause |
 | --- | --- |
@@ -798,7 +851,7 @@ What that leaves to you, as an author:
 
 ---
 
-## 12. Reference
+## 13. Reference
 
 ### `register_ingest_format(*, id, label, parse, extensions=(), filename_patterns=(), description="", options=())`
 
@@ -816,6 +869,12 @@ Module: `export default function mount(container, winnow)`, plus optional
 `handler(req: PluginRequest) -> JSON-able`, where `PluginRequest` has
 `.method`, `.route`, `.query`, `.body`, `.store`. `ValueError` → 400.
 
+### `register_row_action(*, id, label, handler, description="", max_rows=1000)`
+
+`handler(req: PluginRequest) -> JSON-able`; `req.body` is
+`{"source_id", "column", "value", "rows": [{"rid", "source_id", "cells"}]}`.
+Optional return keys `message` / `open_url` / `show_tab`. `ValueError` → 400.
+
 ### HTTP surface
 
 | Endpoint | Purpose |
@@ -827,13 +886,14 @@ Module: `export default function mount(container, winnow)`, plus optional
 | `POST /api/ingest/plugin/upload` | Multipart sibling of the above |
 | `GET /plugin_assets/<fs_name>/<path>` | A plugin's own files |
 | `* /api/plugin/<fs_name>/<route>` | A plugin's registered routes |
+| `POST /api/plugins/row_action/<fs_name>/<id>` | Runs a row action on `{source_id, pairs: [[source_id, rid]…], column?, value?}` |
 
 The path/upload ingest routes are also the scripting entry point — you
 can drive a plugin parser from `curl` without touching the UI.
 
 ---
 
-## 13. Writing a plugin with an LLM
+## 14. Writing a plugin with an LLM
 
 **Paste this one file. That's the whole context budget.**
 
