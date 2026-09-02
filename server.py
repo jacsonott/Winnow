@@ -2696,6 +2696,46 @@ def api_watchlist_hits(watchlist_id: int):
     return store().indicator_hits(watchlist_id)
 
 
+@app.get("/api/watchlist/cases")
+def api_watchlist_cases():
+    """Recent cases that have indicators to offer — the picker behind the
+    watchlist's "From a case…". Each candidate's count is read from the
+    file read-only (same one-shot connect /api/cases uses for source
+    counts); the open case and missing files are excluded outright."""
+    current = os.path.abspath(store().path)
+    out = []
+    for c in WS.cases.list():
+        if os.path.abspath(c["path"]) == current or not os.path.isfile(c["path"]):
+            continue
+        try:
+            ro = sqlite3.connect(f"file:{c['path']}?mode=ro", uri=True)
+            row = ro.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='watchlist'").fetchone()
+            n = ro.execute("SELECT COUNT(*) FROM watchlist").fetchone()[0] if row[0] else 0
+            ro.close()
+        except sqlite3.Error:
+            continue
+        if n:
+            out.append({"id": c["id"], "name": c["name"], "path": c["path"], "indicator_count": n})
+    return out
+
+
+class WatchlistImportCaseBody(BaseModel):
+    case_id: int
+
+
+@app.post("/api/watchlist/import_case")
+def api_watchlist_import_case(body: WatchlistImportCaseBody):
+    rec = WS.cases.get(body.case_id)
+    if rec is None or not os.path.isfile(rec["path"]):
+        raise HTTPException(400, "No such case on this machine")
+    try:
+        res = store().import_watchlist_from_case(rec["path"])
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {**res, "indicators": store().list_indicators()}
+
+
 @app.get("/api/watchlist/badge")
 def api_watchlist_badge():
     """The tab-badge poll: total hits across every indicator vs the count
