@@ -14,7 +14,7 @@ import { updateSearchAllButton } from './search.js';
 import { clearViewStateStash, applyPageTabsSize, loadSources } from './sources.js';
 import { clearTabHistory } from './tabhistory.js';
 import { showGridTab } from './sql.js';
-import { openSettings } from './settings.js';
+import { openSettings, syncAppearanceFromServer } from './settings.js';
 import { drawWordmark } from './splash.js';
 import { S } from './state.js';
 import { fmtBytes } from './tables.js';
@@ -392,11 +392,11 @@ export function openNewCaseModal(state = {}) {
     b.append(el('label', null, 'Group'), groupRow);
 
     let chosenDir = state.chosenDir || S.casesDir || 'cases';
-    const pathInput = fieldInput(state.path || `${chosenDir}/${slugify(state.name || '')}${CASE_EXT}`);
+    const pathInput = fieldInput(state.path || joinPath(chosenDir, slugify(state.name || '') + CASE_EXT));
     pathInput.style.fontFamily = 'var(--mono)';
     let pathTouched = state.pathTouched || false;
     pathInput.oninput = () => { pathTouched = true; };
-    nameInput.oninput = () => { if (!pathTouched) pathInput.value = `${chosenDir}/${slugify(nameInput.value)}${CASE_EXT}`; };
+    nameInput.oninput = () => { if (!pathTouched) pathInput.value = joinPath(chosenDir, slugify(nameInput.value) + CASE_EXT); };
     const browseBtn = el('button', 'btn ghost', 'Browse…');
     browseBtn.onclick = () => {
       const snapshot = {
@@ -407,7 +407,7 @@ export function openNewCaseModal(state = {}) {
       openFolderBrowser(
         chosenDir,
         (dir) => openNewCaseModal({
-          ...snapshot, chosenDir: dir, pathTouched: false, path: `${dir}/${slugify(snapshot.name)}${CASE_EXT}`,
+          ...snapshot, chosenDir: dir, pathTouched: false, path: joinPath(dir, slugify(snapshot.name) + CASE_EXT),
         }),
         () => openNewCaseModal(snapshot),
       );
@@ -501,18 +501,61 @@ export async function maybeOfferStorageDir() {
   }
 }
 
-export async function openExistingCasePrompt() {
-  const path = await promptDialog('Path to an existing case file:');
-  if (!path || !path.trim()) return;
-  const trimmed = path.trim();
-  const name = trimmed.split(/[\\/]/).pop().replace(/\.db-winnow$|\.db$/i, '');
-  try {
-    await post('/api/cases', { path: trimmed, name, group: '', notes: '' });
-  } catch (e) {
-    toast('Could not register case: ' + e.message, 6000);
-    return;
-  }
-  await openCase(trimmed);
+/* Join a directory and a file name with the separator the directory
+   itself uses. Paths here come from the server (the folder browser, the
+   cases-dir preference) in the OS's own shape, so on Windows the directory
+   carries backslashes — and a path shown as C:\\Cases/acme.db-winnow reads
+   as broken to the analyst even though the OS would accept it. */
+export function joinPath(dir, name) {
+  const d = String(dir || '').replace(/[\\/]+$/, '');
+  const sep = d.includes('\\') && !d.includes('/') ? '\\' : '/';
+  return d ? `${d}${sep}${name}` : name;
+}
+
+export function openExistingCasePrompt(state = {}) {
+  modal('Open existing case file', (b) => {
+    const pathInput = fieldInput(state.path || '');
+    pathInput.placeholder = 'Path to a .db-winnow case file';
+    pathInput.style.fontFamily = 'var(--mono)';
+    // Browse… is the same server-disk picker the new-case dialog and
+    // "Add from this machine…" use, in file mode — typing a full path is
+    // fine when you know it, but a case file on an evidence share usually
+    // gets found, not remembered.
+    const browseBtn = el('button', 'btn ghost', 'Browse…');
+    browseBtn.onclick = () => {
+      const snapshot = { path: pathInput.value };
+      openFolderBrowser(S.lastBrowsePath || S.casesDir || undefined, (sel) => {
+        const f = (sel.files || [])[0];
+        openExistingCasePrompt({ path: f ? f.path : snapshot.path });
+      }, () => openExistingCasePrompt(snapshot), { mode: 'files' });
+    };
+    const row = el('div', 'row-actions');
+    row.append(pathInput, browseBtn);
+    b.append(el('label', null, 'Case file'), row);
+    b.append(el('p', 'fb-help', 'Registers the case on this machine\u2019s list and opens it.'));
+
+    const actions = el('div', 'row-actions');
+    const openBtn = el('button', 'btn', 'Open');
+    openBtn.onclick = async () => {
+      const trimmed = pathInput.value.trim();
+      if (!trimmed) { toast('Enter or browse to a case file'); return; }
+      const name = trimmed.split(/[\\/]/).pop().replace(/\.db-winnow$|\.db$/i, '');
+      try {
+        await post('/api/cases', { path: trimmed, name, group: '', notes: '' });
+      } catch (e) {
+        toast('Could not register case: ' + e.message, 6000);
+        return;
+      }
+      $('modal').hidden = true;
+      await openCase(trimmed);
+    };
+    const cancel = el('button', 'btn ghost', 'Cancel');
+    cancel.onclick = () => { $('modal').hidden = true; };
+    actions.append(openBtn, cancel);
+    b.append(actions);
+    pathInput.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); openBtn.click(); } };
+    setTimeout(() => pathInput.focus(), 0);
+  });
 }
 
 export function openEditCaseModal(c) {
@@ -870,6 +913,9 @@ function wireTempBanner() {
 export async function boot() {
   await Promise.all([loadSavedFilters(), loadHeaderNicknames(), loadTimelineTemplates(),
                      loadPlugins(), loadAppSettings()]);
+  // The machine's saved look wins over this origin's cache (a quick-look
+  // window on a free port is a different origin — see saveAppearance).
+  syncAppearanceFromServer();
   const cur = await api('/api/case/current').catch(() => ({ open: false }));
   if (cur.open) {
     setBrandLabel(cur.temp ? 'Quick look' : cur.name);
