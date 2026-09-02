@@ -23,7 +23,7 @@ import { loadDashboards, renderDashboardsInto } from './dashboard.js';
 import { openCaseSettings } from './settings.js';
 import { openErrorLog } from './errlog.js';
 import { S, selClear, selCount, selFirst, specKey } from './state.js';
-import { openTablesManager } from './tables.js';
+import { compactCaseFile, openTablesManager } from './tables.js';
 import { loadTags, renderTagRibbon } from './tags.js';
 import { openTableMenu, updateFiltersButton } from './timeframe.js';
 import { baseColumns } from './tsformat.js';
@@ -1340,6 +1340,7 @@ $('btnCase').onclick = () => dropdownMenu($('btnCase'), [
   { label: 'Export…', onclick: openExportModal },
   { label: 'Sessions…', onclick: openSessionManager },
   { label: 'Case settings…', onclick: openCaseSettings },
+  { label: 'Compact case file…', onclick: () => compactCaseFile() },
   '-',
   { label: 'Error log…', onclick: openErrorLog },
   { label: 'Shut down Winnow…', onclick: shutdownWinnow },

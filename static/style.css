@@ -1199,6 +1199,9 @@ textarea:focus { border-color: var(--accent); outline: none; }
   width: min(680px, 92vw); max-height: 82vh; display: flex; flex-direction: column;
 }
 .modal-card.wide { width: min(920px, 96vw); }
+/* The Tables manager: five buttons, three stats and an index status per
+   row — 920px truncated the buttons off the right edge on any real name. */
+.modal-card.xwide { width: min(1240px, 96vw); }
 
 /* confirm()/prompt() replacements — a separate overlay (not the #modal
    singleton) so one can be triggered from inside an already-open modal
@@ -1301,6 +1304,18 @@ textarea:focus { border-color: var(--accent); outline: none; }
 
 .session-list, .session-queue { display: grid; gap: 4px; margin: 6px 0 12px; }
 .session-row { justify-content: flex-start; padding: 5px 8px; background: var(--panel-2); border-radius: var(--radius-sm); }
+/* Tables-manager rows: a fixed grid, not a free flex row — the name gets
+   the flexible column and ellipsizes instead of shoving the buttons off
+   the modal's edge, stats/status/actions right-align in steady columns so
+   fifty rows read as a table rather than a scatter. */
+.tables-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; align-items: center;
+  gap: 10px; padding: 3px 8px; }
+.tables-row .session-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.tables-row .count { margin-right: 0; white-space: nowrap; }
+.tables-row .tables-acts { display: flex; gap: 4px; }
+.tables-row .tables-acts .btn { padding: 2px 8px; font-size: 11px; }
+.tables-row.no-index { grid-template-columns: minmax(0, 1fr) auto auto; }
+.session-list .source-indexes { padding: 0 4px 4px 16px; margin-top: -2px; }
 /* Drag-to-reorder feedback for saved-filter rows (wireDragReorder) — same
    vocabulary the tab strip and column headers use, on the vertical axis. */
 .session-row.dragging { opacity: .4; }
