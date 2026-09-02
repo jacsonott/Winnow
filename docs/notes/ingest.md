@@ -42,6 +42,22 @@ see [docs/notes/README.md](README.md) for the whole set.
   macros never executed); legacy binary `.xls` is deliberately out of
   scope. Like SQLite files, workbooks are excluded from directory import
   — which sheets to pull is a per-file choice.
+- Plaso ingest (`ingest_plaso`, plasoread.py) reads a `.plaso` storage
+  file — a SQLite db of serialized attribute containers — as ONE flat
+  timeline table, no plaso install involved. Both on-disk generations are
+  handled by looking at the `event` table's columns (`_data` JSON blobs,
+  zlib-compressed when the metadata says so, vs the acstore era's real
+  schema columns), never by trusting `format_version`. Fixed columns
+  (Datetime/Timestamp desc/Data type/Parser/Source file/Host/User) plus
+  one `Attributes (JSON)` cell for everything else — event_data's
+  attribute set varies per data_type, and the JSON-extraction derived
+  columns are the tool for the long tail. Events stream out ORDER BY
+  timestamp, so rid order is chronological and the unsorted view stays on
+  the root_virtual fast path. Unlike SQLite files and workbooks there is
+  no picker — one file is one table — so `.plaso` participates in
+  directory import (kind "plaso") and drag-drop directly. A malformed
+  event_data row degrades to an error note in its Attributes cell; cancel
+  drops the partial source like every other ingest.
 - JSON/JSONL ingest (`ingest_json`/`preview_json_file`/`_flatten_json`) has
   no fixed header row the way CSV's first line is one, so it can't type
   columns from row 1 alone — it makes **two full passes** over the file:

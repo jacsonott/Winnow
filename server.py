@@ -36,7 +36,7 @@ from winnow import plugin_api
 from winnow import updater
 from winnow import version
 from winnow import workspace as WS
-from winnow.store import (CASE_SUFFIX, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, OpCancelled, Store,
+from winnow.store import (CASE_SUFFIX, PLASO_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, OpCancelled, Store,
                    describe_case_lock, probe_case_lock, sweep_orphan_views)
 
 HERE = paths.INSTALL_ROOT  # static/, plugins/, examples/plugins/ all hang off the install root
@@ -1681,6 +1681,8 @@ def _ingest_kind_for_path(path: str) -> str:
         return "sqlite"
     if suffix in XLSX_IMPORT_EXTENSIONS:
         return "xlsx"
+    if suffix in PLASO_IMPORT_EXTENSIONS:
+        return "plaso"
     return "json" if suffix in _JSON_INGEST_EXTS else "csv"
 
 
@@ -1760,6 +1762,8 @@ def _ingest_job_options(kind: str, *, build_fts: bool, delimiter=None, has_heade
     if kind == "json":
         return {**base, "build_fts": build_fts, "flatten_mode": flatten_mode,
                 "flatten_depth": flatten_depth}
+    if kind == "plaso":
+        return {**base, "build_fts": build_fts}   # one file, one table, no options
     return {**base, "build_fts": build_fts, "tables": tables or []}
 
 

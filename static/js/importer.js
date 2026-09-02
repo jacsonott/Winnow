@@ -6,7 +6,7 @@ import { $, api, debounce, el, post, toast } from './core.js';
 import { maybeOfferAssociation } from './assoc.js';
 import { openFolderBrowser } from './home.js';
 import { startJobsPoll, uploadWithProgress } from './jobs.js';
-import { RECOGNIZED_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, extOf, importKindFor, openImportPreview, openJsonImportPreview } from './merge.js';
+import { PLASO_IMPORT_EXTENSIONS, RECOGNIZED_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, extOf, importKindFor, openImportPreview, openJsonImportPreview } from './merge.js';
 import { renderPluginTabs } from './plugins.js';
 import { fmtBytes } from './tables.js';
 import { loadSources } from './sources.js';
@@ -45,7 +45,7 @@ export function globMatches(pattern, name) {
 export function pluginFormatFor(filename) {
   const base = filename.split(/[\\/]/).pop();
   const ext = extOf(base);
-  if (RECOGNIZED_IMPORT_EXTENSIONS.includes(ext) || SQLITE_IMPORT_EXTENSIONS.includes(ext) || XLSX_IMPORT_EXTENSIONS.includes(ext)) return null;
+  if (RECOGNIZED_IMPORT_EXTENSIONS.includes(ext) || SQLITE_IMPORT_EXTENSIONS.includes(ext) || XLSX_IMPORT_EXTENSIONS.includes(ext) || PLASO_IMPORT_EXTENSIONS.includes(ext)) return null;
   return S.pluginFormats.find((f) =>
     (ext && (f.extensions || []).includes(ext))
     || (f.filename_patterns || []).some((p) => globMatches(p, base))) || null;
@@ -107,6 +107,8 @@ export function queueItem(transport, name, fmt = pluginFormatFor(name)) {
   const kind = importKindFor(name);
   return kind === 'json' ? { ...transport, name, kind, flatten_mode: 'none', flatten_depth: 1, configured: false }
     : kind === 'sqlite' || kind === 'xlsx' ? { ...transport, name, kind, tables: null, configured: false }
+    // A .plaso is one file → one timeline table with nothing to configure.
+    : kind === 'plaso' ? { ...transport, name, kind, configured: true }
     : { ...transport, name, kind, delimiter: null, has_header: true, column_types: null, configured: false };
 }
 
@@ -198,6 +200,10 @@ export function openImportModal() {
           cfg.disabled = true;
           cfg.title = 'This plugin format has no options';
         }
+        if (item.kind === 'plaso') {
+          cfg.disabled = true;
+          cfg.title = 'A Plaso storage file imports as one flat timeline table — nothing to configure';
+        }
         cfg.onclick = () => {
           if (item.kind === 'plugin') {
             openPluginOptionsForm(item, {
@@ -250,7 +256,7 @@ export function openImportModal() {
     addLabel.title = 'A regular browser file picker — the file is copied up to the server before importing';
     const addInput = el('input');
     addInput.type = 'file';
-    addInput.accept = [...RECOGNIZED_IMPORT_EXTENSIONS, ...SQLITE_IMPORT_EXTENSIONS, ...XLSX_IMPORT_EXTENSIONS, ...pluginExtensions()].join(',');
+    addInput.accept = [...RECOGNIZED_IMPORT_EXTENSIONS, ...SQLITE_IMPORT_EXTENSIONS, ...XLSX_IMPORT_EXTENSIONS, ...PLASO_IMPORT_EXTENSIONS, ...pluginExtensions()].join(',');
     addInput.multiple = true;
     addInput.hidden = true;
     addInput.onchange = () => {
@@ -591,6 +597,7 @@ export function recognizedImportFile(name) {
   return RECOGNIZED_IMPORT_EXTENSIONS.includes(extOf(name))
     || SQLITE_IMPORT_EXTENSIONS.includes(extOf(name))
     || XLSX_IMPORT_EXTENSIONS.includes(extOf(name))
+    || PLASO_IMPORT_EXTENSIONS.includes(extOf(name))
     || !!pluginFormatFor(name);
 }
 
@@ -644,7 +651,7 @@ export async function openDirectoryImportModal(state = {}) {
     root: state.root || null,
     profileId: state.profileId || null,
     recursive: state.recursive ?? true,
-    extensions: state.extensions || RECOGNIZED_IMPORT_EXTENSIONS.concat(pluginExtensions()),
+    extensions: state.extensions || RECOGNIZED_IMPORT_EXTENSIONS.concat(PLASO_IMPORT_EXTENSIONS, pluginExtensions()),
     includeText: state.includeText || '',
     excludeText: state.excludeText || '',
   };
@@ -767,7 +774,7 @@ export async function openDirectoryImportModal(state = {}) {
         ...st,
         profileId: id,
         recursive: p ? p.recursive : true,
-        extensions: (p && p.extensions) || RECOGNIZED_IMPORT_EXTENSIONS.concat(pluginExtensions()),
+        extensions: (p && p.extensions) || RECOGNIZED_IMPORT_EXTENSIONS.concat(PLASO_IMPORT_EXTENSIONS, pluginExtensions()),
         includeText: p ? (p.include_patterns || []).join('\n') : '',
         excludeText: p ? (p.exclude_patterns || []).join('\n') : '',
       });
@@ -799,7 +806,7 @@ export async function openDirectoryImportModal(state = {}) {
     b.append(el('label', null, 'File types'));
     const extRow = el('div', 'row-actions');
     extRow.style.flexWrap = 'wrap';
-    for (const ext of RECOGNIZED_IMPORT_EXTENSIONS.concat(pluginExtensions())) {
+    for (const ext of RECOGNIZED_IMPORT_EXTENSIONS.concat(PLASO_IMPORT_EXTENSIONS, pluginExtensions())) {
       const chip = el('button', 'btn ghost', ext);
       chip.setAttribute('aria-pressed', String(st.extensions.includes(ext)));
       chip.onclick = () => {
@@ -899,7 +906,7 @@ export async function openDirectoryImportModal(state = {}) {
             });
             pluginOk++;
           } else {
-            await post('/api/ingest/jobs/path', { path: m.path, name: base, folder_path, kind: m.kind === 'json' ? 'json' : 'csv' });
+            await post('/api/ingest/jobs/path', { path: m.path, name: base, folder_path, kind: ['json', 'plaso'].includes(m.kind) ? m.kind : 'csv' });
           }
           ok++;
         } catch (e) {

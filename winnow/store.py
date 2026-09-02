@@ -43,6 +43,7 @@ except ImportError:  # pragma: no cover - Windows
 from . import enrich  # noqa: F401 — registers the cross-table lookup op into timeparse.OPERATIONS
 from . import structparse  # noqa: F401 — registers the JSON/XML extraction ops into timeparse.OPERATIONS
 from . import timeparse
+from . import plasoread
 from . import xlsxread
 
 BATCH = 20_000
@@ -100,6 +101,12 @@ SQLITE_IMPORT_EXTENSIONS = {".db", ".sqlite", ".sqlite3", ".db-wal"}
 # import ignores them too. .xlsm is the same zip container with macros the
 # reader never executes; legacy binary .xls is out of scope (xlsxread.py).
 XLSX_IMPORT_EXTENSIONS = {".xlsx", ".xlsm"}
+
+# Plaso storage files (log2timeline output) — one file, one flat timeline
+# table, read by winnow/plasoread.py. Its own set (not SQLITE_...) because
+# a .plaso must never fall into the generic table picker: its raw tables
+# are serialized attribute containers, useless without the decode step.
+PLASO_IMPORT_EXTENSIONS = {".plaso"}
 # scan_import_directory stops walking once matched+excluded together hit
 # this many entries — same "cap and say so" reasoning as
 # SEARCH_ALL_COUNT_CAP, guarding against an analyst accidentally pointing
@@ -2361,6 +2368,88 @@ class Store:
         rec["rows_per_sec"] = int(total / elapsed) if elapsed > 0 else 0
         return rec
 
+    def ingest_plaso(
+        self,
+        path: str,
+        name: str | None = None,
+        build_fts: bool = True,
+        progress=None,
+        cancel=None,
+    ) -> dict:
+        """Imports a Plaso storage file as one flat timeline table — the
+        .plaso-shaped sibling of ingest_sqlite_table, same conventions:
+        TEXT columns, self.lock held per BATCH-sized chunk, cancel drops
+        the partial source, the source file opened read-only and never
+        touched. Column shape and format handling live in plasoread.py;
+        column types are declared, not sampled — the reader KNOWS its
+        first column is a datetime (the ingest_rows docstring's argument,
+        applied here)."""
+        if not plasoread.is_plaso_storage(path):
+            raise ValueError(f"{os.path.basename(path)} is not a Plaso storage file")
+        name = name or os.path.basename(path)
+        file_hash = self._quick_hash(path)
+        total_rows = plasoread.plaso_summary(path)["event_count"]
+
+        cols = sanitize_columns(list(plasoread.PLASO_COLUMNS))
+        ncols = len(cols)
+        with self.lock, self.db:
+            cur = self.db.execute(
+                "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at)"
+                " VALUES (?,?,?,?,?,?)",
+                (name, os.path.abspath(path), "", "[]", file_hash, time.strftime("%Y-%m-%dT%H:%M:%S")),
+            )
+            source_id = cur.lastrowid
+            self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
+            dest_table = f"src_{source_id}"
+            coldefs = ", ".join(f"{q(c)} TEXT" for c in cols)
+            self.db.execute(f"CREATE TABLE {q(dest_table)} (rid INTEGER PRIMARY KEY, {coldefs})")
+            self.db.execute("UPDATE sources SET table_name=? WHERE id=?", (dest_table, source_id))
+
+        placeholders = ",".join("?" * ncols)
+        insert = f"INSERT INTO {q(dest_table)} ({','.join(q(c) for c in cols)}) VALUES ({placeholders})"
+
+        total = 0
+        t0 = time.time()
+        error: Exception | None = None
+        with self._ingest_synchronous_off():
+            try:
+                batch: list[tuple] = []
+                for row in plasoread.iter_plaso_rows(path):
+                    batch.append(tuple(row))
+                    if len(batch) >= BATCH:
+                        if cancel is not None and cancel():
+                            raise IngestCancelled(f"Import of {name} cancelled")
+                        total = self._commit_ingest_batch(insert, batch, source_id, total)
+                        batch = []
+                        if progress:
+                            progress(total, total, total_rows)
+                if batch:
+                    total = self._commit_ingest_batch(insert, batch, source_id, total)
+                if progress:
+                    progress(total, total, total_rows)
+            except IngestCancelled:
+                # Same cancel-discards-the-partial contract as ingest_csv.
+                self.drop_source(source_id)
+                raise
+            except Exception as e:
+                error = e
+
+        colmeta = [{"name": c, "type": t} for c, t in zip(cols, plasoread.PLASO_COLUMN_TYPES)]
+        with self.lock, self.db:
+            self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
+
+        if error is not None:
+            raise error
+
+        if build_fts and total:
+            self._ensure_fts_building(source_id)
+
+        elapsed = time.time() - t0
+        rec = self.get_source(source_id)
+        rec["elapsed_sec"] = round(elapsed, 2)
+        rec["rows_per_sec"] = int(total / elapsed) if elapsed > 0 else 0
+        return rec
+
     def preview_xlsx_sheets(self, path: str) -> dict:
         """Read-only look at every data sheet in an Excel workbook, in the
         exact shape preview_sqlite_tables returns ({"tables": [...]}) so
@@ -2876,6 +2965,8 @@ class Store:
                 # extension/pattern, and doesn't need to.
                 if ext in (".json", ".jsonl", ".ndjson"):
                     kind = "json"
+                elif ext in PLASO_IMPORT_EXTENSIONS:
+                    kind = "plaso"
                 elif ext in DEFAULT_IMPORT_EXTENSIONS:
                     kind = "csv"
                 else:
@@ -2927,7 +3018,7 @@ class Store:
         system because it wants exactly what this one provides — a progress
         bar over a multi-million-row pass, per-BATCH cancellation, the jobs
         panel, and close()'s cancel-and-join."""
-        if kind not in ("csv", "json", "sqlite", "xlsx", "derive"):
+        if kind not in ("csv", "json", "sqlite", "xlsx", "plaso", "derive"):
             raise ValueError(f"Unknown ingest kind: {kind}")
         try:
             size = os.path.getsize(path)
@@ -3015,6 +3106,12 @@ class Store:
                 self._cascade_dependent_derives(res["source_id"],
                                                 [c["name"] for c in res["columns"]])
                 return
+            elif job["kind"] == "plaso":
+                results = [self.ingest_plaso(
+                    job["path"], name=job["name"],
+                    build_fts=opts.get("build_fts", True),
+                    progress=progress, cancel=cancel,
+                )]
             elif job["kind"] == "json":
                 results = [self.ingest_json(
                     job["path"], name=job["name"],

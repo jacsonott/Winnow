@@ -184,6 +184,12 @@ xlsxread.py        Excel .xlsx/.xlsm reading for import — a thin typed-cell→
                     date-styled cells to ISO text, TRUE/FALSE booleans,
                     numbers without float noise. Legacy .xls is out of
                     scope. See docs/notes/ingest.md.
+plasoread.py       Plaso storage (.plaso) reading for import — both on-disk
+                    generations (the serialized-event era and the acstore
+                    schema-column era), detected by inspection rather than
+                    version number. Fixed column shape plus an
+                    Attributes (JSON) catch-all the structparse derived-column
+                    ops can lift fields out of. Stdlib only.
 defaults/          The defaults Winnow ships, as JSON rather than Python:
                     headers.json names the header sets common tools emit
                     (EvtxECmd, MFTECmd, Amcache, ...); filters.json is a
