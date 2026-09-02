@@ -34,6 +34,7 @@ from winnow import instances
 from winnow import paths
 from winnow import plugin_api
 from winnow import updater
+from winnow import userenv
 from winnow import version
 from winnow import archive
 from winnow import workspace as WS
@@ -195,6 +196,10 @@ STORE: Store | None = None
 # down. See plugin_api.py for the whole model (and its security note: a
 # plugin is arbitrary local Python, same trust model as a Notepad++
 # plugin — the analyst putting it in plugins/ is the consent step).
+# Stored WINNOW_* variables (tokens plugins read) join the process
+# environment before any plugin is imported; a real export wins.
+userenv.load_into_environ()
+
 PLUGINS = plugin_api.PluginRegistry()
 
 
@@ -1232,6 +1237,55 @@ def _is_loopback(request: Request) -> bool:
     peer."""
     host = request.client.host if request.client else ""
     return host in ("127.0.0.1", "::1", "testclient")
+
+
+# ---------------------------------------------------------------- user env
+# WINNOW_* environment variables — where a plugin's token lives, instead of
+# the case file or a Winnow setting. Names and where each came from are all
+# the API ever returns; a value goes in through POST and never comes back
+# out, not even to the loopback client. See winnow/userenv.py.
+
+class EnvVarBody(BaseModel):
+    name: str
+    value: str
+
+
+def _env_guard(request: Request) -> None:
+    if not _is_loopback(request):
+        raise HTTPException(403, "environment variables are loopback-only")
+
+
+@app.get("/api/env")
+def api_env_list(request: Request):
+    _env_guard(request)
+    st = userenv.store()
+    return {"prefix": userenv.PREFIX, "location": st.location(),
+            "platform": file_assoc.platform_name(),
+            "vars": userenv.list_vars(st)}
+
+
+@app.post("/api/env")
+def api_env_set(request: Request, body: EnvVarBody):
+    _env_guard(request)
+    try:
+        name = userenv.set_var(body.name, body.value)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except OSError as e:
+        raise HTTPException(500, f"could not save: {e}")
+    return {"ok": True, "name": name}
+
+
+@app.delete("/api/env/{name}")
+def api_env_delete(request: Request, name: str):
+    _env_guard(request)
+    try:
+        userenv.delete_var(name)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except OSError as e:
+        raise HTTPException(500, f"could not save: {e}")
+    return {"ok": True}
 
 
 class MakeDirBody(BaseModel):

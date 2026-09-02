@@ -10,6 +10,8 @@ import csv as csv_module
 import sys
 from pathlib import Path
 
+import os
+
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -25,6 +27,14 @@ def isolate_workspace(tmp_path, monkeypatch):
     routes (which read/write WS.* directly) can't leak into or read from the
     developer's real workspace/ directory."""
     monkeypatch.setattr(WS, "WORKSPACE_DIR", tmp_path / "workspace")
+    # Same for the WINNOW_* environment store (winnow/userenv.py): never
+    # the developer's real ~/.config/winnow/env, and no WINNOW_* name a
+    # test sets may outlive it in this process's environment.
+    monkeypatch.setenv("WINNOW_ENV_FILE", str(tmp_path / "userenv"))
+    before = {k for k in os.environ if k.startswith("WINNOW_")}
+    yield
+    for k in [k for k in os.environ if k.startswith("WINNOW_") and k not in before]:
+        monkeypatch.delenv(k, raising=False)
 
 
 @pytest.fixture

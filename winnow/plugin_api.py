@@ -126,7 +126,9 @@ A tab plus its backend route, the full custom-UI shape:
         # secrets (see register_row_action's note on WINNOW_* env vars).
         # req: PluginRequest — method, route, query (dict of str), body,
         # storage (per-plugin JSON), variables / set_variable (case
-        # variables from Case settings — config, never secrets)
+        # variables from Case settings — config, never secrets), and
+        # env("WINNOW_X") for a token the analyst saved under Settings →
+        # Environment (server-side only; only WINNOW_* names are readable)
         # (parsed JSON or None), and store (the open Store, or None when no
         # case is open). For reads, use req.store.run_sql(sql, limit) — it
         # opens its own read-only connection, so a slow plugin query never
@@ -211,6 +213,17 @@ class PluginRequest:
             return self.store.get_variables()
         except Exception:  # noqa: BLE001 — a plugin reading a variable must never 500 the case
             return {}
+
+    def env(self, name: str, default: str | None = None) -> str | None:
+        """A `WINNOW_*` environment variable — the place for a token or
+        password, which must never be a case variable (case data travels
+        with the file). Set under Settings → Environment or exported by
+        the shell; the shell wins. Only the `WINNOW_` prefix is readable
+        through here (ValueError otherwise) so a plugin can't lift other
+        credentials out of the process. Never send the value to the
+        browser."""
+        from . import userenv
+        return userenv.get(name, default)
 
     def set_variable(self, name: str, value: str) -> dict:
         """Write a case variable (upsert; keeps any description/required
