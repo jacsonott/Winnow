@@ -326,9 +326,15 @@ html[data-style="studio"][data-theme="light"] {
   grid-template-columns: max-content minmax(0, 1fr);
   grid-template-rows: auto auto auto minmax(0, 1fr);
 }
-#sidebar { grid-column: 1; grid-row: 1 / -1; }
+/* Rows 3/-1, not 1/-1: the sidebar slides in UNDER the tab bar, so
+   toggling it never reflows the top chrome — the tab strips, Case menu and
+   Settings stay exactly where the pointer left them. The banner and bar
+   span both columns for the same reason (they're the full-width chrome the
+   sidebar tucks beneath). */
+#sidebar { grid-column: 1; grid-row: 3 / -1; }
 #sidebar[hidden] { display: none; }
-.temp-banner, .bar, .toolbar, .main-area { grid-column: 2; }
+.temp-banner, .bar { grid-column: 1 / -1; }
+.toolbar, .main-area { grid-column: 2; }
 /* Explicit row per child, not auto-placement — auto-placement once slid
    .main-area into the wrong track when a display:none sibling (the old
    suggestion banner) dropped out of the grid, and past ~1.4M rows that
@@ -1784,7 +1790,7 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 .assoc-handleronly { color: var(--dim); font-size: 0.85em; }
 
 /* Case notes tab */
-.notesview { display: flex; flex-direction: column; min-height: 0; }
+.notesview { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }
 .notes-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px;
   border-bottom: 1px solid var(--line-2); flex: 0 0 auto; }
 .notes-head .notes-label { color: var(--dim); text-transform: uppercase;
@@ -1804,7 +1810,7 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 .notes-preview li { margin: 2px 0; }
 
 /* IOC watchlist tab */
-.watchlistview { display: flex; flex-direction: column; min-height: 0; }
+.watchlistview { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }
 .wl-add { display: flex; gap: 8px; align-items: center;
   padding: 10px 12px; border-bottom: 1px solid var(--line-2); flex: 0 0 auto; }
 .wl-add input[type=text], .wl-add #wlValue { flex: 1 1 260px; min-width: 200px;
@@ -1848,7 +1854,7 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 
 
 /* Case dashboard tab */
-.dashboardview { display: flex; flex-direction: column; min-height: 0; overflow: auto; }
+.dashboardview { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; overflow: auto; }
 .dash-bar { display: flex; align-items: center; gap: 10px; padding: 8px 12px;
   border-bottom: 1px solid var(--line-2); flex: 0 0 auto; position: sticky; top: 0;
   background: var(--panel); z-index: 1; }
