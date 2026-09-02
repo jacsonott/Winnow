@@ -45,7 +45,22 @@ export async function scanWatchlistForSources(sourceIds) {
     if (!wl.length) return;            // nothing to scan for
     for (const sid of sourceIds) await post(`/api/watchlist/scan?source_id=${sid}`, {});
     if (S.activeTab === 'watchlist') await load();
+    else await refreshWatchlistBadge();  // new hits while the analyst is elsewhere → dot
   } catch { /* best effort */ }
+}
+
+/* The tab's new-hit dot: total hits vs the count last seen (case_settings,
+   so it travels with the case). Showing the tab is what marks them seen. */
+export async function refreshWatchlistBadge() {
+  let b;
+  try { b = await api('/api/watchlist/badge'); } catch { return; }
+  $('tabWatchlist')?.classList.toggle('has-new-hits', b.total_hits > b.seen);
+}
+
+async function markHitsSeen() {
+  const total = indicators.reduce((n, i) => n + (i.hit_count || 0), 0);
+  $('tabWatchlist')?.classList.remove('has-new-hits');
+  try { await post('/api/watchlist/seen', { count: total }); } catch { /* best effort */ }
 }
 
 function fillAutoTag() {
@@ -60,28 +75,41 @@ async function load() {
   try { indicators = await api('/api/watchlist'); } catch { indicators = []; }
   renderList();
   if (selected != null && !indicators.some((i) => i.id === selected)) { selected = null; renderHits(); }
+  // Any load while the tab is showing means the analyst is looking at the
+  // current counts — keep the seen high-water in step or the next badge
+  // poll would light the dot for hits already on screen.
+  if (S.activeTab === 'watchlist') markHitsSeen();
 }
 
 function renderList() {
   const list = $('wlList');
   list.replaceChildren();
+  const withHits = indicators.filter((i) => i.hit_count).length;
+  const totalHits = indicators.reduce((n, i) => n + (i.hit_count || 0), 0);
+  const sum = $('wlSummary');
+  if (sum) {
+    sum.textContent = indicators.length
+      ? `${indicators.length} indicator${indicators.length === 1 ? '' : 's'}`
+        + (withHits ? ` · ${withHits} with hits · ${totalHits.toLocaleString()} hit${totalHits === 1 ? '' : 's'}` : ' · no hits yet')
+      : '';
+  }
   if (!indicators.length) {
     list.append(el('div', 'note-status', 'No indicators yet — add one above or import a list. '
       + 'New imports are scanned automatically.'));
     return;
   }
-  const withHits = indicators.filter((i) => i.hit_count).length;
-  const head = el('div', 'wl-listhead',
-    `${indicators.length} indicator${indicators.length === 1 ? '' : 's'}`
-    + (withHits ? ` · ${withHits} with hits` : ''));
-  list.append(head);
   for (const ind of indicators) {
     const row = el('div', 'wl-row' + (ind.id === selected ? ' active' : ''));
-    const kind = el('span', 'wl-kind', KIND_LABEL[ind.kind] || KIND_LABEL.other);
-    kind.style.color = KIND_COLOR[ind.kind] || KIND_COLOR.other;
+    const kind = el('span', 'wl-kind wl-kind-' + (KIND_COLOR[ind.kind] ? ind.kind : 'other'),
+      KIND_LABEL[ind.kind] || KIND_LABEL.other);
     kind.title = ind.kind;
-    const val = el('span', 'wl-val', ind.value);
-    if (ind.note) val.title = ind.note;
+    const mainCol = el('span', 'wl-main');
+    mainCol.append(el('span', 'wl-val', ind.value));
+    if (ind.note) {
+      const note = el('span', 'wl-note', ind.note);
+      note.title = ind.note;
+      mainCol.append(note);
+    }
     const cnt = el('span', 'wl-count' + (ind.hit_count ? ' hot' : ''), String(ind.hit_count));
     cnt.title = `${ind.hit_count} hit${ind.hit_count === 1 ? '' : 's'}`;
     const del = el('button', 'wl-del', '✕');
@@ -92,7 +120,7 @@ function renderList() {
       if (selected === ind.id) selected = null;
       load();
     };
-    row.append(kind, val, cnt, del);
+    row.append(kind, mainCol, cnt, del);
     row.onclick = () => { selected = ind.id; renderList(); renderHits(); };
     list.append(row);
   }
