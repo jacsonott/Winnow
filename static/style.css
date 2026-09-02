@@ -1907,10 +1907,13 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 .dash-head { display: flex; align-items: center; }
 .dash-head h4 { margin: 0 0 8px; color: var(--dim); font-size: 11px; text-transform: uppercase;
   letter-spacing: .07em; font-weight: 500; flex: 1; }
-.dash-rm { background: none; border: none; color: var(--line-2); cursor: pointer; font: inherit; }
-.dash-rm:hover { color: var(--danger); }
 .dash-edit { background: none; border: none; color: var(--line-2); cursor: pointer; font: inherit; margin-right: 2px; }
 .dash-edit:hover { color: var(--accent); }
+/* The reorder handle — the one part of a card that starts a drag, so text
+   inside widgets stays selectable. */
+.dash-grip { color: var(--line-2); cursor: grab; user-select: none; font-size: 11px; }
+.dash-card:hover .dash-grip { color: var(--dim); }
+.dash-remove { margin-left: auto; color: var(--danger); }
 .dash-card { cursor: default; }
 .dash-card[draggable="true"] { cursor: grab; }
 .dash-card.dragging { opacity: .4; }
