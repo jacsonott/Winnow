@@ -10,6 +10,7 @@ import { openRowContextMenu } from './rowmenu.js';
 import { S, selClear, selCount, selHas, selPositions, selRemap, selSetRange } from './state.js';
 import { BULK_TAG_CONFIRM_AT, refreshTagCounts, refreshUndoState, renderTagRibbon } from './tags.js';
 import { confirmDialog, contextMenu, dropdownMenu } from './ui.js';
+import { displayCell } from './tsformat.js';
 import { rebuildView } from './view.js';
 
 /* ----------------------------------------------------------------- group-by */
@@ -922,7 +923,10 @@ export async function copySelectedCells(withHeaders) {
       if (S.groupByCols.length && !groupCoordAt(pos)) continue;
       const r = rowAt(pos);
       if (!r) throw new Error(`row ${pos + 1} could not be loaded`);
-      lines.push(cols.map((name) => (r.cells[colIdx[name]] ?? '')).join('\t'));
+      // What's copied is what's shown: a column's chosen timestamp or
+      // duration format applies here exactly as it does in the grid, so
+      // a pasted timeline reads the way the analyst had it on screen.
+      lines.push(cols.map((name) => displayCell(name, r.cells[colIdx[name]] ?? '')).join('\t'));
     }
     return lines.join('\n');
   })();
@@ -945,7 +949,7 @@ export async function copyRowsAsText(positions, withHeaders) {
     for (const pos of positions) {
       const r = rowAt(pos);
       if (!r) throw new Error(`row ${pos + 1} could not be loaded`);
-      lines.push(cols.map((name) => (r.cells[colIdx[name]] ?? '')).join('\t'));
+      lines.push(cols.map((name) => displayCell(name, r.cells[colIdx[name]] ?? '')).join('\t'));
     }
     return lines.join('\n');
   })();

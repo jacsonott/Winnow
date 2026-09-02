@@ -7,6 +7,7 @@ import { copyRowsAsText, writeClipboardText } from './grouping.js';
 import { S, selCount, selPositions } from './state.js';
 import { UNDO_NEXT, applyTag, undoLastTagChange } from './tags.js';
 import { openTagEditor } from './timeframe.js';
+import { displayCell } from './tsformat.js';
 import { contextMenu } from './ui.js';
 
 /* ------------------------------------------------- row context menu */
@@ -102,7 +103,7 @@ export function rowMenuClipboardItems(ctx) {
     {
       label: 'Copy cell',
       disabled: !ctx.colName,
-      onclick: () => writeClipboardText(Promise.resolve(String(ctx.value == null ? '' : ctx.value)), 'Copied cell'),
+      onclick: () => writeClipboardText(Promise.resolve(String(displayCell(ctx.colName, ctx.value == null ? '' : ctx.value))), 'Copied cell'),
     },
     { label: `Copy ${rows}`, onclick: () => copyRowsAsText(positions(), false) },
     { label: `Copy ${rows} with headers`, onclick: () => copyRowsAsText(positions(), true) },
