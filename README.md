@@ -35,9 +35,12 @@ another analyst. The evidence files themselves are **never modified**.
   profile included).
 - **Plaso timelines** — drop a `.plaso` file in and the whole log2timeline
   output lands as one flat, filterable table. No plaso install needed.
-- **Pivot tables, session bookends, raw NTFS parsing** and more via
-  drop-in plugins (five ship with the app), plus a read-only SQL pane when
-  you want to write the query yourself.
+- **Zipped bundles** — drop in an ESXi support bundle or UAC collection
+  (`.zip`/`.tar`/`.tgz`/`.gz`) and Winnow expands it, nested archives and
+  rotated logs included, then imports the files inside.
+- **Pivot tables, session bookends, raw NTFS parsing, ESXi/UAC log
+  triage** and more via drop-in plugins (six ship with the app), plus a
+  read-only SQL pane when you want to write the query yourself.
 
 ## Get started
 
@@ -265,7 +268,7 @@ GROUP BY 1, 2 ORDER BY n DESC;
 ![The pivot plugin: hosts by event id](docs/screenshots/pivot.png)
 
 **Settings → Plugins** manages everything — on/off per machine or per
-case, effective immediately, no restart. Five examples ship with the app,
+case, effective immediately, no restart. Six examples ship with the app,
 listed there and switched off until you enable them:
 
 - **`pivot/`** — Excel's PivotTable over any table: drag fields into
@@ -281,6 +284,10 @@ listed there and switched off until you enable them:
 - **`claude_assistant/`** — a Claude chat tab that sees the case *schema*
   (never row data) and writes SQL pane queries. Needs network and an API
   key, which is exactly why it's an opt-in plugin.
+- **`esxi_logs/`** — parses VMware ESXi support-bundle and UAC Linux host
+  logs (hostd, vmkernel, auth, shell, vobd, vpxa, rhttpproxy, esxupdate)
+  into one schema; pairs with the shipped ESXi / UAC triage dashboard
+  profile.
 
 A plugin is local Python running with Winnow's own privileges, and nothing
 is ever fetched from a network — installing one is the consent step, so
