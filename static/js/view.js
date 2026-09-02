@@ -120,6 +120,11 @@ export async function rebuildView({ keepScroll = true } = {}) {
     render();
     drawRail();
   }
+  // Anything following the grid (plugin toolbar panels via
+  // winnow.onViewChange) hears about the new view here — after the paint,
+  // so a listener that reads S.view sees the settled state.
+  document.dispatchEvent(new CustomEvent('winnow:viewchange',
+    { detail: { sourceId: S.sourceId, viewId: v.view_id, rowCount: v.row_count } }));
   refreshTagCounts(); // the scope changed, so every ribbon count did too
   updateFiltersButton();
 }

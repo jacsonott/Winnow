@@ -7,7 +7,7 @@ import { maybeOfferAssociation } from './assoc.js';
 import { openFolderBrowser } from './home.js';
 import { startJobsPoll, uploadWithProgress } from './jobs.js';
 import { ARCHIVE_IMPORT_EXTENSIONS, PLASO_IMPORT_EXTENSIONS, RECOGNIZED_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, extOf, importKindFor, openImportPreview, openJsonImportPreview } from './merge.js';
-import { renderPluginTabs } from './plugins.js';
+import { renderPluginTabs, renderPluginPanelButtons } from './plugins.js';
 import { fmtBytes } from './tables.js';
 import { loadSources } from './sources.js';
 import { S } from './state.js';
@@ -25,10 +25,12 @@ export async function loadPlugins() {
     S.pluginFormats = r.formats || [];
     S.pluginTabs = r.tabs || [];
     S.pluginRowActions = r.row_actions || [];
+    S.pluginPanels = r.panels || [];
     S.pluginDirs = r.dirs || [];
     S.pluginsCaseOpen = !!r.case_open;
-  } catch { S.plugins = []; S.pluginFormats = []; S.pluginTabs = []; S.pluginRowActions = []; S.pluginDirs = []; S.pluginsCaseOpen = false; }
+  } catch { S.plugins = []; S.pluginFormats = []; S.pluginTabs = []; S.pluginRowActions = []; S.pluginPanels = []; S.pluginDirs = []; S.pluginsCaseOpen = false; }
   renderPluginTabs();
+  renderPluginPanelButtons();
 }
 
 /* fnmatch-lite for plugin filename_patterns ($MFT, *$UsnJrnl*) — the same

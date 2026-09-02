@@ -324,7 +324,7 @@ html[data-style="studio"][data-theme="light"] {
      invisible while the banner stayed hidden (its default state), which
      is exactly why this went unnoticed for so long. */
   grid-template-columns: max-content minmax(0, 1fr);
-  grid-template-rows: auto auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto auto minmax(0, 1fr);
 }
 /* Rows 3/-1, not 1/-1: the sidebar slides in UNDER the tab bar, so
    toggling it never reflows the top chrome — the tab strips, Case menu and
@@ -334,7 +334,7 @@ html[data-style="studio"][data-theme="light"] {
 #sidebar { grid-column: 1; grid-row: 3 / -1; }
 #sidebar[hidden] { display: none; }
 .temp-banner, .bar { grid-column: 1 / -1; }
-.toolbar, .main-area { grid-column: 2; }
+.toolbar, .plugin-panels, .main-area { grid-column: 2; }
 /* Explicit row per child, not auto-placement — auto-placement once slid
    .main-area into the wrong track when a display:none sibling (the old
    suggestion banner) dropped out of the grid, and past ~1.4M rows that
@@ -348,7 +348,10 @@ html[data-style="studio"][data-theme="light"] {
 .temp-banner { grid-row: 1; }
 .bar { grid-row: 2; }
 .toolbar { grid-row: 3; }
-.main-area { grid-row: 4; }
+/* Plugin toolbar panels: an explicit track like the banner, collapsing
+   to zero while hidden so the grid keeps its height back. */
+.plugin-panels { grid-row: 4; }
+.main-area { grid-row: 5; }
 /* Grid items default to min-width:auto (their content's min-content size),
    not 0 — without this, a row wide enough to overflow (e.g. many/long tab
    names in .bar) blows out #app's implicit single column, stretching every
@@ -486,6 +489,13 @@ html[data-style="studio"][data-theme="light"] {
 }
 
 .search-icon-btn { display: inline-flex; align-items: center; line-height: 1; padding: 4px 8px; }
+.plugin-toolbar-buttons { display: inline-flex; gap: 4px; }
+.plugin-toolbar-buttons:empty { display: none; }
+.plugin-panel-btn[aria-pressed="true"] { color: var(--accent); border-color: var(--accent-dim); }
+.plugin-panels[hidden] { display: none; }
+.plugin-panels { display: flex; flex-direction: column; min-width: 0; }
+.plugin-panel { border-bottom: 1px solid var(--line-2); background: var(--panel); min-width: 0; }
+.plugin-panel[hidden] { display: none; }
 .search-icon-btn svg { width: 14px; height: 14px; }
 /* Pages collapsed into one dropdown (Appearance → Pages as a dropdown). */
 .pages-menu-btn .caret { color: var(--dim); margin-left: 2px; }

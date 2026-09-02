@@ -3,7 +3,7 @@
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { recordTabVisit } from './tabhistory.js';
 import { $, api, debounce, el, post, toast } from './core.js';
-import { hidePluginViews, sqlResultNodes } from './plugins.js';
+import { hidePluginViews, sqlResultNodes, syncPluginPanels } from './plugins.js';
 import { setActiveSqlResult } from './sqlassist.js';
 import { checkPresets } from './savedfilters.js';
 import { syncTabSelection, wireDragReorder } from './sources.js';
@@ -233,6 +233,7 @@ export async function closeSqlTab(t) {
 export function syncTabChrome() {
   const isGrid = S.activeTab === 'grid';
   $('toolbar').hidden = !isGrid;
+  syncPluginPanels();   // plugin toolbar panels live and die with the toolbar
 }
 
 /* The mutually-exclusive main content views (grid / SQL / Timeline / and
