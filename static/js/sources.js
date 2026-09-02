@@ -405,6 +405,10 @@ export function activateTabSlot(digit) {
 export function renderPageTabs() {
   const strip = $('pageTabs');
   const nodes = [];
+  // Appearance → "Pages as a dropdown": the strip collapses to one button
+  // (the way Filters ▾ does) — the individual tab nodes stay in the DOM,
+  // hidden, because the four static ones are found by id every render.
+  const pagesAsMenu = !!(S.appearance && S.appearance.pagesMenu);
   for (const t of pageTabsSorted()) {
     const btn = t.plugin ? el('button', 'tab tab-sql tab-plugin', t.label) : t.node();
     if (t.plugin) {
@@ -416,14 +420,9 @@ export function renderPageTabs() {
     // Closed tabs stay IN the strip's DOM, hidden — the four static nodes
     // (#tabSql & co.) are found by id on every render, and a skipped node
     // would leave the document with replaceChildren and never come back.
-    btn.hidden = pageTabClosed(t.key);
-    if (!btn.dataset.closeWired) {
-      const x = el('span', 'x', '✕');
-      x.title = 'Close this page tab — reopen it from the sidebar\'s Pages section';
-      x.onclick = (e) => { e.stopPropagation(); closePageTab(t.key); };
-      btn.append(x);
-      btn.dataset.closeWired = '1';
-    }
+    // Closing and reopening page tabs lives in the sidebar's Pages section
+    // (✕ / ＋ per row) — the strip stays clean of per-tab chrome.
+    btn.hidden = pageTabClosed(t.key) || pagesAsMenu;
     if (!btn.dataset.dragWired) {
       wireDragReorder(btn, t.key, {
         containerSelector: '#pageTabs',
@@ -434,6 +433,19 @@ export function renderPageTabs() {
       });
       btn.dataset.dragWired = '1';
     }
+    nodes.push(btn);
+  }
+  if (pagesAsMenu) {
+    const open = pageTabsSorted().filter((t) => !pageTabClosed(t.key));
+    const current = open.find((t) => t.key === S.activeTab);
+    const btn = el('button', 'tab tab-sql pages-menu-btn');
+    btn.id = 'pagesMenuBtn';
+    btn.append(el('span', null, current ? current.label : 'Pages'), el('span', 'caret', '\u25be'));
+    btn.title = 'Pages — SQL, Timeline, Notes, Watchlist and plugin tabs';
+    btn.setAttribute('aria-haspopup', 'true');
+    btn.onclick = () => dropdownMenu(btn, open.map((t) => ({
+      label: t.label, checked: t.key === S.activeTab, onclick: t.show,
+    })));
     nodes.push(btn);
   }
   strip.replaceChildren(...nodes);
@@ -451,6 +463,13 @@ export function renderPageTabs() {
 export function syncTabSelection() {
   document.querySelectorAll('#pageTabs .tab').forEach((t) =>
     t.setAttribute('aria-selected', String(t.dataset.pageKey === S.activeTab)));
+  const pm = $('pagesMenuBtn');
+  if (pm) {
+    // The collapsed button stands in for whichever page is up.
+    const cur = pageTabsSorted().find((t) => t.key === S.activeTab);
+    pm.setAttribute('aria-selected', String(!!cur));
+    pm.firstChild.textContent = cur ? cur.label : 'Pages';
+  }
   document.querySelectorAll('#sourceTabs .tab').forEach((t) =>
     t.setAttribute('aria-selected', String(S.activeTab === 'grid' && Number(t.dataset.id) === S.sourceId)));
   renderSidebar();
@@ -1063,7 +1082,12 @@ export function pageSidebarRow(t, index, total) {
   label.onclick = () => { reopenPageTab(t.key); t.show(); };
   row.append(label);
   const acts = el('div', 'sidebar-row-actions');
-  if (!closed) {
+  if (closed) {
+    const add = el('button', 'menu-item-action', '＋');
+    add.title = 'Reopen this page tab';
+    add.onclick = (e) => { e.stopPropagation(); reopenPageTab(t.key); t.show(); };
+    acts.append(add);
+  } else {
     const x = el('button', 'menu-item-action', '✕');
     x.title = 'Close this page tab';
     x.onclick = (e) => { e.stopPropagation(); closePageTab(t.key); };

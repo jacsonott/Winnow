@@ -11,7 +11,7 @@ import { ACTION_LABELS, defaultKeymap, findKeyConflict, keySpecFromEvent, saveKe
 import { buildPluginsPanel } from './plugins.js';
 import { buildAssocPanel } from './assoc.js';
 import { loadSavedFilters } from './savedfilters.js';
-import { applyPageTabsSize } from './sources.js';
+import { applyPageTabsSize, renderPageTabs } from './sources.js';
 import { S, gridRowCount } from './state.js';
 import { openSavedFiltersModal, updateFiltersButton } from './timeframe.js';
 import { TS_FORMATS } from './tsformat.js';
@@ -583,6 +583,25 @@ export function openSettings() {
     secLook.append(splashLabel);
     secLook.append(el('p', 'fb-help',
       'The winnowing animation Winnow starts with. Any key or click skips it.'));
+
+    /* Pages as one dropdown: with several plugin tabs the page strip
+       competes with the table tabs for the bar — collapsing it to a single
+       Pages ▾ button (like Filters ▾) hands that width back. */
+    const pagesLabel = el('label');
+    pagesLabel.style.cssText = 'display:flex;align-items:center;gap:6px';
+    const pagesCb = el('input');
+    pagesCb.type = 'checkbox';
+    pagesCb.checked = !!S.appearance.pagesMenu;
+    pagesCb.onchange = () => {
+      S.appearance.pagesMenu = pagesCb.checked;
+      saveAppearance();
+      renderPageTabs();
+      applyPageTabsSize();
+    };
+    pagesLabel.append(pagesCb, el('span', null, 'Pages as a dropdown'));
+    secLook.append(pagesLabel);
+    secLook.append(el('p', 'fb-help',
+      'Collapse SQL, Timeline, Notes, Watchlist and plugin tabs into one Pages \u25be button, the way Filters \u25be works.'));
 
     const secKeys = settingsSection(b, 'Keyboard shortcuts');
     secKeys.append(el('p', null, 'Tag hotkeys (1–9) are set per-tag in Edit tags. Escape always clears the selection or closes a panel. '
