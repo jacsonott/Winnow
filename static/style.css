@@ -1467,7 +1467,11 @@ textarea:focus { border-color: var(--accent); outline: none; }
    be impossible to miss without shouting. Accent-tinted, not danger —
    nothing is wrong, something is just undecided. */
 .temp-banner {
-  grid-column: 2; display: flex; align-items: center; gap: 12px;
+  /* No grid-column here: the placement rule up top spans it across BOTH
+     columns with the bar. A column-2 pin left over from the old
+     full-height sidebar made the banner jump every time the sidebar
+     toggled. */
+  display: flex; align-items: center; gap: 12px;
   padding: 6px 12px; font-size: 12px;
   background: var(--sel); border-bottom: 1px solid var(--accent-dim);
   color: var(--text);

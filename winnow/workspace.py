@@ -784,10 +784,20 @@ class AppSettings:
         with _LOCK:
             return {**self.DEFAULTS, **_read(self.FILE, {})}
 
+    # The look (skin/theme/accent/splash) is saved here as well as in
+    # localStorage. Browser storage is per-ORIGIN, and an association
+    # quick-look starts a server on a free port — a different origin, so it
+    # came up in the default skin every time. The machine copy is what a
+    # fresh origin adopts on boot; localStorage stays the flash-free cache.
+    APPEARANCE_KEYS = {"style", "themeMode", "accent", "accentCustomized", "splash", "density", "pagesMenu"}
+
     def save(self, values: dict) -> dict:
         fmt = values.get("default_ts_format")
         if fmt is not None and fmt not in self.TS_FORMATS:
             raise ValueError(f"Unknown timestamp format: {fmt}")
+        look = values.get("appearance")
+        if look is not None and not isinstance(look, dict):
+            raise ValueError("appearance must be an object")
         if "remote_session" in values:
             # Whether THIS MACHINE is reached over RDP is a machine fact,
             # which is why it lives here and not in localStorage: browser
@@ -801,6 +811,8 @@ class AppSettings:
                 current["default_ts_format"] = fmt
             if "remote_session" in values:
                 current["remote_session"] = values["remote_session"]
+            if look is not None:
+                current["appearance"] = {k: v for k, v in look.items() if k in self.APPEARANCE_KEYS}
             _write(self.FILE, current)
             return current
 

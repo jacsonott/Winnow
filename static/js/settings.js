@@ -2,7 +2,7 @@
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { autofitMaxWidth } from './columns.js';
-import { $, AUTOFIT_MAX_W_DEFAULT, ROW_H, ROW_H_COMFORTABLE, ROW_H_COMPACT, api, el, post, setRowH, toast } from './core.js';
+import { $, AUTOFIT_MAX_W_DEFAULT, ROW_H, ROW_H_COMFORTABLE, ROW_H_COMPACT, api, debounce, el, post, setRowH, toast } from './core.js';
 import { labeledRow } from './derived.js';
 import { VALUE_FILTER_AUTO_MAX } from './filters.js';
 import { headH, rScroll, render, spacerPx, vScroll } from './grid.js';
@@ -68,6 +68,44 @@ export function saveAppearance() {
   // remoteSession lives server-side now (see loadAppSettings) — persisting
   // it here would resurrect a stale value and fight the machine setting.
   localStorage.setItem(APPEARANCE_KEY, JSON.stringify({ ...S.appearance, remoteSession: undefined }));
+  pushAppearanceSoon();
+}
+
+/* The look is mirrored to the machine (app settings) so a different
+   ORIGIN — an association quick-look on a free port, another browser —
+   boots into the same skin instead of the default. Debounced: the accent
+   picker fires per keystroke. */
+const pushAppearanceSoon = debounce(() => {
+  post('/api/settings/app', { appearance: appearanceForServer() }).catch(() => {});
+}, 400);
+
+function appearanceForServer() {
+  const { remoteSession, ...rest } = S.appearance;
+  return rest;
+}
+
+/* On boot, after the machine settings load. An origin that has never
+   stored a look (a quick-look window on a free port, a second browser)
+   adopts the machine's saved one and repaints — that was the default-skin
+   flash. Adopted IN MEMORY only: nothing is written to this origin's
+   localStorage, so it keeps following the machine on every boot (and the
+   first-run gate, which reads that key, still sees a first run). An
+   origin with its own stored look keeps it — every change there pushes
+   up, so the two only diverge if the analyst deliberately set them apart.
+   A machine with no saved look yet learns this origin's. */
+export function syncAppearanceFromServer() {
+  const remote = S.appSettings && S.appSettings.appearance;
+  const hasLocal = !!localStorage.getItem(APPEARANCE_KEY);
+  if (!remote || typeof remote !== 'object') {
+    if (hasLocal) pushAppearanceSoon();
+    return;
+  }
+  if (hasLocal) return;
+  S.appearance = { ...S.appearance, ...remote };
+  document.documentElement.setAttribute('data-style', S.appearance.style);
+  paintTheme();
+  paintAccent();
+  paintDensity();
 }
 
 export function contrastFg(hex) {
