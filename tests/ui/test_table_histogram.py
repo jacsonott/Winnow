@@ -31,8 +31,10 @@ def test_histogram_panel_follows_filters_and_sets_the_timeframe(page, server):
         page.evaluate("() => __winnow.loadPlugins()")
         btn = page.locator("#pluginToolbarButtons .plugin-panel-btn", has_text="Histogram")
         btn.wait_for(state="visible", timeout=10_000)
-        # Beside search, in the toolbar's right cluster.
+        # In the toolbar's right cluster, immediately LEFT of the ⏱ timeframe button.
         assert page.locator("#toolbar #pluginToolbarButtons").count() == 1
+        bb, tb = btn.bounding_box(), page.locator("#btnTimeRange").bounding_box()
+        assert bb["x"] + bb["width"] <= tb["x"] + 1
         assert btn.get_attribute("aria-pressed") == "false"
 
         btn.click()

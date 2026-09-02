@@ -360,7 +360,13 @@ def test_search_all_sources_caps_on_the_indexed_and_advanced_paths_too(store, wr
 class _CountingLock:
     """Delegates to a real lock while counting how many times it goes fully
     unheld — i.e. how many separate units of work an operation splits into,
-    rather than how many times it re-enters an outer hold."""
+    rather than how many times it re-enters an outer hold. Counts every
+    thread on purpose: the sweep spreads its per-source work across
+    threads, and each release-to-zero is a unit of work whichever thread
+    did it. What that means for the reader: `depth` is a live snapshot,
+    so assert it through _settled_unheld (below) rather than at one
+    instant — a background index build the sweep kicks off can hold the
+    lock for a moment after the sweep returns."""
 
     def __init__(self, inner):
         self._inner = inner
@@ -388,6 +394,19 @@ class _CountingLock:
         return False
 
 
+def _settled_unheld(counting, timeout=3.0):
+    """True once nothing holds the lock — polled, because a transient
+    background hold (a column-index build) can overlap the instant after
+    an operation returns, while a hold the operation LEAKED never lets go."""
+    import time
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if counting.depth == 0:
+            return True
+        time.sleep(0.02)
+    return counting.depth == 0
+
+
 def test_search_all_sources_does_not_hold_the_lock_across_sources(store, write_csv):
     """Invariant #4: hold the lock for one unit of committed work, not for a
     whole loop over the case. This sweep is N full scans back to back on a
@@ -411,7 +430,7 @@ def test_search_all_sources_does_not_hold_the_lock_across_sources(store, write_c
     finally:
         store.lock = counting._inner
     assert len(hits) == 4
-    assert counting.depth == 0
+    assert _settled_unheld(counting)
     assert counting.released_to_zero >= 4  # at least one release per source scanned
 
 
@@ -514,7 +533,7 @@ def test_search_all_job_does_not_hold_the_lock_across_sources(store, write_csv):
     finally:
         store.lock = counting._inner
     assert len(job["hits"]) == 4
-    assert counting.depth == 0
+    assert _settled_unheld(counting)
     assert counting.released_to_zero >= 4
 
 

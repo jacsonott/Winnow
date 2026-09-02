@@ -1951,13 +1951,15 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 .wl-hit:hover { background: var(--panel-2); }
 .wl-hit-src { color: var(--text); }
 .wl-hit-rid { color: var(--dim); }
-/* New hits since the analyst last looked — same dot idiom as the Case
-   button's error indicator. */
-#tabWatchlist.has-new-hits { position: relative; }
-#tabWatchlist.has-new-hits::after {
-  content: ''; position: absolute; top: 4px; right: 4px;
-  width: 6px; height: 6px; border-radius: 50%; background: var(--accent);
+/* New hits since the analyst last looked: a count pill on the tab (and
+   on the collapsed Pages ▾ button / sidebar row), not a 6px dot — the dot
+   was reported as invisible. */
+.tab-badge {
+  display: inline-block; min-width: 16px; padding: 0 5px; margin-left: 6px;
+  border-radius: 9px; background: var(--accent); color: var(--accent-fg);
+  font: 600 10px var(--mono); line-height: 16px; text-align: center; vertical-align: middle;
 }
+.menu-item .tab-badge { margin-left: 8px; }
 
 /* Case dashboard tab */
 .dashboardview { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; overflow: auto; }

@@ -18,7 +18,7 @@ import { syncSearchExpansion } from './search.js';
 import { openSessionManager } from './session.js';
 import { showGridTab, showSqlTab, showTimelineTab } from './sql.js';
 import { showNotesTab } from './notes.js';
-import { showWatchlistTab } from './watchlist.js';
+import { paintWatchlistBadge, refreshWatchlistBadge, showWatchlistTab } from './watchlist.js';
 import { dashDrag, loadDashboards, renderDashboardsInto, showDashboard } from './dashboard.js';
 import { openCaseSettings } from './settings.js';
 import { openErrorLog } from './errlog.js';
@@ -472,6 +472,7 @@ export function renderPageTabs() {
   }
   strip.replaceChildren(...nodes);
   syncTabSelection();
+  paintWatchlistBadge();
 }
 
 /* One place paints "which tab is current". S.activeTab is either a page
@@ -552,6 +553,7 @@ export async function loadSources(select) {
   S.sources = [...sources, ...merges];
   S.folders = folders;
   await loadDashboards();   // populates S.dashboards for the sidebar's Dashboards section
+  refreshWatchlistBadge();  // hits that landed since the analyst last looked — opening a case shows them
   const openTabs = renderTabs();
   // select/S.sourceId are only trustworthy if they actually name a tab
   // that's open right now — S.sourceId in particular is never reset on a
@@ -1134,6 +1136,11 @@ export function pageSidebarRow(t, index, total) {
   // Showing a closed page reopens it — the sidebar is the reopen path,
   // same as a closed table's row under All tables.
   label.onclick = () => { reopenPageTab(t.key); t.show(); };
+  if (t.key === 'watchlist' && S.watchlistNewHits) {
+    const pill = el('span', 'tab-badge', S.watchlistNewHits > 99 ? '99+' : String(S.watchlistNewHits));
+    pill.title = `${S.watchlistNewHits.toLocaleString()} new watchlist hits`;
+    label.append(pill);
+  }
   row.append(label);
   const acts = el('div', 'sidebar-row-actions');
   if (closed) {

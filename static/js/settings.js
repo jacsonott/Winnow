@@ -12,6 +12,7 @@ import { buildPluginsPanel } from './plugins.js';
 import { buildAssocPanel } from './assoc.js';
 import { loadSavedFilters } from './savedfilters.js';
 import { applyPageTabsSize, renderPageTabs } from './sources.js';
+import { lastSplash, reducedMotion } from './splash.js';
 import { S, gridRowCount } from './state.js';
 import { openSavedFiltersModal, updateFiltersButton } from './timeframe.js';
 import { TS_FORMATS } from './tsformat.js';
@@ -589,13 +590,31 @@ export function openSettings() {
     splashCb.type = 'checkbox';
     splashCb.checked = S.appearance.splash !== false;
     splashCb.onchange = () => {
-      S.appearance.splash = splashCb.checked;
+      // Ticked by hand means "play it" — including on a machine whose OS
+      // asks for reduced motion (see splash.splashEnabled).
+      S.appearance.splash = splashCb.checked ? 'always' : false;
       saveAppearance();
+      paintSplashNote();
     };
     splashLabel.append(splashCb, el('span', null, 'Launch animation'));
     secLook.append(splashLabel);
-    secLook.append(el('p', 'fb-help',
-      'The winnowing animation Winnow starts with. Any key or click skips it.'));
+    const splashNote = el('p', 'fb-help');
+    const paintSplashNote = () => {
+      const last = lastSplash();
+      const parts = ['The winnowing animation Winnow starts with. Any key or click skips it.'];
+      if (reducedMotion()) {
+        parts.push(S.appearance.splash === 'always'
+          ? 'Your system asks for reduced motion; it plays anyway because you ticked this yourself.'
+          : 'Your system asks for reduced motion (Windows: Accessibility → Visual effects → Animation effects), '
+            + 'so it is skipped — tick the box to play it regardless.');
+      }
+      if (last && last.result) {
+        parts.push(`Last launch: ${last.result}${last.reason ? ` — ${last.reason}` : ''}.`);
+      }
+      splashNote.textContent = parts.join(' ');
+    };
+    paintSplashNote();
+    secLook.append(splashNote);
 
     /* Pages as one dropdown: with several plugin tabs the page strip
        competes with the table tabs for the bar — collapsing it to a single

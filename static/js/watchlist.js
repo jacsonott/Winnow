@@ -8,7 +8,7 @@
 import { $, api, el, post, toast } from './core.js';
 import { recordTabVisit } from './tabhistory.js';
 import { showMainView, syncTabChrome } from './sql.js';
-import { openSource, syncTabSelection } from './sources.js';
+import { openSource, renderSidebar, syncTabSelection } from './sources.js';
 import { S } from './state.js';
 import { modal } from './ui.js';
 
@@ -55,12 +55,35 @@ export async function scanWatchlistForSources(sourceIds) {
 export async function refreshWatchlistBadge() {
   let b;
   try { b = await api('/api/watchlist/badge'); } catch { return; }
-  $('tabWatchlist')?.classList.toggle('has-new-hits', b.total_hits > b.seen);
+  S.watchlistNewHits = Math.max(0, (b.total_hits || 0) - (b.seen || 0));
+  paintWatchlistBadge();
+}
+
+/* The new-hit indicator: a count pill on the Watchlist tab (and on the
+   collapsed Pages ▾ button when the strip is a dropdown), plus the
+   sidebar's Pages row — one number, painted wherever the tab is
+   represented, so it can't be missed whichever way the pages are shown. */
+export function paintWatchlistBadge() {
+  const n = S.watchlistNewHits || 0;
+  const paint = (host) => {
+    if (!host) return;
+    let pill = host.querySelector(':scope > .tab-badge');
+    if (!n) { if (pill) pill.remove(); return; }
+    if (!pill) { pill = el('span', 'tab-badge'); host.append(pill); }
+    pill.textContent = n > 99 ? '99+' : String(n);
+    pill.title = `${n.toLocaleString()} new watchlist hit${n === 1 ? '' : 's'} since you last looked`;
+  };
+  paint($('tabWatchlist'));
+  const pm = $('pagesMenuBtn');
+  if (pm) paint(pm);
+  $('tabWatchlist')?.classList.toggle('has-new-hits', n > 0);
+  renderSidebar();
 }
 
 async function markHitsSeen() {
   const total = indicators.reduce((n, i) => n + (i.hit_count || 0), 0);
-  $('tabWatchlist')?.classList.remove('has-new-hits');
+  S.watchlistNewHits = 0;
+  paintWatchlistBadge();
   try { await post('/api/watchlist/seen', { count: total }); } catch { /* best effort */ }
 }
 

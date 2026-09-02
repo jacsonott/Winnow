@@ -53,11 +53,16 @@ def test_new_hit_badge_lights_and_clears(page):
       await __winnow.refreshWatchlistBadge();
     }""")
     page.wait_for_selector("#tabWatchlist.has-new-hits")
+    # A visible count pill, not just a class: H2 hits 40 rows.
+    assert page.locator("#tabWatchlist .tab-badge").inner_text() == "40"
+    # …and on the sidebar's Pages row.
+    assert page.locator("#sidebarList .sidebar-row", has_text="Watchlist").locator(".tab-badge").count() == 1
 
-    # Looking at the tab clears the dot and records the seen high-water.
+    # Looking at the tab clears the pill and records the seen high-water.
     page.locator("#tabWatchlist").click()
     page.wait_for_selector("#watchlistview:not([hidden])")
     page.wait_for_selector("#tabWatchlist.has-new-hits", state="detached")
+    assert page.locator("#tabWatchlist .tab-badge").count() == 0
     # Poll from Python — wait_for_function does NOT await a promise-returning
     # predicate (the Promise object is truthy), but page.evaluate does.
     for _ in range(50):
