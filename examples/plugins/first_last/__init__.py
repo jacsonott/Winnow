@@ -52,6 +52,12 @@ MAX_GROUP_COLS = 6
 # Two output rows per group; beyond this the result stops being a summary.
 MAX_GROUPS = 100_000
 PREVIEW_GROUPS = 8
+# "Copy result" returns the whole result to the clipboard; past this it
+# stops being something a clipboard (or the analyst) wants.
+MAX_COPY_ROWS = 20_000
+# The auto-created timeline tag's colour — fixed so every bookend tag
+# reads the same across cases (amber, matching the app's accent family).
+TIMELINE_TAG_COLOR = "#d2a04a"
 
 OPERATORS = {
     "in": ("is any of", "many"),
@@ -81,6 +87,7 @@ def register(api):
     api.register_api("meta", meta, methods=["GET"])
     api.register_api("values", values, methods=["POST"])
     api.register_api("preview", preview, methods=["POST"])
+    api.register_api("rows", rows, methods=["POST"])
     api.register_api("create", create, methods=["POST"])
 
 
@@ -428,17 +435,47 @@ def preview(req):
             "total_groups": total_groups}
 
 
-def create(req):
-    """POST .../create — run the whole thing and land it as a new source."""
+def rows(req):
+    """POST .../rows — the ENTIRE result as rows, for "Copy result": the
+    preview shows only the first few groups, and copying should hand over
+    what Create would have made, not what happened to be on screen."""
     body = req.body or {}
     src, group_cols, sort_col, carry, where, params, template, row_json = _validated(req, body)
-    rows, truncated = _bookend_rows(req, src, group_cols, sort_col, carry, where, params,
-                                    limit=MAX_GROUPS * 2, row_json=row_json)
+    bookends, truncated = _bookend_rows(req, src, group_cols, sort_col, carry, where, params,
+                                        limit=MAX_COPY_ROWS, row_json=row_json)
+    json_cols = [c["name"] for c in src["columns"]] if row_json else None
+    header = [sort_col] + carry + ([ROW_JSON_COLUMN] if row_json else []) + ["Description"]
+    return {"columns": header, "rows": _emit(bookends, sort_col, carry, template, json_cols),
+            "truncated": truncated}
+
+
+def create(req):
+    """POST .../create — run the whole thing and land it as a new source.
+
+    `timeline_tag` (optional, a tag name) puts the bookends on the unified
+    Timeline: the Timeline is exactly "every tagged row across the case",
+    so a tag IS the membership. The tag is found or created by name and
+    applied to every row of the new table through set_tags — the public
+    path that routes _apply_tag_change (invariant #7), so undo works on it
+    like any other tag write. Rids are contiguous from 1 on every ingest
+    path (invariant #2), which is what makes range(1, n+1) exact."""
+    body = req.body or {}
+    src, group_cols, sort_col, carry, where, params, template, row_json = _validated(req, body)
+    bookends, truncated = _bookend_rows(req, src, group_cols, sort_col, carry, where, params,
+                                        limit=MAX_GROUPS * 2, row_json=row_json)
     if truncated:
         raise ValueError(f"More than {MAX_GROUPS:,} groups — narrow the grouping or add a filter")
     json_cols = [c["name"] for c in src["columns"]] if row_json else None
-    out_rows = _emit(rows, sort_col, carry, template, json_cols)
+    out_rows = _emit(bookends, sort_col, carry, template, json_cols)
     name = (body.get("name") or "").strip() or f"First-Last of {src['name']}"
     header = [sort_col] + carry + ([ROW_JSON_COLUMN] if row_json else []) + ["Description"]
     rec = req.store.ingest_rows(header, out_rows, name=name)
-    return {"source": {"id": rec["id"], "name": rec["name"], "row_count": rec["row_count"]}}
+    out = {"source": {"id": rec["id"], "name": rec["name"], "row_count": rec["row_count"]}}
+    tag_name = (body.get("timeline_tag") or "").strip()
+    if tag_name:
+        tag = next((t for t in req.store.list_tags() if t["name"] == tag_name), None)
+        if tag is None:
+            tag = req.store.upsert_tag(None, tag_name, TIMELINE_TAG_COLOR, None)
+        req.store.set_tags(rec["id"], list(range(1, rec["row_count"] + 1)), tag["id"], True)
+        out["timeline_tag"] = {"id": tag["id"], "name": tag["name"]}
+    return out
