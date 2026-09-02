@@ -194,7 +194,7 @@ export function renderHead() {
       h.append(mark);
     }
     if (colMetaEntry) {
-      // Column options (display format, "Add datetime column from this…",
+      // Column options (display format, "Derive a column from this…",
       // the derived-column actions) are a right-click, not a ▾ button that
       // spent a slot of every header's width forever to be used rarely —
       // same move the tab strip's ▦ made. The header's title carries the

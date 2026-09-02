@@ -37,6 +37,26 @@ export function opLabel(opId) {
   return op ? op.label : opId;
 }
 
+/* Does this column hold JSON/XML documents? Judged from rows already in
+   the page cache (the menu builds synchronously, so no fetch): any sampled
+   non-empty cell that opens like a document counts. A column whose first
+   cached rows are all blank simply doesn't offer Flatten until some are on
+   screen — an honest "nothing to flatten here" rather than a stale menu
+   entry on every plain-text column. */
+export function columnLooksStructured(name) {
+  const idx = S.columns.findIndex((c) => c.name === name);
+  if (idx === -1) return false;
+  let seen = 0;
+  for (const r of S.rowsByPos.values()) {
+    const v = r && r.cells ? r.cells[idx] : null;
+    if (v == null || v === '') continue;
+    const t = String(v).trimStart();
+    if (t[0] === '{' || t[0] === '[' || t[0] === '<') return true;
+    if (++seen >= 200) break;
+  }
+  return false;
+}
+
 export function columnMenuItems(name) {
   const c = columnMeta(name) || {};
   const items = [];
@@ -72,14 +92,13 @@ export function columnMenuItems(name) {
     }
   }
   if (items.length) items.push('-');
+  // Three verbs, in the order they get used: Stack, Derive, and — only
+  // when the column actually holds documents — Flatten. The derive modal
+  // is type-first (timestamp / extract / join / compare), so one entry
+  // covers what used to be spelled out as "add a datetime column".
   items.push({ label: 'Stack values (rarest first)…', onclick: () => openStack(name) });
-  items.push({ label: 'Add datetime column from this…', onclick: () => openDerivedColumnModal(name) });
-  // Offered on any base column rather than only ones that sniff as
-  // structured: the check costs a sample scan, the menu is built
-  // synchronously, and a column of JSON that happens to start with a
-  // non-document row would silently lose the entry. The picker itself says
-  // so when there's nothing in there.
-  if (!c.derived && S.sourceId >= 0) {
+  items.push({ label: 'Derive a column from this…', onclick: () => openDerivedColumnModal(name) });
+  if (!c.derived && S.sourceId >= 0 && columnLooksStructured(name)) {
     items.push({ label: 'Flatten JSON/XML into columns…', onclick: () => openFlattenModal(name) });
   }
   if (c.derived) {
