@@ -13,7 +13,7 @@ import { recordTabVisit } from './tabhistory.js';
 import { renderSidebar, syncTabSelection } from './sources.js';
 import { showGridTab, showMainView, syncTabChrome } from './sql.js';
 import { S } from './state.js';
-import { modal, promptDialog, confirmDialog } from './ui.js';
+import { dropdownMenu, modal, promptDialog, confirmDialog } from './ui.js';
 
 let widgets = [];   // the CURRENT board's widgets (the one with S.dashboardId)
 
@@ -159,15 +159,18 @@ function render() {
 }
 
 let dragIdx = null;
-function wireWidgetDrag(cardEl, i) {
-  cardEl.draggable = true;
-  cardEl.addEventListener('dragstart', (e) => {
+function wireWidgetDrag(cardEl, i, grip) {
+  // The grip is the drag source, not the whole card — a fully-draggable
+  // card makes every text selection inside a widget start a drag instead.
+  // The card stays the drop target either way.
+  grip.draggable = true;
+  grip.addEventListener('dragstart', (e) => {
     dragIdx = i;
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('text/plain', String(i));
     cardEl.classList.add('dragging');
   });
-  cardEl.addEventListener('dragend', () => {
+  grip.addEventListener('dragend', () => {
     dragIdx = null;
     document.querySelectorAll('.dash-card.dragging, .dash-card.drop-target')
       .forEach((n) => n.classList.remove('dragging', 'drop-target'));
@@ -191,17 +194,18 @@ function wireWidgetDrag(cardEl, i) {
 
 function card(w, i) {
   const c = el('div', 'dash-card' + (w.span ? ` span${Math.min(4, w.span)}` : ''));
-  wireWidgetDrag(c, i);   // drag to reorder
   const head = el('div', 'dash-head');
-  head.append(el('h4', null, w.title || '(untitled)'));
+  const grip = el('span', 'dash-grip', '⠿');
+  grip.title = 'Drag to reorder';
+  head.append(grip, el('h4', null, w.title || '(untitled)'));
+  // ONE button per card — everything about the widget, removal included,
+  // lives in the editor it opens.
   const edit = el('button', 'dash-edit', '✎');
   edit.title = 'Edit widget';
   edit.onclick = () => openWidgetEditor(w);
-  const rm = el('button', 'dash-rm', '✕');
-  rm.title = 'Remove widget';
-  rm.onclick = async () => { widgets.splice(i, 1); await persist(); render(); };
-  head.append(edit, rm);
+  head.append(edit);
   c.append(head);
+  wireWidgetDrag(c, i, grip);   // drag the grip to reorder
   const body = el('div', 'dash-widget-body');
   c.append(body);
   runWidget(w, body);
@@ -300,21 +304,21 @@ function dashTableOptions() {
   return opts;
 }
 
-function openWidgetEditor(existing) {
+function openWidgetEditor(existing, prefill = null) {
   modal(existing ? 'Edit widget' : 'Add widget', (b) => {
     const mk = (label, node) => { b.append(el('label', null, label)); b.append(node); return node; };
-    const title = el('input'); title.className = 'confirm-input'; title.value = existing?.title || '';
+    const title = el('input'); title.className = 'confirm-input'; title.value = existing?.title || prefill?.title || '';
     const source = el('select');
     for (const o of ['sql', 'watchlist', 'tags']) source.append(new Option(o, o));
     source.value = existing?.source || 'sql';
     const renderSel = el('select');
     for (const o of ['stat', 'kv', 'chips', 'list', 'bar', 'histogram']) renderSel.append(new Option(o, o));
-    renderSel.value = existing?.render || 'stat';
+    renderSel.value = existing?.render || prefill?.render || 'stat';
     const span = el('select');
     for (const o of [1, 2, 3, 4]) span.append(new Option(`${o} column${o === 1 ? '' : 's'}`, String(o)));
     span.value = String(existing?.span || 1);
     const sql = el('textarea'); sql.rows = 5; sql.className = 'dash-sql';
-    sql.value = existing?.query?.sql || '';
+    sql.value = existing?.query?.sql || prefill?.sql || '';
     sql.placeholder = 'SELECT COUNT(DISTINCT RemoteHost) AS hosts FROM src_1';
     const sub = el('input'); sub.className = 'confirm-input'; sub.value = existing?.sub || '';
     // Template + table pickers that write a starting query for you.
@@ -383,6 +387,18 @@ function openWidgetEditor(existing) {
       render();
     };
     acts.append(previewBtn, save);
+    if (existing) {
+      const rm = el('button', 'btn ghost dash-remove', 'Remove widget…');
+      rm.onclick = async () => {
+        if (!(await confirmDialog(`Remove "${existing.title || '(untitled)'}" from this dashboard?`,
+          { danger: true, okLabel: 'Remove' }))) return;
+        widgets.splice(widgets.indexOf(existing), 1);
+        await persist();
+        document.getElementById('modal').hidden = true;
+        render();
+      };
+      acts.append(rm);
+    }
     b.append(acts);
   }, { wide: true });
 }
@@ -399,10 +415,49 @@ async function saveAsProfile() {
   } catch (e) { toast(e.message, 6000); }
 }
 
-// Kept as an export for main.js's wiring call; the dashboard bar is built
-// per-board in renderBar (its buttons carry their own handlers), so there's
-// no static chrome left to wire here.
-export function wireDashboard() {}
+/* "To dashboard…" in the SQL pane: pick a board (or make one), land on it,
+   and open the widget editor pre-filled with the editor's current query —
+   a query that earned a place on a board shouldn't need retyping. */
+async function sqlToWidget(anchor) {
+  const sqlText = $('sqlText').value.trim();
+  if (!sqlText) { toast('Write a query first'); return; }
+  const tab = S.sqlTabs.find((t) => t.id === S.sqlTabId);
+  const openOn = async (id) => {
+    await showDashboard(id);
+    openWidgetEditor(null, { sql: sqlText, title: tab ? tab.name : '', render: 'kv' });
+  };
+  const boards = S.dashboards || [];
+  if (!boards.length) {
+    const name = await promptDialog('New dashboard name:', '', { okLabel: 'Create' });
+    if (!name || !name.trim()) return;
+    const d = await post('/api/dashboards', { name: name.trim() });
+    await loadDashboards();
+    renderSidebar();
+    await openOn(d.id);
+    return;
+  }
+  dropdownMenu(anchor, [
+    ...boards.map((d) => ({ label: d.name, onclick: () => openOn(d.id) })),
+    '-',
+    { label: '＋ New dashboard…',
+      onclick: async () => {
+        const name = await promptDialog('New dashboard name:', '', { okLabel: 'Create' });
+        if (!name || !name.trim()) return;
+        const d = await post('/api/dashboards', { name: name.trim() });
+        await loadDashboards();
+        renderSidebar();
+        await openOn(d.id);
+      } },
+  ]);
+}
+
+// The dashboard bar itself is built per-board in renderBar (its buttons
+// carry their own handlers); the one piece of static chrome is the SQL
+// pane's "To dashboard…" button.
+export function wireDashboard() {
+  const btn = $('btnSqlWidget');
+  if (btn) btn.onclick = () => sqlToWidget(btn);
+}
 
 // Dashboards live in the case; a case switch reloads them.
 export function resetDashboard() { widgets = []; S.dashboardId = null; S.dashboards = []; }
