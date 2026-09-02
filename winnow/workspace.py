@@ -37,6 +37,9 @@ stores longer than it was true:
                            than silently turning it all off
   plugin_bundles.json     named sets of plugins ("case types") applied
                            together from Settings → Plugins
+  dashboards.json         the dashboard library — boards saved machine-wide
+                           from a board's "Save to library…" and added to any
+                           case from the sidebar's Dashboards → Library rows
   app_settings.json       app-wide display preferences, e.g. the default
                            timestamp format for cases that don't set their
                            own — a case's own choice lives in the case
@@ -943,6 +946,55 @@ class PluginBundles:
             _write(self.FILE, data)
 
 
+class DashboardLibrary:
+    """Dashboards saved MACHINE-WIDE (workspace/dashboards.json), not into
+    any one case: a board built for one engagement is usually wanted on
+    the next one of the same kind. A profile (PluginBundles) also carries a
+    board, but a profile is plugins + watchlist + board applied as a unit;
+    the library is just boards, added to a case one at a time. Upsert by
+    name — 'Host overview' means one thing per machine."""
+
+    FILE = "dashboards.json"
+
+    def list(self) -> list[dict]:
+        with _LOCK:
+            return _read(self.FILE, {"dashboards": []})["dashboards"]
+
+    def get(self, board_id: int) -> dict:
+        for b in self.list():
+            if b["id"] == board_id:
+                return b
+        raise KeyError(f"No library dashboard {board_id}")
+
+    def save(self, name: str, widgets: list) -> dict:
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("Name the dashboard")
+        if len(name) > 200:
+            raise ValueError("Dashboard name is too long")
+        if not isinstance(widgets, list):
+            raise ValueError("A dashboard is a list of widgets")
+        with _LOCK:
+            data = _read(self.FILE, {"dashboards": []})
+            items = data["dashboards"]
+            existing = next((b for b in items if b["name"].lower() == name.lower()), None)
+            if existing:
+                existing["widgets"] = widgets
+                existing["updated_at"] = _now()
+                rec = existing
+            else:
+                rec = {"id": _next_id(items), "name": name, "widgets": widgets, "created_at": _now()}
+                items.append(rec)
+            _write(self.FILE, data)
+            return rec
+
+    def delete(self, board_id: int) -> None:
+        with _LOCK:
+            data = _read(self.FILE, {"dashboards": []})
+            data["dashboards"] = [b for b in data["dashboards"] if b["id"] != board_id]
+            _write(self.FILE, data)
+
+
 filters = SavedFilters()
 header_nicknames = HeaderNicknames()
 timeline_templates = TimelineTemplates()
@@ -951,5 +1003,6 @@ column_layouts = ColumnLayouts()
 import_profiles = ImportProfiles()
 plugin_prefs = PluginPrefs()
 plugin_bundles = PluginBundles()
+dashboard_library = DashboardLibrary()
 machine_prefs = MachinePrefs()
 app_settings = AppSettings()

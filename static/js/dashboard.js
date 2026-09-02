@@ -10,12 +10,17 @@
 import { drawBars, drawHistogram } from './charts.js';
 import { $, api, el, post, toast } from './core.js';
 import { recordTabVisit } from './tabhistory.js';
-import { renderSidebar, syncTabSelection } from './sources.js';
+import { renderPageTabs, renderSidebar, syncTabSelection } from './sources.js';
 import { showGridTab, showMainView, syncTabChrome } from './sql.js';
 import { S } from './state.js';
 import { dropdownMenu, modal, promptDialog, confirmDialog } from './ui.js';
 
 let widgets = [];   // the CURRENT board's widgets (the one with S.dashboardId)
+
+/* The dashboard being dragged from the sidebar, for the Pages header's
+   drop target (sources.js) — a tiny shared holder rather than a
+   dataTransfer read, which isn't available during dragover. */
+export const dashDrag = { id: null };
 
 const num = (v) => (typeof v === 'number' ? v : (parseFloat(String(v).replace(/,/g, '')) || 0));
 
@@ -26,6 +31,12 @@ const num = (v) => (typeof v === 'number' ? v : (parseFloat(String(v).replace(/,
 export async function loadDashboards() {
   try { S.dashboards = await api('/api/dashboards'); }
   catch { S.dashboards = []; }
+  // The machine-wide library rides along: it's listed under the same
+  // sidebar section, and doesn't depend on the case.
+  try { S.dashboardLibrary = await api('/api/dashboard_library'); }
+  catch { S.dashboardLibrary = []; }
+  // Pinned boards are page tabs — the strip has to know about them.
+  renderPageTabs();
 }
 
 async function loadWidgets(id) {
@@ -60,18 +71,39 @@ export function renderDashboardsInto(list) {
   list.append(el('div', 'menu-header', 'Dashboards'));
   for (const d of (S.dashboards || [])) {
     const active = S.activeTab === 'dashboard' && S.dashboardId === d.id;
-    const row = el('div', 'sidebar-row' + (active ? ' active' : ''));
+    const row = el('div', 'sidebar-row' + (active ? ' active' : '') + (d.pinned ? ' sidebar-dash-pinned' : ''));
     const label = el('button', 'menu-item', d.name);
-    label.title = `${d.widget_count} widget${d.widget_count === 1 ? '' : 's'} · double-click to rename`;
+    label.title = `${d.widget_count} widget${d.widget_count === 1 ? '' : 's'}`
+      + (d.pinned ? ' · pinned as a page tab' : '') + ' · double-click to rename · drag onto Pages to pin';
     label.onclick = () => showDashboard(d.id);
     label.ondblclick = (e) => { e.preventDefault(); renameDashboard(d); };
     row.append(label, el('span', 'sidebar-row-count', String(d.widget_count)));
     const acts = el('div', 'sidebar-row-actions');
+    const pin = el('button', 'menu-item-action', d.pinned ? '⇲' : '⇱');
+    pin.title = d.pinned ? 'Unpin from the page tabs' : 'Pin as a page tab (or drag this row onto Pages)';
+    pin.onclick = async (e) => {
+      e.stopPropagation();
+      try { await post(`/api/dashboards/${d.id}`, { pinned: !d.pinned }); await loadDashboards(); renderSidebar(); }
+      catch (err) { toast('Could not change the pin: ' + err.message, 5000); }
+    };
     const del = el('button', 'menu-item-action', '✕');
     del.title = 'Delete this dashboard';
     del.onclick = (e) => { e.stopPropagation(); deleteDashboard(d); };
-    acts.append(del);
+    acts.append(pin, del);
     row.append(acts);
+    // Drag source for the Pages header's drop target.
+    row.draggable = true;
+    row.addEventListener('dragstart', (e) => {
+      dashDrag.id = d.id;
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', String(d.id));
+      row.classList.add('dragging');
+    });
+    row.addEventListener('dragend', () => {
+      dashDrag.id = null;
+      row.classList.remove('dragging');
+      document.querySelectorAll('#sidebarList .drop-into').forEach((n) => n.classList.remove('drop-into'));
+    });
     list.append(row);
   }
   const add = el('div', 'sidebar-row sidebar-dash-new');
@@ -79,6 +111,59 @@ export function renderDashboardsInto(list) {
   addBtn.onclick = () => createDashboard();
   add.append(addBtn);
   list.append(add);
+
+  // The machine-wide library: boards kept across cases. ＋ copies one into
+  // this case (create-or-replace by name); ✕ removes it from the library.
+  const lib = S.dashboardLibrary || [];
+  if (lib.length) {
+    list.append(el('div', 'menu-header sidebar-subheader', 'Library'));
+    for (const b of lib) {
+      const row = el('div', 'sidebar-row sidebar-dash-library');
+      const label = el('button', 'menu-item', b.name);
+      label.title = `${b.widget_count} widget${b.widget_count === 1 ? '' : 's'} · saved on this machine — click to add to this case`;
+      const addToCase = async () => {
+        try {
+          const rec = await post(`/api/dashboard_library/${b.id}/add`, {});
+          await loadDashboards();
+          renderSidebar();
+          await showDashboard(rec.id);
+          toast(`Added "${b.name}" to this case`);
+        } catch (err) { toast('Could not add: ' + err.message, 5000); }
+      };
+      label.onclick = addToCase;
+      row.append(label, el('span', 'sidebar-row-count', String(b.widget_count)));
+      const acts = el('div', 'sidebar-row-actions');
+      const plus = el('button', 'menu-item-action', '＋');
+      plus.title = 'Add this board to the open case';
+      plus.onclick = (e) => { e.stopPropagation(); addToCase(); };
+      const del = el('button', 'menu-item-action', '✕');
+      del.title = 'Remove from the library (cases that already have it keep their copy)';
+      del.onclick = async (e) => {
+        e.stopPropagation();
+        if (!(await confirmDialog(`Remove “${b.name}” from the dashboard library?`, { danger: true, okLabel: 'Remove' }))) return;
+        try { await api(`/api/dashboard_library/${b.id}`, { method: 'DELETE' }); await loadDashboards(); renderSidebar(); }
+        catch (err) { toast('Could not remove: ' + err.message, 5000); }
+      };
+      acts.append(plus, del);
+      row.append(acts);
+      list.append(row);
+    }
+  }
+}
+
+/* Save the current board machine-wide (workspace/dashboards.json), so
+   the next case of the same kind can pick it up from the sidebar's
+   Library rows without re-applying a whole profile. Upserts by name. */
+async function saveToLibrary() {
+  const d = (S.dashboards || []).find((x) => x.id === S.dashboardId);
+  const name = await promptDialog('Save this dashboard to the library as:', d ? d.name : '', { okLabel: 'Save' });
+  if (!name || !name.trim()) return;
+  try {
+    await post('/api/dashboard_library', { name: name.trim(), widgets });
+    await loadDashboards();
+    renderSidebar();
+    toast(`Saved "${name.trim()}" to the library — it's under Dashboards → Library in every case`);
+  } catch (e) { toast('Could not save: ' + e.message, 6000); }
 }
 
 export async function createDashboard() {
@@ -131,10 +216,13 @@ function renderBar() {
   bar.append(title, el('div', 'spacer'));
   const add = el('button', 'btn', '＋ Add widget');
   add.onclick = () => openWidgetEditor(null);
+  const lib = el('button', 'btn ghost', 'Save to library…');
+  lib.title = 'Keep this dashboard on this machine, for any case — adds it under Dashboards → Library';
+  lib.onclick = saveToLibrary;
   const prof = el('button', 'btn ghost', 'Save as profile…');
   prof.title = 'Save this dashboard + the enabled plugins as a reusable profile';
   prof.onclick = saveAsProfile;
-  bar.append(add, prof);
+  bar.append(add, lib, prof);
 }
 
 function render() {

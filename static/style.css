@@ -445,6 +445,11 @@ html[data-style="studio"][data-theme="light"] {
 /* A closed page's row in the sidebar Pages section — present (it's the
    reopen path) but visibly parked. */
 .sidebar-page-closed .menu-item { color: var(--dim); opacity: .65; }
+/* Dashboards: a pinned board reads as a page (weight), library boards
+   read as available-not-present (dim), under a lighter sub-header. */
+.sidebar-dash-pinned .menu-item { font-weight: 600; }
+.sidebar-dash-library .menu-item { color: var(--dim); }
+#sidebarList .menu-header.sidebar-subheader { font-size: 9px; opacity: .8; margin-top: 4px; }
 .tab .x:hover { opacity: 1; color: var(--danger); }
 .tab.dragging { opacity: .4; }
 .tab.drop-before { box-shadow: inset 2px 0 0 var(--accent); }
@@ -1153,7 +1158,7 @@ textarea:focus { border-color: var(--accent); outline: none; }
 }
 .sidebar-folder .folder-name { flex: 1 1 auto; min-width: 0; font-weight: 600; }
 .sidebar-folder.drop-into, .sidebar-rootzone.drop-into,
-.sidebar-open-header.drop-into, .sidebar-openrow.drop-into {
+.sidebar-open-header.drop-into, .sidebar-openrow.drop-into, .sidebar-pages-header.drop-into {
   background: var(--ink); box-shadow: inset 0 0 0 1px var(--accent); color: var(--accent);
 }
 .sidebar-rootzone {
