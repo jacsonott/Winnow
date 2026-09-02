@@ -1,6 +1,6 @@
 {
-  "version": 2,
-  "comment": "Shipped analysis profiles. A profile is 'how I analyze this kind of case' — the plugins to enable, an optional starter watchlist, and a dashboard of widgets. SQL widgets use {{evtx}} / {{header_set:Name}} placeholders that bind to whichever table matches that header set in the open case, so the dashboard is portable. Shipped profiles are read-only; Save-as-profile creates editable copies.",
+  "version": 3,
+  "comment": "Shipped analysis profiles. A profile is 'how I analyze this kind of case' — the plugins to enable, an optional starter watchlist, and a dashboard of widgets. SQL widgets use {{evtx}} / {{header_set:Name}} placeholders that bind to whichever table matches that header set in the open case (and {{all:header_set:Name}} unions every matching table, for logs split across many files), so the dashboard is portable. Shipped profiles are read-only; Save-as-profile creates editable copies.",
   "profiles": [
     {
       "name": "KAPE triage",
@@ -232,6 +232,181 @@
           "span": 2,
           "query": {
             "sql": "SELECT Category AS label, COUNT(*) c FROM {{registry}} WHERE Category NOT IN ('','-') GROUP BY Category ORDER BY c DESC LIMIT 10"
+          }
+        }
+      ]
+    },
+    {
+      "name": "ESXi / UAC triage",
+      "description": "VMware ESXi support-bundle and UAC Linux host-log triage — one overview of every parsed log (hostd, vmkernel, auth, shell, vobd, vpxa, syslog, rhttpproxy, esxupdate): SSH and sudo activity with source IPs, shell commands, VM power and snapshot operations, vCenter-initiated actions, account/lockdown/firewall changes, and VIB install/remove. Enable the esxi_logs plugin and import the bundle (Winnow expands the archive).",
+      "plugins": [
+        "esxi_logs"
+      ],
+      "watchlist": [],
+      "dashboard": [
+        {
+          "title": "Log lines",
+          "source": "sql",
+          "render": "stat",
+          "span": 1,
+          "query": {
+            "sql": "SELECT COUNT(*) FROM {{all:header_set:ESXi / Linux host logs}}"
+          },
+          "sub": "across every parsed log"
+        },
+        {
+          "title": "Log types",
+          "source": "sql",
+          "render": "bar",
+          "span": 2,
+          "query": {
+            "sql": "SELECT Log AS label, COUNT(*) c FROM {{all:header_set:ESXi / Linux host logs}} GROUP BY Log ORDER BY c DESC"
+          }
+        },
+        {
+          "title": "Activity window",
+          "source": "sql",
+          "render": "kv",
+          "span": 1,
+          "query": {
+            "sql": "SELECT 'First' AS k, MIN(TS_NORMALIZE(Timestamp)) AS v FROM {{all:header_set:ESXi / Linux host logs}} WHERE Timestamp <> '' UNION ALL SELECT 'Last', MAX(TS_NORMALIZE(Timestamp)) FROM {{all:header_set:ESXi / Linux host logs}} WHERE Timestamp <> ''"
+          }
+        },
+        {
+          "title": "SSH logins accepted",
+          "source": "sql",
+          "render": "stat",
+          "span": 1,
+          "query": {
+            "sql": "SELECT COUNT(*) FROM {{all:header_set:ESXi / Linux host logs}} WHERE Log='auth' AND Message LIKE '%Accepted%'"
+          },
+          "sub": "successful SSH auth"
+        },
+        {
+          "title": "Failed SSH logins",
+          "source": "sql",
+          "render": "stat",
+          "span": 1,
+          "query": {
+            "sql": "SELECT COUNT(*) FROM {{all:header_set:ESXi / Linux host logs}} WHERE Log='auth' AND (Message LIKE '%Failed%' OR Message LIKE '%authentication failure%' OR Message LIKE '%Invalid user%')"
+          },
+          "sub": "auth failures",
+          "tone": "warn"
+        },
+        {
+          "title": "Top source IPs",
+          "source": "sql",
+          "render": "bar",
+          "span": 2,
+          "query": {
+            "sql": "SELECT SourceIP AS label, COUNT(*) c FROM {{all:header_set:ESXi / Linux host logs}} WHERE SourceIP <> '' GROUP BY SourceIP ORDER BY c DESC LIMIT 10"
+          }
+        },
+        {
+          "title": "sudo / su use",
+          "source": "sql",
+          "render": "stat",
+          "span": 1,
+          "query": {
+            "sql": "SELECT COUNT(*) FROM {{all:header_set:ESXi / Linux host logs}} WHERE Component IN ('sudo','su') OR Message LIKE '%sudo:%' OR Message LIKE '% su[%'"
+          },
+          "sub": "privilege escalation"
+        },
+        {
+          "title": "Shell commands",
+          "source": "sql",
+          "render": "stat",
+          "span": 1,
+          "query": {
+            "sql": "SELECT COUNT(*) FROM {{all:header_set:ESXi / Linux host logs}} WHERE Log='shell'"
+          },
+          "sub": "esxcli / vim-cmd / scripts"
+        },
+        {
+          "title": "Top shell commands",
+          "source": "sql",
+          "render": "list",
+          "span": 2,
+          "query": {
+            "sql": "SELECT Message, COUNT(*) c FROM {{all:header_set:ESXi / Linux host logs}} WHERE Log='shell' AND Message <> '' GROUP BY Message ORDER BY c DESC LIMIT 10"
+          }
+        },
+        {
+          "title": "VM power operations",
+          "source": "sql",
+          "render": "stat",
+          "span": 1,
+          "query": {
+            "sql": "SELECT COUNT(*) FROM {{all:header_set:ESXi / Linux host logs}} WHERE Log='hostd' AND (Message LIKE '%power%' OR Message LIKE '%PowerOn%' OR Message LIKE '%PowerOff%')"
+          },
+          "sub": "hostd VM power ops"
+        },
+        {
+          "title": "Snapshot operations",
+          "source": "sql",
+          "render": "stat",
+          "span": 1,
+          "query": {
+            "sql": "SELECT COUNT(*) FROM {{all:header_set:ESXi / Linux host logs}} WHERE Log='hostd' AND Message LIKE '%snapshot%'"
+          },
+          "sub": "create / delete / revert"
+        },
+        {
+          "title": "vCenter-initiated actions",
+          "source": "sql",
+          "render": "stat",
+          "span": 1,
+          "query": {
+            "sql": "SELECT COUNT(*) FROM {{all:header_set:ESXi / Linux host logs}} WHERE Log='vpxa'"
+          },
+          "sub": "vpxa (from vCenter)"
+        },
+        {
+          "title": "Account / lockdown / firewall changes",
+          "source": "sql",
+          "render": "stat",
+          "span": 1,
+          "query": {
+            "sql": "SELECT COUNT(*) FROM {{all:header_set:ESXi / Linux host logs}} WHERE Log='vobd' AND (Message LIKE '%account%' OR Message LIKE '%lockdown%' OR Message LIKE '%firewall%' OR Message LIKE '%Account%')"
+          },
+          "sub": "vobd config changes",
+          "tone": "warn"
+        },
+        {
+          "title": "VIB install / remove",
+          "source": "sql",
+          "render": "stat",
+          "span": 1,
+          "query": {
+            "sql": "SELECT COUNT(*) FROM {{all:header_set:ESXi / Linux host logs}} WHERE Log='esxupdate'"
+          },
+          "sub": "esxupdate package events"
+        },
+        {
+          "title": "Web / API access (rhttpproxy)",
+          "source": "sql",
+          "render": "bar",
+          "span": 2,
+          "query": {
+            "sql": "SELECT SourceIP AS label, COUNT(*) c FROM {{all:header_set:ESXi / Linux host logs}} WHERE Log='rhttpproxy' AND SourceIP <> '' GROUP BY SourceIP ORDER BY c DESC LIMIT 10"
+          }
+        },
+        {
+          "title": "Severity mix",
+          "source": "sql",
+          "render": "bar",
+          "span": 2,
+          "query": {
+            "sql": "SELECT CASE WHEN Severity='' THEN '(none)' ELSE Severity END AS label, COUNT(*) c FROM {{all:header_set:ESXi / Linux host logs}} GROUP BY Severity ORDER BY c DESC"
+          }
+        },
+        {
+          "title": "Log volume over time",
+          "source": "sql",
+          "render": "histogram",
+          "span": 2,
+          "query": {
+            "sql": "SELECT strftime('%Y-%m-%d %H', TS_NORMALIZE(Timestamp)) AS hr, COUNT(*) c FROM {{all:header_set:ESXi / Linux host logs}} WHERE Timestamp <> '' GROUP BY hr ORDER BY hr"
           }
         }
       ]

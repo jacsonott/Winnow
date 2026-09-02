@@ -141,4 +141,23 @@ see [docs/notes/README.md](README.md) for the whole set.
   analyst's installed copy of an example shadows the bundled one instead
   of both loading and fighting over tab ids.
 
+- **The `esxi_logs` example and the {{all:...}} widget placeholder.**
+  The ESXi / UAC triage profile (winnow/defaults/profiles.json) needs to
+  see across MANY log tables at once — a support bundle is a pile of files
+  (hostd.log, vmkernel.log, …) plus rotated copies, all sharing the one
+  "ESXi / Linux host logs" header set the esxi_logs plugin emits. The
+  ordinary `{{header_set:Name}}` placeholder binds to the FIRST matching
+  source, which would silently ignore every other log. So the store grew a
+  sibling: `{{all:header_set:Name}}` expands to a parenthesised
+  `SELECT * FROM src_a UNION ALL SELECT * FROM src_b …` over every matching
+  source (schemas identical by construction, so the union lines up by
+  position), and the dashboard slices it back apart on the plugin's `Log`
+  column ('hostd'/'auth'/'shell'/…, set from the filename). A profile still
+  can't create a merge, and this isn't one — it's a read-time union, so it
+  needs no new object in the case file and picks up rotated logs imported
+  later with no re-wiring. The plugin parses two line shapes per line, not
+  per file (ESXi ISO and year-less Linux syslog both appear in one
+  syslog.log), and folds timestamp-less continuation lines onto the
+  previous row rather than emitting orphans.
+
 - **Bundles are profiles.** A plugin bundle (PluginBundles, workspace/plugin_bundles.json) now carries an optional `dashboard` (a list of widget definitions) alongside its plugins. Applying a bundle whose profile has a dashboard also sets the open case's dashboard (Store.set_dashboard). So a profile is 'how I analyze this kind of case' — plugins + a dashboard — one saveable, shareable JSON thing. See docs/design/analysis-suite.md.
