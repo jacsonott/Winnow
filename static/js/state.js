@@ -100,6 +100,7 @@ export const S = {
   tabHistory: [],          // recently visited page tabs, mouse back/forward — see tabhistory.js
   tabHistoryPos: -1,
   pageTabPrefs: null,      // {order, closed, width} for the page-tab strip, from localStorage — set below, see loadPageTabPrefs
+  dashboardLibrary: [],    // machine-wide saved boards [{id, name, widget_count}] — workspace/dashboards.json
   sqlTabs: [],             // [{id, name, sql, pos}] from the case file's sql_tabs table (see showSqlTab)
   sqlTabId: null,          // which sql tab the editor/result pane is currently showing
   sqlResults: new Map(),   // sql tab id -> last {columns, rows, elapsed_ms, truncated} | {error}, in memory only

@@ -324,7 +324,8 @@ CREATE TABLE IF NOT EXISTS dashboards (
     id      INTEGER PRIMARY KEY,
     name    TEXT NOT NULL,
     widgets TEXT NOT NULL DEFAULT '[]',
-    pos     INTEGER NOT NULL DEFAULT 0
+    pos     INTEGER NOT NULL DEFAULT 0,
+    pinned  INTEGER NOT NULL DEFAULT 0           -- 1: shown as a page tab in the top strip
 );
 """
 
@@ -1200,6 +1201,9 @@ class Store:
             # from before nicknames existed — patch those in place.
             if not any(r[1] == "nickname" for r in self.db.execute("PRAGMA table_info(sources)")):
                 self.db.execute("ALTER TABLE sources ADD COLUMN nickname TEXT")
+            # Same for dashboards.pinned (a board promoted into the page strip).
+            if not any(r[1] == "pinned" for r in self.db.execute("PRAGMA table_info(dashboards)")):
+                self.db.execute("ALTER TABLE dashboards ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
             # The single-row `dashboard` becomes one named "Dashboard" entry
             # the first time a case with that older shape is opened.
             has_named = self.db.execute("SELECT 1 FROM dashboards LIMIT 1").fetchone()
@@ -6964,9 +6968,17 @@ class Store:
         Dashboards section. Widgets themselves are fetched per-board."""
         with self.lock:
             rows = self.db.execute(
-                "SELECT id, name, widgets, pos FROM dashboards ORDER BY pos, id").fetchall()
-        return [{"id": r["id"], "name": r["name"], "pos": r["pos"],
+                "SELECT id, name, widgets, pos, pinned FROM dashboards ORDER BY pos, id").fetchall()
+        return [{"id": r["id"], "name": r["name"], "pos": r["pos"], "pinned": bool(r["pinned"]),
                  "widget_count": len(self._loads_widgets(r["widgets"]))} for r in rows]
+
+    def set_dashboard_pinned(self, dashboard_id: int, pinned: bool) -> None:
+        """Pinned = shown as a page tab in the top strip (next to SQL,
+        Timeline…) as well as under the sidebar's Dashboards section."""
+        with self.lock, self.db:
+            if self.db.execute("UPDATE dashboards SET pinned=? WHERE id=?",
+                               (1 if pinned else 0, dashboard_id)).rowcount == 0:
+                raise KeyError(f"No dashboard {dashboard_id}")
 
     def get_dashboard(self, dashboard_id: int) -> list:
         with self.lock:

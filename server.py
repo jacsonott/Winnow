@@ -2878,6 +2878,7 @@ class DashboardCreate(BaseModel):
 class DashboardUpdate(BaseModel):
     name: str | None = None
     widgets: list | None = None
+    pinned: bool | None = None
 
 
 class DashboardReorder(BaseModel):
@@ -2923,6 +2924,8 @@ def api_dashboard_update(dashboard_id: int, body: DashboardUpdate):
             store().rename_dashboard(dashboard_id, body.name)
         if body.widgets is not None:
             store().set_dashboard_widgets(dashboard_id, body.widgets)
+        if body.pinned is not None:
+            store().set_dashboard_pinned(dashboard_id, body.pinned)
     except ValueError as e:
         raise HTTPException(400, str(e))
     except KeyError as e:
@@ -2934,6 +2937,49 @@ def api_dashboard_update(dashboard_id: int, body: DashboardUpdate):
 def api_dashboard_delete(dashboard_id: int):
     store().delete_dashboard(dashboard_id)
     return {"ok": True}
+
+
+# Machine-wide dashboard library (workspace/dashboards.json) — boards kept
+# across cases, added to the open case one at a time.
+class LibraryDashboardWrite(BaseModel):
+    name: str
+    widgets: list
+
+
+class LibraryAddBody(BaseModel):
+    name: str | None = None
+
+
+@app.get("/api/dashboard_library")
+def api_dashboard_library_list():
+    return [{"id": b["id"], "name": b["name"], "widget_count": len(b.get("widgets") or [])}
+            for b in WS.dashboard_library.list()]
+
+
+@app.post("/api/dashboard_library")
+def api_dashboard_library_save(body: LibraryDashboardWrite):
+    try:
+        rec = WS.dashboard_library.save(body.name, body.widgets)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"id": rec["id"], "name": rec["name"], "widget_count": len(rec["widgets"])}
+
+
+@app.delete("/api/dashboard_library/{board_id}")
+def api_dashboard_library_delete(board_id: int):
+    WS.dashboard_library.delete(board_id)
+    return {"ok": True}
+
+
+@app.post("/api/dashboard_library/{board_id}/add")
+def api_dashboard_library_add(board_id: int, body: LibraryAddBody):
+    """Copy a library board into the open case (create-or-replace by
+    name, so adding it twice refreshes rather than duplicates)."""
+    try:
+        b = WS.dashboard_library.get(board_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    return store().upsert_dashboard_by_name((body.name or b["name"]).strip() or b["name"], b["widgets"])
 
 
 @app.post("/api/dashboard/widget/preview")

@@ -19,7 +19,7 @@ import { openSessionManager } from './session.js';
 import { showGridTab, showSqlTab, showTimelineTab } from './sql.js';
 import { showNotesTab } from './notes.js';
 import { showWatchlistTab } from './watchlist.js';
-import { loadDashboards, renderDashboardsInto } from './dashboard.js';
+import { dashDrag, loadDashboards, renderDashboardsInto, showDashboard } from './dashboard.js';
 import { openCaseSettings } from './settings.js';
 import { openErrorLog } from './errlog.js';
 import { S, selClear, selCount, selFirst, specKey } from './state.js';
@@ -308,6 +308,16 @@ export function pageTabs() {
       plugin: t,
       show: () => showPluginTab(t.id),
     })),
+    // Pinned dashboards ride the page strip too (drag a board from the
+    // sidebar's Dashboards section onto Pages, or its pin action). The
+    // pin lives in the case file, so it travels with the board.
+    ...(S.dashboards || []).filter((d) => d.pinned).map((d) => ({
+      key: 'dashboard:' + d.id,
+      label: d.name,
+      title: `${d.name} — dashboard`,
+      dashboard: d,
+      show: () => showDashboard(d.id),
+    })),
   ];
 }
 
@@ -350,6 +360,16 @@ export function movePageTab(key, dir) {
 export function pageTabClosed(key) { return S.pageTabPrefs.closed.includes(key); }
 
 export function closePageTab(key) {
+  if (key.startsWith('dashboard:')) {
+    // A pinned board's "close" is an unpin — the board itself stays in
+    // the case under the sidebar's Dashboards section.
+    const id = Number(key.slice('dashboard:'.length));
+    post(`/api/dashboards/${id}`, { pinned: false })
+      .then(() => loadDashboards())
+      .then(() => { if (S.activeTab === 'dashboard' && S.dashboardId === id) showGridTab(); renderPageTabs(); })
+      .catch((e) => toast('Could not unpin: ' + e.message, 5000));
+    return;
+  }
   if (!pageTabClosed(key)) {
     S.pageTabPrefs.closed.push(key);
     savePageTabPrefs();
@@ -410,9 +430,11 @@ export function renderPageTabs() {
   // hidden, because the four static ones are found by id every render.
   const pagesAsMenu = !!(S.appearance && S.appearance.pagesMenu);
   for (const t of pageTabsSorted()) {
-    const btn = t.plugin ? el('button', 'tab tab-sql tab-plugin', t.label) : t.node();
-    if (t.plugin) {
-      btn.dataset.tabId = t.plugin.id;
+    const btn = t.plugin ? el('button', 'tab tab-sql tab-plugin', t.label)
+      : t.dashboard ? el('button', 'tab tab-sql tab-dashboard', t.label)
+        : t.node();
+    if (t.plugin || t.dashboard) {
+      if (t.plugin) btn.dataset.tabId = t.plugin.id;
       btn.title = t.title;
       btn.onclick = t.show;
     }
@@ -461,8 +483,11 @@ export function renderPageTabs() {
    the same reason renderTabs() ends with one — every caller has, by
    definition, just changed what's active. */
 export function syncTabSelection() {
+  // A showing board sets activeTab to the plain 'dashboard' (dashboard.js
+  // owns that) — its pinned tab, keyed 'dashboard:<id>', matches on the id.
+  const dashKey = S.activeTab === 'dashboard' && S.dashboardId != null ? 'dashboard:' + S.dashboardId : null;
   document.querySelectorAll('#pageTabs .tab').forEach((t) =>
-    t.setAttribute('aria-selected', String(t.dataset.pageKey === S.activeTab)));
+    t.setAttribute('aria-selected', String(t.dataset.pageKey === S.activeTab || (dashKey != null && t.dataset.pageKey === dashKey))));
   const pm = $('pagesMenuBtn');
   if (pm) {
     // The collapsed button stands in for whichever page is up.
@@ -852,7 +877,11 @@ export function renderSidebar() {
   const pages = pageTabsSorted();
   const shownPages = pages.filter((t) => !q || t.label.toLowerCase().includes(q));
   if (shownPages.length) {
-    list.append(el('div', 'menu-header', 'Pages'));
+    // The Pages header takes a dropped dashboard: that's how a board is
+    // promoted into the page strip (its pin action does the same).
+    const ph = el('div', 'menu-header sidebar-pages-header', 'Pages');
+    wirePagesDrop(ph);
+    list.append(ph);
     for (const t of shownPages) list.append(pageSidebarRow(t, pages.indexOf(t), pages.length));
   }
 
@@ -1030,6 +1059,31 @@ function wireOpenDrop(node) {
     node.classList.remove('drop-into');
     await post(`/api/source/${id}/open`, { open: true });
     await loadSources(id);
+  });
+}
+
+/* Drop target for a dashboard dragged up from the Dashboards section —
+   pins it, which puts it in the page strip. */
+function wirePagesDrop(node) {
+  node.addEventListener('dragover', (e) => {
+    if (dashDrag.id == null) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    node.classList.add('drop-into');
+  });
+  node.addEventListener('dragleave', () => node.classList.remove('drop-into'));
+  node.addEventListener('drop', async (e) => {
+    if (dashDrag.id == null) return;
+    e.preventDefault();
+    const id = dashDrag.id;
+    dashDrag.id = null;
+    node.classList.remove('drop-into');
+    try {
+      await post(`/api/dashboards/${id}`, { pinned: true });
+      await loadDashboards();
+      renderPageTabs();
+      toast('Pinned to the page tabs');
+    } catch (err) { toast('Could not pin: ' + err.message, 5000); }
   });
 }
 
