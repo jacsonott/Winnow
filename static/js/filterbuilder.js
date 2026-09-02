@@ -2,6 +2,7 @@
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { $, api, debounce, el, post, toast } from './core.js';
+import { parseFilter, setColumnFilter } from './filters.js';
 import { checkPresets } from './savedfilters.js';
 import { setGrouping } from './grouping.js';
 import { S, normalizeTree } from './state.js';
@@ -276,6 +277,29 @@ export function renderFilterGroup(node, onStructural, onPreview, isRoot) {
 export function openFilterBuilder(editing = null) {
   markModalAction('openFilterBuilder');
   S.filterTree = normalizeTree(S.filterTree); // a cond root would render as an empty editor
+  // Absorb the header boxes' quick filters into the tree, so the builder
+  // opens showing EVERYTHING currently narrowing the grid — an applied
+  // saved filter already lives in S.filterTree, but a `=H1` typed into a
+  // column box (or written by the value picker) lived only in S.filters
+  // and the builder opened looking empty. The condition MOVES rather than
+  // copies (the absorbed box is cleared via setColumnFilter, which keeps
+  // the visible input in step): both states describe the same rows, so
+  // nothing needs rebuilding until Apply, and a copy would double every
+  // condition on the next open. parseFilter's op vocabulary is a subset of
+  // the builder's, so the translation is 1:1; raw-SQL mode can't hold a
+  // structured condition, so quick filters stay put there.
+  if (S.filterTree.type !== 'raw') {
+    for (const [column, raw] of Object.entries(S.filters)) {
+      const parsed = parseFilter(raw || '');
+      if (!parsed) continue;
+      S.filterTree.children = S.filterTree.children || [];
+      S.filterTree.children.push({
+        type: 'cond', column, op: parsed.op,
+        value: OP_NO_VALUE.has(parsed.op) ? '' : parsed.value,
+      });
+      setColumnFilter(column, '');
+    }
+  }
   modal(editing ? `Edit filter — ${editing.name}` : 'Filter builder', (b) => {
     const help = el('p', 'fb-help',
       'Build filters visually, or type/paste SQL directly below — edits sync both ways when the SQL is simple enough to parse back into the structured editor.');
