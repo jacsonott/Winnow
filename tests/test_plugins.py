@@ -1865,7 +1865,7 @@ def test_kape_profile_ships_and_applies(client, store, write_csv, example_regist
     boards = {b["name"]: b for b in client.get("/api/dashboards").json()}
     assert "KAPE triage" in boards
     widgets = client.get(f"/api/dashboards/{boards['KAPE triage']['id']}").json()["widgets"]
-    assert len(widgets) == 16
+    assert len(widgets) == 22
     # a {{evtx}}-placeholder SQL widget resolves and returns data
     peers = next(w for w in widgets if w["title"] == "Remote logon peers")
     pv = client.post("/api/dashboard/widget/preview", json={"source": "sql", "query": peers["query"]})
