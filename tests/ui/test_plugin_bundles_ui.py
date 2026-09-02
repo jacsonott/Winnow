@@ -39,7 +39,11 @@ def test_save_list_and_delete_a_bundle(page):
 
 def test_shipped_kape_profile_is_readonly_and_applies(page):
     """The shipped KAPE-triage profile shows in the menu with a 'shipped'
-    badge and no delete button, and applying it loads its 9-widget dashboard."""
+    badge and no delete button, and applying it loads every widget the
+    profile defines (counted from the shipped defaults, so growing the
+    dashboard doesn't silently stale this test again)."""
+    from winnow import defaults
+    expected = len(next(pr for pr in defaults.profiles() if pr["name"] == "KAPE triage")["dashboard"])
     page.keyboard.press("M")
     page.wait_for_selector(".session-row:has-text('KAPE triage')")
     row = page.locator(".session-row", has_text="KAPE triage")
@@ -57,7 +61,8 @@ def test_shipped_kape_profile_is_readonly_and_applies(page):
     page.locator("#sidebarList .sidebar-row", has_text="KAPE triage").locator(".menu-item").click()
     page.wait_for_selector("#dashboardview:not([hidden])")
     page.wait_for_function(
-        "() => document.querySelectorAll('#dashGrid .dash-card:not(.dash-add)').length === 16", timeout=10_000)
+        "(n) => document.querySelectorAll('#dashGrid .dash-card:not(.dash-add)').length === n",
+        arg=expected, timeout=10_000)
 
     # cleanup: leave the shared case as we found it
     page.evaluate("""async () => {

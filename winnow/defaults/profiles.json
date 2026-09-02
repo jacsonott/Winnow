@@ -1,10 +1,10 @@
 {
-  "version": 1,
+  "version": 2,
   "comment": "Shipped analysis profiles. A profile is 'how I analyze this kind of case' — the plugins to enable, an optional starter watchlist, and a dashboard of widgets. SQL widgets use {{evtx}} / {{header_set:Name}} placeholders that bind to whichever table matches that header set in the open case, so the dashboard is portable. Shipped profiles are read-only; Save-as-profile creates editable copies.",
   "profiles": [
     {
       "name": "KAPE triage",
-      "description": "Windows host triage from KAPE/EvtxECmd output — logon movement, failed-logon spikes, RDP and explicit-credential use, host facts, log-tampering signals, and (if a RECmd batch is imported) registry persistence. Seeds a starter IOC watchlist.",
+      "description": "Windows host triage from KAPE/EvtxECmd output — logon movement, failed-logon spikes, RDP and explicit-credential use, log-tampering signals, and (if a RECmd batch is imported) host facts from the registry — OS version, role, domain, IPs, Sysmon and PowerShell logging posture — plus registry persistence. Seeds a starter IOC watchlist.",
       "plugins": [
         "lateral_movement"
       ],
@@ -138,6 +138,60 @@
           "span": 2,
           "query": {
             "sql": "SELECT 'First event' AS k, MIN(TS_NORMALIZE(TimeCreated)) AS v FROM {{evtx}} UNION ALL SELECT 'Last event', MAX(TS_NORMALIZE(TimeCreated)) FROM {{evtx}}"
+          }
+        },
+        {
+          "title": "OS version",
+          "source": "sql",
+          "render": "kv",
+          "span": 1,
+          "query": {
+            "sql": "SELECT ValueName AS k, ValueData AS v FROM {{registry}} WHERE KeyPath LIKE '%Microsoft\\Windows NT\\CurrentVersion' AND ValueName IN ('ProductName','DisplayVersion','ReleaseId','CurrentBuild','UBR') AND ValueData <> '' ORDER BY CASE ValueName WHEN 'ProductName' THEN 0 WHEN 'DisplayVersion' THEN 1 WHEN 'ReleaseId' THEN 2 WHEN 'CurrentBuild' THEN 3 ELSE 4 END"
+          }
+        },
+        {
+          "title": "System role",
+          "source": "sql",
+          "render": "kv",
+          "span": 1,
+          "query": {
+            "sql": "SELECT 'Role' AS k, CASE ValueData WHEN 'WinNT' THEN 'Workstation' WHEN 'ServerNT' THEN 'Member / standalone server' WHEN 'LanmanNT' THEN 'Domain controller' ELSE ValueData END AS v FROM {{registry}} WHERE KeyPath LIKE '%Control\\ProductOptions' AND ValueName = 'ProductType' UNION ALL SELECT 'Role', '(ProductType not in this RECmd output)' WHERE NOT EXISTS (SELECT 1 FROM {{registry}} WHERE KeyPath LIKE '%Control\\ProductOptions' AND ValueName = 'ProductType')"
+          }
+        },
+        {
+          "title": "Domain",
+          "source": "sql",
+          "render": "kv",
+          "span": 1,
+          "query": {
+            "sql": "SELECT ValueName AS k, CASE WHEN ValueData = '' THEN '(none — workgroup)' ELSE ValueData END AS v FROM {{registry}} WHERE KeyPath LIKE '%Services\\Tcpip\\Parameters' AND ValueName IN ('Domain','NV Domain','Hostname') ORDER BY CASE ValueName WHEN 'Hostname' THEN 0 WHEN 'Domain' THEN 1 ELSE 2 END"
+          }
+        },
+        {
+          "title": "IP addresses",
+          "source": "sql",
+          "render": "kv",
+          "span": 1,
+          "query": {
+            "sql": "SELECT CASE ValueName WHEN 'DhcpIPAddress' THEN 'IP (DHCP)' WHEN 'IPAddress' THEN 'IP (static)' ELSE 'Gateway' END AS k, ValueData AS v FROM {{registry}} WHERE KeyPath LIKE '%Tcpip\\Parameters\\Interfaces\\%' AND ValueName IN ('DhcpIPAddress','IPAddress','DhcpDefaultGateway') AND ValueData NOT IN ('','0.0.0.0') ORDER BY k"
+          }
+        },
+        {
+          "title": "Sysmon",
+          "source": "sql",
+          "render": "kv",
+          "span": 1,
+          "query": {
+            "sql": "SELECT 'Sysmon' AS k, CASE WHEN COUNT(*) > 0 THEN 'Installed — ' || COUNT(*) || ' service registry entr' || CASE WHEN COUNT(*) = 1 THEN 'y' ELSE 'ies' END ELSE 'Not present in registry' END AS v FROM {{registry}} WHERE KeyPath LIKE '%\\Services\\Sysmon%'"
+          }
+        },
+        {
+          "title": "PowerShell logging",
+          "source": "sql",
+          "render": "kv",
+          "span": 1,
+          "query": {
+            "sql": "SELECT CASE ValueName WHEN 'EnableScriptBlockLogging' THEN 'Script block' WHEN 'EnableModuleLogging' THEN 'Module logging' ELSE 'Transcription' END AS k, CASE WHEN ValueData IN ('1','0x1') THEN 'Enabled' WHEN ValueData IN ('0','0x0') THEN 'Disabled' ELSE ValueData END AS v FROM {{registry}} WHERE KeyPath LIKE '%Policies\\Microsoft\\Windows\\PowerShell%' AND ValueName IN ('EnableScriptBlockLogging','EnableModuleLogging','EnableTranscripting') UNION ALL SELECT 'Policy', '(not configured — no policy keys)' WHERE NOT EXISTS (SELECT 1 FROM {{registry}} WHERE KeyPath LIKE '%Policies\\Microsoft\\Windows\\PowerShell%' AND ValueName IN ('EnableScriptBlockLogging','EnableModuleLogging','EnableTranscripting'))"
           }
         },
         {
