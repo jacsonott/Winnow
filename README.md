@@ -202,7 +202,8 @@ evidence folder tree there automatically.
 
 ## Timestamps
 
-Right-click a column header → **Add datetime column from this…** and
+Right-click a column header → **Derive a column from this…** (choose
+*Timestamp*) and
 Winnow samples the column, suggests a format with a live preview, and adds
 a *new*, genuinely sortable datetime column — the original is never
 modified. It reads Unix epochs (seconds through nanoseconds), Windows

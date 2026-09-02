@@ -63,8 +63,11 @@ def test_column_header_right_click_opens_column_options(page):
     page.locator('.hcell[data-col="Timestamp"]').click(button="right")
     page.wait_for_selector(".menu")
     items = " | ".join(page.locator(".menu .menu-item").all_inner_texts())
-    assert "Add datetime column from this…" in items
+    assert "Derive a column from this…" in items
+    assert "Stack values" in items
     assert "YYYY-MM-DD HH:MM:SS" in items  # display formats, for a datetime column
+    # Plain text → no Flatten entry; only columns holding documents get one.
+    assert "Flatten" not in items
     assert page.locator(".hcell-fmt").count() == 0, "the ▾ button was replaced by this menu"
 
 
