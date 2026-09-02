@@ -447,22 +447,28 @@ export function renderCaseVariables(box) {
     row.append(name, val, desc, del);
     box.append(row);
   }
-  const add = el('div', 'case-var-row case-var-add');
-  const nameIn = el('input', 'case-var-name-in');
-  nameIn.placeholder = 'name (e.g. engagement)';
-  const valIn = el('input', 'case-var-value');
-  valIn.placeholder = 'value';
-  const addBtn = el('button', 'btn ghost', 'Add');
-  addBtn.onclick = async () => {
-    if (!nameIn.value.trim()) { toast('Name the variable'); return; }
-    try {
-      await post('/api/case/variables', { name: nameIn.value.trim(), value: valIn.value });
-      await loadCaseVariables();
-      renderCaseVariables(box);
-    } catch (e) { toast('Could not add: ' + e.message, 5000); }
-  };
-  add.append(nameIn, valIn, el('span', 'case-var-desc', ''), addBtn);
-  box.append(add);
+  // The add row is built once per box and re-attached on every repaint,
+  // so a refresh landing mid-typing (the re-fetch on open) can't wipe it.
+  if (!box._addRow) {
+    const add = el('div', 'case-var-row case-var-add');
+    const nameIn = el('input', 'case-var-name-in');
+    nameIn.placeholder = 'name (e.g. engagement)';
+    const valIn = el('input', 'case-var-value');
+    valIn.placeholder = 'value';
+    const addBtn = el('button', 'btn ghost', 'Add');
+    addBtn.onclick = async () => {
+      if (!nameIn.value.trim()) { toast('Name the variable'); return; }
+      try {
+        await post('/api/case/variables', { name: nameIn.value.trim(), value: valIn.value });
+        nameIn.value = ''; valIn.value = '';
+        await loadCaseVariables();
+        renderCaseVariables(box);
+      } catch (e) { toast('Could not add: ' + e.message, 5000); }
+    };
+    add.append(nameIn, valIn, el('span', 'case-var-desc', ''), addBtn);
+    box._addRow = add;
+  }
+  box.append(box._addRow);
 }
 
 /* A profile's required variables, asked for in one dialog — used after
