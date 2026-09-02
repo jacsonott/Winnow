@@ -29,5 +29,6 @@ def test_menu_closes_on_outside_click(page):
     page.locator(".row").nth(2).locator(".cell").nth(1).click(button="right")
     page.locator(".menu").wait_for(state="visible")
     page.locator("#toolbar, header.bar").first.click(force=True)
-    page.wait_for_timeout(150)
-    assert page.locator(".menu").count() == 0
+    # The claim is "closes on an outside click", not "within 150 ms" — a
+    # fixed wait flaked on busy CI runners twice.
+    page.wait_for_selector(".menu", state="detached", timeout=5_000)
