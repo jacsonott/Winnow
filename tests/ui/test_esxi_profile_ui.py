@@ -67,6 +67,20 @@ def test_esxi_profile_lists_applies_and_builds(browser, server, tmp_path):
             """() => { const c=[...document.querySelectorAll('#dashGrid .dash-card')].find(x=>/Log lines/.test(x.textContent));
                        return c && c.querySelector('.dash-stat') && c.querySelector('.dash-stat').textContent.replace(/,/g,'')==='4'; }""",
             timeout=10_000)
+        # Leave the shared session case as found: drop the created
+        # dashboard and the two imported log sources, and disable the
+        # plugin again (see the shared-server pitfall — every later UI
+        # module sees this case).
+        pg.evaluate("""async () => {
+          const h = { 'X-Timeline-Lite-Client': '1' };
+          for (const d of await fetch('/api/dashboards', { headers: h }).then(r => r.json()))
+            await fetch('/api/dashboards/' + d.id, { method: 'DELETE', headers: h });
+          for (const s of __winnow.S.sources.filter(x => /\\.log$/.test(x.name)))
+            await fetch('/api/source/' + s.id, { method: 'DELETE', headers: h });
+        }""")
+        _post(server, "/api/plugins/toggle", {"fs_name": "esxi_logs", "scope": "off_all"})
+        pg.evaluate("async () => { __winnow.S.sourceId = null; __winnow.S.viewCache.clear();"
+                    " await __winnow.loadSources(); await __winnow.loadPlugins(); }")
     finally:
         ctx.close()
         assert not errors, "uncaught JS errors: " + " | ".join(errors)
