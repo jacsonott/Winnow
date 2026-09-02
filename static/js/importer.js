@@ -24,9 +24,10 @@ export async function loadPlugins() {
     S.plugins = r.plugins || [];
     S.pluginFormats = r.formats || [];
     S.pluginTabs = r.tabs || [];
+    S.pluginRowActions = r.row_actions || [];
     S.pluginDirs = r.dirs || [];
     S.pluginsCaseOpen = !!r.case_open;
-  } catch { S.plugins = []; S.pluginFormats = []; S.pluginTabs = []; S.pluginDirs = []; S.pluginsCaseOpen = false; }
+  } catch { S.plugins = []; S.pluginFormats = []; S.pluginTabs = []; S.pluginRowActions = []; S.pluginDirs = []; S.pluginsCaseOpen = false; }
   renderPluginTabs();
 }
 

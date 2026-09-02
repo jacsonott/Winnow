@@ -1,9 +1,11 @@
 /* The row right-click menu — a section registry, not a fixed list.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
+import { post, toast } from './core.js';
 import { displayValue, ellipsize, filterByValue, openValuePickerForColumn } from './filters.js';
 import { rowAt } from './grid.js';
-import { copyRowsAsText, writeClipboardText } from './grouping.js';
+import { copyRowsAsText, loadRowsForPositions, writeClipboardText } from './grouping.js';
+import { showPluginTab } from './plugins.js';
 import { S, selCount, selPositions } from './state.js';
 import { UNDO_NEXT, applyTag, undoLastTagChange } from './tags.js';
 import { openTagEditor } from './timeframe.js';
@@ -30,7 +32,57 @@ export const ROW_MENU_SECTIONS = [
   { id: 'tags', build: rowMenuTagItems },
   { id: 'cell', build: rowMenuCellItems },
   { id: 'clipboard', build: rowMenuClipboardItems },
+  { id: 'plugins', build: rowMenuPluginItems },
 ];
+
+/* Plugin-registered row actions (PluginAPI.register_row_action) — the
+   extension point for "do X with these rows": a VT lookup on the selected
+   hashes, an enrichment that lands a table. The entry is disabled past
+   the action's max_rows rather than hidden, so the analyst learns the
+   limit instead of wondering where the item went. */
+export function rowMenuPluginItems(ctx) {
+  const actions = S.pluginRowActions || [];
+  if (!actions.length) return [];
+  const { count, positions } = rowMenuTargets(ctx);
+  const scope = count > 1 ? `${count.toLocaleString()} selected rows` : 'this row';
+  const items = [{ header: 'Plugins' }];
+  for (const a of actions) {
+    const tooMany = count > a.max_rows;
+    items.push({
+      label: a.label,
+      disabled: tooMany,
+      title: tooMany
+        ? `${a.label} takes at most ${a.max_rows.toLocaleString()} rows`
+        : `${a.description || a.label} — ${scope} (${a.plugin} plugin)`,
+      onclick: () => runPluginRowAction(a, positions(), ctx),
+    });
+  }
+  return items;
+}
+
+export async function runPluginRowAction(action, positions, ctx) {
+  if (positions.length > 20000) { toast('Selection too large (max 20,000 rows)', 4000); return; }
+  toast(`${action.label}…`, 8000);
+  try {
+    await loadRowsForPositions(positions);   // a selection can span unloaded pages
+    const merged = S.sourceId < 0;
+    const pairs = [];
+    for (const pos of positions) {
+      const r = rowAt(pos);
+      if (r) pairs.push([merged ? r.source_id : S.sourceId, r.rid]);
+    }
+    const res = await post(`/api/plugins/row_action/${action.plugin_fs}/${action.local_id}`, {
+      source_id: S.sourceId, pairs,
+      column: ctx.colName || null,
+      value: ctx.value == null ? null : String(ctx.value),
+    });
+    if (res && res.open_url) window.open(res.open_url, '_blank', 'noopener');
+    if (res && res.show_tab) showPluginTab(res.show_tab);
+    toast(res && res.message ? res.message : `${action.label}: done`, 6000);
+  } catch (e) {
+    toast(`${action.label} failed: ` + e.message, 6000);
+  }
+}
 
 /* How many rows the menu's actions will hit: the selection when the
    right-clicked row is part of it, otherwise just that row (openRowContextMenu
