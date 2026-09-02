@@ -35,6 +35,46 @@ export function modal(title, build, opts = {}) {
   $('modal').hidden = false;
 }
 
+/* ------------------------------------------------------- date picker */
+
+/* A 📅 button that opens the browser's NATIVE date-time picker and writes
+   the choice back into `input` in the app's own shape (YYYY-MM-DD
+   HH:MM:SS — see openTimeRangeModal's comment on why the text input
+   itself must stay free-typed ISO, not a datetime-local control). The
+   native control lives hidden behind the button purely as the picker's
+   anchor; nothing is ever submitted from it. Dependency-free, per the
+   airgap rule. */
+export function datePickerButton(input, { time = true } = {}) {
+  const wrap = el('span', 'date-pick-wrap');
+  const native = el('input', 'date-pick-native');
+  native.type = time ? 'datetime-local' : 'date';
+  if (time) native.step = '1';               // include seconds in the control
+  native.tabIndex = -1;
+  native.setAttribute('aria-hidden', 'true');
+  const btn = el('button', 'btn ghost date-pick-btn', '📅');
+  btn.type = 'button';
+  btn.title = 'Pick from a calendar';
+  btn.onclick = () => {
+    // Seed the picker from what's typed, when it's already the ISO shape.
+    const m = /^(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2})(?::(\d{2}))?)?/.exec(input.value.trim());
+    native.value = m ? (time ? `${m[1]}T${m[2] || '00:00'}:${m[3] || '00'}` : m[1]) : '';
+    try { native.showPicker(); }
+    catch { native.focus(); }               // engines without showPicker: focus opens it
+  };
+  native.onchange = () => {
+    if (!native.value) return;
+    // datetime-local omits :00 seconds — the app's shape always shows them.
+    input.value = time
+      ? native.value.replace('T', ' ') + (native.value.length === 16 ? ':00' : '')
+      : native.value;
+    // Fire the text input's own handlers (live previews, validation).
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.focus();
+  };
+  wrap.append(btn, native);
+  return wrap;
+}
+
 /* --------------------------------------------------------- confirm/prompt */
 
 /* Replacements for window.confirm()/window.prompt() — native browser

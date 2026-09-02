@@ -8,7 +8,7 @@ import { setGrouping } from './grouping.js';
 import { S, normalizeTree } from './state.js';
 import { currentFilterPayload, openSavedFiltersModal, updateFiltersButton } from './timeframe.js';
 import { baseColumns } from './tsformat.js';
-import { markModalAction, modal, promptDialog } from './ui.js';
+import { datePickerButton, markModalAction, modal, promptDialog } from './ui.js';
 import { rebuildView } from './view.js';
 
 /* --------------------------------------------------------- filter builder */
@@ -217,6 +217,10 @@ export function renderCondRow(node, onStructural, onPreview) {
       onPreview();
     };
     row.append(inp);
+    // A datetime column's value is a date string — offer the calendar
+    // (datePickerButton dispatches 'input', so oninput above still fires).
+    const colType = S.columns.find((c) => c.name === node.column)?.type;
+    if (node.op !== 'in' && colType === 'datetime') row.append(datePickerButton(inp));
   }
   return row;
 }

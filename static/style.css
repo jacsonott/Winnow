@@ -1192,6 +1192,14 @@ textarea:focus { border-color: var(--accent); outline: none; }
 
 /* ---------------------------------------------------------------- modal */
 
+/* The calendar button beside free-typed timestamp inputs. The native
+   control is the picker's anchor only: rendered (showPicker refuses a
+   display:none element) but invisible and unclickable behind the button. */
+.date-pick-wrap { position: relative; display: inline-flex; flex: 0 0 auto; }
+.date-pick-btn { padding: 3px 8px; }
+.date-pick-native { position: absolute; inset: 0; width: 100%; height: 100%;
+  opacity: 0; pointer-events: none; border: 0; padding: 0; }
+
 .modal { position: fixed; inset: 0; background: rgba(8,10,12,.7); display: grid; place-items: center; z-index: 50; }
 .modal-card {
   background: var(--panel); border: var(--border-w) solid var(--line-2); border-radius: var(--radius-md);
