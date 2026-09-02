@@ -358,26 +358,35 @@ def test_search_all_sources_caps_on_the_indexed_and_advanced_paths_too(store, wr
 
 
 class _CountingLock:
-    """Delegates to a real lock while counting how many times it goes fully
-    unheld — i.e. how many separate units of work an operation splits into,
-    rather than how many times it re-enters an outer hold."""
+    """Delegates to a real lock while counting how many times the CALLING
+    thread's hold goes fully unheld — i.e. how many separate units of work
+    an operation splits into, rather than how many times it re-enters an
+    outer hold. Per-thread on purpose: while this wrapper is swapped in,
+    the store's background threads (a column-index build the sweep itself
+    kicks off) take the same lock, and a global count read as depth 1 at
+    the exact instant one of them held it — a flake seen on busy CI
+    runners that said nothing about the sweep."""
 
     def __init__(self, inner):
+        import threading
         self._inner = inner
+        self._owner = threading.get_ident()
+        self._ident = threading.get_ident
         self.depth = 0
         self.released_to_zero = 0
 
     def acquire(self, *a, **kw):
         got = self._inner.acquire(*a, **kw)
-        if got:
+        if got and self._ident() == self._owner:
             self.depth += 1
         return got
 
     def release(self):
         self._inner.release()
-        self.depth -= 1
-        if self.depth == 0:
-            self.released_to_zero += 1
+        if self._ident() == self._owner:
+            self.depth -= 1
+            if self.depth == 0:
+                self.released_to_zero += 1
 
     def __enter__(self):
         self.acquire()
