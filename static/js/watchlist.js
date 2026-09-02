@@ -10,6 +10,7 @@ import { recordTabVisit } from './tabhistory.js';
 import { showMainView, syncTabChrome } from './sql.js';
 import { openSource, syncTabSelection } from './sources.js';
 import { S } from './state.js';
+import { modal } from './ui.js';
 
 const KIND_COLOR = { hash: '#7c6cf6', ip: '#39a8e8', domain: '#39e881',
                      filename: '#d9a441', other: '#8a8a90' };
@@ -145,6 +146,54 @@ async function renderHits() {
   }
 }
 
+/* Copy indicators in from another recent case — the standing IOC set an
+   analyst carries between engagements usually lives in whichever case
+   they worked last. The server lists only cases that actually have
+   indicators; the import dedupes by value and never carries auto-tags
+   (they name the other case's tag ids). */
+function openFromCasePicker() {
+  modal('Watchlist from a case', async (b) => {
+    b.append(el('p', 'fb-help',
+      'Copy another case\u2019s indicators into this one. Duplicates are skipped; '
+      + 'auto-tag settings don\u2019t carry (they belong to the other case\u2019s tags).'));
+    const list = el('div', 'session-list');
+    b.append(list);
+    list.append(el('div', 'note-status', 'Reading recent cases\u2026'));
+    let cases;
+    try { cases = await api('/api/watchlist/cases'); }
+    catch (e) { list.replaceChildren(el('div', 'note-status', e.message)); return; }
+    list.replaceChildren();
+    if (!cases.length) {
+      list.append(el('div', 'note-status', 'No other recent case has watchlist indicators.'));
+      return;
+    }
+    for (const c of cases) {
+      const row = el('div', 'row-actions session-row wl-case-row');
+      const name = el('span', 'session-name', c.name);
+      name.title = c.path;
+      row.append(name, el('span', 'count',
+        `${c.indicator_count} indicator${c.indicator_count === 1 ? '' : 's'}`));
+      const go = el('button', 'btn ghost', 'Import');
+      go.onclick = async () => {
+        go.disabled = true;
+        try {
+          const r = await post('/api/watchlist/import_case', { case_id: c.id });
+          document.getElementById('modal').hidden = true;
+          toast(`${r.added} indicator${r.added === 1 ? '' : 's'} imported`
+            + (r.skipped ? ` \u00b7 ${r.skipped} already here` : ''));
+          await post('/api/watchlist/scan', {});
+          await load();
+        } catch (e) {
+          toast(e.message, 6000);
+          go.disabled = false;
+        }
+      };
+      row.append(go);
+      list.append(row);
+    }
+  });
+}
+
 export function wireWatchlist() {
   $('tabWatchlist').onclick = showWatchlistTab;
   $('wlAdd').onclick = async () => {
@@ -172,6 +221,7 @@ export function wireWatchlist() {
     downloadText(csv, 'watchlist.csv', 'text/csv');
   };
   $('wlImport').onclick = () => $('wlImportFile').click();
+  $('wlFromCase').onclick = openFromCasePicker;
   $('wlImportFile').onchange = async () => {
     const f = $('wlImportFile').files[0];
     if (!f) return;

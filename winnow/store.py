@@ -6839,6 +6839,43 @@ class Store:
                 total[wid] = total.get(wid, 0) + n
         return {"matched": total}
 
+    def import_watchlist_from_case(self, path: str) -> dict:
+        """Copy another case file's watchlist into this one — the standing
+        indicator set an analyst carries between engagements usually lives
+        in whichever case they worked last. Read-only against the other
+        .db (never opened as a Store — no lock contention, no migration of
+        someone else's file); deduped by exact value against what's
+        already here; kind and note carried, auto_tag_id deliberately NOT
+        (it names a tag id in the OTHER case's tag_defs — meaningless
+        here). A case file from before the watchlist existed simply has
+        no table and imports zero."""
+        if os.path.abspath(path) == os.path.abspath(self.path):
+            raise ValueError("That is the currently open case")
+        try:
+            ro = sqlite3.connect(f"file:{os.path.abspath(path)}?mode=ro", uri=True)
+        except sqlite3.Error as e:
+            raise ValueError(f"Could not open case file: {e}")
+        ro.row_factory = sqlite3.Row
+        try:
+            if not ro.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='watchlist'").fetchone():
+                return {"added": 0, "skipped": 0}
+            rows = ro.execute("SELECT value, kind, note FROM watchlist ORDER BY id").fetchall()
+        except sqlite3.Error as e:
+            raise ValueError(f"Could not read that case's watchlist: {e}")
+        finally:
+            ro.close()
+        have = {i["value"] for i in self.list_indicators()}
+        added = 0
+        for r in rows:
+            value = (r["value"] or "").strip()
+            if not value or value in have:
+                continue
+            self.add_indicator(value, r["kind"] or "other", r["note"], None)
+            have.add(value)
+            added += 1
+        return {"added": added, "skipped": len(rows) - added}
+
     def indicator_hits(self, wid: int, limit: int = 500) -> list[dict]:
         with self.lock:
             rows = self.db.execute(
