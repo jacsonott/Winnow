@@ -438,6 +438,13 @@ html[data-style="studio"][data-theme="light"] {
 .page-tabs .tab-sql:first-child { border-left: 0; }
 .tab-sql[aria-selected="true"] { color: var(--accent); }
 .tab .x { color: var(--dim); opacity: .5; }
+/* Closed page tabs stay in the strip's DOM (their ids must keep resolving)
+   but must not paint — .tab sets display:flex, which would win over the
+   hidden attribute's UA display:none without this. */
+.tab[hidden] { display: none; }
+/* A closed page's row in the sidebar Pages section — present (it's the
+   reopen path) but visibly parked. */
+.sidebar-page-closed .menu-item { color: var(--dim); opacity: .65; }
 .tab .x:hover { opacity: 1; color: var(--danger); }
 .tab.dragging { opacity: .4; }
 .tab.drop-before { box-shadow: inset 2px 0 0 var(--accent); }
