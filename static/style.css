@@ -1810,6 +1810,16 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 .assoc-ext { font-family: var(--mono, monospace); min-width: 4.5em; }
 .assoc-desc { color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .assoc-handleronly { color: var(--dim); font-size: 0.85em; }
+.assoc-manual { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 8px; }
+.assoc-manual summary { cursor: pointer; color: var(--dim); font-size: 12px; }
+.assoc-manual summary:hover { color: var(--text); }
+.assoc-manual-body { padding: 6px 2px 0; font-size: 12px; }
+.assoc-manual-body ol { margin: 4px 0 8px 18px; padding: 0; }
+.assoc-manual-body li { margin: 4px 0; }
+.assoc-manual-body code { background: var(--panel-3); padding: 1px 4px; border-radius: 2px;
+  font-family: var(--mono); font-size: 11px; }
+.assoc-cmd { display: block; margin-top: 4px; padding: 6px 8px; overflow-x: auto;
+  white-space: nowrap; }
 
 /* Case notes tab */
 .notesview { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }
