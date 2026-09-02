@@ -35,7 +35,7 @@ reading. Start with the Quickstart.
 
 ---
 
-## 1. The four extension points
+## 1. The five extension points
 
 Everything a plugin does, it does by calling methods on the `api` object
 handed to its `register()` function:
@@ -46,11 +46,13 @@ handed to its `register()` function:
 | `api.register_tab(...)` | A pinned tab with your own UI | A whole feature surface: a graph, a dashboard, an assistant, a report builder |
 | `api.register_api(route, handler)` | A backend endpoint | Whatever your tab (or a script) needs the server to do |
 | `api.register_row_action(...)` | An entry in the row right-click menu | Anything that operates on the selected rows: a VirusTotal lookup on the highlighted hashes, an enrichment, a hand-off to another tool |
+| `api.register_toolbar_panel(...)` | A toggle in the table toolbar + a strip above the grid | Something that follows the current view: a histogram of when its rows happened, a sparkline, a legend |
 
 They compose: a tab usually pairs with one or more routes; a row action
-often pairs with a tab that shows its results. Ingest formats and row
-actions work in a single-file plugin; tabs need a folder plugin (there
-has to be somewhere to serve the JS from).
+often pairs with a tab that shows its results; a toolbar panel usually
+pairs with a route that reads through the current view. Ingest formats
+and row actions work in a single-file plugin; tabs and panels need a
+folder plugin (there has to be somewhere to serve the JS from).
 
 The shipped examples map onto these:
 
@@ -59,6 +61,7 @@ The shipped examples map onto these:
 | [`mft_usn/`](../examples/plugins/mft_usn/) | Ingest formats — two of them, with options, streaming parsers, extension *and* bare-filename matching |
 | [`lateral_movement/`](../examples/plugins/lateral_movement/) | A tab + a route — canvas UI, case queries, theming |
 | [`claude_assistant/`](../examples/plugins/claude_assistant/) | A tab + a route that calls an external service, with credentials and dependencies |
+| [`table_histogram/`](../examples/plugins/table_histogram/) | A toolbar panel + a route — following the grid with `onViewChange`, driving the timeframe filter with `setTimeRange` |
 
 ---
 
@@ -485,7 +488,67 @@ sharing the document with the rest of the app.
 
 ---
 
-## 6. Hook: API routes
+## 6. Hook: toolbar panels
+
+```python
+api.register_toolbar_panel(
+    id="histogram",        # unique within this plugin
+    label="Histogram",     # the toolbar toggle's caption
+    entry="ui/panel.js",   # ES module, relative to the plugin folder
+    description="…",       # the toggle's tooltip
+)
+```
+
+A toggle button appears in the table toolbar beside the search icon.
+While it's on (the state persists per browser) and a table is showing,
+your module's UI occupies a strip **between the toolbar and the grid**;
+it hides with the toolbar on page tabs. Folder plugins only.
+
+### The module contract
+
+Identical to a tab's: `export default function mount(container, winnow)`,
+plus optional `onShow(container)` / `onHide(container)` — called on every
+toggle and grid/page switch. `container` is an empty `<section>` spanning
+the grid's width; keep it short (a histogram is ~100px), it's above the
+evidence.
+
+### Following the grid
+
+The `winnow` context is a tab's (see above) with three additions that
+exist for exactly this hook:
+
+```js
+export default function mount(container, winnow) {
+  const off = winnow.onViewChange(({ sourceId, viewId, rowCount }) => refresh());
+  async function refresh() {
+    const v = winnow.state.view;             // {view_id, row_count} — the grid's CURRENT view
+    if (!v) return;
+    const h = await winnow.post(`${winnow.base}/histogram`, { view_id: v.view_id, column });
+    draw(h);
+  }
+  canvas.onmouseup = () => winnow.setTimeRange({ column, start: '2026-03-14 08:00:00', end: '2026-03-14 09:00:00' });
+  clearBtn.onclick = () => winnow.clearTimeRange();
+}
+```
+
+- `winnow.onViewChange(cb)` fires after **every** grid rebuild — filter,
+  search, sort, timeframe, table switch. Returns an unsubscribe.
+- `winnow.state.view` is what the table is showing right now. Hand its
+  `view_id` to a route of yours that reads *through the view* (see
+  `Store.time_histogram` for the shape: reader pool, both view kinds,
+  merges unioned) and your panel describes exactly the rows on screen.
+- `winnow.setTimeRange({column, start, end})` / `winnow.clearTimeRange()`
+  write the case timeframe filter — the toolbar's ⏱ — as if typed into
+  its dialog, so the button, the toggle key and every other consumer
+  agree. The rebuild that follows fires `onViewChange` again.
+
+`table_histogram/` is the worked example: bars per time bucket of a
+datetime column, a drag on them becomes the timeframe filter, and the
+whole thing re-queries on every view change.
+
+---
+
+## 7. Hook: API routes
 
 ```python
 api.register_api("edges", edges_handler, methods=["POST"])
@@ -529,7 +592,7 @@ below).
 
 ---
 
-## 7. Hook: row actions
+## 8. Hook: row actions
 
 ```python
 api.register_row_action(
@@ -579,7 +642,7 @@ from a plugin*).
 
 ---
 
-## 8. Talking to the case
+## 9. Talking to the case
 
 `req.store` is Winnow's `Store`. The safe, supported way to read from it:
 
@@ -687,7 +750,7 @@ portable. Derive a new table instead.
 
 ---
 
-## 9. Testing a plugin
+## 10. Testing a plugin
 
 Plugins are ordinary Python, so ordinary tests work. Two levels:
 
@@ -762,7 +825,7 @@ section of [`CLAUDE.md`](../CLAUDE.md).
 
 ---
 
-## 10. Installing and sharing
+## 11. Installing and sharing
 
 **Install:** Settings → Plugins → *Install a plugin…* — pick the `.py`
 file for a single-file plugin, or the folder that directly contains
@@ -795,15 +858,16 @@ python server.py --plugins-dir ~/src/my-winnow-plugins
 
 Installs from the UI always land in the first directory (`plugins/`).
 
-**Versioning:** the current plugin API version is **3** (row actions
-arrived in 3; `api.q`/`NUM_RE` in 2). Set `WINNOW_API_VERSION` to the
+**Versioning:** the current plugin API version is **4** (toolbar panels
+and the view-change context arrived in 4; row actions in 3; `api.q`/
+`NUM_RE` in 2). Set `WINNOW_API_VERSION` to the
 API version you built against. If a future Winnow's API version is lower than yours, it
 refuses to load your plugin with a "update Winnow" message rather than
 failing mysteriously somewhere inside `register()`.
 
 ---
 
-## 11. Security model
+## 12. Security model
 
 **A plugin is arbitrary Python running with Winnow's privileges.** It can
 read any file the analyst can, open sockets, and touch the case. There is
@@ -831,7 +895,7 @@ What that leaves to you, as an author:
 
 ---
 
-## 12. Troubleshooting
+## 13. Troubleshooting
 
 | Symptom | Cause |
 | --- | --- |
@@ -851,7 +915,7 @@ What that leaves to you, as an author:
 
 ---
 
-## 13. Reference
+## 14. Reference
 
 ### `register_ingest_format(*, id, label, parse, extensions=(), filename_patterns=(), description="", options=())`
 
@@ -868,6 +932,14 @@ Module: `export default function mount(container, winnow)`, plus optional
 
 `handler(req: PluginRequest) -> JSON-able`, where `PluginRequest` has
 `.method`, `.route`, `.query`, `.body`, `.store`. `ValueError` → 400.
+
+### `register_toolbar_panel(*, id, label, entry, description="")`
+
+Module: `export default function mount(container, winnow)`, plus optional
+`onShow(container)` / `onHide(container)`. Context additions:
+`winnow.onViewChange(cb) -> unsubscribe`, `winnow.state.view`,
+`winnow.setTimeRange({column, start, end, enabled=true})`,
+`winnow.clearTimeRange()`.
 
 ### `register_row_action(*, id, label, handler, description="", max_rows=1000)`
 
@@ -893,7 +965,7 @@ can drive a plugin parser from `curl` without touching the UI.
 
 ---
 
-## 14. Writing a plugin with an LLM
+## 15. Writing a plugin with an LLM
 
 **Paste this one file. That's the whole context budget.**
 

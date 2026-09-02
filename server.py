@@ -1915,6 +1915,7 @@ def api_plugins():
         "formats": PLUGINS.list_formats(),
         "tabs": PLUGINS.list_tabs(),
         "row_actions": PLUGINS.list_row_actions(),
+        "panels": PLUGINS.list_panels(),
     }
 
 

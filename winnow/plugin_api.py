@@ -33,6 +33,13 @@ plugin needing to change):
   VirusTotal lookup on the highlighted hashes, an enrichment that lands
   a new table, anything that operates on "these rows". Works from a
   single-file plugin.
+- **Toolbar panels** (register_toolbar_panel): a toggle button in the
+  table toolbar (beside search) that drops the plugin's own UI in
+  between the toolbar and the grid — a histogram of the view, a
+  sparkline, a legend. The panel's module gets the same `winnow`
+  context as a tab plus view-change events, so it can follow every
+  filter the analyst applies. Folder plugins only (there's a module to
+  serve).
 
 A plugin module provides:
 
@@ -96,6 +103,12 @@ A tab plus its backend route, the full custom-UI shape:
         max_rows=50,                      # entry is disabled past this many rows
     )
 
+    api.register_toolbar_panel(
+        id="histogram",                  # unique within this plugin
+        label="Histogram",               # the toolbar toggle's caption
+        entry="ui/panel.js",             # ES module: mount(container, winnow), onShow/onHide,
+    )                                    #   and winnow.onViewChange(cb) to follow the grid
+
     def vt_lookup(req):
         # req.body: {"source_id", "column", "value", "rows": [{"rid",
         # "source_id", "cells": {col: val}}, ...]} — the right-clicked
@@ -147,7 +160,7 @@ from .store import NUM_RE as _store_num_re, q as _store_q
 # provides, with a message that says to update Winnow — the failure mode
 # is otherwise an AttributeError deep inside register() that reads like a
 # plugin bug.
-PLUGIN_API_VERSION = 3
+PLUGIN_API_VERSION = 4
 
 FORMAT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 # API routes may nest ("chat/stream") but each segment keeps the same shape.
@@ -375,6 +388,39 @@ class PluginAPI:
         })
 
 
+    def register_toolbar_panel(self, *, id: str, label: str, entry: str,
+                               description: str = "") -> None:
+        """A toggle button in the table toolbar (next to search) that shows
+        the plugin's own UI in a strip between the toolbar and the grid.
+        `entry` is an ES module (relative to the plugin folder, validated
+        to exist now like a tab's) exporting `mount(container, winnow)`
+        and optional `onShow(container)` / `onHide(container)`. The
+        `winnow` context is a tab's plus `onViewChange(cb)` (fires after
+        every grid rebuild — filter, sort, search, timeframe, table
+        switch; returns an unsubscribe), `state.view` (the current view's
+        {view_id, row_count}), and `setTimeRange({column, start, end})` /
+        `clearTimeRange()` to drive the case timeframe filter. The toggle
+        state persists per browser; the strip hides with the toolbar on
+        page tabs."""
+        if not FORMAT_ID_RE.match(id or ""):
+            raise ValueError(f"Panel id {id!r} must be lowercase [a-z0-9_-]")
+        if not label:
+            raise ValueError("register_toolbar_panel needs a label")
+        if not self._root.is_dir():
+            raise ValueError("register_toolbar_panel is for folder plugins — a single .py file has no module to serve")
+        rel = Path(str(entry).replace("\\", "/"))
+        if rel.is_absolute() or ".." in rel.parts or not (self._root / rel).is_file():
+            raise ValueError(f"Panel entry {entry!r} must be a file inside the plugin folder")
+        self._registry._add_panel({
+            "id": f"{self._plugin}.{id}",
+            "plugin": self._plugin,
+            "plugin_fs": self._fs,
+            "label": label,
+            "entry": rel.as_posix(),
+            "description": description,
+        })
+
+
 class PluginRegistry:
     """Discovers, imports and indexes plugins. One module-level instance
     lives in server.py; tests build their own against tmp dirs.
@@ -391,6 +437,7 @@ class PluginRegistry:
         self._tabs: dict[str, dict] = {}                 # namespaced tab id -> tab dict (see PluginAPI.register_tab)
         self._apis: dict[tuple[str, str], dict] = {}     # (fs_name, route) -> {handler, methods}
         self._row_actions: dict[str, dict] = {}          # namespaced action id -> see register_row_action
+        self._panels: dict[str, dict] = {}               # namespaced panel id -> see register_toolbar_panel
         self._seq = 0  # unique module names across load() calls / same-named plugins in two dirs
 
     # ------------------------------------------------------------- loading
@@ -434,6 +481,7 @@ class PluginRegistry:
         self._tabs = {}
         self._apis = {}
         self._row_actions = {}
+        self._panels = {}
         seen: set[str] = set()
         for directory in directories:
             d = Path(directory)
@@ -525,6 +573,11 @@ class PluginRegistry:
             raise ValueError(f"Duplicate tab id: {tab['id']}")
         self._tabs[tab["id"]] = tab
 
+    def _add_panel(self, panel: dict) -> None:
+        if panel["id"] in self._panels:
+            raise ValueError(f"Duplicate toolbar panel id: {panel['id']}")
+        self._panels[panel["id"]] = panel
+
     def _add_row_action(self, action: dict) -> None:
         if action["id"] in self._row_actions:
             raise ValueError(f"Duplicate row action id: {action['id']}")
@@ -564,6 +617,12 @@ class PluginRegistry:
 
     def get_api(self, fs_name: str, route: str) -> dict | None:
         return self._apis.get((fs_name, route))
+
+    def list_panels(self) -> list[dict]:
+        """Every registered toolbar panel, with its plugin's gen for the
+        entry module's cache-buster (same as list_tabs)."""
+        gen_by_fs = {p["fs_name"]: p["gen"] for p in self.plugins}
+        return [{**t, "gen": gen_by_fs.get(t["plugin_fs"], 0)} for t in self._panels.values()]
 
     def list_row_actions(self) -> list[dict]:
         """Every registered row action, minus the handler (the UI only

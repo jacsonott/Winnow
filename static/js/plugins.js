@@ -12,6 +12,7 @@ import { setActiveSqlResult, sqlCopyResult, sqlDownloadCsv, sqlRowKey, sqlTagsFo
 import { moveCursor } from './grid.js';
 import { S } from './state.js';
 import { confirmDialog, modal, promptDialog } from './ui.js';
+import { updateTimeRangeButton } from './timeframe.js';
 
 /* Settings → Plugins: everything about drop-in extensions in one place —
    every plugin found in the plugins directory (enabled, disabled, or
@@ -336,7 +337,7 @@ export function renderPluginTabs() {
    pane's copy button builds. */
 export function buildPluginTabContext(tab) {
   return {
-    apiVersion: 1,
+    apiVersion: 2,
     plugin: tab.plugin,
     base: `/api/plugin/${tab.plugin_fs}`,      // the plugin's own register_api routes
     assets: `/plugin_assets/${tab.plugin_fs}`, // the plugin's own files (css, workers, data)
@@ -358,6 +359,33 @@ export function buildPluginTabContext(tab) {
       // A plugin honouring it is what makes "the timeframe applies
       // everywhere" true for plugin tabs too.
       get timeRange() { return S.timeRange; },
+      // The grid's current view — what the table is showing right now,
+      // filters/search/timeframe applied — or null before a table is open.
+      // Hand view_id to a plugin route that reads THROUGH the view (the
+      // table_histogram example's Store.time_histogram) to describe
+      // exactly the rows on screen.
+      get view() { return S.view ? { view_id: S.view.view_id, row_count: S.view.row_count } : null; },
+    },
+    // Fires after every grid rebuild — filter, sort, search, timeframe,
+    // table switch — with {sourceId, viewId, rowCount}. Returns an
+    // unsubscribe. This is what lets a panel follow the grid.
+    onViewChange: (cb) => {
+      const h = (e) => cb(e.detail);
+      document.addEventListener('winnow:viewchange', h);
+      return () => document.removeEventListener('winnow:viewchange', h);
+    },
+    // Drive the case timeframe filter (the toolbar's ⏱) from a plugin —
+    // the same object the Timeframe dialog writes, so the button, the
+    // toggle key and every other consumer see it as if typed there.
+    setTimeRange: ({ column = null, start = '', end = '', enabled = true } = {}) => {
+      S.timeRange = { enabled: !!enabled, column: column || null, start: start || '', end: end || '' };
+      updateTimeRangeButton();
+      if (S.sourceId) rebuildView({ keepScroll: false });
+    },
+    clearTimeRange: () => {
+      S.timeRange = { enabled: false, column: null, start: '', end: '' };
+      updateTimeRangeButton();
+      if (S.sourceId) rebuildView({ keepScroll: false });
     },
     // Jump from a plugin's visualization to the EVIDENCE: open the source
     // and exact-filter it to the given column values (clearing whatever
@@ -408,6 +436,104 @@ export async function showPluginTab(tabId) {
     }
   }
   if (m.module && m.module.onShow) { try { m.module.onShow(m.container); } catch (e) { console.error(e); } }
+}
+
+/* ---------------------------------------------------- toolbar panels */
+
+/* Plugin toolbar panels (PluginAPI.register_toolbar_panel): a toggle
+   button per panel in the table toolbar, and — while toggled on and the
+   grid is showing — the panel's own UI in the #pluginPanels strip between
+   the toolbar and the grid. Mounted once per plugin gen like a tab;
+   hidden/shown after that, with onShow/onHide. The toggle persists per
+   browser, keyed by the namespaced panel id, so an analyst who keeps the
+   histogram open gets it back on the next case. */
+const PANEL_PREFS_KEY = 'winnow.panels';
+const pluginPanelMounts = new Map();   // panel id -> {container, module, gen}
+
+function panelPrefs() {
+  try { return JSON.parse(localStorage.getItem(PANEL_PREFS_KEY) || '{}'); } catch { return {}; }
+}
+export function pluginPanelOpen(id) { return !!panelPrefs()[id]; }
+function setPanelPref(id, on) {
+  const p = panelPrefs();
+  if (on) p[id] = true; else delete p[id];
+  localStorage.setItem(PANEL_PREFS_KEY, JSON.stringify(p));
+}
+
+export function renderPluginPanelButtons() {
+  const host = $('pluginToolbarButtons');
+  if (!host) return;
+  host.replaceChildren();
+  const live = new Set((S.pluginPanels || []).map((p) => p.id));
+  // A panel whose plugin was disabled or reloaded loses its mount.
+  for (const [id, m] of [...pluginPanelMounts]) {
+    const p = (S.pluginPanels || []).find((x) => x.id === id);
+    if (!p || p.gen !== m.gen) { m.container.remove(); pluginPanelMounts.delete(id); }
+  }
+  for (const p of S.pluginPanels || []) {
+    const b = el('button', 'btn ghost plugin-panel-btn', p.label);
+    b.dataset.panelId = p.id;
+    b.title = (p.description || `${p.label} — from the ${p.plugin} plugin`) + ' (click to toggle)';
+    b.setAttribute('aria-pressed', String(pluginPanelOpen(p.id)));
+    b.onclick = () => togglePluginPanel(p.id);
+    host.append(b);
+    if (pluginPanelOpen(p.id) && live.has(p.id)) mountPluginPanel(p.id);
+  }
+  syncPluginPanels();
+}
+
+export async function togglePluginPanel(id, on = !pluginPanelOpen(id)) {
+  setPanelPref(id, on);
+  const btn = document.querySelector(`.plugin-panel-btn[data-panel-id="${CSS.escape(id)}"]`);
+  if (btn) btn.setAttribute('aria-pressed', String(on));
+  if (on) await mountPluginPanel(id);
+  syncPluginPanels();
+}
+
+async function mountPluginPanel(id) {
+  const panel = (S.pluginPanels || []).find((p) => p.id === id);
+  if (!panel) return;
+  let m = pluginPanelMounts.get(id);
+  if (m) return;
+  const container = el('section', 'plugin-panel');
+  container.dataset.panelId = id;
+  $('pluginPanels').append(container);
+  m = { container, module: null, gen: panel.gen };
+  pluginPanelMounts.set(id, m);
+  try {
+    const ctx = buildPluginTabContext(panel);
+    const mod = await import(`${ctx.assets}/${panel.entry}?v=${panel.gen}`);
+    if (typeof mod.default !== 'function') throw new Error('panel module has no default export to mount');
+    await mod.default(container, ctx);
+    m.module = mod;
+  } catch (e) {
+    console.error(e);
+    container.replaceChildren(el('p', 'note-status', `Plugin panel "${panel.label}" failed to load: ${e.message}`));
+  }
+  syncPluginPanels();
+}
+
+/* Panels show only with the grid (the toolbar hides on page tabs, and so
+   does the strip) and only while toggled on; the host collapses to
+   nothing when no panel is visible, so the grid gets the row back. */
+export function syncPluginPanels() {
+  const host = $('pluginPanels');
+  if (!host) return;
+  const isGrid = S.activeTab === 'grid';
+  let any = false;
+  for (const [id, m] of pluginPanelMounts) {
+    const show = isGrid && pluginPanelOpen(id);
+    const was = !m.container.hidden;
+    m.container.hidden = !show;
+    if (show) any = true;
+    if (m.module) {
+      try {
+        if (show && !was && m.module.onShow) m.module.onShow(m.container);
+        if (!show && was && m.module.onHide) m.module.onHide(m.container);
+      } catch (e) { console.error(e); }
+    }
+  }
+  host.hidden = !any;
 }
 
 /* Split out of runSql so applySqlTabToEditor can re-paint a cached result

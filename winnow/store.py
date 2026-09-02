@@ -5164,6 +5164,76 @@ class Store:
         rows = rows[:limit]
         return {"groups": [{"value": r["val"], "count": r["n"]} for r in rows], "truncated": truncated}
 
+    # Bucket widths a histogram may pick from, seconds — chosen so the
+    # view's span fits in max_buckets bars. Human-shaped (minute, hour,
+    # day, week…) rather than a raw division, so bars line up with clock
+    # boundaries and a brush lands on times an analyst can read.
+    HISTOGRAM_BUCKETS = (1, 5, 10, 30, 60, 300, 600, 900, 1800, 3600, 3 * 3600, 6 * 3600,
+                         12 * 3600, 86400, 7 * 86400, 30 * 86400, 365 * 86400)
+
+    def time_histogram(self, view_id: str, column: str, max_buckets: int = 160,
+                       op_token: str | None = None) -> dict:
+        """Time buckets over the rows of the CURRENT view — filtered, searched,
+        timeframe'd, exactly what the grid shows — for a datetime column.
+        Two aggregate passes on the reader pool (invariant #4), shaped like
+        group_summary's column branch: a root_virtual/unfiltered view reads
+        the member tables directly, a materialised one joins v.view_N; a
+        merge unions its members. Pass 1 finds the span, pass 2 counts per
+        bucket at the width HISTOGRAM_BUCKETS gives that span.
+
+        TS_NORMALIZE turns whatever the column stores into a sortable
+        'YYYY-MM-DD HH:MM:SS…' (a derived datetime column already is one),
+        and strftime('%s') turns that into epoch seconds — rows the
+        normaliser can't parse have no epoch and fall out of the histogram
+        rather than piling into bucket zero."""
+        handle = self._views.get(view_id)
+        if not handle:
+            raise KeyError("View expired — rebuild it")
+        with self._reader() as ro:
+            src = self._source_lite_on(ro, handle["source_id"])
+            members = self._resolve_members_on(ro, handle["source_id"])
+        colnames = {c["name"]: c["type"] for c in src["columns"]}
+        if column not in colnames:
+            raise KeyError(column)
+        if colnames[column] != "datetime":
+            raise ValueError(f"{column} is not a datetime column")
+        direct = self._grouping_covers_whole_source(handle, src) or handle.get("kind") == "root_virtual"
+        is_derived = self._is_derived(src, column)
+
+        def branch(m: dict, select: str) -> str:
+            derived_alias = None if direct else "d"
+            ref = self._col_ref(src, column, "s", derived_alias)
+            ts = ref if is_derived else f"TS_NORMALIZE({ref})"
+            epoch = f"CAST(strftime('%s', {ts}) AS INTEGER)"
+            if direct:
+                scope = f"FROM {self._member_from(src, m, 's')}"
+            else:
+                scope = (f"FROM v.{q(view_id)} vv "
+                         f"JOIN {q(m['table_name'])} s ON s.rid = vv.rid AND vv.source_id = {int(m['source_id'])}"
+                         f"{self._member_derived_join(src, m, 's')}")
+            return f"SELECT {select.replace('EPOCH', epoch)} {scope}"
+
+        span_union = " UNION ALL ".join(branch(m, "EPOCH AS e") for m in members)
+        with self._reader() as ro, self._dropped_view_is_expired(), self._interruptible(op_token, ro):
+            lo, hi, n = ro.execute(
+                f"SELECT MIN(e), MAX(e), COUNT(*) FROM ({span_union}) WHERE e IS NOT NULL").fetchone()
+        if not n:
+            return {"column": column, "bucket_seconds": 0, "start": None, "end": None,
+                    "total": 0, "buckets": []}
+        span = max(0, int(hi) - int(lo))
+        bucket = next((b for b in self.HISTOGRAM_BUCKETS if span / b <= max_buckets),
+                      self.HISTOGRAM_BUCKETS[-1])
+        count_union = " UNION ALL ".join(
+            branch(m, f"(EPOCH / {bucket}) * {bucket} AS b, 1 AS one") for m in members)
+        with self._reader() as ro, self._dropped_view_is_expired(), self._interruptible(op_token, ro):
+            rows = ro.execute(
+                f"SELECT b, COUNT(*) AS n FROM ({count_union}) WHERE b IS NOT NULL GROUP BY b ORDER BY b"
+            ).fetchall()
+        iso = lambda t: time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(int(t)))
+        return {"column": column, "bucket_seconds": bucket,
+                "start": iso(lo), "end": iso(hi), "total": int(n),
+                "buckets": [[int(r[0]), int(r[1])] for r in rows]}
+
     def _tag_group_branches(self, view_id: str, src: dict, members: list[dict], direct: bool,
                             member_rows: dict[int, int], path_for) -> tuple[list[str], list]:
         """The UNION ALL branches behind grouping by tag: one group per tag,
