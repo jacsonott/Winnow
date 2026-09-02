@@ -182,15 +182,40 @@ export function drawWordmark(canvas, { text = 'WINNOW', color, fontSize = 44 } =
   return { width: total, height: h };
 }
 
-export function splashEnabled(appearance) {
-  // Default on, but an explicit false in the saved appearance wins — and
-  // reduced-motion is treated as "off" rather than "play it faster".
-  if (appearance && appearance.splash === false) return false;
+/* Why the last launch did or didn't play, for Settings → Launch animation.
+   The reports this exists for were "it's enabled but I never see it" —
+   and the two silent reasons (the OS asking for reduced motion; the
+   focus click on a freshly opened window counting as a skip) leave no
+   trace anywhere the analyst looks. Kept in localStorage (per browser,
+   like the setting itself). */
+export const SPLASH_LAST_KEY = 'winnow.splash.last';
+export function recordSplash(result, reason) {
+  try { localStorage.setItem(SPLASH_LAST_KEY, JSON.stringify({ result, reason, at: Date.now() })); } catch { /* full/blocked */ }
+}
+export function lastSplash() {
+  try { return JSON.parse(localStorage.getItem(SPLASH_LAST_KEY) || 'null'); } catch { return null; }
+}
+
+export function reducedMotion() {
   // Plain call, not `matchMedia?.()` — esprima (ES2017) can't parse an
   // optional CALL, and tests/test_static_syntax.py is what stands between
   // a syntax slip and a blank app.
   const mm = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)');
-  return !(mm && mm.matches);
+  return !!(mm && mm.matches);
+}
+
+/* Three states, not two. `false` is off. `'always'` — what the Settings
+   checkbox writes when the analyst ticks it themselves — plays regardless
+   of the OS hint. Anything else (the default `true`, or unset) is
+   "on, but honour reduced-motion": Windows reports reduced motion whenever
+   Animation effects are off, which performance policies and VM images do
+   as a matter of course, so this default alone had the animation quietly
+   never playing on exactly the machines this tool lives on. */
+export function splashEnabled(appearance) {
+  if (appearance && appearance.splash === false) { recordSplash('skipped', 'off in Settings'); return false; }
+  if (appearance && appearance.splash === 'always') return true;
+  if (reducedMotion()) { recordSplash('skipped', 'system asks for reduced motion'); return false; }
+  return true;
 }
 
 /* Runs the animation over the whole viewport and resolves when it's done
@@ -208,9 +233,11 @@ export function runSplash() {
     $('splashTagline').style.color = colors.ink;
 
     let finished = false;
-    const finish = () => {
+    const startedAt = performance.now();
+    const finish = (reason) => {
       if (finished) return;
       finished = true;
+      recordSplash(reason ? 'skipped' : 'played', reason || '');
       if (raf) { cancelAnimationFrame(raf); raf = null; }
       window.removeEventListener('keydown', skip, true);
       window.removeEventListener('mousedown', skip, true);
@@ -220,8 +247,15 @@ export function runSplash() {
       // Matches the CSS fade; the app is already behind it by then.
       setTimeout(() => { root.hidden = true; root.classList.remove('splash-out'); resolve(); }, 420);
     };
-    const skip = () => finish();
-    onDone = finish;
+    // A skip inside the first moments isn't a choice — it's the click that
+    // focused a just-opened app window, or scroll inertia carried in from
+    // the previous one. Real impatience arrives later.
+    const SKIP_GRACE_MS = 700;
+    const skip = (e) => {
+      if (performance.now() - startedAt < SKIP_GRACE_MS) return;
+      finish(`skipped by ${e && e.type ? e.type : 'input'}`);
+    };
+    onDone = () => finish('ended by the app');
 
     window.addEventListener('keydown', skip, true);
     window.addEventListener('mousedown', skip, true);
@@ -234,7 +268,7 @@ export function runSplash() {
       // lands throws it away — the eye needs time to read WINNOW as a word
       // rather than as the debris it just watched arrive. Skippable
       // throughout, so this costs an impatient analyst nothing.
-      setTimeout(finish, SETTLE_HOLD_MS);
+      setTimeout(() => finish(), SETTLE_HOLD_MS);
     });
   });
 }
