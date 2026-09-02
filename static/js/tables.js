@@ -120,10 +120,7 @@ export function openTablesManager() {
       if (!real.length) { toast('No tables to copy'); return; }
       writeClipboardText(Promise.resolve(sqlSchemaForLLM()), `Copied ${real.length} table definition${real.length === 1 ? '' : 's'}`);
     };
-    const compact = el('button', 'btn ghost', 'Compact case file…');
-    compact.title = 'VACUUM — return space freed by removed tables and indexes to the operating system';
-    compact.onclick = async () => { await compactCaseFile(); };
-    acts.append(openAllTagged, copySchema, compact);
+    acts.append(openAllTagged, copySchema);
     b.append(acts);
 
     const list = el('div', 'session-list');
@@ -132,7 +129,9 @@ export function openTablesManager() {
     function render() {
       list.replaceChildren();
       for (const s of S.sources) {
-        const row = el('div', 'row-actions session-row');
+        // A grid row, not a flex scatter — the name ellipsizes in the
+        // flexible column, everything else right-aligns in steady columns.
+        const row = el('div', 'session-row tables-row' + (s.error ? ' no-index' : ''));
         const nameSpan = el('span', 'session-name', (s.is_merge ? '⛓ ' : '') + sourceLabel(s) + (s.error ? ' ⚠' : ''));
         nameSpan.title = sourceTitle(s);
         row.append(nameSpan);
@@ -143,6 +142,7 @@ export function openTablesManager() {
           const status = indexStatusFor(s);
           row.append(el('span', 'index-status index-status-' + status.cls, status.text));
         }
+        const acts2 = el('div', 'tables-acts');
         const toggle = el('button', 'btn ghost', s.is_open ? 'Close' : 'Open');
         toggle.onclick = async () => {
           setBusy(true);
@@ -155,7 +155,7 @@ export function openTablesManager() {
         const menuBtn = el('button', 'btn ghost', 'Settings…');
         menuBtn.title = 'The table menu — columns, pinning, exports, everything per-table';
         menuBtn.onclick = () => openTableMenu(s.id);   // opens the table itself first if it was closed
-        if (!s.error) row.append(menuBtn);
+        if (!s.error) acts2.append(menuBtn);
         const nick = el('button', 'btn ghost', 'Nickname…');
         nick.title = s.is_merge ? 'Rename this merge' : 'A display name shown in place of the file name — clear it to go back';
         nick.onclick = async () => {
@@ -178,7 +178,8 @@ export function openTablesManager() {
           await loadSources();
           openTablesManager();
         };
-        row.append(toggle, nick, del);
+        acts2.append(toggle, nick, del);
+        row.append(acts2);
         list.append(row);
         const idxs = indexesBySource.get(s.id) || [];
         if (idxs.length) list.append(columnIndexRow(s, idxs));
@@ -240,5 +241,5 @@ export function openTablesManager() {
       }
       render();
     }, 1500);
-  }, { wide: true });
+  }, { wide: 'x' });
 }
