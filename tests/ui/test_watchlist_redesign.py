@@ -58,8 +58,15 @@ def test_new_hit_badge_lights_and_clears(page):
     page.locator("#tabWatchlist").click()
     page.wait_for_selector("#watchlistview:not([hidden])")
     page.wait_for_selector("#tabWatchlist.has-new-hits", state="detached")
-    page.wait_for_function("""() => fetch('/api/watchlist/badge').then(r => r.json())
-      .then(b => b.seen > 0 && b.seen === b.total_hits)""")
+    # Poll from Python — wait_for_function does NOT await a promise-returning
+    # predicate (the Promise object is truthy), but page.evaluate does.
+    for _ in range(50):
+        b = page.evaluate("() => fetch('/api/watchlist/badge').then(r => r.json())")
+        if b["seen"] > 0 and b["seen"] == b["total_hits"]:
+            break
+        page.wait_for_timeout(100)
+    else:
+        raise AssertionError(f"seen high-water never persisted: {b}")
     # A badge refresh with nothing new stays dark.
     page.evaluate("() => __winnow.refreshWatchlistBadge()")
     page.wait_for_timeout(200)
