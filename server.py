@@ -2688,6 +2688,30 @@ def api_watchlist_hits(watchlist_id: int):
     return store().indicator_hits(watchlist_id)
 
 
+@app.get("/api/watchlist/badge")
+def api_watchlist_badge():
+    """The tab-badge poll: total hits across every indicator vs the count
+    the analyst last looked at (case_settings, so 'seen' travels with the
+    case rather than resetting per browser)."""
+    st = store()
+    total = sum(i["hit_count"] for i in st.list_indicators())
+    try:
+        seen = int(st.get_case_settings().get("watchlist_seen_hits", "0"))
+    except (TypeError, ValueError):
+        seen = 0
+    return {"total_hits": total, "seen": seen}
+
+
+class WatchlistSeenBody(BaseModel):
+    count: int = 0
+
+
+@app.post("/api/watchlist/seen")
+def api_watchlist_seen(body: WatchlistSeenBody):
+    store().set_case_setting("watchlist_seen_hits", str(max(0, int(body.count))))
+    return {"ok": True}
+
+
 class EntityPivotBody(BaseModel):
     value: str
     limit: int = 60

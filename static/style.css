@@ -1833,47 +1833,64 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 
 /* IOC watchlist tab */
 .watchlistview { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }
-.wl-add { display: flex; gap: 8px; align-items: center;
-  padding: 10px 12px; border-bottom: 1px solid var(--line-2); flex: 0 0 auto; }
-.wl-add input[type=text], .wl-add #wlValue { flex: 1 1 260px; min-width: 200px;
-  background: var(--ink); color: var(--text);
+.wl-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+  border-bottom: 1px solid var(--line-2); flex: 0 0 auto; }
+.wl-head .wl-title { color: var(--dim); text-transform: uppercase;
+  letter-spacing: .07em; font-size: 11px; }
+.wl-head .wl-summary { color: var(--dim); font-size: 12px; }
+.wl-head .spacer { flex: 1; }
+.wl-body { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: minmax(320px, 420px) 1fr; }
+.wl-left { min-height: 0; display: flex; flex-direction: column; border-right: 1px solid var(--line-2); }
+.wl-add { flex: 0 0 auto; display: flex; flex-direction: column; gap: 6px;
+  padding: 10px 12px; border-bottom: 1px solid var(--line-2); background: var(--panel); }
+.wl-add #wlValue { width: 100%; background: var(--ink); color: var(--text);
   border: 1px solid var(--line-2); border-radius: var(--radius-sm); padding: 6px 9px; font: inherit; }
-.wl-add select { background: var(--ink); color: var(--text); border: 1px solid var(--line-2);
-  border-radius: var(--radius-sm); padding: 6px 7px; font: inherit; }
-.wl-add #wlValue:focus, .wl-add select:focus { outline: none; border-color: var(--accent); }
-/* Secondary actions grouped to the right, apart from the primary Add. */
-.wl-tools { margin-left: auto; display: flex; gap: 6px; align-items: center; }
-.wl-body { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: 360px 1fr; }
-.wl-list { border-right: 1px solid var(--line-2); overflow: auto; }
-.wl-listhead { color: var(--dim); text-transform: uppercase; letter-spacing: .07em;
-  font-size: 10px; padding: 8px 12px 6px; }
-.wl-row { display: flex; align-items: center; gap: 10px; padding: 7px 12px;
+.wl-add-row2 { display: flex; gap: 6px; }
+.wl-add-row2 select { flex: 1 1 auto; min-width: 0; }
+.wl-add #wlValue:focus { outline: none; border-color: var(--accent); }
+.wl-list { flex: 1 1 auto; min-height: 0; overflow: auto; }
+.wl-row { display: flex; align-items: center; gap: 10px; padding: 6px 12px;
   border-bottom: 1px solid var(--line); cursor: pointer; }
 .wl-row:hover { background: var(--panel-2); }
 .wl-row.active { background: var(--panel-3); box-shadow: inset 2px 0 0 var(--accent); }
-/* Kind badge — a short uppercase label tinted by KIND_COLOR, clearer than
-   the bare colour swatch it replaced. */
-.wl-kind { flex: 0 0 auto; width: 46px; font-family: var(--mono); font-size: 9px;
-  font-weight: 700; letter-spacing: .06em; text-align: center;
-  border: 1px solid currentColor; border-radius: 8px; padding: 1px 0; opacity: .85; }
-.wl-val { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Kind pill: hue-coded, tinted background so the type reads at a glance
+   without depending on text alone. Fixed hues (not theme tokens) on
+   purpose — an IOC's type shouldn't change colour per theme. */
+.wl-kind { flex: 0 0 auto; width: 52px; font-family: var(--mono); font-size: 9px;
+  letter-spacing: .06em; text-align: center; padding: 2px 0; border-radius: 3px;
+  border: 1px solid currentColor; }
+.wl-kind-hash { color: #7c6cf6; background: rgba(124, 108, 246, .12); }
+.wl-kind-ip { color: #39a8e8; background: rgba(57, 168, 232, .12); }
+.wl-kind-domain { color: #39e881; background: rgba(57, 232, 129, .12); }
+.wl-kind-filename { color: #d9a441; background: rgba(217, 164, 65, .12); }
+.wl-kind-other { color: #8a8a90; background: rgba(138, 138, 144, .12); }
+.wl-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.wl-val { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--mono); font-size: 12px; }
+.wl-note { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--dim); font-size: 11px; }
 .wl-count { flex: 0 0 auto; min-width: 2.2em; text-align: center; color: var(--dim);
-  font-family: var(--mono); font-size: 11px; }
-.wl-count.hot { color: var(--bg); background: var(--accent); font-weight: 600;
-  border-radius: 9px; padding: 1px 7px; }
+  font-family: var(--mono); font-size: 11px; padding: 1px 5px; border-radius: 8px; }
+.wl-count.hot { color: var(--bg); background: var(--accent); font-weight: 600; }
 .wl-del { flex: 0 0 auto; background: none; border: none; color: var(--line-2);
-  cursor: pointer; font: inherit; visibility: hidden; }
+  cursor: pointer; font-size: 12px; visibility: hidden; }
 .wl-row:hover .wl-del { visibility: visible; }
 .wl-del:hover { color: var(--danger); }
 .wl-hits { overflow: auto; }
 .wl-hits-head { color: var(--dim); text-transform: uppercase; letter-spacing: .07em;
-  font-size: 11px; padding: 10px 14px 4px; }
+  font-size: 10px; padding: 10px 14px 6px; }
 .wl-hit { display: flex; justify-content: space-between; padding: 5px 14px;
-  border-bottom: 1px solid var(--line); cursor: pointer; }
+  cursor: pointer; border-bottom: 1px solid var(--line); }
 .wl-hit:hover { background: var(--panel-2); }
 .wl-hit-src { color: var(--text); }
 .wl-hit-rid { color: var(--dim); }
-
+/* New hits since the analyst last looked — same dot idiom as the Case
+   button's error indicator. */
+#tabWatchlist.has-new-hits { position: relative; }
+#tabWatchlist.has-new-hits::after {
+  content: ''; position: absolute; top: 4px; right: 4px;
+  width: 6px; height: 6px; border-radius: 50%; background: var(--accent);
+}
 
 /* Case dashboard tab */
 .dashboardview { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; overflow: auto; }
