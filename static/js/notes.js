@@ -6,10 +6,12 @@
    See docs/design/analysis-suite.md. */
 
 import { $, api, debounce, el, post, toast } from './core.js';
+import { showDashboard } from './dashboard.js';
 import { recordTabVisit } from './tabhistory.js';
-import { showMainView, syncTabChrome } from './sql.js';
-import { syncTabSelection } from './sources.js';
+import { loadSqlTabs, showMainView, showSqlTab, syncTabChrome } from './sql.js';
+import { openSource, sourceLabel, syncTabSelection } from './sources.js';
 import { S } from './state.js';
+import { dropdownMenu } from './ui.js';
 
 let loaded = false;   // whether this case's notes have been fetched into the editor
 
@@ -23,6 +25,12 @@ export function renderMarkdown(src) {
     .replace(/`([^`]+)`/g, '<code>$1</code>')
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>')
+    // In-app links: [label](winnow:table/12), winnow:sql/3, winnow:dashboard/2.
+    // Rendered with a data attribute (no href navigation) — the preview's
+    // click handler resolves them; the target set stays a validated
+    // kind/id pair, so nothing user-typed reaches an executable sink.
+    .replace(/\[([^\]]+)\]\(winnow:(table|sql|dashboard)\/(\d+)\)/g,
+             '<a href="#" class="notes-link" data-winnow="$2/$3">$1</a>')
     .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g,
              '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
   const out = [];
@@ -67,11 +75,69 @@ function setMode(editing) {
   if (!editing) $('notesPreview').innerHTML = renderMarkdown($('notesEditor').value);
 }
 
+/* Follow a winnow: link from the preview — a note that says "see the
+   4624 sweep" can now BE the navigation to it. */
+function followWinnowLink(spec) {
+  const [kind, idText] = spec.split('/');
+  const id = Number(idText);
+  if (kind === 'table') {
+    if (S.sources.some((s) => s.id === id)) openSource(id);
+    else toast('That table is no longer in this case');
+  } else if (kind === 'sql') {
+    S.sqlTabId = id;
+    showSqlTab();
+  } else if (kind === 'dashboard') {
+    showDashboard(id);
+  }
+}
+
+/* Insert [name](winnow:…) at the editor's cursor — links are meant to be
+   picked from what exists, not hand-authored ids. */
+async function insertNotesLink(anchor) {
+  // The SQL tabs load lazily with their pane — fetch them here so a query
+  // can be linked without having visited SQL first this session.
+  if (!(S.sqlTabs || []).length) { try { await loadSqlTabs(); } catch { /* menu just omits queries */ } }
+  const items = [];
+  for (const s of S.sources.filter((x) => !x.error)) {
+    items.push({ label: `Table: ${sourceLabel(s)}`,
+                 onclick: () => insertAtCursor(`[${sourceLabel(s)}](winnow:table/${s.id})`) });
+  }
+  if ((S.sqlTabs || []).length) items.push('-');
+  for (const t of S.sqlTabs || []) {
+    items.push({ label: `Query: ${t.name}`,
+                 onclick: () => insertAtCursor(`[${t.name}](winnow:sql/${t.id})`) });
+  }
+  if ((S.dashboards || []).length) items.push('-');
+  for (const d of S.dashboards || []) {
+    items.push({ label: `Dashboard: ${d.name}`,
+                 onclick: () => insertAtCursor(`[${d.name}](winnow:dashboard/${d.id})`) });
+  }
+  if (!items.length) { toast('Nothing to link to yet'); return; }
+  dropdownMenu(anchor, items);
+}
+
+function insertAtCursor(text) {
+  const ed = $('notesEditor');
+  const at = ed.selectionStart ?? ed.value.length;
+  ed.value = ed.value.slice(0, at) + text + ed.value.slice(ed.selectionEnd ?? at);
+  ed.selectionStart = ed.selectionEnd = at + text.length;
+  ed.focus();
+  ed.dispatchEvent(new Event('input'));   // autosave sees it like typing
+}
+
 export function wireNotes() {
   $('tabNotes').onclick = showNotesTab;
   $('notesEditor').oninput = () => { $('notesSaved').textContent = 'Saving…'; save(); };
   $('btnNotesEdit').onclick = () => setMode(true);
   $('btnNotesPreview').onclick = () => setMode(false);
+  $('btnNotesLink').onclick = () => insertNotesLink($('btnNotesLink'));
+  // Delegated — the preview re-renders wholesale on every mode switch.
+  $('notesPreview').addEventListener('click', (e) => {
+    const a = e.target.closest('a.notes-link');
+    if (!a) return;
+    e.preventDefault();
+    followWinnowLink(a.dataset.winnow);
+  });
 }
 
 // A case switch invalidates the loaded body; refetch on next open.
