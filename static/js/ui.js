@@ -37,42 +37,122 @@ export function modal(title, build, opts = {}) {
 
 /* ------------------------------------------------------- date picker */
 
-/* A 📅 button that opens the browser's NATIVE date-time picker and writes
-   the choice back into `input` in the app's own shape (YYYY-MM-DD
-   HH:MM:SS — see openTimeRangeModal's comment on why the text input
-   itself must stay free-typed ISO, not a datetime-local control). The
-   native control lives hidden behind the button purely as the picker's
-   anchor; nothing is ever submitted from it. Dependency-free, per the
-   airgap rule. */
+/* A 📅 button that opens a calendar for the timestamp input beside it and
+   writes the pick back in the app's own shape (YYYY-MM-DD HH:MM:SS — see
+   openTimeRangeModal's comment on why the text input itself must stay
+   free-typed ISO). The calendar is OURS, not the browser's: Chromium's
+   native popup only knows light/dark, never the app's five styles or the
+   accent, so it read as a foreign object on every theme. This one is an
+   anchoredPanel — the same machinery every menu uses — so it inherits the
+   tokens, the z-order above modals, and the Escape/outside-click dismissal
+   for free. Dependency-free, per the airgap rule. */
+
+const DP_MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July',
+                   'August', 'September', 'October', 'November', 'December'];
+
 export function datePickerButton(input, { time = true } = {}) {
-  const wrap = el('span', 'date-pick-wrap');
-  const native = el('input', 'date-pick-native');
-  native.type = time ? 'datetime-local' : 'date';
-  if (time) native.step = '1';               // include seconds in the control
-  native.tabIndex = -1;
-  native.setAttribute('aria-hidden', 'true');
   const btn = el('button', 'btn ghost date-pick-btn', '📅');
   btn.type = 'button';
   btn.title = 'Pick from a calendar';
-  btn.onclick = () => {
-    // Seed the picker from what's typed, when it's already the ISO shape.
-    const m = /^(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2})(?::(\d{2}))?)?/.exec(input.value.trim());
-    native.value = m ? (time ? `${m[1]}T${m[2] || '00:00'}:${m[3] || '00'}` : m[1]) : '';
-    try { native.showPicker(); }
-    catch { native.focus(); }               // engines without showPicker: focus opens it
-  };
-  native.onchange = () => {
-    if (!native.value) return;
-    // datetime-local omits :00 seconds — the app's shape always shows them.
-    input.value = time
-      ? native.value.replace('T', ' ') + (native.value.length === 16 ? ':00' : '')
-      : native.value;
-    // Fire the text input's own handlers (live previews, validation).
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-    input.focus();
-  };
-  wrap.append(btn, native);
-  return wrap;
+  btn.onclick = () => openDatePickerPanel(btn, input, time);
+  return btn;
+}
+
+function openDatePickerPanel(anchor, input, withTime) {
+  const pad = (n) => String(n).padStart(2, '0');
+  // Seed from what's typed, when it's already the ISO shape — the month
+  // shown and the highlighted day should be the value being edited.
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?/.exec(input.value.trim());
+  const today = new Date();
+  const todayKey = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`;
+  const selectedKey = m ? `${m[1]}-${m[2]}-${m[3]}` : null;
+  let viewYear = m ? +m[1] : today.getFullYear();
+  let viewMonth = m ? +m[2] - 1 : today.getMonth();
+
+  anchoredPanel(anchor, 'date-pick-panel', (panel, close) => {
+    let timeInput = null;
+    const commit = (dateKey) => {
+      const t = withTime && timeInput
+        ? /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(timeInput.value.trim()) : null;
+      const hms = withTime
+        ? ' ' + (t ? `${pad(t[1])}:${t[2]}:${t[3] || '00'}` : '00:00:00') : '';
+      input.value = dateKey + hms;
+      // Fire the text input's own handlers (live previews, validation) —
+      // a pick must be indistinguishable from typing.
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      close();
+      input.focus();
+    };
+
+    const head = el('div', 'dp-head');
+    const title = el('span', 'dp-title');
+    const nav = (label, tip, dY, dM) => {
+      const b = el('button', 'dp-nav', label);
+      b.type = 'button';
+      b.title = tip;
+      b.onclick = (e) => {
+        e.stopPropagation();       // a nav click must not read as outside-the-menu
+        viewMonth += dM;
+        viewYear += dY + Math.floor(viewMonth / 12);
+        viewMonth = ((viewMonth % 12) + 12) % 12;
+        paint();
+      };
+      return b;
+    };
+    head.append(nav('«', 'Previous year', -1, 0), nav('‹', 'Previous month', 0, -1),
+                title, nav('›', 'Next month', 0, 1), nav('»', 'Next year', 1, 0));
+    panel.append(head);
+
+    const dow = el('div', 'dp-dow');
+    for (const d of ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa']) dow.append(el('span', null, d));
+    panel.append(dow);
+    const grid = el('div', 'dp-grid');
+    panel.append(grid);
+
+    function paint() {
+      title.textContent = `${DP_MONTHS[viewMonth]} ${viewYear}`;
+      grid.replaceChildren();
+      const first = new Date(viewYear, viewMonth, 1);
+      const start = new Date(viewYear, viewMonth, 1 - first.getDay());   // back to Sunday
+      for (let i = 0; i < 42; i++) {
+        const d = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i);
+        const key = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+        const cell = el('button', 'dp-day', String(d.getDate()));
+        cell.type = 'button';
+        cell.dataset.date = key;
+        if (d.getMonth() !== viewMonth) cell.classList.add('other');
+        if (key === todayKey) cell.classList.add('today');
+        if (key === selectedKey) cell.classList.add('selected');
+        cell.onclick = () => commit(key);
+        grid.append(cell);
+      }
+    }
+    paint();
+
+    const foot = el('div', 'dp-foot');
+    if (withTime) {
+      timeInput = el('input', 'dp-time');
+      timeInput.value = m && m[4] ? `${m[4]}:${m[5]}:${m[6] || '00'}` : '00:00:00';
+      timeInput.title = 'The time of day a picked date is written with';
+      timeInput.spellcheck = false;
+      foot.append(timeInput);
+    }
+    const todayBtn = el('button', 'btn ghost dp-act', 'Today');
+    todayBtn.type = 'button';
+    todayBtn.onclick = () => commit(todayKey);
+    foot.append(todayBtn);
+    const clear = el('button', 'btn ghost dp-act', 'Clear');
+    clear.type = 'button';
+    clear.title = 'Empty the field';
+    clear.onclick = () => {
+      input.value = '';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      close();
+      input.focus();
+    };
+    foot.append(clear);
+    panel.append(foot);
+  });
 }
 
 /* --------------------------------------------------------- confirm/prompt */

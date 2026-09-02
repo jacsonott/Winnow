@@ -1192,13 +1192,35 @@ textarea:focus { border-color: var(--accent); outline: none; }
 
 /* ---------------------------------------------------------------- modal */
 
-/* The calendar button beside free-typed timestamp inputs. The native
-   control is the picker's anchor only: rendered (showPicker refuses a
-   display:none element) but invisible and unclickable behind the button. */
-.date-pick-wrap { position: relative; display: inline-flex; flex: 0 0 auto; }
-.date-pick-btn { padding: 3px 8px; }
-.date-pick-native { position: absolute; inset: 0; width: 100%; height: 100%;
-  opacity: 0; pointer-events: none; border: 0; padding: 0; }
+/* The calendar beside free-typed timestamp inputs — our own panel (an
+   anchoredPanel, so it rides .menu's tokens/z-order/dismissal), because
+   the browser's native popup only knows light/dark and never matches the
+   app's styles or accent. */
+.date-pick-btn { padding: 3px 8px; flex: 0 0 auto; }
+.date-pick-panel { padding: 8px; min-width: 236px; }
+.dp-head { display: flex; align-items: center; gap: 2px; margin-bottom: 6px; }
+.dp-title { flex: 1; text-align: center; font-size: 12px; color: var(--text); }
+.dp-nav { background: none; border: 0; color: var(--dim); cursor: pointer;
+  padding: 2px 7px; font: inherit; border-radius: var(--radius-sm); }
+.dp-nav:hover { color: var(--accent); background: var(--panel-2); }
+.dp-dow { display: grid; grid-template-columns: repeat(7, 1fr); text-align: center;
+  color: var(--dim); font-size: 9px; letter-spacing: .06em; text-transform: uppercase;
+  margin-bottom: 2px; }
+.dp-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
+.dp-day { border: 0; background: none; color: var(--text); font: 11px var(--mono);
+  padding: 4px 0; text-align: center; cursor: pointer; border-radius: var(--radius-sm); }
+.dp-day:hover { background: var(--panel-2); }
+.dp-day.other { color: var(--dim); opacity: .45; }
+.dp-day.today { box-shadow: inset 0 0 0 1px var(--accent-dim); }
+.dp-day.selected { background: var(--accent); color: var(--accent-fg); font-weight: 600; }
+.dp-day.selected:hover { background: var(--accent); }
+.dp-foot { display: flex; gap: 6px; margin-top: 8px; align-items: center; }
+.dp-time { flex: 0 0 auto; width: 74px; background: var(--ink); color: var(--text);
+  border: 1px solid var(--line-2); border-radius: var(--radius-sm);
+  padding: 3px 6px; font: 11px var(--mono); }
+.dp-time:focus { outline: none; border-color: var(--accent); }
+.dp-act { padding: 2px 8px; font-size: 11px; margin-left: auto; }
+.dp-act + .dp-act { margin-left: 0; }
 
 .modal { position: fixed; inset: 0; background: rgba(8,10,12,.7); display: grid; place-items: center; z-index: 50; }
 .modal-card {
