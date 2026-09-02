@@ -7044,6 +7044,25 @@ class Store:
         "prefetch": "Prefetch (PECmd)",
     }
 
+    def _sources_for_header_set(self, hs_name: str) -> list:
+        """Every non-merge source whose columns carry the named header set —
+        the list form of _source_for_header_set, for the {{all:...}} union
+        placeholder. A support bundle's logs arrive as many files (plus
+        rotated copies) sharing one schema, so an overview query has to
+        span them, not bind to whichever imported first."""
+        from . import defaults
+        want = dict(defaults.headers()["nicknames"]).get(hs_name)
+        if not want:
+            return []
+        out = []
+        for meta in self.list_sources():
+            if meta.get("is_merge") or meta.get("error"):
+                continue
+            cols = {c["name"] for c in self._base_cols(self.get_source(meta["id"]))}
+            if all(c in cols for c in want):
+                out.append(meta)
+        return out
+
     def _source_for_header_set(self, hs_name: str):
         """The first non-merge source whose columns carry every column the
         named header set defines — the same content binding lateral
@@ -7068,12 +7087,25 @@ class Store:
         renders as an empty state — better than a SQL error."""
         import re
 
+        def _hs_of(key: str) -> str:
+            if key.lower().startswith("header_set:"):
+                return key[len("header_set:"):].strip()
+            return self._TABLE_SHORTHANDS.get(key.lower(), key)
+
         def repl(m):
             key = m.group(1).strip()
-            if key.lower().startswith("header_set:"):
-                hs = key[len("header_set:"):].strip()
-            else:
-                hs = self._TABLE_SHORTHANDS.get(key.lower(), key)
+            # {{all:...}} -> a UNION ALL over every source matching the set,
+            # parenthesised so `FROM {{all:...}} x` and bare-column refs
+            # work. The schemas are identical by construction (same header
+            # set), so SELECT * unions line up by position.
+            if key.lower().startswith("all:"):
+                hs = _hs_of(key[len("all:"):].strip())
+                srcs = self._sources_for_header_set(hs)
+                if not srcs:
+                    raise ValueError(f"No \u201c{hs}\u201d table in this case yet")
+                union = " UNION ALL ".join(f"SELECT * FROM {q(s['table_name'])}" for s in srcs)
+                return f"({union})"
+            hs = _hs_of(key)
             src = self._source_for_header_set(hs)
             if not src:
                 raise ValueError(f"No \u201c{hs}\u201d table in this case yet")
