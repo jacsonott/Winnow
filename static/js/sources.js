@@ -285,6 +285,7 @@ export function loadPageTabPrefs() {
   // older/hand-edited profile should read as "no preference", not throw.
   return {
     order: Array.isArray(p.order) ? p.order.filter((k) => typeof k === 'string') : [],
+    closed: Array.isArray(p.closed) ? p.closed.filter((k) => typeof k === 'string') : [],
     width: typeof p.width === 'number' && p.width > 0 ? p.width : null,
   };
 }
@@ -341,6 +342,32 @@ export function movePageTab(key, dir) {
   setPageTabOrder(keys);
 }
 
+/* Page tabs close like table tabs do — the page keeps existing (its key
+   stays in pageTabs(), its row stays in the sidebar's Pages section, which
+   is the reopen path), it just leaves the strip. Persisted alongside the
+   order because it's the same kind of preference: "SQL means the same
+   thing in every case" applies to not-wanting-it too. */
+export function pageTabClosed(key) { return S.pageTabPrefs.closed.includes(key); }
+
+export function closePageTab(key) {
+  if (!pageTabClosed(key)) {
+    S.pageTabPrefs.closed.push(key);
+    savePageTabPrefs();
+  }
+  // Closing the page you're on lands you back on the grid (its empty state
+  // if no table is open) — same place closing the last table tab leaves you.
+  if (S.activeTab === key) showGridTab();
+  renderPageTabs();
+}
+
+export function reopenPageTab(key) {
+  const i = S.pageTabPrefs.closed.indexOf(key);
+  if (i === -1) return;
+  S.pageTabPrefs.closed.splice(i, 1);
+  savePageTabPrefs();
+  renderPageTabs();
+}
+
 /* Alt + 1…0 addresses both strips as one row of keys: 1 is the table tab
    you were last in, and 2…0 are the page tabs in strip order — so the
    digits follow a drag-reorder instead of being nailed to SQL/Timeline.
@@ -366,7 +393,7 @@ export function activateTabSlot(digit) {
     $('body').focus();
     return;
   }
-  const t = pageTabsSorted()[(digit === '0' ? 10 : Number(digit)) - 2]; // 2→first page tab … 0→ninth
+  const t = pageTabsSorted().filter((x) => !pageTabClosed(x.key))[(digit === '0' ? 10 : Number(digit)) - 2]; // 2→first VISIBLE page tab … 0→ninth
   if (t) t.show();
 }
 
@@ -386,6 +413,17 @@ export function renderPageTabs() {
       btn.onclick = t.show;
     }
     btn.dataset.pageKey = t.key;
+    // Closed tabs stay IN the strip's DOM, hidden — the four static nodes
+    // (#tabSql & co.) are found by id on every render, and a skipped node
+    // would leave the document with replaceChildren and never come back.
+    btn.hidden = pageTabClosed(t.key);
+    if (!btn.dataset.closeWired) {
+      const x = el('span', 'x', '✕');
+      x.title = 'Close this page tab — reopen it from the sidebar\'s Pages section';
+      x.onclick = (e) => { e.stopPropagation(); closePageTab(t.key); };
+      btn.append(x);
+      btn.dataset.closeWired = '1';
+    }
     if (!btn.dataset.dragWired) {
       wireDragReorder(btn, t.key, {
         containerSelector: '#pageTabs',
@@ -1016,12 +1054,21 @@ export function openSidebarRow(s, index, total) {
    (SQL and Timeline are always there; a plugin tab comes and goes with its
    plugin's checkbox in Settings), so there's nothing for one to do. */
 export function pageSidebarRow(t, index, total) {
-  const row = el('div', 'sidebar-row' + (S.activeTab === t.key ? ' active' : ''));
+  const closed = pageTabClosed(t.key);
+  const row = el('div', 'sidebar-row' + (S.activeTab === t.key ? ' active' : '') + (closed ? ' sidebar-page-closed' : ''));
   const label = el('button', 'menu-item', t.label);
-  label.title = t.title || t.label;
-  label.onclick = t.show;
+  label.title = closed ? `${t.label} — closed; click to reopen` : (t.title || t.label);
+  // Showing a closed page reopens it — the sidebar is the reopen path,
+  // same as a closed table's row under All tables.
+  label.onclick = () => { reopenPageTab(t.key); t.show(); };
   row.append(label);
   const acts = el('div', 'sidebar-row-actions');
+  if (!closed) {
+    const x = el('button', 'menu-item-action', '✕');
+    x.title = 'Close this page tab';
+    x.onclick = (e) => { e.stopPropagation(); closePageTab(t.key); };
+    acts.append(x);
+  }
   const up = el('button', 'menu-item-action', '▲');
   up.title = 'Move earlier';
   up.disabled = index === 0;
