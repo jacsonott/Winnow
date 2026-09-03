@@ -68,6 +68,7 @@ export function openPluginBundlesModal() {
         if (bd.shipped) name.append(el('span', 'bundle-shipped', 'shipped'));
         const bits = [bd.plugins.join(', ') || (bd.shipped ? '' : '(empty)')];
         if (bd.dashboard && bd.dashboard.length) bits.push(`dashboard · ${bd.dashboard.length} widgets`);
+        if (bd.dashboards && bd.dashboards.length) bits.push(`+ ${bd.dashboards.map((b) => b.name).join(', ')}`);
         if (bd.watchlist && bd.watchlist.length) bits.push(`${bd.watchlist.length} IOCs`);
         const plugins = el('span', 'count', bd.shipped ? (bd.description || bits.filter(Boolean).join(' · ')) : bits.filter(Boolean).join(' · '));
         plugins.title = bits.filter(Boolean).join(' · ');

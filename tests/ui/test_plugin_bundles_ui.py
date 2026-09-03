@@ -57,6 +57,8 @@ def test_shipped_kape_profile_is_readonly_and_applies(page):
 
     # applying creates a NAMED "KAPE triage" dashboard in the sidebar; open it
     page.evaluate("() => __winnow.renderSidebar()")
+    # …and the profile's second board, the host overview, alongside it
+    page.wait_for_selector("#sidebarList .sidebar-row:has-text('KAPE host overview')")
     page.wait_for_selector("#sidebarList .sidebar-row:has-text('KAPE triage')")
     page.locator("#sidebarList .sidebar-row", has_text="KAPE triage").locator(".menu-item").click()
     page.wait_for_selector("#dashboardview:not([hidden])")

@@ -1,6 +1,6 @@
 {
-  "version": 4,
-  "comment": "Shipped analysis profiles. A profile is 'how I analyze this kind of case' — the plugins to enable, an optional starter watchlist, and a dashboard of widgets. SQL widgets use {{evtx}} / {{header_set:Name}} placeholders that bind to whichever table matches that header set in the open case (and {{all:header_set:Name}} unions every matching table, for logs split across many files), so the dashboard is portable. Shipped profiles are read-only; Save-as-profile creates editable copies. A profile may also declare `variables`: [{name, label?, description?, required?, default?}] — case variables it seeds on apply (never overwriting a value the analyst set); required ones are asked for in the new-case dialog and after applying to an existing case. Definitions only, never values.",
+  "version": 5,
+  "comment": "Shipped analysis profiles. A profile is 'how I analyze this kind of case' — the plugins to enable, an optional starter watchlist, and a dashboard of widgets. SQL widgets use {{evtx}} / {{header_set:Name}} placeholders that bind to whichever table matches that header set in the open case (and {{all:header_set:Name}} unions every matching table, for logs split across many files), so the dashboard is portable. Shipped profiles are read-only; Save-as-profile creates editable copies. A profile may also declare `variables`: [{name, label?, description?, required?, default?}] — case variables it seeds on apply (never overwriting a value the analyst set); required ones are asked for in the new-case dialog and after applying to an existing case. Definitions only, never values. A profile may carry extra named boards under `dashboards`: [{name, widgets}] — applied alongside `dashboard` (which keeps the profile's own name), each upserted by its own name.",
   "profiles": [
     {
       "name": "KAPE triage",
@@ -241,6 +241,108 @@
           "label": "Engagement name",
           "required": false,
           "description": "Shown by plugins and dashboards that label their output with the case — optional."
+        }
+      ],
+      "dashboards": [
+        {
+          "name": "KAPE host overview",
+          "description": "Who this machine is: hostname, addresses, domain, OS, role, logging posture, Security-log coverage and Defender alerts.",
+          "widgets": [
+            {
+              "title": "Hostname",
+              "source": "sql",
+              "render": "kv",
+              "span": 1,
+              "query": {
+                "sql": "SELECT 'Computer name' AS k, ValueData AS v FROM {{registry}} WHERE KeyPath LIKE '%Control\\ComputerName\\ComputerName' AND ValueName = 'ComputerName' AND ValueData <> '' UNION ALL SELECT 'Hostname (TCP/IP)', ValueData FROM {{registry}} WHERE KeyPath LIKE '%Services\\Tcpip\\Parameters' AND ValueName = 'Hostname' AND ValueData <> '' UNION ALL SELECT 'Hostname', '(not in this RECmd output)' WHERE NOT EXISTS (SELECT 1 FROM {{registry}} WHERE (KeyPath LIKE '%Control\\ComputerName\\ComputerName' AND ValueName = 'ComputerName' OR KeyPath LIKE '%Services\\Tcpip\\Parameters' AND ValueName = 'Hostname') AND ValueData <> '')"
+              }
+            },
+            {
+              "title": "IP addresses",
+              "source": "sql",
+              "render": "kv",
+              "span": 1,
+              "query": {
+                "sql": "SELECT CASE ValueName WHEN 'DhcpIPAddress' THEN 'IP (DHCP)' WHEN 'IPAddress' THEN 'IP (static)' ELSE 'Gateway' END AS k, ValueData AS v FROM {{registry}} WHERE KeyPath LIKE '%Tcpip\\Parameters\\Interfaces\\%' AND ValueName IN ('DhcpIPAddress','IPAddress','DhcpDefaultGateway') AND ValueData NOT IN ('','0.0.0.0') UNION ALL SELECT 'IP', '(no interface addresses in this RECmd output)' WHERE NOT EXISTS (SELECT 1 FROM {{registry}} WHERE KeyPath LIKE '%Tcpip\\Parameters\\Interfaces\\%' AND ValueName IN ('DhcpIPAddress','IPAddress') AND ValueData NOT IN ('','0.0.0.0')) ORDER BY k"
+              }
+            },
+            {
+              "title": "Domain",
+              "source": "sql",
+              "render": "kv",
+              "span": 1,
+              "query": {
+                "sql": "SELECT ValueName AS k, CASE WHEN ValueData = '' THEN '(none — workgroup)' ELSE ValueData END AS v FROM {{registry}} WHERE KeyPath LIKE '%Services\\Tcpip\\Parameters' AND ValueName IN ('Domain','NV Domain') UNION ALL SELECT 'Domain', '(not in this RECmd output)' WHERE NOT EXISTS (SELECT 1 FROM {{registry}} WHERE KeyPath LIKE '%Services\\Tcpip\\Parameters' AND ValueName IN ('Domain','NV Domain')) ORDER BY k"
+              }
+            },
+            {
+              "title": "OS version",
+              "source": "sql",
+              "render": "kv",
+              "span": 1,
+              "query": {
+                "sql": "SELECT ValueName AS k, ValueData AS v FROM {{registry}} WHERE KeyPath LIKE '%Microsoft\\Windows NT\\CurrentVersion' AND ValueName IN ('ProductName','DisplayVersion','ReleaseId','CurrentBuild','UBR') AND ValueData <> '' ORDER BY CASE ValueName WHEN 'ProductName' THEN 0 WHEN 'DisplayVersion' THEN 1 WHEN 'ReleaseId' THEN 2 WHEN 'CurrentBuild' THEN 3 ELSE 4 END"
+              }
+            },
+            {
+              "title": "System function",
+              "source": "sql",
+              "render": "kv",
+              "span": 1,
+              "query": {
+                "sql": "SELECT 'Function' AS k, CASE ValueData WHEN 'WinNT' THEN 'Workstation' WHEN 'ServerNT' THEN 'Member / standalone server' WHEN 'LanmanNT' THEN 'Domain controller' ELSE ValueData END AS v FROM {{registry}} WHERE KeyPath LIKE '%Control\\ProductOptions' AND ValueName = 'ProductType' UNION ALL SELECT 'Function', '(ProductType not in this RECmd output)' WHERE NOT EXISTS (SELECT 1 FROM {{registry}} WHERE KeyPath LIKE '%Control\\ProductOptions' AND ValueName = 'ProductType')"
+              }
+            },
+            {
+              "title": "Sysmon enabled",
+              "source": "sql",
+              "render": "chips",
+              "span": 1,
+              "sub": "from the SYSTEM hive's service keys",
+              "query": {
+                "sql": "SELECT 'Sysmon service' AS label, (SELECT COUNT(*) FROM {{registry}} WHERE KeyPath LIKE '%\\Services\\Sysmon%' AND ValueName = 'ImagePath') > 0 AS \"on\" UNION ALL SELECT 'Sysmon driver', (SELECT COUNT(*) FROM {{registry}} WHERE KeyPath LIKE '%\\Services\\SysmonDrv%') > 0"
+              }
+            },
+            {
+              "title": "PowerShell logging enabled",
+              "source": "sql",
+              "render": "chips",
+              "span": 1,
+              "sub": "policy keys; unset counts as off",
+              "query": {
+                "sql": "SELECT 'Script block' AS label, COALESCE((SELECT ValueData IN ('1','0x1') FROM {{registry}} WHERE KeyPath LIKE '%Policies\\Microsoft\\Windows\\PowerShell\\ScriptBlockLogging' AND ValueName = 'EnableScriptBlockLogging' LIMIT 1), 0) AS \"on\" UNION ALL SELECT 'Module', COALESCE((SELECT ValueData IN ('1','0x1') FROM {{registry}} WHERE KeyPath LIKE '%Policies\\Microsoft\\Windows\\PowerShell\\ModuleLogging' AND ValueName = 'EnableModuleLogging' LIMIT 1), 0) UNION ALL SELECT 'Transcription', COALESCE((SELECT ValueData IN ('1','0x1') FROM {{registry}} WHERE KeyPath LIKE '%Policies\\Microsoft\\Windows\\PowerShell\\Transcription' AND ValueName = 'EnableTranscripting' LIMIT 1), 0)"
+              }
+            },
+            {
+              "title": "Security log coverage",
+              "source": "sql",
+              "render": "kv",
+              "span": 1,
+              "query": {
+                "sql": "SELECT 'Oldest event' AS k, COALESCE(MIN(TS_NORMALIZE(TimeCreated)), '(no Security channel events)') AS v FROM {{evtx}} WHERE Channel = 'Security' AND TimeCreated <> '' UNION ALL SELECT 'Newest event', COALESCE(MAX(TS_NORMALIZE(TimeCreated)), '') FROM {{evtx}} WHERE Channel = 'Security' AND TimeCreated <> '' UNION ALL SELECT 'Span (days)', COALESCE(ROUND(julianday(MAX(TS_NORMALIZE(TimeCreated))) - julianday(MIN(TS_NORMALIZE(TimeCreated))), 1), '') FROM {{evtx}} WHERE Channel = 'Security' AND TimeCreated <> '' UNION ALL SELECT 'Events', COUNT(*) FROM {{evtx}} WHERE Channel = 'Security'"
+              }
+            },
+            {
+              "title": "Defender detections",
+              "source": "sql",
+              "render": "stat",
+              "span": 1,
+              "tone": "warn",
+              "sub": "1006 / 1015 / 1116 / 1117",
+              "query": {
+                "sql": "SELECT COUNT(*) FROM {{evtx}} WHERE Provider LIKE '%Windows Defender%' AND EventId IN ('1006','1015','1116','1117')"
+              }
+            },
+            {
+              "title": "Most recent Defender alerts",
+              "source": "sql",
+              "render": "kv",
+              "span": 2,
+              "query": {
+                "sql": "SELECT * FROM (SELECT TS_NORMALIZE(TimeCreated) AS k, EventId || ' · ' || CASE WHEN MapDescription <> '' THEN MapDescription ELSE PayloadData1 END AS v FROM {{evtx}} WHERE Provider LIKE '%Windows Defender%' AND EventId IN ('1006','1007','1008','1009','1010','1011','1012','1015','1116','1117','1118','1119','5001','5004','5007','5010','5012') ORDER BY TS_NORMALIZE(TimeCreated) DESC LIMIT 8) UNION ALL SELECT '—', '(no Defender alert events in the logs)' WHERE NOT EXISTS (SELECT 1 FROM {{evtx}} WHERE Provider LIKE '%Windows Defender%' AND EventId IN ('1006','1007','1008','1009','1010','1011','1012','1015','1116','1117','1118','1119','5001','5004','5007','5010','5012'))"
+              }
+            }
+          ]
         }
       ]
     },

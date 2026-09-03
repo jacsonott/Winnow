@@ -198,7 +198,9 @@ evidence folder tree there automatically.
   A board plus your enabled plugins saves as a **profile** you can apply
   to the next case of the same type — the shipped **KAPE triage** profile
   is exactly that: logon movement, RDP, tampering signals, registry
-  persistence, and a starter watchlist.
+  persistence, and a starter watchlist — plus a second **KAPE host
+  overview** board (hostname, IPs, domain, OS, role, Sysmon and
+  PowerShell logging posture, Security-log coverage, Defender alerts).
 
 ## Timestamps
 
