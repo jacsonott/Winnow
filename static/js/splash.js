@@ -22,7 +22,14 @@
 
    Deliberately standalone: it draws to its own canvas and imports nothing
    from the app, so it can run before the case list has loaded and can't
-   be what breaks startup. */
+   be what breaks startup.
+
+   And it has to be cheap on a VM with no GPU and a big high-DPI screen,
+   which is where analysts run this: the physics ticks on a clock (not per
+   painted frame, so the launch takes the same seconds everywhere), the
+   tokens are drawn from a pre-rendered atlas rather than ~1,900 fillText
+   calls a frame, the backing store is capped by a pixel budget, and if
+   frames are still slow it lowers the render scale and thins the chaff. */
 
 import { $ } from './core.js';
 
@@ -107,6 +114,7 @@ const lerp = (a, b, t) => a + (b - a) * t;
 
 let raf = null;
 let onDone = null;
+let degradeNote = '';   // set by start() when it had to trade detail for motion
 
 /* The settled wordmark, drawn once and static — the same dot field the
    animation ends on, so the home screen carries the mark the launch just
@@ -233,11 +241,12 @@ export function runSplash() {
     $('splashTagline').style.color = colors.ink;
 
     let finished = false;
+    degradeNote = '';
     const startedAt = performance.now();
     const finish = (reason) => {
       if (finished) return;
       finished = true;
-      recordSplash(reason ? 'skipped' : 'played', reason || '');
+      recordSplash(reason ? 'skipped' : 'played', reason || degradeNote);
       if (raf) { cancelAnimationFrame(raf); raf = null; }
       window.removeEventListener('keydown', skip, true);
       window.removeEventListener('mousedown', skip, true);
@@ -279,19 +288,58 @@ export function endSplash() { if (onDone) onDone(); }
 
 function start(canvas, colors, done) {
   const ctx = canvas.getContext('2d');
-  const DPR = Math.min(window.devicePixelRatio || 1, 2);
   let W = 0, H = 0;
+  // Backing pixels are what a machine without a GPU pays for — every frame
+  // clears and composites all of them on the CPU. A 2560×1440 display at
+  // 2× is 14.7M pixels; the reports of a "laggy" launch came from exactly
+  // that shape of VM. Budget the backing store, then lower it further if
+  // frames still run slow (see adapt()).
+  const PIXEL_BUDGET = 3.2e6;
+  let DPR = Math.min(window.devicePixelRatio || 1, 2,
+    Math.max(1, Math.sqrt(PIXEL_BUDGET / (window.innerWidth * window.innerHeight))));
 
   function resize() {
     W = window.innerWidth;
     H = window.innerHeight;
-    canvas.width = W * DPR;
-    canvas.height = H * DPR;
+    canvas.width = Math.round(W * DPR);
+    canvas.height = Math.round(H * DPR);
     canvas.style.width = W + 'px';
     canvas.style.height = H + 'px';
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
   }
   resize();
+
+  const CHAFF_RGB = `rgb(${colors.chaff.join(',')})`;
+
+  // Every token pre-rendered once, at the current scale. Drawing a small
+  // bitmap is a fraction of the cost of shaping and rasterising text, and
+  // ~1,900 fillText calls a frame was most of what a slow machine felt.
+  let atlas = null;
+  function buildAtlas() {
+    atlas = new Map();
+    const m = document.createElement('canvas').getContext('2d');
+    m.font = NOISE_FONT;
+    for (const t of TOKENS) {
+      const w = Math.ceil(m.measureText(t).width) + 2;
+      const h = 14, base = 10;     // 10px mono: ascent under the baseline at 10, descent below
+      const c = document.createElement('canvas');
+      c.width = Math.ceil(w * DPR);
+      c.height = Math.ceil(h * DPR);
+      const g = c.getContext('2d');
+      g.setTransform(DPR, 0, 0, DPR, 0, 0);
+      g.font = NOISE_FONT;
+      g.fillStyle = CHAFF_RGB;
+      g.textAlign = 'center';
+      g.textBaseline = 'alphabetic';
+      g.fillText(t, w / 2, base);
+      atlas.set(t, { c, w, h, base });
+    }
+  }
+  buildAtlas();
+  function drawToken(tok, x, y) {
+    const g = atlas.get(tok);
+    ctx.drawImage(g.c, x - g.w / 2, y - g.base, g.w, g.h);
+  }
 
   // Sample the mark + wordmark into a field of landing spots. The grain
   // settles into the same composite the case menu shows: the three-bar
@@ -378,17 +426,31 @@ function start(canvas, colors, done) {
     });
   }
 
-  const CHAFF_RGB = `rgb(${colors.chaff.join(',')})`;
+  // Grain colours quantised per mix step so the hot loop never builds a
+  // string; a target's rgb (bar points) or the accent (letters) keys it.
+  const colorCache = new Map();
+  function grainColor(to, mix) {
+    const step = Math.round(mix * 24);
+    const key = to[0] * 65536 + to[1] * 256 + to[2] + step * 16777216;
+    let c = colorCache.get(key);
+    if (!c) {
+      const t = step / 24;
+      c = `rgb(${Math.round(lerp(colors.chaff[0], to[0], t))},${Math.round(lerp(colors.chaff[1], to[1], t))},${Math.round(lerp(colors.chaff[2], to[2], t))})`;
+      colorCache.set(key, c);
+    }
+    return c;
+  }
+
   let frame = 0;
+  let settled = 0;
   let settledOnce = false;
 
-  function step() {
-    ctx.clearRect(0, 0, W, H);
+  /* One 60Hz tick of physics. Independent of drawing, so a slow display
+     runs several ticks per painted frame and the launch takes the same
+     ~5s of wall-clock it does on a fast one — instead of stretching to
+     whatever a 10fps canvas makes of 400 frames. */
+  function simulate() {
     frame++;
-    ctx.font = NOISE_FONT;
-    ctx.textAlign = 'center';
-    ctx.fillStyle = CHAFF_RGB;
-
     for (let i = chaff.length - 1; i >= 0; i--) {
       const c = chaff[i];
       if (!c.launched) {
@@ -402,13 +464,9 @@ function start(canvas, colors, done) {
       c.y += c.vy;
       if (c.age > c.fadeDelay) c.alpha -= 0.02;
       if (Math.random() < 0.02) c.token = pick(TOKENS);
-      if (c.alpha <= 0 || c.x > W + 140 || c.y < -80 || c.y > H + 60) { chaff.splice(i, 1); continue; }
-      ctx.globalAlpha = Math.max(c.alpha, 0);
-      ctx.fillText(c.token, c.x, c.y);
+      if (c.alpha <= 0 || c.x > W + 140 || c.y < -80 || c.y > H + 60) chaff.splice(i, 1);
     }
-    ctx.globalAlpha = 1;
-
-    let settled = 0;
+    settled = 0;
     for (const p of grains) {
       if (p.phase === 'wait') {
         if (frame >= p.launchFrame) p.phase = 'fly';
@@ -443,40 +501,76 @@ function start(canvas, colors, done) {
       } else {
         settled++;
       }
-
-      if (p.phase === 'fly') {
-        ctx.fillStyle = CHAFF_RGB;
-        ctx.fillText(p.token, p.x, p.y);
-      } else {
-        const mix = p.phase === 'locked' ? 1 : Math.min(1, p.homeAge / 45);
-        // The token dissolves as the grain condenses, rather than swapping
-        // in a single frame.
-        if (mix < 0.5) {
-          ctx.globalAlpha = 1 - mix * 2;
-          ctx.fillStyle = CHAFF_RGB;
-          ctx.fillText(p.token, p.x, p.y);
-        }
-        const to = p.target.rgb || colors.grain;   // bar points keep the icon's colors
-        const rr = Math.round(lerp(colors.chaff[0], to[0], mix));
-        const gg = Math.round(lerp(colors.chaff[1], to[1], mix));
-        const bb = Math.round(lerp(colors.chaff[2], to[2], mix));
-        ctx.globalAlpha = 0.3 + 0.7 * Math.min(1, mix * 1.6);
-        ctx.fillStyle = `rgb(${rr},${gg},${bb})`;
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, p.r * (0.55 + 0.45 * Math.min(1, mix * 1.4)), 0, Math.PI * 2);
-        ctx.fill();
-        ctx.globalAlpha = 1;
-      }
     }
+  }
 
+  function render() {
+    ctx.clearRect(0, 0, W, H);
+    for (const c of chaff) {
+      if (!c.launched) continue;
+      ctx.globalAlpha = Math.max(c.alpha, 0);
+      drawToken(c.token, c.x, c.y);
+    }
+    ctx.globalAlpha = 1;
+    for (const p of grains) {
+      if (p.phase === 'wait') continue;
+      if (p.phase === 'fly') {
+        drawToken(p.token, p.x, p.y);
+        continue;
+      }
+      const mix = p.phase === 'locked' ? 1 : Math.min(1, p.homeAge / 45);
+      // The token dissolves as the grain condenses, rather than swapping
+      // in a single frame.
+      if (mix < 0.5) {
+        ctx.globalAlpha = 1 - mix * 2;
+        drawToken(p.token, p.x, p.y);
+      }
+      ctx.globalAlpha = 0.3 + 0.7 * Math.min(1, mix * 1.6);
+      ctx.fillStyle = grainColor(p.target.rgb || colors.grain, mix);   // bar points keep the icon's colors
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.r * (0.55 + 0.45 * Math.min(1, mix * 1.4)), 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  /* If painted frames are still slow after the pixel budget, trade detail
+     for motion: a coarser backing store (the text is 10px; a little soft
+     beats a slideshow) and half the chaff, up to three times. Noted for
+     Settings → Launch animation's last-launch readout. */
+  let gapEma = 16.7, sinceAdapt = 0, level = 0;
+  function adapt(dt) {
+    gapEma = gapEma * 0.8 + dt * 0.2;
+    if (++sinceAdapt < 20 || level >= 3 || gapEma < 40) return;
+    sinceAdapt = 0;
+    level++;
+    DPR = Math.max(0.6, DPR * 0.75);
+    resize();
+    buildAtlas();
+    chaff = chaff.filter((_, i) => i % 2 === 0);
+    degradeNote = 'detail reduced for a slow display';
+  }
+
+  const TICK = 1000 / 60;
+  let last = null, acc = 0;
+  function loop(now) {
+    if (last == null) last = now;
+    const dt = Math.min(now - last, 250);
+    last = now;
+    acc += dt;
+    let ticks = 0;
+    while (acc >= TICK && ticks < 6) { simulate(); acc -= TICK; ticks++; }
+    if (acc > TICK) acc = TICK;
+    render();
+    adapt(dt);
     if (!settledOnce && grains.length && settled === grains.length) {
       settledOnce = true;
       $('splashTagline').classList.add('visible');
       done();
     }
-    if (chaff.length || settled < grains.length) raf = requestAnimationFrame(step);
+    if (chaff.length || settled < grains.length) raf = requestAnimationFrame(loop);
     else raf = null;
   }
 
-  raf = requestAnimationFrame(step);
+  raf = requestAnimationFrame(loop);
 }
