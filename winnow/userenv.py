@@ -3,12 +3,14 @@ for tokens and other secrets a plugin needs, kept OUT of the case file
 and out of Winnow's own settings.
 
 The rule is a prefix: only `WINNOW_*` names can be set, removed or read
-through this module, so the Settings panel can never become a general
-environment editor and a plugin can never fish `AWS_SECRET_ACCESS_KEY`
-out of the process through Winnow's API. Names Winnow itself reads for
-configuration (RESERVED) can be read but not changed here — they are
-command-line knobs, not secrets, and changing one from the UI would move
-the workspace out from under a running install.
+through this module, so the Settings panel and /api/env can never become
+a general environment editor. On the read side the prefix is a
+convention that keeps well-behaved plugins honest — a plugin is
+arbitrary Python and can always call os.environ itself (see the guide's
+security model); this module does not sandbox that. Names Winnow itself
+reads for configuration (RESERVED) are never loaded from the store or
+accepted for writes — they are command-line knobs, not secrets, and a
+stored one would move the workspace out from under a running install.
 
 Where a value is kept is the OS's own per-user environment, so it is
 exactly as private as the account:
@@ -18,8 +20,11 @@ exactly as private as the account:
   this one is updated in place.
 - Everywhere else: a `NAME=value` file, `~/.config/winnow/env` (or
   `$XDG_CONFIG_HOME/winnow/env`), created 0600 in a 0700 directory.
-  Loaded into the process at startup for any `WINNOW_*` name the shell
-  did not already export — a real environment variable always wins.
+
+Stored values are loaded into the process by main() for any `WINNOW_*`
+name the shell did not already export — a real environment variable
+always wins, and a name the shell exported cannot be changed from here
+(set_var refuses, so the panel can say so instead of pretending).
 
 Values are never returned by the API and never shown by the UI: the
 panel lists names and where each came from, nothing more. A plugin gets
@@ -31,25 +36,38 @@ here is ever sent to the browser.
 
 from __future__ import annotations
 
+import contextlib
+import ntpath
 import os
 import re
 import sys
 import tempfile
 from pathlib import Path
 
+from . import assoc
+
 PREFIX = "WINNOW_"
 NAME_RE = re.compile(r"^WINNOW_[A-Z0-9_]{1,56}$")
-# Winnow's own configuration knobs. Readable, never editable from here.
+# Winnow's own configuration knobs. Never loaded from the store, never
+# editable from here. tests/test_userenv.py checks this against every
+# WINNOW_* the code actually reads from os.environ.
 RESERVED = frozenset({
     "WINNOW_WORKSPACE_DIR", "WINNOW_PLUGINS_DIR", "WINNOW_CASES_DIR", "WINNOW_ENV_FILE",
     "WINNOW_IDLE_EXIT_S", "WINNOW_IDLE_TICK_S", "WINNOW_NEVER_CONNECTED_EXIT_S",
 })
 MAX_VALUE = 8192
 
+# Names THIS module put into os.environ (loaded at startup or saved this
+# run). Anything else that is live came from the shell, and the shell wins.
+_OWNED: set[str] = set()
+
 
 def check_name(name: str, *, for_write: bool = False) -> str:
-    """The name, or ValueError saying what is wrong with it."""
+    """The name, or ValueError saying what is wrong with it. Writes are
+    case-normalised (the UI and curl agree on `WINNOW_TOKEN`)."""
     name = (name or "").strip()
+    if for_write:
+        name = name.upper()
     if not name.startswith(PREFIX):
         raise ValueError(f"Only {PREFIX}* variables can be managed here")
     if not NAME_RE.match(name):
@@ -94,17 +112,16 @@ class FileEnvStore:
             if not line or line.startswith("#") or "=" not in line:
                 continue
             k, v = line.split("=", 1)
-            if k.startswith(PREFIX):
+            if NAME_RE.match(k):      # a hand-typed name the API could never remove is left alone
                 out[k] = v
         return out
 
     def _write(self, data: dict[str, str]) -> None:
         d = self.path.parent
-        d.mkdir(parents=True, exist_ok=True)
-        try:
-            os.chmod(d, 0o700)
-        except OSError:
-            pass
+        if not d.is_dir():
+            d.mkdir(parents=True, exist_ok=True)
+            with contextlib.suppress(OSError):
+                os.chmod(d, 0o700)
         body = "".join(f"{k}={v}\n" for k, v in sorted(data.items()))
         fd, tmp = tempfile.mkstemp(prefix=".env-", dir=str(d))
         try:
@@ -113,7 +130,7 @@ class FileEnvStore:
             os.chmod(tmp, 0o600)
             os.replace(tmp, self.path)
         except BaseException:
-            with _suppress():
+            with contextlib.suppress(OSError):
                 os.unlink(tmp)
             raise
 
@@ -152,40 +169,29 @@ class RegistryEnvStore:
             key = self.reg.OpenKey(self.reg.HKEY_CURRENT_USER, self.KEY, 0, self.reg.KEY_READ)
         except OSError:
             return out
+        expand_kind = getattr(self.reg, "REG_EXPAND_SZ", None)
         try:
             i = 0
             while True:
                 try:
-                    name, value, _kind = self.reg.EnumValue(key, i)
+                    name, value, kind = self.reg.EnumValue(key, i)
                 except OSError:
                     break
                 i += 1
-                if str(name).startswith(PREFIX):
-                    out[str(name)] = str(value)
+                if not isinstance(value, str) or not NAME_RE.match(str(name)):
+                    continue   # binary/DWORD values are not ours; malformed names can't be removed
+                out[str(name)] = ntpath.expandvars(value) if kind == expand_kind else value
         finally:
             self.reg.CloseKey(key)
         return out
 
     def set(self, name: str, value: str) -> None:
-        key = self.reg.CreateKeyEx(self.reg.HKEY_CURRENT_USER, self.KEY, 0, self.reg.KEY_SET_VALUE)
-        try:
-            self.reg.SetValueEx(key, name, 0, self.reg.REG_SZ, value)
-        finally:
-            self.reg.CloseKey(key)
+        assoc.hkcu_set(self.reg, self.KEY, name, value)
         self._notify()
 
     def delete(self, name: str) -> None:
-        try:
-            key = self.reg.OpenKey(self.reg.HKEY_CURRENT_USER, self.KEY, 0, self.reg.KEY_SET_VALUE)
-        except OSError:
-            return
-        try:
-            self.reg.DeleteValue(key, name)
-        except OSError:
-            pass
-        finally:
-            self.reg.CloseKey(key)
-        self._notify()
+        if assoc.hkcu_delete_value(self.reg, self.KEY, name):
+            self._notify()
 
 
 def _broadcast_env_change() -> None:  # pragma: no cover - windows only
@@ -198,11 +204,6 @@ def _broadcast_env_change() -> None:  # pragma: no cover - windows only
             HWND_BROADCAST, WM_SETTINGCHANGE, 0, "Environment", SMTO_ABORTIFHUNG, 2000, None)
     except Exception:  # noqa: BLE001 — cosmetic; the value is already saved
         pass
-
-
-class _suppress:
-    def __enter__(self): return self
-    def __exit__(self, *a): return True
 
 
 def env_file_path() -> Path:
@@ -224,50 +225,61 @@ def store():
 # ------------------------------------------------------------------- API
 
 def load_into_environ(st=None) -> list[str]:
-    """Startup: put every stored WINNOW_* value into this process's
-    environment unless the shell already exported that name — the real
-    environment wins, so a value pasted into the UI can never override
-    one set deliberately outside. Returns the names loaded."""
-    st = st or store()
+    """Startup (main()): put every stored WINNOW_* value into this
+    process's environment unless the shell already exported that name —
+    the real environment wins. RESERVED knobs are skipped: the store is
+    for secrets, not for relocating Winnow's directories. Returns the
+    names loaded."""
     loaded = []
     try:
+        st = st or store()
         data = st.load()
     except Exception as e:  # noqa: BLE001 — a bad file must never block startup
-        print(f"[winnow] could not read {st.location()}: {e}", file=sys.stderr)
+        where = st.location() if st is not None else "the WINNOW_* environment store"
+        print(f"[winnow] could not read {where}: {e}", file=sys.stderr)
         return loaded
     for name, value in data.items():
+        if name in RESERVED or not NAME_RE.match(name):
+            continue
         if name not in os.environ:
             os.environ[name] = value
+            _OWNED.add(name)
             loaded.append(name)
     return loaded
 
 
 def list_vars(st=None) -> list[dict]:
     """Names only — never values. `stored` is on disk / in the registry,
-    `live` is in this process (from the shell or set this run)."""
+    `live` is in this process, `shell` means the shell exported it (so
+    it wins over anything saved here)."""
     st = st or store()
     try:
         stored = set(st.load())
     except Exception:  # noqa: BLE001
         stored = set()
-    live = {k for k in os.environ if k.startswith(PREFIX)}
-    return [{"name": n, "stored": n in stored, "live": n in live, "reserved": n in RESERVED}
+    live = {k for k in os.environ if NAME_RE.match(k)}
+    return [{"name": n, "stored": n in stored, "live": n in live, "reserved": n in RESERVED,
+             "shell": n in live and n not in _OWNED}
             for n in sorted(stored | live)]
 
 
 def set_var(name: str, value: str, st=None) -> str:
     name = check_name(name, for_write=True)
     value = check_value(value)
+    if name in os.environ and name not in _OWNED:
+        raise ValueError(f"{name} is exported by the shell Winnow was started from — that wins; change it there")
     (st or store()).set(name, value)
     os.environ[name] = value      # this run too, not only the next launch
+    _OWNED.add(name)
     return name
 
 
-def delete_var(name: str, st=None) -> str:
+def delete_var(name: str, st=None) -> None:
     name = check_name(name, for_write=True)
     (st or store()).delete(name)
-    os.environ.pop(name, None)
-    return name
+    if name in _OWNED:            # a shell export is not ours to remove
+        os.environ.pop(name, None)
+        _OWNED.discard(name)
 
 
 def get(name: str, default: str | None = None) -> str | None:

@@ -912,7 +912,9 @@ python server.py --plugins-dir ~/src/my-winnow-plugins
 
 Installs from the UI always land in the first directory (`plugins/`).
 
-**Versioning:** the current plugin API version is **4** (toolbar panels
+**Versioning:** the current plugin API version is **5** (`req.env`,
+`req.variables` / `req.set_variable` and the tab context's
+`state.variables` / `setVariable` arrived in 5; toolbar panels
 and the view-change context arrived in 4; row actions in 3; `api.q`/
 `NUM_RE` in 2). Set `WINNOW_API_VERSION` to the
 API version you built against. If a future Winnow's API version is lower than yours, it
@@ -950,7 +952,7 @@ What that leaves to you, as an author:
 
 ### Secrets: the `WINNOW_*` environment
 
-A token has exactly one supported home: an environment variable with the
+A token's supported home is an environment variable with the
 `WINNOW_` prefix, which the analyst sets under **Settings → Environment**
 (or exports from the shell — the shell wins). Winnow keeps it in the
 user's own environment — `HKCU\Environment` on Windows, an owner-only
@@ -967,16 +969,19 @@ def lookup_handler(req):
 ```
 
 - `req.env(name, default=None)` reads one; only `WINNOW_*` names are
-  readable through it (`ValueError` otherwise), so a plugin can't lift
-  `AWS_SECRET_ACCESS_KEY` or anything else out of the process by way of
-  Winnow.
+  readable through it (`ValueError` otherwise). The prefix is a hard
+  limit on what Settings → Environment and `/api/env` can touch, and a
+  convention that keeps a well-behaved plugin on the names the analyst
+  manages — it is not a sandbox. A plugin is ordinary Python and can
+  read `os.environ` directly, which is why section 12 says what it says.
 - Read it server-side, in the handler that uses it. **Never send the
   value to the browser** — not in a response, not in a tab's HTML. A tab
   that needs a network call makes it through its own `register_api`
   route.
-- Tell the analyst the name in your README, the way `claude_assistant`
-  names `ANTHROPIC_API_KEY`: "set `WINNOW_VT_API_KEY` under Settings →
-  Environment".
+- Tell the analyst the name in your README: "set `WINNOW_VT_API_KEY`
+  under Settings → Environment". (The bundled `claude_assistant` predates
+  this and reads the Anthropic SDK's own `ANTHROPIC_API_KEY` from the
+  shell — the pattern to copy is the README sentence, not the name.)
 - For everything that is *not* secret — the engagement, a base URL, a
   document link — use a [case variable](#case-variables) instead, so it
   travels with the case.

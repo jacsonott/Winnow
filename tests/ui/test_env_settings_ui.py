@@ -7,15 +7,6 @@ import pytest
 
 pytestmark = pytest.mark.ui
 
-HDR = "{ 'X-Timeline-Lite-Client': '1', 'Content-Type': 'application/json' }"
-
-
-def _api(page, path, method="GET", body=None):
-    return page.evaluate(
-        """([path, method, body]) => fetch(path, { method, headers: %s,
-              body: body == null ? undefined : JSON.stringify(body) }).then((r) => r.json())""" % HDR,
-        [path, method, body])
-
 
 def _open_env_section(page):
     page.evaluate("() => __winnow.openSettings()")
@@ -23,10 +14,10 @@ def _open_env_section(page):
     head = page.locator(".settings-section-head", has_text="Environment")
     if head.get_attribute("aria-expanded") != "true":
         head.click()
-    page.wait_for_selector("#modalBody .env-list .env-add")
+    page.wait_for_selector("#modalBody .env-add")
 
 
-def test_environment_panel_adds_lists_and_removes_without_showing_values(page):
+def test_environment_panel_adds_lists_and_removes_without_showing_values(page, api):
     try:
         _open_env_section(page)
         body = page.locator("#modalBody .settings-section", has_text="Environment")
@@ -49,13 +40,13 @@ def test_environment_panel_adds_lists_and_removes_without_showing_values(page):
         page.wait_for_function(
             "() => !document.querySelector(\"#modalBody .env-row .env-name\")"
             " || ![...document.querySelectorAll('#modalBody .env-row .env-name')].some((n) => n.textContent === 'WINNOW_UI_TEST_KEY')")
-        assert all(v["name"] != "WINNOW_UI_TEST_KEY" for v in _api(page, "/api/env")["vars"])
+        assert all(v["name"] != "WINNOW_UI_TEST_KEY" for v in api("/api/env")["vars"])
     finally:
         page.keyboard.press("Escape")
-        _api(page, "/api/env/WINNOW_UI_TEST_KEY", "DELETE")
+        api("/api/env/WINNOW_UI_TEST_KEY", "DELETE")
 
 
-def test_a_reserved_name_is_refused_with_a_toast(page):
+def test_a_reserved_name_is_refused_with_a_toast(page, api):
     try:
         _open_env_section(page)
         body = page.locator("#modalBody .settings-section", has_text="Environment")

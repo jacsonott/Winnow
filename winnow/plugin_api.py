@@ -161,6 +161,7 @@ from typing import Any, Callable, Iterable
 # PluginAPI can hand plugins the same quoting helper the app uses rather
 # than having them import app internals themselves.
 from .store import NUM_RE as _store_num_re, q as _store_q
+from . import userenv
 
 # Bumped when PluginAPI's contract changes incompatibly. A plugin may
 # declare WINNOW_API_VERSION = N (the version it was written against);
@@ -168,7 +169,7 @@ from .store import NUM_RE as _store_num_re, q as _store_q
 # provides, with a message that says to update Winnow — the failure mode
 # is otherwise an AttributeError deep inside register() that reads like a
 # plugin bug.
-PLUGIN_API_VERSION = 4
+PLUGIN_API_VERSION = 5
 
 FORMAT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 # API routes may nest ("chat/stream") but each segment keeps the same shape.
@@ -219,10 +220,10 @@ class PluginRequest:
         password, which must never be a case variable (case data travels
         with the file). Set under Settings → Environment or exported by
         the shell; the shell wins. Only the `WINNOW_` prefix is readable
-        through here (ValueError otherwise) so a plugin can't lift other
-        credentials out of the process. Never send the value to the
-        browser."""
-        from . import userenv
+        through here (ValueError otherwise) — a convention that keeps
+        plugins on the analyst-managed names, not a sandbox: a plugin is
+        ordinary Python and can read os.environ itself. Never send the
+        value to the browser."""
         return userenv.get(name, default)
 
     def set_variable(self, name: str, value: str) -> dict:

@@ -129,9 +129,11 @@ see [docs/notes/README.md](README.md) for the whole set.
   `workspace/cases.json` and drop quicklook files in the real `cases/` —
   state that outlives the test and collides on the next run (found as a
   UI test that passed exactly once). Every `Popen` of `server.py` in the
-  suite sets `WINNOW_WORKSPACE_DIR` (read in `workspace.py` at import)
-  and, where cases get written, `WINNOW_CASES_DIR`; do the same in any
-  new one.
+  suite sets `WINNOW_WORKSPACE_DIR` (read in `workspace.py` at import),
+  `WINNOW_ENV_FILE` (the `WINNOW_*` token store `main()` loads and
+  Settings → Environment writes — on Windows it is the real
+  `HKCU\Environment` otherwise) and, where cases get written,
+  `WINNOW_CASES_DIR`; do the same in any new one.
 
 - **The association-default policy lives in the catalogue, and the API
   enforces it.** `winnow/assoc.py`'s `BUILTIN_TYPES` marks which

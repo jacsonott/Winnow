@@ -223,6 +223,7 @@ def test_a_real_assoc_launch_becomes_a_quicklook_server(tmp_path):
     env = {**os.environ, "WINNOW_NEVER_CONNECTED_EXIT_S": "600",
            "WINNOW_IDLE_EXIT_S": "600",
            "WINNOW_WORKSPACE_DIR": str(tmp_path / "ws"),
+           "WINNOW_ENV_FILE": str(tmp_path / "userenv"),
            "WINNOW_CASES_DIR": str(tmp_path / "cases")}
     # -u: the child's stdout is block-buffered under a pipe, so without it
     # the "Winnow on …" line sits in the child's buffer and readline()

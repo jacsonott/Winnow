@@ -62,6 +62,7 @@ def _spawn(tmp_path, extra_env=None, args=()):
            # Keep the spawned server out of the developer's real
            # workspace/ (registry, instances.json).
            "WINNOW_WORKSPACE_DIR": str(tmp_path / "ws"),
+           "WINNOW_ENV_FILE": str(tmp_path / "userenv"),
            **(extra_env or {})}
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))

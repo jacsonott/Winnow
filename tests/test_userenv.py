@@ -5,10 +5,12 @@ routes that never return a value, and PluginRequest.env."""
 from __future__ import annotations
 
 import os
+import re
 import stat
 
 import pytest
 
+from fakes import FakeReg
 from winnow import plugin_api, userenv
 
 
@@ -59,9 +61,9 @@ def test_file_store_round_trip_is_owner_only(tmp_path):
     assert not [p for p in st.path.parent.iterdir() if p.name.startswith(".env-")], "no temp files left"
 
 
-def test_file_store_ignores_foreign_lines(tmp_path):
+def test_file_store_ignores_foreign_and_malformed_lines(tmp_path):
     p = tmp_path / "env"
-    p.write_text("# comment\nOTHER=1\nWINNOW_A=1\nbroken line\n\nWINNOW_B=x=y\n")
+    p.write_text("# comment\nOTHER=1\nWINNOW_A=1\nbroken line\n\nWINNOW_B=x=y\nWINNOW_vt-key=abc\n")
     assert userenv.FileEnvStore(p).load() == {"WINNOW_A": "1", "WINNOW_B": "x=y"}
 
 
@@ -75,69 +77,81 @@ def test_env_file_path_honours_override_and_xdg(monkeypatch, tmp_path):
 
 # --------------------------------------------------------- registry store
 
-class FakeReg:
-    HKEY_CURRENT_USER = "HKCU"
-    KEY_READ = KEY_SET_VALUE = 0
-    REG_SZ = 1
-
-    def __init__(self):
-        self.keys = {"Environment": {"Path": "C:\\x", "WINNOW_OLD": "old"}}
-
-    class _H:
-        def __init__(self, path): self.path = path
-
-    def CreateKeyEx(self, root, path, _r, _a):
-        self.keys.setdefault(path, {})
-        return self._H(path)
-
-    def OpenKey(self, root, path, _r, _a):
-        if path not in self.keys:
-            raise OSError(path)
-        return self._H(path)
-
-    def CloseKey(self, h): pass
-
-    def SetValueEx(self, h, name, _r, _kind, value):
-        self.keys[h.path][name] = value
-
-    def DeleteValue(self, h, name):
-        if name not in self.keys[h.path]:
-            raise OSError(name)
-        del self.keys[h.path][name]
-
-    def EnumValue(self, h, i):
-        items = list(self.keys[h.path].items())
-        if i >= len(items):
-            raise OSError("no more")
-        return items[i][0], items[i][1], self.REG_SZ
-
-
-def test_registry_store_uses_hkcu_environment_and_broadcasts():
+def test_registry_store_uses_hkcu_environment_and_broadcasts(monkeypatch):
     reg = FakeReg()
+    reg.keys["Environment"] = {"Path": "C:\\x", "WINNOW_OLD": "old", "WINNOW_bad": "x", "WINNOW_BIN": b"\x01"}
     pings = []
     st = userenv.RegistryEnvStore(reg, notify=lambda: pings.append(1))
-    assert st.load() == {"WINNOW_OLD": "old"}          # Path is not ours
+    assert st.load() == {"WINNOW_OLD": "old"}          # Path, a malformed name and a binary value are not ours
     st.set("WINNOW_TOKEN", "t")
     assert reg.keys["Environment"]["WINNOW_TOKEN"] == "t"
     assert reg.keys["Environment"]["Path"] == "C:\\x"
     st.delete("WINNOW_OLD")
-    st.delete("WINNOW_NEVER")
+    st.delete("WINNOW_NEVER")                           # nothing removed → no broadcast
     assert st.load() == {"WINNOW_TOKEN": "t"}
-    assert len(pings) == 3
+    assert len(pings) == 2
     assert "Environment" in st.location()
+
+
+def test_registry_store_expands_reg_expand_sz(monkeypatch):
+    reg = FakeReg()
+    monkeypatch.setenv("USERPROFILE", "C:\\Users\\a")
+    reg.keys["Environment"] = {"WINNOW_CA": "%USERPROFILE%\\ca.pem"}
+    reg.kinds[("Environment", "WINNOW_CA")] = FakeReg.REG_EXPAND_SZ
+    assert userenv.RegistryEnvStore(reg, notify=lambda: None).load() == {"WINNOW_CA": "C:\\Users\\a\\ca.pem"}
 
 
 # ------------------------------------------------------------- environ
 
-def test_load_into_environ_lets_the_shell_win(tmp_path, monkeypatch):
+def test_load_into_environ_lets_the_shell_win_and_skips_reserved(tmp_path, monkeypatch):
     st = userenv.FileEnvStore(tmp_path / "env")
     st.set("WINNOW_FROM_FILE", "file")
     st.set("WINNOW_SHELL_SET", "file")
+    st.set("WINNOW_PLUGINS_DIR", "/elsewhere")          # a knob smuggled into the store
     monkeypatch.setenv("WINNOW_SHELL_SET", "shell")
     monkeypatch.delenv("WINNOW_FROM_FILE", raising=False)
+    monkeypatch.delenv("WINNOW_PLUGINS_DIR", raising=False)
     assert userenv.load_into_environ(st) == ["WINNOW_FROM_FILE"]
     assert os.environ["WINNOW_FROM_FILE"] == "file"
     assert os.environ["WINNOW_SHELL_SET"] == "shell"
+    assert "WINNOW_PLUGINS_DIR" not in os.environ
+
+
+def test_importing_server_does_not_load_the_store(tmp_path, monkeypatch):
+    """Loading happens in main(); `import server` (which tests do at
+    collection, before any fixture) must never read a real store."""
+    import importlib
+    import server
+    src = importlib.util.find_spec("server").origin
+    text = open(src, encoding="utf-8").read()
+    body_before_main = text.split("def main()", 1)[0]
+    assert "load_into_environ()" not in body_before_main
+    assert "userenv.load_into_environ()" in text.split("def main()", 1)[1]
+    assert server is not None
+
+
+def test_a_shell_export_cannot_be_overridden_from_here(tmp_path, monkeypatch):
+    st = userenv.FileEnvStore(tmp_path / "env")
+    monkeypatch.setenv("WINNOW_FROM_SHELL", "shell")
+    with pytest.raises(ValueError, match="exported by the shell"):
+        userenv.set_var("WINNOW_FROM_SHELL", "new", st)
+    assert os.environ["WINNOW_FROM_SHELL"] == "shell" and st.load() == {}
+    listed = {v["name"]: v for v in userenv.list_vars(st)}
+    assert listed["WINNOW_FROM_SHELL"]["shell"] is True
+    userenv.delete_var("WINNOW_FROM_SHELL", st)          # not ours to remove from the process
+    assert os.environ["WINNOW_FROM_SHELL"] == "shell"
+
+
+def test_reserved_covers_every_knob_the_code_reads():
+    """Any WINNOW_* the code reads from os.environ is configuration, and
+    must be in RESERVED so the panel can't turn it into a 'token'."""
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+    found = set()
+    for f in [root / "server.py", *(root / "winnow").glob("*.py")]:
+        found.update(re.findall(r"os\.environ(?:\.get\(|\[)\s*[\"'](WINNOW_[A-Z0-9_]+)", f.read_text(encoding="utf-8")))
+    assert found, "the scan found nothing — has the idiom changed?"
+    assert found <= userenv.RESERVED, found - userenv.RESERVED
 
 
 def test_load_into_environ_survives_a_bad_file(tmp_path, capsys):
@@ -158,8 +172,8 @@ def test_set_get_list_delete_touch_store_and_process(tmp_path, monkeypatch):
     with pytest.raises(ValueError):
         userenv.get("PATH")
     listed = {v["name"]: v for v in userenv.list_vars(st)}
-    assert listed["WINNOW_TOKEN"] == {"name": "WINNOW_TOKEN", "stored": True, "live": True, "reserved": False}
-    assert listed["WINNOW_SHELL_ONLY"] == {"name": "WINNOW_SHELL_ONLY", "stored": False, "live": True, "reserved": False}
+    assert listed["WINNOW_TOKEN"] == {"name": "WINNOW_TOKEN", "stored": True, "live": True, "reserved": False, "shell": False}
+    assert listed["WINNOW_SHELL_ONLY"] == {"name": "WINNOW_SHELL_ONLY", "stored": False, "live": True, "reserved": False, "shell": True}
     assert listed["WINNOW_ENV_FILE"]["reserved"] is True   # the conftest override, live
     userenv.delete_var("WINNOW_TOKEN", st)
     assert "WINNOW_TOKEN" not in os.environ and "WINNOW_TOKEN" not in st.load()
@@ -177,17 +191,19 @@ def test_default_store_is_the_file_under_the_override(tmp_path):
 # -------------------------------------------------------------- routes
 
 def test_routes_never_return_a_value(client):
-    r = client.post("/api/env", json={"name": "WINNOW_TOKEN", "value": "hunter2"})
-    assert r.status_code == 200 and r.json() == {"ok": True, "name": "WINNOW_TOKEN"}
-    info = client.get("/api/env").json()
-    assert "hunter2" not in r.text and "hunter2" not in client.get("/api/env").text
+    r = client.post("/api/env", json={"name": "winnow_token", "value": "hunter2"})   # case-normalised
+    assert r.status_code == 200 and r.json()["ok"] and r.json()["name"] == "WINNOW_TOKEN"
+    r2 = client.get("/api/env")
+    info = r2.json()
+    assert "hunter2" not in r.text and "hunter2" not in r2.text
     me = next(v for v in info["vars"] if v["name"] == "WINNOW_TOKEN")
-    assert me == {"name": "WINNOW_TOKEN", "stored": True, "live": True, "reserved": False}
+    assert me == {"name": "WINNOW_TOKEN", "stored": True, "live": True, "reserved": False, "shell": False}
     assert info["prefix"] == "WINNOW_" and info["location"]
+    assert r.json()["vars"] == info["vars"]       # the mutation returns the refreshed listing
     assert os.environ["WINNOW_TOKEN"] == "hunter2"
-    assert client.delete("/api/env/WINNOW_TOKEN").json() == {"ok": True}
+    d = client.delete("/api/env/WINNOW_TOKEN").json()
+    assert d["ok"] and all(v["name"] != "WINNOW_TOKEN" for v in d["vars"])
     assert "WINNOW_TOKEN" not in os.environ
-    assert all(v["name"] != "WINNOW_TOKEN" for v in client.get("/api/env").json()["vars"])
 
 
 def test_routes_refuse_bad_names_and_reserved(client):

@@ -10,9 +10,11 @@ const PREFIX = 'WINNOW_';
 
 function sourceText(v) {
   if (v.reserved) return 'Winnow setting — read-only here';
+  if (v.shell && v.stored) return 'saved · the shell export wins — change it there';
+  if (v.shell) return 'from the shell — this run only';
   if (v.stored && v.live) return 'saved · active';
-  if (v.stored) return 'saved · not loaded in this run (shell export wins, or set since launch)';
-  return 'from the shell — this run only';
+  if (v.stored) return 'saved · not loaded in this run';
+  return 'set this run';
 }
 
 export function buildEnvPanel(b) {
@@ -22,17 +24,26 @@ export function buildEnvPanel(b) {
     + 'settings, never shown again once saved. Plugins read them as req.env("WINNOW_…").'));
   const where = el('p', 'fb-help');
   const list = el('div', 'env-list');
-  b.append(where, list);
+  // Built once, outside the list, so a repaint never discards what is
+  // being typed (the case-variables panel learned this the hard way).
+  const add = el('div', 'env-row env-add');
+  const nameWrap = el('span', 'env-name-wrap');
+  const nameIn = el('input', 'env-name-in');
+  nameIn.placeholder = 'NAME';
+  nameIn.spellcheck = false;
+  // Same normalisation the server applies (upper-case) plus the one it
+  // refuses: anything not a letter, digit or _ becomes _.
+  nameIn.oninput = () => { nameIn.value = nameIn.value.toUpperCase().replace(/[^A-Z0-9_]/g, '_'); };
+  nameWrap.append(el('span', 'env-prefix', PREFIX), nameIn);
+  const valIn = el('input', 'env-value-in');
+  valIn.type = 'password';
+  valIn.placeholder = 'value (kept secret)';
+  valIn.autocomplete = 'off';
+  const save = el('button', 'btn ghost', 'Save');
+  add.append(nameWrap, valIn, save);
+  b.append(where, list, add);
 
-  async function paint() {
-    let info;
-    try { info = await api('/api/env'); } catch (e) {
-      list.replaceChildren(el('p', 'fb-help', e.status === 403
-        ? 'Only available from the machine Winnow is running on.'
-        : 'Could not read the environment: ' + e.message));
-      where.textContent = '';
-      return;
-    }
+  function paint(info) {
     where.textContent = `Only ${info.prefix}* names can be set or read. Stored in ${info.location}.`;
     list.replaceChildren();
     if (!info.vars.length) list.append(el('div', 'note-status', 'Nothing set yet.'));
@@ -47,40 +58,34 @@ export function buildEnvPanel(b) {
       del.onclick = async () => {
         if (!(await confirmDialog(`Remove ${v.name}? Plugins that read it will stop working until it is set again.`,
           { danger: true, okLabel: 'Remove' }))) return;
-        try { await api(`/api/env/${encodeURIComponent(v.name)}`, { method: 'DELETE' }); toast(`${v.name} removed`); }
+        try { paint(await api(`/api/env/${encodeURIComponent(v.name)}`, { method: 'DELETE' })); toast(`${v.name} removed`); }
         catch (e) { toast('Could not remove: ' + e.message, 6000); }
-        paint();
       };
       row.append(name, src, del);
       list.append(row);
     }
-    const add = el('div', 'env-row env-add');
-    const nameWrap = el('span', 'env-name-wrap');
-    const nameIn = el('input', 'env-name-in');
-    nameIn.placeholder = 'NAME';
-    nameIn.spellcheck = false;
-    nameWrap.append(el('span', 'env-prefix', PREFIX), nameIn);
-    const valIn = el('input', 'env-value-in');
-    valIn.type = 'password';
-    valIn.placeholder = 'value (kept secret)';
-    valIn.autocomplete = 'off';
-    const save = el('button', 'btn ghost', 'Save');
-    const submit = async () => {
-      const raw = nameIn.value.trim().toUpperCase();
-      const name = raw.startsWith(PREFIX) ? raw : PREFIX + raw;
-      if (!raw) { toast('Name the variable'); return; }
-      if (!valIn.value) { toast('Give it a value'); return; }
-      try {
-        await post('/api/env', { name, value: valIn.value });
-        toast(`${name} saved`);
-        nameIn.value = ''; valIn.value = '';
-        paint();
-      } catch (e) { toast('Could not save: ' + e.message, 6000); }
-    };
-    save.onclick = submit;
-    valIn.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); submit(); } };
-    add.append(nameWrap, valIn, save);
-    list.append(add);
   }
-  paint();
+  async function refresh() {
+    try { paint(await api('/api/env')); } catch (e) {
+      list.replaceChildren(el('p', 'fb-help', e.status === 403
+        ? 'Only available from the machine Winnow is running on.'
+        : 'Could not read the environment: ' + e.message));
+      where.textContent = '';
+      add.hidden = true;
+    }
+  }
+  const submit = async () => {
+    const raw = nameIn.value.trim();
+    const name = raw.startsWith(PREFIX) ? raw : PREFIX + raw;
+    if (!raw) { toast('Name the variable'); return; }
+    if (!valIn.value) { toast('Give it a value'); return; }
+    try {
+      paint(await post('/api/env', { name, value: valIn.value }));
+      toast(`${name} saved`);
+      nameIn.value = ''; valIn.value = '';
+    } catch (e) { toast('Could not save: ' + e.message, 6000); }
+  };
+  save.onclick = submit;
+  valIn.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); submit(); } };
+  refresh();
 }
