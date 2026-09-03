@@ -1,6 +1,6 @@
 {
-  "version": 3,
-  "comment": "Shipped analysis profiles. A profile is 'how I analyze this kind of case' — the plugins to enable, an optional starter watchlist, and a dashboard of widgets. SQL widgets use {{evtx}} / {{header_set:Name}} placeholders that bind to whichever table matches that header set in the open case (and {{all:header_set:Name}} unions every matching table, for logs split across many files), so the dashboard is portable. Shipped profiles are read-only; Save-as-profile creates editable copies.",
+  "version": 4,
+  "comment": "Shipped analysis profiles. A profile is 'how I analyze this kind of case' — the plugins to enable, an optional starter watchlist, and a dashboard of widgets. SQL widgets use {{evtx}} / {{header_set:Name}} placeholders that bind to whichever table matches that header set in the open case (and {{all:header_set:Name}} unions every matching table, for logs split across many files), so the dashboard is portable. Shipped profiles are read-only; Save-as-profile creates editable copies. A profile may also declare `variables`: [{name, label?, description?, required?, default?}] — case variables it seeds on apply (never overwriting a value the analyst set); required ones are asked for in the new-case dialog and after applying to an existing case. Definitions only, never values.",
   "profiles": [
     {
       "name": "KAPE triage",
@@ -234,6 +234,14 @@
             "sql": "SELECT Category AS label, COUNT(*) c FROM {{registry}} WHERE Category NOT IN ('','-') GROUP BY Category ORDER BY c DESC LIMIT 10"
           }
         }
+      ],
+      "variables": [
+        {
+          "name": "engagement",
+          "label": "Engagement name",
+          "required": false,
+          "description": "Shown by plugins and dashboards that label their output with the case — optional."
+        }
       ]
     },
     {
@@ -408,6 +416,14 @@
           "query": {
             "sql": "SELECT strftime('%Y-%m-%d %H', TS_NORMALIZE(Timestamp)) AS hr, COUNT(*) c FROM {{all:header_set:ESXi / Linux host logs}} WHERE Timestamp <> '' GROUP BY hr ORDER BY hr"
           }
+        }
+      ],
+      "variables": [
+        {
+          "name": "engagement",
+          "label": "Engagement name",
+          "required": false,
+          "description": "Shown by plugins and dashboards that label their output with the case — optional."
         }
       ]
     }

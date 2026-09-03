@@ -894,7 +894,8 @@ class PluginBundles:
                         "description": prof.get("description", ""),
                         "plugins": list(prof.get("plugins") or []),
                         "watchlist": list(prof.get("watchlist") or []),
-                        "dashboard": list(prof.get("dashboard") or [])})
+                        "dashboard": list(prof.get("dashboard") or []),
+                        "variables": list(prof.get("variables") or [])})
         return out
 
     def list(self) -> list[dict]:
@@ -912,11 +913,14 @@ class PluginBundles:
                 return b
         raise KeyError(f"No bundle {bundle_id}")
 
-    def save(self, name: str, plugins: list[str], dashboard: list | None = None) -> dict:
+    def save(self, name: str, plugins: list[str], dashboard: list | None = None,
+             variables: list | None = None) -> dict:
         """Upsert by name — 'Triage' means one thing per machine. A bundle
         is a PROFILE: its plugins plus an optional dashboard (a list of
-        widget definitions), so 'how I analyze this kind of case' is one
-        saveable, shareable thing (see docs/design/analysis-suite.md)."""
+        widget definitions) and optional variable DEFINITIONS
+        ([{name, label?, description?, required?, default?}] — never
+        values, a profile is a template), so 'how I analyze this kind of
+        case' is one saveable, shareable thing."""
         name = (name or "").strip()
         if not name:
             raise ValueError("Name the bundle")
@@ -931,10 +935,13 @@ class PluginBundles:
                 existing["plugins"] = plugins
                 if dashboard is not None:
                     existing["dashboard"] = dashboard
+                if variables is not None:
+                    existing["variables"] = variables
                 rec = existing
             else:
                 rec = {"id": _next_id(items), "name": name, "plugins": plugins,
-                       "dashboard": dashboard or [], "created_at": _now()}
+                       "dashboard": dashboard or [], "variables": variables or [],
+                       "created_at": _now()}
                 items.append(rec)
             _write(self.FILE, data)
             return rec

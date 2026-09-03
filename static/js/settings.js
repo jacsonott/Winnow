@@ -10,7 +10,7 @@ import { drawRail, rebuildGroupPrefix, renderGrouped } from './grouping.js';
 import { ACTION_LABELS, defaultKeymap, findKeyConflict, keySpecFromEvent, saveKeymap } from './keymap.js';
 import { buildPluginsPanel } from './plugins.js';
 import { buildAssocPanel } from './assoc.js';
-import { loadSavedFilters } from './savedfilters.js';
+import { loadCaseVariables, loadSavedFilters } from './savedfilters.js';
 import { applyPageTabsSize, renderPageTabs } from './sources.js';
 import { lastSplash, reducedMotion } from './splash.js';
 import { S, gridRowCount } from './state.js';
@@ -404,6 +404,114 @@ export function openCaseSettings() {
       }
     };
     b.append(labeledRow('Timestamp format', sel));
+
+    b.append(el('div', 'settings-sub-label', 'Variables'));
+    b.append(el('p', 'fb-help',
+      'Named values this case carries for the plugins and people working it — the engagement '
+      + 'name, an API base URL, a link to the scoping document. Plugins read them as '
+      + 'req.variables / winnow.state.variables. Case data, so they travel with the file: '
+      + 'never put a token or password here (Settings → Environment is for those).'));
+    const varsBox = el('div', 'case-vars');
+    b.append(varsBox);
+    renderCaseVariables(varsBox);
+    // Plugins can set variables behind the UI's back; re-fetch on open.
+    loadCaseVariables().then(() => renderCaseVariables(varsBox)).catch(() => {});
+  });
+}
+
+/* Case settings → Variables: one row per variable (name · value · what
+   it's for), required ones flagged while empty, plus an add row. Saves
+   on change through the same route plugins use. */
+export function renderCaseVariables(box) {
+  // The add row is built once per box and never detached — a repaint
+  // landing mid-typing (the re-fetch on open) must not steal focus or
+  // text from it. Only the listed rows are replaced.
+  if (!box._addRow) box._addRow = buildCaseVariableAddRow(box);
+  if (!box._addRow.isConnected) box.append(box._addRow);
+  for (const c of [...box.children]) if (c !== box._addRow) c.remove();
+  const list = S.caseVariables || [];
+  const rows = [];
+  if (!list.length) rows.push(el('div', 'note-status', 'No variables yet.'));
+  for (const v of list) {
+    const row = el('div', 'case-var-row' + (v.required && !v.value ? ' missing' : ''));
+    const name = el('span', 'case-var-name', v.name);
+    name.title = v.name;
+    const val = el('input', 'case-var-value');
+    val.value = v.value || '';
+    val.placeholder = v.required ? 'required' : 'value';
+    val.onchange = async () => {
+      try { await post('/api/case/variables', { name: v.name, value: val.value }); await loadCaseVariables(); renderCaseVariables(box); }
+      catch (e) { toast('Could not save: ' + e.message, 5000); }
+    };
+    const desc = el('span', 'case-var-desc', (v.required ? 'required · ' : '') + (v.description || ''));
+    const del = el('button', 'btn ghost case-var-del', '✕');
+    del.title = 'Remove this variable';
+    del.onclick = async () => {
+      try { await api(`/api/case/variables/${encodeURIComponent(v.name)}`, { method: 'DELETE' }); await loadCaseVariables(); renderCaseVariables(box); }
+      catch (e) { toast('Could not remove: ' + e.message, 5000); }
+    };
+    row.append(name, val, desc, del);
+    rows.push(row);
+  }
+  for (const r of rows) box.insertBefore(r, box._addRow);
+}
+
+function buildCaseVariableAddRow(box) {
+  const add = el('div', 'case-var-row case-var-add');
+  const nameIn = el('input', 'case-var-name-in');
+  nameIn.placeholder = 'name (e.g. engagement)';
+  const valIn = el('input', 'case-var-value');
+  valIn.placeholder = 'value';
+  const addBtn = el('button', 'btn ghost', 'Add');
+  addBtn.onclick = async () => {
+    if (!nameIn.value.trim()) { toast('Name the variable'); return; }
+    try {
+      await post('/api/case/variables', { name: nameIn.value.trim(), value: valIn.value });
+      nameIn.value = ''; valIn.value = '';
+      await loadCaseVariables();
+      renderCaseVariables(box);
+    } catch (e) { toast('Could not add: ' + e.message, 5000); }
+  };
+  add.append(nameIn, valIn, el('span', 'case-var-desc', ''), addBtn);
+  return add;
+}
+
+/* A profile's required variables, asked for in one dialog — used after
+   applying a profile to an existing case (the new-case dialog collects
+   them inline instead). Resolves true when every required one is filled. */
+export function promptForVariables(defs, { title = 'This profile needs a few values' } = {}) {
+  return new Promise((resolve) => {
+    modal(title, (b) => {
+      b.append(el('p', 'fb-help', 'Stored in the case file for plugins to use. Not for tokens or passwords.'));
+      const inputs = new Map();
+      for (const d of defs) {
+        const inp = el('input', 'confirm-input case-var-prompt');
+        inp.dataset.var = d.name;
+        inp.placeholder = d.required ? 'required' : 'optional';
+        inp.value = d.default || '';
+        b.append(el('label', null, (d.label || d.name) + (d.required ? ' *' : '')), inp);
+        if (d.description) b.append(el('p', 'fb-help', d.description));
+        inputs.set(d.name, inp);
+      }
+      const acts = el('div', 'row-actions');
+      const save = el('button', 'btn', 'Save');
+      save.onclick = async () => {
+        const missing = defs.filter((d) => d.required && !(inputs.get(d.name).value || '').trim());
+        if (missing.length) { toast(`Fill in: ${missing.map((d) => d.label || d.name).join(', ')}`); return; }
+        try {
+          for (const [name, inp] of inputs) await post('/api/case/variables', { name, value: inp.value.trim() });
+          await loadCaseVariables();
+          $('modal').hidden = true;
+          resolve(true);
+        } catch (e) { toast('Could not save: ' + e.message, 5000); }
+      };
+      const later = el('button', 'btn ghost', 'Later');
+      later.title = 'Case settings → Variables lists what is still missing';
+      later.onclick = () => { $('modal').hidden = true; resolve(false); };
+      acts.append(save, later);
+      b.append(acts);
+      setTimeout(() => { const first = inputs.values().next().value; if (first) first.focus(); }, 0);
+    });
   });
 }
 

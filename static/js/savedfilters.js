@@ -145,6 +145,11 @@ export async function loadAppSettings() {
 
 export async function loadCaseSettings() {
   try { S.caseSettings = await api('/api/case_settings'); } catch { S.caseSettings = {}; }
+  await loadCaseVariables();
+}
+
+export async function loadCaseVariables() {
+  try { S.caseVariables = await api('/api/case/variables'); } catch { S.caseVariables = []; }
 }
 
 export function filtersForCurrentSource() {

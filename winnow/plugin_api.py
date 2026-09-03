@@ -120,7 +120,13 @@ A tab plus its backend route, the full custom-UI shape:
         return {"message": f"{len(hashes)} hashes queued"}
 
     def edges_handler(req):
-        # req: PluginRequest — method, route, query (dict of str), body
+        # req.variables is the open case's variables, {name: value} — e.g.
+        # req.variables.get("engagement"), req.variables.get("api_base") —
+        # and req.set_variable(name, value) writes one. Case data, not
+        # secrets (see register_row_action's note on WINNOW_* env vars).
+        # req: PluginRequest — method, route, query (dict of str), body,
+        # storage (per-plugin JSON), variables / set_variable (case
+        # variables from Case settings — config, never secrets)
         # (parsed JSON or None), and store (the open Store, or None when no
         # case is open). For reads, use req.store.run_sql(sql, limit) — it
         # opens its own read-only connection, so a slow plugin query never
@@ -191,6 +197,27 @@ class PluginRequest:
         self.body = body
         self.store = store
         self.storage = storage
+
+    @property
+    def variables(self) -> dict:
+        """The open case's variables, {name: value} — the engagement name,
+        a backend API base URL, a document link: things a plugin refers to
+        on every call and that belong to the case (they travel with the
+        .db). {} when no case is open. NOT for secrets: a token goes in a
+        WINNOW_* environment variable, never in a case file."""
+        if self.store is None:
+            return {}
+        try:
+            return self.store.get_variables()
+        except Exception:  # noqa: BLE001 — a plugin reading a variable must never 500 the case
+            return {}
+
+    def set_variable(self, name: str, value: str) -> dict:
+        """Write a case variable (upsert; keeps any description/required
+        flag a profile gave it). ValueError on a bad name or no open case."""
+        if self.store is None:
+            raise ValueError("Open a case first")
+        return self.store.set_variable(name, value)
 
 
 class IngestFormat:
