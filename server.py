@@ -2124,6 +2124,7 @@ class PluginBundleBody(BaseModel):
     dashboard: list | None = None   # profile: an optional dashboard layout
     dashboards: list | None = None  # profile: extra named boards [{name, widgets}]
     variables: list | None = None   # profile: variable DEFINITIONS the case should carry
+    description: str | None = None  # profile: what this profile is for, shown in the list
 
 
 @app.get("/api/plugin_bundles")
@@ -2134,7 +2135,8 @@ def api_plugin_bundles():
 @app.post("/api/plugin_bundles")
 def api_plugin_bundles_save(body: PluginBundleBody):
     try:
-        return WS.plugin_bundles.save(body.name, body.plugins, body.dashboard, body.variables, body.dashboards)
+        return WS.plugin_bundles.save(body.name, body.plugins, body.dashboard, body.variables,
+                                      body.dashboards, body.description)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -3049,6 +3051,17 @@ class LibraryAddBody(BaseModel):
 def api_dashboard_library_list():
     return [{"id": b["id"], "name": b["name"], "widget_count": len(b.get("widgets") or [])}
             for b in WS.dashboard_library.list()]
+
+
+@app.get("/api/dashboard_library/{board_id}")
+def api_dashboard_library_get(board_id: int):
+    """One library board's widgets — what the profile builder embeds when
+    an analyst picks a saved board for a profile."""
+    try:
+        b = WS.dashboard_library.get(board_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    return {"id": b["id"], "name": b["name"], "widgets": b.get("widgets") or []}
 
 
 @app.post("/api/dashboard_library")

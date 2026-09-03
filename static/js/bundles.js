@@ -6,6 +6,7 @@
 import { $, api, el, post, toast } from './core.js';
 import { loadPlugins } from './importer.js';
 import { loadSources, renderPageTabs } from './sources.js';
+import { openProfileBuilder } from './profilebuilder.js';
 import { promptForVariables } from './settings.js';
 import { S } from './state.js';
 import { confirmDialog, markModalAction, modal, promptDialog } from './ui.js';
@@ -39,9 +40,10 @@ export function openPluginBundlesModal() {
   markModalAction('openPluginBundles');
   modal('Plugin bundles', async (b) => {
     b.append(el('p', 'fb-help',
-      'Profiles for a kind of work — plugins, an optional dashboard, and a starter watchlist. '
-      + 'Shipped profiles (like KAPE triage) are read-only; applying one sets THIS case’s plugins, '
-      + 'loads its dashboard, and seeds its indicators. Save your own with the button below.'));
+      'Profiles for a kind of work — plugins, dashboards, the variables a case of this type must '
+      + 'carry, and a starter watchlist. Shipped profiles (like KAPE triage) are read-only; applying '
+      + 'one sets THIS case’s plugins, loads its dashboards, and seeds its indicators. Build your own '
+      + 'with “New profile…”, or start from a shipped one with Copy.'));
 
     const list = el('div', 'session-list');
     b.append(list);
@@ -69,6 +71,11 @@ export function openPluginBundlesModal() {
         const bits = [bd.plugins.join(', ') || (bd.shipped ? '' : '(empty)')];
         if (bd.dashboard && bd.dashboard.length) bits.push(`dashboard · ${bd.dashboard.length} widgets`);
         if (bd.dashboards && bd.dashboards.length) bits.push(`+ ${bd.dashboards.map((b) => b.name).join(', ')}`);
+        if (bd.variables && bd.variables.length) {
+          const req = bd.variables.filter((v) => v.required).length;
+          bits.push(`${bd.variables.length} variable${bd.variables.length === 1 ? '' : 's'}`
+            + (req ? ` (${req} required)` : ''));
+        }
         if (bd.watchlist && bd.watchlist.length) bits.push(`${bd.watchlist.length} IOCs`);
         const plugins = el('span', 'count', bd.shipped ? (bd.description || bits.filter(Boolean).join(' · ')) : bits.filter(Boolean).join(' · '));
         plugins.title = bits.filter(Boolean).join(' · ');
@@ -87,6 +94,14 @@ export function openPluginBundlesModal() {
           }
         };
         row.append(name, plugins, apply);
+        // Shipped profiles can't be edited in place, so their builder button
+        // opens a copy — the same dialog, saving under a new name.
+        const edit = el('button', 'btn ghost', bd.shipped ? 'Copy' : '✎');
+        edit.title = bd.shipped
+          ? 'Start a new profile from this one'
+          : 'Edit this profile — plugins, dashboards and variables';
+        edit.onclick = () => openProfileBuilder(bd, { onSaved: reload });
+        row.append(edit);
         if (!bd.shipped) {
           const del = el('button', 'btn ghost', '✕');
           del.title = 'Delete this profile (cases it was applied to keep their plugins)';
@@ -103,7 +118,17 @@ export function openPluginBundlesModal() {
     }
     render();
 
+    // Reopening is how the list refreshes after the builder saves: the
+    // builder replaces this modal's body, so there is no list to patch.
+    async function reload() {
+      openPluginBundlesModal();
+    }
+
     const acts = el('div', 'row-actions');
+    const build = el('button', 'btn', '＋ New profile…');
+    build.title = 'Pick plugins and dashboards, and declare the variables a case of this type needs';
+    build.onclick = () => openProfileBuilder(null, { onSaved: reload });
+    acts.append(build);
     const save = el('button', 'btn ghost', 'Save current plugins as a bundle…');
     save.title = 'Snapshot the plugins currently enabled (for this case, if one is open) under a name';
     save.onclick = async () => {
