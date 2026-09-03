@@ -186,3 +186,32 @@ def test_reduced_motion_skips_by_default_but_an_explicit_tick_plays(browser, ser
         pg2.wait_for_selector("#splash:not([hidden])", timeout=10_000)
     finally:
         ctx2.close()
+
+
+def test_a_slow_display_still_finishes_in_seconds(browser, server):
+    """The launch must take the same few seconds on a VM with no GPU and a
+    big high-DPI screen as on a workstation. Modelled here with software
+    canvas, a 2560×1440 2× viewport and 8× CPU throttling — the shape of
+    machine that reported a 30-second 'laggy' launch. The physics ticks on
+    a clock, tokens come from a pre-rendered atlas, and the render scale
+    drops when frames run slow, so the whole thing stays under ~half of
+    what a per-frame simulation took."""
+    import time
+    ctx = browser.new_context(viewport={"width": 2560, "height": 1440}, device_scale_factor=2)
+    ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen');"
+                        "localStorage.setItem('winnow.appearance', JSON.stringify({ splash: 'always' }))")
+    pg = ctx.new_page()
+    errors = []
+    pg.on("pageerror", lambda e: errors.append(str(e)))
+    try:
+        cdp = ctx.new_cdp_session(pg)
+        cdp.send("Emulation.setCPUThrottlingRate", {"rate": 8})
+        pg.goto(server)
+        pg.wait_for_selector("#splash:not([hidden])", timeout=20_000)
+        t0 = time.monotonic()
+        pg.wait_for_selector("#splash[hidden]", state="attached", timeout=60_000)
+        took = time.monotonic() - t0
+        assert took < 18, f"splash took {took:.1f}s under throttling"
+        assert not errors, errors
+    finally:
+        ctx.close()
