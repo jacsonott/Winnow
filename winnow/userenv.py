@@ -22,9 +22,13 @@ exactly as private as the account:
   `$XDG_CONFIG_HOME/winnow/env`), created 0600 in a 0700 directory.
 
 Stored values are loaded into the process by main() for any `WINNOW_*`
-name the shell did not already export — a real environment variable
-always wins, and a name the shell exported cannot be changed from here
-(set_var refuses, so the panel can say so instead of pretending).
+name not already set outside Winnow — a foreign environment variable
+always wins, and a name something else exported cannot be changed from
+here (set_var refuses, so the panel can say so instead of pretending).
+
+Either way they survive a restart: the next launch reads the store on
+Unix, and on Windows the OS itself hands the variable to the new process
+because HKCU\\Environment is where it lives.
 
 Values are never returned by the API and never shown by the UI: the
 panel lists names and where each came from, nothing more. A plugin gets
@@ -58,8 +62,23 @@ RESERVED = frozenset({
 MAX_VALUE = 8192
 
 # Names THIS module put into os.environ (loaded at startup or saved this
-# run). Anything else that is live came from the shell, and the shell wins.
+# run). Anything else that is live came from outside, and that wins.
+#
+# On Windows the store IS the user environment (HKCU\Environment), so a
+# launch AFTER a save inherits the variable from the OS and finds it in
+# the store too. That is not a foreign export, it is our own value handed
+# back — so ownership is decided by comparing values, not by mere
+# presence, or the panel would call a saved token a shell export and
+# refuse to let anyone change it.
 _OWNED: set[str] = set()
+
+
+def _foreign(name: str, stored: dict) -> bool:
+    """Live in this process, not ours, and not equal to what we stored —
+    i.e. genuinely set outside Winnow, which wins."""
+    if name in _OWNED or name not in os.environ:
+        return False
+    return stored.get(name) != os.environ[name]
 
 
 def check_name(name: str, *, for_write: bool = False) -> str:
@@ -245,30 +264,39 @@ def load_into_environ(st=None) -> list[str]:
             os.environ[name] = value
             _OWNED.add(name)
             loaded.append(name)
+        elif os.environ[name] == value:
+            # Already present and identical: the OS handed our own saved
+            # value back (Windows). Ours to manage, nothing to load.
+            _OWNED.add(name)
     return loaded
 
 
 def list_vars(st=None) -> list[dict]:
     """Names only — never values. `stored` is on disk / in the registry,
-    `live` is in this process, `shell` means the shell exported it (so
-    it wins over anything saved here)."""
+    `live` is in this process, `shell` means something outside Winnow set
+    it (so it wins over anything saved here)."""
     st = st or store()
     try:
-        stored = set(st.load())
+        stored = st.load()
     except Exception:  # noqa: BLE001
-        stored = set()
+        stored = {}
     live = {k for k in os.environ if NAME_RE.match(k)}
     return [{"name": n, "stored": n in stored, "live": n in live, "reserved": n in RESERVED,
-             "shell": n in live and n not in _OWNED}
-            for n in sorted(stored | live)]
+             "shell": _foreign(n, stored)}
+            for n in sorted(set(stored) | live)]
 
 
 def set_var(name: str, value: str, st=None) -> str:
     name = check_name(name, for_write=True)
     value = check_value(value)
-    if name in os.environ and name not in _OWNED:
-        raise ValueError(f"{name} is exported by the shell Winnow was started from — that wins; change it there")
-    (st or store()).set(name, value)
+    st = st or store()
+    try:
+        stored = st.load()
+    except Exception:  # noqa: BLE001 — an unreadable store must not block a save
+        stored = {}
+    if _foreign(name, stored):
+        raise ValueError(f"{name} is set outside Winnow (a shell export) — that wins; change it there")
+    st.set(name, value)
     os.environ[name] = value      # this run too, not only the next launch
     _OWNED.add(name)
     return name

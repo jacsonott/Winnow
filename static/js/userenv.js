@@ -10,8 +10,8 @@ const PREFIX = 'WINNOW_';
 
 function sourceText(v) {
   if (v.reserved) return 'Winnow setting — read-only here';
-  if (v.shell && v.stored) return 'saved · the shell export wins — change it there';
-  if (v.shell) return 'from the shell — this run only';
+  if (v.shell && v.stored) return 'set outside Winnow — that value wins; change it there';
+  if (v.shell) return 'set outside Winnow — this run only';
   if (v.stored && v.live) return 'saved · active';
   if (v.stored) return 'saved · not loaded in this run';
   return 'set this run';
