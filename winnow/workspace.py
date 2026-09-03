@@ -902,6 +902,10 @@ class PluginBundles:
     def list(self) -> list[dict]:
         with _LOCK:
             saved = _read(self.FILE, {"bundles": []})["bundles"]
+        for b in saved:      # fields added after a bundle was first written
+            b.setdefault("description", "")
+            b.setdefault("dashboards", [])
+            b.setdefault("variables", [])
         try:
             shipped = self._shipped()
         except Exception:  # noqa: BLE001 — a broken profiles.json must not hide saved bundles
@@ -915,7 +919,8 @@ class PluginBundles:
         raise KeyError(f"No bundle {bundle_id}")
 
     def save(self, name: str, plugins: list[str], dashboard: list | None = None,
-             variables: list | None = None, dashboards: list | None = None) -> dict:
+             variables: list | None = None, dashboards: list | None = None,
+             description: str | None = None) -> dict:
         """Upsert by name — 'Triage' means one thing per machine. A bundle
         is a PROFILE: its plugins plus an optional dashboard (a list of
         widget definitions) and optional variable DEFINITIONS
@@ -940,9 +945,12 @@ class PluginBundles:
                     existing["variables"] = variables
                 if dashboards is not None:
                     existing["dashboards"] = dashboards
+                if description is not None:
+                    existing["description"] = description[:400]
                 rec = existing
             else:
                 rec = {"id": _next_id(items), "name": name, "plugins": plugins,
+                       "description": (description or "")[:400],
                        "dashboard": dashboard or [], "dashboards": dashboards or [],
                        "variables": variables or [],
                        "created_at": _now()}

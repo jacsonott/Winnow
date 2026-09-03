@@ -1882,6 +1882,24 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 .env-name-wrap { display: flex; align-items: center; min-width: 0; }
 .env-prefix { font: 12px var(--mono); color: var(--dim); padding-right: 2px; }
 .env-name-in { flex: 1; }
+
+/* The profile builder (static/js/profilebuilder.js) */
+.pb-head { display: grid; gap: 2px; margin-bottom: 8px; }
+.pb-list { display: grid; gap: 2px; max-height: 240px; overflow: auto; margin: 4px 0 8px;
+  border: 1px solid var(--line-2); border-radius: var(--radius-sm); padding: 6px; background: var(--panel-2); }
+.pb-row { display: grid; grid-template-columns: auto minmax(120px, 1fr) minmax(0, 2fr); gap: 8px;
+  align-items: center; padding: 3px 4px; border-radius: var(--radius-sm); cursor: pointer; }
+.pb-row:hover { background: var(--hover); }
+.pb-name { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pb-desc { color: var(--dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pb-vars { display: grid; gap: 4px; margin: 4px 0 8px; }
+.pb-var { display: grid; grid-template-columns: 150px 1fr 1fr 110px auto auto; gap: 6px; align-items: center; }
+.pb-var input.confirm-input { margin: 0; }
+.pb-req { display: flex; align-items: center; gap: 4px; color: var(--dim); font-size: 11px; white-space: nowrap; }
+.pb-var-del { padding: 0 6px; }
+.pb-actions { margin-top: 10px; position: sticky; bottom: 0; background: var(--panel);
+  padding: 8px 0 2px; border-top: 1px solid var(--line-2); }
+@media (max-width: 900px) { .pb-var { grid-template-columns: 1fr 1fr; } }
 .assoc-manual { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 8px; }
 .assoc-manual summary { cursor: pointer; color: var(--dim); font-size: 12px; }
 .assoc-manual summary:hover { color: var(--text); }
