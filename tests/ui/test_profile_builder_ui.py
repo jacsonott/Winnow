@@ -15,7 +15,22 @@ def _open_builder(page):
     page.keyboard.press("M")
     page.wait_for_selector("#modal:not([hidden])")
     page.locator("#modalBody .btn", has_text="New profile").click()
+    _wait_for_builder(page)
+
+
+def _wait_for_builder(page):
+    """The name field is appended before the plugin and dashboard lists are
+    fetched, so waiting on it alone races their two awaits — wait for both
+    sections to have finished painting (rows, or the note that says why
+    there are none)."""
     page.wait_for_selector("#modalBody .pb-head input")
+    for section in ("Plugins", "Dashboards"):
+        page.wait_for_function(
+            """(s) => { const t = [...document.querySelectorAll('#modalBody .settings-section-title')]
+                 .find((n) => n.textContent.trim() === s);
+               const sec = t && t.closest('.settings-section');
+               return !!sec && !!sec.querySelector('.pb-row, .note-status'); }""",
+            arg=section, timeout=15_000)
 
 
 def _cleanup(api):
@@ -89,7 +104,7 @@ def test_editing_an_existing_profile_reopens_it_filled_in(page, api):
         page.keyboard.press("M")
         page.wait_for_selector(f".session-row:has-text('{NAME}')")
         page.locator(".session-row", has_text=NAME).locator(".btn", has_text="✎").click()
-        page.wait_for_selector("#modalBody .pb-head input")
+        _wait_for_builder(page)
         assert page.locator("#modalTitle").inner_text().lower().startswith("edit profile")
         assert page.locator("#modalBody .pb-head input").first.input_value() == NAME
         assert page.locator("#modalBody .pb-var input").first.input_value() == "engagement"
@@ -110,10 +125,11 @@ def test_a_shipped_profile_opens_as_a_copy(page, api):
         page.keyboard.press("M")
         page.wait_for_selector(".session-row:has-text('KAPE triage')")
         page.locator(".session-row", has_text="KAPE triage").locator(".btn", has_text="Copy").click()
-        page.wait_for_selector("#modalBody .pb-head input")
+        _wait_for_builder(page)
         assert page.locator("#modalTitle").inner_text().lower().startswith("new profile from")
         assert page.locator("#modalBody .pb-head input").first.input_value() == "KAPE triage (copy)"
         # the shipped profile's own boards come along, pre-checked
+        page.wait_for_selector("#modalBody .pb-row:has-text('KAPE host overview')")
         assert page.locator("#modalBody .pb-row", has_text="KAPE host overview").count() == 1
     finally:
         page.keyboard.press("Escape")
