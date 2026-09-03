@@ -889,8 +889,10 @@ export function renderSidebar() {
 
   // Dashboards are a section here, not a top-strip tab — a dashboard is a
   // function (build several named boards), not one page. dashboard.js owns
-  // the rows (open/rename/delete + "New dashboard").
-  if (S.sources.length) renderDashboardsInto(list);
+  // the rows (open/rename/delete + "New dashboard"). Not gated on the case
+  // having tables: a fresh case with a profile applied already has boards,
+  // and an empty one still needs the "New dashboard" row to be reachable.
+  renderDashboardsInto(list);
 }
 
 /* A folder in the tree: disclosure + name + recursive table count, the
