@@ -95,6 +95,9 @@ def server(tmp_path_factory, ui_csv):
         # registers this throwaway case in the developer's real registry.
         env={**os.environ,
              "WINNOW_WORKSPACE_DIR": str(tmp_path_factory.mktemp("ws")),
+             # The WINNOW_* token store: without this, Windows falls
+             # through to the developer's real HKCU\Environment.
+             "WINNOW_ENV_FILE": str(tmp_path_factory.mktemp("env") / "env"),
              # Same idea for the association adapters' target dirs: a
              # Settings → File associations test must never write the
              # developer's real ~/.local/share or ~/.config.
@@ -157,3 +160,16 @@ def page(browser, server):
     # catch a broken menu handler rather than just a broken layout.
     ctx.close()
     assert not errors, "uncaught JS errors: " + " | ".join(errors)
+
+
+@pytest.fixture
+def api(page):
+    """JSON call against the shared server from inside the page, carrying
+    the CSRF header every non-GET /api/* route requires."""
+    def _api(path, method="GET", body=None):
+        return page.evaluate(
+            """([path, method, body]) => fetch(path, { method,
+                  headers: { 'X-Timeline-Lite-Client': '1', 'Content-Type': 'application/json' },
+                  body: body == null ? undefined : JSON.stringify(body) }).then((r) => r.json())""",
+            [path, method, body])
+    return _api

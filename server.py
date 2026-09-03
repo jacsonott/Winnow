@@ -34,6 +34,7 @@ from winnow import instances
 from winnow import paths
 from winnow import plugin_api
 from winnow import updater
+from winnow import userenv
 from winnow import version
 from winnow import archive
 from winnow import workspace as WS
@@ -1232,6 +1233,56 @@ def _is_loopback(request: Request) -> bool:
     peer."""
     host = request.client.host if request.client else ""
     return host in ("127.0.0.1", "::1", "testclient")
+
+
+# ---------------------------------------------------------------- user env
+# WINNOW_* environment variables — where a plugin's token lives, instead of
+# the case file or a Winnow setting. Names and where each came from are all
+# the API ever returns; a value goes in through POST and never comes back
+# out, not even to the loopback client. See winnow/userenv.py.
+
+class EnvVarBody(BaseModel):
+    name: str
+    value: str
+
+
+def _env_listing(st) -> dict:
+    return {"prefix": userenv.PREFIX, "location": st.location(), "vars": userenv.list_vars(st)}
+
+
+@app.get("/api/env")
+def api_env_list(request: Request):
+    if not _is_loopback(request):
+        raise HTTPException(403, "environment variables are loopback-only")
+    return _env_listing(userenv.store())
+
+
+@app.post("/api/env")
+def api_env_set(request: Request, body: EnvVarBody):
+    if not _is_loopback(request):
+        raise HTTPException(403, "environment variables are loopback-only")
+    st = userenv.store()
+    try:
+        name = userenv.set_var(body.name, body.value, st)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except OSError as e:
+        raise HTTPException(500, f"could not save: {e}")
+    return {"ok": True, "name": name, **_env_listing(st)}   # the refreshed list, so the panel needn't re-fetch
+
+
+@app.delete("/api/env/{name}")
+def api_env_delete(request: Request, name: str):
+    if not _is_loopback(request):
+        raise HTTPException(403, "environment variables are loopback-only")
+    st = userenv.store()
+    try:
+        userenv.delete_var(name, st)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except OSError as e:
+        raise HTTPException(500, f"could not save: {e}")
+    return {"ok": True, **_env_listing(st)}
 
 
 class MakeDirBody(BaseModel):
@@ -3815,6 +3866,10 @@ def _free_port() -> int:
 
 def main() -> None:
     global STORE
+    # Stored WINNOW_* variables (tokens plugins read) join the process
+    # environment here, not at import — `import server` in a test must
+    # never read the developer's real store. A real export wins.
+    userenv.load_into_environ()
     ap = argparse.ArgumentParser(description="Winnow")
     ap.add_argument("--case", default=None, help="SQLite case file (created if missing). Omit to land on the home screen.")
     ap.add_argument("--open", dest="open_files", nargs="*", default=[], help="CSVs to ingest at startup")

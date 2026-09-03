@@ -447,6 +447,33 @@ def _shell_assoc_changed() -> None:  # pragma: no cover - windows only
         pass
 
 
+def hkcu_set(reg, path: str, name: str | None, value: str) -> None:
+    """Write one REG_SZ value under HKEY_CURRENT_USER, creating the key.
+    Shared by the file-association and user-environment stores so the
+    open/set/close dance lives once."""
+    key = reg.CreateKeyEx(reg.HKEY_CURRENT_USER, path, 0, reg.KEY_SET_VALUE)
+    try:
+        reg.SetValueEx(key, name, 0, reg.REG_SZ, value)
+    finally:
+        reg.CloseKey(key)
+
+
+def hkcu_delete_value(reg, path: str, name: str | None) -> bool:
+    """Delete one value under HKEY_CURRENT_USER; True if something was
+    removed, False when the key or value wasn't there."""
+    try:
+        key = reg.OpenKey(reg.HKEY_CURRENT_USER, path, 0, reg.KEY_SET_VALUE)
+    except OSError:
+        return False
+    try:
+        reg.DeleteValue(key, name)
+        return True
+    except OSError:
+        return False
+    finally:
+        reg.CloseKey(key)
+
+
 class WindowsAssoc:
     """Per-user Windows registration under HKCU\\Software\\Classes: one
     ProgId holding the open command, OpenWithProgids per extension for
@@ -469,11 +496,7 @@ class WindowsAssoc:
         return self.reg.HKEY_CURRENT_USER
 
     def _set(self, path: str, name: str | None, value: str) -> None:
-        key = self.reg.CreateKeyEx(self._hkcu(), path, 0, self.reg.KEY_SET_VALUE)
-        try:
-            self.reg.SetValueEx(key, name, 0, self.reg.REG_SZ, value)
-        finally:
-            self.reg.CloseKey(key)
+        hkcu_set(self.reg, path, name, value)
 
     def _get(self, path: str, name: str | None) -> str | None:
         try:
@@ -488,16 +511,7 @@ class WindowsAssoc:
             self.reg.CloseKey(key)
 
     def _delete_value(self, path: str, name: str | None) -> None:
-        try:
-            key = self.reg.OpenKey(self._hkcu(), path, 0, self.reg.KEY_SET_VALUE)
-        except OSError:
-            return
-        try:
-            self.reg.DeleteValue(key, name)
-        except OSError:
-            pass
-        finally:
-            self.reg.CloseKey(key)
+        hkcu_delete_value(self.reg, path, name)
 
     def _delete_tree(self, path: str) -> None:
         try:

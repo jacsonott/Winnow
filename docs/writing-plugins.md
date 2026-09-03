@@ -799,8 +799,8 @@ never the values.
 
 **Variables live in the case file and travel with it.** They are for
 configuration, not secrets: a token or password belongs in the
-environment (see [Security model](#12-security-model)), never in a
-variable.
+environment (see [Secrets: the `WINNOW_*` environment](#secrets-the-winnow_-environment)),
+never in a variable.
 
 ---
 
@@ -912,7 +912,9 @@ python server.py --plugins-dir ~/src/my-winnow-plugins
 
 Installs from the UI always land in the first directory (`plugins/`).
 
-**Versioning:** the current plugin API version is **4** (toolbar panels
+**Versioning:** the current plugin API version is **5** (`req.env`,
+`req.variables` / `req.set_variable` and the tab context's
+`state.variables` / `setVariable` arrived in 5; toolbar panels
 and the view-change context arrived in 4; row actions in 3; `api.q`/
 `NUM_RE` in 2). Set `WINNOW_API_VERSION` to the
 API version you built against. If a future Winnow's API version is lower than yours, it
@@ -947,6 +949,42 @@ What that leaves to you, as an author:
   variable, which is case data and travels with the file.
 - Keep the airgap in mind — if your plugin needs the internet, make that
   the headline of your README, the way `claude_assistant` does.
+
+### Secrets: the `WINNOW_*` environment
+
+A token's supported home is an environment variable with the
+`WINNOW_` prefix, which the analyst sets under **Settings → Environment**
+(or exports from the shell — the shell wins). Winnow keeps it in the
+user's own environment — `HKCU\Environment` on Windows, an owner-only
+`~/.config/winnow/env` elsewhere — and loads it into the process at
+startup. It is never in the case file, never in a Winnow setting, never
+returned by an API, never shown again once saved.
+
+```python
+def lookup_handler(req):
+    token = req.env("WINNOW_VT_API_KEY")
+    if not token:
+        raise ValueError("Set WINNOW_VT_API_KEY under Settings → Environment")
+    ...
+```
+
+- `req.env(name, default=None)` reads one; only `WINNOW_*` names are
+  readable through it (`ValueError` otherwise). The prefix is a hard
+  limit on what Settings → Environment and `/api/env` can touch, and a
+  convention that keeps a well-behaved plugin on the names the analyst
+  manages — it is not a sandbox. A plugin is ordinary Python and can
+  read `os.environ` directly, which is why section 12 says what it says.
+- Read it server-side, in the handler that uses it. **Never send the
+  value to the browser** — not in a response, not in a tab's HTML. A tab
+  that needs a network call makes it through its own `register_api`
+  route.
+- Tell the analyst the name in your README: "set `WINNOW_VT_API_KEY`
+  under Settings → Environment". (The bundled `claude_assistant` predates
+  this and reads the Anthropic SDK's own `ANTHROPIC_API_KEY` from the
+  shell — the pattern to copy is the README sentence, not the name.)
+- For everything that is *not* secret — the engagement, a base URL, a
+  document link — use a [case variable](#case-variables) instead, so it
+  travels with the case.
 
 ---
 
@@ -1015,6 +1053,7 @@ What every API-route and row-action handler receives:
 | `storage` | Plain-JSON dict persisted per plugin in the workspace (`plugin_data/<fs_name>.json`) — not case data, and readable on disk, so not for secrets |
 | `variables` | The case's variables as `{name: value}` (`{}` with no case) |
 | `set_variable(name, value)` | Create or update one case variable |
+| `env(name, default=None)` | A `WINNOW_*` environment variable — the home for tokens; prefix-enforced, server-side only |
 
 ### HTTP surface
 
@@ -1031,6 +1070,9 @@ What every API-route and row-action handler receives:
 | `GET /api/case/variables` | `[{name, value, description, required}]` for the open case |
 | `POST /api/case/variables` | `{name, value?, description?, required?}` — create or update one |
 | `DELETE /api/case/variables/<name>` | Remove one |
+| `GET /api/env` | `WINNOW_*` names and where each comes from — never values; loopback-only |
+| `POST /api/env` | `{name, value}` — save one; loopback-only |
+| `DELETE /api/env/<name>` | Remove one; loopback-only |
 
 The path/upload ingest routes are also the scripting entry point — you
 can drive a plugin parser from `curl` without touching the UI.

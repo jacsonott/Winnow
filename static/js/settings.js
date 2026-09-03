@@ -10,6 +10,7 @@ import { drawRail, rebuildGroupPrefix, renderGrouped } from './grouping.js';
 import { ACTION_LABELS, defaultKeymap, findKeyConflict, keySpecFromEvent, saveKeymap } from './keymap.js';
 import { buildPluginsPanel } from './plugins.js';
 import { buildAssocPanel } from './assoc.js';
+import { buildEnvPanel } from './userenv.js';
 import { loadCaseVariables, loadSavedFilters } from './savedfilters.js';
 import { applyPageTabsSize, renderPageTabs } from './sources.js';
 import { lastSplash, reducedMotion } from './splash.js';
@@ -958,6 +959,9 @@ export function openSettings() {
 
     const secAssoc = settingsSection(b, 'File associations');
     buildAssocPanel(secAssoc);
+
+    const secEnv = settingsSection(b, 'Environment');
+    buildEnvPanel(secEnv);
 
     const secUpdates = settingsSection(b, 'Updates');
     buildUpdatesPanel(secUpdates);
