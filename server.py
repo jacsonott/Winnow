@@ -2122,6 +2122,7 @@ class PluginBundleBody(BaseModel):
     name: str
     plugins: list[str] = []
     dashboard: list | None = None   # profile: an optional dashboard layout
+    dashboards: list | None = None  # profile: extra named boards [{name, widgets}]
     variables: list | None = None   # profile: variable DEFINITIONS the case should carry
 
 
@@ -2133,7 +2134,7 @@ def api_plugin_bundles():
 @app.post("/api/plugin_bundles")
 def api_plugin_bundles_save(body: PluginBundleBody):
     try:
-        return WS.plugin_bundles.save(body.name, body.plugins, body.dashboard, body.variables)
+        return WS.plugin_bundles.save(body.name, body.plugins, body.dashboard, body.variables, body.dashboards)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -2169,6 +2170,14 @@ def api_plugin_bundles_apply(bundle_id: int):
     # dashboards untouched.
     if bundle.get("dashboard"):
         STORE.upsert_dashboard_by_name(bundle["name"], bundle["dashboard"])
+    # Extra named boards a profile carries (the KAPE host overview) land
+    # under their own names, same upsert-by-name rule.
+    boards_applied = []
+    for board in bundle.get("dashboards") or []:
+        bname = str(board.get("name") or "").strip()
+        if bname and board.get("widgets"):
+            STORE.upsert_dashboard_by_name(bname, board["widgets"])
+            boards_applied.append(bname)
     # A profile can seed a starter watchlist: add its indicators (dedup by
     # value) and scan the case, so the IOC rollups have data immediately.
     seeded = 0
@@ -2191,6 +2200,7 @@ def api_plugin_bundles_apply(bundle_id: int):
             "enabled": sorted(wanted & known),
             "missing": sorted(wanted - known),  # in the bundle, not installed here
             "dashboard_applied": bool(bundle.get("dashboard")),
+            "dashboards_applied": boards_applied,
             "watchlist_seeded": seeded,
             "plugins": api_plugins()}
 

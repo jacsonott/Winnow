@@ -895,6 +895,7 @@ class PluginBundles:
                         "plugins": list(prof.get("plugins") or []),
                         "watchlist": list(prof.get("watchlist") or []),
                         "dashboard": list(prof.get("dashboard") or []),
+                        "dashboards": list(prof.get("dashboards") or []),
                         "variables": list(prof.get("variables") or [])})
         return out
 
@@ -914,7 +915,7 @@ class PluginBundles:
         raise KeyError(f"No bundle {bundle_id}")
 
     def save(self, name: str, plugins: list[str], dashboard: list | None = None,
-             variables: list | None = None) -> dict:
+             variables: list | None = None, dashboards: list | None = None) -> dict:
         """Upsert by name — 'Triage' means one thing per machine. A bundle
         is a PROFILE: its plugins plus an optional dashboard (a list of
         widget definitions) and optional variable DEFINITIONS
@@ -937,10 +938,13 @@ class PluginBundles:
                     existing["dashboard"] = dashboard
                 if variables is not None:
                     existing["variables"] = variables
+                if dashboards is not None:
+                    existing["dashboards"] = dashboards
                 rec = existing
             else:
                 rec = {"id": _next_id(items), "name": name, "plugins": plugins,
-                       "dashboard": dashboard or [], "variables": variables or [],
+                       "dashboard": dashboard or [], "dashboards": dashboards or [],
+                       "variables": variables or [],
                        "created_at": _now()}
                 items.append(rec)
             _write(self.FILE, data)
