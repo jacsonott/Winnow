@@ -16,6 +16,7 @@
    Loaded as <script type="module">, so it is deferred and strict by default.
 */
 
+import * as connection from './connection.js';
 import * as core from './core.js';
 import * as state from './state.js';
 import { maybeOfferDefaultPrompt } from './assoc.js';
@@ -81,7 +82,7 @@ import { wireUi } from './ui.js';
    spread would freeze the value of a rebindable export like ROW_H at boot.
    Collision-free by construction — these names all shared one scope until
    the file was split. Not an API; nothing in the app reads it. */
-const NAMESPACES = { splash, core, state, jobs, tabhistory, charts, stack, notes, watchlist, dashboard, filters, sources, view, columns, tsformat, derived, grid, grouping, tags, detail, ui, filterbuilder, savedfilters, timeframe, merge, importer, tables, plugins, search, session, sql, timeline, rowmenu, keymap, settings, profilebuilder, userenv, home, errlog };
+const NAMESPACES = { splash, core, connection, state, jobs, tabhistory, charts, stack, notes, watchlist, dashboard, filters, sources, view, columns, tsformat, derived, grid, grouping, tags, detail, ui, filterbuilder, savedfilters, timeframe, merge, importer, tables, plugins, search, session, sql, timeline, rowmenu, keymap, settings, profilebuilder, userenv, home, errlog };
 window.__winnow = {};
 for (const ns of Object.values(NAMESPACES)) {
   for (const key of Object.keys(ns)) {
@@ -139,12 +140,8 @@ wireFileDrop();
 if (splash.splashEnabled(S.appearance)) {
   splash.runSplash();   // takes its colours from the live skin, not an argument
 }
-/* Presence: the open connection is how the server knows a browser is
-   still attached — it shuts itself down once every window is gone (see
-   server.py's idle-shutdown block). EventSource reconnects on its own
-   after a server restart, and no handlers are needed because no data ever
-   flows; the connection is the message. */
-new EventSource('/api/presence');
+// Presence, plus the banner that says so when the server stops answering.
+connection.wireConnection();
 
 boot().catch((e) => toast('Could not start: ' + e.message, 8000));
 

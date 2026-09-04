@@ -16,6 +16,9 @@ import { S } from './state.js';
 import { dropdownMenu, modal, promptDialog, confirmDialog } from './ui.js';
 
 let widgets = [];   // the CURRENT board's widgets (the one with S.dashboardId)
+let loadError = null;   // why they aren't here, if they aren't — an empty
+                        // board and an unreachable server look identical
+                        // otherwise, and one of them is alarming
 
 /* The dashboard being dragged from the sidebar, for the Pages header's
    drop target (sources.js) — a tiny shared holder rather than a
@@ -40,8 +43,8 @@ export async function loadDashboards() {
 }
 
 async function loadWidgets(id) {
-  try { widgets = (await api(`/api/dashboards/${id}`)).widgets || []; }
-  catch { widgets = []; }
+  try { widgets = (await api(`/api/dashboards/${id}`)).widgets || []; loadError = null; }
+  catch (e) { widgets = []; loadError = e; }
 }
 
 async function persist() {
@@ -229,6 +232,20 @@ function render() {
   renderBar();
   const grid = $('dashGrid');
   grid.replaceChildren();
+  if (!widgets.length && loadError) {
+    // Say the widgets could not be FETCHED. Offering "＋ Add widget" here
+    // invites someone to rebuild a board that is still perfectly fine.
+    const e = el('div', 'dash-empty');
+    e.append(el('p', null, `Could not load this dashboard — ${loadError.message}.`));
+    e.append(el('p', null, loadError.offline
+      ? 'Its widgets are safe in the case file; they will be here once Winnow is running again.'
+      : 'Its widgets are safe in the case file.'));
+    const retry = el('button', 'btn ghost', 'Try again');
+    retry.onclick = () => showDashboard(S.dashboardId);
+    e.append(retry);
+    grid.append(e);
+    return;
+  }
   if (!widgets.length) {
     const e = el('div', 'dash-empty');
     e.append(el('p', null, 'No widgets yet. A dashboard is a grid of small summaries of the case.'));

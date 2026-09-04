@@ -1883,6 +1883,18 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 .env-prefix { font: 12px var(--mono); color: var(--dim); padding-right: 2px; }
 .env-name-in { flex: 1; }
 
+/* "The server stopped answering" — a bar, not a toast: a toast fades,
+   and this condition does not go away on its own. */
+.conn-banner {
+  position: fixed; left: 50%; transform: translateX(-50%); bottom: 16px; z-index: 90;
+  display: flex; align-items: center; gap: 12px; max-width: min(760px, 92vw);
+  padding: 10px 14px; border-radius: var(--radius-md);
+  background: var(--panel); color: var(--text);
+  border: var(--border-w) solid var(--danger); box-shadow: var(--shadow-modal);
+}
+.conn-msg { font-size: 12px; line-height: 1.45; }
+.conn-banner .btn { white-space: nowrap; flex: 0 0 auto; }
+
 /* The profile builder (static/js/profilebuilder.js) */
 .pb-head { display: grid; gap: 2px; margin-bottom: 8px; }
 .pb-list { display: grid; gap: 2px; max-height: 240px; overflow: auto; margin: 4px 0 8px;
