@@ -44,7 +44,14 @@ export async function loadDashboards() {
 
 async function loadWidgets(id) {
   try { widgets = (await api(`/api/dashboards/${id}`)).widgets || []; loadError = null; }
-  catch (e) { widgets = []; loadError = e; }
+  catch (e) {
+    widgets = [];
+    loadError = e;
+    // 404 means this board is not in this case (deleted elsewhere, or an
+    // id left over from another case). Re-read the list so the sidebar
+    // stops offering it rather than leaving a row that can't open.
+    if (e.status === 404) { try { await loadDashboards(); } catch { /* offline */ } }
+  }
 }
 
 async function persist() {
@@ -64,6 +71,12 @@ export async function showDashboard(id) {
   syncTabChrome();
   await loadWidgets(id);
   render();
+  // The sidebar carries the "which board am I looking at" highlight, and
+  // it only moves when the sidebar is redrawn. Without this the highlight
+  // stayed on whichever board was open when the sidebar was last built,
+  // so the header named one board while the sidebar pointed at another —
+  // and an empty board read as "the board I selected has no widgets".
+  renderSidebar();
 }
 
 /* ---------------------------------------- sidebar "Dashboards" section */
@@ -236,13 +249,20 @@ function render() {
     // Say the widgets could not be FETCHED. Offering "＋ Add widget" here
     // invites someone to rebuild a board that is still perfectly fine.
     const e = el('div', 'dash-empty');
-    e.append(el('p', null, `Could not load this dashboard — ${loadError.message}.`));
-    e.append(el('p', null, loadError.offline
-      ? 'Its widgets are safe in the case file; they will be here once Winnow is running again.'
-      : 'Its widgets are safe in the case file.'));
-    const retry = el('button', 'btn ghost', 'Try again');
-    retry.onclick = () => showDashboard(S.dashboardId);
-    e.append(retry);
+    const gone = loadError.status === 404;
+    e.append(el('p', null, gone
+      ? 'This dashboard is no longer in this case — it was deleted, or it belongs to another case.'
+      : `Could not load this dashboard — ${loadError.message}.`));
+    e.append(el('p', null, gone
+      ? 'Pick one from the sidebar’s Dashboards section, or make a new one.'
+      : loadError.offline
+        ? 'Its widgets are safe in the case file; they will be here once Winnow is running again.'
+        : 'Its widgets are safe in the case file.'));
+    if (!gone) {
+      const retry = el('button', 'btn ghost', 'Try again');
+      retry.onclick = () => showDashboard(S.dashboardId);
+      e.append(retry);
+    }
     grid.append(e);
     return;
   }
