@@ -77,3 +77,48 @@ def test_a_dashboard_that_could_not_load_does_not_look_empty(page, api):
         page.evaluate("() => { __winnow.resetDashboard(); }")
         page.evaluate("() => __winnow.showGridTab()")
         page.evaluate("() => { const b = document.getElementById('connBanner'); b.hidden = true; }")
+
+
+def test_opening_a_board_moves_the_sidebar_highlight(page, api):
+    """The header named one board while the sidebar highlighted another,
+    so an empty board looked like "the board I picked has no widgets"."""
+    a = api("/api/dashboards", "POST", {"name": "Board A", "widgets": [
+        {"title": "Rows", "source": "sql", "render": "stat", "query": {"sql": "SELECT 1"}}]})
+    b = api("/api/dashboards", "POST", {"name": "Board B", "widgets": []})
+    try:
+        page.evaluate("() => __winnow.loadDashboards().then(() => __winnow.renderSidebar())")
+        page.evaluate("(id) => __winnow.showDashboard(id)", a["id"])
+        page.wait_for_selector("#dashBar .dash-title:has-text('Board A')")
+        page.wait_for_selector("#sidebarList .sidebar-row.active:has-text('Board A')")
+
+        # open the other one: the highlight has to follow, not stay put
+        page.evaluate("(id) => __winnow.showDashboard(id)", b["id"])
+        page.wait_for_selector("#dashBar .dash-title:has-text('Board B')")
+        page.wait_for_selector("#sidebarList .sidebar-row.active:has-text('Board B')")
+        assert page.locator("#sidebarList .sidebar-row.active").count() == 1
+        # and the empty board it opened is described as empty, not as failed
+        assert "No widgets yet" in page.locator("#dashGrid .dash-empty").inner_text()
+    finally:
+        for d in (a, b):
+            api(f"/api/dashboards/{d['id']}", "DELETE")
+        page.evaluate("() => { __winnow.resetDashboard(); }")
+        page.evaluate("() => __winnow.showGridTab()")
+        page.evaluate("() => __winnow.loadDashboards().then(() => __winnow.renderSidebar())")
+
+
+def test_a_board_that_is_gone_says_so_and_leaves_the_list(page, api):
+    d = api("/api/dashboards", "POST", {"name": "Vanishing board", "widgets": []})
+    try:
+        page.evaluate("() => __winnow.loadDashboards().then(() => __winnow.renderSidebar())")
+        api(f"/api/dashboards/{d['id']}", "DELETE")        # deleted behind the UI's back
+        page.evaluate("(id) => __winnow.showDashboard(id)", d["id"])
+        page.wait_for_selector("#dashGrid .dash-empty")
+        text = page.locator("#dashGrid .dash-empty").inner_text()
+        assert "no longer in this case" in text
+        assert "Try again" not in text                     # retrying a 404 is pointless
+        page.wait_for_function(
+            "() => !__winnow.S.dashboards.some((b) => b.name === 'Vanishing board')")
+    finally:
+        page.evaluate("() => { __winnow.resetDashboard(); }")
+        page.evaluate("() => __winnow.showGridTab()")
+        page.evaluate("() => __winnow.loadDashboards().then(() => __winnow.renderSidebar())")
