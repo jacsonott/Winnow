@@ -954,10 +954,10 @@ What that leaves to you, as an author:
 
 A token's supported home is an environment variable with the
 `WINNOW_` prefix, which the analyst sets under **Settings → Environment**
-(or exports from the shell — the shell wins). Winnow keeps it in the
+(or exports it outside Winnow — an outside value wins). Winnow keeps it in the
 user's own environment — `HKCU\Environment` on Windows, an owner-only
 `~/.config/winnow/env` elsewhere — and loads it into the process at
-startup. It is never in the case file, never in a Winnow setting, never
+startup, so it survives a restart on every platform. It is never in the case file, never in a Winnow setting, never
 returned by an API, never shown again once saved.
 
 ```python

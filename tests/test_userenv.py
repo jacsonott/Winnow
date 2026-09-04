@@ -130,10 +130,41 @@ def test_importing_server_does_not_load_the_store(tmp_path, monkeypatch):
     assert server is not None
 
 
+def test_a_saved_value_the_os_hands_back_is_still_ours(tmp_path, monkeypatch):
+    """The Windows restart shape: HKCU\\Environment IS the store, so the next
+    launch inherits the variable from the OS and finds it stored too. That
+    is our own value coming back, not a foreign export — the panel must not
+    call it a shell export, and the analyst must still be able to rotate it."""
+    st = userenv.FileEnvStore(tmp_path / "env")
+    st.set("WINNOW_TOKEN", "s3cret")
+    monkeypatch.setenv("WINNOW_TOKEN", "s3cret")      # as a new process would inherit it
+    assert userenv.load_into_environ(st) == []        # nothing to load; already correct
+    row = next(v for v in userenv.list_vars(st) if v["name"] == "WINNOW_TOKEN")
+    assert row["stored"] and row["live"] and row["shell"] is False
+    userenv.set_var("WINNOW_TOKEN", "rotated", st)    # and it can be changed
+    assert st.load()["WINNOW_TOKEN"] == "rotated" and os.environ["WINNOW_TOKEN"] == "rotated"
+    userenv.delete_var("WINNOW_TOKEN", st)
+    assert "WINNOW_TOKEN" not in os.environ and st.load() == {}
+
+
+def test_an_outside_value_that_differs_from_the_store_still_wins(tmp_path, monkeypatch):
+    """A shell export of the SAME name but a different value is genuinely
+    foreign: it wins for this run and can't be edited from here."""
+    st = userenv.FileEnvStore(tmp_path / "env")
+    st.set("WINNOW_TOKEN", "from-winnow")
+    monkeypatch.setenv("WINNOW_TOKEN", "from-the-shell")
+    assert userenv.load_into_environ(st) == []
+    assert userenv.get("WINNOW_TOKEN") == "from-the-shell"
+    row = next(v for v in userenv.list_vars(st) if v["name"] == "WINNOW_TOKEN")
+    assert row["shell"] is True
+    with pytest.raises(ValueError, match="set outside Winnow"):
+        userenv.set_var("WINNOW_TOKEN", "x", st)
+
+
 def test_a_shell_export_cannot_be_overridden_from_here(tmp_path, monkeypatch):
     st = userenv.FileEnvStore(tmp_path / "env")
     monkeypatch.setenv("WINNOW_FROM_SHELL", "shell")
-    with pytest.raises(ValueError, match="exported by the shell"):
+    with pytest.raises(ValueError, match="set outside Winnow"):
         userenv.set_var("WINNOW_FROM_SHELL", "new", st)
     assert os.environ["WINNOW_FROM_SHELL"] == "shell" and st.load() == {}
     listed = {v["name"]: v for v in userenv.list_vars(st)}

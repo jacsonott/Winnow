@@ -219,7 +219,7 @@ class PluginRequest:
         """A `WINNOW_*` environment variable — the place for a token or
         password, which must never be a case variable (case data travels
         with the file). Set under Settings → Environment or exported by
-        the shell; the shell wins. Only the `WINNOW_` prefix is readable
+        outside Winnow; an outside value wins. Only the `WINNOW_` prefix is readable
         through here (ValueError otherwise) — a convention that keeps
         plugins on the analyst-managed names, not a sandbox: a plugin is
         ordinary Python and can read os.environ itself. Never send the
