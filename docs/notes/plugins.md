@@ -11,6 +11,25 @@ see [docs/notes/README.md](README.md) for the whole set.
 
 ---
 
+- **A plugin route handler runs in a worker thread, and must keep
+  doing so.** `api_plugin_dispatch` is `async def`, so for a while it
+  called `entry["handler"](req)` straight from the event loop — one
+  plugin waiting on an LLM completion froze the whole server, presence
+  stream included, for as long as the call took. It now goes through
+  `run_in_threadpool`. Row actions were always fine (their route is a
+  plain `def`, which FastAPI threadpools for you); if you add another
+  plugin entry point from an `async def`, thread it the same way.
+
+- **Plugin tables are namespaced, and that is the isolation.** A plugin's
+  own tables live in the case file as `plugin_<fs_name>_<name>`
+  (`req.table("chat")`). Both halves of the name are validated because
+  both reach SQL as identifiers, and the handle substitutes `{}` with its
+  own quoted table name rather than letting a plugin write table names
+  itself — that substitution IS the boundary between two plugins' data.
+  They carry no `sources` row, so the grid, the sidebar and merges never
+  see them; use `ingest_rows` when an analyst should browse the result.
+
+
 - **Plugins** (plugin_api.py, `plugins/`, Settings → Plugins) are
   Notepad++-style drop-in extensions, first loaded at server *import* (so
   `uvicorn server:app` gets them, not just `python server.py`;

@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form, Query
+from starlette.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse, FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -2054,10 +2055,16 @@ async def api_plugin_dispatch(fs_name: str, route: str, request: Request):
             raise HTTPException(400, "Request body must be JSON")
     req = plugin_api.PluginRequest(
         request.method, route, dict(request.query_params), body, STORE,
-        storage=WS.PluginData(fs_name),
+        storage=WS.PluginData(fs_name), plugin=fs_name,
     )
     try:
-        return JSONResponse(entry["handler"](req))
+        # In a worker thread, NOT on the event loop. A plugin handler is
+        # ordinary blocking Python — an LLM call, a lookup against a remote
+        # service — and calling it here directly froze the whole server for
+        # its duration: the grid, the presence stream, every other request.
+        # Row actions already went through the threadpool (their route is a
+        # plain `def`); this is the one that didn't.
+        return JSONResponse(await run_in_threadpool(entry["handler"], req))
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -2105,7 +2112,7 @@ def api_plugin_row_action(fs_name: str, action_id: str, body: RowActionBody):
     req = plugin_api.PluginRequest(
         "POST", f"row_action/{action_id}", {},
         {"source_id": body.source_id, "column": body.column, "value": body.value, "rows": rows},
-        STORE, storage=WS.PluginData(fs_name))
+        STORE, storage=WS.PluginData(fs_name), plugin=fs_name)
     try:
         out = action["handler"](req)
     except ValueError as e:

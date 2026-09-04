@@ -126,9 +126,13 @@ A tab plus its backend route, the full custom-UI shape:
         # secrets (see register_row_action's note on WINNOW_* env vars).
         # req: PluginRequest — method, route, query (dict of str), body,
         # storage (per-plugin JSON), variables / set_variable (case
-        # variables from Case settings — config, never secrets), and
+        # variables from Case settings — config, never secrets),
         # env("WINNOW_X") for a token the analyst saved under Settings →
-        # Environment (server-side only; only WINNOW_* names are readable)
+        # Environment (server-side only; only WINNOW_* names are readable),
+        # and table("chat") for the plugin's own tables inside the case file
+        #
+        # Handlers run in a worker thread, so blocking here (an HTTP call to
+        # a remote service) does not stall the rest of Winnow.
         # (parsed JSON or None), and store (the open Store, or None when no
         # case is open). For reads, use req.store.run_sql(sql, limit) — it
         # opens its own read-only connection, so a slow plugin query never
@@ -169,7 +173,7 @@ from . import userenv
 # provides, with a message that says to update Winnow — the failure mode
 # is otherwise an AttributeError deep inside register() that reads like a
 # plugin bug.
-PLUGIN_API_VERSION = 5
+PLUGIN_API_VERSION = 6
 
 FORMAT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 # API routes may nest ("chat/stream") but each segment keeps the same shape.
@@ -193,13 +197,17 @@ class PluginRequest:
     not to provide one."""
 
     def __init__(self, method: str, route: str, query: dict, body: Any, store: Any,
-                 storage: Any = None):
+                 storage: Any = None, plugin: str = ""):
         self.method = method
         self.route = route
         self.query = query
         self.body = body
         self.store = store
         self.storage = storage
+        # The plugin's fs_name — what namespaces its own tables. Optional so
+        # the existing 6-positional construction (and every test that uses
+        # it) keeps working; req.table() is what needs it.
+        self.plugin = plugin
 
     @property
     def variables(self) -> dict:
@@ -214,6 +222,26 @@ class PluginRequest:
             return self.store.get_variables()
         except Exception:  # noqa: BLE001 — a plugin reading a variable must never 500 the case
             return {}
+
+    def table(self, name: str) -> "PluginTable":
+        """One of this plugin's own tables in the OPEN CASE — created on
+        first use, private to this plugin, and part of the case file, so it
+        travels with the .db when it is handed to someone else.
+
+        For data that belongs to the case but is not evidence an analyst
+        browses: an LLM chat transcript that has to render offline, a cache
+        of enrichment results, a plugin's own bookkeeping. Machine-level
+        state (settings, anything not about THIS case) stays in
+        `req.storage`; a table an analyst should see in the grid is still
+        `req.store.ingest_rows`, which makes a real source.
+
+        Raises ValueError when no case is open — there is nowhere to put it.
+        """
+        if self.store is None:
+            raise ValueError("No case is open — plugin tables live in the case file")
+        if not self.plugin:
+            raise ValueError("This request has no plugin identity")
+        return PluginTable(self.store, self.plugin, name)
 
     def env(self, name: str, default: str | None = None) -> str | None:
         """A `WINNOW_*` environment variable — the place for a token or
@@ -299,6 +327,65 @@ class IngestFormat:
             "description": self.description,
             "options": self.options,
         }
+
+
+class PluginTable:
+    """A plugin's own table in the case file (`req.table("chat")`).
+
+    The real table is `plugin_<fs_name>_<name>`, and the namespacing is not
+    something an author has to think about: `{}` inside any SQL passed here
+    is replaced with this table's quoted name, and it is the only table
+    reference a plugin gets, so one plugin cannot reach another's data by
+    naming it.
+
+    Reads use Winnow's reader pool, writes the single writer connection
+    (store invariant #4), so a long import never blocks reading a chat
+    transcript back, and two plugins writing at once are serialised rather
+    than corrupting each other.
+    """
+
+    def __init__(self, store: Any, plugin: str, name: str):
+        self._store = store
+        self._plugin = plugin
+        self.name = name
+        # Validates both halves; raises before anything is created.
+        self.table = store._plugin_table(plugin, name)
+
+    def create(self, columns: str) -> "PluginTable":
+        """CREATE TABLE IF NOT EXISTS — safe to call on every request, which
+        is the intended usage (there is no install hook to create it in).
+
+            req.table("chat").create("id INTEGER PRIMARY KEY, role TEXT, "
+                                     "content TEXT, at TEXT")
+        """
+        self._store.plugin_table_create(self._plugin, self.name, columns)
+        return self
+
+    def exists(self) -> bool:
+        return self._store.plugin_table_exists(self._plugin, self.name)
+
+    def insert(self, rows) -> int:
+        """One dict, or a list of dicts sharing their columns. Values are
+        bound, never formatted into SQL."""
+        return self._store.plugin_table_insert(self._plugin, self.name, rows)
+
+    def rows(self, where: str = "", params=(), limit: int = 5000) -> list:
+        """Rows as dicts. `where` is the tail of the query:
+
+            t.rows("WHERE role = ? ORDER BY id DESC", ["user"], limit=50)
+        """
+        return self._store.plugin_table_rows(self._plugin, self.name, where, params, limit)
+
+    def execute(self, sql: str, params=()) -> int:
+        """Any single statement against this table — UPDATE, DELETE, an
+        index. Write `{}` where the table name goes. Returns rowcount.
+
+            t.execute("DELETE FROM {} WHERE at < ?", [cutoff])
+        """
+        return self._store.plugin_table_write(self._plugin, self.name, sql, params)
+
+    def drop(self) -> None:
+        self._store.plugin_table_drop(self._plugin, self.name)
 
 
 class PluginAPI:

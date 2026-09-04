@@ -583,6 +583,18 @@ def edges_handler(req):
 handlers are trivially unit-testable and the contract survives framework
 upgrades.
 
+### Blocking is fine
+
+Handlers run in a worker thread, not on the event loop, so a call that
+takes seconds — an LLM completion, a lookup against a remote service — does
+not stall the rest of Winnow. The grid, other plugins and the analyst's
+next click keep working while yours waits.
+
+Two things that follow: don't hold Winnow's writer lock across a network
+call (do the call, then write), and remember the analyst can be doing
+anything meanwhile, including closing the case — `req.store` is the store
+as it was when the request arrived.
+
 ### Errors
 
 - **`raise ValueError("…")` → HTTP 400** with your message shown to the
@@ -734,6 +746,50 @@ Validate first, quote second: check the column is actually in
 `src["columns"]` before using it, then quote it. Values (as opposed to
 identifiers) should go through `run_sql`'s SQL as literals you built from
 validated input, or be avoided entirely by filtering in Python.
+
+### Your own tables
+
+A plugin can keep its own tables **inside the case file**:
+
+```python
+def chat_handler(req):
+    t = req.table("chat").create(
+        "id INTEGER PRIMARY KEY, role TEXT, content TEXT, at TEXT")
+    if req.method == "POST":
+        t.insert({"role": "user", "content": req.body["text"], "at": now()})
+    return {"messages": t.rows("ORDER BY id")}
+```
+
+`create` is `CREATE TABLE IF NOT EXISTS`, so calling it on every request is
+the intended usage — there is no install hook to create it in.
+
+| Call | What it does |
+| --- | --- |
+| `req.table(name)` | A handle. Created on first `create()`; `ValueError` if no case is open |
+| `t.create(columns)` | `CREATE TABLE IF NOT EXISTS`, idempotent; returns the handle |
+| `t.insert(row_or_rows)` | One dict, or a list sharing their columns. Values are bound |
+| `t.rows(where, params, limit)` | Rows as dicts; `where` is the query tail (`"WHERE role = ? ORDER BY id"`) |
+| `t.execute(sql, params)` | Any single statement; write `{}` where the table name goes |
+| `t.exists()` / `t.drop()` | Self-explanatory |
+| `t.table` | The real table name, if you want to write your own SQL |
+
+The real table is `plugin_<fs_name>_<name>`, and that namespacing is not
+yours to think about: `{}` is substituted with this table's quoted name and
+is the only table reference the handle gives you, so one plugin cannot
+reach another's data by naming it. Names are lowercased; a name that isn't
+a letter followed by letters, digits or `_` is refused.
+
+**Which of the three stores you want:**
+
+| | Lives in | Use it for |
+| --- | --- | --- |
+| `req.table(...)` | The case file | Data about THIS case that should travel with the `.db` — a chat transcript that must render offline, cached enrichment |
+| `req.storage` | `workspace/plugin_data/<fs_name>.json` | Machine-level settings, not tied to a case |
+| `req.store.ingest_rows(...)` | The case file, as a **source** | Output an analyst should browse, filter and tag in the grid |
+
+Reads use Winnow's reader pool and writes the single writer connection, so
+reading a transcript never queues behind an import, and two plugins writing
+at once are serialised rather than corrupting each other.
 
 ### Writing tables from a plugin
 
@@ -912,7 +968,8 @@ python server.py --plugins-dir ~/src/my-winnow-plugins
 
 Installs from the UI always land in the first directory (`plugins/`).
 
-**Versioning:** the current plugin API version is **5** (`req.env`,
+**Versioning:** the current plugin API version is **6** (`req.table`
+arrived in 6; `req.env`,
 `req.variables` / `req.set_variable` and the tab context's
 `state.variables` / `setVariable` arrived in 5; toolbar panels
 and the view-change context arrived in 4; row actions in 3; `api.q`/
@@ -1054,6 +1111,8 @@ What every API-route and row-action handler receives:
 | `variables` | The case's variables as `{name: value}` (`{}` with no case) |
 | `set_variable(name, value)` | Create or update one case variable |
 | `env(name, default=None)` | A `WINNOW_*` environment variable — the home for tokens; prefix-enforced, server-side only |
+| `table(name)` | A `PluginTable` — this plugin's own table in the case file (see [Your own tables](#your-own-tables)) |
+| `plugin` | The plugin's `fs_name`, which namespaces its tables |
 
 ### HTTP surface
 
