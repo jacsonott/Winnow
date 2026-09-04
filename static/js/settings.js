@@ -620,8 +620,7 @@ export function openSettings() {
       saveAppearance();
     };
     capInput.onchange = commitCap;
-    const noCapLabel = el('label');
-    noCapLabel.style.cssText = 'display:flex;align-items:center;gap:6px';
+    const noCapLabel = el('label', 'check-row');
     const noCap = el('input');
     noCap.type = 'checkbox';
     noCap.checked = !autofitMaxWidth();
@@ -641,8 +640,7 @@ export function openSettings() {
       'For running Winnow inside RDP/VNC: scrolls the grid by whole rows (one repaint per wheel '
       + 'notch, like native apps), and stops animations and hover repaints, so the remote display '
       + 'encoder ships small deltas instead of re-encoding the viewport. Saved on this machine.'));
-    const remoteLabel = el('label');
-    remoteLabel.style.cssText = 'display:flex;align-items:center;gap:6px';
+    const remoteLabel = el('label', 'check-row');
     const remoteCb = el('input');
     remoteCb.type = 'checkbox';
     remoteCb.checked = !!S.appearance.remoteSession;
@@ -669,7 +667,7 @@ export function openSettings() {
       let info;
       try { info = await api('/api/assoc/types'); } catch { return; }
       if (info.platform !== 'windows') return;
-      const bgLabel = el('label');
+      const bgLabel = el('label', 'check-row');
       const bgCb = el('input');
       bgCb.type = 'checkbox';
       bgCb.checked = !!info.background;
@@ -693,8 +691,7 @@ export function openSettings() {
        any key or click while it runs — this switch is for someone who opens
        Winnow all day and doesn't want it at all. prefers-reduced-motion is
        honoured without needing this turned off. */
-    const splashLabel = el('label');
-    splashLabel.style.cssText = 'display:flex;align-items:center;gap:6px';
+    const splashLabel = el('label', 'check-row');
     const splashCb = el('input');
     splashCb.type = 'checkbox';
     splashCb.checked = S.appearance.splash !== false;
@@ -728,8 +725,7 @@ export function openSettings() {
     /* Pages as one dropdown: with several plugin tabs the page strip
        competes with the table tabs for the bar — collapsing it to a single
        Pages ▾ button (like Filters ▾) hands that width back. */
-    const pagesLabel = el('label');
-    pagesLabel.style.cssText = 'display:flex;align-items:center;gap:6px';
+    const pagesLabel = el('label', 'check-row');
     const pagesCb = el('input');
     pagesCb.type = 'checkbox';
     pagesCb.checked = !!S.appearance.pagesMenu;
