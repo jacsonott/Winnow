@@ -122,6 +122,19 @@ see [docs/notes/README.md](README.md) for the whole set.
   case — a fresh install's first double-click must not stack the
   cases-dir setup prompt on top of the file the analyst opened.
 
+- **A dropped presence stream is not a closed window.** Idle shutdown
+  used to fire `IDLE_EXIT_S` after the last stream ended, which is right
+  when the analyst closed the window and wrong every other way a stream
+  can end: Edge and Chrome suspend background tabs, laptops sleep, VMs
+  pause. Analysts hit exactly that — the server exited while the window
+  was still sitting there, and the page's next click failed. Now
+  `connection.js` POSTs `/api/goodbye` on `pagehide` (keepalive, so it
+  outlives the unload; skipped when `persisted` says the page is only
+  going into the bfcache), and the short fuse applies only when that
+  arrived. A stream that merely stopped gets `SUSPENDED_EXIT_S` instead.
+  `_presence_open()` clears the flag, so closing one of two windows
+  cannot put the survivor on the short fuse.
+
 - **Tests that spawn a real `server.py` must isolate it by env, not
   fixture.** The autouse `isolate_workspace` monkeypatch can't reach a
   subprocess, so a spawned server sees the real `INSTALL_ROOT` and will

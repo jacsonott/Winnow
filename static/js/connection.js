@@ -65,8 +65,27 @@ function hide() {
    attached — it shuts itself down once every window is gone. No data ever
    flows over it; the connection itself is the message, which is exactly
    why its open/error edges are the earliest notice we get either way. */
+/* Tell the server this window is going, so it can tell a closed window
+   from a suspended one. Without it the server sees the same thing either
+   way — the presence stream stopping — and has to wait out a much longer
+   fuse before assuming nobody is coming back.
+
+   `persisted` means the page is heading into the back/forward cache and
+   may be restored, which is not a goodbye. keepalive lets the request
+   outlive the page; a plain fetch here is cancelled on unload. */
+function sayGoodbye(e) {
+  if (e && e.persisted) return;
+  try {
+    fetch('/api/goodbye', {
+      method: 'POST', keepalive: true,
+      headers: { 'X-Timeline-Lite-Client': '1' },
+    }).catch(() => {});
+  } catch { /* unload is a hostile place; never throw here */ }
+}
+
 export function wireConnection() {
   onConnectionChange((up) => (up ? hide() : show()));
+  window.addEventListener('pagehide', sayGoodbye);
   stream = new EventSource('/api/presence');
   stream.onopen = hide;
   stream.onerror = () => {
