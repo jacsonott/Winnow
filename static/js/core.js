@@ -78,12 +78,35 @@ export const el = (tag, cls, txt) => {
    app sends no CORS allow-headers. GETs are left alone since they're
    read-only and this header would break the plain-navigation download links
    (Export, session/filters export) that can't set custom headers at all. */
+/* The request never reached a server: it shut itself down (Winnow exits
+   a couple of minutes after the last window closes), it crashed, or the
+   machine slept through it. `fetch` reports all of that as the same bare
+   TypeError — "Failed to fetch" — which every catch in the app then shows
+   an analyst verbatim, so it has to be replaced with something true and
+   actionable before it gets there. */
+export const OFFLINE_MESSAGE =
+  'lost the connection to Winnow’s server — it may have shut down';
+const connListeners = [];
+export function onConnectionChange(fn) { connListeners.push(fn); }
+function announce(up) { for (const fn of connListeners) fn(up); }
+
 export async function api(path, opts) {
   const o = { ...opts };
   if (o.method && o.method !== 'GET') {
     o.headers = { ...(o.headers || {}), 'X-Timeline-Lite-Client': '1' };
   }
-  const r = await fetch(path, o);
+  let r;
+  try {
+    r = await fetch(path, o);
+  } catch (e) {
+    const err = new Error(OFFLINE_MESSAGE);
+    err.offline = true;      // callers that want to say more can branch on it
+    err.cause = e;
+    announce(false);
+    throw err;
+  }
+  // Any answer at all means the server is there — a 400 is the app talking.
+  announce(true);
   if (!r.ok) {
     let msg = r.statusText, detail = null;
     // FastAPI's `detail` is usually a string, but a few routes raise a
