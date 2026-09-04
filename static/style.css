@@ -1883,6 +1883,12 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 .env-prefix { font: 12px var(--mono); color: var(--dim); padding-right: 2px; }
 .env-name-in { flex: 1; }
 
+/* A checkbox and its label on one line. A class, not four copies of the
+   same inline style — the fifth row (Windows-only, so invisible to
+   everyone who reviewed the other four) was written without it and sat
+   visibly tighter against its checkbox. */
+.check-row { display: flex; align-items: center; gap: 6px; }
+
 /* The profile builder (static/js/profilebuilder.js) */
 .pb-head { display: grid; gap: 2px; margin-bottom: 8px; }
 .pb-list { display: grid; gap: 2px; max-height: 240px; overflow: auto; margin: 4px 0 8px;
