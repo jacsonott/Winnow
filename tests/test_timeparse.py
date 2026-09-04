@@ -311,3 +311,24 @@ def test_month_name_columns_type_as_datetime_at_ingest():
     assert DATE_RE.match("23 June, 2026")
     assert not DATE_RE.match("word salad 2026")
     assert not DATE_RE.match("mayhem 5 2026")  # 'may' must be the whole word
+
+
+@pytest.mark.parametrize("bad", ["inf", "-inf", "Infinity", "nan", "1e400"])
+def test_webkit_ignores_values_that_are_not_finite(bad):
+    """int(float("inf")) raises OverflowError, which is not a ValueError —
+    it escaped the guard and 500ed the column-suggestion route on any
+    column holding one."""
+    assert timeparse._parse_webkit(bad, {}, {}) is None
+
+
+@pytest.mark.parametrize("op", ["_parse_unix", "_parse_mac", "_parse_excel", "_parse_webkit"])
+@pytest.mark.parametrize("bad", ["inf", "-inf", "Infinity", "nan", "1e400", "-1e400"])
+def test_no_numeric_parser_raises_on_a_value_that_is_not_finite(op, bad):
+    assert getattr(timeparse, op)(bad, {}, {}) is None
+
+
+def test_detecting_a_column_of_infinities_suggests_nothing_rather_than_raising():
+    """What 500ed the column-suggestion route: detect() runs every parser
+    over the samples, so one unguarded conversion took the whole request
+    down with an OverflowError."""
+    assert timeparse.detect(["inf", "nan", "1e400", "inf"]) == []

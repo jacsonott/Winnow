@@ -41,6 +41,7 @@ still timestamps only.
 
 from __future__ import annotations
 
+import math
 import re
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -258,13 +259,24 @@ _UTC_OFFSET_PARAM = {
 _EPOCH_UNITS = (("s", 1), ("ms", 1_000), ("us", 1_000_000), ("ns", 1_000_000_000))
 
 
-def _parse_unix(value: Any, params: dict, state: dict) -> str | None:
-    s = str(value).strip()
+def _finite(value: Any) -> float | None:
+    """A float that arithmetic can survive, or None. "inf", "-inf", "nan"
+    and "1e400" all parse happily as floats and then raise from int(),
+    timedelta() or round() — OverflowError or a ValueError deep inside the
+    stdlib, whichever the call site happens to hit. A value that is not
+    finite is not a timestamp in any of these encodings, so it is rejected
+    once, here, instead of four times in four different ways."""
     try:
-        v = float(s)
+        f = float(str(value).strip())
     except (TypeError, ValueError):
         return None
-    if v <= 0:
+    return f if math.isfinite(f) else None
+
+
+def _parse_unix(value: Any, params: dict, state: dict) -> str | None:
+    s = str(value).strip()
+    v = _finite(s)
+    if v is None or v <= 0:
         return None
     unit = params.get("unit", "auto")
     for name, scale in _EPOCH_UNITS:
@@ -340,10 +352,10 @@ _WEBKIT_OFFSET_US = 11_644_473_600_000_000
 
 def _parse_webkit(value: Any, params: dict, state: dict) -> str | None:
     s = str(value).strip()
-    try:
-        v = int(float(s))
-    except (TypeError, ValueError):
+    f = _finite(s)
+    if f is None:
         return None
+    v = int(f)
     unix_us = v - _WEBKIT_OFFSET_US
     if unix_us <= 0:
         return None
@@ -508,11 +520,8 @@ register_op({
 
 def _parse_mac(value: Any, params: dict, state: dict) -> str | None:
     s = str(value).strip()
-    try:
-        v = float(s)
-    except (TypeError, ValueError):
-        return None
-    if v <= 0:
+    v = _finite(s)
+    if v is None or v <= 0:
         return None
     try:
         dt = _MAC_EPOCH + timedelta(seconds=v)
@@ -534,11 +543,8 @@ register_op({
 
 def _parse_excel(value: Any, params: dict, state: dict) -> str | None:
     s = str(value).strip()
-    try:
-        v = float(s)
-    except (TypeError, ValueError):
-        return None
-    if v <= 0:
+    v = _finite(s)
+    if v is None or v <= 0:
         return None
     # Round to the nearest second: a fractional day stored as a float
     # carries ~µs-scale binary noise that would otherwise surface as

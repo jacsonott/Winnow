@@ -74,6 +74,15 @@ HERE = paths.INSTALL_ROOT  # static/, plugins/, examples/plugins/ all hang off t
 # browser failed to open — the long fuse is what still reaps that one.
 
 IDLE_EXIT_S = float(os.environ.get("WINNOW_IDLE_EXIT_S", "120"))
+# A window that goes quiet is not necessarily a window that closed. Edge
+# and Chrome suspend background tabs, a laptop sleeps, a VM is paused — the
+# presence stream drops in all of those exactly as it does when the analyst
+# closes the window, and in all of those the window is still there waiting.
+# So the short fuse above applies only when a page SAID it was going (the
+# keepalive POST to /api/goodbye that connection.js sends on pagehide); a
+# stream that merely stopped gets this longer one, and a suspended tab that
+# wakes up finds its server still running.
+SUSPENDED_EXIT_S = float(os.environ.get("WINNOW_SUSPENDED_EXIT_S", "1800"))
 NEVER_CONNECTED_EXIT_S = float(os.environ.get("WINNOW_NEVER_CONNECTED_EXIT_S", "900"))
 IDLE_TICK_S = float(os.environ.get("WINNOW_IDLE_TICK_S", "10"))
 
@@ -83,6 +92,8 @@ class _Presence:
         self.streams = 0            # open /api/presence connections
         self.inflight = 0           # other HTTP requests mid-flight
         self.ever_connected = False
+        self.said_goodbye = False   # a page reported itself closing, so the
+                                    # stream ending means gone, not asleep
         self.started = time.monotonic()
         self.last_zero = time.monotonic()
         self.enabled = True         # main() clears this for --no-idle-shutdown
@@ -107,7 +118,13 @@ def _idle_exit_reason(now: float, p: _Presence, busy: bool) -> str | None:
         return None
     if p.ever_connected:
         idle = now - p.last_zero
-        if idle >= IDLE_EXIT_S:
+        if p.said_goodbye:
+            if idle >= IDLE_EXIT_S:
+                return (f"the last window closed {int(idle)}s ago — "
+                        "shutting down (disable with --no-idle-shutdown)")
+        elif idle >= SUSPENDED_EXIT_S:
+            # No window said goodbye: it may have been suspended or asleep
+            # all this time, which is why this fuse is the long one.
             return (f"no browser has been connected for {int(idle)}s — "
                     "shutting down (disable with --no-idle-shutdown)")
     else:
@@ -670,6 +687,21 @@ class UpdateApply(BaseModel):
     confirm: bool = False
 
 
+def _presence_open() -> None:
+    """A window is here. Clearing said_goodbye matters when several are
+    open: one closing must not put the survivors on the closed-window
+    fuse."""
+    PRESENCE.streams += 1
+    PRESENCE.ever_connected = True
+    PRESENCE.said_goodbye = False
+
+
+def _presence_close() -> None:
+    PRESENCE.streams -= 1
+    if PRESENCE.streams == 0:
+        PRESENCE.last_zero = time.monotonic()
+
+
 @app.get("/api/presence")
 async def api_presence():
     """The connection every page holds open so the server knows a browser
@@ -677,17 +709,24 @@ async def api_presence():
     no data ever flows, the CONNECTION is the message. Disconnect is
     noticed at the next ping (≤15s), which is well inside the idle grace."""
     async def stream():
-        PRESENCE.streams += 1
-        PRESENCE.ever_connected = True
+        _presence_open()
         try:
             while True:
                 yield ": ping\n\n"
                 await asyncio.sleep(15)
         finally:
-            PRESENCE.streams -= 1
-            if PRESENCE.streams == 0:
-                PRESENCE.last_zero = time.monotonic()
+            _presence_close()
     return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+@app.post("/api/goodbye")
+def api_goodbye():
+    """A page reporting that it is closing (connection.js sends this on
+    pagehide with keepalive, so it survives the unload). Without it the
+    server cannot tell a closed window from a suspended one and has to
+    assume the analyst may come back — see SUSPENDED_EXIT_S."""
+    PRESENCE.said_goodbye = True
+    return {"ok": True}
 
 
 @app.get("/api/version")
