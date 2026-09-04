@@ -20,15 +20,22 @@ see [docs/notes/README.md](README.md) for the whole set.
   plain `def`, which FastAPI threadpools for you); if you add another
   plugin entry point from an `async def`, thread it the same way.
 
-- **Plugin tables are namespaced, and that is the isolation.** A plugin's
-  own tables live in the case file as `plugin_<fs_name>_<name>`
-  (`req.table("chat")`). Both halves of the name are validated because
-  both reach SQL as identifiers, and the handle substitutes `{}` with its
-  own quoted table name rather than letting a plugin write table names
-  itself — that substitution IS the boundary between two plugins' data.
+- **Plugin tables are namespaced against ACCIDENTS, not against a plugin
+  that means harm.** A plugin's own tables live in the case file as
+  `plugin:<fs_name>:<table>` (`req.table("chat")`). The separator is a
+  colon because `plugin_<fs>_<name>` was ambiguous exactly where this
+  codebase lives — plugin `mft_usn` table `cache` and plugin `mft` table
+  `usn_cache` both produced `plugin_mft_usn_cache`, and one plugin could
+  read and drop the other's data by accident. Underscored folder names are
+  the house style, so that was reachable, not theoretical.
+  `{table}` substitution is a convenience so authors never quote an
+  identifier; it is NOT a boundary, and the docs must not say it is — a
+  plugin holds `req.store` and can do anything to the case file. The
+  plugin half of the name is deliberately permissive (a `chat-gpt` folder
+  installs and serves routes fine, so it must not get a permanent 400
+  from `req.table()`); only `:` and `"` are refused.
   They carry no `sources` row, so the grid, the sidebar and merges never
   see them; use `ingest_rows` when an analyst should browse the result.
-
 
 - **Plugins** (plugin_api.py, `plugins/`, Settings → Plugins) are
   Notepad++-style drop-in extensions, first loaded at server *import* (so

@@ -95,9 +95,11 @@ def test_the_app_answers_while_a_plugin_waits_on_a_slow_service(server_with_slow
     port = server_with_slow_plugin
     started = threading.Event()
 
+    slow_status = []
+
     def slow():
         started.set()
-        _get(port, "/api/plugin/slowpoke/wait?s=3")
+        slow_status.append(_get(port, "/api/plugin/slowpoke/wait?s=3"))
 
     t = threading.Thread(target=slow, daemon=True)
     t.start()
@@ -111,6 +113,9 @@ def test_the_app_answers_while_a_plugin_waits_on_a_slow_service(server_with_slow
     took = time.monotonic() - t0
     assert took < 1.5, f"the app was blocked by the plugin: {took:.1f}s for two requests"
     t.join(timeout=20)
+    # Without this the test passes vacuously if the plugin stops loading:
+    # a 404 answers in ~1ms and satisfies every timing bound above.
+    assert slow_status == [200], f"the slow plugin route did not run: {slow_status}"
 
 
 def test_two_slow_plugin_calls_overlap_rather_than_queue(server_with_slow_plugin):
@@ -120,8 +125,8 @@ def test_two_slow_plugin_calls_overlap_rather_than_queue(server_with_slow_plugin
     done = []
 
     def call():
-        _get(port, "/api/plugin/slowpoke/wait?s=2")
-        done.append(time.monotonic())
+        status = _get(port, "/api/plugin/slowpoke/wait?s=2")
+        done.append((time.monotonic(), status))
 
     t0 = time.monotonic()
     threads = [threading.Thread(target=call, daemon=True) for _ in range(2)]
@@ -130,4 +135,6 @@ def test_two_slow_plugin_calls_overlap_rather_than_queue(server_with_slow_plugin
     for t in threads:
         t.join(timeout=25)
     assert len(done) == 2, "a slow plugin call did not finish"
-    assert max(done) - t0 < 3.5, "the two calls were serialised"
+    assert [st for _, st in done] == [200, 200], f"the plugin route did not run: {done}"
+    assert max(t for t, _ in done) - t0 < 3.5, "the two calls were serialised"
+    assert max(t for t, _ in done) - t0 >= 2, "the plugin did not actually block for its 2s"

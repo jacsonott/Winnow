@@ -590,10 +590,24 @@ takes seconds — an LLM completion, a lookup against a remote service — does
 not stall the rest of Winnow. The grid, other plugins and the analyst's
 next click keep working while yours waits.
 
-Two things that follow: don't hold Winnow's writer lock across a network
-call (do the call, then write), and remember the analyst can be doing
-anything meanwhile, including closing the case — `req.store` is the store
-as it was when the request arrived.
+Three things follow.
+
+Don't hold Winnow's writer lock across a network call — do the call, then
+write. The analyst can be doing anything meanwhile, including closing the
+case; `req.store` is the store as it was when the request arrived.
+
+And **your own handlers can now overlap**, which they could not when they
+ran on the event loop. Module-level mutable state needs a lock, and
+`req.storage.get()` then `.set()` is two operations: if the new value
+depends on the old, use `req.storage.update(fn)`, which does the whole
+read-modify-write under one lock.
+
+```python
+req.storage.update(lambda d: d.__setitem__("calls", d.get("calls", 0) + 1))
+```
+
+A plugin table is not affected by any of this — SQLite serialises the
+writes.
 
 ### Errors
 
@@ -757,7 +771,7 @@ def chat_handler(req):
         "id INTEGER PRIMARY KEY, role TEXT, content TEXT, at TEXT")
     if req.method == "POST":
         t.insert({"role": "user", "content": req.body["text"], "at": now()})
-    return {"messages": t.rows("ORDER BY id")}
+    return {"messages": t.rows("ORDER BY id", limit=None)}
 ```
 
 `create` is `CREATE TABLE IF NOT EXISTS`, so calling it on every request is
@@ -768,16 +782,22 @@ the intended usage — there is no install hook to create it in.
 | `req.table(name)` | A handle. Created on first `create()`; `ValueError` if no case is open |
 | `t.create(columns)` | `CREATE TABLE IF NOT EXISTS`, idempotent; returns the handle |
 | `t.insert(row_or_rows)` | One dict, or a list sharing their columns. Values are bound |
-| `t.rows(where, params, limit)` | Rows as dicts; `where` is the query tail (`"WHERE role = ? ORDER BY id"`) |
-| `t.execute(sql, params)` | Any single statement; write `{}` where the table name goes |
+| `t.rows(where, params, limit)` | Rows as dicts; `where` is the query tail (`"WHERE role = ? ORDER BY id"`). `limit` defaults to **5000** — pass `limit=None` for all of it |
+| `t.execute(sql, params)` | Any single statement; write `{table}` where the table name goes. Returns rows changed (0 for DDL) |
 | `t.exists()` / `t.drop()` | Self-explanatory |
 | `t.table` | The real table name, if you want to write your own SQL |
 
-The real table is `plugin_<fs_name>_<name>`, and that namespacing is not
-yours to think about: `{}` is substituted with this table's quoted name and
-is the only table reference the handle gives you, so one plugin cannot
-reach another's data by naming it. Names are lowercased; a name that isn't
-a letter followed by letters, digits or `_` is refused.
+The real table is `plugin:<fs_name>:<name>`, and that namespacing is not
+yours to think about: `{table}` is substituted with this table's quoted
+name (outside string literals, so `SET meta = '{table}'` stores the braces).
+Table names are lowercased; one that isn't a letter followed by letters,
+digits or `_` is refused.
+
+**This is naming, not a sandbox.** Two plugins cannot collide by accident —
+that is the guarantee. It is not isolation: a plugin is arbitrary Python
+holding `req.store`, so SQL naming another plugin's table runs, exactly as
+anything else it chooses to do to the case file would ([Security
+model](#12-security-model)).
 
 **Which of the three stores you want:**
 
@@ -1107,7 +1127,7 @@ What every API-route and row-action handler receives:
 | `query` | `dict[str, str]` from the query string |
 | `body` | Parsed JSON body, or `None` |
 | `store` | The open `Store`, or `None` when no case is open |
-| `storage` | Plain-JSON dict persisted per plugin in the workspace (`plugin_data/<fs_name>.json`) — not case data, and readable on disk, so not for secrets |
+| `storage` | Plain-JSON dict persisted per plugin in the workspace (`plugin_data/<fs_name>.json`) — not case data, and readable on disk, so not for secrets. `get()`/`set()`, or `update(fn)` when the new value depends on the old |
 | `variables` | The case's variables as `{name: value}` (`{}` with no case) |
 | `set_variable(name, value)` | Create or update one case variable |
 | `env(name, default=None)` | A `WINNOW_*` environment variable — the home for tokens; prefix-enforced, server-side only |

@@ -124,17 +124,18 @@ A tab plus its backend route, the full custom-UI shape:
         # req.variables.get("engagement"), req.variables.get("api_base") —
         # and req.set_variable(name, value) writes one. Case data, not
         # secrets (see register_row_action's note on WINNOW_* env vars).
-        # req: PluginRequest — method, route, query (dict of str), body,
-        # storage (per-plugin JSON), variables / set_variable (case
-        # variables from Case settings — config, never secrets),
-        # env("WINNOW_X") for a token the analyst saved under Settings →
-        # Environment (server-side only; only WINNOW_* names are readable),
-        # and table("chat") for the plugin's own tables inside the case file
+        # req: PluginRequest — method, route, query (dict of str), body
+        # (parsed JSON or None), and store (the open Store, or None when no
+        # case is open). Also storage (per-plugin JSON), variables /
+        # set_variable (case variables from Case settings — config, never
+        # secrets), env("WINNOW_X") for a token the analyst saved under
+        # Settings → Environment, and table("chat") for the plugin's own
+        # tables inside the case file.
         #
         # Handlers run in a worker thread, so blocking here (an HTTP call to
-        # a remote service) does not stall the rest of Winnow.
-        # (parsed JSON or None), and store (the open Store, or None when no
-        # case is open). For reads, use req.store.run_sql(sql, limit) — it
+        # a remote service) does not stall the rest of Winnow — and two of
+        # your own requests can now overlap, so don't keep mutable state in
+        # module globals without a lock. For reads, use req.store.run_sql(sql, limit) — it
         # opens its own read-only connection, so a slow plugin query never
         # holds the shared connection's lock (invariant #4). Raise
         # ValueError for a 400 the analyst can act on; return anything
@@ -332,16 +333,19 @@ class IngestFormat:
 class PluginTable:
     """A plugin's own table in the case file (`req.table("chat")`).
 
-    The real table is `plugin_<fs_name>_<name>`, and the namespacing is not
-    something an author has to think about: `{}` inside any SQL passed here
-    is replaced with this table's quoted name, and it is the only table
-    reference a plugin gets, so one plugin cannot reach another's data by
-    naming it.
+    The real table is `plugin:<fs_name>:<name>`; `{table}` inside any SQL
+    passed here is replaced with its quoted name, so an author never quotes
+    an identifier by hand and two plugins can never collide by accident.
+
+    That is naming, not a sandbox. A plugin is arbitrary Python holding
+    `req.store`, so SQL naming another plugin's table runs, exactly as
+    anything else it does to the case file would (see the guide's security
+    model). What this guarantees is that you cannot reach someone else's
+    data *by accident*.
 
     Reads use Winnow's reader pool, writes the single writer connection
     (store invariant #4), so a long import never blocks reading a chat
-    transcript back, and two plugins writing at once are serialised rather
-    than corrupting each other.
+    transcript back, and two writes are serialised rather than interleaved.
     """
 
     def __init__(self, store: Any, plugin: str, name: str):
@@ -352,8 +356,10 @@ class PluginTable:
         self.table = store._plugin_table(plugin, name)
 
     def create(self, columns: str) -> "PluginTable":
-        """CREATE TABLE IF NOT EXISTS — safe to call on every request, which
-        is the intended usage (there is no install hook to create it in).
+        """CREATE TABLE IF NOT EXISTS — safe and cheap to call on every
+        request, which is the intended usage (there is no install hook to
+        create it in): it checks on the reader pool first and only takes the
+        writer lock when there is something to create.
 
             req.table("chat").create("id INTEGER PRIMARY KEY, role TEXT, "
                                      "content TEXT, at TEXT")
@@ -369,18 +375,25 @@ class PluginTable:
         bound, never formatted into SQL."""
         return self._store.plugin_table_insert(self._plugin, self.name, rows)
 
-    def rows(self, where: str = "", params=(), limit: int = 5000) -> list:
+    def rows(self, where: str = "", params=(), limit: int | None = 5000) -> list:
         """Rows as dicts. `where` is the tail of the query:
 
             t.rows("WHERE role = ? ORDER BY id DESC", ["user"], limit=50)
+
+        A LIMIT you write in the tail is yours and is left alone. Otherwise
+        `limit` caps the result — it defaults to 5000, so pass
+        `limit=None` when you mean the whole table (a long transcript).
         """
         return self._store.plugin_table_rows(self._plugin, self.name, where, params, limit)
 
     def execute(self, sql: str, params=()) -> int:
         """Any single statement against this table — UPDATE, DELETE, an
-        index. Write `{}` where the table name goes. Returns rowcount.
+        index. Write `{table}` where the table name goes; it is substituted
+        outside string literals, so `SET meta = '{table}'` stores the braces
+        rather than the table's name. Returns the number of rows changed
+        (0 for statements that change none, DDL included).
 
-            t.execute("DELETE FROM {} WHERE at < ?", [cutoff])
+            t.execute("DELETE FROM {table} WHERE at < ?", [cutoff])
         """
         return self._store.plugin_table_write(self._plugin, self.name, sql, params)
 
