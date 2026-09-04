@@ -129,3 +129,14 @@ def test_reader_sees_committed_writes_immediately(ingested):
     assert store.tag_positions(view["view_id"]) == []
     store.set_tags(sid, [2], 1, True)
     assert store.tag_positions(view["view_id"]) != []
+
+
+def test_dashboard_reads_do_not_take_the_writer_lock(store):
+    """Opening a board while an import runs must not queue behind it —
+    invariant #4. Held writer lock, reads still answer."""
+    store.create_dashboard("Board", [{"title": "w", "source": "sql", "render": "stat",
+                                      "query": {"sql": "SELECT 1"}}])
+    (board,) = store.list_dashboards()
+    with store.lock:                      # stand in for an ingest mid-batch
+        assert len(store.list_dashboards()) == 1
+        assert len(store.get_dashboard(board["id"])) == 1

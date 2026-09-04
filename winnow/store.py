@@ -7109,9 +7109,13 @@ class Store:
 
     def list_dashboards(self) -> list[dict]:
         """Each named dashboard with its widget count — the sidebar's
-        Dashboards section. Widgets themselves are fetched per-board."""
-        with self.lock:
-            rows = self.db.execute(
+        Dashboards section. Widgets themselves are fetched per-board.
+
+        On the reader pool (invariant #4): opening a board while 30 files
+        are importing must not queue behind the ingest holding the writer
+        lock."""
+        with self._reader() as db:
+            rows = db.execute(
                 "SELECT id, name, widgets, pos, pinned FROM dashboards ORDER BY pos, id").fetchall()
         return [{"id": r["id"], "name": r["name"], "pos": r["pos"], "pinned": bool(r["pinned"]),
                  "widget_count": len(self._loads_widgets(r["widgets"]))} for r in rows]
@@ -7125,8 +7129,9 @@ class Store:
                 raise KeyError(f"No dashboard {dashboard_id}")
 
     def get_dashboard(self, dashboard_id: int) -> list:
-        with self.lock:
-            row = self.db.execute("SELECT widgets FROM dashboards WHERE id=?", (dashboard_id,)).fetchone()
+        """One board's widgets. Reader pool, same reason as list_dashboards."""
+        with self._reader() as db:
+            row = db.execute("SELECT widgets FROM dashboards WHERE id=?", (dashboard_id,)).fetchone()
         if row is None:
             raise KeyError(f"No dashboard {dashboard_id}")
         return self._loads_widgets(row["widgets"])
