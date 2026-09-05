@@ -22,11 +22,21 @@ def clean_up_imports(page):
     tables it did not expect), far from the cause."""
     before = set(page.evaluate("() => __winnow.S.sources.map((s) => s.id)"))
     yield
+    # Every job this test started has to be FINISHED before anything is
+    # deleted. One still running would keep the jobs poll alive into the
+    # next module and create its source after this teardown had listed
+    # what to remove — which is how a leftover table reaches a test that
+    # never imported anything (it failed on CI, not locally: the runner is
+    # slower, so the window is wider).
+    page.wait_for_function(
+        """() => !__winnow.ingestJobs.some((j) => j.status === 'running' || j.status === 'queued')""",
+        timeout=30_000)
     page.evaluate(
         """async (before) => {
              const S = __winnow.S;
              // Let any in-flight grid fetch settle before the source goes.
              await new Promise((r) => setTimeout(r, 150));
+             await __winnow.loadSources();          // pick up anything that just landed
              const mine = S.sources.filter((s) => !before.includes(s.id));
              for (const s of mine) {
                S.viewCache?.delete?.(s.id);
@@ -37,6 +47,9 @@ def clean_up_imports(page):
              await __winnow.loadSources();
            }""",
         sorted(before))
+    left = page.evaluate("(before) => __winnow.S.sources.filter((s) => !before.includes(s.id)).length",
+                         sorted(before))
+    assert left == 0, f"{left} imported table(s) left in the shared case"
 
 
 def _import(page, path, name):
