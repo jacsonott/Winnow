@@ -870,6 +870,27 @@ class PluginData:
             _write(self._file, data)
         return data
 
+    def update(self, fn) -> dict:
+        """Read-modify-write under the workspace lock: `fn(current)` returns
+        the new document (or mutates and returns None).
+
+        `get()` then `set()` is two operations, and plugin route handlers
+        run in a threadpool — two of the same plugin's requests overlapping
+        would each read the same document and the later write would drop the
+        earlier one's change. This is the way to do it when the new value
+        depends on the old."""
+        with _LOCK:
+            data = _read(self._file, {})
+            if not isinstance(data, dict):
+                data = {}
+            out = fn(data)
+            if out is None:
+                out = data
+            if not isinstance(out, dict):
+                raise ValueError("Plugin storage holds one JSON object")
+            _write(self._file, out)
+            return out
+
 
 class PluginBundles:
     """Named per-machine sets of plugins — "case types". A triage bundle

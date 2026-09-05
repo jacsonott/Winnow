@@ -11,6 +11,32 @@ see [docs/notes/README.md](README.md) for the whole set.
 
 ---
 
+- **A plugin route handler runs in a worker thread, and must keep
+  doing so.** `api_plugin_dispatch` is `async def`, so for a while it
+  called `entry["handler"](req)` straight from the event loop — one
+  plugin waiting on an LLM completion froze the whole server, presence
+  stream included, for as long as the call took. It now goes through
+  `run_in_threadpool`. Row actions were always fine (their route is a
+  plain `def`, which FastAPI threadpools for you); if you add another
+  plugin entry point from an `async def`, thread it the same way.
+
+- **Plugin tables are namespaced against ACCIDENTS, not against a plugin
+  that means harm.** A plugin's own tables live in the case file as
+  `plugin:<fs_name>:<table>` (`req.table("chat")`). The separator is a
+  colon because `plugin_<fs>_<name>` was ambiguous exactly where this
+  codebase lives — plugin `mft_usn` table `cache` and plugin `mft` table
+  `usn_cache` both produced `plugin_mft_usn_cache`, and one plugin could
+  read and drop the other's data by accident. Underscored folder names are
+  the house style, so that was reachable, not theoretical.
+  `{table}` substitution is a convenience so authors never quote an
+  identifier; it is NOT a boundary, and the docs must not say it is — a
+  plugin holds `req.store` and can do anything to the case file. The
+  plugin half of the name is deliberately permissive (a `chat-gpt` folder
+  installs and serves routes fine, so it must not get a permanent 400
+  from `req.table()`); only `:` and `"` are refused.
+  They carry no `sources` row, so the grid, the sidebar and merges never
+  see them; use `ingest_rows` when an analyst should browse the result.
+
 - **Plugins** (plugin_api.py, `plugins/`, Settings → Plugins) are
   Notepad++-style drop-in extensions, first loaded at server *import* (so
   `uvicorn server:app` gets them, not just `python server.py`;

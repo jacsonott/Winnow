@@ -7107,6 +7107,191 @@ class Store:
                               required=bool(d.get("required")))
         return [v["name"] for v in self.list_variables() if v["required"] and not v["value"]]
 
+    # ------------------------------------------------------- plugin tables
+    #
+    # A plugin's own tables, inside the case file. Not a source: they carry
+    # no `sources` row, so the grid, the sidebar and merges never see them —
+    # they are a plugin's private store for things that belong to THIS case
+    # and should travel with it when the .db is handed over (an LLM chat
+    # transcript that has to render offline is the case that prompted them).
+    #
+    # Machine-level plugin state stays in `req.storage` (workspace JSON);
+    # analysis output an analyst should browse still goes through
+    # `ingest_rows`, which makes a real source. This is the third thing:
+    # case-scoped, plugin-private, queryable.
+    #
+    # NAMED `plugin:<fs_name>:<table>`, with a separator neither half can
+    # contain. `plugin_<fs>_<name>` was ambiguous exactly where this
+    # codebase lives: plugin `mft_usn` table `cache` and plugin `mft` table
+    # `usn_cache` both produced `plugin_mft_usn_cache`, so one plugin could
+    # read and drop another's table by accident. Identifiers are always
+    # quoted, so a colon costs nothing.
+    #
+    # This keeps two plugins from colliding. It is NOT a security boundary:
+    # a plugin is arbitrary Python holding `req.store`, and can do anything
+    # to the case file that Winnow can (docs/writing-plugins.md §12).
+
+    PLUGIN_TABLE_RE = re.compile(r"^[a-z][a-z0-9_]{0,40}$")
+
+    @staticmethod
+    def _plugin_ns(fs_name: str) -> str:
+        """The plugin half of the name. Deliberately permissive: fs_name is
+        whatever the analyst named the folder or file, and a plugin called
+        `chat-gpt` loads and serves routes perfectly well — it must not then
+        get a permanent 400 from req.table(). Only what breaks the naming
+        scheme is refused."""
+        fs = (fs_name or "").strip().lower()
+        if not fs:
+            raise ValueError("No plugin name")
+        if ":" in fs or '"' in fs or len(fs) > 64:
+            raise ValueError(f"Bad plugin name {fs!r} — no ':' or '\"', max 64 characters")
+        return fs
+
+    def _plugin_table(self, fs_name: str, name: str) -> str:
+        """The real table name. The table half is the author's own choice,
+        so it is held to a strict shape; both halves reach SQL as an
+        identifier (invariant #5) and are quoted at every use."""
+        nm = (name or "").strip().lower()
+        if not self.PLUGIN_TABLE_RE.match(nm):
+            raise ValueError(
+                f"Bad table name {nm!r} — a letter, then letters, digits or _ (max 41)")
+        return f"plugin:{self._plugin_ns(fs_name)}:{nm}"
+
+    @staticmethod
+    def _sub_table(sql: str, table: str) -> str:
+        """Replace `{table}` with the quoted table name, but never inside a
+        string literal: `UPDATE {table} SET meta = '{table}'` has to store
+        the two braces, not the table's name. Single-quote literals are the
+        only string form SQLite standardises, and '' is its escape — which
+        this handles by simply toggling on every quote."""
+        out = []
+        i = 0
+        in_str = False
+        quoted = q(table)
+        while i < len(sql):
+            ch = sql[i]
+            if ch == "'":
+                in_str = not in_str
+                out.append(ch)
+                i += 1
+                continue
+            if not in_str and sql.startswith("{table}", i):
+                out.append(quoted)
+                i += len("{table}")
+                continue
+            out.append(ch)
+            i += 1
+        return "".join(out)
+
+    def plugin_table_create(self, fs_name: str, name: str, columns: str) -> str:
+        """CREATE TABLE IF NOT EXISTS with the given column definitions.
+
+        Checks first on the reader pool, and only takes the writer lock when
+        there is something to create — this is documented as the call every
+        request makes, and taking the writer lock unconditionally would put
+        a routine read behind whatever holds it (a long import, compact()'s
+        VACUUM)."""
+        table = self._plugin_table(fs_name, name)
+        if not isinstance(columns, str) or not columns.strip():
+            raise ValueError("Give the columns, e.g. 'id INTEGER PRIMARY KEY, role TEXT'")
+        if self._plugin_table_exists(table):
+            return table
+        with self.lock, self.db:
+            self.db.execute(f"CREATE TABLE IF NOT EXISTS {q(table)} ({columns})")
+        return table
+
+    def _plugin_table_exists(self, table: str) -> bool:
+        with self._reader() as db:
+            return db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (table,)).fetchone() is not None
+
+    def plugin_table_exists(self, fs_name: str, name: str) -> bool:
+        return self._plugin_table_exists(self._plugin_table(fs_name, name))
+
+    def plugin_tables(self, fs_name: str) -> list[str]:
+        """This plugin's table names, without the namespace prefix."""
+        prefix = f"plugin:{self._plugin_ns(fs_name)}:"
+        like = prefix.replace("\\", "\\\\").replace("_", "\\_").replace("%", "\\%") + "%"
+        with self._reader() as db:
+            rows = db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE ? ESCAPE '\\' "
+                "ORDER BY name", (like,)).fetchall()
+        return [r["name"][len(prefix):] for r in rows]
+
+    def plugin_table_write(self, fs_name: str, name: str, sql: str, params: Sequence = ()) -> int:
+        """One statement on the writer connection, with `{table}` standing
+        in for this plugin's table so an author never quotes an identifier
+        by hand. Returns the number of rows changed (0 for statements that
+        change none, DDL included — sqlite3 reports -1 there).
+
+        The substitution is a convenience, not a sandbox: SQL naming another
+        table runs. Isolation between plugins is by NAMING (they cannot
+        collide by accident), and nothing more — see the block comment
+        above."""
+        table = self._plugin_table(fs_name, name)
+        with self.lock, self.db:
+            cur = self.db.execute(self._sub_table(str(sql), table), tuple(params or ()))
+            return max(0, cur.rowcount if cur.rowcount is not None else 0)
+
+    def plugin_table_insert(self, fs_name: str, name: str, rows: "list[dict] | dict") -> int:
+        """Insert one row or many. Column names come from the dicts, so they
+        are quoted (invariant #5) and the values are always bound. Rows may
+        list their columns in any order, as long as it is the same set."""
+        table = self._plugin_table(fs_name, name)
+        items = [rows] if isinstance(rows, dict) else list(rows or [])
+        if not items:
+            return 0
+        cols = list(items[0].keys())
+        if not cols:
+            raise ValueError("A row needs at least one column")
+        wanted = set(cols)
+        for r in items:
+            if set(r.keys()) != wanted:
+                raise ValueError("Every row in one insert needs the same columns")
+        sql = (f"INSERT INTO {q(table)} ({', '.join(q(c) for c in cols)}) "
+               f"VALUES ({', '.join('?' for _ in cols)})")
+        with self.lock, self.db:
+            self.db.executemany(sql, [tuple(r[c] for c in cols) for r in items])
+        return len(items)
+
+    def plugin_table_rows(self, fs_name: str, name: str, where: str = "", params: Sequence = (),
+                          limit: int | None = 5000) -> list[dict]:
+        """Rows as dicts, on the reader pool (invariant #4) — reading a chat
+        transcript must not queue behind an import.
+
+        `where` is the tail of the query (WHERE / ORDER BY / LIMIT), with
+        values bound through `params`. A LIMIT in the tail is the author's,
+        and is left alone; otherwise `limit` caps the result, and
+        `limit=None` means no cap."""
+        table = self._plugin_table(fs_name, name)
+        tail = (where or "").strip()
+        args = list(params or ())
+        sql = f"SELECT * FROM {q(table)}" + (f" {tail}" if tail else "")
+        if limit is not None and not re.search(r"(?i)\blimit\b", self._strip_literals(tail)):
+            sql += " LIMIT ?"
+            args.append(max(1, int(limit)))
+        with self._reader() as db:
+            return [dict(r) for r in db.execute(sql, tuple(args)).fetchall()]
+
+    @staticmethod
+    def _strip_literals(sql: str) -> str:
+        """The statement with single-quoted literals blanked — so a LIMIT
+        inside a string doesn't read as a LIMIT clause."""
+        out, in_str = [], False
+        for ch in sql:
+            if ch == "'":
+                in_str = not in_str
+                out.append(" ")
+            else:
+                out.append(" " if in_str else ch)
+        return "".join(out)
+
+    def plugin_table_drop(self, fs_name: str, name: str) -> None:
+        table = self._plugin_table(fs_name, name)
+        with self.lock, self.db:
+            self.db.execute(f"DROP TABLE IF EXISTS {q(table)}")
+
     def list_dashboards(self) -> list[dict]:
         """Each named dashboard with its widget count — the sidebar's
         Dashboards section. Widgets themselves are fetched per-board.
