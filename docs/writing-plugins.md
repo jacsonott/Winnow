@@ -587,8 +587,14 @@ upgrades.
 
 Handlers run in a worker thread, not on the event loop, so a call that
 takes seconds — an LLM completion, a lookup against a remote service — does
-not stall the rest of Winnow. The grid, other plugins and the analyst's
-next click keep working while yours waits.
+not stall the rest of Winnow. The grid, the analyst's next click and
+Winnow's own routes keep working while yours waits.
+
+Plugins share a pool of their own (8 concurrent handlers), separate from
+the one Winnow's routes use. So a slow plugin can never starve the app —
+but past that many at once, the ninth call waits for a free slot. If your
+plugin fans out, do it inside one handler rather than by firing a request
+per item from the tab.
 
 Three things follow.
 

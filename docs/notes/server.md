@@ -22,11 +22,15 @@ see [docs/notes/README.md](README.md) for the whole set.
   calls a Store method — or `_reload_plugins`, which imports arbitrary
   plugin code — on the loop. Pass the bound method as an argument
   (`run_in_threadpool(store().ingest_csv, tmp, ...)`), don't call it.
-  Two consequences worth knowing: the worker pool is bounded (anyio's
-  default is 40 threads), so enough simultaneous slow handlers still queue;
-  and threadpooling does not make anything take the writer lock less — a
-  long write still serialises other writes, which is invariant #4's job,
-  not this one's.
+  Two consequences worth knowing. The worker pool is bounded (anyio's
+  default is 40 threads) and shared by every sync route, so enough
+  simultaneous slow handlers would fill it and stall the app anyway —
+  which is why PLUGIN handlers run under a limiter of their own
+  (`PLUGIN_THREADS`, 8) rather than the default one: a plugin can queue
+  behind other plugins, never in front of Winnow's own routes. And
+  threadpooling does not make anything take the writer lock less — a long
+  write still serialises other writes, which is invariant #4's job, not
+  this one's.
 
 - **One case file, one Winnow.** SQLite's WAL keeps the *file* consistent
   across processes, but nothing in this app invalidates a second process's
@@ -141,6 +145,16 @@ see [docs/notes/README.md](README.md) for the whole set.
   not a job_id. `/api/prefs` reports `first_run: false` inside a temp
   case — a fresh install's first double-click must not stack the
   cases-dir setup prompt on top of the file the analyst opened.
+
+- **The quick-look sweep must recognise every kind of work.** It deletes
+  abandoned temp cases after 7 days, and judged "no analysis" from tags,
+  notes and sessions alone — so a quick-look whose content was a
+  dashboard, case variables, a watchlist, a saved query or a PLUGIN's own
+  table (an LLM chat transcript is often the only thing in one) was swept
+  as empty. `_WORK_TABLES` + `_case_holds_work()` now cover everything a
+  case holds except what it is BORN with (`open_tabs`, the seeded
+  `tag_defs`) and incidental UI state. Add new case tables to that list
+  when they can hold something an analyst would miss.
 
 - **A dropped presence stream is not a closed window.** Idle shutdown
   used to fire `IDLE_EXIT_S` after the last stream ended, which is right
