@@ -138,3 +138,42 @@ def test_two_slow_plugin_calls_overlap_rather_than_queue(server_with_slow_plugin
     assert [st for _, st in done] == [200, 200], f"the plugin route did not run: {done}"
     assert max(t for t, _ in done) - t0 < 3.5, "the two calls were serialised"
     assert max(t for t, _ in done) - t0 >= 2, "the plugin did not actually block for its 2s"
+
+
+def test_slow_plugins_cannot_starve_the_rest_of_the_app(server_with_slow_plugin):
+    """Moving handlers off the loop is not enough on its own: run_in_threadpool
+    uses anyio's DEFAULT limiter, shared with every sync route, so enough
+    simultaneous slow plugin calls would fill it and stall the app anyway.
+    Plugin handlers have a limiter of their own (server.PLUGIN_THREADS), so
+    core routes keep answering however many are queued."""
+    port = server_with_slow_plugin
+    threads = [threading.Thread(target=lambda: _get(port, "/api/plugin/slowpoke/wait?s=4"),
+                                daemon=True) for _ in range(20)]
+    for t in threads:
+        t.start()
+    time.sleep(1.0)                      # all of them are in the handler now
+
+    t0 = time.monotonic()
+    assert _get(port, "/api/version", timeout=10) == 200
+    assert _get(port, "/api/sources", timeout=10) == 200
+    took = time.monotonic() - t0
+    assert took < 2.0, f"20 slow plugin calls starved the app: {took:.1f}s for two requests"
+    for t in threads:
+        t.join(timeout=30)
+
+
+def test_the_plugin_limiter_is_smaller_than_the_shared_pool():
+    """The number itself: bigger than the default (40) would defeat it."""
+    import asyncio
+
+    import anyio
+
+    import server
+
+    async def default_tokens():
+        return anyio.to_thread.current_default_thread_limiter().total_tokens
+
+    shared = asyncio.run(default_tokens())
+    assert server.PLUGIN_THREADS.total_tokens < shared, (
+        f"the plugin limiter ({server.PLUGIN_THREADS.total_tokens}) has to leave room in the "
+        f"shared pool ({shared}) for everything else")
