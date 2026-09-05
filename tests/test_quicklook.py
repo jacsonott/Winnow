@@ -191,6 +191,68 @@ def test_the_janitor_eats_only_abandoned_quicklooks(client, tmp_path):
     assert (qdir / "young-empty.db").exists()
 
 
+def test_the_sweep_keeps_any_kind_of_work(tmp_path, monkeypatch):
+    """"No analysis" used to mean only "no tags, notes or sessions", so a
+    quick-look holding a dashboard, case variables, a watchlist, a query or
+    a PLUGIN's table — an LLM chat transcript is often the only thing in
+    one — was deleted as empty after 7 days. Deleting findings to save disk
+    is the worst trade this app can make."""
+    import os
+    import sqlite3
+    import server
+    from winnow.store import Store
+
+    qdir = tmp_path / "cases" / server.QUICKLOOK_DIRNAME
+    qdir.mkdir(parents=True)
+    monkeypatch.setattr(server, "_cases_dir", lambda: str(tmp_path / "cases"))
+    old = __import__("time").time() - 30 * 86400
+
+    def aged(name, work=None):
+        st = Store(str(qdir / name))
+        try:
+            if work:
+                work(st)
+        finally:
+            st.close()
+        os.utime(qdir / name, (old, old))
+
+    aged("empty.db")
+    aged("dashboard.db", lambda st: st.create_dashboard("Host overview", []))
+    aged("variables.db", lambda st: st.set_variable("engagement", "ACME"))
+    aged("watchlist.db", lambda st: st.add_indicator("10.0.0.5", "ip", None, None))
+    aged("notes.db", lambda st: st.set_case_notes("what I found"))
+    aged("plugintable.db", lambda st: st.plugin_table_create("llm_harness", "history",
+                                                             "id INTEGER PRIMARY KEY"))
+
+    removed = server._sweep_quicklook()
+
+    assert (qdir / "empty.db").exists() is False
+    assert removed == 1, "only the genuinely empty case should go"
+    for kept in ("dashboard.db", "variables.db", "watchlist.db", "notes.db", "plugintable.db"):
+        assert (qdir / kept).exists(), f"{kept} held work and was deleted"
+
+
+def test_a_fresh_case_still_reads_as_empty(tmp_path):
+    """The other half: the tables a case is BORN with (open_tabs, the seeded
+    tag_defs) must not make every quick-look immortal."""
+    import sqlite3
+    import server
+    from winnow.store import DEFAULT_TAGS, Store
+
+    path = tmp_path / "fresh.db"
+    st = Store(str(path), default_tags=DEFAULT_TAGS)
+    csv = tmp_path / "e.csv"
+    csv.write_text("A,B\n1,2\n")
+    st.ingest_csv(str(csv), name="e.csv", build_fts=False)
+    st.close()
+
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        assert server._case_holds_work(conn) is False
+    finally:
+        conn.close()
+
+
 # ------------------------------------------------------- the real launcher
 
 import http.client
