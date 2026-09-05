@@ -2056,6 +2056,7 @@ async def api_plugin_dispatch(fs_name: str, route: str, request: Request):
     req = plugin_api.PluginRequest(
         request.method, route, dict(request.query_params), body, STORE,
         storage=WS.PluginData(fs_name), plugin=fs_name,
+        loopback=_is_loopback(request),
     )
     try:
         # In a worker thread, NOT on the event loop. A plugin handler is
@@ -2080,7 +2081,7 @@ class RowActionBody(BaseModel):
 
 
 @app.post("/api/plugins/row_action/{fs_name}/{action_id}")
-def api_plugin_row_action(fs_name: str, action_id: str, body: RowActionBody):
+def api_plugin_row_action(fs_name: str, action_id: str, body: RowActionBody, request: Request):
     """Resolve the selected rows to full cells and hand them to the
     plugin's handler (see PluginAPI.register_row_action). Rows are read
     per real source through run_sql — the read-only path — so a slow
@@ -2112,7 +2113,8 @@ def api_plugin_row_action(fs_name: str, action_id: str, body: RowActionBody):
     req = plugin_api.PluginRequest(
         "POST", f"row_action/{action_id}", {},
         {"source_id": body.source_id, "column": body.column, "value": body.value, "rows": rows},
-        STORE, storage=WS.PluginData(fs_name), plugin=fs_name)
+        STORE, storage=WS.PluginData(fs_name), plugin=fs_name,
+        loopback=_is_loopback(request))
     try:
         out = action["handler"](req)
     except ValueError as e:
