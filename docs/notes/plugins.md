@@ -11,6 +11,18 @@ see [docs/notes/README.md](README.md) for the whole set.
 
 ---
 
+- **`_reload_plugins()` mutates the registry in place, so a shared
+  `PluginRegistry` in a test is a landmine.** It calls
+  `PLUGINS.load(...)` on the existing object rather than building a new
+  one. A test that monkeypatches `server.PLUGINS` to a module-scoped
+  fixture and then does anything that reloads — applying a profile,
+  toggling a plugin, switching case — rewrites that fixture against the
+  real plugin directories, where the bundled examples are default-OFF.
+  Every later test in the module then gets 404s from example-plugin
+  routes, far from the test that caused it. `tests/test_plugins.py`'s
+  `example_registry` is function-scoped for exactly this reason; keep it
+  that way.
+
 - **A plugin can WRITE `WINNOW_*` environment variables, and that is
   deliberately not a privilege boundary.** `req.set_env` goes through
   `userenv.set_var`, so it inherits every rule the Settings panel has
