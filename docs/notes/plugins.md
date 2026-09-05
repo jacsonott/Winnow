@@ -11,6 +11,20 @@ see [docs/notes/README.md](README.md) for the whole set.
 
 ---
 
+- **A plugin can WRITE `WINNOW_*` environment variables, and that is
+  deliberately not a privilege boundary.** `req.set_env` goes through
+  `userenv.set_var`, so it inherits every rule the Settings panel has
+  (prefix, RESERVED refused, a shell export still wins) — a plugin can do
+  no more than the analyst can. It grants no capability a plugin lacked:
+  it is arbitrary Python and could always write `~/.config/winnow/env` or
+  poke the registry itself. What the API buys is that it lands in the
+  right place with the right permissions and shows up in the panel the
+  analyst manages. The one genuinely new exposure is by proxy: Winnow's
+  own `/api/env` routes are loopback-only, and a plugin route is not, so a
+  plugin that wraps `set_env` in a route hands a remote viewer (remote
+  mode) the ability to trigger it. `req.is_loopback` exists so the plugin
+  can make the same call Winnow makes; the guide says to use it.
+
 - **A plugin route handler runs in a worker thread, and must keep
   doing so.** `api_plugin_dispatch` is `async def`, so for a while it
   called `entry["handler"](req)` straight from the event loop — one

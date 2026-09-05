@@ -988,8 +988,8 @@ python server.py --plugins-dir ~/src/my-winnow-plugins
 
 Installs from the UI always land in the first directory (`plugins/`).
 
-**Versioning:** the current plugin API version is **6** (`req.table`
-arrived in 6; `req.env`,
+**Versioning:** the current plugin API version is **7** (`req.set_env` /
+`req.unset_env` / `req.is_loopback` arrived in 7; `req.table` in 6; `req.env`,
 `req.variables` / `req.set_variable` and the tab context's
 `state.variables` / `setVariable` arrived in 5; toolbar panels
 and the view-change context arrived in 4; row actions in 3; `api.q`/
@@ -1051,6 +1051,22 @@ def lookup_handler(req):
   convention that keeps a well-behaved plugin on the names the analyst
   manages — it is not a sandbox. A plugin is ordinary Python and can
   read `os.environ` directly, which is why section 12 says what it says.
+- **Saving one:** `req.set_env("WINNOW_VT_API_KEY", token)` persists it the
+  same way Settings → Environment does — immediately, and across restarts —
+  so a plugin that obtained a key itself (an OAuth exchange, a field in its
+  own tab) doesn't have to send the analyst somewhere else to retype it.
+  `req.unset_env(name)` removes it. The rules are the panel's, so a plugin
+  cannot do what the analyst cannot: `WINNOW_*` names only, never one of
+  Winnow's own settings, and never over a value exported outside Winnow.
+
+  This is not a new privilege — a plugin is arbitrary Python and could
+  always write that file itself. It is the way that lands in the right
+  place with the right permissions, and that the analyst can see and undo.
+  Two things to weigh: saving a secret they didn't ask you to save is a
+  surprise, so say so in your UI; and your route is reachable by whoever
+  can reach Winnow, so check `req.is_loopback` if a remote viewer shouldn't
+  be able to trigger it.
+
 - Read it server-side, in the handler that uses it. **Never send the
   value to the browser** — not in a response, not in a tab's HTML. A tab
   that needs a network call makes it through its own `register_api`
@@ -1131,6 +1147,9 @@ What every API-route and row-action handler receives:
 | `variables` | The case's variables as `{name: value}` (`{}` with no case) |
 | `set_variable(name, value)` | Create or update one case variable |
 | `env(name, default=None)` | A `WINNOW_*` environment variable — the home for tokens; prefix-enforced, server-side only |
+| `set_env(name, value)` | Save one, the way Settings → Environment does — same rules, so no more than the analyst can do |
+| `unset_env(name)` | Remove one this plugin saved |
+| `is_loopback` | Whether the caller is on this machine — Winnow's own env routes are loopback-only, a plugin's are not |
 | `table(name)` | A `PluginTable` — this plugin's own table in the case file (see [Your own tables](#your-own-tables)) |
 | `plugin` | The plugin's `fs_name`, which namespaces its tables |
 

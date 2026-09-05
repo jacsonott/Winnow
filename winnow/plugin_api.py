@@ -129,8 +129,9 @@ A tab plus its backend route, the full custom-UI shape:
         # case is open). Also storage (per-plugin JSON), variables /
         # set_variable (case variables from Case settings — config, never
         # secrets), env("WINNOW_X") for a token the analyst saved under
-        # Settings → Environment, and table("chat") for the plugin's own
-        # tables inside the case file.
+        # Settings → Environment (set_env/unset_env save one, the same way
+        # the panel does), table("chat") for the plugin's own tables inside
+        # the case file, and is_loopback for whether the caller is local.
         #
         # Handlers run in a worker thread, so blocking here (an HTTP call to
         # a remote service) does not stall the rest of Winnow — and two of
@@ -174,7 +175,7 @@ from . import userenv
 # provides, with a message that says to update Winnow — the failure mode
 # is otherwise an AttributeError deep inside register() that reads like a
 # plugin bug.
-PLUGIN_API_VERSION = 6
+PLUGIN_API_VERSION = 7
 
 FORMAT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 # API routes may nest ("chat/stream") but each segment keeps the same shape.
@@ -198,7 +199,7 @@ class PluginRequest:
     not to provide one."""
 
     def __init__(self, method: str, route: str, query: dict, body: Any, store: Any,
-                 storage: Any = None, plugin: str = ""):
+                 storage: Any = None, plugin: str = "", loopback: bool = True):
         self.method = method
         self.route = route
         self.query = query
@@ -209,6 +210,12 @@ class PluginRequest:
         # the existing 6-positional construction (and every test that uses
         # it) keeps working; req.table() is what needs it.
         self.plugin = plugin
+        # Whether the browser that called this route is on this machine.
+        # Winnow's own env/association routes are loopback-only; a plugin
+        # route is not, so a plugin doing something it would not want a
+        # remote viewer doing has to be able to ask. Defaults True: a
+        # handler constructed outside the HTTP path is local by definition.
+        self.is_loopback = loopback
 
     @property
     def variables(self) -> dict:
@@ -243,6 +250,38 @@ class PluginRequest:
         if not self.plugin:
             raise ValueError("This request has no plugin identity")
         return PluginTable(self.store, self.plugin, name)
+
+    def set_env(self, name: str, value: str) -> str:
+        """Save a `WINNOW_*` environment variable for this user — the same
+        operation Settings → Environment performs, and the way to persist a
+        token your plugin obtained itself (an OAuth exchange, a key the
+        analyst pasted into your tab) instead of telling them to go and type
+        it in somewhere else.
+
+        It takes effect immediately and survives a restart: on Windows the
+        user's own `HKCU\\Environment`, elsewhere an owner-only
+        `~/.config/winnow/env`, loaded at every launch. Same rules as the
+        panel, so a plugin cannot do what the analyst cannot: only
+        `WINNOW_*` names, never one of Winnow's own settings, and never over
+        a value exported outside Winnow (that one wins; ValueError).
+
+        This is not a new privilege — a plugin is arbitrary Python and could
+        always write that file itself. It is the way to do it that lands in
+        the right place with the right permissions, and that the analyst can
+        see and remove under Settings → Environment.
+
+        Two things to weigh before calling it. Saving a secret the analyst
+        did not ask you to save is a surprise; say so in your UI. And your
+        route is reachable by whoever can reach Winnow — check
+        `req.is_loopback` if you do not want a remote viewer triggering it.
+        """
+        return userenv.set_var(name, value)
+
+    def unset_env(self, name: str) -> None:
+        """Remove a `WINNOW_*` variable this plugin saved. A value exported
+        outside Winnow is not yours to remove: the stored one goes, the live
+        one stays."""
+        userenv.delete_var(name)
 
     def env(self, name: str, default: str | None = None) -> str | None:
         """A `WINNOW_*` environment variable — the place for a token or
