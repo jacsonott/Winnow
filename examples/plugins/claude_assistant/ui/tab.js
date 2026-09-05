@@ -1,11 +1,14 @@
 /* Claude assistant tab — a schema-aware chat pane. The interesting parts
    as a plugin-UI reference: winnow.schemaText() (the same LLM-ready schema
-   dump the SQL pane's copy button builds) sent as context, chat history
-   kept in the module (survives tab switches; reset on case switch when the
-   whole mount is torn down), and errors surfaced inline in the log rather
-   than only as toasts — a failed question is part of the conversation. */
+   dump the SQL pane's copy button builds) sent as context, a transcript the
+   SERVER keeps in the case file (so it survives a reload, a case handed to
+   someone else, and the service being unreachable), and errors surfaced
+   inline in the log rather than only as toasts — a failed question is part
+   of the conversation.
 
-let history = []; // [{role: 'user'|'assistant', content}] — what gets replayed to the API
+   Nothing is kept in this module: the tab renders what GET history returns
+   and the server builds the API context from the same table. A chat history
+   in a JS variable is one reload from gone. */
 
 export default function mount(container, winnow) {
   const { el, post } = winnow;
@@ -28,10 +31,26 @@ export default function mount(container, winnow) {
     return d;
   };
 
-  line('assistant',
+  const intro = () => line('assistant',
     'Ask about the open case — event IDs, artifacts, or "write me a query for…". '
     + 'With the schema box checked I can see your tables\' columns (never the rows) '
     + 'and write SQL you can paste into the SQL pane.');
+
+  // Whatever this case already said, before any network call.
+  (async () => {
+    try {
+      const r = await winnow.api(`${winnow.base}/history`);
+      if (r.turns.length) {
+        for (const t of r.turns) line(t.role === 'user' ? 'user' : 'assistant', t.content);
+        if (!r.persisted) line('error', 'No case is open, so this conversation will not be kept.');
+      } else {
+        intro();
+      }
+    } catch (e) {
+      intro();
+      line('error', 'Could not load this case\'s chat: ' + e.message);
+    }
+  })();
 
   const bar = el('div');
   bar.style.cssText = 'flex:0 0 auto;display:flex;gap:8px;align-items:flex-end;padding:10px;border-top:1px solid var(--line-2)';
@@ -47,7 +66,18 @@ export default function mount(container, winnow) {
   schemaLabel.append(schemaCb, document.createTextNode(' send schema'));
   schemaLabel.title = "Include the case's table/column names as context — column names only, never row data";
   const stats = el('span', 'note-status', '');
-  bar.append(input, schemaLabel, send, stats);
+  const clearBtn = el('button', 'btn ghost', 'Clear');
+  clearBtn.title = 'Forget this case\'s conversation (it is stored in the case file)';
+  clearBtn.onclick = async () => {
+    if (!(await winnow.confirmDialog('Forget this case\'s conversation with Claude?',
+      { danger: true, okLabel: 'Clear' }))) return;
+    try {
+      await post(`${winnow.base}/clear`, {});
+      log.replaceChildren();
+      intro();
+    } catch (e) { winnow.toast('Could not clear it: ' + e.message, 6000); }
+  };
+  bar.append(input, schemaLabel, send, clearBtn, stats);
   container.append(bar);
 
   async function submit() {
@@ -58,13 +88,13 @@ export default function mount(container, winnow) {
     const pending = line('assistant', '…');
     send.disabled = true;
     try {
+      // No history in the body: the server reads this case's transcript,
+      // which is also what it appends this exchange to.
       const r = await post(`${winnow.base}/ask`, {
         question: q,
-        history,
         schema: schemaCb.checked ? winnow.schemaText() : null,
       });
       pending.textContent = r.answer || '(empty response)';
-      history.push({ role: 'user', content: q }, { role: 'assistant', content: r.answer });
       const cached = r.usage.cache_read_input_tokens ? `, ${r.usage.cache_read_input_tokens.toLocaleString()} cached` : '';
       stats.textContent = `${r.model} · ${r.usage.input_tokens.toLocaleString()} in${cached} · ${r.usage.output_tokens.toLocaleString()} out`;
     } catch (e) {
