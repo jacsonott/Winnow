@@ -1619,7 +1619,13 @@ async def api_ingest_upload(
             while chunk := await file.read(4 << 20):
                 out.write(chunk)
         types = json.loads(column_types) if column_types else None
-        return store().ingest_csv(
+        # In a worker thread, never on the event loop: a 130MB CSV takes
+        # seconds to minutes, and every one of them froze the whole server
+        # (measured: /api/version took 2.4s mid-ingest). Sync `def` routes
+        # get this from FastAPI for free; an `async def` route — which this
+        # has to be, for `await file.read()` — must ask for it.
+        return await run_in_threadpool(
+            store().ingest_csv,
             tmp, name=file.filename, build_fts=build_fts, delimiter=delimiter or None,
             has_header=has_header, column_types=types,
         )
@@ -1650,7 +1656,8 @@ async def api_ingest_preview(
     raw = await file.read(512 * 1024)  # bounded sample — full parse happens at real ingest time
     text = _decode_preview_bytes(raw)
     try:
-        return store().preview_csv_text(text, delimiter=delimiter or None, has_header=has_header)
+        return await run_in_threadpool(
+            store().preview_csv_text, text, delimiter=delimiter or None, has_header=has_header)
     except Exception as e:
         raise HTTPException(400, str(e))
 
@@ -1669,7 +1676,7 @@ async def api_ingest_sqlite_preview(file: UploadFile = File(...)):
         with os.fdopen(fd, "wb") as out:
             while chunk := await file.read(4 << 20):
                 out.write(chunk)
-        return store().preview_sqlite_tables(tmp)
+        return await run_in_threadpool(store().preview_sqlite_tables, tmp)
     except Exception as e:
         raise HTTPException(400, str(e))
     finally:
@@ -1691,7 +1698,8 @@ async def api_ingest_sqlite_upload(
             while chunk := await file.read(4 << 20):
                 out.write(chunk)
         ts_cols = json.loads(timestamp_columns) if timestamp_columns else None
-        return store().ingest_sqlite_table(
+        return await run_in_threadpool(
+            store().ingest_sqlite_table,  # threadpool: see api_ingest_upload
             tmp, table, name=name or f"{Path(file.filename or 'upload').stem}.{table}",
             build_fts=build_fts, timestamp_columns=ts_cols,
         )
@@ -1714,7 +1722,8 @@ async def api_ingest_xlsx_preview(file: UploadFile = File(...)):
         with os.fdopen(fd, "wb") as out:
             while chunk := await file.read(4 << 20):
                 out.write(chunk)
-        return store().preview_xlsx_sheets(tmp)
+        # openpyxl opening a large workbook is seconds of CPU.
+        return await run_in_threadpool(store().preview_xlsx_sheets, tmp)
     except Exception as e:
         raise HTTPException(400, str(e))
     finally:
@@ -1736,7 +1745,8 @@ async def api_ingest_json_preview(
         with os.fdopen(fd, "wb") as out:
             while chunk := await file.read(4 << 20):
                 out.write(chunk)
-        return store().preview_json_file(tmp, flatten_mode=flatten_mode, flatten_depth=flatten_depth)
+        return await run_in_threadpool(
+            store().preview_json_file, tmp, flatten_mode=flatten_mode, flatten_depth=flatten_depth)
     except Exception as e:
         raise HTTPException(400, str(e))
     finally:
@@ -1757,7 +1767,8 @@ async def api_ingest_json_upload(
         with os.fdopen(fd, "wb") as out:
             while chunk := await file.read(4 << 20):
                 out.write(chunk)
-        return store().ingest_json(
+        return await run_in_threadpool(
+            store().ingest_json,  # threadpool: see api_ingest_upload
             tmp, name=name or file.filename, flatten_mode=flatten_mode, flatten_depth=flatten_depth,
             build_fts=build_fts,
         )
@@ -1817,7 +1828,7 @@ async def api_ingest_archive_upload(file: UploadFile = File(...)):
         os.replace(tmp, named)
         tmp = named
         try:
-            return archive.expand_archive(tmp, dest_root=dest_root)
+            return await run_in_threadpool(archive.expand_archive, tmp, dest_root=dest_root)
         except archive.ArchiveError as e:
             raise HTTPException(400, str(e))
     finally:
@@ -1955,7 +1966,8 @@ async def api_ingest_job_upload(
                 out.write(chunk)
         table_list = json.loads(tables) if tables else None
         types = json.loads(column_types) if column_types else None
-        return store().start_ingest_job(
+        return await run_in_threadpool(
+            store().start_ingest_job,  # threadpool: see api_ingest_upload
             kind, tmp, name=name or file.filename, delete_after=True,
             options=_ingest_job_options(
                 kind, build_fts=build_fts, delimiter=delimiter or None,
@@ -2316,7 +2328,7 @@ async def api_plugins_install(
         # the frontend confirms and retries with overwrite=true.
         raise HTTPException(409, f"A plugin named {fs_name} is already installed")
     if overwrite and dest.exists():
-        shutil.rmtree(dest) if dest.is_dir() else dest.unlink()
+        await run_in_threadpool(_remove_plugin_dest, dest)
 
     PLUGIN_DIRS[0].mkdir(parents=True, exist_ok=True)
     for p, f in keep:
@@ -2329,9 +2341,21 @@ async def api_plugins_install(
     # Installing something states intent to use it — clear any stale
     # disabled mark left by an earlier install under the same name.
     WS.plugin_prefs.set_enabled(fs_name, True)
-    _reload_plugins()
+    # A reload IMPORTS every enabled plugin, i.e. runs arbitrary module-level
+    # Python. On the loop that is the plugin-dispatch defect again, just at
+    # install time. (The other _reload_plugins() callers are sync `def`
+    # routes, which FastAPI already threadpools.)
+    await run_in_threadpool(_reload_plugins)
     rec = next((p for p in PLUGINS.describe() if p["fs_name"] == fs_name), None)
     return {"installed": fs_name, "error": rec["error"] if rec else None, **api_plugins()}
+
+
+def _remove_plugin_dest(dest: Path) -> None:
+    """Delete an installed plugin before overwriting it. A named function
+    rather than a lambda at the call site so it is clear — to a reader and
+    to tests/test_event_loop_blocking.py — that the deletion happens in a
+    worker thread, not on the loop."""
+    shutil.rmtree(dest) if dest.is_dir() else dest.unlink()
 
 
 def _ingest_via_plugin(path: str, format_id: str, name: str | None,
@@ -2392,7 +2416,11 @@ async def api_ingest_plugin_upload(
             while chunk := await file.read(4 << 20):
                 out.write(chunk)
         opts = json.loads(options) if options else {}
-        return _ingest_via_plugin(tmp, format_id, name or file.filename, opts, build_fts)
+        # A plugin parser is arbitrary Python — MFT parsing, an archive
+        # walk — and ran on the loop until now, the same defect the plugin
+        # ROUTE dispatcher had.
+        return await run_in_threadpool(
+            _ingest_via_plugin, tmp, format_id, name or file.filename, opts, build_fts)
     except Exception as e:
         raise HTTPException(400, str(e))
 
@@ -3550,7 +3578,7 @@ async def api_session_import(source_id: int, file: UploadFile = File(...), merge
         session = json.loads(await file.read())
     except Exception as e:
         raise HTTPException(400, f"Not a valid session file: {e}")
-    return store().import_session(source_id, session, merge=merge)
+    return await run_in_threadpool(store().import_session, source_id, session, merge=merge)
 
 
 @app.get("/api/case_session")
@@ -3568,7 +3596,7 @@ async def api_case_session_import(file: UploadFile = File(...), merge: bool = Fo
         session = json.loads(await file.read())
     except Exception as e:
         raise HTTPException(400, f"Not a valid session file: {e}")
-    return store().import_case_session(session, merge=merge)
+    return await run_in_threadpool(store().import_case_session, session, merge=merge)
 
 
 class SessionSaveReq(BaseModel):
