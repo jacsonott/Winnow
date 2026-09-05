@@ -180,7 +180,10 @@ export async function pollJobs() {
   }
   if (!$('app').hidden) {
     if (finishedNow.some((j) => j.status === 'done')) {
-      try { await loadSources(); } catch {}
+      // navigate:false — a finished import refreshes the tab strip, the
+      // sidebar and the dashboards, but never takes the analyst somewhere
+      // they didn't ask to go (see loadSources).
+      try { await loadSources(undefined, { navigate: false }); } catch {}
     } else if (ftsWatch.size) {
       // Keep the index-build rows honest without loadSources()'s tab
       // re-select side effects (same reasoning as the Tables modal poll).

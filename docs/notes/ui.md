@@ -10,6 +10,20 @@ see [docs/notes/README.md](README.md) for the whole set.
 
 ---
 
+- **A background refresh must not navigate.** `loadSources()` re-opens
+  the current source as a side effect of picking a tab, and `openSource()`
+  switches to the grid and resets that source's filters and search. That
+  is right for a real navigation and wrong for "an import finished": with
+  a batch of files, the jobs poll called it once per completion, so the
+  analyst was dragged back to whichever table the first file opened —
+  every few seconds, losing the filter they had just set, and tearing down
+  and refetching the grid each time (the "it locks up" in the report).
+  `loadSources(select, { navigate: false })` refreshes the tab strip,
+  sidebar and dashboards without moving anyone; it still opens a table
+  when nothing is on screen, which is what makes the FIRST import land.
+  Any new background caller wants that option — `refreshSourcesQuietly()`
+  in tables.js exists for the same reason on the polling path.
+
 - **Theming rule for controls.** `<select>` has a global themed base rule in
   `static/style.css` (dark `--ink`/`--line-2`, accent focus), and each theme
   sets `color-scheme` on `<html>` so the parts CSS can't reach — the native
