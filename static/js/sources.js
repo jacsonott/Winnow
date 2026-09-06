@@ -546,7 +546,7 @@ export function applyPageTabsSize() {
 
  // paints the saved order onto SQL/Timeline before plugins load
 
-export async function loadSources(select) {
+export async function loadSources(select, { navigate = true } = {}) {
   const [sources, merges, folders] = await Promise.all([
     api('/api/sources'), api('/api/merges'), api('/api/folders'),
   ]);
@@ -567,6 +567,22 @@ export async function loadSources(select) {
   const target = (candidate != null && openTabs.some((s) => s.id === candidate))
     ? candidate
     : (openTabs.find((s) => !s.error) || {}).id;
+  /* A BACKGROUND refresh must not move the analyst. openSource() switches
+     to the grid tab and resets that source's filters and search — right
+     for a real navigation, wrong for "another import just finished". A
+     30-file import called this once per completion, so it dragged them
+     back to whichever table the first file opened, over and over, and
+     threw away the filter they had set in between.
+
+     It still opens something when nothing is on screen yet, which is what
+     makes the FIRST import land on its table — the behaviour worth
+     keeping. `select` is always honoured: passing one IS the navigation. */
+  if (!navigate && select == null) {
+    const onAPage = S.activeTab !== 'grid';
+    const gridIsLive = S.sourceId != null && S.view != null
+      && openTabs.some((s) => s.id === S.sourceId);
+    if (onAPage || gridIsLive) return;
+  }
   if (target) await openSource(target);
   else {
     S.sourceId = null;
