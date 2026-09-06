@@ -8,6 +8,26 @@ see [docs/notes/README.md](README.md) for the whole set.
 
 ---
 
+- **An `async def` route runs ON the event loop; a plain `def` route does
+  not.** FastAPI threadpools sync handlers for you, so most of this file is
+  safe by default. The async ones — which have to be async, because they
+  `await file.read()` or the request body, which is exactly where the heavy
+  work lives — must hand blocking work to `run_in_threadpool` themselves.
+  This has bitten twice: the plugin dispatcher called plugin handlers
+  directly (one LLM call froze Winnow for its duration), and
+  `/api/ingest/upload` called `ingest_csv` directly (a 130MB CSV made a
+  trivial `/api/version` take **2.4s**; 21ms after the fix). Every ingest,
+  preview, import and plugin-install route is threadpooled now, and
+  `tests/test_event_loop_blocking.py` fails the build if a new async route
+  calls a Store method — or `_reload_plugins`, which imports arbitrary
+  plugin code — on the loop. Pass the bound method as an argument
+  (`run_in_threadpool(store().ingest_csv, tmp, ...)`), don't call it.
+  Two consequences worth knowing: the worker pool is bounded (anyio's
+  default is 40 threads), so enough simultaneous slow handlers still queue;
+  and threadpooling does not make anything take the writer lock less — a
+  long write still serialises other writes, which is invariant #4's job,
+  not this one's.
+
 - **One case file, one Winnow.** SQLite's WAL keeps the *file* consistent
   across processes, but nothing in this app invalidates a second process's
   caches or its frontend's row counts, `compact()` holds the writer for
