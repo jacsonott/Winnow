@@ -79,8 +79,8 @@ export function openJumpTsModal() {
     cancel.onclick = () => { $('modal').hidden = true; };
     actions.append(jumpBtn, cancel);
     b.append(actions);
-    setTimeout(() => { input.focus(); input.select(); }, 0);
-  });
+
+  }, { focus: 'input' });
 }
 
 export async function doJumpTs() {

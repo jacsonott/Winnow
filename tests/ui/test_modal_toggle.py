@@ -30,6 +30,32 @@ def test_toggle_defers_to_a_focused_input(page):
     page.wait_for_selector("#modal[hidden]", state="attached")
 
 
+def test_the_caret_is_in_the_box_before_the_next_keystroke_can_arrive(page):
+    """The flake behind the test above, made deterministic.
+
+    The input used to be focused in a setTimeout(0), while modal() unhides
+    synchronously — so there was a window where the dialog was on screen
+    with the caret still on <body>. A keystroke landing in it went to the
+    global keymap, and since J is what opened the dialog, J closed it again
+    out from under someone already typing. On an idle machine the window
+    closes before Playwright can send the second key, which is why this only
+    ever failed in full-suite runs.
+
+    Opening and typing inside ONE task removes the timing: no macrotask can
+    run between them, so a deferred focus has not fired yet. The keystroke
+    is dispatched from the focused element, which is where the browser sends
+    a real one (keymap.js reads e.target)."""
+    out = page.evaluate("""() => {
+        __winnow.openJumpTsModal();
+        const focused = document.activeElement;
+        focused.dispatchEvent(new KeyboardEvent('keydown', { key: 'J', bubbles: true }));
+        return { tag: focused.tagName, hidden: document.getElementById('modal').hidden };
+    }""")
+    assert out["tag"] == "INPUT", "the caret was not in the box when the key arrived"
+    assert out["hidden"] is False, "the keystroke closed the dialog instead of typing into it"
+    page.keyboard.press("Escape")
+
+
 def test_a_different_keybind_does_not_close_someone_elses_dialog(page):
     page.keyboard.press("C")  # table menu
     page.wait_for_selector("#modal:not([hidden])")

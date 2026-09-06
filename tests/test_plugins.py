@@ -594,8 +594,15 @@ def ft(dt: datetime) -> int:
     return (d.days * 86400 + d.seconds) * 10_000_000 + d.microseconds * 10
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def example_registry() -> PluginRegistry:
+    """Function-scoped, and that is load-bearing: server._reload_plugins()
+    calls PLUGINS.load(...) which mutates the registry IN PLACE. A test that
+    monkeypatches server.PLUGINS to this object and then does anything that
+    reloads (applying a profile, toggling a plugin, switching case) rewrites
+    it against the real plugin directories — where the bundled examples are
+    default-OFF. Shared across a module, that silently removed the example
+    plugins' routes from every test that ran afterwards."""
     reg = PluginRegistry()
     reg.load([EXAMPLES])
     rec = next(p for p in reg.describe() if p["name"] == "mft-usn")
@@ -1082,6 +1089,7 @@ def _fake_anthropic(record: dict, msg) -> types.ModuleType:
 
     class _Client:
         def __init__(self, *a, **kw):
+            record["api_key"] = kw.get("api_key")     # None when the SDK resolves it itself
             self.beta = types.SimpleNamespace(messages=_Messages())
 
     mod.Anthropic = _Client
@@ -1109,14 +1117,13 @@ def claude_client(client, example_registry, monkeypatch):
 def test_claude_ask_request_shape(claude_client, monkeypatch):
     record = {}
     monkeypatch.setitem(sys.modules, "anthropic", _fake_anthropic(record, _claude_msg()))
+    # Prior turns come from the case's own transcript, not the browser.
+    claude_client.post("/api/plugin/claude_assistant/clear")
+    r0 = claude_client.post("/api/plugin/claude_assistant/ask", json={"question": "hi"})
+    assert r0.status_code == 200, r0.text
     r = claude_client.post("/api/plugin/claude_assistant/ask", json={
         "question": "Which src_ table has the 4624s?",
         "schema": "CREATE TABLE src_1 (...);",
-        "history": [
-            {"role": "user", "content": "hi"},
-            {"role": "assistant", "content": "hello"},
-            {"role": "system", "content": "sneaky"},   # not a chat role — dropped
-        ],
     })
     assert r.status_code == 200, r.text
     out = r.json()
@@ -1130,8 +1137,9 @@ def test_claude_ask_request_shape(claude_client, monkeypatch):
     # Schema rides in system with the cache breakpoint on it.
     assert record["system"][1]["text"].endswith("CREATE TABLE src_1 (...);")
     assert record["system"][1]["cache_control"] == {"type": "ephemeral"}
-    # History sanitized; the new question is the last user turn.
+    # The stored turns replay in order; the new question is the last one.
     assert [m["role"] for m in record["messages"]] == ["user", "assistant", "user"]
+    assert record["messages"][0]["content"] == "hi"
     assert record["messages"][-1]["content"] == "Which src_ table has the 4624s?"
 
 
@@ -1887,3 +1895,50 @@ def test_kape_profile_ships_and_applies(client, store, write_csv, example_regist
     miss = client.post("/api/dashboard/widget/preview",
                        json={"source": "sql", "query": {"sql": "SELECT * FROM {{mft}}"}})
     assert miss.status_code == 400 and "table" in miss.json()["detail"].lower()
+
+
+def test_claude_transcript_lives_in_the_case_and_renders_without_the_service(claude_client, monkeypatch, store):
+    """The point of the example: the tab can be reloaded, or the service can
+    be unreachable, and the conversation is still there."""
+    record = {}
+    monkeypatch.setitem(sys.modules, "anthropic", _fake_anthropic(record, _claude_msg()))
+    claude_client.post("/api/plugin/claude_assistant/clear")
+    claude_client.post("/api/plugin/claude_assistant/ask", json={"question": "what is 4624?"})
+
+    # No SDK at all now — the tab still renders the history.
+    monkeypatch.setitem(sys.modules, "anthropic", None)
+    got = claude_client.get("/api/plugin/claude_assistant/history").json()
+    assert got["persisted"] is True
+    assert [t["role"] for t in got["turns"]] == ["user", "assistant"]
+    assert got["turns"][0]["content"] == "what is 4624?"
+    assert got["turns"][1]["content"] == "SELECT 1;"
+    assert got["turns"][0]["at"]
+
+    # It is in the case file, in this plugin's own table — never a source.
+    assert store.plugin_tables("claude_assistant") == ["history"]
+    assert store.list_sources() == [] or all(
+        not s["name"].startswith("plugin") for s in store.list_sources())
+
+    # Clearing forgets this case's chat.
+    assert claude_client.post("/api/plugin/claude_assistant/clear").json() == {"ok": True}
+    assert claude_client.get("/api/plugin/claude_assistant/history").json()["turns"] == []
+
+
+def test_claude_a_failed_question_does_not_become_context(claude_client, monkeypatch):
+    """Both turns are written only after the call succeeds, so a refusal or
+    a network error never poisons the next question."""
+    record = {}
+    claude_client.post("/api/plugin/claude_assistant/clear")
+    monkeypatch.setitem(sys.modules, "anthropic", _fake_anthropic(record, _claude_msg(stop_reason="refusal")))
+    assert claude_client.post("/api/plugin/claude_assistant/ask", json={"question": "bad"}).status_code == 400
+    assert claude_client.get("/api/plugin/claude_assistant/history").json()["turns"] == []
+
+
+def test_claude_prefers_the_winnow_named_key(claude_client, monkeypatch):
+    """The guide tells authors to name a WINNOW_* variable; the bundled
+    example has to follow its own advice."""
+    record = {}
+    monkeypatch.setitem(sys.modules, "anthropic", _fake_anthropic(record, _claude_msg()))
+    monkeypatch.setenv("WINNOW_ANTHROPIC_API_KEY", "sk-from-settings")
+    claude_client.post("/api/plugin/claude_assistant/ask", json={"question": "q"})
+    assert record["api_key"] == "sk-from-settings"

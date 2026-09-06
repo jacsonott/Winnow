@@ -33,6 +33,20 @@ export function modal(title, build, opts = {}) {
   setSearchAllRepaint(() => {});
   build(b);
   $('modal').hidden = false;
+  // Focus AFTER unhiding, and synchronously. focus() on an element inside a
+  // hidden container does nothing, which is why callers reached for
+  // setTimeout(0) — and that left a window where the dialog was on screen
+  // but the caret was not in it, so the next keystroke went to the global
+  // keymap instead. For a dialog opened BY a keybinding that is not a lost
+  // character: the same key toggles the dialog shut again, out from under
+  // someone who was already typing.
+  if (opts.focus) {
+    const target = typeof opts.focus === 'function' ? opts.focus(b) : b.querySelector(opts.focus);
+    if (target) {
+      target.focus();
+      if (typeof target.select === 'function') target.select();
+    }
+  }
 }
 
 /* ------------------------------------------------------- date picker */
