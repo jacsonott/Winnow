@@ -10,6 +10,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import functools
+import anyio
 import heapq
 import json
 import os
@@ -628,11 +630,42 @@ def is_winnow_case_file(path: str) -> bool:
         return False
 
 
+# Every table whose contents can only exist because someone did something.
+# The sweep keeps a quick-look case forever if ANY of them has a row.
+#
+# Deliberately not here: `open_tabs` and `tag_defs`, which a fresh case is
+# born with (1 and 3 rows), `sources`, which every quick-look has by
+# definition, and `layouts`/`case_settings`, which are incidental UI state
+# rather than findings. Everything else in the case file got there because
+# an analyst — or a plugin acting for them — put it there.
+_WORK_TABLES = (
+    "row_tags", "row_notes", "sessions",        # the original three
+    "case_notes", "case_variables",
+    "dashboards", "dashboard",                  # `dashboard` is the pre-rename single-row table
+    "derived_columns", "filter_presets", "merges", "saved_views",
+    "source_folders", "watchlist", "sql_tabs",
+)
+
+
+def _case_holds_work(conn) -> bool:
+    """Whether this case file contains anything worth keeping. Errs toward
+    True: a janitor that can eat findings is worse than the disk it saves."""
+    present = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    for t in _WORK_TABLES:
+        if t in present and conn.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]:
+            return True
+    # A plugin's own tables (plugin:<fs_name>:<table>) are case data too —
+    # an LLM plugin's chat transcript is often the ONLY thing in a
+    # quick-look, and it was being swept as "no analysis".
+    return any(n.startswith("plugin:") for n in present)
+
+
 def _sweep_quicklook(max_age_days: int = 7) -> int:
     """Delete abandoned quick-look cases: old, unlocked, and holding no
-    analysis (no tags, no notes, no saved sessions). Anything with work in
-    it is kept forever — a janitor that can eat findings is worse than the
-    disk it saves."""
+    analysis at all (see _case_holds_work). Anything with work in it is
+    kept forever — a janitor that can eat findings is worse than the disk
+    it saves."""
     d = os.path.join(_cases_dir(), QUICKLOOK_DIRNAME)
     if not os.path.isdir(d):
         return 0
@@ -649,10 +682,7 @@ def _sweep_quicklook(max_age_days: int = 7) -> int:
                 continue
             conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
             try:
-                busy = any(
-                    conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
-                    for t in ("row_tags", "row_notes", "sessions")
-                    if conn.execute("SELECT 1 FROM sqlite_master WHERE name=?", (t,)).fetchone())
+                busy = _case_holds_work(conn)
             finally:
                 conn.close()
             if busy:
@@ -2042,6 +2072,21 @@ def api_plugin_asset(fs_name: str, asset_path: str):
     return FileResponse(target)
 
 
+# Plugin handlers get their own slice of the worker pool. run_in_threadpool
+# uses anyio's DEFAULT limiter — the same one every sync route shares — so
+# enough simultaneous slow plugin calls (an LLM that takes 30s, twelve tabs
+# open) would fill it and stall the app anyway, which is the very thing
+# moving them off the event loop was meant to prevent. A limiter of their
+# own bounds plugins without touching what core routes can use.
+PLUGIN_THREADS = anyio.CapacityLimiter(8)
+
+
+async def _run_plugin_handler(handler, req):
+    """Run a plugin's handler off the event loop, under the plugin limiter."""
+    return await anyio.to_thread.run_sync(functools.partial(handler, req),
+                                          limiter=PLUGIN_THREADS)
+
+
 @app.api_route("/api/plugin/{fs_name}/{route:path}", methods=["GET", "POST", "PUT", "DELETE"])
 async def api_plugin_dispatch(fs_name: str, route: str, request: Request):
     """One dispatcher for every plugin-registered backend route (see
@@ -2077,7 +2122,7 @@ async def api_plugin_dispatch(fs_name: str, route: str, request: Request):
         # its duration: the grid, the presence stream, every other request.
         # Row actions already went through the threadpool (their route is a
         # plain `def`); this is the one that didn't.
-        return JSONResponse(await run_in_threadpool(entry["handler"], req))
+        return JSONResponse(await _run_plugin_handler(entry["handler"], req))
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -2092,20 +2137,11 @@ class RowActionBody(BaseModel):
     value: str | None = None
 
 
-@app.post("/api/plugins/row_action/{fs_name}/{action_id}")
-def api_plugin_row_action(fs_name: str, action_id: str, body: RowActionBody, request: Request):
-    """Resolve the selected rows to full cells and hand them to the
-    plugin's handler (see PluginAPI.register_row_action). Rows are read
-    per real source through run_sql — the read-only path — so a slow
-    handler never touches the writer lock; the per-action max_rows cap is
-    enforced here, not trusted from the client."""
-    action = PLUGINS.get_row_action(fs_name, action_id)
-    if action is None:
-        raise HTTPException(404, f"No row action {fs_name}/{action_id}")
+def _resolve_row_action_rows(pairs: list[tuple[int, int]]) -> list[dict]:
+    """(source_id, rid) pairs -> full cells, grouped per real source. Reads
+    go through run_sql (the read-only path), so a big selection never
+    touches the writer lock."""
     st = store()
-    pairs = [(int(a), int(b)) for a, b in body.pairs][: action["max_rows"] + 1]
-    if len(pairs) > action["max_rows"]:
-        raise HTTPException(400, f"{action['label']} takes at most {action['max_rows']} rows")
     by_source: dict[int, list[int]] = {}
     for sid, rid in pairs:
         by_source.setdefault(sid, []).append(rid)
@@ -2122,13 +2158,34 @@ def api_plugin_row_action(fs_name: str, action_id: str, body: RowActionBody, req
                          limit=len(rids))
         for r in res["rows"]:
             rows.append({"rid": r[0], "source_id": sid, "cells": dict(zip(cols, r[1:]))})
+    return rows
+
+
+@app.post("/api/plugins/row_action/{fs_name}/{action_id}")
+async def api_plugin_row_action(fs_name: str, action_id: str, body: RowActionBody, request: Request):
+    """Resolve the selected rows to full cells and hand them to the
+    plugin's handler (see PluginAPI.register_row_action). Rows are read
+    per real source through run_sql — the read-only path — so a slow
+    handler never touches the writer lock; the per-action max_rows cap is
+    enforced here, not trusted from the client."""
+    action = PLUGINS.get_row_action(fs_name, action_id)
+    if action is None:
+        raise HTTPException(404, f"No row action {fs_name}/{action_id}")
+    pairs = [(int(a), int(b)) for a, b in body.pairs][: action["max_rows"] + 1]
+    if len(pairs) > action["max_rows"]:
+        raise HTTPException(400, f"{action['label']} takes at most {action['max_rows']} rows")
+    # Resolving the selection is up to max_rows SQL reads; off the loop like
+    # everything else on this route (it became async so the handler could
+    # run under the plugin limiter — which would have moved this work ONTO
+    # the loop if it stayed inline).
+    rows = await run_in_threadpool(_resolve_row_action_rows, pairs)
     req = plugin_api.PluginRequest(
         "POST", f"row_action/{action_id}", {},
         {"source_id": body.source_id, "column": body.column, "value": body.value, "rows": rows},
         STORE, storage=WS.PluginData(fs_name), plugin=fs_name,
         loopback=_is_loopback(request))
     try:
-        out = action["handler"](req)
+        out = await _run_plugin_handler(action["handler"], req)
     except ValueError as e:
         raise HTTPException(400, str(e))
     return JSONResponse(out if out is not None else {"ok": True})

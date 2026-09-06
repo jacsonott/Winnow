@@ -56,8 +56,21 @@ def _store_expr(node: ast.AST) -> bool:
     return isinstance(node, ast.Name) and node.id == "STORE"
 
 
+def _aliases(fn: ast.AsyncFunctionDef) -> set[str]:
+    """Locals bound to the store — `st = store()` reads exactly like
+    `store()` to everyone except a scan that only looks for the call."""
+    names = set()
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Assign) and _store_expr(node.value):
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    names.add(t.id)
+    return names
+
+
 def _offenders(fn: ast.AsyncFunctionDef) -> list[str]:
     out = []
+    aliased = _aliases(fn)
     for node in ast.walk(fn):
         if not isinstance(node, ast.Call):
             continue
@@ -65,7 +78,9 @@ def _offenders(fn: ast.AsyncFunctionDef) -> list[str]:
         # store().anything(...) / STORE.anything(...) — a Store method CALL.
         # `run_in_threadpool(store().method, ...)` passes an attribute and is
         # not a call here, which is what makes the fixed form pass.
-        if isinstance(f, ast.Attribute) and _store_expr(f.value):
+        if isinstance(f, ast.Attribute) and (
+                _store_expr(f.value)
+                or (isinstance(f.value, ast.Name) and f.value.id in aliased)):
             out.append(f"line {node.lineno}: store().{f.attr}() on the event loop")
         name = getattr(f, "attr", None) or getattr(f, "id", None)
         if name in HEAVY_FUNCTIONS:
@@ -105,6 +120,14 @@ def test_the_rule_would_catch_a_regression():
     )
     (fn,) = [n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef)]
     assert _offenders(fn), "the scan no longer catches a direct Store call"
+
+    aliased = ast.parse(
+        "async def api_z():\n"
+        "    st = store()\n"
+        "    return st.run_sql('SELECT 1')\n"
+    )
+    (fn_a,) = [n for n in ast.walk(aliased) if isinstance(n, ast.AsyncFunctionDef)]
+    assert _offenders(fn_a), "an aliased store handle must not slip past"
 
     ok = ast.parse(
         "async def api_y():\n"
