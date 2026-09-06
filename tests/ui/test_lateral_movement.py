@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import urllib.request
 
+import time
+
 import pytest
 
 pytestmark = pytest.mark.ui
@@ -19,6 +21,21 @@ _EVTX_COLS = ("RecordNumber,EventRecordId,TimeCreated,EventId,Level,Provider,Cha
               "ThreadId,Computer,ChunkNumber,UserId,MapDescription,UserName,RemoteHost,PayloadData1,"
               "PayloadData2,PayloadData3,PayloadData4,PayloadData5,PayloadData6,ExecutableInfo,"
               "HiddenRecord,SourceFile,Keywords,ExtraDataOffset,Payload")
+
+
+def _wait_for_source(pg, name, timeout=25.0):
+    """Wait for an imported table to appear. Polled from Python because
+    page.wait_for_function does NOT await a promise-returning predicate:
+    `() => loadSources().then(...)` hands it a Promise, which is truthy,
+    so the wait passed instantly and the test raced the import."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        names = pg.evaluate(
+            "() => __winnow.loadSources().then(() => __winnow.S.sources.map((s) => s.name))")
+        if name in names:
+            return
+        time.sleep(0.25)
+    raise AssertionError(f"{name} never appeared in S.sources")
 
 
 def _evtx_row(rn, ts, eid, comp, user, remote, p2):
@@ -57,9 +74,7 @@ def test_lateral_movement_tab_mounts_binds_defaults_and_builds(browser, server, 
         pg.goto(server, wait_until="networkidle")
         pg.wait_for_selector(".row")
         # Wait for the logon import to land, then activate the plugin tab.
-        pg.wait_for_function(
-            "() => __winnow.loadSources().then(() => __winnow.S.sources.some((s) => s.name === 'logons.csv'))",
-            timeout=15_000)
+        _wait_for_source(pg, "logons.csv")
         # The toggle happened server-side out of band; a real Settings
         # toggle calls this, so the test does too.
         pg.evaluate("() => __winnow.loadPlugins()")

@@ -7,6 +7,8 @@ from __future__ import annotations
 import json
 import urllib.request
 
+import time
+
 import pytest
 
 pytestmark = pytest.mark.ui
@@ -25,9 +27,18 @@ def test_flatten_appears_only_for_document_columns(page, server, tmp_path):
                  "2026-03-14 08:00:00,\"{\"\"user\"\": \"\"a\"\"}\",plain\n"
                  "2026-03-14 08:00:01,\"{\"\"user\"\": \"\"b\"\"}\",plain\n")
     _post(server, "/api/ingest/jobs/path", {"path": str(f), "name": "events.csv", "kind": "csv"})
-    page.wait_for_function(
-        "() => __winnow.loadSources().then(() => __winnow.S.sources.some((s) => s.name === 'events.csv'))",
-        timeout=15_000)
+    # Polled from Python: wait_for_function does not await a promise
+    # predicate, so the .then() form below passed instantly and raced the
+    # import (see tests/ui/test_merge_flow.py for the same fix).
+    deadline = time.monotonic() + 25
+    while time.monotonic() < deadline:
+        names = page.evaluate(
+            "() => __winnow.loadSources().then(() => __winnow.S.sources.map((s) => s.name))")
+        if "events.csv" in names:
+            break
+        time.sleep(0.25)
+    else:
+        raise AssertionError("events.csv never appeared in S.sources")
     sid = page.evaluate("() => __winnow.S.sources.find((s) => s.name === 'events.csv').id")
     page.evaluate("(id) => __winnow.openSource(id)", sid)
     page.wait_for_selector('.hcell[data-col="Payload"]')

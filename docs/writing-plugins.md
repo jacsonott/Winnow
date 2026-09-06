@@ -15,23 +15,25 @@ reading. Start with the Quickstart.
 
 **Contents**
 
-1. [The three extension points](#1-the-three-extension-points)
+1. [The five extension points](#1-the-five-extension-points)
 2. [Quickstart: a parser in 20 lines](#2-quickstart-a-parser-in-20-lines)
 3. [Plugin anatomy](#3-plugin-anatomy)
 4. [Hook: ingest formats](#4-hook-ingest-formats)
 5. [Hook: tabs](#5-hook-tabs)
-6. [Hook: API routes](#6-hook-api-routes)
-7. [Talking to the case](#7-talking-to-the-case)
-8. [Testing a plugin](#8-testing-a-plugin)
-9. [Installing and sharing](#9-installing-and-sharing)
-10. [Security model](#10-security-model)
-11. [Troubleshooting](#11-troubleshooting)
-12. [Reference](#12-reference)
-13. [Writing a plugin with an LLM](#13-writing-a-plugin-with-an-llm)
+6. [Hook: toolbar panels](#6-hook-toolbar-panels)
+7. [Hook: API routes](#7-hook-api-routes)
+8. [Hook: row actions](#8-hook-row-actions)
+9. [Talking to the case](#9-talking-to-the-case)
+10. [Testing a plugin](#10-testing-a-plugin)
+11. [Installing and sharing](#11-installing-and-sharing)
+12. [Security model](#12-security-model)
+13. [Troubleshooting](#13-troubleshooting)
+14. [Reference](#14-reference)
+15. [Writing a plugin with an LLM](#15-writing-a-plugin-with-an-llm)
 
 > **This file is self-contained.** You do not need to read Winnow's
 > source to write a plugin against it, and neither does an LLM you're
-> working with — see [§13](#13-writing-a-plugin-with-an-llm).
+> working with — see [§15](#15-writing-a-plugin-with-an-llm).
 
 ---
 
@@ -62,6 +64,9 @@ The shipped examples map onto these:
 | [`lateral_movement/`](../examples/plugins/lateral_movement/) | A tab + a route — canvas UI, case queries, theming |
 | [`claude_assistant/`](../examples/plugins/claude_assistant/) | A tab + a route that calls an external service, with credentials and dependencies |
 | [`table_histogram/`](../examples/plugins/table_histogram/) | A toolbar panel + a route — following the grid with `onViewChange`, driving the timeframe filter with `setTimeRange` |
+| [`first_last/`](../examples/plugins/first_last/) | A tab that writes a TABLE back — `ingest_rows` output an analyst browses, tags and exports like any other source |
+| [`pivot/`](../examples/plugins/pivot/) | A tab that aggregates the current view — drag-and-drop rows/columns/values over the case's own data |
+| [`esxi_logs/`](../examples/plugins/esxi_logs/) | Ingest formats for a support bundle's ESXi/Linux logs, and the profile that pairs them with a dashboard |
 
 ---
 
@@ -350,7 +355,7 @@ Prefer it to reaching into the app's globals — this is what's supported.
 
 | Field | What it is |
 | --- | --- |
-| `apiVersion` | Contract version of this object (currently `1`) |
+| `apiVersion` | Contract version of this object (currently `2`) |
 | `plugin` | Your plugin's display name |
 | `base` | `/api/plugin/<fs_name>` — prefix for your own routes |
 | `assets` | `/plugin_assets/<fs_name>` — prefix for your own files |
@@ -368,7 +373,13 @@ Prefer it to reaching into the app's globals — this is what's supported.
 | `state.sourceId` | Currently selected source id |
 | `state.tags` | Tag definitions |
 | `state.variables` | The case's variables as `{name: value}` — see [Case variables](#case-variables) |
+| `state.timeRange` | The case timeframe filter verbatim — `{enabled, column, start, end}`. Honouring it is what makes "the timeframe applies everywhere" true for your tab too |
+| `state.view` | What the grid is showing right now — `{view_id, row_count}`, filters/search/timeframe applied, or `null` before a table is open. Hand `view_id` to a route that reads THROUGH the view |
 | `setVariable(name, value)` | Set one case variable (creates it if new) |
+| `onViewChange(cb)` | Fires after every grid rebuild — filter, sort, search, timeframe, table switch — with `{sourceId, viewId, rowCount}`. Returns an unsubscribe |
+| `onAppearanceChange(cb)` | Fires after every skin / theme / accent change with `{style, themeMode, accent}`. A canvas doesn't inherit CSS, so redraw here. Returns an unsubscribe |
+| `setTimeRange({column, start, end, enabled})` / `clearTimeRange()` | Drive the case timeframe filter (the toolbar's ⏱) — the same object the Timeframe dialog writes, so every other consumer sees it as if typed there |
+| `openFiltered(sourceId, pairs)` | Jump from your visualization to the EVIDENCE: opens the source and exact-filters it to `[{column, value}, …]`. Clears existing filters — it is a navigation, not a refinement |
 
 **Always call your backend through `winnow.api` / `winnow.post`.** A raw
 `fetch()` won't carry the `X-Timeline-Lite-Client` header that Winnow's
@@ -1122,16 +1133,19 @@ Module: `export default function mount(container, winnow)`, plus optional
 
 ### `register_api(route, handler, methods=("GET", "POST"))`
 
-`handler(req: PluginRequest) -> JSON-able`, where `PluginRequest` has
-`.method`, `.route`, `.query`, `.body`, `.store`. `ValueError` → 400.
+`handler(req: PluginRequest) -> JSON-able`; see [`PluginRequest`](#pluginrequest)
+for everything it carries. `ValueError` → 400. Handlers run in a worker
+thread, so blocking is fine ([Blocking is fine](#blocking-is-fine)).
 
 ### `register_toolbar_panel(*, id, label, entry, description="")`
 
 Module: `export default function mount(container, winnow)`, plus optional
-`onShow(container)` / `onHide(container)`. Context additions:
-`winnow.onViewChange(cb) -> unsubscribe`, `winnow.state.view`,
-`winnow.setTimeRange({column, start, end, enabled=true})`,
-`winnow.clearTimeRange()`, `winnow.onAppearanceChange(cb) -> unsubscribe`.
+`onShow(container)` / `onHide(container)`. Panels get the same `winnow`
+context a tab does (one object builds both), so `onViewChange`,
+`state.view`, `setTimeRange` / `clearTimeRange` and `onAppearanceChange`
+are available to tabs as well — they are listed under
+[The `winnow` context](#the-winnow-context), not additions here. They
+matter most to a panel, which sits beside the grid and has to follow it.
 
 ### `register_row_action(*, id, label, handler, description="", max_rows=1000)`
 
@@ -1211,7 +1225,7 @@ step up to guide + contract is still under a tenth.
 > Here is the plugin development guide for Winnow, a local DFIR triage
 > tool. Write a plugin that <what you want>. Follow the contract in the
 > guide exactly — do not invent API surface that isn't documented in it.
-> Include a test file using the standalone recipe in §8.
+> Include a test file using the standalone recipe in §10.
 >
 > <paste this file>
 
@@ -1219,10 +1233,10 @@ step up to guide + contract is still under a tenth.
 
 - **Don't paste `tests/test_plugins.py`.** It mostly tests Winnow's
   plugin *host* — the loader, installs, traversal rejection — none of
-  which a plugin author implements. §8's recipe is the part that's
+  which a plugin author implements. §10's recipe is the part that's
   actually about testing your own plugin.
 - **Don't paste `store.py`.** The supported surface is the short list in
-  §7; the rest is internals a plugin must not reach into anyway. If you
+  §9; the rest is internals a plugin must not reach into anyway. If you
   paste it, an LLM will happily use a private method and you'll find out
   when Winnow refactors.
 - **Do paste an example plugin** if you're building something in the
@@ -1242,6 +1256,6 @@ Three things this guide can't do for you:
 - **Anything an LLM asserts that isn't in here.** The failure mode to
   watch for is a confidently invented method — `store.query()`,
   `api.register_command()`, `winnow.refresh()`. None of those exist.
-  Cross-check any API call against §12; if it isn't listed, it's a
+  Cross-check any API call against §14; if it isn't listed, it's a
   hallucination, and the plugin will fail at load or at first click with
   a message that says so.
