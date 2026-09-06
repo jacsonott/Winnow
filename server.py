@@ -34,6 +34,7 @@ from pydantic import BaseModel
 from winnow import assoc as file_assoc
 from winnow import browser
 from winnow import instances
+from winnow import multicase
 from winnow import paths
 from winnow import plugin_api
 from winnow import updater
@@ -758,6 +759,107 @@ def api_goodbye():
     assume the analyst may come back — see SUSPENDED_EXIT_S."""
     PRESENCE.said_goodbye = True
     return {"ok": True}
+
+
+# ------------------------------------------------------------- across cases
+#
+# One writable case, N read-only readers (winnow/multicase.py). These
+# routes never write to another case and never take its lock, so they work
+# while another Winnow has it open — which is the normal state when an
+# analyst is working a set of hosts.
+
+class MultiCaseBody(BaseModel):
+    paths: list[str] = []          # case files; empty means every registered case
+    values: list[str] | None = None
+    sql: str | None = None
+    start: str = ""
+    end: str = ""
+    limit: int = 5000
+
+
+def _multicase_paths(body: MultiCaseBody) -> tuple[list[str], dict[str, str]]:
+    """The cases to read, and their registry names. Restricted to the
+    REGISTERED cases: these routes take a path from the browser, and the
+    case list is the analyst's own statement of what they work on."""
+    known = {c["path"]: (c.get("name") or os.path.basename(c["path"])) for c in WS.cases.list()}
+    if body.paths:
+        unknown = [p for p in body.paths if p not in known]
+        if unknown:
+            raise HTTPException(400, f"Not a registered case: {unknown[0]}")
+        paths = list(body.paths)
+    else:
+        paths = list(known)
+    # The open case reads from its own Store, not from a second connection.
+    here = STORE.path if STORE is not None and not STORE.closed else None
+    paths = [p for p in paths if p != here]
+    return paths, known
+
+
+@app.get("/api/multicase/cases")
+def api_multicase_cases():
+    """Registered cases this session can read, with the open one marked."""
+    here = STORE.path if STORE is not None and not STORE.closed else None
+    out = []
+    for c in WS.cases.list():
+        out.append({"path": c["path"], "name": c.get("name") or os.path.basename(c["path"]),
+                    "group": c.get("group") or "", "is_open": c["path"] == here,
+                    "exists": os.path.isfile(c["path"])})
+    return {"cases": out, "attach_budget": multicase.ATTACH_BUDGET}
+
+
+@app.post("/api/multicase/sweep")
+async def api_multicase_sweep(body: MultiCaseBody):
+    """A: where else did these values land. Defaults to this case's
+    watchlist, which is the question an analyst already has written down."""
+    paths, names = _multicase_paths(body)
+    values = [v for v in (body.values or []) if str(v).strip()]
+    if not values:
+        if STORE is None or STORE.closed:
+            raise HTTPException(400, "Give some values, or open a case with a watchlist")
+        values = [i["value"] for i in await run_in_threadpool(STORE.list_indicators)]
+    if not values:
+        raise HTTPException(400, "No values to look for — add some IOCs to the watchlist first")
+    try:
+        cases = await run_in_threadpool(
+            multicase.sweep_values, paths, values, names=names, limit_per_case=min(body.limit, 500))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"values": values, "cases": cases,
+            "total_hits": sum(len(c["hits"]) for c in cases)}
+
+
+@app.post("/api/multicase/sql")
+async def api_multicase_sql(body: MultiCaseBody):
+    """B: one read-only SELECT across several cases, attached as c1, c2…"""
+    paths, names = _multicase_paths(body)
+    try:
+        return await run_in_threadpool(
+            multicase.query_across, paths, body.sql or "", limit=body.limit, names=names)
+    except (ValueError, multicase.NotACaseFile) as e:
+        # Analyst-actionable: a forbidden statement, too many cases, an
+        # empty query. The 400-vs-500 split the rest of the app keeps.
+        raise HTTPException(400, str(e))
+    except sqlite3.Error as e:
+        raise HTTPException(400, f"SQL error: {e}")
+
+
+@app.post("/api/multicase/schema")
+async def api_multicase_schema(body: MultiCaseBody):
+    paths, names = _multicase_paths(body)
+    try:
+        return {"schema": await run_in_threadpool(multicase.schema_across, paths, names)}
+    except (ValueError, multicase.NotACaseFile) as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/multicase/timeline")
+async def api_multicase_timeline(body: MultiCaseBody):
+    """C: several cases on one timeline. Read-only — acting on a row means
+    opening it in the case that owns it."""
+    paths, names = _multicase_paths(body)
+    return await run_in_threadpool(
+        multicase.timeline_across, paths, start=body.start, end=body.end,
+        limit=min(body.limit, 20000), names=names)
 
 
 @app.get("/api/version")

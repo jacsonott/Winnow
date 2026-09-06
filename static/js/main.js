@@ -43,6 +43,7 @@ import * as filterbuilder from './filterbuilder.js';
 import * as savedfilters from './savedfilters.js';
 import * as timeframe from './timeframe.js';
 import * as merge from './merge.js';
+import * as multicase from './multicase.js';
 import * as importer from './importer.js';
 import * as tables from './tables.js';
 import * as plugins from './plugins.js';
@@ -82,7 +83,7 @@ import { wireUi } from './ui.js';
    spread would freeze the value of a rebindable export like ROW_H at boot.
    Collision-free by construction — these names all shared one scope until
    the file was split. Not an API; nothing in the app reads it. */
-const NAMESPACES = { splash, core, connection, state, jobs, tabhistory, charts, stack, notes, watchlist, dashboard, filters, sources, view, columns, tsformat, derived, grid, grouping, tags, detail, ui, filterbuilder, savedfilters, timeframe, merge, importer, tables, plugins, search, session, sql, timeline, rowmenu, keymap, settings, profilebuilder, userenv, home, errlog };
+const NAMESPACES = { splash, core, connection, state, jobs, tabhistory, charts, stack, notes, watchlist, dashboard, filters, sources, view, columns, tsformat, derived, grid, grouping, tags, detail, ui, filterbuilder, savedfilters, timeframe, merge, multicase, importer, tables, plugins, search, session, sql, timeline, rowmenu, keymap, settings, profilebuilder, userenv, home, errlog };
 window.__winnow = {};
 for (const ns of Object.values(NAMESPACES)) {
   for (const key of Object.keys(ns)) {
@@ -94,6 +95,7 @@ for (const ns of Object.values(NAMESPACES)) {
 // mouseup, where browsers fire their own history navigation from.
 window.addEventListener('mouseup', tabhistory.onMouseNav);
 
+core.$('btnAcrossCases').onclick = () => multicase.openMultiCase();
 notes.wireNotes();
 watchlist.wireWatchlist();
 dashboard.wireDashboard();
