@@ -5,6 +5,8 @@ analyst actually clicks through had nothing."""
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 pytestmark = pytest.mark.ui
@@ -27,10 +29,21 @@ def test_merge_builder_creates_and_opens_a_merge(page, tmp_path):
     # runner a stale background job from an earlier test can satisfy the
     # count while the twin itself isn't in S.sources yet, and the merge
     # builder would then find no eligible pair and render no button.
-    page.wait_for_function(
-        """() => __winnow.loadSources().then(() =>
-             __winnow.S.sources.some((s) => s.name === 'twin.csv'))""",
-        timeout=20_000)
+    #
+    # Polled from Python, NOT with wait_for_function: that does not await a
+    # promise predicate, so `() => loadSources().then(...)` returned a
+    # Promise — always truthy — and the wait passed instantly. It read like
+    # a fix for exactly this flake while doing nothing, which is why the
+    # flake kept coming back on slow runners. page.evaluate does await.
+    deadline = time.monotonic() + 25
+    while time.monotonic() < deadline:
+        names = page.evaluate(
+            "() => __winnow.loadSources().then(() => __winnow.S.sources.map((s) => s.name))")
+        if "twin.csv" in names:
+            break
+        time.sleep(0.25)
+    else:
+        pytest.fail("twin.csv never appeared in S.sources")
 
     merge_id = None
     try:
