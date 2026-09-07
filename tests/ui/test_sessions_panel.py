@@ -82,9 +82,54 @@ def test_the_diff_shows_what_a_reviewer_added_and_removed(page):
         assert "removed on the right" in text, text
         # The rows carry what changed, not just that something did.
         assert "→ ta" in text.replace("\t", " ") or "→\tta" in text
-        # The rows themselves, not just the headings.
+        # The rows themselves, not just the headings — with the evidence in
+        # them: a preview of the row's own cells, not only its number.
         assert page.locator(".diff-added").count() >= 1
         assert page.locator(".diff-removed").count() >= 1
+        assert page.locator(".diff-added .diff-cell").count() >= 1
+        assert "Host" in page.locator(".diff-added .diff-cell-k").all_inner_texts()
+        # Click a row for all of it.
+        page.locator(".diff-added.diff-expandable").first.click()
+        page.wait_for_selector(".diff-full-row")
+        assert page.locator(".diff-full-row .diff-full-kv").count() >= 3
+    finally:
+        _cleanup(page)
+        page.keyboard.press("Escape")
+
+
+def test_the_diff_opens_its_rows_in_the_table(page):
+    """From a difference to the evidence: "Open N in <table>" leaves the
+    grid showing exactly those rows, via a rid filter the Filters button
+    owns, so Clear filters brings the table back."""
+    _cleanup(page)
+    _tag_rows(page, [0, 1, 2])
+    try:
+        page.evaluate("""() => fetch('/api/case_sessions', { method: 'POST',
+          headers: { 'X-Timeline-Lite-Client': '1', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: 'analyst' }) })""")
+        page.wait_for_timeout(200)
+        _tag_rows(page, [1, 2])           # the reviewer drops two of the three
+        rids = page.evaluate("() => [1, 2].map((p) => __winnow.rowAt(p).rid)")
+
+        _open(page)
+        page.locator(".session-compare select").first.select_option("analyst")
+        page.locator(".session-compare select").nth(1).select_option("__live__")
+        page.locator(".btn", has_text="Compare").click()
+        page.wait_for_selector(".diff-removed")
+        # the chips narrow the list to one kind of change
+        page.locator(".diff-chip[data-group='added']").click()
+        assert page.locator(".diff-removed").count() == 0
+        page.locator(".diff-chip[data-group='added']").click()      # and back
+        page.wait_for_selector(".diff-removed")
+        page.locator(".diff-open-all", has_text="Open 2 in").click()
+        page.wait_for_selector("#modal[hidden]", state="attached")
+        page.wait_for_function("(n) => __winnow.S.view && __winnow.S.view.row_count === n", arg=2)
+        assert page.evaluate("() => __winnow.S.filterTree.type") == "raw"
+        shown = page.evaluate("() => [0, 1].map((p) => __winnow.rowAt(p).rid)")
+        assert sorted(shown) == sorted(rids)
+        # the way back is the ordinary one
+        page.locator("#btnReset").click()
+        page.wait_for_function("() => __winnow.S.view && __winnow.S.view.row_count === 200")
     finally:
         _cleanup(page)
         page.keyboard.press("Escape")

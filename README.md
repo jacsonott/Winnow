@@ -248,7 +248,11 @@ filter the column to it, exclude it, or search every column for it.
 assignments, notes, layout and saved views, plus a hash of the source
 files — load it against the same evidence elsewhere and it warns on a
 mismatch. Tags merge by *name*, so two analysts who both invented
-"Lateral movement" end up merged, not duplicated. **Export** writes the
+"Lateral movement" end up merged, not duplicated. **Compare** two
+sessions (or one against the live case) and you get the rows, not just
+counts: each difference shows the row's own cells beside what each side
+tagged it, click for the whole row, narrow by kind of change or by tag,
+and open any row — or every row in a group — in the table. **Export** writes the
 current view — filters, sort and search applied — as CSV or XLSX, with
 `Line`, `Tags` and `Note` columns prepended, or just the tagged rows.
 

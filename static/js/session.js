@@ -12,9 +12,13 @@
    what did they add, what did they drop, and where did we disagree.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
+import { renderHead } from './columns.js';
 import { $, api, el, post, setBusy, toast } from './core.js';
-import { loadSources } from './sources.js';
+import { loadSources, openSource } from './sources.js';
+import { S } from './state.js';
+import { updateFiltersButton } from './timeframe.js';
 import { confirmDialog, modal, promptDialog } from './ui.js';
+import { rebuildView } from './view.js';
 
 const LIVE = '__live__';
 
@@ -243,12 +247,81 @@ function side(v) {
   return v ? String(v) : '(none)';
 }
 
+/* Open a table on exactly these rows: the grid, filtered to `rid IN (…)`
+   through the raw filter-tree node, so the analyst reads the evidence
+   with every other tool — sort, search, the detail panel — and the
+   Filters button shows how to get back out. */
+export async function openDiffRows(sourceId, rids, what) {
+  if (!(S.sources || []).some((s) => s.id === sourceId)) { toast('That table is no longer in this case'); return; }
+  const ids = [...new Set(rids.map(Number).filter(Number.isFinite))];
+  if (!ids.length) return;
+  $('modal').hidden = true;
+  await openSource(sourceId);
+  S.filterTree = { type: 'raw', sql: `rid IN (${ids.join(', ')})` };
+  updateFiltersButton();
+  renderHead();
+  await rebuildView({ keepScroll: false });
+  toast(`${what || 'Rows'} — ${ids.length.toLocaleString()} row${ids.length === 1 ? '' : 's'}; Clear filters brings the table back`, 5000);
+}
 
+/* Which columns make a one-line preview of a row: the first timestamp-
+   looking column, then the first few others with something in them. */
+function previewColumns(columns, cells) {
+  const idxs = [];
+  const ts = columns.findIndex((c) => /time|date|created|modified/i.test(c));
+  if (ts >= 0 && cells[ts] !== '' && cells[ts] != null) idxs.push(ts);
+  for (let i = 0; i < columns.length && idxs.length < 4; i++) {
+    if (i === ts) continue;
+    const v = cells[i];
+    if (v !== '' && v != null) idxs.push(i);
+  }
+  return idxs;
+}
+
+function rowPreview(columns, cells) {
+  const wrap = el('div', 'diff-preview');
+  if (!columns || !cells) {
+    wrap.append(el('span', 'diff-preview-none', 'row not in this case'));
+    return wrap;
+  }
+  for (const i of previewColumns(columns, cells)) {
+    const cell = el('span', 'diff-cell');
+    cell.append(el('span', 'diff-cell-k', columns[i]), el('span', 'diff-cell-v', String(cells[i])));
+    wrap.append(cell);
+  }
+  wrap.title = columns.map((c, i) => `${c}: ${cells[i] == null ? '' : cells[i]}`).join('\n');
+  return wrap;
+}
+
+function fullRow(columns, cells) {
+  const dl = el('div', 'diff-full');
+  columns.forEach((c, i) => {
+    const v = cells[i];
+    if (v === '' || v == null) return;
+    const kv = el('div', 'diff-full-kv');
+    kv.append(el('span', 'diff-cell-k', c), el('span', 'diff-cell-v', String(v)));
+    dl.append(kv);
+  });
+  return dl;
+}
+
+const GROUPS = [
+  ['added', 'Added on the right', 'diff-added'],
+  ['removed', 'Removed on the right', 'diff-removed'],
+  ['changed', 'Tagged differently', 'diff-changed'],
+  ['note_changes', 'Notes changed', 'diff-note'],
+];
+
+/* The diff, as rows: every entry is the row itself (a one-line preview,
+   click for all of it) beside what each side said about it, with a way
+   to open it — or the whole group — in the table. The chips at the top
+   narrow the list to one kind of change; the tag picker to one tag. */
 function renderDiff(out, d) {
   out.replaceChildren();
   const c = d.counts;
   if (!c.added && !c.removed && !c.changed && !c.note_changes) {
     out.append(el('div', 'note-status', 'No differences — the two agree on every row.'));
+    return;
   }
   if (d.only_left_sources.length || d.only_right_sources.length) {
     // Not a like-for-like comparison; say so rather than letting the
@@ -258,31 +331,92 @@ function renderDiff(out, d) {
       + `${d.only_left_sources.length} only on the left, ${d.only_right_sources.length} only on the right. `
       + 'Counts below cover what they share.'));
   }
-  const groups = [
-    ['Added on the right', d.added, 'diff-added'],
-    ['Removed on the right', d.removed, 'diff-removed'],
-    ['Tagged differently', d.changed, 'diff-changed'],
-    ['Notes changed', d.note_changes, 'diff-note'],
-  ];
-  for (const [label, rows, cls] of groups) {
-    if (!rows.length) continue;
-    out.append(el('h4', null, `${label} (${rows.length.toLocaleString()})`));
-    const tbl = el('table', 'diff-table');
-    for (const r of rows.slice(0, 200)) {
-      const tr = el('tr', cls);
-      tr.append(el('td', null, r.source), el('td', 'diff-rid', `row ${r.rid.toLocaleString()}`),
-                el('td', null, side(r.left)),
-                el('td', 'diff-arrow', '→'),
-                el('td', null, side(r.right)));
-      tbl.append(tr);
+  const state = { group: 'all', tag: '' };
+  const tagNames = new Set();
+  for (const [key] of GROUPS) {
+    if (key === 'note_changes') continue;
+    for (const r of d[key]) { for (const n of r.left) tagNames.add(n); for (const n of r.right) tagNames.add(n); }
+  }
+
+  const bar = el('div', 'diff-bar');
+  const chips = el('div', 'diff-chips');
+  const chip = (key, label, n) => {
+    const b = el('button', 'btn ghost diff-chip', `${label} ${n.toLocaleString()}`);
+    b.dataset.group = key;
+    b.setAttribute('aria-pressed', String(state.group === key));
+    b.onclick = () => { state.group = state.group === key ? 'all' : key; paint(); };
+    return b;
+  };
+  const tagSel = el('select', 'diff-tag');
+  tagSel.append(new Option('any tag', ''));
+  for (const n of [...tagNames].sort()) tagSel.append(new Option(n, n));
+  tagSel.onchange = () => { state.tag = tagSel.value; paint(); };
+  bar.append(chips, tagSel);
+  const body = el('div', 'diff-body');
+  out.append(bar, body);
+
+  const matchesTag = (r) => !state.tag || (r.left || []).includes(state.tag) || (r.right || []).includes(state.tag);
+
+  function paint() {
+    chips.replaceChildren(
+      chip('added', '+', c.added), chip('removed', '−', c.removed),
+      chip('changed', '±', c.changed), chip('notes', '✎', c.note_changes));
+    body.replaceChildren();
+    for (const [key, label, cls] of GROUPS) {
+      const gkey = key === 'note_changes' ? 'notes' : key;
+      if (state.group !== 'all' && state.group !== gkey) continue;
+      const rows = (key === 'note_changes' ? d[key] : d[key].filter(matchesTag));
+      if (!rows.length) continue;
+      const head = el('div', 'diff-group-head');
+      head.append(el('h4', null, `${label} (${rows.length.toLocaleString()})`));
+      // One "open" per table the group touches: the grid shows one table.
+      const bySource = new Map();
+      for (const r of rows) if (r.source_id != null) bySource.set(r.source_id, (bySource.get(r.source_id) || []).concat(r.rid));
+      for (const [sid, rids] of bySource) {
+        const src = (S.sources || []).find((s) => s.id === sid);
+        const open = el('button', 'btn ghost diff-open-all', `Open ${rids.length.toLocaleString()} in ${src ? (src.nickname || src.name) : 'table'}`);
+        open.title = 'Show exactly these rows in the table';
+        open.onclick = () => openDiffRows(sid, rids, label);
+        head.append(open);
+      }
+      body.append(head);
+      const tbl = el('table', 'diff-table');
+      for (const r of rows.slice(0, 200)) {
+        const columns = r.source_id != null ? d.columns[String(r.source_id)] : null;
+        const tr = el('tr', cls);
+        const rid = el('td', 'diff-rid', `${r.source} · row ${r.rid.toLocaleString()}`);
+        const prev = el('td', 'diff-row');
+        prev.append(rowPreview(columns, r.cells));
+        const openOne = el('button', 'btn ghost diff-open', '⤴');
+        openOne.title = 'Open this row in the table';
+        openOne.disabled = r.source_id == null;
+        openOne.onclick = (e) => { e.stopPropagation(); openDiffRows(r.source_id, [r.rid], `Row ${r.rid}`); };
+        const act = el('td', 'diff-act');
+        act.append(openOne);
+        tr.append(rid, prev, el('td', 'diff-side', side(r.left)), el('td', 'diff-arrow', '→'),
+                  el('td', 'diff-side', side(r.right)), act);
+        if (columns && r.cells) {
+          tr.classList.add('diff-expandable');
+          tr.title = 'Click to see the whole row';
+          tr.onclick = () => {
+            const next = tr.nextElementSibling;
+            if (next && next.classList.contains('diff-full-row')) { next.remove(); return; }
+            const full = el('tr', 'diff-full-row');
+            const td = el('td'); td.colSpan = 6; td.append(fullRow(columns, r.cells));
+            full.append(td);
+            tr.after(full);
+          };
+        }
+        tbl.append(tr);
+      }
+      body.append(tbl);
+      if (rows.length > 200) body.append(el('div', 'fb-help', `Showing the first 200 of ${rows.length.toLocaleString()}.`));
     }
-    out.append(tbl);
-    if (rows.length > 200) {
-      out.append(el('div', 'fb-help', `Showing the first 200 of ${rows.length.toLocaleString()}.`));
+    if (!body.children.length) body.append(el('div', 'note-status', 'Nothing matches that tag in this group.'));
+    if (d.truncated) {
+      body.append(el('div', 'note-status',
+        'The comparison hit its row cap — these sessions differ on more rows than are listed.'));
     }
   }
-  if (d.truncated) {
-    out.append(el('div', 'note-status',
-      'The comparison hit its row cap — these sessions differ on more rows than are listed.'));
-  }
+  paint();
 }

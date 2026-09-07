@@ -109,8 +109,67 @@ def test_a_row_tagged_differently_is_changed_not_added_and_removed(store, write_
 
     d = store.diff_sessions("before", "after")
     assert d["counts"] == {"added": 0, "removed": 0, "changed": 1, "note_changes": 0}
-    assert d["changed"][0] == {"source": "evidence.csv", "rid": 1,
-                               "left": ["TA"], "right": ["Benign"]}
+    row = d["changed"][0]
+    assert {k: row[k] for k in ("source", "rid", "left", "right")} == {
+        "source": "evidence.csv", "rid": 1, "left": ["TA"], "right": ["Benign"]}
+    # The row itself rides along: its live source id and its cells, so the
+    # reviewer reads the evidence rather than a row number.
+    assert row["source_id"] == sid
+    cols = d["columns"][str(sid)]
+    assert cols and len(row["cells"]) == len(cols)
+
+
+def test_diff_rows_carry_their_cells_and_a_foreign_row_does_not(store, write_csv, tmp_path):
+    """Cells come from THIS case by rid; a session about a table this
+    case does not have keeps its row number and nothing else."""
+    sid = _case(store, write_csv)
+    _tag(store, sid, [2], "TA")
+    store.save_session("mine")
+    d = store.diff_sessions("mine", store.LIVE_SESSION)   # identical: nothing to list
+    assert d["counts"] == {"added": 0, "removed": 0, "changed": 0, "note_changes": 0}
+    ta = next(t["id"] for t in store.list_tags() if t["name"] == "TA")
+    store.set_tags(sid, [2], ta, False)
+    d = store.diff_sessions("mine", store.LIVE_SESSION)
+    (row,) = d["removed"]
+    cols = d["columns"][str(sid)]
+    got = dict(zip(cols, row["cells"]))
+    # the fixture's second row, by its own values
+    src_cols, first_rows = _fixture_rows(store, sid, 2)
+    assert got == dict(zip(src_cols, first_rows[1]))
+    # a session whose source this case lacks
+    foreign = {"format": "winnow-case-session/1", "sources": [{
+        "source": {"name": "elsewhere.csv", "file_hash": "nope", "columns": []},
+        "tag_defs": [{"id": 1, "name": "TA"}], "row_tags": [{"rid": 5, "tag_id": 1}], "row_notes": []}]}
+    store.adopt_session("theirs", foreign)
+    d = store.diff_sessions("theirs", store.LIVE_SESSION)
+    assert d["only_left_sources"] == ["nope"]
+    (r,) = d["removed"]
+    assert r["rid"] == 5 and r["source_id"] is None and r["cells"] is None
+
+
+def _fixture_rows(store, sid, n):
+    src = store.get_source(sid)
+    cols = [c["name"] for c in src["columns"] if not c.get("derived")]
+    res = store.run_sql(f'SELECT {", ".join(chr(34) + c + chr(34) for c in cols)} FROM src_{sid} ORDER BY rid LIMIT {n}')
+    return cols, res["rows"]
+
+
+def test_rows_by_rids_is_keyed_and_chunked(store, write_csv):
+    sid = _case(store, write_csv)
+    cols, rows = store.rows_by_rids(sid, [3, 1, 3, 999])
+    assert set(rows) == {1, 3} and all(len(v) == len(cols) for v in rows.values())
+    cols2, rows2 = store.rows_by_rids(sid, list(range(1, 1200)))   # more than one IN chunk
+    assert cols2 == cols and set(rows2) == {r for r in range(1, 1200) if r <= store.get_source(sid)["row_count"]}
+
+
+def test_a_rid_list_is_a_legal_raw_filter(store, write_csv):
+    """What "open these rows" sends: `rid IN (…)` through the raw filter
+    node, which the validator used to reject as an unknown identifier."""
+    sid = _case(store, write_csv)
+    store.validate_where_fragment(sid, "rid IN (1, 3)")
+    sql = store.spec_sql(sid, {"source_id": sid, "filter_tree": {"type": "raw", "sql": "rid IN (1, 3)"}})
+    assert [r[0] for r in store.run_sql(f"SELECT rid FROM ({sql})")["rows"]] == [1, 3] or \
+        len(store.run_sql(sql)["rows"]) == 2
 
 
 def test_diff_matches_tags_by_name_across_differently_numbered_cases(store, write_csv, tmp_path):

@@ -5609,6 +5609,10 @@ class Store:
         "AND", "OR", "NOT", "IS", "NULL", "IN", "BETWEEN", "LIKE", "GLOB", "REGEXP", "ESCAPE",
         "CAST", "REAL", "TEXT", "INTEGER", "COALESCE", "LENGTH", "LOWER", "UPPER", "SUBSTR",
         "TRIM", "TRUE", "FALSE",
+        # Every source table's own row id — not in its column list, but a
+        # legitimate filter target: the session diff opens "these rows" as
+        # `rid IN (…)`.
+        "RID",
     }
 
     def validate_where_fragment(self, source_id: int, fragment: str) -> None:
@@ -7994,6 +7998,57 @@ class Store:
                 notes[(key, rn["rid"])] = rn.get("note") or ""
         return tags, notes, labels
 
+    def rows_by_rids(self, source_id: int, rids: list[int]) -> tuple[list[str], dict[int, list]]:
+        """(base column names, {rid: cells}) for a handful of rows named by
+        rid — what the session diff shows beside a changed tag, so the
+        reviewer sees the evidence and not a row number. Reader pool,
+        chunked so a long list never builds one enormous IN."""
+        with self._reader() as ro:
+            src = self._source_lite_on(ro, source_id)
+            cols = [c["name"] for c in self._base_cols(src)]
+            table = src["table_name"]
+            out: dict[int, list] = {}
+            sel = ", ".join(q(c) for c in cols)
+            want = sorted({int(r) for r in rids})
+            for i in range(0, len(want), 500):
+                chunk = want[i:i + 500]
+                marks = ",".join("?" * len(chunk))
+                for row in ro.execute(f"SELECT rid, {sel} FROM {q(table)} WHERE rid IN ({marks})", chunk):
+                    out[row[0]] = list(row[1:])
+        return cols, out
+
+    def _attach_diff_rows(self, groups: list[list[dict]], labels: dict) -> dict:
+        """Give each diff row its live source id and its cells, so the diff
+        can show the row and open it. Sessions key sources by file hash (or
+        name); a source this case does not have stays a row number with
+        `source_id: None`. Returns {source label: [column names]}."""
+        by_hash = {s["file_hash"]: s["id"] for s in self.list_sources() if s.get("file_hash")}
+        by_name = {s["name"]: s["id"] for s in self.list_sources()}
+        by_key = {k: by_hash.get(k, by_name.get(k)) for k in labels}
+        by_key.update({k: by_name.get(labels[k]) for k in labels if by_key.get(k) is None})
+        wanted: dict[int, set] = {}
+        for rows in groups:
+            for r in rows:
+                sid = by_key.get(r["key"])
+                r["source_id"] = sid
+                if sid is not None:
+                    wanted.setdefault(sid, set()).add(r["rid"])
+        columns: dict = {}
+        cells: dict = {}
+        for sid, rids in wanted.items():
+            try:
+                cols, got = self.rows_by_rids(sid, sorted(rids))
+            except KeyError:
+                continue
+            columns[sid] = cols
+            cells[sid] = got
+        for rows in groups:
+            for r in rows:
+                r.pop("key", None)
+                sid = r.get("source_id")
+                r["cells"] = cells.get(sid, {}).get(r["rid"]) if sid is not None else None
+        return {str(sid): cols for sid, cols in columns.items()}
+
     def diff_sessions(self, left: str, right: str, limit: int = 2000) -> dict:
         """What changed between two sessions — the QC question: "what did
         the reviewer tag that I didn't, and what did I tag that they
@@ -8019,7 +8074,7 @@ class Store:
             a, b = lt.get(key, set()), rt.get(key, set())
             if a == b:
                 continue
-            row = {"source": labels.get(key[0], key[0]), "rid": key[1],
+            row = {"source": labels.get(key[0], key[0]), "key": key[0], "rid": key[1],
                    "left": sorted(a), "right": sorted(b)}
             if not a:
                 added.append(row)
@@ -8030,21 +8085,29 @@ class Store:
         for key in sorted(set(ln) | set(rn), key=lambda k: (str(k[0]), k[1])):
             a, b = ln.get(key), rn.get(key)
             if a != b:
-                note_changes.append({"source": labels.get(key[0], key[0]), "rid": key[1],
+                note_changes.append({"source": labels.get(key[0], key[0]), "key": key[0], "rid": key[1],
                                      "left": a, "right": b})
 
         def _cap(rows):
             return rows[:limit]
 
+        counts = [len(added), len(removed), len(changed), len(note_changes)]
+        capped = [_cap(added), _cap(removed), _cap(changed), _cap(note_changes)]
+        # The rows themselves ride along for what is listed: the reviewer
+        # reads the evidence, not a row number, and can open it.
+        columns = self._attach_diff_rows(capped, labels)
+        added, removed, changed, note_changes = capped
+
         return {
             "left": left, "right": right,
+            "columns": columns,
             # "only in right" reads as added when right is the later pass,
             # which is how a review is run: left = what was handed over.
-            "added": _cap(added), "removed": _cap(removed), "changed": _cap(changed),
-            "note_changes": _cap(note_changes),
-            "counts": {"added": len(added), "removed": len(removed),
-                       "changed": len(changed), "note_changes": len(note_changes)},
-            "truncated": max(len(added), len(removed), len(changed), len(note_changes)) > limit,
+            "added": added, "removed": removed, "changed": changed,
+            "note_changes": note_changes,
+            "counts": {"added": counts[0], "removed": counts[1],
+                       "changed": counts[2], "note_changes": counts[3]},
+            "truncated": max(counts) > limit,
             # A shared source is one both sides have evidence for; anything
             # else means the two sessions are describing different cases and
             # the numbers above are not a like-for-like comparison.
