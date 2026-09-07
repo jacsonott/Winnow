@@ -307,7 +307,18 @@ see [docs/notes/README.md](README.md) for the whole set.
   (positioned at the pointer) and `anchoredPanel` (a card with real
   controls in it) as the three entry points. That's what makes "only one
   of these is open at a time, and Escape closes it" true across all of
-  them rather than four near-copies of the same two listeners. The
+  them rather than four near-copies of the same two listeners. An item
+  may carry `submenu` (an array, or a function for one that repaints —
+  the tag list's ✓) and opens a `.menu-sub` flyout beside itself on
+  hover or click; one per level, closed with the root or when a plain
+  sibling is hovered. A menu opened with `{ pins: '<key>' }` lets
+  submenu items that declare a stable `pinId` be dragged or ☆-starred
+  onto a **Pinned** section at its top (`menuPins`, localStorage
+  `winnow.menupins`); pins are resolved against the live item tree on
+  every paint, so a pinned tag's ✓ is current and a pinned plugin
+  action simply isn't shown while the plugin is off. The row menu is
+  the one using it: filters for the clicked column stay broken out,
+  Tag / Add to dashboard / Copy / Plugins fold into submenus. The
   column-header menu is the one that *replaced* a visible control rather
   than adding a surface: its `▾` (`.hcell-fmt`) cost a slot of every
   header's width, on every table, forever, to be opened rarely — the same

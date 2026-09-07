@@ -15,14 +15,17 @@ def test_right_click_opens_the_menu_with_its_sections(page):
     menu = page.locator(".menu")
     menu.wait_for(state="visible")
     text = menu.inner_text()
-    # One stable item from each registered section: clipboard ops and the
-    # tag list (default tags are seeded into every new case).
-    assert "Copy cell" in text
-    assert "Copy" in text and "with headers" in text
+    # One stable entry from each registered section at the top level: the
+    # Tag and Copy submenus and the clicked column's filters.
+    assert "Tag this row" in text and "Copy" in text and "Filter to" in text
+    # The tag list (default tags are seeded into every new case) is a click away.
+    page.locator(".menu .menu-item-sub", has_text="Tag this row").click()
+    page.wait_for_selector(".menu-sub")
+    sub = page.locator(".menu-sub").inner_text()
     tag_names = page.evaluate("() => __winnow.S.tags.map((t) => t.name)")
-    assert any(n in text for n in tag_names)
+    assert any(n in sub for n in tag_names)
     page.keyboard.press("Escape")
-    assert page.locator(".menu").count() == 0
+    assert page.locator(".menu").count() == 0   # root and flyout both gone
 
 
 def test_menu_closes_on_outside_click(page):

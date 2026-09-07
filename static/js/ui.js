@@ -263,8 +263,21 @@ export let openMenuEl = null;
 
 export let openMenuAnchor = null;
 
+/* Submenus open beside their item, root-first in this list; closing the
+   root closes them all, and an outside click is one that lands in none
+   of them. Only one submenu per level is ever open. */
+let openSubEls = [];
+let subTimer = null;
+
+function closeSubmenusFrom(level) {
+  clearTimeout(subTimer);
+  subTimer = null;
+  while (openSubEls.length > level) openSubEls.pop().remove();
+}
+
 export function closeMenu() {
   if (openMenuAnchor) openMenuAnchor.setAttribute('aria-expanded', 'false');
+  closeSubmenusFrom(0);
   if (openMenuEl) openMenuEl.remove();
   openMenuEl = null;
   openMenuAnchor = null;
@@ -272,7 +285,52 @@ export function closeMenu() {
   document.removeEventListener('keydown', onMenuKeydown, true);
 }
 
-export function onMenuOutsideClick(e) { if (openMenuEl && !openMenuEl.contains(e.target)) closeMenu(); }
+export function onMenuOutsideClick(e) {
+  if (!openMenuEl) return;
+  if (openMenuEl.contains(e.target) || openSubEls.some((s) => s.contains(e.target))) return;
+  closeMenu();
+}
+
+/* ------------------------------------------------------------- pins */
+
+/* Items an analyst has dragged (or starred) out of a submenu onto the top
+   of a menu, kept per menu on this machine. A pin is a stable id the item
+   declares (`pinId`), never the label — labels carry values ("Filter to
+   chrome.exe") and plugin actions get renamed. A pinned id whose item is
+   not in the menu right now (a plugin turned off) is simply not shown;
+   it comes back when the item does. */
+const PINS_KEY = 'winnow.menupins';
+
+function readPins() {
+  try { return JSON.parse(localStorage.getItem(PINS_KEY) || '{}') || {}; } catch { return {}; }
+}
+
+export function menuPins(key) {
+  const all = readPins();
+  const ids = Array.isArray(all[key]) ? all[key].slice() : [];
+  const save = () => { const cur = readPins(); cur[key] = ids; localStorage.setItem(PINS_KEY, JSON.stringify(cur)); };
+  return {
+    key,
+    ids,
+    has: (id) => ids.includes(id),
+    add: (id) => { if (!ids.includes(id)) { ids.push(id); save(); } },
+    remove: (id) => { const i = ids.indexOf(id); if (i >= 0) { ids.splice(i, 1); save(); } },
+  };
+}
+
+/* Every pinnable item in a menu tree, submenus included — what the
+   Pinned section is resolved from on each render, so a pinned tag's ✓
+   and a pinned plugin action's disabled state stay live. */
+function collectPinnable(items, out = new Map()) {
+  for (const item of items || []) {
+    if (!item || item === '-' || item.header) continue;
+    if (item.pinId) out.set(item.pinId, item);
+    if (item.submenu) collectPinnable(typeof item.submenu === 'function' ? item.submenu() : item.submenu, out);
+  }
+  return out;
+}
+
+const PIN_MIME = 'text/x-winnow-pin';
 
 /* Swallowed rather than left to bubble: the document-level Escape handler
    further down clears the row selection, and dismissing a menu you just
@@ -290,7 +348,11 @@ export function onMenuKeydown(e) {
    dim text, e.g. a hotkey) and `keepOpen` (re-render the menu in place
    instead of closing it, so toggling three tags is three clicks). '-' is a
    separator and {header} a section label. */
-export function menuItemNode(item, rerender) {
+/* `submenu` (an array, or a function for one that repaints itself — a
+   tag list whose ✓ moves) opens a flyout beside the item on hover or
+   click. `pinId` marks an item the analyst may pin to the top of the
+   menu; see menuPins. */
+export function menuItemNode(item, rerender, level = 0) {
   // menu-item-flex, not plain .menu-item: the ✓/swatch/hint slots need a
   // flex row, while the sidebar's own hand-built .menu-item rows (a bare
   // text node inside the button) still rely on block-level ellipsing.
@@ -303,18 +365,122 @@ export function menuItemNode(item, rerender) {
   }
   b.append(el('span', 'menu-item-text', item.label));
   if (item.hint) b.append(el('span', 'menu-item-hint', item.hint));
+  if (item.submenu) {
+    b.classList.add('menu-item-sub');
+    b.setAttribute('aria-haspopup', 'true');
+    b.append(el('span', 'menu-caret', '▸'));
+  }
   b.disabled = !!item.disabled;
   if (item.title) b.title = item.title;
-  b.onclick = async () => {
-    if (!item.keepOpen) { closeMenu(); item.onclick(); return; }
-    await item.onclick();
-    rerender();
-  };
+  if (item.submenu) {
+    b.onclick = () => {
+      if (openSubEls[level] && openSubEls[level].dataset.owner === item.label) closeSubmenusFrom(level);
+      else openSubmenu(b, item, level);
+    };
+    b.addEventListener('mouseenter', () => {
+      clearTimeout(subTimer);
+      subTimer = setTimeout(() => openSubmenu(b, item, level), 160);
+    });
+    b.addEventListener('mouseleave', () => { clearTimeout(subTimer); subTimer = null; });
+  } else {
+    b.onclick = async () => {
+      if (!item.keepOpen) { closeMenu(); item.onclick(); return; }
+      await item.onclick();
+      rerender();
+    };
+    // Sliding onto a plain sibling closes the submenu a neighbour opened
+    // — after a beat, so a diagonal move into the flyout isn't punished.
+    b.addEventListener('mouseenter', () => {
+      clearTimeout(subTimer);
+      if (openSubEls.length > level) subTimer = setTimeout(() => closeSubmenusFrom(level), 220);
+    });
+  }
   return b;
 }
 
-export function fillMenuNode(menu, items, rerender) {
+function openSubmenu(parentBtn, item, level) {
+  if (openSubEls[level] && openSubEls[level].dataset.owner === item.label) return;
+  closeSubmenusFrom(level);
+  const sub = el('div', 'menu menu-sub');
+  sub.dataset.owner = item.label;
+  const get = () => (typeof item.submenu === 'function' ? item.submenu() : item.submenu) || [];
+  const rerenderSub = () => { if (openSubEls[level] === sub) fillMenuNode(sub, get(), rerenderSub, level + 1); };
+  fillMenuNode(sub, get(), rerenderSub, level + 1);
+  // Entering the flyout cancels a pending close its parent's sibling armed.
+  sub.addEventListener('mouseenter', () => { clearTimeout(subTimer); subTimer = null; });
+  document.body.append(sub);
+  const r = parentBtn.getBoundingClientRect();
+  const m = 8;
+  let left = r.right + 2;
+  if (left + sub.offsetWidth > window.innerWidth - m) left = Math.max(m, r.left - sub.offsetWidth - 2);
+  let top = r.top - 4;
+  if (top + sub.offsetHeight > window.innerHeight - m) top = Math.max(m, window.innerHeight - sub.offsetHeight - m);
+  sub.style.left = left + 'px';
+  sub.style.top = top + 'px';
+  openSubEls[level] = sub;
+}
+
+/* The menu currently being filled at the root, for the drop target. */
+let pinCtl = null;   // menuPins(...) for the open root menu, or null
+let rootRerender = null;
+
+function pinnableRow(item, node, pins, pinned) {
+  const row = el('div', 'menu-item-row menu-pinnable');
+  row.append(node);
+  const act = el('button', 'menu-item-action menu-pin-btn', pinned ? '✕' : '☆');
+  act.title = pinned ? 'Unpin from the top of this menu' : 'Pin to the top of this menu — or drag it there';
+  act.onclick = (e) => {
+    e.stopPropagation();
+    if (pinned) pins.remove(item.pinId); else pins.add(item.pinId);
+    closeSubmenusFrom(0);
+    if (rootRerender) rootRerender();
+  };
+  row.append(act);
+  if (!pinned) {
+    node.draggable = true;
+    node.addEventListener('dragstart', (e) => {
+      e.dataTransfer.setData(PIN_MIME, item.pinId);
+      e.dataTransfer.setData('text/plain', item.label);
+      e.dataTransfer.effectAllowed = 'copy';
+      if (openMenuEl) openMenuEl.classList.add('pin-drag');
+    });
+    node.addEventListener('dragend', () => { if (openMenuEl) openMenuEl.classList.remove('pin-drag'); });
+  }
+  return row;
+}
+
+export function fillMenuNode(menu, items, rerender, level = 0) {
   menu.replaceChildren();
+  const pins = level === 0 ? pinCtl : null;
+  if (pins) {
+    rootRerender = rerender;
+    const all = collectPinnable(items);
+    const present = pins.ids.filter((id) => all.has(id));
+    if (present.length) {
+      menu.append(el('div', 'menu-header', 'Pinned'));
+      for (const id of present) menu.append(pinnableRow(all.get(id), menuItemNode(all.get(id), rerender, 0), pins, true));
+      menu.append(el('div', 'menu-sep'));
+    }
+    // Only visible mid-drag (.pin-drag), so the menu costs nothing at rest.
+    const zone = el('div', 'menu-dropzone', 'Drop here to pin');
+    zone.addEventListener('dragover', (e) => {
+      if (![...e.dataTransfer.types].includes(PIN_MIME)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+      zone.classList.add('over');
+    });
+    zone.addEventListener('dragleave', () => zone.classList.remove('over'));
+    zone.addEventListener('drop', (e) => {
+      const id = e.dataTransfer.getData(PIN_MIME);
+      if (!id) return;
+      e.preventDefault();
+      pins.add(id);
+      menu.classList.remove('pin-drag');
+      closeSubmenusFrom(0);
+      rerender();
+    });
+    menu.append(zone);
+  }
   for (const item of items) {
     if (!item) continue;
     if (item === '-') { menu.append(el('div', 'menu-sep')); continue; }
@@ -322,7 +488,9 @@ export function fillMenuNode(menu, items, rerender) {
       menu.append(el('div', 'menu-header' + (item.literal ? ' menu-header-literal' : ''), item.header));
       continue;
     }
-    menu.append(menuItemNode(item, rerender));
+    const node = menuItemNode(item, rerender, level);
+    if (item.pinId && pinCtl && level > 0) menu.append(pinnableRow(item, node, pinCtl, pinCtl.has(item.pinId)));
+    else menu.append(node);
   }
 }
 
@@ -367,11 +535,28 @@ export function showFloating(node, rect, anchorEl) {
    item re-runs to repaint itself with fresh state (a tag's ✓ after the
    tag actually landed), so callers build items from live state rather than
    patching DOM nodes by hand. */
-export function showMenu(items, rect, anchorEl) {
+export function showMenu(items, rect, anchorEl, opts = {}) {
   const get = typeof items === 'function' ? items : () => items;
   const menu = el('div', 'menu');
+  // `opts.pins` names the per-menu pin store ('row' for the row menu):
+  // with one, submenu items that declare a pinId can be pinned to the top.
+  pinCtl = opts.pins ? menuPins(opts.pins) : null;
   const rerender = () => { if (openMenuEl === menu) fillMenuNode(menu, get(), rerender); };
   fillMenuNode(menu, get(), rerender);
+  // The whole root is a drop target too, so a drag doesn't have to find
+  // the zone: anywhere on the menu pins.
+  if (pinCtl) {
+    menu.addEventListener('dragover', (e) => { if ([...e.dataTransfer.types].includes(PIN_MIME)) e.preventDefault(); });
+    menu.addEventListener('drop', (e) => {
+      const id = e.dataTransfer.getData(PIN_MIME);
+      if (!id) return;
+      e.preventDefault();
+      pinCtl.add(id);
+      menu.classList.remove('pin-drag');
+      closeSubmenusFrom(0);
+      rerender();
+    });
+  }
   showFloating(menu, rect, anchorEl);
   return menu;
 }
@@ -386,9 +571,9 @@ export function dropdownMenu(anchorEl, items) {
 /* Right-click menus. `e` is the contextmenu event — its client coords are
    the anchor, and preventDefault() is the caller's job (some surfaces want
    the browser's own menu when the click misses anything actionable). */
-export function contextMenu(e, items) {
+export function contextMenu(e, items, opts = {}) {
   closeMenu();
-  showMenu(items, { top: e.clientY, bottom: e.clientY, left: e.clientX, right: e.clientX });
+  showMenu(items, { top: e.clientY, bottom: e.clientY, left: e.clientX, right: e.clientX }, null, opts);
 }
 
 /* A floating card that isn't a list of buttons — same one-at-a-time,

@@ -22,22 +22,31 @@ def open_row_menu(page, row=2, cell=2):
 
 def test_row_right_click_menu_has_tags_and_cell_actions(page):
     open_row_menu(page)
-    items = page.locator(".menu .menu-item").all_inner_texts()
+    items = page.locator(".menu:not(.menu-sub) .menu-item").all_inner_texts()
     joined = " | ".join(i.replace("\n", " ") for i in items)
-    assert "Edit tags…" in joined
+    # The clicked column's filters are broken out at the top level …
     assert "Filter to" in joined and "Exclude" in joined
-    assert "Copy cell" in joined and "Copy row" in joined
+    # … everything else folds into a submenu so the list stays short.
+    assert "Tag this row" in joined and "Copy" in joined
+    assert "Edit tags…" not in joined and "Copy cell" not in joined
+    page.locator(".menu .menu-item-sub", has_text="Tag this row").click()
+    page.wait_for_selector(".menu-sub")
+    sub = " | ".join(page.locator(".menu-sub .menu-item").all_inner_texts())
+    assert "Edit tags…" in sub
     # Tag rows carry their swatch and hotkey hint — the menu is the discoverable
     # copy of the 1-9 hotkeys, so losing them makes it a worse menu, not a
     # broken one, and nothing else would catch it.
-    assert page.locator(".menu .menu-swatch").count() >= 1
+    assert page.locator(".menu-sub .menu-swatch").count() >= 1
+    page.locator(".menu:not(.menu-sub) .menu-item-sub", has_text="Copy").click()
+    page.wait_for_selector(".menu-sub .menu-item:has-text('Copy cell')")
+    assert page.locator(".menu-sub .menu-item", has_text="Copy row").count() == 2   # plain, and with headers
 
 
 def test_row_menu_scope_follows_the_selection(page):
     for i in (1, 2, 3):
         page.locator(".row").nth(i).locator(".rowcheck").check()
     open_row_menu(page, row=2)
-    assert "3 SELECTED ROWS" in page.locator(".menu .menu-header").first.inner_text().upper()
+    assert "3 SELECTED ROWS" in page.locator(".menu .menu-item-sub").first.inner_text().upper()
     page.keyboard.press("Escape")
     # Escape closes the menu without discarding the selection underneath it.
     assert page.locator(".menu").count() == 0
@@ -45,7 +54,7 @@ def test_row_menu_scope_follows_the_selection(page):
 
     # Right-clicking outside the selection collapses onto that one row.
     open_row_menu(page, row=9)
-    assert "THIS ROW" in page.locator(".menu .menu-header").first.inner_text().upper()
+    assert "THIS ROW" in page.locator(".menu .menu-item-sub").first.inner_text().upper()
 
 
 def test_row_menu_filters_by_the_clicked_cell(page):

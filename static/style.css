@@ -1122,6 +1122,20 @@ textarea:focus { border-color: var(--accent); outline: none; }
   border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 0 4px;
 }
 .menu-sep { flex: 0 0 auto; height: 1px; background: var(--line); margin: 4px 2px; }
+/* Submenus: a flyout beside its item; the caret says there is one. */
+.menu-sub { z-index: 57; }
+.menu-caret { flex: 0 0 auto; color: var(--dim); font-size: 10px; margin-left: 4px; }
+.menu-item-sub[aria-haspopup] { padding-right: 8px; }
+/* Pinning: a ☆ on hover in a submenu, ✕ on a pinned row at the top, and a
+   drop zone the root shows only while a pin is being dragged. */
+/* Dim at rest rather than hidden: the ☆ is how pinning gets discovered. */
+.menu-pinnable .menu-pin-btn { opacity: .4; }
+.menu-pinnable:hover .menu-pin-btn, .menu-pinnable:focus-within .menu-pin-btn { opacity: 1; }
+.menu-pinnable .menu-item[draggable="true"] { cursor: grab; }
+.menu-dropzone { display: none; flex: 0 0 auto; margin: 2px; padding: 8px 10px; border: 1px dashed var(--accent-dim);
+  border-radius: var(--radius-sm); color: var(--dim); font-size: 11px; text-align: center; }
+.menu.pin-drag .menu-dropzone { display: block; }
+.menu-dropzone.over { border-color: var(--accent); color: var(--accent); background: var(--sel); }
 .menu-header {
   flex: 0 0 auto;
   font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--dim);

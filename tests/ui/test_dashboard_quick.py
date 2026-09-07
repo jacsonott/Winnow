@@ -120,7 +120,9 @@ def test_row_menu_adds_a_count_of_the_cell_value(page):
         value = cell.inner_text().strip()
         cell.click(button="right")
         page.wait_for_selector(".menu")
-        page.locator(".menu .menu-item", has_text=f"Count of Host = {value}").click()
+        page.locator(".menu .menu-item-sub", has_text="Add to dashboard").click()
+        page.wait_for_selector(".menu-sub")
+        page.locator(".menu-sub .menu-item", has_text=f"Count of Host = {value}").click()
         (w,) = _wait_widgets(page, did, 1)
         assert w["render"] == "stat" and w["title"] == f"Host = {value}"
         assert w["drill"] == {"table": f"src_{_src(page)}", "where": [{"column": "Host", "op": "equals", "value": value}]}

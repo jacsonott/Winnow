@@ -38,6 +38,15 @@ export const ROW_MENU_SECTIONS = [
   { id: 'plugins', build: rowMenuPluginItems },
 ];
 
+/* The menu is one level deep at the top: the clicked column's filters
+   stay broken out (they are what a right-click on a cell is usually for),
+   and everything else folds into a submenu — Tag, Add to dashboard, Copy,
+   Plugins — so the list stays short as plugins and tags grow. Items in
+   the submenus that declare a pinId can be dragged (or starred) onto the
+   top of the menu, where they stay, per machine: an analyst who runs one
+   plugin's lookup fifty times a day keeps it one click away. */
+export const ROW_MENU_PINS = 'row';
+
 /* Plugin-registered row actions (PluginAPI.register_row_action) — the
    extension point for "do X with these rows": a VT lookup on the selected
    hashes, an enrichment that lands a table. The entry is disabled past
@@ -48,11 +57,13 @@ export function rowMenuPluginItems(ctx) {
   if (!actions.length) return [];
   const { count, positions } = rowMenuTargets(ctx);
   const scope = count > 1 ? `${count.toLocaleString()} selected rows` : 'this row';
-  const items = [{ header: 'Plugins' }];
+  const items = [];
   for (const a of actions) {
     const tooMany = count > a.max_rows;
     items.push({
       label: a.label,
+      hint: a.plugin,
+      pinId: `plugin:${a.plugin_fs}:${a.local_id}`,
       disabled: tooMany,
       title: tooMany
         ? `${a.label} takes at most ${a.max_rows.toLocaleString()} rows`
@@ -60,7 +71,12 @@ export function rowMenuPluginItems(ctx) {
       onclick: () => runPluginRowAction(a, positions(), ctx),
     });
   }
-  return items;
+  return [{
+    label: 'Plugins',
+    hint: String(actions.length),
+    title: 'Row actions the enabled plugins registered — drag one to the top of this menu to keep it there',
+    submenu: items,
+  }];
 }
 
 export async function runPluginRowAction(action, positions, ctx) {
@@ -95,10 +111,12 @@ export function rowMenuTargets(ctx) {
   return n ? { count: n, positions: () => selPositions() } : { count: 1, positions: () => [ctx.pos] };
 }
 
-export function rowMenuTagItems(ctx) {
+/* The tag list is a function, not an array: a keepOpen tag item repaints
+   the flyout after tagging, and the ✓ has to read the row as it is now. */
+export function rowMenuTagList(ctx) {
   const { count } = rowMenuTargets(ctx);
   const scope = count > 1 ? `${count.toLocaleString()} selected rows` : 'this row';
-  const items = [{ header: `Tag ${scope}` }];
+  const items = [];
   const row = rowAt(ctx.pos);
   for (const t of S.tags) {
     // The ✓ reads the right-clicked row even when a whole selection is the
@@ -111,12 +129,14 @@ export function rowMenuTagItems(ctx) {
       swatch: t.color,
       checked: on,
       hint: t.hotkey || '',
+      pinId: `tag:${t.id}`,
       keepOpen: true, // tagging three tags in a row shouldn't need three right-clicks
       title: `${on ? 'Remove' : 'Apply'} "${t.name}" — ${scope}`,
       onclick: () => applyTag(t, !on),
     });
   }
   if (!S.tags.length) items.push({ label: 'No tags in this case yet', disabled: true });
+  items.push('-');
   if (UNDO_NEXT.available) {
     items.push({
       label: `Undo: ${UNDO_NEXT.label}`,
@@ -126,6 +146,17 @@ export function rowMenuTagItems(ctx) {
   }
   items.push({ label: 'Edit tags…', onclick: openTagEditor });
   return items;
+}
+
+export function rowMenuTagItems(ctx) {
+  const { count } = rowMenuTargets(ctx);
+  const scope = count > 1 ? `${count.toLocaleString()} selected rows` : 'this row';
+  return [{
+    label: `Tag ${scope}`,
+    hint: S.tags.length ? '1–9' : '',
+    title: 'The tags, with their hotkeys — pin the ones you use to the top of this menu',
+    submenu: () => rowMenuTagList(ctx),
+  }];
 }
 
 export function rowMenuCellItems(ctx) {
@@ -155,31 +186,35 @@ export function rowMenuCellItems(ctx) {
 export function rowMenuDashboardItems(ctx) {
   if (!ctx.colName || S.sourceId == null || S.sourceId < 0) return [];
   const shown = ellipsize(displayValue(ctx.value));
-  return [
-    { header: 'Add to dashboard' },
-    {
+  return [{
+    label: 'Add to dashboard',
+    submenu: [{
       label: `Count of ${ctx.colName} = ${shown}`,
+      pinId: 'dash:count-of-value',
       title: 'A number on a dashboard that opens these rows when clicked',
       onclick: () => quickAddWidget(widgetFrom({
         template: 'countwhere', table: tableOf(S.sourceId), column: ctx.colName,
         value: ctx.value == null ? '' : String(ctx.value), match: 'equals' })),
-    },
-  ];
+    }],
+  }];
 }
 
 export function rowMenuClipboardItems(ctx) {
   const { count, positions } = rowMenuTargets(ctx);
   const rows = count > 1 ? `${count.toLocaleString()} rows` : 'row';
-  return [
-    '-',
-    {
-      label: 'Copy cell',
-      disabled: !ctx.colName,
-      onclick: () => writeClipboardText(Promise.resolve(String(displayCell(ctx.colName, ctx.value == null ? '' : ctx.value))), 'Copied cell'),
-    },
-    { label: `Copy ${rows}`, onclick: () => copyRowsAsText(positions(), false) },
-    { label: `Copy ${rows} with headers`, onclick: () => copyRowsAsText(positions(), true) },
-  ];
+  return [{
+    label: 'Copy',
+    submenu: [
+      {
+        label: 'Copy cell',
+        pinId: 'copy:cell',
+        disabled: !ctx.colName,
+        onclick: () => writeClipboardText(Promise.resolve(String(displayCell(ctx.colName, ctx.value == null ? '' : ctx.value))), 'Copied cell'),
+      },
+      { label: `Copy ${rows}`, pinId: 'copy:rows', onclick: () => copyRowsAsText(positions(), false) },
+      { label: `Copy ${rows} with headers`, pinId: 'copy:rows-headers', onclick: () => copyRowsAsText(positions(), true) },
+    ],
+  }];
 }
 
 export function rowMenuItems(ctx) {
@@ -187,12 +222,14 @@ export function rowMenuItems(ctx) {
   for (const section of ROW_MENU_SECTIONS) {
     const items = section.build(ctx);
     if (!items.length) continue;
-    if (out.length && items[0] !== '-') out.push('-');
+    // Separators only around the broken-out filter block; the folded
+    // entries read as one short list.
+    if (out.length && (section.id === 'cell' || out[out.length - 1].header !== undefined || items[0].header)) out.push('-');
     out.push(...items);
   }
   return out;
 }
 
 export function openRowContextMenu(ctx, e) {
-  contextMenu(e, () => rowMenuItems(ctx));
+  contextMenu(e, () => rowMenuItems(ctx), { pins: ROW_MENU_PINS });
 }

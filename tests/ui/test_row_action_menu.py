@@ -17,9 +17,12 @@ def test_plugin_section_lists_actions_and_respects_max_rows(page):
     try:
         page.locator(".row").nth(1).locator(".cell").nth(1).click(button="right")
         page.wait_for_selector(".menu")
-        text = page.locator(".menu").inner_text()
-        assert "plugins" in text.lower() and "Look up on VT" in text
-        item = page.locator(".menu .menu-item", has_text="Look up on VT")
+        # Plugin actions live under a Plugins ▸ submenu, counted in its hint.
+        plugins = page.locator(".menu .menu-item-sub", has_text="Plugins")
+        assert plugins.count() == 1 and plugins.locator(".menu-item-hint").inner_text() == "1"
+        plugins.click()
+        page.wait_for_selector(".menu-sub")
+        item = page.locator(".menu-sub .menu-item", has_text="Look up on VT")
         assert item.get_attribute("aria-disabled") in (None, "false") and not item.is_disabled()
         page.keyboard.press("Escape")
 
@@ -28,7 +31,9 @@ def test_plugin_section_lists_actions_and_respects_max_rows(page):
         page.locator(".row").nth(2).locator(".cell").nth(1).click(modifiers=["Shift"])
         page.locator(".row").nth(1).locator(".cell").nth(1).click(button="right")
         page.wait_for_selector(".menu")
-        item = page.locator(".menu .menu-item", has_text="Look up on VT")
+        page.locator(".menu .menu-item-sub", has_text="Plugins").click()
+        page.wait_for_selector(".menu-sub")
+        item = page.locator(".menu-sub .menu-item", has_text="Look up on VT")
         assert item.is_disabled() or item.get_attribute("aria-disabled") == "true"
         page.keyboard.press("Escape")
     finally:
