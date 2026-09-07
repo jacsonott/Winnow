@@ -1901,6 +1901,38 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 .conn-msg { font-size: 12px; line-height: 1.45; }
 .conn-banner .btn { white-space: nowrap; flex: 0 0 auto; }
 
+/* Across cases (static/js/multicase.js) */
+.mc-cases { display: grid; gap: 2px; max-height: 150px; overflow: auto; margin: 4px 0 10px;
+  border: 1px solid var(--line-2); border-radius: var(--radius-sm); padding: 6px; background: var(--panel-2); }
+.mc-case { display: grid; grid-template-columns: auto minmax(120px, 1fr) minmax(0, 1fr); gap: 8px;
+  align-items: center; padding: 2px 4px; border-radius: var(--radius-sm); cursor: pointer; }
+.mc-case:hover { background: var(--hover); }
+.mc-case-name { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mc-case-note, .mc-summary, .mc-src { color: var(--dim); font-size: 11px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mc-tabs { margin-bottom: 8px; }
+.mc-controls { display: grid; gap: 6px; margin-bottom: 10px; }
+.mc-values, .mc-sql { width: 100%; background: var(--ink); color: var(--text);
+  border: 1px solid var(--line-2); border-radius: var(--radius-sm); padding: 6px 8px;
+  font: 12px var(--mono); resize: vertical; }
+.mc-out { max-height: 46vh; overflow: auto; display: grid; gap: 2px; align-content: start; }
+.mc-case-head { font-size: 12px; font-weight: 600; margin: 8px 0 2px; color: var(--accent); }
+.mc-case-err { font-size: 11px; color: var(--danger); }
+.mc-hit { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 8px;
+  align-items: center; padding: 3px 6px; border-radius: var(--radius-sm); background: var(--panel-2); }
+/* A timeline row leads with its timestamp, so it has one column more. */
+.mc-hit-time { grid-template-columns: auto auto auto minmax(0, 1fr) auto; }
+.mc-hit .mc-summary { text-align: left; }
+.mc-hit .mc-when { font: 11px var(--mono); white-space: nowrap; }
+.mc-case-tag { font-size: 11px; padding: 1px 6px; border-radius: 999px;
+  background: var(--sel); white-space: nowrap; }
+.mc-open { padding: 0 8px; }
+.mc-table { border-collapse: collapse; font: 12px var(--mono); width: 100%; }
+.mc-table th, .mc-table td { border: 1px solid var(--line-2); padding: 2px 6px; text-align: left; }
+.mc-table th { background: var(--panel-2); }
+.mc-schema { font: 11px var(--mono); white-space: pre-wrap; color: var(--dim); }
+.mc-over-budget { color: var(--danger); }
+
 /* The profile builder (static/js/profilebuilder.js) */
 .pb-head { display: grid; gap: 2px; margin-bottom: 8px; }
 .pb-list { display: grid; gap: 2px; max-height: 240px; overflow: auto; margin: 4px 0 8px;

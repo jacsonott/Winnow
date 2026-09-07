@@ -8,6 +8,25 @@ see [docs/notes/README.md](README.md) for the whole set.
 
 ---
 
+- **Across cases: one writable case, N read-only readers.**
+  `winnow/multicase.py` reads OTHER case files (`mode=ro`, no lock, no
+  views database, no heartbeat) while the open case keeps its exclusive
+  lock and its writer — so every invariant in CLAUDE.md holds unchanged
+  and a case another Winnow has open is still readable (verified: WAL
+  and all). Three things sit on it: an IOC sweep, a cross-case SELECT,
+  and a unified timeline.
+  Two constraints worth knowing. SQLite attaches at most **10**
+  databases (`MAX_ATTACHED`), and `v` already uses one — so the query
+  path caps at 8 cases and everything else opens one reader at a time,
+  which is why the sweep and timeline have no case limit. And the routes
+  only read **registered** cases: a path arrives from the browser, and
+  the case list is the analyst's own statement of what they work on.
+  These views are read-only BY DESIGN, not pending work: tags and notes
+  live in the case that owns the row, so writing across cases means
+  opening those cases read-write and fighting the one-Winnow-per-case
+  lock. The supported move is "open it in its own case", which every row
+  offers.
+
 - **An `async def` route runs ON the event loop; a plain `def` route does
   not.** FastAPI threadpools sync handlers for you, so most of this file is
   safe by default. The async ones — which have to be async, because they
