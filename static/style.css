@@ -2116,6 +2116,19 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 .dash-field { margin-top: 10px; min-width: 0; }
 .dash-form .confirm-input, .dash-form select { width: 100%; box-sizing: border-box; }
 .dash-form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
+.dash-form-flex { display: flex; gap: 12px; }
+.dash-form-flex .dash-field { flex: 1 1 0; }
+.dash-form-flex .dash-field[hidden] { display: none; }
+.dash-advanced { margin-top: 10px; border: 1px dashed var(--line-2); border-radius: var(--radius-sm); padding: 4px 8px; }
+.dash-advanced summary { cursor: pointer; font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; }
+.dash-advanced .dash-field { margin-top: 6px; }
+/* Drilldown: the number, a bar, a list row — each a way back to the rows. */
+.dash-drill { background: none; border: none; color: var(--line-2); cursor: pointer; font: inherit; margin-right: 2px; }
+.dash-card:hover .dash-drill { color: var(--accent); }
+.dash-widget-body.drillable, .dash-list-row.drillable, canvas.drillable { cursor: pointer; }
+.dash-widget-body.drillable:hover .dash-stat { text-decoration: underline; text-decoration-color: var(--accent-dim); text-underline-offset: 6px; }
+.dash-list-row.drillable:hover { background: var(--sel); }
+.dash-pick-board, .dash-start-from { width: 100%; }
 .dash-form-row-3 { grid-template-columns: 1fr 1fr 1fr; }
 .dash-card.dash-preview { cursor: default; min-height: 60px; }
 .dash-widget-body { flex: 1 1 auto; min-height: 0; }

@@ -7,13 +7,19 @@
    dashboard) and reused across cases of the same type. See
    docs/design/analysis-suite.md. */
 
-import { drawBars, drawHistogram } from './charts.js';
+import { drawBars, drawHistogram, pickBar } from './charts.js';
+import { renderHead } from './columns.js';
 import { $, api, el, post, toast } from './core.js';
+import { WIDGET_TEMPLATES, bucketRange, columnsForTable, recipeSql, tableOf, templateById, widgetFrom } from './dashwidgets.js';
+import { currentSpec, renderAdvancedChips, updateSearchHint } from './filters.js';
+import { syncSearchExpansion } from './search.js';
 import { recordTabVisit } from './tabhistory.js';
-import { renderPageTabs, renderSidebar, syncTabSelection } from './sources.js';
-import { showGridTab, showMainView, syncTabChrome } from './sql.js';
+import { openSource, renderPageTabs, renderSidebar, sourceLabel, syncTabSelection } from './sources.js';
+import { showGridTab, showMainView, showSqlTab, syncTabChrome } from './sql.js';
 import { S } from './state.js';
+import { updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
 import { dropdownMenu, modal, promptDialog, confirmDialog } from './ui.js';
+import { rebuildView } from './view.js';
 
 let widgets = [];   // the CURRENT board's widgets (the one with S.dashboardId)
 let loadError = null;   // why they aren't here, if they aren't — an empty
@@ -185,16 +191,268 @@ async function saveToLibrary() {
   } catch (e) { toast('Could not save: ' + e.message, 6000); }
 }
 
+/* New board: a name and a starting point. Blank is one choice among
+   several — a starter built from the open table, one of the shipped
+   boards, or a library board — because an empty grid with instructions
+   in it was where most boards stopped. */
 export async function createDashboard() {
-  const name = await promptDialog('New dashboard name:', '', { okLabel: 'Create' });
-  if (!name || !name.trim()) return;
-  try {
-    const d = await post('/api/dashboards', { name: name.trim() });
-    await loadDashboards();
-    renderSidebar();
-    await showDashboard(d.id);
-  } catch (e) { toast('Could not create dashboard: ' + e.message, 6000); }
+  const bundles = await api('/api/plugin_bundles').catch(() => []);
+  const src = S.sourceId != null ? (S.sources || []).find((s) => s.id === S.sourceId && !s.error && !s.is_merge) : null;
+  modal('New dashboard', (b) => {
+    const form = el('div', 'dash-form');
+    const name = el('input'); name.className = 'confirm-input'; name.placeholder = 'e.g. Overview';
+    const from = el('select'); from.className = 'dash-start-from';
+    from.append(new Option('Blank', 'blank'));
+    if (src) from.append(new Option(`Starter for ${sourceLabel(src)} — row count, activity window, top values`, 'starter'));
+    for (const p of bundles.filter((x) => x.shipped && (x.dashboard || []).length)) {
+      from.append(new Option(`Shipped: ${p.name} (${p.dashboard.length} widgets)`, 'shipped:' + p.id));
+    }
+    for (const l of S.dashboardLibrary || []) from.append(new Option(`Library: ${l.name} (${l.widget_count} widgets)`, 'library:' + l.id));
+    if (src) from.value = 'starter';
+    const f1 = el('div', 'dash-field'); f1.append(el('label', null, 'Name'), name);
+    const f2 = el('div', 'dash-field'); f2.append(el('label', null, 'Start from'), from);
+    form.append(f1, f2);
+    b.append(form);
+    b.append(el('p', 'fb-help', 'A starter reads the open table: a row count, its activity window and '
+      + 'events over time (when it has a timestamp), and the top values of its low-cardinality columns. '
+      + 'Every widget it makes opens the rows behind it when clicked, and can be edited or removed.'));
+    const acts = el('div', 'row-actions');
+    const create = el('button', 'btn', 'Create');
+    const cancel = el('button', 'btn ghost', 'Cancel');
+    cancel.onclick = () => { $('modal').hidden = true; };
+    create.onclick = async () => {
+      if (!name.value.trim()) { toast('Give the dashboard a name'); return; }
+      create.disabled = true;
+      try {
+        const d = await post('/api/dashboards', { name: name.value.trim() });
+        const start = await startingWidgets(from.value, bundles);
+        if (start.length) await post(`/api/dashboards/${d.id}`, { widgets: start });
+        $('modal').hidden = true;
+        await loadDashboards();
+        renderSidebar();
+        await showDashboard(d.id);
+        if (start.length) toast(`“${d.name}” starts with ${start.length} widget${start.length === 1 ? '' : 's'} — click any to open its rows`, 5000);
+      } catch (e) { toast('Could not create dashboard: ' + e.message, 6000); create.disabled = false; }
+    };
+    name.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); create.click(); } };
+    acts.append(create, cancel);
+    b.append(acts);
+  }, { focus: 'input' });
 }
+
+async function startingWidgets(choice, bundles) {
+  if (choice === 'starter') return buildStarter(S.sourceId);
+  if (choice.startsWith('shipped:')) {
+    const p = bundles.find((x) => String(x.id) === choice.slice('shipped:'.length));
+    return p ? JSON.parse(JSON.stringify(p.dashboard)) : [];
+  }
+  if (choice.startsWith('library:')) {
+    const rec = await api(`/api/dashboard_library/${choice.slice('library:'.length)}`);
+    return rec.widgets || [];
+  }
+  return [];
+}
+
+/* A first board for a table, from its shape alone: the count, the time
+   span and rhythm if it has a timestamp, and the top values of up to four
+   columns that have few enough distinct values to chart (2–12). Every
+   widget is a recipe, so it is editable and drills into its rows. */
+export async function buildStarter(sourceId) {
+  const src = (S.sources || []).find((s) => s.id === sourceId);
+  if (!src) return [];
+  const t = tableOf(sourceId);
+  const out = [widgetFrom({ template: 'count', table: t }, { title: `Rows in ${sourceLabel(src)}` })];
+  const dt = src.columns.find((c) => c.type === 'datetime');
+  if (dt) {
+    const win = widgetFrom({ template: 'window', table: t, column: dt.name });
+    out.push(win);
+    // Per day is one solid block when the whole table is a single day's
+    // triage; read the window first and bucket by the hour for short spans.
+    let bucket = 'day';
+    try {
+      const rows = (await post('/api/dashboard/widget/preview', { source: 'sql', query: win.query })).rows || [];
+      const first = Date.parse(String(rows[0] && rows[0][1] || '').replace(' ', 'T'));
+      const last = Date.parse(String(rows[1] && rows[1][1] || '').replace(' ', 'T'));
+      if (Number.isFinite(first) && Number.isFinite(last) && last - first <= 2 * 86400e3) bucket = 'hour';
+    } catch { /* unknown span — per day is the safe default */ }
+    out.push(widgetFrom({ template: 'time', table: t, column: dt.name, bucket }));
+  }
+  const picked = [];
+  for (const c of src.columns.filter((x) => x.type !== 'datetime' && !x.derived).slice(0, 12)) {
+    if (picked.length >= 4) break;
+    try {
+      const vals = await api(`/api/column_values?source_id=${sourceId}&column=${encodeURIComponent(c.name)}&limit=13`);
+      const n = (Array.isArray(vals) ? vals : (vals.values || [])).length;
+      if (n >= 2 && n <= 12) picked.push(c.name);
+    } catch { /* an unreadable column is just not charted */ }
+  }
+  for (const col of picked) out.push(widgetFrom({ template: 'top', table: t, column: col }));
+  return out.filter(Boolean);
+}
+
+/* ------------------------------------------- one-click from the grid */
+
+/* Add a ready-made widget to a board without the editor: the column
+   header menu, the row menu and the Filters menu all land here. One
+   board means no question; none means name the first; several means a
+   pick. Returns the board id, or null if the analyst backed out. */
+export async function quickAddWidget(w) {
+  if (!w) { toast('Nothing to add'); return null; }
+  const id = await pickBoard();
+  if (id == null) return null;
+  try {
+    await addWidgetTo(id, w);
+  } catch (e) { toast('Could not add the widget: ' + e.message, 5000); return null; }
+  const d = (S.dashboards || []).find((x) => x.id === id);
+  toast(`Added “${w.title}” to ${d ? d.name : 'the dashboard'} — click it there to open its rows`, 4500);
+  return id;
+}
+
+async function addWidgetTo(id, w) {
+  if (id === S.dashboardId && S.activeTab === 'dashboard') {
+    widgets.push(w);
+    await persist();
+    render();
+    return;
+  }
+  const cur = (await api(`/api/dashboards/${id}`)).widgets || [];
+  cur.push(w);
+  await post(`/api/dashboards/${id}`, { widgets: cur });
+  await loadDashboards();
+  renderSidebar();
+}
+
+function pickBoard() {
+  const boards = S.dashboards || [];
+  if (boards.length === 1) return Promise.resolve(boards[0].id);
+  if (!boards.length) {
+    return (async () => {
+      const name = await promptDialog('No dashboard in this case yet — name the first one:', 'Overview', { okLabel: 'Create' });
+      if (!name || !name.trim()) return null;
+      const d = await post('/api/dashboards', { name: name.trim() });
+      await loadDashboards();
+      renderSidebar();
+      return d.id;
+    })();
+  }
+  return new Promise((resolve) => {
+    let done = false;
+    let watch = null;
+    const finish = (v) => { if (!done) { done = true; clearInterval(watch); resolve(v); } };
+    modal('Add to which dashboard?', (b) => {
+      const sel = el('select'); sel.className = 'dash-pick-board';
+      for (const d of boards) sel.append(new Option(`${d.name} (${d.widget_count} widget${d.widget_count === 1 ? '' : 's'})`, String(d.id)));
+      if (S.dashboardId != null && boards.some((d) => d.id === S.dashboardId)) sel.value = String(S.dashboardId);
+      b.append(sel);
+      const acts = el('div', 'row-actions');
+      const ok = el('button', 'btn', 'Add');
+      ok.onclick = () => { $('modal').hidden = true; finish(Number(sel.value)); };
+      const cancel = el('button', 'btn ghost', 'Cancel');
+      cancel.onclick = () => { $('modal').hidden = true; finish(null); };
+      acts.append(ok, cancel);
+      b.append(acts);
+    }, { focus: 'select' });
+    // Escape and the Close button hide the modal without telling us.
+    watch = setInterval(() => { if ($('modal').hidden) finish(null); }, 150);
+  });
+}
+
+/* The Filters menu's "count of this view": whatever the grid is showing
+   right now — header boxes, search, builder tree, timeframe, tag filter —
+   as one number, whose drill reopens the table in exactly this state. */
+export async function addViewCountWidget() {
+  if (S.sourceId == null) { toast('Open a table first'); return null; }
+  const src = (S.sources || []).find((s) => s.id === S.sourceId);
+  const spec = currentSpec();
+  let sqlText;
+  try { sqlText = (await post('/api/view/sql', spec)).sql; }
+  catch (e) { toast('Could not build the query: ' + e.message, 5000); return null; }
+  const parts = [];
+  for (const [c, raw] of Object.entries(S.filters)) if (raw) parts.push(`${c}: ${raw}`);
+  if (spec.search) parts.push(`search “${spec.search}”`);
+  if ((spec.search_terms || []).length) parts.push(`${spec.search_terms.length} search terms`);
+  if (spec.filter_tree) parts.push('filter builder');
+  if (spec.time_range && spec.time_range.enabled) parts.push('timeframe');
+  if ((spec.tags || []).length) parts.push('tag filter');
+  const summary = parts.length ? parts.join(', ') : 'all rows';
+  const w = {
+    title: `${sourceLabel(src)} — ${summary}`, source: 'sql', render: 'stat', span: 1, sub: 'rows matching this view',
+    query: { sql: `SELECT COUNT(*) AS n FROM (\n${sqlText}\n)` },
+    drill: { table: tableOf(S.sourceId), spec: {
+      filters: { ...S.filters }, filter_tree: spec.filter_tree, search: spec.search, search_mode: spec.search_mode,
+      search_terms: spec.search_terms, tags: spec.tags, time_range: spec.time_range } },
+  };
+  return quickAddWidget(w);
+}
+
+/* ------------------------------------------------------- drilldown */
+
+/* From a widget to its rows. `extra.value` is a clicked bar or list row
+   (a value of the widget's pivot column); `extra.bucket` a clicked
+   histogram bucket. A widget with no drill but its own SQL opens as a
+   query in the SQL pane instead — never a dead click. */
+export async function drillInto(w, extra = {}) {
+  const drill = w.drill;
+  if (!drill) {
+    if (w.source === 'sql' && w.query && w.query.sql) return openAsQuery(w);
+    toast('This widget has no rows to open');
+    return;
+  }
+  let sourceId;
+  const m = /^src_(\d+)$/.exec(drill.table || '');
+  if (m) sourceId = Number(m[1]);
+  else {
+    try { sourceId = (await post('/api/dashboard/resolve', { table: drill.table })).source_id; }
+    catch (e) { toast(e.message, 5000); return; }
+  }
+  if (!(S.sources || []).some((s) => s.id === sourceId)) { toast('That table is no longer in this case'); return; }
+  await openSource(sourceId);
+  if (drill.spec) {
+    const sp = drill.spec;
+    S.filters = { ...(sp.filters || {}) };
+    S.filterTree = sp.filter_tree ? JSON.parse(JSON.stringify(sp.filter_tree)) : { type: 'group', op: 'AND', children: [] };
+    S.search = sp.search || '';
+    S.searchMode = sp.search_mode || 'contains';
+    S.searchTerms = (sp.search_terms || []).map((x) => ({ ...x }));
+    S.tagFilter = [...(sp.tags || [])];
+    S.timeRange = sp.time_range ? { ...sp.time_range } : { enabled: false, column: null, start: '', end: '' };
+    $('search').value = S.searchMode === 'advanced' ? '' : S.search;
+    document.querySelectorAll('#searchModeToggle button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.mode === S.searchMode)));
+    if (S.searchMode === 'advanced') renderAdvancedChips();
+    syncSearchExpansion(!!(S.search || S.searchTerms.length));
+    updateSearchHint();
+  } else {
+    const conds = (drill.where || []).map((c) => ({ type: 'cond', column: c.column, op: c.op, value: c.value }));
+    if (extra.value != null && drill.column) {
+      const v = String(extra.value);
+      conds.push(v === '' || v === '(empty)'
+        ? { type: 'cond', column: drill.column, op: 'empty', value: '' }
+        : { type: 'cond', column: drill.column, op: 'equals', value: v });
+    }
+    S.filterTree = { type: 'group', op: 'AND', children: conds };
+    if (extra.bucket != null && drill.column) {
+      const r = bucketRange(extra.bucket);
+      if (r) S.timeRange = { enabled: true, column: drill.column, start: r.start, end: r.end };
+    }
+  }
+  updateTimeRangeButton();
+  updateFiltersButton();
+  renderHead();
+  await rebuildView({ keepScroll: false });
+  toast(`Rows behind “${w.title}”` + (extra.value != null && drill.column ? ` · ${drill.column} = ${extra.value}` : '')
+    + (extra.bucket != null ? ` · ${extra.bucket}` : ''), 3500);
+}
+
+async function openAsQuery(w) {
+  try {
+    const r = await post('/api/dashboard/resolve', { sql: w.query.sql });
+    const rec = await post('/api/sql_tabs', { name: w.title || 'Widget', sql: r.sql });
+    S.sqlTabId = rec.id;
+    showSqlTab();
+  } catch (e) { toast('Could not open as a query: ' + e.message, 5000); }
+}
+
+const drillable = (w) => !!(w.drill || (w.source === 'sql' && w.query && w.query.sql));
 
 async function renameDashboard(d) {
   const name = await promptDialog('Rename dashboard:', d.name, { okLabel: 'Rename' });
@@ -328,6 +586,12 @@ function card(w, i) {
   head.append(grip, el('h4', null, w.title || '(untitled)'));
   // ONE button per card — everything about the widget, removal included,
   // lives in the editor it opens.
+  if (drillable(w)) {
+    const open = el('button', 'dash-drill', '⤴');
+    open.title = w.drill ? 'Open the rows behind this widget' : 'Open this widget’s query in the SQL pane';
+    open.onclick = (e) => { e.stopPropagation(); drillInto(w); };
+    head.append(open);
+  }
   const edit = el('button', 'dash-edit', '✎');
   edit.title = 'Edit widget';
   edit.onclick = () => openWidgetEditor(w);
@@ -335,6 +599,13 @@ function card(w, i) {
   c.append(head);
   wireWidgetDrag(c, i, grip);   // drag the grip to reorder
   const body = el('div', 'dash-widget-body');
+  if (w.drill && ['stat', 'kv', 'chips'].includes(w.render)) {
+    // The number IS the link. Bars and list rows carry their own (finer)
+    // targets in runWidget; the whole body stays clickable for the rest.
+    body.classList.add('drillable');
+    body.title = 'Open these rows';
+    body.onclick = () => drillInto(w);
+  }
   c.append(body);
   runWidget(w, body);
   return c;
@@ -373,23 +644,51 @@ async function runWidget(w, body) {
       for (const r of rows.slice(0, 12)) {
         const row = el('div', 'dash-list-row');
         row.append(el('span', 't', String(r[0])), el('span', 'c', String(r[r.length - 1])));
+        if (w.drill && w.drill.column) {
+          row.classList.add('drillable');
+          row.title = `Open rows where ${w.drill.column} = ${r[0]}`;
+          row.onclick = (e) => { e.stopPropagation(); drillInto(w, { value: r[0] }); };
+        }
         body.append(row);
       }
       break;
     case 'bar': {
       const canvas = el('canvas'); canvas.style.cssText = 'width:100%;height:100%;display:block';
       body.style.height = '160px'; body.append(canvas);
-      requestAnimationFrame(() => drawBars(canvas, {
-        rows: rows.map((r) => ({ label: String(r[0]), value: num(r[r.length - 1]) })),
-        label: 'label', value: 'value' }));
+      let boxes = [];
+      requestAnimationFrame(() => {
+        boxes = drawBars(canvas, {
+          rows: rows.map((r) => ({ label: String(r[0]), value: num(r[r.length - 1]) })),
+          label: 'label', value: 'value' }).boxes;
+      });
+      if (w.drill && w.drill.column) {
+        canvas.classList.add('drillable');
+        canvas.title = `Click a bar to open those rows (${w.drill.column})`;
+        canvas.onclick = (e) => {
+          e.stopPropagation();
+          const r = pickBar(boxes, e.offsetX, e.offsetY);
+          if (r) drillInto(w, { value: r.label });
+        };
+      }
       break;
     }
     case 'histogram': {
       const canvas = el('canvas'); canvas.style.cssText = 'width:100%;height:100%;display:block';
       body.style.height = '120px'; body.append(canvas);
       const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim();
+      const labels = rows.map((r) => String(r[0]));
       requestAnimationFrame(() => drawHistogram(canvas, {
         buckets: rows.map((r) => [String(r[0]), [num(r[r.length - 1])]]), colors: [accent] }));
+      if (w.drill && w.drill.column && w.drill.bucket) {
+        canvas.classList.add('drillable');
+        canvas.title = 'Click a bar to open that period';
+        canvas.onclick = (e) => {
+          e.stopPropagation();
+          if (!labels.length) return;
+          const idx = Math.min(labels.length - 1, Math.max(0, Math.floor(e.offsetX / (canvas.clientWidth / labels.length))));
+          drillInto(w, { bucket: labels[idx] });
+        };
+      }
       break;
     }
     default:
@@ -397,24 +696,6 @@ async function runWidget(w, body) {
   }
 }
 
-/* Starting points so a widget isn't a blank SQL box. Each fills the query
-   (against whichever table is picked) and the render kind; the ⟨column⟩ /
-   ⟨value⟩ placeholders are what the analyst then edits. */
-const WIDGET_TEMPLATES = [
-  { id: 'blank', label: 'Blank — write my own SQL' },
-  { id: 'count', label: 'Total row count', render: 'stat', title: 'Row count',
-    sql: (t) => `SELECT COUNT(*) AS n FROM ${t}` },
-  { id: 'countwhere', label: 'Count matching a condition', render: 'stat', title: 'Matches',
-    sql: (t) => `SELECT COUNT(*) AS n FROM ${t}\nWHERE ⟨column⟩ = '⟨value⟩'` },
-  { id: 'distinct', label: 'Distinct count', render: 'stat', title: 'Distinct',
-    sql: (t) => `SELECT COUNT(DISTINCT ⟨column⟩) AS n FROM ${t}` },
-  { id: 'top', label: 'Top values of a column (bar chart)', render: 'bar', title: 'Top values',
-    sql: (t) => `SELECT ⟨column⟩ AS label, COUNT(*) AS n\nFROM ${t}\nGROUP BY ⟨column⟩ ORDER BY n DESC LIMIT 10` },
-  { id: 'rare', label: 'Rarest values / long tail (list)', render: 'list', title: 'Rarest values',
-    sql: (t) => `SELECT ⟨column⟩ AS label, COUNT(*) AS n\nFROM ${t}\nGROUP BY ⟨column⟩ ORDER BY n ASC LIMIT 10` },
-  { id: 'time', label: 'Events over time (histogram)', render: 'histogram', title: 'Over time',
-    sql: (t) => `SELECT strftime('%Y-%m-%d', TS_NORMALIZE(⟨timestamp⟩)) AS day, COUNT(*) AS n\nFROM ${t}\nGROUP BY day ORDER BY day` },
-];
 
 /* The FROM options: this case's own tables (src_<id>), plus portable
    header-set placeholders that resolve on any case — so a widget built
@@ -432,22 +713,42 @@ function dashTableOptions() {
   return opts;
 }
 
+async function ensureHeaderSets() {
+  if (S.headerSets) return;
+  try { S.headerSets = await api('/api/header_sets'); }
+  catch { S.headerSets = { shorthands: {}, sets: [] }; }
+}
+
+/* The widget editor, guided: pick what to show (a template), where from
+   (a table), and the column or value it needs, and the SQL is written —
+   and shown, under Advanced, for anyone who wants to change it. A widget
+   built this way carries its recipe (`build`) so it reopens guided, and a
+   drill so clicking it opens its rows. Hand-edited SQL is respected as
+   is: the recipe and the drill are dropped rather than left describing a
+   query they no longer match. */
 function openWidgetEditor(existing, prefill = null) {
   modal(existing ? 'Edit widget' : 'Add widget', (b) => {
-    // Stacked label-over-control rows (.dash-form) — the inline run of
-    // "Title[input]Data source[select]" had no gap anywhere and left the
-    // SQL label dangling at the end of the template row.
     const form = el('div', 'dash-form');
     const mk = (label, node, into = form) => {
       const field = el('div', 'dash-field');
       field.append(el('label', null, label), node);
       into.append(field);
-      return node;
+      return field;
     };
     const title = el('input'); title.className = 'confirm-input'; title.value = existing?.title || prefill?.title || '';
     const source = el('select');
     for (const o of ['sql', 'watchlist', 'tags']) source.append(new Option(o, o));
     source.value = existing?.source || 'sql';
+    const templ = el('select'); templ.className = 'dash-template';
+    for (const t of WIDGET_TEMPLATES) templ.append(new Option(t.label, t.id));
+    const tableSel = el('select'); tableSel.className = 'dash-table';
+    for (const o of dashTableOptions()) tableSel.append(new Option(o.label, o.value));
+    const colSel = el('select'); colSel.className = 'dash-column';
+    const valueIn = el('input'); valueIn.className = 'confirm-input dash-value'; valueIn.placeholder = 'value';
+    const matchSel = el('select'); matchSel.className = 'dash-match';
+    matchSel.append(new Option('equals', 'equals'), new Option('contains', 'contains'));
+    const bucketSel = el('select'); bucketSel.className = 'dash-bucket';
+    bucketSel.append(new Option('per day', 'day'), new Option('per hour', 'hour'));
     const renderSel = el('select');
     for (const o of ['stat', 'kv', 'chips', 'list', 'bar', 'histogram']) renderSel.append(new Option(o, o));
     renderSel.value = existing?.render || prefill?.render || 'stat';
@@ -458,50 +759,114 @@ function openWidgetEditor(existing, prefill = null) {
     sql.value = existing?.query?.sql || prefill?.sql || '';
     sql.placeholder = 'SELECT COUNT(DISTINCT RemoteHost) AS hosts FROM src_1';
     const sub = el('input'); sub.className = 'confirm-input'; sub.value = existing?.sub || '';
-    // Template + table pickers that write a starting query for you.
-    const templ = el('select');
-    for (const t of WIDGET_TEMPLATES) templ.append(new Option(t.label, t.id));
-    const tableSel = el('select');
-    for (const o of dashTableOptions()) tableSel.append(new Option(o.label, o.value));
-    const applyTemplate = () => {
-      const t = WIDGET_TEMPLATES.find((x) => x.id === templ.value);
-      if (!t || t.id === 'blank' || !tableSel.value) return;
-      sql.value = t.sql(tableSel.value);
-      renderSel.value = t.render;
-      if (!title.value.trim()) title.value = t.title;
+
+    // The recipe this widget was built from, if it was.
+    const build0 = existing?.build || prefill?.build || null;
+    templ.value = build0 ? build0.template : 'blank';
+    if (build0 && build0.table && [...tableSel.options].some((o) => o.value === build0.table)) tableSel.value = build0.table;
+    if (build0 && build0.value) valueIn.value = build0.value;
+    if (build0 && build0.match) matchSel.value = build0.match;
+    if (build0 && build0.bucket) bucketSel.value = build0.bucket;
+
+    let autoTitle = build0 ? templateById(build0.template).title(build0) : '';
+    const picks = () => ({ template: templ.value, table: tableSel.value, column: colSel.value,
+      value: valueIn.value.trim(), match: matchSel.value, bucket: bucketSel.value });
+    const fillColumns = (want) => {
+      const t = templateById(templ.value);
+      const cols = columnsForTable(tableSel.value);
+      const timeOnly = t.id === 'time' || t.id === 'window';
+      const dts = cols.filter((c) => c.type === 'datetime');
+      const list = timeOnly && dts.length ? dts : cols;
+      colSel.replaceChildren();
+      for (const c of list) colSel.append(new Option(c.name, c.name));
+      if (want && [...colSel.options].some((o) => o.value === want)) colSel.value = want;
     };
-    templ.onchange = applyTemplate;
-    tableSel.onchange = () => { if (templ.value !== 'blank') applyTemplate(); };
+    const syncFields = () => {
+      const t = templateById(templ.value);
+      const needs = new Set(t.needs || []);
+      fColumn.hidden = !needs.has('column');
+      fValue.hidden = !needs.has('value');
+      fMatch.hidden = !needs.has('match');
+      fBucket.hidden = !needs.has('bucket');
+      advanced.open = t.id === 'blank' || advanced.dataset.custom === '1';
+    };
+    // Rewrite the SQL from the picks — never over a hand edit.
+    const regenerate = () => {
+      const t = templateById(templ.value);
+      if (t.id === 'blank') { advanced.open = true; return; }
+      const s = recipeSql(picks());
+      if (s == null) return;
+      sql.value = s;
+      advanced.dataset.custom = '';
+      renderSel.value = t.render;
+      if (t.span) span.value = String(t.span);
+      const nt = t.title(picks());
+      if (!title.value.trim() || title.value === autoTitle) title.value = nt;
+      autoTitle = nt;
+    };
+    templ.onchange = () => { fillColumns(colSel.value); syncFields(); regenerate(); };
+    tableSel.onchange = () => { fillColumns(colSel.value); regenerate(); };
+    colSel.onchange = regenerate;
+    valueIn.oninput = regenerate;
+    matchSel.onchange = regenerate;
+    bucketSel.onchange = regenerate;
+    sql.oninput = () => { advanced.dataset.custom = '1'; };
 
-    // Build the widget object from the current field values — shared by
-    // Preview and Save so they can't disagree about what "this widget" is.
-    const draft = () => ({
-      title: title.value.trim() || '(untitled)', source: source.value, render: renderSel.value,
-      span: Number(span.value), sub: sub.value.trim() || undefined,
-      query: source.value === 'sql' ? { sql: sql.value.trim() } : {},
-    });
+    // What Preview and Save both build — so they can't disagree.
+    const draft = () => {
+      const w = {
+        title: title.value.trim() || '(untitled)', source: source.value, render: renderSel.value,
+        span: Number(span.value), sub: sub.value.trim() || undefined,
+        query: source.value === 'sql' ? { sql: sql.value.trim() } : {},
+      };
+      if (source.value === 'sql') {
+        const gen = templ.value === 'blank' ? null : widgetFrom(picks());
+        if (gen && gen.query.sql === sql.value.trim()) { w.build = gen.build; w.drill = gen.drill; }
+        else if (existing && existing.drill && (existing.query?.sql || '') === sql.value.trim()) {
+          w.drill = existing.drill;   // shipped widgets: a drill written by hand, SQL untouched
+          if (existing.build) w.build = existing.build;
+        }
+      }
+      return w;
+    };
 
-    b.append(el('p', 'fb-help', 'A widget is a data source rendered a chosen way. '
-      + 'SQL is read-only against the case; watchlist and tags read case state. '
-      + 'stat/kv/chips/list/bar/histogram interpret the returned columns.'));
+    b.append(el('p', 'fb-help', 'Pick what to show and which table it comes from; the query is written for you '
+      + 'and sits under Advanced if you want to change it. A widget built this way opens the rows behind it when clicked.'));
     b.append(form);
     const top = el('div', 'dash-form-row');
     mk('Title', title, top); mk('Data source', source, top);
     form.append(top);
     const sqlWrap = el('div');
     const pick = el('div', 'dash-form-row');
-    mk('Start from a template', templ, pick); mk('Table', tableSel, pick);
+    mk('What to show', templ, pick); mk('Table', tableSel, pick);
     sqlWrap.append(pick);
-    mk('SQL query', sql, sqlWrap);
-    sqlWrap.append(el('p', 'fb-help', 'Pick a template and a table to get a working query, then '
-      + 'edit the ⟨column⟩ / ⟨value⟩ parts. A {{…}} table is portable — it resolves on any case, '
+    const detail = el('div', 'dash-form-flex');
+    const fColumn = mk('Column', colSel, detail);
+    const fMatch = mk('Match', matchSel, detail);
+    const fValue = mk('Value', valueIn, detail);
+    const fBucket = mk('Bucket', bucketSel, detail);
+    sqlWrap.append(detail);
+    const advanced = el('details', 'dash-advanced');
+    advanced.append(el('summary', null, 'Advanced — the SQL'));
+    const sqlField = el('div', 'dash-field');
+    sqlField.append(sql);
+    advanced.append(sqlField);
+    advanced.append(el('p', 'fb-help', 'Read-only against the case. Edit it and the widget is yours: the recipe '
+      + 'above stops applying, and the drilldown with it. A {{…}} table is portable — it resolves on any case, '
       + 'so the widget still works when this dashboard is saved as a profile.'));
+    sqlWrap.append(advanced);
     form.append(sqlWrap);
     const look = el('div', 'dash-form-row dash-form-row-3');
     mk('Render as', renderSel, look); mk('Sub-label (optional, for stat)', sub, look); mk('Width', span, look);
     form.append(look);
     const syncSql = () => { sqlWrap.style.display = source.value === 'sql' ? '' : 'none'; };
     source.onchange = syncSql; syncSql();
+
+    fillColumns(build0 ? build0.column : null);
+    if (!build0 && sql.value.trim()) advanced.dataset.custom = '1';
+    syncFields();
+    // A portable {{…}} table's columns come from the header sets, fetched once.
+    ensureHeaderSets().then(() => { if (!colSel.options.length) fillColumns(build0 ? build0.column : null); });
 
     // Live preview — see the widget's output before committing it.
     const previewWrap = el('div', 'dash-preview-wrap');
@@ -524,7 +889,11 @@ function openWidgetEditor(existing, prefill = null) {
       if (source.value === 'sql' && !sql.value.trim()) { toast('SQL widget needs a query'); return; }
       const w = draft();
       w.title = title.value.trim();   // draft() defaulted to "(untitled)"; keep the real one on save
-      if (existing) Object.assign(existing, w); else widgets.push(w);
+      if (existing) {
+        delete existing.build;        // a stale recipe or drill must not outlive a hand edit
+        delete existing.drill;
+        Object.assign(existing, w);
+      } else widgets.push(w);
       await persist();
       document.getElementById('modal').hidden = true;
       render();

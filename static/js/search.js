@@ -2,6 +2,7 @@
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { $, api, el, post, toast } from './core.js';
+import { addViewCountWidget } from './dashboard.js';
 import { openFilterBuilder } from './filterbuilder.js';
 import { renderAdvancedChips, renderTermChips, updateSearchHint } from './filters.js';
 import { applyPreset, matchingSavedFilters } from './savedfilters.js';
@@ -438,6 +439,11 @@ $('btnFilters').onclick = () => dropdownMenu($('btnFilters'), () => {
     { label: 'Filter builder…', onclick: openFilterBuilder },
     { label: 'Saved filters…', onclick: openSavedFiltersModal },
   ];
+  if (S.sourceId != null && S.sourceId >= 0) {
+    items.push({ label: 'Add to dashboard: count of this view',
+      title: 'A number on a dashboard — the rows this view shows now — that reopens the view when clicked',
+      onclick: () => addViewCountWidget() });
+  }
   // The suggestion banner's chips, relocated: saved filters matching the
   // open table's columns apply straight from here (the button's accent
   // ring is what says they exist — see updateFiltersButton).

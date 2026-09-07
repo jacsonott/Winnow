@@ -32,6 +32,180 @@
       ],
       "dashboard": [
         {
+          "title": "Hostname",
+          "source": "sql",
+          "render": "kv",
+          "span": 1,
+          "query": {
+            "sql": "SELECT 'Computer name' AS k, ValueData AS v FROM {{registry}} WHERE KeyPath LIKE '%Control\\ComputerName\\ComputerName' AND ValueName = 'ComputerName' AND ValueData <> '' UNION ALL SELECT 'Hostname (TCP/IP)', ValueData FROM {{registry}} WHERE KeyPath LIKE '%Services\\Tcpip\\Parameters' AND ValueName = 'Hostname' AND ValueData <> '' UNION ALL SELECT 'Hostname', '(not in this RECmd output)' WHERE NOT EXISTS (SELECT 1 FROM {{registry}} WHERE (KeyPath LIKE '%Control\\ComputerName\\ComputerName' AND ValueName = 'ComputerName' OR KeyPath LIKE '%Services\\Tcpip\\Parameters' AND ValueName = 'Hostname') AND ValueData <> '')"
+          },
+          "drill": {
+            "table": "{{registry}}",
+            "where": [
+              {
+                "column": "KeyPath",
+                "op": "contains",
+                "value": "ComputerName"
+              }
+            ]
+          }
+        },
+        {
+          "title": "IP addresses",
+          "source": "sql",
+          "render": "kv",
+          "span": 1,
+          "query": {
+            "sql": "SELECT CASE ValueName WHEN 'DhcpIPAddress' THEN 'IP (DHCP)' WHEN 'IPAddress' THEN 'IP (static)' ELSE 'Gateway' END AS k, ValueData AS v FROM {{registry}} WHERE KeyPath LIKE '%Tcpip\\Parameters\\Interfaces\\%' AND ValueName IN ('DhcpIPAddress','IPAddress','DhcpDefaultGateway') AND ValueData NOT IN ('','0.0.0.0') UNION ALL SELECT 'IP', '(no interface addresses in this RECmd output)' WHERE NOT EXISTS (SELECT 1 FROM {{registry}} WHERE KeyPath LIKE '%Tcpip\\Parameters\\Interfaces\\%' AND ValueName IN ('DhcpIPAddress','IPAddress') AND ValueData NOT IN ('','0.0.0.0')) ORDER BY k"
+          },
+          "drill": {
+            "table": "{{registry}}",
+            "where": [
+              {
+                "column": "KeyPath",
+                "op": "contains",
+                "value": "Tcpip\\Parameters\\Interfaces"
+              }
+            ]
+          }
+        },
+        {
+          "title": "Domain",
+          "source": "sql",
+          "render": "kv",
+          "span": 1,
+          "query": {
+            "sql": "SELECT ValueName AS k, CASE WHEN ValueData = '' THEN '(none — workgroup)' ELSE ValueData END AS v FROM {{registry}} WHERE KeyPath LIKE '%Services\\Tcpip\\Parameters' AND ValueName IN ('Domain','NV Domain') UNION ALL SELECT 'Domain', '(not in this RECmd output)' WHERE NOT EXISTS (SELECT 1 FROM {{registry}} WHERE KeyPath LIKE '%Services\\Tcpip\\Parameters' AND ValueName IN ('Domain','NV Domain')) ORDER BY k"
+          },
+          "drill": {
+            "table": "{{registry}}",
+            "where": [
+              {
+                "column": "KeyPath",
+                "op": "contains",
+                "value": "Tcpip\\Parameters"
+              },
+              {
+                "column": "ValueName",
+                "op": "in",
+                "value": [
+                  "Domain",
+                  "NV Domain"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "title": "OS version",
+          "source": "sql",
+          "render": "kv",
+          "span": 1,
+          "query": {
+            "sql": "SELECT ValueName AS k, ValueData AS v FROM {{registry}} WHERE KeyPath LIKE '%Microsoft\\Windows NT\\CurrentVersion' AND ValueName IN ('ProductName','DisplayVersion','ReleaseId','CurrentBuild','UBR') AND ValueData <> '' ORDER BY CASE ValueName WHEN 'ProductName' THEN 0 WHEN 'DisplayVersion' THEN 1 WHEN 'ReleaseId' THEN 2 WHEN 'CurrentBuild' THEN 3 ELSE 4 END"
+          },
+          "drill": {
+            "table": "{{registry}}",
+            "where": [
+              {
+                "column": "KeyPath",
+                "op": "contains",
+                "value": "Windows NT\\CurrentVersion"
+              }
+            ]
+          }
+        },
+        {
+          "title": "System function",
+          "source": "sql",
+          "render": "kv",
+          "span": 1,
+          "query": {
+            "sql": "SELECT 'Function' AS k, CASE ValueData WHEN 'WinNT' THEN 'Workstation' WHEN 'ServerNT' THEN 'Member / standalone server' WHEN 'LanmanNT' THEN 'Domain controller' ELSE ValueData END AS v FROM {{registry}} WHERE KeyPath LIKE '%Control\\ProductOptions' AND ValueName = 'ProductType' UNION ALL SELECT 'Function', '(ProductType not in this RECmd output)' WHERE NOT EXISTS (SELECT 1 FROM {{registry}} WHERE KeyPath LIKE '%Control\\ProductOptions' AND ValueName = 'ProductType')"
+          },
+          "drill": {
+            "table": "{{registry}}",
+            "where": [
+              {
+                "column": "KeyPath",
+                "op": "contains",
+                "value": "Control\\ProductOptions"
+              }
+            ]
+          }
+        },
+        {
+          "title": "Sysmon enabled",
+          "source": "sql",
+          "render": "chips",
+          "span": 1,
+          "sub": "from the SYSTEM hive's service keys",
+          "query": {
+            "sql": "SELECT 'Sysmon service' AS label, (SELECT COUNT(*) FROM {{registry}} WHERE KeyPath LIKE '%\\Services\\Sysmon%' AND ValueName = 'ImagePath') > 0 AS \"on\" UNION ALL SELECT 'Sysmon driver', (SELECT COUNT(*) FROM {{registry}} WHERE KeyPath LIKE '%\\Services\\SysmonDrv%') > 0"
+          },
+          "drill": {
+            "table": "{{registry}}",
+            "where": [
+              {
+                "column": "KeyPath",
+                "op": "contains",
+                "value": "Services\\Sysmon"
+              }
+            ]
+          }
+        },
+        {
+          "title": "PowerShell logging enabled",
+          "source": "sql",
+          "render": "chips",
+          "span": 1,
+          "sub": "policy keys; unset counts as off",
+          "query": {
+            "sql": "SELECT 'Script block' AS label, COALESCE((SELECT ValueData IN ('1','0x1') FROM {{registry}} WHERE KeyPath LIKE '%Policies\\Microsoft\\Windows\\PowerShell\\ScriptBlockLogging' AND ValueName = 'EnableScriptBlockLogging' LIMIT 1), 0) AS \"on\" UNION ALL SELECT 'Module', COALESCE((SELECT ValueData IN ('1','0x1') FROM {{registry}} WHERE KeyPath LIKE '%Policies\\Microsoft\\Windows\\PowerShell\\ModuleLogging' AND ValueName = 'EnableModuleLogging' LIMIT 1), 0) UNION ALL SELECT 'Transcription', COALESCE((SELECT ValueData IN ('1','0x1') FROM {{registry}} WHERE KeyPath LIKE '%Policies\\Microsoft\\Windows\\PowerShell\\Transcription' AND ValueName = 'EnableTranscripting' LIMIT 1), 0)"
+          },
+          "drill": {
+            "table": "{{registry}}",
+            "where": [
+              {
+                "column": "KeyPath",
+                "op": "contains",
+                "value": "Policies\\Microsoft\\Windows\\PowerShell"
+              }
+            ]
+          }
+        },
+        {
+          "title": "Security log coverage",
+          "source": "sql",
+          "render": "kv",
+          "span": 1,
+          "query": {
+            "sql": "SELECT 'Oldest event' AS k, COALESCE(MIN(TS_NORMALIZE(TimeCreated)), '(no Security channel events)') AS v FROM {{evtx}} WHERE Channel = 'Security' AND TimeCreated <> '' UNION ALL SELECT 'Newest event', COALESCE(MAX(TS_NORMALIZE(TimeCreated)), '') FROM {{evtx}} WHERE Channel = 'Security' AND TimeCreated <> '' UNION ALL SELECT 'Span (days)', COALESCE(ROUND(julianday(MAX(TS_NORMALIZE(TimeCreated))) - julianday(MIN(TS_NORMALIZE(TimeCreated))), 1), '') FROM {{evtx}} WHERE Channel = 'Security' AND TimeCreated <> '' UNION ALL SELECT 'Events', COUNT(*) FROM {{evtx}} WHERE Channel = 'Security'"
+          },
+          "drill": {
+            "table": "{{evtx}}",
+            "where": [
+              {
+                "column": "Channel",
+                "op": "equals",
+                "value": "Security"
+              }
+            ]
+          }
+        },
+        {
+          "title": "Activity window",
+          "source": "sql",
+          "render": "kv",
+          "span": 2,
+          "query": {
+            "sql": "SELECT 'First event' AS k, MIN(TS_NORMALIZE(TimeCreated)) AS v FROM {{evtx}} UNION ALL SELECT 'Last event', MAX(TS_NORMALIZE(TimeCreated)) FROM {{evtx}}"
+          },
+          "drill": {
+            "table": "{{evtx}}"
+          }
+        },
+        {
           "title": "Watchlist hits",
           "source": "watchlist",
           "render": "stat",
@@ -46,72 +220,6 @@
           "span": 1
         },
         {
-          "title": "Remote logon peers",
-          "source": "sql",
-          "render": "stat",
-          "span": 1,
-          "sub": "distinct hosts in 4624s",
-          "query": {
-            "sql": "SELECT COUNT(DISTINCT RemoteHost) FROM {{evtx}} WHERE EventId='4624' AND RemoteHost NOT IN ('-','','- (-)')"
-          }
-        },
-        {
-          "title": "Failed logons (4625)",
-          "source": "sql",
-          "render": "stat",
-          "span": 1,
-          "tone": "warn",
-          "query": {
-            "sql": "SELECT COUNT(*) FROM {{evtx}} WHERE EventId='4625'"
-          }
-        },
-        {
-          "title": "Logon volume over time (4624/4625/4648)",
-          "source": "sql",
-          "render": "histogram",
-          "span": 2,
-          "query": {
-            "sql": "SELECT strftime('%Y-%m-%d %H', TS_NORMALIZE(TimeCreated)) AS hr, COUNT(*) c FROM {{evtx}} WHERE Channel='Security' AND EventId IN ('4624','4625','4648') AND TimeCreated <> '' GROUP BY hr ORDER BY hr"
-          }
-        },
-        {
-          "title": "Top remote hosts (4624)",
-          "source": "sql",
-          "render": "bar",
-          "span": 2,
-          "query": {
-            "sql": "SELECT RemoteHost, COUNT(*) c FROM {{evtx}} WHERE EventId='4624' AND RemoteHost NOT IN ('-','','- (-)') GROUP BY RemoteHost ORDER BY c DESC LIMIT 8"
-          }
-        },
-        {
-          "title": "Rarest logon accounts (long tail)",
-          "source": "sql",
-          "render": "list",
-          "span": 2,
-          "query": {
-            "sql": "SELECT UserName, COUNT(*) c FROM {{evtx}} WHERE EventId='4624' AND UserName <> '' GROUP BY UserName ORDER BY c ASC LIMIT 10"
-          }
-        },
-        {
-          "title": "RDP sessions (21/24/25)",
-          "source": "sql",
-          "render": "stat",
-          "span": 1,
-          "query": {
-            "sql": "SELECT COUNT(*) FROM {{evtx}} WHERE Channel LIKE '%TerminalServices-LocalSessionManager%' AND EventId IN ('21','24','25')"
-          }
-        },
-        {
-          "title": "Explicit credentials (4648)",
-          "source": "sql",
-          "render": "stat",
-          "span": 1,
-          "tone": "warn",
-          "query": {
-            "sql": "SELECT COUNT(*) FROM {{evtx}} WHERE EventId='4648'"
-          }
-        },
-        {
           "title": "Computers seen",
           "source": "sql",
           "render": "stat",
@@ -119,6 +227,10 @@
           "sub": "distinct hosts in the logs",
           "query": {
             "sql": "SELECT COUNT(DISTINCT Computer) FROM {{evtx}} WHERE Computer NOT IN ('','-')"
+          },
+          "drill": {
+            "table": "{{evtx}}",
+            "column": "Computer"
           }
         },
         {
@@ -129,69 +241,219 @@
           "sub": "distinct UserName values",
           "query": {
             "sql": "SELECT COUNT(DISTINCT UserName) FROM {{evtx}} WHERE UserName NOT IN ('','-')"
+          },
+          "drill": {
+            "table": "{{evtx}}",
+            "column": "UserName"
           }
         },
         {
-          "title": "Activity window",
+          "title": "Remote logon peers",
+          "source": "sql",
+          "render": "stat",
+          "span": 1,
+          "sub": "distinct hosts in 4624s",
+          "query": {
+            "sql": "SELECT COUNT(DISTINCT RemoteHost) FROM {{evtx}} WHERE EventId='4624' AND RemoteHost NOT IN ('-','','- (-)')"
+          },
+          "drill": {
+            "table": "{{evtx}}",
+            "where": [
+              {
+                "column": "EventId",
+                "op": "equals",
+                "value": "4624"
+              }
+            ],
+            "column": "RemoteHost"
+          }
+        },
+        {
+          "title": "Failed logons (4625)",
+          "source": "sql",
+          "render": "stat",
+          "span": 1,
+          "tone": "warn",
+          "query": {
+            "sql": "SELECT COUNT(*) FROM {{evtx}} WHERE EventId='4625'"
+          },
+          "drill": {
+            "table": "{{evtx}}",
+            "where": [
+              {
+                "column": "EventId",
+                "op": "equals",
+                "value": "4625"
+              }
+            ]
+          }
+        },
+        {
+          "title": "RDP sessions (21/24/25)",
+          "source": "sql",
+          "render": "stat",
+          "span": 1,
+          "query": {
+            "sql": "SELECT COUNT(*) FROM {{evtx}} WHERE Channel LIKE '%TerminalServices-LocalSessionManager%' AND EventId IN ('21','24','25')"
+          },
+          "drill": {
+            "table": "{{evtx}}",
+            "where": [
+              {
+                "column": "Channel",
+                "op": "contains",
+                "value": "TerminalServices-LocalSessionManager"
+              },
+              {
+                "column": "EventId",
+                "op": "in",
+                "value": [
+                  "21",
+                  "24",
+                  "25"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "title": "Explicit credentials (4648)",
+          "source": "sql",
+          "render": "stat",
+          "span": 1,
+          "tone": "warn",
+          "query": {
+            "sql": "SELECT COUNT(*) FROM {{evtx}} WHERE EventId='4648'"
+          },
+          "drill": {
+            "table": "{{evtx}}",
+            "where": [
+              {
+                "column": "EventId",
+                "op": "equals",
+                "value": "4648"
+              }
+            ]
+          }
+        },
+        {
+          "title": "Logon volume over time (4624/4625/4648)",
+          "source": "sql",
+          "render": "histogram",
+          "span": 2,
+          "query": {
+            "sql": "SELECT strftime('%Y-%m-%d %H', TS_NORMALIZE(TimeCreated)) AS hr, COUNT(*) c FROM {{evtx}} WHERE Channel='Security' AND EventId IN ('4624','4625','4648') AND TimeCreated <> '' GROUP BY hr ORDER BY hr"
+          },
+          "drill": {
+            "table": "{{evtx}}",
+            "where": [
+              {
+                "column": "Channel",
+                "op": "equals",
+                "value": "Security"
+              },
+              {
+                "column": "EventId",
+                "op": "in",
+                "value": [
+                  "4624",
+                  "4625",
+                  "4648"
+                ]
+              }
+            ],
+            "column": "TimeCreated",
+            "bucket": "hour"
+          }
+        },
+        {
+          "title": "Top remote hosts (4624)",
+          "source": "sql",
+          "render": "bar",
+          "span": 2,
+          "query": {
+            "sql": "SELECT RemoteHost, COUNT(*) c FROM {{evtx}} WHERE EventId='4624' AND RemoteHost NOT IN ('-','','- (-)') GROUP BY RemoteHost ORDER BY c DESC LIMIT 8"
+          },
+          "drill": {
+            "table": "{{evtx}}",
+            "where": [
+              {
+                "column": "EventId",
+                "op": "equals",
+                "value": "4624"
+              }
+            ],
+            "column": "RemoteHost"
+          }
+        },
+        {
+          "title": "Rarest logon accounts (long tail)",
+          "source": "sql",
+          "render": "list",
+          "span": 2,
+          "query": {
+            "sql": "SELECT UserName, COUNT(*) c FROM {{evtx}} WHERE EventId='4624' AND UserName <> '' GROUP BY UserName ORDER BY c ASC LIMIT 10"
+          },
+          "drill": {
+            "table": "{{evtx}}",
+            "where": [
+              {
+                "column": "EventId",
+                "op": "equals",
+                "value": "4624"
+              }
+            ],
+            "column": "UserName"
+          }
+        },
+        {
+          "title": "Defender detections",
+          "source": "sql",
+          "render": "stat",
+          "span": 1,
+          "tone": "warn",
+          "sub": "1006 / 1015 / 1116 / 1117",
+          "query": {
+            "sql": "SELECT COUNT(*) FROM {{evtx}} WHERE Provider LIKE '%Windows Defender%' AND EventId IN ('1006','1015','1116','1117')"
+          },
+          "drill": {
+            "table": "{{evtx}}",
+            "where": [
+              {
+                "column": "Provider",
+                "op": "contains",
+                "value": "Windows Defender"
+              },
+              {
+                "column": "EventId",
+                "op": "in",
+                "value": [
+                  "1006",
+                  "1015",
+                  "1116",
+                  "1117"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "title": "Most recent Defender alerts",
           "source": "sql",
           "render": "kv",
           "span": 2,
           "query": {
-            "sql": "SELECT 'First event' AS k, MIN(TS_NORMALIZE(TimeCreated)) AS v FROM {{evtx}} UNION ALL SELECT 'Last event', MAX(TS_NORMALIZE(TimeCreated)) FROM {{evtx}}"
-          }
-        },
-        {
-          "title": "OS version",
-          "source": "sql",
-          "render": "kv",
-          "span": 1,
-          "query": {
-            "sql": "SELECT ValueName AS k, ValueData AS v FROM {{registry}} WHERE KeyPath LIKE '%Microsoft\\Windows NT\\CurrentVersion' AND ValueName IN ('ProductName','DisplayVersion','ReleaseId','CurrentBuild','UBR') AND ValueData <> '' ORDER BY CASE ValueName WHEN 'ProductName' THEN 0 WHEN 'DisplayVersion' THEN 1 WHEN 'ReleaseId' THEN 2 WHEN 'CurrentBuild' THEN 3 ELSE 4 END"
-          }
-        },
-        {
-          "title": "System role",
-          "source": "sql",
-          "render": "kv",
-          "span": 1,
-          "query": {
-            "sql": "SELECT 'Role' AS k, CASE ValueData WHEN 'WinNT' THEN 'Workstation' WHEN 'ServerNT' THEN 'Member / standalone server' WHEN 'LanmanNT' THEN 'Domain controller' ELSE ValueData END AS v FROM {{registry}} WHERE KeyPath LIKE '%Control\\ProductOptions' AND ValueName = 'ProductType' UNION ALL SELECT 'Role', '(ProductType not in this RECmd output)' WHERE NOT EXISTS (SELECT 1 FROM {{registry}} WHERE KeyPath LIKE '%Control\\ProductOptions' AND ValueName = 'ProductType')"
-          }
-        },
-        {
-          "title": "Domain",
-          "source": "sql",
-          "render": "kv",
-          "span": 1,
-          "query": {
-            "sql": "SELECT ValueName AS k, CASE WHEN ValueData = '' THEN '(none — workgroup)' ELSE ValueData END AS v FROM {{registry}} WHERE KeyPath LIKE '%Services\\Tcpip\\Parameters' AND ValueName IN ('Domain','NV Domain','Hostname') ORDER BY CASE ValueName WHEN 'Hostname' THEN 0 WHEN 'Domain' THEN 1 ELSE 2 END"
-          }
-        },
-        {
-          "title": "IP addresses",
-          "source": "sql",
-          "render": "kv",
-          "span": 1,
-          "query": {
-            "sql": "SELECT CASE ValueName WHEN 'DhcpIPAddress' THEN 'IP (DHCP)' WHEN 'IPAddress' THEN 'IP (static)' ELSE 'Gateway' END AS k, ValueData AS v FROM {{registry}} WHERE KeyPath LIKE '%Tcpip\\Parameters\\Interfaces\\%' AND ValueName IN ('DhcpIPAddress','IPAddress','DhcpDefaultGateway') AND ValueData NOT IN ('','0.0.0.0') ORDER BY k"
-          }
-        },
-        {
-          "title": "Sysmon",
-          "source": "sql",
-          "render": "kv",
-          "span": 1,
-          "query": {
-            "sql": "SELECT 'Sysmon' AS k, CASE WHEN COUNT(*) > 0 THEN 'Installed — ' || COUNT(*) || ' service registry entr' || CASE WHEN COUNT(*) = 1 THEN 'y' ELSE 'ies' END ELSE 'Not present in registry' END AS v FROM {{registry}} WHERE KeyPath LIKE '%\\Services\\Sysmon%'"
-          }
-        },
-        {
-          "title": "PowerShell logging",
-          "source": "sql",
-          "render": "kv",
-          "span": 1,
-          "query": {
-            "sql": "SELECT CASE ValueName WHEN 'EnableScriptBlockLogging' THEN 'Script block' WHEN 'EnableModuleLogging' THEN 'Module logging' ELSE 'Transcription' END AS k, CASE WHEN ValueData IN ('1','0x1') THEN 'Enabled' WHEN ValueData IN ('0','0x0') THEN 'Disabled' ELSE ValueData END AS v FROM {{registry}} WHERE KeyPath LIKE '%Policies\\Microsoft\\Windows\\PowerShell%' AND ValueName IN ('EnableScriptBlockLogging','EnableModuleLogging','EnableTranscripting') UNION ALL SELECT 'Policy', '(not configured — no policy keys)' WHERE NOT EXISTS (SELECT 1 FROM {{registry}} WHERE KeyPath LIKE '%Policies\\Microsoft\\Windows\\PowerShell%' AND ValueName IN ('EnableScriptBlockLogging','EnableModuleLogging','EnableTranscripting'))"
+            "sql": "SELECT * FROM (SELECT TS_NORMALIZE(TimeCreated) AS k, EventId || ' · ' || CASE WHEN MapDescription <> '' THEN MapDescription ELSE PayloadData1 END AS v FROM {{evtx}} WHERE Provider LIKE '%Windows Defender%' AND EventId IN ('1006','1007','1008','1009','1010','1011','1012','1015','1116','1117','1118','1119','5001','5004','5007','5010','5012') ORDER BY TS_NORMALIZE(TimeCreated) DESC LIMIT 8) UNION ALL SELECT '—', '(no Defender alert events in the logs)' WHERE NOT EXISTS (SELECT 1 FROM {{evtx}} WHERE Provider LIKE '%Windows Defender%' AND EventId IN ('1006','1007','1008','1009','1010','1011','1012','1015','1116','1117','1118','1119','5001','5004','5007','5010','5012'))"
+          },
+          "drill": {
+            "table": "{{evtx}}",
+            "where": [
+              {
+                "column": "Provider",
+                "op": "contains",
+                "value": "Windows Defender"
+              }
+            ]
           }
         },
         {
@@ -203,6 +465,16 @@
           "sub": "log tampering",
           "query": {
             "sql": "SELECT COUNT(*) FROM {{evtx}} WHERE EventId='1102'"
+          },
+          "drill": {
+            "table": "{{evtx}}",
+            "where": [
+              {
+                "column": "EventId",
+                "op": "equals",
+                "value": "1102"
+              }
+            ]
           }
         },
         {
@@ -213,6 +485,16 @@
           "tone": "warn",
           "query": {
             "sql": "SELECT COUNT(*) FROM {{evtx}} WHERE EventId='4719'"
+          },
+          "drill": {
+            "table": "{{evtx}}",
+            "where": [
+              {
+                "column": "EventId",
+                "op": "equals",
+                "value": "4719"
+              }
+            ]
           }
         },
         {
@@ -223,6 +505,9 @@
           "sub": "autostart persistence (RECmd)",
           "query": {
             "sql": "SELECT COUNT(*) FROM {{registry}} WHERE KeyPath LIKE '%\\Run' OR KeyPath LIKE '%\\RunOnce' OR KeyPath LIKE '%\\Services%' OR Category LIKE '%Run%' OR Category LIKE '%Service%'"
+          },
+          "drill": {
+            "table": "{{registry}}"
           }
         },
         {
@@ -232,6 +517,10 @@
           "span": 2,
           "query": {
             "sql": "SELECT Category AS label, COUNT(*) c FROM {{registry}} WHERE Category NOT IN ('','-') GROUP BY Category ORDER BY c DESC LIMIT 10"
+          },
+          "drill": {
+            "table": "{{registry}}",
+            "column": "Category"
           }
         }
       ],
@@ -241,108 +530,6 @@
           "label": "Engagement name",
           "required": false,
           "description": "Shown by plugins and dashboards that label their output with the case — optional."
-        }
-      ],
-      "dashboards": [
-        {
-          "name": "KAPE host overview",
-          "description": "Who this machine is: hostname, addresses, domain, OS, role, logging posture, Security-log coverage and Defender alerts.",
-          "widgets": [
-            {
-              "title": "Hostname",
-              "source": "sql",
-              "render": "kv",
-              "span": 1,
-              "query": {
-                "sql": "SELECT 'Computer name' AS k, ValueData AS v FROM {{registry}} WHERE KeyPath LIKE '%Control\\ComputerName\\ComputerName' AND ValueName = 'ComputerName' AND ValueData <> '' UNION ALL SELECT 'Hostname (TCP/IP)', ValueData FROM {{registry}} WHERE KeyPath LIKE '%Services\\Tcpip\\Parameters' AND ValueName = 'Hostname' AND ValueData <> '' UNION ALL SELECT 'Hostname', '(not in this RECmd output)' WHERE NOT EXISTS (SELECT 1 FROM {{registry}} WHERE (KeyPath LIKE '%Control\\ComputerName\\ComputerName' AND ValueName = 'ComputerName' OR KeyPath LIKE '%Services\\Tcpip\\Parameters' AND ValueName = 'Hostname') AND ValueData <> '')"
-              }
-            },
-            {
-              "title": "IP addresses",
-              "source": "sql",
-              "render": "kv",
-              "span": 1,
-              "query": {
-                "sql": "SELECT CASE ValueName WHEN 'DhcpIPAddress' THEN 'IP (DHCP)' WHEN 'IPAddress' THEN 'IP (static)' ELSE 'Gateway' END AS k, ValueData AS v FROM {{registry}} WHERE KeyPath LIKE '%Tcpip\\Parameters\\Interfaces\\%' AND ValueName IN ('DhcpIPAddress','IPAddress','DhcpDefaultGateway') AND ValueData NOT IN ('','0.0.0.0') UNION ALL SELECT 'IP', '(no interface addresses in this RECmd output)' WHERE NOT EXISTS (SELECT 1 FROM {{registry}} WHERE KeyPath LIKE '%Tcpip\\Parameters\\Interfaces\\%' AND ValueName IN ('DhcpIPAddress','IPAddress') AND ValueData NOT IN ('','0.0.0.0')) ORDER BY k"
-              }
-            },
-            {
-              "title": "Domain",
-              "source": "sql",
-              "render": "kv",
-              "span": 1,
-              "query": {
-                "sql": "SELECT ValueName AS k, CASE WHEN ValueData = '' THEN '(none — workgroup)' ELSE ValueData END AS v FROM {{registry}} WHERE KeyPath LIKE '%Services\\Tcpip\\Parameters' AND ValueName IN ('Domain','NV Domain') UNION ALL SELECT 'Domain', '(not in this RECmd output)' WHERE NOT EXISTS (SELECT 1 FROM {{registry}} WHERE KeyPath LIKE '%Services\\Tcpip\\Parameters' AND ValueName IN ('Domain','NV Domain')) ORDER BY k"
-              }
-            },
-            {
-              "title": "OS version",
-              "source": "sql",
-              "render": "kv",
-              "span": 1,
-              "query": {
-                "sql": "SELECT ValueName AS k, ValueData AS v FROM {{registry}} WHERE KeyPath LIKE '%Microsoft\\Windows NT\\CurrentVersion' AND ValueName IN ('ProductName','DisplayVersion','ReleaseId','CurrentBuild','UBR') AND ValueData <> '' ORDER BY CASE ValueName WHEN 'ProductName' THEN 0 WHEN 'DisplayVersion' THEN 1 WHEN 'ReleaseId' THEN 2 WHEN 'CurrentBuild' THEN 3 ELSE 4 END"
-              }
-            },
-            {
-              "title": "System function",
-              "source": "sql",
-              "render": "kv",
-              "span": 1,
-              "query": {
-                "sql": "SELECT 'Function' AS k, CASE ValueData WHEN 'WinNT' THEN 'Workstation' WHEN 'ServerNT' THEN 'Member / standalone server' WHEN 'LanmanNT' THEN 'Domain controller' ELSE ValueData END AS v FROM {{registry}} WHERE KeyPath LIKE '%Control\\ProductOptions' AND ValueName = 'ProductType' UNION ALL SELECT 'Function', '(ProductType not in this RECmd output)' WHERE NOT EXISTS (SELECT 1 FROM {{registry}} WHERE KeyPath LIKE '%Control\\ProductOptions' AND ValueName = 'ProductType')"
-              }
-            },
-            {
-              "title": "Sysmon enabled",
-              "source": "sql",
-              "render": "chips",
-              "span": 1,
-              "sub": "from the SYSTEM hive's service keys",
-              "query": {
-                "sql": "SELECT 'Sysmon service' AS label, (SELECT COUNT(*) FROM {{registry}} WHERE KeyPath LIKE '%\\Services\\Sysmon%' AND ValueName = 'ImagePath') > 0 AS \"on\" UNION ALL SELECT 'Sysmon driver', (SELECT COUNT(*) FROM {{registry}} WHERE KeyPath LIKE '%\\Services\\SysmonDrv%') > 0"
-              }
-            },
-            {
-              "title": "PowerShell logging enabled",
-              "source": "sql",
-              "render": "chips",
-              "span": 1,
-              "sub": "policy keys; unset counts as off",
-              "query": {
-                "sql": "SELECT 'Script block' AS label, COALESCE((SELECT ValueData IN ('1','0x1') FROM {{registry}} WHERE KeyPath LIKE '%Policies\\Microsoft\\Windows\\PowerShell\\ScriptBlockLogging' AND ValueName = 'EnableScriptBlockLogging' LIMIT 1), 0) AS \"on\" UNION ALL SELECT 'Module', COALESCE((SELECT ValueData IN ('1','0x1') FROM {{registry}} WHERE KeyPath LIKE '%Policies\\Microsoft\\Windows\\PowerShell\\ModuleLogging' AND ValueName = 'EnableModuleLogging' LIMIT 1), 0) UNION ALL SELECT 'Transcription', COALESCE((SELECT ValueData IN ('1','0x1') FROM {{registry}} WHERE KeyPath LIKE '%Policies\\Microsoft\\Windows\\PowerShell\\Transcription' AND ValueName = 'EnableTranscripting' LIMIT 1), 0)"
-              }
-            },
-            {
-              "title": "Security log coverage",
-              "source": "sql",
-              "render": "kv",
-              "span": 1,
-              "query": {
-                "sql": "SELECT 'Oldest event' AS k, COALESCE(MIN(TS_NORMALIZE(TimeCreated)), '(no Security channel events)') AS v FROM {{evtx}} WHERE Channel = 'Security' AND TimeCreated <> '' UNION ALL SELECT 'Newest event', COALESCE(MAX(TS_NORMALIZE(TimeCreated)), '') FROM {{evtx}} WHERE Channel = 'Security' AND TimeCreated <> '' UNION ALL SELECT 'Span (days)', COALESCE(ROUND(julianday(MAX(TS_NORMALIZE(TimeCreated))) - julianday(MIN(TS_NORMALIZE(TimeCreated))), 1), '') FROM {{evtx}} WHERE Channel = 'Security' AND TimeCreated <> '' UNION ALL SELECT 'Events', COUNT(*) FROM {{evtx}} WHERE Channel = 'Security'"
-              }
-            },
-            {
-              "title": "Defender detections",
-              "source": "sql",
-              "render": "stat",
-              "span": 1,
-              "tone": "warn",
-              "sub": "1006 / 1015 / 1116 / 1117",
-              "query": {
-                "sql": "SELECT COUNT(*) FROM {{evtx}} WHERE Provider LIKE '%Windows Defender%' AND EventId IN ('1006','1015','1116','1117')"
-              }
-            },
-            {
-              "title": "Most recent Defender alerts",
-              "source": "sql",
-              "render": "kv",
-              "span": 2,
-              "query": {
-                "sql": "SELECT * FROM (SELECT TS_NORMALIZE(TimeCreated) AS k, EventId || ' · ' || CASE WHEN MapDescription <> '' THEN MapDescription ELSE PayloadData1 END AS v FROM {{evtx}} WHERE Provider LIKE '%Windows Defender%' AND EventId IN ('1006','1007','1008','1009','1010','1011','1012','1015','1116','1117','1118','1119','5001','5004','5007','5010','5012') ORDER BY TS_NORMALIZE(TimeCreated) DESC LIMIT 8) UNION ALL SELECT '—', '(no Defender alert events in the logs)' WHERE NOT EXISTS (SELECT 1 FROM {{evtx}} WHERE Provider LIKE '%Windows Defender%' AND EventId IN ('1006','1007','1008','1009','1010','1011','1012','1015','1116','1117','1118','1119','5001','5004','5007','5010','5012'))"
-              }
-            }
-          ]
         }
       ]
     },

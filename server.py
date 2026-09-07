@@ -3333,6 +3333,40 @@ def api_dashboard_widget_preview(body: WidgetPreviewBody):
         raise HTTPException(400, str(e))
 
 
+class ResolveBody(BaseModel):
+    table: str | None = None
+    sql: str | None = None
+
+
+@app.post("/api/dashboard/resolve")
+def api_dashboard_resolve(body: ResolveBody):
+    """Where a widget's data lives in THIS case. `table` (src_N or a
+    {{evtx}}-style placeholder) comes back as the source id the drilldown
+    opens; `sql` comes back with its placeholders substituted, for opening
+    a widget's query in the SQL pane. 400 when the case has no such table,
+    with the same wording the widget shows as its empty state."""
+    out = {}
+    try:
+        if body.table:
+            out["source_id"] = store().resolve_table_source(body.table)
+        if body.sql:
+            out["sql"] = store()._resolve_table_placeholders(body.sql)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return out
+
+
+@app.get("/api/header_sets")
+def api_header_sets():
+    """The shipped header sets and the {{shorthand}} names that stand for
+    them — what the widget editor lists as columns for a portable table
+    it can't read from the case."""
+    from winnow import defaults
+    from winnow.store import Store
+    sets = [{"name": n, "columns": cols} for n, cols in defaults.headers()["nicknames"]]
+    return {"shorthands": dict(Store._TABLE_SHORTHANDS), "sets": sets}
+
+
 # ------------------------------------------------------------ derived columns
 
 

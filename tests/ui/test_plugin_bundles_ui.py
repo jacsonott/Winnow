@@ -55,11 +55,11 @@ def test_shipped_kape_profile_is_readonly_and_applies(page):
     row.locator(".btn", has_text="Apply to this case").click()
     page.wait_for_selector("#modal[hidden]", state="attached")
 
-    # applying creates a NAMED "KAPE triage" dashboard in the sidebar; open it
+    # applying creates ONE named "KAPE triage" dashboard in the sidebar
+    # (the host overview it used to ship beside is folded into it); open it
     page.evaluate("() => __winnow.renderSidebar()")
-    # …and the profile's second board, the host overview, alongside it
-    page.wait_for_selector("#sidebarList .sidebar-row:has-text('KAPE host overview')")
     page.wait_for_selector("#sidebarList .sidebar-row:has-text('KAPE triage')")
+    assert page.locator("#sidebarList .sidebar-row", has_text="KAPE host overview").count() == 0
     page.locator("#sidebarList .sidebar-row", has_text="KAPE triage").locator(".menu-item").click()
     page.wait_for_selector("#dashboardview:not([hidden])")
     page.wait_for_function(
