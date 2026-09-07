@@ -25,6 +25,7 @@ export function modal(title, build, opts = {}) {
   $('modalTitle').textContent = title;
   document.querySelector('.modal-card').classList.toggle('wide', !!opts.wide);
   document.querySelector('.modal-card').classList.toggle('xwide', opts.wide === 'x');
+  document.querySelector('.modal-card').classList.toggle('tall', !!opts.tall);
   const b = $('modalBody');
   b.replaceChildren();
   // Any modal opening supersedes the Search-all pane's repaint hook; the

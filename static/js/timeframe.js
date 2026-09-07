@@ -227,7 +227,7 @@ export function openTimeRangeModal() {
       `Stays applied across filter/preset changes and table switches, unlike the regular filters — `
       + `toggle it on/off quickly with "${toggleKey}", or jump straight back to this dialog with "${openKey}".`));
 
-    const enabledLabel = el('label');
+    const enabledLabel = el('label', 'tf-enabled');
     const enabledCb = el('input');
     enabledCb.type = 'checkbox';
     enabledCb.checked = S.timeRange.enabled;

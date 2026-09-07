@@ -57,7 +57,10 @@ async function loadWidgets(id) {
 async function persist() {
   if (S.dashboardId == null) return;
   try { await post(`/api/dashboards/${S.dashboardId}`, { widgets }); }
-  catch (e) { toast('Could not save dashboard: ' + e.message, 6000); }
+  catch (e) { toast('Could not save dashboard: ' + e.message, 6000); return; }
+  // The sidebar's per-board count comes from the list endpoint, so it
+  // showed 0 after the first widget until something else reloaded it.
+  try { await loadDashboards(); renderSidebar(); } catch { /* offline — the next reload catches up */ }
 }
 
 /* --------------------------------------------------------- show a board */
@@ -431,7 +434,16 @@ function dashTableOptions() {
 
 function openWidgetEditor(existing, prefill = null) {
   modal(existing ? 'Edit widget' : 'Add widget', (b) => {
-    const mk = (label, node) => { b.append(el('label', null, label)); b.append(node); return node; };
+    // Stacked label-over-control rows (.dash-form) — the inline run of
+    // "Title[input]Data source[select]" had no gap anywhere and left the
+    // SQL label dangling at the end of the template row.
+    const form = el('div', 'dash-form');
+    const mk = (label, node, into = form) => {
+      const field = el('div', 'dash-field');
+      field.append(el('label', null, label), node);
+      into.append(field);
+      return node;
+    };
     const title = el('input'); title.className = 'confirm-input'; title.value = existing?.title || prefill?.title || '';
     const source = el('select');
     for (const o of ['sql', 'watchlist', 'tags']) source.append(new Option(o, o));
@@ -472,16 +484,22 @@ function openWidgetEditor(existing, prefill = null) {
     b.append(el('p', 'fb-help', 'A widget is a data source rendered a chosen way. '
       + 'SQL is read-only against the case; watchlist and tags read case state. '
       + 'stat/kv/chips/list/bar/histogram interpret the returned columns.'));
-    mk('Title', title); mk('Data source', source);
+    b.append(form);
+    const top = el('div', 'dash-form-row');
+    mk('Title', title, top); mk('Data source', source, top);
+    form.append(top);
     const sqlWrap = el('div');
-    sqlWrap.append(el('label', null, 'Start from a template'), templ);
-    sqlWrap.append(el('label', null, 'Table'), tableSel);
-    sqlWrap.append(el('label', null, 'SQL query'), sql);
+    const pick = el('div', 'dash-form-row');
+    mk('Start from a template', templ, pick); mk('Table', tableSel, pick);
+    sqlWrap.append(pick);
+    mk('SQL query', sql, sqlWrap);
     sqlWrap.append(el('p', 'fb-help', 'Pick a template and a table to get a working query, then '
       + 'edit the ⟨column⟩ / ⟨value⟩ parts. A {{…}} table is portable — it resolves on any case, '
       + 'so the widget still works when this dashboard is saved as a profile.'));
-    b.append(sqlWrap);
-    mk('Render as', renderSel); mk('Sub-label (optional, for stat)', sub); mk('Width', span);
+    form.append(sqlWrap);
+    const look = el('div', 'dash-form-row dash-form-row-3');
+    mk('Render as', renderSel, look); mk('Sub-label (optional, for stat)', sub, look); mk('Width', span, look);
+    form.append(look);
     const syncSql = () => { sqlWrap.style.display = source.value === 'sql' ? '' : 'none'; };
     source.onchange = syncSql; syncSql();
 

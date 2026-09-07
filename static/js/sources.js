@@ -8,7 +8,7 @@ import { $, ROW_H, api, el, post, toast } from './core.js';
 import { derivedOps } from './derived.js';
 import { currentSpec, renderAdvancedChips, setSearchMode, updateSearchHint } from './filters.js';
 import { clearPageCache, headH, rScroll, render, rowAt, spacerPx } from './grid.js';
-import { closeAllGroupViews, drawRail, dropGrouping, regroupAll, setGrouping } from './grouping.js';
+import { closeAllGroupViews, drawRail, dropGrouping, regroupAll, renderGroupStrip, setGrouping } from './grouping.js';
 import { shutdownWinnow } from './home.js';
 import { openImportModal } from './importer.js';
 import { openMergeBuilder } from './merge.js';
@@ -587,7 +587,12 @@ export async function loadSources(select, { navigate = true } = {}) {
   else {
     S.sourceId = null;
     $('empty').hidden = false;
+    $('noRows').hidden = true;
     $('viewStats').textContent = '';
+    // A fresh load with no tables (a quick-look just created, an empty
+    // case) never reaches renderHead, so the strip stayed an 18px dashed
+    // stub until a table opened.
+    renderGroupStrip();
   }
 }
 
@@ -659,6 +664,7 @@ export async function openSource(id) {
   updateSearchHint();
   updateFiltersButton();
   $('empty').hidden = true;
+  $('noRows').hidden = true;
 
   const saved = await api(`/api/layout?source_id=${id}`).catch(() => ({}));
   // No per-source layout saved yet (a source opened for the first time) —
@@ -1452,6 +1458,7 @@ $('btnCase').onclick = () => dropdownMenu($('btnCase'), [
 // Wrapped, not passed directly: an onclick handler is called with the
 // MouseEvent, which would arrive as `seed`.
 $('btnReset').onclick = () => clearAllFilters();
+$('noRowsClear').onclick = () => clearAllFilters();
 
 // The empty-case state's one useful next action, right where the eye lands —
 // the same openImportModal the Case menu's "Import…" entry opens.

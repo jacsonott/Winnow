@@ -487,6 +487,21 @@ html[data-style="studio"][data-theme="light"] {
   padding: 6px 10px; background: var(--ink);
   border-bottom: 1px solid var(--line);
 }
+/* Under width pressure (tag counts, the search box, a 1280px laptop, the
+   wider Phosphor/Blueprint fonts) the flex items used to share the squeeze
+   evenly, which folded every button into a two-line pill and stacked the
+   tag chips vertically. Buttons in a bar never wrap their own label; the
+   ribbon and the group strip are the things that give way, because chips
+   wrapping onto a second line is the designed behaviour and a truncated
+   "drag a column header here" hint costs nothing. */
+.toolbar .btn, .sql-head .btn, .detail-head .btn, .dash-bar .btn, .wl-head .btn { white-space: nowrap; flex: 0 0 auto; }
+.toolbar > .group-strip { flex: 0 6 auto; min-width: 150px; } /* the first to give: its hint is decoration; 150px keeps the label and + Tag */
+.toolbar > .tag-ribbon { flex: 0 1 auto; min-width: 0; }     /* then the chips wrap onto a second line */
+.toolbar > .search-wrap { flex: 0 0 auto; }                  /* the box you type in never shrinks */
+.group-strip-hint { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* Empty, the strip is one line — label, hint, + Tag — and clips rather than
+   folding "+ Tag" under the label. With pills in it, it wraps as before. */
+.group-strip:not(.has-groups) { flex-wrap: nowrap; overflow: hidden; }
 
 .search-icon-btn { display: inline-flex; align-items: center; line-height: 1; padding: 4px 8px; }
 .plugin-toolbar-buttons { display: inline-flex; gap: 4px; }
@@ -878,6 +893,8 @@ html[data-style="studio"][data-theme="light"] {
      this whole-grid cover. */
   z-index: 6;
 }
+.empty.no-rows { inset: auto 0; top: 42%; background: transparent; pointer-events: none; z-index: 2; }
+.empty.no-rows .btn { pointer-events: auto; }
 .empty-title { color: var(--text); font-size: 15px; margin: 0; }
 .empty p { margin: 0; }
 code { font-family: var(--mono); color: var(--accent); background: var(--panel); padding: 1px 5px; }
@@ -895,6 +912,8 @@ code { font-family: var(--mono); color: var(--accent); background: var(--panel);
   padding: 5px 10px; border-bottom: 1px solid var(--line);
   font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim);
 }
+.sql-head > span { flex: 1 1 auto; min-width: 0; }
+.sql-head > div { flex: 0 0 auto; display: flex; gap: 6px; margin-left: 10px; }
 .detail-actions { display: flex; gap: 6px; }
 .detail-body { display: grid; grid-template-columns: 1fr 300px; gap: 14px; overflow: auto; padding: 10px; }
 .main-area[data-dock="right"] .detail-body { grid-template-columns: 1fr; grid-auto-rows: min-content; }
@@ -1250,6 +1269,10 @@ textarea:focus { border-color: var(--accent); outline: none; }
   width: min(680px, 92vw); max-height: 82vh; display: flex; flex-direction: column;
 }
 .modal-card.wide { width: min(920px, 96vw); }
+/* Settings: ten collapsible sections. A card that grows re-centres itself
+   on every click, so the header jumped up to 165px; a fixed height keeps it
+   still and scrolls the body instead. */
+.modal-card.tall { height: 82vh; }
 /* The Tables manager: five buttons, three stats and an index status per
    row — 920px truncated the buttons off the right edge on any real name. */
 .modal-card.xwide { width: min(1240px, 96vw); }
@@ -1314,7 +1337,10 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .vp-toggles { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; justify-content: space-between; }
 .vp-seg { display: flex; gap: 2px; flex-wrap: wrap; }
 .vp-seg .btn { font-size: 11px; padding: 3px 7px; }
-.vp-seg .btn[aria-pressed="true"] { color: var(--accent); border-color: var(--accent-dim); }
+/* The same filled look the Settings segments use: accent text on the
+   accent-dim fill measured 1.4–2.7:1 across the skins, and accent-on-panel
+   fails in Phosphor light, where the green is not a text colour. */
+.vp-seg .btn[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
 .vp-list {
   flex: 1 1 auto; min-height: 60px; max-height: 40vh; overflow-y: auto;
   display: flex; flex-direction: column; gap: 1px;
@@ -1539,7 +1565,9 @@ textarea:focus { border-color: var(--accent); outline: none; }
   border-radius: var(--radius-sm);
 }
 
-.fb-help { margin: 0 0 10px; font-size: 12px; color: var(--dim); }
+/* 6px on top so the focused input's ring doesn't sit on the help text. */
+.fb-help { margin: 6px 0 10px; font-size: 12px; color: var(--dim); }
+.tf-enabled { display: flex; align-items: center; gap: 6px; margin: 4px 0 10px; }
 .fb-tree { border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 8px; margin-bottom: 10px; }
 .fb-group { display: flex; flex-direction: column; gap: 6px; }
 .fb-group .fb-group { border-left: 2px solid var(--line-2); padding-left: 10px; margin-left: 2px; }
@@ -1804,6 +1832,12 @@ html[data-style="blueprint"] .row.selected { box-shadow: inset 5px 0 0 0 var(--a
 html[data-style="blueprint"] .detail-head, html[data-style="blueprint"] .sql-head, html[data-style="blueprint"] .modal-head {
   background: var(--accent); color: var(--accent-fg); text-transform: uppercase; font-weight: 700;
 }
+/* The buttons and the tab's row count inherit the dim grey from their own
+   rules, which on the solid accent measured 1.08:1 — Close was invisible. */
+html[data-style="blueprint"] .modal-head .btn, html[data-style="blueprint"] .detail-head .btn, html[data-style="blueprint"] .sql-head .btn {
+  color: var(--accent-fg); border-color: var(--accent-fg); background: transparent;
+}
+html[data-style="blueprint"] .tab[aria-selected="true"] .count, html[data-style="blueprint"] .tab[aria-selected="true"] .x { color: var(--accent-fg); opacity: .85; }
 
 /* Studio: gentle lift on hover instead of a color swap, pill-shaped active
    tab, a softer backdrop behind modals. */
@@ -1950,6 +1984,9 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 .notes-preview pre { background: var(--panel-3); padding: 10px 12px; overflow: auto; }
 .notes-preview pre code { background: none; padding: 0; }
 .notes-preview li { margin: 2px 0; }
+.notes-preview table { border-collapse: collapse; margin: 8px 0; font-size: 13px; }
+.notes-preview th, .notes-preview td { border: 1px solid var(--line-2); padding: 4px 10px; text-align: left; }
+.notes-preview th { background: var(--panel-2); color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
 
 /* IOC watchlist tab */
 .watchlistview { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }
@@ -2043,6 +2080,11 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 /* Preview pane in the widget editor — one card's worth of output before
    committing it. */
 .dash-preview-wrap { margin-top: 8px; }
+.dash-form label { display: block; font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; margin: 0 0 4px; }
+.dash-field { margin-top: 10px; min-width: 0; }
+.dash-form .confirm-input, .dash-form select { width: 100%; box-sizing: border-box; }
+.dash-form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
+.dash-form-row-3 { grid-template-columns: 1fr 1fr 1fr; }
 .dash-card.dash-preview { cursor: default; min-height: 60px; }
 .dash-widget-body { flex: 1 1 auto; min-height: 0; }
 .dash-stat { font-size: 34px; color: var(--accent); line-height: 1; }

@@ -961,7 +961,7 @@ export function openSettings() {
 
     const secUpdates = settingsSection(b, 'Updates');
     buildUpdatesPanel(secUpdates);
-  });
+  }, { tall: true });
 }
 
 /* Settings → Updates. Shows what this install is, and checks for a newer

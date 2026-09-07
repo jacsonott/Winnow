@@ -37,7 +37,22 @@ export function renderMarkdown(src) {
   const lines = (src || '').split('\n');
   let inList = false, inCode = false;
   const closeList = () => { if (inList) { out.push('</ul>'); inList = false; } };
-  for (const line of lines) {
+  // GitHub-style tables: a header row, a |---|---| separator, then rows.
+  const cells = (l) => l.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
+  const isSep = (l) => /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$/.test(l || '');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!inCode && /^\s*\|/.test(line) && isSep(lines[i + 1])) {
+      closeList();
+      out.push('<table><thead><tr>' + cells(line).map((c) => `<th>${inline(c)}</th>`).join('') + '</tr></thead><tbody>');
+      i += 1;
+      while (i + 1 < lines.length && /^\s*\|/.test(lines[i + 1])) {
+        i += 1;
+        out.push('<tr>' + cells(lines[i]).map((c) => `<td>${inline(c)}</td>`).join('') + '</tr>');
+      }
+      out.push('</tbody></table>');
+      continue;
+    }
     if (/^```/.test(line)) {
       if (inCode) { out.push('</code></pre>'); inCode = false; }
       else { closeList(); out.push('<pre><code>'); inCode = true; }
