@@ -146,6 +146,11 @@ try {
         <p class="empty-title">No file open</p>
         <p><button class="btn" id="emptyImportBtn">Import files…</button></p>
       </div>
+      <div class="empty no-rows" id="noRows" hidden>
+        <p class="empty-title">No rows match</p>
+        <p>Every row is hidden by the current filters, search or timeframe.</p>
+        <p><button class="btn ghost" id="noRowsClear">Clear filters</button></p>
+      </div>
     </main>
 
     <section class="sqlview" id="sqlview" hidden>

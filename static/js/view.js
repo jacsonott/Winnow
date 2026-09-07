@@ -109,6 +109,7 @@ export async function rebuildView({ keepScroll = true } = {}) {
   S.cellAnchor = null;
   const src = S.sources.find((s) => s.id === S.sourceId);
   $('spacerY').style.height = spacerPx(v.row_count) + 'px';
+  $('noRows').hidden = v.row_count > 0;
   $('viewStats').innerHTML =
     `<b>${v.row_count.toLocaleString()}</b> of ${src.row_count.toLocaleString()} rows · ${v.elapsed_ms} ms`;
   $('body').scrollTop = rScroll($('body'), v.row_count, scroll, headH());

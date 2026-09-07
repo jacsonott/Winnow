@@ -33,6 +33,19 @@ see [docs/notes/README.md](README.md) for the whole set.
   unthemed** (the widget editor did before this). Contextual rules
   (`.fb-cond select`, `.wl-add select`, …) still win where they set more.
 
+- **Bar buttons never wrap their label.** `.toolbar .btn`, `.sql-head .btn`,
+  `.detail-head .btn`, `.dash-bar .btn` and `.wl-head .btn` are
+  `white-space: nowrap; flex: 0 0 auto`. Under width pressure (tag counts,
+  the open search box, a 1280px laptop, the wider Phosphor/Blueprint faces)
+  the things that give way are, in order, the group strip (`flex-shrink: 6`,
+  its hint ellipsizes, 150px floor keeps the label and `+ Tag`) and then the
+  tag ribbon, whose chips wrap onto a second line — the designed behaviour.
+  Before this every flex item shared the squeeze evenly and each button
+  folded into a two-line pill. A pressed segment (`.vp-seg`, `.segmented`)
+  is the filled accent with `--accent-fg` text; accent text on the dim
+  accent fill measured 1.4–2.7:1 across the skins, and accent-on-panel
+  fails in Phosphor light.
+
 - The **timeframe filter** (`S.timeRange`, `static/js/timeframe.js`, `time_range` on
   `ViewSpec`, compiled in `_compile_where` via the registered SQL function
   `TS_NORMALIZE`) is deliberately a separate piece of state from every

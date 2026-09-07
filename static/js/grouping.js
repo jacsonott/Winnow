@@ -607,6 +607,7 @@ export function groupByTagButton() {
 export function renderGroupStrip() {
   const strip = $('groupStrip');
   strip.replaceChildren();
+  strip.classList.toggle('has-groups', S.groupByCols.length > 0);
   strip.append(el('span', 'group-strip-label', 'Group by'));
   if (!S.groupByCols.length) {
     strip.append(el('span', 'group-strip-hint', 'drag a column header here'));
