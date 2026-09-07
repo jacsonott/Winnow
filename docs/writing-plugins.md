@@ -1157,7 +1157,8 @@ The entry appears under the row menu's **Plugins ▸** submenu, labelled
 with your plugin's name as its hint. An analyst can drag it (or click its
 ☆) onto the top of the menu, where it stays across sessions on that
 machine, keyed by `plugin:<fs_name>:<id>` — so keep `id` stable across
-versions, or their pin silently stops matching.
+versions, or their pin silently stops matching. `fs_name` is your plugin's
+folder name, so renaming the folder drops the pin too.
 
 ### `PluginRequest`
 

@@ -159,8 +159,9 @@ def test_a_pinned_action_runs_and_hides_while_its_plugin_is_off(page):
 
 
 def test_pinned_tag_toggles_from_the_top_level(page):
-    tag_id = page.evaluate("() => __winnow.S.tags[0].id")
-    page.evaluate("(id) => { localStorage.setItem('winnow.menupins', JSON.stringify({ row: ['tag:' + id] })); }", tag_id)
+    # Pins key on the tag's NAME: ids are per case file and get reused.
+    tag_name = page.evaluate("() => __winnow.S.tags[0].name")
+    page.evaluate("(n) => { localStorage.setItem('winnow.menupins', JSON.stringify({ row: ['tag:' + n] })); }", tag_name)
     try:
         _open(page, row=5)
         pinned = page.locator(".menu:not(.menu-sub) .menu-pinnable .menu-item").first
@@ -173,3 +174,95 @@ def test_pinned_tag_toggles_from_the_top_level(page):
         page.keyboard.press("Escape")
     finally:
         _clear_pins(page)
+
+
+def test_hover_then_click_leaves_the_flyout_open(page):
+    _open(page)
+    parent = page.locator(".menu:not(.menu-sub) .menu-item-sub", has_text="Copy")
+    parent.hover()
+    page.wait_for_selector(".menu-sub")          # hover opened it
+    parent.click()                                # the click must not toggle it shut
+    page.wait_for_timeout(250)
+    assert page.locator(".menu-sub").count() == 1
+    assert parent.get_attribute("aria-expanded") == "true"
+    page.keyboard.press("Escape")
+
+
+def test_rules_sit_before_and_after_the_filter_block_only(page):
+    _open(page)
+    kinds = page.evaluate("""() => [...document.querySelector('.menu:not(.menu-sub)').children].map(n =>
+        n.classList.contains('menu-sep') ? '-' : n.classList.contains('menu-header') ? 'H' :
+        n.classList.contains('menu-dropzone') ? '' : (n.querySelector('.menu-item-text') || n).textContent.trim().split(' ')[0])""")
+    kinds = [k for k in kinds if k]
+    seps = [i for i, k in enumerate(kinds) if k == "-"]
+    assert len(seps) == 2, kinds
+    assert kinds[seps[0] + 1] == "H"                  # the column header opens the block
+    assert kinds[seps[1] - 1].startswith("Filter")    # the last filter item closes it
+    assert kinds[seps[1] + 1] == "Add"                # then the folded entries
+    page.keyboard.press("Escape")
+
+
+def test_undo_appears_at_the_top_after_a_pinned_tag(page):
+    tag_name = page.evaluate("() => __winnow.S.tags[0].name")
+    page.evaluate("(n) => { localStorage.setItem('winnow.menupins', JSON.stringify({ row: ['tag:' + n] })); }", tag_name)
+    try:
+        _open(page, row=6)
+        page.locator(".menu:not(.menu-sub) .menu-pinnable .menu-item").first.click()
+        page.wait_for_function("() => (__winnow.rowAt(6) || { tags: [] }).tags.length === 1")
+        page.wait_for_selector(".menu:not(.menu-sub) .menu-item:has-text('Undo')")
+        page.locator(".menu:not(.menu-sub) .menu-item", has_text="Undo").click()
+        page.wait_for_function("() => (__winnow.rowAt(6) || { tags: [] }).tags.length === 0")
+    finally:
+        _clear_pins(page)
+
+
+def test_pinned_tag_and_its_flyout_twin_agree(page):
+    tag_name = page.evaluate("() => __winnow.S.tags[0].name")
+    page.evaluate("(n) => { localStorage.setItem('winnow.menupins', JSON.stringify({ row: ['tag:' + n] })); }", tag_name)
+    try:
+        _open(page, row=7)
+        sub = _sub(page, "Tag this row")
+        sub.locator(".menu-item").first.click()          # toggle inside the flyout
+        page.wait_for_function("() => (__winnow.rowAt(7) || { tags: [] }).tags.length === 1")
+        # the flyout stayed open and the pinned twin at the top caught up
+        page.wait_for_selector(".menu:not(.menu-sub) .menu-pinnable .menu-check:has-text('\u2713')")
+        assert page.locator(".menu-sub .menu-item").first.locator(".menu-check").inner_text() == "\u2713"
+        # and clicking the pinned twin now REMOVES rather than re-applying
+        page.locator(".menu:not(.menu-sub) .menu-pinnable .menu-item").first.click()
+        page.wait_for_function("() => (__winnow.rowAt(7) || { tags: [] }).tags.length === 0")
+        page.keyboard.press("Escape")
+    finally:
+        _clear_pins(page)
+
+
+def test_a_disabled_action_is_not_offered_for_dragging(page):
+    page.evaluate("() => { __winnow.S.pluginRowActions = [{ id: 'demo.vt', local_id: 'vt', plugin: 'demo', "
+                  "plugin_fs: 'demo', label: 'Look up on VT', description: 'demo', max_rows: 2 }]; }")
+    try:
+        page.locator(".row").nth(0).locator(".cell").nth(1).click()
+        page.locator(".row").nth(3).locator(".cell").nth(1).click(modifiers=["Shift"])   # 4 rows > max 2
+        _open(page, row=1)
+        sub = _sub(page, "Plugins")
+        item = sub.locator(".menu-pinnable .menu-item", has_text="Look up on VT")
+        assert item.is_disabled() and item.get_attribute("draggable") is None
+        assert sub.locator(".menu-pinnable .menu-pin-btn").count() == 1   # the star still works
+        assert sub.locator(".menu-item-note").inner_text() == "demo"       # a note, not a keycap
+        page.keyboard.press("Escape")
+        page.keyboard.press("Escape")
+    finally:
+        page.evaluate("() => { __winnow.S.pluginRowActions = []; }")
+
+
+def test_arrow_keys_walk_into_and_out_of_a_flyout(page):
+    _open(page)
+    page.locator(".menu:not(.menu-sub) .menu-item").first.focus()
+    page.keyboard.press("ArrowRight")                 # the first item is Tag this row ▸
+    page.wait_for_selector(".menu-sub")
+    assert page.evaluate("() => document.activeElement.closest('.menu-sub') !== null")
+    page.keyboard.press("ArrowDown")
+    assert page.evaluate("() => document.activeElement.closest('.menu-sub') !== null")
+    page.keyboard.press("ArrowLeft")
+    page.wait_for_selector(".menu-sub", state="detached")
+    assert page.evaluate("() => document.activeElement.classList.contains('menu-item-sub')")
+    assert page.evaluate("() => document.activeElement.getAttribute('aria-expanded')") == "false"
+    page.keyboard.press("Escape")

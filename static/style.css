@@ -1125,6 +1125,8 @@ textarea:focus { border-color: var(--accent); outline: none; }
 /* Submenus: a flyout beside its item; the caret says there is one. */
 .menu-sub { z-index: 57; }
 .menu-caret { flex: 0 0 auto; color: var(--dim); font-size: 10px; margin-left: 4px; }
+/* A note is dim text that is not a key: a plugin's name beside its action. */
+.menu-item-note { flex: 0 0 auto; color: var(--text-faint); font-size: 10px; }
 .menu-item-sub[aria-haspopup] { padding-right: 8px; }
 /* Pinning: a ☆ on hover in a submenu, ✕ on a pinned row at the top, and a
    drop zone the root shows only while a pin is being dragged. */

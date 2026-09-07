@@ -87,7 +87,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   has never seen a single one of the rows. Untagging is a mode flip on the
   same menu rather than a ✓ toggle: a group is a set of rows with mixed
   tags, so there's no single row to read a checkmark off the way
-  `rowMenuTagItems` does. The throwaway view is safe to drop immediately
+  `rowMenuTagList` does. The throwaway view is safe to drop immediately
   because undo records the *rows* (invariant #7's `v.undo_<n>` delta table),
   not the view they were found through. Tagging while grouped *by tag* —
   and undoing — calls `regroupIfGroupedByTag()`: the tag just changed which
@@ -311,14 +311,20 @@ see [docs/notes/README.md](README.md) for the whole set.
   may carry `submenu` (an array, or a function for one that repaints —
   the tag list's ✓) and opens a `.menu-sub` flyout beside itself on
   hover or click; one per level, closed with the root or when a plain
-  sibling is hovered. A menu opened with `{ pins: '<key>' }` lets
-  submenu items that declare a stable `pinId` be dragged or ☆-starred
-  onto a **Pinned** section at its top (`menuPins`, localStorage
-  `winnow.menupins`); pins are resolved against the live item tree on
-  every paint, so a pinned tag's ✓ is current and a pinned plugin
-  action simply isn't shown while the plugin is off. The row menu is
-  the one using it: filters for the clicked column stay broken out,
-  Tag / Add to dashboard / Copy / Plugins fold into submenus. The
+  sibling is hovered; a click on the parent opens (never toggles shut)
+  and the arrow keys walk it (Right opens, Left closes and refocuses the
+  parent). Flyout identity is `level:index`, not the label. A menu
+  opened with `{ pins: '<key>' }` lets submenu items that declare a
+  stable `pinId` be dragged or ☆-starred onto a **Pinned** section at
+  its top (`menuPins`, localStorage `winnow.menupins`); the root menu
+  element owns the store and the repaint (`_pins`, `_repaint`), and one
+  `repaintAll` refills the root and every open flyout after any state
+  change, so a pinned tag's ✓ and its twin inside the flyout always
+  agree, and a pinned plugin action simply isn't shown while the plugin
+  is off. Tag pins key on the tag's *name* (ids are per case file). The
+  row menu is the one using it: filters for the clicked column stay
+  broken out, Tag / Add to dashboard / Copy / Plugins fold into
+  submenus, and Undo sits at the top level beside Tag. The
   column-header menu is the one that *replaced* a visible control rather
   than adding a surface: its `▾` (`.hcell-fmt`) cost a slot of every
   header's width, on every table, forever, to be opened rarely — the same
@@ -337,7 +343,9 @@ see [docs/notes/README.md](README.md) for the whole set.
   now the place per-row features are expected to land — a new action
   should be an entry, never surgery on a growing if-chain. Sections get
   `{pos, colName, colIndex, value}` and return items; an empty return is
-  skipped, separator and all. The row is re-resolved (`rowAt(ctx.pos)`) on
+  skipped. Sections are not separator-delimited any more: the only rules
+  are before and after the broken-out filter block (`cell`), and every
+  other section contributes one folded `{label, submenu}` entry. The row is re-resolved (`rowAt(ctx.pos)`) on
   every repaint rather than captured, because a keepOpen tag item
   re-renders after tagging and the bulk tag path clears the page cache
   underneath it. Scope follows the selection: right-clicking *inside* one

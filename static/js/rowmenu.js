@@ -55,14 +55,13 @@ export const ROW_MENU_PINS = 'row';
 export function rowMenuPluginItems(ctx) {
   const actions = S.pluginRowActions || [];
   if (!actions.length) return [];
-  const { count, positions } = rowMenuTargets(ctx);
-  const scope = count > 1 ? `${count.toLocaleString()} selected rows` : 'this row';
+  const { count, positions, scope } = rowMenuTargets(ctx);
   const items = [];
   for (const a of actions) {
     const tooMany = count > a.max_rows;
     items.push({
       label: a.label,
-      hint: a.plugin,
+      note: a.plugin,
       pinId: `plugin:${a.plugin_fs}:${a.local_id}`,
       disabled: tooMany,
       title: tooMany
@@ -108,14 +107,21 @@ export async function runPluginRowAction(action, positions, ctx) {
    has already moved the cursor there). */
 export function rowMenuTargets(ctx) {
   const n = selCount();
-  return n ? { count: n, positions: () => selPositions() } : { count: 1, positions: () => [ctx.pos] };
+  const count = n || 1;
+  return {
+    count,
+    positions: n ? () => selPositions() : () => [ctx.pos],
+    // The wording that tells the analyst how many rows an action hits —
+    // every section reads it from here, and the UI tests assert on it.
+    scope: count > 1 ? `${count.toLocaleString()} selected rows` : 'this row',
+    rows: count > 1 ? `${count.toLocaleString()} rows` : 'row',
+  };
 }
 
 /* The tag list is a function, not an array: a keepOpen tag item repaints
    the flyout after tagging, and the ✓ has to read the row as it is now. */
 export function rowMenuTagList(ctx) {
-  const { count } = rowMenuTargets(ctx);
-  const scope = count > 1 ? `${count.toLocaleString()} selected rows` : 'this row';
+  const { scope } = rowMenuTargets(ctx);
   const items = [];
   const row = rowAt(ctx.pos);
   for (const t of S.tags) {
@@ -129,14 +135,29 @@ export function rowMenuTagList(ctx) {
       swatch: t.color,
       checked: on,
       hint: t.hotkey || '',
-      pinId: `tag:${t.id}`,
+      // By name, not id: tag ids are per case file and reused, pins are
+      // per machine — "the tag called Malicious" is what was pinned.
+      pinId: `tag:${t.name}`,
       keepOpen: true, // tagging three tags in a row shouldn't need three right-clicks
       title: `${on ? 'Remove' : 'Apply'} "${t.name}" — ${scope}`,
       onclick: () => applyTag(t, !on),
     });
   }
   if (!S.tags.length) items.push({ label: 'No tags in this case yet', disabled: true });
-  items.push('-');
+  items.push('-', { label: 'Edit tags…', onclick: openTagEditor });
+  return items;
+}
+
+export function rowMenuTagItems(ctx) {
+  const { scope } = rowMenuTargets(ctx);
+  const items = [{
+    label: `Tag ${scope}`,
+    hint: S.tags.length ? '1–9' : '',
+    title: 'The tags, with their hotkeys — pin the ones you use to the top of this menu',
+    submenu: () => rowMenuTagList(ctx),
+  }];
+  // Undo sits at the top level, beside whatever just tagged — a pinned
+  // tag included — rather than inside a flyout the tagging closed.
   if (UNDO_NEXT.available) {
     items.push({
       label: `Undo: ${UNDO_NEXT.label}`,
@@ -144,19 +165,7 @@ export function rowMenuTagList(ctx) {
       onclick: () => undoLastTagChange(),
     });
   }
-  items.push({ label: 'Edit tags…', onclick: openTagEditor });
   return items;
-}
-
-export function rowMenuTagItems(ctx) {
-  const { count } = rowMenuTargets(ctx);
-  const scope = count > 1 ? `${count.toLocaleString()} selected rows` : 'this row';
-  return [{
-    label: `Tag ${scope}`,
-    hint: S.tags.length ? '1–9' : '',
-    title: 'The tags, with their hotkeys — pin the ones you use to the top of this menu',
-    submenu: () => rowMenuTagList(ctx),
-  }];
 }
 
 export function rowMenuCellItems(ctx) {
@@ -200,8 +209,7 @@ export function rowMenuDashboardItems(ctx) {
 }
 
 export function rowMenuClipboardItems(ctx) {
-  const { count, positions } = rowMenuTargets(ctx);
-  const rows = count > 1 ? `${count.toLocaleString()} rows` : 'row';
+  const { positions, rows } = rowMenuTargets(ctx);
   return [{
     label: 'Copy',
     submenu: [
@@ -219,13 +227,15 @@ export function rowMenuClipboardItems(ctx) {
 
 export function rowMenuItems(ctx) {
   const out = [];
+  let prev = null;
   for (const section of ROW_MENU_SECTIONS) {
     const items = section.build(ctx);
     if (!items.length) continue;
-    // Separators only around the broken-out filter block; the folded
-    // entries read as one short list.
-    if (out.length && (section.id === 'cell' || out[out.length - 1].header !== undefined || items[0].header)) out.push('-');
+    // A rule before and after the broken-out filter block, and nowhere
+    // else: the folded entries read as one short list.
+    if (out.length && (section.id === 'cell' || prev === 'cell')) out.push('-');
     out.push(...items);
+    prev = section.id;
   }
   return out;
 }

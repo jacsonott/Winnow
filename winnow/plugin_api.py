@@ -532,7 +532,11 @@ class PluginAPI:
 
     def register_row_action(self, *, id: str, label: str, handler: Callable[[PluginRequest], Any],
                             description: str = "", max_rows: int = 1000) -> None:
-        """An entry in the row right-click menu of every table view. When
+        """An entry under the row right-click menu's "Plugins ▸" submenu in
+        every table view. Analysts can pin it to the top of that menu, and
+        the pin is keyed ``plugin:<fs_name>:<id>`` on their machine — so
+        keep ``id`` stable across versions (and the plugin folder's name,
+        which is ``fs_name``), or their pin silently stops matching. When
         chosen, the server resolves the selected rows (full cells, by
         (source_id, rid) — merges included) and calls
         `handler(PluginRequest)` with them in `req.body`:
