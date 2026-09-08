@@ -301,17 +301,30 @@ see [docs/notes/README.md](README.md) for the whole set.
     `currentIds: sameGroupFilterIds(...)` so a drag across header sets is
     a structural no-op rather than a rule someone has to remember.
 - **Session comparison** (session.js) is counts in the panel and rows in
-  the grid, never rows in the panel. `renderDiff` draws one line per
-  table with a count per kind (only-left, only-right, tagged differently,
-  notes); each count calls `pivotDiff`, which sets `S.diffMarks`
-  (`{sourceId, left, right, rows: {rid: {kind, left, right}}}`), opens the
-  table and applies a raw `rid IN (…)` filter-tree node (`rid` is in the
-  validator's word list for this). grid.js paints a `.diff-mark` pill in
-  the gutter for any row in `S.diffMarks` — A for the left session, B for
-  the right, A→B for both — with the two sides' tags in its title. The
-  `#diffBanner` track above the grid names the sides and offers "All
-  differences" and Done; it follows `winnow:viewchange`, so it hides on
-  another table and returns with the compared one.
+  the grid, never rows in the panel. The first cut listed the differing
+  rows inside the modal, three columns of tag names per row: it read as
+  cramped at twenty rows and useless at two thousand, and the rows were
+  a copy of what the grid already shows. So `renderDiff` draws one line
+  per table with a count per kind (only-left, only-right, tagged
+  differently, notes) from the server's uncapped per-table tally
+  (`sources`), and each count calls `pivotDiff`, which sets
+  `S.diffMarks` (`{sourceId, left, right, rows: {rid: {tags, note}},
+  what, n, prevTree}`), opens the table if it isn't the one on screen,
+  and lands on a `rid IN` **cond** node through `replaceFilters` — nothing
+  else ANDed under it, so the grid shows the N rows the count promised.
+  `rid` is a column to both the raw validator and the condition compiler
+  via `Store.PHYSICAL_COLUMNS`, not a keyword. grid.js paints a
+  `.diff-mark` pill in the gutter for any row in `S.diffMarks` — A for
+  the left session, B for the right, A→B for both (`diffMarkNode` is the
+  one builder the legend and banner use too) — with both sides' tags and
+  notes in its title. The `#diffBanner` track above the grid is drawn
+  from `S.diffMarks` alone (`syncDiffBanner`, called on
+  `winnow:viewchange` — which the cached re-open path also dispatches —
+  and on tab switches), and Done lands on `prevTree`. The marks are
+  cleared by Done, by `clearAllFilters`, by opening another case and by
+  removing the table; put the rows back in the panel, or leave any of
+  those paths out, and the grid wears comparison chrome over a view that
+  isn't the comparison.
 - **The right-click surfaces** (row menu, column-header menu, table menu,
   header value picker) all hang off one floating-menu implementation in `static/js/ui.js` —
   `showFloating`/`placeFloating` plus the single `openMenuEl`/`openMenuAnchor`

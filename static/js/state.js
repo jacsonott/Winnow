@@ -79,7 +79,9 @@ export const S = {
   pluginTabs: [],        // plugin-registered pinned tabs [{id, plugin, plugin_fs, label, entry, gen}] — see showPluginTab
   // A session comparison pivoted into the grid: which rows differ and how,
   // so each carries a mark saying which session its tag came from.
-  // {sourceId, left, right, rows: {rid: {kind, left: [tags], right: [tags]}}}
+  // {sourceId, left, right, rows: {rid: {tags: {left, right} | null, note: {left, right} | null}},
+  //  what, n, prevTree}  — what/n caption the banner, prevTree is what Done lands on.
+  // Cleared by Done, Clear filters, opening another case, removing the table.
   diffMarks: null,
   pluginRowActions: [],  // plugin-registered row-menu entries [{id, local_id, plugin, plugin_fs, label, description, max_rows}]
   pluginPanels: [],      // plugin-registered toolbar panels [{id, plugin, plugin_fs, label, entry, description, gen}] — see plugins.js

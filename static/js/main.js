@@ -97,6 +97,7 @@ window.addEventListener('mouseup', tabhistory.onMouseNav);
 
 core.$('btnAcrossCases').onclick = () => multicase.openMultiCase();
 notes.wireNotes();
+session.wireSession();
 watchlist.wireWatchlist();
 dashboard.wireDashboard();
 wireSources();

@@ -5497,6 +5497,8 @@ class Store:
         Shared by the flat quick-filter list and the guided filter-tree's
         'cond' leaves. Returns ("", []) for an unknown column/op or an empty
         value on ops that require one."""
+        if col in Store.PHYSICAL_COLUMNS:
+            colnames = {**colnames, col: Store.PHYSICAL_COLUMNS[col]}
         if col not in colnames:
             return "", []
         c = q(col)
@@ -5538,6 +5540,10 @@ class Store:
             items = [s for s in (val if isinstance(val, list) else str(val).split("\n")) if s != ""]
             if not items:
                 return "", []
+            if col in Store.PHYSICAL_COLUMNS:
+                # Row ids arrive as strings (the tree is JSON from a picker);
+                # bind them as the integers the column holds.
+                items = [int(s) if str(s).strip().lstrip("-").isdigit() else s for s in items]
             return f"{c} IN ({','.join('?' * len(items))})", items
         return "", []
 
@@ -5609,11 +5615,13 @@ class Store:
         "AND", "OR", "NOT", "IS", "NULL", "IN", "BETWEEN", "LIKE", "GLOB", "REGEXP", "ESCAPE",
         "CAST", "REAL", "TEXT", "INTEGER", "COALESCE", "LENGTH", "LOWER", "UPPER", "SUBSTR",
         "TRIM", "TRUE", "FALSE",
-        # Every source table's own row id — not in its column list, but a
-        # legitimate filter target: the session diff opens "these rows" as
-        # `rid IN (…)`.
-        "RID",
     }
+
+    # Columns every source table has beyond its own column list — the row
+    # id. One definition, read by the raw-fragment validator and the
+    # guided condition compiler alike, so `rid` is a column everywhere or
+    # nowhere (the session diff opens "these rows" as a rid IN condition).
+    PHYSICAL_COLUMNS = {"rid": "number"}
 
     def validate_where_fragment(self, source_id: int, fragment: str) -> None:
         """Raise ValueError with a human-readable reason for anything that is
@@ -5652,7 +5660,7 @@ class Store:
             raise ValueError("Only a boolean filter expression is allowed — no SELECT/PRAGMA/ATTACH/etc.")
 
         src = self.get_source(source_id)
-        colnames = {c["name"] for c in src["columns"]}
+        colnames = {c["name"] for c in src["columns"]} | set(self.PHYSICAL_COLUMNS)
         for ident in re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\b", structural):
             if ident.upper() in self.ALLOWED_SQL_WORDS or ident in colnames or NUM_RE.match(ident):
                 continue
@@ -7655,7 +7663,7 @@ class Store:
         tags_applied = 0
         sources_restored = 0
         sources_reimported = 0
-        by_hash = {s["file_hash"]: s["id"] for s in self.list_sources() if s.get("file_hash")}
+        by_hash = self._live_sources_by_hash()
 
         for src_session in session.get("sources", []):
             s_meta = src_session.get("source", {})
@@ -7998,19 +8006,24 @@ class Store:
                 notes[(key, rn["rid"])] = rn.get("note") or ""
         return tags, notes, labels
 
-    def _attach_diff_sources(self, groups: list[list[dict]]) -> None:
-        """Give each diff row its live source id, so the panel can pivot to
-        the table. Sessions key sources by file hash (or name); a source this
-        case does not have stays a row number with `source_id: None`."""
-        by_hash = {s["file_hash"]: s["id"] for s in self.list_sources() if s.get("file_hash")}
-        by_name = {s["name"]: s["id"] for s in self.list_sources()}
-        for rows in groups:
-            for r in rows:
-                key = r.pop("key", None)
-                sid = by_hash.get(key)
-                if sid is None:
-                    sid = by_name.get(key, by_name.get(r["source"]))
-                r["source_id"] = sid
+    def _live_sources_by_hash(self, sources: list[dict] | None = None) -> dict:
+        """{file_hash: source_id} for the open case — the one way a session
+        source is matched to a live table (import_case_session and the diff
+        both read it). Evidence is identified by its own fingerprint, never
+        by a filename two different exports can share."""
+        return {s["file_hash"]: s["id"] for s in (sources or self.list_sources()) if s.get("file_hash")}
+
+    def _session_source_resolver(self):
+        """key -> live source id | None, for the keys _session_tag_map
+        builds (a file hash, or the name of a source that has none). A hash
+        matches by hash only; a hashless source matches a hashless live
+        source of the same name, since nothing better identifies it. A
+        same-named table with a different hash is a different file and
+        stays unresolved — a diff must never pivot into the wrong evidence."""
+        sources = self.list_sources()
+        by_hash = self._live_sources_by_hash(sources)
+        by_name_hashless = {s["name"]: s["id"] for s in sources if not s.get("file_hash")}
+        return lambda key: by_hash.get(key, by_name_hashless.get(key))
 
     def diff_sessions(self, left: str, right: str, limit: int = 2000) -> dict:
         """What changed between two sessions — the QC question: "what did
@@ -8051,25 +8064,34 @@ class Store:
                 note_changes.append({"source": labels.get(key[0], key[0]), "key": key[0], "rid": key[1],
                                      "left": a, "right": b})
 
-        def _cap(rows):
-            return rows[:limit]
-
-        counts = [len(added), len(removed), len(changed), len(note_changes)]
-        capped = [_cap(added), _cap(removed), _cap(changed), _cap(note_changes)]
+        groups = {"added": added, "removed": removed, "changed": changed, "note_changes": note_changes}
+        counts = {k: len(v) for k, v in groups.items()}
+        # Per table, uncapped: what the panel shows as its counts. The row
+        # lists below are capped, so a table past the cap still reports
+        # how many rows differ even when not all of them can be opened.
+        resolve = self._session_source_resolver()
+        per_source: dict = {}
+        for kind, rows in groups.items():
+            for r in rows:
+                ps = per_source.setdefault(r["key"], {
+                    "source": r["source"], "source_id": resolve(r["key"]),
+                    "counts": {k: 0 for k in groups}})
+                ps["counts"][kind] += 1
         # Each listed row names its live source, so the panel's counts can
         # pivot to the table showing exactly those rows.
-        self._attach_diff_sources(capped)
-        added, removed, changed, note_changes = capped
+        capped = {k: v[:limit] for k, v in groups.items()}
+        for rows in capped.values():
+            for r in rows:
+                r["source_id"] = resolve(r.pop("key"))
 
         return {
             "left": left, "right": right,
             # "only in right" reads as added when right is the later pass,
             # which is how a review is run: left = what was handed over.
-            "added": added, "removed": removed, "changed": changed,
-            "note_changes": note_changes,
-            "counts": {"added": counts[0], "removed": counts[1],
-                       "changed": counts[2], "note_changes": counts[3]},
-            "truncated": max(counts) > limit,
+            **capped,
+            "counts": counts,
+            "sources": [per_source[k] for k in sorted(per_source, key=str)],
+            "truncated": max(counts.values(), default=0) > limit,
             # A shared source is one both sides have evidence for; anything
             # else means the two sessions are describing different cases and
             # the numbers above are not a like-for-like comparison.

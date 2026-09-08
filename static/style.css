@@ -1516,7 +1516,7 @@ textarea:focus { border-color: var(--accent); outline: none; }
    temporary case until the analyst decides otherwise, and that fact should
    be impossible to miss without shouting. Accent-tinted, not danger —
    nothing is wrong, something is just undecided. */
-.temp-banner {
+.temp-banner, .diff-banner {
   /* No grid-column here: the placement rule up top spans it across BOTH
      columns with the bar. A column-2 pin left over from the old
      full-height sidebar made the banner jump every time the sidebar
@@ -1526,31 +1526,15 @@ textarea:focus { border-color: var(--accent); outline: none; }
   background: var(--sel); border-bottom: 1px solid var(--accent-dim);
   color: var(--text);
 }
-.temp-banner-actions { margin-left: auto; display: flex; gap: 6px; }
+.temp-banner-actions, .diff-banner-actions { margin-left: auto; display: flex; gap: 6px; }
 
-/* Sessions panel: the "received from another analyst" marker, and the
-   diff table. Three columns of tag names with an arrow between them —
-   deliberately a table, not a list, because a reviewer reads DOWN the
-   before and after columns comparing them. */
+/* Sessions panel: the "received from another analyst" marker. */
 .session-badge {
   font-size: 10px; text-transform: uppercase; letter-spacing: .04em;
   padding: 1px 5px; border-radius: var(--radius-sm);
   background: var(--panel-3); color: var(--dim);
 }
 .session-diff { margin-top: 6px; max-height: 340px; overflow: auto; }
-.diff-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-.diff-table td {
-  padding: 2px 6px; border-bottom: 1px solid var(--border-hairline);
-  vertical-align: top;
-}
-.diff-rid { color: var(--dim); font-family: var(--mono); white-space: nowrap; }
-.diff-arrow { color: var(--dim); text-align: center; width: 1.5em; }
-/* The accent carries "what the reviewer added"; danger carries "what they
-   dropped" — the two a QC pass acts on first. */
-.diff-added td:last-child { color: var(--accent); }
-.diff-removed td:nth-child(3) { color: var(--danger); }
-.diff-changed td:last-child { color: var(--accent); }
-.diff-note td { color: var(--text); }
 /* The comparison, as counts: one line per table, each count a way into
    the grid. The rows themselves are never listed here — the grid shows
    them, marked. */
@@ -1571,12 +1555,10 @@ textarea:focus { border-color: var(--accent); outline: none; }
 }
 .diff-mark-removed { color: var(--danger); border-color: var(--danger-border); }
 .diff-mark-added { color: var(--accent); border-color: var(--accent-dim); }
-.diff-banner {
-  display: flex; align-items: center; gap: 12px; padding: 5px 12px; font-size: 12px;
-  background: var(--sel); border-bottom: 1px solid var(--accent-dim); color: var(--text);
-}
+/* The session-comparison banner wears the quick-look banner's look (the
+   shared rule above): another accent-tinted "something is in progress"
+   strip, in its own grid track. */
 .diff-banner .diff-mark { line-height: 14px; }
-.diff-banner-actions { margin-left: auto; display: flex; gap: 6px; }
 
 /* Settings → Updates: the release notes blob. Monospace and scrollable
    because it's markdown straight from the GitHub release, not something

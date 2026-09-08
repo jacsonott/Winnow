@@ -365,7 +365,36 @@ export function rowPaintContext() {
     // per painted row.
     pins: pinnedOffsets(),
     needle: S.search.trim().toLowerCase(),
+    // A pivoted session comparison's rows, when they are this table's.
+    diffRows: S.diffMarks && S.diffMarks.sourceId === S.sourceId ? S.diffMarks.rows : null,
   };
+}
+
+/* A session comparison's mark on a row: A, the left session only; B, the
+   right only; A→B, both with different tags (or a note that differs).
+   Shared with the panel's legend and the banner, so the pill in the
+   gutter and the key explaining it can't drift apart. */
+const DIFF_GLYPH = { removed: 'A', added: 'B', changed: 'A→B' };
+export function diffMarkNode(kind, title) {
+  const m = el('span', 'diff-mark diff-mark-' + kind, DIFF_GLYPH[kind]);
+  if (title) m.title = title;
+  return m;
+}
+/* One row can differ in its tags AND its note; the tags decide the glyph
+   (they are what a review is about), and the title says both. */
+export function diffKind(dm) {
+  if (!dm.tags) return 'changed';
+  if (!dm.tags.left.length) return 'added';
+  if (!dm.tags.right.length) return 'removed';
+  return 'changed';
+}
+const tagsText = (v) => (v.length ? v.join(', ') : 'no tags');
+function diffMarkTitle(dm) {
+  const { left, right } = S.diffMarks;
+  const lines = [];
+  if (dm.tags) lines.push(`A · ${left}: ${tagsText(dm.tags.left)}`, `B · ${right}: ${tagsText(dm.tags.right)}`);
+  if (dm.note) lines.push(`note A · ${left}: ${dm.note.left || 'no note'}`, `note B · ${right}: ${dm.note.right || 'no note'}`);
+  return lines.join('\n');
 }
 
 /* One data row's DOM. `pos` addresses the row the way the current mode
@@ -375,7 +404,8 @@ export function rowPaintContext() {
    reduced copy of it precisely so that selection, tag stripes, the note
    mark and the cell-range highlight can't be present in one mode and
    quietly missing in the other. */
-export function buildDataRow(pos, r, { cols, colMeta, idx, tagColor, widths, pins, needle }) {
+export function buildDataRow(pos, r, ctx) {
+  const { cols, colMeta, idx, tagColor, widths, pins, needle } = ctx;
   const row = el('div', 'row' + (r ? '' : ' pending'));
   row.dataset.pos = pos;
   if (pos === S.cursor) row.classList.add('cursor');
@@ -401,16 +431,9 @@ export function buildDataRow(pos, r, { cols, colMeta, idx, tagColor, widths, pin
     }
     if (r.note) mid.append(el('span', 'has-note', '✎'));
     // A session comparison's mark: which side tagged this row (see
-    // session.js pivotDiff). A: the left session, B: the right; A→B: both,
-    // differently; ✎: the note changed.
-    const dm = S.diffMarks && S.diffMarks.sourceId === S.sourceId ? S.diffMarks.rows[r.rid] : null;
-    if (dm) {
-      const glyph = { removed: 'A', added: 'B', changed: 'A→B', note: 'A→B' }[dm.kind] || '?';
-      const mark = el('span', 'diff-mark diff-mark-' + dm.kind, glyph);
-      const tags = (v) => (Array.isArray(v) ? (v.length ? v.join(', ') : 'no tags') : (v || 'no note'));
-      mark.title = `A · ${S.diffMarks.left}: ${tags(dm.left)}\nB · ${S.diffMarks.right}: ${tags(dm.right)}`;
-      mid.append(mark);
-    }
+    // session.js pivotDiff).
+    const dm = ctx.diffRows && ctx.diffRows[r.rid];
+    if (dm) mid.append(diffMarkNode(diffKind(dm), diffMarkTitle(dm)));
   }
   g.append(cb, mid, el('span', 'rid', r ? String(r.rid) : '·'));
   row.append(g);
