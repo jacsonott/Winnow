@@ -7459,6 +7459,22 @@ class Store:
 
         return re.sub(r"\{\{([^}]+)\}\}", repl, sql)
 
+    def resolve_table_sources(self, table: str) -> list[int]:
+        """Every source a widget's table names in this case: one for src_N or
+        a plain placeholder, all of them for {{all:…}} — whose SQL unions
+        every match, so a drill has to say which one it is opening."""
+        key = (table or "").strip()
+        m = re.fullmatch(r"\{\{\s*all:([^}]+)\}\}", key)
+        if not m:
+            return [self.resolve_table_source(key)]
+        inner = m.group(1).strip()
+        hs = inner[len("header_set:"):].strip() if inner.lower().startswith("header_set:") \
+            else self._TABLE_SHORTHANDS.get(inner.lower(), inner)
+        srcs = self._sources_for_header_set(hs)
+        if not srcs:
+            raise ValueError(f"No \u201c{hs}\u201d table in this case yet")
+        return [int(s["id"]) for s in srcs]
+
     def resolve_table_source(self, table: str) -> int:
         """The source id a widget's table names in this case — `src_N`
         as-is (if it exists), a `{{evtx}}` / `{{header_set:…}}` placeholder

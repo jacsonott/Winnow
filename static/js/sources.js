@@ -625,7 +625,7 @@ function stashViewState() {
   });
 }
 
-export async function openSource(id) {
+export async function openSource(id, { skipBuild = false } = {}) {
   const src = S.sources.find((s) => s.id === id);
   if (!src) return;
   recordTabVisit({ kind: 'source', id });
@@ -718,6 +718,9 @@ export async function openSource(id) {
   if (S.columns.some((c) => c.derived)) await derivedOps().catch(() => {});
   await loadTags();
   renderHead();
+  // A caller about to replace the filters (a dashboard drill) builds the
+  // view itself, once, rather than paying for the stashed one first.
+  if (skipBuild) { syncTabSelection(); return; }
 
   const spec = currentSpec();
   const cached = S.viewCache.get(id);

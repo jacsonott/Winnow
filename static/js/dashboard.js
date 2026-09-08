@@ -223,10 +223,13 @@ export async function createDashboard() {
     create.onclick = async () => {
       if (!name.value.trim()) { toast('Give the dashboard a name'); return; }
       create.disabled = true;
+      // The starting widgets first, then ONE create carrying them: a board
+      // that exists before its widgets can't be re-created by a retry.
+      let start;
+      try { start = await startingWidgets(from.value, bundles); }
+      catch (e) { toast('Could not build the starting widgets: ' + e.message, 6000); create.disabled = false; return; }
       try {
-        const d = await post('/api/dashboards', { name: name.value.trim() });
-        const start = await startingWidgets(from.value, bundles);
-        if (start.length) await post(`/api/dashboards/${d.id}`, { widgets: start });
+        const d = await post('/api/dashboards', { name: name.value.trim(), widgets: start });
         $('modal').hidden = true;
         await loadDashboards();
         renderSidebar();
@@ -387,10 +390,59 @@ export async function addViewCountWidget() {
 
 /* ------------------------------------------------------- drilldown */
 
+/* The grid state a drill starts from: nothing left over from the last
+   visit to this table — openSource restores per-table header filters,
+   search and tag filter from its stash, and never touches the timeframe,
+   and any of those ANDed onto the widget's condition would show fewer
+   rows than the widget counted. */
+function resetGridState() {
+  S.filters = {};
+  S.filterTree = { type: 'group', op: 'AND', children: [] };
+  S.search = '';
+  S.searchMode = 'contains';
+  S.searchTerms = [];
+  S.tagFilter = [];
+  S.timeRange = { enabled: false, column: null, start: '', end: '' };
+  $('search').value = '';
+  document.querySelectorAll('#searchModeToggle button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.mode === 'contains')));
+  syncSearchExpansion(false);
+  updateSearchHint();
+}
+
+/* Which of several tables a {{all:…}} widget should open: its SQL counted
+   across all of them, so the analyst picks. */
+function pickTable(ids) {
+  return new Promise((resolve) => {
+    let done = false;
+    let watch = null;
+    const finish = (v) => { if (!done) { done = true; clearInterval(watch); resolve(v); } };
+    modal('This widget counts across several tables — open which?', (b) => {
+      const sel = el('select'); sel.className = 'dash-pick-table';
+      for (const id of ids) {
+        const s = (S.sources || []).find((x) => x.id === id);
+        sel.append(new Option(s ? sourceLabel(s) : `table ${id}`, String(id)));
+      }
+      b.append(sel);
+      const acts = el('div', 'row-actions');
+      const ok = el('button', 'btn', 'Open');
+      ok.onclick = () => { $('modal').hidden = true; finish(Number(sel.value)); };
+      const cancel = el('button', 'btn ghost', 'Cancel');
+      cancel.onclick = () => { $('modal').hidden = true; finish(null); };
+      acts.append(ok, cancel);
+      b.append(acts);
+    }, { focus: 'select' });
+    watch = setInterval(() => { if ($('modal').hidden) finish(null); }, 150);
+  });
+}
+
+const deepCopy = (x) => JSON.parse(JSON.stringify(x));
+
 /* From a widget to its rows. `extra.value` is a clicked bar or list row
    (a value of the widget's pivot column); `extra.bucket` a clicked
    histogram bucket. A widget with no drill but its own SQL opens as a
-   query in the SQL pane instead — never a dead click. */
+   query in the SQL pane instead — never a dead click. A drill carries
+   either `where` (conditions ANDed) or `tree` (a whole filter-tree node,
+   for the OR-shaped ones); `column` is what a clicked value filters on. */
 export async function drillInto(w, extra = {}) {
   const drill = w.drill;
   if (!drill) {
@@ -398,24 +450,34 @@ export async function drillInto(w, extra = {}) {
     toast('This widget has no rows to open');
     return;
   }
+  // A bucket the timeframe can't express is refused up front, not opened
+  // as the whole table under a toast naming the bucket.
+  const range = extra.bucket != null ? bucketRange(extra.bucket) : null;
+  if (extra.bucket != null && !range) { toast(`Can't open the "${extra.bucket}" bucket as a time range`, 5000); return; }
   let sourceId;
   const m = /^src_(\d+)$/.exec(drill.table || '');
   if (m) sourceId = Number(m[1]);
   else {
-    try { sourceId = (await post('/api/dashboard/resolve', { table: drill.table })).source_id; }
+    let r;
+    try { r = await post('/api/dashboard/resolve', { table: drill.table }); }
     catch (e) { toast(e.message, 5000); return; }
+    const ids = (r.source_ids || [r.source_id]).filter((id) => (S.sources || []).some((s) => s.id === id));
+    if (!ids.length) { toast('That table is no longer in this case'); return; }
+    sourceId = ids.length === 1 ? ids[0] : await pickTable(ids);
+    if (sourceId == null) return;
   }
   if (!(S.sources || []).some((s) => s.id === sourceId)) { toast('That table is no longer in this case'); return; }
-  await openSource(sourceId);
+  await openSource(sourceId, { skipBuild: true });
+  resetGridState();
   if (drill.spec) {
     const sp = drill.spec;
     S.filters = { ...(sp.filters || {}) };
-    S.filterTree = sp.filter_tree ? JSON.parse(JSON.stringify(sp.filter_tree)) : { type: 'group', op: 'AND', children: [] };
+    S.filterTree = sp.filter_tree ? deepCopy(sp.filter_tree) : { type: 'group', op: 'AND', children: [] };
     S.search = sp.search || '';
     S.searchMode = sp.search_mode || 'contains';
     S.searchTerms = (sp.search_terms || []).map((x) => ({ ...x }));
     S.tagFilter = [...(sp.tags || [])];
-    S.timeRange = sp.time_range ? { ...sp.time_range } : { enabled: false, column: null, start: '', end: '' };
+    S.timeRange = sp.time_range ? { ...sp.time_range } : S.timeRange;
     $('search').value = S.searchMode === 'advanced' ? '' : S.search;
     document.querySelectorAll('#searchModeToggle button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.mode === S.searchMode)));
     if (S.searchMode === 'advanced') renderAdvancedChips();
@@ -423,17 +485,22 @@ export async function drillInto(w, extra = {}) {
     updateSearchHint();
   } else {
     const conds = (drill.where || []).map((c) => ({ type: 'cond', column: c.column, op: c.op, value: c.value }));
+    if (drill.tree) conds.push(deepCopy(drill.tree));
     if (extra.value != null && drill.column) {
       const v = String(extra.value);
       conds.push(v === '' || v === '(empty)'
         ? { type: 'cond', column: drill.column, op: 'empty', value: '' }
         : { type: 'cond', column: drill.column, op: 'equals', value: v });
     }
-    S.filterTree = { type: 'group', op: 'AND', children: conds };
-    if (extra.bucket != null && drill.column) {
-      const r = bucketRange(extra.bucket);
-      if (r) S.timeRange = { enabled: true, column: drill.column, start: r.start, end: r.end };
+    if (range && drill.column) {
+      // The timeframe needs a column the case typed as datetime; for a
+      // text column that merely holds dates, the bucket's own prefix is
+      // the filter ('2026-03-14 08' matches every row in that hour).
+      const col = (S.columns || []).find((c) => c.name === drill.column);
+      if (col && col.type === 'datetime') S.timeRange = { enabled: true, column: drill.column, start: range.start, end: range.end };
+      else conds.push({ type: 'cond', column: drill.column, op: 'starts', value: String(extra.bucket).replace('T', ' ') });
     }
+    S.filterTree = { type: 'group', op: 'AND', children: conds };
   }
   updateTimeRangeButton();
   updateFiltersButton();
@@ -795,7 +862,9 @@ function openWidgetEditor(existing, prefill = null) {
       const t = templateById(templ.value);
       if (t.id === 'blank') { advanced.open = true; return; }
       const s = recipeSql(picks());
-      if (s == null) return;
+      // A pick still missing (no column yet, header sets not loaded): no
+      // query — Save then says so — rather than the previous template's.
+      if (s == null) { sql.value = ''; return; }
       sql.value = s;
       advanced.dataset.custom = '';
       renderSel.value = t.render;
@@ -822,7 +891,7 @@ function openWidgetEditor(existing, prefill = null) {
       if (source.value === 'sql') {
         const gen = templ.value === 'blank' ? null : widgetFrom(picks());
         if (gen && gen.query.sql === sql.value.trim()) { w.build = gen.build; w.drill = gen.drill; }
-        else if (existing && existing.drill && (existing.query?.sql || '') === sql.value.trim()) {
+        else if (existing && existing.drill && (existing.query?.sql || '').trim() === sql.value.trim()) {
           w.drill = existing.drill;   // shipped widgets: a drill written by hand, SQL untouched
           if (existing.build) w.build = existing.build;
         }
@@ -866,7 +935,11 @@ function openWidgetEditor(existing, prefill = null) {
     if (!build0 && sql.value.trim()) advanced.dataset.custom = '1';
     syncFields();
     // A portable {{…}} table's columns come from the header sets, fetched once.
-    ensureHeaderSets().then(() => { if (!colSel.options.length) fillColumns(build0 ? build0.column : null); });
+    ensureHeaderSets().then(() => {
+      if (colSel.options.length) return;
+      fillColumns(build0 ? build0.column : null);
+      if (!build0) regenerate();
+    });
 
     // Live preview — see the widget's output before committing it.
     const previewWrap = el('div', 'dash-preview-wrap');
