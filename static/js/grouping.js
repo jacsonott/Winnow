@@ -706,7 +706,7 @@ export async function tagWholeGroup(g, tag, on) {
   render();
   drawRail();
   regroupIfGroupedByTag();
-  refreshUndoState();
+  await refreshUndoState();
   const affected = res.affected != null ? res.affected : n;
   toast(`${on ? 'Tagged' : 'Untagged'} ${affected.toLocaleString()} row${affected === 1 ? '' : 's'} · ${tag.name}`);
 }
@@ -722,7 +722,7 @@ export function groupRowSpan(gi) {
 }
 
 /* Flipped by the menu's own "Remove a tag instead" item, which repaints
-   through fillMenuNode's rerender rather than opening a second surface. A
+   through the menu's own repaint rather than opening a second surface. A
    group is a set of rows with mixed tags, so there's no single row to read
    a ✓ off the way rowMenuTagList does — apply and remove have to be two
    explicit choices rather than one toggle. Module-level (not per-menu)

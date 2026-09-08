@@ -168,6 +168,12 @@ export function toastAction(msg, label, onclick, ms = 12000) {
   toast._t = setTimeout(() => (t.hidden = true), ms);
 }
 
+/* Whether a drag carries a given type. `types` is a frozen array in
+   current browsers and a DOMStringList in older WebKit — includes.call
+   handles both without copying it on every dragover. */
+export const dragHas = (e, type) =>
+  !!(e.dataTransfer && e.dataTransfer.types && Array.prototype.includes.call(e.dataTransfer.types, type));
+
 export const debounce = (fn, ms) => {
   let t;
   return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };

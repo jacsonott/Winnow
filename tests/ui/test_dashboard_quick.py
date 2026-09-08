@@ -113,16 +113,14 @@ def test_column_menu_offers_over_time_only_for_datetime_columns(page):
         _delete_board(page, did)
 
 
-def test_row_menu_adds_a_count_of_the_cell_value(page):
+def test_row_menu_adds_a_count_of_the_cell_value(page, flyout):
     did = _new_board(page, "Quick C")
     try:
         cell = _cell(page, 2, "Host")
         value = cell.inner_text().strip()
         cell.click(button="right")
         page.wait_for_selector(".menu")
-        page.locator(".menu .menu-item-sub", has_text="Add to dashboard").click()
-        page.wait_for_selector(".menu-sub")
-        page.locator(".menu-sub .menu-item", has_text=f"Count of Host = {value}").click()
+        flyout("Add to dashboard").locator(".menu-item", has_text=f"Count of Host = {value}").click()
         (w,) = _wait_widgets(page, did, 1)
         assert w["render"] == "stat" and w["title"] == f"Host = {value}"
         assert w["drill"] == {"table": f"src_{_src(page)}", "where": [{"column": "Host", "op": "equals", "value": value}]}

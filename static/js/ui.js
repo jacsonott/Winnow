@@ -2,7 +2,7 @@
 the one floating-menu implementation behind every dropdown and right-click.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { $, el } from './core.js';
+import { $, dragHas, el } from './core.js';
 import { setSearchAllRepaint } from './search.js';
 
 /* ---------------------------------------------------------------- modal */
@@ -264,20 +264,27 @@ export let openMenuEl = null;
 export let openMenuAnchor = null;
 
 /* Submenus open beside their item, root-first in this list — each entry
-   {el, key, level, parent, refill}. Closing the root closes them all, an
-   outside click is one that lands in none of them, and only one flyout
-   per level is ever open. Identity is the item's position in its parent
-   (`level:index`), not its label, so two sibling submenus with the same
-   caption stay distinct. */
+   {el, key, parent, refill}, indexed by depth. Closing the root closes
+   them all, an outside click is one that lands in none of them, and only
+   one flyout per depth is ever open. A flyout's identity is its parent
+   item's key (`item.key`, else its label) at that depth — not its
+   position, which a repaint shifts whenever a row (Undo) appears above. */
 let openSubs = [];
 let subTimer = null;
+
+/* Bookkeeping the DOM doesn't carry, kept off the nodes rather than as
+   expandos: for a submenu button, the item it was built from, its key,
+   the menu context and how to open it; for a root menu, its context (pin
+   store + repaint). WeakMaps, so nothing outlives its node. */
+const BTN = new WeakMap();
+const MENU = new WeakMap();
 
 function armSubTimer(fn, ms) { clearTimeout(subTimer); subTimer = setTimeout(fn, ms); }
 function disarmSubTimer() { clearTimeout(subTimer); subTimer = null; }
 
-function closeSubmenusFrom(level) {
+function closeSubmenusFrom(depth) {
   disarmSubTimer();
-  while (openSubs.length > level) {
+  while (openSubs.length > depth) {
     const s = openSubs.pop();
     if (s.parent && s.parent.isConnected) s.parent.setAttribute('aria-expanded', 'false');
     s.el.remove();
@@ -300,11 +307,17 @@ export function onMenuOutsideClick(e) {
   closeMenu();
 }
 
+const focusableIn = (node) => [...node.querySelectorAll('.menu-item:not(:disabled)')];
+const isTextField = (n) => !!n && (/^(INPUT|TEXTAREA|SELECT)$/.test(n.tagName) || n.isContentEditable);
+
 /* Escape is swallowed rather than left to bubble: the document-level
    handler further down clears the row selection, and dismissing a menu
    you just opened shouldn't also throw away what was selected underneath
    it. The arrows walk the menu the focus is in; Right opens a flyout and
-   Left closes it, the way native menus do. */
+   Left closes it, the way native menus do. From outside the menu (focus
+   on the body, or on the button that opened it) Down and Up step in at
+   the first or last item and nothing else is claimed: a caret in a text
+   field keeps its arrows, and a menu only owns keys for a focus it owns. */
 export function onMenuKeydown(e) {
   if (!openMenuEl) return;
   if (e.key === 'Escape') {
@@ -316,25 +329,32 @@ export function onMenuKeydown(e) {
   if (!['ArrowDown', 'ArrowUp', 'ArrowRight', 'ArrowLeft'].includes(e.key)) return;
   const active = document.activeElement;
   const inSub = openSubs.find((s) => s.el.contains(active));
-  const container = inSub ? inSub.el : (openMenuEl.contains(active) ? openMenuEl : openMenuEl);
-  const focusable = [...container.querySelectorAll('.menu-item:not(:disabled)')];
+  if (!inSub && !openMenuEl.contains(active)) {
+    if (isTextField(active) || (e.key !== 'ArrowDown' && e.key !== 'ArrowUp')) return;
+    const items = focusableIn(openMenuEl);
+    if (!items.length) return;
+    e.preventDefault();
+    e.stopPropagation();
+    items[e.key === 'ArrowDown' ? 0 : items.length - 1].focus();
+    return;
+  }
+  const focusable = focusableIn(inSub ? inSub.el : openMenuEl);
   if (!focusable.length) return;
   e.preventDefault();
   e.stopPropagation();
-  const i = focusable.indexOf(active);
+  const i = focusable.indexOf(active);   // -1: focus is on a ☆, not an item
   if (e.key === 'ArrowDown') { focusable[(i + 1) % focusable.length].focus(); return; }
-  if (e.key === 'ArrowUp') { focusable[(i - 1 + focusable.length) % focusable.length].focus(); return; }
+  if (e.key === 'ArrowUp') { focusable[i < 0 ? focusable.length - 1 : (i - 1 + focusable.length) % focusable.length].focus(); return; }
   if (e.key === 'ArrowRight') {
-    if (active && active.classList.contains('menu-item-sub') && active._openSub) {
-      const sub = active._openSub();
-      const first = sub && sub.querySelector('.menu-item:not(:disabled)');
-      if (first) first.focus();
-    }
+    const meta = BTN.get(active);
+    const sub = meta && meta.open();
+    const first = sub && focusableIn(sub)[0];
+    if (first) first.focus();
     return;
   }
   if (inSub) {   // ArrowLeft
     const parent = inSub.parent;
-    closeSubmenusFrom(inSub.level);
+    closeSubmenusFrom(openSubs.indexOf(inSub));
     if (parent && parent.isConnected) parent.focus();
   }
 }
@@ -343,10 +363,12 @@ export function onMenuKeydown(e) {
 
 /* Items an analyst has dragged (or starred) out of a submenu onto the top
    of a menu, kept per menu on this machine. A pin is a stable id the item
-   declares (`pinId`), never the label — labels carry values ("Filter to
-   chrome.exe") and plugin actions get renamed. A pinned id whose item is
-   not in the menu right now (a plugin turned off) is simply not shown;
-   it comes back when the item does. */
+   declares (`pinId`); the item itself is resolved fresh from the menu's
+   tree on every paint, so its state (a tag's ✓, a plugin action's
+   disabled) is always current, and an id whose item is absent (the plugin
+   is off) is simply not shown — the pin is kept for when it returns. A
+   per-browser UI preference, not workspace/: the same case opened on a
+   different machine has different pins, like the keymap. */
 const PINS_KEY = 'winnow.menupins';
 
 function readPins() {
@@ -354,7 +376,8 @@ function readPins() {
 }
 
 export function menuPins(key) {
-  const ids = (() => { const all = readPins(); return Array.isArray(all[key]) ? all[key].slice() : []; })();
+  const all = readPins();
+  const ids = Array.isArray(all[key]) ? all[key].slice() : [];
   const save = () => {
     try { const cur = readPins(); cur[key] = ids; localStorage.setItem(PINS_KEY, JSON.stringify(cur)); }
     catch { /* a full or blocked localStorage: the pin lives for this page */ }
@@ -371,42 +394,72 @@ export function menuPins(key) {
    re-runs to repaint with fresh state. */
 const itemsOf = (x) => (typeof x === 'function' ? x() : x) || [];
 
-/* Every pinnable item in a menu tree, submenus included — what the Pinned
-   section is resolved from on each paint, so a pinned tag's ✓ and a pinned
-   plugin action's disabled state stay live. Only walked when there is a
-   pin to resolve: it runs every function submenu. */
-function collectPinnable(items, out = new Map()) {
+/* The items behind a set of pin ids, found in a menu tree — what the
+   Pinned section is resolved from on each paint, so a pinned tag's ✓ and
+   a pinned plugin action's disabled state stay live. Plain arrays are
+   read first and function submenus only run while an id is still
+   unresolved, so pinning `copy:cell` never costs a tag-list build. Two
+   items sharing an id is a section bug (the later would silently win),
+   so it is reported rather than resolved. */
+function collectPinnable(items, wanted, out = new Map()) {
+  const deferred = [];
   for (const item of items) {
     if (!item || item === '-' || item.header) continue;
-    if (item.pinId) out.set(item.pinId, item);
-    if (item.submenu) collectPinnable(itemsOf(item.submenu), out);
+    if (item.pinId && wanted.has(item.pinId)) {
+      if (out.has(item.pinId)) console.warn(`menu: two items declare pinId ${item.pinId}`);
+      else out.set(item.pinId, item);
+    }
+    if (typeof item.submenu === 'function') deferred.push(item.submenu);
+    else if (item.submenu) collectPinnable(item.submenu, wanted, out);
+  }
+  for (const thunk of deferred) {
+    if (out.size >= wanted.size) break;
+    collectPinnable(itemsOf(thunk), wanted, out);
   }
   return out;
 }
 
 const PIN_MIME = 'text/x-winnow-pin';
-const isPinDrag = (e) => [...((e.dataTransfer && e.dataTransfer.types) || [])].includes(PIN_MIME);
+const isPinDrag = (e) => dragHas(e, PIN_MIME);
 
-/* The root menu owns its pin store and its repaint (`_pins`, `_repaint`);
-   flyouts reach them through openMenuEl, so closing the root forgets
+/* The open root's context — pin store and repaint. Flyouts reach it
+   through the button that opened them (BTN), so closing the root forgets
    everything with it. */
-function rootPins() { return openMenuEl ? openMenuEl._pins || null : null; }
+function rootCtx() { return openMenuEl ? MENU.get(openMenuEl) || null : null; }
 
 /* Repaint everything that is open — the root and every flyout, in place.
-   One path for all state changes (a tag toggled anywhere, a pin added),
-   so a pinned tag at the top and its twin inside the flyout can never
-   disagree. Flyouts are re-filled rather than re-opened, so their
-   position holds and the hover state is undisturbed. */
+   One path for all state changes (a tag toggled anywhere, a pin added, a
+   hotkey pressed with the menu up), so a pinned tag at the top and its
+   twin inside the flyout can never disagree. The root is rebuilt, so
+   each flyout is re-bound to its parent's new button (found by key in
+   the fresh tree), refilled from that button's current item and placed
+   again — the Undo row appearing above it moves it; a flyout whose
+   parent is gone closes. */
 function repaintAll() {
-  if (!openMenuEl || !openMenuEl._repaint) return;
-  openMenuEl._repaint();
-  for (const s of openSubs) s.refill();
+  const ctx = rootCtx();
+  if (!ctx) return;
+  ctx.repaint();
+  let host = openMenuEl;
+  for (let depth = 0; depth < openSubs.length; depth++) {
+    const s = openSubs[depth];
+    const parent = [...host.querySelectorAll('.menu-item-sub')].find((b) => (BTN.get(b) || {}).key === s.key);
+    if (!parent) { closeSubmenusFrom(depth); break; }
+    s.parent = parent;
+    parent.setAttribute('aria-expanded', 'true');
+    s.refill();
+    placeFloating(s.el, parent.getBoundingClientRect(), { side: 'right' });
+    host = s.el;
+  }
 }
 
+/* For the app's other surfaces (the tag hotkeys) to keep an open menu
+   honest after they change what it shows. */
+export function repaintOpenMenus() { repaintAll(); }
+
 function commitPin(id, on) {
-  const pins = rootPins();
-  if (!pins) return;
-  if (on) pins.add(id); else pins.remove(id);
+  const ctx = rootCtx();
+  if (!ctx || !ctx.pins) return;
+  if (on) ctx.pins.add(id); else ctx.pins.remove(id);
   if (openMenuEl) openMenuEl.classList.remove('pin-drag');
   closeSubmenusFrom(0);
   repaintAll();
@@ -421,10 +474,11 @@ function commitPin(id, on) {
    key — a plugin's name), `keepOpen` (repaint the menu in place instead of
    closing it, so toggling three tags is three clicks), `submenu` (an array,
    or a function for one that repaints — opens a flyout beside the item on
-   hover or click) and `pinId` (a stable id; the analyst may pin the item
-   to the top of a menu opened with pins). '-' is a separator and {header}
-   a section label. */
-export function menuItemNode(item, rerender, level = 0, index = 0) {
+   hover or click; `key` names it when two siblings share a label), and
+   `pinId` (a stable id; the analyst may pin the item to the top of a menu
+   opened with pins). '-' is a separator and {header} a section label.
+   `ctx` is the root menu's {pins, repaint}; `depth` 0 is the root. */
+export function menuItemNode(item, ctx = null, depth = 0) {
   // menu-item-flex, not plain .menu-item: the ✓/swatch/hint slots need a
   // flex row, while the sidebar's own hand-built .menu-item rows (a bare
   // text node inside the button) still rely on block-level ellipsing.
@@ -447,9 +501,8 @@ export function menuItemNode(item, rerender, level = 0, index = 0) {
   b.disabled = !!item.disabled;
   if (item.title) b.title = item.title;
   if (item.submenu) {
-    const key = `${level}:${index}`;
-    const open = () => openSubmenu(b, item, level, key);
-    b._openSub = open;
+    const open = () => openSubmenu(b, depth);
+    BTN.set(b, { item, key: `${depth}:${item.key != null ? item.key : item.label}`, ctx, open });
     // A click on a parent opens its flyout, and leaves it open if hover
     // already did — never toggles it shut under the pointer.
     b.onclick = open;
@@ -461,35 +514,43 @@ export function menuItemNode(item, rerender, level = 0, index = 0) {
       await item.onclick();
       // Everything open repaints, not just this menu: a tag toggled in
       // the flyout has a pinned twin at the top that must agree.
-      if (openMenuEl && openMenuEl._repaint) repaintAll(); else rerender();
+      repaintAll();
     };
     // Sliding onto a plain sibling closes the flyout a neighbour opened
     // — after a beat, so a diagonal move into the flyout isn't punished.
     b.addEventListener('mouseenter', () => {
-      if (openSubs.length > level) armSubTimer(() => closeSubmenusFrom(level), 220);
+      if (openSubs.length > depth) armSubTimer(() => closeSubmenusFrom(depth), 220);
       else disarmSubTimer();
     });
   }
   return b;
 }
 
-function openSubmenu(parentBtn, item, level, key) {
+function openSubmenu(parentBtn, depth) {
   // A hover timer can outlive a repaint that replaced its button; a
   // detached button has no geometry to place a flyout against.
   if (!parentBtn.isConnected) return null;
-  const cur = openSubs[level];
-  if (cur && cur.key === key) return cur.el;
-  closeSubmenusFrom(level);
+  const meta = BTN.get(parentBtn);
+  const cur = openSubs[depth];
+  if (cur && cur.key === meta.key) {
+    cur.parent = parentBtn;   // the same flyout, possibly a repainted parent
+    parentBtn.setAttribute('aria-expanded', 'true');
+    return cur.el;
+  }
+  closeSubmenusFrom(depth);
   const sub = el('div', 'menu menu-sub');
   sub.setAttribute('role', 'menu');
-  const refill = () => fillMenuNode(sub, itemsOf(item.submenu), refill, level + 1);
-  refill();
+  const entry = { el: sub, key: meta.key, parent: parentBtn, refill: null };
+  // Filled from the parent's CURRENT item, so a repaint that rebuilt the
+  // parent (and its array submenu) is what the flyout shows.
+  entry.refill = () => fillMenuNode(sub, itemsOf(BTN.get(entry.parent).item.submenu), meta.ctx, depth + 1);
+  entry.refill();
   // Entering the flyout cancels a pending close its parent's sibling armed.
   sub.addEventListener('mouseenter', disarmSubTimer);
   document.body.append(sub);
   placeFloating(sub, parentBtn.getBoundingClientRect(), { side: 'right' });
   parentBtn.setAttribute('aria-expanded', 'true');
-  openSubs[level] = { el: sub, key, level, parent: parentBtn, refill };
+  openSubs[depth] = entry;
   return sub;
 }
 
@@ -516,27 +577,27 @@ function pinnableRow(item, node, pins) {
   return row;
 }
 
-export function fillMenuNode(menu, items, rerender, level = 0) {
+export function fillMenuNode(menu, items, ctx = null, depth = 0) {
   menu.replaceChildren();
-  const pins = rootPins();
-  if (pins && level === 0) {
+  const pins = ctx ? ctx.pins : null;
+  if (pins && depth === 0) {
     if (pins.ids.length) {
-      const all = collectPinnable(items);
+      const all = collectPinnable(items, new Set(pins.ids));
       const present = pins.ids.filter((id) => all.has(id));
       if (present.length) {
         menu.append(el('div', 'menu-header', 'Pinned'));
-        for (const id of present) menu.append(pinnableRow(all.get(id), menuItemNode(all.get(id), rerender, 0), pins));
+        for (const id of present) menu.append(pinnableRow(all.get(id), menuItemNode(all.get(id), ctx, 0), pins));
         menu.append(el('div', 'menu-sep'));
       }
     }
     // Only visible mid-drag (.pin-drag), so the menu costs nothing at rest.
-    // Purely a highlight: the drop itself is handled once, by the root.
+    // Purely a highlight: dragover and the drop are handled once, by the
+    // root, and reach it by bubbling.
     const zone = el('div', 'menu-dropzone', 'Drop here to pin');
-    zone.addEventListener('dragover', (e) => { if (isPinDrag(e)) { e.preventDefault(); zone.classList.add('over'); } });
+    zone.addEventListener('dragenter', (e) => { if (isPinDrag(e)) zone.classList.add('over'); });
     zone.addEventListener('dragleave', () => zone.classList.remove('over'));
     menu.append(zone);
   }
-  let index = 0;
   for (const item of items) {
     if (!item) continue;
     if (item === '-') { menu.append(el('div', 'menu-sep')); continue; }
@@ -544,8 +605,10 @@ export function fillMenuNode(menu, items, rerender, level = 0) {
       menu.append(el('div', 'menu-header' + (item.literal ? ' menu-header-literal' : ''), item.header));
       continue;
     }
-    const node = menuItemNode(item, rerender, level, index++);
-    if (item.pinId && pins && level > 0) menu.append(pinnableRow(item, node, pins));
+    const node = menuItemNode(item, ctx, depth);
+    // Pinnable inside a flyout only: a root item already sits where a pin
+    // would put it.
+    if (item.pinId && pins && depth > 0) menu.append(pinnableRow(item, node, pins));
     else menu.append(node);
   }
 }
@@ -607,16 +670,13 @@ export function showFloating(node, rect, anchorEl) {
 export function showMenu(items, rect, anchorEl, opts = {}) {
   const menu = el('div', 'menu');
   menu.setAttribute('role', 'menu');
-  const rerender = () => { if (openMenuEl === menu) fillMenuNode(menu, itemsOf(items), rerender); };
-  menu._repaint = rerender;
-  menu._pins = opts.pins ? menuPins(opts.pins) : null;
-  // The root must be openMenuEl before it is filled: fillMenuNode reads
-  // the pin store off it.
-  const prev = openMenuEl;
-  openMenuEl = menu;
-  fillMenuNode(menu, itemsOf(items), rerender);
-  openMenuEl = prev;
-  if (menu._pins) {
+  const ctx = {
+    pins: opts.pins ? menuPins(opts.pins) : null,
+    repaint: () => { if (openMenuEl === menu) fillMenuNode(menu, itemsOf(items), ctx, 0); },
+  };
+  MENU.set(menu, ctx);
+  fillMenuNode(menu, itemsOf(items), ctx, 0);
+  if (ctx.pins) {
     menu.addEventListener('dragover', (e) => { if (isPinDrag(e)) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; } });
     menu.addEventListener('drop', (e) => {
       const id = e.dataTransfer.getData(PIN_MIME);

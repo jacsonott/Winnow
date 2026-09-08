@@ -1153,8 +1153,9 @@ matter most to a panel, which sits beside the grid and has to follow it.
 `{"source_id", "column", "value", "rows": [{"rid", "source_id", "cells"}]}`.
 Optional return keys `message` / `open_url` / `show_tab`. `ValueError` → 400.
 
-The entry appears under the row menu's **Plugins ▸** submenu, labelled
-with your plugin's name as its hint. An analyst can drag it (or click its
+The entry appears under the row menu's **Plugins ▸** submenu (whose
+hint counts the actions on offer), with your plugin's name beside it. An
+analyst can drag it (or click its
 ☆) onto the top of the menu, where it stays across sessions on that
 machine, keyed by `plugin:<fs_name>:<id>` — so keep `id` stable across
 versions, or their pin silently stops matching. `fs_name` is your plugin's

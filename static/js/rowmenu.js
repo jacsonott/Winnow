@@ -22,7 +22,10 @@ import { contextMenu } from './ui.js';
    should mean adding an entry here (or an item to an existing section),
    never surgery on a growing if-chain. Each section gets the same ctx and
    returns menu items (see fillMenuNode for the item shape); a section that
-   doesn't apply returns [] and is skipped, separator and all.
+   doesn't apply returns [] and is skipped. Rules are placed by shape, not
+   by section name: folded entries (submenus) read as one short list, and
+   anything broken out beside them — the clicked column's filters, Undo —
+   gets a rule on the side that meets a fold.
 
    ctx: {pos, colName, colIndex, value} — the row and, when the click
    landed on a cell rather than the gutter, that cell's column and its
@@ -57,6 +60,9 @@ export function rowMenuPluginItems(ctx) {
   if (!actions.length) return [];
   const { count, positions, scope } = rowMenuTargets(ctx);
   const items = [];
+  // The pin key is the action's filesystem identity (plugin folder +
+  // local id), the one the dispatch route uses — published to plugin
+  // authors in docs/writing-plugins.md, so it is spelled out once, here.
   for (const a of actions) {
     const tooMany = count > a.max_rows;
     items.push({
@@ -148,11 +154,20 @@ export function rowMenuTagList(ctx) {
   return items;
 }
 
+/* The keys the tags actually carry (keymap.js dispatches 1–9 to
+   tag_defs.hotkey), so the entry advertises what pressing them does here
+   and says nothing when no tag has one. */
+function tagHotkeyHint() {
+  const keys = S.tags.map((t) => t.hotkey).filter(Boolean).sort();
+  if (!keys.length) return '';
+  return keys.length === 1 ? keys[0] : `${keys[0]}–${keys[keys.length - 1]}`;
+}
+
 export function rowMenuTagItems(ctx) {
   const { scope } = rowMenuTargets(ctx);
   const items = [{
     label: `Tag ${scope}`,
-    hint: S.tags.length ? '1–9' : '',
+    hint: tagHotkeyHint(),
     title: 'The tags, with their hotkeys — pin the ones you use to the top of this menu',
     submenu: () => rowMenuTagList(ctx),
   }];
@@ -191,16 +206,24 @@ export function rowMenuCellItems(ctx) {
 }
 
 /* The value under the cursor as a number on a board — "how many rows
-   have this?" — whose drill is exactly the filter the item above applies. */
+   have this?" — whose drill is exactly the filter the item above applies.
+   Always offered, disabled when it can't apply (a gutter click has no
+   value; a merged view is not one table a widget can query), so a pinned
+   copy stays where the analyst put it rather than coming and going with
+   where they right-clicked. */
 export function rowMenuDashboardItems(ctx) {
-  if (!ctx.colName || S.sourceId == null || S.sourceId < 0) return [];
-  const shown = ellipsize(displayValue(ctx.value));
+  const merged = S.sourceId == null || S.sourceId < 0;
+  const ok = !!ctx.colName && !merged;
+  const shown = ok ? ellipsize(displayValue(ctx.value)) : '';
   return [{
     label: 'Add to dashboard',
     submenu: [{
-      label: `Count of ${ctx.colName} = ${shown}`,
+      label: ok ? `Count of ${ctx.colName} = ${shown}` : 'Count of this value',
       pinId: 'dash:count-of-value',
-      title: 'A number on a dashboard that opens these rows when clicked',
+      disabled: !ok,
+      title: !ctx.colName ? 'Right-click a cell to count its value'
+        : merged ? 'A merged view is not one table a widget can count'
+        : 'A number on a dashboard that opens these rows when clicked',
       onclick: () => quickAddWidget(widgetFrom({
         template: 'countwhere', table: tableOf(S.sourceId), column: ctx.colName,
         value: ctx.value == null ? '' : String(ctx.value), match: 'equals' })),
@@ -225,17 +248,20 @@ export function rowMenuClipboardItems(ctx) {
   }];
 }
 
+const folded = (item) => !!(item && item !== '-' && !item.header && item.submenu);
+
 export function rowMenuItems(ctx) {
   const out = [];
-  let prev = null;
   for (const section of ROW_MENU_SECTIONS) {
     const items = section.build(ctx);
     if (!items.length) continue;
-    // A rule before and after the broken-out filter block, and nowhere
-    // else: the folded entries read as one short list.
-    if (out.length && (section.id === 'cell' || prev === 'cell')) out.push('-');
+    // A rule wherever a section boundary has something broken out on
+    // either side — the column's filter block, an Undo row — and none
+    // between two folds, so Tag ▸ / Add to dashboard ▸ / Copy ▸ read as
+    // one short list. No section is named here: a new one lands in the
+    // registry and the rules follow from its shape.
+    if (out.length && !(folded(out[out.length - 1]) && folded(items[0]))) out.push('-');
     out.push(...items);
-    prev = section.id;
   }
   return out;
 }

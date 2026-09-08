@@ -313,18 +313,26 @@ see [docs/notes/README.md](README.md) for the whole set.
   hover or click; one per level, closed with the root or when a plain
   sibling is hovered; a click on the parent opens (never toggles shut)
   and the arrow keys walk it (Right opens, Left closes and refocuses the
-  parent). Flyout identity is `level:index`, not the label. A menu
-  opened with `{ pins: '<key>' }` lets submenu items that declare a
-  stable `pinId` be dragged or ☆-starred onto a **Pinned** section at
-  its top (`menuPins`, localStorage `winnow.menupins`); the root menu
-  element owns the store and the repaint (`_pins`, `_repaint`), and one
-  `repaintAll` refills the root and every open flyout after any state
-  change, so a pinned tag's ✓ and its twin inside the flyout always
-  agree, and a pinned plugin action simply isn't shown while the plugin
-  is off. Tag pins key on the tag's *name* (ids are per case file). The
-  row menu is the one using it: filters for the clicked column stay
-  broken out, Tag / Add to dashboard / Copy / Plugins fold into
-  submenus, and Undo sits at the top level beside Tag. The
+  parent); from outside the menu only Down/Up step in, so a caret in a
+  text field keeps its arrows. A flyout's identity is its parent item's
+  `key` (else its label) at its depth — never its position, which a
+  repaint shifts when Undo appears. A menu opened with
+  `{ pins: '<key>' }` lets submenu items that declare a stable `pinId`
+  be dragged or ☆-starred onto a **Pinned** section at its top
+  (`menuPins`, localStorage `winnow.menupins`). The root's context
+  (pin store + repaint) and each submenu button's item live in WeakMaps
+  (`MENU`, `BTN`) rather than on the nodes, and one `repaintAll` rebuilds
+  the root, re-binds every open flyout to its parent's new button,
+  refills and re-places it — after a keepOpen click, a pin, or a tag
+  hotkey pressed with the menu up (`repaintOpenMenus`) — so a pinned
+  tag's ✓ and its twin inside the flyout always agree, and a pinned
+  plugin action simply isn't shown while the plugin is off (the plugins
+  panel refreshes `S.pluginRowActions` on toggle for that). Tag pins key
+  on the tag's *name* (ids are per case file). The row menu is the one
+  using it: filters for the clicked column stay broken out, Tag / Add to
+  dashboard / Copy / Plugins fold into submenus, Undo sits at the top
+  level beside Tag, and rules fall where a fold meets something broken
+  out (no section is named in the loop). The
   column-header menu is the one that *replaced* a visible control rather
   than adding a surface: its `▾` (`.hcell-fmt`) cost a slot of every
   header's width, on every table, forever, to be opened rarely — the same

@@ -192,7 +192,7 @@ export async function tagWholeViewSelection(tag, on) {
   render();
   drawRail();
   regroupIfGroupedByTag();
-  refreshUndoState();
+  await refreshUndoState();   // awaited: a menu repaints from UNDO_NEXT the moment this returns
   const n = res.affected != null ? res.affected : count;
   toast(`${on ? 'Tagged' : 'Untagged'} ${n.toLocaleString()} row${n === 1 ? '' : 's'} · ${tag.name}`);
 }
@@ -233,7 +233,7 @@ export async function tagRowsAtPositions(tag, positions, on) {
   render();
   drawRail();
   regroupIfGroupedByTag();
-  refreshUndoState();
+  await refreshUndoState();   // awaited: a menu repaints from UNDO_NEXT the moment this returns
   toast(`${on ? 'Tagged' : 'Untagged'} ${rows.length.toLocaleString()} row${rows.length === 1 ? '' : 's'} · ${tag.name}`);
 }
 
@@ -297,6 +297,6 @@ export async function applyTagToView(tag) {
   render();
   drawRail();
   regroupIfGroupedByTag();
-  refreshUndoState();
+  await refreshUndoState();
   toast(`Tagged ${res.affected.toLocaleString()} rows · ${tag.name}`);
 }
