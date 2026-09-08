@@ -59,7 +59,12 @@ def test_toolbar_buttons_never_fold_into_two_lines(page):
 def test_sql_run_button_shares_the_row_with_the_others(page):
     page.locator("#tabSql").click()
     page.wait_for_selector("#sqlview:not([hidden])")
-    assert _rect(page, "#btnRunSql")["y"] == _rect(page, "#btnSqlSchema")["y"]
+    # The query-tab strip renders after its fetch and can add a line above
+    # the head; measure both buttons in one call once it has settled.
+    page.wait_for_selector("#sqlTabs > *")
+    page.wait_for_timeout(150)
+    tops = page.evaluate("() => ['btnRunSql', 'btnSqlSchema'].map(id => document.getElementById(id).getBoundingClientRect().top)")
+    assert tops[0] == tops[1], tops
 
 
 def test_timeframe_enabled_and_column_are_separate_rows(page):

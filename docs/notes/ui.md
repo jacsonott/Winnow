@@ -300,6 +300,18 @@ see [docs/notes/README.md](README.md) for the whole set.
     rows via the one shared `wireDragReorder`, scoped by
     `currentIds: sameGroupFilterIds(...)` so a drag across header sets is
     a structural no-op rather than a rule someone has to remember.
+- **Session comparison** (session.js) is counts in the panel and rows in
+  the grid, never rows in the panel. `renderDiff` draws one line per
+  table with a count per kind (only-left, only-right, tagged differently,
+  notes); each count calls `pivotDiff`, which sets `S.diffMarks`
+  (`{sourceId, left, right, rows: {rid: {kind, left, right}}}`), opens the
+  table and applies a raw `rid IN (…)` filter-tree node (`rid` is in the
+  validator's word list for this). grid.js paints a `.diff-mark` pill in
+  the gutter for any row in `S.diffMarks` — A for the left session, B for
+  the right, A→B for both — with the two sides' tags in its title. The
+  `#diffBanner` track above the grid names the sides and offers "All
+  differences" and Done; it follows `winnow:viewchange`, so it hides on
+  another table and returns with the compared one.
 - **The right-click surfaces** (row menu, column-header menu, table menu,
   header value picker) all hang off one floating-menu implementation in `static/js/ui.js` —
   `showFloating`/`placeFloating` plus the single `openMenuEl`/`openMenuAnchor`

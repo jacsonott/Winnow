@@ -324,7 +324,7 @@ html[data-style="studio"][data-theme="light"] {
      invisible while the banner stayed hidden (its default state), which
      is exactly why this went unnoticed for so long. */
   grid-template-columns: max-content minmax(0, 1fr);
-  grid-template-rows: auto auto auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto auto auto minmax(0, 1fr);
 }
 /* Rows 3/-1, not 1/-1: the sidebar slides in UNDER the tab bar, so
    toggling it never reflows the top chrome — the tab strips, Case menu and
@@ -334,7 +334,7 @@ html[data-style="studio"][data-theme="light"] {
 #sidebar { grid-column: 1; grid-row: 3 / -1; }
 #sidebar[hidden] { display: none; }
 .temp-banner, .bar { grid-column: 1 / -1; }
-.toolbar, .plugin-panels, .main-area { grid-column: 2; }
+.toolbar, .plugin-panels, .diff-banner, .main-area { grid-column: 2; }
 /* Explicit row per child, not auto-placement — auto-placement once slid
    .main-area into the wrong track when a display:none sibling (the old
    suggestion banner) dropped out of the grid, and past ~1.4M rows that
@@ -351,7 +351,10 @@ html[data-style="studio"][data-theme="light"] {
 /* Plugin toolbar panels: an explicit track like the banner, collapsing
    to zero while hidden so the grid keeps its height back. */
 .plugin-panels { grid-row: 4; }
-.main-area { grid-row: 5; }
+/* The session-comparison banner: its own track, collapsing while hidden. */
+.diff-banner { grid-row: 5; }
+.diff-banner[hidden] { display: none; }
+.main-area { grid-row: 6; }
 /* Grid items default to min-width:auto (their content's min-content size),
    not 0 — without this, a row wide enough to overflow (e.g. many/long tab
    names in .bar) blows out #app's implicit single column, stretching every
@@ -1548,30 +1551,32 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .diff-removed td:nth-child(3) { color: var(--danger); }
 .diff-changed td:last-child { color: var(--accent); }
 .diff-note td { color: var(--text); }
-/* The diff as rows: a preview of the evidence beside the two verdicts. */
-.diff-bar { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
-.diff-chips { display: flex; gap: 4px; }
-.diff-chip { font-family: var(--mono); font-size: 11px; padding: 2px 8px; }
-.diff-tag { margin-left: auto; }
-.diff-group-head { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
-.diff-group-head h4 { margin: 0; flex: 1 1 auto; }
-.diff-open-all { font-size: 11px; padding: 2px 8px; }
-.diff-row { width: 45%; }
-.diff-preview { display: flex; flex-wrap: wrap; gap: 2px 10px; }
-.diff-cell { display: inline-flex; gap: 4px; min-width: 0; max-width: 260px; font-family: var(--mono); font-size: 11px; }
-.diff-cell-k { color: var(--dim); flex: 0 0 auto; }
-.diff-cell-k::after { content: ':'; }
-.diff-cell-v { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.diff-preview-none { color: var(--text-faint); font-style: italic; font-size: 11px; }
-.diff-side { white-space: nowrap; }
-.diff-act { width: 2em; text-align: right; }
-.diff-open { padding: 0 6px; font-size: 12px; }
-.diff-expandable { cursor: pointer; }
-.diff-expandable:hover td { background: var(--panel-2); }
-.diff-full-row td { background: var(--ink); padding: 6px 10px; }
-.diff-full { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 2px 14px; }
-.diff-full-kv { display: flex; gap: 6px; font-family: var(--mono); font-size: 11px; min-width: 0; }
-.diff-full-kv .diff-cell-v { white-space: normal; word-break: break-all; }
+/* The comparison, as counts: one line per table, each count a way into
+   the grid. The rows themselves are never listed here — the grid shows
+   them, marked. */
+.diff-stats { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 6px; }
+.diff-stats th { text-align: left; font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--dim);
+  padding: 4px 8px; border-bottom: 1px solid var(--line); font-weight: 500; }
+.diff-stats th.n, .diff-stats td.n { text-align: right; width: 1%; white-space: nowrap; }
+.diff-stats td { padding: 3px 8px; border-bottom: 1px solid var(--border-hairline); }
+.diff-stats td.n .btn { font-family: var(--mono); font-size: 12px; padding: 1px 8px; min-width: 3em; }
+.diff-stats td.n .zero { color: var(--text-faint); font-family: var(--mono); padding: 1px 8px; }
+.diff-stats .diff-n-removed .btn { color: var(--danger); }
+.diff-stats .diff-n-added .btn { color: var(--accent); }
+.diff-legend { display: flex; gap: 14px; margin-top: 6px; font-size: 11px; color: var(--dim); }
+.diff-legend b { color: var(--text); font-weight: 500; }
+.diff-mark {
+  flex: 0 0 auto; font-family: var(--mono); font-size: 9px; line-height: 12px; padding: 0 3px;
+  border-radius: var(--radius-sm); border: 1px solid var(--line-2); color: var(--text); background: var(--panel-2);
+}
+.diff-mark-removed { color: var(--danger); border-color: var(--danger-border); }
+.diff-mark-added { color: var(--accent); border-color: var(--accent-dim); }
+.diff-banner {
+  display: flex; align-items: center; gap: 12px; padding: 5px 12px; font-size: 12px;
+  background: var(--sel); border-bottom: 1px solid var(--accent-dim); color: var(--text);
+}
+.diff-banner .diff-mark { line-height: 14px; }
+.diff-banner-actions { margin-left: auto; display: flex; gap: 6px; }
 
 /* Settings → Updates: the release notes blob. Monospace and scrollable
    because it's markdown straight from the GitHub release, not something

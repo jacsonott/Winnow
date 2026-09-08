@@ -7998,56 +7998,19 @@ class Store:
                 notes[(key, rn["rid"])] = rn.get("note") or ""
         return tags, notes, labels
 
-    def rows_by_rids(self, source_id: int, rids: list[int]) -> tuple[list[str], dict[int, list]]:
-        """(base column names, {rid: cells}) for a handful of rows named by
-        rid — what the session diff shows beside a changed tag, so the
-        reviewer sees the evidence and not a row number. Reader pool,
-        chunked so a long list never builds one enormous IN."""
-        with self._reader() as ro:
-            src = self._source_lite_on(ro, source_id)
-            cols = [c["name"] for c in self._base_cols(src)]
-            table = src["table_name"]
-            out: dict[int, list] = {}
-            sel = ", ".join(q(c) for c in cols)
-            want = sorted({int(r) for r in rids})
-            for i in range(0, len(want), 500):
-                chunk = want[i:i + 500]
-                marks = ",".join("?" * len(chunk))
-                for row in ro.execute(f"SELECT rid, {sel} FROM {q(table)} WHERE rid IN ({marks})", chunk):
-                    out[row[0]] = list(row[1:])
-        return cols, out
-
-    def _attach_diff_rows(self, groups: list[list[dict]], labels: dict) -> dict:
-        """Give each diff row its live source id and its cells, so the diff
-        can show the row and open it. Sessions key sources by file hash (or
-        name); a source this case does not have stays a row number with
-        `source_id: None`. Returns {source label: [column names]}."""
+    def _attach_diff_sources(self, groups: list[list[dict]]) -> None:
+        """Give each diff row its live source id, so the panel can pivot to
+        the table. Sessions key sources by file hash (or name); a source this
+        case does not have stays a row number with `source_id: None`."""
         by_hash = {s["file_hash"]: s["id"] for s in self.list_sources() if s.get("file_hash")}
         by_name = {s["name"]: s["id"] for s in self.list_sources()}
-        by_key = {k: by_hash.get(k, by_name.get(k)) for k in labels}
-        by_key.update({k: by_name.get(labels[k]) for k in labels if by_key.get(k) is None})
-        wanted: dict[int, set] = {}
         for rows in groups:
             for r in rows:
-                sid = by_key.get(r["key"])
+                key = r.pop("key", None)
+                sid = by_hash.get(key)
+                if sid is None:
+                    sid = by_name.get(key, by_name.get(r["source"]))
                 r["source_id"] = sid
-                if sid is not None:
-                    wanted.setdefault(sid, set()).add(r["rid"])
-        columns: dict = {}
-        cells: dict = {}
-        for sid, rids in wanted.items():
-            try:
-                cols, got = self.rows_by_rids(sid, sorted(rids))
-            except KeyError:
-                continue
-            columns[sid] = cols
-            cells[sid] = got
-        for rows in groups:
-            for r in rows:
-                r.pop("key", None)
-                sid = r.get("source_id")
-                r["cells"] = cells.get(sid, {}).get(r["rid"]) if sid is not None else None
-        return {str(sid): cols for sid, cols in columns.items()}
 
     def diff_sessions(self, left: str, right: str, limit: int = 2000) -> dict:
         """What changed between two sessions — the QC question: "what did
@@ -8093,14 +8056,13 @@ class Store:
 
         counts = [len(added), len(removed), len(changed), len(note_changes)]
         capped = [_cap(added), _cap(removed), _cap(changed), _cap(note_changes)]
-        # The rows themselves ride along for what is listed: the reviewer
-        # reads the evidence, not a row number, and can open it.
-        columns = self._attach_diff_rows(capped, labels)
+        # Each listed row names its live source, so the panel's counts can
+        # pivot to the table showing exactly those rows.
+        self._attach_diff_sources(capped)
         added, removed, changed, note_changes = capped
 
         return {
             "left": left, "right": right,
-            "columns": columns,
             # "only in right" reads as added when right is the later pass,
             # which is how a review is run: left = what was handed over.
             "added": added, "removed": removed, "changed": changed,

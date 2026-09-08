@@ -239,83 +239,20 @@ function diffPanel(getSessions) {
   return wrap;
 }
 
-/* A tag row's side is a list of tag names; a note row's is the note text
-   or null. One cell renderer for both — "(none)" rather than an empty cell,
-   so a removal reads as a removal instead of a rendering glitch. */
-function side(v) {
-  if (Array.isArray(v)) return v.length ? v.join(', ') : '(none)';
-  return v ? String(v) : '(none)';
-}
-
-/* Open a table on exactly these rows: the grid, filtered to `rid IN (…)`
-   through the raw filter-tree node, so the analyst reads the evidence
-   with every other tool — sort, search, the detail panel — and the
-   Filters button shows how to get back out. */
-export async function openDiffRows(sourceId, rids, what) {
-  if (!(S.sources || []).some((s) => s.id === sourceId)) { toast('That table is no longer in this case'); return; }
-  const ids = [...new Set(rids.map(Number).filter(Number.isFinite))];
-  if (!ids.length) return;
-  $('modal').hidden = true;
-  await openSource(sourceId);
-  S.filterTree = { type: 'raw', sql: `rid IN (${ids.join(', ')})` };
-  updateFiltersButton();
-  renderHead();
-  await rebuildView({ keepScroll: false });
-  toast(`${what || 'Rows'} — ${ids.length.toLocaleString()} row${ids.length === 1 ? '' : 's'}; Clear filters brings the table back`, 5000);
-}
-
-/* Which columns make a one-line preview of a row: the first timestamp-
-   looking column, then the first few others with something in them. */
-function previewColumns(columns, cells) {
-  const idxs = [];
-  const ts = columns.findIndex((c) => /time|date|created|modified/i.test(c));
-  if (ts >= 0 && cells[ts] !== '' && cells[ts] != null) idxs.push(ts);
-  for (let i = 0; i < columns.length && idxs.length < 4; i++) {
-    if (i === ts) continue;
-    const v = cells[i];
-    if (v !== '' && v != null) idxs.push(i);
-  }
-  return idxs;
-}
-
-function rowPreview(columns, cells) {
-  const wrap = el('div', 'diff-preview');
-  if (!columns || !cells) {
-    wrap.append(el('span', 'diff-preview-none', 'row not in this case'));
-    return wrap;
-  }
-  for (const i of previewColumns(columns, cells)) {
-    const cell = el('span', 'diff-cell');
-    cell.append(el('span', 'diff-cell-k', columns[i]), el('span', 'diff-cell-v', String(cells[i])));
-    wrap.append(cell);
-  }
-  wrap.title = columns.map((c, i) => `${c}: ${cells[i] == null ? '' : cells[i]}`).join('\n');
-  return wrap;
-}
-
-function fullRow(columns, cells) {
-  const dl = el('div', 'diff-full');
-  columns.forEach((c, i) => {
-    const v = cells[i];
-    if (v === '' || v == null) return;
-    const kv = el('div', 'diff-full-kv');
-    kv.append(el('span', 'diff-cell-k', c), el('span', 'diff-cell-v', String(v)));
-    dl.append(kv);
-  });
-  return dl;
-}
-
-const GROUPS = [
-  ['added', 'Added on the right', 'diff-added'],
-  ['removed', 'Removed on the right', 'diff-removed'],
-  ['changed', 'Tagged differently', 'diff-changed'],
-  ['note_changes', 'Notes changed', 'diff-note'],
+const LIVE_LABEL = 'Current work';
+const KINDS = [
+  ['removed', (l, r) => `Only in ${l}`, 'tagged on the left, not on the right'],
+  ['added', (l, r) => `Only in ${r}`, 'tagged on the right, not on the left'],
+  ['changed', () => 'Tagged differently', 'tagged on both sides, with different tags'],
+  ['note_changes', () => 'Notes changed', 'a note that differs'],
 ];
+const KIND_OF = { removed: 'removed', added: 'added', changed: 'changed', note_changes: 'note' };
 
-/* The diff, as rows: every entry is the row itself (a one-line preview,
-   click for all of it) beside what each side said about it, with a way
-   to open it — or the whole group — in the table. The chips at the top
-   narrow the list to one kind of change; the tag picker to one tag. */
+const nameOf = (v) => (v === LIVE ? LIVE_LABEL : v);
+
+/* The comparison as counts, one line per table. A count is a button:
+   the rows behind it open in the grid, marked with which session tagged
+   them — the panel never lists rows itself. */
 function renderDiff(out, d) {
   out.replaceChildren();
   const c = d.counts;
@@ -331,92 +268,130 @@ function renderDiff(out, d) {
       + `${d.only_left_sources.length} only on the left, ${d.only_right_sources.length} only on the right. `
       + 'Counts below cover what they share.'));
   }
-  const state = { group: 'all', tag: '' };
-  const tagNames = new Set();
-  for (const [key] of GROUPS) {
-    if (key === 'note_changes') continue;
-    for (const r of d[key]) { for (const n of r.left) tagNames.add(n); for (const n of r.right) tagNames.add(n); }
-  }
-
-  const bar = el('div', 'diff-bar');
-  const chips = el('div', 'diff-chips');
-  const chip = (key, label, n) => {
-    const b = el('button', 'btn ghost diff-chip', `${label} ${n.toLocaleString()}`);
-    b.dataset.group = key;
-    b.setAttribute('aria-pressed', String(state.group === key));
-    b.onclick = () => { state.group = state.group === key ? 'all' : key; paint(); };
-    return b;
-  };
-  const tagSel = el('select', 'diff-tag');
-  tagSel.append(new Option('any tag', ''));
-  for (const n of [...tagNames].sort()) tagSel.append(new Option(n, n));
-  tagSel.onchange = () => { state.tag = tagSel.value; paint(); };
-  bar.append(chips, tagSel);
-  const body = el('div', 'diff-body');
-  out.append(bar, body);
-
-  const matchesTag = (r) => !state.tag || (r.left || []).includes(state.tag) || (r.right || []).includes(state.tag);
-
-  function paint() {
-    chips.replaceChildren(
-      chip('added', '+', c.added), chip('removed', '−', c.removed),
-      chip('changed', '±', c.changed), chip('notes', '✎', c.note_changes));
-    body.replaceChildren();
-    for (const [key, label, cls] of GROUPS) {
-      const gkey = key === 'note_changes' ? 'notes' : key;
-      if (state.group !== 'all' && state.group !== gkey) continue;
-      const rows = (key === 'note_changes' ? d[key] : d[key].filter(matchesTag));
-      if (!rows.length) continue;
-      const head = el('div', 'diff-group-head');
-      head.append(el('h4', null, `${label} (${rows.length.toLocaleString()})`));
-      // One "open" per table the group touches: the grid shows one table.
-      const bySource = new Map();
-      for (const r of rows) if (r.source_id != null) bySource.set(r.source_id, (bySource.get(r.source_id) || []).concat(r.rid));
-      for (const [sid, rids] of bySource) {
-        const src = (S.sources || []).find((s) => s.id === sid);
-        const open = el('button', 'btn ghost diff-open-all', `Open ${rids.length.toLocaleString()} in ${src ? (src.nickname || src.name) : 'table'}`);
-        open.title = 'Show exactly these rows in the table';
-        open.onclick = () => openDiffRows(sid, rids, label);
-        head.append(open);
-      }
-      body.append(head);
-      const tbl = el('table', 'diff-table');
-      for (const r of rows.slice(0, 200)) {
-        const columns = r.source_id != null ? d.columns[String(r.source_id)] : null;
-        const tr = el('tr', cls);
-        const rid = el('td', 'diff-rid', `${r.source} · row ${r.rid.toLocaleString()}`);
-        const prev = el('td', 'diff-row');
-        prev.append(rowPreview(columns, r.cells));
-        const openOne = el('button', 'btn ghost diff-open', '⤴');
-        openOne.title = 'Open this row in the table';
-        openOne.disabled = r.source_id == null;
-        openOne.onclick = (e) => { e.stopPropagation(); openDiffRows(r.source_id, [r.rid], `Row ${r.rid}`); };
-        const act = el('td', 'diff-act');
-        act.append(openOne);
-        tr.append(rid, prev, el('td', 'diff-side', side(r.left)), el('td', 'diff-arrow', '→'),
-                  el('td', 'diff-side', side(r.right)), act);
-        if (columns && r.cells) {
-          tr.classList.add('diff-expandable');
-          tr.title = 'Click to see the whole row';
-          tr.onclick = () => {
-            const next = tr.nextElementSibling;
-            if (next && next.classList.contains('diff-full-row')) { next.remove(); return; }
-            const full = el('tr', 'diff-full-row');
-            const td = el('td'); td.colSpan = 6; td.append(fullRow(columns, r.cells));
-            full.append(td);
-            tr.after(full);
-          };
-        }
-        tbl.append(tr);
-      }
-      body.append(tbl);
-      if (rows.length > 200) body.append(el('div', 'fb-help', `Showing the first 200 of ${rows.length.toLocaleString()}.`));
-    }
-    if (!body.children.length) body.append(el('div', 'note-status', 'Nothing matches that tag in this group.'));
-    if (d.truncated) {
-      body.append(el('div', 'note-status',
-        'The comparison hit its row cap — these sessions differ on more rows than are listed.'));
+  const L = nameOf(d.left), R = nameOf(d.right);
+  // Per table: the rows of each kind, keyed by live source id (a table
+  // this case lacks gets a line with no way in).
+  const tables = new Map();
+  for (const [kind] of KINDS) {
+    for (const r of d[kind]) {
+      const key = r.source_id != null ? `id:${r.source_id}` : `name:${r.source}`;
+      const rec = tables.get(key) || { sourceId: r.source_id, name: r.source, rows: { removed: [], added: [], changed: [], note_changes: [] } };
+      rec.rows[kind].push(r);
+      tables.set(key, rec);
     }
   }
-  paint();
+  const tbl = el('table', 'diff-stats');
+  const head = el('tr');
+  head.append(el('th', null, 'Table'));
+  for (const [kind, label, why] of KINDS) {
+    const th = el('th', 'n', label(L, R));
+    th.title = why;
+    head.append(th);
+  }
+  head.append(el('th', 'n', 'All'));
+  tbl.append(head);
+  for (const rec of tables.values()) {
+    const tr = el('tr');
+    const nameTd = el('td', null, rec.name);
+    if (rec.sourceId == null) nameTd.append(el('span', 'fb-help', ' — not in this case'));
+    tr.append(nameTd);
+    const all = [];
+    for (const [kind] of KINDS) {
+      const rows = rec.rows[kind];
+      all.push(...rows);
+      const td = el('td', 'n diff-n-' + kind);
+      if (rows.length && rec.sourceId != null) {
+        const b = el('button', 'btn ghost', rows.length.toLocaleString());
+        b.title = `Open these ${rows.length.toLocaleString()} rows in the table, marked`;
+        b.onclick = () => pivotDiff(d, rec, kind);
+        td.append(b);
+      } else td.append(el('span', 'zero', rows.length ? rows.length.toLocaleString() : '·'));
+      tr.append(td);
+    }
+    const allTd = el('td', 'n');
+    if (all.length && rec.sourceId != null) {
+      const b = el('button', 'btn', all.length.toLocaleString());
+      b.title = 'Open every differing row in this table';
+      b.onclick = () => pivotDiff(d, rec, null);
+      allTd.append(b);
+    } else allTd.append(el('span', 'zero', '·'));
+    tr.append(allTd);
+    tbl.append(tr);
+  }
+  out.append(tbl);
+  const legend = el('div', 'diff-legend');
+  legend.append(legendMark('removed', 'A', `${L} only`), legendMark('added', 'B', `${R} only`),
+    legendMark('changed', 'A→B', 'both, differently'));
+  legend.append(el('span', null, 'A = ' + L + ', B = ' + R + '. Marks appear on the rows when you open them.'));
+  out.append(legend);
+  if (d.truncated) {
+    out.append(el('div', 'note-status',
+      'The comparison hit its row cap — these sessions differ on more rows than can be opened at once.'));
+  }
 }
+
+function legendMark(kind, glyph, text) {
+  const s = el('span');
+  s.append(el('span', 'diff-mark diff-mark-' + kind, glyph), ' ', el('b', null, text));
+  return s;
+}
+
+/* Into the grid: the table filtered to the differing rows (all kinds, or
+   one), every one of them marked with which session tagged it. The
+   filter is an ordinary raw `rid IN (…)` so sort, search and the detail
+   panel apply, and the banner's Done — or Clear filters — is the way out. */
+export async function pivotDiff(d, rec, kind) {
+  const rows = {};
+  for (const [k] of KINDS) {
+    for (const r of rec.rows[k]) rows[r.rid] = { kind: KIND_OF[k], left: r.left, right: r.right };
+  }
+  const rids = (kind ? rec.rows[kind] : Object.values(KINDS).flatMap(([k]) => rec.rows[k])).map((r) => r.rid);
+  S.diffMarks = { sourceId: rec.sourceId, left: nameOf(d.left), right: nameOf(d.right), rows, kind,
+    count: Object.keys(rows).length };
+  await openDiffRows(rec.sourceId, rids, kind ? KINDS.find(([k]) => k === kind)[1](nameOf(d.left), nameOf(d.right)) : 'All differences');
+}
+
+export async function openDiffRows(sourceId, rids, what) {
+  if (!(S.sources || []).some((s) => s.id === sourceId)) { toast('That table is no longer in this case'); return; }
+  const ids = [...new Set(rids.map(Number).filter(Number.isFinite))];
+  if (!ids.length) return;
+  $('modal').hidden = true;
+  await openSource(sourceId);
+  S.filterTree = { type: 'raw', sql: `rid IN (${ids.join(', ')})` };
+  updateFiltersButton();
+  renderHead();
+  await rebuildView({ keepScroll: false });
+  syncDiffBanner(what, ids.length);
+}
+
+/* The banner above the grid while a comparison is pivoted in. Follows the
+   view: it shows on the compared table and hides on any other, and Done
+   drops the marks and the filter together. */
+function syncDiffBanner(what, n) {
+  const b = $('diffBanner');
+  const dm = S.diffMarks;
+  if (!b) return;
+  if (!dm || dm.sourceId !== S.sourceId) { b.hidden = true; return; }
+  b.replaceChildren();
+  b.append(el('span', null, 'Comparing sessions — '), legendMark('removed', 'A', dm.left), legendMark('added', 'B', dm.right));
+  if (what) b.append(el('span', 'fb-help', `showing ${what.toLowerCase()} (${(n || 0).toLocaleString()} row${n === 1 ? '' : 's'})`));
+  const acts = el('span', 'diff-banner-actions');
+  const all = el('button', 'btn ghost', `All differences (${dm.count.toLocaleString()})`);
+  all.onclick = () => openDiffRows(dm.sourceId, Object.keys(dm.rows).map(Number), 'All differences');
+  const done = el('button', 'btn ghost', 'Done');
+  done.title = 'Drop the marks and the row filter';
+  done.onclick = async () => {
+    S.diffMarks = null;
+    S.filterTree = { type: 'group', op: 'AND', children: [] };
+    updateFiltersButton();
+    renderHead();
+    b.hidden = true;
+    await rebuildView({ keepScroll: false });
+  };
+  acts.append(all, done);
+  b.append(acts);
+  b.hidden = false;
+}
+
+// Switching tables hides the banner; coming back shows it again.
+document.addEventListener('winnow:viewchange', () => syncDiffBanner());

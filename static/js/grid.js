@@ -400,6 +400,17 @@ export function buildDataRow(pos, r, { cols, colMeta, idx, tagColor, widths, pin
       mid.append(st);
     }
     if (r.note) mid.append(el('span', 'has-note', '✎'));
+    // A session comparison's mark: which side tagged this row (see
+    // session.js pivotDiff). A: the left session, B: the right; A→B: both,
+    // differently; ✎: the note changed.
+    const dm = S.diffMarks && S.diffMarks.sourceId === S.sourceId ? S.diffMarks.rows[r.rid] : null;
+    if (dm) {
+      const glyph = { removed: 'A', added: 'B', changed: 'A→B', note: 'A→B' }[dm.kind] || '?';
+      const mark = el('span', 'diff-mark diff-mark-' + dm.kind, glyph);
+      const tags = (v) => (Array.isArray(v) ? (v.length ? v.join(', ') : 'no tags') : (v || 'no note'));
+      mark.title = `A · ${S.diffMarks.left}: ${tags(dm.left)}\nB · ${S.diffMarks.right}: ${tags(dm.right)}`;
+      mid.append(mark);
+    }
   }
   g.append(cb, mid, el('span', 'rid', r ? String(r.rid) : '·'));
   row.append(g);
