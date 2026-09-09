@@ -27,6 +27,7 @@ placements — the keyboard/trackpad path):
 | **Group rows on** | Any columns — one group per distinct combination |
 | **Ordered by** | One column that defines first/last (defaults to the first datetime column); ties break by file order, deterministically |
 | **Include columns** | Carried into the output next to the description, valued from each bookend's own row — drag the chips **or the preview's headers** to set their order |
+| **Total up** | Number columns summed over each group's **whole** set of rows, not just its two bookends — bytes moved across a session, events in a burst. Both bookends of a group carry the same total. A non-number column is refused rather than summed to zero |
 | **Filters** | Scope which rows participate — same operators as the grid |
 | **Description** | Free text + placeholders: `{which}` → First/Last, `{count}` → group size, `{Column}` → that row's own value. Click a chip to insert. A typo'd placeholder fails the preview by name, never ships garbage |
 
@@ -37,6 +38,11 @@ Ctrl+C copies the selection as TSV.
 
 A one-event group emits a single row labelled `First` — a story with one
 event has no separate ending.
+
+Totals ride the window that is already partitioned by the group (the same
+one behind `{count}`), so asking for them costs no extra pass over the
+table. Values that do not parse as numbers are skipped rather than read as
+zero, so one `n/a` in a byte column cannot quietly deflate a total.
 
 ## Output
 

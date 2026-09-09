@@ -155,6 +155,12 @@ def _esc_like(value):
 NUM_RE_SQL = r"^-?\d+(\.\d+)?$"
 
 
+def _is_number_column(src, col):
+    """Whether ingest typed this column as a number. Not _numeric() — that
+    returns the cast expression, and any non-empty string is truthy."""
+    return any(c["name"] == col and c.get("type") == "number" for c in src["columns"])
+
+
 def _numeric(src, col):
     ident = _col(src, col)
     return f"(CASE WHEN {ident} REGEXP '{NUM_RE_SQL}' THEN CAST({ident} AS REAL) ELSE NULL END)"
@@ -290,7 +296,17 @@ def _validated(req, body):
     if not sort_col:
         raise ValueError("Pick the column that orders each group (first/last are meaningless without one)")
     carry = body.get("columns") or []
-    _check_columns(src, group_cols + [sort_col] + carry)
+    sums = body.get("sum_columns") or []
+    if not isinstance(sums, list):
+        raise ValueError("sum_columns must be a list of column names")
+    _check_columns(src, group_cols + [sort_col] + carry + sums)
+    for c in sums:
+        # SUM over text is 0 in SQLite, and a 0 that looks like a real
+        # total is the kind of number that ends up in a report. _numeric
+        # builds a safe-cast EXPRESSION, not a predicate — the column's own
+        # declared type is the question here.
+        if not _is_number_column(src, c):
+            raise ValueError(f"{c} is not a number column — nothing to sum")
     for f in body.get("filters") or []:
         _check_columns(src, [f.get("column")])
     where, params = _where(src, body.get("filters"))
@@ -299,10 +315,17 @@ def _validated(req, body):
         where = f"{where} AND {tag_clause}" if where else f" WHERE {tag_clause}"
     template = body.get("template") or "{which} of {count}"
     row_json = bool(body.get("row_json"))
-    return src, group_cols, sort_col, carry, where, params, template, row_json
+    return src, group_cols, sort_col, carry, sums, where, params, template, row_json
 
 
-def _bookend_rows(req, src, group_cols, sort_col, carry, where, params, limit, row_json=False):
+def _sum_alias(col):
+    """The output column's name. Prefixed so it cannot collide with a
+    carried column of the same name sitting beside it."""
+    return f"Sum of {col}"
+
+
+def _bookend_rows(req, src, group_cols, sort_col, carry, where, params, limit,
+                  row_json=False, sums=()):
     """One windowed pass: rank each row inside its group both directions,
     keep rank 1 of each. Selected values are the *row's own* — the first
     row's user, not the group's."""
@@ -316,6 +339,15 @@ def _bookend_rows(req, src, group_cols, sort_col, carry, where, params, limit, r
             needed.append(c)
     sel = ", ".join(f"{_col(src, c)} AS {q(c)}" for c in needed)
     part = ", ".join(_col(src, c) for c in group_cols)
+    # Totals ride the window that is already partitioned by the group, so
+    # they cost no extra pass — the same reason group_n does. Every row of
+    # the group carries the total, and the bookends we keep are rows of it.
+    # _numeric's guarded cast, not a bare CAST: a number column can still
+    # hold the odd "-" or "n/a", and CAST turns those into 0, which is a
+    # wrong total rather than a missing one.
+    sum_sel = "".join(
+        f", SUM({_numeric(src, c)}) OVER (PARTITION BY {part}) AS {q(_sum_alias(c))}"
+        for c in sums)
     # Direction must be stated PER COLUMN: "ORDER BY ts, rid DESC" flips only
     # rid, leaving the last-window ranked by ascending time — every group's
     # "Last" would be its earliest row with the biggest rid. On a merge,
@@ -330,6 +362,7 @@ def _bookend_rows(req, src, group_cols, sort_col, carry, where, params, limit, r
         f" ROW_NUMBER() OVER (PARTITION BY {part} ORDER BY {order_asc}) AS rn_first,"
         f" ROW_NUMBER() OVER (PARTITION BY {part} ORDER BY {order_desc}) AS rn_last,"
         f" COUNT(*) OVER (PARTITION BY {part}) AS group_n"
+        f"{sum_sel}"
         f" FROM {_scope(req, src)}{where}"
     )
     outer = (
@@ -371,7 +404,15 @@ def _render(template, row, which):
 ROW_JSON_COLUMN = "Row (JSON)"
 
 
-def _emit(rows, sort_col, carry, template, json_cols=None):
+def _fmt_sum(v):
+    """Whole numbers without a trailing .0 — a count of bytes should read
+    as bytes. SUM is REAL so that mixed ints and decimals add up."""
+    if v is None:
+        return ""
+    return str(int(v)) if float(v).is_integer() else f"{float(v):g}"
+
+
+def _emit(rows, sort_col, carry, template, json_cols=None, sums=()):
     """The output rows: one per bookend. A single-row group is both its own
     first and its last — emitted once, labelled First (a story with one
     event has no separate ending). `json_cols` non-None adds a cell with
@@ -386,7 +427,9 @@ def _emit(rows, sort_col, carry, template, json_cols=None):
             labels.append("Last")
         for which in labels:
             desc = _render(template, r, which)
-            row = [r.get(sort_col, "")] + [("" if r.get(c) is None else str(r.get(c))) for c in carry]
+            row = ([r.get(sort_col, "")]
+                   + [("" if r.get(c) is None else str(r.get(c))) for c in carry]
+                   + [_fmt_sum(r.get(_sum_alias(c))) for c in sums])
             if json_cols is not None:
                 row.append(json.dumps({c: r.get(c) for c in json_cols}, ensure_ascii=False))
             out.append(row + [desc])
@@ -422,16 +465,17 @@ def preview(req):
     total group count, so 'Create table' says what it will make before it
     makes it."""
     body = req.body or {}
-    src, group_cols, sort_col, carry, where, params, template, row_json = _validated(req, body)
+    src, group_cols, sort_col, carry, sums, where, params, template, row_json = _validated(req, body)
     part = ", ".join(_col(src, c) for c in group_cols)
     count_sql = f"SELECT COUNT(*) FROM (SELECT 1 FROM {_scope(req, src)}{where} GROUP BY {part})"
     total_groups = req.store.run_sql(_inline(count_sql, params), limit=1)["rows"][0][0]
 
     rows, _ = _bookend_rows(req, src, group_cols, sort_col, carry, where, params,
-                            limit=PREVIEW_GROUPS * 2 + 2, row_json=row_json)
+                            limit=PREVIEW_GROUPS * 2 + 2, row_json=row_json, sums=sums)
     json_cols = [c["name"] for c in src["columns"]] if row_json else None
-    header = [sort_col] + carry + ([ROW_JSON_COLUMN] if row_json else []) + ["Description"]
-    return {"columns": header, "rows": _emit(rows, sort_col, carry, template, json_cols),
+    header = ([sort_col] + carry + [_sum_alias(c) for c in sums]
+              + ([ROW_JSON_COLUMN] if row_json else []) + ["Description"])
+    return {"columns": header, "rows": _emit(rows, sort_col, carry, template, json_cols, sums),
             "total_groups": total_groups}
 
 
@@ -440,12 +484,13 @@ def rows(req):
     preview shows only the first few groups, and copying should hand over
     what Create would have made, not what happened to be on screen."""
     body = req.body or {}
-    src, group_cols, sort_col, carry, where, params, template, row_json = _validated(req, body)
+    src, group_cols, sort_col, carry, sums, where, params, template, row_json = _validated(req, body)
     bookends, truncated = _bookend_rows(req, src, group_cols, sort_col, carry, where, params,
-                                        limit=MAX_COPY_ROWS, row_json=row_json)
+                                        limit=MAX_COPY_ROWS, row_json=row_json, sums=sums)
     json_cols = [c["name"] for c in src["columns"]] if row_json else None
-    header = [sort_col] + carry + ([ROW_JSON_COLUMN] if row_json else []) + ["Description"]
-    return {"columns": header, "rows": _emit(bookends, sort_col, carry, template, json_cols),
+    header = ([sort_col] + carry + [_sum_alias(c) for c in sums]
+              + ([ROW_JSON_COLUMN] if row_json else []) + ["Description"])
+    return {"columns": header, "rows": _emit(bookends, sort_col, carry, template, json_cols, sums),
             "truncated": truncated}
 
 
@@ -460,15 +505,16 @@ def create(req):
     like any other tag write. Rids are contiguous from 1 on every ingest
     path (invariant #2), which is what makes range(1, n+1) exact."""
     body = req.body or {}
-    src, group_cols, sort_col, carry, where, params, template, row_json = _validated(req, body)
+    src, group_cols, sort_col, carry, sums, where, params, template, row_json = _validated(req, body)
     bookends, truncated = _bookend_rows(req, src, group_cols, sort_col, carry, where, params,
-                                        limit=MAX_GROUPS * 2, row_json=row_json)
+                                        limit=MAX_GROUPS * 2, row_json=row_json, sums=sums)
     if truncated:
         raise ValueError(f"More than {MAX_GROUPS:,} groups — narrow the grouping or add a filter")
     json_cols = [c["name"] for c in src["columns"]] if row_json else None
-    out_rows = _emit(bookends, sort_col, carry, template, json_cols)
+    out_rows = _emit(bookends, sort_col, carry, template, json_cols, sums)
     name = (body.get("name") or "").strip() or f"First-Last of {src['name']}"
-    header = [sort_col] + carry + ([ROW_JSON_COLUMN] if row_json else []) + ["Description"]
+    header = ([sort_col] + carry + [_sum_alias(c) for c in sums]
+              + ([ROW_JSON_COLUMN] if row_json else []) + ["Description"])
     rec = req.store.ingest_rows(header, out_rows, name=name)
     out = {"source": {"id": rec["id"], "name": rec["name"], "row_count": rec["row_count"]}}
     tag_name = (body.get("timeline_tag") or "").strip()
