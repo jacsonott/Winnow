@@ -83,3 +83,36 @@ def test_the_authorizer_refuses_writes_the_text_scan_never_looked_for(store, wri
                 ro.execute(sql)
     finally:
         ro.close()
+
+
+# ------------------------------------------------- cross-case identifiers
+
+def test_a_quote_in_a_header_does_not_silently_drop_a_source_from_a_sweep(tmp_path):
+    """Column names are user data (invariant #5). The cross-case sweep built
+    them into SQL by hand, and `sanitize_columns` does not strip a double
+    quote — so a header like `Path"Name` produced a syntax error that
+    `except sqlite3.Error: continue` swallowed. The source vanished from the
+    sweep and an indicator that IS present reported zero hits: a false
+    negative in the one feature whose whole job is "is this anywhere".
+    """
+    import csv
+
+    from winnow import multicase as mc
+    from winnow.store import Store
+
+    case = tmp_path / "c.db-winnow"
+    src = tmp_path / "e.csv"
+    with open(src, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(['Path"Name', "Other"])
+        w.writerow(["C:/evil.exe", "x"])
+    store = Store(str(case))
+    try:
+        store.ingest_csv(str(src), name="e", build_fts=False)
+    finally:
+        store.close()
+
+    (result,) = mc.sweep_values([str(case)], ["evil.exe"])
+    assert result["error"] is None, result["error"]
+    assert result["hits"], "the source with a quoted header was skipped from the sweep"
+    assert result["hits"][0]["rid"] == 1

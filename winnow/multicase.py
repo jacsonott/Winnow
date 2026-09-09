@@ -32,7 +32,7 @@ import re
 import sqlite3
 from typing import Any, Iterator
 
-from winnow.store import read_only_authorizer
+from winnow.store import q, read_only_authorizer
 
 # `v` is already attached to the writable Store's connection; leave room.
 MAX_ATTACHED = 10
@@ -114,7 +114,7 @@ class CaseReader:
         the caller attached this case under."""
         lines = [f"-- {self.name} ({os.path.basename(self.path)}) attached as {alias}"]
         for s in self.sources():
-            cols = ",\n  ".join(f'"{c}" TEXT' for c in s["columns"])
+            cols = ",\n  ".join(f"{q(c)} TEXT" for c in s["columns"])
             lines.append(f'CREATE TABLE {alias}."{s["table_name"]}" (  -- {s["name"]}'
                          f' · {s["row_count"]:,} rows\n  {cols}\n);')
         return "\n".join(lines)
@@ -151,15 +151,15 @@ class CaseReader:
             cols = src["columns"]
             if not cols:
                 continue
-            blob = " || '\\u0001' || ".join(f'COALESCE("{c}", \'\')' for c in cols)
+            blob = " || '\\u0001' || ".join(f"COALESCE({q(c)}, '')" for c in cols)
             where = " OR ".join(f"{blob} LIKE ?" for _ in wanted)
             params = [f"%{v}%" for v in wanted]
             sel = "rid"
             if columns_per_row:
-                sel += ", " + ", ".join(f'"{c}"' for c in cols[:columns_per_row])
+                sel += ", " + ", ".join(q(c) for c in cols[:columns_per_row])
             try:
                 rows = self.db.execute(
-                    f'SELECT {sel} FROM "{src["table_name"]}" WHERE {where} '
+                    f"SELECT {sel} FROM {q(src['table_name'])} WHERE {where} "
                     f"LIMIT {int(limit_per_case - len(hits))}", params).fetchall()
             except sqlite3.Error:
                 continue          # a malformed source must not sink the sweep
@@ -190,16 +190,16 @@ class CaseReader:
             if not col or col not in src["columns"]:
                 continue
             others = [c for c in src["columns"] if c != col][:4]
-            sel = ", ".join(f'"{c}"' for c in [col] + others)
-            where, params = [f'"{col}" <> \'\''], []
+            sel = ", ".join(q(c) for c in [col] + others)
+            where, params = [f"{q(col)} <> ''"], []
             if start:
-                where.append(f'"{col}" >= ?'); params.append(start)
+                where.append(f"{q(col)} >= ?"); params.append(start)
             if end:
-                where.append(f'"{col}" <= ?'); params.append(end)
+                where.append(f"{q(col)} <= ?"); params.append(end)
             try:
                 rows = self.db.execute(
-                    f'SELECT rid, {sel} FROM "{src["table_name"]}" WHERE {" AND ".join(where)} '
-                    f'ORDER BY "{col}" LIMIT {int(limit - len(out))}', params).fetchall()
+                    f"SELECT rid, {sel} FROM {q(src['table_name'])} WHERE {' AND '.join(where)} "
+                    f"ORDER BY {q(col)} LIMIT {int(limit - len(out))}", params).fetchall()
             except sqlite3.Error:
                 continue
             for r in rows:
