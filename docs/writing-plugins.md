@@ -47,7 +47,7 @@ handed to its `register()` function:
 | `api.register_ingest_format(...)` | A file parser | Formats Winnow can't read: raw `$MFT`, EVTX, prefetch, a vendor's export |
 | `api.register_tab(...)` | A pinned tab with your own UI | A whole feature surface: a graph, a dashboard, an assistant, a report builder |
 | `api.register_api(route, handler)` | A backend endpoint | Whatever your tab (or a script) needs the server to do |
-| `api.register_row_action(...)` | An entry in the row right-click menu | Anything that operates on the selected rows: a VirusTotal lookup on the highlighted hashes, an enrichment, a hand-off to another tool |
+| `api.register_row_action(...)` | An entry under the row right-click menu's **Plugins ▸** submenu — analysts can pin it to the top of the menu | Anything that operates on the selected rows: a VirusTotal lookup on the highlighted hashes, an enrichment, a hand-off to another tool |
 | `api.register_toolbar_panel(...)` | A toggle in the table toolbar + a strip above the grid | Something that follows the current view: a histogram of when its rows happened, a sparkline, a legend |
 
 They compose: a tab usually pairs with one or more routes; a row action
@@ -1152,6 +1152,14 @@ matter most to a panel, which sits beside the grid and has to follow it.
 `handler(req: PluginRequest) -> JSON-able`; `req.body` is
 `{"source_id", "column", "value", "rows": [{"rid", "source_id", "cells"}]}`.
 Optional return keys `message` / `open_url` / `show_tab`. `ValueError` → 400.
+
+The entry appears under the row menu's **Plugins ▸** submenu (whose
+hint counts the actions on offer), with your plugin's name beside it. An
+analyst can drag it (or click its
+☆) onto the top of the menu, where it stays across sessions on that
+machine, keyed by `plugin:<fs_name>:<id>` — so keep `id` stable across
+versions, or their pin silently stops matching. `fs_name` is your plugin's
+folder name, so renaming the folder drops the pin too.
 
 ### `PluginRequest`
 

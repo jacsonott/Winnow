@@ -2,7 +2,7 @@
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { applyBundle } from './bundles.js';
-import { $, api, el, post, setBusy, toast } from './core.js';
+import { $, api, dragHas, el, post, setBusy, toast } from './core.js';
 import { loadPlugins, openImportModal, queueFiles } from './importer.js';
 import { inFlightWork, startJobsPoll } from './jobs.js';
 import { resetPluginTabMounts } from './plugins.js';
@@ -672,7 +672,7 @@ export async function deleteCaseFile(c) {
    fresh quick-look (temp) case. Both open the target and hand the files to
    the normal import modal — so the analyst still configures/reviews before
    ingest, exactly like an in-app drop. */
-const isFileDrag = (e) => !!(e.dataTransfer && [...(e.dataTransfer.types || [])].includes('Files'));
+const isFileDrag = (e) => dragHas(e, 'Files');
 
 async function importDroppedFiles(files, casePath) {
   try {

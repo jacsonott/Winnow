@@ -193,14 +193,22 @@ evidence folder tree there automatically.
 - **Notes** — a Markdown scratchpad saved in the case file. Links like
   `[the 4624 sweep](winnow:table/3)` navigate to tables, queries and
   dashboards from the preview — the Link ▾ button writes them for you.
-- **Dashboards** — named boards of widgets (counts, charts, top-N lists)
-  built from templates or your own SQL, with live preview before saving.
-  A board plus your enabled plugins saves as a **profile** you can apply
-  to the next case of the same type — the shipped **KAPE triage** profile
-  is exactly that: logon movement, RDP, tampering signals, registry
-  persistence, and a starter watchlist — plus a second **KAPE host
-  overview** board (hostname, IPs, domain, OS, role, Sysmon and
-  PowerShell logging posture, Security-log coverage, Defender alerts).
+- **Dashboards** — named boards of widgets (counts, charts, top-N lists).
+  Build one from what you are looking at: a column header's menu adds
+  its top values, distinct count or events-over-time; a cell's menu adds
+  a count of rows with that value; the Filters menu adds a count of the
+  current view. The widget editor is guided — pick a template, a table
+  and a column and it writes the SQL, with live preview; the SQL is there
+  under Advanced when you want it. Every widget built this way knows
+  where its rows are: click a number, a bar or a list row and the table
+  opens filtered to exactly those rows. A new board can start blank, from
+  a shipped board, from the library, or as a starter built from the open
+  table. A board plus your enabled plugins saves as a **profile** you can
+  apply to the next case of the same type — the shipped **KAPE triage**
+  profile is exactly that: host facts (hostname, IPs, domain, OS, role,
+  Sysmon and PowerShell logging posture, Security-log coverage, Defender
+  alerts), logon movement, RDP, tampering signals, registry persistence,
+  and a starter watchlist.
 
 ## Timestamps
 

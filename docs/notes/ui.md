@@ -87,7 +87,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   has never seen a single one of the rows. Untagging is a mode flip on the
   same menu rather than a ✓ toggle: a group is a set of rows with mixed
   tags, so there's no single row to read a checkmark off the way
-  `rowMenuTagItems` does. The throwaway view is safe to drop immediately
+  `rowMenuTagList` does. The throwaway view is safe to drop immediately
   because undo records the *rows* (invariant #7's `v.undo_<n>` delta table),
   not the view they were found through. Tagging while grouped *by tag* —
   and undoing — calls `regroupIfGroupedByTag()`: the tag just changed which
@@ -332,7 +332,32 @@ see [docs/notes/README.md](README.md) for the whole set.
   (positioned at the pointer) and `anchoredPanel` (a card with real
   controls in it) as the three entry points. That's what makes "only one
   of these is open at a time, and Escape closes it" true across all of
-  them rather than four near-copies of the same two listeners. The
+  them rather than four near-copies of the same two listeners. An item
+  may carry `submenu` (an array, or a function for one that repaints —
+  the tag list's ✓) and opens a `.menu-sub` flyout beside itself on
+  hover or click; one per level, closed with the root or when a plain
+  sibling is hovered; a click on the parent opens (never toggles shut)
+  and the arrow keys walk it (Right opens, Left closes and refocuses the
+  parent); from outside the menu only Down/Up step in, so a caret in a
+  text field keeps its arrows. A flyout's identity is its parent item's
+  `key` (else its label) at its depth — never its position, which a
+  repaint shifts when Undo appears. A menu opened with
+  `{ pins: '<key>' }` lets submenu items that declare a stable `pinId`
+  be dragged or ☆-starred onto a **Pinned** section at its top
+  (`menuPins`, localStorage `winnow.menupins`). The root's context
+  (pin store + repaint) and each submenu button's item live in WeakMaps
+  (`MENU`, `BTN`) rather than on the nodes, and one `repaintAll` rebuilds
+  the root, re-binds every open flyout to its parent's new button,
+  refills and re-places it — after a keepOpen click, a pin, or a tag
+  hotkey pressed with the menu up (`repaintOpenMenus`) — so a pinned
+  tag's ✓ and its twin inside the flyout always agree, and a pinned
+  plugin action simply isn't shown while the plugin is off (the plugins
+  panel refreshes `S.pluginRowActions` on toggle for that). Tag pins key
+  on the tag's *name* (ids are per case file). The row menu is the one
+  using it: filters for the clicked column stay broken out, Tag / Add to
+  dashboard / Copy / Plugins fold into submenus, Undo sits at the top
+  level beside Tag, and rules fall where a fold meets something broken
+  out (no section is named in the loop). The
   column-header menu is the one that *replaced* a visible control rather
   than adding a surface: its `▾` (`.hcell-fmt`) cost a slot of every
   header's width, on every table, forever, to be opened rarely — the same
@@ -351,7 +376,9 @@ see [docs/notes/README.md](README.md) for the whole set.
   now the place per-row features are expected to land — a new action
   should be an entry, never surgery on a growing if-chain. Sections get
   `{pos, colName, colIndex, value}` and return items; an empty return is
-  skipped, separator and all. The row is re-resolved (`rowAt(ctx.pos)`) on
+  skipped. Sections are not separator-delimited any more: the only rules
+  are before and after the broken-out filter block (`cell`), and every
+  other section contributes one folded `{label, submenu}` entry. The row is re-resolved (`rowAt(ctx.pos)`) on
   every repaint rather than captured, because a keepOpen tag item
   re-renders after tagging and the bulk tag path clears the page cache
   underneath it. Scope follows the selection: right-clicking *inside* one
@@ -546,4 +573,4 @@ see [docs/notes/README.md](README.md) for the whole set.
 
 - **Entity pivot tab** (entity.js) — pick any value and see everywhere it appears across every table: per-source counts, which columns it landed in, a merged time histogram (charts.js) and a chronological evidence stream. Reachable from any cell's right-click ('Pivot on X'), the watchlist, or the tab's search box. Backend entity_pivot reuses the blob search + TS_NORMALIZE (shared with a future super-timeline). See docs/design/analysis-suite.md.
 
-- **Case dashboard tab** (dashboard.js) — a grid of widgets, each a saved query + a render kind (stat/kv/chips/list/bar/histogram). Sources: sql (read-only run_sql), watchlist, tags. Layout lives in the case .db (Store.dashboard) so it travels with the case; 'Save as profile' extends a plugin bundle with the dashboard, so applying that profile on a new case lays it out. This is what gives plugin bundles ('profiles') their purpose. See docs/design/analysis-suite.md.
+- **Case dashboards** (dashboard.js, dashwidgets.js) — named boards of widgets, each a data source (sql via read-only run_sql, watchlist, tags) plus a render kind (stat/kv/chips/list/bar/histogram). Widgets are built from RECIPES (dashwidgets.js `WIDGET_TEMPLATES` + `widgetFrom`): a template, a table and the column/value it needs produce the SQL, the render, a `build` (the recipe, so the editor reopens guided) and a `drill` — `{table, where:[{column,op,value}] | tree: <filter-tree node>, column?, bucket?}` or `{table, spec}` for a count-of-this-view widget — which `drillInto` turns into the grid opened on those rows: `openSource(id, { skipBuild: true })`, every stashed filter/search/tag/timeframe reset, then one view build (placeholder tables resolve through `POST /api/dashboard/resolve`, which lists every source a `{{all:…}}` spans so the analyst picks one; a widget with SQL but no drill opens as a query in the SQL pane; a bucket the timeframe can't express is refused, and a bucket on a column not typed datetime filters by the label's prefix instead). The shipped KAPE drills are checked against their SQL on a fixture in tests/test_dashboard_drill.py: a stat's drill opens exactly the rows it counted. Hand-editing a recipe's SQL drops `build` and `drill` rather than leaving them describing a query they no longer match. Entry points that skip the editor: the column header menu (top values / distinct / over time), the row menu (count of this value) and the Filters menu (count of this view), all through `quickAddWidget`, which asks which board only when there are several. `createDashboard` offers a starting point — blank, a starter built from the open table (`buildStarter`: count, activity window, over time, top values of 2–12-distinct columns), a shipped board, or a library board. Layout lives in the case .db; 'Save as profile' extends a plugin bundle with the board. The shipped KAPE triage board carries hand-written drills (checked against the header sets in tests/test_dashboard_drill.py). See docs/design/analysis-suite.md.

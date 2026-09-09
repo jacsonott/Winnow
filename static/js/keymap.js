@@ -4,7 +4,7 @@
 import { autofitAllColumnWidths, resetAllColumnWidths, saveDefaultLayout, visibleCols } from './columns.js';
 import { openFilterBuilder } from './filterbuilder.js';
 import { $, ROW_H } from './core.js';
-import { currentModalAction } from './ui.js';
+import { currentModalAction, repaintOpenMenus } from './ui.js';
 import { toggleDetailPane } from './detail.js';
 import { filterBySelectedCell, openValuePickerForColumn, selectedCellTarget } from './filters.js';
 import { headH, moveCursor, render } from './grid.js';
@@ -423,7 +423,9 @@ document.addEventListener('keydown', (e) => {
   }
   if (/^[1-9]$/.test(digit) && S.activeTab === 'grid') {
     const t = S.tags.find((x) => x.hotkey === digit);
-    if (t) { e.preventDefault(); e.shiftKey ? applyTagToView(t) : applyTag(t); }
+    // The row menu's tag flyout may be open (its Tag entry advertises
+    // these keys); it repaints so its ✓ reads what just happened.
+    if (t) { e.preventDefault(); Promise.resolve(e.shiftKey ? applyTagToView(t) : applyTag(t)).then(repaintOpenMenus); }
   }
   // The SQL pane's result rows are taggable too, when the query resolves
   // real rows and some are selected (invariant #9's spirit: same

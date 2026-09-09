@@ -202,7 +202,8 @@ def test_widget_editor_pairs_every_label_with_its_control(page):
         page.wait_for_selector("#modal .dash-form")
         bad = page.evaluate(
             """() => [...document.querySelectorAll('#modal .dash-field')].filter(f => {
-                 const l = f.querySelector('label'), c = l.nextElementSibling;
+                 const l = f.querySelector('label'), c = l && l.nextElementSibling;
+                 if (!l) return false;   // the SQL box under Advanced is labelled by its summary
                  if (!c) return true;
                  const lb = l.getBoundingClientRect(), cb = c.getBoundingClientRect();
                  return !(cb.top >= lb.bottom - 1 && Math.abs(cb.left - lb.left) < 2);   // control sits under its label

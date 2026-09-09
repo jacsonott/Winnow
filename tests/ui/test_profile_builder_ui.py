@@ -128,9 +128,9 @@ def test_a_shipped_profile_opens_as_a_copy(page, api):
         _wait_for_builder(page)
         assert page.locator("#modalTitle").inner_text().lower().startswith("new profile from")
         assert page.locator("#modalBody .pb-head input").first.input_value() == "KAPE triage (copy)"
-        # the shipped profile's own boards come along, pre-checked
-        page.wait_for_selector("#modalBody .pb-row:has-text('KAPE host overview')")
-        assert page.locator("#modalBody .pb-row", has_text="KAPE host overview").count() == 1
+        # the shipped profile's own board comes along, pre-checked
+        page.wait_for_selector("#modalBody .pb-row:has-text('the profile\u2019s own board')")
+        assert page.locator("#modalBody .pb-row", has_text="KAPE triage").count() == 1
     finally:
         page.keyboard.press("Escape")
         _cleanup(api)

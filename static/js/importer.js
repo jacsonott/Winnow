@@ -2,7 +2,7 @@
 SQLite table picker, folder import, and OS drag-and-drop.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { $, api, debounce, el, post, toast } from './core.js';
+import { $, api, debounce, dragHas, el, post, toast } from './core.js';
 import { maybeOfferAssociation } from './assoc.js';
 import { openFolderBrowser } from './home.js';
 import { startJobsPoll, uploadWithProgress } from './jobs.js';
@@ -591,7 +591,7 @@ function openUnitPicker(src, { initial, onConfirm, onCancel } = {}, cfg) {
    hides too early) as the pointer passes over any child element. */
 export function wireFileDrop() {
   let depth = 0;
-  const isFileDrag = (e) => !!(e.dataTransfer && e.dataTransfer.types && e.dataTransfer.types.includes('Files'));
+  const isFileDrag = (e) => dragHas(e, 'Files');
 
   window.addEventListener('dragenter', (e) => {
     if (!isFileDrag(e)) return;

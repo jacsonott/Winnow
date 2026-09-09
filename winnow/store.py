@@ -7471,6 +7471,52 @@ class Store:
 
         return re.sub(r"\{\{([^}]+)\}\}", repl, sql)
 
+    def resolve_table_sources(self, table: str) -> list[int]:
+        """Every source a widget's table names in this case: one for src_N or
+        a plain placeholder, all of them for {{all:…}} — whose SQL unions
+        every match, so a drill has to say which one it is opening."""
+        key = (table or "").strip()
+        m = re.fullmatch(r"\{\{\s*all:([^}]+)\}\}", key)
+        if not m:
+            return [self.resolve_table_source(key)]
+        inner = m.group(1).strip()
+        hs = inner[len("header_set:"):].strip() if inner.lower().startswith("header_set:") \
+            else self._TABLE_SHORTHANDS.get(inner.lower(), inner)
+        srcs = self._sources_for_header_set(hs)
+        if not srcs:
+            raise ValueError(f"No \u201c{hs}\u201d table in this case yet")
+        return [int(s["id"]) for s in srcs]
+
+    def resolve_table_source(self, table: str) -> int:
+        """The source id a widget's table names in this case — `src_N`
+        as-is (if it exists), a `{{evtx}}` / `{{header_set:…}}` placeholder
+        by the same first-match rule the SQL resolver uses. `{{all:…}}`
+        binds to the first of its sources: a drilldown opens ONE table.
+        ValueError, worded like the widget's empty state, when there's
+        none."""
+        import re
+        key = (table or "").strip()
+        m = re.fullmatch(r"src_(\d+)", key)
+        if m:
+            sid = int(m.group(1))
+            if any(s["id"] == sid for s in self.list_sources()):
+                return sid
+            raise ValueError("That table is no longer in this case")
+        m = re.fullmatch(r"\{\{([^}]+)\}\}", key)
+        if not m:
+            raise ValueError(f"Not a table reference: {table!r}")
+        inner = m.group(1).strip()
+        if inner.lower().startswith("all:"):
+            inner = inner[4:].strip()
+        if inner.lower().startswith("header_set:"):
+            hs = inner[len("header_set:"):].strip()
+        else:
+            hs = self._TABLE_SHORTHANDS.get(inner.lower(), inner)
+        src = self._source_for_header_set(hs)
+        if not src:
+            raise ValueError(f"No \u201c{hs}\u201d table in this case yet")
+        return int(src["id"])
+
     def dashboard_widget_preview(self, source: str, query: dict, limit: int = 200) -> dict:
         """Run one widget's data source and return normalized tabular data
         the client renders per the widget's kind. SQL rides the read-only
