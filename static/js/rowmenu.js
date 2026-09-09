@@ -213,7 +213,10 @@ export function rowMenuCellItems(ctx) {
    where they right-clicked. */
 export function rowMenuDashboardItems(ctx) {
   const merged = S.sourceId == null || S.sourceId < 0;
-  const ok = !!ctx.colName && !merged;
+  // A derived column's values live in the drv_<id> sidecar, and a widget
+  // queries src_<id> — counting one would produce "no such column".
+  const derived = !!(S.columns || []).find((c) => c.name === ctx.colName && c.derived);
+  const ok = !!ctx.colName && !merged && !derived;
   const shown = ok ? ellipsize(displayValue(ctx.value)) : '';
   return [{
     label: 'Add to dashboard',
@@ -223,6 +226,7 @@ export function rowMenuDashboardItems(ctx) {
       disabled: !ok,
       title: !ctx.colName ? 'Right-click a cell to count its value'
         : merged ? 'A merged view is not one table a widget can count'
+        : derived ? 'A derived column is computed per row, not stored in the table a widget queries'
         : 'A number on a dashboard that opens these rows when clicked',
       onclick: () => quickAddWidget(widgetFrom({
         template: 'countwhere', table: tableOf(S.sourceId), column: ctx.colName,

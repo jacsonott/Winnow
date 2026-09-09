@@ -125,7 +125,9 @@ export function columnMenuItems(name) {
   }
   // Straight onto a board, no editor: the column is the pick, the
   // widget writes its own query and knows how to open these rows.
-  if (S.sourceId != null && S.sourceId >= 0) {
+  // Not for a derived column itself: a widget queries src_<id>, where a
+  // derived column's values are not (they are in the drv_<id> sidecar).
+  if (S.sourceId != null && S.sourceId >= 0 && !c.derived) {
     const table = tableOf(S.sourceId);
     items.push('-', { header: 'Add to dashboard' });
     items.push({ label: `Top values of ${name}`, onclick: () => quickAddWidget(widgetFrom({ template: 'top', table, column: name })) });

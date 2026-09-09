@@ -513,7 +513,14 @@ export async function drillInto(w, extra = {}) {
 async function openAsQuery(w) {
   try {
     const r = await post('/api/dashboard/resolve', { sql: w.query.sql });
-    const rec = await post('/api/sql_tabs', { name: w.title || 'Widget', sql: r.sql });
+    const name = w.title || 'Widget';
+    // Reuse the tab this widget already opened rather than creating one
+    // per click. SQL tabs live in the case file, so a pass over a board
+    // used to leave a permanent row of identically named duplicates —
+    // worst on a board whose widgets have no drill, where this button is
+    // the only thing that responds.
+    const mine = (S.sqlTabs || []).find((t) => t.name === name && t.sql === r.sql);
+    const rec = mine || await post('/api/sql_tabs', { name, sql: r.sql });
     S.sqlTabId = rec.id;
     showSqlTab();
   } catch (e) { toast('Could not open as a query: ' + e.message, 5000); }

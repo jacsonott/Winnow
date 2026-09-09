@@ -260,3 +260,28 @@ def test_header_sets_lists_the_shorthands_and_their_columns(client):
     names = {s["name"]: s["columns"] for s in body["sets"]}
     assert "EventId" in names["Event logs (EvtxECmd)"]
     assert "KeyPath" in names["Registry (RECmd batch)"]
+
+
+def test_a_union_placeholder_names_its_columns_rather_than_select_star(store, write_csv):
+    """`{{all:…}}` matches any source that CONTAINS the header set —
+    order-insensitive and superset-tolerant — so a positional `SELECT *`
+    union lined branches up on an assumption the matcher never made. A
+    table with the same columns in a different order unioned silently and
+    charted values from the wrong column; one with an extra column made
+    the branch widths differ and took the whole query down."""
+    cols = HEADER_SETS["ESXi / Linux host logs"]
+    store.ingest_csv(write_csv([cols, ["2026-03-14 08:00:00", "auth", "info", "sshd",
+                                       "1", "0", "root", "10.0.0.1", "Accepted password"]],
+                               "a.csv"), name="a", build_fts=False)
+    # Same set, different order, plus a column the set does not name.
+    shuffled = list(reversed(cols)) + ["Extra"]
+    row = {c: "" for c in shuffled}
+    row.update({"Timestamp": "2026-03-14 09:00:00", "Log": "shell", "Message": "esxcli",
+                "SourceIP": "10.0.0.2", "Extra": "ignore me"})
+    store.ingest_csv(write_csv([shuffled, [row[c] for c in shuffled]], "b.csv"),
+                     name="b", build_fts=False)
+
+    sql = store._resolve_table_placeholders(
+        "SELECT Log, SourceIP FROM {{all:header_set:ESXi / Linux host logs}} ORDER BY Log")
+    rows = store.run_sql(sql)["rows"]
+    assert rows == [["auth", "10.0.0.1"], ["shell", "10.0.0.2"]], rows
