@@ -169,8 +169,21 @@ def test_a_keyword_inside_a_string_is_not_a_keyword(cases):
 
 
 def test_the_query_cannot_write(cases):
-    with pytest.raises(sqlite3.OperationalError):
+    # DatabaseError, not OperationalError: the refusal now comes from the
+    # connection's authorizer ("not authorized") rather than from SQLite
+    # noticing a read-only attachment, which is the point — the authorizer
+    # also stops the writes that reach a NEW file (VACUUM INTO, ATTACH),
+    # where the attachment being read-only never helped. See
+    # tests/test_sql_read_only.py.
+    with pytest.raises(sqlite3.DatabaseError):
         mc.query_across(cases[:1], "UPDATE c1.sources SET name='x'")
+
+
+def test_the_query_cannot_write_a_new_file(cases, tmp_path):
+    target = tmp_path / "escaped.db"
+    with pytest.raises((ValueError, sqlite3.DatabaseError)):
+        mc.query_across(cases[:1], f"/* ' */ VACUUM INTO '{target}'")
+    assert not target.exists()
 
 
 def test_too_many_cases_is_a_clear_error(cases):

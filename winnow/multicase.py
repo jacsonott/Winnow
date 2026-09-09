@@ -32,6 +32,8 @@ import re
 import sqlite3
 from typing import Any, Iterator
 
+from winnow.store import read_only_authorizer
+
 # `v` is already attached to the writable Store's connection; leave room.
 MAX_ATTACHED = 10
 ATTACH_BUDGET = 8
@@ -229,6 +231,39 @@ def open_cases(paths: list[str], names: dict[str, str] | None = None) -> Iterato
 _FORBIDDEN_RE = re.compile(r"\b(attach|detach|pragma|vacuum)\b", re.IGNORECASE)
 
 
+def _strip_sql_comments(sql: str) -> str:
+    """Blank `--` and `/* */` comments. Without this a quote inside a
+    comment shifts the parity that _blank_string_literals depends on, and
+    the keyword scan below reads over the statement it is meant to catch
+    (`/* ' */ ATTACH ...`). Same fix as Store's pane guard."""
+    out: list[str] = []
+    i, n = 0, len(sql)
+    while i < n:
+        two = sql[i:i + 2]
+        if two == "--":
+            while i < n and sql[i] != "\n":
+                out.append(" ")
+                i += 1
+        elif two == "/*":
+            end = sql.find("*/", i + 2)
+            stop = n if end < 0 else end + 2
+            out.append(" " * (stop - i))
+            i = stop
+        elif sql[i] == "'":
+            out.append(sql[i])
+            i += 1
+            while i < n:
+                out.append(sql[i])
+                if sql[i] == "'":
+                    i += 1
+                    break
+                i += 1
+        else:
+            out.append(sql[i])
+            i += 1
+    return "".join(out)
+
+
 def _blank_string_literals(sql: str) -> str:
     """Single-quoted literals blanked, so a keyword inside a string is not
     read as a keyword. Same idea as Store's SQL-pane guard."""
@@ -259,7 +294,7 @@ def query_across(paths: list[str], sql: str, *, limit: int = 5000,
         raise ValueError(
             f"SQLite attaches at most {MAX_ATTACHED} databases at once — "
             f"pick {ATTACH_BUDGET} cases or fewer")
-    structural = _blank_string_literals(sql or "")
+    structural = _blank_string_literals(_strip_sql_comments(sql or ""))
     if not structural.strip():
         raise ValueError("Write a query")
     if _FORBIDDEN_RE.search(structural):
@@ -272,6 +307,11 @@ def query_across(paths: list[str], sql: str, *, limit: int = 5000,
             conn.row_factory = sqlite3.Row
             for alias, r in zip(aliases, readers):
                 conn.execute(f"ATTACH DATABASE ? AS {alias}", (f"file:{r.path}?mode=ro",))
+            # After the attaches, so they are still allowed: from here the
+            # connection can only read. The main database here is :memory:
+            # and therefore writable, so the keyword scan above was the only
+            # thing standing between a cross-case query and a file write.
+            conn.set_authorizer(read_only_authorizer)
             import time as _time
             t0 = _time.time()
             cur = conn.execute(sql)
