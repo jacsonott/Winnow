@@ -13,6 +13,7 @@ import contextlib
 import functools
 import anyio
 import heapq
+import ipaddress
 import json
 import os
 import re
@@ -299,6 +300,41 @@ _reload_plugins()
 # POST's already does.
 CSRF_HEADER = "X-Timeline-Lite-Client"
 
+# Host names this server will answer to. The custom-header gate above rests
+# on a cross-origin page being unable to set the header — which holds right
+# up until the page IS same-origin. DNS rebinding does exactly that: a page
+# on evil.com re-resolves its own name to 127.0.0.1, and the browser then
+# treats it as same-origin with Winnow, so it can set any header it likes
+# and read the responses. The TCP peer really is 127.0.0.1, so _is_loopback
+# does not help either.
+#
+# The Host header is what distinguishes the two, because the browser sends
+# the name it resolved. An IP literal cannot be rebound (there is no name to
+# re-resolve), and the loopback names below are the ones a browser can only
+# reach by being on this machine. Anything else is a name we never told
+# anyone to use, and is refused — add it with --allow-host if you meant it.
+LOOPBACK_HOST_NAMES = {"localhost", "localhost.localdomain", "127.0.0.1", "::1", "[::1]"}
+ALLOWED_HOSTS: set[str] = set(LOOPBACK_HOST_NAMES)
+
+
+def _host_is_allowed(raw: str) -> bool:
+    """`raw` is the Host header: "name", "name:port", or "[v6]:port"."""
+    host = (raw or "").strip()
+    if not host:
+        return False          # HTTP/1.1 requires it; absent means crafted
+    if host.startswith("["):  # bracketed IPv6, with or without a port
+        host = host[: host.index("]") + 1] if "]" in host else host
+    elif ":" in host:
+        host = host.rsplit(":", 1)[0]
+    host = host.strip("[]").lower()
+    if host in ALLOWED_HOSTS:
+        return True
+    try:                      # an IP literal has no name to rebind
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
+
 
 # ------------------------------------------------------------ error log
 #
@@ -374,6 +410,20 @@ async def op_cancelled_handler(request: Request, exc: OpCancelled):
     # fault — the frontend treats it as "keep what you had". Deliberately
     # not 4xx-per-endpoint: any cancellable operation can raise this.
     return JSONResponse({"detail": "Cancelled"}, status_code=499)
+
+
+@app.middleware("http")
+async def check_host_header(request: Request, call_next):
+    """Refuse a Host this server was never meant to answer to. See
+    ALLOWED_HOSTS — this is what keeps the client-header gate meaningful
+    against a page that has made itself same-origin by rebinding DNS."""
+    if not _host_is_allowed(request.headers.get("host", "")):
+        return PlainTextResponse(
+            "Unrecognised Host header. Reach Winnow at the address it printed "
+            "on startup, or pass --allow-host if you front it with a name.",
+            status_code=421,   # Misdirected Request
+        )
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -935,6 +985,16 @@ def api_case_open(body: CaseOpen):
     global STORE
     if not os.path.isfile(body.path):
         raise HTTPException(400, f"No case file at {body.path}")
+    # An existing file that is not a case must not be opened AS one:
+    # Store.__init__ runs META_SCHEMA against whatever it is handed, so
+    # pointing this at a browser history database or a mounted piece of
+    # evidence would add tables to it in place. is_winnow_case_file has
+    # existed for the double-click handler since before this route did; it
+    # is the same question. A path that does not exist yet is a new case
+    # and goes through /api/cases, which is where creation belongs.
+    if not is_winnow_case_file(body.path):
+        raise HTTPException(
+            400, f"{body.path} is not a Winnow case file — opening it would write into it")
     # Re-opening the case that's already open is a no-op, not a reopen. Two
     # reasons, and the second is the load-bearing one: the client's own
     # state reset in openCase() is what that request is really for, and the
@@ -1659,6 +1719,15 @@ def api_cases_delete(case_id: int, delete_file: bool = False):
         if rec and os.path.isfile(rec["path"]):
             if STORE is not None and os.path.abspath(STORE.path) == os.path.abspath(rec["path"]):
                 raise HTTPException(400, "Close this case before deleting its file")
+            # Registering a case is just recording a path, and nothing
+            # checked what was at the end of it — so "forget this case, and
+            # delete the file" was an unlink of anything the analyst's
+            # account could reach. Deleting a case file requires it to be
+            # one; the registry entry goes either way.
+            if not is_winnow_case_file(rec["path"]):
+                raise HTTPException(
+                    400, f"{rec['path']} is not a Winnow case file — removed from the "
+                         "list, but not deleted from disk")
             os.remove(rec["path"])
     WS.cases.delete(case_id)
     return {"ok": True}
@@ -2428,6 +2497,7 @@ def api_plugin_bundles_apply(bundle_id: int):
 
 @app.post("/api/plugins/install")
 async def api_plugins_install(
+    request: Request,
     files: list[UploadFile] = File(...),
     paths: str | None = Form(None),  # JSON list of relative paths aligned with files — folder installs; omitted for a single .py
     overwrite: bool = Form(False),
@@ -2450,6 +2520,11 @@ async def api_plugins_install(
     response carries the load error, and the panel shows it exactly as it
     would any other broken plugin; deleting or fixing it is the analyst's
     call, same as a hand-copied broken plugin."""
+    # Loopback only, like /api/browse_dir/new and for a stronger reason:
+    # this route writes .py into the plugin directory and then imports it.
+    # Every other gate here is a header a same-origin page can set.
+    if not _is_loopback(request):
+        raise HTTPException(403, "Plugin installation is local-only")
     try:
         rel_paths = json.loads(paths) if paths else [f.filename or "" for f in files]
     except json.JSONDecodeError:
@@ -4168,6 +4243,10 @@ def main() -> None:
     ap.add_argument("--case", default=None, help="SQLite case file (created if missing). Omit to land on the home screen.")
     ap.add_argument("--open", dest="open_files", nargs="*", default=[], help="CSVs to ingest at startup")
     ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--allow-host", action="append", default=[], metavar="NAME",
+                    help="Extra Host header value to accept (a reverse proxy's "
+                         "name, say). Repeatable. IP literals and loopback "
+                         "names are always accepted; see ALLOWED_HOSTS.")
     ap.add_argument("--force", action="store_true",
                     help="Open --case even if another Winnow already has it open")
     ap.add_argument("--port", type=int, default=8777)
@@ -4208,6 +4287,10 @@ def main() -> None:
             # reads like a failed load when it's a perfectly good plugin.
             what = ", ".join(p["formats"] + p["tabs"]) or "registered nothing"
             print(f"Plugin loaded: {p['name']}" + (f" v{p['version']}" if p["version"] else "") + f" ({what})")
+
+    # The bound address is by definition one this server answers to, as is
+    # anything the operator named explicitly.
+    ALLOWED_HOSTS.update({args.host.lower(), *(h.lower() for h in args.allow_host)})
 
     if args.host not in ("127.0.0.1", "localhost", "::1"):
         print(
