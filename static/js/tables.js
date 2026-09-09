@@ -5,7 +5,7 @@ import { openTableMenu } from './timeframe.js';
 import { $, api, el, post, setBusy, toast } from './core.js';
 import { writeClipboardText } from './grouping.js';
 import { sqlSchemaForLLM } from './plugins.js';
-import { editSourceNickname, loadSources, sourceLabel, sourceTitle } from './sources.js';
+import { dropViewStateFor, editSourceNickname, loadSources, sourceLabel, sourceTitle } from './sources.js';
 import { S } from './state.js';
 import { markModalAction, confirmDialog, modal } from './ui.js';
 
@@ -173,6 +173,7 @@ export function openTablesManager() {
           } else {
             await api(`/api/source/${s.id}`, { method: 'DELETE' });
             S.viewCache.delete(s.id); // SQLite can reuse a deleted source's row id — don't let a stale cached view leak onto it
+            dropViewStateFor(s.id);   // nor the filters/sort stashed for it
             if (S.diffMarks && S.diffMarks.sourceId === s.id) S.diffMarks = null; // nor a comparison's marks
           }
           if (S.sourceId === s.id) S.sourceId = null;

@@ -402,6 +402,12 @@ function resetGridState() {
   S.searchMode = 'contains';
   S.searchTerms = [];
   S.tagFilter = [];
+  // A widget's number is computed over the whole table, so the rows behind
+  // it are too. The timeframe is global state, so say so rather than
+  // turning it off under the analyst.
+  if (S.timeRange && S.timeRange.enabled) {
+    toast('Timeframe filter turned off — these are all the rows behind that number', 4000);
+  }
   S.timeRange = { enabled: false, column: null, start: '', end: '' };
   $('search').value = '';
   document.querySelectorAll('#searchModeToggle button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.mode === 'contains')));

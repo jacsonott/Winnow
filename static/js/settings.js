@@ -766,9 +766,15 @@ export function openSettings() {
           addBtn.disabled = true;
           const done = () => {
             document.removeEventListener('keydown', capture, true);
+            document.removeEventListener('winnow:modalclose', done);
             addBtn.disabled = false;
             addBtn.textContent = '+ key';
           };
+          // Closing the modal disarms it. Escape already did (capture
+          // handles it), but the × button did not: the listener outlived
+          // the dialog, swallowed the next keystroke anywhere in the app,
+          // and silently bound it to this action.
+          document.addEventListener('winnow:modalclose', done);
           const capture = (ke) => {
             ke.preventDefault();
             ke.stopPropagation();

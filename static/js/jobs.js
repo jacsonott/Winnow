@@ -37,6 +37,17 @@ export const dismissedJobs = new Set();
 
 export const ftsWatch = new Set();
 
+/* Job ids and source ids both restart at 1 in a new case (`_ingest_job_seq`
+   is per Store; `sources.id` is a plain INTEGER PRIMARY KEY). Everything
+   above is keyed by one of them, so carrying it across a case switch makes
+   case B's first import inherit case A's "already dismissed" and never
+   show a progress row. Called from home.js openCase. */
+export function resetJobState() {
+  seenJobStatus.clear();
+  dismissedJobs.clear();
+  ftsWatch.clear();
+}
+
       // source ids seen building, for the "ready" toast
 
 export function uploadWithProgress(url, fd, name) {

@@ -24,8 +24,8 @@ import { openCaseSettings } from './settings.js';
 import { openErrorLog } from './errlog.js';
 import { S, selClear, selCount, selFirst, specKey } from './state.js';
 import { compactCaseFile, openTablesManager } from './tables.js';
-import { loadTags, renderTagRibbon } from './tags.js';
-import { openTableMenu, updateFiltersButton } from './timeframe.js';
+import { loadTags, refreshTagCounts, renderTagRibbon } from './tags.js';
+import { openTableMenu, updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
 import { baseColumns } from './tsformat.js';
 import { confirmDialog, dropdownMenu, modal, promptDialog } from './ui.js';
 import { rebuildView } from './view.js';
@@ -607,6 +607,13 @@ const viewStateStash = new Map();
 
 export function clearViewStateStash() { viewStateStash.clear(); }
 
+/* One table's stash, dropped when that table is. SQLite reuses a deleted
+   source's id, so a re-import can land on it and inherit the previous
+   file's filters and sort — silently showing a slice of a table nobody
+   filtered, or a filter on a column the new file doesn't have. closeTab
+   already does this; Remove did not. */
+export function dropViewStateFor(id) { return viewStateStash.delete(id); }
+
 function stashViewState() {
   if (S.sourceId == null || !S.view) return;
   viewStateStash.set(S.sourceId, {
@@ -728,7 +735,11 @@ export async function openSource(id, { skipBuild = false } = {}) {
     // Same filter/sort/search as last time we had this source open — the
     // materialized v.view_N table is still alive server-side (Store only
     // evicts views for the SAME source on rebuild), so skip re-materializing.
-    S.view = { view_id: cached.view_id, row_count: cached.row_count, elapsed_ms: cached.elapsed_ms };
+    // source_id included: refreshTagCounts compares it against S.sourceId
+    // and returns early without it, so the tag ribbon silently kept showing
+    // whole-table counts beside a filtered view for as long as it lasted.
+    S.view = { view_id: cached.view_id, row_count: cached.row_count,
+               elapsed_ms: cached.elapsed_ms, source_id: id };
     clearPageCache();
     selClear();
     S.anchor = -1;
@@ -739,6 +750,7 @@ export async function openSource(id, { skipBuild = false } = {}) {
     render();
     drawRail();
     updateFiltersButton();
+    refreshTagCounts();   // no rebuild happened, so nothing else re-scoped them
     // The cached view is flat — a restored grouping still needs its
     // summary levels rebuilt on top of it.
     if (S.groupByCols.length) await regroupAll();
@@ -1367,11 +1379,11 @@ export async function clearAllFilters(seed = null) {
    tag filter or grouping ANDed underneath it. What a pivot from elsewhere
    (a session comparison's "open these rows") needs: the promise is "these
    N rows", not "these N rows intersected with whatever was on screen". */
-export async function replaceFilters(tree) {
-  return landOnFilters({}, tree);
+export async function replaceFilters(tree, { clearTimeframe = false } = {}) {
+  return landOnFilters({}, tree, { clearTimeframe });
 }
 
-async function landOnFilters(filters, tree) {
+async function landOnFilters(filters, tree, { clearTimeframe = false } = {}) {
   // Deliberately doesn't touch S.timeRange — the timeframe filter is meant
   // to survive exactly this ("apply/clear filters shouldn't lose my
   // timeframe"), same as it survives applyPreset() and a tab switch. Use
@@ -1387,6 +1399,16 @@ async function landOnFilters(filters, tree) {
   S.filters = filters;
   S.search = ''; S.tagFilter = []; S.searchTerms = []; S.advCollapsed = null;
   S.filterTree = tree;
+  // A pivot from a COUNT has to show the rows behind that count. The
+  // numbers it came from — a dashboard widget's SQL, a session diff — are
+  // computed against the whole table and know nothing about the timeframe,
+  // so leaving it on would show fewer rows than the number promised. The
+  // caller says so out loud (it is global state) rather than this being a
+  // silent difference between two drills.
+  if (clearTimeframe) {
+    S.timeRange = { enabled: false, column: null, start: '', end: '' };
+    updateTimeRangeButton();
+  }
   updateFiltersButton();
   $('search').value = '';
   renderHead(); renderTagRibbon();

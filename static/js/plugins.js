@@ -312,7 +312,7 @@ export function hidePluginViews() {
 }
 
 export function resetPluginTabMounts() {
-  for (const m of pluginTabMounts.values()) m.container.remove();
+  for (const [id, m] of pluginTabMounts) { disposePluginMount(id); m.container.remove(); }
   pluginTabMounts.clear();
 }
 
@@ -328,7 +328,7 @@ export function renderPluginTabs() {
   renderPageTabs();
   for (const [id, m] of [...pluginTabMounts]) {
     const t = pluginTabById(id);
-    if (!t || t.gen !== m.gen) { m.container.remove(); pluginTabMounts.delete(id); }
+    if (!t || t.gen !== m.gen) { disposePluginMount(id); m.container.remove(); pluginTabMounts.delete(id); }
   }
   if (S.activeTab.startsWith('plugin:') && !pluginTabById(S.activeTab.slice(7))) showGridTab();
 }
@@ -339,6 +339,33 @@ export function renderPluginTabs() {
    connection server-side — see run_sql) is the blessed way for a tab to
    query the case; `schemaText` is the same LLM-ready schema dump the SQL
    pane's copy button builds. */
+/* Document-level listeners a mounted plugin registered, per mount id.
+
+   The context hands out onViewChange/onAppearanceChange with an
+   unsubscribe, but a mount is torn down by removing its container — the
+   plugin never gets a chance to call it, and there is no onDestroy in the
+   contract. Opening a case reloads every plugin, which bumps its gen and
+   drops every mount, so the listeners accumulated one set per case switch:
+   each still firing on every grid rebuild, painting into detached DOM and
+   re-issuing the panel's fetch. Tracked here and cut in disposePluginMount,
+   which every teardown path calls. */
+const mountListeners = new Map();   // mount id -> [unsubscribe]
+
+function trackMountListener(id, off) {
+  if (id == null) return off;
+  const list = mountListeners.get(id) || [];
+  list.push(off);
+  mountListeners.set(id, list);
+  return off;
+}
+
+export function disposePluginMount(id) {
+  for (const off of mountListeners.get(id) || []) {
+    try { off(); } catch { /* a plugin's own teardown must not block ours */ }
+  }
+  mountListeners.delete(id);
+}
+
 export function buildPluginTabContext(tab) {
   return {
     apiVersion: 2,
@@ -384,7 +411,7 @@ export function buildPluginTabContext(tab) {
     onViewChange: (cb) => {
       const h = (e) => cb(e.detail);
       document.addEventListener('winnow:viewchange', h);
-      return () => document.removeEventListener('winnow:viewchange', h);
+      return trackMountListener(tab.id, () => document.removeEventListener('winnow:viewchange', h));
     },
     // Fires after every skin / theme / accent change with {style, themeMode,
     // accent}. Canvases don't inherit CSS — a panel that painted with the
@@ -393,7 +420,7 @@ export function buildPluginTabContext(tab) {
     onAppearanceChange: (cb) => {
       const h = (e) => cb(e.detail);
       document.addEventListener('winnow:appearance', h);
-      return () => document.removeEventListener('winnow:appearance', h);
+      return trackMountListener(tab.id, () => document.removeEventListener('winnow:appearance', h));
     },
     // Drive the case timeframe filter (the toolbar's ⏱) from a plugin —
     // the same object the Timeframe dialog writes, so the button, the
@@ -435,7 +462,7 @@ export async function showPluginTab(tabId) {
   syncTabChrome();
 
   let m = pluginTabMounts.get(tabId);
-  if (m && m.gen !== tab.gen) { m.container.remove(); pluginTabMounts.delete(tabId); m = null; }
+  if (m && m.gen !== tab.gen) { disposePluginMount(tabId); m.container.remove(); pluginTabMounts.delete(tabId); m = null; }
   if (m) {
     m.container.hidden = false;
   } else {
@@ -489,7 +516,7 @@ export function renderPluginPanelButtons() {
   // A panel whose plugin was disabled or reloaded loses its mount.
   for (const [id, m] of [...pluginPanelMounts]) {
     const p = (S.pluginPanels || []).find((x) => x.id === id);
-    if (!p || p.gen !== m.gen) { m.container.remove(); pluginPanelMounts.delete(id); }
+    if (!p || p.gen !== m.gen) { disposePluginMount(id); m.container.remove(); pluginPanelMounts.delete(id); }
   }
   for (const p of S.pluginPanels || []) {
     const b = el('button', 'btn ghost plugin-panel-btn', p.label);

@@ -155,8 +155,18 @@ export function wireNotes() {
   });
 }
 
-// A case switch invalidates the loaded body; refetch on next open.
-export function resetNotes() { loaded = false; }
+/* A case switch invalidates the loaded body — and the TEXT, which is the
+   part that bit: clearing only the flag left the previous case's narrative
+   in the editor, where showNotesTab's anti-clobber guard then refused to
+   seed the new case's body over it. The analyst read case A's notes under
+   case B's title, and the first keystroke autosaved them onto case B. */
+export function resetNotes() {
+  loaded = false;
+  const ed = $('notesEditor');
+  if (ed) ed.value = '';
+  const prev = $('notesPreview');
+  if (prev) prev.innerHTML = '';
+}
 
 export async function showNotesTab() {
   recordTabVisit({ kind: 'page', key: 'notes' });
