@@ -41,7 +41,7 @@ a folder import, or the per-format picker in Settings → Plugins.
 ## As a reference for writing your own plugin
 
 This folder demonstrates every part of the authoring contract documented
-in [`plugin_api.py`](../../../plugin_api.py): a package-style plugin with
+in [`plugin_api.py`](../../../winnow/plugin_api.py): a package-style plugin with
 `PLUGIN` metadata and relative imports, two `register_ingest_format`
 calls, extension *and* bare-filename matching (a `$MFT` has no extension),
 a per-format `choice` option, streaming row generators, and explicit

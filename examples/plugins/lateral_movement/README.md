@@ -52,7 +52,7 @@ or `cp -r examples/plugins/lateral_movement plugins/`. No restart needed.
 ## As a reference for writing your own UI plugin
 
 The most complete demonstration of the plugin custom-UI hooks documented
-in [`plugin_api.py`](../../../plugin_api.py):
+in [`plugin_api.py`](../../../winnow/plugin_api.py):
 
 - `register_tab(id, label, entry)` — a pinned tab whose content is
   `ui/tab.js` (+ `ui/tab.css`), ES modules served from the plugin folder,

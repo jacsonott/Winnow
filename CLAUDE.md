@@ -173,8 +173,9 @@ updater.py         Updating in place without losing analyst state, which all
                     applying; rollback() undoes. Never checks on its own.
 update.py          The CLI front door to updater.py — --check, --dry-run,
                     --from (the airgap path), --download-only, --rollback,
-                    and --main (development: sync to the branch tip rather
-                    than a release; the install records main@<sha>).
+                    and --dev (development: sync to the develop branch tip
+                    rather than a release; the install records
+                    develop@<sha>; --branch NAME overrides which).
                     The one that still works when a bad update has broken
                     the UI, since it needs no running server.
 xlsxread.py        Excel .xlsx/.xlsm reading for import — a thin typed-cell→
@@ -421,9 +422,15 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
    fragments, batch derived add, the first_last/pivot/lateral_movement
    plugins) was closed in #53–#55 — the plugins' `_scope()` union shape
    is the pattern to copy for any new per-member read. Structural
-   exceptions worth knowing: a merge has no `src_N` of its own, so the
-   SQL pane and the claude_assistant plugin (which writes SQL against
-   `src_N` by name) can't address one; and the Timeline configures real
+   exceptions worth knowing, kept current because this list is where the
+   exceptions live: a merge has no `src_N` of its own, so anything that
+   writes SQL against a table by name has to handle it. The SQL pane
+   *does* — `_pane_connection` creates a `merge_<id>` TEMP VIEW for every
+   merge and `sqlassist.js` offers them — but the claude_assistant plugin
+   does not, and neither do **dashboards**: `_sources_for_header_set`
+   skips merges, `tableOf` emits `src_-3` which `resolve_table_source`
+   rejects, the widget editor's From list excludes them, and every "Add
+   to dashboard" entry is disabled on one. The Timeline configures real
    sources (a merge's tags live on its members, so they appear
    regardless).
 
