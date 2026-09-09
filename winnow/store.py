@@ -5653,6 +5653,10 @@ class Store:
         # so a forensic value like CommandLine = 'SELECT * FROM users' isn't
         # mistaken for a SELECT statement, and a value like 'Sysmon' isn't
         # mistaken for a bare identifier.
+        # NOT comment-stripped: this validator REJECTS comments outright a
+        # line below, and stripping them first would blank the very markers
+        # it looks for. (The SQL pane, where comments are legal, strips them
+        # before its keyword scan instead — see run_sql.)
         structural = _blank_string_literals(frag)
         if ";" in structural or "--" in structural or "/*" in structural or "*/" in structural:
             raise ValueError("Statement separators and comments are not allowed")
@@ -8884,6 +8888,9 @@ class Store:
                     continue
         except sqlite3.Error:
             pass
+        # Last, so the TEMP views above are still allowed to be created:
+        # from here on this connection can only read.
+        ro.set_authorizer(read_only_authorizer)
         return ro
 
     SQL_TO_TABLE_SOFT_CAP = 500_000
@@ -8897,7 +8904,7 @@ class Store:
         name = (name or "").strip()
         if not name:
             raise ValueError("Name the new table")
-        structural = _blank_string_literals(sql)
+        structural = _blank_string_literals(_strip_sql_comments(sql))
         if self.SQL_PANE_FORBIDDEN_RE.search(structural):
             raise ValueError("ATTACH, DETACH, PRAGMA and VACUUM aren't allowed in the SQL pane")
         ro = self._pane_connection()
@@ -8944,7 +8951,7 @@ class Store:
         on). Stacked statements aren't a separate concern here: Python's
         sqlite3 already refuses to execute more than one statement per call.
         """
-        structural = _blank_string_literals(sql)
+        structural = _blank_string_literals(_strip_sql_comments(sql))
         if self.SQL_PANE_FORBIDDEN_RE.search(structural):
             raise ValueError("ATTACH, DETACH, PRAGMA and VACUUM aren't allowed in the SQL pane")
         ro = self._pane_connection()
@@ -9002,6 +9009,65 @@ def _xlsx_sheet_name(name: str, used: set[str]) -> str:
         n += 1
     used.add(clean.lower())
     return clean
+
+
+# The only SQLite actions a read-only query needs. Everything else — the
+# CREATE_TABLE/INSERT/ATTACH that `VACUUM INTO` performs, a bare ATTACH,
+# a PRAGMA, any write — is refused by the authorizer below.
+#
+# This exists because the keyword blacklist it backs up was bypassable:
+# `_blank_string_literals` has no notion of comments, so `/* ' */ VACUUM
+# INTO 'x'` shifted quote parity and blanked the keyword out of the string
+# the blacklist scanned. Text scanning is the friendly error; the
+# authorizer is the guarantee, and it cannot be fooled by spelling.
+_READ_ONLY_ACTIONS = frozenset({
+    sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ, sqlite3.SQLITE_FUNCTION,
+    sqlite3.SQLITE_TRANSACTION, sqlite3.SQLITE_RECURSIVE,
+})
+
+
+def read_only_authorizer(action, _arg1, _arg2, _db, _trigger):
+    return sqlite3.SQLITE_OK if action in _READ_ONLY_ACTIONS else sqlite3.SQLITE_DENY
+
+
+def _strip_sql_comments(frag: str) -> str:
+    """Blank `--` and `/* */` comments, preserving length. Runs before
+    literal blanking: a quote inside a comment is not a quote, and letting
+    it shift parity is what made the keyword scan bypassable."""
+    out: list[str] = []
+    i, n = 0, len(frag)
+    while i < n:
+        two = frag[i:i + 2]
+        if two == "--":
+            while i < n and frag[i] != "\n":
+                out.append(" ")
+                i += 1
+        elif two == "/*":
+            depth_end = frag.find("*/", i + 2)
+            stop = n if depth_end < 0 else depth_end + 2
+            out.append(" " * (stop - i))
+            i = stop
+        elif frag[i] in ("'", '"'):
+            # A literal: copy it verbatim here so a comment marker inside a
+            # string is not mistaken for a comment. Blanking of the literal
+            # itself is _blank_string_literals' job, which runs next.
+            ch = frag[i]
+            out.append(ch)
+            i += 1
+            while i < n:
+                out.append(frag[i])
+                if frag[i] == ch:
+                    if i + 1 < n and frag[i + 1] == ch:
+                        out.append(frag[i + 1])
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+        else:
+            out.append(frag[i])
+            i += 1
+    return "".join(out)
 
 
 def _blank_string_literals(frag: str) -> str:
