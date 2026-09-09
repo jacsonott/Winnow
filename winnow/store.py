@@ -6017,6 +6017,7 @@ class Store:
         sid = member["source_id"]
         with self._reader() as ro, self._dropped_view_is_expired():
             src = self._source_lite_on(ro, sid)
+            self._require_columns(src)
             cols = [c["name"] for c in src["columns"]]
             where_sql, where_params = self._virtual_group_where(handle, ro)
             sel = ", ".join(q(c) for c in cols)
@@ -8287,7 +8288,6 @@ class Store:
         sid = member["source_id"]
         with self._reader() as ro, self._dropped_view_is_expired():
             src = self._source_lite_on(ro, sid)
-            self._require_columns(src)
             cols = [c["name"] for c in src["columns"]]
             where_sql, where_params = self._virtual_group_where(handle, ro)
             sel = ", ".join(q(c) for c in cols)
