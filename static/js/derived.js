@@ -695,7 +695,12 @@ export async function openDerivedColumnModal(prefill, editing) {
    an action rather than a modal: the analyst asked to import a file, not
    to be interrupted — and a column that isn't converted still shows and
    searches exactly as before. */
+/* Source ids restart per case, so this has to be cleared with one —
+   otherwise case B's source 1 never gets its "looks like an epoch
+   timestamp" offer because case A's source 1 already consumed it. */
 export const suggestedSources = new Set();
+
+export function resetDerivedSuggestions() { suggestedSources.clear(); }
 
 export async function offerTimestampColumns(sourceId) {
   if (suggestedSources.has(sourceId)) return;

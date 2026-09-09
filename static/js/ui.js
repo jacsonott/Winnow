@@ -717,11 +717,21 @@ export function anchoredPanel(anchorEl, cls, build) {
   return panel;
 }
 
+/* Hiding the modal is not the whole story: things armed inside it (the
+   keybinding capture in settings.js) hold document-level listeners that
+   have to be told, or they outlive the dialog and swallow the next
+   keystroke anywhere in the app. One event, so a new one can listen
+   rather than every close path growing a call. */
+export function closeModal() {
+  $('modal').hidden = true;
+  document.dispatchEvent(new CustomEvent('winnow:modalclose'));
+}
+
 /* DOM wiring for this module, called once by main.js. Handlers can't
    fire during load, so the order these run in doesn't matter — the
    startup steps that DO depend on order live in main.js instead. */
 export function wireUi() {
-$('modalClose').onclick = () => ($('modal').hidden = true);
+$('modalClose').onclick = () => closeModal();
 
 /* Backdrop close must key off where the press STARTED, not where the click
    resolves: a `click` fires on the common ancestor of its mousedown and
@@ -739,6 +749,6 @@ $('modal').onclick = (e) => {
   // resolves its click to the backdrop (common-ancestor rule) and used to
   // close the Search-all modal mid-highlight. A deliberate backdrop click
   // is down+up in place and still closes.
-  if (e.target === $('modal') && modalPressOnBackdrop && modalReleaseOnBackdrop) $('modal').hidden = true;
+  if (e.target === $('modal') && modalPressOnBackdrop && modalReleaseOnBackdrop) closeModal();
 };
 }

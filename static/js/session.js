@@ -369,7 +369,13 @@ export async function openDiffRows(sourceId, rids, marks) {
   // What Done lands on — the filter the table had before the pivot.
   const prevTree = (S.diffMarks && S.diffMarks.sourceId === sourceId) ? S.diffMarks.prevTree : S.filterTree;
   S.diffMarks = { sourceId, ...marks, n: ids.length, prevTree };
-  await replaceFilters({ type: 'cond', column: 'rid', op: 'in', value: ids.map(String) });
+  // The counts this came from are computed over the whole table and know
+  // nothing about the timeframe, so leaving it on would show fewer rows
+  // than the number promised. Cleared, and said out loud: it is global.
+  const hadTimeframe = S.timeRange && S.timeRange.enabled;
+  await replaceFilters({ type: 'cond', column: 'rid', op: 'in', value: ids.map(String) },
+                       { clearTimeframe: true });
+  if (hadTimeframe) toast('Timeframe filter turned off — these are all the differing rows', 4000);
 }
 
 /* The banner above the grid while a comparison is pivoted in. Drawn from

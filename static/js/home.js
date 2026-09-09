@@ -6,6 +6,8 @@ import { $, api, dragHas, el, post, setBusy, toast } from './core.js';
 import { loadPlugins, openImportModal, queueFiles } from './importer.js';
 import { inFlightWork, startJobsPoll } from './jobs.js';
 import { resetPluginTabMounts } from './plugins.js';
+import { resetDerivedSuggestions } from './derived.js';
+import { resetJobState } from './jobs.js';
 import { resetNotes } from './notes.js';
 import { resetWatchlist } from './watchlist.js';
 import { resetDashboard } from './dashboard.js';
@@ -123,6 +125,10 @@ export async function openCase(path, opts = {}) {
   // openSource() try it, get a 409, and rebuild anyway.
   S.viewCache.clear();
   clearViewStateStash(); // per-tab filters describe the previous case's tables
+  // Job ids and source ids restart at 1 in a new case, so anything keyed by
+  // one of them would attach to the wrong thing here.
+  resetJobState();
+  resetDerivedSuggestions();
   S.diffMarks = null;    // a comparison's rids belong to the previous case's tables too
   S.tabOrder = [];
   // Another case's tab history points at ids that mean nothing here.
