@@ -27,6 +27,20 @@ import { updateTimeRangeButton } from './timeframe.js';
    Each enabled format keeps its own no-accept-attribute file picker — the
    one file-picking path that can reach a target the format matches by
    bare-name pattern ("$MFT" has no extension for an accept to allow). */
+/* A per-case scope is only offerable when a case is on screen. #home and
+   #app are siblings and exactly one is visible (see CLAUDE.md), so that is
+   the question — S.pluginsCaseOpen alone answers "does the server hold a
+   Store", which stays true after showHome(). */
+const caseScopeAvailable = () => !!S.pluginsCaseOpen && !$('app').hidden;
+
+/* Which case "this case" is. The brand button is already the app's answer
+   to that, so it is the same string, and naming it means the option can
+   never be read as being about some other case. */
+function thisCase() {
+  const label = ($('brandLabel') && $('brandLabel').textContent || '').trim();
+  return label && label !== 'Winnow' ? `“${label}”` : 'this case';
+}
+
 export function buildPluginsPanel(b) {
   const box = el('div');
   b.append(box);
@@ -151,15 +165,23 @@ export function buildPluginsPanel(b) {
       // per-case override that lives in the case file and travels with it.
       // The select's value is the current state's provenance, so what it
       // shows is why the plugin is on/off, not just whether.
+      //
+      // The two per-case scopes need a case ON SCREEN, not merely one the
+      // server still holds. Going back to the home screen only hides #app
+      // (showHome), so the Store stays open and case_open stays true — and
+      // Settings opened from there offered "this case only" for a case
+      // nothing on that screen names. Choosing it wrote a plugin_overrides
+      // entry into whichever case was still open, which the analyst then
+      // met the next time they opened it.
       const scopeSel = el('select');
       scopeSel.style.cssText = 'background:var(--ink);color:var(--text);border:1px solid var(--line-2);'
         + 'padding:3px 6px;font:inherit;font-size:12px';
       const OPTIONS = [
         ['on_all', 'On — all cases'],
         ['off_all', 'Off — all cases'],
-        ...(S.pluginsCaseOpen ? [
-          ['on_case', 'On — this case only'],
-          ['off_case', 'Off — this case only'],
+        ...(caseScopeAvailable() ? [
+          ['on_case', `On — ${thisCase()} only`],
+          ['off_case', `Off — ${thisCase()} only`],
         ] : []),
       ];
       for (const [v, label] of OPTIONS) {
@@ -167,12 +189,28 @@ export function buildPluginsPanel(b) {
         o.value = v;
         scopeSel.append(o);
       }
-      scopeSel.value = p.case_override === true ? 'on_case'
+      const want = p.case_override === true ? 'on_case'
         : p.case_override === false ? 'off_case'
         : p.machine_enabled ? 'on_all' : 'off_all';
-      scopeSel.title = p.case_override != null
-        ? 'This case overrides the everywhere setting; other cases follow it'
-        : 'Applies to every case on this machine';
+      // A case the server still holds can carry an override while its
+      // scopes are not on offer here. Say so in a disabled option rather
+      // than falling back to the first one — a select showing "On — all
+      // cases" for a plugin a case has turned off is a lie, and a
+      // one-click-away lie at that.
+      const strandedOverride = !caseScopeAvailable() && p.case_override != null;
+      if (strandedOverride) {
+        const o = el('option', null,
+          `${p.case_override ? 'On' : 'Off'} — set by the open case (open it to change)`);
+        o.value = want;
+        o.disabled = true;
+        scopeSel.append(o);
+      }
+      scopeSel.value = want;
+      scopeSel.title = strandedOverride
+        ? 'A case that is open but not on screen has overridden the everywhere setting — open that case to change it'
+        : p.case_override != null
+          ? 'This case overrides the everywhere setting; other cases follow it'
+          : 'Applies to every case on this machine';
       scopeSel.onchange = async () => {
         scopeSel.disabled = true;
         try {
