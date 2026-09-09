@@ -434,7 +434,12 @@ def test_a_missing_pick_leaves_no_query_behind(page):
         page.evaluate("() => { __winnow.S.headerSets = { shorthands: {}, sets: [] }; }")
         page.locator("#modal .dash-table").select_option("{{evtx}}")
         page.locator("#modal .dash-template").select_option("top")
-        assert page.locator("#modal .dash-sql").input_value() == ""
+        # regenerate() awaits ensureHeaderSets(), so the box settles a tick
+        # after the change — and the previous selection's regenerate can
+        # still be in flight. Asserting straight away read whichever won,
+        # which passed locally and failed on a slower runner.
+        page.wait_for_function(
+            "() => document.querySelector('#modal .dash-sql').value === ''")
         page.locator("#modal .confirm-input").first.fill("Nothing")
         page.locator("#modal button", has_text="Save widget").click()
         page.wait_for_selector("#toast:not([hidden])")
