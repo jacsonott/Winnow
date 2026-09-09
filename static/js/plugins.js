@@ -258,7 +258,9 @@ export function buildPluginsPanel(b) {
    comparisons that silently do string comparison instead. Merges have no
    single backing table (they're a Store-level UNION over their members,
    not a real SQLite table — see _merge_source_dict in store.py), so
-   they're left out; the SQL pane couldn't query one by name anyway. */
+   they're left out. (The pane itself CAN query a merge — _pane_connection
+   makes a merge_<id> TEMP VIEW for each — so this is a shape the schema
+   dump has not caught up with, not a limit of the pane.) */
 export function sqlSchemaForLLM() {
   const real = S.sources.filter((s) => !s.is_merge && !s.error);
   const lines = [

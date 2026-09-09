@@ -5,7 +5,7 @@ The long-form "why is it like this" notes that used to live in one
 same entries — split by subsystem so a session working on one part of the
 app reads that part's traps instead of all 1,300 lines of them.
 
-CLAUDE.md still carries what applies everywhere: the layout, the seven
+CLAUDE.md still carries what applies everywhere: the layout, the ten
 invariants, testing and the backlog. **Read the note for whatever you're
 about to touch before you touch it** — most of these entries exist because
 something plausible was tried and measured, and the measurement is the

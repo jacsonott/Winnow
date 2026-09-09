@@ -38,9 +38,23 @@ another analyst. The evidence files themselves are **never modified**.
 - **Zipped bundles** — drop in an ESXi support bundle or UAC collection
   (`.zip`/`.tar`/`.tgz`/`.gz`) and Winnow expands it, nested archives and
   rotated logs included, then imports the files inside.
+- **One view over several tables** — merge same-shaped exports from a
+  fleet of hosts and filter, sort, tag and export them as one, with each
+  row still knowing which file it came from.
+- **Work across cases** — sweep an IOC through every case you have
+  registered, run one query over several at once, or read their timelines
+  side by side, without opening each in turn.
+- **Answer a column** — stack a column's values rarest-first to find the
+  one odd service name, pull fields out of nested JSON or XML into real
+  columns, capture part of a value with a regex, or look one column up
+  against another table.
 - **Pivot tables, session bookends, raw NTFS parsing, ESXi/UAC log
-  triage** and more via drop-in plugins (six ship with the app), plus a
-  read-only SQL pane when you want to write the query yourself.
+  triage** and more via drop-in plugins (seven ship with the app, off
+  until you turn them on), plus a read-only SQL pane when you want to
+  write the query yourself.
+- **Analysis profiles** — a bundle of plugins, a watchlist and a
+  dashboard, applied to a new case in one click (`M`). KAPE triage and
+  ESXi/UAC ship ready to use.
 
 ## Get started
 
@@ -133,7 +147,10 @@ Filters are typed straight into the box under each column header:
 | `a\|b\|c` | any of |
 
 The `▾` on each filter box opens that column's values — every distinct
-value with a count, ticked or unticked, like Excel's header dropdown.
+value with a count, ticked or unticked, like Excel's header dropdown. It
+appears automatically on tables up to about 250k rows; past that,
+counting every distinct value on every open costs more than it gives, so
+turn it on per table from the table menu (right-click the tab).
 Click a column header to sort, `Shift`-click for a secondary sort.
 **Right-click** does the obvious thing everywhere: a row (tag, filter to
 the cell, copy), a group header (tag the whole group), a column header
@@ -267,9 +284,13 @@ per table — rows tagged only in one, only in the other, tagged
 differently, notes changed. Click a count and the table opens on
 exactly those rows, each marked **A** or **B** for which session tagged
 it (hover for the tags on each side), under a banner that names the two
-sides; Done brings the whole table back. **Export** writes the
-current view — filters, sort and search applied — as CSV or XLSX, with
-`Line`, `Tags` and `Note` columns prepended, or just the tagged rows.
+sides; Done brings the whole table back. **Export** offers three things,
+and they are not the same scope: the current view as CSV (filters, sort
+and search applied), just the tagged rows of it as CSV, and — separately
+— every tagged row from *every* table in the case as XLSX, one worksheet
+per table. All of them prepend `Line`, `Tags` and `Note`. The XLSX one is
+the case-wide deliverable; reach for a CSV if you mean the table in front
+of you.
 
 ## SQL pane
 
@@ -290,7 +311,7 @@ GROUP BY 1, 2 ORDER BY n DESC;
 ![The pivot plugin: hosts by event id](docs/screenshots/pivot.png)
 
 **Settings → Plugins** manages everything — on/off per machine or per
-case, effective immediately, no restart. Six examples ship with the app,
+case, effective immediately, no restart. Seven examples ship with the app,
 listed there and switched off until you enable them:
 
 - **`pivot/`** — Excel's PivotTable over any table: drag fields into
@@ -310,6 +331,9 @@ listed there and switched off until you enable them:
   logs (hostd, vmkernel, auth, shell, vobd, vpxa, rhttpproxy, esxupdate)
   into one schema; pairs with the shipped ESXi / UAC triage dashboard
   profile.
+- **`table_histogram/`** — a toolbar panel showing when the open table's
+  events happened; drag across it to set the timeframe. The reference for
+  `register_toolbar_panel`.
 
 A plugin is local Python running with Winnow's own privileges, and nothing
 is ever fetched from a network — installing one is the consent step, so

@@ -12,22 +12,25 @@ on disk into here. Toggles and installs take effect immediately — no
 server restart. Copying a plugin into this folder by hand still works
 exactly the same; the panel picks it up on next open.
 
-Three ready-made examples ship in [`examples/plugins/`](../examples/plugins/):
+Seven ready-made examples ship in [`examples/plugins/`](../examples/plugins/):
 `mft_usn` (raw NTFS `$MFT`/`$J` parsing — an ingest-format plugin),
-`lateral_movement` (a pinned graph tab — a custom-UI plugin), and
-`claude_assistant` (a Claude chat tab — an external-integration plugin;
-needs network + API key). Install any of them from Settings → Plugins →
-"Install a plugin folder…", or
+`lateral_movement` (a pinned graph tab — a custom-UI plugin),
+`table_histogram` (a toolbar panel you drag on to set the timeframe),
+`first_last`, `pivot`, `esxi_logs`, and `claude_assistant` (a Claude chat
+tab — an external-integration plugin; needs network + API key).
 
-```bash
-cp -r examples/plugins/mft_usn plugins/
-```
+They are already loaded: `examples/plugins/` is a bundled plugin
+directory, so all seven are listed in Settings → Plugins with no install
+step, switched **off** by default. Turn one on there rather than copying
+it here — a copy in this folder shadows the bundled one and you end up
+maintaining two.
 
 Writing one? Start with
 **[docs/writing-plugins.md](../docs/writing-plugins.md)** — quickstart,
-the three extension points (ingest formats, tabs, API routes), testing,
-and troubleshooting. The contract is also spelled out at the top of
-[`plugin_api.py`](../plugin_api.py). A plugin that fails to load never
+the five extension points (ingest formats, tabs, API routes, row actions,
+toolbar panels), testing, and troubleshooting. The contract is also
+spelled out at the top of
+[`winnow/plugin_api.py`](../winnow/plugin_api.py). A plugin that fails to load never
 takes the server down — it's listed with its error in Settings → Plugins
 and in the startup output.
 
