@@ -8,6 +8,15 @@ venv/
 *.db
 *.db-wal
 *.db-shm
+# Case files are `.db-winnow` (store.CASE_SUFFIX), which `*.db` does NOT
+# match — nor do the `-wal`/`-shm` siblings SQLite writes beside them.
+# The gap put a real case file in the repo once; a case opened inside a
+# checkout also leaves untracked siblings that abort scripts/release.py's
+# dirty-tree check for something the analyst can't commit.
+*.db-winnow
+*.db-winnow-wal
+*.db-winnow-shm
+cases/
 # Advisory "this case is open" markers (store._CaseLock) — per-process,
 # meaningless on another machine, and stale the moment the server exits.
 *.winnow-lock
