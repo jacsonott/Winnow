@@ -141,14 +141,57 @@ export default function mount(container, winnow) {
     // brush overlay
     if (brush) {
       const x0 = Math.min(brush.x0, brush.x1), x1 = Math.max(brush.x0, brush.x1);
+      // Translucent: --sel is an opaque-enough panel tint, and painting it
+      // over the plot hid the bars being selected — you were choosing a
+      // range by covering up the thing you were choosing it from. The
+      // outline stays fully opaque, so the edges are still exact.
+      ctx.save();
+      ctx.globalAlpha = 0.28;
       ctx.fillStyle = t.sel;
       ctx.fillRect(x0, top, x1 - x0, plotH);
+      ctx.restore();
       ctx.strokeStyle = t.accent;
       ctx.strokeRect(x0 + 0.5, top + 0.5, x1 - x0, plotH);
+      // What the drag would apply, while it is being dragged.
+      const r = snapped();
+      const label = `${iso(r.start)} — ${iso(r.end)}`;
+      ctx.fillStyle = t.text;
+      const lw = ctx.measureText(label).width;
+      ctx.fillText(label, Math.max(2, Math.min(w - lw - 2, (x0 + x1) / 2 - lw / 2)), top + 10);
     }
     const tr = winnow.state.timeRange;
     info.textContent = `${data.total.toLocaleString()} rows · ${humanBucket(data.bucket_seconds)} buckets · max ${max.toLocaleString()}`
       + (tr && tr.enabled && (tr.start || tr.end) ? ' · timeframe on' : '');
+  }
+
+  /* Snapping. Ranges should read as clean clock times, which is why the
+     drag is rounded outwards — but rounding to the CURRENT bar width made
+     a smaller timeframe unselectable: with 6h bars, any drag inside one
+     bar became that whole 6h bar, so the view never narrowed enough for
+     the histogram to re-bucket and "zoom in" did nothing. The unit is
+     picked from the drag itself instead: fine enough that the rounding
+     cannot grow the range much, never finer than a second, and never
+     coarser than the bar it was dragged over. The server re-buckets from
+     whatever span it is given (Store.HISTOGRAM_BUCKETS), so a genuinely
+     small range is what produces the finer bars. */
+  const SNAP_UNITS = [1, 5, 15, 30, 60, 300, 600, 900, 1800, 3600, 3 * 3600, 6 * 3600, 12 * 3600, 86400];
+  function snapUnit(seconds) {
+    const cap = data ? data.bucket_seconds : 1;
+    const want = Math.max(1, seconds / 12);   // rounding adds ≤ ~8% per end
+    let unit = SNAP_UNITS[0];
+    for (const u of SNAP_UNITS) { if (u <= want && u <= cap) unit = u; }
+    return unit;
+  }
+
+  /* The range the current drag would apply: both ends rounded outwards
+     with one unit chosen from the drag's own width. */
+  function snapped() {
+    if (!brush) return null;
+    const w = canvas.clientWidth || 1;
+    const t0 = tOf(Math.min(brush.x0, brush.x1), w);
+    const t1 = tOf(Math.max(brush.x0, brush.x1), w);
+    const u = snapUnit(Math.max(1, t1 - t0));
+    return { start: Math.floor(t0 / u) * u, end: Math.ceil(t1 / u) * u };
   }
 
   /* ----------------------------------------------------------- brush */
@@ -170,19 +213,16 @@ export default function mount(container, winnow) {
       canvas.title = b ? `${iso(b[0])} — ${b[1].toLocaleString()} rows` : iso(tt);
     }
   });
-  const endBrush = (e) => {
+  const endBrush = () => {
     if (!brush) return;
     const w = canvas.clientWidth || 1;
     const x0 = Math.max(0, Math.min(brush.x0, brush.x1)), x1 = Math.min(w, Math.max(brush.x0, brush.x1));
     const wasDrag = Math.abs(x1 - x0) > 3;
+    const r = snapped();
     brush = null;
     draw();
-    if (!wasDrag) return;
-    // Snap to bucket boundaries, so the range reads as clean clock times.
-    const bs = data.bucket_seconds;
-    const start = Math.floor(tOf(x0, w) / bs) * bs;
-    const end = Math.ceil(tOf(x1, w) / bs) * bs;
-    winnow.setTimeRange({ column, start: iso(start), end: iso(end) });
+    if (!wasDrag || !r) return;
+    winnow.setTimeRange({ column, start: iso(r.start), end: iso(r.end) });
   };
   canvas.addEventListener('mouseup', endBrush);
   canvas.addEventListener('mouseleave', (e) => { if (brush) endBrush(e); });
@@ -193,7 +233,14 @@ export default function mount(container, winnow) {
     if (!v || !pickColumn()) { data = null; draw(); return; }
     inflight++;
     draw();
-    try { data = await post(`${winnow.base}/histogram`, { view_id: v.view_id, column }); }
+    // Ask for as many buckets as the canvas can actually show, rather than
+    // a fixed 160: at 900px that was 5px slivers, and a zoomed-in view came
+    // back just as dense as the one it zoomed out of, which is what made
+    // narrowing the timeframe feel like it had changed nothing. ~7px a bar
+    // is readable, and the server picks the nearest clean width from
+    // Store.HISTOGRAM_BUCKETS for the span it is given.
+    const maxBuckets = Math.max(20, Math.min(400, Math.floor((canvas.clientWidth || 600) / 7)));
+    try { data = await post(`${winnow.base}/histogram`, { view_id: v.view_id, column, max_buckets: maxBuckets }); }
     catch { data = null; }   // a mid-rebuild 400 just means the next view change repaints
     inflight = Math.max(0, inflight - 1);
     draw();
