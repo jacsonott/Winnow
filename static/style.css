@@ -853,7 +853,21 @@ html[data-style="studio"][data-theme="light"] {
    rid placed by flow would land in column 1 and stop lining up with its
    neighbours. tabular-nums so rids of differing digit counts right-align
    cleanly. */
-.gutter .rid { grid-column: 3; justify-self: end; font-variant-numeric: tabular-nums; }
+/* Clickable, and it has to look it: the number selects its row the way
+   the checkbox does (see grid.js), and an inert-looking number beside a
+   12px checkbox is why people were aiming at the checkbox. The hit area
+   is padded out to the gutter's right edge so the target is the column,
+   not the digits. */
+.gutter .rid {
+  grid-column: 3; justify-self: end; font-variant-numeric: tabular-nums;
+  /* Left only: the digits stay flush right, where the "Line" header above
+     them is measured against (docs/notes/grid.md's three-slot contract).
+     The padding just widens the target leftwards into empty gutter. */
+  cursor: pointer; padding-left: 6px; border-radius: var(--radius-sm);
+  user-select: none;
+}
+.gutter .rid:hover { background: var(--panel-3); color: var(--text); }
+.row.selected .gutter .rid { color: var(--text); }
 
 .gutter input.rowcheck, .hcell input.select-all-rows {
   width: 12px; height: 12px; accent-color: var(--accent);
