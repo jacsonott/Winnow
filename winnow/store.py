@@ -8247,7 +8247,11 @@ class Store:
         # Covers all three export shapes at once, and eagerly: the body
         # below is a generator, so an error raised inside it would surface
         # from StreamingResponse rather than from the route's try/except.
-        self._require_columns(self._source_lite(handle["source_id"]))
+        # On a pooled reader, never _source_lite — that takes the writer
+        # lock, and an export must not block behind a build (invariant #4;
+        # test_concurrency.py fails the moment it does).
+        with self._reader() as ro:
+            self._require_columns(self._source_lite_on(ro, handle["source_id"]))
         if handle.get("kind") == "group_virtual":
             return self._export_virtual_group_csv_rows(handle, tagged_only)
         if handle.get("kind") == "root_virtual":
