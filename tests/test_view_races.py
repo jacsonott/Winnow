@@ -90,3 +90,7 @@ def test_a_source_still_importing_says_so_instead_of_500ing(store, write_csv):
         store.fetch_rows(v["view_id"], 0, 10)
     with pytest.raises(ValueError, match="still importing"):
         store.column_max_lengths(sid)
+    # Eagerly, not from inside the streaming generator — a route's
+    # try/except cannot catch what the response body raises later.
+    with pytest.raises(ValueError, match="still importing"):
+        store.export_view_csv(v["view_id"])

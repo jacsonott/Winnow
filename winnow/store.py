@@ -6017,7 +6017,6 @@ class Store:
         sid = member["source_id"]
         with self._reader() as ro, self._dropped_view_is_expired():
             src = self._source_lite_on(ro, sid)
-            self._require_columns(src)
             cols = [c["name"] for c in src["columns"]]
             where_sql, where_params = self._virtual_group_where(handle, ro)
             sel = ", ".join(q(c) for c in cols)
@@ -8245,6 +8244,10 @@ class Store:
         handle = self._views.get(view_id)
         if not handle:
             raise KeyError("View expired — rebuild it")
+        # Covers all three export shapes at once, and eagerly: the body
+        # below is a generator, so an error raised inside it would surface
+        # from StreamingResponse rather than from the route's try/except.
+        self._require_columns(self._source_lite(handle["source_id"]))
         if handle.get("kind") == "group_virtual":
             return self._export_virtual_group_csv_rows(handle, tagged_only)
         if handle.get("kind") == "root_virtual":
