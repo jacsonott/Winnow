@@ -131,8 +131,12 @@ def test_the_bars_get_finer_for_the_smaller_range(page, wide_table):
     # before its refetch lands — wait for the row count the new data brings.
     page.wait_for_function("() => __winnow.S.view && __winnow.S.view.row_count < 720")
     page.wait_for_function(
-        """() => { const m = /(\\d[\\d,]*) rows/.exec(document.querySelector('.plugin-panel').textContent);
-             return m && Number(m[1].replace(/,/g, '')) === __winnow.S.view.row_count; }""",
+        """() => { const v = __winnow.S.view;
+             if (!v) return false;          // mid-rebuild: S.view is briefly unset
+             const p = document.querySelector('.plugin-panel');
+             if (!p) return false;
+             const m = /(\\d[\\d,]*) rows/.exec(p.textContent);
+             return !!m && Number(m[1].replace(/,/g, '')) === v.row_count; }""",
         timeout=15_000)
     after = _bucket_seconds(page)
     assert after < before, (before, after)
@@ -147,12 +151,13 @@ def test_the_panel_asks_for_as_many_bars_as_it_can_show(page, wide_table):
             if r.url.endswith("/histogram") and r.post_data else None)
 
     wide = page.locator("canvas.th-canvas").bounding_box()["width"]
-    page.evaluate("() => __winnow.S.appearance && void 0")   # no-op; keep the panel mounted
     page.set_viewport_size({"width": 900, "height": 900})
-    page.wait_for_function("() => document.querySelector('canvas.th-canvas').clientWidth < %d" % int(wide))
+    page.wait_for_function(
+        "(w) => { const c = document.querySelector('canvas.th-canvas'); return !!c && c.clientWidth < w; }",
+        arg=int(wide))
     page.evaluate("() => __winnow.rebuildView({ keepScroll: false })")
-    page.wait_for_function("(n) => window.__asks === undefined || true", arg=1)
-    page.wait_for_timeout(800)
+    # The panel refetches on the view change, after its own 150ms debounce.
+    page.wait_for_timeout(1200)
 
     narrow = page.locator("canvas.th-canvas").bounding_box()["width"]
     got = [json.loads(a).get("max_buckets") for a in asks if a]
