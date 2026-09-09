@@ -87,7 +87,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   has never seen a single one of the rows. Untagging is a mode flip on the
   same menu rather than a ✓ toggle: a group is a set of rows with mixed
   tags, so there's no single row to read a checkmark off the way
-  `rowMenuTagItems` does. The throwaway view is safe to drop immediately
+  `rowMenuTagList` does. The throwaway view is safe to drop immediately
   because undo records the *rows* (invariant #7's `v.undo_<n>` delta table),
   not the view they were found through. Tagging while grouped *by tag* —
   and undoing — calls `regroupIfGroupedByTag()`: the tag just changed which
@@ -307,7 +307,32 @@ see [docs/notes/README.md](README.md) for the whole set.
   (positioned at the pointer) and `anchoredPanel` (a card with real
   controls in it) as the three entry points. That's what makes "only one
   of these is open at a time, and Escape closes it" true across all of
-  them rather than four near-copies of the same two listeners. The
+  them rather than four near-copies of the same two listeners. An item
+  may carry `submenu` (an array, or a function for one that repaints —
+  the tag list's ✓) and opens a `.menu-sub` flyout beside itself on
+  hover or click; one per level, closed with the root or when a plain
+  sibling is hovered; a click on the parent opens (never toggles shut)
+  and the arrow keys walk it (Right opens, Left closes and refocuses the
+  parent); from outside the menu only Down/Up step in, so a caret in a
+  text field keeps its arrows. A flyout's identity is its parent item's
+  `key` (else its label) at its depth — never its position, which a
+  repaint shifts when Undo appears. A menu opened with
+  `{ pins: '<key>' }` lets submenu items that declare a stable `pinId`
+  be dragged or ☆-starred onto a **Pinned** section at its top
+  (`menuPins`, localStorage `winnow.menupins`). The root's context
+  (pin store + repaint) and each submenu button's item live in WeakMaps
+  (`MENU`, `BTN`) rather than on the nodes, and one `repaintAll` rebuilds
+  the root, re-binds every open flyout to its parent's new button,
+  refills and re-places it — after a keepOpen click, a pin, or a tag
+  hotkey pressed with the menu up (`repaintOpenMenus`) — so a pinned
+  tag's ✓ and its twin inside the flyout always agree, and a pinned
+  plugin action simply isn't shown while the plugin is off (the plugins
+  panel refreshes `S.pluginRowActions` on toggle for that). Tag pins key
+  on the tag's *name* (ids are per case file). The row menu is the one
+  using it: filters for the clicked column stay broken out, Tag / Add to
+  dashboard / Copy / Plugins fold into submenus, Undo sits at the top
+  level beside Tag, and rules fall where a fold meets something broken
+  out (no section is named in the loop). The
   column-header menu is the one that *replaced* a visible control rather
   than adding a surface: its `▾` (`.hcell-fmt`) cost a slot of every
   header's width, on every table, forever, to be opened rarely — the same
@@ -326,7 +351,9 @@ see [docs/notes/README.md](README.md) for the whole set.
   now the place per-row features are expected to land — a new action
   should be an entry, never surgery on a growing if-chain. Sections get
   `{pos, colName, colIndex, value}` and return items; an empty return is
-  skipped, separator and all. The row is re-resolved (`rowAt(ctx.pos)`) on
+  skipped. Sections are not separator-delimited any more: the only rules
+  are before and after the broken-out filter block (`cell`), and every
+  other section contributes one folded `{label, submenu}` entry. The row is re-resolved (`rowAt(ctx.pos)`) on
   every repaint rather than captured, because a keepOpen tag item
   re-renders after tagging and the bulk tag path clears the page cache
   underneath it. Scope follows the selection: right-clicking *inside* one
