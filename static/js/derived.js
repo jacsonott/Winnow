@@ -4,6 +4,8 @@ own additions to a source's column set.
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { openStack } from './stack.js';
 import { saveLayout } from './columns.js';
+import { quickAddWidget } from './dashboard.js';
+import { tableOf, widgetFrom } from './dashwidgets.js';
 import { $, api, el, post, setBusy, toast, toastAction } from './core.js';
 import { ellipsize } from './filters.js';
 import { render } from './grid.js';
@@ -120,6 +122,17 @@ export function columnMenuItems(name) {
       items.push({ label: 'Re-derive…', onclick: () => openDerivedColumnModal(c.derived_from, c) });
     }
     items.push({ label: 'Remove derived column…', onclick: () => removeDerivedColumn(c) });
+  }
+  // Straight onto a board, no editor: the column is the pick, the
+  // widget writes its own query and knows how to open these rows.
+  if (S.sourceId != null && S.sourceId >= 0) {
+    const table = tableOf(S.sourceId);
+    items.push('-', { header: 'Add to dashboard' });
+    items.push({ label: `Top values of ${name}`, onclick: () => quickAddWidget(widgetFrom({ template: 'top', table, column: name })) });
+    items.push({ label: `Distinct count of ${name}`, onclick: () => quickAddWidget(widgetFrom({ template: 'distinct', table, column: name })) });
+    if (c.type === 'datetime') {
+      items.push({ label: `Events over time by ${name}`, onclick: () => quickAddWidget(widgetFrom({ template: 'time', table, column: name, bucket: 'day' })) });
+    }
   }
   return items;
 }

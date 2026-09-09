@@ -1,8 +1,9 @@
-"""The KAPE profile's second board, "KAPE host overview": hostname, IPs,
-domain, OS, function, Sysmon / PowerShell-logging yes-no chips, Security
-log coverage and Defender alerts — each widget run against synthetic
-RECmd- and EvtxECmd-shaped tables, plus the apply path that lands both
-boards."""
+"""The host-facts cards on the KAPE triage board: hostname, IPs, domain,
+OS, function, Sysmon / PowerShell-logging yes-no chips, Security log
+coverage and Defender alerts — each widget run against synthetic RECmd-
+and EvtxECmd-shaped tables. These were a second "KAPE host overview"
+board once, duplicating six older cards on the triage board; the two are
+one board now, and this checks the merge left exactly one of each."""
 
 from __future__ import annotations
 
@@ -68,9 +69,8 @@ EVTX_ROWS = [
 
 def _board():
     kape = next(p for p in defaults.profiles() if p["name"] == "KAPE triage")
-    (board,) = kape["dashboards"]
-    assert board["name"] == "KAPE host overview"
-    return board
+    assert not kape.get("dashboards"), "the host overview was merged into the triage board"
+    return {"name": kape["name"], "widgets": kape["dashboard"]}
 
 
 def _widget(title):
@@ -89,12 +89,16 @@ def host(store, write_csv):
     return store
 
 
-def test_the_board_covers_the_asked_for_facts():
+def test_the_board_covers_the_asked_for_facts_once_each():
     titles = [w["title"] for w in _board()["widgets"]]
     for want in ["Hostname", "IP addresses", "Domain", "OS version", "System function",
                  "Sysmon enabled", "PowerShell logging enabled", "Security log coverage",
                  "Most recent Defender alerts"]:
-        assert want in titles, want
+        assert titles.count(want) == 1, want
+    # The six older triage cards the overview superseded are gone, not doubled.
+    for retired in ["System role", "Sysmon", "PowerShell logging"]:
+        assert retired not in titles, retired
+    assert len(titles) == len(set(titles))
 
 
 def test_hostname_from_computername_and_tcpip(host):
@@ -153,21 +157,21 @@ def test_defender_alerts_say_when_there_are_none(store, write_csv):
     assert _rows(store, "Most recent Defender alerts") == [["—", "(no Defender alert events in the logs)"]]
 
 
-def test_applying_the_profile_lands_both_boards(client, host):
+def test_applying_the_profile_lands_one_board(client, host):
     kape = next(b for b in client.get("/api/plugin_bundles").json() if b["name"] == "KAPE triage")
-    assert [b["name"] for b in kape["dashboards"]] == ["KAPE host overview"]
+    assert kape.get("dashboards", []) == []
     body = client.post(f"/api/plugin_bundles/{kape['id']}/apply").json()
-    assert body["dashboard_applied"] is True and body["dashboards_applied"] == ["KAPE host overview"]
+    assert body["dashboard_applied"] is True and body["dashboards_applied"] == []
     boards = {b["name"]: b for b in client.get("/api/dashboards").json()}
-    assert "KAPE triage" in boards and "KAPE host overview" in boards
-    widgets = client.get(f"/api/dashboards/{boards['KAPE host overview']['id']}").json()["widgets"]
+    assert [n for n in boards if n.startswith("KAPE")] == ["KAPE triage"]
+    widgets = client.get(f"/api/dashboards/{boards['KAPE triage']['id']}").json()["widgets"]
     assert len(widgets) == len(_board()["widgets"])
     # a second apply refreshes rather than duplicates
     client.post(f"/api/plugin_bundles/{kape['id']}/apply")
-    assert sum(1 for b in client.get("/api/dashboards").json() if b["name"] == "KAPE host overview") == 1
+    assert sum(1 for b in client.get("/api/dashboards").json() if b["name"] == "KAPE triage") == 1
     # every widget previews without error against the fixture
     for w in widgets:
-        pv = client.post("/api/dashboard/widget/preview", json={"source": "sql", "query": w["query"]})
+        pv = client.post("/api/dashboard/widget/preview", json={"source": w["source"], "query": w.get("query", {})})
         assert pv.status_code == 200, (w["title"], pv.text)
 
 

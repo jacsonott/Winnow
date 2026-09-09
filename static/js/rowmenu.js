@@ -2,6 +2,8 @@
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { post, toast } from './core.js';
+import { quickAddWidget } from './dashboard.js';
+import { tableOf, widgetFrom } from './dashwidgets.js';
 import { displayValue, ellipsize, filterByValue, openValuePickerForColumn } from './filters.js';
 import { rowAt } from './grid.js';
 import { copyRowsAsText, loadRowsForPositions, writeClipboardText } from './grouping.js';
@@ -31,6 +33,7 @@ import { contextMenu } from './ui.js';
 export const ROW_MENU_SECTIONS = [
   { id: 'tags', build: rowMenuTagItems },
   { id: 'cell', build: rowMenuCellItems },
+  { id: 'dashboard', build: rowMenuDashboardItems },
   { id: 'clipboard', build: rowMenuClipboardItems },
   { id: 'plugins', build: rowMenuPluginItems },
 ];
@@ -143,6 +146,23 @@ export function rowMenuCellItems(ctx) {
       // for the scan, which the always-visible button isn't.
       label: 'Filter by values…',
       onclick: () => openValuePickerForColumn(ctx.colName),
+    },
+  ];
+}
+
+/* The value under the cursor as a number on a board — "how many rows
+   have this?" — whose drill is exactly the filter the item above applies. */
+export function rowMenuDashboardItems(ctx) {
+  if (!ctx.colName || S.sourceId == null || S.sourceId < 0) return [];
+  const shown = ellipsize(displayValue(ctx.value));
+  return [
+    { header: 'Add to dashboard' },
+    {
+      label: `Count of ${ctx.colName} = ${shown}`,
+      title: 'A number on a dashboard that opens these rows when clicked',
+      onclick: () => quickAddWidget(widgetFrom({
+        template: 'countwhere', table: tableOf(S.sourceId), column: ctx.colName,
+        value: ctx.value == null ? '' : String(ctx.value), match: 'equals' })),
     },
   ];
 }

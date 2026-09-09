@@ -1,7 +1,11 @@
-"""The KAPE profile's registry host-fact widgets: OS version, system role,
-domain, IPs, Sysmon presence, and PowerShell logging posture, each keyed
+"""The KAPE board's registry host-fact cards: OS version, system function,
+domain, IPs, Sysmon presence and PowerShell logging posture, each keyed
 on KeyPath/ValueName suffixes so they hold for any RECmd batch (and any
-ControlSet). Driven against a synthetic RECmd-shaped table."""
+ControlSet). Driven against a synthetic RECmd-shaped table with the
+traps a real batch has — a CurrentVersion subkey that must not leak into
+the OS card, a disconnected 0.0.0.0 interface, an empty NV Domain, a
+Sysmon Parameters row beside its ImagePath. (These cards replaced six
+older ones on the triage board; the traps carried over with them.)"""
 
 from __future__ import annotations
 
@@ -72,14 +76,18 @@ def _widget(title):
     return next(w for w in kape["dashboard"] if w["title"] == title)
 
 
-def _preview(store, title):
-    w = _widget(title)
-    res = store.dashboard_widget_preview(w["source"], w["query"])
-    return {tuple(r[:1])[0]: r[1] for r in res["rows"]}, [tuple(r) for r in res["rows"]]
+def _rows(store, title):
+    res = store.dashboard_widget_preview("sql", _widget(title)["query"])
+    return [tuple(r) for r in res["rows"]]
+
+
+def _kv(store, title):
+    return {r[0]: r[1] for r in _rows(store, title)}
 
 
 def test_os_version_reads_currentversion_only(reg_store):
-    kv, rows = _preview(reg_store, "OS version")
+    rows = _rows(reg_store, "OS version")
+    kv = dict(rows)
     assert kv["ProductName"] == "Windows 10 Pro"
     assert kv["DisplayVersion"] == "22H2"
     assert kv["CurrentBuild"] == "19045"
@@ -87,45 +95,42 @@ def test_os_version_reads_currentversion_only(reg_store):
     assert [r[0] for r in rows][:2] == ["ProductName", "DisplayVersion"]
 
 
-def test_system_role_maps_producttype(reg_store):
-    kv, _ = _preview(reg_store, "System role")
-    assert kv == {"Role": "Workstation"}
+def test_system_function_maps_producttype(reg_store):
+    assert _kv(reg_store, "System function") == {"Function": "Workstation"}
 
 
-def test_domain_card_shows_hostname_and_workgroup_fallback(reg_store):
-    kv, rows = _preview(reg_store, "Domain")
-    assert kv["Hostname"] == "WKSTN-014"
+def test_system_function_says_when_the_batch_lacks_it(store, write_csv):
+    store.ingest_csv(write_csv([REG_COLS] + [ROWS[0]], "bare.csv"), name="bare", build_fts=False)
+    assert _kv(store, "System function") == {"Function": "(ProductType not in this RECmd output)"}
+
+
+def test_hostname_and_domain_cards(reg_store):
+    assert _kv(reg_store, "Hostname") == {"Hostname (TCP/IP)": "WKSTN-014"}   # no ComputerName key in this batch
+    kv = _kv(reg_store, "Domain")
     assert kv["Domain"] == "corp.example.com"
     assert kv["NV Domain"] == "(none — workgroup)"          # empty value reads honestly
-    assert rows[0][0] == "Hostname"
 
 
 def test_ip_card_lists_real_interfaces_only(reg_store):
-    kv, rows = _preview(reg_store, "IP addresses")
+    kv = _kv(reg_store, "IP addresses")
     assert kv["IP (DHCP)"] == "10.0.0.5"
     assert kv["Gateway"] == "10.0.0.1"
-    assert "0.0.0.0" not in [r[1] for r in rows]
+    assert "0.0.0.0" not in kv.values()
 
 
-def test_sysmon_counts_service_entries(reg_store):
-    kv, _ = _preview(reg_store, "Sysmon")
-    assert kv["Sysmon"] == "Installed — 3 service registry entries"
+def test_sysmon_chips_need_the_service_and_the_driver(reg_store):
+    assert _rows(reg_store, "Sysmon enabled") == [("Sysmon service", 1), ("Sysmon driver", 1)]
 
 
-def test_sysmon_absent_reads_not_present(store, write_csv):
+def test_sysmon_absent_reads_off(store, write_csv):
     store.ingest_csv(write_csv([REG_COLS] + [ROWS[0]], "bare.csv"), name="bare", build_fts=False)
-    kv, _ = _preview(store, "Sysmon")
-    assert kv["Sysmon"] == "Not present in registry"
+    assert _rows(store, "Sysmon enabled") == [("Sysmon service", 0), ("Sysmon driver", 0)]
 
 
-def test_powershell_logging_posture_and_fallback(reg_store, store, write_csv):
-    kv, _ = _preview(reg_store, "PowerShell logging")
-    assert kv["Script block"] == "Enabled"
-    assert kv["Module logging"] == "Disabled"
-    assert "Transcription" not in kv                        # value genuinely absent
+def test_powershell_logging_posture(reg_store):
+    assert _rows(reg_store, "PowerShell logging enabled") == [("Script block", 1), ("Module", 0), ("Transcription", 0)]
 
 
-def test_powershell_unconfigured_says_so(store, write_csv):
+def test_powershell_unconfigured_is_all_off(store, write_csv):
     store.ingest_csv(write_csv([REG_COLS] + [ROWS[0]], "bare2.csv"), name="bare2", build_fts=False)
-    kv, _ = _preview(store, "PowerShell logging")
-    assert kv == {"Policy": "(not configured — no policy keys)"}
+    assert _rows(store, "PowerShell logging enabled") == [("Script block", 0), ("Module", 0), ("Transcription", 0)]
