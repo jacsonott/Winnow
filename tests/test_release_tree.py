@@ -125,13 +125,22 @@ def test_a_case_file_anywhere_in_the_tree_is_ignored(name):
     assert ignored, f"{name} is not ignored — .gitignore does not cover the case suffix"
 
 
-def test_the_declared_version_is_not_the_one_main_already_ships():
-    """The release script reads version.py off origin/develop and refuses a
-    version that disagrees with the tag; this catches the forgotten bump
-    while it is still cheap."""
+def test_the_declared_version_is_not_already_released():
+    """A version that is already tagged means the bump was forgotten — the
+    release script refuses it, and catching it here is cheaper.
+
+    Unless THIS commit is that release. `scripts/release.py --write` builds
+    the snapshot and tags it in one step, so on the tagged commit the
+    version and the tag agree by construction; asserting otherwise would
+    fail CI on every release PR into main, which is the one run that must
+    pass for a release to ship at all. Caught by running this suite against
+    the snapshot before pushing it.
+    """
     from winnow import version
 
-    tags = _git("tag", "-l").split()
-    assert f"v{version.VERSION}" not in tags, (
+    want = f"v{version.VERSION}"
+    if want in _git("tag", "--points-at", "HEAD").split():
+        return          # this commit IS that release
+    assert want not in _git("tag", "-l").split(), (
         f"winnow/version.py still says {version.VERSION}, which is already tagged — "
         "bump it in the commit you want released")
