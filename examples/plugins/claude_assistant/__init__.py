@@ -25,13 +25,15 @@ MODEL = "claude-opus-5"
 MAX_HISTORY = 40         # turns kept per request — the tab is a scratchpad, not an archive
 MAX_TOKENS = 64000       # streamed, so a large ceiling is safe (no HTTP timeout risk)
 
+from datetime import datetime, timezone
+
 PLUGIN = {
     "name": "claude-assistant",
     "version": "1.0.0",
     "description": "Ask Claude about the open case — schema-aware help writing SQL pane queries and interpreting artifacts. Needs network + ANTHROPIC_API_KEY.",
 }
 
-WINNOW_API_VERSION = 1
+WINNOW_API_VERSION = 6   # req.table (plugin-owned tables in the case file)
 
 SYSTEM_PROMPT = """You are a DFIR analyst's assistant embedded in Winnow, \
 a local SQLite-backed tool for triaging forensic CSV/EVTX/registry exports.
@@ -45,6 +47,42 @@ timestamps are strings. Keep answers focused and practical; when you \
 reference an artifact or event ID, say why it matters for the investigation."""
 
 
+# The transcript lives in the CASE FILE, in this plugin's own table, so it
+# renders when the service is unreachable and travels with the .db when the
+# case is handed to another analyst. It is not a source: it never appears in
+# the grid or a merge. See docs/writing-plugins.md, "Your own tables".
+HISTORY_COLUMNS = "id INTEGER PRIMARY KEY, role TEXT, content TEXT, at TEXT"
+
+
+def _history(req):
+    """This case's transcript table, or None with no case open (the plugin
+    still answers questions then — it just has nothing to remember with)."""
+    if req.store is None:
+        return None
+    return req.table("history").create(HISTORY_COLUMNS)
+
+
+def _turns(req, limit=None):
+    t = _history(req)
+    return t.rows("ORDER BY id", limit=limit) if t else []
+
+
+def history(req):
+    """GET /api/plugin/claude_assistant/history -> {turns: [{role, content, at}]}
+    What the tab renders on mount, with no network involved."""
+    return {"turns": [{"role": r["role"], "content": r["content"], "at": r["at"]}
+                      for r in _turns(req)],
+            "persisted": req.store is not None}
+
+
+def clear(req):
+    """POST /api/plugin/claude_assistant/clear — forget this case's chat."""
+    t = _history(req)
+    if t:
+        t.execute("DELETE FROM {table}")
+    return {"ok": True}
+
+
 def register(api):
     api.register_tab(
         id="chat",
@@ -53,12 +91,18 @@ def register(api):
         description="Ask Claude about the open case — it sees the table schemas (not the data) and writes SQL-pane queries.",
     )
     api.register_api("ask", ask, methods=["POST"])
+    api.register_api("history", history, methods=["GET"])
+    api.register_api("clear", clear, methods=["POST"])
 
 
 def ask(req):
     """POST /api/plugin/claude_assistant/ask
-    body: {question, history: [{role, content}], schema: str|null}
+    body: {question, schema: str|null}
     -> {answer, model, stop_reason, usage}
+
+    Context comes from this case's stored transcript, not from the browser:
+    the tab can be closed, reopened or reloaded and the conversation carries
+    on where it left off.
     """
     b = req.body or {}
     question = (b.get("question") or "").strip()
@@ -85,13 +129,18 @@ def ask(req):
         })
 
     messages = []
-    for turn in (b.get("history") or [])[-MAX_HISTORY:]:
+    for turn in _turns(req)[-MAX_HISTORY:]:
         role, content = turn.get("role"), turn.get("content")
         if role in ("user", "assistant") and isinstance(content, str) and content.strip():
             messages.append({"role": role, "content": content})
     messages.append({"role": "user", "content": question})
 
-    client = anthropic.Anthropic()  # resolves ANTHROPIC_API_KEY / `ant auth login` profile
+    # A key the analyst saved under Settings → Environment wins; otherwise
+    # the SDK resolves ANTHROPIC_API_KEY / `ant auth login` as it always
+    # has. req.env only reads WINNOW_* names, which is why the Winnow-side
+    # one is spelled that way.
+    key = req.env("WINNOW_ANTHROPIC_API_KEY")
+    client = anthropic.Anthropic(api_key=key) if key else anthropic.Anthropic()
     try:
         # Streamed with get_final_message(): the browser round trip stays a
         # plain JSON response, but the SDK connection can't hit its HTTP
@@ -109,8 +158,9 @@ def ask(req):
             msg = stream.get_final_message()
     except anthropic.AuthenticationError:
         raise ValueError(
-            "No Anthropic credentials — set ANTHROPIC_API_KEY (or run `ant auth login`) "
-            "in the environment Winnow's server runs in, then restart it"
+            "No Anthropic credentials — save WINNOW_ANTHROPIC_API_KEY under "
+            "Settings → Environment (or set ANTHROPIC_API_KEY / run `ant auth login` "
+            "in the environment Winnow's server runs in, then restart it)"
         )
     except anthropic.APIConnectionError:
         raise ValueError("Could not reach the Anthropic API — this plugin needs network access")
@@ -125,6 +175,17 @@ def ask(req):
         raise ValueError(f"Claude declined this request ({why}) — rephrase and try again")
 
     answer = "".join(block.text for block in msg.content if block.type == "text")
+
+    # Both turns land together, after the call succeeded: a question that
+    # errored is shown in the tab but never becomes context for the next
+    # one. SQLite serialises the write, so two tabs asking at once cannot
+    # interleave a pair.
+    t = _history(req)
+    if t:
+        at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        t.insert([{"role": "user", "content": question, "at": at},
+                  {"role": "assistant", "content": answer, "at": at}])
+
     return {
         "answer": answer,
         "model": msg.model,

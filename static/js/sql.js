@@ -3,9 +3,10 @@
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { recordTabVisit } from './tabhistory.js';
 import { $, api, debounce, el, post, toast } from './core.js';
-import { hidePluginViews, sqlResultNodes } from './plugins.js';
+import { hidePluginViews, sqlResultNodes, syncPluginPanels } from './plugins.js';
 import { setActiveSqlResult } from './sqlassist.js';
 import { checkPresets } from './savedfilters.js';
+import { syncDiffBanner } from './session.js';
 import { syncTabSelection, wireDragReorder } from './sources.js';
 import { S } from './state.js';
 import { buildTimeline } from './timeline.js';
@@ -20,10 +21,7 @@ import { confirmDialog, promptDialog } from './ui.js';
 export function showSqlTab() {
   recordTabVisit({ kind: 'page', key: 'sql' });
   S.activeTab = 'sql';
-  $('grid').hidden = true;
-  $('timelineview').hidden = true;
-  hidePluginViews();
-  $('sqlview').hidden = false;
+  showMainView('sqlview');
   syncTabSelection();
   // The toolbar and the "matching saved filter" banner are about a
   // specific table's grid — meaningless here (see syncTabChrome).
@@ -236,14 +234,28 @@ export async function closeSqlTab(t) {
 export function syncTabChrome() {
   const isGrid = S.activeTab === 'grid';
   $('toolbar').hidden = !isGrid;
+  syncPluginPanels();   // plugin toolbar panels live and die with the toolbar
+  syncDiffBanner();     // as does a session comparison's banner
+}
+
+/* The mutually-exclusive main content views (grid / SQL / Timeline / and
+   the analysis-suite tabs). Each new page tab adds its view id here and
+   routes through showMainView, so no show-function has to know about the
+   others — the trap that made adding a tab an N-place edit. */
+export const MAIN_VIEWS = ['grid', 'sqlview', 'timelineview', 'notesview', 'watchlistview', 'dashboardview'];
+export function hideMainViews() {
+  for (const v of MAIN_VIEWS) { const e = $(v); if (e) e.hidden = true; }
+}
+export function showMainView(id) {
+  hideMainViews();
+  hidePluginViews();
+  const e = $(id);
+  if (e) e.hidden = false;
 }
 
 export function showGridTab() {
   S.activeTab = 'grid';
-  $('sqlview').hidden = true;
-  $('timelineview').hidden = true;
-  hidePluginViews();
-  $('grid').hidden = false;
+  showMainView('grid');
   syncTabSelection();
   syncTabChrome();
   if (S.sourceId) checkPresets(S.sourceId); // refresh the Filters button's suggestion state
@@ -252,10 +264,7 @@ export function showGridTab() {
 export function showTimelineTab() {
   recordTabVisit({ kind: 'page', key: 'timeline' });
   S.activeTab = 'timeline';
-  $('grid').hidden = true;
-  $('sqlview').hidden = true;
-  hidePluginViews();
-  $('timelineview').hidden = false;
+  showMainView('timelineview');
   syncTabSelection();
   syncTabChrome(); // the Timeline has its own tag filter and stats
   buildTimeline(); // always fresh — tags can change in any table while this tab isn't the active one

@@ -365,7 +365,36 @@ export function rowPaintContext() {
     // per painted row.
     pins: pinnedOffsets(),
     needle: S.search.trim().toLowerCase(),
+    // A pivoted session comparison's rows, when they are this table's.
+    diffRows: S.diffMarks && S.diffMarks.sourceId === S.sourceId ? S.diffMarks.rows : null,
   };
+}
+
+/* A session comparison's mark on a row: A, the left session only; B, the
+   right only; A→B, both with different tags (or a note that differs).
+   Shared with the panel's legend and the banner, so the pill in the
+   gutter and the key explaining it can't drift apart. */
+const DIFF_GLYPH = { removed: 'A', added: 'B', changed: 'A→B' };
+export function diffMarkNode(kind, title) {
+  const m = el('span', 'diff-mark diff-mark-' + kind, DIFF_GLYPH[kind]);
+  if (title) m.title = title;
+  return m;
+}
+/* One row can differ in its tags AND its note; the tags decide the glyph
+   (they are what a review is about), and the title says both. */
+export function diffKind(dm) {
+  if (!dm.tags) return 'changed';
+  if (!dm.tags.left.length) return 'added';
+  if (!dm.tags.right.length) return 'removed';
+  return 'changed';
+}
+const tagsText = (v) => (v.length ? v.join(', ') : 'no tags');
+function diffMarkTitle(dm) {
+  const { left, right } = S.diffMarks;
+  const lines = [];
+  if (dm.tags) lines.push(`A · ${left}: ${tagsText(dm.tags.left)}`, `B · ${right}: ${tagsText(dm.tags.right)}`);
+  if (dm.note) lines.push(`note A · ${left}: ${dm.note.left || 'no note'}`, `note B · ${right}: ${dm.note.right || 'no note'}`);
+  return lines.join('\n');
 }
 
 /* One data row's DOM. `pos` addresses the row the way the current mode
@@ -375,7 +404,8 @@ export function rowPaintContext() {
    reduced copy of it precisely so that selection, tag stripes, the note
    mark and the cell-range highlight can't be present in one mode and
    quietly missing in the other. */
-export function buildDataRow(pos, r, { cols, colMeta, idx, tagColor, widths, pins, needle }) {
+export function buildDataRow(pos, r, ctx) {
+  const { cols, colMeta, idx, tagColor, widths, pins, needle } = ctx;
   const row = el('div', 'row' + (r ? '' : ' pending'));
   row.dataset.pos = pos;
   if (pos === S.cursor) row.classList.add('cursor');
@@ -400,6 +430,10 @@ export function buildDataRow(pos, r, { cols, colMeta, idx, tagColor, widths, pin
       mid.append(st);
     }
     if (r.note) mid.append(el('span', 'has-note', '✎'));
+    // A session comparison's mark: which side tagged this row (see
+    // session.js pivotDiff).
+    const dm = ctx.diffRows && ctx.diffRows[r.rid];
+    if (dm) mid.append(diffMarkNode(diffKind(dm), diffMarkTitle(dm)));
   }
   g.append(cb, mid, el('span', 'rid', r ? String(r.rid) : '·'));
   row.append(g);
@@ -618,9 +652,9 @@ $('body').addEventListener('click', (e) => {
   }
   if (e.target.closest('.rowcheck')) return; // owned by the delegated `change` listener below
   // .cell clicks are handled synchronously from `mousedown` below (see the
-  // comment there) — this handler is left only for gutter clicks (row
-  // number, note icon, blank gutter space).
-  if (e.target.closest('.cell')) return;
+  // comment there), and so is the row number — this handler is left for the
+  // rest of the gutter (note icon, tag stripes, blank space).
+  if (e.target.closest('.cell') || e.target.closest('.rid')) return;
   const row = e.target.closest('.row');
   if (!row) return;
   const pos = Number(row.dataset.pos);
@@ -637,6 +671,67 @@ $('body').addEventListener('change', (e) => {
   S.cellAnchor = null;
   render();
 });
+
+/* The row number is the checkbox, in cell form.
+
+   The checkbox was the only way to select a row, which is a 12px target
+   that has to be aimed at, and nothing about the number beside it said it
+   was inert. Clicking the number now does exactly what ticking the box
+   does — toggles that one row, leaving the others alone — and dragging
+   down the column paints the same choice onto every row it crosses, the
+   way dragging across data cells extends a cell range.
+
+   Deliberately NOT routed through activateRow/moveCursor: those clear the
+   row selection on a plain click, which is right for "I clicked a cell"
+   and exactly wrong for "I ticked a box". The cursor still follows, so
+   the detail pane and the keyboard stay on the row you just picked. */
+let ridPainting = null;   // the state a drag is painting: true = select
+let ridAnchor = -1;       // last row-number click, for shift-extend
+
+function ridRowAt(target) {
+  const rid = target.closest('.rid');
+  if (!rid) return -1;
+  const row = rid.closest('.row');
+  if (!row) return -1;
+  const pos = Number(row.dataset.pos);
+  // Grouped mode interleaves group headings into the position space, and a
+  // heading is not a row anything can select (selSetRange skips them too).
+  if (S.groupByCols.length && !groupCoordAt(pos)) return -1;
+  return pos;
+}
+
+$('body').addEventListener('mousedown', (e) => {
+  if (e.button !== 0) return;
+  const pos = ridRowAt(e.target);
+  if (pos < 0) return;
+  e.preventDefault();   // no native text-drag off the digits
+  if (e.shiftKey && ridAnchor >= 0) {
+    selSetRange(ridAnchor, pos);
+  } else {
+    ridPainting = !selHas(pos);
+    ridPainting ? selAdd(pos) : selRemove(pos);
+    ridAnchor = pos;
+  }
+  // Same reasoning as the checkbox's own handler: picking rows is a fresh
+  // "what to copy" choice, so a stale cell rectangle must not win.
+  S.cellRange = null;
+  S.cellAnchor = null;
+  S.cursor = pos;
+  S.anchor = pos;
+  render();
+  maybeShowDetail(pos);
+  $('body').focus();
+});
+
+$('body').addEventListener('mousemove', (e) => {
+  if (ridPainting === null) return;
+  const pos = ridRowAt(e.target);
+  if (pos < 0 || selHas(pos) === ridPainting) return;
+  ridPainting ? selAdd(pos) : selRemove(pos);
+  render();
+});
+
+document.addEventListener('mouseup', () => { ridPainting = null; });
 
 $('body').addEventListener('mousedown', (e) => {
   if (e.button !== 0) return;

@@ -2,7 +2,7 @@
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { autofitMaxWidth } from './columns.js';
-import { $, AUTOFIT_MAX_W_DEFAULT, ROW_H, ROW_H_COMFORTABLE, ROW_H_COMPACT, api, el, post, setRowH, toast } from './core.js';
+import { $, AUTOFIT_MAX_W_DEFAULT, ROW_H, ROW_H_COMFORTABLE, ROW_H_COMPACT, api, debounce, el, post, setRowH, toast } from './core.js';
 import { labeledRow } from './derived.js';
 import { VALUE_FILTER_AUTO_MAX } from './filters.js';
 import { headH, rScroll, render, spacerPx, vScroll } from './grid.js';
@@ -10,8 +10,10 @@ import { drawRail, rebuildGroupPrefix, renderGrouped } from './grouping.js';
 import { ACTION_LABELS, defaultKeymap, findKeyConflict, keySpecFromEvent, saveKeymap } from './keymap.js';
 import { buildPluginsPanel } from './plugins.js';
 import { buildAssocPanel } from './assoc.js';
-import { loadSavedFilters } from './savedfilters.js';
-import { applyPageTabsSize } from './sources.js';
+import { buildEnvPanel } from './userenv.js';
+import { loadCaseVariables, loadSavedFilters } from './savedfilters.js';
+import { applyPageTabsSize, renderPageTabs } from './sources.js';
+import { lastSplash, reducedMotion } from './splash.js';
 import { S, gridRowCount } from './state.js';
 import { openSavedFiltersModal, updateFiltersButton } from './timeframe.js';
 import { TS_FORMATS } from './tsformat.js';
@@ -68,6 +70,44 @@ export function saveAppearance() {
   // remoteSession lives server-side now (see loadAppSettings) — persisting
   // it here would resurrect a stale value and fight the machine setting.
   localStorage.setItem(APPEARANCE_KEY, JSON.stringify({ ...S.appearance, remoteSession: undefined }));
+  pushAppearanceSoon();
+}
+
+/* The look is mirrored to the machine (app settings) so a different
+   ORIGIN — an association quick-look on a free port, another browser —
+   boots into the same skin instead of the default. Debounced: the accent
+   picker fires per keystroke. */
+const pushAppearanceSoon = debounce(() => {
+  post('/api/settings/app', { appearance: appearanceForServer() }).catch(() => {});
+}, 400);
+
+function appearanceForServer() {
+  const { remoteSession, ...rest } = S.appearance;
+  return rest;
+}
+
+/* On boot, after the machine settings load. An origin that has never
+   stored a look (a quick-look window on a free port, a second browser)
+   adopts the machine's saved one and repaints — that was the default-skin
+   flash. Adopted IN MEMORY only: nothing is written to this origin's
+   localStorage, so it keeps following the machine on every boot (and the
+   first-run gate, which reads that key, still sees a first run). An
+   origin with its own stored look keeps it — every change there pushes
+   up, so the two only diverge if the analyst deliberately set them apart.
+   A machine with no saved look yet learns this origin's. */
+export function syncAppearanceFromServer() {
+  const remote = S.appSettings && S.appSettings.appearance;
+  const hasLocal = !!localStorage.getItem(APPEARANCE_KEY);
+  if (!remote || typeof remote !== 'object') {
+    if (hasLocal) pushAppearanceSoon();
+    return;
+  }
+  if (hasLocal) return;
+  S.appearance = { ...S.appearance, ...remote };
+  document.documentElement.setAttribute('data-style', S.appearance.style);
+  paintTheme();
+  paintAccent();
+  paintDensity();
 }
 
 export function contrastFg(hex) {
@@ -136,6 +176,17 @@ export function resolveAutoTheme() {
 
 export function paintTheme() {
   document.documentElement.setAttribute('data-theme', S.appearance.themeMode === 'auto' ? resolveAutoTheme() : S.appearance.themeMode);
+  announceAppearance();
+}
+
+/* Canvases don't inherit CSS: anything that painted with a token (the
+   rail, a plugin panel's bars) has to redraw when the look changes.
+   Fired by every theme/accent/skin paint; plugins subscribe through
+   winnow.onAppearanceChange. */
+function announceAppearance() {
+  document.dispatchEvent(new CustomEvent('winnow:appearance', {
+    detail: { style: S.appearance.style, themeMode: S.appearance.themeMode, accent: S.appearance.accent },
+  }));
 }
 
 /* An inline --accent beats the stylesheet, so writing one unconditionally
@@ -155,6 +206,7 @@ export function paintAccent() {
     root.style.removeProperty('--accent');
     root.style.removeProperty('--accent-fg');
   }
+  announceAppearance();
 }
 
 /* Each style has a signature accent (the color it showed in the design
@@ -166,6 +218,7 @@ export function applyStyle(styleName) {
   S.appearance.style = styleName;
   document.documentElement.setAttribute('data-style', styleName);
   if (!S.appearance.accentCustomized) applyAccent(STYLES[styleName].defaultAccent, false);
+  else announceAppearance();   // applyAccent announces on the other branch
   saveAppearance();
 }
 
@@ -352,6 +405,114 @@ export function openCaseSettings() {
       }
     };
     b.append(labeledRow('Timestamp format', sel));
+
+    b.append(el('div', 'settings-sub-label', 'Variables'));
+    b.append(el('p', 'fb-help',
+      'Named values this case carries for the plugins and people working it — the engagement '
+      + 'name, an API base URL, a link to the scoping document. Plugins read them as '
+      + 'req.variables / winnow.state.variables. Case data, so they travel with the file: '
+      + 'never put a token or password here (Settings → Environment is for those).'));
+    const varsBox = el('div', 'case-vars');
+    b.append(varsBox);
+    renderCaseVariables(varsBox);
+    // Plugins can set variables behind the UI's back; re-fetch on open.
+    loadCaseVariables().then(() => renderCaseVariables(varsBox)).catch(() => {});
+  });
+}
+
+/* Case settings → Variables: one row per variable (name · value · what
+   it's for), required ones flagged while empty, plus an add row. Saves
+   on change through the same route plugins use. */
+export function renderCaseVariables(box) {
+  // The add row is built once per box and never detached — a repaint
+  // landing mid-typing (the re-fetch on open) must not steal focus or
+  // text from it. Only the listed rows are replaced.
+  if (!box._addRow) box._addRow = buildCaseVariableAddRow(box);
+  if (!box._addRow.isConnected) box.append(box._addRow);
+  for (const c of [...box.children]) if (c !== box._addRow) c.remove();
+  const list = S.caseVariables || [];
+  const rows = [];
+  if (!list.length) rows.push(el('div', 'note-status', 'No variables yet.'));
+  for (const v of list) {
+    const row = el('div', 'case-var-row' + (v.required && !v.value ? ' missing' : ''));
+    const name = el('span', 'case-var-name', v.name);
+    name.title = v.name;
+    const val = el('input', 'case-var-value');
+    val.value = v.value || '';
+    val.placeholder = v.required ? 'required' : 'value';
+    val.onchange = async () => {
+      try { await post('/api/case/variables', { name: v.name, value: val.value }); await loadCaseVariables(); renderCaseVariables(box); }
+      catch (e) { toast('Could not save: ' + e.message, 5000); }
+    };
+    const desc = el('span', 'case-var-desc', (v.required ? 'required · ' : '') + (v.description || ''));
+    const del = el('button', 'btn ghost case-var-del', '✕');
+    del.title = 'Remove this variable';
+    del.onclick = async () => {
+      try { await api(`/api/case/variables/${encodeURIComponent(v.name)}`, { method: 'DELETE' }); await loadCaseVariables(); renderCaseVariables(box); }
+      catch (e) { toast('Could not remove: ' + e.message, 5000); }
+    };
+    row.append(name, val, desc, del);
+    rows.push(row);
+  }
+  for (const r of rows) box.insertBefore(r, box._addRow);
+}
+
+function buildCaseVariableAddRow(box) {
+  const add = el('div', 'case-var-row case-var-add');
+  const nameIn = el('input', 'case-var-name-in');
+  nameIn.placeholder = 'name (e.g. engagement)';
+  const valIn = el('input', 'case-var-value');
+  valIn.placeholder = 'value';
+  const addBtn = el('button', 'btn ghost', 'Add');
+  addBtn.onclick = async () => {
+    if (!nameIn.value.trim()) { toast('Name the variable'); return; }
+    try {
+      await post('/api/case/variables', { name: nameIn.value.trim(), value: valIn.value });
+      nameIn.value = ''; valIn.value = '';
+      await loadCaseVariables();
+      renderCaseVariables(box);
+    } catch (e) { toast('Could not add: ' + e.message, 5000); }
+  };
+  add.append(nameIn, valIn, el('span', 'case-var-desc', ''), addBtn);
+  return add;
+}
+
+/* A profile's required variables, asked for in one dialog — used after
+   applying a profile to an existing case (the new-case dialog collects
+   them inline instead). Resolves true when every required one is filled. */
+export function promptForVariables(defs, { title = 'This profile needs a few values' } = {}) {
+  return new Promise((resolve) => {
+    modal(title, (b) => {
+      b.append(el('p', 'fb-help', 'Stored in the case file for plugins to use. Not for tokens or passwords.'));
+      const inputs = new Map();
+      for (const d of defs) {
+        const inp = el('input', 'confirm-input case-var-prompt');
+        inp.dataset.var = d.name;
+        inp.placeholder = d.required ? 'required' : 'optional';
+        inp.value = d.default || '';
+        b.append(el('label', null, (d.label || d.name) + (d.required ? ' *' : '')), inp);
+        if (d.description) b.append(el('p', 'fb-help', d.description));
+        inputs.set(d.name, inp);
+      }
+      const acts = el('div', 'row-actions');
+      const save = el('button', 'btn', 'Save');
+      save.onclick = async () => {
+        const missing = defs.filter((d) => d.required && !(inputs.get(d.name).value || '').trim());
+        if (missing.length) { toast(`Fill in: ${missing.map((d) => d.label || d.name).join(', ')}`); return; }
+        try {
+          for (const [name, inp] of inputs) await post('/api/case/variables', { name, value: inp.value.trim() });
+          await loadCaseVariables();
+          $('modal').hidden = true;
+          resolve(true);
+        } catch (e) { toast('Could not save: ' + e.message, 5000); }
+      };
+      const later = el('button', 'btn ghost', 'Later');
+      later.title = 'Case settings → Variables lists what is still missing';
+      later.onclick = () => { $('modal').hidden = true; resolve(false); };
+      acts.append(save, later);
+      b.append(acts);
+      setTimeout(() => { const first = inputs.values().next().value; if (first) first.focus(); }, 0);
+    });
   });
 }
 
@@ -459,8 +620,7 @@ export function openSettings() {
       saveAppearance();
     };
     capInput.onchange = commitCap;
-    const noCapLabel = el('label');
-    noCapLabel.style.cssText = 'display:flex;align-items:center;gap:6px';
+    const noCapLabel = el('label', 'check-row');
     const noCap = el('input');
     noCap.type = 'checkbox';
     noCap.checked = !autofitMaxWidth();
@@ -480,8 +640,7 @@ export function openSettings() {
       'For running Winnow inside RDP/VNC: scrolls the grid by whole rows (one repaint per wheel '
       + 'notch, like native apps), and stops animations and hover repaints, so the remote display '
       + 'encoder ships small deltas instead of re-encoding the viewport. Saved on this machine.'));
-    const remoteLabel = el('label');
-    remoteLabel.style.cssText = 'display:flex;align-items:center;gap:6px';
+    const remoteLabel = el('label', 'check-row');
     const remoteCb = el('input');
     remoteCb.type = 'checkbox';
     remoteCb.checked = !!S.appearance.remoteSession;
@@ -508,7 +667,7 @@ export function openSettings() {
       let info;
       try { info = await api('/api/assoc/types'); } catch { return; }
       if (info.platform !== 'windows') return;
-      const bgLabel = el('label');
+      const bgLabel = el('label', 'check-row');
       const bgCb = el('input');
       bgCb.type = 'checkbox';
       bgCb.checked = !!info.background;
@@ -532,19 +691,54 @@ export function openSettings() {
        any key or click while it runs — this switch is for someone who opens
        Winnow all day and doesn't want it at all. prefers-reduced-motion is
        honoured without needing this turned off. */
-    const splashLabel = el('label');
-    splashLabel.style.cssText = 'display:flex;align-items:center;gap:6px';
+    const splashLabel = el('label', 'check-row');
     const splashCb = el('input');
     splashCb.type = 'checkbox';
     splashCb.checked = S.appearance.splash !== false;
     splashCb.onchange = () => {
-      S.appearance.splash = splashCb.checked;
+      // Ticked by hand means "play it" — including on a machine whose OS
+      // asks for reduced motion (see splash.splashEnabled).
+      S.appearance.splash = splashCb.checked ? 'always' : false;
       saveAppearance();
+      paintSplashNote();
     };
     splashLabel.append(splashCb, el('span', null, 'Launch animation'));
     secLook.append(splashLabel);
+    const splashNote = el('p', 'fb-help');
+    const paintSplashNote = () => {
+      const last = lastSplash();
+      const parts = ['The winnowing animation Winnow starts with. Any key or click skips it.'];
+      if (reducedMotion()) {
+        parts.push(S.appearance.splash === 'always'
+          ? 'Your system asks for reduced motion; it plays anyway because you ticked this yourself.'
+          : 'Your system asks for reduced motion (Windows: Accessibility → Visual effects → Animation effects), '
+            + 'so it is skipped — tick the box to play it regardless.');
+      }
+      if (last && last.result) {
+        parts.push(`Last launch: ${last.result}${last.reason ? ` — ${last.reason}` : ''}.`);
+      }
+      splashNote.textContent = parts.join(' ');
+    };
+    paintSplashNote();
+    secLook.append(splashNote);
+
+    /* Pages as one dropdown: with several plugin tabs the page strip
+       competes with the table tabs for the bar — collapsing it to a single
+       Pages ▾ button (like Filters ▾) hands that width back. */
+    const pagesLabel = el('label', 'check-row');
+    const pagesCb = el('input');
+    pagesCb.type = 'checkbox';
+    pagesCb.checked = !!S.appearance.pagesMenu;
+    pagesCb.onchange = () => {
+      S.appearance.pagesMenu = pagesCb.checked;
+      saveAppearance();
+      renderPageTabs();
+      applyPageTabsSize();
+    };
+    pagesLabel.append(pagesCb, el('span', null, 'Pages as a dropdown'));
+    secLook.append(pagesLabel);
     secLook.append(el('p', 'fb-help',
-      'The winnowing animation Winnow starts with. Any key or click skips it.'));
+      'Collapse SQL, Timeline, Notes, Watchlist and plugin tabs into one Pages \u25be button, the way Filters \u25be works.'));
 
     const secKeys = settingsSection(b, 'Keyboard shortcuts');
     secKeys.append(el('p', null, 'Tag hotkeys (1–9) are set per-tag in Edit tags. Escape always clears the selection or closes a panel. '
@@ -572,9 +766,15 @@ export function openSettings() {
           addBtn.disabled = true;
           const done = () => {
             document.removeEventListener('keydown', capture, true);
+            document.removeEventListener('winnow:modalclose', done);
             addBtn.disabled = false;
             addBtn.textContent = '+ key';
           };
+          // Closing the modal disarms it. Escape already did (capture
+          // handles it), but the × button did not: the listener outlived
+          // the dialog, swallowed the next keystroke anywhere in the app,
+          // and silently bound it to this action.
+          document.addEventListener('winnow:modalclose', done);
           const capture = (ke) => {
             ke.preventDefault();
             ke.stopPropagation();
@@ -762,9 +962,12 @@ export function openSettings() {
     const secAssoc = settingsSection(b, 'File associations');
     buildAssocPanel(secAssoc);
 
+    const secEnv = settingsSection(b, 'Environment');
+    buildEnvPanel(secEnv);
+
     const secUpdates = settingsSection(b, 'Updates');
     buildUpdatesPanel(secUpdates);
-  });
+  }, { tall: true });
 }
 
 /* Settings → Updates. Shows what this install is, and checks for a newer

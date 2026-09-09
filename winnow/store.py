@@ -43,6 +43,7 @@ except ImportError:  # pragma: no cover - Windows
 from . import enrich  # noqa: F401 — registers the cross-table lookup op into timeparse.OPERATIONS
 from . import structparse  # noqa: F401 — registers the JSON/XML extraction ops into timeparse.OPERATIONS
 from . import timeparse
+from . import plasoread
 from . import xlsxread
 
 BATCH = 20_000
@@ -100,6 +101,12 @@ SQLITE_IMPORT_EXTENSIONS = {".db", ".sqlite", ".sqlite3", ".db-wal"}
 # import ignores them too. .xlsm is the same zip container with macros the
 # reader never executes; legacy binary .xls is out of scope (xlsxread.py).
 XLSX_IMPORT_EXTENSIONS = {".xlsx", ".xlsm"}
+
+# Plaso storage files (log2timeline output) — one file, one flat timeline
+# table, read by winnow/plasoread.py. Its own set (not SQLITE_...) because
+# a .plaso must never fall into the generic table picker: its raw tables
+# are serialized attribute containers, useless without the decode step.
+PLASO_IMPORT_EXTENSIONS = {".plaso"}
 # scan_import_directory stops walking once matched+excluded together hit
 # this many entries — same "cap and say so" reasoning as
 # SEARCH_ALL_COUNT_CAP, guarding against an analyst accidentally pointing
@@ -249,6 +256,90 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE TABLE IF NOT EXISTS case_settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+
+-- Sidebar folders: a per-case tree an analyst sorts tables into, and which
+-- a directory import reproduces from the on-disk folder structure. Case
+-- data, not a UI preference — it organizes *this* evidence and should
+-- travel with the .db, same reasoning as sql_tabs/sessions above (only the
+-- collapsed/expanded state is a per-browser localStorage preference).
+-- Purely organizational: source_folder_map keys by the SIGNED source id
+-- (negative = merge, the convention open_tabs uses) so merges fold with no
+-- extra machinery, and a table with no map row is simply "ungrouped" (root
+-- level). Deleting a folder reparents its tables and never drops a source
+-- (invariant #1 — the import record is untouched).
+CREATE TABLE IF NOT EXISTS source_folders (
+    id        INTEGER PRIMARY KEY,
+    name      TEXT NOT NULL,
+    parent_id INTEGER,                      -- NULL = top level
+    pos       INTEGER NOT NULL DEFAULT 0    -- order among siblings
+);
+CREATE TABLE IF NOT EXISTS source_folder_map (
+    source_id INTEGER PRIMARY KEY,          -- signed: negative = merge id
+    folder_id INTEGER NOT NULL,
+    pos       INTEGER NOT NULL DEFAULT 0    -- order within the folder
+);
+
+-- The case narrative: a single free-form Markdown scratchpad, distinct
+-- from per-row notes. In the case file (not workspace/) because the story
+-- of the investigation must travel with the .db to whoever receives it,
+-- same portability argument as sessions.
+CREATE TABLE IF NOT EXISTS case_notes (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    body       TEXT NOT NULL DEFAULT '',
+    updated_at TEXT
+);
+
+-- IOC watchlist: indicators the case is scanned for, and the materialised
+-- hits (so they survive, are countable, and are taggable/exportable).
+-- Evidence-adjacent findings, so they live in the case .db, not workspace/.
+CREATE TABLE IF NOT EXISTS watchlist (
+    id          INTEGER PRIMARY KEY,
+    value       TEXT NOT NULL,
+    kind        TEXT NOT NULL DEFAULT 'other',   -- hash|ip|domain|filename|other (advisory: sets colour)
+    note        TEXT,
+    auto_tag_id INTEGER,                          -- if set, matching rows get this tag on scan
+    created_at  TEXT
+);
+CREATE TABLE IF NOT EXISTS watchlist_hits (
+    watchlist_id INTEGER NOT NULL,
+    source_id    INTEGER NOT NULL,
+    rid          INTEGER NOT NULL,
+    PRIMARY KEY (watchlist_id, source_id, rid)
+) WITHOUT ROWID;
+
+-- The case's dashboard: one JSON document (a list of widget definitions).
+-- In the case .db so a dashboard travels with the case it summarises; a
+-- PROFILE (workspace) is the reusable template a dashboard is applied from.
+CREATE TABLE IF NOT EXISTS dashboard (
+    id      INTEGER PRIMARY KEY CHECK (id = 1),
+    widgets TEXT NOT NULL DEFAULT '[]'
+);
+-- Named dashboards: "Dashboard" was one page; now it's a function, and a
+-- case can hold several named boards (a KAPE-triage board, a lateral-
+-- movement board). The single-row `dashboard` above is kept only as a
+-- one-way migration source for case files from before this — its contents
+-- become one "Dashboard" entry here on next open (see _migrate_dashboards).
+-- Case variables: named values a case carries for the plugins and people
+-- working it — the engagement name, a backend API base URL, a link to the
+-- scoping document. Case data (they travel with the .db), NOT secrets:
+-- tokens belong in WINNOW_* environment variables, never here. A profile
+-- can declare variables (some required) that seed on apply and that the
+-- new-case dialog insists on.
+CREATE TABLE IF NOT EXISTS case_variables (
+    name        TEXT PRIMARY KEY,
+    value       TEXT NOT NULL DEFAULT '',
+    description TEXT,
+    required    INTEGER NOT NULL DEFAULT 0,
+    updated_at  TEXT
+);
+
+CREATE TABLE IF NOT EXISTS dashboards (
+    id      INTEGER PRIMARY KEY,
+    name    TEXT NOT NULL,
+    widgets TEXT NOT NULL DEFAULT '[]',
+    pos     INTEGER NOT NULL DEFAULT 0,
+    pinned  INTEGER NOT NULL DEFAULT 0           -- 1: shown as a page tab in the top strip
 );
 """
 
@@ -654,6 +745,18 @@ class IngestCancelled(Exception):
     `cancel` callable never see it."""
 
 
+class UnknownFilterColumn(ValueError):
+    """A filter names a column this table does not have. Raised rather than
+    dropped, because a dropped condition shows MORE rows under a filter
+    that claims to be applied — see _compile_condition."""
+
+    def __init__(self, column: str):
+        self.column = column
+        super().__init__(
+            f'This filter uses a column this table does not have: "{column}". '
+            "Edit the filter, or apply it to a table that has that column.")
+
+
 class OpCancelled(Exception):
     """A registered cancellable operation (view/timeline build, group
     summary) was interrupted via cancel_op. server.py maps it to HTTP 499 —
@@ -1027,6 +1130,8 @@ def _current_user() -> str:
 
 
 class Store:
+    FTS_BUILD_CONCURRENCY = 2  # trigram builds are CPU/writer-bound; more just thrash
+
     def __init__(self, path: str, default_tags: list[tuple] | None = None):
         self.path = path
         self._default_tags = default_tags or DEFAULT_TAGS
@@ -1122,6 +1227,18 @@ class Store:
             # from before nicknames existed — patch those in place.
             if not any(r[1] == "nickname" for r in self.db.execute("PRAGMA table_info(sources)")):
                 self.db.execute("ALTER TABLE sources ADD COLUMN nickname TEXT")
+            # Same for dashboards.pinned (a board promoted into the page strip).
+            if not any(r[1] == "pinned" for r in self.db.execute("PRAGMA table_info(dashboards)")):
+                self.db.execute("ALTER TABLE dashboards ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
+            # The single-row `dashboard` becomes one named "Dashboard" entry
+            # the first time a case with that older shape is opened.
+            has_named = self.db.execute("SELECT 1 FROM dashboards LIMIT 1").fetchone()
+            if not has_named:
+                old = self.db.execute("SELECT widgets FROM dashboard WHERE id=1").fetchone()
+                if old and old["widgets"] and old["widgets"] != "[]":
+                    self.db.execute(
+                        "INSERT INTO dashboards(name, widgets, pos) VALUES ('Dashboard', ?, 0)",
+                        (old["widgets"],))
             if not open_tabs_existed:
                 ids = [r[0] for r in self.db.execute("SELECT id FROM sources")]
                 ids += [-r[0] for r in self.db.execute("SELECT id FROM merges")]
@@ -1131,6 +1248,15 @@ class Store:
                     )
         self._seed_tags()
         self._view_seq = 0
+        # Its own lock for the same reason _search_job_lock exists: handing
+        # out a view id must not queue behind a multi-second build. `+=` on
+        # an attribute is load/add/store, so two requests arriving together
+        # (two tabs, a grid rebuild racing a Timeline build) could compute
+        # the same id — and then one CREATE TABLE v."view_9" raises "table
+        # already exists" (a 500, since api_view maps only ValueError and
+        # KeyError), or the loser wins the _views dict and its handle
+        # describes a table it does not own.
+        self._view_seq_lock = threading.Lock()
         self._views: dict[str, dict] = {}
         self._undo_seq = 0
         # Tag-change undo history. Entries are newest-last; each owns a
@@ -1141,6 +1267,14 @@ class Store:
         self._maxlen_cache: dict[int, tuple[int, dict[str, int]]] = {}
         self._fts_threads: dict[int, threading.Thread] = {}
         self._index_threads: dict[tuple[int, str], threading.Thread] = {}
+        # Caps how many trigram builds run at once. A broad action — a
+        # search-all sweep over a case with many unindexed sources — calls
+        # _ensure_fts_building for every one of them, and each build holds
+        # the writer lock in chunks; unbounded, that swarm starves an
+        # interactive build_view (a preset apply "not working at all" while
+        # a sweep ran). Bounded like ingest (CPU-bound work; more just
+        # thrashes), so at most FTS_BUILD_CONCURRENCY compete for the writer.
+        self._fts_build_sem = threading.Semaphore(self.FTS_BUILD_CONCURRENCY)
         # Guards the two thread registries above — its own lock, not
         # self.lock, for the same reason as _search_job_lock: the ensure-*
         # helpers are called from read paths (group_summary, column_values,
@@ -1274,10 +1408,16 @@ class Store:
         t.start()
 
     def _build_fts_worker(self, source_id: int) -> None:
-        try:
-            self.build_fts(source_id)
-        except Exception:
-            pass  # best-effort background upgrade — the next search attempt retries
+        # The thread is registered (so _is_fts_building sees it and the
+        # per-source dedup holds) before it waits here for a build slot —
+        # bounding writer contention when many builds are requested at once
+        # (the search-all sweep). The heavy, lock-holding build_fts runs
+        # only once a slot is free.
+        with self._fts_build_sem:
+            try:
+                self.build_fts(source_id)
+            except Exception:
+                pass  # best-effort background upgrade — the next search attempt retries
 
     def _is_fts_building(self, source_id: int) -> bool:
         with self._threads_lock:
@@ -2267,6 +2407,88 @@ class Store:
         rec["rows_per_sec"] = int(total / elapsed) if elapsed > 0 else 0
         return rec
 
+    def ingest_plaso(
+        self,
+        path: str,
+        name: str | None = None,
+        build_fts: bool = True,
+        progress=None,
+        cancel=None,
+    ) -> dict:
+        """Imports a Plaso storage file as one flat timeline table — the
+        .plaso-shaped sibling of ingest_sqlite_table, same conventions:
+        TEXT columns, self.lock held per BATCH-sized chunk, cancel drops
+        the partial source, the source file opened read-only and never
+        touched. Column shape and format handling live in plasoread.py;
+        column types are declared, not sampled — the reader KNOWS its
+        first column is a datetime (the ingest_rows docstring's argument,
+        applied here)."""
+        if not plasoread.is_plaso_storage(path):
+            raise ValueError(f"{os.path.basename(path)} is not a Plaso storage file")
+        name = name or os.path.basename(path)
+        file_hash = self._quick_hash(path)
+        total_rows = plasoread.plaso_summary(path)["event_count"]
+
+        cols = sanitize_columns(list(plasoread.PLASO_COLUMNS))
+        ncols = len(cols)
+        with self.lock, self.db:
+            cur = self.db.execute(
+                "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at)"
+                " VALUES (?,?,?,?,?,?)",
+                (name, os.path.abspath(path), "", "[]", file_hash, time.strftime("%Y-%m-%dT%H:%M:%S")),
+            )
+            source_id = cur.lastrowid
+            self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
+            dest_table = f"src_{source_id}"
+            coldefs = ", ".join(f"{q(c)} TEXT" for c in cols)
+            self.db.execute(f"CREATE TABLE {q(dest_table)} (rid INTEGER PRIMARY KEY, {coldefs})")
+            self.db.execute("UPDATE sources SET table_name=? WHERE id=?", (dest_table, source_id))
+
+        placeholders = ",".join("?" * ncols)
+        insert = f"INSERT INTO {q(dest_table)} ({','.join(q(c) for c in cols)}) VALUES ({placeholders})"
+
+        total = 0
+        t0 = time.time()
+        error: Exception | None = None
+        with self._ingest_synchronous_off():
+            try:
+                batch: list[tuple] = []
+                for row in plasoread.iter_plaso_rows(path):
+                    batch.append(tuple(row))
+                    if len(batch) >= BATCH:
+                        if cancel is not None and cancel():
+                            raise IngestCancelled(f"Import of {name} cancelled")
+                        total = self._commit_ingest_batch(insert, batch, source_id, total)
+                        batch = []
+                        if progress:
+                            progress(total, total, total_rows)
+                if batch:
+                    total = self._commit_ingest_batch(insert, batch, source_id, total)
+                if progress:
+                    progress(total, total, total_rows)
+            except IngestCancelled:
+                # Same cancel-discards-the-partial contract as ingest_csv.
+                self.drop_source(source_id)
+                raise
+            except Exception as e:
+                error = e
+
+        colmeta = [{"name": c, "type": t} for c, t in zip(cols, plasoread.PLASO_COLUMN_TYPES)]
+        with self.lock, self.db:
+            self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
+
+        if error is not None:
+            raise error
+
+        if build_fts and total:
+            self._ensure_fts_building(source_id)
+
+        elapsed = time.time() - t0
+        rec = self.get_source(source_id)
+        rec["elapsed_sec"] = round(elapsed, 2)
+        rec["rows_per_sec"] = int(total / elapsed) if elapsed > 0 else 0
+        return rec
+
     def preview_xlsx_sheets(self, path: str) -> dict:
         """Read-only look at every data sheet in an Excel workbook, in the
         exact shape preview_sqlite_tables returns ({"tables": [...]}) so
@@ -2782,6 +3004,8 @@ class Store:
                 # extension/pattern, and doesn't need to.
                 if ext in (".json", ".jsonl", ".ndjson"):
                     kind = "json"
+                elif ext in PLASO_IMPORT_EXTENSIONS:
+                    kind = "plaso"
                 elif ext in DEFAULT_IMPORT_EXTENSIONS:
                     kind = "csv"
                 else:
@@ -2833,7 +3057,7 @@ class Store:
         system because it wants exactly what this one provides — a progress
         bar over a multi-million-row pass, per-BATCH cancellation, the jobs
         panel, and close()'s cancel-and-join."""
-        if kind not in ("csv", "json", "sqlite", "xlsx", "derive"):
+        if kind not in ("csv", "json", "sqlite", "xlsx", "plaso", "derive"):
             raise ValueError(f"Unknown ingest kind: {kind}")
         try:
             size = os.path.getsize(path)
@@ -2921,6 +3145,12 @@ class Store:
                 self._cascade_dependent_derives(res["source_id"],
                                                 [c["name"] for c in res["columns"]])
                 return
+            elif job["kind"] == "plaso":
+                results = [self.ingest_plaso(
+                    job["path"], name=job["name"],
+                    build_fts=opts.get("build_fts", True),
+                    progress=progress, cancel=cancel,
+                )]
             elif job["kind"] == "json":
                 results = [self.ingest_json(
                     job["path"], name=job["name"],
@@ -2952,6 +3182,19 @@ class Store:
                         ))
                     with self._ingest_jobs_lock:
                         job["tables_done"] = i + 1
+            # Directory import: drop each new table into the folder that
+            # mirrors its on-disk path (created once, shared across the
+            # tree), and bring it in CLOSED — a folder import can be dozens
+            # of files, and opening a tab per file buries the working set.
+            # They're one click away in the folder tree. folder_path is ""
+            # for a file at the scan root, which stays open like a single
+            # import.
+            if opts.get("folder_path"):
+                fid = self.ensure_folder_path(opts["folder_path"])
+                for r in results:
+                    if fid is not None:
+                        self.set_source_folder(r["id"], fid)
+                    self.set_tab_open(r["id"], False)
             with self._ingest_jobs_lock:
                 job["status"] = "done"
                 job["rows_done"] = sum(r.get("row_count") or 0 for r in results)
@@ -3139,6 +3382,176 @@ class Store:
 
     # ----------------------------------------------------------------- sources
 
+    # ------------------------------------------------------------ folders
+    #
+    # A per-case tree an analyst sorts tables into (and a directory import
+    # reproduces from disk). Folders are organizational only: nothing here
+    # ever touches a source table, and delete_folder reparents rather than
+    # drops (invariant #1). Membership is keyed by the SIGNED source id so a
+    # merge folds like any other table.
+
+    def list_folders(self) -> list[dict]:
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT id, name, parent_id, pos FROM source_folders "
+                "ORDER BY (parent_id IS NULL) DESC, parent_id, pos, id"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def _source_folder(self, source_id: int) -> tuple[int | None, int]:
+        """(folder_id, pos) for one signed source id — (None, 0) if it sits
+        at the root (no map row)."""
+        with self.lock:
+            r = self.db.execute(
+                "SELECT folder_id, pos FROM source_folder_map WHERE source_id=?",
+                (source_id,)).fetchone()
+        return (r["folder_id"], r["pos"]) if r else (None, 0)
+
+    def _folder_exists(self, folder_id: int) -> bool:
+        return self.db.execute(
+            "SELECT 1 FROM source_folders WHERE id=?", (folder_id,)).fetchone() is not None
+
+    def create_folder(self, name: str, parent_id: int | None = None) -> dict:
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("A folder needs a name")
+        if len(name) > 200:
+            raise ValueError("That folder name is too long")
+        with self.lock, self.db:
+            if parent_id is not None and not self._folder_exists(parent_id):
+                raise ValueError("That parent folder no longer exists")
+            pos = (self.db.execute(
+                "SELECT COALESCE(MAX(pos), -1) + 1 FROM source_folders WHERE parent_id IS ?",
+                (parent_id,)).fetchone()[0])
+            cur = self.db.execute(
+                "INSERT INTO source_folders(name, parent_id, pos) VALUES (?,?,?)",
+                (name, parent_id, pos))
+            fid = cur.lastrowid
+        return {"id": fid, "name": name, "parent_id": parent_id, "pos": pos}
+
+    def rename_folder(self, folder_id: int, name: str) -> None:
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("A folder needs a name")
+        if len(name) > 200:
+            raise ValueError("That folder name is too long")
+        with self.lock, self.db:
+            if not self._folder_exists(folder_id):
+                raise KeyError(f"No folder {folder_id}")
+            self.db.execute("UPDATE source_folders SET name=? WHERE id=?", (name, folder_id))
+
+    def _descendant_ids(self, folder_id: int) -> set[int]:
+        """folder_id and every folder beneath it — used to reject a move
+        that would make a folder its own ancestor."""
+        seen = {folder_id}
+        frontier = [folder_id]
+        while frontier:
+            kids = self.db.execute(
+                "SELECT id FROM source_folders WHERE parent_id=?", (frontier.pop(),)).fetchall()
+            for (kid,) in kids:
+                if kid not in seen:
+                    seen.add(kid)
+                    frontier.append(kid)
+        return seen
+
+    def move_folder(self, folder_id: int, parent_id: int | None, pos: int | None = None) -> None:
+        """Reparent and/or reorder a folder. A move into the folder's own
+        subtree (including itself) is refused — that would orphan a cycle."""
+        with self.lock, self.db:
+            if not self._folder_exists(folder_id):
+                raise KeyError(f"No folder {folder_id}")
+            if parent_id is not None:
+                if not self._folder_exists(parent_id):
+                    raise ValueError("That parent folder no longer exists")
+                if parent_id in self._descendant_ids(folder_id):
+                    raise ValueError("A folder can't be moved inside itself")
+            if pos is None:
+                pos = (self.db.execute(
+                    "SELECT COALESCE(MAX(pos), -1) + 1 FROM source_folders WHERE parent_id IS ?",
+                    (parent_id,)).fetchone()[0])
+            self.db.execute(
+                "UPDATE source_folders SET parent_id=?, pos=? WHERE id=?",
+                (parent_id, pos, folder_id))
+
+    def reorder_folders(self, parent_id: int | None, ordered_ids: list[int]) -> None:
+        """Set sibling order under one parent from a full id list (index =
+        pos). Ids not actually children of parent_id are ignored."""
+        with self.lock, self.db:
+            kids = {r[0] for r in self.db.execute(
+                "SELECT id FROM source_folders WHERE parent_id IS ?", (parent_id,))}
+            for i, fid in enumerate([f for f in ordered_ids if f in kids]):
+                self.db.execute("UPDATE source_folders SET pos=? WHERE id=?", (i, fid))
+
+    def delete_folder(self, folder_id: int) -> None:
+        """Delete a folder, reparenting its child folders and member tables
+        to its own parent (root when it was top-level). Never deletes a
+        source — a folder is a label, not a container that owns evidence."""
+        with self.lock, self.db:
+            row = self.db.execute(
+                "SELECT parent_id FROM source_folders WHERE id=?", (folder_id,)).fetchone()
+            if row is None:
+                raise KeyError(f"No folder {folder_id}")
+            parent = row["parent_id"]
+            self.db.execute(
+                "UPDATE source_folders SET parent_id=? WHERE parent_id=?", (parent, folder_id))
+            if parent is None:
+                # tables land at the root — the root is "no map row" at all
+                self.db.execute(
+                    "DELETE FROM source_folder_map WHERE folder_id=?", (folder_id,))
+            else:
+                self.db.execute(
+                    "UPDATE source_folder_map SET folder_id=? WHERE folder_id=?",
+                    (parent, folder_id))
+            self.db.execute("DELETE FROM source_folders WHERE id=?", (folder_id,))
+
+    def set_source_folder(self, source_id: int, folder_id: int | None, pos: int | None = None) -> None:
+        """Put a table in a folder (or, with folder_id=None, back at the
+        root — which is simply the absence of a map row)."""
+        with self.lock, self.db:
+            if folder_id is None:
+                self.db.execute("DELETE FROM source_folder_map WHERE source_id=?", (source_id,))
+                return
+            if not self._folder_exists(folder_id):
+                raise ValueError("That folder no longer exists")
+            if pos is None:
+                pos = (self.db.execute(
+                    "SELECT COALESCE(MAX(pos), -1) + 1 FROM source_folder_map WHERE folder_id=?",
+                    (folder_id,)).fetchone()[0])
+            self.db.execute(
+                "INSERT INTO source_folder_map(source_id, folder_id, pos) VALUES (?,?,?) "
+                "ON CONFLICT(source_id) DO UPDATE SET folder_id=excluded.folder_id, pos=excluded.pos",
+                (source_id, folder_id, pos))
+
+    def ensure_folder_path(self, path: str, parent_id: int | None = None) -> int | None:
+        """Find-or-create a nested folder chain from a posix path
+        ("RegistryHives/Users"), returning the leaf folder's id. Empty path
+        (a file at the scan root) returns None — the caller leaves the
+        source ungrouped. Reused across a directory import so a tree of
+        files lands in one shared folder structure, not a folder per file."""
+        parts = [p.strip() for p in (path or "").replace("\\", "/").split("/")]
+        parts = [p for p in parts if p and p not in (".", "..")]
+        if not parts:
+            return parent_id
+        cur = parent_id
+        # One transaction for the whole chain: two directory-import jobs
+        # (MAX_CONCURRENT_INGESTS=2) that share a folder would otherwise both
+        # miss the find and both insert a duplicate.
+        with self.lock, self.db:
+            for part in parts:
+                row = self.db.execute(
+                    "SELECT id FROM source_folders WHERE parent_id IS ? AND name=? COLLATE NOCASE",
+                    (cur, part)).fetchone()
+                if row:
+                    cur = row["id"]
+                else:
+                    pos = (self.db.execute(
+                        "SELECT COALESCE(MAX(pos), -1) + 1 FROM source_folders WHERE parent_id IS ?",
+                        (cur,)).fetchone()[0])
+                    cur = self.db.execute(
+                        "INSERT INTO source_folders(name, parent_id, pos) VALUES (?,?,?)",
+                        (part, cur, pos)).lastrowid
+        return cur
+
     def list_sources(self) -> list[dict]:
         """Bulk per-source annotation (is_open / tagged_row_count /
         note_count) in one locked pass — a per-source query here would be an
@@ -3153,6 +3566,8 @@ class Store:
             derived = self.db.execute(
                 "SELECT * FROM derived_columns ORDER BY source_id, id"
             ).fetchall()
+            folder = {r[0]: (r[1], r[2]) for r in self.db.execute(
+                "SELECT source_id, folder_id, pos FROM source_folder_map")}
         by_src: dict[int, list] = {}
         for r in derived:
             by_src.setdefault(r["source_id"], []).append(r)
@@ -3163,6 +3578,7 @@ class Store:
                 d["columns"].append(self._derived_col_entry(dr))
                 d["has_derived"] = True
             d["is_open"] = d["id"] in open_ids
+            d["folder_id"], d["folder_pos"] = folder.get(d["id"], (None, 0))
             d["tagged_row_count"] = tagged.get(d["id"], 0)
             d["note_count"] = notes.get(d["id"], 0)
             d["fts_building"] = self._is_fts_building(d["id"])
@@ -3184,6 +3600,13 @@ class Store:
                 self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
             else:
                 self.db.execute("DELETE FROM open_tabs WHERE source_id=?", (source_id,))
+
+    def close_all_tabs(self) -> None:
+        """Close every open tab in one shot — the tables stay in the case
+        (and the folder tree); only their open flag clears. Cheaper and
+        atomic vs one round trip per tab from the client."""
+        with self.lock, self.db:
+            self.db.execute("DELETE FROM open_tabs")
 
     def set_source_nickname(self, source_id: int, nickname: str | None) -> dict:
         """A display name the analyst chooses ("DC01 security log") over the
@@ -3365,6 +3788,8 @@ class Store:
             "is_merge": True,
             "member_source_ids": member_ids,
             "is_open": self._tab_meta(-merge_id)["is_open"],
+            "folder_id": self._source_folder(-merge_id)[0],
+            "folder_pos": self._source_folder(-merge_id)[1],
             "tagged_row_count": sum(m["tagged_row_count"] for m in members),
             "note_count": sum(m["note_count"] for m in members),
         }
@@ -3466,6 +3891,9 @@ class Store:
             self.db.execute("DELETE FROM sources WHERE id=?", (source_id,))
             self.db.execute(f"DROP TABLE IF EXISTS {q(self._derived_table(source_id))}")
             self.db.execute("DELETE FROM derived_columns WHERE source_id=?", (source_id,))
+        # SQLite reuses this id on the next import, so anything still keyed
+        # by it would silently attach to a different file.
+        self._drop_undo_for_source(source_id)
         self._maxlen_cache.pop(source_id, None)
 
     # -------------------------------------------------------- derived columns
@@ -4230,8 +4658,7 @@ class Store:
                 )
                 params.extend(p)
             union_sql = " UNION ALL ".join(branches)
-            self._view_seq += 1
-            vid = f"view_{self._view_seq}"
+            vid = self._next_view_id()
             sql = (
                 f"INSERT INTO v.{q(vid)}(source_id, rid) "
                 f"SELECT source_id, rid FROM ({union_sql}) {order}"
@@ -4249,8 +4676,7 @@ class Store:
                 )
             if not where and not has_sort:
                 return self._build_virtual_root_view(source_id, src)
-            self._view_seq += 1
-            vid = f"view_{self._view_seq}"
+            vid = self._next_view_id()
             sql = (
                 f"INSERT INTO v.{q(vid)}(source_id, rid) "
                 f"SELECT {int(source_id)}, rid FROM {self._from_clause(src)}"
@@ -4310,6 +4736,12 @@ class Store:
             if handle and handle.get("kind") in ("root", "root_virtual") and handle["source_id"] == source_id:
                 self._evict_view_and_children(old)
 
+    def _next_view_id(self) -> str:
+        """The one place a view id is minted. See _view_seq_lock."""
+        with self._view_seq_lock:
+            self._view_seq += 1
+            return f"view_{self._view_seq}"
+
     def _build_virtual_root_view(self, source_id: int, src: dict) -> dict:
         """No filters, no sort: the view IS the source table in its natural
         rid order, which INTEGER PRIMARY KEY already gives for free — no
@@ -4339,8 +4771,7 @@ class Store:
         opening a table."""
         with self.lock, self.db:
             self._evict_root_views(source_id)
-            self._view_seq += 1
-            vid = f"view_{self._view_seq}"
+            vid = self._next_view_id()
             handle = {
                 "view_id": vid,
                 "source_id": source_id,
@@ -4446,8 +4877,7 @@ class Store:
             if tag_ids:
                 params.extend(tag_ids)
 
-        self._view_seq += 1
-        vid = f"view_{self._view_seq}"
+        vid = self._next_view_id()
         with self.lock, self._interruptible(op_token, self.db), self.db:
             self.db.execute(
                 f"CREATE TABLE v.{q(vid)} (pos INTEGER PRIMARY KEY, source_id INTEGER, rid INTEGER, "
@@ -4774,6 +5204,76 @@ class Store:
         rows = rows[:limit]
         return {"groups": [{"value": r["val"], "count": r["n"]} for r in rows], "truncated": truncated}
 
+    # Bucket widths a histogram may pick from, seconds — chosen so the
+    # view's span fits in max_buckets bars. Human-shaped (minute, hour,
+    # day, week…) rather than a raw division, so bars line up with clock
+    # boundaries and a brush lands on times an analyst can read.
+    HISTOGRAM_BUCKETS = (1, 5, 10, 30, 60, 300, 600, 900, 1800, 3600, 3 * 3600, 6 * 3600,
+                         12 * 3600, 86400, 7 * 86400, 30 * 86400, 365 * 86400)
+
+    def time_histogram(self, view_id: str, column: str, max_buckets: int = 160,
+                       op_token: str | None = None) -> dict:
+        """Time buckets over the rows of the CURRENT view — filtered, searched,
+        timeframe'd, exactly what the grid shows — for a datetime column.
+        Two aggregate passes on the reader pool (invariant #4), shaped like
+        group_summary's column branch: a root_virtual/unfiltered view reads
+        the member tables directly, a materialised one joins v.view_N; a
+        merge unions its members. Pass 1 finds the span, pass 2 counts per
+        bucket at the width HISTOGRAM_BUCKETS gives that span.
+
+        TS_NORMALIZE turns whatever the column stores into a sortable
+        'YYYY-MM-DD HH:MM:SS…' (a derived datetime column already is one),
+        and strftime('%s') turns that into epoch seconds — rows the
+        normaliser can't parse have no epoch and fall out of the histogram
+        rather than piling into bucket zero."""
+        handle = self._views.get(view_id)
+        if not handle:
+            raise KeyError("View expired — rebuild it")
+        with self._reader() as ro:
+            src = self._source_lite_on(ro, handle["source_id"])
+            members = self._resolve_members_on(ro, handle["source_id"])
+        colnames = {c["name"]: c["type"] for c in src["columns"]}
+        if column not in colnames:
+            raise KeyError(column)
+        if colnames[column] != "datetime":
+            raise ValueError(f"{column} is not a datetime column")
+        direct = self._grouping_covers_whole_source(handle, src) or handle.get("kind") == "root_virtual"
+        is_derived = self._is_derived(src, column)
+
+        def branch(m: dict, select: str) -> str:
+            derived_alias = None if direct else "d"
+            ref = self._col_ref(src, column, "s", derived_alias)
+            ts = ref if is_derived else f"TS_NORMALIZE({ref})"
+            epoch = f"CAST(strftime('%s', {ts}) AS INTEGER)"
+            if direct:
+                scope = f"FROM {self._member_from(src, m, 's')}"
+            else:
+                scope = (f"FROM v.{q(view_id)} vv "
+                         f"JOIN {q(m['table_name'])} s ON s.rid = vv.rid AND vv.source_id = {int(m['source_id'])}"
+                         f"{self._member_derived_join(src, m, 's')}")
+            return f"SELECT {select.replace('EPOCH', epoch)} {scope}"
+
+        span_union = " UNION ALL ".join(branch(m, "EPOCH AS e") for m in members)
+        with self._reader() as ro, self._dropped_view_is_expired(), self._interruptible(op_token, ro):
+            lo, hi, n = ro.execute(
+                f"SELECT MIN(e), MAX(e), COUNT(*) FROM ({span_union}) WHERE e IS NOT NULL").fetchone()
+        if not n:
+            return {"column": column, "bucket_seconds": 0, "start": None, "end": None,
+                    "total": 0, "buckets": []}
+        span = max(0, int(hi) - int(lo))
+        bucket = next((b for b in self.HISTOGRAM_BUCKETS if span / b <= max_buckets),
+                      self.HISTOGRAM_BUCKETS[-1])
+        count_union = " UNION ALL ".join(
+            branch(m, f"(EPOCH / {bucket}) * {bucket} AS b, 1 AS one") for m in members)
+        with self._reader() as ro, self._dropped_view_is_expired(), self._interruptible(op_token, ro):
+            rows = ro.execute(
+                f"SELECT b, COUNT(*) AS n FROM ({count_union}) WHERE b IS NOT NULL GROUP BY b ORDER BY b"
+            ).fetchall()
+        iso = lambda t: time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(int(t)))
+        return {"column": column, "bucket_seconds": bucket,
+                "start": iso(lo), "end": iso(hi), "total": int(n),
+                "buckets": [[int(r[0]), int(r[1])] for r in rows]}
+
     def _tag_group_branches(self, view_id: str, src: dict, members: list[dict], direct: bool,
                             member_rows: dict[int, int], path_for) -> tuple[list[str], list]:
         """The UNION ALL branches behind grouping by tag: one group per tag,
@@ -4915,7 +5415,11 @@ class Store:
             pc, pp = self._path_where(path, colnames, "s", src, d_alias, m["source_id"])
             return f"{c}" + "".join(f" AND {x}" for x in pc), [*v, *pp]
 
-        with self.lock:
+        # Both locked blocks below read v.<parent view>, whose handle was
+        # taken unlocked above — a rebuild of the same source can evict it in
+        # either window. Same contract as every other view read: expired, so
+        # a 409 the frontend rebuilds on, not a 500.
+        with self.lock, self._dropped_view_is_expired():
             total = 0
             for m in members:
                 where_sql, where_params = _conds(m)
@@ -4947,8 +5451,7 @@ class Store:
         covers_source = self._grouping_covers_whole_source(root, src)
         is_merge = bool(src.get("is_merge"))
         if is_merge or not covers_source or total > self.GROUP_MATERIALIZE_THRESHOLD:
-            self._view_seq += 1
-            vid = f"view_{self._view_seq}"
+            vid = self._next_view_id()
             branches = []
             params: list[Any] = []
             for m in members:
@@ -4967,7 +5470,7 @@ class Store:
                     )
                     params.extend([m["source_id"], *where_params])
             union_sql = " UNION ALL ".join(branches)
-            with self.lock, self.db:
+            with self.lock, self._dropped_view_is_expired(), self.db:
                 # Same ORDER BY-fed insert as build_view: pos auto-assigns
                 # 1..N in insertion (= sorted) order, rowcount replaces a
                 # count(*) re-scan. root_pos is unique across the union
@@ -4985,8 +5488,7 @@ class Store:
             }
             return {"view_id": vid, "row_count": n, "elapsed_ms": 0}
 
-        self._view_seq += 1
-        vid = f"view_{self._view_seq}"
+        vid = self._next_view_id()
         self._views[vid] = {
             "view_id": vid, "source_id": root["source_id"], "row_count": total,
             "kind": "group_virtual", "parent_view_id": view_id,
@@ -5018,12 +5520,25 @@ class Store:
         return f"{cond_sql}{extra}", [*cond_val, *path_params]
 
     @staticmethod
-    def _compile_condition(col: str, op: str, val: Any, colnames: dict) -> tuple[str, list]:
+    def _compile_condition(col: str, op: str, val: Any, colnames: dict,
+                           strict: bool = False) -> tuple[str, list]:
         """Compile one column/op/value condition into a parameterized clause.
         Shared by the flat quick-filter list and the guided filter-tree's
-        'cond' leaves. Returns ("", []) for an unknown column/op or an empty
-        value on ops that require one."""
+        'cond' leaves. Returns ("", []) for an unknown op, or an empty value
+        on ops that require one — an empty filter box means "no filter".
+
+        A column this table does not have is a different thing entirely, and
+        `strict` says so. Dropping such a condition silently BROADENS the
+        result: the analyst is shown more rows than they asked for, under a
+        filter chip saying the filter is on. Saved filters are offered
+        across cases on a column-overlap heuristic, so this is reachable by
+        design, and in a triage tool "more rows than you asked for, with no
+        warning" is the worst possible failure."""
+        if col in Store.PHYSICAL_COLUMNS:
+            colnames = {**colnames, col: Store.PHYSICAL_COLUMNS[col]}
         if col not in colnames:
+            if strict and col:
+                raise UnknownFilterColumn(col)
             return "", []
         c = q(col)
         numeric = colnames[col] == "number"
@@ -5064,6 +5579,10 @@ class Store:
             items = [s for s in (val if isinstance(val, list) else str(val).split("\n")) if s != ""]
             if not items:
                 return "", []
+            if col in Store.PHYSICAL_COLUMNS:
+                # Row ids arrive as strings (the tree is JSON from a picker);
+                # bind them as the integers the column holds.
+                items = [int(s) if str(s).strip().lstrip("-").isdigit() else s for s in items]
             return f"{c} IN ({','.join('?' * len(items))})", items
         return "", []
 
@@ -5120,7 +5639,7 @@ class Store:
             return f"({sql})", []
         if kind == "cond":
             col, op = node.get("column"), node.get("op")
-            c, p = self._compile_condition(col, op, node.get("value", ""), colnames)
+            c, p = self._compile_condition(col, op, node.get("value", ""), colnames, strict=True)
             if c and op in SARGABLE_OPS and col in colnames:
                 self._ensure_column_index_building(source_id, col, self._index_table_for(src, col))
             return c, p
@@ -5136,6 +5655,12 @@ class Store:
         "CAST", "REAL", "TEXT", "INTEGER", "COALESCE", "LENGTH", "LOWER", "UPPER", "SUBSTR",
         "TRIM", "TRUE", "FALSE",
     }
+
+    # Columns every source table has beyond its own column list — the row
+    # id. One definition, read by the raw-fragment validator and the
+    # guided condition compiler alike, so `rid` is a column everywhere or
+    # nowhere (the session diff opens "these rows" as a rid IN condition).
+    PHYSICAL_COLUMNS = {"rid": "number"}
 
     def validate_where_fragment(self, source_id: int, fragment: str) -> None:
         """Raise ValueError with a human-readable reason for anything that is
@@ -5167,6 +5692,10 @@ class Store:
         # so a forensic value like CommandLine = 'SELECT * FROM users' isn't
         # mistaken for a SELECT statement, and a value like 'Sysmon' isn't
         # mistaken for a bare identifier.
+        # NOT comment-stripped: this validator REJECTS comments outright a
+        # line below, and stripping them first would blank the very markers
+        # it looks for. (The SQL pane, where comments are legal, strips them
+        # before its keyword scan instead — see run_sql.)
         structural = _blank_string_literals(frag)
         if ";" in structural or "--" in structural or "/*" in structural or "*/" in structural:
             raise ValueError("Statement separators and comments are not allowed")
@@ -5174,7 +5703,7 @@ class Store:
             raise ValueError("Only a boolean filter expression is allowed — no SELECT/PRAGMA/ATTACH/etc.")
 
         src = self.get_source(source_id)
-        colnames = {c["name"] for c in src["columns"]}
+        colnames = {c["name"] for c in src["columns"]} | set(self.PHYSICAL_COLUMNS)
         for ident in re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\b", structural):
             if ident.upper() in self.ALLOWED_SQL_WORDS or ident in colnames or NUM_RE.match(ident):
                 continue
@@ -5417,6 +5946,25 @@ class Store:
             sql += f"\n{order}"
         return self._inline_sql_params(sql, params)
 
+    @staticmethod
+    def _require_columns(src: dict) -> None:
+        """A source whose column list is still empty is not readable yet.
+
+        Every ingest path inserts the `sources` row with `columns='[]'` and
+        only fills it in at the end, while `open_tabs` is written straight
+        away — so a directory import gives the tab strip tabs for files
+        that are still importing. Reading one built `SELECT rid,  FROM
+        "src_5"`, whose OperationalError is not "no such table" and so
+        surfaced as a 500. A `kill -9` mid-import leaves the row that way
+        permanently, and the tab 500s forever.
+
+        A ValueError instead: the routes already turn it into a 400 the UI
+        shows, and "still importing" is the true answer."""
+        if not src.get("columns"):
+            raise ValueError(
+                f"{src.get('name') or 'This table'} is still importing — its columns "
+                "aren't known yet. It will open when the import finishes.")
+
     def fetch_rows(self, view_id: str, start: int, count: int) -> dict:
         """Pages v.view_N by pos, then resolves each row's cells/tags/notes
         against ITS OWN source_id — not a single handle-level constant. For
@@ -5434,6 +5982,7 @@ class Store:
 
         with self._reader() as ro, self._dropped_view_is_expired():
             src = self._source_lite_on(ro, handle["source_id"])
+            self._require_columns(src)
             cols = [c["name"] for c in src["columns"]]
 
             vrows = ro.execute(
@@ -5498,6 +6047,7 @@ class Store:
         sid = member["source_id"]
         with self._reader() as ro, self._dropped_view_is_expired():
             src = self._source_lite_on(ro, sid)
+            self._require_columns(src)
             cols = [c["name"] for c in src["columns"]]
             where_sql, where_params = self._virtual_group_where(handle, ro)
             sel = ", ".join(q(c) for c in cols)
@@ -5548,7 +6098,15 @@ class Store:
         sid = handle["source_id"]
         with self._reader() as ro, self._dropped_view_is_expired():
             src = self._source_lite_on(ro, sid)
-            cols = self._export_columns(ro, src)
+            # Source-column order (same as the materialised fetch_rows path),
+            # NOT _export_columns: the client maps each cell by its column's
+            # index in S.columns (source order), so paging in the saved
+            # layout's display order — with hidden columns dropped — scrambles
+            # values under headers whenever a custom layout reorders/hides a
+            # column. _export_columns is for CSV/XLSX, which emit the on-screen
+            # arrangement on purpose; the grid does its own ordering client-side.
+            self._require_columns(src)
+            cols = [c["name"] for c in src["columns"]]
             sel = ", ".join(q(c) for c in cols)
 
             # _from_clause adds the derived-value sidecar join only when the
@@ -5795,6 +6353,7 @@ class Store:
             cached = self._maxlen_cache.get(source_id)
             if cached and cached[0] == src["row_count"]:
                 return cached[1]
+            self._require_columns(src)
             cols = [c["name"] for c in src["columns"]]
             members = self._resolve_members_on(ro, source_id)
             sel = ", ".join(f"MAX(LENGTH({q(c)}))" for c in cols)
@@ -6106,7 +6665,12 @@ class Store:
         if handle.get("kind") == "root_virtual":
             return self._tag_virtual_root(handle, tag_id, on, exclude)
         skip_sql, skip_params = self._exclude_clause(exclude, "source_id", "rid")
-        with self.lock, self.db:
+        # The handle was read unlocked, and a concurrent rebuild of the same
+        # source evicts v.view_N in the window before the lock. Without this
+        # the write raises "no such table" — an OperationalError, which
+        # server.py maps to a 500 rather than the 409 the frontend rebuilds
+        # on, so a bulk tag is lost instead of retried.
+        with self.lock, self._dropped_view_is_expired(), self.db:
             changed = self._apply_tag_change(
                 tag_id=tag_id, on=on, source_id=handle["source_id"], scope="view",
                 target_sql=f"SELECT source_id, rid FROM v.{q(view_id)}{skip_sql}",
@@ -6360,6 +6924,749 @@ class Store:
 
     # ------------------------------------------ legacy filter-preset migration
 
+    def get_case_notes(self) -> dict:
+        """The case narrative Markdown. One row, read whole."""
+        with self.lock:
+            row = self.db.execute("SELECT body, updated_at FROM case_notes WHERE id=1").fetchone()
+        return {"body": row["body"] if row else "", "updated_at": row["updated_at"] if row else None}
+
+    def set_case_notes(self, body: str) -> dict:
+        ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+        with self.lock, self.db:
+            self.db.execute(
+                "INSERT INTO case_notes(id, body, updated_at) VALUES (1, ?, ?)"
+                " ON CONFLICT(id) DO UPDATE SET body=excluded.body, updated_at=excluded.updated_at",
+                (body or "", ts))
+        return {"body": body or "", "updated_at": ts}
+
+    # ------------------------------------------------------------ watchlist
+
+    def add_indicator(self, value: str, kind: str = "other",
+                      note: str | None = None, auto_tag_id: int | None = None) -> dict:
+        value = (value or "").strip()
+        if not value:
+            raise ValueError("An indicator needs a value")
+        with self.lock, self.db:
+            cur = self.db.execute(
+                "INSERT INTO watchlist(value, kind, note, auto_tag_id, created_at)"
+                " VALUES (?,?,?,?,?)",
+                (value, kind or "other", note, auto_tag_id, time.strftime("%Y-%m-%dT%H:%M:%S")))
+        return self._indicator(cur.lastrowid)
+
+    def _indicator(self, wid: int) -> dict:
+        with self.lock:
+            r = self.db.execute("SELECT * FROM watchlist WHERE id=?", (wid,)).fetchone()
+            n = self.db.execute("SELECT COUNT(*) c FROM watchlist_hits WHERE watchlist_id=?", (wid,)).fetchone()["c"]
+        return {"id": r["id"], "value": r["value"], "kind": r["kind"], "note": r["note"],
+                "auto_tag_id": r["auto_tag_id"], "hit_count": n}
+
+    def list_indicators(self) -> list[dict]:
+        with self.lock:
+            rows = self.db.execute("SELECT id FROM watchlist ORDER BY id").fetchall()
+        return [self._indicator(r["id"]) for r in rows]
+
+    def delete_indicator(self, wid: int) -> None:
+        with self.lock, self.db:
+            self.db.execute("DELETE FROM watchlist WHERE id=?", (wid,))
+            self.db.execute("DELETE FROM watchlist_hits WHERE watchlist_id=?", (wid,))
+
+    def scan_source(self, source_id: int) -> dict:
+        """Scan one source for every indicator: find matching rids (a
+        substring match over all columns, the same blob search-all uses),
+        record them in watchlist_hits, and — for indicators with an
+        auto_tag_id — tag those rows through the normal tag path (undoable,
+        on the rail). Idempotent: a source's hits for a watchlist are
+        replaced each scan. Returns per-indicator match counts."""
+        src = self.get_source(source_id)
+        if src.get("is_merge"):
+            return {"source_id": source_id, "matched": {}}   # merges have no src_N of their own
+        blob = _blob_expr([c["name"] for c in self._base_cols(src)])
+        table = q(src["table_name"])
+        indicators = self.list_indicators()
+        matched: dict[int, int] = {}
+        for ind in indicators:
+            wid = ind["id"]
+            with self.lock:
+                rids = [r["rid"] for r in self.db.execute(
+                    f"SELECT rid FROM {table} WHERE instr(lower({blob}), lower(?)) > 0",
+                    (ind["value"],)).fetchall()]
+            with self.lock, self.db:
+                self.db.execute(
+                    "DELETE FROM watchlist_hits WHERE watchlist_id=? AND source_id=?", (wid, source_id))
+                self.db.executemany(
+                    "INSERT OR IGNORE INTO watchlist_hits(watchlist_id, source_id, rid) VALUES (?,?,?)",
+                    [(wid, source_id, rid) for rid in rids])
+            matched[wid] = len(rids)
+            if ind["auto_tag_id"] and rids:
+                self.set_tags(source_id, rids, int(ind["auto_tag_id"]), True)
+        return {"source_id": source_id, "matched": matched}
+
+    def scan_all(self) -> dict:
+        total: dict[int, int] = {}
+        for s in self.list_sources():
+            if s.get("is_merge") or s.get("error"):
+                continue
+            for wid, n in self.scan_source(s["id"])["matched"].items():
+                total[wid] = total.get(wid, 0) + n
+        return {"matched": total}
+
+    def import_watchlist_from_case(self, path: str) -> dict:
+        """Copy another case file's watchlist into this one — the standing
+        indicator set an analyst carries between engagements usually lives
+        in whichever case they worked last. Read-only against the other
+        .db (never opened as a Store — no lock contention, no migration of
+        someone else's file); deduped by exact value against what's
+        already here; kind and note carried, auto_tag_id deliberately NOT
+        (it names a tag id in the OTHER case's tag_defs — meaningless
+        here). A case file from before the watchlist existed simply has
+        no table and imports zero."""
+        if os.path.abspath(path) == os.path.abspath(self.path):
+            raise ValueError("That is the currently open case")
+        try:
+            ro = sqlite3.connect(f"file:{os.path.abspath(path)}?mode=ro", uri=True)
+        except sqlite3.Error as e:
+            raise ValueError(f"Could not open case file: {e}")
+        ro.row_factory = sqlite3.Row
+        try:
+            if not ro.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='watchlist'").fetchone():
+                return {"added": 0, "skipped": 0}
+            rows = ro.execute("SELECT value, kind, note FROM watchlist ORDER BY id").fetchall()
+        except sqlite3.Error as e:
+            raise ValueError(f"Could not read that case's watchlist: {e}")
+        finally:
+            ro.close()
+        have = {i["value"] for i in self.list_indicators()}
+        added = 0
+        for r in rows:
+            value = (r["value"] or "").strip()
+            if not value or value in have:
+                continue
+            self.add_indicator(value, r["kind"] or "other", r["note"], None)
+            have.add(value)
+            added += 1
+        return {"added": added, "skipped": len(rows) - added}
+
+    def indicator_hits(self, wid: int, limit: int = 500) -> list[dict]:
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT source_id, rid FROM watchlist_hits WHERE watchlist_id=? LIMIT ?",
+                (wid, limit)).fetchall()
+        names = {s["id"]: s["name"] for s in self.list_sources()}
+        out = []
+        for r in rows:
+            out.append({"source_id": r["source_id"], "rid": r["rid"],
+                        "source_name": names.get(r["source_id"], f"source {r['source_id']}")})
+        return out
+
+    # --------------------------------------------------------- entity pivot
+
+    def entity_pivot(self, value: str, limit: int = 60) -> dict:
+        """Everywhere a value appears across every table: per-source match
+        counts, which columns it landed in, and a merged, time-bucketed
+        evidence stream. The counted scan is the same all-columns blob
+        search-all uses; the timeline reuses TS_NORMALIZE so it lines up
+        with the grid's own datetime handling — the same normalization a
+        super-timeline would share. See docs/design/analysis-suite.md."""
+        value = (value or "").strip()
+        if not value:
+            raise ValueError("Pivot needs a value")
+        sources: list[dict] = []
+        rows: list[dict] = []
+        buckets: dict[str, int] = {}
+        for meta in self.list_sources():
+            if meta.get("is_merge") or meta.get("error"):
+                continue
+            src = self.get_source(meta["id"])
+            base = self._base_cols(src)
+            names = [c["name"] for c in base]
+            blob = _blob_expr(names)
+            table = q(src["table_name"])
+            match = f"instr(lower({blob}), lower(?)) > 0"
+            with self.lock:
+                n = self.db.execute(
+                    f"SELECT COUNT(*) c FROM {table} WHERE {match}", (value,)).fetchone()["c"]
+            if not n:
+                continue
+            # Which columns held it — a general stand-in for "seen as
+            # source / destination" that needs no per-tool hardcoding.
+            in_cols = []
+            for c in names:
+                with self.lock:
+                    hit = self.db.execute(
+                        f"SELECT 1 FROM {table} WHERE instr(lower({q(c)}), lower(?)) > 0 LIMIT 1",
+                        (value,)).fetchone()
+                if hit:
+                    in_cols.append(c)
+            tcol = next((c["name"] for c in base if c.get("type") == "datetime"), None)
+            sources.append({"source_id": src["id"], "source_name": src["name"],
+                            "count": n, "columns": in_cols, "time_col": tcol})
+            # A capped, time-ordered sample per source, merged client-side.
+            ts_expr = f"TS_NORMALIZE({q(tcol)})" if tcol else "NULL"
+            with self.lock:
+                sample = self.db.execute(
+                    f"SELECT rid, {ts_expr} AS ts, substr({blob}, 1, 200) AS preview"
+                    f" FROM {table} WHERE {match} ORDER BY ts LIMIT ?", (value, limit)).fetchall()
+            for r in sample:
+                rows.append({"source_id": src["id"], "source_name": src["name"],
+                             "rid": r["rid"], "ts": r["ts"], "preview": r["preview"]})
+                if r["ts"]:
+                    day = str(r["ts"])[:10]
+                    buckets[day] = buckets.get(day, 0) + 1
+        rows.sort(key=lambda r: (r["ts"] or "￿"))
+        return {"value": value, "sources": sources,
+                "rows": rows[:limit],
+                "buckets": sorted(buckets.items())}
+
+    # ------------------------------------------------------------ dashboard
+
+    # ---- named dashboards (a case holds several) ----
+
+    @staticmethod
+    def _loads_widgets(text) -> list:
+        try:
+            w = json.loads(text)
+            return w if isinstance(w, list) else []
+        except (TypeError, ValueError):
+            return []
+
+    # ------------------------------------------------------- case variables
+
+    VARIABLE_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
+
+    def list_variables(self) -> list[dict]:
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT name, value, description, required FROM case_variables ORDER BY required DESC, name").fetchall()
+        return [{"name": r["name"], "value": r["value"], "description": r["description"] or "",
+                 "required": bool(r["required"])} for r in rows]
+
+    def get_variables(self) -> dict:
+        """{name: value} — the shape a plugin reads (req.variables)."""
+        return {v["name"]: v["value"] for v in self.list_variables()}
+
+    def set_variable(self, name: str, value: str | None = None, description: str | None = None,
+                     required: bool | None = None) -> dict:
+        """Upsert. Omitted fields keep their stored value, so a plugin
+        setting a value never clears the description a profile gave it."""
+        name = (name or "").strip()
+        if not self.VARIABLE_NAME_RE.match(name):
+            raise ValueError("A variable name is a letter followed by letters, digits, _ . or - (max 64)")
+        if value is not None and len(str(value)) > 4000:
+            raise ValueError("Variable values are capped at 4000 characters")
+        with self.lock, self.db:
+            row = self.db.execute("SELECT value, description, required FROM case_variables WHERE name=?",
+                                  (name,)).fetchone()
+            self.db.execute(
+                "INSERT OR REPLACE INTO case_variables(name, value, description, required, updated_at)"
+                " VALUES (?,?,?,?,?)",
+                (name,
+                 str(value) if value is not None else (row["value"] if row else ""),
+                 description if description is not None else (row["description"] if row else None),
+                 int(bool(required)) if required is not None else (row["required"] if row else 0),
+                 time.strftime("%Y-%m-%dT%H:%M:%S")))
+        return next(v for v in self.list_variables() if v["name"] == name)
+
+    def delete_variable(self, name: str) -> None:
+        with self.lock, self.db:
+            self.db.execute("DELETE FROM case_variables WHERE name=?", (name,))
+
+    def seed_variables(self, defs: list[dict]) -> list[str]:
+        """A profile's declared variables land as rows — created with the
+        declared default when absent, description/required refreshed when
+        present, an existing VALUE never overwritten (re-applying a profile
+        must not wipe what the analyst typed). Returns the names that are
+        required and still empty, for the caller to prompt for."""
+        for d in defs or []:
+            if not isinstance(d, dict):
+                continue
+            name = str(d.get("name") or "").strip()
+            if not self.VARIABLE_NAME_RE.match(name):
+                continue
+            with self.lock:
+                exists = self.db.execute("SELECT 1 FROM case_variables WHERE name=?", (name,)).fetchone()
+            self.set_variable(name, None if exists else (d.get("default") or ""),
+                              description=d.get("description") or d.get("label") or "",
+                              required=bool(d.get("required")))
+        return [v["name"] for v in self.list_variables() if v["required"] and not v["value"]]
+
+    # ------------------------------------------------------- plugin tables
+    #
+    # A plugin's own tables, inside the case file. Not a source: they carry
+    # no `sources` row, so the grid, the sidebar and merges never see them —
+    # they are a plugin's private store for things that belong to THIS case
+    # and should travel with it when the .db is handed over (an LLM chat
+    # transcript that has to render offline is the case that prompted them).
+    #
+    # Machine-level plugin state stays in `req.storage` (workspace JSON);
+    # analysis output an analyst should browse still goes through
+    # `ingest_rows`, which makes a real source. This is the third thing:
+    # case-scoped, plugin-private, queryable.
+    #
+    # NAMED `plugin:<fs_name>:<table>`, with a separator neither half can
+    # contain. `plugin_<fs>_<name>` was ambiguous exactly where this
+    # codebase lives: plugin `mft_usn` table `cache` and plugin `mft` table
+    # `usn_cache` both produced `plugin_mft_usn_cache`, so one plugin could
+    # read and drop another's table by accident. Identifiers are always
+    # quoted, so a colon costs nothing.
+    #
+    # This keeps two plugins from colliding. It is NOT a security boundary:
+    # a plugin is arbitrary Python holding `req.store`, and can do anything
+    # to the case file that Winnow can (docs/writing-plugins.md §12).
+
+    PLUGIN_TABLE_RE = re.compile(r"^[a-z][a-z0-9_]{0,40}$")
+
+    @staticmethod
+    def _plugin_ns(fs_name: str) -> str:
+        """The plugin half of the name. Deliberately permissive: fs_name is
+        whatever the analyst named the folder or file, and a plugin called
+        `chat-gpt` loads and serves routes perfectly well — it must not then
+        get a permanent 400 from req.table(). Only what breaks the naming
+        scheme is refused."""
+        fs = (fs_name or "").strip().lower()
+        if not fs:
+            raise ValueError("No plugin name")
+        if ":" in fs or '"' in fs or len(fs) > 64:
+            raise ValueError(f"Bad plugin name {fs!r} — no ':' or '\"', max 64 characters")
+        return fs
+
+    def _plugin_table(self, fs_name: str, name: str) -> str:
+        """The real table name. The table half is the author's own choice,
+        so it is held to a strict shape; both halves reach SQL as an
+        identifier (invariant #5) and are quoted at every use."""
+        nm = (name or "").strip().lower()
+        if not self.PLUGIN_TABLE_RE.match(nm):
+            raise ValueError(
+                f"Bad table name {nm!r} — a letter, then letters, digits or _ (max 41)")
+        return f"plugin:{self._plugin_ns(fs_name)}:{nm}"
+
+    @staticmethod
+    def _sub_table(sql: str, table: str) -> str:
+        """Replace `{table}` with the quoted table name, but never inside a
+        string literal: `UPDATE {table} SET meta = '{table}'` has to store
+        the two braces, not the table's name. Single-quote literals are the
+        only string form SQLite standardises, and '' is its escape — which
+        this handles by simply toggling on every quote."""
+        out = []
+        i = 0
+        in_str = False
+        quoted = q(table)
+        while i < len(sql):
+            ch = sql[i]
+            if ch == "'":
+                in_str = not in_str
+                out.append(ch)
+                i += 1
+                continue
+            if not in_str and sql.startswith("{table}", i):
+                out.append(quoted)
+                i += len("{table}")
+                continue
+            out.append(ch)
+            i += 1
+        return "".join(out)
+
+    def plugin_table_create(self, fs_name: str, name: str, columns: str) -> str:
+        """CREATE TABLE IF NOT EXISTS with the given column definitions.
+
+        Checks first on the reader pool, and only takes the writer lock when
+        there is something to create — this is documented as the call every
+        request makes, and taking the writer lock unconditionally would put
+        a routine read behind whatever holds it (a long import, compact()'s
+        VACUUM)."""
+        table = self._plugin_table(fs_name, name)
+        if not isinstance(columns, str) or not columns.strip():
+            raise ValueError("Give the columns, e.g. 'id INTEGER PRIMARY KEY, role TEXT'")
+        if self._plugin_table_exists(table):
+            return table
+        with self.lock, self.db:
+            self.db.execute(f"CREATE TABLE IF NOT EXISTS {q(table)} ({columns})")
+        return table
+
+    def _plugin_table_exists(self, table: str) -> bool:
+        with self._reader() as db:
+            return db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (table,)).fetchone() is not None
+
+    def plugin_table_exists(self, fs_name: str, name: str) -> bool:
+        return self._plugin_table_exists(self._plugin_table(fs_name, name))
+
+    def plugin_tables(self, fs_name: str) -> list[str]:
+        """This plugin's table names, without the namespace prefix."""
+        prefix = f"plugin:{self._plugin_ns(fs_name)}:"
+        like = prefix.replace("\\", "\\\\").replace("_", "\\_").replace("%", "\\%") + "%"
+        with self._reader() as db:
+            rows = db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE ? ESCAPE '\\' "
+                "ORDER BY name", (like,)).fetchall()
+        return [r["name"][len(prefix):] for r in rows]
+
+    def plugin_table_write(self, fs_name: str, name: str, sql: str, params: Sequence = ()) -> int:
+        """One statement on the writer connection, with `{table}` standing
+        in for this plugin's table so an author never quotes an identifier
+        by hand. Returns the number of rows changed (0 for statements that
+        change none, DDL included — sqlite3 reports -1 there).
+
+        The substitution is a convenience, not a sandbox: SQL naming
+        another PLUGIN's table runs. Isolation between plugins is by NAMING
+        (they cannot collide by accident), and nothing more — see the block
+        comment above.
+
+        Evidence is the exception, and not a stylistic one. Invariant #1
+        says a source table is never mutated, and invariant #2's virtual
+        paging carve-out is only exact BECAUSE of it: `pos = rid - 1` holds
+        while rids stay contiguous, so a plugin deleting rows from a src_
+        table would silently page and tag the wrong rows everywhere, with no
+        error. A plugin has plenty of legitimate reasons to write; none of
+        them is into the evidence."""
+        table = self._plugin_table(fs_name, name)
+        with self.lock, self.db:
+            # Scoped to this one statement, and to the writer connection the
+            # lock we hold makes ours alone for its duration.
+            self.db.set_authorizer(self._refuse_evidence_writes)
+            try:
+                cur = self.db.execute(self._sub_table(str(sql), table), tuple(params or ()))
+            except sqlite3.DatabaseError as e:
+                if "not authorized" in str(e).lower():
+                    raise ValueError(
+                        "A plugin may not write to source or analyst tables (invariant #1). "
+                        "Use your own plugin table — the {table} placeholder.") from e
+                raise
+            finally:
+                self.db.set_authorizer(None)
+            return max(0, cur.rowcount if cur.rowcount is not None else 0)
+
+    # src_<id>, drv_<id> and the tables analyst work lives in. A plugin
+    # reads these freely (plugin_query); writing to them is what invariants
+    # #1 and #2 forbid.
+    _EVIDENCE_TABLE_RE = re.compile(
+        r"^(src_\d+|drv_\d+|fts_\d+|row_tags|row_notes|sources|tag_defs)$", re.IGNORECASE)
+    _WRITE_ACTIONS = frozenset({
+        sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE,
+        sqlite3.SQLITE_DROP_TABLE, sqlite3.SQLITE_DROP_TEMP_TABLE,
+        sqlite3.SQLITE_ALTER_TABLE, sqlite3.SQLITE_DROP_INDEX,
+    })
+
+    @classmethod
+    def _refuse_evidence_writes(cls, action, arg1, _arg2, _db, _trigger):
+        """Authorizer for a plugin's own statement. Reads the parsed action
+        and the table it names, so no spelling — a comment, a case change,
+        a quoted alias — changes the answer, which a text scan cannot say."""
+        if action in cls._WRITE_ACTIONS and arg1 and cls._EVIDENCE_TABLE_RE.match(str(arg1)):
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    def plugin_table_insert(self, fs_name: str, name: str, rows: "list[dict] | dict") -> int:
+        """Insert one row or many. Column names come from the dicts, so they
+        are quoted (invariant #5) and the values are always bound. Rows may
+        list their columns in any order, as long as it is the same set."""
+        table = self._plugin_table(fs_name, name)
+        items = [rows] if isinstance(rows, dict) else list(rows or [])
+        if not items:
+            return 0
+        cols = list(items[0].keys())
+        if not cols:
+            raise ValueError("A row needs at least one column")
+        wanted = set(cols)
+        for r in items:
+            if set(r.keys()) != wanted:
+                raise ValueError("Every row in one insert needs the same columns")
+        sql = (f"INSERT INTO {q(table)} ({', '.join(q(c) for c in cols)}) "
+               f"VALUES ({', '.join('?' for _ in cols)})")
+        with self.lock, self.db:
+            self.db.executemany(sql, [tuple(r[c] for c in cols) for r in items])
+        return len(items)
+
+    def plugin_table_rows(self, fs_name: str, name: str, where: str = "", params: Sequence = (),
+                          limit: int | None = 5000) -> list[dict]:
+        """Rows as dicts, on the reader pool (invariant #4) — reading a chat
+        transcript must not queue behind an import.
+
+        `where` is the tail of the query (WHERE / ORDER BY / LIMIT), with
+        values bound through `params`. A LIMIT in the tail is the author's,
+        and is left alone; otherwise `limit` caps the result, and
+        `limit=None` means no cap."""
+        table = self._plugin_table(fs_name, name)
+        tail = (where or "").strip()
+        args = list(params or ())
+        sql = f"SELECT * FROM {q(table)}" + (f" {tail}" if tail else "")
+        if limit is not None and not re.search(r"(?i)\blimit\b", self._strip_literals(tail)):
+            sql += " LIMIT ?"
+            args.append(max(1, int(limit)))
+        with self._reader() as db:
+            return [dict(r) for r in db.execute(sql, tuple(args)).fetchall()]
+
+    @staticmethod
+    def _strip_literals(sql: str) -> str:
+        """The statement with single-quoted literals blanked — so a LIMIT
+        inside a string doesn't read as a LIMIT clause."""
+        out, in_str = [], False
+        for ch in sql:
+            if ch == "'":
+                in_str = not in_str
+                out.append(" ")
+            else:
+                out.append(" " if in_str else ch)
+        return "".join(out)
+
+    def plugin_table_drop(self, fs_name: str, name: str) -> None:
+        table = self._plugin_table(fs_name, name)
+        with self.lock, self.db:
+            self.db.execute(f"DROP TABLE IF EXISTS {q(table)}")
+
+    def list_dashboards(self) -> list[dict]:
+        """Each named dashboard with its widget count — the sidebar's
+        Dashboards section. Widgets themselves are fetched per-board.
+
+        On the reader pool (invariant #4): opening a board while 30 files
+        are importing must not queue behind the ingest holding the writer
+        lock."""
+        with self._reader() as db:
+            rows = db.execute(
+                "SELECT id, name, widgets, pos, pinned FROM dashboards ORDER BY pos, id").fetchall()
+        return [{"id": r["id"], "name": r["name"], "pos": r["pos"], "pinned": bool(r["pinned"]),
+                 "widget_count": len(self._loads_widgets(r["widgets"]))} for r in rows]
+
+    def set_dashboard_pinned(self, dashboard_id: int, pinned: bool) -> None:
+        """Pinned = shown as a page tab in the top strip (next to SQL,
+        Timeline…) as well as under the sidebar's Dashboards section."""
+        with self.lock, self.db:
+            if self.db.execute("UPDATE dashboards SET pinned=? WHERE id=?",
+                               (1 if pinned else 0, dashboard_id)).rowcount == 0:
+                raise KeyError(f"No dashboard {dashboard_id}")
+
+    def get_dashboard(self, dashboard_id: int) -> list:
+        """One board's widgets. Reader pool, same reason as list_dashboards."""
+        with self._reader() as db:
+            row = db.execute("SELECT widgets FROM dashboards WHERE id=?", (dashboard_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"No dashboard {dashboard_id}")
+        return self._loads_widgets(row["widgets"])
+
+    def set_dashboard_widgets(self, dashboard_id: int, widgets: list) -> list:
+        if not isinstance(widgets, list):
+            raise ValueError("A dashboard is a list of widgets")
+        with self.lock, self.db:
+            cur = self.db.execute(
+                "UPDATE dashboards SET widgets=? WHERE id=?", (json.dumps(widgets), dashboard_id))
+            if cur.rowcount == 0:
+                raise KeyError(f"No dashboard {dashboard_id}")
+        return widgets
+
+    def create_dashboard(self, name: str, widgets: list | None = None) -> dict:
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("A dashboard needs a name")
+        if len(name) > 200:
+            raise ValueError("That dashboard name is too long")
+        with self.lock, self.db:
+            pos = self.db.execute("SELECT COALESCE(MAX(pos), -1) + 1 FROM dashboards").fetchone()[0]
+            cur = self.db.execute(
+                "INSERT INTO dashboards(name, widgets, pos) VALUES (?,?,?)",
+                (name, json.dumps(widgets or []), pos))
+            did = cur.lastrowid
+        return {"id": did, "name": name, "pos": pos, "widget_count": len(widgets or [])}
+
+    def rename_dashboard(self, dashboard_id: int, name: str) -> None:
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("A dashboard needs a name")
+        if len(name) > 200:
+            raise ValueError("That dashboard name is too long")
+        with self.lock, self.db:
+            if self.db.execute("UPDATE dashboards SET name=? WHERE id=?",
+                               (name, dashboard_id)).rowcount == 0:
+                raise KeyError(f"No dashboard {dashboard_id}")
+
+    def delete_dashboard(self, dashboard_id: int) -> None:
+        with self.lock, self.db:
+            self.db.execute("DELETE FROM dashboards WHERE id=?", (dashboard_id,))
+
+    def reorder_dashboards(self, ordered_ids: list[int]) -> None:
+        with self.lock, self.db:
+            known = {r[0] for r in self.db.execute("SELECT id FROM dashboards")}
+            for i, did in enumerate([d for d in ordered_ids if d in known]):
+                self.db.execute("UPDATE dashboards SET pos=? WHERE id=?", (i, did))
+
+    def upsert_dashboard_by_name(self, name: str, widgets: list) -> dict:
+        """Create-or-replace a dashboard by name — how a profile applies its
+        board (a second apply of the same profile refreshes rather than
+        duplicates)."""
+        with self.lock, self.db:
+            row = self.db.execute(
+                "SELECT id FROM dashboards WHERE name=? COLLATE NOCASE", (name,)).fetchone()
+            if row:
+                self.db.execute("UPDATE dashboards SET widgets=? WHERE id=?",
+                               (json.dumps(widgets), row["id"]))
+                return {"id": row["id"], "name": name}
+        return self.create_dashboard(name, widgets)
+
+    # Shorthands a SHIPPED dashboard uses so its SQL is portable across
+    # cases — the table's src_<id> varies, but its header set doesn't.
+    _TABLE_SHORTHANDS = {
+        "evtx": "Event logs (EvtxECmd)",
+        "mft": "NTFS $MFT (MFTECmd)",
+        "usn": "USN journal $J (MFTECmd)",
+        "registry": "Registry (RECmd batch)",
+        "amcache": "Amcache — program entries",
+        "prefetch": "Prefetch (PECmd)",
+    }
+
+    def _sources_for_header_set(self, hs_name: str) -> list:
+        """Every non-merge source whose columns carry the named header set —
+        the list form of _source_for_header_set, for the {{all:...}} union
+        placeholder. A support bundle's logs arrive as many files (plus
+        rotated copies) sharing one schema, so an overview query has to
+        span them, not bind to whichever imported first."""
+        from . import defaults
+        want = dict(defaults.headers()["nicknames"]).get(hs_name)
+        if not want:
+            return []
+        out = []
+        for meta in self.list_sources():
+            if meta.get("is_merge") or meta.get("error"):
+                continue
+            cols = {c["name"] for c in self._base_cols(self.get_source(meta["id"]))}
+            if all(c in cols for c in want):
+                out.append(meta)
+        return out
+
+    def _source_for_header_set(self, hs_name: str):
+        """The first non-merge source whose columns carry every column the
+        named header set defines — the same content binding lateral
+        movement's defaults use. None if this case has no such table."""
+        from . import defaults
+        sets = dict(defaults.headers()["nicknames"])
+        want = sets.get(hs_name)
+        if not want:
+            return None
+        for meta in self.list_sources():
+            if meta.get("is_merge") or meta.get("error"):
+                continue
+            cols = {c["name"] for c in self._base_cols(self.get_source(meta["id"]))}
+            if all(c in cols for c in want):
+                return meta
+        return None
+
+    def _resolve_table_placeholders(self, sql: str) -> str:
+        """Substitute {{evtx}} / {{header_set:Full Name}} in a widget's SQL
+        with the matching source's src_<id> table. A placeholder for a
+        table this case doesn't have raises a friendly error the widget
+        renders as an empty state — better than a SQL error."""
+        import re
+
+        def _hs_of(key: str) -> str:
+            if key.lower().startswith("header_set:"):
+                return key[len("header_set:"):].strip()
+            return self._TABLE_SHORTHANDS.get(key.lower(), key)
+
+        def repl(m):
+            key = m.group(1).strip()
+            # {{all:...}} -> a UNION ALL over every source matching the set,
+            # parenthesised so `FROM {{all:...}} x` and bare-column refs work.
+            #
+            # Each branch NAMES the header set's columns rather than
+            # SELECT *. The matcher accepts any source that CONTAINS the
+            # set (order-insensitive, superset-tolerant), so `SELECT *`
+            # lined the branches up by position on an assumption the
+            # matcher never made: a table carrying the same nine columns in
+            # a different order unioned silently and charted values from
+            # the wrong column, and one with an extra column made the
+            # counts differ and took the whole query down with it.
+            if key.lower().startswith("all:"):
+                hs = _hs_of(key[len("all:"):].strip())
+                srcs = self._sources_for_header_set(hs)
+                if not srcs:
+                    raise ValueError(f"No \u201c{hs}\u201d table in this case yet")
+                from . import defaults
+                want = dict(defaults.headers()["nicknames"]).get(hs) or []
+                cols = ", ".join(q(c) for c in want)
+                union = " UNION ALL ".join(
+                    f"SELECT {cols} FROM {q(s['table_name'])}" for s in srcs)
+                return f"({union})"
+            hs = _hs_of(key)
+            src = self._source_for_header_set(hs)
+            if not src:
+                raise ValueError(f"No \u201c{hs}\u201d table in this case yet")
+            return q(src["table_name"])
+
+        return re.sub(r"\{\{([^}]+)\}\}", repl, sql)
+
+    def resolve_table_sources(self, table: str) -> list[int]:
+        """Every source a widget's table names in this case: one for src_N or
+        a plain placeholder, all of them for {{all:…}} — whose SQL unions
+        every match, so a drill has to say which one it is opening."""
+        key = (table or "").strip()
+        m = re.fullmatch(r"\{\{\s*all:([^}]+)\}\}", key)
+        if not m:
+            return [self.resolve_table_source(key)]
+        inner = m.group(1).strip()
+        hs = inner[len("header_set:"):].strip() if inner.lower().startswith("header_set:") \
+            else self._TABLE_SHORTHANDS.get(inner.lower(), inner)
+        srcs = self._sources_for_header_set(hs)
+        if not srcs:
+            raise ValueError(f"No \u201c{hs}\u201d table in this case yet")
+        return [int(s["id"]) for s in srcs]
+
+    def resolve_table_source(self, table: str) -> int:
+        """The source id a widget's table names in this case — `src_N`
+        as-is (if it exists), a `{{evtx}}` / `{{header_set:…}}` placeholder
+        by the same first-match rule the SQL resolver uses. `{{all:…}}`
+        binds to the first of its sources: a drilldown opens ONE table.
+        ValueError, worded like the widget's empty state, when there's
+        none."""
+        import re
+        key = (table or "").strip()
+        m = re.fullmatch(r"src_(\d+)", key)
+        if m:
+            sid = int(m.group(1))
+            if any(s["id"] == sid for s in self.list_sources()):
+                return sid
+            raise ValueError("That table is no longer in this case")
+        m = re.fullmatch(r"\{\{([^}]+)\}\}", key)
+        if not m:
+            raise ValueError(f"Not a table reference: {table!r}")
+        inner = m.group(1).strip()
+        if inner.lower().startswith("all:"):
+            inner = inner[4:].strip()
+        if inner.lower().startswith("header_set:"):
+            hs = inner[len("header_set:"):].strip()
+        else:
+            hs = self._TABLE_SHORTHANDS.get(inner.lower(), inner)
+        src = self._source_for_header_set(hs)
+        if not src:
+            raise ValueError(f"No \u201c{hs}\u201d table in this case yet")
+        return int(src["id"])
+
+    def dashboard_widget_preview(self, source: str, query: dict, limit: int = 200) -> dict:
+        """Run one widget's data source and return normalized tabular data
+        the client renders per the widget's kind. SQL rides the read-only
+        run_sql path (own connection, statement checks) — so a dashboard is
+        data, not code. watchlist / tags read the case's own state."""
+        query = query or {}
+        if source == "sql":
+            sql = (query.get("sql") or "").strip()
+            if not sql:
+                raise ValueError("SQL widget needs a query")
+            sql = self._resolve_table_placeholders(sql)   # {{evtx}} -> src_<id>
+            res = self.run_sql(sql, limit=min(int(query.get("limit") or limit), 1000))
+            return {"columns": res["columns"], "rows": res["rows"], "truncated": res.get("truncated", False)}
+        if source == "watchlist":
+            inds = self.list_indicators()
+            return {"columns": ["indicator", "hits"],
+                    "rows": [[i["value"], i["hit_count"]] for i in inds],
+                    "total": sum(i["hit_count"] for i in inds)}
+        if source == "tags":
+            with self.lock:
+                rows = self.db.execute(
+                    "SELECT td.name AS name, COUNT(rt.rid) AS n FROM tag_defs td"
+                    " LEFT JOIN row_tags rt ON rt.tag_id = td.id"
+                    " GROUP BY td.id ORDER BY n DESC").fetchall()
+            return {"columns": ["tag", "count"], "rows": [[r["name"], r["n"]] for r in rows],
+                    "total": sum(r["n"] for r in rows)}
+        raise ValueError(f"Unknown widget source {source!r}")
+
     def pop_legacy_presets(self) -> list[dict]:
         """filter_presets used to be this case's own SQLite-backed table of
         saved filters, scoped to just this case file. Presets are saved
@@ -6466,6 +7773,10 @@ class Store:
                 "ON CONFLICT(source_id, rid) DO UPDATE SET note=excluded.note",
                 [(source_id, r["rid"], r["note"]) for r in session.get("row_notes", [])],
             )
+        # Tag state was just replaced wholesale, not by a recorded delta, so
+        # every existing undo entry now describes a world that is gone —
+        # replaying one would strip tags off rows the loaded session owns.
+        self._discard_undo()
         if session.get("layout"):
             self.save_layout(source_id, session["layout"])
         for sv in session.get("saved_views", []):
@@ -6524,7 +7835,7 @@ class Store:
         tags_applied = 0
         sources_restored = 0
         sources_reimported = 0
-        by_hash = {s["file_hash"]: s["id"] for s in self.list_sources() if s.get("file_hash")}
+        by_hash = self._live_sources_by_hash()
 
         for src_session in session.get("sources", []):
             s_meta = src_session.get("source", {})
@@ -6837,12 +8148,38 @@ class Store:
             self.db.execute("DELETE FROM row_notes")
         # The undo entries reference rows that no longer carry those tags;
         # replaying one would reinsert assignments this deliberately cleared.
+        self._discard_undo()
+        return {"saved": saved, "tags_cleared": tags, "notes_cleared": notes}
+
+    def _drop_undo_for_source(self, source_id: int) -> None:
+        """Undo entries naming a source that no longer exists. SQLite reuses
+        a deleted row id, so the next import can land on the same source_id
+        and inherit them — replaying one then tags rows of an unrelated
+        file. Mirrors _drop_undo_for_tag."""
+        with self.lock:
+            keep = []
+            for entry in self._undo:
+                if entry.get("source_id") == source_id:
+                    with contextlib.suppress(sqlite3.Error):
+                        self.db.execute(f"DROP TABLE IF EXISTS v.{q(entry['table'])}")
+                    continue
+                keep.append(entry)
+            self._undo[:] = keep
+
+    def _discard_undo(self) -> None:
+        """Drop the whole undo journal and its delta tables.
+
+        Called by anything that replaces tag state wholesale rather than by
+        a recorded delta (invariant #7). An entry names rows by (source_id,
+        rid) and a direction; once the state it was recorded against is
+        gone, replaying it writes tags onto rows nobody chose — which is
+        exactly the silent corruption the invariant exists to prevent, and
+        the undo label still reads as the analyst's own last action."""
         with self.lock:
             for entry in self._undo:
                 with contextlib.suppress(sqlite3.Error):
                     self.db.execute(f"DROP TABLE IF EXISTS v.{q(entry['table'])}")
             self._undo.clear()
-        return {"saved": saved, "tags_cleared": tags, "notes_cleared": notes}
 
     def _session_tag_map(self, data: dict) -> tuple[dict, dict, dict]:
         """(tags_by_row, notes_by_row, source_labels) for a session document.
@@ -6866,6 +8203,25 @@ class Store:
             for rn in src.get("row_notes") or []:
                 notes[(key, rn["rid"])] = rn.get("note") or ""
         return tags, notes, labels
+
+    def _live_sources_by_hash(self, sources: list[dict] | None = None) -> dict:
+        """{file_hash: source_id} for the open case — the one way a session
+        source is matched to a live table (import_case_session and the diff
+        both read it). Evidence is identified by its own fingerprint, never
+        by a filename two different exports can share."""
+        return {s["file_hash"]: s["id"] for s in (sources or self.list_sources()) if s.get("file_hash")}
+
+    def _session_source_resolver(self):
+        """key -> live source id | None, for the keys _session_tag_map
+        builds (a file hash, or the name of a source that has none). A hash
+        matches by hash only; a hashless source matches a hashless live
+        source of the same name, since nothing better identifies it. A
+        same-named table with a different hash is a different file and
+        stays unresolved — a diff must never pivot into the wrong evidence."""
+        sources = self.list_sources()
+        by_hash = self._live_sources_by_hash(sources)
+        by_name_hashless = {s["name"]: s["id"] for s in sources if not s.get("file_hash")}
+        return lambda key: by_hash.get(key, by_name_hashless.get(key))
 
     def diff_sessions(self, left: str, right: str, limit: int = 2000) -> dict:
         """What changed between two sessions — the QC question: "what did
@@ -6892,7 +8248,7 @@ class Store:
             a, b = lt.get(key, set()), rt.get(key, set())
             if a == b:
                 continue
-            row = {"source": labels.get(key[0], key[0]), "rid": key[1],
+            row = {"source": labels.get(key[0], key[0]), "key": key[0], "rid": key[1],
                    "left": sorted(a), "right": sorted(b)}
             if not a:
                 added.append(row)
@@ -6903,21 +8259,37 @@ class Store:
         for key in sorted(set(ln) | set(rn), key=lambda k: (str(k[0]), k[1])):
             a, b = ln.get(key), rn.get(key)
             if a != b:
-                note_changes.append({"source": labels.get(key[0], key[0]), "rid": key[1],
+                note_changes.append({"source": labels.get(key[0], key[0]), "key": key[0], "rid": key[1],
                                      "left": a, "right": b})
 
-        def _cap(rows):
-            return rows[:limit]
+        groups = {"added": added, "removed": removed, "changed": changed, "note_changes": note_changes}
+        counts = {k: len(v) for k, v in groups.items()}
+        # Per table, uncapped: what the panel shows as its counts. The row
+        # lists below are capped, so a table past the cap still reports
+        # how many rows differ even when not all of them can be opened.
+        resolve = self._session_source_resolver()
+        per_source: dict = {}
+        for kind, rows in groups.items():
+            for r in rows:
+                ps = per_source.setdefault(r["key"], {
+                    "source": r["source"], "source_id": resolve(r["key"]),
+                    "counts": {k: 0 for k in groups}})
+                ps["counts"][kind] += 1
+        # Each listed row names its live source, so the panel's counts can
+        # pivot to the table showing exactly those rows.
+        capped = {k: v[:limit] for k, v in groups.items()}
+        for rows in capped.values():
+            for r in rows:
+                r["source_id"] = resolve(r.pop("key"))
 
         return {
             "left": left, "right": right,
             # "only in right" reads as added when right is the later pass,
             # which is how a review is run: left = what was handed over.
-            "added": _cap(added), "removed": _cap(removed), "changed": _cap(changed),
-            "note_changes": _cap(note_changes),
-            "counts": {"added": len(added), "removed": len(removed),
-                       "changed": len(changed), "note_changes": len(note_changes)},
-            "truncated": max(len(added), len(removed), len(changed), len(note_changes)) > limit,
+            **capped,
+            "counts": counts,
+            "sources": [per_source[k] for k in sorted(per_source, key=str)],
+            "truncated": max(counts.values(), default=0) > limit,
             # A shared source is one both sides have evidence for; anything
             # else means the two sessions are describing different cases and
             # the numbers above are not a like-for-like comparison.
@@ -6984,6 +8356,14 @@ class Store:
         handle = self._views.get(view_id)
         if not handle:
             raise KeyError("View expired — rebuild it")
+        # Covers all three export shapes at once, and eagerly: the body
+        # below is a generator, so an error raised inside it would surface
+        # from StreamingResponse rather than from the route's try/except.
+        # On a pooled reader, never _source_lite — that takes the writer
+        # lock, and an export must not block behind a build (invariant #4;
+        # test_concurrency.py fails the moment it does).
+        with self._reader() as ro:
+            self._require_columns(self._source_lite_on(ro, handle["source_id"]))
         if handle.get("kind") == "group_virtual":
             return self._export_virtual_group_csv_rows(handle, tagged_only)
         if handle.get("kind") == "root_virtual":
@@ -7019,7 +8399,11 @@ class Store:
         sid = member["source_id"]
         with self._reader() as ro, self._dropped_view_is_expired():
             src = self._source_lite_on(ro, sid)
-            cols = [c["name"] for c in src["columns"]]
+            # The analyst's layout, like every other export path. This one
+            # used raw storage order, so the same rows exported from an
+            # expanded group carried columns they had taken off screen,
+            # while exporting them from a filtered parent did not.
+            cols = self._export_columns(ro, src)
             where_sql, where_params = self._virtual_group_where(handle, ro)
             sel = ", ".join(q(c) for c in cols)
 
@@ -7664,6 +9048,9 @@ class Store:
                     continue
         except sqlite3.Error:
             pass
+        # Last, so the TEMP views above are still allowed to be created:
+        # from here on this connection can only read.
+        ro.set_authorizer(read_only_authorizer)
         return ro
 
     SQL_TO_TABLE_SOFT_CAP = 500_000
@@ -7677,7 +9064,7 @@ class Store:
         name = (name or "").strip()
         if not name:
             raise ValueError("Name the new table")
-        structural = _blank_string_literals(sql)
+        structural = _blank_string_literals(_strip_sql_comments(sql))
         if self.SQL_PANE_FORBIDDEN_RE.search(structural):
             raise ValueError("ATTACH, DETACH, PRAGMA and VACUUM aren't allowed in the SQL pane")
         ro = self._pane_connection()
@@ -7724,7 +9111,7 @@ class Store:
         on). Stacked statements aren't a separate concern here: Python's
         sqlite3 already refuses to execute more than one statement per call.
         """
-        structural = _blank_string_literals(sql)
+        structural = _blank_string_literals(_strip_sql_comments(sql))
         if self.SQL_PANE_FORBIDDEN_RE.search(structural):
             raise ValueError("ATTACH, DETACH, PRAGMA and VACUUM aren't allowed in the SQL pane")
         ro = self._pane_connection()
@@ -7782,6 +9169,65 @@ def _xlsx_sheet_name(name: str, used: set[str]) -> str:
         n += 1
     used.add(clean.lower())
     return clean
+
+
+# The only SQLite actions a read-only query needs. Everything else — the
+# CREATE_TABLE/INSERT/ATTACH that `VACUUM INTO` performs, a bare ATTACH,
+# a PRAGMA, any write — is refused by the authorizer below.
+#
+# This exists because the keyword blacklist it backs up was bypassable:
+# `_blank_string_literals` has no notion of comments, so `/* ' */ VACUUM
+# INTO 'x'` shifted quote parity and blanked the keyword out of the string
+# the blacklist scanned. Text scanning is the friendly error; the
+# authorizer is the guarantee, and it cannot be fooled by spelling.
+_READ_ONLY_ACTIONS = frozenset({
+    sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ, sqlite3.SQLITE_FUNCTION,
+    sqlite3.SQLITE_TRANSACTION, sqlite3.SQLITE_RECURSIVE,
+})
+
+
+def read_only_authorizer(action, _arg1, _arg2, _db, _trigger):
+    return sqlite3.SQLITE_OK if action in _READ_ONLY_ACTIONS else sqlite3.SQLITE_DENY
+
+
+def _strip_sql_comments(frag: str) -> str:
+    """Blank `--` and `/* */` comments, preserving length. Runs before
+    literal blanking: a quote inside a comment is not a quote, and letting
+    it shift parity is what made the keyword scan bypassable."""
+    out: list[str] = []
+    i, n = 0, len(frag)
+    while i < n:
+        two = frag[i:i + 2]
+        if two == "--":
+            while i < n and frag[i] != "\n":
+                out.append(" ")
+                i += 1
+        elif two == "/*":
+            depth_end = frag.find("*/", i + 2)
+            stop = n if depth_end < 0 else depth_end + 2
+            out.append(" " * (stop - i))
+            i = stop
+        elif frag[i] in ("'", '"'):
+            # A literal: copy it verbatim here so a comment marker inside a
+            # string is not mistaken for a comment. Blanking of the literal
+            # itself is _blank_string_literals' job, which runs next.
+            ch = frag[i]
+            out.append(ch)
+            i += 1
+            while i < n:
+                out.append(frag[i])
+                if frag[i] == ch:
+                    if i + 1 < n and frag[i + 1] == ch:
+                        out.append(frag[i + 1])
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+        else:
+            out.append(frag[i])
+            i += 1
+    return "".join(out)
 
 
 def _blank_string_literals(frag: str) -> str:

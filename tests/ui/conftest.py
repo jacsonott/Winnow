@@ -95,6 +95,9 @@ def server(tmp_path_factory, ui_csv):
         # registers this throwaway case in the developer's real registry.
         env={**os.environ,
              "WINNOW_WORKSPACE_DIR": str(tmp_path_factory.mktemp("ws")),
+             # The WINNOW_* token store: without this, Windows falls
+             # through to the developer's real HKCU\Environment.
+             "WINNOW_ENV_FILE": str(tmp_path_factory.mktemp("env") / "env"),
              # Same idea for the association adapters' target dirs: a
              # Settings → File associations test must never write the
              # developer's real ~/.local/share or ~/.config.
@@ -157,3 +160,52 @@ def page(browser, server):
     # catch a broken menu handler rather than just a broken layout.
     ctx.close()
     assert not errors, "uncaught JS errors: " + " | ".join(errors)
+
+
+@pytest.fixture
+def api(page):
+    """JSON call against the shared server from inside the page, carrying
+    the CSRF header every non-GET /api/* route requires."""
+    def _api(path, method="GET", body=None):
+        return page.evaluate(
+            """([path, method, body]) => fetch(path, { method,
+                  headers: { 'X-Timeline-Lite-Client': '1', 'Content-Type': 'application/json' },
+                  body: body == null ? undefined : JSON.stringify(body) }).then((r) => r.json())""",
+            [path, method, body])
+    return _api
+
+
+@pytest.fixture
+def row_menu(page):
+    """Right-click a grid cell and wait for the row menu (the root, not a
+    flyout). Returns the root locator. One gesture for every row-menu
+    test, so a change to how it opens is one edit."""
+    def _open(row=2, cell=2):
+        page.locator(".row").nth(row).locator(".cell").nth(cell).click(button="right")
+        page.wait_for_selector(".menu:not(.menu-sub)")
+        return page.locator(".menu:not(.menu-sub)")
+    return _open
+
+
+@pytest.fixture
+def flyout(page):
+    """Click a submenu parent in the open root menu by label and wait for
+    its flyout. Returns the flyout locator."""
+    def _open(label):
+        page.locator(".menu:not(.menu-sub) .menu-item-sub", has_text=label).click()
+        page.wait_for_selector(".menu-sub")
+        return page.locator(".menu-sub")
+    return _open
+
+
+@pytest.fixture
+def fake_row_action(page):
+    """Register a stand-in plugin row action ('Look up on VT' from a
+    plugin whose folder and id are both 'demo' / 'vt' — the pair the pin
+    key is built from) straight into client state, and take it away
+    again after the test. `max_rows` sets where the entry greys out."""
+    def _register(max_rows=50):
+        page.evaluate("(n) => { __winnow.S.pluginRowActions = [{ id: 'demo.vt', local_id: 'vt', plugin: 'demo', "
+                      "plugin_fs: 'demo', label: 'Look up on VT', description: 'demo', max_rows: n }]; }", max_rows)
+    yield _register
+    page.evaluate("() => { __winnow.S.pluginRowActions = []; }")

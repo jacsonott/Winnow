@@ -10,7 +10,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import functools
+import anyio
 import heapq
+import ipaddress
 import json
 import os
 import re
@@ -24,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form, Query
+from starlette.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse, FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -31,13 +35,16 @@ from pydantic import BaseModel
 from winnow import assoc as file_assoc
 from winnow import browser
 from winnow import instances
+from winnow import multicase
 from winnow import paths
 from winnow import plugin_api
 from winnow import updater
+from winnow import userenv
 from winnow import version
+from winnow import archive
 from winnow import workspace as WS
-from winnow.store import (CASE_SUFFIX, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, OpCancelled, Store,
-                   describe_case_lock, probe_case_lock, sweep_orphan_views)
+from winnow.store import (CASE_SUFFIX, PLASO_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, OpCancelled, Store,
+                   describe_case_lock, probe_case_lock, q, sweep_orphan_views)
 
 HERE = paths.INSTALL_ROOT  # static/, plugins/, examples/plugins/ all hang off the install root
 
@@ -72,6 +79,15 @@ HERE = paths.INSTALL_ROOT  # static/, plugins/, examples/plugins/ all hang off t
 # browser failed to open — the long fuse is what still reaps that one.
 
 IDLE_EXIT_S = float(os.environ.get("WINNOW_IDLE_EXIT_S", "120"))
+# A window that goes quiet is not necessarily a window that closed. Edge
+# and Chrome suspend background tabs, a laptop sleeps, a VM is paused — the
+# presence stream drops in all of those exactly as it does when the analyst
+# closes the window, and in all of those the window is still there waiting.
+# So the short fuse above applies only when a page SAID it was going (the
+# keepalive POST to /api/goodbye that connection.js sends on pagehide); a
+# stream that merely stopped gets this longer one, and a suspended tab that
+# wakes up finds its server still running.
+SUSPENDED_EXIT_S = float(os.environ.get("WINNOW_SUSPENDED_EXIT_S", "1800"))
 NEVER_CONNECTED_EXIT_S = float(os.environ.get("WINNOW_NEVER_CONNECTED_EXIT_S", "900"))
 IDLE_TICK_S = float(os.environ.get("WINNOW_IDLE_TICK_S", "10"))
 
@@ -81,6 +97,8 @@ class _Presence:
         self.streams = 0            # open /api/presence connections
         self.inflight = 0           # other HTTP requests mid-flight
         self.ever_connected = False
+        self.said_goodbye = False   # a page reported itself closing, so the
+                                    # stream ending means gone, not asleep
         self.started = time.monotonic()
         self.last_zero = time.monotonic()
         self.enabled = True         # main() clears this for --no-idle-shutdown
@@ -105,7 +123,13 @@ def _idle_exit_reason(now: float, p: _Presence, busy: bool) -> str | None:
         return None
     if p.ever_connected:
         idle = now - p.last_zero
-        if idle >= IDLE_EXIT_S:
+        if p.said_goodbye:
+            if idle >= IDLE_EXIT_S:
+                return (f"the last window closed {int(idle)}s ago — "
+                        "shutting down (disable with --no-idle-shutdown)")
+        elif idle >= SUSPENDED_EXIT_S:
+            # No window said goodbye: it may have been suspended or asleep
+            # all this time, which is why this fuse is the long one.
             return (f"no browser has been connected for {int(idle)}s — "
                     "shutting down (disable with --no-idle-shutdown)")
     else:
@@ -276,6 +300,84 @@ _reload_plugins()
 # POST's already does.
 CSRF_HEADER = "X-Timeline-Lite-Client"
 
+# Host names this server will answer to. The custom-header gate above rests
+# on a cross-origin page being unable to set the header — which holds right
+# up until the page IS same-origin. DNS rebinding does exactly that: a page
+# on evil.com re-resolves its own name to 127.0.0.1, and the browser then
+# treats it as same-origin with Winnow, so it can set any header it likes
+# and read the responses. The TCP peer really is 127.0.0.1, so _is_loopback
+# does not help either.
+#
+# The Host header is what distinguishes the two, because the browser sends
+# the name it resolved. An IP literal cannot be rebound (there is no name to
+# re-resolve), and the loopback names below are the ones a browser can only
+# reach by being on this machine. Anything else is a name we never told
+# anyone to use, and is refused — add it with --allow-host if you meant it.
+LOOPBACK_HOST_NAMES = {"localhost", "localhost.localdomain", "127.0.0.1", "::1", "[::1]"}
+ALLOWED_HOSTS: set[str] = set(LOOPBACK_HOST_NAMES)
+
+
+def _host_is_allowed(raw: str) -> bool:
+    """`raw` is the Host header: "name", "name:port", or "[v6]:port"."""
+    host = (raw or "").strip()
+    if not host:
+        return False          # HTTP/1.1 requires it; absent means crafted
+    if host.startswith("["):  # bracketed IPv6, with or without a port
+        host = host[: host.index("]") + 1] if "]" in host else host
+    elif ":" in host:
+        host = host.rsplit(":", 1)[0]
+    host = host.strip("[]").lower()
+    if host in ALLOWED_HOSTS:
+        return True
+    try:                      # an IP literal has no name to rebind
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
+
+
+# ------------------------------------------------------------ error log
+#
+# Errors used to go only to the terminal Winnow was started from, which an
+# analyst rarely has in front of them. Capture them into a bounded ring the
+# UI can show (Case menu -> Error log). record_log ALSO prints, so the
+# terminal behaviour is unchanged for anyone watching it.
+import collections as _collections
+import datetime as _datetime
+import threading as _threading
+
+_ERRLOG: "_collections.deque" = _collections.deque(maxlen=500)
+_ERRLOG_LOCK = _threading.Lock()
+_errlog_seq = 0
+
+
+def record_log(level: str, message) -> None:
+    global _errlog_seq
+    with _ERRLOG_LOCK:
+        _errlog_seq += 1
+        _ERRLOG.append({
+            "seq": _errlog_seq,
+            "ts": _datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "level": level,
+            "message": str(message),
+        })
+    print(f"[{level}] {message}", file=sys.stderr, flush=True)
+
+
+@app.get("/api/log")
+def api_log():
+    with _ERRLOG_LOCK:
+        return {"entries": list(_ERRLOG), "seq": _errlog_seq}
+
+
+@app.exception_handler(Exception)
+async def _unhandled_error_handler(request: Request, exc: Exception):
+    # Any route error that isn't an HTTPException / the two specific handlers
+    # below lands here: record it (so it's visible in the app, not just the
+    # terminal) and answer a clean 500 rather than a raw traceback.
+    record_log("error", f"{request.method} {request.url.path} — {type(exc).__name__}: {exc}")
+    return JSONResponse({"detail": f"Internal error: {exc}"}, status_code=500)
+
 
 # A request that was already executing against the previous case's Store
 # when a case switch closed it can't be salvaged — sqlite3 raises
@@ -308,6 +410,20 @@ async def op_cancelled_handler(request: Request, exc: OpCancelled):
     # fault — the frontend treats it as "keep what you had". Deliberately
     # not 4xx-per-endpoint: any cancellable operation can raise this.
     return JSONResponse({"detail": "Cancelled"}, status_code=499)
+
+
+@app.middleware("http")
+async def check_host_header(request: Request, call_next):
+    """Refuse a Host this server was never meant to answer to. See
+    ALLOWED_HOSTS — this is what keeps the client-header gate meaningful
+    against a page that has made itself same-origin by rebinding DNS."""
+    if not _host_is_allowed(request.headers.get("host", "")):
+        return PlainTextResponse(
+            "Unrecognised Host header. Reach Winnow at the address it printed "
+            "on startup, or pass --allow-host if you front it with a name.",
+            status_code=421,   # Misdirected Request
+        )
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -451,6 +567,7 @@ class IngestPluginPath(BaseModel):
     name: str | None = None
     options: dict = {}      # values for the format's declared options
     build_fts: bool = True
+    folder_path: str | None = None   # directory import: the on-disk subfolder to file this under
 
 
 class DirectoryScan(BaseModel):
@@ -564,11 +681,42 @@ def is_winnow_case_file(path: str) -> bool:
         return False
 
 
+# Every table whose contents can only exist because someone did something.
+# The sweep keeps a quick-look case forever if ANY of them has a row.
+#
+# Deliberately not here: `open_tabs` and `tag_defs`, which a fresh case is
+# born with (1 and 3 rows), `sources`, which every quick-look has by
+# definition, and `layouts`/`case_settings`, which are incidental UI state
+# rather than findings. Everything else in the case file got there because
+# an analyst — or a plugin acting for them — put it there.
+_WORK_TABLES = (
+    "row_tags", "row_notes", "sessions",        # the original three
+    "case_notes", "case_variables",
+    "dashboards", "dashboard",                  # `dashboard` is the pre-rename single-row table
+    "derived_columns", "filter_presets", "merges", "saved_views",
+    "source_folders", "watchlist", "sql_tabs",
+)
+
+
+def _case_holds_work(conn) -> bool:
+    """Whether this case file contains anything worth keeping. Errs toward
+    True: a janitor that can eat findings is worse than the disk it saves."""
+    present = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    for t in _WORK_TABLES:
+        if t in present and conn.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]:
+            return True
+    # A plugin's own tables (plugin:<fs_name>:<table>) are case data too —
+    # an LLM plugin's chat transcript is often the ONLY thing in a
+    # quick-look, and it was being swept as "no analysis".
+    return any(n.startswith("plugin:") for n in present)
+
+
 def _sweep_quicklook(max_age_days: int = 7) -> int:
     """Delete abandoned quick-look cases: old, unlocked, and holding no
-    analysis (no tags, no notes, no saved sessions). Anything with work in
-    it is kept forever — a janitor that can eat findings is worse than the
-    disk it saves."""
+    analysis at all (see _case_holds_work). Anything with work in it is
+    kept forever — a janitor that can eat findings is worse than the disk
+    it saves."""
     d = os.path.join(_cases_dir(), QUICKLOOK_DIRNAME)
     if not os.path.isdir(d):
         return 0
@@ -585,10 +733,7 @@ def _sweep_quicklook(max_age_days: int = 7) -> int:
                 continue
             conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
             try:
-                busy = any(
-                    conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
-                    for t in ("row_tags", "row_notes", "sessions")
-                    if conn.execute("SELECT 1 FROM sqlite_master WHERE name=?", (t,)).fetchone())
+                busy = _case_holds_work(conn)
             finally:
                 conn.close()
             if busy:
@@ -624,6 +769,21 @@ class UpdateApply(BaseModel):
     confirm: bool = False
 
 
+def _presence_open() -> None:
+    """A window is here. Clearing said_goodbye matters when several are
+    open: one closing must not put the survivors on the closed-window
+    fuse."""
+    PRESENCE.streams += 1
+    PRESENCE.ever_connected = True
+    PRESENCE.said_goodbye = False
+
+
+def _presence_close() -> None:
+    PRESENCE.streams -= 1
+    if PRESENCE.streams == 0:
+        PRESENCE.last_zero = time.monotonic()
+
+
 @app.get("/api/presence")
 async def api_presence():
     """The connection every page holds open so the server knows a browser
@@ -631,17 +791,125 @@ async def api_presence():
     no data ever flows, the CONNECTION is the message. Disconnect is
     noticed at the next ping (≤15s), which is well inside the idle grace."""
     async def stream():
-        PRESENCE.streams += 1
-        PRESENCE.ever_connected = True
+        _presence_open()
         try:
             while True:
                 yield ": ping\n\n"
                 await asyncio.sleep(15)
         finally:
-            PRESENCE.streams -= 1
-            if PRESENCE.streams == 0:
-                PRESENCE.last_zero = time.monotonic()
+            _presence_close()
     return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+@app.post("/api/goodbye")
+def api_goodbye():
+    """A page reporting that it is closing (connection.js sends this on
+    pagehide with keepalive, so it survives the unload). Without it the
+    server cannot tell a closed window from a suspended one and has to
+    assume the analyst may come back — see SUSPENDED_EXIT_S."""
+    PRESENCE.said_goodbye = True
+    return {"ok": True}
+
+
+# ------------------------------------------------------------- across cases
+#
+# One writable case, N read-only readers (winnow/multicase.py). These
+# routes never write to another case and never take its lock, so they work
+# while another Winnow has it open — which is the normal state when an
+# analyst is working a set of hosts.
+
+class MultiCaseBody(BaseModel):
+    paths: list[str] = []          # case files; empty means every registered case
+    values: list[str] | None = None
+    sql: str | None = None
+    start: str = ""
+    end: str = ""
+    limit: int = 5000
+
+
+def _multicase_paths(body: MultiCaseBody) -> tuple[list[str], dict[str, str]]:
+    """The cases to read, and their registry names. Restricted to the
+    REGISTERED cases: these routes take a path from the browser, and the
+    case list is the analyst's own statement of what they work on."""
+    known = {c["path"]: (c.get("name") or os.path.basename(c["path"])) for c in WS.cases.list()}
+    if body.paths:
+        unknown = [p for p in body.paths if p not in known]
+        if unknown:
+            raise HTTPException(400, f"Not a registered case: {unknown[0]}")
+        paths = list(body.paths)
+    else:
+        paths = list(known)
+    # The open case reads from its own Store, not from a second connection.
+    here = STORE.path if STORE is not None and not STORE.closed else None
+    paths = [p for p in paths if p != here]
+    return paths, known
+
+
+@app.get("/api/multicase/cases")
+def api_multicase_cases():
+    """Registered cases this session can read, with the open one marked."""
+    here = STORE.path if STORE is not None and not STORE.closed else None
+    out = []
+    for c in WS.cases.list():
+        out.append({"path": c["path"], "name": c.get("name") or os.path.basename(c["path"]),
+                    "group": c.get("group") or "", "is_open": c["path"] == here,
+                    "exists": os.path.isfile(c["path"])})
+    return {"cases": out, "attach_budget": multicase.ATTACH_BUDGET}
+
+
+@app.post("/api/multicase/sweep")
+async def api_multicase_sweep(body: MultiCaseBody):
+    """A: where else did these values land. Defaults to this case's
+    watchlist, which is the question an analyst already has written down."""
+    paths, names = _multicase_paths(body)
+    values = [v for v in (body.values or []) if str(v).strip()]
+    if not values:
+        if STORE is None or STORE.closed:
+            raise HTTPException(400, "Give some values, or open a case with a watchlist")
+        values = [i["value"] for i in await run_in_threadpool(STORE.list_indicators)]
+    if not values:
+        raise HTTPException(400, "No values to look for — add some IOCs to the watchlist first")
+    try:
+        cases = await run_in_threadpool(
+            multicase.sweep_values, paths, values, names=names, limit_per_case=min(body.limit, 500))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"values": values, "cases": cases,
+            "total_hits": sum(len(c["hits"]) for c in cases)}
+
+
+@app.post("/api/multicase/sql")
+async def api_multicase_sql(body: MultiCaseBody):
+    """B: one read-only SELECT across several cases, attached as c1, c2…"""
+    paths, names = _multicase_paths(body)
+    try:
+        return await run_in_threadpool(
+            multicase.query_across, paths, body.sql or "", limit=body.limit, names=names)
+    except (ValueError, multicase.NotACaseFile) as e:
+        # Analyst-actionable: a forbidden statement, too many cases, an
+        # empty query. The 400-vs-500 split the rest of the app keeps.
+        raise HTTPException(400, str(e))
+    except sqlite3.Error as e:
+        raise HTTPException(400, f"SQL error: {e}")
+
+
+@app.post("/api/multicase/schema")
+async def api_multicase_schema(body: MultiCaseBody):
+    paths, names = _multicase_paths(body)
+    try:
+        return {"schema": await run_in_threadpool(multicase.schema_across, paths, names)}
+    except (ValueError, multicase.NotACaseFile) as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/multicase/timeline")
+async def api_multicase_timeline(body: MultiCaseBody):
+    """C: several cases on one timeline. Read-only — acting on a row means
+    opening it in the case that owns it."""
+    paths, names = _multicase_paths(body)
+    return await run_in_threadpool(
+        multicase.timeline_across, paths, start=body.start, end=body.end,
+        limit=min(body.limit, 20000), names=names)
 
 
 @app.get("/api/version")
@@ -717,6 +985,16 @@ def api_case_open(body: CaseOpen):
     global STORE
     if not os.path.isfile(body.path):
         raise HTTPException(400, f"No case file at {body.path}")
+    # An existing file that is not a case must not be opened AS one:
+    # Store.__init__ runs META_SCHEMA against whatever it is handed, so
+    # pointing this at a browser history database or a mounted piece of
+    # evidence would add tables to it in place. is_winnow_case_file has
+    # existed for the double-click handler since before this route did; it
+    # is the same question. A path that does not exist yet is a new case
+    # and goes through /api/cases, which is where creation belongs.
+    if not is_winnow_case_file(body.path):
+        raise HTTPException(
+            400, f"{body.path} is not a Winnow case file — opening it would write into it")
     # Re-opening the case that's already open is a no-op, not a reopen. Two
     # reasons, and the second is the load-bearing one: the client's own
     # state reset in openCase() is what that request is really for, and the
@@ -730,7 +1008,7 @@ def api_case_open(body: CaseOpen):
             body.path, name=os.path.splitext(os.path.basename(body.path))[0]
         )
         WS.cases.touch_opened(rec["id"])
-        return {"sources": STORE.list_sources(), "name": rec["name"]}
+        return {"sources": STORE.list_sources(), "name": rec["name"], "temp": _is_temp_case(STORE.path)}
     if not body.force:
         holder = probe_case_lock(body.path)
         if holder:
@@ -778,7 +1056,7 @@ def api_case_open(body: CaseOpen):
     # exists the moment the case does, and an "off in this case" plugin's
     # code is unloaded rather than merely unlisted.
     _reload_plugins()
-    return {"sources": STORE.list_sources(), "name": rec["name"]}
+    return {"sources": STORE.list_sources(), "name": rec["name"], "temp": _is_temp_case(STORE.path)}
 
 
 class CopySourcesBody(BaseModel):
@@ -804,6 +1082,20 @@ def api_case_copy_sources(body: CopySourcesBody):
     except ValueError as e:
         code = 409 if "another Winnow" in str(e) else 400
         raise HTTPException(code, str(e))
+
+
+@app.post("/api/case/quicklook/new")
+def api_quicklook_new(request: Request):
+    """Create a fresh, empty quick-look case file and return its path — the
+    home screen's drag-and-drop into no particular case (drop the files,
+    then open this path and import). Loopback-only, like the association
+    open: it writes a file. The temp case stays out of the registry until
+    the analyst saves it, same as an association-opened one."""
+    if not _is_loopback(request):
+        raise HTTPException(403, "Quick-look cases are only created from this machine")
+    temp = _new_temp_case_path()
+    _open_store(temp).close()   # materialise an empty case file with the schema
+    return {"path": temp}
 
 
 class AssocOpenBody(BaseModel):
@@ -981,6 +1273,10 @@ def api_assoc_types(request: Request):
     prompted = set(WS.machine_prefs.get(_ASSOC_PROMPTED_KEY) or [])
     return {"platform": file_assoc.platform_name(),
             "background": _assoc_background(),
+            # The exact command the OS is told to run — surfaced so the
+            # panel's manual-setup help can show THIS install's paths
+            # rather than a placeholder the analyst has to reconstruct.
+            "command": " ".join(file_assoc.launch_command(_assoc_background())),
             "types": [{**t, **st.get(t["ext"], {"registered": False, "default": False}),
                        "asked": t["ext"] in asked,
                        "prompted": t["ext"] in prompted} for t in catalogue]}
@@ -1169,6 +1465,56 @@ def _is_loopback(request: Request) -> bool:
     peer."""
     host = request.client.host if request.client else ""
     return host in ("127.0.0.1", "::1", "testclient")
+
+
+# ---------------------------------------------------------------- user env
+# WINNOW_* environment variables — where a plugin's token lives, instead of
+# the case file or a Winnow setting. Names and where each came from are all
+# the API ever returns; a value goes in through POST and never comes back
+# out, not even to the loopback client. See winnow/userenv.py.
+
+class EnvVarBody(BaseModel):
+    name: str
+    value: str
+
+
+def _env_listing(st) -> dict:
+    return {"prefix": userenv.PREFIX, "location": st.location(), "vars": userenv.list_vars(st)}
+
+
+@app.get("/api/env")
+def api_env_list(request: Request):
+    if not _is_loopback(request):
+        raise HTTPException(403, "environment variables are loopback-only")
+    return _env_listing(userenv.store())
+
+
+@app.post("/api/env")
+def api_env_set(request: Request, body: EnvVarBody):
+    if not _is_loopback(request):
+        raise HTTPException(403, "environment variables are loopback-only")
+    st = userenv.store()
+    try:
+        name = userenv.set_var(body.name, body.value, st)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except OSError as e:
+        raise HTTPException(500, f"could not save: {e}")
+    return {"ok": True, "name": name, **_env_listing(st)}   # the refreshed list, so the panel needn't re-fetch
+
+
+@app.delete("/api/env/{name}")
+def api_env_delete(request: Request, name: str):
+    if not _is_loopback(request):
+        raise HTTPException(403, "environment variables are loopback-only")
+    st = userenv.store()
+    try:
+        userenv.delete_var(name, st)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except OSError as e:
+        raise HTTPException(500, f"could not save: {e}")
+    return {"ok": True, **_env_listing(st)}
 
 
 class MakeDirBody(BaseModel):
@@ -1373,6 +1719,15 @@ def api_cases_delete(case_id: int, delete_file: bool = False):
         if rec and os.path.isfile(rec["path"]):
             if STORE is not None and os.path.abspath(STORE.path) == os.path.abspath(rec["path"]):
                 raise HTTPException(400, "Close this case before deleting its file")
+            # Registering a case is just recording a path, and nothing
+            # checked what was at the end of it — so "forget this case, and
+            # delete the file" was an unlink of anything the analyst's
+            # account could reach. Deleting a case file requires it to be
+            # one; the registry entry goes either way.
+            if not is_winnow_case_file(rec["path"]):
+                raise HTTPException(
+                    400, f"{rec['path']} is not a Winnow case file — removed from the "
+                         "list, but not deleted from disk")
             os.remove(rec["path"])
     WS.cases.delete(case_id)
     return {"ok": True}
@@ -1465,7 +1820,13 @@ async def api_ingest_upload(
             while chunk := await file.read(4 << 20):
                 out.write(chunk)
         types = json.loads(column_types) if column_types else None
-        return store().ingest_csv(
+        # In a worker thread, never on the event loop: a 130MB CSV takes
+        # seconds to minutes, and every one of them froze the whole server
+        # (measured: /api/version took 2.4s mid-ingest). Sync `def` routes
+        # get this from FastAPI for free; an `async def` route — which this
+        # has to be, for `await file.read()` — must ask for it.
+        return await run_in_threadpool(
+            store().ingest_csv,
             tmp, name=file.filename, build_fts=build_fts, delimiter=delimiter or None,
             has_header=has_header, column_types=types,
         )
@@ -1496,7 +1857,8 @@ async def api_ingest_preview(
     raw = await file.read(512 * 1024)  # bounded sample — full parse happens at real ingest time
     text = _decode_preview_bytes(raw)
     try:
-        return store().preview_csv_text(text, delimiter=delimiter or None, has_header=has_header)
+        return await run_in_threadpool(
+            store().preview_csv_text, text, delimiter=delimiter or None, has_header=has_header)
     except Exception as e:
         raise HTTPException(400, str(e))
 
@@ -1515,7 +1877,7 @@ async def api_ingest_sqlite_preview(file: UploadFile = File(...)):
         with os.fdopen(fd, "wb") as out:
             while chunk := await file.read(4 << 20):
                 out.write(chunk)
-        return store().preview_sqlite_tables(tmp)
+        return await run_in_threadpool(store().preview_sqlite_tables, tmp)
     except Exception as e:
         raise HTTPException(400, str(e))
     finally:
@@ -1537,7 +1899,8 @@ async def api_ingest_sqlite_upload(
             while chunk := await file.read(4 << 20):
                 out.write(chunk)
         ts_cols = json.loads(timestamp_columns) if timestamp_columns else None
-        return store().ingest_sqlite_table(
+        return await run_in_threadpool(
+            store().ingest_sqlite_table,  # threadpool: see api_ingest_upload
             tmp, table, name=name or f"{Path(file.filename or 'upload').stem}.{table}",
             build_fts=build_fts, timestamp_columns=ts_cols,
         )
@@ -1560,7 +1923,8 @@ async def api_ingest_xlsx_preview(file: UploadFile = File(...)):
         with os.fdopen(fd, "wb") as out:
             while chunk := await file.read(4 << 20):
                 out.write(chunk)
-        return store().preview_xlsx_sheets(tmp)
+        # openpyxl opening a large workbook is seconds of CPU.
+        return await run_in_threadpool(store().preview_xlsx_sheets, tmp)
     except Exception as e:
         raise HTTPException(400, str(e))
     finally:
@@ -1582,7 +1946,8 @@ async def api_ingest_json_preview(
         with os.fdopen(fd, "wb") as out:
             while chunk := await file.read(4 << 20):
                 out.write(chunk)
-        return store().preview_json_file(tmp, flatten_mode=flatten_mode, flatten_depth=flatten_depth)
+        return await run_in_threadpool(
+            store().preview_json_file, tmp, flatten_mode=flatten_mode, flatten_depth=flatten_depth)
     except Exception as e:
         raise HTTPException(400, str(e))
     finally:
@@ -1603,7 +1968,8 @@ async def api_ingest_json_upload(
         with os.fdopen(fd, "wb") as out:
             while chunk := await file.read(4 << 20):
                 out.write(chunk)
-        return store().ingest_json(
+        return await run_in_threadpool(
+            store().ingest_json,  # threadpool: see api_ingest_upload
             tmp, name=name or file.filename, flatten_mode=flatten_mode, flatten_depth=flatten_depth,
             build_fts=build_fts,
         )
@@ -1623,7 +1989,52 @@ def _ingest_kind_for_path(path: str) -> str:
         return "sqlite"
     if suffix in XLSX_IMPORT_EXTENSIONS:
         return "xlsx"
+    if suffix in PLASO_IMPORT_EXTENSIONS:
+        return "plaso"
     return "json" if suffix in _JSON_INGEST_EXTS else "csv"
+
+
+class ArchiveExpandBody(BaseModel):
+    path: str
+
+
+@app.post("/api/ingest/archive/expand")
+def api_ingest_archive_expand(body: ArchiveExpandBody):
+    """Expand a zip/tar/tgz/gz evidence archive (support bundle, UAC
+    collection) — recursively, nested archives included — into a fresh
+    directory beside it. The response's root feeds the directory-import
+    modal; nothing is ingested here."""
+    if not os.path.isfile(body.path):
+        raise HTTPException(400, f"No file at {body.path}")
+    try:
+        return archive.expand_archive(body.path)
+    except archive.ArchiveError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/ingest/archive/upload")
+async def api_ingest_archive_upload(file: UploadFile = File(...)):
+    """Upload-then-expand: the archive spools to a tempfile, expands into a
+    directory beside the CASE file (the one durable, analyst-visible place
+    an upload has), and the spool is removed either way."""
+    suffix = Path(file.filename or "upload.zip").suffix or ".zip"
+    fd, tmp = tempfile.mkstemp(suffix=suffix)
+    try:
+        with os.fdopen(fd, "wb") as out:
+            while chunk := await file.read(4 << 20):
+                out.write(chunk)
+        dest_root = os.path.dirname(os.path.abspath(store().path))
+        # Name the extraction after the UPLOADED file, not the tempfile.
+        named = os.path.join(os.path.dirname(tmp), os.path.basename(file.filename or "archive.zip"))
+        os.replace(tmp, named)
+        tmp = named
+        try:
+            return await run_in_threadpool(archive.expand_archive, tmp, dest_root=dest_root)
+        except archive.ArchiveError as e:
+            raise HTTPException(400, str(e))
+    finally:
+        with contextlib.suppress(OSError):
+            os.remove(tmp)
 
 
 class PreviewPath(BaseModel):
@@ -1685,18 +2096,26 @@ class IngestJobPath(BaseModel):
     flatten_depth: int = 0
     # sqlite options
     tables: list[dict] | None = None  # [{table, name?, timestamp_columns?}]
+    # directory import: the file's on-disk subfolder, reproduced as a sidebar
+    # folder the new table is filed under ("" / None leaves it ungrouped)
+    folder_path: str | None = None
 
 
 def _ingest_job_options(kind: str, *, build_fts: bool, delimiter=None, has_header=True,
                         column_types=None, flatten_mode="none", flatten_depth=0,
-                        tables=None) -> dict:
+                        tables=None, folder_path=None) -> dict:
+    # folder_path rides along on every kind — the job worker files each new
+    # source under it when the ingest completes (directory import).
+    base = {"folder_path": folder_path} if folder_path else {}
     if kind == "csv":
-        return {"build_fts": build_fts, "delimiter": delimiter,
+        return {**base, "build_fts": build_fts, "delimiter": delimiter,
                 "has_header": has_header, "column_types": column_types}
     if kind == "json":
-        return {"build_fts": build_fts, "flatten_mode": flatten_mode,
+        return {**base, "build_fts": build_fts, "flatten_mode": flatten_mode,
                 "flatten_depth": flatten_depth}
-    return {"build_fts": build_fts, "tables": tables or []}
+    if kind == "plaso":
+        return {**base, "build_fts": build_fts}   # one file, one table, no options
+    return {**base, "build_fts": build_fts, "tables": tables or []}
 
 
 @app.post("/api/ingest/jobs/path")
@@ -1715,7 +2134,7 @@ def api_ingest_job_path(body: IngestJobPath):
                 kind, build_fts=body.build_fts, delimiter=body.delimiter,
                 has_header=body.has_header, column_types=body.column_types,
                 flatten_mode=body.flatten_mode, flatten_depth=body.flatten_depth,
-                tables=body.tables,
+                tables=body.tables, folder_path=body.folder_path,
             ),
         )
     except ValueError as e:
@@ -1748,7 +2167,8 @@ async def api_ingest_job_upload(
                 out.write(chunk)
         table_list = json.loads(tables) if tables else None
         types = json.loads(column_types) if column_types else None
-        return store().start_ingest_job(
+        return await run_in_threadpool(
+            store().start_ingest_job,  # threadpool: see api_ingest_upload
             kind, tmp, name=name or file.filename, delete_after=True,
             options=_ingest_job_options(
                 kind, build_fts=build_fts, delimiter=delimiter or None,
@@ -1798,6 +2218,8 @@ def api_plugins():
         "plugins": plugins,
         "formats": PLUGINS.list_formats(),
         "tabs": PLUGINS.list_tabs(),
+        "row_actions": PLUGINS.list_row_actions(),
+        "panels": PLUGINS.list_panels(),
     }
 
 
@@ -1819,6 +2241,21 @@ def api_plugin_asset(fs_name: str, asset_path: str):
     if root not in target.parents or not target.is_file():
         raise HTTPException(404, "No such asset")
     return FileResponse(target)
+
+
+# Plugin handlers get their own slice of the worker pool. run_in_threadpool
+# uses anyio's DEFAULT limiter — the same one every sync route shares — so
+# enough simultaneous slow plugin calls (an LLM that takes 30s, twelve tabs
+# open) would fill it and stall the app anyway, which is the very thing
+# moving them off the event loop was meant to prevent. A limiter of their
+# own bounds plugins without touching what core routes can use.
+PLUGIN_THREADS = anyio.CapacityLimiter(8)
+
+
+async def _run_plugin_handler(handler, req):
+    """Run a plugin's handler off the event loop, under the plugin limiter."""
+    return await anyio.to_thread.run_sync(functools.partial(handler, req),
+                                          limiter=PLUGIN_THREADS)
 
 
 @app.api_route("/api/plugin/{fs_name}/{route:path}", methods=["GET", "POST", "PUT", "DELETE"])
@@ -1846,11 +2283,83 @@ async def api_plugin_dispatch(fs_name: str, route: str, request: Request):
             raise HTTPException(400, "Request body must be JSON")
     req = plugin_api.PluginRequest(
         request.method, route, dict(request.query_params), body, STORE,
+        storage=WS.PluginData(fs_name), plugin=fs_name,
+        loopback=_is_loopback(request),
     )
     try:
-        return JSONResponse(entry["handler"](req))
+        # In a worker thread, NOT on the event loop. A plugin handler is
+        # ordinary blocking Python — an LLM call, a lookup against a remote
+        # service — and calling it here directly froze the whole server for
+        # its duration: the grid, the presence stream, every other request.
+        # Row actions already went through the threadpool (their route is a
+        # plain `def`); this is the one that didn't.
+        return JSONResponse(await _run_plugin_handler(entry["handler"], req))
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+
+class RowActionBody(BaseModel):
+    """The row menu's selection: (source_id, rid) pairs — a merged view's
+    rows carry their member source ids, a plain table's carry its own —
+    plus the right-clicked cell, when the click landed on one."""
+    source_id: int
+    pairs: list[list[int]]
+    column: str | None = None
+    value: str | None = None
+
+
+def _resolve_row_action_rows(pairs: list[tuple[int, int]]) -> list[dict]:
+    """(source_id, rid) pairs -> full cells, grouped per real source. Reads
+    go through run_sql (the read-only path), so a big selection never
+    touches the writer lock."""
+    st = store()
+    by_source: dict[int, list[int]] = {}
+    for sid, rid in pairs:
+        by_source.setdefault(sid, []).append(rid)
+    rows = []
+    for sid, rids in by_source.items():
+        try:
+            src = st.get_source(sid)
+        except KeyError:
+            raise HTTPException(400, f"No source {sid}")
+        cols = [c["name"] for c in src["columns"] if not c.get("derived")]
+        sel = ", ".join(q(c) for c in cols)
+        marks = ",".join(str(int(r)) for r in rids)
+        res = st.run_sql(f"SELECT rid, {sel} FROM {q(src['table_name'])} WHERE rid IN ({marks})",
+                         limit=len(rids))
+        for r in res["rows"]:
+            rows.append({"rid": r[0], "source_id": sid, "cells": dict(zip(cols, r[1:]))})
+    return rows
+
+
+@app.post("/api/plugins/row_action/{fs_name}/{action_id}")
+async def api_plugin_row_action(fs_name: str, action_id: str, body: RowActionBody, request: Request):
+    """Resolve the selected rows to full cells and hand them to the
+    plugin's handler (see PluginAPI.register_row_action). Rows are read
+    per real source through run_sql — the read-only path — so a slow
+    handler never touches the writer lock; the per-action max_rows cap is
+    enforced here, not trusted from the client."""
+    action = PLUGINS.get_row_action(fs_name, action_id)
+    if action is None:
+        raise HTTPException(404, f"No row action {fs_name}/{action_id}")
+    pairs = [(int(a), int(b)) for a, b in body.pairs][: action["max_rows"] + 1]
+    if len(pairs) > action["max_rows"]:
+        raise HTTPException(400, f"{action['label']} takes at most {action['max_rows']} rows")
+    # Resolving the selection is up to max_rows SQL reads; off the loop like
+    # everything else on this route (it became async so the handler could
+    # run under the plugin limiter — which would have moved this work ONTO
+    # the loop if it stayed inline).
+    rows = await run_in_threadpool(_resolve_row_action_rows, pairs)
+    req = plugin_api.PluginRequest(
+        "POST", f"row_action/{action_id}", {},
+        {"source_id": body.source_id, "column": body.column, "value": body.value, "rows": rows},
+        STORE, storage=WS.PluginData(fs_name), plugin=fs_name,
+        loopback=_is_loopback(request))
+    try:
+        out = await _run_plugin_handler(action["handler"], req)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return JSONResponse(out if out is not None else {"ok": True})
 
 
 class PluginToggle(BaseModel):
@@ -1900,6 +2409,10 @@ def api_plugins_toggle(body: PluginToggle):
 class PluginBundleBody(BaseModel):
     name: str
     plugins: list[str] = []
+    dashboard: list | None = None   # profile: an optional dashboard layout
+    dashboards: list | None = None  # profile: extra named boards [{name, widgets}]
+    variables: list | None = None   # profile: variable DEFINITIONS the case should carry
+    description: str | None = None  # profile: what this profile is for, shown in the list
 
 
 @app.get("/api/plugin_bundles")
@@ -1910,7 +2423,8 @@ def api_plugin_bundles():
 @app.post("/api/plugin_bundles")
 def api_plugin_bundles_save(body: PluginBundleBody):
     try:
-        return WS.plugin_bundles.save(body.name, body.plugins)
+        return WS.plugin_bundles.save(body.name, body.plugins, body.dashboard, body.variables,
+                                      body.dashboards, body.description)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -1940,14 +2454,50 @@ def api_plugin_bundles_apply(bundle_id: int):
         overrides[fs_name] = fs_name in wanted
     STORE.set_case_setting("plugin_overrides", json.dumps(overrides))
     _reload_plugins()
+    # A profile's dashboard becomes a NAMED dashboard on apply, keyed by the
+    # profile name (a second apply refreshes it rather than duplicating).
+    # Applying a plain plugin bundle (no dashboard) leaves the case's own
+    # dashboards untouched.
+    if bundle.get("dashboard"):
+        STORE.upsert_dashboard_by_name(bundle["name"], bundle["dashboard"])
+    # Extra named boards a profile carries (the KAPE host overview) land
+    # under their own names, same upsert-by-name rule.
+    boards_applied = []
+    for board in bundle.get("dashboards") or []:
+        bname = str(board.get("name") or "").strip()
+        if bname and board.get("widgets"):
+            STORE.upsert_dashboard_by_name(bname, board["widgets"])
+            boards_applied.append(bname)
+    # A profile can seed a starter watchlist: add its indicators (dedup by
+    # value) and scan the case, so the IOC rollups have data immediately.
+    seeded = 0
+    if bundle.get("watchlist"):
+        have = {i["value"] for i in STORE.list_indicators()}
+        for ind in bundle["watchlist"]:
+            val = (ind.get("value") or "").strip()
+            if val and val not in have:
+                STORE.add_indicator(val, ind.get("kind", "other"), ind.get("note"), ind.get("auto_tag_id"))
+                have.add(val)
+                seeded += 1
+        if seeded:
+            with contextlib.suppress(Exception):
+                STORE.scan_all()
+    # A profile's variable definitions seed rows (values never overwritten);
+    # the required ones still empty come back so the UI can ask for them.
+    variables_missing = STORE.seed_variables(bundle.get("variables") or [])
     return {"applied": bundle["name"],
+            "variables_missing": variables_missing,
             "enabled": sorted(wanted & known),
             "missing": sorted(wanted - known),  # in the bundle, not installed here
+            "dashboard_applied": bool(bundle.get("dashboard")),
+            "dashboards_applied": boards_applied,
+            "watchlist_seeded": seeded,
             "plugins": api_plugins()}
 
 
 @app.post("/api/plugins/install")
 async def api_plugins_install(
+    request: Request,
     files: list[UploadFile] = File(...),
     paths: str | None = Form(None),  # JSON list of relative paths aligned with files — folder installs; omitted for a single .py
     overwrite: bool = Form(False),
@@ -1970,6 +2520,11 @@ async def api_plugins_install(
     response carries the load error, and the panel shows it exactly as it
     would any other broken plugin; deleting or fixing it is the analyst's
     call, same as a hand-copied broken plugin."""
+    # Loopback only, like /api/browse_dir/new and for a stronger reason:
+    # this route writes .py into the plugin directory and then imports it.
+    # Every other gate here is a header a same-origin page can set.
+    if not _is_loopback(request):
+        raise HTTPException(403, "Plugin installation is local-only")
     try:
         rel_paths = json.loads(paths) if paths else [f.filename or "" for f in files]
     except json.JSONDecodeError:
@@ -2007,7 +2562,7 @@ async def api_plugins_install(
         # the frontend confirms and retries with overwrite=true.
         raise HTTPException(409, f"A plugin named {fs_name} is already installed")
     if overwrite and dest.exists():
-        shutil.rmtree(dest) if dest.is_dir() else dest.unlink()
+        await run_in_threadpool(_remove_plugin_dest, dest)
 
     PLUGIN_DIRS[0].mkdir(parents=True, exist_ok=True)
     for p, f in keep:
@@ -2020,9 +2575,21 @@ async def api_plugins_install(
     # Installing something states intent to use it — clear any stale
     # disabled mark left by an earlier install under the same name.
     WS.plugin_prefs.set_enabled(fs_name, True)
-    _reload_plugins()
+    # A reload IMPORTS every enabled plugin, i.e. runs arbitrary module-level
+    # Python. On the loop that is the plugin-dispatch defect again, just at
+    # install time. (The other _reload_plugins() callers are sync `def`
+    # routes, which FastAPI already threadpools.)
+    await run_in_threadpool(_reload_plugins)
     rec = next((p for p in PLUGINS.describe() if p["fs_name"] == fs_name), None)
     return {"installed": fs_name, "error": rec["error"] if rec else None, **api_plugins()}
+
+
+def _remove_plugin_dest(dest: Path) -> None:
+    """Delete an installed plugin before overwriting it. A named function
+    rather than a lambda at the call site so it is clear — to a reader and
+    to tests/test_event_loop_blocking.py — that the deletion happens in a
+    worker thread, not on the loop."""
+    shutil.rmtree(dest) if dest.is_dir() else dest.unlink()
 
 
 def _ingest_via_plugin(path: str, format_id: str, name: str | None,
@@ -2054,7 +2621,16 @@ def api_ingest_plugin_path(body: IngestPluginPath):
     if not os.path.isfile(body.path):
         raise HTTPException(400, f"No file at {body.path}")
     try:
-        return _ingest_via_plugin(body.path, body.format_id, body.name, body.options, body.build_fts)
+        rec = _ingest_via_plugin(body.path, body.format_id, body.name, body.options, body.build_fts)
+        # Directory import files this table under the folder mirroring its
+        # on-disk path and brings it in closed (same as the job path — a
+        # folder import shouldn't open a tab per file).
+        if body.folder_path:
+            fid = store().ensure_folder_path(body.folder_path)
+            if fid is not None:
+                store().set_source_folder(rec["id"], fid)
+            store().set_tab_open(rec["id"], False)
+        return rec
     except Exception as e:  # surface the real parser error to the UI, same as the other ingest routes
         raise HTTPException(400, str(e))
 
@@ -2074,7 +2650,11 @@ async def api_ingest_plugin_upload(
             while chunk := await file.read(4 << 20):
                 out.write(chunk)
         opts = json.loads(options) if options else {}
-        return _ingest_via_plugin(tmp, format_id, name or file.filename, opts, build_fts)
+        # A plugin parser is arbitrary Python — MFT parsing, an archive
+        # walk — and ran on the loop until now, the same defect the plugin
+        # ROUTE dispatcher had.
+        return await run_in_threadpool(
+            _ingest_via_plugin, tmp, format_id, name or file.filename, opts, build_fts)
     except Exception as e:
         raise HTTPException(400, str(e))
 
@@ -2099,6 +2679,13 @@ def api_set_tab_open(source_id: int, body: TabOpenReq):
     return {"ok": True}
 
 
+@app.post("/api/tabs/close_all")
+def api_close_all_tabs():
+    """Close every open tab at once (the tables stay in the case)."""
+    store().close_all_tabs()
+    return {"ok": True}
+
+
 class NicknameReq(BaseModel):
     nickname: str | None = None
 
@@ -2114,6 +2701,99 @@ def api_set_source_nickname(source_id: int, body: NicknameReq):
         raise HTTPException(400, str(e))
     except KeyError as e:
         raise HTTPException(404, str(e))
+
+
+# ------------------------------------------------------------------ folders
+#
+# Sidebar folders an analyst sorts tables into (and a directory import
+# reproduces from disk). Organizational metadata in the case file — see
+# Store's folder methods and META_SCHEMA. All behind the CSRF header gate
+# like every other mutating route.
+
+class FolderCreate(BaseModel):
+    name: str
+    parent_id: int | None = None
+
+
+class FolderRename(BaseModel):
+    name: str
+
+
+class FolderMove(BaseModel):
+    parent_id: int | None = None   # None = top level
+    pos: int | None = None
+
+
+class FolderReorder(BaseModel):
+    parent_id: int | None = None
+    ordered_ids: list[int]
+
+
+class SourceFolderReq(BaseModel):
+    folder_id: int | None = None   # None = back to the root (ungrouped)
+    pos: int | None = None
+
+
+@app.get("/api/folders")
+def api_folders_list():
+    return store().list_folders()
+
+
+@app.post("/api/folders")
+def api_folders_create(body: FolderCreate):
+    try:
+        return store().create_folder(body.name, body.parent_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/folders/reorder")
+def api_folders_reorder(body: FolderReorder):
+    store().reorder_folders(body.parent_id, body.ordered_ids)
+    return {"ok": True}
+
+
+@app.post("/api/folders/{folder_id}/rename")
+def api_folder_rename(folder_id: int, body: FolderRename):
+    try:
+        store().rename_folder(folder_id, body.name)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    return {"ok": True}
+
+
+@app.post("/api/folders/{folder_id}/move")
+def api_folder_move(folder_id: int, body: FolderMove):
+    try:
+        store().move_folder(folder_id, body.parent_id, body.pos)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    return {"ok": True}
+
+
+@app.delete("/api/folders/{folder_id}")
+def api_folder_delete(folder_id: int):
+    try:
+        store().delete_folder(folder_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    return {"ok": True}
+
+
+@app.post("/api/source/{source_id}/folder")
+def api_set_source_folder(source_id: int, body: SourceFolderReq):
+    """Put a table (real source or, via a negative id, a merge) in a folder,
+    or with folder_id=null back at the root. Organizational only — never
+    touches the source's data."""
+    try:
+        store().set_source_folder(source_id, body.folder_id, body.pos)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True}
 
 
 class MergeCreate(BaseModel):
@@ -2380,6 +3060,7 @@ def api_default_tags_save(body: DefaultTagsWrite):
 class AppSettingsWrite(BaseModel):
     default_ts_format: str | None = None
     remote_session: bool | None = None
+    appearance: dict | None = None
 
 
 @app.get("/api/settings/app")
@@ -2412,6 +3093,355 @@ def api_case_settings_save(body: CaseSettingWrite):
         raise HTTPException(400, f"Unknown timestamp format: {body.ts_format}")
     store().set_case_setting("ts_format", body.ts_format)
     return store().get_case_settings()
+
+
+# ------------------------------------------------------------ case variables
+
+class CaseVariableWrite(BaseModel):
+    name: str
+    value: str | None = None
+    description: str | None = None
+    required: bool | None = None
+
+
+@app.get("/api/case/variables")
+def api_case_variables():
+    return store().list_variables()
+
+
+@app.post("/api/case/variables")
+def api_case_variable_set(body: CaseVariableWrite):
+    try:
+        return store().set_variable(body.name, body.value, body.description, body.required)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.delete("/api/case/variables/{name}")
+def api_case_variable_delete(name: str):
+    store().delete_variable(name)
+    return {"ok": True}
+
+
+class CaseNotesWrite(BaseModel):
+    body: str = ""
+
+
+@app.get("/api/case/notes")
+def api_case_notes_get():
+    return store().get_case_notes()
+
+
+@app.post("/api/case/notes")
+def api_case_notes_save(body: CaseNotesWrite):
+    return store().set_case_notes(body.body)
+
+
+class IndicatorBody(BaseModel):
+    value: str
+    kind: str = "other"
+    note: str | None = None
+    auto_tag_id: int | None = None
+
+
+class WatchlistImportBody(BaseModel):
+    text: str = ""
+    kind: str = "other"
+    auto_tag_id: int | None = None
+
+
+@app.get("/api/watchlist")
+def api_watchlist_list():
+    return store().list_indicators()
+
+
+@app.post("/api/watchlist")
+def api_watchlist_add(body: IndicatorBody):
+    try:
+        return store().add_indicator(body.value, body.kind, body.note, body.auto_tag_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/watchlist/import")
+def api_watchlist_import(body: WatchlistImportBody):
+    """One indicator per line; blanks and #-comments dropped; optional
+    'value,kind' per line overrides the body default. Deduped against
+    what's already in the list."""
+    have = {i["value"] for i in store().list_indicators()}
+    added = 0
+    for line in (body.text or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        value, _, kind = line.partition(",")
+        value = value.strip()
+        if not value or value in have:
+            continue
+        store().add_indicator(value, (kind.strip() or body.kind), None, body.auto_tag_id)
+        have.add(value)
+        added += 1
+    return {"added": added, "indicators": store().list_indicators()}
+
+
+@app.delete("/api/watchlist/{wid}")
+def api_watchlist_delete(wid: int):
+    store().delete_indicator(wid)
+    return {"ok": True}
+
+
+@app.post("/api/watchlist/scan")
+def api_watchlist_scan(source_id: int | None = None):
+    return store().scan_source(source_id) if source_id is not None else store().scan_all()
+
+
+@app.get("/api/watchlist/hits")
+def api_watchlist_hits(watchlist_id: int):
+    return store().indicator_hits(watchlist_id)
+
+
+@app.get("/api/watchlist/cases")
+def api_watchlist_cases():
+    """Recent cases that have indicators to offer — the picker behind the
+    watchlist's "From a case…". Each candidate's count is read from the
+    file read-only (same one-shot connect /api/cases uses for source
+    counts); the open case and missing files are excluded outright."""
+    current = os.path.abspath(store().path)
+    out = []
+    for c in WS.cases.list():
+        if os.path.abspath(c["path"]) == current or not os.path.isfile(c["path"]):
+            continue
+        try:
+            ro = sqlite3.connect(f"file:{c['path']}?mode=ro", uri=True)
+            row = ro.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='watchlist'").fetchone()
+            n = ro.execute("SELECT COUNT(*) FROM watchlist").fetchone()[0] if row[0] else 0
+            ro.close()
+        except sqlite3.Error:
+            continue
+        if n:
+            out.append({"id": c["id"], "name": c["name"], "path": c["path"], "indicator_count": n})
+    return out
+
+
+class WatchlistImportCaseBody(BaseModel):
+    case_id: int
+
+
+@app.post("/api/watchlist/import_case")
+def api_watchlist_import_case(body: WatchlistImportCaseBody):
+    rec = WS.cases.get(body.case_id)
+    if rec is None or not os.path.isfile(rec["path"]):
+        raise HTTPException(400, "No such case on this machine")
+    try:
+        res = store().import_watchlist_from_case(rec["path"])
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {**res, "indicators": store().list_indicators()}
+
+
+@app.get("/api/watchlist/badge")
+def api_watchlist_badge():
+    """The tab-badge poll: total hits across every indicator vs the count
+    the analyst last looked at (case_settings, so 'seen' travels with the
+    case rather than resetting per browser)."""
+    st = store()
+    total = sum(i["hit_count"] for i in st.list_indicators())
+    try:
+        seen = int(st.get_case_settings().get("watchlist_seen_hits", "0"))
+    except (TypeError, ValueError):
+        seen = 0
+    return {"total_hits": total, "seen": seen}
+
+
+class WatchlistSeenBody(BaseModel):
+    count: int = 0
+
+
+@app.post("/api/watchlist/seen")
+def api_watchlist_seen(body: WatchlistSeenBody):
+    store().set_case_setting("watchlist_seen_hits", str(max(0, int(body.count))))
+    return {"ok": True}
+
+
+class EntityPivotBody(BaseModel):
+    value: str
+    limit: int = 60
+
+
+@app.post("/api/entity/pivot")
+def api_entity_pivot(body: EntityPivotBody):
+    try:
+        return store().entity_pivot(body.value, body.limit)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+class DashboardCreate(BaseModel):
+    name: str
+    widgets: list | None = None
+
+
+class DashboardUpdate(BaseModel):
+    name: str | None = None
+    widgets: list | None = None
+    pinned: bool | None = None
+
+
+class DashboardReorder(BaseModel):
+    ordered_ids: list[int]
+
+
+class WidgetPreviewBody(BaseModel):
+    source: str
+    query: dict = {}
+
+
+@app.get("/api/dashboards")
+def api_dashboards_list():
+    return store().list_dashboards()
+
+
+@app.post("/api/dashboards")
+def api_dashboards_create(body: DashboardCreate):
+    try:
+        return store().create_dashboard(body.name, body.widgets or [])
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/dashboards/reorder")
+def api_dashboards_reorder(body: DashboardReorder):
+    store().reorder_dashboards(body.ordered_ids)
+    return {"ok": True}
+
+
+@app.get("/api/dashboards/{dashboard_id}")
+def api_dashboard_widgets_get(dashboard_id: int):
+    try:
+        return {"widgets": store().get_dashboard(dashboard_id)}
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/dashboards/{dashboard_id}")
+def api_dashboard_update(dashboard_id: int, body: DashboardUpdate):
+    try:
+        if body.name is not None:
+            store().rename_dashboard(dashboard_id, body.name)
+        if body.widgets is not None:
+            store().set_dashboard_widgets(dashboard_id, body.widgets)
+        if body.pinned is not None:
+            store().set_dashboard_pinned(dashboard_id, body.pinned)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    return {"ok": True}
+
+
+@app.delete("/api/dashboards/{dashboard_id}")
+def api_dashboard_delete(dashboard_id: int):
+    store().delete_dashboard(dashboard_id)
+    return {"ok": True}
+
+
+# Machine-wide dashboard library (workspace/dashboards.json) — boards kept
+# across cases, added to the open case one at a time.
+class LibraryDashboardWrite(BaseModel):
+    name: str
+    widgets: list
+
+
+class LibraryAddBody(BaseModel):
+    name: str | None = None
+
+
+@app.get("/api/dashboard_library")
+def api_dashboard_library_list():
+    return [{"id": b["id"], "name": b["name"], "widget_count": len(b.get("widgets") or [])}
+            for b in WS.dashboard_library.list()]
+
+
+@app.get("/api/dashboard_library/{board_id}")
+def api_dashboard_library_get(board_id: int):
+    """One library board's widgets — what the profile builder embeds when
+    an analyst picks a saved board for a profile."""
+    try:
+        b = WS.dashboard_library.get(board_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    return {"id": b["id"], "name": b["name"], "widgets": b.get("widgets") or []}
+
+
+@app.post("/api/dashboard_library")
+def api_dashboard_library_save(body: LibraryDashboardWrite):
+    try:
+        rec = WS.dashboard_library.save(body.name, body.widgets)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"id": rec["id"], "name": rec["name"], "widget_count": len(rec["widgets"])}
+
+
+@app.delete("/api/dashboard_library/{board_id}")
+def api_dashboard_library_delete(board_id: int):
+    WS.dashboard_library.delete(board_id)
+    return {"ok": True}
+
+
+@app.post("/api/dashboard_library/{board_id}/add")
+def api_dashboard_library_add(board_id: int, body: LibraryAddBody):
+    """Copy a library board into the open case (create-or-replace by
+    name, so adding it twice refreshes rather than duplicates)."""
+    try:
+        b = WS.dashboard_library.get(board_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    return store().upsert_dashboard_by_name((body.name or b["name"]).strip() or b["name"], b["widgets"])
+
+
+@app.post("/api/dashboard/widget/preview")
+def api_dashboard_widget_preview(body: WidgetPreviewBody):
+    try:
+        return store().dashboard_widget_preview(body.source, body.query)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+class ResolveBody(BaseModel):
+    table: str | None = None
+    sql: str | None = None
+
+
+@app.post("/api/dashboard/resolve")
+def api_dashboard_resolve(body: ResolveBody):
+    """Where a widget's data lives in THIS case. `table` (src_N or a
+    {{evtx}}-style placeholder) comes back as the source id the drilldown
+    opens; `sql` comes back with its placeholders substituted, for opening
+    a widget's query in the SQL pane. 400 when the case has no such table,
+    with the same wording the widget shows as its empty state."""
+    out = {}
+    try:
+        if body.table:
+            ids = store().resolve_table_sources(body.table)
+            out["source_id"] = ids[0]
+            out["source_ids"] = ids   # more than one for {{all:…}}: the client asks which
+        if body.sql:
+            out["sql"] = store()._resolve_table_placeholders(body.sql)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return out
+
+
+@app.get("/api/header_sets")
+def api_header_sets():
+    """The shipped header sets and the {{shorthand}} names that stand for
+    them — what the widget editor lists as columns for a portable table
+    it can't read from the case."""
+    from winnow import defaults
+    from winnow.store import Store
+    sets = [{"name": n, "columns": cols} for n, cols in defaults.headers()["nicknames"]]
+    return {"shorthands": dict(Store._TABLE_SHORTHANDS), "sets": sets}
 
 
 # ------------------------------------------------------------ derived columns
@@ -2818,7 +3848,7 @@ async def api_session_import(source_id: int, file: UploadFile = File(...), merge
         session = json.loads(await file.read())
     except Exception as e:
         raise HTTPException(400, f"Not a valid session file: {e}")
-    return store().import_session(source_id, session, merge=merge)
+    return await run_in_threadpool(store().import_session, source_id, session, merge=merge)
 
 
 @app.get("/api/case_session")
@@ -2836,7 +3866,7 @@ async def api_case_session_import(file: UploadFile = File(...), merge: bool = Fo
         session = json.loads(await file.read())
     except Exception as e:
         raise HTTPException(400, f"Not a valid session file: {e}")
-    return store().import_case_session(session, merge=merge)
+    return await run_in_threadpool(store().import_case_session, session, merge=merge)
 
 
 class SessionSaveReq(BaseModel):
@@ -3205,10 +4235,18 @@ def _free_port() -> int:
 
 def main() -> None:
     global STORE
+    # Stored WINNOW_* variables (tokens plugins read) join the process
+    # environment here, not at import — `import server` in a test must
+    # never read the developer's real store. A real export wins.
+    userenv.load_into_environ()
     ap = argparse.ArgumentParser(description="Winnow")
     ap.add_argument("--case", default=None, help="SQLite case file (created if missing). Omit to land on the home screen.")
     ap.add_argument("--open", dest="open_files", nargs="*", default=[], help="CSVs to ingest at startup")
     ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--allow-host", action="append", default=[], metavar="NAME",
+                    help="Extra Host header value to accept (a reverse proxy's "
+                         "name, say). Repeatable. IP literals and loopback "
+                         "names are always accepted; see ALLOWED_HOSTS.")
     ap.add_argument("--force", action="store_true",
                     help="Open --case even if another Winnow already has it open")
     ap.add_argument("--port", type=int, default=8777)
@@ -3241,7 +4279,7 @@ def main() -> None:
         _reload_plugins()
     for p in PLUGINS.describe():
         if p["error"]:
-            print(f"Plugin FAILED: {p['name']} ({p['path']}): {p['error']}", file=sys.stderr)
+            record_log("error", f"Plugin FAILED: {p['name']} ({p['path']}): {p['error']}")
         elif not p["enabled"]:
             print(f"Plugin disabled: {p['name']} (toggle in Settings → Plugins)")
         else:
@@ -3249,6 +4287,10 @@ def main() -> None:
             # reads like a failed load when it's a perfectly good plugin.
             what = ", ".join(p["formats"] + p["tabs"]) or "registered nothing"
             print(f"Plugin loaded: {p['name']}" + (f" v{p['version']}" if p["version"] else "") + f" ({what})")
+
+    # The bound address is by definition one this server answers to, as is
+    # anything the operator named explicitly.
+    ALLOWED_HOSTS.update({args.host.lower(), *(h.lower() for h in args.allow_host)})
 
     if args.host not in ("127.0.0.1", "localhost", "::1"):
         print(

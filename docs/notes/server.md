@@ -8,6 +8,49 @@ see [docs/notes/README.md](README.md) for the whole set.
 
 ---
 
+- **Across cases: one writable case, N read-only readers.**
+  `winnow/multicase.py` reads OTHER case files (`mode=ro`, no lock, no
+  views database, no heartbeat) while the open case keeps its exclusive
+  lock and its writer — so every invariant in CLAUDE.md holds unchanged
+  and a case another Winnow has open is still readable (verified: WAL
+  and all). Three things sit on it: an IOC sweep, a cross-case SELECT,
+  and a unified timeline.
+  Two constraints worth knowing. SQLite attaches at most **10**
+  databases (`MAX_ATTACHED`), and `v` already uses one — so the query
+  path caps at 8 cases and everything else opens one reader at a time,
+  which is why the sweep and timeline have no case limit. And the routes
+  only read **registered** cases: a path arrives from the browser, and
+  the case list is the analyst's own statement of what they work on.
+  These views are read-only BY DESIGN, not pending work: tags and notes
+  live in the case that owns the row, so writing across cases means
+  opening those cases read-write and fighting the one-Winnow-per-case
+  lock. The supported move is "open it in its own case", which every row
+  offers.
+
+- **An `async def` route runs ON the event loop; a plain `def` route does
+  not.** FastAPI threadpools sync handlers for you, so most of this file is
+  safe by default. The async ones — which have to be async, because they
+  `await file.read()` or the request body, which is exactly where the heavy
+  work lives — must hand blocking work to `run_in_threadpool` themselves.
+  This has bitten twice: the plugin dispatcher called plugin handlers
+  directly (one LLM call froze Winnow for its duration), and
+  `/api/ingest/upload` called `ingest_csv` directly (a 130MB CSV made a
+  trivial `/api/version` take **2.4s**; 21ms after the fix). Every ingest,
+  preview, import and plugin-install route is threadpooled now, and
+  `tests/test_event_loop_blocking.py` fails the build if a new async route
+  calls a Store method — or `_reload_plugins`, which imports arbitrary
+  plugin code — on the loop. Pass the bound method as an argument
+  (`run_in_threadpool(store().ingest_csv, tmp, ...)`), don't call it.
+  Two consequences worth knowing. The worker pool is bounded (anyio's
+  default is 40 threads) and shared by every sync route, so enough
+  simultaneous slow handlers would fill it and stall the app anyway —
+  which is why PLUGIN handlers run under a limiter of their own
+  (`PLUGIN_THREADS`, 8) rather than the default one: a plugin can queue
+  behind other plugins, never in front of Winnow's own routes. And
+  threadpooling does not make anything take the writer lock less — a long
+  write still serialises other writes, which is invariant #4's job, not
+  this one's.
+
 - **One case file, one Winnow.** SQLite's WAL keeps the *file* consistent
   across processes, but nothing in this app invalidates a second process's
   caches or its frontend's row counts, `compact()` holds the writer for
@@ -122,6 +165,29 @@ see [docs/notes/README.md](README.md) for the whole set.
   case — a fresh install's first double-click must not stack the
   cases-dir setup prompt on top of the file the analyst opened.
 
+- **The quick-look sweep must recognise every kind of work.** It deletes
+  abandoned temp cases after 7 days, and judged "no analysis" from tags,
+  notes and sessions alone — so a quick-look whose content was a
+  dashboard, case variables, a watchlist, a saved query or a PLUGIN's own
+  table (an LLM chat transcript is often the only thing in one) was swept
+  as empty. `_WORK_TABLES` + `_case_holds_work()` now cover everything a
+  case holds except what it is BORN with (`open_tabs`, the seeded
+  `tag_defs`) and incidental UI state. Add new case tables to that list
+  when they can hold something an analyst would miss.
+
+- **A dropped presence stream is not a closed window.** Idle shutdown
+  used to fire `IDLE_EXIT_S` after the last stream ended, which is right
+  when the analyst closed the window and wrong every other way a stream
+  can end: Edge and Chrome suspend background tabs, laptops sleep, VMs
+  pause. Analysts hit exactly that — the server exited while the window
+  was still sitting there, and the page's next click failed. Now
+  `connection.js` POSTs `/api/goodbye` on `pagehide` (keepalive, so it
+  outlives the unload; skipped when `persisted` says the page is only
+  going into the bfcache), and the short fuse applies only when that
+  arrived. A stream that merely stopped gets `SUSPENDED_EXIT_S` instead.
+  `_presence_open()` clears the flag, so closing one of two windows
+  cannot put the survivor on the short fuse.
+
 - **Tests that spawn a real `server.py` must isolate it by env, not
   fixture.** The autouse `isolate_workspace` monkeypatch can't reach a
   subprocess, so a spawned server sees the real `INSTALL_ROOT` and will
@@ -129,9 +195,11 @@ see [docs/notes/README.md](README.md) for the whole set.
   `workspace/cases.json` and drop quicklook files in the real `cases/` —
   state that outlives the test and collides on the next run (found as a
   UI test that passed exactly once). Every `Popen` of `server.py` in the
-  suite sets `WINNOW_WORKSPACE_DIR` (read in `workspace.py` at import)
-  and, where cases get written, `WINNOW_CASES_DIR`; do the same in any
-  new one.
+  suite sets `WINNOW_WORKSPACE_DIR` (read in `workspace.py` at import),
+  `WINNOW_ENV_FILE` (the `WINNOW_*` token store `main()` loads and
+  Settings → Environment writes — on Windows it is the real
+  `HKCU\Environment` otherwise) and, where cases get written,
+  `WINNOW_CASES_DIR`; do the same in any new one.
 
 - **The association-default policy lives in the catalogue, and the API
   enforces it.** `winnow/assoc.py`'s `BUILTIN_TYPES` marks which

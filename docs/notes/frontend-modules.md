@@ -88,3 +88,6 @@ name any import you didn't add. Then check the module you moved *from* still
 compiles without it, and that you haven't given `core.js` an import (rule 2).
 The browser tests in `tests/ui/` are the backstop, but they exercise a
 fraction of the surface; the static check covers all of it.
+
+- **dashwidgets.js** — widget recipes: `WIDGET_TEMPLATES` (row count, count matching a value, distinct, top, rarest, over time, activity window), `widgetFrom(build)` → the widget with its SQL, render, `build` and `drill`, `columnsForTable` (a case table's columns, or a {{…}} placeholder's header set from `S.headerSets`), `bucketRange` (a histogram label back to a timeframe). Pure — no DOM, no fetches; dashboard.js does the asking and saving.
+- **charts.js** — dependency-free canvas charts (`drawBars`, `drawHistogram`, `pickBar`), the shared visualization surface for the stack view, entity pivot and dashboard widgets. Declarations only; reads CSS tokens at draw time so a theme switch repaints. No chart library (airgap). See docs/design/analysis-suite.md.

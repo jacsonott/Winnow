@@ -77,10 +77,22 @@ export const S = {
   plugins: [],           // loaded plugin records from GET /api/plugins — name/version/error, for the Plugins modal
   pluginFormats: [],     // plugin-registered ingest formats (extensions/patterns/options) — routes files to plugin parsers
   pluginTabs: [],        // plugin-registered pinned tabs [{id, plugin, plugin_fs, label, entry, gen}] — see showPluginTab
+  // A session comparison pivoted into the grid: which rows differ and how,
+  // so each carries a mark saying which session its tag came from.
+  // {sourceId, left, right, rows: {rid: {tags: {left, right} | null, note: {left, right} | null}},
+  //  what, n, prevTree}  — what/n caption the banner, prevTree is what Done lands on.
+  // Cleared by Done, Clear filters, opening another case, removing the table.
+  diffMarks: null,
+  pluginRowActions: [],  // plugin-registered row-menu entries [{id, local_id, plugin, plugin_fs, label, description, max_rows}]
+  pluginPanels: [],      // plugin-registered toolbar panels [{id, plugin, plugin_fs, label, entry, description, gen}] — see plugins.js
   pluginDirs: [],        // where the server loads plugins from — shown in the Plugins modal so "drop it where?" has an answer
   lastBrowsePath: null,  // last dir the "Add from this machine…" picker was in — session-only convenience, not persisted
   pluginsCaseOpen: false, // whether /api/plugins was answered with a case open — gates the per-case scope options in Settings → Plugins
   sidebarFilter: '',      // substring filter typed into the sidebar's own search box
+  dashboards: [],         // [{id, name, pos, widget_count}] named dashboards, from the case file (see dashboard.js)
+  dashboardId: null,      // which named dashboard is currently showing
+  folders: [],            // sidebar folder tree [{id, name, parent_id, pos}], from the case file (see sources.js)
+  collapsedFolders: new Set(), // folder ids collapsed in the sidebar — a per-browser view pref (localStorage)
   timeline: {
     view: null, pages: new Map(), pending: new Set(), reqId: 0,
     tagFilter: null, // tag ids currently checked; null = not yet initialized (defaults to "every known tag" on first load)
@@ -94,7 +106,10 @@ export const S = {
   tempCase: false,         // the open case is a quick look — gates the home-navigation guard
   tabHistory: [],          // recently visited page tabs, mouse back/forward — see tabhistory.js
   tabHistoryPos: -1,
-  pageTabPrefs: null,      // {order, width} for the page-tab strip, from localStorage — set below, see loadPageTabPrefs
+  pageTabPrefs: null,      // {order, closed, width} for the page-tab strip, from localStorage — set below, see loadPageTabPrefs
+  dashboardLibrary: [],    // machine-wide saved boards [{id, name, widget_count}] — workspace/dashboards.json
+  watchlistNewHits: 0,     // hits landed since the analyst last looked at the Watchlist tab — the tab pill
+  caseVariables: [],       // the open case's variables [{name, value, description, required}] — Case settings → Variables
   sqlTabs: [],             // [{id, name, sql, pos}] from the case file's sql_tabs table (see showSqlTab)
   sqlTabId: null,          // which sql tab the editor/result pane is currently showing
   sqlResults: new Map(),   // sql tab id -> last {columns, rows, elapsed_ms, truncated} | {error}, in memory only

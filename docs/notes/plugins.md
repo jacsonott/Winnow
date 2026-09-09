@@ -11,6 +11,58 @@ see [docs/notes/README.md](README.md) for the whole set.
 
 ---
 
+- **`_reload_plugins()` mutates the registry in place, so a shared
+  `PluginRegistry` in a test is a landmine.** It calls
+  `PLUGINS.load(...)` on the existing object rather than building a new
+  one. A test that monkeypatches `server.PLUGINS` to a module-scoped
+  fixture and then does anything that reloads — applying a profile,
+  toggling a plugin, switching case — rewrites that fixture against the
+  real plugin directories, where the bundled examples are default-OFF.
+  Every later test in the module then gets 404s from example-plugin
+  routes, far from the test that caused it. `tests/test_plugins.py`'s
+  `example_registry` is function-scoped for exactly this reason; keep it
+  that way.
+
+- **A plugin can WRITE `WINNOW_*` environment variables, and that is
+  deliberately not a privilege boundary.** `req.set_env` goes through
+  `userenv.set_var`, so it inherits every rule the Settings panel has
+  (prefix, RESERVED refused, a shell export still wins) — a plugin can do
+  no more than the analyst can. It grants no capability a plugin lacked:
+  it is arbitrary Python and could always write `~/.config/winnow/env` or
+  poke the registry itself. What the API buys is that it lands in the
+  right place with the right permissions and shows up in the panel the
+  analyst manages. The one genuinely new exposure is by proxy: Winnow's
+  own `/api/env` routes are loopback-only, and a plugin route is not, so a
+  plugin that wraps `set_env` in a route hands a remote viewer (remote
+  mode) the ability to trigger it. `req.is_loopback` exists so the plugin
+  can make the same call Winnow makes; the guide says to use it.
+
+- **A plugin route handler runs in a worker thread, and must keep
+  doing so.** `api_plugin_dispatch` is `async def`, so for a while it
+  called `entry["handler"](req)` straight from the event loop — one
+  plugin waiting on an LLM completion froze the whole server, presence
+  stream included, for as long as the call took. It now goes through
+  `run_in_threadpool`. Row actions were always fine (their route is a
+  plain `def`, which FastAPI threadpools for you); if you add another
+  plugin entry point from an `async def`, thread it the same way.
+
+- **Plugin tables are namespaced against ACCIDENTS, not against a plugin
+  that means harm.** A plugin's own tables live in the case file as
+  `plugin:<fs_name>:<table>` (`req.table("chat")`). The separator is a
+  colon because `plugin_<fs>_<name>` was ambiguous exactly where this
+  codebase lives — plugin `mft_usn` table `cache` and plugin `mft` table
+  `usn_cache` both produced `plugin_mft_usn_cache`, and one plugin could
+  read and drop the other's data by accident. Underscored folder names are
+  the house style, so that was reachable, not theoretical.
+  `{table}` substitution is a convenience so authors never quote an
+  identifier; it is NOT a boundary, and the docs must not say it is — a
+  plugin holds `req.store` and can do anything to the case file. The
+  plugin half of the name is deliberately permissive (a `chat-gpt` folder
+  installs and serves routes fine, so it must not get a permanent 400
+  from `req.table()`); only `:` and `"` are refused.
+  They carry no `sources` row, so the grid, the sidebar and merges never
+  see them; use `ingest_rows` when an analyst should browse the result.
+
 - **Plugins** (plugin_api.py, `plugins/`, Settings → Plugins) are
   Notepad++-style drop-in extensions, first loaded at server *import* (so
   `uvicorn server:app` gets them, not just `python server.py`;
@@ -52,14 +104,14 @@ see [docs/notes/README.md](README.md) for the whole set.
   change; the module's default export gets `(container, winnow)` where
   `winnow` is `buildPluginTabContext`'s stable surface (api/post/el/
   modal helpers, `sql()` → run_sql's own RO connection, `schemaText()`,
-  live state getters); optional onShow/onHide exports fire per switch.
+  live state getters incl. state.timeRange, plus openFiltered(source_id, [{column, value}]) to jump to the evidence); optional onShow/onHide exports fire per switch.
   `register_api` registers backend routes dispatched at request time by
   the one catch-all `/api/plugin/{fs}/{route}` handler — deliberately
   not real FastAPI routes, so a Settings toggle's registry reload is
   instantly authoritative with no stale route objects. Handlers get a
   plain `PluginRequest` (method/route/query/body/store — None when no
-  case is open) and return JSON-ables; ValueError → 400, same split as
-  api_view; the CSRF middleware already covers non-GET. Plugin backends
+  case is open — and `storage`, the plugin's own persistent dict) and return JSON-ables; ValueError → 400, same split as
+  api_view; the CSRF middleware already covers non-GET. `req.storage.get()/set(dict)` is one JSON document per plugin under workspace/plugin_data/ (machine level, in updater.PROTECTED) — cross-case state like a plugin's saved definitions, parallel to the app's saved filters. Plugin backends
   should read via `req.store.run_sql` (own RO connection — never holds
   invariant #4's lock). A plugin that
   fails to import/register is recorded with its error and skipped, never
@@ -140,3 +192,24 @@ see [docs/notes/README.md](README.md) for the whole set.
   `PluginRegistry.load` is first-directory-wins on fs_name, so an
   analyst's installed copy of an example shadows the bundled one instead
   of both loading and fighting over tab ids.
+
+- **The `esxi_logs` example and the {{all:...}} widget placeholder.**
+  The ESXi / UAC triage profile (winnow/defaults/profiles.json) needs to
+  see across MANY log tables at once — a support bundle is a pile of files
+  (hostd.log, vmkernel.log, …) plus rotated copies, all sharing the one
+  "ESXi / Linux host logs" header set the esxi_logs plugin emits. The
+  ordinary `{{header_set:Name}}` placeholder binds to the FIRST matching
+  source, which would silently ignore every other log. So the store grew a
+  sibling: `{{all:header_set:Name}}` expands to a parenthesised
+  `SELECT * FROM src_a UNION ALL SELECT * FROM src_b …` over every matching
+  source (schemas identical by construction, so the union lines up by
+  position), and the dashboard slices it back apart on the plugin's `Log`
+  column ('hostd'/'auth'/'shell'/…, set from the filename). A profile still
+  can't create a merge, and this isn't one — it's a read-time union, so it
+  needs no new object in the case file and picks up rotated logs imported
+  later with no re-wiring. The plugin parses two line shapes per line, not
+  per file (ESXi ISO and year-less Linux syslog both appear in one
+  syslog.log), and folds timestamp-less continuation lines onto the
+  previous row rather than emitting orphans.
+
+- **Bundles are profiles.** A plugin bundle (PluginBundles, workspace/plugin_bundles.json) now carries an optional `dashboard` (a list of widget definitions) alongside its plugins. Applying a bundle whose profile has a dashboard also sets the open case's dashboard (Store.set_dashboard). So a profile is 'how I analyze this kind of case' — plugins + a dashboard — one saveable, shareable JSON thing. See docs/design/analysis-suite.md.

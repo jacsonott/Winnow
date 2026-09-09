@@ -13,7 +13,8 @@ def test_regex_capture_column_from_the_modal(page):
     page.wait_for_selector("#modal:not([hidden])")
     assert page.locator("#modalTitle").inner_text().lower() == "add derived column"
 
-    op_sel = page.locator("#modalBody select").nth(1)
+    page.locator("#modalBody select").nth(1).select_option(label="Extract part of a value")  # type
+    op_sel = page.locator("#modalBody select").nth(2)                                          # operation
     op_sel.select_option(label="Regex capture")
     page.wait_for_timeout(200)
     # the suggestion tracks the op kind

@@ -2,16 +2,21 @@
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { applyBundle } from './bundles.js';
-import { $, api, el, post, setBusy, toast } from './core.js';
-import { loadPlugins } from './importer.js';
-import { startJobsPoll } from './jobs.js';
+import { $, api, dragHas, el, post, setBusy, toast } from './core.js';
+import { loadPlugins, openImportModal, queueFiles } from './importer.js';
+import { inFlightWork, startJobsPoll } from './jobs.js';
 import { resetPluginTabMounts } from './plugins.js';
+import { resetDerivedSuggestions } from './derived.js';
+import { resetJobState } from './jobs.js';
+import { resetNotes } from './notes.js';
+import { resetWatchlist } from './watchlist.js';
+import { resetDashboard } from './dashboard.js';
 import { loadAppSettings, loadCaseSettings, loadHeaderNicknames, loadSavedFilters } from './savedfilters.js';
 import { updateSearchAllButton } from './search.js';
 import { clearViewStateStash, applyPageTabsSize, loadSources } from './sources.js';
 import { clearTabHistory } from './tabhistory.js';
 import { showGridTab } from './sql.js';
-import { openSettings } from './settings.js';
+import { openSettings, syncAppearanceFromServer } from './settings.js';
 import { drawWordmark } from './splash.js';
 import { S } from './state.js';
 import { fmtBytes } from './tables.js';
@@ -45,11 +50,19 @@ export function showApp() {
    static farewell replaces the page: there is deliberately no "restart"
    affordance, because there's no server left to serve one. */
 export async function shutdownWinnow() {
+  // Warn if work is still running — committed data is safe, but an
+  // in-flight import/sweep/build/query would be interrupted.
+  const busy = inFlightWork();
+  const warn = busy.length
+    ? `\n\n\u26a0 Still running: ${busy.join(', ')}. Shutting down now interrupts ${busy.length === 1 ? 'it' : 'them'} — `
+      + 'anything already committed is saved, but unfinished work is not.'
+    : '';
   const go = await confirmDialog(
-    'Shut down the Winnow server?\n\nEverything is already saved in the case file on disk — tags, notes and '
+    'Shut down the Winnow server?' + warn
+    + '\n\nEverything already committed is saved in the case file on disk — tags, notes and finished '
     + 'imports are never lost. This page (and any other tab using this server) will stop working until you '
     + 'start Winnow again.',
-    { okLabel: 'Shut down', cancelLabel: 'Keep running', danger: true });
+    { okLabel: busy.length ? 'Shut down anyway' : 'Shut down', cancelLabel: 'Keep running', danger: true });
   if (!go) return;
   try { await post('/api/shutdown', {}); } catch { /* the server may drop before the response lands */ }
   const note = el('div', 'shutdown-note');
@@ -112,6 +125,11 @@ export async function openCase(path, opts = {}) {
   // openSource() try it, get a 409, and rebuild anyway.
   S.viewCache.clear();
   clearViewStateStash(); // per-tab filters describe the previous case's tables
+  // Job ids and source ids restart at 1 in a new case, so anything keyed by
+  // one of them would attach to the wrong thing here.
+  resetJobState();
+  resetDerivedSuggestions();
+  S.diffMarks = null;    // a comparison's rids belong to the previous case's tables too
   S.tabOrder = [];
   // Another case's tab history points at ids that mean nothing here.
   clearTabHistory();
@@ -138,6 +156,9 @@ export async function openCase(path, opts = {}) {
   // A mounted plugin tab's UI was built from the previous case's data —
   // tear the mounts down so the next activation rebuilds against this one.
   resetPluginTabMounts();
+  resetNotes();   // another case's narrative isn't this one's
+  resetWatchlist();
+  resetDashboard();
   // The effective plugin set is per-case (case_settings overrides beat the
   // machine default), and the server reloaded its registry when this case
   // opened — refetch so tabs/formats/panel reflect THIS case's plugins.
@@ -145,6 +166,10 @@ export async function openCase(path, opts = {}) {
   if (S.activeTab !== 'grid') showGridTab();
   setBrandLabel(res.name);
   showApp();
+  // A quick-look (temp) case — e.g. one made by dropping files on the home
+  // screen — surfaces its banner so it can be saved or discarded, the same
+  // as one opened at boot (only boot painted this before).
+  paintTempBanner(!!res.temp);
   // ts_format lives in the case file, so it's per-case state like sql_tabs
   // — reload it rather than carrying the last case's setting over.
   await loadCaseSettings();
@@ -374,22 +399,23 @@ export function openNewCaseModal(state = {}) {
     b.append(el('label', null, 'Group'), groupRow);
 
     let chosenDir = state.chosenDir || S.casesDir || 'cases';
-    const pathInput = fieldInput(state.path || `${chosenDir}/${slugify(state.name || '')}${CASE_EXT}`);
+    const pathInput = fieldInput(state.path || joinPath(chosenDir, slugify(state.name || '') + CASE_EXT));
     pathInput.style.fontFamily = 'var(--mono)';
     let pathTouched = state.pathTouched || false;
     pathInput.oninput = () => { pathTouched = true; };
-    nameInput.oninput = () => { if (!pathTouched) pathInput.value = `${chosenDir}/${slugify(nameInput.value)}${CASE_EXT}`; };
+    nameInput.oninput = () => { if (!pathTouched) pathInput.value = joinPath(chosenDir, slugify(nameInput.value) + CASE_EXT); };
     const browseBtn = el('button', 'btn ghost', 'Browse…');
     browseBtn.onclick = () => {
       const snapshot = {
         name: nameInput.value, group: groupInput.value, path: pathInput.value,
         chosenDir, pathTouched,
         caseType: typeSel.value,
+        vars: Object.fromEntries([...varInputs].map(([k, inp]) => [k, inp.value])),
       };
       openFolderBrowser(
         chosenDir,
         (dir) => openNewCaseModal({
-          ...snapshot, chosenDir: dir, pathTouched: false, path: `${dir}/${slugify(snapshot.name)}${CASE_EXT}`,
+          ...snapshot, chosenDir: dir, pathTouched: false, path: joinPath(dir, slugify(snapshot.name) + CASE_EXT),
         }),
         () => openNewCaseModal(snapshot),
       );
@@ -405,17 +431,48 @@ export function openNewCaseModal(state = {}) {
     const noneOpt = el('option', null, 'None — machine defaults');
     noneOpt.value = '';
     typeSel.append(noneOpt);
+    let bundlesById = new Map();
+    const varsBox = el('div', 'case-vars new-case-vars');
+    varsBox.hidden = true;
+    const varInputs = new Map();     // variable name -> input, for the chosen profile
+    // A profile can declare variables the case should carry (the
+    // engagement name, an API base URL…); required ones are asked for
+    // here, before the case exists, rather than as a surprise afterwards.
+    const renderProfileVars = () => {
+      varsBox.replaceChildren();
+      varInputs.clear();
+      const bd = bundlesById.get(Number(typeSel.value));
+      const defs = (bd && bd.variables) || [];
+      varsBox.hidden = !defs.length;
+      if (!defs.length) return;
+      varsBox.append(el('div', 'fb-help', `“${bd.name}” asks for:`));
+      for (const d of defs) {
+        const row = el('div', 'case-var-row');
+        const name = el('span', 'case-var-name', (d.label || d.name) + (d.required ? ' *' : ''));
+        name.title = d.name;
+        const inp = el('input', 'case-var-value');
+        inp.dataset.var = d.name;
+        inp.value = state.vars && state.vars[d.name] != null ? state.vars[d.name] : (d.default || '');
+        inp.placeholder = d.required ? 'required' : 'optional';
+        row.append(name, inp, el('span', 'case-var-desc', d.description || ''), el('span'));
+        varInputs.set(d.name, inp);
+        varsBox.append(row);
+      }
+    };
     api('/api/plugin_bundles').then((bundles) => {
+      bundlesById = new Map(bundles.map((bd) => [bd.id, bd]));
       for (const bd of bundles) {
         const o = el('option', null, `${bd.name} (${bd.plugins.length} plugin${bd.plugins.length === 1 ? '' : 's'})`);
         o.value = String(bd.id);
         typeSel.append(o);
       }
       if (state.caseType) typeSel.value = state.caseType;
+      renderProfileVars();
     }).catch(() => {});
+    typeSel.onchange = renderProfileVars;
     const typeRow = el('div', 'row-actions');
     typeRow.append(typeSel);
-    b.append(el('label', null, 'Case type'), typeRow);
+    b.append(el('label', null, 'Case type'), typeRow, varsBox);
 
 
     const actions = el('div', 'row-actions');
@@ -425,6 +482,13 @@ export function openNewCaseModal(state = {}) {
       if (!name) { toast('Name the case first'); return; }
       const path = pathInput.value.trim();
       if (!path) { toast('Give the case file a path'); return; }
+      const bd = bundlesById.get(Number(typeSel.value));
+      const missing = ((bd && bd.variables) || []).filter((d) => d.required && !(varInputs.get(d.name)?.value || '').trim());
+      if (missing.length) {
+        toast(`“${bd.name}” needs: ${missing.map((d) => d.label || d.name).join(', ')}`, 5000);
+        varInputs.get(missing[0].name).focus();
+        return;
+      }
       try {
         await post('/api/cases', { path, name, group: groupInput.value.trim(), notes: '' });
       } catch (e) {
@@ -435,6 +499,11 @@ export function openNewCaseModal(state = {}) {
       await openCase(path); // shared with the home screen's "open" flow — same brand-label/view-cache handling
       if (typeSel.value) {
         try {
+          // Values typed above land first, so applying the profile (which
+          // seeds definitions without overwriting values) finds them filled.
+          for (const [vname, inp] of varInputs) {
+            if (inp.value.trim()) await post('/api/case/variables', { name: vname, value: inp.value.trim() });
+          }
           await applyBundle({ id: Number(typeSel.value) });
         } catch (e) {
           toast('Case created, but the case-type bundle failed to apply: ' + e.message, 6000);
@@ -483,18 +552,61 @@ export async function maybeOfferStorageDir() {
   }
 }
 
-export async function openExistingCasePrompt() {
-  const path = await promptDialog('Path to an existing case file:');
-  if (!path || !path.trim()) return;
-  const trimmed = path.trim();
-  const name = trimmed.split(/[\\/]/).pop().replace(/\.db-winnow$|\.db$/i, '');
-  try {
-    await post('/api/cases', { path: trimmed, name, group: '', notes: '' });
-  } catch (e) {
-    toast('Could not register case: ' + e.message, 6000);
-    return;
-  }
-  await openCase(trimmed);
+/* Join a directory and a file name with the separator the directory
+   itself uses. Paths here come from the server (the folder browser, the
+   cases-dir preference) in the OS's own shape, so on Windows the directory
+   carries backslashes — and a path shown as C:\\Cases/acme.db-winnow reads
+   as broken to the analyst even though the OS would accept it. */
+export function joinPath(dir, name) {
+  const d = String(dir || '').replace(/[\\/]+$/, '');
+  const sep = d.includes('\\') && !d.includes('/') ? '\\' : '/';
+  return d ? `${d}${sep}${name}` : name;
+}
+
+export function openExistingCasePrompt(state = {}) {
+  modal('Open existing case file', (b) => {
+    const pathInput = fieldInput(state.path || '');
+    pathInput.placeholder = 'Path to a .db-winnow case file';
+    pathInput.style.fontFamily = 'var(--mono)';
+    // Browse… is the same server-disk picker the new-case dialog and
+    // "Add from this machine…" use, in file mode — typing a full path is
+    // fine when you know it, but a case file on an evidence share usually
+    // gets found, not remembered.
+    const browseBtn = el('button', 'btn ghost', 'Browse…');
+    browseBtn.onclick = () => {
+      const snapshot = { path: pathInput.value };
+      openFolderBrowser(S.lastBrowsePath || S.casesDir || undefined, (sel) => {
+        const f = (sel.files || [])[0];
+        openExistingCasePrompt({ path: f ? f.path : snapshot.path });
+      }, () => openExistingCasePrompt(snapshot), { mode: 'files' });
+    };
+    const row = el('div', 'row-actions');
+    row.append(pathInput, browseBtn);
+    b.append(el('label', null, 'Case file'), row);
+    b.append(el('p', 'fb-help', 'Registers the case on this machine\u2019s list and opens it.'));
+
+    const actions = el('div', 'row-actions');
+    const openBtn = el('button', 'btn', 'Open');
+    openBtn.onclick = async () => {
+      const trimmed = pathInput.value.trim();
+      if (!trimmed) { toast('Enter or browse to a case file'); return; }
+      const name = trimmed.split(/[\\/]/).pop().replace(/\.db-winnow$|\.db$/i, '');
+      try {
+        await post('/api/cases', { path: trimmed, name, group: '', notes: '' });
+      } catch (e) {
+        toast('Could not register case: ' + e.message, 6000);
+        return;
+      }
+      $('modal').hidden = true;
+      await openCase(trimmed);
+    };
+    const cancel = el('button', 'btn ghost', 'Cancel');
+    cancel.onclick = () => { $('modal').hidden = true; };
+    actions.append(openBtn, cancel);
+    b.append(actions);
+    pathInput.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); openBtn.click(); } };
+    setTimeout(() => pathInput.focus(), 0);
+  });
 }
 
 export function openEditCaseModal(c) {
@@ -561,8 +673,39 @@ export async function deleteCaseFile(c) {
   refreshCases();
 }
 
+/* Home-screen drag-and-drop import. Dropping files on a case row imports
+   into THAT case; dropping on the home screen but not on any case makes a
+   fresh quick-look (temp) case. Both open the target and hand the files to
+   the normal import modal — so the analyst still configures/reviews before
+   ingest, exactly like an in-app drop. */
+const isFileDrag = (e) => dragHas(e, 'Files');
+
+async function importDroppedFiles(files, casePath) {
+  try {
+    const path = casePath || (await post('/api/case/quicklook/new', {})).path;
+    await openCase(path);        // switches to the app and opens the case
+    queueFiles(files);
+    openImportModal();
+  } catch (e) { toast('Could not start the import: ' + e.message, 6000); }
+}
+
 export function renderCaseRow(c) {
   const row = el('div', 'home-case-row' + (c.exists === false ? ' missing' : ''));
+  if (c.exists !== false) {
+    row.addEventListener('dragover', (e) => {
+      if (!isFileDrag(e)) return;
+      e.preventDefault(); e.stopPropagation();
+      row.classList.add('home-case-drop');
+    });
+    row.addEventListener('dragleave', () => row.classList.remove('home-case-drop'));
+    row.addEventListener('drop', (e) => {
+      if (!isFileDrag(e)) return;
+      e.preventDefault(); e.stopPropagation();   // don't let the home-area handler also fire
+      row.classList.remove('home-case-drop');
+      const files = [...e.dataTransfer.files];
+      if (files.length) importDroppedFiles(files, c.path);
+    });
+  }
   const main = el('div', 'home-case-main');
   const nameRow = el('div', 'home-case-name');
   nameRow.append(el('span', null, (c.exists === false ? '⚠ ' : '') + c.name));
@@ -821,6 +964,9 @@ function wireTempBanner() {
 export async function boot() {
   await Promise.all([loadSavedFilters(), loadHeaderNicknames(), loadTimelineTemplates(),
                      loadPlugins(), loadAppSettings()]);
+  // The machine's saved look wins over this origin's cache (a quick-look
+  // window on a free port is a different origin — see saveAppearance).
+  syncAppearanceFromServer();
   const cur = await api('/api/case/current').catch(() => ({ open: false }));
   if (cur.open) {
     setBrandLabel(cur.temp ? 'Quick look' : cur.name);
@@ -844,4 +990,21 @@ $('btnHome').onclick = () => {
   if (S.tempCase) { openQuickLookExitDialog(); return; }
   showHome(); refreshCases();
 };
+// Drop files anywhere on the home screen that ISN'T a case row → a fresh
+// quick-look case. Case rows stopPropagation on their own drop (above), so
+// this only fires for the "no particular case" gesture.
+const home = $('home');
+home.addEventListener('dragover', (e) => {
+  if (!isFileDrag(e)) return;
+  e.preventDefault();
+  home.classList.add('home-drop');
+});
+home.addEventListener('dragleave', (e) => { if (e.target === home) home.classList.remove('home-drop'); });
+home.addEventListener('drop', (e) => {
+  if (!isFileDrag(e)) return;
+  e.preventDefault(); e.stopPropagation();
+  home.classList.remove('home-drop');
+  const files = [...e.dataTransfer.files];
+  if (files.length) importDroppedFiles(files, null);   // null → new quick-look case
+});
 }

@@ -594,8 +594,15 @@ def ft(dt: datetime) -> int:
     return (d.days * 86400 + d.seconds) * 10_000_000 + d.microseconds * 10
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def example_registry() -> PluginRegistry:
+    """Function-scoped, and that is load-bearing: server._reload_plugins()
+    calls PLUGINS.load(...) which mutates the registry IN PLACE. A test that
+    monkeypatches server.PLUGINS to this object and then does anything that
+    reloads (applying a profile, toggling a plugin, switching case) rewrites
+    it against the real plugin directories — where the bundled examples are
+    default-OFF. Shared across a module, that silently removed the example
+    plugins' routes from every test that ran afterwards."""
     reg = PluginRegistry()
     reg.load([EXAMPLES])
     rec = next(p for p in reg.describe() if p["name"] == "mft-usn")
@@ -879,35 +886,67 @@ def lateral_client(client, store, write_csv, example_registry, monkeypatch):
     return client, rec["id"]
 
 
+def _sel(source_id, **kw):
+    return {"source_id": source_id, "src_col": "SourceHost", "dst_col": "DestHost", **kw}
+
+
 def test_lateral_movement_edges(lateral_client):
     client, source_id = lateral_client
     r = client.post("/api/plugin/lateral_movement/edges", json={
-        "source_id": source_id, "src_col": "SourceHost", "dst_col": "DestHost",
-        "label_col": "User",
+        "selections": [_sel(source_id, label_col="User")],
     })
     assert r.status_code == 200, r.text
     out = r.json()
     assert out["truncated"] is False
+    # k tags the selection; no time_col here, so t is None.
     assert out["edges"] == [
-        {"src": "WS1", "dst": "SRV1", "n": 2, "labels": 2},
-        {"src": "WS2", "dst": "SRV1", "n": 1, "labels": 1},
+        {"k": 0, "src": "WS1", "dst": "SRV1", "t": None, "n": 2, "labels": 2},
+        {"k": 0, "src": "WS2", "dst": "SRV1", "t": None, "n": 1, "labels": 1},
     ]
+
+
+def test_lateral_movement_multiple_selections_carry_their_index(lateral_client):
+    """Two events out of one table land on one graph, each edge tagged with
+    the selection (k) that produced it — that's how the UI colors them."""
+    client, source_id = lateral_client
+    r = client.post("/api/plugin/lateral_movement/edges", json={
+        "selections": [
+            _sel(source_id),
+            _sel(source_id, conditions=[{"column": "User", "op": "equals", "value": "alice"}]),
+        ],
+    })
+    assert r.status_code == 200, r.text
+    edges = r.json()["edges"]
+    assert {e["k"] for e in edges} == {0, 1}
+    # selection 1 is alice-only: WS1->SRV1 once, WS2->SRV1 once.
+    k1 = {(e["src"], e["dst"]): e["n"] for e in edges if e["k"] == 1}
+    assert k1 == {("WS1", "SRV1"): 1, ("WS2", "SRV1"): 1}
+
+
+def test_lateral_movement_conditions_filter(lateral_client):
+    client, source_id = lateral_client
+    r = client.post("/api/plugin/lateral_movement/edges", json={
+        "selections": [_sel(source_id, conditions=[
+            {"column": "User", "op": "in", "value": "bob,carol"}])],
+    })
+    assert r.status_code == 200, r.text
+    # only bob's WS1->SRV1 survives (carol's row is a filtered '-' source)
+    assert r.json()["edges"] == [
+        {"k": 0, "src": "WS1", "dst": "SRV1", "t": None, "n": 1, "labels": None}]
 
 
 def test_lateral_movement_validation(lateral_client):
     client, source_id = lateral_client
+    r = client.post("/api/plugin/lateral_movement/edges", json={"selections": []})
+    assert r.status_code == 400 and "at least one" in r.json()["detail"].lower()
     r = client.post("/api/plugin/lateral_movement/edges", json={
-        "source_id": source_id, "src_col": "SourceHost", "dst_col": "Nope",
-    })
+        "selections": [_sel(source_id, dst_col="Nope")]})
     assert r.status_code == 400 and "Nope" in r.json()["detail"]
     r = client.post("/api/plugin/lateral_movement/edges", json={
-        "source_id": -1, "src_col": "a", "dst_col": "b",
-    })
-    # merges work now (invariant #9) — -1 just doesn't exist in this case
+        "selections": [_sel(-1)]})
     assert r.status_code == 400 and "no source" in r.json()["detail"].lower()
     r = client.post("/api/plugin/lateral_movement/edges", json={
-        "source_id": source_id, "src_col": "SourceHost", "dst_col": "SourceHost",
-    })
+        "selections": [_sel(source_id, dst_col="SourceHost")]})
     assert r.status_code == 400
 
 
@@ -924,7 +963,7 @@ def test_lateral_movement_edges_over_a_merge(lateral_client, store, write_csv):
 
     def n_for(sid):
         r = client.post("/api/plugin/lateral_movement/edges", json={
-            "source_id": sid, "src_col": "SourceHost", "dst_col": "DestHost"})
+            "selections": [{"source_id": sid, "src_col": "SourceHost", "dst_col": "DestHost"}]})
         assert r.status_code == 200, r.text
         return {(e["src"], e["dst"]): e["n"] for e in r.json()["edges"]}
 
@@ -937,6 +976,83 @@ def test_lateral_movement_tab_asset(lateral_client):
     client, _ = lateral_client
     r = client.get("/plugin_assets/lateral_movement/ui/tab.js")
     assert r.status_code == 200 and "export default" in r.text
+
+
+TIMED_ROWS = [
+    ["SourceHost", "DestHost", "User", "When"],
+    ["WS1", "SRV1", "alice", "2026-03-14 08:00:00"],
+    ["WS1", "SRV1", "bob", "2026-03-14 08:30:00"],
+    ["WS2", "SRV1", "alice", "2026-03-15 09:00:00"],
+]
+
+
+@pytest.fixture
+def timed_client(client, store, write_csv, example_registry, monkeypatch):
+    import server
+    monkeypatch.setattr(server, "PLUGINS", example_registry)
+    rec = store.ingest_csv(write_csv(TIMED_ROWS, "timed.csv"), name="timed")
+    return client, rec["id"]
+
+
+def test_lateral_movement_time_bucketing_and_filter(timed_client):
+    client, sid = timed_client
+    sel = {"source_id": sid, "src_col": "SourceHost", "dst_col": "DestHost",
+           "time_col": "When", "label_col": "User"}
+    # Full range: every edge carries a bucket key, chosen from the span.
+    r = client.post("/api/plugin/lateral_movement/edges", json={"selections": [sel]})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["bucket"] in ("minute", "hour", "day")
+    assert all(e["t"] for e in out["edges"])
+
+    # The case timeframe passes straight through and cuts the 15th.
+    r = client.post("/api/plugin/lateral_movement/edges", json={
+        "selections": [sel], "time": {"start": "2026-03-14 00:00:00", "end": "2026-03-14 23:59:59"}})
+    assert r.status_code == 200, r.text
+    edges = r.json()["edges"]
+    assert {(e["src"], e["dst"]) for e in edges} == {("WS1", "SRV1")}
+
+
+def test_lateral_movement_defaults_ship_tied_to_a_header_set(lateral_client):
+    """The shipped KAPE defaults are served, each tied to a header set
+    (the app's own EvtxECmd nickname) so it only offers itself on a real
+    EVTX table — same binding a filter default uses."""
+    client, _ = lateral_client
+    r = client.get("/api/plugin/lateral_movement/defs")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    shipped = body["shipped"]
+    assert any("4624" in d["name"] for d in shipped)
+    for d in shipped:
+        assert d["src_col"] and d["dst_col"]
+        assert d["header_set"] == "Event logs (EvtxECmd)"
+    # The header sets are served so the UI can offer and resolve them.
+    assert "Event logs (EvtxECmd)" in body["header_sets"]
+    evtx = body["header_sets"]["Event logs (EvtxECmd)"]
+    assert "EventId" in evtx and "RemoteHost" in evtx
+
+
+def test_lateral_movement_saved_defs_persist_machine_side(lateral_client):
+    client, _ = lateral_client
+    mine = {"name": "WinRM", "src_col": "SourceHost", "dst_col": "DestHost",
+            "conditions": [{"column": "User", "op": "equals", "value": "svc"}]}
+    r = client.post("/api/plugin/lateral_movement/defs", json={"saved": [mine]})
+    assert r.status_code == 200, r.text
+    assert [d["name"] for d in r.json()["saved"]] == ["WinRM"]
+    # A fresh GET (new request, same machine storage) still has it.
+    assert client.get("/api/plugin/lateral_movement/defs").json()["saved"][0]["name"] == "WinRM"
+    # A malformed definition is refused as a 400, not stored.
+    bad = client.post("/api/plugin/lateral_movement/defs", json={"saved": [{"name": "x"}]})
+    assert bad.status_code == 400
+    # A definition bound to a header set that doesn't exist is refused —
+    # it would otherwise never appear on any table, silently.
+    ghost = client.post("/api/plugin/lateral_movement/defs", json={"saved": [
+        {"name": "Ghost", "src_col": "a", "dst_col": "b", "header_set": "No such set"}]})
+    assert ghost.status_code == 400 and "header set" in ghost.json()["detail"].lower()
+    # A valid header set is accepted.
+    ok = client.post("/api/plugin/lateral_movement/defs", json={"saved": [
+        {"name": "Real", "src_col": "a", "dst_col": "b", "header_set": "Event logs (EvtxECmd)"}]})
+    assert ok.status_code == 200
 
 
 # ================================================== claude_assistant plugin
@@ -973,6 +1089,7 @@ def _fake_anthropic(record: dict, msg) -> types.ModuleType:
 
     class _Client:
         def __init__(self, *a, **kw):
+            record["api_key"] = kw.get("api_key")     # None when the SDK resolves it itself
             self.beta = types.SimpleNamespace(messages=_Messages())
 
     mod.Anthropic = _Client
@@ -1000,14 +1117,13 @@ def claude_client(client, example_registry, monkeypatch):
 def test_claude_ask_request_shape(claude_client, monkeypatch):
     record = {}
     monkeypatch.setitem(sys.modules, "anthropic", _fake_anthropic(record, _claude_msg()))
+    # Prior turns come from the case's own transcript, not the browser.
+    claude_client.post("/api/plugin/claude_assistant/clear")
+    r0 = claude_client.post("/api/plugin/claude_assistant/ask", json={"question": "hi"})
+    assert r0.status_code == 200, r0.text
     r = claude_client.post("/api/plugin/claude_assistant/ask", json={
         "question": "Which src_ table has the 4624s?",
         "schema": "CREATE TABLE src_1 (...);",
-        "history": [
-            {"role": "user", "content": "hi"},
-            {"role": "assistant", "content": "hello"},
-            {"role": "system", "content": "sneaky"},   # not a chat role — dropped
-        ],
     })
     assert r.status_code == 200, r.text
     out = r.json()
@@ -1021,8 +1137,9 @@ def test_claude_ask_request_shape(claude_client, monkeypatch):
     # Schema rides in system with the cache breakpoint on it.
     assert record["system"][1]["text"].endswith("CREATE TABLE src_1 (...);")
     assert record["system"][1]["cache_control"] == {"type": "ephemeral"}
-    # History sanitized; the new question is the last user turn.
+    # The stored turns replay in order; the new question is the last one.
     assert [m["role"] for m in record["messages"]] == ["user", "assistant", "user"]
+    assert record["messages"][0]["content"] == "hi"
     assert record["messages"][-1]["content"] == "Which src_ table has the 4624s?"
 
 
@@ -1722,3 +1839,106 @@ def test_first_last_merge_row_json_carries_the_exposed_columns(fl_client, store,
               columns=[], template="{which}", row_json=True)
     zed = next(r for r in out["rows"] if '"zed"' in r[1])
     assert set(_json.loads(zed[1]).keys()) == {"When", "Host", "User", "EventId"}
+
+
+# ============================================= shipped KAPE profile
+
+def test_kape_profile_ships_and_applies(client, store, write_csv, example_registry, monkeypatch):
+    """The KAPE-triage default profile is listed (read-only), and applying
+    it sets the dashboard, seeds the watchlist, and its SQL widgets resolve
+    the {{evtx}} placeholder against a real EvtxECmd table."""
+    import server
+    from winnow import defaults
+    monkeypatch.setattr(server, "PLUGINS", example_registry)
+
+    evtx_cols = dict(defaults.headers()["nicknames"])["Event logs (EvtxECmd)"]
+    def row(**kw):
+        d = {c: "" for c in evtx_cols}; d.update(kw); return [d[c] for c in evtx_cols]
+    rows = [evtx_cols,
+            row(EventId="4624", Channel="Security", RemoteHost="WKS07", UserName="alice"),
+            row(EventId="4624", Channel="Security", RemoteHost="WKS01", UserName="bob"),
+            row(EventId="4625", Channel="Security", RemoteHost="WKS07", UserName="admin")]
+    store.ingest_csv(write_csv(rows, "evtx.csv"), name="evtx", build_fts=False)
+
+    listed = {b["name"]: b for b in client.get("/api/plugin_bundles").json()}
+    assert "KAPE triage" in listed
+    kape = listed["KAPE triage"]
+    assert kape["id"] < 0 and kape["shipped"] is True and kape["dashboard"]
+
+    ap = client.post(f"/api/plugin_bundles/{kape['id']}/apply")
+    assert ap.status_code == 200
+    body = ap.json()
+    assert body["dashboard_applied"] is True and body["watchlist_seeded"] == 5
+
+    boards = {b["name"]: b for b in client.get("/api/dashboards").json()}
+    assert "KAPE triage" in boards
+    widgets = client.get(f"/api/dashboards/{boards['KAPE triage']['id']}").json()["widgets"]
+    assert len(widgets) == len(next(p for p in defaults.profiles() if p["name"] == "KAPE triage")["dashboard"])
+    # a {{evtx}}-placeholder SQL widget resolves and returns data
+    peers = next(w for w in widgets if w["title"] == "Remote logon peers")
+    pv = client.post("/api/dashboard/widget/preview", json={"source": "sql", "query": peers["query"]})
+    assert pv.status_code == 200 and pv.json()["rows"][0][0] == 2   # WKS07, WKS01
+
+    # a host-facts widget (also {{evtx}}) resolves — distinct accounts here
+    accts = next(w for w in widgets if w["title"] == "Distinct accounts")
+    av = client.post("/api/dashboard/widget/preview", json={"source": "sql", "query": accts["query"]})
+    assert av.status_code == 200 and av.json()["rows"][0][0] >= 1
+
+    # the registry-persistence widget resolves its {{registry}} placeholder to
+    # a friendly empty state (this case has EVTX only, no RECmd batch), not a
+    # SQL error — the whole point of shipping widgets a case may not fill
+    reg = next(w for w in widgets if w["title"] == "Run / service registry entries")
+    rv = client.post("/api/dashboard/widget/preview", json={"source": "sql", "query": reg["query"]})
+    assert rv.status_code == 400 and "table" in rv.json()["detail"].lower()
+
+    # a placeholder with no matching table gives a friendly 400, not a SQL error
+    miss = client.post("/api/dashboard/widget/preview",
+                       json={"source": "sql", "query": {"sql": "SELECT * FROM {{mft}}"}})
+    assert miss.status_code == 400 and "table" in miss.json()["detail"].lower()
+
+
+def test_claude_transcript_lives_in_the_case_and_renders_without_the_service(claude_client, monkeypatch, store):
+    """The point of the example: the tab can be reloaded, or the service can
+    be unreachable, and the conversation is still there."""
+    record = {}
+    monkeypatch.setitem(sys.modules, "anthropic", _fake_anthropic(record, _claude_msg()))
+    claude_client.post("/api/plugin/claude_assistant/clear")
+    claude_client.post("/api/plugin/claude_assistant/ask", json={"question": "what is 4624?"})
+
+    # No SDK at all now — the tab still renders the history.
+    monkeypatch.setitem(sys.modules, "anthropic", None)
+    got = claude_client.get("/api/plugin/claude_assistant/history").json()
+    assert got["persisted"] is True
+    assert [t["role"] for t in got["turns"]] == ["user", "assistant"]
+    assert got["turns"][0]["content"] == "what is 4624?"
+    assert got["turns"][1]["content"] == "SELECT 1;"
+    assert got["turns"][0]["at"]
+
+    # It is in the case file, in this plugin's own table — never a source.
+    assert store.plugin_tables("claude_assistant") == ["history"]
+    assert store.list_sources() == [] or all(
+        not s["name"].startswith("plugin") for s in store.list_sources())
+
+    # Clearing forgets this case's chat.
+    assert claude_client.post("/api/plugin/claude_assistant/clear").json() == {"ok": True}
+    assert claude_client.get("/api/plugin/claude_assistant/history").json()["turns"] == []
+
+
+def test_claude_a_failed_question_does_not_become_context(claude_client, monkeypatch):
+    """Both turns are written only after the call succeeds, so a refusal or
+    a network error never poisons the next question."""
+    record = {}
+    claude_client.post("/api/plugin/claude_assistant/clear")
+    monkeypatch.setitem(sys.modules, "anthropic", _fake_anthropic(record, _claude_msg(stop_reason="refusal")))
+    assert claude_client.post("/api/plugin/claude_assistant/ask", json={"question": "bad"}).status_code == 400
+    assert claude_client.get("/api/plugin/claude_assistant/history").json()["turns"] == []
+
+
+def test_claude_prefers_the_winnow_named_key(claude_client, monkeypatch):
+    """The guide tells authors to name a WINNOW_* variable; the bundled
+    example has to follow its own advice."""
+    record = {}
+    monkeypatch.setitem(sys.modules, "anthropic", _fake_anthropic(record, _claude_msg()))
+    monkeypatch.setenv("WINNOW_ANTHROPIC_API_KEY", "sk-from-settings")
+    claude_client.post("/api/plugin/claude_assistant/ask", json={"question": "q"})
+    assert record["api_key"] == "sk-from-settings"

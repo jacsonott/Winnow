@@ -2,7 +2,10 @@
 own additions to a source's column set.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
+import { openStack } from './stack.js';
 import { saveLayout } from './columns.js';
+import { quickAddWidget } from './dashboard.js';
+import { tableOf, widgetFrom } from './dashwidgets.js';
 import { $, api, el, post, setBusy, toast, toastAction } from './core.js';
 import { ellipsize } from './filters.js';
 import { render } from './grid.js';
@@ -34,6 +37,26 @@ export async function derivedOps() {
 export function opLabel(opId) {
   const op = (DERIVED_OPS || []).find((o) => o.id === opId);
   return op ? op.label : opId;
+}
+
+/* Does this column hold JSON/XML documents? Judged from rows already in
+   the page cache (the menu builds synchronously, so no fetch): any sampled
+   non-empty cell that opens like a document counts. A column whose first
+   cached rows are all blank simply doesn't offer Flatten until some are on
+   screen — an honest "nothing to flatten here" rather than a stale menu
+   entry on every plain-text column. */
+export function columnLooksStructured(name) {
+  const idx = S.columns.findIndex((c) => c.name === name);
+  if (idx === -1) return false;
+  let seen = 0;
+  for (const r of S.rowsByPos.values()) {
+    const v = r && r.cells ? r.cells[idx] : null;
+    if (v == null || v === '') continue;
+    const t = String(v).trimStart();
+    if (t[0] === '{' || t[0] === '[' || t[0] === '<') return true;
+    if (++seen >= 200) break;
+  }
+  return false;
 }
 
 export function columnMenuItems(name) {
@@ -71,13 +94,13 @@ export function columnMenuItems(name) {
     }
   }
   if (items.length) items.push('-');
-  items.push({ label: 'Add datetime column from this…', onclick: () => openDerivedColumnModal(name) });
-  // Offered on any base column rather than only ones that sniff as
-  // structured: the check costs a sample scan, the menu is built
-  // synchronously, and a column of JSON that happens to start with a
-  // non-document row would silently lose the entry. The picker itself says
-  // so when there's nothing in there.
-  if (!c.derived && S.sourceId >= 0) {
+  // Three verbs, in the order they get used: Stack, Derive, and — only
+  // when the column actually holds documents — Flatten. The derive modal
+  // is type-first (timestamp / extract / join / compare), so one entry
+  // covers what used to be spelled out as "add a datetime column".
+  items.push({ label: 'Stack values (rarest first)…', onclick: () => openStack(name) });
+  items.push({ label: 'Derive a column from this…', onclick: () => openDerivedColumnModal(name) });
+  if (!c.derived && S.sourceId >= 0 && columnLooksStructured(name)) {
     items.push({ label: 'Flatten JSON/XML into columns…', onclick: () => openFlattenModal(name) });
   }
   if (c.derived) {
@@ -99,6 +122,19 @@ export function columnMenuItems(name) {
       items.push({ label: 'Re-derive…', onclick: () => openDerivedColumnModal(c.derived_from, c) });
     }
     items.push({ label: 'Remove derived column…', onclick: () => removeDerivedColumn(c) });
+  }
+  // Straight onto a board, no editor: the column is the pick, the
+  // widget writes its own query and knows how to open these rows.
+  // Not for a derived column itself: a widget queries src_<id>, where a
+  // derived column's values are not (they are in the drv_<id> sidecar).
+  if (S.sourceId != null && S.sourceId >= 0 && !c.derived) {
+    const table = tableOf(S.sourceId);
+    items.push('-', { header: 'Add to dashboard' });
+    items.push({ label: `Top values of ${name}`, onclick: () => quickAddWidget(widgetFrom({ template: 'top', table, column: name })) });
+    items.push({ label: `Distinct count of ${name}`, onclick: () => quickAddWidget(widgetFrom({ template: 'distinct', table, column: name })) });
+    if (c.type === 'datetime') {
+      items.push({ label: `Events over time by ${name}`, onclick: () => quickAddWidget(widgetFrom({ template: 'time', table, column: name, bucket: 'day' })) });
+    }
   }
   return items;
 }
@@ -412,37 +448,31 @@ export async function openDerivedColumnModal(prefill, editing) {
     colSelect.value = state.column;
     colSelect.disabled = !!editing;
 
-    // Grouped, not one flat list: with timestamps, extraction and
-    // comparisons all in the registry, thirteen timestamp formats drowned
-    // the other kinds. A two-input operation (duration) still needs a
-    // second column rather than a format guess, so it's offered but never
-    // auto-suggested.
-    const OP_GROUPS = [
-      ['Timestamps', (op) => op.family === 'datetime' && op.derived_kind !== 'duration'],
+    // TYPE first, then the specific op. As one grouped dropdown, thirteen
+    // timestamp formats filled the visible list and the extract/join/
+    // compare kinds read as if they weren't there — an optgroup you had to
+    // scroll past. The type picker surfaces the four kinds up front; the op
+    // picker below then shows only the chosen kind's ops. A two-input
+    // operation (duration/compare) still needs a second column, so it's
+    // offered but never auto-suggested.
+    const typeSelect = el('select');
+    const OP_TYPES = [
+      ['Timestamp', (op) => op.family === 'datetime' && op.derived_kind !== 'duration'],
       ['Extract part of a value', (op) => op.family === 'extract'],
       ['Join from another table', (op) => op.family === 'lookup'],
-      ['Comparisons', (op) => op.derived_kind === 'duration'],
+      ['Compare (elapsed time)', (op) => op.derived_kind === 'duration'],
     ];
-    const grouped = new Set();
-    for (const [label, match] of OP_GROUPS) {
-      const members = ops.filter((op) => match(op) && !grouped.has(op.id));
-      if (!members.length) continue;
-      const g = document.createElement('optgroup');
-      g.label = label;
-      for (const op of members) {
-        grouped.add(op.id);
-        const o = el('option', null, op.label);
-        o.value = op.id;
-        g.append(o);
-      }
-      opSelect.append(g);
+    const typeOf = (op) => { for (const [label, m] of OP_TYPES) if (m(op)) return label; return 'Other'; };
+    // Only offer types that actually have ops (a future family lands under
+    // "Other" rather than vanishing).
+    const typeLabels = OP_TYPES.map(([l]) => l).concat('Other')
+      .filter((label) => ops.some((op) => typeOf(op) === label));
+    for (const label of typeLabels) typeSelect.append(new Option(label, label));
+    function fillOpSelect(type) {
+      opSelect.replaceChildren();
+      for (const op of ops) if (typeOf(op) === type) opSelect.append(new Option(op.label, op.id));
     }
-    for (const op of ops) {
-      if (grouped.has(op.id)) continue; // a future family lands ungrouped rather than invisible
-      const o = el('option', null, op.label);
-      o.value = op.id;
-      opSelect.append(o);
-    }
+    fillOpSelect(typeSelect.value);   // the first type by default
 
     function currentOp() { return ops.find((o) => o.id === opSelect.value); }
 
@@ -570,6 +600,8 @@ export async function openDerivedColumnModal(prefill, editing) {
         suggestNote.textContent =
           `Suggested: ${best.label} — ${Math.round(best.confidence * 100)}% of sampled values parse.`;
         if (!editing) {
+          const bop = ops.find((o) => o.id === best.op_id);
+          if (bop) { typeSelect.value = typeOf(bop); fillOpSelect(typeSelect.value); }
           opSelect.value = best.op_id;
           state.params = Object.assign({}, best.params);
         }
@@ -582,19 +614,23 @@ export async function openDerivedColumnModal(prefill, editing) {
 
     colSelect.onchange = () => pickColumn(colSelect.value);
     let nameTouched = false;
-    opSelect.onchange = () => {
+    function onOpChanged() {
       state.params = {};
       // "(parsed)" vs "(extract)" tracks the op kind — keep the suggestion
       // current until the analyst has typed a name of their own.
       if (!editing && !nameTouched) { nameInput.value = defaultName(); state.name = nameInput.value; }
       buildParams();
       refreshPreview();
-    };
+    }
+    opSelect.onchange = onOpChanged;
+    // Switching type repopulates the op list, then behaves like an op change.
+    typeSelect.onchange = () => { fillOpSelect(typeSelect.value); onOpChanged(); };
     nameInput.oninput = () => { nameTouched = true; state.name = nameInput.value; };
 
     body.append(labeledRow('Parse column', colSelect));
     body.append(suggestNote);
-    body.append(labeledRow('Format', opSelect));
+    body.append(labeledRow('Type', typeSelect));
+    body.append(labeledRow('Operation', opSelect));
     body.append(paramBox);
     if (!editing) {
       nameInput.value = defaultName();
@@ -606,7 +642,10 @@ export async function openDerivedColumnModal(prefill, editing) {
 
     if (editing) {
       state.opId = editing.derived_op;
+      const eop = ops.find((o) => o.id === editing.derived_op);
+      if (eop) { typeSelect.value = typeOf(eop); fillOpSelect(typeSelect.value); }
       opSelect.value = editing.derived_op;
+      typeSelect.disabled = true;
       opSelect.disabled = true;
       api(`/api/derived?source_id=${S.sourceId}`).then((defs) => {
         const d = defs.find((x) => x.id === editing.derived_id);
@@ -658,7 +697,12 @@ export async function openDerivedColumnModal(prefill, editing) {
    an action rather than a modal: the analyst asked to import a file, not
    to be interrupted — and a column that isn't converted still shows and
    searches exactly as before. */
+/* Source ids restart per case, so this has to be cleared with one —
+   otherwise case B's source 1 never gets its "looks like an epoch
+   timestamp" offer because case A's source 1 already consumed it. */
 export const suggestedSources = new Set();
+
+export function resetDerivedSuggestions() { suggestedSources.clear(); }
 
 export async function offerTimestampColumns(sourceId) {
   if (suggestedSources.has(sourceId)) return;

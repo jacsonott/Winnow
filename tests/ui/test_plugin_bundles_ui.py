@@ -35,3 +35,43 @@ def test_save_list_and_delete_a_bundle(page):
       { headers: { 'X-Timeline-Lite-Client': '1' } }).then((r) => r.json())""")
     assert all(b["id"] != rec["id"] for b in bundles)
     page.keyboard.press("Escape")
+
+
+def test_shipped_kape_profile_is_readonly_and_applies(page):
+    """The shipped KAPE-triage profile shows in the menu with a 'shipped'
+    badge and no delete button, and applying it loads every widget the
+    profile defines (counted from the shipped defaults, so growing the
+    dashboard doesn't silently stale this test again)."""
+    from winnow import defaults
+    expected = len(next(pr for pr in defaults.profiles() if pr["name"] == "KAPE triage")["dashboard"])
+    page.keyboard.press("M")
+    page.wait_for_selector(".session-row:has-text('KAPE triage')")
+    row = page.locator(".session-row", has_text="KAPE triage")
+    # read-only: a shipped badge, no delete control
+    assert row.locator(".bundle-shipped").count() == 1
+    assert row.locator(".btn", has_text="✕").count() == 0
+    assert row.locator(".btn", has_text="Apply to this case").is_enabled()
+
+    row.locator(".btn", has_text="Apply to this case").click()
+    page.wait_for_selector("#modal[hidden]", state="attached")
+
+    # applying creates ONE named "KAPE triage" dashboard in the sidebar
+    # (the host overview it used to ship beside is folded into it); open it
+    page.evaluate("() => __winnow.renderSidebar()")
+    page.wait_for_selector("#sidebarList .sidebar-row:has-text('KAPE triage')")
+    assert page.locator("#sidebarList .sidebar-row", has_text="KAPE host overview").count() == 0
+    page.locator("#sidebarList .sidebar-row", has_text="KAPE triage").locator(".menu-item").click()
+    page.wait_for_selector("#dashboardview:not([hidden])")
+    page.wait_for_function(
+        "(n) => document.querySelectorAll('#dashGrid .dash-card:not(.dash-add)').length === n",
+        arg=expected, timeout=10_000)
+
+    # cleanup: leave the shared case as we found it
+    page.evaluate("""async () => {
+      const h = { 'Content-Type':'application/json', 'X-Timeline-Lite-Client':'1' };
+      for (const d of await fetch('/api/dashboards', { headers:h }).then(r=>r.json()))
+        await fetch('/api/dashboards/' + d.id, { method:'DELETE', headers:h });
+      const wl = await fetch('/api/watchlist', { headers:h }).then(r=>r.json());
+      for (const i of (wl.indicators||wl)) await fetch('/api/watchlist/' + i.id, { method:'DELETE', headers:h });
+    }""")
+    page.keyboard.press("Escape")

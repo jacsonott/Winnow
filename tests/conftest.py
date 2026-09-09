@@ -10,6 +10,8 @@ import csv as csv_module
 import sys
 from pathlib import Path
 
+import os
+
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -25,6 +27,19 @@ def isolate_workspace(tmp_path, monkeypatch):
     routes (which read/write WS.* directly) can't leak into or read from the
     developer's real workspace/ directory."""
     monkeypatch.setattr(WS, "WORKSPACE_DIR", tmp_path / "workspace")
+    # Same for the WINNOW_* environment store (winnow/userenv.py): never
+    # the developer's real ~/.config/winnow/env, and no WINNOW_* name a
+    # test sets may outlive it in this process's environment.
+    monkeypatch.setenv("WINNOW_ENV_FILE", str(tmp_path / "userenv"))
+    # Restored by hand, not via monkeypatch: userenv writes os.environ
+    # directly, and monkeypatch.delenv would be undone by its own undo().
+    before = {k: v for k, v in os.environ.items() if k.startswith("WINNOW_")}
+    yield
+    for k in [k for k in os.environ if k.startswith("WINNOW_") and k not in before]:
+        os.environ.pop(k, None)
+    for k, v in before.items():
+        if os.environ.get(k) != v:
+            os.environ[k] = v
 
 
 @pytest.fixture
@@ -70,6 +85,22 @@ def ingested(store, write_csv):
     path = write_csv(STANDARD_ROWS)
     rec = store.ingest_csv(path, name="standard.csv")
     return store, rec["id"]
+
+
+@pytest.fixture(autouse=True)
+def allow_testclient_host(monkeypatch):
+    """Starlette's TestClient sends `Host: testserver`, which server.py's
+    Host gate refuses like any other name nobody configured — that gate is
+    what keeps the client-header gate meaningful against a page that has
+    made itself same-origin by rebinding DNS (tests/test_host_header.py).
+
+    Allowed here, for tests only, rather than in server.ALLOWED_HOSTS, so
+    the shipped default stays "loopback names and IP literals". Autouse
+    because 40-odd modules build their own TestClient; a fixture they each
+    had to remember would be a fixture somebody forgets."""
+    import server
+
+    monkeypatch.setattr(server, "ALLOWED_HOSTS", server.ALLOWED_HOSTS | {"testserver"})
 
 
 @pytest.fixture

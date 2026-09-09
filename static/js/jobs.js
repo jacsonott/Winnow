@@ -4,6 +4,7 @@ progress, and armOpCancel.
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { $, api, el, post, toast } from './core.js';
 import { offerTimestampColumns } from './derived.js';
+import { scanWatchlistForSources } from './watchlist.js';
 import { loadSources } from './sources.js';
 import { S } from './state.js';
 import { refreshSourcesQuietly } from './tables.js';
@@ -35,6 +36,17 @@ export const seenJobStatus = new Map();
 export const dismissedJobs = new Set();
 
 export const ftsWatch = new Set();
+
+/* Job ids and source ids both restart at 1 in a new case (`_ingest_job_seq`
+   is per Store; `sources.id` is a plain INTEGER PRIMARY KEY). Everything
+   above is keyed by one of them, so carrying it across a case switch makes
+   case B's first import inherit case A's "already dismissed" and never
+   show a progress row. Called from home.js openCase. */
+export function resetJobState() {
+  seenJobStatus.clear();
+  dismissedJobs.clear();
+  ftsWatch.clear();
+}
 
       // source ids seen building, for the "ready" toast
 
@@ -74,6 +86,21 @@ export function uploadWithProgress(url, fd, name) {
   });
 }
 
+
+/* A short list of operations still running, for the shutdown guard — empty
+   when the server is idle. Reads the same live state the corner panel does
+   plus the search-all job and the cancellable-op token. */
+export function inFlightWork() {
+  const bits = [];
+  const imports = ingestJobs.filter((j) => j.status === 'running' || j.status === 'queued').length
+    + activeUploads.size;
+  if (imports) bits.push(`${imports} import${imports === 1 ? '' : 's'} in progress`);
+  if (S.searchAll && S.searchAll.running) bits.push('a Search-all sweep');
+  const indexing = (S.sources || []).filter((s) => s.fts_building).length;
+  if (indexing) bits.push(`${indexing} index build${indexing === 1 ? '' : 's'}`);
+  if (opCancelCurrent) bits.push('a running query');
+  return bits;
+}
 
 export function startJobsPoll() {
   if (!jobsPollTimer) pollJobs();
@@ -151,6 +178,10 @@ export async function pollJobs() {
         warn ? 8000 : 3500);
       setTimeout(() => { dismissedJobs.add(j.job_id); renderJobsPanel(); }, 8000);
       for (const sid of j.source_ids || []) offerTimestampColumns(sid);
+      // A freshly imported table is scanned against the case's IOC
+      // watchlist (auto-tagging matches); fire-and-forget, the watchlist
+      // tab and the rail reflect it.
+      scanWatchlistForSources(j.source_ids || []);
     } else if (j.status === 'error') {
       toast(`Import failed for ${j.name}: ${j.error}`, 8000);
     } else {
@@ -160,7 +191,10 @@ export async function pollJobs() {
   }
   if (!$('app').hidden) {
     if (finishedNow.some((j) => j.status === 'done')) {
-      try { await loadSources(); } catch {}
+      // navigate:false — a finished import refreshes the tab strip, the
+      // sidebar and the dashboards, but never takes the analyst somewhere
+      // they didn't ask to go (see loadSources).
+      try { await loadSources(undefined, { navigate: false }); } catch {}
     } else if (ftsWatch.size) {
       // Keep the index-build rows honest without loadSources()'s tab
       // re-select side effects (same reasoning as the Tables modal poll).
@@ -236,27 +270,45 @@ export function renderJobsPanel() {
     }));
     count++;
   }
-  for (const j of ingestJobs) {
-    if (dismissedJobs.has(j.job_id)) continue;
-    const running = j.status === 'running' || j.status === 'queued';
+  // Directory imports queue dozens of files at once. Show the ones
+  // actually importing right now, roll the rest into one "N queued" row so
+  // the in-progress files aren't buried below a long waiting list, and keep
+  // finished/errored rows (they auto-dismiss). Running first, then the
+  // queued summary, then the completed — so what's happening stays on top.
+  const active = ingestJobs.filter((j) => !dismissedJobs.has(j.job_id) && j.status === 'running');
+  const queued = ingestJobs.filter((j) => !dismissedJobs.has(j.job_id) && j.status === 'queued');
+  const finished = ingestJobs.filter((j) => !dismissedJobs.has(j.job_id)
+    && j.status !== 'running' && j.status !== 'queued');
+  for (const j of active) {
     const label = j.tables_total > 1
       ? `${j.name} — ${Math.min(j.tables_done + 1, j.tables_total)}/${j.tables_total}${j.current_table ? `: ${j.current_table}` : ''}`
       : j.name;
-    if (running) {
-      panel.append(jobPanelRow({
-        label, phase: j.status === 'queued' ? 'queued' : 'importing',
-        pct: j.units_total ? j.units_done / j.units_total : 0,
-        indeterminate: !j.units_total,
-        detail: j.rows_done ? `${j.rows_done.toLocaleString()} rows` : '',
-        onCancel: () => post(`/api/ingest/jobs/${j.job_id}/cancel`, {}).then(startJobsPoll).catch(() => {}),
-      }));
-    } else {
-      panel.append(jobPanelRow({
-        label: j.name, phase: j.status, done: true,
-        detail: j.status === 'done' ? jobDoneDetail(j) : (j.error || ''),
-        onDismiss: () => { dismissedJobs.add(j.job_id); renderJobsPanel(); },
-      }));
-    }
+    panel.append(jobPanelRow({
+      label, phase: 'importing',
+      pct: j.units_total ? j.units_done / j.units_total : 0,
+      indeterminate: !j.units_total,
+      detail: j.rows_done ? `${j.rows_done.toLocaleString()} rows` : '',
+      onCancel: () => post(`/api/ingest/jobs/${j.job_id}/cancel`, {}).then(startJobsPoll).catch(() => {}),
+    }));
+    count++;
+  }
+  if (queued.length) {
+    panel.append(jobPanelRow({
+      label: `${queued.length} queued`, phase: 'queued', indeterminate: false,
+      detail: 'waiting to import',
+      // Cancel the whole waiting batch at once — the common "I didn't mean
+      // to import that many" recovery.
+      onCancel: () => Promise.allSettled(
+        queued.map((j) => post(`/api/ingest/jobs/${j.job_id}/cancel`, {}))).then(startJobsPoll),
+    }));
+    count++;
+  }
+  for (const j of finished) {
+    panel.append(jobPanelRow({
+      label: j.name, phase: j.status, done: true,
+      detail: j.status === 'done' ? jobDoneDetail(j) : (j.error || ''),
+      onDismiss: () => { dismissedJobs.add(j.job_id); renderJobsPanel(); },
+    }));
     count++;
   }
   for (const src of S.sources || []) {

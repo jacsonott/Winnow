@@ -1,0 +1,77 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Case dashboard — mockup</title>
+<style>
+  :root{--ink:#0b0b0c;--panel:#101312;--panel2:#171b19;--panel3:#1e2320;--line:#242a26;--line2:#333a35;
+        --text:#c9cdc4;--dim:#7c8578;--accent:#d9a441;--accent2:#8a6c33;--danger:#e0836a;--good:#a9c48f;--grey:#c3c9d1;
+        --mono:'JetBrains Mono',ui-monospace,Menlo,monospace;}
+  *{box-sizing:border-box}body{margin:0;background:var(--ink);color:var(--text);font:13px/1.5 var(--mono)}
+  .bar{display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--line2);background:var(--panel)}
+  .bar .title{color:var(--text);font-weight:600}.bar .prof{color:var(--accent);border:1px solid var(--accent2);border-radius:2px;padding:2px 8px}
+  .bar .pill{border:1px solid var(--line2);border-radius:2px;padding:3px 9px;color:var(--dim);cursor:pointer}
+  .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;padding:12px}
+  .card{background:var(--panel);border:1px solid var(--line2);border-radius:3px;padding:12px;min-height:120px;position:relative}
+  .card h4{margin:0 0 8px;color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.07em;font-weight:500}
+  .card .drag{position:absolute;top:8px;right:10px;color:var(--line2)}
+  .stat{font-size:34px;color:var(--accent);line-height:1}.stat.warn{color:var(--danger)}.stat.ok{color:var(--good)}
+  .sub{color:var(--dim);font-size:11px;margin-top:4px}
+  .kv{display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid var(--line)}
+  .kv:last-child{border-bottom:none}.kv .k{color:var(--dim)}.kv .v{color:var(--text)}
+  .span2{grid-column:span 2}.span4{grid-column:span 4}
+  .bars{display:flex;align-items:flex-end;gap:3px;height:70px;margin-top:4px}
+  .b{flex:1;background:var(--accent2)}.b.hot{background:var(--accent)}.b.fail{background:var(--danger)}
+  .list .row{display:flex;justify-content:space-between;padding:3px 0}.list .row .c{color:var(--accent)}
+  .chip{display:inline-block;padding:1px 7px;border:1px solid var(--line2);border-radius:10px;margin:2px 3px 0 0;font-size:11px}
+  .chip.on{color:var(--good);border-color:var(--accent2)}.chip.off{color:var(--danger);border-color:#5a3a34}
+  .card.add{display:flex;align-items:center;justify-content:center;color:var(--dim);border-style:dashed;cursor:pointer}
+  .sqlnote{position:absolute;bottom:8px;left:12px;color:var(--line2);font-size:10px}
+</style></head><body>
+  <div class="bar">
+    <span class="title">Case dashboard</span>
+    <span class="prof">Profile · KAPE triage</span>
+    <span style="flex:1"></span>
+    <span class="pill">＋ Add widget</span><span class="pill">Edit layout</span><span class="pill">Save as profile ▾</span>
+  </div>
+  <div class="grid">
+    <div class="card"><span class="drag">⠿</span><h4>Watchlist hits — this host</h4>
+      <div class="stat warn">37</div><div class="sub">across 5 indicators · 3 tables<br>rclone.exe ·  185.220.101.4 ·  evil.example.com</div>
+      <div class="sqlnote">widget: watchlist.count</div></div>
+    <div class="card"><span class="drag">⠿</span><h4>Tagged findings</h4>
+      <div class="stat">128</div><div class="sub">TA 44 · Suspicious 71 · Benign 13</div>
+      <div class="sqlnote">widget: tag.counts</div></div>
+    <div class="card"><span class="drag">⠿</span><h4>Distinct remote hosts</h4>
+      <div class="stat">41</div><div class="sub">outbound from this host<br>9 inbound</div>
+      <div class="sqlnote">SELECT COUNT(DISTINCT RemoteHost) …</div></div>
+    <div class="card"><span class="drag">⠿</span><h4>Host facts</h4>
+      <div class="kv"><span class="k">Computer</span><span class="v">WKS07</span></div>
+      <div class="kv"><span class="k">OS build</span><span class="v">22631.4169</span></div>
+      <div class="kv"><span class="k">Timezone</span><span class="v">UTC−05:00</span></div>
+      <div class="kv"><span class="k">Last boot</span><span class="v">Mar 14 07:58</span></div>
+      <div class="sqlnote">SQL widget · Registry (RECmd)</div></div>
+
+    <div class="card span2"><span class="drag">⠿</span><h4>Event volume over the incident window (per hour)</h4>
+      <div class="bars">
+        <div class="b" style="height:20%"></div><div class="b" style="height:30%"></div><div class="b" style="height:18%"></div>
+        <div class="b" style="height:40%"></div><div class="b" style="height:26%"></div><div class="b fail" style="height:92%"></div>
+        <div class="b fail" style="height:80%"></div><div class="b hot" style="height:66%"></div><div class="b hot" style="height:54%"></div>
+        <div class="b" style="height:30%"></div><div class="b" style="height:22%"></div><div class="b" style="height:16%"></div></div>
+      <div class="sqlnote">SQL widget · GROUP BY strftime(hour) — chart:bar</div></div>
+    <div class="card span2"><span class="drag">⠿</span><h4>Logging posture (are we blind?)</h4>
+      <div style="margin-top:2px">
+        <span class="chip on">Sysmon ✓</span><span class="chip off">PowerShell ScriptBlock ✗</span>
+        <span class="chip on">Cmdline auditing ✓</span><span class="chip off">Module logging ✗</span>
+        <span class="chip on">Security 4688 ✓</span><span class="chip off">WMI tracing ✗</span></div>
+      <div class="sub" style="margin-top:8px">Two blind spots — attacker PowerShell here would leave no script content.</div>
+      <div class="sqlnote">SQL widget · Registry keys → boolean chips</div></div>
+
+    <div class="card span2"><span class="drag">⠿</span><h4>Top command lines (rarest first — stack)</h4>
+      <div class="list">
+        <div class="row"><span>cmd /c rclone.exe copy \\FILESRV01\Finance …</span><span class="c">1</span></div>
+        <div class="row"><span>powershell -enc SQBFAFgA…</span><span class="c">1</span></div>
+        <div class="row"><span>psexec \\SQLSRV01 -s cmd</span><span class="c">2</span></div>
+        <div class="row"><span>net use \\DC01\C$ /user:svc_backup</span><span class="c">3</span></div>
+      </div><div class="sqlnote">widget: stack(CommandLine) · asc</div></div>
+    <div class="card"><span class="drag">⠿</span><h4>Persistence run keys</h4>
+      <div class="stat ok">2</div><div class="sub">new since baseline</div>
+      <div class="sqlnote">saved query · Registry</div></div>
+    <div class="card add">＋ drop a saved SQL query, filter, or watchlist here</div>
+  </div>
+</body></html>

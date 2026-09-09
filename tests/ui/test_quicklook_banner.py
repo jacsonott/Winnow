@@ -32,10 +32,11 @@ def quicklook_server(browser, tmp_path):
     # the real INSTALL_ROOT, so point its workspace and cases dir at
     # tmp_path or "Promoted case" registers in the developer's install and
     # collides with itself on every rerun.
-    env = dict(**__import__("os").environ,
-               WINNOW_IDLE_EXIT_S="600", WINNOW_NEVER_CONNECTED_EXIT_S="600",
-               WINNOW_WORKSPACE_DIR=str(tmp_path / "ws"),
-               WINNOW_CASES_DIR=str(tmp_path / "cases"))
+    env = {**__import__("os").environ,
+           "WINNOW_IDLE_EXIT_S": "600", "WINNOW_NEVER_CONNECTED_EXIT_S": "600",
+           "WINNOW_WORKSPACE_DIR": str(tmp_path / "ws"),
+           "WINNOW_ENV_FILE": str(tmp_path / "userenv"),
+           "WINNOW_CASES_DIR": str(tmp_path / "cases")}
     proc = subprocess.Popen(
         [sys.executable, "-u", str(ROOT / "server.py"), "--assoc", str(dropped),
          "--no-browser", "--no-fts"],

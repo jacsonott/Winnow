@@ -16,11 +16,18 @@
    Loaded as <script type="module">, so it is deferred and strict by default.
 */
 
+import * as connection from './connection.js';
 import * as core from './core.js';
 import * as state from './state.js';
 import { maybeOfferDefaultPrompt } from './assoc.js';
 import * as jobs from './jobs.js';
 import * as tabhistory from './tabhistory.js';
+import * as charts from './charts.js';
+import * as stack from './stack.js';
+import * as notes from './notes.js';
+import * as watchlist from './watchlist.js';
+import * as dashboard from './dashboard.js';
+import * as dashwidgets from './dashwidgets.js';
 import * as filters from './filters.js';
 import * as splash from './splash.js';
 import * as sources from './sources.js';
@@ -37,6 +44,7 @@ import * as filterbuilder from './filterbuilder.js';
 import * as savedfilters from './savedfilters.js';
 import * as timeframe from './timeframe.js';
 import * as merge from './merge.js';
+import * as multicase from './multicase.js';
 import * as importer from './importer.js';
 import * as tables from './tables.js';
 import * as plugins from './plugins.js';
@@ -46,8 +54,11 @@ import * as sql from './sql.js';
 import * as timeline from './timeline.js';
 import * as rowmenu from './rowmenu.js';
 import * as keymap from './keymap.js';
+import * as profilebuilder from './profilebuilder.js';
 import * as settings from './settings.js';
+import * as userenv from './userenv.js';
 import * as home from './home.js';
+import * as errlog from './errlog.js';
 import { toast } from './core.js';
 import { applyDetailPrefs, loadDetailPrefs, wireDetail } from './detail.js';
 import { wireFilters } from './filters.js';
@@ -73,7 +84,7 @@ import { wireUi } from './ui.js';
    spread would freeze the value of a rebindable export like ROW_H at boot.
    Collision-free by construction — these names all shared one scope until
    the file was split. Not an API; nothing in the app reads it. */
-const NAMESPACES = { splash, core, state, jobs, tabhistory, filters, sources, view, columns, tsformat, derived, grid, grouping, tags, detail, ui, filterbuilder, savedfilters, timeframe, merge, importer, tables, plugins, search, session, sql, timeline, rowmenu, keymap, settings, home };
+const NAMESPACES = { splash, core, connection, state, jobs, tabhistory, charts, stack, notes, watchlist, dashboard, dashwidgets, filters, sources, view, columns, tsformat, derived, grid, grouping, tags, detail, ui, filterbuilder, savedfilters, timeframe, merge, multicase, importer, tables, plugins, search, session, sql, timeline, rowmenu, keymap, settings, profilebuilder, userenv, home, errlog };
 window.__winnow = {};
 for (const ns of Object.values(NAMESPACES)) {
   for (const key of Object.keys(ns)) {
@@ -85,6 +96,11 @@ for (const ns of Object.values(NAMESPACES)) {
 // mouseup, where browsers fire their own history navigation from.
 window.addEventListener('mouseup', tabhistory.onMouseNav);
 
+core.$('btnAcrossCases').onclick = () => multicase.openMultiCase();
+notes.wireNotes();
+session.wireSession();
+watchlist.wireWatchlist();
+dashboard.wireDashboard();
 wireSources();
 wireGrouping();
 wireDetail();
@@ -128,13 +144,14 @@ wireFileDrop();
 if (splash.splashEnabled(S.appearance)) {
   splash.runSplash();   // takes its colours from the live skin, not an argument
 }
-/* Presence: the open connection is how the server knows a browser is
-   still attached — it shuts itself down once every window is gone (see
-   server.py's idle-shutdown block). EventSource reconnects on its own
-   after a server restart, and no handlers are needed because no data ever
-   flows; the connection is the message. */
-new EventSource('/api/presence');
+// Presence, plus the banner that says so when the server stops answering.
+connection.wireConnection();
 
 boot().catch((e) => toast('Could not start: ' + e.message, 8000));
+
+// Surface server-side errors in the app (Case menu → Error log) with a dot
+// on the Case button when new ones land — they used to go only to the
+// terminal.
+errlog.startLogBadgePoll();
 
 maybeOfferRemoteMode().then(() => maybeOfferStorageDir()).then(() => maybeOfferDefaultPrompt());

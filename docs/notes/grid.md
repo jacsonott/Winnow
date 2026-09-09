@@ -166,3 +166,17 @@ see [docs/notes/README.md](README.md) for the whole set.
   `.hcell`'s `cursor: pointer` and hover tint — it's the one header cell
   that doesn't sort. The select-all box's indeterminate state was already
   handled by `syncSelectAllCheckbox`.
+- **The row number IS the checkbox** (grid.js's `.rid` mousedown handler).
+  The 12px box was the only way to pick a row, and the number beside it
+  looked equally clickable while doing nothing — people aimed at the box.
+  Clicking the number toggles that one row, exactly as ticking the box
+  does; shift-click extends from the last one; dragging down the column
+  paints the same choice onto the rows it crosses, the way dragging across
+  data cells extends a cell range. Deliberately **not** routed through
+  `activateRow`/`moveCursor`: those `selClear()` on a plain click, which
+  is right for "I clicked a cell" and exactly wrong for "I ticked a box" —
+  wiring it that way silently wipes the selection it was meant to add to.
+  The `click` handler skips `.rid` for the same reason. Its padding is
+  left-only: the digits stay flush right, where the "Line" header is
+  measured against, and the padding only widens the target into empty
+  gutter, so the three-slot contract above is untouched.

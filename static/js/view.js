@@ -30,6 +30,8 @@ export async function rebuildView({ keepScroll = true } = {}) {
   const spec = currentSpec();
   spec.op_token = opToken();
   const seq = ++rebuildSeq;
+  // Which table this rebuild is for; checked again before it paints.
+  const forSourceId = S.sourceId;
   let v;
   let seeded = [];
   setBusy(true);
@@ -96,6 +98,12 @@ export async function rebuildView({ keepScroll = true } = {}) {
   // A newer rebuild started while this one was in flight — its view has
   // already evicted ours server-side; let it win.
   if (seq !== rebuildSeq) return;
+  // …and the table may have changed under it without any rebuild at all:
+  // openSource's cached-view path restores S.view directly and never bumps
+  // rebuildSeq. Painting here would put THIS source's rows under the OTHER
+  // source's headers, and the line below would cache the view under the
+  // wrong id, so the poison survives the next open.
+  if (S.sourceId !== forSourceId) return;
   S.view = v;
   S.viewCache.set(S.sourceId, { key: specKey(spec), view_id: v.view_id, row_count: v.row_count, elapsed_ms: v.elapsed_ms });
   clearPageCache();
@@ -109,6 +117,7 @@ export async function rebuildView({ keepScroll = true } = {}) {
   S.cellAnchor = null;
   const src = S.sources.find((s) => s.id === S.sourceId);
   $('spacerY').style.height = spacerPx(v.row_count) + 'px';
+  $('noRows').hidden = v.row_count > 0;
   $('viewStats').innerHTML =
     `<b>${v.row_count.toLocaleString()}</b> of ${src.row_count.toLocaleString()} rows · ${v.elapsed_ms} ms`;
   $('body').scrollTop = rScroll($('body'), v.row_count, scroll, headH());
@@ -120,6 +129,11 @@ export async function rebuildView({ keepScroll = true } = {}) {
     render();
     drawRail();
   }
+  // Anything following the grid (plugin toolbar panels via
+  // winnow.onViewChange) hears about the new view here — after the paint,
+  // so a listener that reads S.view sees the settled state.
+  document.dispatchEvent(new CustomEvent('winnow:viewchange',
+    { detail: { sourceId: S.sourceId, viewId: v.view_id, rowCount: v.row_count } }));
   refreshTagCounts(); // the scope changed, so every ribbon count did too
   updateFiltersButton();
 }

@@ -109,8 +109,76 @@ def test_a_row_tagged_differently_is_changed_not_added_and_removed(store, write_
 
     d = store.diff_sessions("before", "after")
     assert d["counts"] == {"added": 0, "removed": 0, "changed": 1, "note_changes": 0}
-    assert d["changed"][0] == {"source": "evidence.csv", "rid": 1,
-                               "left": ["TA"], "right": ["Benign"]}
+    row = d["changed"][0]
+    assert {k: row[k] for k in ("source", "rid", "left", "right")} == {
+        "source": "evidence.csv", "rid": 1, "left": ["TA"], "right": ["Benign"]}
+    # The live source rides along so the panel's counts can pivot to the
+    # table; the row's cells do not — the grid shows them, marked.
+    assert row["source_id"] == sid and "cells" not in row
+
+
+def test_a_foreign_session_row_has_no_source_to_pivot_to(store, write_csv):
+    """A session about a table this case does not have keeps its row number
+    and says so, rather than binding to some other table by accident."""
+    sid = _case(store, write_csv)
+    _tag(store, sid, [2], "TA")
+    foreign = {"format": "winnow-case-session/1", "sources": [{
+        "source": {"name": "elsewhere.csv", "file_hash": "nope", "columns": []},
+        "tag_defs": [{"id": 1, "name": "TA"}], "row_tags": [{"rid": 5, "tag_id": 1}], "row_notes": []}]}
+    store.adopt_session("theirs", foreign)
+    d = store.diff_sessions("theirs", store.LIVE_SESSION)
+    assert d["only_left_sources"] == ["nope"]
+    (theirs,) = [r for r in d["removed"] if r["source"] == "elsewhere.csv"]
+    assert theirs["rid"] == 5 and theirs["source_id"] is None
+    (mine,) = [r for r in d["added"] if r["source"] == "evidence.csv"]
+    assert mine["source_id"] == sid
+
+
+def _rids(store, sid, tree):
+    sql = store.spec_sql(sid, {"source_id": sid, "filter_tree": tree})
+    return sorted(r[0] for r in store.run_sql(f"SELECT rid FROM ({sql})")["rows"])
+
+
+def test_rid_is_a_column_to_the_raw_validator_and_the_condition_compiler(store, write_csv):
+    """What "open these rows" sends: a `rid IN` condition node — the same
+    shape the value picker builds — which the compiler used to drop (rid
+    is not in the column list) and the raw validator used to reject."""
+    sid = _case(store, write_csv)
+    store.validate_where_fragment(sid, "rid IN (1, 3)")
+    assert _rids(store, sid, {"type": "raw", "sql": "rid IN (1, 3)"}) == [1, 3]
+    # The picker's node carries strings; the column holds integers.
+    assert _rids(store, sid, {"type": "cond", "column": "rid", "op": "in", "value": ["1", "3"]}) == [1, 3]
+    assert _rids(store, sid, {"type": "cond", "column": "rid", "op": ">=", "value": "3"}) == [3, 4]
+
+
+def test_a_same_named_table_with_a_different_hash_is_not_this_evidence(store, write_csv):
+    """The trap the hash exists for: two exports can share a filename. A
+    session about the other one must not pivot into this one's rows."""
+    sid = _case(store, write_csv)
+    _tag(store, sid, [2], "TA")
+    mine = store.get_source(sid)
+    foreign = {"format": "winnow-case-session/1", "sources": [{
+        "source": {"name": mine["name"], "file_hash": "not-" + str(mine.get("file_hash")), "columns": []},
+        "tag_defs": [{"id": 1, "name": "TA"}], "row_tags": [{"rid": 2, "tag_id": 1}], "row_notes": []}]}
+    store.adopt_session("theirs", foreign)
+    d = store.diff_sessions("theirs", store.LIVE_SESSION)
+    theirs = [r for r in d["removed"]]
+    assert theirs and all(r["source_id"] is None for r in theirs)
+    assert [s["source_id"] for s in d["sources"] if s["source"] == mine["name"] and s["counts"]["removed"]] == [None]
+
+
+def test_per_table_counts_are_not_capped_even_when_the_rows_are(store, write_csv):
+    """Past the cap, a table still reports how many rows differ; only the
+    rows that can be opened are listed."""
+    sid = _case(store, write_csv)
+    _tag(store, sid, [1, 2, 3, 4], "TA")
+    store.save_session("all")
+    ta = next(t["id"] for t in store.list_tags() if t["name"] == "TA")
+    store.set_tags(sid, [1, 2, 3, 4], ta, False)      # the reviewer dropped all four
+    d = store.diff_sessions("all", store.LIVE_SESSION, limit=2)
+    (src,) = d["sources"]
+    assert src["source_id"] == sid and src["counts"]["removed"] == 4
+    assert len(d["removed"]) == 2 and d["truncated"]
 
 
 def test_diff_matches_tags_by_name_across_differently_numbered_cases(store, write_csv, tmp_path):
