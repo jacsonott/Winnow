@@ -62,9 +62,11 @@ def test_sql_run_button_shares_the_row_with_the_others(page):
     # The query-tab strip renders after its fetch and can add a line above
     # the head; measure both buttons in one call once it has settled.
     page.wait_for_selector("#sqlTabs > *")
-    page.wait_for_timeout(150)
-    tops = page.evaluate("() => ['btnRunSql', 'btnSqlSchema'].map(id => document.getElementById(id).getBoundingClientRect().top)")
-    assert tops[0] == tops[1], tops
+    tops = "() => ['btnRunSql', 'btnSqlSchema'].map(id => document.getElementById(id).getBoundingClientRect().top)"
+    # Waits for the settled layout rather than a fixed beat: it returns as
+    # soon as the two share a row and only spends the timeout on a failure.
+    page.wait_for_function(f"() => {{ const t = ({tops})(); return t[0] === t[1]; }}")
+    assert page.evaluate(tops)[0] == page.evaluate(tops)[1]
 
 
 def test_timeframe_enabled_and_column_are_separate_rows(page):

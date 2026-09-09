@@ -324,7 +324,7 @@ html[data-style="studio"][data-theme="light"] {
      invisible while the banner stayed hidden (its default state), which
      is exactly why this went unnoticed for so long. */
   grid-template-columns: max-content minmax(0, 1fr);
-  grid-template-rows: auto auto auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto auto auto minmax(0, 1fr);
 }
 /* Rows 3/-1, not 1/-1: the sidebar slides in UNDER the tab bar, so
    toggling it never reflows the top chrome — the tab strips, Case menu and
@@ -334,7 +334,7 @@ html[data-style="studio"][data-theme="light"] {
 #sidebar { grid-column: 1; grid-row: 3 / -1; }
 #sidebar[hidden] { display: none; }
 .temp-banner, .bar { grid-column: 1 / -1; }
-.toolbar, .plugin-panels, .main-area { grid-column: 2; }
+.toolbar, .plugin-panels, .diff-banner, .main-area { grid-column: 2; }
 /* Explicit row per child, not auto-placement — auto-placement once slid
    .main-area into the wrong track when a display:none sibling (the old
    suggestion banner) dropped out of the grid, and past ~1.4M rows that
@@ -351,7 +351,10 @@ html[data-style="studio"][data-theme="light"] {
 /* Plugin toolbar panels: an explicit track like the banner, collapsing
    to zero while hidden so the grid keeps its height back. */
 .plugin-panels { grid-row: 4; }
-.main-area { grid-row: 5; }
+/* The session-comparison banner: its own track, collapsing while hidden. */
+.diff-banner { grid-row: 5; }
+.diff-banner[hidden] { display: none; }
+.main-area { grid-row: 6; }
 /* Grid items default to min-width:auto (their content's min-content size),
    not 0 — without this, a row wide enough to overflow (e.g. many/long tab
    names in .bar) blows out #app's implicit single column, stretching every
@@ -1529,7 +1532,7 @@ textarea:focus { border-color: var(--accent); outline: none; }
    temporary case until the analyst decides otherwise, and that fact should
    be impossible to miss without shouting. Accent-tinted, not danger —
    nothing is wrong, something is just undecided. */
-.temp-banner {
+.temp-banner, .diff-banner {
   /* No grid-column here: the placement rule up top spans it across BOTH
      columns with the bar. A column-2 pin left over from the old
      full-height sidebar made the banner jump every time the sidebar
@@ -1539,31 +1542,39 @@ textarea:focus { border-color: var(--accent); outline: none; }
   background: var(--sel); border-bottom: 1px solid var(--accent-dim);
   color: var(--text);
 }
-.temp-banner-actions { margin-left: auto; display: flex; gap: 6px; }
+.temp-banner-actions, .diff-banner-actions { margin-left: auto; display: flex; gap: 6px; }
 
-/* Sessions panel: the "received from another analyst" marker, and the
-   diff table. Three columns of tag names with an arrow between them —
-   deliberately a table, not a list, because a reviewer reads DOWN the
-   before and after columns comparing them. */
+/* Sessions panel: the "received from another analyst" marker. */
 .session-badge {
   font-size: 10px; text-transform: uppercase; letter-spacing: .04em;
   padding: 1px 5px; border-radius: var(--radius-sm);
   background: var(--panel-3); color: var(--dim);
 }
 .session-diff { margin-top: 6px; max-height: 340px; overflow: auto; }
-.diff-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-.diff-table td {
-  padding: 2px 6px; border-bottom: 1px solid var(--border-hairline);
-  vertical-align: top;
+/* The comparison, as counts: one line per table, each count a way into
+   the grid. The rows themselves are never listed here — the grid shows
+   them, marked. */
+.diff-stats { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 6px; }
+.diff-stats th { text-align: left; font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--dim);
+  padding: 4px 8px; border-bottom: 1px solid var(--line); font-weight: 500; }
+.diff-stats th.n, .diff-stats td.n { text-align: right; width: 1%; white-space: nowrap; }
+.diff-stats td { padding: 3px 8px; border-bottom: 1px solid var(--border-hairline); }
+.diff-stats td.n .btn { font-family: var(--mono); font-size: 12px; padding: 1px 8px; min-width: 3em; }
+.diff-stats td.n .zero { color: var(--text-faint); font-family: var(--mono); padding: 1px 8px; }
+.diff-stats .diff-n-removed .btn { color: var(--danger); }
+.diff-stats .diff-n-added .btn { color: var(--accent); }
+.diff-legend { display: flex; gap: 14px; margin-top: 6px; font-size: 11px; color: var(--dim); }
+.diff-legend b { color: var(--text); font-weight: 500; }
+.diff-mark {
+  flex: 0 0 auto; font-family: var(--mono); font-size: 9px; line-height: 12px; padding: 0 3px;
+  border-radius: var(--radius-sm); border: 1px solid var(--line-2); color: var(--text); background: var(--panel-2);
 }
-.diff-rid { color: var(--dim); font-family: var(--mono); white-space: nowrap; }
-.diff-arrow { color: var(--dim); text-align: center; width: 1.5em; }
-/* The accent carries "what the reviewer added"; danger carries "what they
-   dropped" — the two a QC pass acts on first. */
-.diff-added td:last-child { color: var(--accent); }
-.diff-removed td:nth-child(3) { color: var(--danger); }
-.diff-changed td:last-child { color: var(--accent); }
-.diff-note td { color: var(--text); }
+.diff-mark-removed { color: var(--danger); border-color: var(--danger-border); }
+.diff-mark-added { color: var(--accent); border-color: var(--accent-dim); }
+/* The session-comparison banner wears the quick-look banner's look (the
+   shared rule above): another accent-tinted "something is in progress"
+   strip, in its own grid track. */
+.diff-banner .diff-mark { line-height: 14px; }
 
 /* Settings → Updates: the release notes blob. Monospace and scrollable
    because it's markdown straight from the GitHub release, not something

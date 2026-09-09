@@ -742,6 +742,11 @@ export async function openSource(id, { skipBuild = false } = {}) {
     // The cached view is flat — a restored grouping still needs its
     // summary levels rebuilt on top of it.
     if (S.groupByCols.length) await regroupAll();
+    // A cached view is still a change of view for whatever follows the
+    // grid (a plugin panel, the session-comparison banner) — the same
+    // event rebuildView ends with, since that is the path skipped here.
+    document.dispatchEvent(new CustomEvent('winnow:viewchange',
+      { detail: { sourceId: S.sourceId, viewId: cached.view_id, rowCount: cached.row_count } }));
   } else {
     await rebuildView({ keepScroll: false });
     // Same view spec as when we left (the stash IS the spec), so the raw
@@ -1351,6 +1356,22 @@ export async function recenterOnRow(anchor) {
    plus one filter, and spelling the reset out a second time is how the
    timeframe carve-out below gets forgotten in the copy. */
 export async function clearAllFilters(seed = null) {
+  // A pivoted session comparison is a filter plus marks; clearing the
+  // filters clears the marks with it, so the grid never wears comparison
+  // chrome over a view that isn't the comparison.
+  S.diffMarks = null;
+  return landOnFilters(seed ? { [seed.column]: seed.raw } : {}, { type: 'group', op: 'AND', children: [] });
+}
+
+/* Exactly this filter tree and nothing else — no header filter, search,
+   tag filter or grouping ANDed underneath it. What a pivot from elsewhere
+   (a session comparison's "open these rows") needs: the promise is "these
+   N rows", not "these N rows intersected with whatever was on screen". */
+export async function replaceFilters(tree) {
+  return landOnFilters({}, tree);
+}
+
+async function landOnFilters(filters, tree) {
   // Deliberately doesn't touch S.timeRange — the timeframe filter is meant
   // to survive exactly this ("apply/clear filters shouldn't lose my
   // timeframe"), same as it survives applyPreset() and a tab switch. Use
@@ -1363,9 +1384,9 @@ export async function clearAllFilters(seed = null) {
     S.lastGroupBy = { cols: [...S.groupByCols], sort: S.groupSort, dir: S.groupSortDir };
     await dropGrouping();
   }
-  S.filters = seed ? { [seed.column]: seed.raw } : {};
+  S.filters = filters;
   S.search = ''; S.tagFilter = []; S.searchTerms = []; S.advCollapsed = null;
-  S.filterTree = { type: 'group', op: 'AND', children: [] };
+  S.filterTree = tree;
   updateFiltersButton();
   $('search').value = '';
   renderHead(); renderTagRibbon();

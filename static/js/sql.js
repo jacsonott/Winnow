@@ -6,6 +6,7 @@ import { $, api, debounce, el, post, toast } from './core.js';
 import { hidePluginViews, sqlResultNodes, syncPluginPanels } from './plugins.js';
 import { setActiveSqlResult } from './sqlassist.js';
 import { checkPresets } from './savedfilters.js';
+import { syncDiffBanner } from './session.js';
 import { syncTabSelection, wireDragReorder } from './sources.js';
 import { S } from './state.js';
 import { buildTimeline } from './timeline.js';
@@ -234,6 +235,7 @@ export function syncTabChrome() {
   const isGrid = S.activeTab === 'grid';
   $('toolbar').hidden = !isGrid;
   syncPluginPanels();   // plugin toolbar panels live and die with the toolbar
+  syncDiffBanner();     // as does a session comparison's banner
 }
 
 /* The mutually-exclusive main content views (grid / SQL / Timeline / and

@@ -173,6 +173,7 @@ export function openTablesManager() {
           } else {
             await api(`/api/source/${s.id}`, { method: 'DELETE' });
             S.viewCache.delete(s.id); // SQLite can reuse a deleted source's row id — don't let a stale cached view leak onto it
+            if (S.diffMarks && S.diffMarks.sourceId === s.id) S.diffMarks = null; // nor a comparison's marks
           }
           if (S.sourceId === s.id) S.sourceId = null;
           await loadSources();

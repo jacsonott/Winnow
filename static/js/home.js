@@ -123,6 +123,7 @@ export async function openCase(path, opts = {}) {
   // openSource() try it, get a 409, and rebuild anyway.
   S.viewCache.clear();
   clearViewStateStash(); // per-tab filters describe the previous case's tables
+  S.diffMarks = null;    // a comparison's rids belong to the previous case's tables too
   S.tabOrder = [];
   // Another case's tab history points at ids that mean nothing here.
   clearTabHistory();
