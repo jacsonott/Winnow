@@ -79,3 +79,13 @@ def test_paths_module_imports_nothing_from_the_app():
         if line.startswith(("import ", "from ")):
             assert not any(line.startswith(f"{kw} {m}") for kw in ("import", "from")
                            for m in app_modules), f"paths.py must not import app code: {line}"
+
+
+def test_double_click_launchers_ship():
+    from winnow import paths
+    launch = paths.INSTALL_ROOT / "launch"
+    for f in ("winnow.sh", "winnow.command", "winnow.bat", "winnow.vbs"):
+        p = launch / f
+        assert p.is_file() and p.stat().st_size > 0, f
+    assert (launch / "winnow.sh").read_text(encoding="utf-8").startswith("#!")
+    assert "server.py" in (launch / "winnow.bat").read_text(encoding="utf-8")

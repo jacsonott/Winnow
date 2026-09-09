@@ -10,6 +10,42 @@ see [docs/notes/README.md](README.md) for the whole set.
 
 ---
 
+- **A background refresh must not navigate.** `loadSources()` re-opens
+  the current source as a side effect of picking a tab, and `openSource()`
+  switches to the grid and resets that source's filters and search. That
+  is right for a real navigation and wrong for "an import finished": with
+  a batch of files, the jobs poll called it once per completion, so the
+  analyst was dragged back to whichever table the first file opened —
+  every few seconds, losing the filter they had just set, and tearing down
+  and refetching the grid each time (the "it locks up" in the report).
+  `loadSources(select, { navigate: false })` refreshes the tab strip,
+  sidebar and dashboards without moving anyone; it still opens a table
+  when nothing is on screen, which is what makes the FIRST import land.
+  Any new background caller wants that option — `refreshSourcesQuietly()`
+  in tables.js exists for the same reason on the polling path.
+
+- **Theming rule for controls.** `<select>` has a global themed base rule in
+  `static/style.css` (dark `--ink`/`--line-2`, accent focus), and each theme
+  sets `color-scheme` on `<html>` so the parts CSS can't reach — the native
+  option popup, date pickers, the scrollbar fallback — follow the theme
+  instead of flashing a white OS menu on a dark app. **Any new dropdown/menu
+  inherits this by default; never ship a bare `el('select')` that looks
+  unthemed** (the widget editor did before this). Contextual rules
+  (`.fb-cond select`, `.wl-add select`, …) still win where they set more.
+
+- **Bar buttons never wrap their label.** `.toolbar .btn`, `.sql-head .btn`,
+  `.detail-head .btn`, `.dash-bar .btn` and `.wl-head .btn` are
+  `white-space: nowrap; flex: 0 0 auto`. Under width pressure (tag counts,
+  the open search box, a 1280px laptop, the wider Phosphor/Blueprint faces)
+  the things that give way are, in order, the group strip (`flex-shrink: 6`,
+  its hint ellipsizes, 150px floor keeps the label and `+ Tag`) and then the
+  tag ribbon, whose chips wrap onto a second line — the designed behaviour.
+  Before this every flex item shared the squeeze evenly and each button
+  folded into a two-line pill. A pressed segment (`.vp-seg`, `.segmented`)
+  is the filled accent with `--accent-fg` text; accent text on the dim
+  accent fill measured 1.4–2.7:1 across the skins, and accent-on-panel
+  fails in Phosphor light.
+
 - The **timeframe filter** (`S.timeRange`, `static/js/timeframe.js`, `time_range` on
   `ViewSpec`, compiled in `_compile_where` via the registered SQL function
   `TS_NORMALIZE`) is deliberately a separate piece of state from every
@@ -51,7 +87,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   has never seen a single one of the rows. Untagging is a mode flip on the
   same menu rather than a ✓ toggle: a group is a set of rows with mixed
   tags, so there's no single row to read a checkmark off the way
-  `rowMenuTagItems` does. The throwaway view is safe to drop immediately
+  `rowMenuTagList` does. The throwaway view is safe to drop immediately
   because undo records the *rows* (invariant #7's `v.undo_<n>` delta table),
   not the view they were found through. Tagging while grouped *by tag* —
   and undoing — calls `regroupIfGroupedByTag()`: the tag just changed which
@@ -71,13 +107,35 @@ see [docs/notes/README.md](README.md) for the whole set.
   only direct children (`.bar`/`.toolbar`/`#presetBanner`/`.main-area`) all
   moved to `grid-column: 2` — so hiding it (`[hidden]`) collapses that
   column to zero width for free, nothing else occupies it. `renderSidebar`
-  is called from inside `renderTabs()` itself (every one of `renderTabs`'s
-  three callers — `loadSources`, `moveTab`, the tab-strip's own drag-drop
-  handler — means `S.sources`/`S.tabOrder` just changed), not from a
-  parallel set of call sites that could drift out of sync. It lists page tabs
-  too, in a third section (Pages) under Open/Closed — same rows, same
-  drag/▲/▼ reorder, just against the other strip; see the two-strips entry
-  below. Its active-row highlight isn't simply `s.id === S.sourceId`:
+  is called from inside `renderTabs()` itself (both of `renderTabs`'s
+  callers — `loadSources` and the tab strip's own drag-drop handler —
+  mean `S.sources`/`S.tabOrder` just changed), not from a
+  parallel set of call sites that could drift out of sync. The table list
+  has two parts. An **Open** section at the top is the working set — the
+  tables with a tab open, in `S.tabOrder`, reorderable by ▲/▼ or drag
+  (`openSidebarRow`, which still uses `wireDragReorder`/`moveTab`); drag a
+  table from the tree onto it (`wireOpenDrop`) to open one. Below it, **All
+  tables** is a **folder tree**: every table sits at the root or inside a
+  folder (`source_folders`/`source_folder_map` in the case file — see
+  store.py), open or not — so an open table appears in *both* (the Open
+  section is your tabs, the tree is the whole library). This replaced a
+  first cut that had folders *replace* the old Open/Closed split entirely;
+  the working-set section came back because reordering and closing tabs
+  from the sidebar is worth keeping. Folders are created/renamed/
+  reordered/deleted from their header rows (`.sidebar-folder`, a class
+  distinct from `.sidebar-row` — so its actions need their own
+  `:hover .sidebar-row-actions` rule, which is easy to forget) and from the
+  header's ＋; a table is filed by dragging its row onto a folder (or the
+  row's "Move to a folder" button) and dragged back out via the root drop
+  zone. A directory import reproduces the on-disk tree here (importer.js
+  sends the file's subfolder as `folder_path`, the ingest job creates the
+  folders via `ensure_folder_path`). Folder membership is keyed by the
+  *signed* source id, so a merge folds like any table. Folder collapse
+  state is per-browser `localStorage` (`FOLDERS_KEY`), but the folders
+  themselves are case data that travels with the `.db`. Page tabs still get
+  their own Pages section below the tree — same rows, same drag/▲/▼
+  reorder against the other strip; see the two-strips entry below. Its
+  active-row highlight isn't simply `s.id === S.sourceId`:
   `S.sourceId` is never cleared while a page tab is showing (there's no
   single "a source is open" flag to unset), so `sidebarRow` also requires
   `S.activeTab === 'grid'` — the same condition `syncTabSelection` applies
@@ -90,13 +148,11 @@ see [docs/notes/README.md](README.md) for the whole set.
   its rows' `.menu-item`/`.menu-item-action` classes live on, reused as-is
   by the sidebar's own rows. Drag-to-reorder (`wireDragReorder`, factored
   out of what used to be `wireTabDrag` alone) is shared by the horizontal
-  strip and the sidebar's vertical list — same native-HTML5-DnD technique,
-  same `S.tabOrder`, just measured along a different axis (tab strip:
-  pointer left/right of the dragged node's horizontal midpoint; sidebar:
-  above/below its vertical midpoint). `draggedTabId` is one shared closure
-  variable rather than one per axis on purpose: a drag started on a tab and
-  dropped on a sidebar row (or vice versa) still reorders correctly, since
-  both surfaces render from the same `openTabsSorted()`.
+  strip and the SQL pane's sub-tab strip — same native-HTML5-DnD technique
+  and `S.tabOrder`/`S.sqlTabs`. The sidebar's table rows once used it too,
+  but they drag differently now: a sidebar drag *files a table into a
+  folder* (`wireTableDrag` + `wireFolderDrop`, its own `draggedTableId`),
+  not reorders the strip.
 - **Editing a saved filter** goes through the real grid, not a
   self-contained dialog: the Saved filters modal's "Edit" applies that
   filter (`applyPreset`) and *then* opens `openFilterBuilder(f)` with the
@@ -244,6 +300,31 @@ see [docs/notes/README.md](README.md) for the whole set.
     rows via the one shared `wireDragReorder`, scoped by
     `currentIds: sameGroupFilterIds(...)` so a drag across header sets is
     a structural no-op rather than a rule someone has to remember.
+- **Session comparison** (session.js) is counts in the panel and rows in
+  the grid, never rows in the panel. The first cut listed the differing
+  rows inside the modal, three columns of tag names per row: it read as
+  cramped at twenty rows and useless at two thousand, and the rows were
+  a copy of what the grid already shows. So `renderDiff` draws one line
+  per table with a count per kind (only-left, only-right, tagged
+  differently, notes) from the server's uncapped per-table tally
+  (`sources`), and each count calls `pivotDiff`, which sets
+  `S.diffMarks` (`{sourceId, left, right, rows: {rid: {tags, note}},
+  what, n, prevTree}`), opens the table if it isn't the one on screen,
+  and lands on a `rid IN` **cond** node through `replaceFilters` — nothing
+  else ANDed under it, so the grid shows the N rows the count promised.
+  `rid` is a column to both the raw validator and the condition compiler
+  via `Store.PHYSICAL_COLUMNS`, not a keyword. grid.js paints a
+  `.diff-mark` pill in the gutter for any row in `S.diffMarks` — A for
+  the left session, B for the right, A→B for both (`diffMarkNode` is the
+  one builder the legend and banner use too) — with both sides' tags and
+  notes in its title. The `#diffBanner` track above the grid is drawn
+  from `S.diffMarks` alone (`syncDiffBanner`, called on
+  `winnow:viewchange` — which the cached re-open path also dispatches —
+  and on tab switches), and Done lands on `prevTree`. The marks are
+  cleared by Done, by `clearAllFilters`, by opening another case and by
+  removing the table; put the rows back in the panel, or leave any of
+  those paths out, and the grid wears comparison chrome over a view that
+  isn't the comparison.
 - **The right-click surfaces** (row menu, column-header menu, table menu,
   header value picker) all hang off one floating-menu implementation in `static/js/ui.js` —
   `showFloating`/`placeFloating` plus the single `openMenuEl`/`openMenuAnchor`
@@ -251,7 +332,32 @@ see [docs/notes/README.md](README.md) for the whole set.
   (positioned at the pointer) and `anchoredPanel` (a card with real
   controls in it) as the three entry points. That's what makes "only one
   of these is open at a time, and Escape closes it" true across all of
-  them rather than four near-copies of the same two listeners. The
+  them rather than four near-copies of the same two listeners. An item
+  may carry `submenu` (an array, or a function for one that repaints —
+  the tag list's ✓) and opens a `.menu-sub` flyout beside itself on
+  hover or click; one per level, closed with the root or when a plain
+  sibling is hovered; a click on the parent opens (never toggles shut)
+  and the arrow keys walk it (Right opens, Left closes and refocuses the
+  parent); from outside the menu only Down/Up step in, so a caret in a
+  text field keeps its arrows. A flyout's identity is its parent item's
+  `key` (else its label) at its depth — never its position, which a
+  repaint shifts when Undo appears. A menu opened with
+  `{ pins: '<key>' }` lets submenu items that declare a stable `pinId`
+  be dragged or ☆-starred onto a **Pinned** section at its top
+  (`menuPins`, localStorage `winnow.menupins`). The root's context
+  (pin store + repaint) and each submenu button's item live in WeakMaps
+  (`MENU`, `BTN`) rather than on the nodes, and one `repaintAll` rebuilds
+  the root, re-binds every open flyout to its parent's new button,
+  refills and re-places it — after a keepOpen click, a pin, or a tag
+  hotkey pressed with the menu up (`repaintOpenMenus`) — so a pinned
+  tag's ✓ and its twin inside the flyout always agree, and a pinned
+  plugin action simply isn't shown while the plugin is off (the plugins
+  panel refreshes `S.pluginRowActions` on toggle for that). Tag pins key
+  on the tag's *name* (ids are per case file). The row menu is the one
+  using it: filters for the clicked column stay broken out, Tag / Add to
+  dashboard / Copy / Plugins fold into submenus, Undo sits at the top
+  level beside Tag, and rules fall where a fold meets something broken
+  out (no section is named in the loop). The
   column-header menu is the one that *replaced* a visible control rather
   than adding a surface: its `▾` (`.hcell-fmt`) cost a slot of every
   header's width, on every table, forever, to be opened rarely — the same
@@ -270,7 +376,9 @@ see [docs/notes/README.md](README.md) for the whole set.
   now the place per-row features are expected to land — a new action
   should be an entry, never surgery on a growing if-chain. Sections get
   `{pos, colName, colIndex, value}` and return items; an empty return is
-  skipped, separator and all. The row is re-resolved (`rowAt(ctx.pos)`) on
+  skipped. Sections are not separator-delimited any more: the only rules
+  are before and after the broken-out filter block (`cell`), and every
+  other section contributes one folded `{label, submenu}` entry. The row is re-resolved (`rowAt(ctx.pos)`) on
   every repaint rather than captured, because a keepOpen tag item
   re-renders after tagging and the bulk tag path clears the page cache
   underneath it. Scope follows the selection: right-clicking *inside* one
@@ -456,3 +564,13 @@ see [docs/notes/README.md](README.md) for the whole set.
   over the defaults and a stored map has no entry for an action that
   didn't exist. When retiring an alias later, remember both halves: the
   DEFAULT_KEYMAP entry and a migration for maps that carry it.
+
+- **Stack view** (stack.js) — the column-header menu's "Stack values (rarest first)…" opens a modal of the current view's distinct values by count (via group_summary, order=count direction=asc), drawn with charts.js. Click a bar to filter the grid to that value. Least-frequency-of-occurrence triage. See docs/design/analysis-suite.md.
+
+- **Case notes tab** (notes.js) — a free-form Markdown scratchpad for the investigation narrative, stored in the case file (Store.case_notes) so it travels with the .db, distinct from per-row notes. Edit/preview toggle, debounced autosave, a tiny dependency-free Markdown renderer (airgap). Page tabs now route visibility through sql.js's showMainView(id)/MAIN_VIEWS registry so adding a tab is a one-place edit. See docs/design/analysis-suite.md.
+
+- **IOC watchlist tab** (watchlist.js) — case-level indicators (Store.watchlist / watchlist_hits, in the .db) scanned across every table via the blob substring search-all uses; matches are counted, listed, and optionally auto-tagged through the normal tag path. Auto-scans new imports (jobs.js source-done hook). Import a list / paste / scan-all. See docs/design/analysis-suite.md.
+
+- **Entity pivot tab** (entity.js) — pick any value and see everywhere it appears across every table: per-source counts, which columns it landed in, a merged time histogram (charts.js) and a chronological evidence stream. Reachable from any cell's right-click ('Pivot on X'), the watchlist, or the tab's search box. Backend entity_pivot reuses the blob search + TS_NORMALIZE (shared with a future super-timeline). See docs/design/analysis-suite.md.
+
+- **Case dashboards** (dashboard.js, dashwidgets.js) — named boards of widgets, each a data source (sql via read-only run_sql, watchlist, tags) plus a render kind (stat/kv/chips/list/bar/histogram). Widgets are built from RECIPES (dashwidgets.js `WIDGET_TEMPLATES` + `widgetFrom`): a template, a table and the column/value it needs produce the SQL, the render, a `build` (the recipe, so the editor reopens guided) and a `drill` — `{table, where:[{column,op,value}] | tree: <filter-tree node>, column?, bucket?}` or `{table, spec}` for a count-of-this-view widget — which `drillInto` turns into the grid opened on those rows: `openSource(id, { skipBuild: true })`, every stashed filter/search/tag/timeframe reset, then one view build (placeholder tables resolve through `POST /api/dashboard/resolve`, which lists every source a `{{all:…}}` spans so the analyst picks one; a widget with SQL but no drill opens as a query in the SQL pane; a bucket the timeframe can't express is refused, and a bucket on a column not typed datetime filters by the label's prefix instead). The shipped KAPE drills are checked against their SQL on a fixture in tests/test_dashboard_drill.py: a stat's drill opens exactly the rows it counted. Hand-editing a recipe's SQL drops `build` and `drill` rather than leaving them describing a query they no longer match. Entry points that skip the editor: the column header menu (top values / distinct / over time), the row menu (count of this value) and the Filters menu (count of this view), all through `quickAddWidget`, which asks which board only when there are several. `createDashboard` offers a starting point — blank, a starter built from the open table (`buildStarter`: count, activity window, over time, top values of 2–12-distinct columns), a shipped board, or a library board. Layout lives in the case .db; 'Save as profile' extends a plugin bundle with the board. The shipped KAPE triage board carries hand-written drills (checked against the header sets in tests/test_dashboard_drill.py). See docs/design/analysis-suite.md.

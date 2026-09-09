@@ -46,6 +46,17 @@ def test_merge_raw_sql_validates_and_rejects_like_a_table(store, write_csv):
         store.validate_where_fragment(mid, "1; DROP TABLE x")
 
 
+def test_rid_filters_reach_every_member_of_a_merge(store, write_csv):
+    """`rid` is legal under the USING(rid) join shape, as a raw fragment
+    and as the condition node the session diff pivots with."""
+    _, _, mid = _mk(store, write_csv)
+    store.validate_where_fragment(mid, "rid IN (1)")
+    for tree in ({"type": "raw", "sql": "rid IN (1)"},
+                 {"type": "cond", "column": "rid", "op": "in", "value": ["1"]}):
+        v = store.build_view(mid, {"source_id": mid, "filters": [], "sort": [], "filter_tree": tree})
+        assert v["row_count"] == 2, tree   # rid 1 of each member
+
+
 def test_merge_spec_sql_carries_the_raw_fragment(store, write_csv):
     _, _, mid = _mk(store, write_csv)
     sql = store.spec_sql(mid, {"source_id": mid, "filters": [], "sort": [],

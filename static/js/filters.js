@@ -496,9 +496,16 @@ export function currentSourceHasFts() {
 
 export function updateSearchHint() {
   const hasFts = currentSourceHasFts();
-  if (S.searchMode === 'regex') $('searchMode').textContent = 'regex · full scan, slow on large sources';
-  else if (S.searchMode === 'advanced') $('searchMode').textContent = hasFts ? 'advanced · full-text' : 'advanced · substring chain';
-  else $('searchMode').textContent = 'substring';
+  const hint = $('searchMode');
+  if (S.searchMode === 'regex') hint.textContent = 'regex · full scan';
+  else if (S.searchMode === 'advanced') hint.textContent = hasFts ? 'advanced · full-text' : 'advanced · substring chain';
+  else hint.textContent = 'substring';
+  // The hint sits inside the box's right padding, which was a fixed 74px —
+  // the longer hints painted straight over the typed text. Size the padding
+  // to the hint; while the box is hidden (no layout yet) estimate from the
+  // 10px uppercase face and let the next call correct it.
+  const w = hint.offsetWidth || Math.ceil(hint.textContent.length * 6.7);
+  $('search').style.paddingRight = (w + 16) + 'px';
 }
 
 /* Generic multi-term AND/OR/NOT chip editor — shared by the toolbar's

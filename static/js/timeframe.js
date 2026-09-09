@@ -15,7 +15,7 @@ import { normalizeTree, S } from './state.js';
 import { openTablesManager } from './tables.js';
 import { loadTags } from './tags.js';
 import { baseColumns, columnMeta, parseTimestamp } from './tsformat.js';
-import { markModalAction, confirmDialog, modal, promptDialog } from './ui.js';
+import { datePickerButton, markModalAction, confirmDialog, modal, promptDialog } from './ui.js';
 import { rebuildView } from './view.js';
 
 /* ------------------------------------------------------ jump to timestamp */
@@ -59,7 +59,7 @@ export function openJumpTsModal() {
     input.style.cssText = 'flex:1;background:var(--ink);color:var(--text);border:1px solid var(--line-2);'
       + 'padding:6px 8px;font:inherit;font-family:var(--mono)';
     input.value = S.jumpTs.value || '';
-    row.append(el('span', null, 'Moment'), input);
+    row.append(el('span', null, 'Moment'), input, datePickerButton(input));
     b.append(row);
     b.append(el('p', 'fb-help', '24-hour time — the date alone, or date plus HH:MM, also work.'));
 
@@ -79,8 +79,8 @@ export function openJumpTsModal() {
     cancel.onclick = () => { $('modal').hidden = true; };
     actions.append(jumpBtn, cancel);
     b.append(actions);
-    setTimeout(() => { input.focus(); input.select(); }, 0);
-  });
+
+  }, { focus: 'input' });
 }
 
 export async function doJumpTs() {
@@ -227,7 +227,7 @@ export function openTimeRangeModal() {
       `Stays applied across filter/preset changes and table switches, unlike the regular filters — `
       + `toggle it on/off quickly with "${toggleKey}", or jump straight back to this dialog with "${openKey}".`));
 
-    const enabledLabel = el('label');
+    const enabledLabel = el('label', 'tf-enabled');
     const enabledCb = el('input');
     enabledCb.type = 'checkbox';
     enabledCb.checked = S.timeRange.enabled;
@@ -270,7 +270,7 @@ export function openTimeRangeModal() {
     startInput.placeholder = 'YYYY-MM-DD HH:MM:SS';
     startInput.style.cssText = inputStyle;
     startInput.value = S.timeRange.start || '';
-    startRow.append(el('span', null, 'Start'), startInput);
+    startRow.append(el('span', null, 'Start'), startInput, datePickerButton(startInput));
     b.append(startRow);
 
     const endRow = el('div', 'row-actions');
@@ -279,7 +279,7 @@ export function openTimeRangeModal() {
     endInput.placeholder = 'YYYY-MM-DD HH:MM:SS';
     endInput.style.cssText = inputStyle;
     endInput.value = S.timeRange.end || '';
-    endRow.append(el('span', null, 'End'), endInput);
+    endRow.append(el('span', null, 'End'), endInput, datePickerButton(endInput));
     b.append(endRow);
     b.append(el('p', 'fb-help', '24-hour time, e.g. 2024-01-05 13:22:01 — the date alone, or date plus HH:MM, also work.'));
 

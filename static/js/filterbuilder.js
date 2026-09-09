@@ -2,11 +2,13 @@
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { $, api, debounce, el, post, toast } from './core.js';
+import { parseFilter, setColumnFilter } from './filters.js';
 import { checkPresets } from './savedfilters.js';
+import { setGrouping } from './grouping.js';
 import { S, normalizeTree } from './state.js';
 import { currentFilterPayload, openSavedFiltersModal, updateFiltersButton } from './timeframe.js';
 import { baseColumns } from './tsformat.js';
-import { markModalAction, modal, promptDialog } from './ui.js';
+import { datePickerButton, markModalAction, modal, promptDialog } from './ui.js';
 import { rebuildView } from './view.js';
 
 /* --------------------------------------------------------- filter builder */
@@ -215,6 +217,10 @@ export function renderCondRow(node, onStructural, onPreview) {
       onPreview();
     };
     row.append(inp);
+    // A datetime column's value is a date string — offer the calendar
+    // (datePickerButton dispatches 'input', so oninput above still fires).
+    const colType = S.columns.find((c) => c.name === node.column)?.type;
+    if (node.op !== 'in' && colType === 'datetime') row.append(datePickerButton(inp));
   }
   return row;
 }
@@ -275,6 +281,29 @@ export function renderFilterGroup(node, onStructural, onPreview, isRoot) {
 export function openFilterBuilder(editing = null) {
   markModalAction('openFilterBuilder');
   S.filterTree = normalizeTree(S.filterTree); // a cond root would render as an empty editor
+  // Absorb the header boxes' quick filters into the tree, so the builder
+  // opens showing EVERYTHING currently narrowing the grid — an applied
+  // saved filter already lives in S.filterTree, but a `=H1` typed into a
+  // column box (or written by the value picker) lived only in S.filters
+  // and the builder opened looking empty. The condition MOVES rather than
+  // copies (the absorbed box is cleared via setColumnFilter, which keeps
+  // the visible input in step): both states describe the same rows, so
+  // nothing needs rebuilding until Apply, and a copy would double every
+  // condition on the next open. parseFilter's op vocabulary is a subset of
+  // the builder's, so the translation is 1:1; raw-SQL mode can't hold a
+  // structured condition, so quick filters stay put there.
+  if (S.filterTree.type !== 'raw') {
+    for (const [column, raw] of Object.entries(S.filters)) {
+      const parsed = parseFilter(raw || '');
+      if (!parsed) continue;
+      S.filterTree.children = S.filterTree.children || [];
+      S.filterTree.children.push({
+        type: 'cond', column, op: parsed.op,
+        value: OP_NO_VALUE.has(parsed.op) ? '' : parsed.value,
+      });
+      setColumnFilter(column, '');
+    }
+  }
   modal(editing ? `Edit filter — ${editing.name}` : 'Filter builder', (b) => {
     const help = el('p', 'fb-help',
       'Build filters visually, or type/paste SQL directly below — edits sync both ways when the SQL is simple enough to parse back into the structured editor.');
@@ -323,12 +352,58 @@ export function openFilterBuilder(editing = null) {
       validateLive(text);
     };
 
-    b.append(help, treeContainer, sqlLabel, sqlBox, status);
+    // Group by — editable here so a filter can carry a grouping the way the
+    // shipped defaults do (currentFilterPayload serializes S.groupByCols when
+    // set; applying a saved filter restores it via setGrouping). Local until
+    // Apply, then setGrouping + the doApply rebuild lay it on the grid.
+    let gbCols = [...S.groupByCols];
+    let gbSort = S.groupSort;
+    let gbDir = S.groupSortDir;
+    const gbWrap = el('div', 'fb-groupby');
+    function renderGroupBy() {
+      gbWrap.replaceChildren();
+      gbWrap.append(el('div', 'fb-groupby-label', 'Group by'));
+      const chips = el('div', 'fb-groupby-chips');
+      gbCols.forEach((name, i) => {
+        const chip = el('span', 'fb-groupby-chip', name);
+        const rm = el('button', 'fb-groupby-rm', '✕');
+        rm.title = 'Remove from grouping';
+        rm.onclick = () => { gbCols.splice(i, 1); renderGroupBy(); };
+        chip.append(rm);
+        chips.append(chip);
+      });
+      const add = el('select', 'fb-groupby-add');
+      add.append(new Option(gbCols.length ? '+ nested level…' : '(no grouping)', ''));
+      for (const c of S.columns) if (!gbCols.includes(c.name)) add.append(new Option(c.name, c.name));
+      add.onchange = () => { if (add.value) { gbCols.push(add.value); renderGroupBy(); } };
+      chips.append(add);
+      gbWrap.append(chips);
+      if (gbCols.length) {
+        const sortRow = el('div', 'fb-groupby-sort');
+        sortRow.append(el('span', 'fb-groupby-sublabel', 'order groups'));
+        const by = el('select');
+        for (const [v, l] of [['count', 'by count'], ['value', 'by value']]) by.append(new Option(l, v));
+        by.value = gbSort;
+        by.onchange = () => { gbSort = by.value; };
+        const dir = el('select');
+        for (const [v, l] of [['desc', 'high → low'], ['asc', 'low → high']]) dir.append(new Option(l, v));
+        dir.value = gbDir;
+        dir.onchange = () => { gbDir = dir.value; };
+        sortRow.append(by, dir);
+        gbWrap.append(sortRow);
+      }
+    }
+    renderGroupBy();
+
+    b.append(help, treeContainer, sqlLabel, sqlBox, status, gbWrap);
 
     const actions = el('div', 'row-actions');
     const apply = el('button', 'btn', 'Apply');
     apply.onclick = () => {
       const doApply = () => {
+        // Grouping first — setGrouping only updates state; the rebuild below
+        // (its regroupAll) is what lays it on the grid.
+        setGrouping(gbCols, gbSort, gbDir);
         $('modal').hidden = true;
         updateFiltersButton();
         rebuildView({ keepScroll: false });

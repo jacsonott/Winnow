@@ -9,25 +9,26 @@ import pytest
 pytestmark = pytest.mark.ui
 
 
-def test_right_click_opens_the_menu_with_its_sections(page):
-    cell = page.locator(".row").nth(2).locator(".cell").nth(1)
-    cell.click(button="right")
-    menu = page.locator(".menu")
-    menu.wait_for(state="visible")
+def test_right_click_opens_the_menu_with_its_sections(page, row_menu, flyout):
+    menu = row_menu(row=2, cell=1)
     text = menu.inner_text()
-    # One stable item from each registered section: clipboard ops and the
-    # tag list (default tags are seeded into every new case).
-    assert "Copy cell" in text
-    assert "Copy" in text and "with headers" in text
+    # One stable entry from each registered section at the top level: the
+    # Tag and Copy submenus and the clicked column's filters.
+    assert "Tag this row" in text and "Copy" in text and "Filter to" in text
+    # The tag list (default tags are seeded into every new case) is a click away.
+    flyout("Tag this row")
+    sub = page.locator(".menu-sub").inner_text()
     tag_names = page.evaluate("() => __winnow.S.tags.map((t) => t.name)")
-    assert any(n in text for n in tag_names)
+    assert any(n in sub for n in tag_names)
     page.keyboard.press("Escape")
-    assert page.locator(".menu").count() == 0
+    assert page.locator(".menu").count() == 0   # root and flyout both gone
 
 
 def test_menu_closes_on_outside_click(page):
     page.locator(".row").nth(2).locator(".cell").nth(1).click(button="right")
     page.locator(".menu").wait_for(state="visible")
     page.locator("#toolbar, header.bar").first.click(force=True)
-    page.wait_for_timeout(150)
-    assert page.locator(".menu").count() == 0
+    # The claim is "closes on an outside click", not "within N ms" — a
+    # fixed wait flaked on busy CI runners twice, and 5s flaked on a third.
+    # Playwright's default (30s) is the honest bound for "eventually".
+    page.wait_for_selector(".menu", state="detached")

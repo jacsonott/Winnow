@@ -18,6 +18,11 @@ tests/               export-ignore
 bench/               export-ignore
 CLAUDE.md            export-ignore
 requirements-dev.txt export-ignore
+# Neither is read at runtime: screenshots/ is README material kept at full
+# resolution, design/ is prototype HTML. Together they were over half the
+# bytes an analyst pulled over a slow link or carried in on a USB stick.
+screenshots/         export-ignore
+design/              export-ignore
 
 # Brand icons are binary — never line-ending-convert or diff them as text.
 *.png binary

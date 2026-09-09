@@ -2,6 +2,7 @@
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { $, api, el, post, toast } from './core.js';
+import { addViewCountWidget } from './dashboard.js';
 import { openFilterBuilder } from './filterbuilder.js';
 import { renderAdvancedChips, renderTermChips, updateSearchHint } from './filters.js';
 import { applyPreset, matchingSavedFilters } from './savedfilters.js';
@@ -290,6 +291,23 @@ export function openSearchAllModal() {
         : 'All of those terms are already in the list');
     };
     impLabel.append(impInput);
+    // The terms you're about to sweep for are usually exactly the IOCs
+    // worth watching as new data lands — add them to the watchlist in one
+    // click (it dedupes against what's already there, then scans).
+    const wlBtn = el('button', 'btn ghost', 'Add to watchlist');
+    wlBtn.title = 'Add these terms to the case watchlist and scan every table for them';
+    wlBtn.onclick = async () => {
+      const terms = searchAllTerms(st).filter((t) => !t.exclude).map((t) => t.term.trim()).filter(Boolean);
+      if (!terms.length) { toast('Enter a term or two first'); return; }
+      try {
+        const r = await post('/api/watchlist/import', { text: terms.join('\n'), kind: 'other' });
+        await post('/api/watchlist/scan', {});
+        const dupes = terms.length - r.added;
+        toast(r.added
+          ? `${r.added} added to the watchlist${dupes > 0 ? ` · ${dupes} already there` : ''}`
+          : 'All of those are already on the watchlist', 5000);
+      } catch (e) { toast('Could not add to the watchlist: ' + e.message, 6000); }
+    };
     const searchBtn = el('button', 'btn', 'Search  ⌘⏎');
     const cancelBtn = el('button', 'btn ghost', 'Stop');
     cancelBtn.title = 'Stop the sweep — tables already counted keep their results';
@@ -298,7 +316,7 @@ export function openSearchAllModal() {
       try { await post(`/api/search_all/cancel?job_id=${st.jobId}`, {}); } catch { /* already gone */ }
     };
     const progress = el('span', 'search-all-progress');
-    searchActs.append(searchBtn, impLabel, cancelBtn, progress);
+    searchActs.append(searchBtn, impLabel, wlBtn, cancelBtn, progress);
     b.append(searchActs);
 
     const results = el('div', 'search-all-results');
@@ -421,6 +439,11 @@ $('btnFilters').onclick = () => dropdownMenu($('btnFilters'), () => {
     { label: 'Filter builder…', onclick: openFilterBuilder },
     { label: 'Saved filters…', onclick: openSavedFiltersModal },
   ];
+  if (S.sourceId != null && S.sourceId >= 0) {
+    items.push({ label: 'Add to dashboard: count of this view',
+      title: 'A number on a dashboard — the rows this view shows now — that reopens the view when clicked',
+      onclick: () => addViewCountWidget() });
+  }
   // The suggestion banner's chips, relocated: saved filters matching the
   // open table's columns apply straight from here (the button's accent
   // ring is what says they exist — see updateFiltersButton).

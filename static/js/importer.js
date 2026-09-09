@@ -2,12 +2,12 @@
 SQLite table picker, folder import, and OS drag-and-drop.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { $, api, debounce, el, post, toast } from './core.js';
+import { $, api, debounce, dragHas, el, post, toast } from './core.js';
 import { maybeOfferAssociation } from './assoc.js';
 import { openFolderBrowser } from './home.js';
 import { startJobsPoll, uploadWithProgress } from './jobs.js';
-import { RECOGNIZED_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, extOf, importKindFor, openImportPreview, openJsonImportPreview } from './merge.js';
-import { renderPluginTabs } from './plugins.js';
+import { ARCHIVE_IMPORT_EXTENSIONS, PLASO_IMPORT_EXTENSIONS, RECOGNIZED_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, extOf, importKindFor, openImportPreview, openJsonImportPreview } from './merge.js';
+import { renderPluginTabs, renderPluginPanelButtons } from './plugins.js';
 import { fmtBytes } from './tables.js';
 import { loadSources } from './sources.js';
 import { S } from './state.js';
@@ -24,10 +24,13 @@ export async function loadPlugins() {
     S.plugins = r.plugins || [];
     S.pluginFormats = r.formats || [];
     S.pluginTabs = r.tabs || [];
+    S.pluginRowActions = r.row_actions || [];
+    S.pluginPanels = r.panels || [];
     S.pluginDirs = r.dirs || [];
     S.pluginsCaseOpen = !!r.case_open;
-  } catch { S.plugins = []; S.pluginFormats = []; S.pluginTabs = []; S.pluginDirs = []; S.pluginsCaseOpen = false; }
+  } catch { S.plugins = []; S.pluginFormats = []; S.pluginTabs = []; S.pluginRowActions = []; S.pluginPanels = []; S.pluginDirs = []; S.pluginsCaseOpen = false; }
   renderPluginTabs();
+  renderPluginPanelButtons();
 }
 
 /* fnmatch-lite for plugin filename_patterns ($MFT, *$UsnJrnl*) — the same
@@ -45,7 +48,7 @@ export function globMatches(pattern, name) {
 export function pluginFormatFor(filename) {
   const base = filename.split(/[\\/]/).pop();
   const ext = extOf(base);
-  if (RECOGNIZED_IMPORT_EXTENSIONS.includes(ext) || SQLITE_IMPORT_EXTENSIONS.includes(ext) || XLSX_IMPORT_EXTENSIONS.includes(ext)) return null;
+  if (RECOGNIZED_IMPORT_EXTENSIONS.includes(ext) || SQLITE_IMPORT_EXTENSIONS.includes(ext) || XLSX_IMPORT_EXTENSIONS.includes(ext) || PLASO_IMPORT_EXTENSIONS.includes(ext) || ARCHIVE_IMPORT_EXTENSIONS.includes(ext)) return null;
   return S.pluginFormats.find((f) =>
     (ext && (f.extensions || []).includes(ext))
     || (f.filename_patterns || []).some((p) => globMatches(p, base))) || null;
@@ -107,6 +110,10 @@ export function queueItem(transport, name, fmt = pluginFormatFor(name)) {
   const kind = importKindFor(name);
   return kind === 'json' ? { ...transport, name, kind, flatten_mode: 'none', flatten_depth: 1, configured: false }
     : kind === 'sqlite' || kind === 'xlsx' ? { ...transport, name, kind, tables: null, configured: false }
+    // A .plaso is one file → one timeline table with nothing to configure.
+    : kind === 'plaso' ? { ...transport, name, kind, configured: true }
+    // An archive expands on import, then you pick files from its contents.
+    : kind === 'archive' ? { ...transport, name, kind, configured: true }
     : { ...transport, name, kind, delimiter: null, has_header: true, column_types: null, configured: false };
 }
 
@@ -198,6 +205,14 @@ export function openImportModal() {
           cfg.disabled = true;
           cfg.title = 'This plugin format has no options';
         }
+        if (item.kind === 'plaso') {
+          cfg.disabled = true;
+          cfg.title = 'A Plaso storage file imports as one flat timeline table — nothing to configure';
+        }
+        if (item.kind === 'archive') {
+          cfg.disabled = true;
+          cfg.title = 'Expands on import (nested archives included) — you pick the files from its contents next';
+        }
         cfg.onclick = () => {
           if (item.kind === 'plugin') {
             openPluginOptionsForm(item, {
@@ -250,7 +265,7 @@ export function openImportModal() {
     addLabel.title = 'A regular browser file picker — the file is copied up to the server before importing';
     const addInput = el('input');
     addInput.type = 'file';
-    addInput.accept = [...RECOGNIZED_IMPORT_EXTENSIONS, ...SQLITE_IMPORT_EXTENSIONS, ...XLSX_IMPORT_EXTENSIONS, ...pluginExtensions()].join(',');
+    addInput.accept = [...RECOGNIZED_IMPORT_EXTENSIONS, ...SQLITE_IMPORT_EXTENSIONS, ...XLSX_IMPORT_EXTENSIONS, ...PLASO_IMPORT_EXTENSIONS, ...ARCHIVE_IMPORT_EXTENSIONS, ...pluginExtensions()].join(',');
     addInput.multiple = true;
     addInput.hidden = true;
     addInput.onchange = () => {
@@ -285,7 +300,27 @@ export function openImportModal() {
         // the loop; the directory-import loop does the same, for the same
         // reason.
         let pluginOk = 0;
+        const expanded = [];   // archive expansion reports, handed to directory import below
         for (const item of queue) {
+          if (item.kind === 'archive') {
+            toast(`Expanding ${item.name}\u2026`, 60000);
+            try {
+              const rep = item.path
+                ? await post('/api/ingest/archive/expand', { path: item.path })
+                : await (() => {
+                  const fd = new FormData();
+                  fd.append('file', item.file);
+                  return uploadWithProgress('/api/ingest/archive/upload', fd, item.name);
+                })();
+              expanded.push({ name: item.name, ...rep });
+              toast(`Expanded ${item.name}: ${rep.files.toLocaleString()} file${rep.files === 1 ? '' : 's'}`
+                + (rep.archives > 1 ? ` from ${rep.archives} nested archives` : '')
+                + (rep.truncated ? ' (stopped at a safety cap — partial)' : ''), 6000);
+            } catch (e) {
+              if (!e.cancelled) toast(`Could not expand ${item.name}: ` + e.message, 8000);
+            }
+            continue;
+          }
           // Two transports, chosen by how the item arrived — a path item
           // (the "Add from this machine…" picker, directory import) reads
           // in place with no upload leg; a browser-picked File uploads.
@@ -358,6 +393,14 @@ export function openImportModal() {
         // The analyst just opened these types with Winnow — the moment
         // the one-time Open With offer is actually justified.
         maybeOfferAssociation(queue.map((i) => i.name));
+        // Expanded archives hand off to directory import — the flow that
+        // already owns extension gates, include/exclude and the sidebar
+        // folder mirror. One modal, rooted at the first expansion; other
+        // roots are announced for a follow-up pass.
+        if (expanded.length) {
+          for (const r of expanded.slice(1)) toast(`Also expanded to ${r.root} — import it via Case \u2192 Import \u2192 folder`, 10000);
+          openDirectoryImportModal({ root: expanded[0].root });
+        }
       })();
     };
     queueActs.append(pathBtn, addLabel, folderBtn, importAll);
@@ -548,7 +591,7 @@ function openUnitPicker(src, { initial, onConfirm, onCancel } = {}, cfg) {
    hides too early) as the pointer passes over any child element. */
 export function wireFileDrop() {
   let depth = 0;
-  const isFileDrag = (e) => !!(e.dataTransfer && e.dataTransfer.types && e.dataTransfer.types.includes('Files'));
+  const isFileDrag = (e) => dragHas(e, 'Files');
 
   window.addEventListener('dragenter', (e) => {
     if (!isFileDrag(e)) return;
@@ -591,6 +634,8 @@ export function recognizedImportFile(name) {
   return RECOGNIZED_IMPORT_EXTENSIONS.includes(extOf(name))
     || SQLITE_IMPORT_EXTENSIONS.includes(extOf(name))
     || XLSX_IMPORT_EXTENSIONS.includes(extOf(name))
+    || PLASO_IMPORT_EXTENSIONS.includes(extOf(name))
+    || ARCHIVE_IMPORT_EXTENSIONS.includes(extOf(name))
     || !!pluginFormatFor(name);
 }
 
@@ -644,7 +689,7 @@ export async function openDirectoryImportModal(state = {}) {
     root: state.root || null,
     profileId: state.profileId || null,
     recursive: state.recursive ?? true,
-    extensions: state.extensions || RECOGNIZED_IMPORT_EXTENSIONS.concat(pluginExtensions()),
+    extensions: state.extensions || RECOGNIZED_IMPORT_EXTENSIONS.concat(PLASO_IMPORT_EXTENSIONS, pluginExtensions()),
     includeText: state.includeText || '',
     excludeText: state.excludeText || '',
   };
@@ -767,7 +812,7 @@ export async function openDirectoryImportModal(state = {}) {
         ...st,
         profileId: id,
         recursive: p ? p.recursive : true,
-        extensions: (p && p.extensions) || RECOGNIZED_IMPORT_EXTENSIONS.concat(pluginExtensions()),
+        extensions: (p && p.extensions) || RECOGNIZED_IMPORT_EXTENSIONS.concat(PLASO_IMPORT_EXTENSIONS, pluginExtensions()),
         includeText: p ? (p.include_patterns || []).join('\n') : '',
         excludeText: p ? (p.exclude_patterns || []).join('\n') : '',
       });
@@ -799,7 +844,7 @@ export async function openDirectoryImportModal(state = {}) {
     b.append(el('label', null, 'File types'));
     const extRow = el('div', 'row-actions');
     extRow.style.flexWrap = 'wrap';
-    for (const ext of RECOGNIZED_IMPORT_EXTENSIONS.concat(pluginExtensions())) {
+    for (const ext of RECOGNIZED_IMPORT_EXTENSIONS.concat(PLASO_IMPORT_EXTENSIONS, pluginExtensions())) {
       const chip = el('button', 'btn ghost', ext);
       chip.setAttribute('aria-pressed', String(st.extensions.includes(ext)));
       chip.onclick = () => {
@@ -884,15 +929,22 @@ export async function openDirectoryImportModal(state = {}) {
         // built-in kinds. A scan-matched extension no loaded plugin claims
         // falls through to the delimited parser, the pre-plugin behavior.
         const fmt = m.kind === 'plugin' ? pluginFormatFor(m.path) : null;
+        // Reproduce the on-disk tree in the sidebar: the file's basename is
+        // the table name, and its nested directory (posix, "" at the scan
+        // root) becomes the folder the server files it under. This replaces
+        // the old behaviour of stuffing the whole rel_path into the name.
+        const slash = m.rel_path.lastIndexOf('/');
+        const base = slash === -1 ? m.rel_path : m.rel_path.slice(slash + 1);
+        const folder_path = slash === -1 ? '' : m.rel_path.slice(0, slash);
         try {
           if (fmt) {
             toast(`Importing ${m.rel_path}…`, 60000);
             await post('/api/ingest/plugin/path', {
-              path: m.path, name: m.rel_path, format_id: fmt.id, options: defaultPluginOptions(fmt),
+              path: m.path, name: base, folder_path, format_id: fmt.id, options: defaultPluginOptions(fmt),
             });
             pluginOk++;
           } else {
-            await post('/api/ingest/jobs/path', { path: m.path, name: m.rel_path, kind: m.kind === 'json' ? 'json' : 'csv' });
+            await post('/api/ingest/jobs/path', { path: m.path, name: base, folder_path, kind: ['json', 'plaso'].includes(m.kind) ? m.kind : 'csv' });
           }
           ok++;
         } catch (e) {

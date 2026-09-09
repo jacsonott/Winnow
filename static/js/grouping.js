@@ -10,6 +10,7 @@ import { openRowContextMenu } from './rowmenu.js';
 import { S, selClear, selCount, selHas, selPositions, selRemap, selSetRange } from './state.js';
 import { BULK_TAG_CONFIRM_AT, refreshTagCounts, refreshUndoState, renderTagRibbon } from './tags.js';
 import { confirmDialog, contextMenu, dropdownMenu } from './ui.js';
+import { displayCell } from './tsformat.js';
 import { rebuildView } from './view.js';
 
 /* ----------------------------------------------------------------- group-by */
@@ -606,6 +607,7 @@ export function groupByTagButton() {
 export function renderGroupStrip() {
   const strip = $('groupStrip');
   strip.replaceChildren();
+  strip.classList.toggle('has-groups', S.groupByCols.length > 0);
   strip.append(el('span', 'group-strip-label', 'Group by'));
   if (!S.groupByCols.length) {
     strip.append(el('span', 'group-strip-hint', 'drag a column header here'));
@@ -704,7 +706,7 @@ export async function tagWholeGroup(g, tag, on) {
   render();
   drawRail();
   regroupIfGroupedByTag();
-  refreshUndoState();
+  await refreshUndoState();
   const affected = res.affected != null ? res.affected : n;
   toast(`${on ? 'Tagged' : 'Untagged'} ${affected.toLocaleString()} row${affected === 1 ? '' : 's'} · ${tag.name}`);
 }
@@ -720,9 +722,9 @@ export function groupRowSpan(gi) {
 }
 
 /* Flipped by the menu's own "Remove a tag instead" item, which repaints
-   through fillMenuNode's rerender rather than opening a second surface. A
+   through the menu's own repaint rather than opening a second surface. A
    group is a set of rows with mixed tags, so there's no single row to read
-   a ✓ off the way rowMenuTagItems does — apply and remove have to be two
+   a ✓ off the way rowMenuTagList does — apply and remove have to be two
    explicit choices rather than one toggle. Module-level (not per-menu)
    because the menu is a singleton; reset every time one opens. */
 export let groupMenuUntagMode = false;
@@ -922,7 +924,10 @@ export async function copySelectedCells(withHeaders) {
       if (S.groupByCols.length && !groupCoordAt(pos)) continue;
       const r = rowAt(pos);
       if (!r) throw new Error(`row ${pos + 1} could not be loaded`);
-      lines.push(cols.map((name) => (r.cells[colIdx[name]] ?? '')).join('\t'));
+      // What's copied is what's shown: a column's chosen timestamp or
+      // duration format applies here exactly as it does in the grid, so
+      // a pasted timeline reads the way the analyst had it on screen.
+      lines.push(cols.map((name) => displayCell(name, r.cells[colIdx[name]] ?? '')).join('\t'));
     }
     return lines.join('\n');
   })();
@@ -945,7 +950,7 @@ export async function copyRowsAsText(positions, withHeaders) {
     for (const pos of positions) {
       const r = rowAt(pos);
       if (!r) throw new Error(`row ${pos + 1} could not be loaded`);
-      lines.push(cols.map((name) => (r.cells[colIdx[name]] ?? '')).join('\t'));
+      lines.push(cols.map((name) => displayCell(name, r.cells[colIdx[name]] ?? '')).join('\t'));
     }
     return lines.join('\n');
   })();

@@ -37,6 +37,9 @@ stores longer than it was true:
                            than silently turning it all off
   plugin_bundles.json     named sets of plugins ("case types") applied
                            together from Settings → Plugins
+  dashboards.json         the dashboard library — boards saved machine-wide
+                           from a board's "Save to library…" and added to any
+                           case from the sidebar's Dashboards → Library rows
   app_settings.json       app-wide display preferences, e.g. the default
                            timestamp format for cases that don't set their
                            own — a case's own choice lives in the case
@@ -159,6 +162,7 @@ def _read(name: str, default: Any) -> Any:
 
 def _write(name: str, data: Any) -> None:
     path = _ensure_dir() / name
+    path.parent.mkdir(parents=True, exist_ok=True)   # plugin_data/<name>.json nests one level
     tmp = path.with_suffix(path.suffix + ".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
@@ -783,10 +787,20 @@ class AppSettings:
         with _LOCK:
             return {**self.DEFAULTS, **_read(self.FILE, {})}
 
+    # The look (skin/theme/accent/splash) is saved here as well as in
+    # localStorage. Browser storage is per-ORIGIN, and an association
+    # quick-look starts a server on a free port — a different origin, so it
+    # came up in the default skin every time. The machine copy is what a
+    # fresh origin adopts on boot; localStorage stays the flash-free cache.
+    APPEARANCE_KEYS = {"style", "themeMode", "accent", "accentCustomized", "splash", "density", "pagesMenu"}
+
     def save(self, values: dict) -> dict:
         fmt = values.get("default_ts_format")
         if fmt is not None and fmt not in self.TS_FORMATS:
             raise ValueError(f"Unknown timestamp format: {fmt}")
+        look = values.get("appearance")
+        if look is not None and not isinstance(look, dict):
+            raise ValueError("appearance must be an object")
         if "remote_session" in values:
             # Whether THIS MACHINE is reached over RDP is a machine fact,
             # which is why it lives here and not in localStorage: browser
@@ -800,6 +814,8 @@ class AppSettings:
                 current["default_ts_format"] = fmt
             if "remote_session" in values:
                 current["remote_session"] = values["remote_session"]
+            if look is not None:
+                current["appearance"] = {k: v for k, v in look.items() if k in self.APPEARANCE_KEYS}
             _write(self.FILE, current)
             return current
 
@@ -826,6 +842,56 @@ class MachinePrefs:
             _write(self.FILE, data)
 
 
+class PluginData:
+    """Per-plugin persistent state, one JSON document per plugin fs name —
+    the machine-level storage a plugin's routes see as `req.storage`.
+    workspace/ because it's workflow state exactly like saved filters:
+    a plugin's saved defaults should survive case switches and updates
+    (workspace/ is in updater.PROTECTED), and must never live inside a
+    case file another analyst will receive."""
+
+    DIR = "plugin_data"
+
+    def __init__(self, fs_name: str):
+        # The fs name comes from a directory listing, but belt-and-braces:
+        # it becomes a filename, so it must never traverse.
+        safe = "".join(ch for ch in fs_name if ch.isalnum() or ch in "-_.") or "plugin"
+        self._file = f"{self.DIR}/{safe}.json"
+
+    def get(self) -> dict:
+        with _LOCK:
+            data = _read(self._file, {})
+            return data if isinstance(data, dict) else {}
+
+    def set(self, data: dict) -> dict:
+        if not isinstance(data, dict):
+            raise ValueError("Plugin storage holds one JSON object")
+        with _LOCK:
+            _write(self._file, data)
+        return data
+
+    def update(self, fn) -> dict:
+        """Read-modify-write under the workspace lock: `fn(current)` returns
+        the new document (or mutates and returns None).
+
+        `get()` then `set()` is two operations, and plugin route handlers
+        run in a threadpool — two of the same plugin's requests overlapping
+        would each read the same document and the later write would drop the
+        earlier one's change. This is the way to do it when the new value
+        depends on the old."""
+        with _LOCK:
+            data = _read(self._file, {})
+            if not isinstance(data, dict):
+                data = {}
+            out = fn(data)
+            if out is None:
+                out = data
+            if not isinstance(out, dict):
+                raise ValueError("Plugin storage holds one JSON object")
+            _write(self._file, out)
+            return out
+
+
 class PluginBundles:
     """Named per-machine sets of plugins — "case types". A triage bundle
     enables lateral movement + system-info plugins, a BEC bundle the
@@ -837,9 +903,35 @@ class PluginBundles:
 
     FILE = "plugin_bundles.json"
 
+    @staticmethod
+    def _shipped() -> list[dict]:
+        """Shipped default profiles (defaults/profiles.json), given negative
+        ids and a shipped flag so they list alongside saved bundles but
+        can't be overwritten in place — Save-as makes an editable copy."""
+        from . import defaults
+        out = []
+        for i, prof in enumerate(defaults.profiles()):
+            out.append({"id": -(i + 1), "shipped": True, "name": prof["name"],
+                        "description": prof.get("description", ""),
+                        "plugins": list(prof.get("plugins") or []),
+                        "watchlist": list(prof.get("watchlist") or []),
+                        "dashboard": list(prof.get("dashboard") or []),
+                        "dashboards": list(prof.get("dashboards") or []),
+                        "variables": list(prof.get("variables") or [])})
+        return out
+
     def list(self) -> list[dict]:
         with _LOCK:
-            return _read(self.FILE, {"bundles": []})["bundles"]
+            saved = _read(self.FILE, {"bundles": []})["bundles"]
+        for b in saved:      # fields added after a bundle was first written
+            b.setdefault("description", "")
+            b.setdefault("dashboards", [])
+            b.setdefault("variables", [])
+        try:
+            shipped = self._shipped()
+        except Exception:  # noqa: BLE001 — a broken profiles.json must not hide saved bundles
+            shipped = []
+        return shipped + saved
 
     def get(self, bundle_id: int) -> dict:
         for b in self.list():
@@ -847,8 +939,15 @@ class PluginBundles:
                 return b
         raise KeyError(f"No bundle {bundle_id}")
 
-    def save(self, name: str, plugins: list[str]) -> dict:
-        """Upsert by name — 'Triage' means one thing per machine."""
+    def save(self, name: str, plugins: list[str], dashboard: list | None = None,
+             variables: list | None = None, dashboards: list | None = None,
+             description: str | None = None) -> dict:
+        """Upsert by name — 'Triage' means one thing per machine. A bundle
+        is a PROFILE: its plugins plus an optional dashboard (a list of
+        widget definitions) and optional variable DEFINITIONS
+        ([{name, label?, description?, required?, default?}] — never
+        values, a profile is a template), so 'how I analyze this kind of
+        case' is one saveable, shareable thing."""
         name = (name or "").strip()
         if not name:
             raise ValueError("Name the bundle")
@@ -861,9 +960,21 @@ class PluginBundles:
             existing = next((b for b in items if b["name"].lower() == name.lower()), None)
             if existing:
                 existing["plugins"] = plugins
+                if dashboard is not None:
+                    existing["dashboard"] = dashboard
+                if variables is not None:
+                    existing["variables"] = variables
+                if dashboards is not None:
+                    existing["dashboards"] = dashboards
+                if description is not None:
+                    existing["description"] = description[:400]
                 rec = existing
             else:
-                rec = {"id": _next_id(items), "name": name, "plugins": plugins, "created_at": _now()}
+                rec = {"id": _next_id(items), "name": name, "plugins": plugins,
+                       "description": (description or "")[:400],
+                       "dashboard": dashboard or [], "dashboards": dashboards or [],
+                       "variables": variables or [],
+                       "created_at": _now()}
                 items.append(rec)
             _write(self.FILE, data)
             return rec
@@ -875,6 +986,55 @@ class PluginBundles:
             _write(self.FILE, data)
 
 
+class DashboardLibrary:
+    """Dashboards saved MACHINE-WIDE (workspace/dashboards.json), not into
+    any one case: a board built for one engagement is usually wanted on
+    the next one of the same kind. A profile (PluginBundles) also carries a
+    board, but a profile is plugins + watchlist + board applied as a unit;
+    the library is just boards, added to a case one at a time. Upsert by
+    name — 'Host overview' means one thing per machine."""
+
+    FILE = "dashboards.json"
+
+    def list(self) -> list[dict]:
+        with _LOCK:
+            return _read(self.FILE, {"dashboards": []})["dashboards"]
+
+    def get(self, board_id: int) -> dict:
+        for b in self.list():
+            if b["id"] == board_id:
+                return b
+        raise KeyError(f"No library dashboard {board_id}")
+
+    def save(self, name: str, widgets: list) -> dict:
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("Name the dashboard")
+        if len(name) > 200:
+            raise ValueError("Dashboard name is too long")
+        if not isinstance(widgets, list):
+            raise ValueError("A dashboard is a list of widgets")
+        with _LOCK:
+            data = _read(self.FILE, {"dashboards": []})
+            items = data["dashboards"]
+            existing = next((b for b in items if b["name"].lower() == name.lower()), None)
+            if existing:
+                existing["widgets"] = widgets
+                existing["updated_at"] = _now()
+                rec = existing
+            else:
+                rec = {"id": _next_id(items), "name": name, "widgets": widgets, "created_at": _now()}
+                items.append(rec)
+            _write(self.FILE, data)
+            return rec
+
+    def delete(self, board_id: int) -> None:
+        with _LOCK:
+            data = _read(self.FILE, {"dashboards": []})
+            data["dashboards"] = [b for b in data["dashboards"] if b["id"] != board_id]
+            _write(self.FILE, data)
+
+
 filters = SavedFilters()
 header_nicknames = HeaderNicknames()
 timeline_templates = TimelineTemplates()
@@ -883,5 +1043,6 @@ column_layouts = ColumnLayouts()
 import_profiles = ImportProfiles()
 plugin_prefs = PluginPrefs()
 plugin_bundles = PluginBundles()
+dashboard_library = DashboardLibrary()
 machine_prefs = MachinePrefs()
 app_settings = AppSettings()

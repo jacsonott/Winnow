@@ -2,7 +2,7 @@
 the one floating-menu implementation behind every dropdown and right-click.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { $, el } from './core.js';
+import { $, dragHas, el } from './core.js';
 import { setSearchAllRepaint } from './search.js';
 
 /* ---------------------------------------------------------------- modal */
@@ -24,6 +24,8 @@ export function modal(title, build, opts = {}) {
   pendingModalAction = null;
   $('modalTitle').textContent = title;
   document.querySelector('.modal-card').classList.toggle('wide', !!opts.wide);
+  document.querySelector('.modal-card').classList.toggle('xwide', opts.wide === 'x');
+  document.querySelector('.modal-card').classList.toggle('tall', !!opts.tall);
   const b = $('modalBody');
   b.replaceChildren();
   // Any modal opening supersedes the Search-all pane's repaint hook; the
@@ -32,6 +34,140 @@ export function modal(title, build, opts = {}) {
   setSearchAllRepaint(() => {});
   build(b);
   $('modal').hidden = false;
+  // Focus AFTER unhiding, and synchronously. focus() on an element inside a
+  // hidden container does nothing, which is why callers reached for
+  // setTimeout(0) — and that left a window where the dialog was on screen
+  // but the caret was not in it, so the next keystroke went to the global
+  // keymap instead. For a dialog opened BY a keybinding that is not a lost
+  // character: the same key toggles the dialog shut again, out from under
+  // someone who was already typing.
+  if (opts.focus) {
+    const target = typeof opts.focus === 'function' ? opts.focus(b) : b.querySelector(opts.focus);
+    if (target) {
+      target.focus();
+      if (typeof target.select === 'function') target.select();
+    }
+  }
+}
+
+/* ------------------------------------------------------- date picker */
+
+/* A 📅 button that opens a calendar for the timestamp input beside it and
+   writes the pick back in the app's own shape (YYYY-MM-DD HH:MM:SS — see
+   openTimeRangeModal's comment on why the text input itself must stay
+   free-typed ISO). The calendar is OURS, not the browser's: Chromium's
+   native popup only knows light/dark, never the app's five styles or the
+   accent, so it read as a foreign object on every theme. This one is an
+   anchoredPanel — the same machinery every menu uses — so it inherits the
+   tokens, the z-order above modals, and the Escape/outside-click dismissal
+   for free. Dependency-free, per the airgap rule. */
+
+const DP_MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July',
+                   'August', 'September', 'October', 'November', 'December'];
+
+export function datePickerButton(input, { time = true } = {}) {
+  const btn = el('button', 'btn ghost date-pick-btn', '📅');
+  btn.type = 'button';
+  btn.title = 'Pick from a calendar';
+  btn.onclick = () => openDatePickerPanel(btn, input, time);
+  return btn;
+}
+
+function openDatePickerPanel(anchor, input, withTime) {
+  const pad = (n) => String(n).padStart(2, '0');
+  // Seed from what's typed, when it's already the ISO shape — the month
+  // shown and the highlighted day should be the value being edited.
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?/.exec(input.value.trim());
+  const today = new Date();
+  const todayKey = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`;
+  const selectedKey = m ? `${m[1]}-${m[2]}-${m[3]}` : null;
+  let viewYear = m ? +m[1] : today.getFullYear();
+  let viewMonth = m ? +m[2] - 1 : today.getMonth();
+
+  anchoredPanel(anchor, 'date-pick-panel', (panel, close) => {
+    let timeInput = null;
+    const commit = (dateKey) => {
+      const t = withTime && timeInput
+        ? /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(timeInput.value.trim()) : null;
+      const hms = withTime
+        ? ' ' + (t ? `${pad(t[1])}:${t[2]}:${t[3] || '00'}` : '00:00:00') : '';
+      input.value = dateKey + hms;
+      // Fire the text input's own handlers (live previews, validation) —
+      // a pick must be indistinguishable from typing.
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      close();
+      input.focus();
+    };
+
+    const head = el('div', 'dp-head');
+    const title = el('span', 'dp-title');
+    const nav = (label, tip, dY, dM) => {
+      const b = el('button', 'dp-nav', label);
+      b.type = 'button';
+      b.title = tip;
+      b.onclick = (e) => {
+        e.stopPropagation();       // a nav click must not read as outside-the-menu
+        viewMonth += dM;
+        viewYear += dY + Math.floor(viewMonth / 12);
+        viewMonth = ((viewMonth % 12) + 12) % 12;
+        paint();
+      };
+      return b;
+    };
+    head.append(nav('«', 'Previous year', -1, 0), nav('‹', 'Previous month', 0, -1),
+                title, nav('›', 'Next month', 0, 1), nav('»', 'Next year', 1, 0));
+    panel.append(head);
+
+    const dow = el('div', 'dp-dow');
+    for (const d of ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa']) dow.append(el('span', null, d));
+    panel.append(dow);
+    const grid = el('div', 'dp-grid');
+    panel.append(grid);
+
+    function paint() {
+      title.textContent = `${DP_MONTHS[viewMonth]} ${viewYear}`;
+      grid.replaceChildren();
+      const first = new Date(viewYear, viewMonth, 1);
+      const start = new Date(viewYear, viewMonth, 1 - first.getDay());   // back to Sunday
+      for (let i = 0; i < 42; i++) {
+        const d = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i);
+        const key = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+        const cell = el('button', 'dp-day', String(d.getDate()));
+        cell.type = 'button';
+        cell.dataset.date = key;
+        if (d.getMonth() !== viewMonth) cell.classList.add('other');
+        if (key === todayKey) cell.classList.add('today');
+        if (key === selectedKey) cell.classList.add('selected');
+        cell.onclick = () => commit(key);
+        grid.append(cell);
+      }
+    }
+    paint();
+
+    const foot = el('div', 'dp-foot');
+    if (withTime) {
+      timeInput = el('input', 'dp-time');
+      timeInput.value = m && m[4] ? `${m[4]}:${m[5]}:${m[6] || '00'}` : '00:00:00';
+      timeInput.title = 'The time of day a picked date is written with';
+      timeInput.spellcheck = false;
+      foot.append(timeInput);
+    }
+    const todayBtn = el('button', 'btn ghost dp-act', 'Today');
+    todayBtn.type = 'button';
+    todayBtn.onclick = () => commit(todayKey);
+    foot.append(todayBtn);
+    const clear = el('button', 'btn ghost dp-act', 'Clear');
+    clear.type = 'button';
+    clear.title = 'Empty the field';
+    clear.onclick = () => {
+      input.value = '';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      close();
+      input.focus();
+    };
+    foot.append(clear);
+    panel.append(foot);
+  });
 }
 
 /* --------------------------------------------------------- confirm/prompt */
@@ -127,8 +263,37 @@ export let openMenuEl = null;
 
 export let openMenuAnchor = null;
 
+/* Submenus open beside their item, root-first in this list — each entry
+   {el, key, parent, refill}, indexed by depth. Closing the root closes
+   them all, an outside click is one that lands in none of them, and only
+   one flyout per depth is ever open. A flyout's identity is its parent
+   item's key (`item.key`, else its label) at that depth — not its
+   position, which a repaint shifts whenever a row (Undo) appears above. */
+let openSubs = [];
+let subTimer = null;
+
+/* Bookkeeping the DOM doesn't carry, kept off the nodes rather than as
+   expandos: for a submenu button, the item it was built from, its key,
+   the menu context and how to open it; for a root menu, its context (pin
+   store + repaint). WeakMaps, so nothing outlives its node. */
+const BTN = new WeakMap();
+const MENU = new WeakMap();
+
+function armSubTimer(fn, ms) { clearTimeout(subTimer); subTimer = setTimeout(fn, ms); }
+function disarmSubTimer() { clearTimeout(subTimer); subTimer = null; }
+
+function closeSubmenusFrom(depth) {
+  disarmSubTimer();
+  while (openSubs.length > depth) {
+    const s = openSubs.pop();
+    if (s.parent && s.parent.isConnected) s.parent.setAttribute('aria-expanded', 'false');
+    s.el.remove();
+  }
+}
+
 export function closeMenu() {
   if (openMenuAnchor) openMenuAnchor.setAttribute('aria-expanded', 'false');
+  closeSubmenusFrom(0);
   if (openMenuEl) openMenuEl.remove();
   openMenuEl = null;
   openMenuAnchor = null;
@@ -136,25 +301,184 @@ export function closeMenu() {
   document.removeEventListener('keydown', onMenuKeydown, true);
 }
 
-export function onMenuOutsideClick(e) { if (openMenuEl && !openMenuEl.contains(e.target)) closeMenu(); }
-
-/* Swallowed rather than left to bubble: the document-level Escape handler
-   further down clears the row selection, and dismissing a menu you just
-   opened shouldn't also throw away what was selected underneath it. */
-export function onMenuKeydown(e) {
-  if (e.key !== 'Escape' || !openMenuEl) return;
-  e.preventDefault();
-  e.stopPropagation();
+export function onMenuOutsideClick(e) {
+  if (!openMenuEl) return;
+  if (openMenuEl.contains(e.target) || openSubs.some((s) => s.el.contains(e.target))) return;
   closeMenu();
 }
+
+const focusableIn = (node) => [...node.querySelectorAll('.menu-item:not(:disabled)')];
+const isTextField = (n) => !!n && (/^(INPUT|TEXTAREA|SELECT)$/.test(n.tagName) || n.isContentEditable);
+
+/* Escape is swallowed rather than left to bubble: the document-level
+   handler further down clears the row selection, and dismissing a menu
+   you just opened shouldn't also throw away what was selected underneath
+   it. The arrows walk the menu the focus is in; Right opens a flyout and
+   Left closes it, the way native menus do. From outside the menu (focus
+   on the body, or on the button that opened it) Down and Up step in at
+   the first or last item and nothing else is claimed: a caret in a text
+   field keeps its arrows, and a menu only owns keys for a focus it owns. */
+export function onMenuKeydown(e) {
+  if (!openMenuEl) return;
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    e.stopPropagation();
+    closeMenu();
+    return;
+  }
+  if (!['ArrowDown', 'ArrowUp', 'ArrowRight', 'ArrowLeft'].includes(e.key)) return;
+  const active = document.activeElement;
+  const inSub = openSubs.find((s) => s.el.contains(active));
+  if (!inSub && !openMenuEl.contains(active)) {
+    if (isTextField(active) || (e.key !== 'ArrowDown' && e.key !== 'ArrowUp')) return;
+    const items = focusableIn(openMenuEl);
+    if (!items.length) return;
+    e.preventDefault();
+    e.stopPropagation();
+    items[e.key === 'ArrowDown' ? 0 : items.length - 1].focus();
+    return;
+  }
+  const focusable = focusableIn(inSub ? inSub.el : openMenuEl);
+  if (!focusable.length) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const i = focusable.indexOf(active);   // -1: focus is on a ☆, not an item
+  if (e.key === 'ArrowDown') { focusable[(i + 1) % focusable.length].focus(); return; }
+  if (e.key === 'ArrowUp') { focusable[i < 0 ? focusable.length - 1 : (i - 1 + focusable.length) % focusable.length].focus(); return; }
+  if (e.key === 'ArrowRight') {
+    const meta = BTN.get(active);
+    const sub = meta && meta.open();
+    const first = sub && focusableIn(sub)[0];
+    if (first) first.focus();
+    return;
+  }
+  if (inSub) {   // ArrowLeft
+    const parent = inSub.parent;
+    closeSubmenusFrom(openSubs.indexOf(inSub));
+    if (parent && parent.isConnected) parent.focus();
+  }
+}
+
+/* ------------------------------------------------------------- pins */
+
+/* Items an analyst has dragged (or starred) out of a submenu onto the top
+   of a menu, kept per menu on this machine. A pin is a stable id the item
+   declares (`pinId`); the item itself is resolved fresh from the menu's
+   tree on every paint, so its state (a tag's ✓, a plugin action's
+   disabled) is always current, and an id whose item is absent (the plugin
+   is off) is simply not shown — the pin is kept for when it returns. A
+   per-browser UI preference, not workspace/: the same case opened on a
+   different machine has different pins, like the keymap. */
+const PINS_KEY = 'winnow.menupins';
+
+function readPins() {
+  try { return JSON.parse(localStorage.getItem(PINS_KEY) || '{}') || {}; } catch { return {}; }
+}
+
+export function menuPins(key) {
+  const all = readPins();
+  const ids = Array.isArray(all[key]) ? all[key].slice() : [];
+  const save = () => {
+    try { const cur = readPins(); cur[key] = ids; localStorage.setItem(PINS_KEY, JSON.stringify(cur)); }
+    catch { /* a full or blocked localStorage: the pin lives for this page */ }
+  };
+  return {
+    ids,
+    has: (id) => ids.includes(id),
+    add: (id) => { if (!ids.includes(id)) { ids.push(id); save(); } },
+    remove: (id) => { const i = ids.indexOf(id); if (i >= 0) { ids.splice(i, 1); save(); } },
+  };
+}
+
+/* `items` may be an array or a thunk — the thunk is what a keepOpen item
+   re-runs to repaint with fresh state. */
+const itemsOf = (x) => (typeof x === 'function' ? x() : x) || [];
+
+/* The items behind a set of pin ids, found in a menu tree — what the
+   Pinned section is resolved from on each paint, so a pinned tag's ✓ and
+   a pinned plugin action's disabled state stay live. Plain arrays are
+   read first and function submenus only run while an id is still
+   unresolved, so pinning `copy:cell` never costs a tag-list build. Two
+   items sharing an id is a section bug (the later would silently win),
+   so it is reported rather than resolved. */
+function collectPinnable(items, wanted, out = new Map()) {
+  const deferred = [];
+  for (const item of items) {
+    if (!item || item === '-' || item.header) continue;
+    if (item.pinId && wanted.has(item.pinId)) {
+      if (out.has(item.pinId)) console.warn(`menu: two items declare pinId ${item.pinId}`);
+      else out.set(item.pinId, item);
+    }
+    if (typeof item.submenu === 'function') deferred.push(item.submenu);
+    else if (item.submenu) collectPinnable(item.submenu, wanted, out);
+  }
+  for (const thunk of deferred) {
+    if (out.size >= wanted.size) break;
+    collectPinnable(itemsOf(thunk), wanted, out);
+  }
+  return out;
+}
+
+const PIN_MIME = 'text/x-winnow-pin';
+const isPinDrag = (e) => dragHas(e, PIN_MIME);
+
+/* The open root's context — pin store and repaint. Flyouts reach it
+   through the button that opened them (BTN), so closing the root forgets
+   everything with it. */
+function rootCtx() { return openMenuEl ? MENU.get(openMenuEl) || null : null; }
+
+/* Repaint everything that is open — the root and every flyout, in place.
+   One path for all state changes (a tag toggled anywhere, a pin added, a
+   hotkey pressed with the menu up), so a pinned tag at the top and its
+   twin inside the flyout can never disagree. The root is rebuilt, so
+   each flyout is re-bound to its parent's new button (found by key in
+   the fresh tree), refilled from that button's current item and placed
+   again — the Undo row appearing above it moves it; a flyout whose
+   parent is gone closes. */
+function repaintAll() {
+  const ctx = rootCtx();
+  if (!ctx) return;
+  ctx.repaint();
+  let host = openMenuEl;
+  for (let depth = 0; depth < openSubs.length; depth++) {
+    const s = openSubs[depth];
+    const parent = [...host.querySelectorAll('.menu-item-sub')].find((b) => (BTN.get(b) || {}).key === s.key);
+    if (!parent) { closeSubmenusFrom(depth); break; }
+    s.parent = parent;
+    parent.setAttribute('aria-expanded', 'true');
+    s.refill();
+    placeFloating(s.el, parent.getBoundingClientRect(), { side: 'right' });
+    host = s.el;
+  }
+}
+
+/* For the app's other surfaces (the tag hotkeys) to keep an open menu
+   honest after they change what it shows. */
+export function repaintOpenMenus() { repaintAll(); }
+
+function commitPin(id, on) {
+  const ctx = rootCtx();
+  if (!ctx || !ctx.pins) return;
+  if (on) ctx.pins.add(id); else ctx.pins.remove(id);
+  if (openMenuEl) openMenuEl.classList.remove('pin-drag');
+  closeSubmenusFrom(0);
+  repaintAll();
+}
+
+/* ------------------------------------------------------------ items */
 
 /* One item is {label, onclick} plus any of: `disabled`, `title`, `checked`
    (renders a ✓ column — pass false for "checkable but off", omit entirely
    for a plain item), `swatch` (a color chip, for tags), `hint` (right-aligned
-   dim text, e.g. a hotkey) and `keepOpen` (re-render the menu in place
-   instead of closing it, so toggling three tags is three clicks). '-' is a
-   separator and {header} a section label. */
-export function menuItemNode(item, rerender) {
+   keycap text, e.g. a hotkey), `note` (right-aligned dim text that is NOT a
+   key — a plugin's name), `keepOpen` (repaint the menu in place instead of
+   closing it, so toggling three tags is three clicks), `submenu` (an array,
+   or a function for one that repaints — opens a flyout beside the item on
+   hover or click; `key` names it when two siblings share a label), and
+   `pinId` (a stable id; the analyst may pin the item to the top of a menu
+   opened with pins). '-' is a separator and {header} a section label.
+   `ctx` is the root menu's {pins, repaint}; `depth` 0 is the root. */
+export function menuItemNode(item, ctx = null, depth = 0) {
   // menu-item-flex, not plain .menu-item: the ✓/swatch/hint slots need a
   // flex row, while the sidebar's own hand-built .menu-item rows (a bare
   // text node inside the button) still rely on block-level ellipsing.
@@ -166,19 +490,114 @@ export function menuItemNode(item, rerender) {
     b.append(sw);
   }
   b.append(el('span', 'menu-item-text', item.label));
+  if (item.note) b.append(el('span', 'menu-item-note', item.note));
   if (item.hint) b.append(el('span', 'menu-item-hint', item.hint));
+  if (item.submenu) {
+    b.classList.add('menu-item-sub');
+    b.setAttribute('aria-haspopup', 'true');
+    b.setAttribute('aria-expanded', 'false');
+    b.append(el('span', 'menu-caret', '▸'));
+  }
   b.disabled = !!item.disabled;
   if (item.title) b.title = item.title;
-  b.onclick = async () => {
-    if (!item.keepOpen) { closeMenu(); item.onclick(); return; }
-    await item.onclick();
-    rerender();
-  };
+  if (item.submenu) {
+    const open = () => openSubmenu(b, depth);
+    BTN.set(b, { item, key: `${depth}:${item.key != null ? item.key : item.label}`, ctx, open });
+    // A click on a parent opens its flyout, and leaves it open if hover
+    // already did — never toggles it shut under the pointer.
+    b.onclick = open;
+    b.addEventListener('mouseenter', () => armSubTimer(open, 160));
+    b.addEventListener('mouseleave', disarmSubTimer);
+  } else {
+    b.onclick = async () => {
+      if (!item.keepOpen) { closeMenu(); item.onclick(); return; }
+      await item.onclick();
+      // Everything open repaints, not just this menu: a tag toggled in
+      // the flyout has a pinned twin at the top that must agree.
+      repaintAll();
+    };
+    // Sliding onto a plain sibling closes the flyout a neighbour opened
+    // — after a beat, so a diagonal move into the flyout isn't punished.
+    b.addEventListener('mouseenter', () => {
+      if (openSubs.length > depth) armSubTimer(() => closeSubmenusFrom(depth), 220);
+      else disarmSubTimer();
+    });
+  }
   return b;
 }
 
-export function fillMenuNode(menu, items, rerender) {
+function openSubmenu(parentBtn, depth) {
+  // A hover timer can outlive a repaint that replaced its button; a
+  // detached button has no geometry to place a flyout against.
+  if (!parentBtn.isConnected) return null;
+  const meta = BTN.get(parentBtn);
+  const cur = openSubs[depth];
+  if (cur && cur.key === meta.key) {
+    cur.parent = parentBtn;   // the same flyout, possibly a repainted parent
+    parentBtn.setAttribute('aria-expanded', 'true');
+    return cur.el;
+  }
+  closeSubmenusFrom(depth);
+  const sub = el('div', 'menu menu-sub');
+  sub.setAttribute('role', 'menu');
+  const entry = { el: sub, key: meta.key, parent: parentBtn, refill: null };
+  // Filled from the parent's CURRENT item, so a repaint that rebuilt the
+  // parent (and its array submenu) is what the flyout shows.
+  entry.refill = () => fillMenuNode(sub, itemsOf(BTN.get(entry.parent).item.submenu), meta.ctx, depth + 1);
+  entry.refill();
+  // Entering the flyout cancels a pending close its parent's sibling armed.
+  sub.addEventListener('mouseenter', disarmSubTimer);
+  document.body.append(sub);
+  placeFloating(sub, parentBtn.getBoundingClientRect(), { side: 'right' });
+  parentBtn.setAttribute('aria-expanded', 'true');
+  openSubs[depth] = entry;
+  return sub;
+}
+
+function pinnableRow(item, node, pins) {
+  const pinned = pins.has(item.pinId);
+  const row = el('div', 'menu-item-row menu-pinnable');
+  row.append(node);
+  const act = el('button', 'menu-item-action menu-pin-btn', pinned ? '✕' : '☆');
+  act.title = pinned ? 'Unpin from the top of this menu' : 'Pin to the top of this menu — or drag it there';
+  act.onclick = (e) => { e.stopPropagation(); commitPin(item.pinId, !pinned); };
+  row.append(act);
+  // A disabled button dispatches no drag events, and in some browsers no
+  // mouse events; the star still works, so don't promise a drag.
+  if (!pinned && !item.disabled) {
+    node.draggable = true;
+    node.addEventListener('dragstart', (e) => {
+      e.dataTransfer.setData(PIN_MIME, item.pinId);
+      e.dataTransfer.setData('text/plain', item.label);
+      e.dataTransfer.effectAllowed = 'copy';
+      if (openMenuEl) openMenuEl.classList.add('pin-drag');
+    });
+    node.addEventListener('dragend', () => { if (openMenuEl) openMenuEl.classList.remove('pin-drag'); });
+  }
+  return row;
+}
+
+export function fillMenuNode(menu, items, ctx = null, depth = 0) {
   menu.replaceChildren();
+  const pins = ctx ? ctx.pins : null;
+  if (pins && depth === 0) {
+    if (pins.ids.length) {
+      const all = collectPinnable(items, new Set(pins.ids));
+      const present = pins.ids.filter((id) => all.has(id));
+      if (present.length) {
+        menu.append(el('div', 'menu-header', 'Pinned'));
+        for (const id of present) menu.append(pinnableRow(all.get(id), menuItemNode(all.get(id), ctx, 0), pins));
+        menu.append(el('div', 'menu-sep'));
+      }
+    }
+    // Only visible mid-drag (.pin-drag), so the menu costs nothing at rest.
+    // Purely a highlight: dragover and the drop are handled once, by the
+    // root, and reach it by bubbling.
+    const zone = el('div', 'menu-dropzone', 'Drop here to pin');
+    zone.addEventListener('dragenter', (e) => { if (isPinDrag(e)) zone.classList.add('over'); });
+    zone.addEventListener('dragleave', () => zone.classList.remove('over'));
+    menu.append(zone);
+  }
   for (const item of items) {
     if (!item) continue;
     if (item === '-') { menu.append(el('div', 'menu-sep')); continue; }
@@ -186,25 +605,39 @@ export function fillMenuNode(menu, items, rerender) {
       menu.append(el('div', 'menu-header' + (item.literal ? ' menu-header-literal' : ''), item.header));
       continue;
     }
-    menu.append(menuItemNode(item, rerender));
+    const node = menuItemNode(item, ctx, depth);
+    // Pinnable inside a flyout only: a root item already sits where a pin
+    // would put it.
+    if (item.pinId && pins && depth > 0) menu.append(pinnableRow(item, node, pins));
+    else menu.append(node);
   }
 }
 
 /* Positions a floating node against a rect — a button's own bounding box,
-   or a zero-size rect at the pointer. Flips above the rect when there isn't
-   room below (right-clicking a row near the bottom of the grid is the
-   common case, not the edge case) and clamps into the viewport on both
-   axes. Measured after the node is in the DOM, so callers append first. */
-export function placeFloating(node, rect) {
+   or a zero-size rect at the pointer. Below the rect by default, flipping
+   above when there isn't room (right-clicking a row near the bottom of
+   the grid is the common case, not the edge case); `side: 'right'` puts
+   it beside the rect (a flyout), flipping to the left. Both clamp into
+   the viewport on both axes. Measured after the node is in the DOM, so
+   callers append first. */
+export function placeFloating(node, rect, { side = 'below' } = {}) {
   const m = 8;
   const w = node.offsetWidth, h = node.offsetHeight;
-  let top = rect.bottom + 4;
-  if (top + h > window.innerHeight - m) {
-    const above = rect.top - h - 4;
-    top = above >= m ? above : Math.max(m, window.innerHeight - h - m);
+  let top, left;
+  if (side === 'right') {
+    left = rect.right + 2;
+    if (left + w > window.innerWidth - m) left = rect.left - w - 2;
+    top = rect.top - 4;
+    if (top + h > window.innerHeight - m) top = window.innerHeight - h - m;
+  } else {
+    top = rect.bottom + 4;
+    if (top + h > window.innerHeight - m) {
+      const above = rect.top - h - 4;
+      top = above >= m ? above : Math.max(m, window.innerHeight - h - m);
+    }
+    left = rect.left;
+    if (left + w > window.innerWidth - m) left = rect.right - w;
   }
-  let left = rect.left;
-  if (left + w > window.innerWidth - m) left = rect.right - w;
   node.style.top = Math.max(m, top) + 'px';
   node.style.left = Math.max(m, left) + 'px';
 }
@@ -230,12 +663,28 @@ export function showFloating(node, rect, anchorEl) {
 /* `items` may be a function returning the array — that's what a keepOpen
    item re-runs to repaint itself with fresh state (a tag's ✓ after the
    tag actually landed), so callers build items from live state rather than
-   patching DOM nodes by hand. */
-export function showMenu(items, rect, anchorEl) {
-  const get = typeof items === 'function' ? items : () => items;
+   patching DOM nodes by hand. `opts.pins` names the per-menu pin store
+   ('row' for the row menu): with one, submenu items that declare a pinId
+   can be pinned to the top, and the whole root is the drop target so a
+   drag doesn't have to find the zone. */
+export function showMenu(items, rect, anchorEl, opts = {}) {
   const menu = el('div', 'menu');
-  const rerender = () => { if (openMenuEl === menu) fillMenuNode(menu, get(), rerender); };
-  fillMenuNode(menu, get(), rerender);
+  menu.setAttribute('role', 'menu');
+  const ctx = {
+    pins: opts.pins ? menuPins(opts.pins) : null,
+    repaint: () => { if (openMenuEl === menu) fillMenuNode(menu, itemsOf(items), ctx, 0); },
+  };
+  MENU.set(menu, ctx);
+  fillMenuNode(menu, itemsOf(items), ctx, 0);
+  if (ctx.pins) {
+    menu.addEventListener('dragover', (e) => { if (isPinDrag(e)) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; } });
+    menu.addEventListener('drop', (e) => {
+      const id = e.dataTransfer.getData(PIN_MIME);
+      if (!id) return;
+      e.preventDefault();
+      commitPin(id, true);
+    });
+  }
   showFloating(menu, rect, anchorEl);
   return menu;
 }
@@ -250,9 +699,9 @@ export function dropdownMenu(anchorEl, items) {
 /* Right-click menus. `e` is the contextmenu event — its client coords are
    the anchor, and preventDefault() is the caller's job (some surfaces want
    the browser's own menu when the click misses anything actionable). */
-export function contextMenu(e, items) {
+export function contextMenu(e, items, opts = {}) {
   closeMenu();
-  showMenu(items, { top: e.clientY, bottom: e.clientY, left: e.clientX, right: e.clientX });
+  showMenu(items, { top: e.clientY, bottom: e.clientY, left: e.clientX, right: e.clientX }, null, opts);
 }
 
 /* A floating card that isn't a list of buttons — same one-at-a-time,
@@ -268,11 +717,21 @@ export function anchoredPanel(anchorEl, cls, build) {
   return panel;
 }
 
+/* Hiding the modal is not the whole story: things armed inside it (the
+   keybinding capture in settings.js) hold document-level listeners that
+   have to be told, or they outlive the dialog and swallow the next
+   keystroke anywhere in the app. One event, so a new one can listen
+   rather than every close path growing a call. */
+export function closeModal() {
+  $('modal').hidden = true;
+  document.dispatchEvent(new CustomEvent('winnow:modalclose'));
+}
+
 /* DOM wiring for this module, called once by main.js. Handlers can't
    fire during load, so the order these run in doesn't matter — the
    startup steps that DO depend on order live in main.js instead. */
 export function wireUi() {
-$('modalClose').onclick = () => ($('modal').hidden = true);
+$('modalClose').onclick = () => closeModal();
 
 /* Backdrop close must key off where the press STARTED, not where the click
    resolves: a `click` fires on the common ancestor of its mousedown and
@@ -290,6 +749,6 @@ $('modal').onclick = (e) => {
   // resolves its click to the backdrop (common-ancestor rule) and used to
   // close the Search-all modal mid-highlight. A deliberate backdrop click
   // is down+up in place and still closes.
-  if (e.target === $('modal') && modalPressOnBackdrop && modalReleaseOnBackdrop) $('modal').hidden = true;
+  if (e.target === $('modal') && modalPressOnBackdrop && modalReleaseOnBackdrop) closeModal();
 };
 }

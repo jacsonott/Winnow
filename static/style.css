@@ -41,12 +41,32 @@
 * { scrollbar-width: thin; }
 html { scrollbar-color: var(--line-2) transparent; }
 
+/* Tell the UA which palette its native controls live in, so the parts CSS
+   can't reach — the <select> option popup, date pickers, the scrollbar
+   fallback — follow the theme instead of flashing a white OS menu on a
+   dark app. Keyed on the theme, so it flips with the toggle. */
+html[data-theme="dark"] { color-scheme: dark; }
+html[data-theme="light"] { color-scheme: light; }
+
 html, body {
   height: 100%; margin: 0;
   background: var(--ink); color: var(--text);
   font-family: var(--ui); font-size: 13px;
   overflow: hidden;
 }
+
+/* Themed <select> by default — THE rule for any new dropdown/menu, so one
+   never ships with the bare white OS look (the widget editor's selects
+   did). Contextual rules (.fb-cond select, .wl-add select, …) still win
+   where they set more; this is the floor everything inherits. The option
+   popup itself is UA-drawn, but color-scheme above makes it match. */
+select {
+  background: var(--ink); color: var(--text);
+  border: var(--border-w) solid var(--line-2); border-radius: var(--radius-sm);
+  padding: 5px 7px; font: inherit;
+}
+select:focus { outline: none; border-color: var(--accent); }
+select:disabled { color: var(--text-faint); }
 
 /* ------------------------------------------------------------- appearance */
 /* Fallback (also "panel" + "dark", i.e. the original look) so a page that
@@ -304,11 +324,17 @@ html[data-style="studio"][data-theme="light"] {
      invisible while the banner stayed hidden (its default state), which
      is exactly why this went unnoticed for so long. */
   grid-template-columns: max-content minmax(0, 1fr);
-  grid-template-rows: auto auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto auto auto minmax(0, 1fr);
 }
-#sidebar { grid-column: 1; grid-row: 1 / -1; }
+/* Rows 3/-1, not 1/-1: the sidebar slides in UNDER the tab bar, so
+   toggling it never reflows the top chrome — the tab strips, Case menu and
+   Settings stay exactly where the pointer left them. The banner and bar
+   span both columns for the same reason (they're the full-width chrome the
+   sidebar tucks beneath). */
+#sidebar { grid-column: 1; grid-row: 3 / -1; }
 #sidebar[hidden] { display: none; }
-.temp-banner, .bar, .toolbar, .main-area { grid-column: 2; }
+.temp-banner, .bar { grid-column: 1 / -1; }
+.toolbar, .plugin-panels, .diff-banner, .main-area { grid-column: 2; }
 /* Explicit row per child, not auto-placement — auto-placement once slid
    .main-area into the wrong track when a display:none sibling (the old
    suggestion banner) dropped out of the grid, and past ~1.4M rows that
@@ -322,7 +348,13 @@ html[data-style="studio"][data-theme="light"] {
 .temp-banner { grid-row: 1; }
 .bar { grid-row: 2; }
 .toolbar { grid-row: 3; }
-.main-area { grid-row: 4; }
+/* Plugin toolbar panels: an explicit track like the banner, collapsing
+   to zero while hidden so the grid keeps its height back. */
+.plugin-panels { grid-row: 4; }
+/* The session-comparison banner: its own track, collapsing while hidden. */
+.diff-banner { grid-row: 5; }
+.diff-banner[hidden] { display: none; }
+.main-area { grid-row: 6; }
 /* Grid items default to min-width:auto (their content's min-content size),
    not 0 — without this, a row wide enough to overflow (e.g. many/long tab
    names in .bar) blows out #app's implicit single column, stretching every
@@ -412,6 +444,18 @@ html[data-style="studio"][data-theme="light"] {
 .page-tabs .tab-sql:first-child { border-left: 0; }
 .tab-sql[aria-selected="true"] { color: var(--accent); }
 .tab .x { color: var(--dim); opacity: .5; }
+/* Closed page tabs stay in the strip's DOM (their ids must keep resolving)
+   but must not paint — .tab sets display:flex, which would win over the
+   hidden attribute's UA display:none without this. */
+.tab[hidden] { display: none; }
+/* A closed page's row in the sidebar Pages section — present (it's the
+   reopen path) but visibly parked. */
+.sidebar-page-closed .menu-item { color: var(--dim); opacity: .65; }
+/* Dashboards: a pinned board reads as a page (weight), library boards
+   read as available-not-present (dim), under a lighter sub-header. */
+.sidebar-dash-pinned .menu-item { font-weight: 600; }
+.sidebar-dash-library .menu-item { color: var(--dim); }
+#sidebarList .menu-header.sidebar-subheader { font-size: 9px; opacity: .8; margin-top: 4px; }
 .tab .x:hover { opacity: 1; color: var(--danger); }
 .tab.dragging { opacity: .4; }
 .tab.drop-before { box-shadow: inset 2px 0 0 var(--accent); }
@@ -446,8 +490,33 @@ html[data-style="studio"][data-theme="light"] {
   padding: 6px 10px; background: var(--ink);
   border-bottom: 1px solid var(--line);
 }
+/* Under width pressure (tag counts, the search box, a 1280px laptop, the
+   wider Phosphor/Blueprint fonts) the flex items used to share the squeeze
+   evenly, which folded every button into a two-line pill and stacked the
+   tag chips vertically. Buttons in a bar never wrap their own label; the
+   ribbon and the group strip are the things that give way, because chips
+   wrapping onto a second line is the designed behaviour and a truncated
+   "drag a column header here" hint costs nothing. */
+.toolbar .btn, .sql-head .btn, .detail-head .btn, .dash-bar .btn, .wl-head .btn { white-space: nowrap; flex: 0 0 auto; }
+.toolbar > .group-strip { flex: 0 6 auto; min-width: 150px; } /* the first to give: its hint is decoration; 150px keeps the label and + Tag */
+.toolbar > .tag-ribbon { flex: 0 1 auto; min-width: 0; }     /* then the chips wrap onto a second line */
+.toolbar > .search-wrap { flex: 0 0 auto; }                  /* the box you type in never shrinks */
+.group-strip-hint { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* Empty, the strip is one line — label, hint, + Tag — and clips rather than
+   folding "+ Tag" under the label. With pills in it, it wraps as before. */
+.group-strip:not(.has-groups) { flex-wrap: nowrap; overflow: hidden; }
 
-.search-icon-btn { font-size: 13px; line-height: 1; padding: 4px 8px; }
+.search-icon-btn { display: inline-flex; align-items: center; line-height: 1; padding: 4px 8px; }
+.plugin-toolbar-buttons { display: inline-flex; gap: 4px; }
+.plugin-toolbar-buttons:empty { display: none; }
+.plugin-panel-btn[aria-pressed="true"] { color: var(--accent); border-color: var(--accent-dim); }
+.plugin-panels[hidden] { display: none; }
+.plugin-panels { display: flex; flex-direction: column; min-width: 0; }
+.plugin-panel { border-bottom: 1px solid var(--line-2); background: var(--panel); min-width: 0; }
+.plugin-panel[hidden] { display: none; }
+.search-icon-btn svg { width: 14px; height: 14px; }
+/* Pages collapsed into one dropdown (Appearance → Pages as a dropdown). */
+.pages-menu-btn .caret { color: var(--dim); margin-left: 2px; }
 
 .search-wrap { position: relative; display: flex; align-items: center; }
 #search {
@@ -545,7 +614,7 @@ html[data-style="studio"][data-theme="light"] {
 .group-strip-arrow { color: var(--dim); font-size: 12px; flex: 0 0 auto; }
 .group-pill {
   display: flex; align-items: center; gap: 6px; flex: 0 0 auto;
-  background: var(--panel-2); border: var(--border-w) solid var(--accent-dim); border-radius: 999px;
+  background: var(--panel-2); border: var(--border-w) solid var(--line-2); border-radius: 999px;
   padding: 2px 4px 2px 10px; font-size: 12px; color: var(--text); cursor: grab; white-space: nowrap;
 }
 .group-pill.dragging { opacity: .4; }
@@ -572,7 +641,7 @@ html[data-style="studio"][data-theme="light"] {
   padding-left: calc(var(--group-level, 0) * 18px);
 }
 .group-header-row:hover { background: var(--panel-3); }
-.group-header-row[data-level="0"] { background: var(--panel-3); box-shadow: inset 2px 0 0 var(--accent-dim); }
+.group-header-row[data-level="0"] { background: var(--panel-3); box-shadow: inset 2px 0 0 var(--line-2); }
 .group-header-label {
   display: flex; align-items: center; gap: 6px; min-width: 0;
   padding: 0 10px; font-family: var(--mono); font-size: 12px;
@@ -584,7 +653,10 @@ html[data-style="studio"][data-theme="light"] {
    when a selection was just made. */
 .group-header-value { user-select: text; cursor: text; }
 .group-header-col { color: var(--dim); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; flex: 0 0 auto; }
-.group-header-value { color: var(--accent); font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+/* Neutral, not accent: a grouped view is dozens of these headers, and
+   painting every value in the accent made the whole grid read as
+   highlighted. Weight alone carries the hierarchy. */
+.group-header-value { color: var(--text); font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
 .group-header-count { color: var(--dim); font-size: 11px; margin-left: 8px; flex: 0 0 auto; }
 
 /* ----------------------------------------------------------------- grid */
@@ -781,7 +853,21 @@ html[data-style="studio"][data-theme="light"] {
    rid placed by flow would land in column 1 and stop lining up with its
    neighbours. tabular-nums so rids of differing digit counts right-align
    cleanly. */
-.gutter .rid { grid-column: 3; justify-self: end; font-variant-numeric: tabular-nums; }
+/* Clickable, and it has to look it: the number selects its row the way
+   the checkbox does (see grid.js), and an inert-looking number beside a
+   12px checkbox is why people were aiming at the checkbox. The hit area
+   is padded out to the gutter's right edge so the target is the column,
+   not the digits. */
+.gutter .rid {
+  grid-column: 3; justify-self: end; font-variant-numeric: tabular-nums;
+  /* Left only: the digits stay flush right, where the "Line" header above
+     them is measured against (docs/notes/grid.md's three-slot contract).
+     The padding just widens the target leftwards into empty gutter. */
+  cursor: pointer; padding-left: 6px; border-radius: var(--radius-sm);
+  user-select: none;
+}
+.gutter .rid:hover { background: var(--panel-3); color: var(--text); }
+.row.selected .gutter .rid { color: var(--text); }
 
 .gutter input.rowcheck, .hcell input.select-all-rows {
   width: 12px; height: 12px; accent-color: var(--accent);
@@ -824,6 +910,8 @@ html[data-style="studio"][data-theme="light"] {
      this whole-grid cover. */
   z-index: 6;
 }
+.empty.no-rows { inset: auto 0; top: 42%; background: transparent; pointer-events: none; z-index: 2; }
+.empty.no-rows .btn { pointer-events: auto; }
 .empty-title { color: var(--text); font-size: 15px; margin: 0; }
 .empty p { margin: 0; }
 code { font-family: var(--mono); color: var(--accent); background: var(--panel); padding: 1px 5px; }
@@ -841,6 +929,8 @@ code { font-family: var(--mono); color: var(--accent); background: var(--panel);
   padding: 5px 10px; border-bottom: 1px solid var(--line);
   font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim);
 }
+.sql-head > span { flex: 1 1 auto; min-width: 0; }
+.sql-head > div { flex: 0 0 auto; display: flex; gap: 6px; margin-left: 10px; }
 .detail-actions { display: flex; gap: 6px; }
 .detail-body { display: grid; grid-template-columns: 1fr 300px; gap: 14px; overflow: auto; padding: 10px; }
 .main-area[data-dock="right"] .detail-body { grid-template-columns: 1fr; grid-auto-rows: min-content; }
@@ -1049,6 +1139,22 @@ textarea:focus { border-color: var(--accent); outline: none; }
   border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 0 4px;
 }
 .menu-sep { flex: 0 0 auto; height: 1px; background: var(--line); margin: 4px 2px; }
+/* Submenus: a flyout beside its item; the caret says there is one. */
+.menu-sub { z-index: 57; }
+.menu-caret { flex: 0 0 auto; color: var(--dim); font-size: 10px; margin-left: 4px; }
+/* A note is dim text that is not a key: a plugin's name beside its action. */
+.menu-item-note { flex: 0 0 auto; color: var(--text-faint); font-size: 10px; }
+.menu-item-sub[aria-haspopup] { padding-right: 8px; }
+/* Pinning: a ☆ on hover in a submenu, ✕ on a pinned row at the top, and a
+   drop zone the root shows only while a pin is being dragged. */
+/* Dim at rest rather than hidden: the ☆ is how pinning gets discovered. */
+.menu-pinnable .menu-pin-btn { opacity: .4; }
+.menu-pinnable:hover .menu-pin-btn, .menu-pinnable:focus-within .menu-pin-btn { opacity: 1; }
+.menu-pinnable .menu-item[draggable="true"] { cursor: grab; }
+.menu-dropzone { display: none; flex: 0 0 auto; margin: 2px; padding: 8px 10px; border: 1px dashed var(--accent-dim);
+  border-radius: var(--radius-sm); color: var(--dim); font-size: 11px; text-align: center; }
+.menu.pin-drag .menu-dropzone { display: block; }
+.menu-dropzone.over { border-color: var(--accent); color: var(--accent); background: var(--sel); }
 .menu-header {
   flex: 0 0 auto;
   font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--dim);
@@ -1088,14 +1194,56 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .sidebar-resize:hover::after, .sidebar-resize.dragging::after {
   content: ""; position: absolute; inset: 0 3px; background: var(--accent-dim);
 }
-.sidebar-head { flex: 0 0 auto; padding: 8px; border-bottom: 1px solid var(--line); }
+.sidebar-head { flex: 0 0 auto; padding: 8px; border-bottom: 1px solid var(--line); display: flex; gap: 6px; align-items: center; }
 #sidebarFilter {
-  width: 100%; background: var(--ink); color: var(--text);
+  flex: 1 1 auto; min-width: 0; background: var(--ink); color: var(--text);
   border: var(--border-w) solid var(--line-2); border-radius: var(--radius-sm);
   padding: 5px 8px; font: inherit; font-size: 12px;
 }
+.sidebar-newfolder {
+  flex: 0 0 auto; background: var(--ink); color: var(--dim);
+  border: var(--border-w) solid var(--line-2); border-radius: var(--radius-sm);
+  padding: 4px 7px; font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap;
+}
+.sidebar-newfolder:hover { color: var(--text); border-color: var(--accent); }
 .sidebar-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 4px; display: flex; flex-direction: column; gap: 1px; }
-.sidebar-row { display: flex; align-items: stretch; gap: 1px; border-radius: var(--radius-sm); }
+.sidebar-row { display: flex; align-items: stretch; gap: 1px; border-radius: var(--radius-sm); padding-left: calc(var(--depth, 0) * 12px); }
+
+/* Folder header rows in the table tree — depth indent via --depth (set per
+   row in renderSidebar), a disclosure twisty, and a drop-into highlight
+   when a table is dragged over. */
+.sidebar-folder { display: flex; align-items: stretch; gap: 1px; border-radius: var(--radius-sm); padding-left: calc(var(--depth, 0) * 12px); }
+.sidebar-folder:hover { background: var(--panel-2); }
+.sidebar-folder .folder-twisty {
+  flex: 0 0 auto; width: 16px; background: none; border: 0; color: var(--dim);
+  cursor: pointer; font: inherit; font-size: 10px; padding: 0;
+}
+.sidebar-folder .folder-name { flex: 1 1 auto; min-width: 0; font-weight: 600; }
+.sidebar-folder.drop-into, .sidebar-rootzone.drop-into,
+.sidebar-open-header.drop-into, .sidebar-openrow.drop-into, .sidebar-pages-header.drop-into {
+  background: var(--ink); box-shadow: inset 0 0 0 1px var(--accent); color: var(--accent);
+}
+.sidebar-rootzone {
+  margin: 4px 2px 2px; padding: 6px 8px; text-align: center; font-size: 11px;
+  color: var(--text-faint); border: 1px dashed var(--line-2); border-radius: var(--radius-sm);
+}
+/* The Open section header doubles as a drop target for opening a table,
+   and carries a "close all" affordance once more than one tab is open. */
+.sidebar-open-header { display: flex; align-items: center; }
+.sidebar-open-label { flex: 1 1 auto; }
+.sidebar-closeall {
+  flex: 0 0 auto; background: none; border: 0; color: var(--dim); cursor: pointer;
+  font: inherit; font-size: 10px; text-transform: none; letter-spacing: 0; padding: 0 2px;
+}
+.sidebar-closeall:hover { color: var(--accent); }
+
+/* Distinct section bands so Open / All tables / Pages read as separate
+   groupings rather than three faint labels adrift in one list. */
+#sidebarList .menu-header {
+  color: var(--text); background: var(--panel-2);
+  border-radius: var(--radius-sm); margin: 8px 2px 2px; padding: 5px 8px;
+}
+#sidebarList .menu-header:first-child { margin-top: 2px; }
 .sidebar-row.active { background: var(--ink); box-shadow: inset 2px 0 0 var(--accent); }
 .sidebar-row.active .menu-item { color: var(--accent); }
 .sidebar-row .menu-item { flex: 1 1 auto; min-width: 0; }
@@ -1108,16 +1256,44 @@ textarea:focus { border-color: var(--accent); outline: none; }
   color: var(--dim); font-family: var(--mono); font-size: 11px; padding-right: 8px;
 }
 .sidebar-row-actions { flex: 0 0 auto; display: none; align-items: stretch; gap: 1px; }
-.sidebar-row:hover .sidebar-row-actions { display: flex; }
-/* Drag-to-reorder (wireSidebarRowDrag/wireDragReorder) — same technique
-   and same S.tabOrder as the horizontal tab strip's own .tab.dragging/
-   .drop-before/.drop-after, just a top/bottom edge instead of left/right
-   since this list is vertical. */
+.sidebar-row:hover .sidebar-row-actions,
+.sidebar-folder:hover .sidebar-row-actions { display: flex; }
+/* A table row mid-drag (wireTableDrag) — fades while it's being dragged
+   onto a folder header or the root drop zone (both light up via
+   .drop-into above). */
 .sidebar-row.dragging { opacity: .4; }
-.sidebar-row.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
-.sidebar-row.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
 
 /* ---------------------------------------------------------------- modal */
+
+/* The calendar beside free-typed timestamp inputs — our own panel (an
+   anchoredPanel, so it rides .menu's tokens/z-order/dismissal), because
+   the browser's native popup only knows light/dark and never matches the
+   app's styles or accent. */
+.date-pick-btn { padding: 3px 8px; flex: 0 0 auto; }
+.date-pick-panel { padding: 8px; min-width: 236px; }
+.dp-head { display: flex; align-items: center; gap: 2px; margin-bottom: 6px; }
+.dp-title { flex: 1; text-align: center; font-size: 12px; color: var(--text); }
+.dp-nav { background: none; border: 0; color: var(--dim); cursor: pointer;
+  padding: 2px 7px; font: inherit; border-radius: var(--radius-sm); }
+.dp-nav:hover { color: var(--accent); background: var(--panel-2); }
+.dp-dow { display: grid; grid-template-columns: repeat(7, 1fr); text-align: center;
+  color: var(--dim); font-size: 9px; letter-spacing: .06em; text-transform: uppercase;
+  margin-bottom: 2px; }
+.dp-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
+.dp-day { border: 0; background: none; color: var(--text); font: 11px var(--mono);
+  padding: 4px 0; text-align: center; cursor: pointer; border-radius: var(--radius-sm); }
+.dp-day:hover { background: var(--panel-2); }
+.dp-day.other { color: var(--dim); opacity: .45; }
+.dp-day.today { box-shadow: inset 0 0 0 1px var(--accent-dim); }
+.dp-day.selected { background: var(--accent); color: var(--accent-fg); font-weight: 600; }
+.dp-day.selected:hover { background: var(--accent); }
+.dp-foot { display: flex; gap: 6px; margin-top: 8px; align-items: center; }
+.dp-time { flex: 0 0 auto; width: 74px; background: var(--ink); color: var(--text);
+  border: 1px solid var(--line-2); border-radius: var(--radius-sm);
+  padding: 3px 6px; font: 11px var(--mono); }
+.dp-time:focus { outline: none; border-color: var(--accent); }
+.dp-act { padding: 2px 8px; font-size: 11px; margin-left: auto; }
+.dp-act + .dp-act { margin-left: 0; }
 
 .modal { position: fixed; inset: 0; background: rgba(8,10,12,.7); display: grid; place-items: center; z-index: 50; }
 .modal-card {
@@ -1126,6 +1302,13 @@ textarea:focus { border-color: var(--accent); outline: none; }
   width: min(680px, 92vw); max-height: 82vh; display: flex; flex-direction: column;
 }
 .modal-card.wide { width: min(920px, 96vw); }
+/* Settings: ten collapsible sections. A card that grows re-centres itself
+   on every click, so the header jumped up to 165px; a fixed height keeps it
+   still and scrolls the body instead. */
+.modal-card.tall { height: 82vh; }
+/* The Tables manager: five buttons, three stats and an index status per
+   row — 920px truncated the buttons off the right edge on any real name. */
+.modal-card.xwide { width: min(1240px, 96vw); }
 
 /* confirm()/prompt() replacements — a separate overlay (not the #modal
    singleton) so one can be triggered from inside an already-open modal
@@ -1187,7 +1370,10 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .vp-toggles { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; justify-content: space-between; }
 .vp-seg { display: flex; gap: 2px; flex-wrap: wrap; }
 .vp-seg .btn { font-size: 11px; padding: 3px 7px; }
-.vp-seg .btn[aria-pressed="true"] { color: var(--accent); border-color: var(--accent-dim); }
+/* The same filled look the Settings segments use: accent text on the
+   accent-dim fill measured 1.4–2.7:1 across the skins, and accent-on-panel
+   fails in Phosphor light, where the green is not a text colour. */
+.vp-seg .btn[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
 .vp-list {
   flex: 1 1 auto; min-height: 60px; max-height: 40vh; overflow-y: auto;
   display: flex; flex-direction: column; gap: 1px;
@@ -1228,6 +1414,18 @@ textarea:focus { border-color: var(--accent); outline: none; }
 
 .session-list, .session-queue { display: grid; gap: 4px; margin: 6px 0 12px; }
 .session-row { justify-content: flex-start; padding: 5px 8px; background: var(--panel-2); border-radius: var(--radius-sm); }
+/* Tables-manager rows: a fixed grid, not a free flex row — the name gets
+   the flexible column and ellipsizes instead of shoving the buttons off
+   the modal's edge, stats/status/actions right-align in steady columns so
+   fifty rows read as a table rather than a scatter. */
+.tables-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; align-items: center;
+  gap: 10px; padding: 3px 8px; }
+.tables-row .session-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.tables-row .count { margin-right: 0; white-space: nowrap; }
+.tables-row .tables-acts { display: flex; gap: 4px; }
+.tables-row .tables-acts .btn { padding: 2px 8px; font-size: 11px; }
+.tables-row.no-index { grid-template-columns: minmax(0, 1fr) auto auto; }
+.session-list .source-indexes { padding: 0 4px 4px 16px; margin-top: -2px; }
 /* Drag-to-reorder feedback for saved-filter rows (wireDragReorder) — same
    vocabulary the tab strip and column headers use, on the vertical axis. */
 .session-row.dragging { opacity: .4; }
@@ -1348,37 +1546,49 @@ textarea:focus { border-color: var(--accent); outline: none; }
    temporary case until the analyst decides otherwise, and that fact should
    be impossible to miss without shouting. Accent-tinted, not danger —
    nothing is wrong, something is just undecided. */
-.temp-banner {
-  grid-column: 2; display: flex; align-items: center; gap: 12px;
+.temp-banner, .diff-banner {
+  /* No grid-column here: the placement rule up top spans it across BOTH
+     columns with the bar. A column-2 pin left over from the old
+     full-height sidebar made the banner jump every time the sidebar
+     toggled. */
+  display: flex; align-items: center; gap: 12px;
   padding: 6px 12px; font-size: 12px;
   background: var(--sel); border-bottom: 1px solid var(--accent-dim);
   color: var(--text);
 }
-.temp-banner-actions { margin-left: auto; display: flex; gap: 6px; }
+.temp-banner-actions, .diff-banner-actions { margin-left: auto; display: flex; gap: 6px; }
 
-/* Sessions panel: the "received from another analyst" marker, and the
-   diff table. Three columns of tag names with an arrow between them —
-   deliberately a table, not a list, because a reviewer reads DOWN the
-   before and after columns comparing them. */
+/* Sessions panel: the "received from another analyst" marker. */
 .session-badge {
   font-size: 10px; text-transform: uppercase; letter-spacing: .04em;
   padding: 1px 5px; border-radius: var(--radius-sm);
   background: var(--panel-3); color: var(--dim);
 }
 .session-diff { margin-top: 6px; max-height: 340px; overflow: auto; }
-.diff-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-.diff-table td {
-  padding: 2px 6px; border-bottom: 1px solid var(--border-hairline);
-  vertical-align: top;
+/* The comparison, as counts: one line per table, each count a way into
+   the grid. The rows themselves are never listed here — the grid shows
+   them, marked. */
+.diff-stats { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 6px; }
+.diff-stats th { text-align: left; font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--dim);
+  padding: 4px 8px; border-bottom: 1px solid var(--line); font-weight: 500; }
+.diff-stats th.n, .diff-stats td.n { text-align: right; width: 1%; white-space: nowrap; }
+.diff-stats td { padding: 3px 8px; border-bottom: 1px solid var(--border-hairline); }
+.diff-stats td.n .btn { font-family: var(--mono); font-size: 12px; padding: 1px 8px; min-width: 3em; }
+.diff-stats td.n .zero { color: var(--text-faint); font-family: var(--mono); padding: 1px 8px; }
+.diff-stats .diff-n-removed .btn { color: var(--danger); }
+.diff-stats .diff-n-added .btn { color: var(--accent); }
+.diff-legend { display: flex; gap: 14px; margin-top: 6px; font-size: 11px; color: var(--dim); }
+.diff-legend b { color: var(--text); font-weight: 500; }
+.diff-mark {
+  flex: 0 0 auto; font-family: var(--mono); font-size: 9px; line-height: 12px; padding: 0 3px;
+  border-radius: var(--radius-sm); border: 1px solid var(--line-2); color: var(--text); background: var(--panel-2);
 }
-.diff-rid { color: var(--dim); font-family: var(--mono); white-space: nowrap; }
-.diff-arrow { color: var(--dim); text-align: center; width: 1.5em; }
-/* The accent carries "what the reviewer added"; danger carries "what they
-   dropped" — the two a QC pass acts on first. */
-.diff-added td:last-child { color: var(--accent); }
-.diff-removed td:nth-child(3) { color: var(--danger); }
-.diff-changed td:last-child { color: var(--accent); }
-.diff-note td { color: var(--text); }
+.diff-mark-removed { color: var(--danger); border-color: var(--danger-border); }
+.diff-mark-added { color: var(--accent); border-color: var(--accent-dim); }
+/* The session-comparison banner wears the quick-look banner's look (the
+   shared rule above): another accent-tinted "something is in progress"
+   strip, in its own grid track. */
+.diff-banner .diff-mark { line-height: 14px; }
 
 /* Settings → Updates: the release notes blob. Monospace and scrollable
    because it's markdown straight from the GitHub release, not something
@@ -1396,7 +1606,9 @@ textarea:focus { border-color: var(--accent); outline: none; }
   border-radius: var(--radius-sm);
 }
 
-.fb-help { margin: 0 0 10px; font-size: 12px; color: var(--dim); }
+/* 6px on top so the focused input's ring doesn't sit on the help text. */
+.fb-help { margin: 6px 0 10px; font-size: 12px; color: var(--dim); }
+.tf-enabled { display: flex; align-items: center; gap: 6px; margin: 4px 0 10px; }
 .fb-tree { border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 8px; margin-bottom: 10px; }
 .fb-group { display: flex; flex-direction: column; gap: 6px; }
 .fb-group .fb-group { border-left: 2px solid var(--line-2); padding-left: 10px; margin-left: 2px; }
@@ -1422,6 +1634,19 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .fb-status { font-size: 11px; min-height: 14px; margin-top: 4px; }
 .fb-status.ok { color: var(--str); }
 .fb-status.err { color: var(--danger); }
+/* Group-by control in the filter builder — carries into the saved filter. */
+.fb-groupby { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; }
+.fb-groupby-label { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 6px; }
+.fb-groupby-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.fb-groupby-chip { display: inline-flex; align-items: center; gap: 4px; background: var(--ink);
+  border: 1px solid var(--line-2); border-radius: 10px; padding: 2px 4px 2px 9px; font-size: 12px; }
+.fb-groupby-rm { background: none; border: 0; color: var(--dim); cursor: pointer; font: inherit; padding: 0 2px; }
+.fb-groupby-rm:hover { color: var(--danger); }
+.fb-groupby select { background: var(--ink); color: var(--text); border: 1px solid var(--line-2);
+  border-radius: var(--radius-sm); padding: 4px 6px; font: inherit; }
+.fb-groupby select:focus { outline: none; border-color: var(--accent); }
+.fb-groupby-sort { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
+.fb-groupby-sublabel { font-size: 11px; color: var(--dim); }
 .fb-raw-banner { font-size: 12px; color: var(--dim); margin-bottom: 8px; }
 
 /* ----------------------------------------------------------- settings */
@@ -1517,6 +1742,10 @@ textarea:focus { border-color: var(--accent); outline: none; }
 }
 .home-case-row:hover { border-color: var(--line-2); }
 .home-case-row.missing { opacity: .6; border-style: dashed; }
+/* Drag-and-drop import targets: a case row (import into it) or the home
+   area outside any row (a fresh quick-look case). */
+.home-case-row.home-case-drop { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.home.home-drop { box-shadow: inset 0 0 0 2px var(--accent); }
 .home-case-main { flex: 1; min-width: 0; cursor: pointer; }
 .home-case-name { font-size: 13px; color: var(--text); display: flex; align-items: center; gap: 8px; }
 .home-case-group-badge {
@@ -1644,6 +1873,12 @@ html[data-style="blueprint"] .row.selected { box-shadow: inset 5px 0 0 0 var(--a
 html[data-style="blueprint"] .detail-head, html[data-style="blueprint"] .sql-head, html[data-style="blueprint"] .modal-head {
   background: var(--accent); color: var(--accent-fg); text-transform: uppercase; font-weight: 700;
 }
+/* The buttons and the tab's row count inherit the dim grey from their own
+   rules, which on the solid accent measured 1.08:1 — Close was invisible. */
+html[data-style="blueprint"] .modal-head .btn, html[data-style="blueprint"] .detail-head .btn, html[data-style="blueprint"] .sql-head .btn {
+  color: var(--accent-fg); border-color: var(--accent-fg); background: transparent;
+}
+html[data-style="blueprint"] .tab[aria-selected="true"] .count, html[data-style="blueprint"] .tab[aria-selected="true"] .x { color: var(--accent-fg); opacity: .85; }
 
 /* Studio: gentle lift on hover instead of a color swap, pill-shaped active
    tab, a softer backdrop behind modals. */
@@ -1705,3 +1940,269 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 .assoc-ext { font-family: var(--mono, monospace); min-width: 4.5em; }
 .assoc-desc { color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .assoc-handleronly { color: var(--dim); font-size: 0.85em; }
+/* Case settings → Variables */
+.case-vars { display: grid; gap: 4px; margin: 6px 0 10px; }
+.case-var-row, .env-row { display: grid; grid-template-columns: 160px minmax(120px, 1fr) minmax(0, 1fr) auto;
+  gap: 8px; align-items: center; padding: 3px 6px; border-radius: var(--radius-sm); background: var(--panel-2); }
+.case-var-row.missing { box-shadow: inset 2px 0 0 var(--danger); }
+.case-var-name, .env-name { font-family: var(--mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.case-var-name-in, .case-var-value, .env-name-in, .env-value-in { background: var(--ink); color: var(--text); border: 1px solid var(--line-2);
+  border-radius: var(--radius-sm); padding: 4px 7px; font: 12px var(--mono); min-width: 0; }
+.case-var-desc, .env-src { color: var(--dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.case-var-del, .env-del { padding: 0 6px; }
+.case-var-add, .env-add { background: transparent; border: 1px dashed var(--line-2); }
+/* Settings → Environment — shares the case-variables row styling above */
+.env-list { display: grid; gap: 4px; margin: 6px 0 4px; }
+.env-row { grid-template-columns: minmax(180px, 1fr) minmax(0, 1.4fr) auto; }
+.env-name-wrap { display: flex; align-items: center; min-width: 0; }
+.env-prefix { font: 12px var(--mono); color: var(--dim); padding-right: 2px; }
+.env-name-in { flex: 1; }
+
+/* A checkbox and its label on one line. A class, not four copies of the
+   same inline style — the fifth row (Windows-only, so invisible to
+   everyone who reviewed the other four) was written without it and sat
+   visibly tighter against its checkbox. */
+.check-row { display: flex; align-items: center; gap: 6px; }
+
+/* "The server stopped answering" — a bar, not a toast: a toast fades,
+   and this condition does not go away on its own. */
+.conn-banner {
+  position: fixed; left: 50%; transform: translateX(-50%); bottom: 16px; z-index: 90;
+  display: flex; align-items: center; gap: 12px; max-width: min(760px, 92vw);
+  padding: 10px 14px; border-radius: var(--radius-md);
+  background: var(--panel); color: var(--text);
+  border: var(--border-w) solid var(--danger); box-shadow: var(--shadow-modal);
+}
+.conn-msg { font-size: 12px; line-height: 1.45; }
+.conn-banner .btn { white-space: nowrap; flex: 0 0 auto; }
+
+/* Across cases (static/js/multicase.js) */
+.mc-cases { display: grid; gap: 2px; max-height: 150px; overflow: auto; margin: 4px 0 10px;
+  border: 1px solid var(--line-2); border-radius: var(--radius-sm); padding: 6px; background: var(--panel-2); }
+.mc-case { display: grid; grid-template-columns: auto minmax(120px, 1fr) minmax(0, 1fr); gap: 8px;
+  align-items: center; padding: 2px 4px; border-radius: var(--radius-sm); cursor: pointer; }
+.mc-case:hover { background: var(--hover); }
+.mc-case-name { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mc-case-note, .mc-summary, .mc-src { color: var(--dim); font-size: 11px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mc-tabs { margin-bottom: 8px; }
+.mc-controls { display: grid; gap: 6px; margin-bottom: 10px; }
+.mc-values, .mc-sql { width: 100%; background: var(--ink); color: var(--text);
+  border: 1px solid var(--line-2); border-radius: var(--radius-sm); padding: 6px 8px;
+  font: 12px var(--mono); resize: vertical; }
+.mc-out { max-height: 46vh; overflow: auto; display: grid; gap: 2px; align-content: start; }
+.mc-case-head { font-size: 12px; font-weight: 600; margin: 8px 0 2px; color: var(--accent); }
+.mc-case-err { font-size: 11px; color: var(--danger); }
+.mc-hit { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 8px;
+  align-items: center; padding: 3px 6px; border-radius: var(--radius-sm); background: var(--panel-2); }
+/* A timeline row leads with its timestamp, so it has one column more. */
+.mc-hit-time { grid-template-columns: auto auto auto minmax(0, 1fr) auto; }
+.mc-hit .mc-summary { text-align: left; }
+.mc-hit .mc-when { font: 11px var(--mono); white-space: nowrap; }
+.mc-case-tag { font-size: 11px; padding: 1px 6px; border-radius: 999px;
+  background: var(--sel); white-space: nowrap; }
+.mc-open { padding: 0 8px; }
+.mc-table { border-collapse: collapse; font: 12px var(--mono); width: 100%; }
+.mc-table th, .mc-table td { border: 1px solid var(--line-2); padding: 2px 6px; text-align: left; }
+.mc-table th { background: var(--panel-2); }
+.mc-schema { font: 11px var(--mono); white-space: pre-wrap; color: var(--dim); }
+.mc-over-budget { color: var(--danger); }
+
+/* The profile builder (static/js/profilebuilder.js) */
+.pb-head { display: grid; gap: 2px; margin-bottom: 8px; }
+.pb-list { display: grid; gap: 2px; max-height: 240px; overflow: auto; margin: 4px 0 8px;
+  border: 1px solid var(--line-2); border-radius: var(--radius-sm); padding: 6px; background: var(--panel-2); }
+.pb-row { display: grid; grid-template-columns: auto minmax(120px, 1fr) minmax(0, 2fr); gap: 8px;
+  align-items: center; padding: 3px 4px; border-radius: var(--radius-sm); cursor: pointer; }
+.pb-row:hover { background: var(--hover); }
+.pb-name { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pb-desc { color: var(--dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pb-vars { display: grid; gap: 4px; margin: 4px 0 8px; }
+.pb-var { display: grid; grid-template-columns: 150px 1fr 1fr 110px auto auto; gap: 6px; align-items: center; }
+.pb-var input.confirm-input { margin: 0; }
+.pb-req { display: flex; align-items: center; gap: 4px; color: var(--dim); font-size: 11px; white-space: nowrap; }
+.pb-var-del { padding: 0 6px; }
+.pb-actions { margin-top: 10px; position: sticky; bottom: 0; background: var(--panel);
+  padding: 8px 0 2px; border-top: 1px solid var(--line-2); }
+@media (max-width: 900px) { .pb-var { grid-template-columns: 1fr 1fr; } }
+.assoc-manual { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 8px; }
+.assoc-manual summary { cursor: pointer; color: var(--dim); font-size: 12px; }
+.assoc-manual summary:hover { color: var(--text); }
+.assoc-manual-body { padding: 6px 2px 0; font-size: 12px; }
+.assoc-manual-body ol { margin: 4px 0 8px 18px; padding: 0; }
+.assoc-manual-body li { margin: 4px 0; }
+.assoc-manual-body code { background: var(--panel-3); padding: 1px 4px; border-radius: 2px;
+  font-family: var(--mono); font-size: 11px; }
+.assoc-cmd { display: block; margin-top: 4px; padding: 6px 8px; overflow-x: auto;
+  white-space: nowrap; }
+
+/* Case notes tab */
+.notesview { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }
+.notes-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+  border-bottom: 1px solid var(--line-2); flex: 0 0 auto; }
+.notes-head .notes-label { color: var(--dim); text-transform: uppercase;
+  letter-spacing: .07em; font-size: 11px; }
+.notes-head .spacer { flex: 1; }
+.notes-editor { flex: 1 1 auto; min-height: 0; width: 100%; resize: none;
+  background: var(--panel); color: var(--text); border: none; outline: none;
+  padding: 16px 18px; font: 13px/1.6 var(--mono); }
+.notes-preview { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 8px 22px 40px;
+  color: var(--text); max-width: 82ch; }
+.notes-preview h1, .notes-preview h2, .notes-preview h3, .notes-preview h4 {
+  color: var(--text); border-bottom: 1px solid var(--line); padding-bottom: 3px; }
+.notes-preview a { color: var(--accent); }
+.notes-preview a.notes-link { text-decoration: none; border-bottom: 1px dashed var(--accent-dim); }
+.notes-preview a.notes-link:hover { border-bottom-style: solid; }
+.notes-preview code { background: var(--panel-3); padding: 1px 4px; border-radius: 2px; }
+.notes-preview pre { background: var(--panel-3); padding: 10px 12px; overflow: auto; }
+.notes-preview pre code { background: none; padding: 0; }
+.notes-preview li { margin: 2px 0; }
+.notes-preview table { border-collapse: collapse; margin: 8px 0; font-size: 13px; }
+.notes-preview th, .notes-preview td { border: 1px solid var(--line-2); padding: 4px 10px; text-align: left; }
+.notes-preview th { background: var(--panel-2); color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+
+/* IOC watchlist tab */
+.watchlistview { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }
+.wl-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+  border-bottom: 1px solid var(--line-2); flex: 0 0 auto; }
+.wl-head .wl-title { color: var(--dim); text-transform: uppercase;
+  letter-spacing: .07em; font-size: 11px; }
+.wl-head .wl-summary { color: var(--dim); font-size: 12px; }
+.wl-head .spacer { flex: 1; }
+.wl-body { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: minmax(320px, 420px) 1fr; }
+.wl-left { min-height: 0; display: flex; flex-direction: column; border-right: 1px solid var(--line-2); }
+.wl-add { flex: 0 0 auto; display: flex; flex-direction: column; gap: 6px;
+  padding: 10px 12px; border-bottom: 1px solid var(--line-2); background: var(--panel); }
+.wl-add #wlValue { width: 100%; background: var(--ink); color: var(--text);
+  border: 1px solid var(--line-2); border-radius: var(--radius-sm); padding: 6px 9px; font: inherit; }
+.wl-add-row2 { display: flex; gap: 6px; }
+.wl-add-row2 select { flex: 1 1 auto; min-width: 0; }
+.wl-add #wlValue:focus { outline: none; border-color: var(--accent); }
+.wl-list { flex: 1 1 auto; min-height: 0; overflow: auto; }
+.wl-row { display: flex; align-items: center; gap: 10px; padding: 6px 12px;
+  border-bottom: 1px solid var(--line); cursor: pointer; }
+.wl-row:hover { background: var(--panel-2); }
+.wl-row.active { background: var(--panel-3); box-shadow: inset 2px 0 0 var(--accent); }
+/* Kind pill: hue-coded, tinted background so the type reads at a glance
+   without depending on text alone. Fixed hues (not theme tokens) on
+   purpose — an IOC's type shouldn't change colour per theme. */
+.wl-kind { flex: 0 0 auto; width: 52px; font-family: var(--mono); font-size: 9px;
+  letter-spacing: .06em; text-align: center; padding: 2px 0; border-radius: 3px;
+  border: 1px solid currentColor; }
+.wl-kind-hash { color: #7c6cf6; background: rgba(124, 108, 246, .12); }
+.wl-kind-ip { color: #39a8e8; background: rgba(57, 168, 232, .12); }
+.wl-kind-domain { color: #39e881; background: rgba(57, 232, 129, .12); }
+.wl-kind-filename { color: #d9a441; background: rgba(217, 164, 65, .12); }
+.wl-kind-other { color: #8a8a90; background: rgba(138, 138, 144, .12); }
+.wl-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.wl-val { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--mono); font-size: 12px; }
+.wl-note { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--dim); font-size: 11px; }
+.wl-count { flex: 0 0 auto; min-width: 2.2em; text-align: center; color: var(--dim);
+  font-family: var(--mono); font-size: 11px; padding: 1px 5px; border-radius: 8px; }
+.wl-count.hot { color: var(--bg); background: var(--accent); font-weight: 600; }
+.wl-del { flex: 0 0 auto; background: none; border: none; color: var(--line-2);
+  cursor: pointer; font-size: 12px; visibility: hidden; }
+.wl-row:hover .wl-del { visibility: visible; }
+.wl-del:hover { color: var(--danger); }
+.wl-hits { overflow: auto; }
+.wl-hits-head { color: var(--dim); text-transform: uppercase; letter-spacing: .07em;
+  font-size: 10px; padding: 10px 14px 6px; }
+.wl-hit { display: flex; justify-content: space-between; padding: 5px 14px;
+  cursor: pointer; border-bottom: 1px solid var(--line); }
+.wl-hit:hover { background: var(--panel-2); }
+.wl-hit-src { color: var(--text); }
+.wl-hit-rid { color: var(--dim); }
+/* New hits since the analyst last looked: a count pill on the tab (and
+   on the collapsed Pages ▾ button / sidebar row), not a 6px dot — the dot
+   was reported as invisible. */
+.tab-badge {
+  display: inline-block; min-width: 16px; padding: 0 5px; margin-left: 6px;
+  border-radius: 9px; background: var(--accent); color: var(--accent-fg);
+  font: 600 10px var(--mono); line-height: 16px; text-align: center; vertical-align: middle;
+}
+.menu-item .tab-badge { margin-left: 8px; }
+
+/* Case dashboard tab */
+.dashboardview { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; overflow: auto; }
+.dash-bar { display: flex; align-items: center; gap: 10px; padding: 8px 12px;
+  border-bottom: 1px solid var(--line-2); flex: 0 0 auto; position: sticky; top: 0;
+  background: var(--panel); z-index: 1; }
+.dash-bar .dash-title { color: var(--text); font-weight: 600; }
+.dash-bar .spacer { flex: 1; }
+.dash-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; padding: 12px; }
+.dash-card { background: var(--panel); border: 1px solid var(--line-2); border-radius: 3px;
+  padding: 12px; min-height: 120px; position: relative; display: flex; flex-direction: column; }
+.dash-card.span2 { grid-column: span 2; } .dash-card.span3 { grid-column: span 3; }
+.dash-card.span4 { grid-column: span 4; }
+.dash-head { display: flex; align-items: center; }
+.dash-head h4 { margin: 0 0 8px; color: var(--dim); font-size: 11px; text-transform: uppercase;
+  letter-spacing: .07em; font-weight: 500; flex: 1; }
+.dash-edit { background: none; border: none; color: var(--line-2); cursor: pointer; font: inherit; margin-right: 2px; }
+.dash-edit:hover { color: var(--accent); }
+/* The reorder handle — the one part of a card that starts a drag, so text
+   inside widgets stays selectable. */
+.dash-grip { color: var(--line-2); cursor: grab; user-select: none; font-size: 11px; }
+.dash-card:hover .dash-grip { color: var(--dim); }
+.dash-remove { margin-left: auto; color: var(--danger); }
+.dash-card { cursor: default; }
+.dash-card[draggable="true"] { cursor: grab; }
+.dash-card.dragging { opacity: .4; }
+.dash-card.drop-target { box-shadow: inset 0 0 0 2px var(--accent); }
+/* Preview pane in the widget editor — one card's worth of output before
+   committing it. */
+.dash-preview-wrap { margin-top: 8px; }
+.dash-form label { display: block; font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; margin: 0 0 4px; }
+.dash-field { margin-top: 10px; min-width: 0; }
+.dash-form .confirm-input, .dash-form select { width: 100%; box-sizing: border-box; }
+.dash-form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
+.dash-form-flex { display: flex; gap: 12px; }
+.dash-form-flex .dash-field { flex: 1 1 0; }
+.dash-form-flex .dash-field[hidden] { display: none; }
+.dash-advanced { margin-top: 10px; border: 1px dashed var(--line-2); border-radius: var(--radius-sm); padding: 4px 8px; }
+.dash-advanced summary { cursor: pointer; font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; }
+.dash-advanced .dash-field { margin-top: 6px; }
+/* Drilldown: the number, a bar, a list row — each a way back to the rows. */
+.dash-drill { background: none; border: none; color: var(--line-2); cursor: pointer; font: inherit; margin-right: 2px; }
+.dash-card:hover .dash-drill { color: var(--accent); }
+.dash-widget-body.drillable, .dash-list-row.drillable, canvas.drillable { cursor: pointer; }
+.dash-widget-body.drillable:hover .dash-stat { text-decoration: underline; text-decoration-color: var(--accent-dim); text-underline-offset: 6px; }
+.dash-list-row.drillable:hover { background: var(--sel); }
+.dash-pick-board, .dash-start-from { width: 100%; }
+.dash-form-row-3 { grid-template-columns: 1fr 1fr 1fr; }
+.dash-card.dash-preview { cursor: default; min-height: 60px; }
+.dash-widget-body { flex: 1 1 auto; min-height: 0; }
+.dash-stat { font-size: 34px; color: var(--accent); line-height: 1; }
+.dash-stat.warn { color: var(--danger); } .dash-stat.ok { color: var(--good); }
+.dash-sub { color: var(--dim); font-size: 11px; margin-top: 4px; }
+.dash-kv { display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px solid var(--line); }
+.dash-kv:last-child { border-bottom: none; } .dash-kv .k { color: var(--dim); } .dash-kv .v { color: var(--text); }
+.dash-chip { display: inline-block; padding: 1px 8px; border: 1px solid var(--line-2); border-radius: 10px;
+  margin: 2px 3px 0 0; font-size: 11px; color: var(--dim); }
+.dash-chip.on { color: var(--good); border-color: var(--accent-dim, var(--line-2)); }
+.dash-chip.off { color: var(--danger); border-color: var(--danger-border, var(--line-2)); }
+.dash-list-row { display: flex; justify-content: space-between; padding: 3px 0; }
+.dash-list-row .t { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dash-list-row .c { color: var(--accent); padding-left: 8px; }
+.dash-add { align-items: center; justify-content: center; color: var(--dim); border-style: dashed; cursor: pointer; }
+.dash-add:hover { color: var(--accent); border-color: var(--accent); }
+.dash-empty { grid-column: span 4; color: var(--dim); padding: 24px; text-align: center; }
+.dash-sql { width: 100%; background: var(--ink); color: var(--text); border: 1px solid var(--line-2);
+  font: 12px var(--mono); padding: 6px 8px; resize: vertical; }
+.bundle-shipped { margin-left: 8px; font-size: 10px; color: var(--accent); border: 1px solid var(--accent-dim, var(--line-2)); border-radius: 8px; padding: 0 6px; text-transform: uppercase; letter-spacing: .06em; }
+
+/* Error log (Case menu → Error log) + its unseen-errors dot on the Case
+   button. Errors that used to print only to the terminal show here. */
+#btnCase.has-errors { position: relative; }
+#btnCase.has-errors::after {
+  content: ''; position: absolute; top: 3px; right: 3px;
+  width: 6px; height: 6px; border-radius: 50%; background: var(--danger);
+}
+.errlog-list { max-height: 60vh; overflow: auto; font-family: var(--mono); font-size: 12px; }
+.errlog-row { display: grid; grid-template-columns: 150px 56px 1fr; gap: 8px;
+  padding: 5px 4px; border-bottom: 1px solid var(--line); align-items: start; }
+.errlog-ts { color: var(--dim); }
+.errlog-lvl { color: var(--dim); font-size: 10px; letter-spacing: .06em; }
+.errlog-row.errlog-error .errlog-lvl { color: var(--danger); }
+.errlog-msg { color: var(--text); white-space: pre-wrap; word-break: break-word; }

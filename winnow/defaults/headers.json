@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "nicknames": [
     {
       "name": "Event logs (EvtxECmd)",
@@ -620,6 +620,20 @@
         "L2ProfileFlags",
         "L2ProfileId",
         "ProfileName"
+      ]
+    },
+    {
+      "name": "ESXi / Linux host logs",
+      "columns": [
+        "Timestamp",
+        "Log",
+        "Severity",
+        "Component",
+        "PID",
+        "CPU",
+        "User",
+        "SourceIP",
+        "Message"
       ]
     }
   ]

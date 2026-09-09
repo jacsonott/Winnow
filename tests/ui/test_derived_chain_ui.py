@@ -45,7 +45,8 @@ def test_modal_offers_derived_inputs_and_builds_a_chain(page):
           .map((o) => [o.value, o.textContent])""")
         assert ["ChainParent", "ChainParent · derived"] in opts
 
-        page.locator("#modalBody select").nth(1).select_option(label="Regex capture")
+        page.locator("#modalBody select").nth(1).select_option(label="Extract part of a value")  # type
+        page.locator("#modalBody select").nth(2).select_option(label="Regex capture")            # operation
         page.locator(".derived-param input").first.fill(r"^(\w+)")
         page.wait_for_selector(".derived-preview-row")
         assert "powershell" in page.locator(".derived-preview-row").first.inner_text()

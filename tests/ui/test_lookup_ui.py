@@ -37,7 +37,7 @@ def test_lookup_modal_pickers_preview_and_column(page, tmp_path):
     try:
         page.evaluate("() => __winnow.openDerivedColumnModal('Host')")
         page.wait_for_selector("#modal:not([hidden])")
-        page.locator("#modalBody select").nth(1).select_option(label="Look up from another table")
+        page.locator("#modalBody select").nth(1).select_option(label="Join from another table")  # type -> its op auto-selects
         page.wait_for_timeout(200)
 
         # The table picker offers the other real tables — never the open one.

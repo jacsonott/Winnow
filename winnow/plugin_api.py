@@ -28,6 +28,18 @@ plugin needing to change):
   /api/plugin/<fs_name>/<route>, for whatever the plugin's UI (or a
   script) needs the server to do — query the case, call an external
   service, run a computation. Folder plugins only, same as tabs.
+- **Row actions** (register_row_action): an entry in every table view's
+  row right-click menu that hands the selected rows to a handler — a
+  VirusTotal lookup on the highlighted hashes, an enrichment that lands
+  a new table, anything that operates on "these rows". Works from a
+  single-file plugin.
+- **Toolbar panels** (register_toolbar_panel): a toggle button in the
+  table toolbar (beside search) that drops the plugin's own UI in
+  between the toolbar and the grid — a histogram of the view, a
+  sparkline, a legend. The panel's module gets the same `winnow`
+  context as a tab plus view-change events, so it can follow every
+  filter the analyst applies. Folder plugins only (there's a module to
+  serve).
 
 A plugin module provides:
 
@@ -83,10 +95,48 @@ A tab plus its backend route, the full custom-UI shape:
     #
     #   export default function mount(container, winnow) { ... }
 
+    api.register_row_action(
+        id="vt",                          # unique within this plugin
+        label="Look up on VirusTotal",    # the menu entry
+        handler=vt_lookup,
+        description="Query VT for the selected cell's hash",
+        max_rows=50,                      # entry is disabled past this many rows
+    )
+
+    api.register_toolbar_panel(
+        id="histogram",                  # unique within this plugin
+        label="Histogram",               # the toolbar toggle's caption
+        entry="ui/panel.js",             # ES module: mount(container, winnow), onShow/onHide,
+    )                                    #   and winnow.onViewChange(cb) to follow the grid
+
+    def vt_lookup(req):
+        # req.body: {"source_id", "column", "value", "rows": [{"rid",
+        # "source_id", "cells": {col: val}}, ...]} — the right-clicked
+        # cell's column/value plus every selected row's full cells.
+        # Return JSON; three keys the UI acts on: "message" (toast),
+        # "open_url" (opens in a new browser tab), "show_tab" (switches
+        # to one of this plugin's registered tabs).
+        hashes = {r["cells"].get(req.body["column"]) for r in req.body["rows"]}
+        return {"message": f"{len(hashes)} hashes queued"}
+
     def edges_handler(req):
+        # req.variables is the open case's variables, {name: value} — e.g.
+        # req.variables.get("engagement"), req.variables.get("api_base") —
+        # and req.set_variable(name, value) writes one. Case data, not
+        # secrets (see register_row_action's note on WINNOW_* env vars).
         # req: PluginRequest — method, route, query (dict of str), body
         # (parsed JSON or None), and store (the open Store, or None when no
-        # case is open). For reads, use req.store.run_sql(sql, limit) — it
+        # case is open). Also storage (per-plugin JSON), variables /
+        # set_variable (case variables from Case settings — config, never
+        # secrets), env("WINNOW_X") for a token the analyst saved under
+        # Settings → Environment (set_env/unset_env save one, the same way
+        # the panel does), table("chat") for the plugin's own tables inside
+        # the case file, and is_loopback for whether the caller is local.
+        #
+        # Handlers run in a worker thread, so blocking here (an HTTP call to
+        # a remote service) does not stall the rest of Winnow — and two of
+        # your own requests can now overlap, so don't keep mutable state in
+        # module globals without a lock. For reads, use req.store.run_sql(sql, limit) — it
         # opens its own read-only connection, so a slow plugin query never
         # holds the shared connection's lock (invariant #4). Raise
         # ValueError for a 400 the analyst can act on; return anything
@@ -117,6 +167,7 @@ from typing import Any, Callable, Iterable
 # PluginAPI can hand plugins the same quoting helper the app uses rather
 # than having them import app internals themselves.
 from .store import NUM_RE as _store_num_re, q as _store_q
+from . import userenv
 
 # Bumped when PluginAPI's contract changes incompatibly. A plugin may
 # declare WINNOW_API_VERSION = N (the version it was written against);
@@ -124,7 +175,7 @@ from .store import NUM_RE as _store_num_re, q as _store_q
 # provides, with a message that says to update Winnow — the failure mode
 # is otherwise an AttributeError deep inside register() that reads like a
 # plugin bug.
-PLUGIN_API_VERSION = 2
+PLUGIN_API_VERSION = 7
 
 FORMAT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 # API routes may nest ("chat/stream") but each segment keeps the same shape.
@@ -137,14 +188,118 @@ class PluginRequest:
     """What a register_api handler receives — a deliberately plain shape
     (no FastAPI types) so the contract stays stable across framework
     versions and handlers are trivially testable. `store` is the currently
-    open Store, or None when no case is open."""
+    open Store, or None when no case is open.
 
-    def __init__(self, method: str, route: str, query: dict, body: Any, store: Any):
+    `storage` is the plugin's own persistent dict — machine-level (it
+    lives in workspace/, beside the case registry, not in any case file),
+    so a plugin can keep cross-case state the way the app keeps saved
+    filters: get() the whole dict, set() the whole dict. The server
+    supplies it scoped to THIS plugin's fs name; a handler constructed in
+    a test may pass any object with get()/set(). None when the host chose
+    not to provide one."""
+
+    def __init__(self, method: str, route: str, query: dict, body: Any, store: Any,
+                 storage: Any = None, plugin: str = "", loopback: bool = True):
         self.method = method
         self.route = route
         self.query = query
         self.body = body
         self.store = store
+        self.storage = storage
+        # The plugin's fs_name — what namespaces its own tables. Optional so
+        # the existing 6-positional construction (and every test that uses
+        # it) keeps working; req.table() is what needs it.
+        self.plugin = plugin
+        # Whether the browser that called this route is on this machine.
+        # Winnow's own env/association routes are loopback-only; a plugin
+        # route is not, so a plugin doing something it would not want a
+        # remote viewer doing has to be able to ask. Defaults True: a
+        # handler constructed outside the HTTP path is local by definition.
+        self.is_loopback = loopback
+
+    @property
+    def variables(self) -> dict:
+        """The open case's variables, {name: value} — the engagement name,
+        a backend API base URL, a document link: things a plugin refers to
+        on every call and that belong to the case (they travel with the
+        .db). {} when no case is open. NOT for secrets: a token goes in a
+        WINNOW_* environment variable, never in a case file."""
+        if self.store is None:
+            return {}
+        try:
+            return self.store.get_variables()
+        except Exception:  # noqa: BLE001 — a plugin reading a variable must never 500 the case
+            return {}
+
+    def table(self, name: str) -> "PluginTable":
+        """One of this plugin's own tables in the OPEN CASE — created on
+        first use, private to this plugin, and part of the case file, so it
+        travels with the .db when it is handed to someone else.
+
+        For data that belongs to the case but is not evidence an analyst
+        browses: an LLM chat transcript that has to render offline, a cache
+        of enrichment results, a plugin's own bookkeeping. Machine-level
+        state (settings, anything not about THIS case) stays in
+        `req.storage`; a table an analyst should see in the grid is still
+        `req.store.ingest_rows`, which makes a real source.
+
+        Raises ValueError when no case is open — there is nowhere to put it.
+        """
+        if self.store is None:
+            raise ValueError("No case is open — plugin tables live in the case file")
+        if not self.plugin:
+            raise ValueError("This request has no plugin identity")
+        return PluginTable(self.store, self.plugin, name)
+
+    def set_env(self, name: str, value: str) -> str:
+        """Save a `WINNOW_*` environment variable for this user — the same
+        operation Settings → Environment performs, and the way to persist a
+        token your plugin obtained itself (an OAuth exchange, a key the
+        analyst pasted into your tab) instead of telling them to go and type
+        it in somewhere else.
+
+        It takes effect immediately and survives a restart: on Windows the
+        user's own `HKCU\\Environment`, elsewhere an owner-only
+        `~/.config/winnow/env`, loaded at every launch. Same rules as the
+        panel, so a plugin cannot do what the analyst cannot: only
+        `WINNOW_*` names, never one of Winnow's own settings, and never over
+        a value exported outside Winnow (that one wins; ValueError).
+
+        This is not a new privilege — a plugin is arbitrary Python and could
+        always write that file itself. It is the way to do it that lands in
+        the right place with the right permissions, and that the analyst can
+        see and remove under Settings → Environment.
+
+        Two things to weigh before calling it. Saving a secret the analyst
+        did not ask you to save is a surprise; say so in your UI. And your
+        route is reachable by whoever can reach Winnow — check
+        `req.is_loopback` if you do not want a remote viewer triggering it.
+        """
+        return userenv.set_var(name, value)
+
+    def unset_env(self, name: str) -> None:
+        """Remove a `WINNOW_*` variable this plugin saved. A value exported
+        outside Winnow is not yours to remove: the stored one goes, the live
+        one stays."""
+        userenv.delete_var(name)
+
+    def env(self, name: str, default: str | None = None) -> str | None:
+        """A `WINNOW_*` environment variable — the place for a token or
+        password, which must never be a case variable (case data travels
+        with the file). Set under Settings → Environment or exported by
+        outside Winnow; an outside value wins. Only the `WINNOW_` prefix is readable
+        through here (ValueError otherwise) — a convention that keeps
+        plugins on the analyst-managed names, not a sandbox: a plugin is
+        ordinary Python and can read os.environ itself. Never send the
+        value to the browser."""
+        return userenv.get(name, default)
+
+    def set_variable(self, name: str, value: str) -> dict:
+        """Write a case variable (upsert; keeps any description/required
+        flag a profile gave it). ValueError on a bad name or no open case."""
+        if self.store is None:
+            raise ValueError("Open a case first")
+        return self.store.set_variable(name, value)
 
 
 class IngestFormat:
@@ -212,6 +367,77 @@ class IngestFormat:
             "description": self.description,
             "options": self.options,
         }
+
+
+class PluginTable:
+    """A plugin's own table in the case file (`req.table("chat")`).
+
+    The real table is `plugin:<fs_name>:<name>`; `{table}` inside any SQL
+    passed here is replaced with its quoted name, so an author never quotes
+    an identifier by hand and two plugins can never collide by accident.
+
+    That is naming, not a sandbox. A plugin is arbitrary Python holding
+    `req.store`, so SQL naming another plugin's table runs, exactly as
+    anything else it does to the case file would (see the guide's security
+    model). What this guarantees is that you cannot reach someone else's
+    data *by accident*.
+
+    Reads use Winnow's reader pool, writes the single writer connection
+    (store invariant #4), so a long import never blocks reading a chat
+    transcript back, and two writes are serialised rather than interleaved.
+    """
+
+    def __init__(self, store: Any, plugin: str, name: str):
+        self._store = store
+        self._plugin = plugin
+        self.name = name
+        # Validates both halves; raises before anything is created.
+        self.table = store._plugin_table(plugin, name)
+
+    def create(self, columns: str) -> "PluginTable":
+        """CREATE TABLE IF NOT EXISTS — safe and cheap to call on every
+        request, which is the intended usage (there is no install hook to
+        create it in): it checks on the reader pool first and only takes the
+        writer lock when there is something to create.
+
+            req.table("chat").create("id INTEGER PRIMARY KEY, role TEXT, "
+                                     "content TEXT, at TEXT")
+        """
+        self._store.plugin_table_create(self._plugin, self.name, columns)
+        return self
+
+    def exists(self) -> bool:
+        return self._store.plugin_table_exists(self._plugin, self.name)
+
+    def insert(self, rows) -> int:
+        """One dict, or a list of dicts sharing their columns. Values are
+        bound, never formatted into SQL."""
+        return self._store.plugin_table_insert(self._plugin, self.name, rows)
+
+    def rows(self, where: str = "", params=(), limit: int | None = 5000) -> list:
+        """Rows as dicts. `where` is the tail of the query:
+
+            t.rows("WHERE role = ? ORDER BY id DESC", ["user"], limit=50)
+
+        A LIMIT you write in the tail is yours and is left alone. Otherwise
+        `limit` caps the result — it defaults to 5000, so pass
+        `limit=None` when you mean the whole table (a long transcript).
+        """
+        return self._store.plugin_table_rows(self._plugin, self.name, where, params, limit)
+
+    def execute(self, sql: str, params=()) -> int:
+        """Any single statement against this table — UPDATE, DELETE, an
+        index. Write `{table}` where the table name goes; it is substituted
+        outside string literals, so `SET meta = '{table}'` stores the braces
+        rather than the table's name. Returns the number of rows changed
+        (0 for statements that change none, DDL included).
+
+            t.execute("DELETE FROM {table} WHERE at < ?", [cutoff])
+        """
+        return self._store.plugin_table_write(self._plugin, self.name, sql, params)
+
+    def drop(self) -> None:
+        self._store.plugin_table_drop(self._plugin, self.name)
 
 
 class PluginAPI:
@@ -304,6 +530,89 @@ class PluginAPI:
         self._registry._add_api(self._fs, route, handler, methods)
 
 
+    # NOTE for anything added below that touches tables: a plugin's SQL may
+    # not write to src_<id>/drv_<id>/row_tags/row_notes/sources/tag_defs.
+    # Reads are unrestricted. Enforced by an authorizer in
+    # Store.plugin_table_write, because invariant #2's paging carve-out is
+    # exact only while invariant #1 holds.
+
+    def register_row_action(self, *, id: str, label: str, handler: Callable[[PluginRequest], Any],
+                            description: str = "", max_rows: int = 1000) -> None:
+        """An entry under the row right-click menu's "Plugins ▸" submenu in
+        every table view. Analysts can pin it to the top of that menu, and
+        the pin is keyed ``plugin:<fs_name>:<id>`` on their machine — so
+        keep ``id`` stable across versions (and the plugin folder's name,
+        which is ``fs_name``), or their pin silently stops matching. When
+        chosen, the server resolves the selected rows (full cells, by
+        (source_id, rid) — merges included) and calls
+        `handler(PluginRequest)` with them in `req.body`:
+
+            {"source_id": int, "column": str|None, "value": str|None,
+             "rows": [{"rid": int, "source_id": int, "cells": {col: val}}, ...]}
+
+        The return value is JSON-able; the UI acts on three optional keys
+        — "message" (toast), "open_url" (new browser tab), "show_tab"
+        (activate one of this plugin's tabs) — and toasts "done"
+        otherwise. ValueError → 400 with the message. `max_rows` caps the
+        selection the entry accepts (it's disabled past that) so a
+        network-bound lookup can't be pointed at a million rows."""
+        if not FORMAT_ID_RE.match(id or ""):
+            raise ValueError(f"Row action id {id!r} must be lowercase [a-z0-9_-]")
+        if not label or not callable(handler):
+            raise ValueError("register_row_action needs a label and a callable handler")
+        try:
+            max_rows = int(max_rows)
+        except (TypeError, ValueError):
+            raise ValueError("max_rows must be an integer")
+        if max_rows < 1:
+            raise ValueError("max_rows must be at least 1")
+        self._registry._add_row_action({
+            "id": f"{self._plugin}.{id}",
+            "local_id": id,
+            "plugin": self._plugin,
+            "plugin_fs": self._fs,
+            "label": label,
+            "description": description,
+            "max_rows": max_rows,
+            "handler": handler,
+        })
+
+
+    def register_toolbar_panel(self, *, id: str, label: str, entry: str,
+                               description: str = "") -> None:
+        """A toggle button in the table toolbar (next to search) that shows
+        the plugin's own UI in a strip between the toolbar and the grid.
+        `entry` is an ES module (relative to the plugin folder, validated
+        to exist now like a tab's) exporting `mount(container, winnow)`
+        and optional `onShow(container)` / `onHide(container)`. The
+        `winnow` context is a tab's plus `onViewChange(cb)` (fires after
+        every grid rebuild — filter, sort, search, timeframe, table
+        switch; returns an unsubscribe), `state.view` (the current view's
+        {view_id, row_count}), `setTimeRange({column, start, end})` /
+        `clearTimeRange()` to drive the case timeframe filter, and
+        `onAppearanceChange(cb)` so a canvas painted with the accent can
+        redraw when the look changes. The toggle
+        state persists per browser; the strip hides with the toolbar on
+        page tabs."""
+        if not FORMAT_ID_RE.match(id or ""):
+            raise ValueError(f"Panel id {id!r} must be lowercase [a-z0-9_-]")
+        if not label:
+            raise ValueError("register_toolbar_panel needs a label")
+        if not self._root.is_dir():
+            raise ValueError("register_toolbar_panel is for folder plugins — a single .py file has no module to serve")
+        rel = Path(str(entry).replace("\\", "/"))
+        if rel.is_absolute() or ".." in rel.parts or not (self._root / rel).is_file():
+            raise ValueError(f"Panel entry {entry!r} must be a file inside the plugin folder")
+        self._registry._add_panel({
+            "id": f"{self._plugin}.{id}",
+            "plugin": self._plugin,
+            "plugin_fs": self._fs,
+            "label": label,
+            "entry": rel.as_posix(),
+            "description": description,
+        })
+
+
 class PluginRegistry:
     """Discovers, imports and indexes plugins. One module-level instance
     lives in server.py; tests build their own against tmp dirs.
@@ -319,6 +628,8 @@ class PluginRegistry:
         self._formats: dict[str, IngestFormat] = {}
         self._tabs: dict[str, dict] = {}                 # namespaced tab id -> tab dict (see PluginAPI.register_tab)
         self._apis: dict[tuple[str, str], dict] = {}     # (fs_name, route) -> {handler, methods}
+        self._row_actions: dict[str, dict] = {}          # namespaced action id -> see register_row_action
+        self._panels: dict[str, dict] = {}               # namespaced panel id -> see register_toolbar_panel
         self._seq = 0  # unique module names across load() calls / same-named plugins in two dirs
 
     # ------------------------------------------------------------- loading
@@ -361,6 +672,8 @@ class PluginRegistry:
         self._formats = {}
         self._tabs = {}
         self._apis = {}
+        self._row_actions = {}
+        self._panels = {}
         seen: set[str] = set()
         for directory in directories:
             d = Path(directory)
@@ -452,6 +765,16 @@ class PluginRegistry:
             raise ValueError(f"Duplicate tab id: {tab['id']}")
         self._tabs[tab["id"]] = tab
 
+    def _add_panel(self, panel: dict) -> None:
+        if panel["id"] in self._panels:
+            raise ValueError(f"Duplicate toolbar panel id: {panel['id']}")
+        self._panels[panel["id"]] = panel
+
+    def _add_row_action(self, action: dict) -> None:
+        if action["id"] in self._row_actions:
+            raise ValueError(f"Duplicate row action id: {action['id']}")
+        self._row_actions[action["id"]] = action
+
     def _add_api(self, fs_name: str, route: str, handler: Callable, methods: set[str]) -> None:
         if (fs_name, route) in self._apis:
             raise ValueError(f"Duplicate API route: {route}")
@@ -486,6 +809,21 @@ class PluginRegistry:
 
     def get_api(self, fs_name: str, route: str) -> dict | None:
         return self._apis.get((fs_name, route))
+
+    def list_panels(self) -> list[dict]:
+        """Every registered toolbar panel, with its plugin's gen for the
+        entry module's cache-buster (same as list_tabs)."""
+        gen_by_fs = {p["fs_name"]: p["gen"] for p in self.plugins}
+        return [{**t, "gen": gen_by_fs.get(t["plugin_fs"], 0)} for t in self._panels.values()]
+
+    def list_row_actions(self) -> list[dict]:
+        """Every registered row action, minus the handler (the UI only
+        needs label/description/max_rows and where to POST)."""
+        return [{k: v for k, v in a.items() if k != "handler"} for a in self._row_actions.values()]
+
+    def get_row_action(self, fs_name: str, local_id: str) -> dict | None:
+        return next((a for a in self._row_actions.values()
+                     if a["plugin_fs"] == fs_name and a["local_id"] == local_id), None)
 
     def describe(self) -> list[dict]:
         return [dict(p) for p in self.plugins]

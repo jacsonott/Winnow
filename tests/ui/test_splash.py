@@ -44,6 +44,7 @@ def test_any_key_skips_it(browser, server):
     try:
         pg.goto(server)
         pg.wait_for_selector("#splash:not([hidden])", timeout=10_000)
+        pg.wait_for_timeout(800)          # past the focus-click grace period
         pg.keyboard.press("Escape")
         # Far faster than the ~4s the animation itself takes to settle.
         pg.wait_for_selector("#splash", state="hidden", timeout=3_000)
@@ -57,6 +58,7 @@ def test_a_click_skips_it(browser, server):
     try:
         pg.goto(server)
         pg.wait_for_selector("#splash:not([hidden])", timeout=10_000)
+        pg.wait_for_timeout(800)          # past the focus-click grace period
         pg.mouse.click(550, 350)
         pg.wait_for_selector("#splash", state="hidden", timeout=3_000)
     finally:
@@ -136,5 +138,80 @@ def test_the_finished_wordmark_is_held_before_handing_over(browser, server):
         pg.wait_for_selector("#splash", state="hidden", timeout=25_000)
         held = _t.monotonic() - shown
         assert held > 1.5, f"handed over {held:.1f}s after settling — too quick to read"
+    finally:
+        ctx.close()
+
+
+def test_a_click_in_the_first_moments_does_not_skip_it(browser, server):
+    """The click that focuses a freshly opened app window lands on frame
+    one — it used to end the animation before anyone saw it."""
+    ctx = _ctx(browser, '{}')
+    pg = ctx.new_page()
+    try:
+        pg.goto(server, wait_until="commit")
+        pg.wait_for_selector("#splash:not([hidden])", timeout=10_000)
+        pg.mouse.click(550, 350)
+        pg.wait_for_timeout(300)
+        assert pg.locator("#splash").get_attribute("hidden") is None   # still playing
+    finally:
+        ctx.close()
+
+
+def test_reduced_motion_skips_by_default_but_an_explicit_tick_plays(browser, server):
+    """Windows with Animation effects off reports reduced motion; the
+    default honours it (and Settings says so), a hand-ticked box overrides."""
+    ctx = browser.new_context(viewport={"width": 1200, "height": 800}, reduced_motion="reduce")
+    ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen');"
+                        "localStorage.setItem('winnow.appearance', JSON.stringify({ splash: true }))")
+    pg = ctx.new_page()
+    try:
+        pg.goto(server, wait_until="networkidle")
+        pg.wait_for_selector(".row")
+        assert pg.locator("#splash").get_attribute("hidden") is not None
+        last = pg.evaluate("() => JSON.parse(localStorage.getItem('winnow.splash.last'))")
+        assert last["result"] == "skipped" and "reduced motion" in last["reason"]
+        # Settings explains it.
+        pg.evaluate("() => __winnow.openSettings()")
+        pg.wait_for_selector("#modal:not([hidden])")
+        assert "reduced motion" in pg.locator("#modal .fb-help", has_text="Launch").first.inner_text() or \
+               "reduced motion" in pg.locator("#modal").inner_text()
+    finally:
+        ctx.close()
+    ctx2 = browser.new_context(viewport={"width": 1200, "height": 800}, reduced_motion="reduce")
+    ctx2.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen');"
+                         "localStorage.setItem('winnow.appearance', JSON.stringify({ splash: 'always' }))")
+    pg2 = ctx2.new_page()
+    try:
+        pg2.goto(server, wait_until="commit")
+        pg2.wait_for_selector("#splash:not([hidden])", timeout=10_000)
+    finally:
+        ctx2.close()
+
+
+def test_a_slow_display_still_finishes_in_seconds(browser, server):
+    """The launch must take the same few seconds on a VM with no GPU and a
+    big high-DPI screen as on a workstation. Modelled here with software
+    canvas, a 2560×1440 2× viewport and 8× CPU throttling — the shape of
+    machine that reported a 30-second 'laggy' launch. The physics ticks on
+    a clock, tokens come from a pre-rendered atlas, and the render scale
+    drops when frames run slow, so the whole thing stays under ~half of
+    what a per-frame simulation took."""
+    import time
+    ctx = browser.new_context(viewport={"width": 2560, "height": 1440}, device_scale_factor=2)
+    ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen');"
+                        "localStorage.setItem('winnow.appearance', JSON.stringify({ splash: 'always' }))")
+    pg = ctx.new_page()
+    errors = []
+    pg.on("pageerror", lambda e: errors.append(str(e)))
+    try:
+        cdp = ctx.new_cdp_session(pg)
+        cdp.send("Emulation.setCPUThrottlingRate", {"rate": 8})
+        pg.goto(server)
+        pg.wait_for_selector("#splash:not([hidden])", timeout=20_000)
+        t0 = time.monotonic()
+        pg.wait_for_selector("#splash[hidden]", state="attached", timeout=60_000)
+        took = time.monotonic() - t0
+        assert took < 18, f"splash took {took:.1f}s under throttling"
+        assert not errors, errors
     finally:
         ctx.close()

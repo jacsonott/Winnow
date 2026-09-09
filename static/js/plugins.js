@@ -4,12 +4,16 @@
 import { recordTabVisit } from './tabhistory.js';
 import { $, api, el, post, setBusy, toast } from './core.js';
 import { loadPlugins, openImportModal, pluginFormatById, queueFilesForFormat } from './importer.js';
-import { loadSources, openSource, renderPageTabs, syncTabSelection } from './sources.js';
-import { activeSqlTab, scheduleSqlTabSave, showGridTab, syncTabChrome } from './sql.js';
+import { clearAllFilters, loadSources, openSource, renderPageTabs, syncTabSelection } from './sources.js';
+import { setColumnFilter, valueFilterText } from './filters.js';
+import { rebuildView } from './view.js';
+import { activeSqlTab, hideMainViews, scheduleSqlTabSave, showGridTab, syncTabChrome } from './sql.js';
 import { setActiveSqlResult, sqlCopyResult, sqlDownloadCsv, sqlRowKey, sqlTagsFor, tagChips, wireSqlAssist } from './sqlassist.js';
 import { moveCursor } from './grid.js';
+import { loadCaseVariables } from './savedfilters.js';
 import { S } from './state.js';
 import { confirmDialog, modal, promptDialog } from './ui.js';
+import { updateTimeRangeButton } from './timeframe.js';
 
 /* Settings → Plugins: everything about drop-in extensions in one place —
    every plugin found in the plugins directory (enabled, disabled, or
@@ -32,6 +36,9 @@ export function buildPluginsPanel(b) {
     S.pluginFormats = r.formats || [];
     S.pluginTabs = r.tabs || [];
     S.pluginDirs = r.dirs || [];
+    // A toggle takes a plugin's row actions with it — and a pinned one
+    // out of the row menu, which promises to hide it while its plugin is off.
+    S.pluginRowActions = r.row_actions || [];
     renderPluginTabs(); // a toggle/install can add or remove pinned tabs
   }
 
@@ -251,7 +258,9 @@ export function buildPluginsPanel(b) {
    comparisons that silently do string comparison instead. Merges have no
    single backing table (they're a Store-level UNION over their members,
    not a real SQLite table — see _merge_source_dict in store.py), so
-   they're left out; the SQL pane couldn't query one by name anyway. */
+   they're left out. (The pane itself CAN query a merge — _pane_connection
+   makes a merge_<id> TEMP VIEW for each — so this is a shape the schema
+   dump has not caught up with, not a limit of the pane.) */
 export function sqlSchemaForLLM() {
   const real = S.sources.filter((s) => !s.is_merge && !s.error);
   const lines = [
@@ -305,7 +314,7 @@ export function hidePluginViews() {
 }
 
 export function resetPluginTabMounts() {
-  for (const m of pluginTabMounts.values()) m.container.remove();
+  for (const [id, m] of pluginTabMounts) { disposePluginMount(id); m.container.remove(); }
   pluginTabMounts.clear();
 }
 
@@ -321,7 +330,7 @@ export function renderPluginTabs() {
   renderPageTabs();
   for (const [id, m] of [...pluginTabMounts]) {
     const t = pluginTabById(id);
-    if (!t || t.gen !== m.gen) { m.container.remove(); pluginTabMounts.delete(id); }
+    if (!t || t.gen !== m.gen) { disposePluginMount(id); m.container.remove(); pluginTabMounts.delete(id); }
   }
   if (S.activeTab.startsWith('plugin:') && !pluginTabById(S.activeTab.slice(7))) showGridTab();
 }
@@ -332,9 +341,36 @@ export function renderPluginTabs() {
    connection server-side — see run_sql) is the blessed way for a tab to
    query the case; `schemaText` is the same LLM-ready schema dump the SQL
    pane's copy button builds. */
+/* Document-level listeners a mounted plugin registered, per mount id.
+
+   The context hands out onViewChange/onAppearanceChange with an
+   unsubscribe, but a mount is torn down by removing its container — the
+   plugin never gets a chance to call it, and there is no onDestroy in the
+   contract. Opening a case reloads every plugin, which bumps its gen and
+   drops every mount, so the listeners accumulated one set per case switch:
+   each still firing on every grid rebuild, painting into detached DOM and
+   re-issuing the panel's fetch. Tracked here and cut in disposePluginMount,
+   which every teardown path calls. */
+const mountListeners = new Map();   // mount id -> [unsubscribe]
+
+function trackMountListener(id, off) {
+  if (id == null) return off;
+  const list = mountListeners.get(id) || [];
+  list.push(off);
+  mountListeners.set(id, list);
+  return off;
+}
+
+export function disposePluginMount(id) {
+  for (const off of mountListeners.get(id) || []) {
+    try { off(); } catch { /* a plugin's own teardown must not block ours */ }
+  }
+  mountListeners.delete(id);
+}
+
 export function buildPluginTabContext(tab) {
   return {
-    apiVersion: 1,
+    apiVersion: 2,
     plugin: tab.plugin,
     base: `/api/plugin/${tab.plugin_fs}`,      // the plugin's own register_api routes
     assets: `/plugin_assets/${tab.plugin_fs}`, // the plugin's own files (css, workers, data)
@@ -352,6 +388,67 @@ export function buildPluginTabContext(tab) {
       get sources() { return S.sources; },
       get sourceId() { return S.sourceId; },
       get tags() { return S.tags; },
+      // The case timeframe filter, verbatim — {enabled, column, start, end}.
+      // A plugin honouring it is what makes "the timeframe applies
+      // everywhere" true for plugin tabs too.
+      get timeRange() { return S.timeRange; },
+      // The grid's current view — what the table is showing right now,
+      // filters/search/timeframe applied — or null before a table is open.
+      // Hand view_id to a plugin route that reads THROUGH the view (the
+      // table_histogram example's Store.time_histogram) to describe
+      // exactly the rows on screen.
+      get view() { return S.view ? { view_id: S.view.view_id, row_count: S.view.row_count } : null; },
+      // The case's variables as {name: value} — engagement name, API base
+      // URL, a document link. Case data, never secrets.
+      get variables() { return Object.fromEntries((S.caseVariables || []).map((v) => [v.name, v.value])); },
+    },
+    // Write a case variable (upsert) and refresh the local copy.
+    setVariable: async (name, value) => {
+      await post('/api/case/variables', { name, value: String(value ?? '') });
+      await loadCaseVariables();
+    },
+    // Fires after every grid rebuild — filter, sort, search, timeframe,
+    // table switch — with {sourceId, viewId, rowCount}. Returns an
+    // unsubscribe. This is what lets a panel follow the grid.
+    onViewChange: (cb) => {
+      const h = (e) => cb(e.detail);
+      document.addEventListener('winnow:viewchange', h);
+      return trackMountListener(tab.id, () => document.removeEventListener('winnow:viewchange', h));
+    },
+    // Fires after every skin / theme / accent change with {style, themeMode,
+    // accent}. Canvases don't inherit CSS — a panel that painted with the
+    // accent redraws here, or it keeps the old colour until the next view
+    // change. Returns an unsubscribe.
+    onAppearanceChange: (cb) => {
+      const h = (e) => cb(e.detail);
+      document.addEventListener('winnow:appearance', h);
+      return trackMountListener(tab.id, () => document.removeEventListener('winnow:appearance', h));
+    },
+    // Drive the case timeframe filter (the toolbar's ⏱) from a plugin —
+    // the same object the Timeframe dialog writes, so the button, the
+    // toggle key and every other consumer see it as if typed there.
+    setTimeRange: ({ column = null, start = '', end = '', enabled = true } = {}) => {
+      S.timeRange = { enabled: !!enabled, column: column || null, start: start || '', end: end || '' };
+      updateTimeRangeButton();
+      if (S.sourceId) rebuildView({ keepScroll: false });
+    },
+    clearTimeRange: () => {
+      S.timeRange = { enabled: false, column: null, start: '', end: '' };
+      updateTimeRangeButton();
+      if (S.sourceId) rebuildView({ keepScroll: false });
+    },
+    // Jump from a plugin's visualization to the EVIDENCE: open the source
+    // and exact-filter it to the given column values (clearing whatever
+    // filters were there — this is a navigation, not a refinement).
+    openFiltered: async (sourceId, pairs) => {
+      await openSource(sourceId);
+      await clearAllFilters();
+      let applied = 0;
+      for (const { column, value } of pairs || []) {
+        const raw = valueFilterText(value);
+        if (raw !== null) { setColumnFilter(column, raw); applied++; }
+      }
+      if (applied) await rebuildView({ keepScroll: false });
     },
   };
 }
@@ -361,15 +458,13 @@ export async function showPluginTab(tabId) {
   const tab = pluginTabById(tabId);
   if (!tab) return;
   S.activeTab = 'plugin:' + tabId;
-  $('grid').hidden = true;
-  $('sqlview').hidden = true;
-  $('timelineview').hidden = true;
+  hideMainViews();
   hidePluginViews();
   syncTabSelection();
   syncTabChrome();
 
   let m = pluginTabMounts.get(tabId);
-  if (m && m.gen !== tab.gen) { m.container.remove(); pluginTabMounts.delete(tabId); m = null; }
+  if (m && m.gen !== tab.gen) { disposePluginMount(tabId); m.container.remove(); pluginTabMounts.delete(tabId); m = null; }
   if (m) {
     m.container.hidden = false;
   } else {
@@ -391,6 +486,104 @@ export async function showPluginTab(tabId) {
     }
   }
   if (m.module && m.module.onShow) { try { m.module.onShow(m.container); } catch (e) { console.error(e); } }
+}
+
+/* ---------------------------------------------------- toolbar panels */
+
+/* Plugin toolbar panels (PluginAPI.register_toolbar_panel): a toggle
+   button per panel in the table toolbar, and — while toggled on and the
+   grid is showing — the panel's own UI in the #pluginPanels strip between
+   the toolbar and the grid. Mounted once per plugin gen like a tab;
+   hidden/shown after that, with onShow/onHide. The toggle persists per
+   browser, keyed by the namespaced panel id, so an analyst who keeps the
+   histogram open gets it back on the next case. */
+const PANEL_PREFS_KEY = 'winnow.panels';
+const pluginPanelMounts = new Map();   // panel id -> {container, module, gen}
+
+function panelPrefs() {
+  try { return JSON.parse(localStorage.getItem(PANEL_PREFS_KEY) || '{}'); } catch { return {}; }
+}
+export function pluginPanelOpen(id) { return !!panelPrefs()[id]; }
+function setPanelPref(id, on) {
+  const p = panelPrefs();
+  if (on) p[id] = true; else delete p[id];
+  localStorage.setItem(PANEL_PREFS_KEY, JSON.stringify(p));
+}
+
+export function renderPluginPanelButtons() {
+  const host = $('pluginToolbarButtons');
+  if (!host) return;
+  host.replaceChildren();
+  const live = new Set((S.pluginPanels || []).map((p) => p.id));
+  // A panel whose plugin was disabled or reloaded loses its mount.
+  for (const [id, m] of [...pluginPanelMounts]) {
+    const p = (S.pluginPanels || []).find((x) => x.id === id);
+    if (!p || p.gen !== m.gen) { disposePluginMount(id); m.container.remove(); pluginPanelMounts.delete(id); }
+  }
+  for (const p of S.pluginPanels || []) {
+    const b = el('button', 'btn ghost plugin-panel-btn', p.label);
+    b.dataset.panelId = p.id;
+    b.title = (p.description || `${p.label} — from the ${p.plugin} plugin`) + ' (click to toggle)';
+    b.setAttribute('aria-pressed', String(pluginPanelOpen(p.id)));
+    b.onclick = () => togglePluginPanel(p.id);
+    host.append(b);
+    if (pluginPanelOpen(p.id) && live.has(p.id)) mountPluginPanel(p.id);
+  }
+  syncPluginPanels();
+}
+
+export async function togglePluginPanel(id, on = !pluginPanelOpen(id)) {
+  setPanelPref(id, on);
+  const btn = document.querySelector(`.plugin-panel-btn[data-panel-id="${CSS.escape(id)}"]`);
+  if (btn) btn.setAttribute('aria-pressed', String(on));
+  if (on) await mountPluginPanel(id);
+  syncPluginPanels();
+}
+
+async function mountPluginPanel(id) {
+  const panel = (S.pluginPanels || []).find((p) => p.id === id);
+  if (!panel) return;
+  let m = pluginPanelMounts.get(id);
+  if (m) return;
+  const container = el('section', 'plugin-panel');
+  container.dataset.panelId = id;
+  $('pluginPanels').append(container);
+  m = { container, module: null, gen: panel.gen };
+  pluginPanelMounts.set(id, m);
+  try {
+    const ctx = buildPluginTabContext(panel);
+    const mod = await import(`${ctx.assets}/${panel.entry}?v=${panel.gen}`);
+    if (typeof mod.default !== 'function') throw new Error('panel module has no default export to mount');
+    await mod.default(container, ctx);
+    m.module = mod;
+  } catch (e) {
+    console.error(e);
+    container.replaceChildren(el('p', 'note-status', `Plugin panel "${panel.label}" failed to load: ${e.message}`));
+  }
+  syncPluginPanels();
+}
+
+/* Panels show only with the grid (the toolbar hides on page tabs, and so
+   does the strip) and only while toggled on; the host collapses to
+   nothing when no panel is visible, so the grid gets the row back. */
+export function syncPluginPanels() {
+  const host = $('pluginPanels');
+  if (!host) return;
+  const isGrid = S.activeTab === 'grid';
+  let any = false;
+  for (const [id, m] of pluginPanelMounts) {
+    const show = isGrid && pluginPanelOpen(id);
+    const was = !m.container.hidden;
+    m.container.hidden = !show;
+    if (show) any = true;
+    if (m.module) {
+      try {
+        if (show && !was && m.module.onShow) m.module.onShow(m.container);
+        if (!show && was && m.module.onHide) m.module.onHide(m.container);
+      } catch (e) { console.error(e); }
+    }
+  }
+  host.hidden = !any;
 }
 
 /* Split out of runSql so applySqlTabToEditor can re-paint a cached result

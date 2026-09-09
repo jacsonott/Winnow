@@ -15,27 +15,29 @@ reading. Start with the Quickstart.
 
 **Contents**
 
-1. [The three extension points](#1-the-three-extension-points)
+1. [The five extension points](#1-the-five-extension-points)
 2. [Quickstart: a parser in 20 lines](#2-quickstart-a-parser-in-20-lines)
 3. [Plugin anatomy](#3-plugin-anatomy)
 4. [Hook: ingest formats](#4-hook-ingest-formats)
 5. [Hook: tabs](#5-hook-tabs)
-6. [Hook: API routes](#6-hook-api-routes)
-7. [Talking to the case](#7-talking-to-the-case)
-8. [Testing a plugin](#8-testing-a-plugin)
-9. [Installing and sharing](#9-installing-and-sharing)
-10. [Security model](#10-security-model)
-11. [Troubleshooting](#11-troubleshooting)
-12. [Reference](#12-reference)
-13. [Writing a plugin with an LLM](#13-writing-a-plugin-with-an-llm)
+6. [Hook: toolbar panels](#6-hook-toolbar-panels)
+7. [Hook: API routes](#7-hook-api-routes)
+8. [Hook: row actions](#8-hook-row-actions)
+9. [Talking to the case](#9-talking-to-the-case)
+10. [Testing a plugin](#10-testing-a-plugin)
+11. [Installing and sharing](#11-installing-and-sharing)
+12. [Security model](#12-security-model)
+13. [Troubleshooting](#13-troubleshooting)
+14. [Reference](#14-reference)
+15. [Writing a plugin with an LLM](#15-writing-a-plugin-with-an-llm)
 
 > **This file is self-contained.** You do not need to read Winnow's
 > source to write a plugin against it, and neither does an LLM you're
-> working with — see [§13](#13-writing-a-plugin-with-an-llm).
+> working with — see [§15](#15-writing-a-plugin-with-an-llm).
 
 ---
 
-## 1. The three extension points
+## 1. The five extension points
 
 Everything a plugin does, it does by calling methods on the `api` object
 handed to its `register()` function:
@@ -45,18 +47,26 @@ handed to its `register()` function:
 | `api.register_ingest_format(...)` | A file parser | Formats Winnow can't read: raw `$MFT`, EVTX, prefetch, a vendor's export |
 | `api.register_tab(...)` | A pinned tab with your own UI | A whole feature surface: a graph, a dashboard, an assistant, a report builder |
 | `api.register_api(route, handler)` | A backend endpoint | Whatever your tab (or a script) needs the server to do |
+| `api.register_row_action(...)` | An entry under the row right-click menu's **Plugins ▸** submenu — analysts can pin it to the top of the menu | Anything that operates on the selected rows: a VirusTotal lookup on the highlighted hashes, an enrichment, a hand-off to another tool |
+| `api.register_toolbar_panel(...)` | A toggle in the table toolbar + a strip above the grid | Something that follows the current view: a histogram of when its rows happened, a sparkline, a legend |
 
-They compose: a tab usually pairs with one or more routes. Ingest
-formats work in a single-file plugin; tabs need a folder plugin (there
-has to be somewhere to serve the JS from).
+They compose: a tab usually pairs with one or more routes; a row action
+often pairs with a tab that shows its results; a toolbar panel usually
+pairs with a route that reads through the current view. Ingest formats
+and row actions work in a single-file plugin; tabs and panels need a
+folder plugin (there has to be somewhere to serve the JS from).
 
-The three shipped examples map one-to-one onto these:
+The shipped examples map onto these:
 
 | Example | Demonstrates |
 | --- | --- |
 | [`mft_usn/`](../examples/plugins/mft_usn/) | Ingest formats — two of them, with options, streaming parsers, extension *and* bare-filename matching |
 | [`lateral_movement/`](../examples/plugins/lateral_movement/) | A tab + a route — canvas UI, case queries, theming |
 | [`claude_assistant/`](../examples/plugins/claude_assistant/) | A tab + a route that calls an external service, with credentials and dependencies |
+| [`table_histogram/`](../examples/plugins/table_histogram/) | A toolbar panel + a route — following the grid with `onViewChange`, driving the timeframe filter with `setTimeRange` |
+| [`first_last/`](../examples/plugins/first_last/) | A tab that writes a TABLE back — `ingest_rows` output an analyst browses, tags and exports like any other source |
+| [`pivot/`](../examples/plugins/pivot/) | A tab that aggregates the current view — drag-and-drop rows/columns/values over the case's own data |
+| [`esxi_logs/`](../examples/plugins/esxi_logs/) | Ingest formats for a support bundle's ESXi/Linux logs, and the profile that pairs them with a dashboard |
 
 ---
 
@@ -345,7 +355,7 @@ Prefer it to reaching into the app's globals — this is what's supported.
 
 | Field | What it is |
 | --- | --- |
-| `apiVersion` | Contract version of this object (currently `1`) |
+| `apiVersion` | Contract version of this object (currently `2`) |
 | `plugin` | Your plugin's display name |
 | `base` | `/api/plugin/<fs_name>` — prefix for your own routes |
 | `assets` | `/plugin_assets/<fs_name>` — prefix for your own files |
@@ -362,6 +372,14 @@ Prefer it to reaching into the app's globals — this is what's supported.
 | `state.sources` | Live source list (`{id, name, columns, row_count, is_merge, error}`) |
 | `state.sourceId` | Currently selected source id |
 | `state.tags` | Tag definitions |
+| `state.variables` | The case's variables as `{name: value}` — see [Case variables](#case-variables) |
+| `state.timeRange` | The case timeframe filter verbatim — `{enabled, column, start, end}`. Honouring it is what makes "the timeframe applies everywhere" true for your tab too |
+| `state.view` | What the grid is showing right now — `{view_id, row_count}`, filters/search/timeframe applied, or `null` before a table is open. Hand `view_id` to a route that reads THROUGH the view |
+| `setVariable(name, value)` | Set one case variable (creates it if new) |
+| `onViewChange(cb)` | Fires after every grid rebuild — filter, sort, search, timeframe, table switch — with `{sourceId, viewId, rowCount}`. Returns an unsubscribe |
+| `onAppearanceChange(cb)` | Fires after every skin / theme / accent change with `{style, themeMode, accent}`. A canvas doesn't inherit CSS, so redraw here. Returns an unsubscribe |
+| `setTimeRange({column, start, end, enabled})` / `clearTimeRange()` | Drive the case timeframe filter (the toolbar's ⏱) — the same object the Timeframe dialog writes, so every other consumer sees it as if typed there |
+| `openFiltered(sourceId, pairs)` | Jump from your visualization to the EVIDENCE: opens the source and exact-filters it to `[{column, value}, …]`. Clears existing filters — it is a navigation, not a refinement |
 
 **Always call your backend through `winnow.api` / `winnow.post`.** A raw
 `fetch()` won't carry the `X-Timeline-Lite-Client` header that Winnow's
@@ -483,7 +501,72 @@ sharing the document with the rest of the app.
 
 ---
 
-## 6. Hook: API routes
+## 6. Hook: toolbar panels
+
+```python
+api.register_toolbar_panel(
+    id="histogram",        # unique within this plugin
+    label="Histogram",     # the toolbar toggle's caption
+    entry="ui/panel.js",   # ES module, relative to the plugin folder
+    description="…",       # the toggle's tooltip
+)
+```
+
+A toggle button appears in the table toolbar beside the search icon.
+While it's on (the state persists per browser) and a table is showing,
+your module's UI occupies a strip **between the toolbar and the grid**;
+it hides with the toolbar on page tabs. Folder plugins only.
+
+### The module contract
+
+Identical to a tab's: `export default function mount(container, winnow)`,
+plus optional `onShow(container)` / `onHide(container)` — called on every
+toggle and grid/page switch. `container` is an empty `<section>` spanning
+the grid's width; keep it short (a histogram is ~100px), it's above the
+evidence.
+
+### Following the grid
+
+The `winnow` context is a tab's (see above) with three additions that
+exist for exactly this hook:
+
+```js
+export default function mount(container, winnow) {
+  const off = winnow.onViewChange(({ sourceId, viewId, rowCount }) => refresh());
+  async function refresh() {
+    const v = winnow.state.view;             // {view_id, row_count} — the grid's CURRENT view
+    if (!v) return;
+    const h = await winnow.post(`${winnow.base}/histogram`, { view_id: v.view_id, column });
+    draw(h);
+  }
+  canvas.onmouseup = () => winnow.setTimeRange({ column, start: '2026-03-14 08:00:00', end: '2026-03-14 09:00:00' });
+  clearBtn.onclick = () => winnow.clearTimeRange();
+}
+```
+
+- `winnow.onViewChange(cb)` fires after **every** grid rebuild — filter,
+  search, sort, timeframe, table switch. Returns an unsubscribe.
+- `winnow.state.view` is what the table is showing right now. Hand its
+  `view_id` to a route of yours that reads *through the view* (see
+  `Store.time_histogram` for the shape: reader pool, both view kinds,
+  merges unioned) and your panel describes exactly the rows on screen.
+- `winnow.setTimeRange({column, start, end})` / `winnow.clearTimeRange()`
+  write the case timeframe filter — the toolbar's ⏱ — as if typed into
+  its dialog, so the button, the toggle key and every other consumer
+  agree. The rebuild that follows fires `onViewChange` again.
+- `winnow.onAppearanceChange(cb)` fires after every skin / theme / accent
+  change. A canvas doesn't inherit CSS: read the tokens you paint with
+  (`getComputedStyle(document.documentElement).getPropertyValue('--accent')`
+  and friends) at draw time and redraw here, and your panel follows the
+  analyst's look — including a custom accent — like the rest of the app.
+
+`table_histogram/` is the worked example: bars per time bucket of a
+datetime column, a drag on them becomes the timeframe filter, and the
+whole thing re-queries on every view change.
+
+---
+
+## 7. Hook: API routes
 
 ```python
 api.register_api("edges", edges_handler, methods=["POST"])
@@ -511,6 +594,38 @@ def edges_handler(req):
 handlers are trivially unit-testable and the contract survives framework
 upgrades.
 
+### Blocking is fine
+
+Handlers run in a worker thread, not on the event loop, so a call that
+takes seconds — an LLM completion, a lookup against a remote service — does
+not stall the rest of Winnow. The grid, the analyst's next click and
+Winnow's own routes keep working while yours waits.
+
+Plugins share a pool of their own (8 concurrent handlers), separate from
+the one Winnow's routes use. So a slow plugin can never starve the app —
+but past that many at once, the ninth call waits for a free slot. If your
+plugin fans out, do it inside one handler rather than by firing a request
+per item from the tab.
+
+Three things follow.
+
+Don't hold Winnow's writer lock across a network call — do the call, then
+write. The analyst can be doing anything meanwhile, including closing the
+case; `req.store` is the store as it was when the request arrived.
+
+And **your own handlers can now overlap**, which they could not when they
+ran on the event loop. Module-level mutable state needs a lock, and
+`req.storage.get()` then `.set()` is two operations: if the new value
+depends on the old, use `req.storage.update(fn)`, which does the whole
+read-modify-write under one lock.
+
+```python
+req.storage.update(lambda d: d.__setitem__("calls", d.get("calls", 0) + 1))
+```
+
+A plugin table is not affected by any of this — SQLite serialises the
+writes.
+
 ### Errors
 
 - **`raise ValueError("…")` → HTTP 400** with your message shown to the
@@ -527,7 +642,57 @@ below).
 
 ---
 
-## 7. Talking to the case
+## 8. Hook: row actions
+
+```python
+api.register_row_action(
+    id="vt",                          # unique within this plugin
+    label="Look up on VirusTotal",    # the menu entry
+    handler=vt_lookup,
+    description="Query VT for the selected cell's hash",
+    max_rows=50,                      # the entry is disabled past this many rows
+)
+```
+
+Right-clicking a row (or a selection) in any table view shows a
+**Plugins** section listing every registered action. Choosing one has
+the server resolve the selected rows to their full cells — by
+`(source_id, rid)`, so a merged view hands you each member's own row —
+and call your handler.
+
+### The handler
+
+```python
+def vt_lookup(req):
+    # req.body = {
+    #   "source_id": int,            # the table (or merge) the analyst is in
+    #   "column": str | None,        # the right-clicked cell's column…
+    #   "value":  str | None,        # …and its value, when the click hit a cell
+    #   "rows": [{"rid": int, "source_id": int, "cells": {col: val, ...}}, ...],
+    # }
+    hashes = {r["cells"].get(req.body["column"]) for r in req.body["rows"]}
+    ...
+    return {"message": f"{len(hashes)} hashes queued"}
+```
+
+The return value is JSON-able. Three optional keys drive the UI:
+
+| key | effect |
+| --- | --- |
+| `message` | Shown as a toast (default: "*label*: done") |
+| `open_url` | Opened in a new browser tab — hand off to a web console |
+| `show_tab` | Activates one of this plugin's registered tabs (namespaced id, e.g. `"vt-plugin.results"`) — for results too rich for a toast |
+
+`raise ValueError("…")` → 400 with the message, same as API routes.
+`max_rows` is enforced server-side as well as greying the menu entry, so a
+network-bound lookup can never be pointed at a million rows. `req.store`
+and `req.storage` are available exactly as for API routes — an action can
+land its results as a new table with `ingest_rows` (see *Writing tables
+from a plugin*).
+
+---
+
+## 9. Talking to the case
 
 `req.store` is Winnow's `Store`. The safe, supported way to read from it:
 
@@ -613,6 +778,64 @@ Validate first, quote second: check the column is actually in
 identifiers) should go through `run_sql`'s SQL as literals you built from
 validated input, or be avoided entirely by filtering in Python.
 
+### Your own tables
+
+A plugin can keep its own tables **inside the case file**:
+
+```python
+def chat_handler(req):
+    t = req.table("chat").create(
+        "id INTEGER PRIMARY KEY, role TEXT, content TEXT, at TEXT")
+    if req.method == "POST":
+        t.insert({"role": "user", "content": req.body["text"], "at": now()})
+    return {"messages": t.rows("ORDER BY id", limit=None)}
+```
+
+`create` is `CREATE TABLE IF NOT EXISTS`, so calling it on every request is
+the intended usage — there is no install hook to create it in.
+
+| Call | What it does |
+| --- | --- |
+| `req.table(name)` | A handle. Created on first `create()`; `ValueError` if no case is open |
+| `t.create(columns)` | `CREATE TABLE IF NOT EXISTS`, idempotent; returns the handle |
+| `t.insert(row_or_rows)` | One dict, or a list sharing their columns. Values are bound |
+| `t.rows(where, params, limit)` | Rows as dicts; `where` is the query tail (`"WHERE role = ? ORDER BY id"`). `limit` defaults to **5000** — pass `limit=None` for all of it |
+| `t.execute(sql, params)` | Any single statement; write `{table}` where the table name goes. Returns rows changed (0 for DDL) |
+| `t.exists()` / `t.drop()` | Self-explanatory |
+| `t.table` | The real table name, if you want to write your own SQL |
+
+The real table is `plugin:<fs_name>:<name>`, and that namespacing is not
+yours to think about: `{table}` is substituted with this table's quoted
+name (outside string literals, so `SET meta = '{table}'` stores the braces).
+Table names are lowercased; one that isn't a letter followed by letters,
+digits or `_` is refused.
+
+**This is naming, not a sandbox.** Two plugins cannot collide by accident —
+that is the guarantee. It is not isolation: a plugin is arbitrary Python
+holding `req.store`, so SQL naming another plugin's table runs, exactly as
+anything else it chooses to do to the case file would ([Security
+model](#12-security-model)).
+
+**The evidence is the one exception.** `t.execute` refuses to write to
+`src_<id>`, `drv_<id>`, `row_tags`, `row_notes`, `sources` or `tag_defs`
+— reads are unrestricted. Not politeness: a source table is never mutated
+(invariant #1), and the grid's fast paging path is exact only because of
+it (`pos = rid - 1` holds while row ids stay contiguous), so a plugin
+deleting rows from a source would make every page and every tag land on
+the wrong row, silently. Keep plugin state in your own table.
+
+**Which of the three stores you want:**
+
+| | Lives in | Use it for |
+| --- | --- | --- |
+| `req.table(...)` | The case file | Data about THIS case that should travel with the `.db` — a chat transcript that must render offline, cached enrichment |
+| `req.storage` | `workspace/plugin_data/<fs_name>.json` | Machine-level settings, not tied to a case |
+| `req.store.ingest_rows(...)` | The case file, as a **source** | Output an analyst should browse, filter and tag in the grid |
+
+Reads use Winnow's reader pool and writes the single writer connection, so
+reading a transcript never queues behind an import, and two plugins writing
+at once are serialised rather than corrupting each other.
+
 ### Writing tables from a plugin
 
 To turn a computation into a browsable table, use `ingest_rows` — the
@@ -633,9 +856,56 @@ result is a completely normal source.
 contract — that's what makes re-import non-destructive and sessions
 portable. Derive a new table instead.
 
+### Case variables
+
+A case carries a small set of named values — the engagement name, the
+base URL of a backend your plugin talks to, a link to the scoping
+document — that the analyst edits under **Case ▾ → Case settings →
+Variables**. Plugins read and write the same set:
+
+```python
+def report_handler(req):
+    base = req.variables.get("report_api")        # {} when no case is open
+    if not base:
+        raise ValueError("Set the `report_api` variable in Case settings")
+    req.set_variable("last_report", datetime.now().isoformat())
+    ...
+```
+
+- `req.variables` is a plain `{name: value}` dict of strings; it never
+  raises.
+- `req.set_variable(name, value)` creates or updates one. Names are
+  `[A-Za-z][A-Za-z0-9_.-]*` (up to 64 chars); values are capped at 4000
+  characters. `ValueError` when no case is open or the name is bad.
+- Tabs and toolbar panels get the same through `winnow.state.variables`
+  and `winnow.setVariable(name, value)`.
+
+A **profile** (case type) can declare the variables its plugins expect,
+so the analyst is asked once, at case creation, rather than discovering
+a missing setting mid-investigation:
+
+```json
+"variables": [
+  {"name": "engagement", "label": "Engagement name", "required": true,
+   "description": "Used in report titles"},
+  {"name": "report_api", "label": "Report API base URL", "default": "http://reports.local"}
+]
+```
+
+Required ones gate the **New case** dialog; applying a profile to an
+existing case seeds any that are absent (never overwriting a value the
+analyst already set) and prompts for the required ones still empty.
+Saving a profile from a case carries its variable *definitions* along —
+never the values.
+
+**Variables live in the case file and travel with it.** They are for
+configuration, not secrets: a token or password belongs in the
+environment (see [Secrets: the `WINNOW_*` environment](#secrets-the-winnow_-environment)),
+never in a variable.
+
 ---
 
-## 8. Testing a plugin
+## 10. Testing a plugin
 
 Plugins are ordinary Python, so ordinary tests work. Two levels:
 
@@ -710,7 +980,7 @@ section of [`CLAUDE.md`](../CLAUDE.md).
 
 ---
 
-## 9. Installing and sharing
+## 11. Installing and sharing
 
 **Install:** Settings → Plugins → *Install a plugin…* — pick the `.py`
 file for a single-file plugin, or the folder that directly contains
@@ -743,14 +1013,19 @@ python server.py --plugins-dir ~/src/my-winnow-plugins
 
 Installs from the UI always land in the first directory (`plugins/`).
 
-**Versioning:** set `WINNOW_API_VERSION` to the API version you built
-against. If a future Winnow's API version is lower than yours, it
+**Versioning:** the current plugin API version is **7** (`req.set_env` /
+`req.unset_env` / `req.is_loopback` arrived in 7; `req.table` in 6; `req.env`,
+`req.variables` / `req.set_variable` and the tab context's
+`state.variables` / `setVariable` arrived in 5; toolbar panels
+and the view-change context arrived in 4; row actions in 3; `api.q`/
+`NUM_RE` in 2). Set `WINNOW_API_VERSION` to the
+API version you built against. If a future Winnow's API version is lower than yours, it
 refuses to load your plugin with a "update Winnow" message rather than
 failing mysteriously somewhere inside `register()`.
 
 ---
 
-## 10. Security model
+## 12. Security model
 
 **A plugin is arbitrary Python running with Winnow's privileges.** It can
 read any file the analyst can, open sockets, and touch the case. There is
@@ -772,13 +1047,66 @@ What that leaves to you, as an author:
   outside the case. Analysts run these on evidence machines.
 - Treat everything from `req.body` and `req.query` as hostile input.
 - Don't log or persist secrets; read credentials from the environment
-  rather than a file in the plugin folder.
+  rather than a file in the plugin folder — and never from a case
+  variable, which is case data and travels with the file.
 - Keep the airgap in mind — if your plugin needs the internet, make that
   the headline of your README, the way `claude_assistant` does.
 
+### Secrets: the `WINNOW_*` environment
+
+A token's supported home is an environment variable with the
+`WINNOW_` prefix, which the analyst sets under **Settings → Environment**
+(or exports it outside Winnow — an outside value wins). Winnow keeps it in the
+user's own environment — `HKCU\Environment` on Windows, an owner-only
+`~/.config/winnow/env` elsewhere — and loads it into the process at
+startup, so it survives a restart on every platform. It is never in the case file, never in a Winnow setting, never
+returned by an API, never shown again once saved.
+
+```python
+def lookup_handler(req):
+    token = req.env("WINNOW_VT_API_KEY")
+    if not token:
+        raise ValueError("Set WINNOW_VT_API_KEY under Settings → Environment")
+    ...
+```
+
+- `req.env(name, default=None)` reads one; only `WINNOW_*` names are
+  readable through it (`ValueError` otherwise). The prefix is a hard
+  limit on what Settings → Environment and `/api/env` can touch, and a
+  convention that keeps a well-behaved plugin on the names the analyst
+  manages — it is not a sandbox. A plugin is ordinary Python and can
+  read `os.environ` directly, which is why section 12 says what it says.
+- **Saving one:** `req.set_env("WINNOW_VT_API_KEY", token)` persists it the
+  same way Settings → Environment does — immediately, and across restarts —
+  so a plugin that obtained a key itself (an OAuth exchange, a field in its
+  own tab) doesn't have to send the analyst somewhere else to retype it.
+  `req.unset_env(name)` removes it. The rules are the panel's, so a plugin
+  cannot do what the analyst cannot: `WINNOW_*` names only, never one of
+  Winnow's own settings, and never over a value exported outside Winnow.
+
+  This is not a new privilege — a plugin is arbitrary Python and could
+  always write that file itself. It is the way that lands in the right
+  place with the right permissions, and that the analyst can see and undo.
+  Two things to weigh: saving a secret they didn't ask you to save is a
+  surprise, so say so in your UI; and your route is reachable by whoever
+  can reach Winnow, so check `req.is_loopback` if a remote viewer shouldn't
+  be able to trigger it.
+
+- Read it server-side, in the handler that uses it. **Never send the
+  value to the browser** — not in a response, not in a tab's HTML. A tab
+  that needs a network call makes it through its own `register_api`
+  route.
+- Tell the analyst the name in your README: "set `WINNOW_VT_API_KEY`
+  under Settings → Environment". (The bundled `claude_assistant` predates
+  this and reads the Anthropic SDK's own `ANTHROPIC_API_KEY` from the
+  shell — the pattern to copy is the README sentence, not the name.)
+- For everything that is *not* secret — the engagement, a base URL, a
+  document link — use a [case variable](#case-variables) instead, so it
+  travels with the case.
+
 ---
 
-## 11. Troubleshooting
+## 13. Troubleshooting
 
 | Symptom | Cause |
 | --- | --- |
@@ -798,7 +1126,7 @@ What that leaves to you, as an author:
 
 ---
 
-## 12. Reference
+## 14. Reference
 
 ### `register_ingest_format(*, id, label, parse, extensions=(), filename_patterns=(), description="", options=())`
 
@@ -813,8 +1141,53 @@ Module: `export default function mount(container, winnow)`, plus optional
 
 ### `register_api(route, handler, methods=("GET", "POST"))`
 
-`handler(req: PluginRequest) -> JSON-able`, where `PluginRequest` has
-`.method`, `.route`, `.query`, `.body`, `.store`. `ValueError` → 400.
+`handler(req: PluginRequest) -> JSON-able`; see [`PluginRequest`](#pluginrequest)
+for everything it carries. `ValueError` → 400. Handlers run in a worker
+thread, so blocking is fine ([Blocking is fine](#blocking-is-fine)).
+
+### `register_toolbar_panel(*, id, label, entry, description="")`
+
+Module: `export default function mount(container, winnow)`, plus optional
+`onShow(container)` / `onHide(container)`. Panels get the same `winnow`
+context a tab does (one object builds both), so `onViewChange`,
+`state.view`, `setTimeRange` / `clearTimeRange` and `onAppearanceChange`
+are available to tabs as well — they are listed under
+[The `winnow` context](#the-winnow-context), not additions here. They
+matter most to a panel, which sits beside the grid and has to follow it.
+
+### `register_row_action(*, id, label, handler, description="", max_rows=1000)`
+
+`handler(req: PluginRequest) -> JSON-able`; `req.body` is
+`{"source_id", "column", "value", "rows": [{"rid", "source_id", "cells"}]}`.
+Optional return keys `message` / `open_url` / `show_tab`. `ValueError` → 400.
+
+The entry appears under the row menu's **Plugins ▸** submenu (whose
+hint counts the actions on offer), with your plugin's name beside it. An
+analyst can drag it (or click its
+☆) onto the top of the menu, where it stays across sessions on that
+machine, keyed by `plugin:<fs_name>:<id>` — so keep `id` stable across
+versions, or their pin silently stops matching. `fs_name` is your plugin's
+folder name, so renaming the folder drops the pin too.
+
+### `PluginRequest`
+
+What every API-route and row-action handler receives:
+
+| Member | What it is |
+| --- | --- |
+| `method`, `route` | HTTP method and the route as registered |
+| `query` | `dict[str, str]` from the query string |
+| `body` | Parsed JSON body, or `None` |
+| `store` | The open `Store`, or `None` when no case is open |
+| `storage` | Plain-JSON dict persisted per plugin in the workspace (`plugin_data/<fs_name>.json`) — not case data, and readable on disk, so not for secrets. `get()`/`set()`, or `update(fn)` when the new value depends on the old |
+| `variables` | The case's variables as `{name: value}` (`{}` with no case) |
+| `set_variable(name, value)` | Create or update one case variable |
+| `env(name, default=None)` | A `WINNOW_*` environment variable — the home for tokens; prefix-enforced, server-side only |
+| `set_env(name, value)` | Save one, the way Settings → Environment does — same rules, so no more than the analyst can do |
+| `unset_env(name)` | Remove one this plugin saved |
+| `is_loopback` | Whether the caller is on this machine — Winnow's own env routes are loopback-only, a plugin's are not |
+| `table(name)` | A `PluginTable` — this plugin's own table in the case file (see [Your own tables](#your-own-tables)) |
+| `plugin` | The plugin's `fs_name`, which namespaces its tables |
 
 ### HTTP surface
 
@@ -827,13 +1200,20 @@ Module: `export default function mount(container, winnow)`, plus optional
 | `POST /api/ingest/plugin/upload` | Multipart sibling of the above |
 | `GET /plugin_assets/<fs_name>/<path>` | A plugin's own files |
 | `* /api/plugin/<fs_name>/<route>` | A plugin's registered routes |
+| `POST /api/plugins/row_action/<fs_name>/<id>` | Runs a row action on `{source_id, pairs: [[source_id, rid]…], column?, value?}` |
+| `GET /api/case/variables` | `[{name, value, description, required}]` for the open case |
+| `POST /api/case/variables` | `{name, value?, description?, required?}` — create or update one |
+| `DELETE /api/case/variables/<name>` | Remove one |
+| `GET /api/env` | `WINNOW_*` names and where each comes from — never values; loopback-only |
+| `POST /api/env` | `{name, value}` — save one; loopback-only |
+| `DELETE /api/env/<name>` | Remove one; loopback-only |
 
 The path/upload ingest routes are also the scripting entry point — you
 can drive a plugin parser from `curl` without touching the UI.
 
 ---
 
-## 13. Writing a plugin with an LLM
+## 15. Writing a plugin with an LLM
 
 **Paste this one file. That's the whole context budget.**
 
@@ -861,7 +1241,7 @@ step up to guide + contract is still under a tenth.
 > Here is the plugin development guide for Winnow, a local DFIR triage
 > tool. Write a plugin that <what you want>. Follow the contract in the
 > guide exactly — do not invent API surface that isn't documented in it.
-> Include a test file using the standalone recipe in §8.
+> Include a test file using the standalone recipe in §10.
 >
 > <paste this file>
 
@@ -869,10 +1249,10 @@ step up to guide + contract is still under a tenth.
 
 - **Don't paste `tests/test_plugins.py`.** It mostly tests Winnow's
   plugin *host* — the loader, installs, traversal rejection — none of
-  which a plugin author implements. §8's recipe is the part that's
+  which a plugin author implements. §10's recipe is the part that's
   actually about testing your own plugin.
 - **Don't paste `store.py`.** The supported surface is the short list in
-  §7; the rest is internals a plugin must not reach into anyway. If you
+  §9; the rest is internals a plugin must not reach into anyway. If you
   paste it, an LLM will happily use a private method and you'll find out
   when Winnow refactors.
 - **Do paste an example plugin** if you're building something in the
@@ -892,6 +1272,6 @@ Three things this guide can't do for you:
 - **Anything an LLM asserts that isn't in here.** The failure mode to
   watch for is a confidently invented method — `store.query()`,
   `api.register_command()`, `winnow.refresh()`. None of those exist.
-  Cross-check any API call against §12; if it isn't listed, it's a
+  Cross-check any API call against §14; if it isn't listed, it's a
   hallucination, and the plugin will fail at load or at first click with
   a message that says so.
