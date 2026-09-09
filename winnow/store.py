@@ -1248,6 +1248,15 @@ class Store:
                     )
         self._seed_tags()
         self._view_seq = 0
+        # Its own lock for the same reason _search_job_lock exists: handing
+        # out a view id must not queue behind a multi-second build. `+=` on
+        # an attribute is load/add/store, so two requests arriving together
+        # (two tabs, a grid rebuild racing a Timeline build) could compute
+        # the same id — and then one CREATE TABLE v."view_9" raises "table
+        # already exists" (a 500, since api_view maps only ValueError and
+        # KeyError), or the loser wins the _views dict and its handle
+        # describes a table it does not own.
+        self._view_seq_lock = threading.Lock()
         self._views: dict[str, dict] = {}
         self._undo_seq = 0
         # Tag-change undo history. Entries are newest-last; each owns a
@@ -4649,8 +4658,7 @@ class Store:
                 )
                 params.extend(p)
             union_sql = " UNION ALL ".join(branches)
-            self._view_seq += 1
-            vid = f"view_{self._view_seq}"
+            vid = self._next_view_id()
             sql = (
                 f"INSERT INTO v.{q(vid)}(source_id, rid) "
                 f"SELECT source_id, rid FROM ({union_sql}) {order}"
@@ -4668,8 +4676,7 @@ class Store:
                 )
             if not where and not has_sort:
                 return self._build_virtual_root_view(source_id, src)
-            self._view_seq += 1
-            vid = f"view_{self._view_seq}"
+            vid = self._next_view_id()
             sql = (
                 f"INSERT INTO v.{q(vid)}(source_id, rid) "
                 f"SELECT {int(source_id)}, rid FROM {self._from_clause(src)}"
@@ -4729,6 +4736,12 @@ class Store:
             if handle and handle.get("kind") in ("root", "root_virtual") and handle["source_id"] == source_id:
                 self._evict_view_and_children(old)
 
+    def _next_view_id(self) -> str:
+        """The one place a view id is minted. See _view_seq_lock."""
+        with self._view_seq_lock:
+            self._view_seq += 1
+            return f"view_{self._view_seq}"
+
     def _build_virtual_root_view(self, source_id: int, src: dict) -> dict:
         """No filters, no sort: the view IS the source table in its natural
         rid order, which INTEGER PRIMARY KEY already gives for free — no
@@ -4758,8 +4771,7 @@ class Store:
         opening a table."""
         with self.lock, self.db:
             self._evict_root_views(source_id)
-            self._view_seq += 1
-            vid = f"view_{self._view_seq}"
+            vid = self._next_view_id()
             handle = {
                 "view_id": vid,
                 "source_id": source_id,
@@ -4865,8 +4877,7 @@ class Store:
             if tag_ids:
                 params.extend(tag_ids)
 
-        self._view_seq += 1
-        vid = f"view_{self._view_seq}"
+        vid = self._next_view_id()
         with self.lock, self._interruptible(op_token, self.db), self.db:
             self.db.execute(
                 f"CREATE TABLE v.{q(vid)} (pos INTEGER PRIMARY KEY, source_id INTEGER, rid INTEGER, "
@@ -5404,7 +5415,11 @@ class Store:
             pc, pp = self._path_where(path, colnames, "s", src, d_alias, m["source_id"])
             return f"{c}" + "".join(f" AND {x}" for x in pc), [*v, *pp]
 
-        with self.lock:
+        # Both locked blocks below read v.<parent view>, whose handle was
+        # taken unlocked above — a rebuild of the same source can evict it in
+        # either window. Same contract as every other view read: expired, so
+        # a 409 the frontend rebuilds on, not a 500.
+        with self.lock, self._dropped_view_is_expired():
             total = 0
             for m in members:
                 where_sql, where_params = _conds(m)
@@ -5436,8 +5451,7 @@ class Store:
         covers_source = self._grouping_covers_whole_source(root, src)
         is_merge = bool(src.get("is_merge"))
         if is_merge or not covers_source or total > self.GROUP_MATERIALIZE_THRESHOLD:
-            self._view_seq += 1
-            vid = f"view_{self._view_seq}"
+            vid = self._next_view_id()
             branches = []
             params: list[Any] = []
             for m in members:
@@ -5456,7 +5470,7 @@ class Store:
                     )
                     params.extend([m["source_id"], *where_params])
             union_sql = " UNION ALL ".join(branches)
-            with self.lock, self.db:
+            with self.lock, self._dropped_view_is_expired(), self.db:
                 # Same ORDER BY-fed insert as build_view: pos auto-assigns
                 # 1..N in insertion (= sorted) order, rowcount replaces a
                 # count(*) re-scan. root_pos is unique across the union
@@ -5474,8 +5488,7 @@ class Store:
             }
             return {"view_id": vid, "row_count": n, "elapsed_ms": 0}
 
-        self._view_seq += 1
-        vid = f"view_{self._view_seq}"
+        vid = self._next_view_id()
         self._views[vid] = {
             "view_id": vid, "source_id": root["source_id"], "row_count": total,
             "kind": "group_virtual", "parent_view_id": view_id,
@@ -5933,6 +5946,25 @@ class Store:
             sql += f"\n{order}"
         return self._inline_sql_params(sql, params)
 
+    @staticmethod
+    def _require_columns(src: dict) -> None:
+        """A source whose column list is still empty is not readable yet.
+
+        Every ingest path inserts the `sources` row with `columns='[]'` and
+        only fills it in at the end, while `open_tabs` is written straight
+        away — so a directory import gives the tab strip tabs for files
+        that are still importing. Reading one built `SELECT rid,  FROM
+        "src_5"`, whose OperationalError is not "no such table" and so
+        surfaced as a 500. A `kill -9` mid-import leaves the row that way
+        permanently, and the tab 500s forever.
+
+        A ValueError instead: the routes already turn it into a 400 the UI
+        shows, and "still importing" is the true answer."""
+        if not src.get("columns"):
+            raise ValueError(
+                f"{src.get('name') or 'This table'} is still importing — its columns "
+                "aren't known yet. It will open when the import finishes.")
+
     def fetch_rows(self, view_id: str, start: int, count: int) -> dict:
         """Pages v.view_N by pos, then resolves each row's cells/tags/notes
         against ITS OWN source_id — not a single handle-level constant. For
@@ -5950,6 +5982,7 @@ class Store:
 
         with self._reader() as ro, self._dropped_view_is_expired():
             src = self._source_lite_on(ro, handle["source_id"])
+            self._require_columns(src)
             cols = [c["name"] for c in src["columns"]]
 
             vrows = ro.execute(
@@ -6014,6 +6047,7 @@ class Store:
         sid = member["source_id"]
         with self._reader() as ro, self._dropped_view_is_expired():
             src = self._source_lite_on(ro, sid)
+            self._require_columns(src)
             cols = [c["name"] for c in src["columns"]]
             where_sql, where_params = self._virtual_group_where(handle, ro)
             sel = ", ".join(q(c) for c in cols)
@@ -6071,6 +6105,7 @@ class Store:
             # values under headers whenever a custom layout reorders/hides a
             # column. _export_columns is for CSV/XLSX, which emit the on-screen
             # arrangement on purpose; the grid does its own ordering client-side.
+            self._require_columns(src)
             cols = [c["name"] for c in src["columns"]]
             sel = ", ".join(q(c) for c in cols)
 
@@ -6318,6 +6353,7 @@ class Store:
             cached = self._maxlen_cache.get(source_id)
             if cached and cached[0] == src["row_count"]:
                 return cached[1]
+            self._require_columns(src)
             cols = [c["name"] for c in src["columns"]]
             members = self._resolve_members_on(ro, source_id)
             sel = ", ".join(f"MAX(LENGTH({q(c)}))" for c in cols)
@@ -6629,7 +6665,12 @@ class Store:
         if handle.get("kind") == "root_virtual":
             return self._tag_virtual_root(handle, tag_id, on, exclude)
         skip_sql, skip_params = self._exclude_clause(exclude, "source_id", "rid")
-        with self.lock, self.db:
+        # The handle was read unlocked, and a concurrent rebuild of the same
+        # source evicts v.view_N in the window before the lock. Without this
+        # the write raises "no such table" — an OperationalError, which
+        # server.py maps to a 500 rather than the 409 the frontend rebuilds
+        # on, so a bulk tag is lost instead of retried.
+        with self.lock, self._dropped_view_is_expired(), self.db:
             changed = self._apply_tag_change(
                 tag_id=tag_id, on=on, source_id=handle["source_id"], scope="view",
                 target_sql=f"SELECT source_id, rid FROM v.{q(view_id)}{skip_sql}",
@@ -8304,6 +8345,14 @@ class Store:
         handle = self._views.get(view_id)
         if not handle:
             raise KeyError("View expired — rebuild it")
+        # Covers all three export shapes at once, and eagerly: the body
+        # below is a generator, so an error raised inside it would surface
+        # from StreamingResponse rather than from the route's try/except.
+        # On a pooled reader, never _source_lite — that takes the writer
+        # lock, and an export must not block behind a build (invariant #4;
+        # test_concurrency.py fails the moment it does).
+        with self._reader() as ro:
+            self._require_columns(self._source_lite_on(ro, handle["source_id"]))
         if handle.get("kind") == "group_virtual":
             return self._export_virtual_group_csv_rows(handle, tagged_only)
         if handle.get("kind") == "root_virtual":
