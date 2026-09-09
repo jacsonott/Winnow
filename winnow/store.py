@@ -745,6 +745,18 @@ class IngestCancelled(Exception):
     `cancel` callable never see it."""
 
 
+class UnknownFilterColumn(ValueError):
+    """A filter names a column this table does not have. Raised rather than
+    dropped, because a dropped condition shows MORE rows under a filter
+    that claims to be applied — see _compile_condition."""
+
+    def __init__(self, column: str):
+        self.column = column
+        super().__init__(
+            f'This filter uses a column this table does not have: "{column}". '
+            "Edit the filter, or apply it to a table that has that column.")
+
+
 class OpCancelled(Exception):
     """A registered cancellable operation (view/timeline build, group
     summary) was interrupted via cancel_op. server.py maps it to HTTP 499 —
@@ -3870,6 +3882,9 @@ class Store:
             self.db.execute("DELETE FROM sources WHERE id=?", (source_id,))
             self.db.execute(f"DROP TABLE IF EXISTS {q(self._derived_table(source_id))}")
             self.db.execute("DELETE FROM derived_columns WHERE source_id=?", (source_id,))
+        # SQLite reuses this id on the next import, so anything still keyed
+        # by it would silently attach to a different file.
+        self._drop_undo_for_source(source_id)
         self._maxlen_cache.pop(source_id, None)
 
     # -------------------------------------------------------- derived columns
@@ -5492,14 +5507,25 @@ class Store:
         return f"{cond_sql}{extra}", [*cond_val, *path_params]
 
     @staticmethod
-    def _compile_condition(col: str, op: str, val: Any, colnames: dict) -> tuple[str, list]:
+    def _compile_condition(col: str, op: str, val: Any, colnames: dict,
+                           strict: bool = False) -> tuple[str, list]:
         """Compile one column/op/value condition into a parameterized clause.
         Shared by the flat quick-filter list and the guided filter-tree's
-        'cond' leaves. Returns ("", []) for an unknown column/op or an empty
-        value on ops that require one."""
+        'cond' leaves. Returns ("", []) for an unknown op, or an empty value
+        on ops that require one — an empty filter box means "no filter".
+
+        A column this table does not have is a different thing entirely, and
+        `strict` says so. Dropping such a condition silently BROADENS the
+        result: the analyst is shown more rows than they asked for, under a
+        filter chip saying the filter is on. Saved filters are offered
+        across cases on a column-overlap heuristic, so this is reachable by
+        design, and in a triage tool "more rows than you asked for, with no
+        warning" is the worst possible failure."""
         if col in Store.PHYSICAL_COLUMNS:
             colnames = {**colnames, col: Store.PHYSICAL_COLUMNS[col]}
         if col not in colnames:
+            if strict and col:
+                raise UnknownFilterColumn(col)
             return "", []
         c = q(col)
         numeric = colnames[col] == "number"
@@ -5600,7 +5626,7 @@ class Store:
             return f"({sql})", []
         if kind == "cond":
             col, op = node.get("column"), node.get("op")
-            c, p = self._compile_condition(col, op, node.get("value", ""), colnames)
+            c, p = self._compile_condition(col, op, node.get("value", ""), colnames, strict=True)
             if c and op in SARGABLE_OPS and col in colnames:
                 self._ensure_column_index_building(source_id, col, self._index_table_for(src, col))
             return c, p
@@ -7651,6 +7677,10 @@ class Store:
                 "ON CONFLICT(source_id, rid) DO UPDATE SET note=excluded.note",
                 [(source_id, r["rid"], r["note"]) for r in session.get("row_notes", [])],
             )
+        # Tag state was just replaced wholesale, not by a recorded delta, so
+        # every existing undo entry now describes a world that is gone —
+        # replaying one would strip tags off rows the loaded session owns.
+        self._discard_undo()
         if session.get("layout"):
             self.save_layout(source_id, session["layout"])
         for sv in session.get("saved_views", []):
@@ -8022,12 +8052,38 @@ class Store:
             self.db.execute("DELETE FROM row_notes")
         # The undo entries reference rows that no longer carry those tags;
         # replaying one would reinsert assignments this deliberately cleared.
+        self._discard_undo()
+        return {"saved": saved, "tags_cleared": tags, "notes_cleared": notes}
+
+    def _drop_undo_for_source(self, source_id: int) -> None:
+        """Undo entries naming a source that no longer exists. SQLite reuses
+        a deleted row id, so the next import can land on the same source_id
+        and inherit them — replaying one then tags rows of an unrelated
+        file. Mirrors _drop_undo_for_tag."""
+        with self.lock:
+            keep = []
+            for entry in self._undo:
+                if entry.get("source_id") == source_id:
+                    with contextlib.suppress(sqlite3.Error):
+                        self.db.execute(f"DROP TABLE IF EXISTS v.{q(entry['table'])}")
+                    continue
+                keep.append(entry)
+            self._undo[:] = keep
+
+    def _discard_undo(self) -> None:
+        """Drop the whole undo journal and its delta tables.
+
+        Called by anything that replaces tag state wholesale rather than by
+        a recorded delta (invariant #7). An entry names rows by (source_id,
+        rid) and a direction; once the state it was recorded against is
+        gone, replaying it writes tags onto rows nobody chose — which is
+        exactly the silent corruption the invariant exists to prevent, and
+        the undo label still reads as the analyst's own last action."""
         with self.lock:
             for entry in self._undo:
                 with contextlib.suppress(sqlite3.Error):
                     self.db.execute(f"DROP TABLE IF EXISTS v.{q(entry['table'])}")
             self._undo.clear()
-        return {"saved": saved, "tags_cleared": tags, "notes_cleared": notes}
 
     def _session_tag_map(self, data: dict) -> tuple[dict, dict, dict]:
         """(tags_by_row, notes_by_row, source_labels) for a session document.
@@ -8239,7 +8295,11 @@ class Store:
         sid = member["source_id"]
         with self._reader() as ro, self._dropped_view_is_expired():
             src = self._source_lite_on(ro, sid)
-            cols = [c["name"] for c in src["columns"]]
+            # The analyst's layout, like every other export path. This one
+            # used raw storage order, so the same rows exported from an
+            # expanded group carried columns they had taken off screen,
+            # while exporting them from a filtered parent did not.
+            cols = self._export_columns(ro, src)
             where_sql, where_params = self._virtual_group_where(handle, ro)
             sel = ", ".join(q(c) for c in cols)
 
