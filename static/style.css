@@ -412,6 +412,7 @@ html[data-style="studio"][data-theme="light"] {
    the bar, like every other vertical rule in it (.tab/.tab-jump's 1px
    borders) — just three times as thick, since this one separates two
    *kinds* of tab rather than two tabs. */
+.tab-split[hidden] { display: none; }
 .tab-split {
   flex: 0 0 auto; width: 9px; margin: 0 -6px; position: relative;
   cursor: col-resize; touch-action: none;

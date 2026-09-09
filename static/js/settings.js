@@ -57,6 +57,11 @@ export function defaultAppearance() {
     // this therefore reads as on, which is what a new feature should do for
     // someone who has never seen the switch.
     splash: true,
+    // Same rule. The strip competes with the table tabs for one bar, and
+    // loses badly once a few plugin tabs are on — the dropdown hands that
+    // width back and is the better default for everyone who has not
+    // deliberately chosen otherwise.
+    pagesMenu: true,
   };
 }
 

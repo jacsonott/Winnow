@@ -140,9 +140,14 @@ def page(browser, server):
     # for several seconds, which every click in every test would otherwise
     # wait out. test_first_run_prompt.py and test_splash.py build their own
     # contexts without this.
+    # `pagesMenu: false` for the same reason as the sidebar below: the Pages
+    # dropdown is the default now, and most tests predate it and click the
+    # individual #tabSql/#tabTimeline nodes it hides. The shared context
+    # models an analyst who expanded the strip; the default itself is
+    # covered by tests/ui/test_pages_dropdown.py, which turns it back on.
     ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen');"
                         "localStorage.setItem('winnow.appearance',"
-                        " JSON.stringify({ splash: false }));"
+                        " JSON.stringify({ splash: false, pagesMenu: false }));"
                         # The sidebar defaults CLOSED now; most tests predate
                         # that and address rows in it, so the shared context
                         # models an analyst who chose to keep it open.

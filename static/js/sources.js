@@ -495,6 +495,9 @@ export function syncTabSelection() {
     const cur = pageTabsSorted().find((t) => t.key === S.activeTab);
     pm.setAttribute('aria-selected', String(!!cur));
     pm.firstChild.textContent = cur ? cur.label : 'Pages';
+    // The button just changed width with its label; the strip is sized to
+    // its content, so it has to be told to re-fit.
+    applyPageTabsSize();
   }
   document.querySelectorAll('#sourceTabs .tab').forEach((t) =>
     t.setAttribute('aria-selected', String(S.activeTab === 'grid' && Number(t.dataset.id) === S.sourceId)));
@@ -534,6 +537,22 @@ export function clampPageTabsWidth(px) {
 
 export function applyPageTabsSize() {
   const strip = $('pageTabs');
+  // Collapsed to a dropdown, the strip IS one button whose label is the
+  // page that is up — so it has to be content-width, or a stored drag
+  // width from the expanded strip leaves "SQL" rattling around in 300px,
+  // or clips a long plugin tab's name. The stored width is kept, not
+  // cleared: turning the dropdown back off restores the strip the analyst
+  // had dragged.
+  const split = $('tabSplit');
+  if (S.appearance && S.appearance.pagesMenu) {
+    strip.style.flexBasis = '';
+    strip.style.maxWidth = '';
+    // Nothing to drag: the width is the button's. A handle that visibly
+    // does nothing is worse than no handle.
+    if (split) split.hidden = true;
+    return;
+  }
+  if (split) split.hidden = false;
   if (!S.pageTabPrefs.width) {
     // No preference: back to the stylesheet's content-width-with-a-60%-cap.
     strip.style.flexBasis = '';
