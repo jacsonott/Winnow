@@ -3348,7 +3348,9 @@ def api_dashboard_resolve(body: ResolveBody):
     out = {}
     try:
         if body.table:
-            out["source_id"] = store().resolve_table_source(body.table)
+            ids = store().resolve_table_sources(body.table)
+            out["source_id"] = ids[0]
+            out["source_ids"] = ids   # more than one for {{all:…}}: the client asks which
         if body.sql:
             out["sql"] = store()._resolve_table_placeholders(body.sql)
     except ValueError as e:

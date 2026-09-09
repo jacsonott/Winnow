@@ -29,10 +29,17 @@ export const WIDGET_TEMPLATES = [
     title: (p) => 'Row count',
     sql: (t) => `SELECT COUNT(*) AS n FROM ${t}`,
     drill: (t) => ({ table: t }) },
+  // An empty value is a real pick — "how many rows have nothing here?" —
+  // and needs the empty-aware op on the drill side, since equals '' is a
+  // condition the server drops.
   { id: 'countwhere', label: 'Count of rows matching a value', render: 'stat', needs: ['column', 'value', 'match'],
-    title: (p) => `${p.column} ${p.match === 'contains' ? 'contains' : '='} ${p.value}`,
-    sql: (t, p) => `SELECT COUNT(*) AS n FROM ${t}\nWHERE ${qcol(p.column)} ${p.match === 'contains' ? 'LIKE ' + like(p.value) : '= ' + qval(p.value)}`,
-    drill: (t, p) => ({ table: t, where: [{ column: p.column, op: p.match === 'contains' ? 'contains' : 'equals', value: p.value }] }) },
+    title: (p) => (p.value === '' ? `${p.column} is empty` : `${p.column} ${p.match === 'contains' ? 'contains' : '='} ${p.value}`),
+    sql: (t, p) => (p.value === ''
+      ? `SELECT COUNT(*) AS n FROM ${t}\nWHERE ${qcol(p.column)} = '' OR ${qcol(p.column)} IS NULL`
+      : `SELECT COUNT(*) AS n FROM ${t}\nWHERE ${qcol(p.column)} ${p.match === 'contains' ? 'LIKE ' + like(p.value) : '= ' + qval(p.value)}`),
+    drill: (t, p) => ({ table: t, where: [p.value === ''
+      ? { column: p.column, op: 'empty', value: '' }
+      : { column: p.column, op: p.match === 'contains' ? 'contains' : 'equals', value: p.value }] }) },
   { id: 'distinct', label: 'Distinct count of a column', render: 'stat', needs: ['column'],
     title: (p) => `Distinct ${p.column}`,
     sql: (t, p) => `SELECT COUNT(DISTINCT ${qcol(p.column)}) AS n FROM ${t}\nWHERE ${qcol(p.column)} <> ''`,
@@ -47,7 +54,10 @@ export const WIDGET_TEMPLATES = [
     drill: (t, p) => ({ table: t, column: p.column }) },
   { id: 'time', label: 'Events over time (histogram)', render: 'histogram', needs: ['column', 'bucket'], span: 2,
     title: (p) => `${p.column} over time`,
-    sql: (t, p) => `SELECT strftime('${BUCKET_FMT[p.bucket] || BUCKET_FMT.day}', TS_NORMALIZE(${qcol(p.column)})) AS bucket, COUNT(*) AS n\nFROM ${t}\nWHERE ${qcol(p.column)} <> ''\nGROUP BY bucket ORDER BY bucket`,
+    // TS_NORMALIZE is NULL for a value it can't read; those rows would be
+    // one bucket labelled "null" that no timeframe can reopen, so they
+    // are left out of the chart rather than charted as a lie.
+    sql: (t, p) => `SELECT strftime('${BUCKET_FMT[p.bucket] || BUCKET_FMT.day}', TS_NORMALIZE(${qcol(p.column)})) AS bucket, COUNT(*) AS n\nFROM ${t}\nWHERE ${qcol(p.column)} <> '' AND TS_NORMALIZE(${qcol(p.column)}) IS NOT NULL\nGROUP BY bucket ORDER BY bucket`,
     drill: (t, p) => ({ table: t, column: p.column, bucket: p.bucket || 'day' }) },
   { id: 'window', label: 'Activity window (first / last)', render: 'kv', needs: ['column'], span: 2,
     title: (p) => 'Activity window',
@@ -63,7 +73,8 @@ export function templateById(id) {
 export function recipeSql(build) {
   const t = templateById(build.template);
   if (!t.sql || !build.table) return null;
-  for (const n of t.needs) if (n !== 'match' && n !== 'bucket' && !build[n]) return null;
+  if (t.needs.includes('column') && !build.column) return null;
+  if (t.needs.includes('value') && build.value == null) return null;   // '' is a pick; undefined is not
   return t.sql(build.table, build);
 }
 
@@ -116,7 +127,7 @@ export function columnsForTable(table) {
    is the whole day, '2026-03-14 08' the whole hour. Null for anything
    else (a label the widget's own SQL shaped differently). */
 export function bucketRange(label) {
-  const s = String(label || '').trim();
+  const s = String(label || '').trim().replace('T', ' ');
   let m = /^(\d{4}-\d{2}-\d{2}) (\d{2})$/.exec(s);
   if (m) return { start: `${m[1]} ${m[2]}:00:00`, end: `${m[1]} ${m[2]}:59:59` };
   m = /^(\d{4}-\d{2}-\d{2})$/.exec(s);

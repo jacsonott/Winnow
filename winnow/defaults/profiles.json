@@ -41,13 +41,60 @@
           },
           "drill": {
             "table": "{{registry}}",
-            "where": [
-              {
-                "column": "KeyPath",
-                "op": "contains",
-                "value": "ComputerName"
-              }
-            ]
+            "tree": {
+              "type": "group",
+              "op": "OR",
+              "children": [
+                {
+                  "type": "group",
+                  "op": "AND",
+                  "children": [
+                    {
+                      "type": "cond",
+                      "column": "KeyPath",
+                      "op": "regex",
+                      "value": "Control\\\\ComputerName\\\\ComputerName$"
+                    },
+                    {
+                      "type": "cond",
+                      "column": "ValueName",
+                      "op": "equals",
+                      "value": "ComputerName"
+                    },
+                    {
+                      "type": "cond",
+                      "column": "ValueData",
+                      "op": "not_empty",
+                      "value": ""
+                    }
+                  ]
+                },
+                {
+                  "type": "group",
+                  "op": "AND",
+                  "children": [
+                    {
+                      "type": "cond",
+                      "column": "KeyPath",
+                      "op": "regex",
+                      "value": "Services\\\\Tcpip\\\\Parameters$"
+                    },
+                    {
+                      "type": "cond",
+                      "column": "ValueName",
+                      "op": "equals",
+                      "value": "Hostname"
+                    },
+                    {
+                      "type": "cond",
+                      "column": "ValueData",
+                      "op": "not_empty",
+                      "value": ""
+                    }
+                  ]
+                }
+              ]
+            }
           }
         },
         {
@@ -64,7 +111,26 @@
               {
                 "column": "KeyPath",
                 "op": "contains",
-                "value": "Tcpip\\Parameters\\Interfaces"
+                "value": "Tcpip\\Parameters\\Interfaces\\"
+              },
+              {
+                "column": "ValueName",
+                "op": "in",
+                "value": [
+                  "DhcpIPAddress",
+                  "IPAddress",
+                  "DhcpDefaultGateway"
+                ]
+              },
+              {
+                "column": "ValueData",
+                "op": "not_empty",
+                "value": ""
+              },
+              {
+                "column": "ValueData",
+                "op": "not_equals",
+                "value": "0.0.0.0"
               }
             ]
           }
@@ -82,8 +148,8 @@
             "where": [
               {
                 "column": "KeyPath",
-                "op": "contains",
-                "value": "Tcpip\\Parameters"
+                "op": "regex",
+                "value": "Services\\\\Tcpip\\\\Parameters$"
               },
               {
                 "column": "ValueName",
@@ -109,8 +175,24 @@
             "where": [
               {
                 "column": "KeyPath",
-                "op": "contains",
-                "value": "Windows NT\\CurrentVersion"
+                "op": "regex",
+                "value": "Microsoft\\\\Windows\\ NT\\\\CurrentVersion$"
+              },
+              {
+                "column": "ValueName",
+                "op": "in",
+                "value": [
+                  "ProductName",
+                  "DisplayVersion",
+                  "ReleaseId",
+                  "CurrentBuild",
+                  "UBR"
+                ]
+              },
+              {
+                "column": "ValueData",
+                "op": "not_empty",
+                "value": ""
               }
             ]
           }
@@ -128,8 +210,13 @@
             "where": [
               {
                 "column": "KeyPath",
-                "op": "contains",
-                "value": "Control\\ProductOptions"
+                "op": "regex",
+                "value": "Control\\\\ProductOptions$"
+              },
+              {
+                "column": "ValueName",
+                "op": "equals",
+                "value": "ProductType"
               }
             ]
           }
@@ -145,13 +232,42 @@
           },
           "drill": {
             "table": "{{registry}}",
-            "where": [
-              {
-                "column": "KeyPath",
-                "op": "contains",
-                "value": "Services\\Sysmon"
-              }
-            ]
+            "tree": {
+              "type": "group",
+              "op": "OR",
+              "children": [
+                {
+                  "type": "group",
+                  "op": "AND",
+                  "children": [
+                    {
+                      "type": "cond",
+                      "column": "KeyPath",
+                      "op": "contains",
+                      "value": "\\Services\\Sysmon"
+                    },
+                    {
+                      "type": "cond",
+                      "column": "ValueName",
+                      "op": "equals",
+                      "value": "ImagePath"
+                    }
+                  ]
+                },
+                {
+                  "type": "group",
+                  "op": "AND",
+                  "children": [
+                    {
+                      "type": "cond",
+                      "column": "KeyPath",
+                      "op": "contains",
+                      "value": "\\Services\\SysmonDrv"
+                    }
+                  ]
+                }
+              ]
+            }
           }
         },
         {
@@ -165,13 +281,66 @@
           },
           "drill": {
             "table": "{{registry}}",
-            "where": [
-              {
-                "column": "KeyPath",
-                "op": "contains",
-                "value": "Policies\\Microsoft\\Windows\\PowerShell"
-              }
-            ]
+            "tree": {
+              "type": "group",
+              "op": "OR",
+              "children": [
+                {
+                  "type": "group",
+                  "op": "AND",
+                  "children": [
+                    {
+                      "type": "cond",
+                      "column": "KeyPath",
+                      "op": "regex",
+                      "value": "Policies\\\\Microsoft\\\\Windows\\\\PowerShell\\\\ScriptBlockLogging$"
+                    },
+                    {
+                      "type": "cond",
+                      "column": "ValueName",
+                      "op": "equals",
+                      "value": "EnableScriptBlockLogging"
+                    }
+                  ]
+                },
+                {
+                  "type": "group",
+                  "op": "AND",
+                  "children": [
+                    {
+                      "type": "cond",
+                      "column": "KeyPath",
+                      "op": "regex",
+                      "value": "Policies\\\\Microsoft\\\\Windows\\\\PowerShell\\\\ModuleLogging$"
+                    },
+                    {
+                      "type": "cond",
+                      "column": "ValueName",
+                      "op": "equals",
+                      "value": "EnableModuleLogging"
+                    }
+                  ]
+                },
+                {
+                  "type": "group",
+                  "op": "AND",
+                  "children": [
+                    {
+                      "type": "cond",
+                      "column": "KeyPath",
+                      "op": "regex",
+                      "value": "Policies\\\\Microsoft\\\\Windows\\\\PowerShell\\\\Transcription$"
+                    },
+                    {
+                      "type": "cond",
+                      "column": "ValueName",
+                      "op": "equals",
+                      "value": "EnableTranscripting"
+                    }
+                  ]
+                }
+              ]
+            }
           }
         },
         {
@@ -230,7 +399,19 @@
           },
           "drill": {
             "table": "{{evtx}}",
-            "column": "Computer"
+            "column": "Computer",
+            "where": [
+              {
+                "column": "Computer",
+                "op": "not_empty",
+                "value": ""
+              },
+              {
+                "column": "Computer",
+                "op": "not_equals",
+                "value": "-"
+              }
+            ]
           }
         },
         {
@@ -244,7 +425,19 @@
           },
           "drill": {
             "table": "{{evtx}}",
-            "column": "UserName"
+            "column": "UserName",
+            "where": [
+              {
+                "column": "UserName",
+                "op": "not_empty",
+                "value": ""
+              },
+              {
+                "column": "UserName",
+                "op": "not_equals",
+                "value": "-"
+              }
+            ]
           }
         },
         {
@@ -258,14 +451,29 @@
           },
           "drill": {
             "table": "{{evtx}}",
+            "column": "RemoteHost",
             "where": [
               {
                 "column": "EventId",
                 "op": "equals",
                 "value": "4624"
+              },
+              {
+                "column": "RemoteHost",
+                "op": "not_empty",
+                "value": ""
+              },
+              {
+                "column": "RemoteHost",
+                "op": "not_equals",
+                "value": "-"
+              },
+              {
+                "column": "RemoteHost",
+                "op": "not_equals",
+                "value": "- (-)"
               }
-            ],
-            "column": "RemoteHost"
+            ]
           }
         },
         {
@@ -346,6 +554,8 @@
           },
           "drill": {
             "table": "{{evtx}}",
+            "column": "TimeCreated",
+            "bucket": "hour",
             "where": [
               {
                 "column": "Channel",
@@ -360,10 +570,13 @@
                   "4625",
                   "4648"
                 ]
+              },
+              {
+                "column": "TimeCreated",
+                "op": "not_empty",
+                "value": ""
               }
-            ],
-            "column": "TimeCreated",
-            "bucket": "hour"
+            ]
           }
         },
         {
@@ -376,14 +589,29 @@
           },
           "drill": {
             "table": "{{evtx}}",
+            "column": "RemoteHost",
             "where": [
               {
                 "column": "EventId",
                 "op": "equals",
                 "value": "4624"
+              },
+              {
+                "column": "RemoteHost",
+                "op": "not_empty",
+                "value": ""
+              },
+              {
+                "column": "RemoteHost",
+                "op": "not_equals",
+                "value": "-"
+              },
+              {
+                "column": "RemoteHost",
+                "op": "not_equals",
+                "value": "- (-)"
               }
-            ],
-            "column": "RemoteHost"
+            ]
           }
         },
         {
@@ -396,14 +624,19 @@
           },
           "drill": {
             "table": "{{evtx}}",
+            "column": "UserName",
             "where": [
               {
                 "column": "EventId",
                 "op": "equals",
                 "value": "4624"
+              },
+              {
+                "column": "UserName",
+                "op": "not_empty",
+                "value": ""
               }
-            ],
-            "column": "UserName"
+            ]
           }
         },
         {
@@ -452,6 +685,29 @@
                 "column": "Provider",
                 "op": "contains",
                 "value": "Windows Defender"
+              },
+              {
+                "column": "EventId",
+                "op": "in",
+                "value": [
+                  "1006",
+                  "1007",
+                  "1008",
+                  "1009",
+                  "1010",
+                  "1011",
+                  "1012",
+                  "1015",
+                  "1116",
+                  "1117",
+                  "1118",
+                  "1119",
+                  "5001",
+                  "5004",
+                  "5007",
+                  "5010",
+                  "5012"
+                ]
               }
             ]
           }
@@ -507,7 +763,73 @@
             "sql": "SELECT COUNT(*) FROM {{registry}} WHERE KeyPath LIKE '%\\Run' OR KeyPath LIKE '%\\RunOnce' OR KeyPath LIKE '%\\Services%' OR Category LIKE '%Run%' OR Category LIKE '%Service%'"
           },
           "drill": {
-            "table": "{{registry}}"
+            "table": "{{registry}}",
+            "tree": {
+              "type": "group",
+              "op": "OR",
+              "children": [
+                {
+                  "type": "group",
+                  "op": "AND",
+                  "children": [
+                    {
+                      "type": "cond",
+                      "column": "KeyPath",
+                      "op": "regex",
+                      "value": "\\\\Run$"
+                    }
+                  ]
+                },
+                {
+                  "type": "group",
+                  "op": "AND",
+                  "children": [
+                    {
+                      "type": "cond",
+                      "column": "KeyPath",
+                      "op": "regex",
+                      "value": "\\\\RunOnce$"
+                    }
+                  ]
+                },
+                {
+                  "type": "group",
+                  "op": "AND",
+                  "children": [
+                    {
+                      "type": "cond",
+                      "column": "KeyPath",
+                      "op": "contains",
+                      "value": "\\Services"
+                    }
+                  ]
+                },
+                {
+                  "type": "group",
+                  "op": "AND",
+                  "children": [
+                    {
+                      "type": "cond",
+                      "column": "Category",
+                      "op": "contains",
+                      "value": "Run"
+                    }
+                  ]
+                },
+                {
+                  "type": "group",
+                  "op": "AND",
+                  "children": [
+                    {
+                      "type": "cond",
+                      "column": "Category",
+                      "op": "contains",
+                      "value": "Service"
+                    }
+                  ]
+                }
+              ]
+            }
           }
         },
         {
@@ -520,7 +842,19 @@
           },
           "drill": {
             "table": "{{registry}}",
-            "column": "Category"
+            "column": "Category",
+            "where": [
+              {
+                "column": "Category",
+                "op": "not_empty",
+                "value": ""
+              },
+              {
+                "column": "Category",
+                "op": "not_equals",
+                "value": "-"
+              }
+            ]
           }
         }
       ],

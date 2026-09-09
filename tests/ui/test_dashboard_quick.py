@@ -378,3 +378,133 @@ def test_new_dashboard_can_start_from_a_shipped_board(page):
         assert len(_widgets(page, did)) == len(kape["dashboard"])
     finally:
         _delete_board(page, did)
+
+
+# ------------------------------------------------------------ review fixes
+
+
+def test_a_drill_starts_from_a_clean_slate(page):
+    """Header filters and a timeframe left on the table must not AND
+    themselves onto the widget's condition — the grid would then show fewer
+    rows than the widget counted."""
+    did = _new_board(page, "Slate")
+    src = _src(page)
+    try:
+        page.locator('#filterRow input[data-col="Host"]').fill("H1")
+        page.wait_for_function("() => __winnow.S.view && __winnow.S.view.row_count === 40")
+        page.evaluate("() => { __winnow.S.timeRange = { enabled: true, column: 'Timestamp', start: '2026-03-14 08:00:00', end: '2026-03-14 08:00:10' }; }")
+        w = page.evaluate("(t) => __winnow.widgetFrom({ template: 'countwhere', table: t, column: 'Host', value: 'H2', match: 'equals' })", f"src_{src}")
+        _put_widgets(page, did, [w])
+        _show(page, did)
+        page.wait_for_selector("#dashGrid .dash-card .dash-stat")
+        stale = page.evaluate("() => __winnow.S.view.view_id")     # the H1 view also has 40 rows: wait for a NEW one
+        page.locator("#dashGrid .dash-widget-body.drillable").first.click()
+        page.wait_for_selector("#dashboardview", state="hidden")
+        page.wait_for_function("(v) => __winnow.S.view && __winnow.S.view.view_id !== v && __winnow.S.view.row_count === 40", arg=stale)
+        assert page.locator('#filterRow input[data-col="Host"]').input_value() == ""
+        assert page.evaluate("() => __winnow.S.timeRange.enabled") is False
+        assert _cell(page, 0, "Host").inner_text().strip() == "H2"
+    finally:
+        page.evaluate("() => { __winnow.S.timeRange = { enabled: false, column: null, start: '', end: '' }; }")
+        _delete_board(page, did)
+
+
+def test_an_empty_cell_counts_as_empty_not_as_nothing(page):
+    """The row menu offers 'Count of X = (empty)' for a blank cell; the
+    recipe has to accept the empty value and drill with the empty-aware op,
+    since equals '' is a condition the server drops."""
+    src = _src(page)
+    w = page.evaluate("(t) => __winnow.widgetFrom({ template: 'countwhere', table: t, column: 'Host', value: '', match: 'equals' })", f"src_{src}")
+    assert w is not None and w["title"] == "Host is empty"
+    assert w["drill"]["where"] == [{"column": "Host", "op": "empty", "value": ""}]
+    assert "= ''" in w["query"]["sql"] and _preview(page, w)["rows"][0][0] == 0
+
+
+def test_a_missing_pick_leaves_no_query_behind(page):
+    """Switching templates with a required column still unavailable must
+    not keep the previous template's SQL in the box for Save to store."""
+    did = _new_board(page, "Stale")
+    try:
+        _show(page, did)
+        page.locator("#dashBar button", has_text="Add widget").click()
+        page.wait_for_selector("#modal:not([hidden]) .dash-template")
+        page.locator("#modal .dash-template").select_option("count")
+        assert "COUNT(*)" in page.locator("#modal .dash-sql").input_value()
+        # a portable table whose header set has no columns to offer
+        page.evaluate("() => { __winnow.S.headerSets = { shorthands: {}, sets: [] }; }")
+        page.locator("#modal .dash-table").select_option("{{evtx}}")
+        page.locator("#modal .dash-template").select_option("top")
+        assert page.locator("#modal .dash-sql").input_value() == ""
+        page.locator("#modal .confirm-input").first.fill("Nothing")
+        page.locator("#modal button", has_text="Save widget").click()
+        page.wait_for_selector("#toast:not([hidden])")
+        assert "needs a query" in page.locator("#toast").inner_text()
+        assert _widgets(page, did) == []
+        page.keyboard.press("Escape")
+    finally:
+        page.evaluate("() => { __winnow.S.headerSets = null; }")
+        _delete_board(page, did)
+
+
+def test_a_bucket_that_is_not_a_time_range_is_refused(page):
+    src = _src(page)
+    w = page.evaluate("(t) => __winnow.widgetFrom({ template: 'time', table: t, column: 'Timestamp', bucket: 'hour' })", f"src_{src}")
+    before = page.evaluate("() => [__winnow.S.activeTab, __winnow.S.view.row_count]")
+    page.evaluate("(w) => __winnow.drillInto(w, { bucket: 'null' })", w)
+    page.wait_for_selector("#toast:not([hidden])")
+    assert "null" in page.locator("#toast").inner_text() and "time range" in page.locator("#toast").inner_text()
+    assert page.evaluate("() => [__winnow.S.activeTab, __winnow.S.view.row_count]") == before
+    assert page.evaluate("() => __winnow.S.timeRange.enabled") is False
+
+
+def test_a_bucket_on_a_text_column_filters_by_its_prefix(page):
+    """The timeframe only works on a column the case typed as datetime;
+    for a text column that holds dates the bucket label is the filter."""
+    src = _src(page)
+    try:
+        page.evaluate("(id) => { for (const c of __winnow.S.sources.find((s) => s.id === id).columns) if (c.name === 'Timestamp') c.type = 'text'; }", src)
+        w = page.evaluate("(t) => __winnow.widgetFrom({ template: 'time', table: t, column: 'Timestamp', bucket: 'hour' })", f"src_{src}")
+        page.evaluate("(w) => __winnow.drillInto(w, { bucket: '2026-03-14 08' })", w)
+        page.wait_for_function("() => __winnow.S.filterTree.children && __winnow.S.filterTree.children.some((c) => c.op === 'starts' && c.value === '2026-03-14 08')")
+        page.wait_for_function("() => __winnow.S.view && __winnow.S.view.row_count === 200")
+        assert page.evaluate("() => __winnow.S.timeRange.enabled") is False
+    finally:
+        page.evaluate("(id) => { for (const c of __winnow.S.sources.find((s) => s.id === id).columns) if (c.name === 'Timestamp') c.type = 'datetime'; }", src)
+        page.evaluate("() => { __winnow.S.filterTree = { type: 'group', op: 'AND', children: [] }; }")
+
+
+def test_editing_width_keeps_a_hand_written_drill_with_a_trailing_newline(page):
+    did = _new_board(page, "Newline")
+    src = _src(page)
+    try:
+        _put_widgets(page, did, [{"title": "Rows", "source": "sql", "render": "stat", "span": 1,
+                                  "query": {"sql": f"SELECT COUNT(*) AS n FROM src_{src}\n"}, "drill": {"table": f"src_{src}"}}])
+        _show(page, did)
+        page.wait_for_selector("#dashGrid .dash-edit")
+        page.locator("#dashGrid .dash-edit").first.click()
+        page.wait_for_selector("#modal:not([hidden]) .dash-template")
+        page.locator("#modal select").last.select_option("2")     # Width
+        page.locator("#modal button", has_text="Save widget").click()
+        page.wait_for_selector("#modal[hidden]", state="attached")
+        (w,) = _wait_widgets(page, did, 1)
+        assert w["span"] == 2 and w["drill"] == {"table": f"src_{src}"}
+    finally:
+        _delete_board(page, did)
+
+
+def test_creating_a_board_from_a_missing_library_entry_creates_nothing(page):
+    page.evaluate("() => { __winnow.S.dashboardLibrary = [{ id: 999999, name: 'Gone', widget_count: 3 }]; }")
+    before = page.evaluate("() => fetch('/api/dashboards').then(r => r.json()).then(b => b.length)")
+    try:
+        page.locator("#sidebarList .menu-item", has_text="New dashboard").click()
+        page.wait_for_selector("#modal:not([hidden]) .dash-start-from")
+        page.locator("#modal .confirm-input").first.fill("From gone")
+        page.locator("#modal .dash-start-from").select_option("library:999999")
+        page.locator("#modal button", has_text="Create").click()
+        page.wait_for_selector("#toast:not([hidden])")
+        assert "starting widgets" in page.locator("#toast").inner_text()
+        assert page.evaluate("() => fetch('/api/dashboards').then(r => r.json()).then(b => b.length)") == before
+        assert page.locator("#modal button", has_text="Create").is_enabled()
+        page.keyboard.press("Escape")
+    finally:
+        page.evaluate("() => { __winnow.S.dashboardLibrary = []; }")
