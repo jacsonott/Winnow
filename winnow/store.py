@@ -7564,15 +7564,26 @@ class Store:
         def repl(m):
             key = m.group(1).strip()
             # {{all:...}} -> a UNION ALL over every source matching the set,
-            # parenthesised so `FROM {{all:...}} x` and bare-column refs
-            # work. The schemas are identical by construction (same header
-            # set), so SELECT * unions line up by position.
+            # parenthesised so `FROM {{all:...}} x` and bare-column refs work.
+            #
+            # Each branch NAMES the header set's columns rather than
+            # SELECT *. The matcher accepts any source that CONTAINS the
+            # set (order-insensitive, superset-tolerant), so `SELECT *`
+            # lined the branches up by position on an assumption the
+            # matcher never made: a table carrying the same nine columns in
+            # a different order unioned silently and charted values from
+            # the wrong column, and one with an extra column made the
+            # counts differ and took the whole query down with it.
             if key.lower().startswith("all:"):
                 hs = _hs_of(key[len("all:"):].strip())
                 srcs = self._sources_for_header_set(hs)
                 if not srcs:
                     raise ValueError(f"No \u201c{hs}\u201d table in this case yet")
-                union = " UNION ALL ".join(f"SELECT * FROM {q(s['table_name'])}" for s in srcs)
+                from . import defaults
+                want = dict(defaults.headers()["nicknames"]).get(hs) or []
+                cols = ", ".join(q(c) for c in want)
+                union = " UNION ALL ".join(
+                    f"SELECT {cols} FROM {q(s['table_name'])}" for s in srcs)
                 return f"({union})"
             hs = _hs_of(key)
             src = self._source_for_header_set(hs)

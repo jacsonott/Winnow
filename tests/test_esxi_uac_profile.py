@@ -137,3 +137,70 @@ def test_union_placeholder_absent_is_a_friendly_error(store):
     w = prof["dashboard"][0]
     with pytest.raises(ValueError, match="table in this case yet"):
         store.dashboard_widget_preview(w["source"], w["query"])
+
+
+# ------------------------------------------------------------ drilldown
+
+def _drill_rows(store, sid, drill, value=None):
+    """The rows a drill opens — what dashboard.js drillInto builds, compiled
+    by the store the same way the grid's own filter tree is. Mirrors the
+    helper in tests/test_dashboard_drill.py; kept local so the two profiles'
+    suites stay independent."""
+    children = [{"type": "cond", **c} for c in drill.get("where", [])]
+    if drill.get("tree"):
+        children.append(drill["tree"])
+    if value is not None and drill.get("column"):
+        # Same mapping drillInto does: an empty (or "(empty)") bar label is
+        # the empty op, because `equals ""` means "no filter" everywhere
+        # else and would open the whole table.
+        op = "empty" if value in ("", "(empty)") else "equals"
+        children.append({"type": "cond", "column": drill["column"], "op": op,
+                         "value": "" if op == "empty" else value})
+    tree = {"type": "group", "op": "AND", "children": children}
+    sql = store.spec_sql(sid, {"source_id": sid, "filter_tree": tree})
+    return store.run_sql(sql, limit=10000)["rows"]
+
+
+def _sids(store):
+    return [s["id"] for s in store.list_sources() if not s.get("is_merge")]
+
+
+def test_every_widget_on_this_board_is_clickable(esxi_store):
+    """The board shipped with no drills at all, so every chart was inert:
+    clicking the tallest bar did nothing, no toast, no cursor change."""
+    for w in _widgets():
+        assert w.get("drill"), w["title"]
+        assert w["drill"]["table"] == "{{all:header_set:ESXi / Linux host logs}}"
+
+
+def test_every_counting_drill_opens_exactly_the_rows_its_number_counted(esxi_store):
+    """A drill is only as good as its match with the SQL — a number the
+    click contradicts is worse than no click."""
+    checked = 0
+    for w in _widgets():
+        if w["render"] != "stat":
+            continue
+        (n,) = _run(esxi_store, w["title"])["rows"][0]
+        opened = sum(len(_drill_rows(esxi_store, sid, w["drill"])) for sid in _sids(esxi_store))
+        assert opened == n, (w["title"], n, opened)
+        checked += 1
+    assert checked >= 9, checked
+
+
+@pytest.mark.parametrize("title", ["Log types", "Top source IPs", "Severity mix",
+                                   "Web / API access (rhttpproxy)", "Top shell commands"])
+def test_each_bar_opens_the_rows_behind_it(esxi_store, title):
+    w = next(x for x in _widgets() if x["title"] == title)
+    rows = _run(esxi_store, title)["rows"]
+    assert rows, title
+    for label, count in rows:
+        opened = sum(len(_drill_rows(esxi_store, sid, w["drill"], value=str(label)))
+                     for sid in _sids(esxi_store))
+        assert opened == count, (title, label, count, opened)
+
+
+def test_the_severity_bar_labels_are_values_a_click_can_filter_on(esxi_store):
+    """It used to relabel empty as '(none)' with CASE, so that bar's label
+    was a string no row holds and clicking it opened nothing."""
+    w = next(x for x in _widgets() if x["title"] == "Severity mix")
+    assert "CASE" not in w["query"]["sql"].upper()
