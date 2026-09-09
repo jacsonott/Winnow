@@ -45,9 +45,14 @@ another analyst. The evidence files themselves are **never modified**.
 ## Get started
 
 ```bash
-pip install fastapi "uvicorn[standard]" python-multipart
+pip install -r requirements.txt
 python server.py
 ```
+
+Python 3.9 or newer, and four packages — FastAPI, uvicorn, python-multipart
+and openpyxl. `requirements.txt` is the list; installing the first three by
+hand leaves out openpyxl, which the app imports at startup for Excel
+support, so `python server.py` stops before it binds.
 
 That opens the home screen at http://127.0.0.1:8777 in an **app window** —
 no address bar or tab strip, its own taskbar entry — falling back to an
