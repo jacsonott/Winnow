@@ -39,7 +39,7 @@ def test_csrf_middleware_exempts_get(store, monkeypatch):
     from fastapi.testclient import TestClient
 
     monkeypatch.setattr(server, "STORE", store)
-    bare_client = TestClient(server.app)
+    bare_client = TestClient(server.app)   # no client header: the point of this test
     r = bare_client.get("/api/sources")
     assert r.status_code == 200
 

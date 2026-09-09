@@ -7237,14 +7237,54 @@ class Store:
         by hand. Returns the number of rows changed (0 for statements that
         change none, DDL included — sqlite3 reports -1 there).
 
-        The substitution is a convenience, not a sandbox: SQL naming another
-        table runs. Isolation between plugins is by NAMING (they cannot
-        collide by accident), and nothing more — see the block comment
-        above."""
+        The substitution is a convenience, not a sandbox: SQL naming
+        another PLUGIN's table runs. Isolation between plugins is by NAMING
+        (they cannot collide by accident), and nothing more — see the block
+        comment above.
+
+        Evidence is the exception, and not a stylistic one. Invariant #1
+        says a source table is never mutated, and invariant #2's virtual
+        paging carve-out is only exact BECAUSE of it: `pos = rid - 1` holds
+        while rids stay contiguous, so a plugin deleting rows from a src_
+        table would silently page and tag the wrong rows everywhere, with no
+        error. A plugin has plenty of legitimate reasons to write; none of
+        them is into the evidence."""
         table = self._plugin_table(fs_name, name)
         with self.lock, self.db:
-            cur = self.db.execute(self._sub_table(str(sql), table), tuple(params or ()))
+            # Scoped to this one statement, and to the writer connection the
+            # lock we hold makes ours alone for its duration.
+            self.db.set_authorizer(self._refuse_evidence_writes)
+            try:
+                cur = self.db.execute(self._sub_table(str(sql), table), tuple(params or ()))
+            except sqlite3.DatabaseError as e:
+                if "not authorized" in str(e).lower():
+                    raise ValueError(
+                        "A plugin may not write to source or analyst tables (invariant #1). "
+                        "Use your own plugin table — the {table} placeholder.") from e
+                raise
+            finally:
+                self.db.set_authorizer(None)
             return max(0, cur.rowcount if cur.rowcount is not None else 0)
+
+    # src_<id>, drv_<id> and the tables analyst work lives in. A plugin
+    # reads these freely (plugin_query); writing to them is what invariants
+    # #1 and #2 forbid.
+    _EVIDENCE_TABLE_RE = re.compile(
+        r"^(src_\d+|drv_\d+|fts_\d+|row_tags|row_notes|sources|tag_defs)$", re.IGNORECASE)
+    _WRITE_ACTIONS = frozenset({
+        sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE,
+        sqlite3.SQLITE_DROP_TABLE, sqlite3.SQLITE_DROP_TEMP_TABLE,
+        sqlite3.SQLITE_ALTER_TABLE, sqlite3.SQLITE_DROP_INDEX,
+    })
+
+    @classmethod
+    def _refuse_evidence_writes(cls, action, arg1, _arg2, _db, _trigger):
+        """Authorizer for a plugin's own statement. Reads the parsed action
+        and the table it names, so no spelling — a comment, a case change,
+        a quoted alias — changes the answer, which a text scan cannot say."""
+        if action in cls._WRITE_ACTIONS and arg1 and cls._EVIDENCE_TABLE_RE.match(str(arg1)):
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
 
     def plugin_table_insert(self, fs_name: str, name: str, rows: "list[dict] | dict") -> int:
         """Insert one row or many. Column names come from the dicts, so they

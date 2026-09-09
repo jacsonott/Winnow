@@ -87,6 +87,22 @@ def ingested(store, write_csv):
     return store, rec["id"]
 
 
+@pytest.fixture(autouse=True)
+def allow_testclient_host(monkeypatch):
+    """Starlette's TestClient sends `Host: testserver`, which server.py's
+    Host gate refuses like any other name nobody configured — that gate is
+    what keeps the client-header gate meaningful against a page that has
+    made itself same-origin by rebinding DNS (tests/test_host_header.py).
+
+    Allowed here, for tests only, rather than in server.ALLOWED_HOSTS, so
+    the shipped default stays "loopback names and IP literals". Autouse
+    because 40-odd modules build their own TestClient; a fixture they each
+    had to remember would be a fixture somebody forgets."""
+    import server
+
+    monkeypatch.setattr(server, "ALLOWED_HOSTS", server.ALLOWED_HOSTS | {"testserver"})
+
+
 @pytest.fixture
 def client(store, monkeypatch):
     import server

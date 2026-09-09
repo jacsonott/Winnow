@@ -816,6 +816,14 @@ holding `req.store`, so SQL naming another plugin's table runs, exactly as
 anything else it chooses to do to the case file would ([Security
 model](#12-security-model)).
 
+**The evidence is the one exception.** `t.execute` refuses to write to
+`src_<id>`, `drv_<id>`, `row_tags`, `row_notes`, `sources` or `tag_defs`
+— reads are unrestricted. Not politeness: a source table is never mutated
+(invariant #1), and the grid's fast paging path is exact only because of
+it (`pos = rid - 1` holds while row ids stay contiguous), so a plugin
+deleting rows from a source would make every page and every tag land on
+the wrong row, silently. Keep plugin state in your own table.
+
 **Which of the three stores you want:**
 
 | | Lives in | Use it for |

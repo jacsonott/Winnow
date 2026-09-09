@@ -70,6 +70,7 @@ manual route and shows the exact command your install registers.
 | `--open A.csv B.csv` | Ingest files at startup |
 | `--no-fts` | Skip the full-text index — roughly halves import time; search falls back to substring scanning |
 | `--port`, `--host` | Defaults 8777 / 127.0.0.1 |
+| `--allow-host NAME` | Accept this `Host` header too. Loopback names and IP addresses always work; a name you put in front of Winnow needs this |
 | `--no-browser` / `--browser-tab` | Don't auto-open a window / open a plain tab instead |
 | `--force` | Open a case another Winnow still holds |
 

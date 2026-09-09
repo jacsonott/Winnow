@@ -530,6 +530,12 @@ class PluginAPI:
         self._registry._add_api(self._fs, route, handler, methods)
 
 
+    # NOTE for anything added below that touches tables: a plugin's SQL may
+    # not write to src_<id>/drv_<id>/row_tags/row_notes/sources/tag_defs.
+    # Reads are unrestricted. Enforced by an authorizer in
+    # Store.plugin_table_write, because invariant #2's paging carve-out is
+    # exact only while invariant #1 holds.
+
     def register_row_action(self, *, id: str, label: str, handler: Callable[[PluginRequest], Any],
                             description: str = "", max_rows: int = 1000) -> None:
         """An entry under the row right-click menu's "Plugins ▸" submenu in
