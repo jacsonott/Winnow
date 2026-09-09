@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import time
 import urllib.request
 
 import pytest
@@ -44,10 +45,18 @@ def wide_table(page, server, tmp_path):
     f = tmp_path / "wide.csv"
     f.write_text("\n".join(lines) + "\n")
     _post(server, "/api/ingest/jobs/path", {"path": str(f), "name": "wide.csv", "kind": "csv"})
-    page.wait_for_function(
-        """() => __winnow.loadSources().then(() =>
-             __winnow.S.sources.some((s) => s.name === 'wide.csv'))""",
-        timeout=25_000)
+    # Polled from Python: wait_for_function does not await a promise
+    # predicate, so the .then() form passes instantly and races the import
+    # (tests/test_ui_test_hygiene.py enforces this).
+    deadline = time.monotonic() + 25
+    while time.monotonic() < deadline:
+        names = page.evaluate(
+            "() => __winnow.loadSources().then(() => __winnow.S.sources.map((s) => s.name))")
+        if "wide.csv" in names:
+            break
+        time.sleep(0.25)
+    else:
+        raise AssertionError("wide.csv never appeared in S.sources")
     sid = page.evaluate("() => __winnow.S.sources.find((s) => s.name === 'wide.csv').id")
     page.evaluate("(id) => __winnow.openSource(id)", sid)
     page.wait_for_function("(id) => __winnow.S.sourceId === id", arg=sid)
