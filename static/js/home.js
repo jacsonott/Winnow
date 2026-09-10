@@ -783,7 +783,7 @@ export function renderHome() {
   brand.append(mark);
   head.append(brand);
   drawWordmark(mark, {
-    color: getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#d9a441',
+    color: getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#cfa057',
   });
   head.append(el('div', 'home-head-spacer'));
   const newBtn = el('button', 'btn', '+ New case');
