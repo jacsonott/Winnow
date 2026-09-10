@@ -1373,6 +1373,11 @@ export async function recenterOnRow(anchor) {
     ({ pos } = await api(`/api/row_position?view_id=${S.view.view_id}&source_id=${anchor.source_id}&rid=${anchor.rid}`));
   } catch { return; }
   if (pos == null) return;
+  // Checked again on the far side of the await: the view can go while that
+  // request is in flight — a case switch, a rebuild, the table being
+  // removed — and reading row_count off nothing throws where nobody is
+  // catching, which fails the whole page rather than skipping a scroll.
+  if (!S.view) return;
   S.cursor = pos;
   // Centers within the row band below the sticky header: the visible band
   // is [scrollTop + headH(), scrollTop + clientHeight], hence the extra
