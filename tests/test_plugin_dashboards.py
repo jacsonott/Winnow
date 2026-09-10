@@ -64,9 +64,13 @@ def test_a_broken_plugin_is_recorded_not_raised(tmp_path):
 
 @pytest.mark.parametrize("widgets,msg", [
     ([], "non-empty"),
-    ([{"title": "x"}], "source"),
-    ([{"title": "x", "source": "sql"}], "query.sql"),
-    ([{"title": "x", "source": "sql", "query": {}}], "query.sql"),
+    ([{"source": "sql", "render": "stat", "query": {"sql": "SELECT 1"}}], "title"),
+    ([{"title": "x", "render": "stat"}], "source"),
+    ([{"title": "x", "source": "watchlst", "render": "stat"}], "source"),
+    ([{"title": "x", "source": "sql", "query": {"sql": "SELECT 1"}}], "render"),
+    ([{"title": "x", "source": "sql", "render": "table", "query": {"sql": "SELECT 1"}}], "render"),
+    ([{"title": "x", "source": "sql", "render": "stat"}], "query.sql"),
+    ([{"title": "x", "source": "sql", "render": "stat", "query": {}}], "query.sql"),
 ])
 def test_a_widget_that_could_not_render_is_refused_at_registration(tmp_path, widgets, msg):
     """Better here, naming the widget, than as a card reading "no such
@@ -95,9 +99,11 @@ def test_the_listing_carries_offered_boards(client, monkeypatch, tmp_path):
     import server
 
     monkeypatch.setattr(server, "PLUGINS", _plugin(tmp_path, _register(GOOD)))
+    # The listing rides /api/plugins, the way tabs, panels and row actions
+    # do — there is no second route for it to drift from.
     boards = client.get("/api/plugins").json()["dashboards"]
     assert [b["label"] for b in boards] == ["Board one"]
-    assert client.get("/api/plugin_dashboards").json()[0]["widget_count"] == 1
+    assert boards[0]["widget_count"] == 1 and "widgets" not in boards[0]
 
 
 def test_adding_one_copies_it_into_the_open_case(client, store, write_csv, monkeypatch, tmp_path):
@@ -130,7 +136,32 @@ def test_an_unknown_board_is_a_404(client, monkeypatch, tmp_path):
 
     monkeypatch.setattr(server, "PLUGINS", _plugin(tmp_path, _register(GOOD)))
     assert client.post("/api/plugin_dashboards/boards/nope/add", json={}).status_code == 404
-    assert client.get("/api/plugin_dashboards/boards/nope").status_code == 404
+
+
+def test_it_will_not_overwrite_a_board_the_analyst_built(client, store, write_csv, monkeypatch, tmp_path):
+    """The name comes from the PLUGIN, so a board the analyst made can
+    share it by coincidence. Replacing it would discard their widgets with
+    no undo — so a taken name is a question, not a default."""
+    import server
+
+    store.ingest_csv(write_csv([["a"], ["1"]], "e.csv"), name="e", build_fts=False)
+    monkeypatch.setattr(server, "PLUGINS", _plugin(tmp_path, _register(GOOD)))
+    mine = store.create_dashboard("Board one", [{"title": "Mine", "source": "tags", "render": "stat"}])
+
+    r = client.post("/api/plugin_dashboards/boards/b1/add", json={})
+    assert r.status_code == 409
+    detail = r.json()["detail"]
+    assert detail["error"] == "name_taken" and detail["dashboard_id"] == mine["id"]
+    assert store.get_dashboard(mine["id"])[0]["title"] == "Mine", "it replaced them anyway"
+
+    # A different name lands beside it, untouched.
+    assert client.post("/api/plugin_dashboards/boards/b1/add",
+                       json={"name": "Board one (plugin)"}).status_code == 200
+    assert store.get_dashboard(mine["id"])[0]["title"] == "Mine"
+    # …and replace=true is the answer to the question it asked.
+    r = client.post("/api/plugin_dashboards/boards/b1/add", json={"replace": True})
+    assert r.status_code == 200
+    assert store.get_dashboard(mine["id"])[0]["title"] == "Rows"
 
 
 # --------------------------------------------------- the shipped example

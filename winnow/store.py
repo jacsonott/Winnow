@@ -7489,6 +7489,22 @@ class Store:
             for i, did in enumerate([d for d in ordered_ids if d in known]):
                 self.db.execute("UPDATE dashboards SET pos=? WHERE id=?", (i, did))
 
+    def find_dashboard_by_name(self, name: str) -> dict | None:
+        """The board that name would land on, if any — so a caller can ask
+        before replacing one it did not create (see the plugin-board add
+        route). NOCASE, matching upsert_dashboard_by_name's own lookup."""
+        with self._reader() as ro:
+            row = ro.execute(
+                "SELECT id, name, widgets FROM dashboards WHERE name=? COLLATE NOCASE",
+                (name,)).fetchone()
+        if not row:
+            return None
+        try:
+            n = len(json.loads(row["widgets"]) or [])
+        except (TypeError, ValueError):
+            n = 0
+        return {"id": row["id"], "name": row["name"], "widget_count": n}
+
     def upsert_dashboard_by_name(self, name: str, widgets: list) -> dict:
         """Create-or-replace a dashboard by name — how a profile applies its
         board (a second apply of the same profile refreshes rather than

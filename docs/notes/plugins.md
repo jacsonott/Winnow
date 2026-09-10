@@ -218,9 +218,16 @@ see [docs/notes/README.md](README.md) for the whole set.
   (`upsert_dashboard_by_name`, so twice refreshes rather than duplicates).
   Loading a plugin must never put a board in a case: the analyst opened
   Winnow to look at something, and a plugin does not get to decide what.
-  The registry holds the widgets and the listing omits them — the sidebar
-  needs a name and a count, and `/api/plugin_dashboards/<fs>/<id>` fetches
-  the rest when one is added. Registering needs no case open, which is
+  The registry holds the widgets and the listing omits them; the listing
+  rides `/api/plugins` alongside tabs and panels rather than getting a
+  route of its own to drift from. **A name already in use is a 409, not a
+  replace**: the library's add replaces by name and is right to, because
+  the analyst named that board — here the name is the PLUGIN's, so a
+  board they built by hand can collide with it by coincidence, and
+  `replace=true` is the answer to a question the UI asks rather than a
+  default. `source` and `render` are validated at registration against
+  what actually runs and draws, so a typo is the plugin's load error and
+  not a card reading "Unknown render" weeks later. Registering needs no case open, which is
   what makes it a declaration; a board built FROM the open case's data is
   `req.store.create_dashboard` from a route instead, and that path was
   always there — this hook is the half that can be declared, documented

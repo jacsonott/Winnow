@@ -1168,6 +1168,11 @@ twice refreshes rather than duplicates.
 anyone's case. A plugin that dropped one into every case it could see
 would be deciding what the analyst opened Winnow to look at.
 
+`source` and `render` are checked against what actually runs and draws,
+at registration — a typo, or a render nobody implemented, is your
+plugin's load error rather than a card reading `Unknown render "table"`
+in somebody's case weeks later.
+
 `widgets` is a list of widget definitions — the same shape the dashboard
 editor writes and profiles carry:
 
@@ -1189,7 +1194,7 @@ api.register_dashboard(
 | --- | --- |
 | `title` | the card's heading (required) |
 | `source` | `"sql"`, `"tags"` or `"watchlist"` (required) |
-| `render` | `"stat"`, `"kv"`, `"bar"`, `"list"`, `"histogram"` or `"table"` |
+| `render` | `"stat"`, `"kv"`, `"chips"`, `"list"`, `"bar"` or `"histogram"` (required) |
 | `query.sql` | required for `source: "sql"`; runs on the read-only pane connection, so a board is data, not code |
 | `span` | `1` or `2` — how wide the card sits |
 | `drill` | makes the card clickable; see below |
