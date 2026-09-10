@@ -65,8 +65,12 @@ def test_lateral_movement_tab_mounts_binds_defaults_and_builds(browser, server, 
     _post(server, "/api/ingest/jobs/path", {"path": str(f), "name": "logons.csv", "kind": "csv"})
 
     ctx = browser.new_context(viewport={"width": 1300, "height": 850})
+    # pagesMenu: false for the same reason tests/ui/conftest.py does it —
+    # this file clicks the plugin's own .tab-plugin node, which the Pages
+    # dropdown (the default now) collapses into one button.
     ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen');"
-                        "localStorage.setItem('winnow.appearance', JSON.stringify({ splash: false }))")
+                        "localStorage.setItem('winnow.appearance',"
+                        " JSON.stringify({ splash: false, pagesMenu: false }))")
     pg = ctx.new_page()
     errors = []
     pg.on("pageerror", lambda e: errors.append(str(e)))

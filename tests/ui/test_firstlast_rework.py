@@ -37,8 +37,12 @@ def fl_page(browser, server):
     _post(server, "/api/plugins/toggle", {"fs_name": "first_last", "scope": "on_all"})
     ctx = browser.new_context(viewport={"width": 1500, "height": 900},
                               permissions=["clipboard-read", "clipboard-write"])
+    # pagesMenu: false for the same reason tests/ui/conftest.py does it —
+    # this file clicks the plugin's own .tab-plugin node, which the Pages
+    # dropdown (the default now) collapses into one button.
     ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen');"
-                        "localStorage.setItem('winnow.appearance', JSON.stringify({ splash: false }))")
+                        "localStorage.setItem('winnow.appearance',"
+                        " JSON.stringify({ splash: false, pagesMenu: false }))")
     pg = ctx.new_page()
     errors: list[str] = []
     pg.on("pageerror", lambda e: errors.append(str(e)))
