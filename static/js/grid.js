@@ -460,7 +460,13 @@ export function buildDataRow(pos, r, ctx) {
 export function renderTagToolbar() {
   const bar = $('tagToolbar');
   const count = selCount();
-  if (!count) { bar.hidden = true; return; }
+  // Grid chrome, not app chrome. It is position:fixed at the bottom of the
+  // viewport, so it used to follow the analyst onto SQL, Timeline, Notes,
+  // the watchlist, a dashboard and every plugin tab — offering to tag "12
+  // selected" rows that nothing on that page has, beside a Clear selection
+  // button for a selection they could not see. The selection itself is
+  // kept: coming back to the grid brings the bar back with it.
+  if (!count || S.activeTab !== 'grid') { bar.hidden = true; return; }
   bar.hidden = false;
   bar.replaceChildren(el('span', 'tag-toolbar-count', `${count.toLocaleString()} selected`));
   for (const t of S.tags) {
