@@ -191,5 +191,9 @@ def test_the_selection_does_not_hide_the_bars_under_it(page, wide_table):
         }""")
         assert distinct > 1, "the selection painted a flat wash over the bars"
     finally:
+        # Back to where the drag started before releasing: this test is
+        # about what the brush LOOKS like, and letting it apply a timeframe
+        # leaves a rebuild in flight for the fixture to tear down under.
+        page.mouse.move(box["x"] + box["width"] * 0.20, y)
         page.mouse.up()
         page.evaluate("() => { __winnow.S.timeRange = { enabled: false, column: null, start: '', end: '' }; }")

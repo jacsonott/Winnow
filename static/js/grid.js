@@ -82,6 +82,7 @@ export function ensurePage(idx, { keep, prefetch } = {}) {
   if (S.pages.has(idx)) return Promise.resolve();
   const inFlight = S.pending.get(idx);
   if (inFlight) return inFlight;
+  if (!S.view) return Promise.resolve();   // nothing to page against
   const vid = S.view.view_id;
   const gen = S.pageGen;
   const p = (async () => {
@@ -173,6 +174,7 @@ export function schedulePrefetch() {
 }
 
 export function prefetchFlatPages() {
+  if (!S.view) return;   // exported: not every caller is schedulePrefetch
   const maxPage = Math.floor(Math.max(0, S.view.row_count - 1) / PAGE);
   const [firstPage, lastPage] = visiblePageRange();
   for (let d = 1; d <= PREFETCH_RADIUS; d++) {
