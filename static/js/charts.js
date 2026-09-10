@@ -37,10 +37,10 @@ export function drawBars(canvas, spec) {
   const rows = spec.rows || [];
   if (!rows.length) return { boxes: [] };
   const valKey = spec.value || 'n', labKey = spec.label || 'value';
-  const accent = cssVar('--accent', '#d9a441');
+  const accent = cssVar('--accent', '#cfa057');
   const line = cssVar('--line-2', '#333a35');
-  const dim = cssVar('--dim', '#7c8578');
-  const text = cssVar('--text', '#c9cdc4');
+  const dim = cssVar('--dim', '#848d80');
+  const text = cssVar('--text', '#c3c8be');
   const max = spec.max || Math.max(1, ...rows.map((r) => +r[valKey] || 0));
   const boxes = [];
   ctx.font = `11px ${cssVar('--mono', 'monospace')}`;
@@ -87,7 +87,7 @@ export function drawHistogram(canvas, spec) {
   const { ctx, w, h } = fit(canvas);
   const buckets = spec.buckets || [];
   if (!buckets.length) return;
-  const colors = spec.colors || [cssVar('--accent', '#d9a441')];
+  const colors = spec.colors || [cssVar('--accent', '#cfa057')];
   const brush = spec.brush || null;
   const bw = w / buckets.length;
   const max = Math.max(1, ...buckets.map(([, row]) => row.reduce((a, b) => a + (+b || 0), 0)));
@@ -97,7 +97,7 @@ export function drawHistogram(canvas, spec) {
     row.forEach((v, k) => {
       if (!v) return;
       const bh = ((+v || 0) / max) * (h - 6);
-      ctx.fillStyle = colors[k] || cssVar('--dim', '#7c8578');
+      ctx.fillStyle = colors[k] || cssVar('--dim', '#848d80');
       ctx.globalAlpha = inBrush ? 1 : 0.3;
       ctx.fillRect(i * bw + 1, y - bh, Math.max(1, bw - 2), bh);
       y -= bh;

@@ -12,6 +12,17 @@ import pytest
 pytestmark = pytest.mark.ui
 
 
+def _hex(v: str) -> tuple[int, int, int]:
+    h = v.strip().lstrip("#")
+    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def _rgb(v: str) -> tuple[int, int, int]:
+    """"rgb(15, 18, 17)" as the same triple _hex returns."""
+    import re
+    return tuple(int(n) for n in re.findall(r"\d+", v)[:3])
+
+
 def _ctx(browser, appearance="{}"):
     ctx = browser.new_context(viewport={"width": 1100, "height": 700})
     ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen');"
@@ -105,8 +116,8 @@ def test_it_wears_the_skin_that_is_actually_applied(browser, server):
     palette of its own — launching into Phosphor should not flash a wheat
     field first."""
     seen = {}
-    for style, accent in (("phosphor", "#39e881"), ("harvest", "#d9a441")):
-        ctx = _ctx(browser, f'{{ "style": "{style}", "themeMode": "dark", "accent": "{accent}" }}')
+    for style in ("phosphor", "harvest"):
+        ctx = _ctx(browser, f'{{ "style": "{style}", "themeMode": "dark" }}')
         pg = ctx.new_page()
         try:
             pg.goto(server)
@@ -114,14 +125,25 @@ def test_it_wears_the_skin_that_is_actually_applied(browser, server):
             seen[style] = pg.evaluate("""() => {
               const cs = getComputedStyle(document.documentElement);
               return { bg: getComputedStyle(document.getElementById('splash')).backgroundColor,
+                       ink: cs.getPropertyValue('--ink').trim(),
                        accent: cs.getPropertyValue('--accent').trim() };
             }""")
         finally:
             ctx.close()
-    # Each skin's own background, and its own accent for the grain.
+
+    # Asserted as relationships, not literals. This used to pin each skin's
+    # accent by hex, which made it a second copy of the palette: softening
+    # Harvest for long sessions failed a splash test, which is the tail
+    # wagging the dog. What matters is that the splash wears whatever the
+    # skin says, and that two skins do not look the same.
     assert seen["phosphor"]["bg"] != seen["harvest"]["bg"], seen
-    assert seen["phosphor"]["accent"].lower().startswith("#39e881")
-    assert seen["harvest"]["accent"].lower().startswith("#d9a441")
+    assert seen["phosphor"]["accent"] != seen["harvest"]["accent"], seen
+    for style, s in seen.items():
+        assert _rgb(s["bg"]) == _hex(s["ink"]), (style, s)   # the skin's own ink, not a palette of its own
+    pr, pg_, pb = _hex(seen["phosphor"]["accent"])
+    hr, hg, hb = _hex(seen["harvest"]["accent"])
+    assert pg_ > pr and pg_ > pb, seen["phosphor"]        # phosphor's grain is green
+    assert hr > hb and hg > hb, seen["harvest"]           # harvest's is warm
 
 
 def test_the_finished_wordmark_is_held_before_handing_over(browser, server):
