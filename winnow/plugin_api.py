@@ -109,6 +109,15 @@ A tab plus its backend route, the full custom-UI shape:
         entry="ui/panel.js",             # ES module: mount(container, winnow), onShow/onHide,
     )                                    #   and winnow.onViewChange(cb) to follow the grid
 
+    api.register_dashboard(              # a board this plugin OFFERS
+        id="triage",                     # unique within this plugin
+        label="ESXi triage",             # its name in Dashboards ▸ Library
+        widgets=[                        # the shape the dashboard editor writes
+            {"title": "Log lines", "source": "sql", "render": "stat",
+             "query": {"sql": "SELECT COUNT(*) FROM {{all:header_set:ESXi / Linux host logs}}"}},
+        ],
+    )                                    # the analyst adds it with ＋; loading never applies it
+
     def vt_lookup(req):
         # req.body: {"source_id", "column", "value", "rows": [{"rid",
         # "source_id", "cells": {col: val}}, ...]} — the right-clicked
@@ -175,7 +184,7 @@ from . import userenv
 # provides, with a message that says to update Winnow — the failure mode
 # is otherwise an AttributeError deep inside register() that reads like a
 # plugin bug.
-PLUGIN_API_VERSION = 7
+PLUGIN_API_VERSION = 8
 
 FORMAT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 # API routes may nest ("chat/stream") but each segment keeps the same shape.
@@ -613,6 +622,69 @@ class PluginAPI:
         })
 
 
+    def register_dashboard(self, *, id: str, label: str, widgets: list,
+                           description: str = "") -> None:
+        """A dashboard this plugin offers, listed under Dashboards ▸ Library
+        in the sidebar. It is OFFERED, never applied: the analyst adds it to
+        a case with ＋, which copies the widgets in (create-or-replace by
+        name, so adding twice refreshes rather than duplicates). A board a
+        plugin dropped into every case it could see would be the wrong
+        default for the analyst who wanted one table on screen.
+
+        `widgets` is a list of widget definitions — the same shape the
+        dashboard editor writes and profiles carry:
+
+            {"title": str,                  # the card's heading
+             "source": "sql"|"tags"|"watchlist",
+             "render": "stat"|"kv"|"bar"|"list"|"histogram"|"table",
+             "query": {"sql": "SELECT …"},  # source "sql" only
+             "span": 1|2,                   # optional; card width
+             "drill": {...}}                # optional; see below
+
+        SQL rides the read-only pane connection, so a widget is data, not
+        code. Two placeholders save you from hardcoding a table id that is
+        different in every case: ``{{evtx}}``-style shorthands and
+        ``{{header_set:Some Set}}`` bind to the first table carrying that
+        header set, and ``{{all:header_set:Some Set}}`` unions every table
+        that does. A placeholder no table matches is a friendly error on
+        the card, not a broken board.
+
+        A `drill` makes the card clickable, opening the rows behind its
+        number — `{"table": "{{evtx}}", "where": [{"column", "op",
+        "value"}], "column": "…", "bucket": "hour"}`. It has to select
+        exactly the rows the widget counted: a number whose click
+        contradicts it is worse than one that does not respond.
+
+        Registering does not need a case open, so a board can be offered
+        the moment the plugin loads. To build one FROM the data of the case
+        that is open — counts only known at runtime — call
+        ``req.store.create_dashboard(name, widgets)`` from a
+        register_api handler instead; this hook is for the boards your
+        plugin always ships."""
+        if not FORMAT_ID_RE.match(id or ""):
+            raise ValueError(f"Dashboard id {id!r} must be lowercase [a-z0-9_-]")
+        if not label:
+            raise ValueError("register_dashboard needs a label")
+        if not isinstance(widgets, list) or not widgets:
+            raise ValueError("register_dashboard needs a non-empty list of widgets")
+        for i, w in enumerate(widgets):
+            if not isinstance(w, dict) or not w.get("title"):
+                raise ValueError(f"Widget {i} needs a title")
+            if not w.get("source"):
+                raise ValueError(f"Widget {w['title']!r} needs a source (sql, tags or watchlist)")
+            if w["source"] == "sql" and not (w.get("query") or {}).get("sql"):
+                raise ValueError(f"Widget {w['title']!r} is a sql widget with no query.sql")
+        self._registry._add_dashboard({
+            "id": f"{self._plugin}.{id}",
+            "local_id": id,
+            "plugin": self._plugin,
+            "plugin_fs": self._fs,
+            "label": label,
+            "description": description,
+            "widgets": widgets,
+        })
+
+
 class PluginRegistry:
     """Discovers, imports and indexes plugins. One module-level instance
     lives in server.py; tests build their own against tmp dirs.
@@ -630,6 +702,7 @@ class PluginRegistry:
         self._apis: dict[tuple[str, str], dict] = {}     # (fs_name, route) -> {handler, methods}
         self._row_actions: dict[str, dict] = {}          # namespaced action id -> see register_row_action
         self._panels: dict[str, dict] = {}               # namespaced panel id -> see register_toolbar_panel
+        self._dashboards: dict[str, dict] = {}           # namespaced board id -> see register_dashboard
         self._seq = 0  # unique module names across load() calls / same-named plugins in two dirs
 
     # ------------------------------------------------------------- loading
@@ -674,6 +747,7 @@ class PluginRegistry:
         self._apis = {}
         self._row_actions = {}
         self._panels = {}
+        self._dashboards = {}
         seen: set[str] = set()
         for directory in directories:
             d = Path(directory)
@@ -770,6 +844,11 @@ class PluginRegistry:
             raise ValueError(f"Duplicate toolbar panel id: {panel['id']}")
         self._panels[panel["id"]] = panel
 
+    def _add_dashboard(self, board: dict) -> None:
+        if board["id"] in self._dashboards:
+            raise ValueError(f"Duplicate dashboard id: {board['id']}")
+        self._dashboards[board["id"]] = board
+
     def _add_row_action(self, action: dict) -> None:
         if action["id"] in self._row_actions:
             raise ValueError(f"Duplicate row action id: {action['id']}")
@@ -815,6 +894,17 @@ class PluginRegistry:
         entry module's cache-buster (same as list_tabs)."""
         gen_by_fs = {p["fs_name"]: p["gen"] for p in self.plugins}
         return [{**t, "gen": gen_by_fs.get(t["plugin_fs"], 0)} for t in self._panels.values()]
+
+    def list_dashboards(self) -> list[dict]:
+        """Every registered dashboard, without its widgets — the sidebar
+        lists them by name and count, and fetches the widgets only when
+        the analyst adds one."""
+        return [{k: v for k, v in b.items() if k != "widgets"} | {"widget_count": len(b["widgets"])}
+                for b in self._dashboards.values()]
+
+    def get_dashboard(self, fs_name: str, local_id: str) -> dict | None:
+        return next((b for b in self._dashboards.values()
+                     if b["plugin_fs"] == fs_name and b["local_id"] == local_id), None)
 
     def list_row_actions(self) -> list[dict]:
         """Every registered row action, minus the handler (the UI only

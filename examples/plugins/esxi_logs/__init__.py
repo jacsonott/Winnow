@@ -209,6 +209,12 @@ def parse(path, options):
     }
 
 
+# The header set these logs land in, as a placeholder the widgets below
+# resolve per case: a bundle arrives as many files, so a board has to span
+# every table carrying the set rather than bind to whichever imported first.
+_ALL = "{{all:header_set:ESXi / Linux host logs}}"
+
+
 def register(api):
     api.register_ingest_format(
         id="esxi_log",
@@ -229,4 +235,45 @@ def register(api):
              "default": "auto"},
         ],
         parse=parse,
+    )
+
+    # The reference implementation of register_dashboard: the overview an
+    # analyst would otherwise rebuild on every ESXi case. The full 17-widget
+    # board still ships as the "ESXi / UAC triage" PROFILE (plugins +
+    # watchlist + board, applied as a unit); this is the board on its own,
+    # offered under Dashboards ▸ Library for a case that just needs the
+    # overview. Every query is written against {{all:header_set:…}} rather
+    # than a table id, because a support bundle arrives as many log files
+    # and the ids differ in every case.
+    api.register_dashboard(
+        id="overview",
+        label="ESXi / Linux host overview",
+        description="When the host was active, what it logged, and who reached it.",
+        widgets=[
+            {"title": "Log lines", "source": "sql", "render": "stat",
+             "query": {"sql": f"SELECT COUNT(*) FROM {_ALL}"},
+             "drill": {"table": _ALL, "where": []}},
+            {"title": "Log types", "source": "sql", "render": "bar",
+             "query": {"sql": f"SELECT Log AS label, COUNT(*) c FROM {_ALL}"
+                              " GROUP BY Log ORDER BY c DESC"},
+             "drill": {"table": _ALL, "column": "Log"}},
+            {"title": "Failed SSH logins", "source": "sql", "render": "stat",
+             "query": {"sql": f"SELECT COUNT(*) FROM {_ALL} WHERE Log='auth'"
+                              " AND (Message LIKE '%Failed%' OR Message LIKE '%Invalid user%')"},
+             "drill": {"table": _ALL, "tree": {"type": "group", "op": "AND", "children": [
+                 {"type": "cond", "column": "Log", "op": "equals", "value": "auth"},
+                 {"type": "group", "op": "OR", "children": [
+                     {"type": "cond", "column": "Message", "op": "contains", "value": "Failed"},
+                     {"type": "cond", "column": "Message", "op": "contains", "value": "Invalid user"}]}]}}},
+            {"title": "Top source IPs", "source": "sql", "render": "bar",
+             "query": {"sql": f"SELECT SourceIP AS label, COUNT(*) c FROM {_ALL}"
+                              " WHERE SourceIP <> '' GROUP BY SourceIP ORDER BY c DESC LIMIT 10"},
+             "drill": {"table": _ALL, "column": "SourceIP",
+                       "where": [{"column": "SourceIP", "op": "not_empty", "value": ""}]}},
+            {"title": "Activity over time", "source": "sql", "render": "histogram",
+             "query": {"sql": "SELECT strftime('%Y-%m-%d %H', TS_NORMALIZE(Timestamp)) AS hr,"
+                              f" COUNT(*) c FROM {_ALL} WHERE Timestamp <> '' GROUP BY hr ORDER BY hr"},
+             "drill": {"table": _ALL, "column": "Timestamp", "bucket": "hour",
+                       "where": [{"column": "Timestamp", "op": "not_empty", "value": ""}]}},
+        ],
     )

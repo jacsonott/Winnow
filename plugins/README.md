@@ -27,8 +27,8 @@ maintaining two.
 
 Writing one? Start with
 **[docs/writing-plugins.md](../docs/writing-plugins.md)** — quickstart,
-the five extension points (ingest formats, tabs, API routes, row actions,
-toolbar panels), testing, and troubleshooting. The contract is also
+the six extension points (ingest formats, tabs, API routes, row actions,
+toolbar panels, dashboards), testing, and troubleshooting. The contract is also
 spelled out at the top of
 [`winnow/plugin_api.py`](../winnow/plugin_api.py). A plugin that fails to load never
 takes the server down — it's listed with its error in Settings → Plugins

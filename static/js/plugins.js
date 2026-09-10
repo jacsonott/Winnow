@@ -53,6 +53,7 @@ export function buildPluginsPanel(b) {
     // A toggle takes a plugin's row actions with it — and a pinned one
     // out of the row menu, which promises to hide it while its plugin is off.
     S.pluginRowActions = r.row_actions || [];
+    S.pluginDashboards = r.dashboards || [];
     renderPluginTabs(); // a toggle/install can add or remove pinned tabs
   }
 
