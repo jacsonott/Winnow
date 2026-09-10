@@ -29,7 +29,7 @@ export default function mount(container, winnow) {
   const newSheet = (name) => ({
     name,
     sourceId: null,
-    groupBy: [], carry: [], filters: [], tags: { mode: '', ids: [] }, rowJson: false,
+    groupBy: [], carry: [], sums: [], filters: [], tags: { mode: '', ids: [] }, rowJson: false,
     sortColumn: null,
     template: '{which} of {count}',
     meta: sharedMeta, preview: null, error: null, loading: false,
@@ -169,6 +169,7 @@ export default function mount(container, winnow) {
     ['groupBy', 'Group rows on', 'What defines a group — Host + User makes one group per session pair'],
     ['sort', 'Ordered by', 'The column that orders each group; first/last are meaningless without one'],
     ['carry', 'Include columns', 'Columns carried into the result — drag chips (or the preview headers) to set their order'],
+    ['sums', 'Total up', 'Number columns summed over each WHOLE group — bytes moved in a session, not just the two bookends'],
     ['filters', 'Filters', 'Only rows matching these are grouped'],
   ];
   const zoneBodies = {};
@@ -265,6 +266,15 @@ export default function mount(container, winnow) {
         openFilterEditor(f);
         return;
       }
+    } else if (zone === 'sums') {
+      // Only a number column has a total. Say so rather than adding a chip
+      // the server will refuse on the next preview.
+      const col = (currentSource()?.columns || []).find((c) => c.name === name);
+      if (!col || col.type !== 'number') {
+        toast(`${name} is not a number column — nothing to sum`, 4000);
+        return;
+      }
+      if (!state.sums.includes(name)) state.sums.push(name);
     } else if (zone === 'groupBy' || zone === 'carry') {
       const list = state[zone];
       if (from !== zone && !list.includes(name)) list.push(name);
@@ -547,6 +557,7 @@ export default function mount(container, winnow) {
       group_by: state.groupBy,
       sort_column: state.sortColumn,
       columns: state.carry,
+      sum_columns: state.sums,
       filters: state.filters,
       tags: state.tags.mode ? state.tags : null,
       row_json: state.rowJson,
