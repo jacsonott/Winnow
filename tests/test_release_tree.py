@@ -125,22 +125,29 @@ def test_a_case_file_anywhere_in_the_tree_is_ignored(name):
     assert ignored, f"{name} is not ignored — .gitignore does not cover the case suffix"
 
 
-def test_the_declared_version_is_not_already_released():
-    """A version that is already tagged means the bump was forgotten — the
-    release script refuses it, and catching it here is cheaper.
+def test_a_tagged_commit_declares_the_version_it_is_tagged_with():
+    """The check worth having, in the direction that stays quiet.
 
-    Unless THIS commit is that release. `scripts/release.py --write` builds
-    the snapshot and tags it in one step, so on the tagged commit the
-    version and the tag agree by construction; asserting otherwise would
-    fail CI on every release PR into main, which is the one run that must
-    pass for a release to ship at all. Caught by running this suite against
-    the snapshot before pushing it.
+    It used to assert the declared version was not already tagged, to
+    catch a forgotten bump. That fires on every commit after a release —
+    `develop` legitimately sits at the shipped version until someone opens
+    the next cycle — so it would have failed CI on every PR from the
+    moment 0.3.0 shipped until the next bump. A required check that is red
+    for reasons nobody can act on is the kind that teaches people to
+    re-run until green.
+
+    The forgotten bump is already refused where it matters and cannot be
+    skipped: `scripts/release.py` reads version.py off the source branch
+    and exits rather than tag a version that disagrees. What that guard
+    does NOT cover is a tag and a tree that disagree after the fact — a
+    hand-moved tag, a cherry-pick onto a release commit — so that is what
+    this asserts, and on an untagged commit it has nothing to say.
     """
     from winnow import version
 
-    want = f"v{version.VERSION}"
-    if want in _git("tag", "--points-at", "HEAD").split():
-        return          # this commit IS that release
-    assert want not in _git("tag", "-l").split(), (
-        f"winnow/version.py still says {version.VERSION}, which is already tagged — "
-        "bump it in the commit you want released")
+    tags = [t for t in _git("tag", "--points-at", "HEAD").split() if t.startswith("v")]
+    if not tags:
+        return          # an ordinary commit declares whatever it likes
+    assert f"v{version.VERSION}" in tags, (
+        f"this commit is tagged {tags} but winnow/version.py says {version.VERSION} — "
+        "the app would report a version its own tag contradicts")
