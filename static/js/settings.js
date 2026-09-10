@@ -7,6 +7,7 @@ import { labeledRow } from './derived.js';
 import { VALUE_FILTER_AUTO_MAX } from './filters.js';
 import { headH, rScroll, render, spacerPx, vScroll } from './grid.js';
 import { drawRail, rebuildGroupPrefix, renderGrouped } from './grouping.js';
+import { shutdownWinnow } from './home.js';
 import { ACTION_LABELS, defaultKeymap, findKeyConflict, keySpecFromEvent, saveKeymap } from './keymap.js';
 import { buildPluginsPanel } from './plugins.js';
 import { buildAssocPanel } from './assoc.js';
@@ -972,6 +973,24 @@ export function openSettings() {
 
     const secUpdates = settingsSection(b, 'Updates');
     buildUpdatesPanel(secUpdates);
+
+    /* Last, and deliberately: shutting the server down is the one thing in
+       here that ends the session, so it sits below everything an analyst
+       might have come to change. The ⏻ on the home screen and the Case ▾
+       entry both reach the same shutdownWinnow — including its "still
+       running" warning, which is the part that must not be bypassed by
+       adding a second button. */
+    const secOff = settingsSection(b, 'Shut down');
+    secOff.append(el('p', null,
+      'Stops the Winnow server. Everything already committed is saved in the case file — '
+      + 'tags, notes and finished imports are never lost. This page, and any other tab using '
+      + 'this server, stops working until you start Winnow again.'));
+    const offActs = el('div', 'row-actions');
+    const offBtn = el('button', 'btn danger', '\u23fb  Shut down Winnow');
+    offBtn.title = 'Stop the server (asks first, and warns about anything still running)';
+    offBtn.onclick = () => { $('modal').hidden = true; shutdownWinnow(); };
+    offActs.append(offBtn);
+    secOff.append(offActs);
   }, { tall: true });
 }
 
