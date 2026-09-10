@@ -212,4 +212,18 @@ see [docs/notes/README.md](README.md) for the whole set.
   syslog.log), and folds timestamp-less continuation lines onto the
   previous row rather than emitting orphans.
 
+- **A plugin's dashboard is offered, not applied** (`register_dashboard`,
+  API 8). It appears under Dashboards ▸ Library beside the machine-wide
+  boards and is copied into a case only when the analyst presses ＋
+  (`upsert_dashboard_by_name`, so twice refreshes rather than duplicates).
+  Loading a plugin must never put a board in a case: the analyst opened
+  Winnow to look at something, and a plugin does not get to decide what.
+  The registry holds the widgets and the listing omits them — the sidebar
+  needs a name and a count, and `/api/plugin_dashboards/<fs>/<id>` fetches
+  the rest when one is added. Registering needs no case open, which is
+  what makes it a declaration; a board built FROM the open case's data is
+  `req.store.create_dashboard` from a route instead, and that path was
+  always there — this hook is the half that can be declared, documented
+  and tested. Widget SQL should use `{{all:header_set:…}}` rather than a
+  table id: ids differ per case, and a bundle arrives as many files.
 - **Bundles are profiles.** A plugin bundle (PluginBundles, workspace/plugin_bundles.json) now carries an optional `dashboard` (a list of widget definitions) alongside its plugins. Applying a bundle whose profile has a dashboard also sets the open case's dashboard (Store.set_dashboard). So a profile is 'how I analyze this kind of case' — plugins + a dashboard — one saveable, shareable JSON thing. See docs/design/analysis-suite.md.

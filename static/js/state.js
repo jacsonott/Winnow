@@ -83,6 +83,7 @@ export const S = {
   //  what, n, prevTree}  — what/n caption the banner, prevTree is what Done lands on.
   // Cleared by Done, Clear filters, opening another case, removing the table.
   diffMarks: null,
+  pluginDashboards: [],  // boards plugins offer (register_dashboard) — listed under Dashboards ▸ Library, added by ＋
   pluginRowActions: [],  // plugin-registered row-menu entries [{id, local_id, plugin, plugin_fs, label, description, max_rows}]
   pluginPanels: [],      // plugin-registered toolbar panels [{id, plugin, plugin_fs, label, entry, description, gen}] — see plugins.js
   pluginDirs: [],        // where the server loads plugins from — shown in the Plugins modal so "drop it where?" has an answer

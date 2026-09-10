@@ -174,6 +174,39 @@ export function renderDashboardsInto(list) {
       list.append(row);
     }
   }
+
+  // Boards a plugin offers (register_dashboard). Same Library section, no
+  // ✕: the plugin owns them, so removing one means turning the plugin off.
+  // Offered, never applied — a plugin that dropped a board into every case
+  // it could see would be deciding what the analyst opened Winnow to look
+  // at.
+  const offered = S.pluginDashboards || [];
+  if (offered.length) {
+    if (!lib.length) list.append(el('div', 'menu-header sidebar-subheader', 'Library'));
+    for (const b of offered) {
+      const row = el('div', 'sidebar-row sidebar-dash-library');
+      const label = el('button', 'menu-item', b.label);
+      label.title = `${b.widget_count} widget${b.widget_count === 1 ? '' : 's'} · offered by the ${b.plugin} plugin — click to add to this case`;
+      const addToCase = async () => {
+        try {
+          const rec = await post(`/api/plugin_dashboards/${encodeURIComponent(b.plugin_fs)}/${encodeURIComponent(b.local_id)}/add`, {});
+          await loadDashboards();
+          renderSidebar();
+          await showDashboard(rec.id);
+          toast(`Added "${b.label}" to this case`);
+        } catch (err) { toast('Could not add: ' + err.message, 5000); }
+      };
+      label.onclick = addToCase;
+      row.append(label, el('span', 'sidebar-row-count', String(b.widget_count)));
+      const acts = el('div', 'sidebar-row-actions');
+      const plus = el('button', 'menu-item-action', '＋');
+      plus.title = `Add this board to the open case (from ${b.plugin})`;
+      plus.onclick = (e) => { e.stopPropagation(); addToCase(); };
+      acts.append(plus);
+      row.append(acts);
+      list.append(row);
+    }
+  }
 }
 
 /* Save the current board machine-wide (workspace/dashboards.json), so

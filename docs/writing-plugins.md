@@ -15,7 +15,7 @@ reading. Start with the Quickstart.
 
 **Contents**
 
-1. [The five extension points](#1-the-five-extension-points)
+1. [The six extension points](#1-the-six-extension-points)
 2. [Quickstart: a parser in 20 lines](#2-quickstart-a-parser-in-20-lines)
 3. [Plugin anatomy](#3-plugin-anatomy)
 4. [Hook: ingest formats](#4-hook-ingest-formats)
@@ -37,7 +37,7 @@ reading. Start with the Quickstart.
 
 ---
 
-## 1. The five extension points
+## 1. The six extension points
 
 Everything a plugin does, it does by calling methods on the `api` object
 handed to its `register()` function:
@@ -49,6 +49,7 @@ handed to its `register()` function:
 | `api.register_api(route, handler)` | A backend endpoint | Whatever your tab (or a script) needs the server to do |
 | `api.register_row_action(...)` | An entry under the row right-click menu's **Plugins ▸** submenu — analysts can pin it to the top of the menu | Anything that operates on the selected rows: a VirusTotal lookup on the highlighted hashes, an enrichment, a hand-off to another tool |
 | `api.register_toolbar_panel(...)` | A toggle in the table toolbar + a strip above the grid | Something that follows the current view: a histogram of when its rows happened, a sparkline, a legend |
+| `api.register_dashboard(...)` | A board under **Dashboards ▸ Library**, added to a case with ＋ | The overview you would build by hand every time you open this kind of case: counts, top values, a timeline of what matters for the format your plugin reads |
 
 They compose: a tab usually pairs with one or more routes; a row action
 often pairs with a tab that shows its results; a toolbar panel usually
@@ -66,7 +67,7 @@ The shipped examples map onto these:
 | [`table_histogram/`](../examples/plugins/table_histogram/) | A toolbar panel + a route — following the grid with `onViewChange`, driving the timeframe filter with `setTimeRange` |
 | [`first_last/`](../examples/plugins/first_last/) | A tab that writes a TABLE back — `ingest_rows` output an analyst browses, tags and exports like any other source |
 | [`pivot/`](../examples/plugins/pivot/) | A tab that aggregates the current view — drag-and-drop rows/columns/values over the case's own data |
-| [`esxi_logs/`](../examples/plugins/esxi_logs/) | Ingest formats for a support bundle's ESXi/Linux logs, and the profile that pairs them with a dashboard |
+| [`esxi_logs/`](../examples/plugins/esxi_logs/) | Ingest formats for a support bundle's ESXi/Linux logs, the profile that pairs them with a dashboard, and the reference `register_dashboard` board |
 
 ---
 
@@ -1013,7 +1014,8 @@ python server.py --plugins-dir ~/src/my-winnow-plugins
 
 Installs from the UI always land in the first directory (`plugins/`).
 
-**Versioning:** the current plugin API version is **7** (`req.set_env` /
+**Versioning:** the current plugin API version is **8** (`api.register_dashboard`
+arrived in 8; `req.set_env` /
 `req.unset_env` / `req.is_loopback` arrived in 7; `req.table` in 6; `req.env`,
 `req.variables` / `req.set_variable` and the tab context's
 `state.variables` / `setVariable` arrived in 5; toolbar panels
@@ -1154,6 +1156,65 @@ context a tab does (one object builds both), so `onViewChange`,
 are available to tabs as well — they are listed under
 [The `winnow` context](#the-winnow-context), not additions here. They
 matter most to a panel, which sits beside the grid and has to follow it.
+
+### `register_dashboard(*, id, label, widgets, description="")`
+
+A board your plugin offers. It appears under **Dashboards ▸ Library** in
+the sidebar, named `label`, and the analyst adds it to a case with ＋ —
+which copies the widgets in, create-or-replace by name, so adding it
+twice refreshes rather than duplicates.
+
+**Offered, never applied.** Loading your plugin does not put a board in
+anyone's case. A plugin that dropped one into every case it could see
+would be deciding what the analyst opened Winnow to look at.
+
+`widgets` is a list of widget definitions — the same shape the dashboard
+editor writes and profiles carry:
+
+```python
+api.register_dashboard(
+    id="triage",
+    label="ESXi triage",
+    widgets=[
+        {"title": "Log lines", "source": "sql", "render": "stat",
+         "query": {"sql": "SELECT COUNT(*) FROM {{all:header_set:ESXi / Linux host logs}}"}},
+        {"title": "Log types", "source": "sql", "render": "bar",
+         "query": {"sql": "SELECT Log AS label, COUNT(*) c FROM {{evtx}} GROUP BY Log ORDER BY c DESC"},
+         "drill": {"table": "{{evtx}}", "column": "Log"}},
+    ],
+)
+```
+
+| key | |
+| --- | --- |
+| `title` | the card's heading (required) |
+| `source` | `"sql"`, `"tags"` or `"watchlist"` (required) |
+| `render` | `"stat"`, `"kv"`, `"bar"`, `"list"`, `"histogram"` or `"table"` |
+| `query.sql` | required for `source: "sql"`; runs on the read-only pane connection, so a board is data, not code |
+| `span` | `1` or `2` — how wide the card sits |
+| `drill` | makes the card clickable; see below |
+
+**Write the SQL against a placeholder, not a table id**, which is
+different in every case: `{{evtx}}`-style shorthands and
+`{{header_set:Some Set}}` bind to the first table carrying that header
+set, and `{{all:header_set:Some Set}}` unions every table that does. A
+placeholder no table matches is a friendly message on the card, not a
+broken board.
+
+A `drill` opens the rows behind a number:
+`{"table": "{{evtx}}", "where": [{"column", "op", "value"}], "column": …,
+"bucket": "hour"}` — `where` conditions are ANDed, `tree` takes a whole
+filter tree for the OR-shaped ones, `column` is what a clicked bar or row
+pivots on, `bucket` is for a time histogram. **It has to select exactly
+the rows the widget counted.** A number whose click contradicts it is
+worse than one that does not respond at all, and it is the mistake that
+is easiest to ship: test it against a real case before you do.
+
+Registering needs no case open, so a board can be offered the moment the
+plugin loads. For a board built from the data of the case that IS open —
+counts you cannot know in advance — call `req.store.create_dashboard(name,
+widgets)` from a [`register_api`](#register_apiroute-handler-methodsget-post)
+handler instead. This hook is for the boards your plugin always ships.
 
 ### `register_row_action(*, id, label, handler, description="", max_rows=1000)`
 

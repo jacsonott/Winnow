@@ -25,10 +25,11 @@ export async function loadPlugins() {
     S.pluginFormats = r.formats || [];
     S.pluginTabs = r.tabs || [];
     S.pluginRowActions = r.row_actions || [];
+    S.pluginDashboards = r.dashboards || [];
     S.pluginPanels = r.panels || [];
     S.pluginDirs = r.dirs || [];
     S.pluginsCaseOpen = !!r.case_open;
-  } catch { S.plugins = []; S.pluginFormats = []; S.pluginTabs = []; S.pluginRowActions = []; S.pluginPanels = []; S.pluginDirs = []; S.pluginsCaseOpen = false; }
+  } catch { S.plugins = []; S.pluginFormats = []; S.pluginTabs = []; S.pluginRowActions = []; S.pluginDashboards = []; S.pluginPanels = []; S.pluginDirs = []; S.pluginsCaseOpen = false; }
   renderPluginTabs();
   renderPluginPanelButtons();
 }
