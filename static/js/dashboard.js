@@ -187,14 +187,27 @@ export function renderDashboardsInto(list) {
       const row = el('div', 'sidebar-row sidebar-dash-library');
       const label = el('button', 'menu-item', b.label);
       label.title = `${b.widget_count} widget${b.widget_count === 1 ? '' : 's'} · offered by the ${b.plugin} plugin — click to add to this case`;
-      const addToCase = async () => {
+      const addToCase = async (replace = false) => {
+        const route = `/api/plugin_dashboards/${encodeURIComponent(b.plugin_fs)}/${encodeURIComponent(b.local_id)}/add`;
         try {
-          const rec = await post(`/api/plugin_dashboards/${encodeURIComponent(b.plugin_fs)}/${encodeURIComponent(b.local_id)}/add`, {});
+          const rec = await post(route, { replace });
           await loadDashboards();
           renderSidebar();
           await showDashboard(rec.id);
           toast(`Added "${b.label}" to this case`);
-        } catch (err) { toast('Could not add: ' + err.message, 5000); }
+        } catch (err) {
+          // The name is the plugin's, so it can collide with a board the
+          // analyst built. The server refuses rather than choosing for
+          // them; this is where they choose.
+          const taken = err.detail && err.detail.error === 'name_taken' ? err.detail : null;
+          if (!taken) { toast('Could not add: ' + err.message, 5000); return; }
+          const go = await confirmDialog(
+            `This case already has a dashboard called “${taken.name}” with `
+            + `${taken.widget_count} widget${taken.widget_count === 1 ? '' : 's'}.\n\n`
+            + 'Replacing it discards those widgets — there is no undo.',
+            { danger: true, okLabel: 'Replace it', cancelLabel: 'Keep mine' });
+          if (go) addToCase(true);
+        }
       };
       label.onclick = addToCase;
       row.append(label, el('span', 'sidebar-row-count', String(b.widget_count)));

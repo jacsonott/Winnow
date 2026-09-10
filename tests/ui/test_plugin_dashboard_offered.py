@@ -31,7 +31,9 @@ def offered(page, server):
     _post(server, "/api/plugins/toggle", {"fs_name": "esxi_logs", "scope": "on_all"})
     page.evaluate("() => __winnow.loadPlugins()")
     page.wait_for_function("() => (__winnow.S.pluginDashboards || []).length > 0", timeout=10_000)
-    page.evaluate("() => __winnow.renderSidebar()")
+    # Deliberately NOT calling renderSidebar() here: toggling a plugin has
+    # to redraw the section itself, and calling it by hand was hiding that
+    # it did not (found in review).
     yield
     page.evaluate("""async () => {
       for (const d of __winnow.S.dashboards.filter((x) => x.name.includes('host overview'))) {
@@ -45,6 +47,12 @@ def offered(page, server):
     }""")
     _post(server, "/api/plugins/toggle", {"fs_name": "esxi_logs", "scope": "off_all"})
     page.evaluate("() => __winnow.loadPlugins()")
+    # …and turning it off takes the row with it, rather than leaving a
+    # phantom whose ＋ would 404.
+    page.wait_for_function(
+        "(n) => !document.querySelector(`#sidebarList .sidebar-dash-library`)"
+        " || ![...document.querySelectorAll('#sidebarList .sidebar-dash-library')]"
+        ".some((r) => r.textContent.includes(n))", arg=BOARD, timeout=10_000)
 
 
 def _row(page):
@@ -52,6 +60,8 @@ def _row(page):
 
 
 def test_enabling_the_plugin_offers_the_board_without_adding_it(page, offered):
+    # Drawn by the toggle itself — nothing here redraws the sidebar.
+    _row(page).wait_for(state="visible", timeout=10_000)
     assert _row(page).count() == 1
     assert page.evaluate("() => __winnow.S.dashboards.some((d) => d.name.includes('host overview'))") is False, \
         "loading a plugin must not put a board in the case"
@@ -93,3 +103,28 @@ def test_adding_it_twice_refreshes_rather_than_duplicating(page, offered):
         page.wait_for_function("() => __winnow.S.dashboards.some((d) => d.name.includes('host overview'))")
     assert page.evaluate(
         "() => __winnow.S.dashboards.filter((d) => d.name.includes('host overview')).length") == 1
+
+
+def test_a_name_collision_asks_before_replacing(page, offered):
+    """The name is the plugin's, so it can collide with a board the analyst
+    built. Their widgets must not go without them saying so."""
+    page.evaluate("""async () => {
+      await fetch('/api/dashboards', { method: 'POST',
+        headers: { 'X-Timeline-Lite-Client': '1', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'ESXi / Linux host overview',
+                               widgets: [{ title: 'Mine', source: 'tags', render: 'stat' }] }) });
+      await __winnow.loadDashboards(); __winnow.renderSidebar();
+    }""")
+    row = _row(page)
+    row.hover()
+    row.locator(".menu-item-action[title^='Add this board']").click()
+    page.wait_for_selector(".confirm-overlay")
+    assert "no undo" in page.locator(".confirm-card").inner_text()
+
+    page.locator(".confirm-card .btn", has_text="Keep mine").click()
+    page.wait_for_selector(".confirm-overlay", state="detached")
+    mine = page.evaluate("""async () => {
+      const d = __winnow.S.dashboards.find((x) => x.name === 'ESXi / Linux host overview');
+      const r = await fetch('/api/dashboards/' + d.id, { headers: { 'X-Timeline-Lite-Client': '1' } });
+      return (await r.json()).widgets; }""")
+    assert [w["title"] for w in mine] == ["Mine"], "declining replaced them anyway"

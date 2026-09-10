@@ -3354,6 +3354,11 @@ class LibraryDashboardWrite(BaseModel):
     widgets: list
 
 
+class PluginBoardAddBody(BaseModel):
+    name: str | None = None
+    replace: bool = False
+
+
 class LibraryAddBody(BaseModel):
     name: str | None = None
 
@@ -3401,33 +3406,27 @@ def api_dashboard_library_add(board_id: int, body: LibraryAddBody):
     return store().upsert_dashboard_by_name((body.name or b["name"]).strip() or b["name"], b["widgets"])
 
 
-@app.get("/api/plugin_dashboards")
-def api_plugin_dashboards():
-    """Dashboards plugins offer (register_dashboard). Listed without their
-    widgets, like the machine-wide library — the sidebar needs a name and a
-    count, and the widgets only when one is added."""
-    return PLUGINS.list_dashboards()
-
-
-@app.get("/api/plugin_dashboards/{fs_name}/{local_id}")
-def api_plugin_dashboard_get(fs_name: str, local_id: str):
-    """One offered board's widgets — what the profile builder embeds when
-    an analyst picks a plugin's board for a profile."""
-    b = PLUGINS.get_dashboard(fs_name, local_id)
-    if not b:
-        raise HTTPException(404, f"No dashboard {local_id} from {fs_name}")
-    return {"id": b["id"], "label": b["label"], "widgets": b["widgets"]}
-
-
 @app.post("/api/plugin_dashboards/{fs_name}/{local_id}/add")
-def api_plugin_dashboard_add(fs_name: str, local_id: str, body: LibraryAddBody):
-    """Copy an offered board into the open case (create-or-replace by name,
-    so adding it twice refreshes rather than duplicates). Offered, never
-    applied: a plugin does not get to put a board in a case by loading."""
+def api_plugin_dashboard_add(fs_name: str, local_id: str, body: PluginBoardAddBody):
+    """Copy an offered board into the open case. Offered, never applied: a
+    plugin does not get to put a board in a case by loading.
+
+    Nor by colliding. The library's add replaces by name, which is right
+    there — the analyst named that board and asked for it back. Here the
+    name comes from the PLUGIN, so a board the analyst built by hand can
+    share it by coincidence, and replacing it would discard their widgets
+    with no undo. A name already in use is a 409 carrying the existing
+    board, and the UI asks; `replace=true` is the answer to that question,
+    never the default."""
     b = PLUGINS.get_dashboard(fs_name, local_id)
     if not b:
         raise HTTPException(404, f"No dashboard {local_id} from {fs_name}")
     name = (body.name or b["label"]).strip() or b["label"]
+    existing = store().find_dashboard_by_name(name)
+    if existing and not body.replace:
+        raise HTTPException(409, {"error": "name_taken", "name": name,
+                                  "dashboard_id": existing["id"],
+                                  "widget_count": existing["widget_count"]})
     return store().upsert_dashboard_by_name(name, b["widgets"])
 
 

@@ -622,6 +622,14 @@ class PluginAPI:
         })
 
 
+    # What dashboard_widget_preview can run, and what the dashboard can
+    # draw (static/js/dashboard.js's runWidget). Checked at registration:
+    # a typo like "watchlst" or a render nobody implemented is a card
+    # reading "Unknown render" in somebody's case, weeks later, with the
+    # plugin looking innocent — and it is knowable right here.
+    WIDGET_SOURCES = ("sql", "tags", "watchlist")
+    WIDGET_RENDERS = ("stat", "kv", "chips", "list", "bar", "histogram")
+
     def register_dashboard(self, *, id: str, label: str, widgets: list,
                            description: str = "") -> None:
         """A dashboard this plugin offers, listed under Dashboards ▸ Library
@@ -636,7 +644,7 @@ class PluginAPI:
 
             {"title": str,                  # the card's heading
              "source": "sql"|"tags"|"watchlist",
-             "render": "stat"|"kv"|"bar"|"list"|"histogram"|"table",
+             "render": "stat"|"kv"|"chips"|"list"|"bar"|"histogram",
              "query": {"sql": "SELECT …"},  # source "sql" only
              "span": 1|2,                   # optional; card width
              "drill": {...}}                # optional; see below
@@ -648,6 +656,10 @@ class PluginAPI:
         header set, and ``{{all:header_set:Some Set}}`` unions every table
         that does. A placeholder no table matches is a friendly error on
         the card, not a broken board.
+
+        Adding a board whose name is already taken in that case is
+        refused rather than resolved — the analyst chose that name, and
+        your label collided with it. They are asked; you do not decide.
 
         A `drill` makes the card clickable, opening the rows behind its
         number — `{"table": "{{evtx}}", "where": [{"column", "op",
@@ -670,8 +682,14 @@ class PluginAPI:
         for i, w in enumerate(widgets):
             if not isinstance(w, dict) or not w.get("title"):
                 raise ValueError(f"Widget {i} needs a title")
-            if not w.get("source"):
-                raise ValueError(f"Widget {w['title']!r} needs a source (sql, tags or watchlist)")
+            if w.get("source") not in self.WIDGET_SOURCES:
+                raise ValueError(
+                    f"Widget {w['title']!r} has source {w.get('source')!r} — "
+                    f"one of {', '.join(self.WIDGET_SOURCES)}")
+            if w.get("render") not in self.WIDGET_RENDERS:
+                raise ValueError(
+                    f"Widget {w['title']!r} has render {w.get('render')!r} — "
+                    f"one of {', '.join(self.WIDGET_RENDERS)}")
             if w["source"] == "sql" and not (w.get("query") or {}).get("sql"):
                 raise ValueError(f"Widget {w['title']!r} is a sql widget with no query.sql")
         self._registry._add_dashboard({

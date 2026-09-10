@@ -4,7 +4,7 @@
 import { recordTabVisit } from './tabhistory.js';
 import { $, api, el, post, setBusy, toast } from './core.js';
 import { loadPlugins, openImportModal, pluginFormatById, queueFilesForFormat } from './importer.js';
-import { clearAllFilters, loadSources, openSource, renderPageTabs, syncTabSelection } from './sources.js';
+import { clearAllFilters, loadSources, openSource, renderPageTabs, renderSidebar, syncTabSelection } from './sources.js';
 import { setColumnFilter, valueFilterText } from './filters.js';
 import { rebuildView } from './view.js';
 import { activeSqlTab, hideMainViews, scheduleSqlTabSave, showGridTab, syncTabChrome } from './sql.js';
@@ -55,6 +55,10 @@ export function buildPluginsPanel(b) {
     S.pluginRowActions = r.row_actions || [];
     S.pluginDashboards = r.dashboards || [];
     renderPluginTabs(); // a toggle/install can add or remove pinned tabs
+    // …and can add or remove offered boards. Without this the Dashboards
+    // section keeps whatever it last drew: a board that is not offered
+    // yet, or a phantom row whose ＋ 404s because its plugin is off.
+    renderSidebar();
   }
 
   async function installFiles(fileList, relPaths) {
