@@ -1454,11 +1454,36 @@ export function openExportModal() {
       acts.append(all, tagged);
       b.append(acts);
     }
-    b.append(el('p', null, 'Exports every tagged row from every table in this case — not just the one open now — one worksheet per table.'));
+    b.append(el('p', null, 'Exports every table in this case — not just the one open now — one worksheet per table. '
+      + 'Tagged rows only, or everything.'));
     const xlsxActs = el('div', 'row-actions');
     const xlsx = el('button', 'btn', 'Export tagged rows from all tables (.xlsx)');
     xlsx.onclick = () => { window.location = '/api/export/tagged_xlsx'; $('modal').hidden = true; };
-    xlsxActs.append(xlsx);
+    const every = el('button', 'btn', 'Export all tables (.xlsx)');
+    every.title = 'Every row of every table, each on its own worksheet. Big cases take a while.';
+    every.onclick = async () => {
+      // Ask the server what this would write before writing it: Excel
+      // stops a worksheet at 1,048,576 rows, and a timeline is often past
+      // that. The rows still all land — on continuation sheets — but the
+      // analyst gets to hear that, and the size of what's coming, first.
+      let plan;
+      try { plan = await api('/api/export/all_xlsx/plan'); } catch (e) { toast('Could not plan the export: ' + e.message, 6000); return; }
+      if (!plan.tables.length) { toast('Nothing to export — the case has no tables.'); return; }
+      const total = plan.tables.reduce((n, t) => n + t.rows, 0);
+      if (plan.over_cap.length) {
+        const names = plan.over_cap.map((n) => `“${n}”`).join(', ');
+        const ok = await confirmDialog(
+          `${names} ${plan.over_cap.length === 1 ? 'has' : 'have'} more rows than Excel allows on one worksheet `
+          + `(${plan.rows_per_sheet.toLocaleString()}). Every row will still be exported, continued on `
+          + `“Name (2)”, “Name (3)”… sheets. ${total.toLocaleString()} rows across `
+          + `${plan.tables.length} table${plan.tables.length === 1 ? '' : 's'} — this can take a while. Export anyway?`,
+          { okLabel: 'Export anyway' });
+        if (!ok) return;
+      }
+      window.location = '/api/export/all_xlsx';
+      $('modal').hidden = true;
+    };
+    xlsxActs.append(xlsx, every);
     b.append(xlsxActs);
   });
 }

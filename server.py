@@ -4108,6 +4108,43 @@ def api_export_tagged_xlsx(filename: str = "tagged-export.xlsx"):
     )
 
 
+@app.get("/api/export/all_xlsx/plan")
+def api_export_all_xlsx_plan():
+    return store().export_all_xlsx_plan()
+
+
+@app.get("/api/export/all_xlsx")
+def api_export_all_xlsx(filename: str = "all-tables.xlsx"):
+    """Every table, every row, to a temp file the response streams and
+    then deletes. A temp FILE rather than BytesIO because the workbook is
+    the size of the case; mkstemp's descriptor is closed before openpyxl
+    opens the path, which Windows insists on. Runs in the threadpool (a
+    plain def), so a multi-minute export doesn't block the app — there is
+    no progress bar for it yet, and the plan route is how the UI warns
+    about a big one first."""
+    from starlette.background import BackgroundTask
+    t0 = time.time()
+    wlog.record("info", f"Export started: all tables (.xlsx) → {filename}")
+    fd, path = tempfile.mkstemp(suffix=".xlsx", prefix="winnow-export-")
+    os.close(fd)
+    try:
+        stats = store().export_all_xlsx(path)
+    except BaseException:
+        wlog.record("error", "Export failed: all tables (.xlsx)")
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+        raise
+    wlog.record("info", f"Export finished: all tables (.xlsx) — {stats['rows']:,} rows on "
+                        f"{stats['sheets']} sheet{'s' if stats['sheets'] != 1 else ''}, "
+                        f"{os.path.getsize(path):,} bytes in {time.time() - t0:.1f}s")
+    return FileResponse(
+        path,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=filename,
+        background=BackgroundTask(os.unlink, path),
+    )
+
+
 class SearchAllReq(BaseModel):
     query: str = ""
     terms: list[dict] = []  # advanced mode: [{term, connector: "AND"|"OR", exclude: bool}]
