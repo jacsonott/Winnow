@@ -3079,6 +3079,10 @@ def api_app_settings_save(body: AppSettingsWrite):
 
 class CaseSettingWrite(BaseModel):
     ts_format: str | None = None
+    # Shows the "Add to dashboard" entries in the column-header menu, the
+    # row menu and the Filters ▾ dropdown. Off, those menus stay short —
+    # most analysts read boards someone else built and never author one.
+    dashboard_creator: bool | None = None
 
 
 @app.get("/api/case_settings")
@@ -3088,11 +3092,18 @@ def api_case_settings_get():
 
 @app.post("/api/case_settings")
 def api_case_settings_save(body: CaseSettingWrite):
-    """A blank/absent ts_format clears the case override, so the case falls
-    back to the system-wide default rather than pinning today's value."""
-    if body.ts_format is not None and body.ts_format not in WS.AppSettings.TS_FORMATS | {""}:
-        raise HTTPException(400, f"Unknown timestamp format: {body.ts_format}")
-    store().set_case_setting("ts_format", body.ts_format)
+    """Writes only the keys the body actually carried, so a client saving
+    one setting can't blank another. A blank ts_format clears the case
+    override (the case falls back to the system-wide default); a false
+    dashboard_creator clears that key rather than storing "0", since
+    absent already means off and set_case_setting deletes on None."""
+    sent = body.model_fields_set
+    if "ts_format" in sent:
+        if body.ts_format is not None and body.ts_format not in WS.AppSettings.TS_FORMATS | {""}:
+            raise HTTPException(400, f"Unknown timestamp format: {body.ts_format}")
+        store().set_case_setting("ts_format", body.ts_format)
+    if "dashboard_creator" in sent:
+        store().set_case_setting("dashboard_creator", "1" if body.dashboard_creator else None)
     return store().get_case_settings()
 
 

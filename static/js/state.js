@@ -134,6 +134,13 @@ export const S = {
    headers) in grouped mode. Every bound on the shared position space goes
    through this rather than reaching for S.view.row_count, which is only
    half the answer once a grouping is on. */
+/* Case settings → "Dashboard creator mode". Off by default: the "Add to
+   dashboard" entries only appear in the header, row and Filters ▾ menus
+   when the case has opted in, so the menus stay short for everyone who
+   reads boards and never authors one. Stored as "1" (case_settings values
+   are TEXT); absent is off. */
+export const dashboardCreatorMode = () => !!(S.caseSettings && S.caseSettings.dashboard_creator === '1');
+
 export const gridRowCount = () => (S.groupByCols.length ? S.groupTotalRows : S.view ? S.view.row_count : 0);
 
 export const selViewRows = () => gridRowCount();
