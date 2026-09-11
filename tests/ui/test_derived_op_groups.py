@@ -12,23 +12,28 @@ pytestmark = pytest.mark.ui
 def test_type_first_picker(page):
     page.evaluate("() => __winnow.openDerivedColumnModal('CommandLine')")
     page.wait_for_selector("#modal:not([hidden])")
-    # selects in the body: [Parse column, Type, Operation, …params]
+    # selects in the body: [Type, Parse column, Operation, …params] — Type
+    # first, since it's the question the analyst arrives with.
+    labels = page.evaluate(
+        "() => [...document.querySelectorAll('#modalBody .derived-row-label')].map((n) => n.textContent)")
+    assert labels[:3] == ["Type", "Parse column", "Operation"], labels
     types = page.evaluate(
-        "() => [...document.querySelectorAll('#modalBody select')[1].options].map((o) => o.value)")
-    assert types == ["Timestamp", "Extract part of a value", "Join from another table", "Compare (elapsed time)"]
+        "() => [...document.querySelectorAll('#modalBody select')[0].options].map((o) => o.value)")
+    assert types == ["Timestamp", "Extract part of a value", "Join from another table",
+                     "Compare (elapsed time)", "Combine columns"]
 
     # picking a type populates the Operation list with only that kind's ops
-    page.locator("#modalBody select").nth(1).select_option(label="Extract part of a value")
+    page.locator("#modalBody select").nth(0).select_option(label="Extract part of a value")
     ops = page.evaluate(
         "() => [...document.querySelectorAll('#modalBody select')[2].options].map((o) => o.textContent)")
     assert len(ops) == 3 and any("Regex" in o for o in ops)   # JSON, XML, regex
 
-    page.locator("#modalBody select").nth(1).select_option(label="Timestamp")
+    page.locator("#modalBody select").nth(0).select_option(label="Timestamp")
     ts = page.evaluate("() => document.querySelectorAll('#modalBody select')[2].options.length")
     assert ts >= 10
 
     # picking an operation still works end to end
-    page.locator("#modalBody select").nth(1).select_option(label="Extract part of a value")
+    page.locator("#modalBody select").nth(0).select_option(label="Extract part of a value")
     page.locator("#modalBody select").nth(2).select_option(label="Regex capture")
     page.wait_for_timeout(200)
     assert page.locator(".derived-name").input_value() == "CommandLine (extract)"

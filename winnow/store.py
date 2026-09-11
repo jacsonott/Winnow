@@ -41,6 +41,7 @@ except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
 
 from . import enrich  # noqa: F401 — registers the cross-table lookup op into timeparse.OPERATIONS
+from . import combine  # noqa: F401 — registers the multi-column ops (coalesce) the same way
 from . import structparse  # noqa: F401 — registers the JSON/XML extraction ops into timeparse.OPERATIONS
 from . import timeparse
 from . import plasoread
@@ -4051,8 +4052,9 @@ class Store:
                 if self._find_column(msrc, (name or "").strip()):
                     raise ValueError(
                         f"Member table {msrc['name']!r} already has a column called {(name or '').strip()!r}")
-                if self._find_column(msrc, input_column) is None:
-                    raise ValueError(f"Member table {msrc['name']!r} has no column {input_column!r}")
+                for col in timeparse.op_inputs(op_id, input_column, params):
+                    if self._find_column(msrc, col) is None:
+                        raise ValueError(f"Member table {msrc['name']!r} has no column {col!r}")
             results = [self.add_derived_column(m["source_id"], name, input_column, op_id, params)
                        for m in members]
             return {"definition": results[0]["definition"],
@@ -4093,8 +4095,8 @@ class Store:
             return entry
 
         _check_input(input_column, "input column")
-        if op["two_input"]:
-            _check_input(params["other_column"], "second column")
+        for col in timeparse.op_inputs(op_id, input_column, params)[1:]:
+            _check_input(col, "other column")
         if op.get("check"):
             op["check"](self, params)  # ops that reference the case (lookup) validate NOW, not mid-backfill
 
@@ -4200,8 +4202,8 @@ class Store:
             op = timeparse.OPERATIONS.get(op_id)
             if op is None:
                 raise ValueError(f"Unknown operation: {op_id}")
-            if op["two_input"]:
-                raise ValueError(f"{op['label']!r} takes two columns and can't be added in a batch")
+            if op["multi_input"]:
+                raise ValueError(f"{op['label']!r} reads several columns and can't be added in a batch")
             if not name:
                 raise ValueError("Every new column needs a name")
             if len(name) > 200:
@@ -4264,8 +4266,8 @@ class Store:
             ).fetchall()
         for o in others:
             o_params = json.loads(o["params"] or "{}")
-            if (o["input_column"].lower() == d["name"].lower()
-                    or str(o_params.get("other_column", "")).lower() == d["name"].lower()):
+            reads = {c.lower() for c in timeparse.op_inputs(o["op_id"], o["input_column"], o_params)}
+            if d["name"].lower() in reads:
                 raise ValueError(f"{o['name']!r} is computed from this column — remove that one first")
         drv = self._derived_table(d["source_id"])
         with self.lock, self.db:
@@ -4284,8 +4286,8 @@ class Store:
         lower = {n.lower() for n in names}
         out = []
         for d in self.list_derived_columns(source_id):
-            other = str((d.get("params") or {}).get("other_column", ""))
-            if d["input_column"].lower() in lower or other.lower() in lower:
+            reads = {c.lower() for c in timeparse.op_inputs(d["op_id"], d["input_column"], d.get("params"))}
+            if reads & lower:
                 out.append(d)
         return out
 
@@ -4390,9 +4392,8 @@ class Store:
         plans = []
         for d in defs:
             op = timeparse.OPERATIONS[d["op_id"]]
-            plan = {"d": d, "op": op, "state": {}, "a": slot(d["input_column"])}
-            if op["two_input"]:
-                plan["b"] = slot(d["params"]["other_column"])
+            inputs = timeparse.op_inputs(d["op_id"], d["input_column"], d["params"])
+            plan = {"d": d, "op": op, "state": {}, "slots": [slot(c) for c in inputs]}
             if op.get("prepare"):
                 # e.g. lookup loading its whole mapping once — per
                 # definition, before the scan, so the scan stays dict hits
@@ -4402,10 +4403,8 @@ class Store:
         # slot() keys case-insensitively but _col_ref needs the real name.
         real = {}
         for d in defs:
-            real[d["input_column"].lower()] = d["input_column"]
-            if timeparse.OPERATIONS[d["op_id"]]["two_input"]:
-                other = d["params"]["other_column"]
-                real[other.lower()] = other
+            for c in timeparse.op_inputs(d["op_id"], d["input_column"], d["params"]):
+                real[c.lower()] = c
         sel = ", ".join(self._col_ref(src, real[c]) for c in cols)
 
         names = [d["name"] for d in defs]
@@ -4431,10 +4430,11 @@ class Store:
                     out = [t[0]]
                     for plan in plans:
                         op = plan["op"]
-                        if op["two_input"]:
-                            out.append(op["parse_pair"](t[1 + plan["a"]], t[1 + plan["b"]], plan["d"]["params"]))
+                        if op["multi_input"]:
+                            out.append(op["parse_multi"]([t[1 + i] for i in plan["slots"]],
+                                                         plan["d"]["params"], plan["state"]))
                         else:
-                            out.append(op["parse"](t[1 + plan["a"]], plan["d"]["params"], plan["state"]))
+                            out.append(op["parse"](t[1 + plan["slots"][0]], plan["d"]["params"], plan["state"]))
                     vals.append(tuple(out))
                 last_rid = vals[-1][0]
                 with self.lock, self.db:
@@ -4477,12 +4477,25 @@ class Store:
         the number the analyst needs to decide whether they picked the wrong
         format. An empty input cell isn't a failure, it's an empty cell."""
         drv = self._derived_table(d["source_id"])
-        inp = self._col_ref(src, d["input_column"], "s")
         with self._reader() as ro:
             return ro.execute(
                 f"SELECT COUNT(*) FROM {self._from_clause(src, 's')} "
-                f"WHERE {inp} IS NOT NULL AND {inp} <> '' AND {q(drv)}.{q(d['name'])} IS NULL"
+                f"WHERE {self._had_input_sql(src, d, 's')} AND {q(drv)}.{q(d['name'])} IS NULL"
             ).fetchone()[0]
+
+    def _had_input_sql(self, src: dict, d: dict, alias: str | None = None) -> str:
+        """The row had something to read. One column, non-empty, for the
+        ordinary op; for a multi-column op (coalesce) ANY of its inputs
+        non-blank — the op's own contract is that whitespace is blank, so
+        TRIM there, and a row where every listed column is empty is an
+        empty row, not a failed one (the preview counts the same way)."""
+        inputs = timeparse.op_inputs(d["op_id"], d["input_column"], d.get("params"))
+        refs = [self._col_ref(src, c, alias) if alias else self._col_ref(src, c) for c in inputs]
+        if len(refs) == 1:
+            return f"({refs[0]} IS NOT NULL AND {refs[0]} <> '')"
+        # TRIM's default strips spaces only; the op's blank is Python's
+        # str.strip(), so name the whitespace explicitly.
+        return "(" + " OR ".join(f"({r} IS NOT NULL AND TRIM({r}, ' \t\r\n') <> '')" for r in refs) + ")"
 
     def unparsed_where_fragment(self, def_id: int) -> str:
         """An advanced-filter fragment selecting exactly the rows that
@@ -4490,7 +4503,11 @@ class Store:
         which 12". Built here rather than in the frontend because it has
         to quote two analyst-named columns into SQL (invariant #5)."""
         d = self.get_derived_column(def_id)
-        return f"{q(d['name'])} IS NULL AND {q(d['input_column'])} <> ''"
+        inputs = timeparse.op_inputs(d["op_id"], d["input_column"], d.get("params"))
+        if len(inputs) == 1:
+            return f"{q(d['name'])} IS NULL AND {q(d['input_column'])} <> ''"
+        had = " OR ".join(f"TRIM(COALESCE({q(c)}, ''), ' \t\r\n') <> ''" for c in inputs)
+        return f"{q(d['name'])} IS NULL AND ({had})"
 
     DETECT_SAMPLE = 200
 
@@ -4574,17 +4591,25 @@ class Store:
         src = self._source_lite(source_id)
         if self._find_column(src, column) is None:
             raise KeyError(column)
-        if op["two_input"]:
-            other = params["other_column"]
-            if self._find_column(src, other) is None:
-                raise KeyError(other)
+        if op["multi_input"]:
+            inputs = timeparse.op_inputs(op_id, column, params)
+            for other in inputs[1:]:
+                if self._find_column(src, other) is None:
+                    raise KeyError(other)
+            state: dict = {}
+            if op.get("prepare"):
+                op["prepare"](self, params, state)
+            sel = ", ".join(self._col_ref(src, c) for c in inputs)
             with self._reader() as ro:
                 rows = ro.execute(
-                    f"SELECT {self._col_ref(src, column)}, {self._col_ref(src, other)} "
-                    f"FROM {self._from_clause(src)} LIMIT ?", (limit,),
+                    f"SELECT {sel} FROM {self._from_clause(src)} LIMIT ?", (limit,),
                 ).fetchall()
-            preview = [{"input": r[0], "output": op["parse_pair"](r[0], r[1], params)} for r in rows]
-            failures = sum(1 for p in preview if p["output"] is None)
+            preview = [{"input": r[0], "output": op["parse_multi"](list(r), params, state)} for r in rows]
+            # A failure is a NULL from a row that HAD something to read —
+            # the same rule _count_parse_failures applies after the
+            # backfill, so the modal's verdict and the column's count agree.
+            failures = sum(1 for r, p in zip(rows, preview)
+                           if p["output"] is None and any(v is not None and str(v).strip() for v in r))
             return {"preview": preview, "sampled": len(preview), "failures": failures}
         samples = self._sample_column(src, column)
         preview = self._preview_rows(samples[:limit], op_id, params)
@@ -7843,7 +7868,7 @@ class Store:
                 # A chained column's parent was created a moment ago and its
                 # backfill is an async job — wait for that link, or the
                 # "still building" guard (correctly) refuses the child.
-                for inp in (d["input_column"], str((d.get("params") or {}).get("other_column", ""))):
+                for inp in timeparse.op_inputs(d["op_id"], d["input_column"], d.get("params")):
                     jid = pending_jobs.get(inp.lower())
                     if jid:
                         self.wait_for_ingest_job(jid, timeout=600)
