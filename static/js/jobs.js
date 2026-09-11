@@ -3,6 +3,7 @@ progress, and armOpCancel.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { $, api, el, post, toast } from './core.js';
+import { clientLog } from './errlog.js';
 import { offerTimestampColumns } from './derived.js';
 import { scanWatchlistForSources } from './watchlist.js';
 import { loadSources } from './sources.js';
@@ -143,7 +144,12 @@ export async function pollJobs() {
       seenJobStatus.set(j.job_id, j.status);
     }
     ingestJobs = d.jobs;
-  } catch { ingestJobs = []; }
+  } catch (e) {
+    // The panel empties and the progress bar with it. Say so where it can
+    // be found later — this is the trace behind "it stopped updating".
+    ingestJobs = [];
+    clientLog('warn', 'Job poll failed: ' + (e && e.message ? e.message : String(e)));
+  }
 
   for (const j of finishedNow) {
     if (j.kind === 'derive') {

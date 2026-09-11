@@ -46,6 +46,7 @@ from . import structparse  # noqa: F401 — registers the JSON/XML extraction op
 from . import timeparse
 from . import plasoread
 from . import xlsxread
+from . import log as wlog
 
 BATCH = 20_000
 SAMPLE_ROWS = 500
@@ -3101,8 +3102,22 @@ class Store:
         t = threading.Thread(target=self._ingest_job_worker, args=(job,), daemon=True)
         with self._ingest_jobs_lock:
             job["thread"] = t
+        wlog.record("info", f"{self._job_noun(job)} queued: {job['name']} ({job['kind']}) — job #{job['job_id']}")
         t.start()
         return self._ingest_job_snapshot(job)
+
+    @staticmethod
+    def _job_elapsed(job: dict) -> float:
+        """Seconds since the job started RUNNING — not since it was queued,
+        or a 20 ms import that waited ten minutes behind a 50 GB one would
+        log as a ten-minute import."""
+        started = job.get("run_started_at") or job.get("started_at")
+        return max(0.0, time.time() - started) if started else 0.0
+
+    @staticmethod
+    def _job_noun(job: dict) -> str:
+        """A derive is a job too, but it isn't an import; the log says which."""
+        return "Derive" if job.get("kind") == "derive" else "Import"
 
     def _ingest_job_worker(self, job: dict) -> None:
         acquired = False
@@ -3112,8 +3127,10 @@ class Store:
             with self._ingest_jobs_lock:
                 if job["cancelled"]:
                     job["status"] = "cancelled"
+                    wlog.record("info", f"{self._job_noun(job)} cancelled: {job['name']} ({job['kind']}) before it started")
                     return
                 job["status"] = "running"
+                job["run_started_at"] = time.time()
 
             def cancel() -> bool:
                 return job["cancelled"]  # plain bool read; set under the jobs lock
@@ -3152,6 +3169,8 @@ class Store:
                 # (its name is new), so this only fires on re-derives.
                 self._cascade_dependent_derives(res["source_id"],
                                                 [c["name"] for c in res["columns"]])
+                wlog.record("info", f"Derive finished: {job['name']} — {res['rows']:,} rows in "
+                                    f"{self._job_elapsed(job):.1f}s (table {res['source_id']})")
                 return
             elif job["kind"] == "plaso":
                 results = [self.ingest_plaso(
@@ -3213,13 +3232,22 @@ class Store:
                                            "first_bad_line")}
                     for r in results
                 ]
+            wlog.record("info", f"Import finished: {job['name']} ({job['kind']}) — "
+                                f"{job['rows_done']:,} rows in {self._job_elapsed(job):.1f}s"
+                                f" (table{'s' if len(job['source_ids']) != 1 else ''} "
+                                f"{', '.join(str(i) for i in job['source_ids'])})")
         except IngestCancelled:
             with self._ingest_jobs_lock:
                 job["status"] = "cancelled"
+            wlog.record("info", f"{self._job_noun(job)} cancelled: {job['name']} ({job['kind']}) "
+                                f"after {self._job_elapsed(job):.1f}s")
         except Exception as e:  # noqa: BLE001 — surfaced to the UI as job.error
             with self._ingest_jobs_lock:
                 job["status"] = "error"
                 job["error"] = str(e)
+            # The toast this becomes is gone in seconds; this is the record.
+            wlog.record("error", f"{self._job_noun(job)} failed: {job['name']} ({job['kind']}) — "
+                                 f"{type(e).__name__}: {e}")
         finally:
             with self._ingest_jobs_lock:
                 job["finished_at"] = time.time()

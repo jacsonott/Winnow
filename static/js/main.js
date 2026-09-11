@@ -150,7 +150,7 @@ connection.wireConnection();
 
 boot().catch((e) => toast('Could not start: ' + e.message, 8000));
 
-// Surface server-side errors in the app (Case menu → Error log) with a dot
+// Surface server-side errors in the app (Case menu → Log) with a dot
 // on the Case button when new ones land — they used to go only to the
 // terminal.
 errlog.startLogBadgePoll();
