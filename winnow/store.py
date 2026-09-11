@@ -7490,8 +7490,11 @@ class Store:
             raise ValueError("A dashboard needs a name")
         if len(name) > 200:
             raise ValueError("That dashboard name is too long")
+        # A rename is a hand edit like changing a card: the board stops
+        # being the plugin's copy, so a later add of the offered board asks
+        # before replacing it rather than refreshing silently.
         with self.lock, self.db:
-            if self.db.execute("UPDATE dashboards SET name=? WHERE id=?",
+            if self.db.execute("UPDATE dashboards SET name=?, origin=NULL WHERE id=?",
                                (name, dashboard_id)).rowcount == 0:
                 raise KeyError(f"No dashboard {dashboard_id}")
 

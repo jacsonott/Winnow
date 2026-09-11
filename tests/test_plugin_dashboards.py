@@ -166,6 +166,21 @@ def test_another_plugins_board_of_the_same_name_still_asks(client, store, write_
     assert r.json()["detail"]["dashboard_id"] == first.json()["id"]
 
 
+def test_renaming_the_board_makes_it_the_analysts_too(client, store, write_csv, monkeypatch, tmp_path):
+    """A rename is the other hand edit. Only reachable through the API's
+    custom name today, but the ownership rule should be one rule."""
+    import server
+
+    store.ingest_csv(write_csv([["a"], ["1"]], "e.csv"), name="e", build_fts=False)
+    monkeypatch.setattr(server, "PLUGINS", _plugin(tmp_path, _register(GOOD)))
+    first = client.post("/api/plugin_dashboards/boards/b1/add", json={})
+    assert first.status_code == 200, first.text
+    store.rename_dashboard(first.json()["id"], "Host overview — Q3")
+    assert store.find_dashboard_by_name("Host overview — Q3")["origin"] is None
+    r = client.post("/api/plugin_dashboards/boards/b1/add", json={"name": "Host overview — Q3"})
+    assert r.status_code == 409, "the renamed copy is the analyst's now"
+
+
 def test_editing_the_board_by_hand_makes_it_the_analysts(client, store, write_csv, monkeypatch, tmp_path):
     """The silent refresh lasts exactly as long as the widgets are still the
     plugin's. Change one card and there IS work of the analyst's to lose,
