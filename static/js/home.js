@@ -3,6 +3,7 @@
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { applyBundle } from './bundles.js';
 import { $, api, dragHas, el, post, setBusy, toast } from './core.js';
+import { pad2 } from './tsformat.js';
 import { loadPlugins, openImportModal, queueFiles } from './importer.js';
 import { inFlightWork, startJobsPoll } from './jobs.js';
 import { resetPluginTabMounts } from './plugins.js';
@@ -233,7 +234,7 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
     let sort = { by: 'name', dir: 'asc' };
     try { sort = { ...sort, ...JSON.parse(localStorage.getItem(SORT_KEY) || '{}') }; } catch { /* default */ }
     let query = '';
-    const filterBox = el('input', 'browse-filter');
+    const filterBox = el('input', 'panel-search browse-filter');
     const sortSel = el('select', 'browse-sort');
     const sortDir = el('button', 'btn ghost browse-sort-dir');
     if (filesMode) {
@@ -241,7 +242,7 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
       filterBox.type = 'search';
       filterBox.placeholder = 'Filter this folder…';
       filterBox.autocomplete = 'off';
-      filterBox.oninput = () => { query = filterBox.value.trim().toLowerCase(); paint(); };
+      filterBox.oninput = () => { query = filterBox.value.trim().toLowerCase(); if (listing) paint(); };
       for (const [v, l] of [['name', 'Name'], ['size', 'Size'], ['mtime', 'Modified']]) sortSel.append(new Option(l, v));
       sortSel.value = sort.by;
       const paintDir = () => {
@@ -249,8 +250,11 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
         sortDir.title = sort.dir === 'asc' ? 'Ascending — click for descending' : 'Descending — click for ascending';
       };
       const remember = () => { try { localStorage.setItem(SORT_KEY, JSON.stringify(sort)); } catch { /* private mode */ } };
-      sortSel.onchange = () => { sort.by = sortSel.value; remember(); paint(); };
-      sortDir.onclick = () => { sort.dir = sort.dir === 'asc' ? 'desc' : 'asc'; paintDir(); remember(); paint(); };
+      // A sort change re-asks the server: the listing is capped at 2000
+      // entries, and the cap has to be taken in the order being shown.
+      const resort = () => { remember(); if (listing) load(listing.path); };
+      sortSel.onchange = () => { sort.by = sortSel.value; resort(); };
+      sortDir.onclick = () => { sort.dir = sort.dir === 'asc' ? 'desc' : 'asc'; paintDir(); resort(); };
       paintDir();
       tools.append(filterBox, el('span', 'fb-help', 'Sort'), sortSel, sortDir);
       b.append(tools);
@@ -316,7 +320,8 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
       const seq = ++loadSeq;
       let res;
       try {
-        res = await api(`/api/browse_dir?path=${encodeURIComponent(path || '')}${filesMode ? '&files=true' : ''}`);
+        res = await api(`/api/browse_dir?path=${encodeURIComponent(path || '')}`
+          + (filesMode ? `&files=true&sort=${sort.by}&dir=${sort.dir}` : ''));
       } catch (e) {
         // The configured cases folder often doesn't exist yet — which is
         // exactly when someone reaches for "New folder". Opening onto an
@@ -356,24 +361,19 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
     /* The listing arrives name-sorted from the server; the picker's own
        sort and filter are applied here, over what it already has, so a
        change is a repaint and not a round trip. */
+    /* The server already returns the files in the picker's order (see
+       the sort= param) — only the filter is applied here, so a keystroke
+       is a repaint and not a round trip. */
     function sortedFiles(files) {
-      const shown = query ? files.filter((f) => f.name.toLowerCase().includes(query)) : files.slice();
-      const dir = sort.dir === 'asc' ? 1 : -1;
-      const key = sort.by;
-      shown.sort((a, b) => {
-        if (key === 'name') return a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true }) * dir;
-        const x = a[key] || 0, y = b[key] || 0;
-        return (x === y ? a.name.localeCompare(b.name) : (x - y) * dir);
-      });
-      return shown;
+      return query ? files.filter((f) => f.name.toLowerCase().includes(query)) : files.slice();
     }
-    const pad2 = (n) => String(n).padStart(2, '0');
     const fmtDay = (epoch) => {
       const d = new Date(epoch * 1000);
       return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
     };
 
     function paint() {
+      if (!listing) return;   // a control poked before the first listing landed
       // Built off-DOM: up to 2×BROWSE_LIST_CAP rows appended one at a time
       // into a live scroll container re-layouts on every append.
       const frag = document.createDocumentFragment();

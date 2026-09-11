@@ -1216,11 +1216,15 @@ textarea:focus { border-color: var(--accent); outline: none; }
   content: ""; position: absolute; inset: 0 3px; background: var(--accent-dim);
 }
 .sidebar-head { flex: 0 0 auto; padding: 8px; border-bottom: 1px solid var(--line); display: flex; gap: 6px; align-items: center; }
-#sidebarFilter {
+/* The one filter-box look: the sidebar's, and any panel's `.panel-search`
+   (Columns, the Log, the file picker). One rule, so a border or padding
+   change reaches every box, and the focus ring is the same everywhere. */
+#sidebarFilter, .panel-search {
   flex: 1 1 auto; min-width: 0; background: var(--ink); color: var(--text);
   border: var(--border-w) solid var(--line-2); border-radius: var(--radius-sm);
   padding: 5px 8px; font: inherit; font-size: 12px;
 }
+#sidebarFilter:focus, .panel-search:focus { border-color: var(--accent); outline: none; }
 .sidebar-newfolder {
   flex: 0 0 auto; background: var(--ink); color: var(--dim);
   border: var(--border-w) solid var(--line-2); border-radius: var(--radius-sm);
@@ -1462,11 +1466,6 @@ textarea:focus { border-color: var(--accent); outline: none; }
 /* The file picker's filter/sort row, and the modified column each file
    row grew — mono like the size beside it. */
 .browse-tools { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; }
-.browse-filter {
-  flex: 1 1 auto; min-width: 0; background: var(--ink); color: var(--text);
-  border: var(--border-w) solid var(--line-2); border-radius: var(--radius-sm);
-  padding: 5px 8px; font: inherit; font-size: 12px;
-}
 .browse-sort { font-size: 12px; }
 .browse-sort-dir { padding: 2px 8px; }
 .browse-row .browse-mtime { flex: 0 0 auto; margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--dim); }

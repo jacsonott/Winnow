@@ -19,8 +19,16 @@ def test_file_entries_carry_an_integer_mtime(client, tmp_path):
     assert files["old.csv"]["mtime"] == 1_600_000_000
     assert files["new.csv"]["mtime"] == 1_700_000_000
     assert isinstance(files["old.csv"]["size"], int)
-    # Still name-sorted on the wire; the picker does its own ordering.
+    # Name-sorted by default; the picker's sort is taken server-side so
+    # the 2000-entry cap is cut in the order being shown.
     assert [f["name"] for f in res.json()["files"]] == ["new.csv", "old.csv"]
+    res = client.get(f"/api/browse_dir?path={folder}&files=true&sort=mtime&dir=desc")
+    assert [f["name"] for f in res.json()["files"]] == ["new.csv", "old.csv"]
+    res = client.get(f"/api/browse_dir?path={folder}&files=true&sort=mtime&dir=asc")
+    assert [f["name"] for f in res.json()["files"]] == ["old.csv", "new.csv"]
+    (folder / "big.csv").write_text("x" * 500)
+    res = client.get(f"/api/browse_dir?path={folder}&files=true&sort=size&dir=desc")
+    assert [f["name"] for f in res.json()["files"]][0] == "big.csv"
 
 
 def test_folder_mode_is_unchanged(client, tmp_path):
@@ -29,3 +37,18 @@ def test_folder_mode_is_unchanged(client, tmp_path):
     res = client.get(f"/api/browse_dir?path={folder}")
     assert res.status_code == 200
     assert "files" not in res.json() and res.json()["dirs"] == ["sub"]
+
+
+def test_the_cap_is_cut_in_the_requested_order(client, tmp_path, monkeypatch):
+    """With a cap of 2 and three files, Modified-descending must return the
+    two NEWEST, not the newest two of the alphabetically-first two."""
+    import server as srv
+    monkeypatch.setattr(srv, "BROWSE_LIST_CAP", 2)
+    folder = tmp_path / "files"
+    folder.mkdir()
+    for name, mt in [("a_old.csv", 1_600_000_000), ("b_mid.csv", 1_650_000_000), ("z_new.csv", 1_700_000_000)]:
+        (folder / name).write_text("x")
+        os.utime(folder / name, (mt, mt))
+    res = client.get(f"/api/browse_dir?path={folder}&files=true&sort=mtime&dir=desc").json()
+    assert res["truncated"] is True
+    assert [f["name"] for f in res["files"]] == ["z_new.csv", "b_mid.csv"]

@@ -61,11 +61,22 @@ def test_the_file_picker_filters_and_sorts(page, tmp_path):
     # A modified column, per file.
     assert page.locator("#modalBody .browse-row .browse-mtime").first.inner_text().startswith("20")
 
+    # A sort change re-asks the server (the cap is cut in that order), so
+    # each one is waited for by its first row.
+    def first_is(name):
+        page.wait_for_function(
+            "(n) => { const r = document.querySelector('#modalBody .browse-row .session-name'); return r && r.textContent === n; }",
+            arg=name, timeout=10_000)
     page.locator("#modalBody .browse-sort").select_option("size")
+    first_is("a_small.csv")
     assert names() == ["a_small.csv", "c_old.txt", "b_big.csv"]
     page.locator("#modalBody .browse-sort-dir").click()
+    first_is("b_big.csv")
     assert names() == ["b_big.csv", "c_old.txt", "a_small.csv"]
     page.locator("#modalBody .browse-sort").select_option("mtime")
+    page.wait_for_function(
+        "() => [...document.querySelectorAll('#modalBody .browse-row .session-name')].map((n) => n.textContent).join() === 'a_small.csv,b_big.csv,c_old.txt'",
+        timeout=10_000)
     assert names() == ["a_small.csv", "b_big.csv", "c_old.txt"], "newest first, descending"
 
     # A selection survives re-sorting and filtering.
