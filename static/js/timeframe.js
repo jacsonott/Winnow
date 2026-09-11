@@ -2,7 +2,7 @@
 navigation that survive everything else being cleared.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { isPinned, renderHead, saveDefaultLayout, saveLayout, togglePin } from './columns.js';
+import { isPinned, moveColumn, renderHead, saveDefaultLayout, saveLayout, togglePin } from './columns.js';
 import { $, api, el, post, toast } from './core.js';
 import { openDerivedColumnModal } from './derived.js';
 import { hasActiveFilterTree, openFilterBuilder } from './filterbuilder.js';
@@ -567,9 +567,26 @@ export function buildColumnsPanel(container, refresh = openTableMenu) {
     container.append(el('p', null, 'Open a table to manage its columns.'));
     return;
   }
+  // A filter box first: a KAPE table has a few hundred columns, and the
+  // one to hide or pin is somewhere in the middle. Rows not matching are
+  // hidden, not removed — the drag order still runs over all of S.order,
+  // so a drop between two visible rows lands where the list shows it.
+  const search = el('input', 'panel-search collist-search');
+  search.type = 'search';
+  search.placeholder = 'Filter columns…';
+  search.autocomplete = 'off';
+  search.setAttribute('aria-label', 'Filter columns');
+  container.append(search);
   const list = el('div', 'collist');
+  const rows = new Map();
+  const applySearch = () => {
+    const q = search.value.trim().toLowerCase();
+    for (const [name, row] of rows) row.hidden = !!q && !name.toLowerCase().includes(q);
+  };
+  search.oninput = applySearch;
   S.order.forEach((name) => {
     const row = el('div', 'collist-row');
+    rows.set(name, row);
     const lab = el('label');
     const cb = el('input');
     cb.type = 'checkbox';
@@ -621,6 +638,18 @@ export function buildColumnsPanel(container, refresh = openTableMenu) {
       refresh();
     };
     row.append(pick);
+    // To either end in one click. Drag handles the rest; these handle the
+    // case drag is worst at — the column that belongs first on a table
+    // with two hundred of them.
+    const top = el('button', 'btn ghost collist-move', '⤒');
+    top.title = `Move "${name}" to the top`;
+    // The row moves in place rather than the panel re-rendering, so a
+    // filter typed into the box above survives the click.
+    top.onclick = () => { moveColumn(name, 'top'); list.prepend(row); };
+    const bottom = el('button', 'btn ghost collist-move', '⤓');
+    bottom.title = `Move "${name}" to the bottom`;
+    bottom.onclick = () => { moveColumn(name, 'bottom'); list.append(row); };
+    row.append(top, bottom);
     // Reorder from here too — the grid's header drag is invisible to
     // anyone working from this panel, and hidden columns can ONLY be
     // repositioned here. Same DnD vocabulary as the tab strip.
@@ -632,13 +661,16 @@ export function buildColumnsPanel(container, refresh = openTableMenu) {
       onReorder: (order) => {
         S.order = order;
         renderHead(); render(); saveLayout();
-        refresh();
+        // Rows follow the new order in place — like ⤒ ⤓, so a filter
+        // typed above survives the drop instead of the panel re-rendering
+        // with an empty box and every column back.
+        for (const n of order) { const rw = rows.get(n); if (rw) list.append(rw); }
       },
     });
     list.append(row);
   });
   container.append(list);
-  container.append(el('p', 'fb-help', 'Drag rows here — or the column headers in the grid — to reorder columns.'));
+  container.append(el('p', 'fb-help', 'Drag rows here — or the column headers in the grid — to reorder columns. ⤒ ⤓ send one straight to an end.'));
   const acts = el('div', 'row-actions');
   const addDerived = el('button', 'btn ghost', 'Add derived column…');
   addDerived.title = 'Parse a timestamp, or extract part of a value — JSON/XML field or a regex capture — into its own sortable, filterable column';
@@ -708,6 +740,18 @@ export function buildTableActionsPanel(container, refresh) {
     if (!src) return;
     if (await editSourceNickname(src)) refresh();
   };
+  acts.append(dflt, nick, nickTable);
+  container.append(acts);
+}
+
+/* The strip along the top of the table menu: the three things this menu
+   is opened FOR most of the time. They used to sit last, under the column
+   list — on a wide table that meant scrolling past two hundred rows to
+   close a tab. Naming and layout defaults stay at the bottom; those are
+   set once per table, not once per hour. */
+export function buildTableStripPanel(container) {
+  const src = S.sources.find((s) => s.id === S.sourceId);
+  const strip = el('div', 'table-menu-strip');
   const tables = el('button', 'btn ghost', 'Tables manager…');
   tables.title = 'Every table in the case — indexes, row counts, dropping a source';
   tables.onclick = () => openTablesManager();
@@ -720,15 +764,14 @@ export function buildTableActionsPanel(container, refresh) {
     saveLayout();
     await clearAllFilters();
   };
-  acts.append(dflt, nick, nickTable, tables, reset);
-  container.append(acts);
+  strip.append(tables, reset);
   if (src && src.is_open) {
-    const close = el('button', 'btn ghost', 'Close this tab');
+    const close = el('button', 'btn ghost table-menu-close', 'Close this tab');
     close.title = 'Stays in the case — reopen it from the sidebar';
-    close.style.marginTop = '10px';
     close.onclick = async () => { $('modal').hidden = true; await closeTab(src); };
-    container.append(close);
+    strip.append(close);
   }
+  container.append(strip);
 }
 
 /* The table menu — everything that's about *this table* rather than the
@@ -742,6 +785,7 @@ export function buildTableActionsPanel(container, refresh) {
    this replaced — a menu that's going to keep growing needs a home that
    doesn't cost tab-strip width per entry. */
 export const TABLE_MENU_SECTIONS = [
+  { id: 'strip', title: null, build: buildTableStripPanel },
   { id: 'columns', title: 'Columns', build: buildColumnsPanel },
   { id: 'valueFilters', title: 'Value filter dropdowns', build: buildValueFilterPanel },
   { id: 'table', title: 'This table', build: buildTableActionsPanel },
@@ -761,7 +805,7 @@ export async function openTableMenu(sourceId) {
   modal(`Table — ${src ? sourceLabel(src) : ''}`, (b) => {
     for (const section of TABLE_MENU_SECTIONS) {
       const wrap = el('div', 'table-menu-section');
-      wrap.append(el('h4', null, section.title));
+      if (section.title) wrap.append(el('h4', null, section.title));
       section.build(wrap, () => openTableMenu(id));
       b.append(wrap);
     }
