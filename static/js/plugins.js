@@ -631,12 +631,35 @@ export function syncPluginPanels() {
 
 /* Split out of runSql so applySqlTabToEditor can re-paint a cached result
    when you switch back to a tab, without re-running its query. */
+/* Which result column is the pane view's own Tags column, if any — the
+   GROUP_CONCAT of tag names Store._annotation_cols appends to every
+   src_N/merge_N view. When the result carries one AND the rid join
+   resolved, the chips go INTO that column instead of a second "Tags"
+   header being appended beside it: the two said the same thing twice.
+   The view names it "Winnow Tags" when the file has its own Tags column,
+   so that name is unambiguous; a bare "Tags" is only the view's if the
+   single source behind the result has no column of that name — a file's
+   own Tags text must keep showing as text. -1 when there is no such
+   column, and the chips get their own column as before. */
+function annotationTagsIdx(r) {
+  const lower = r.columns.map((c) => String(c).toLowerCase());
+  const wt = lower.indexOf('winnow tags');
+  if (wt !== -1) return wt;
+  const t = lower.indexOf('tags');
+  if (t === -1) return -1;
+  const sid = r.tags.ref.sidIdx === -1 ? r.tags.ref.sid : null;
+  const src = sid != null ? S.sources.find((s) => s.id === sid) : null;
+  const own = src && src.columns.some((c) => String(c.name).toLowerCase() === 'tags');
+  return own ? -1 : t;
+}
+
 export function sqlResultNodes(r) {
   const t = el('table');
   const sort = { idx: null, dir: 1 };
   let lastClickedKey = null; // shift-range anchor — must survive repaints
   let displayedRows = r.rows; // what paint() last drew, for the CSV export
   const sortedRows = () => displayedRows;
+  const annIdx = r.tags ? annotationTagsIdx(r) : -1;
   const paint = () => {
     t.replaceChildren();
     const hr = el('tr');
@@ -647,7 +670,7 @@ export function sqlResultNodes(r) {
       th.onclick = () => { sort.dir = sort.idx === i ? -sort.dir : 1; sort.idx = i; paint(); };
       hr.append(th);
     });
-    if (r.tags) hr.append(el('th', null, 'Tags'));
+    if (r.tags && annIdx === -1) hr.append(el('th', null, 'Tags'));
     t.append(hr);
     let rows = r.rows;
     if (sort.idx != null) {
@@ -669,12 +692,21 @@ export function sqlResultNodes(r) {
     displayedRows = rows;
     for (const row of rows) {
       const tr = el('tr');
-      for (const v of row) tr.append(el('td', null, v == null ? '' : String(v)));
-      if (r.tags) {
-        const key = sqlRowKey(r.tags.ref, row);
+      const key = r.tags ? sqlRowKey(r.tags.ref, row) : null;
+      row.forEach((v, i) => {
         const td = el('td');
-        td.append(tagChips(r.tags.map[key]));
+        // The view's Tags text is replaced by the live chips; sorting and
+        // the CSV still read the text from `row`, which is untouched.
+        if (i === annIdx) td.append(tagChips(r.tags.map[key]));
+        else td.textContent = v == null ? '' : String(v);
         tr.append(td);
+      });
+      if (r.tags) {
+        if (annIdx === -1) {
+          const td = el('td');
+          td.append(tagChips(r.tags.map[key]));
+          tr.append(td);
+        }
         if (key) {
           tr.classList.toggle('sql-row-sel', r.tags.sel.has(key));
           tr.style.cursor = 'pointer';
