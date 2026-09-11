@@ -41,9 +41,6 @@ another analyst. The evidence files themselves are **never modified**.
 - **One view over several tables** — merge same-shaped exports from a
   fleet of hosts and filter, sort, tag and export them as one, with each
   row still knowing which file it came from.
-- **Work across cases** — sweep an IOC through every case you have
-  registered, run one query over several at once, or read their timelines
-  side by side, without opening each in turn.
 - **Answer a column** — stack a column's values rarest-first to find the
   one odd service name, pull fields out of nested JSON or XML into real
   columns, capture part of a value with a regex, or look one column up

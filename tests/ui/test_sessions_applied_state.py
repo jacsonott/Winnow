@@ -89,15 +89,49 @@ def test_the_panel_says_a_comparison_is_applied_and_can_clear_it(page):
         page.wait_for_function("() => __winnow.S.view && __winnow.S.view.row_count === 3")
         page.wait_for_function("() => document.querySelectorAll('#body .row.diff-b').length === 1")
 
+        # Selection and the keyboard cursor still read over the wash.
+        page.locator("#body .row.diff-a").first.click()
+        sel_bg = page.evaluate("() => getComputedStyle(document.querySelector('#body .row.diff-a.selected, #body .row.diff-a.cursor')).backgroundColor")
+        assert sel_bg != a, "a selected/cursor row must not keep the diff wash"
+
         # Clear from the panel: marks gone, filter back to none, line gone.
         _open(page)
         page.locator("#modalBody .diff-applied .btn", has_text="Clear").click()
         page.wait_for_function("() => __winnow.S.diffMarks === null")
         page.wait_for_function("() => __winnow.S.view && __winnow.S.view.row_count === 200")
-        assert page.locator("#modalBody .diff-applied").is_hidden()
+        page.wait_for_selector("#modalBody .diff-applied", state="hidden")
         assert page.locator("#diffBanner").is_hidden()
         assert page.locator("#body .row.diff-a, #body .row.diff-b").count() == 0
         page.keyboard.press("Escape")
+    finally:
+        page.evaluate("() => { __winnow.S.diffMarks = null; }")
+        _cleanup(page)
+        page.keyboard.press("Escape")
+
+
+def test_clear_from_another_table_lands_on_the_compared_one(page):
+    """Clear is reachable from any table; the filter it restores belongs
+    to the compared table, so it must go there rather than rewrite the
+    filters of whatever happened to be open."""
+    _cleanup(page)
+    _tag_rows(page, [0, 1])
+    try:
+        _save(page, "analyst")
+        _tag_rows(page, [1])
+        _compare(page, "analyst", "__live__")
+        page.locator(".diff-stats tr").nth(1).locator(".diff-n-removed .btn").click()
+        page.wait_for_selector("#modal", state="hidden")
+        page.wait_for_function("() => __winnow.S.view && __winnow.S.view.row_count === 1")
+        compared = page.evaluate("() => __winnow.S.sourceId")
+        # Somewhere else: the SQL page.
+        page.click("#tabSql")
+        page.wait_for_selector("#sqlview:not([hidden])")
+        _open(page)
+        page.locator("#modalBody .diff-applied .btn", has_text="Clear").click()
+        page.wait_for_function("() => __winnow.S.diffMarks === null")
+        page.wait_for_function("(id) => __winnow.S.activeTab === 'grid' && __winnow.S.sourceId === id", arg=compared)
+        page.wait_for_function("() => __winnow.S.view && __winnow.S.view.row_count === 200")
+        assert page.locator("#diffBanner").is_hidden()
     finally:
         page.evaluate("() => { __winnow.S.diffMarks = null; }")
         _cleanup(page)

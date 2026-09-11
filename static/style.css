@@ -760,6 +760,9 @@ html[data-style="studio"][data-theme="light"] {
 .fcell.pinned { background: var(--panel); box-shadow: inset -1px 0 0 var(--line-2); }
 .cell.pinned { background: var(--ink); box-shadow: inset -1px 0 0 var(--line); }
 .row:nth-child(even) .cell.pinned { background: var(--row-even); }
+.row.diff-a .cell.pinned { background: var(--diff-a-bg); }
+.row.diff-b .cell.pinned { background: var(--diff-b-bg); }
+.row.diff-ab .cell.pinned { background: linear-gradient(90deg, var(--diff-a-bg), var(--diff-b-bg)); }
 .row:hover .cell.pinned { background: var(--row-hover); }
 .row.selected .cell.pinned { background: var(--row-selected); }
 .cell.pinned.cell-selected { background: var(--cell-selected-bg); }
@@ -836,6 +839,11 @@ html[data-style="studio"][data-theme="light"] {
   background: var(--ink); /* opaque base so .gutter's sticky `background: inherit` never shows scrolled-under cells through odd rows */
 }
 .row:nth-child(even) { background: var(--row-even); }
+/* A pivoted session comparison's wash: after the zebra, BEFORE hover,
+   cursor and selection, which must still read over it. */
+.row.diff-a { background: var(--diff-a-bg); }
+.row.diff-b { background: var(--diff-b-bg); }
+.row.diff-ab { background: linear-gradient(90deg, var(--diff-a-bg), var(--diff-b-bg)); }
 .row:hover { background: var(--row-hover); }
 .row.cursor { background: var(--sel); box-shadow: inset 0 0 0 1px var(--sel-line); }
 .row.selected { background: var(--row-selected); }
@@ -1633,10 +1641,9 @@ textarea:focus { border-color: var(--accent); outline: none; }
 /* The row itself carries a wash of its side, so a pivoted comparison
    reads at a glance down the grid rather than pill by pill. Selection
    still wins — that highlight has one job. */
-.row.diff-a, .row.diff-a .cell.pinned { background: var(--diff-a-bg); }
-.row.diff-b, .row.diff-b .cell.pinned { background: var(--diff-b-bg); }
-.row.diff-ab, .row.diff-ab .cell.pinned { background: linear-gradient(90deg, var(--diff-a-bg), var(--diff-b-bg)); }
-.row.diff-a.selected, .row.diff-b.selected, .row.diff-ab.selected { background: var(--row-selected); }
+/* The wash rules themselves sit with the row background rules (above
+   .row:hover / .row.cursor / .row.selected in source order, at equal
+   specificity), so hover, the keyboard cursor and selection still win. */
 /* The session-comparison banner wears the quick-look banner's look (the
    shared rule above): another accent-tinted "something is in progress"
    strip, in its own grid track. */

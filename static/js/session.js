@@ -203,10 +203,7 @@ export function openSessionManager() {
         { left: dm.left, right: dm.right, rows: dm.rows, what: 'All differences' });
       const clear = el('button', 'btn ghost', 'Clear');
       clear.title = 'Drop the marks and the row filter — the same as the banner\'s Done';
-      clear.onclick = async () => {
-        await clearDiff();
-        paintApplied();
-      };
+      clear.onclick = () => { const done = clearDiff(); paintApplied(); return done; };
       acts.append(all, clear);
       applied.append(line, acts);
     };
@@ -430,9 +427,21 @@ export async function openDiffRows(sourceId, rids, marks) {
 export async function clearDiff() {
   const dm = S.diffMarks;
   if (!dm) return;
-  const back = dm.prevTree || { type: 'group', op: 'AND', children: [] };
+  // The Sessions panel's Clear can be pressed from any table; the filter
+  // being restored belongs to the COMPARED one, so land there first (the
+  // same step openDiffRows takes), or another table's filters would be
+  // overwritten and the compared table left on its rid filter with no
+  // marks and no banner.
+  // Marks go first, synchronously: anything repainting from S.diffMarks
+  // (the Sessions panel's status line) sees the cleared state before the
+  // view rebuild lands, rather than racing it.
   S.diffMarks = null;
-  await replaceFilters(back);
+  if (!(S.sources || []).some((s) => s.id === dm.sourceId)) return;
+  if (S.sourceId !== dm.sourceId || S.activeTab !== 'grid') {
+    $('modal').hidden = true;
+    await openSource(dm.sourceId);
+  }
+  await replaceFilters(dm.prevTree || { type: 'group', op: 'AND', children: [] });
 }
 
 /* The banner above the grid while a comparison is pivoted in. Drawn from
