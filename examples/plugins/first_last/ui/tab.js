@@ -20,6 +20,16 @@ const REFRESH_MS = 350;
    stale and Refresh runs it. Remembered in localStorage: the analyst who
    turned it off on this machine has the same data tomorrow. */
 const AUTO_KEY = 'winnow.firstlast.auto';
+/* The rail's width, dragged on its right edge and remembered per machine
+   — twenty chips and a long description want more than 280px, a wide
+   preview wants less. */
+const RAIL_KEY = 'winnow.firstlast.rail';
+const RAIL_MIN = 200, RAIL_MAX = 640, RAIL_DEFAULT = 280;
+const readRail = () => {
+  try { const n = Number(localStorage.getItem(RAIL_KEY)); return n >= RAIL_MIN && n <= RAIL_MAX ? n : RAIL_DEFAULT; }
+  catch { return RAIL_DEFAULT; }
+};
+const writeRail = (w) => { try { localStorage.setItem(RAIL_KEY, String(w)); } catch { /* private mode */ } };
 const readAuto = () => { try { return localStorage.getItem(AUTO_KEY) !== '0'; } catch { return true; } };
 const writeAuto = (on) => { try { localStorage.setItem(AUTO_KEY, on ? '1' : '0'); } catch { /* private mode */ } };
 
@@ -39,6 +49,7 @@ export default function mount(container, winnow) {
     sourceId: null,
     groupBy: [], carry: [], sums: [], filters: [], tags: { mode: '', ids: [] }, rowJson: false,
     sortColumn: null,
+    colWidths: {},        // preview column name -> px, dragged on the header's edge
     template: '{which} of {count}',
     meta: sharedMeta, preview: null, error: null, loading: false, stale: false,
     selRows: new Set(), selAnchor: null,
@@ -161,11 +172,48 @@ export default function mount(container, winnow) {
   container.append(body);
 
   const side = el('div');
-  side.style.cssText = 'flex:0 0 280px;min-width:0;border-right:1px solid var(--line-2);'
+  side.className = 'fl-rail';
+  side.style.cssText = `flex:0 0 ${readRail()}px;min-width:0;border-right:1px solid var(--line-2);`
     + 'display:flex;flex-direction:column;overflow:auto;background:var(--panel)';
+  // A drag handle on the rail's edge — the app sidebar's .sidebar-resize,
+  // done inline like everything else in this plugin: 7px wide, straddling
+  // the border, an accent line while hovered or dragged.
+  const rail = el('div');
+  rail.className = 'fl-rail-resize';
+  rail.title = 'Drag to resize the panel · double-click to reset';
+  rail.style.cssText = 'flex:0 0 7px;margin:0 -3px;cursor:col-resize;touch-action:none;z-index:2;position:relative';
+  const railLine = el('div');
+  railLine.style.cssText = 'position:absolute;inset:0 3px;background:transparent';
+  rail.append(railLine);
+  rail.onmouseenter = () => { railLine.style.background = 'var(--accent-dim)'; };
+  rail.onmouseleave = () => { if (!rail.dataset.drag) railLine.style.background = 'transparent'; };
+  rail.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const startX = e.clientX, startW = side.getBoundingClientRect().width;
+    rail.dataset.drag = '1';
+    railLine.style.background = 'var(--accent-dim)';
+    rail.setPointerCapture(e.pointerId);
+    const move = (ev) => {
+      const w = Math.round(Math.max(RAIL_MIN, Math.min(RAIL_MAX, startW + ev.clientX - startX)));
+      side.style.flexBasis = `${w}px`;
+    };
+    const up = () => {
+      rail.removeEventListener('pointermove', move);
+      rail.removeEventListener('pointerup', up);
+      rail.removeEventListener('pointercancel', up);
+      delete rail.dataset.drag;
+      railLine.style.background = 'transparent';
+      writeRail(Math.round(side.getBoundingClientRect().width));
+    };
+    rail.addEventListener('pointermove', move);
+    rail.addEventListener('pointerup', up);
+    rail.addEventListener('pointercancel', up);
+  });
+  rail.ondblclick = () => { side.style.flexBasis = `${RAIL_DEFAULT}px`; writeRail(RAIL_DEFAULT); };
   const main = el('div');
   main.style.cssText = 'flex:1 1 auto;min-width:0;overflow:auto;display:flex;flex-direction:column';
-  body.append(side, main);
+  body.append(side, rail, main);
 
   /* ------------------------------------------------------- field list */
 
@@ -683,9 +731,61 @@ export default function mount(container, winnow) {
     t.style.cssText = 'border-collapse:collapse;margin:8px;white-space:nowrap;user-select:none';
     const thead = el('thead');
     const hr = el('tr');
+    const applyWidth = (node, c) => {
+      const w = state.colWidths[c];
+      if (!w) return;
+      node.style.width = `${w}px`;
+      node.style.minWidth = `${w}px`;
+      node.style.maxWidth = `${w}px`;
+    };
     state.preview.columns.forEach((c, ci) => {
       const th = el('th', null, c);
       th.style.cssText = headCss;
+      applyWidth(th, c);
+      // Resize from the header's right edge. The handle is its own
+      // element so a press on it never starts the header's reorder drag,
+      // and it stops the pointer event there for the same reason.
+      const grip = el('div');
+      grip.className = 'fl-col-resize';
+      grip.title = 'Drag to resize · double-click to fit';
+      grip.style.cssText = 'position:absolute;top:0;right:-3px;bottom:0;width:7px;cursor:col-resize;touch-action:none;z-index:1';
+      grip.draggable = false;
+      grip.addEventListener('dragstart', (e) => e.preventDefault());
+      grip.addEventListener('pointerdown', (e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const startX = e.clientX, startW = th.getBoundingClientRect().width;
+        const wasDraggable = th.draggable;
+        th.draggable = false;
+        grip.setPointerCapture(e.pointerId);
+        grip.style.background = 'var(--accent-dim)';
+        const cells = [...t.querySelectorAll('tbody tr')].map((tr) => tr.children[ci]).filter(Boolean);
+        const move = (ev) => {
+          const w = Math.round(Math.max(40, startW + ev.clientX - startX));
+          state.colWidths[c] = w;
+          applyWidth(th, c);
+          for (const td of cells) applyWidth(td, c);
+        };
+        const up = () => {
+          grip.removeEventListener('pointermove', move);
+          grip.removeEventListener('pointerup', up);
+          grip.removeEventListener('pointercancel', up);
+          grip.style.background = '';
+          th.draggable = wasDraggable;
+        };
+        grip.addEventListener('pointermove', move);
+        grip.addEventListener('pointerup', up);
+        grip.addEventListener('pointercancel', up);
+      });
+      grip.addEventListener('dblclick', (e) => {
+        e.stopPropagation();
+        delete state.colWidths[c];
+        for (const node of [th, ...[...t.querySelectorAll('tbody tr')].map((tr) => tr.children[ci])]) {
+          if (node) { node.style.width = ''; node.style.minWidth = ''; node.style.maxWidth = ''; }
+        }
+      });
+      th.append(grip);
       // Included columns sit between the sort column (0) and the trailing
       // JSON/Description columns — exactly indices 1..carry.length.
       const carryIdx = ci - 1;
@@ -718,12 +818,13 @@ export default function mount(container, winnow) {
     const tb = el('tbody');
     state.preview.rows.forEach((row, ri) => {
       const tr = el('tr');
-      for (const v of row) {
+      row.forEach((v, ci) => {
         const td = el('td', null, v == null ? '' : String(v));
         td.style.cssText = cellCss;
         td.title = v == null ? '' : String(v);
+        applyWidth(td, state.preview.columns[ci]);
         tr.append(td);
-      }
+      });
       // Table-tab selection semantics: click selects, Shift extends from
       // the anchor, Ctrl/Cmd toggles.
       tr.addEventListener('mousedown', (e) => {
@@ -858,6 +959,7 @@ export default function mount(container, winnow) {
     state.groupBy = [];
     state.carry = [];
     state.sums = [];      // a total from the old table would 400 on the new one
+    state.colWidths = {};
     state.filters = [];
     state.tags = { mode: '', ids: [] };
     state.rowJson = false;
