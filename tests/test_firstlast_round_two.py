@@ -53,6 +53,20 @@ def test_sum_placeholder_renders_the_group_total_formatted(fl_client):
     assert "Sum of Bytes" in out["columns"]
 
 
+def test_min_and_max_placeholders_ride_the_same_total_up_column(fl_client):
+    client, sid = fl_client
+    out = _fl(client, "preview", source_id=sid, group_by=["User"], sort_column="When",
+              columns=[], sum_columns=["Bytes"], template="{which}: {min:Bytes}–{max:Bytes} of {sum:Bytes}")
+    descs = sorted(r[-1] for r in out["rows"])
+    assert descs == ["First: 50–250.5 of 400.5", "Last: 50–250.5 of 400.5", "Only: 7–7 of 7"]
+    # Only the sum is an output column; min and max are placeholders only.
+    assert [c for c in out["columns"] if c.endswith("of Bytes")] == ["Sum of Bytes"]
+    r = client.post(f"/api/plugin/{PLUGIN}/preview", json={
+        "source_id": sid, "group_by": ["User"], "sort_column": "When", "columns": [],
+        "template": "{max:Bytes}"})
+    assert r.status_code == 400 and "Total up" in r.text
+
+
 def test_sum_placeholder_needs_the_column_under_total_up(fl_client):
     client, sid = fl_client
     r = client.post(f"/api/plugin/{PLUGIN}/preview", json={
@@ -85,5 +99,5 @@ def test_single_row_groups_say_only_everywhere(fl_client):
 def test_meta_advertises_the_syntax(fl_client):
     client, _ = fl_client
     meta = client.get(f"/api/plugin/{PLUGIN}/meta").json()
-    assert meta["placeholders"] == ["which", "count", "sum:<column>"]
+    assert meta["placeholders"] == ["which", "count", "sum:<column>", "min:<column>", "max:<column>"]
     assert meta["which_values"] == ["First", "Last", "Only"]

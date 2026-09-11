@@ -91,6 +91,8 @@ def test_a_total_up_column_offers_a_sum_chip(fl_page):
         pg.locator("input.fl-auto").check()
     pg.evaluate(DRAG, ["[data-field='EventId']", "[data-zone='sums']"])
     pg.wait_for_selector("button:has-text('{sum:EventId}')", timeout=5_000)
+    assert pg.locator("button", has_text="{min:EventId}").count() == 1
+    assert pg.locator("button", has_text="{max:EventId}").count() == 1
     pg.locator("button", has_text="{sum:EventId}").click()
     tmpl_value = pg.evaluate("() => document.querySelector(\"input[style*='var(--mono)']\").value")
     assert "{sum:EventId}" in tmpl_value

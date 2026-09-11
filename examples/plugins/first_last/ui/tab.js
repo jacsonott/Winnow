@@ -242,8 +242,8 @@ export default function mount(container, winnow) {
   chipRow.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px';
   tmplWrap.append(tmplInput, chipRow, el('div', 'note-status',
     'Free text plus placeholders — {which} is First/Last (Only, for a one-row group), {count} the '
-    + 'group size, {Column} that row’s value, {sum:Column} a Total-up column’s group total. '
-    + 'Click a chip to insert it.'));
+    + 'group size, {Column} that row’s value, {sum:Column} / {min:Column} / {max:Column} a Total-up '
+    + 'column’s group total, smallest and largest. Click a chip to insert it.'));
   side.append(tmplWrap);
 
   /* --------------------------------------------------- drag and drop */
@@ -402,7 +402,7 @@ export default function mount(container, winnow) {
     };
     // Totals first among the computed ones: a chip per Total-up column,
     // in the colon form that keeps functions and fields from colliding.
-    const sumChips = state.sums.map((c) => `{sum:${c}}`);
+    const sumChips = state.sums.flatMap((c) => [`{sum:${c}}`, `{min:${c}}`, `{max:${c}}`]);
     for (const ph of ['{which}', '{count}', ...sumChips, ...cols.map((c) => `{${c.name}}`)]) {
       const chipBtn = el('button', 'btn ghost', ph);
       chipBtn.style.cssText = 'font-size:10px;padding:1px 5px;font-family:var(--mono)';

@@ -324,6 +324,17 @@ def _sum_alias(col):
     return f"Sum of {col}"
 
 
+# Group-wide aggregates a Total-up column carries besides its sum. Only the
+# sum becomes an output column; min and max ride the same window for the
+# {min:Column} / {max:Column} placeholders, so asking for either costs no
+# extra pass and needs nothing new under Total up.
+AGGREGATES = {"sum": "SUM", "min": "MIN", "max": "MAX"}
+
+
+def _agg_alias(kind, col):
+    return _sum_alias(col) if kind == "sum" else f"{kind.capitalize()} of {col}"
+
+
 def _bookend_rows(req, src, group_cols, sort_col, carry, where, params, limit,
                   row_json=False, sums=()):
     """One windowed pass: rank each row inside its group both directions,
@@ -346,8 +357,8 @@ def _bookend_rows(req, src, group_cols, sort_col, carry, where, params, limit,
     # hold the odd "-" or "n/a", and CAST turns those into 0, which is a
     # wrong total rather than a missing one.
     sum_sel = "".join(
-        f", SUM({_numeric(src, c)}) OVER (PARTITION BY {part}) AS {q(_sum_alias(c))}"
-        for c in sums)
+        f", {fn}({_numeric(src, c)}) OVER (PARTITION BY {part}) AS {q(_agg_alias(kind, c))}"
+        for c in sums for kind, fn in AGGREGATES.items())
     # Direction must be stated PER COLUMN: "ORDER BY ts, rid DESC" flips only
     # rid, leaving the last-window ranked by ascending time — every group's
     # "Last" would be its earliest row with the biggest rid. On a merge,
@@ -376,8 +387,9 @@ def _bookend_rows(req, src, group_cols, sort_col, carry, where, params, limit,
 
 def _render(template, row, which, sums=()):
     """{ColumnName} → the row's value, {count} → group size, {which} →
-    First/Last/Only, {sum:Column} → that column's group total, formatted
-    like the Sum column. Unknown names raise, naming the offender.
+    First/Last/Only, {sum:Column} / {min:Column} / {max:Column} → that
+    Total-up column's group total, smallest and largest, formatted like
+    the Sum column. Unknown names raise, naming the offender.
 
     The colon form is the namespace for anything computed rather than
     read: a plain name is always a field, so no column name can shadow a
@@ -394,18 +406,20 @@ def _render(template, row, which, sums=()):
                 out.append(which)
             elif key == "count":
                 out.append(str(row.get("group_n", "")))
-            elif key.startswith("sum:"):
-                col = key[4:].strip()
+            elif ":" in key and key.split(":", 1)[0] in AGGREGATES:
+                kind, col = key.split(":", 1)
+                col = col.strip()
                 if col not in sums:
                     raise ValueError(
                         f"{{{key}}} needs {col!r} under Total up first"
                         + (f" — totals available: {', '.join(sums)}" if sums else ""))
-                out.append(_fmt_sum(row.get(_sum_alias(col))))
+                out.append(_fmt_sum(row.get(_agg_alias(kind, col))))
             elif key in row:
                 val = row.get(key)
                 out.append("" if val is None else str(val))
             else:
-                raise ValueError(f"Unknown placeholder {{{key}}} — use a column name, {{count}}, {{which}} or {{sum:Column}}")
+                raise ValueError(f"Unknown placeholder {{{key}}} — use a column name, {{count}}, {{which}}, "
+                                 f"{{sum:Column}}, {{min:Column}} or {{max:Column}}")
             i = j + 1
             continue
         out.append(ch)
@@ -458,7 +472,7 @@ def meta(req):
     return {
         "operators": [{"id": k, "label": v[0], "value_kind": v[1]} for k, v in OPERATORS.items()],
         "limits": {"groups": MAX_GROUPS, "group_cols": MAX_GROUP_COLS, "preview_groups": PREVIEW_GROUPS},
-        "placeholders": ["which", "count", "sum:<column>"],
+        "placeholders": ["which", "count", "sum:<column>", "min:<column>", "max:<column>"],
         "which_values": ["First", "Last", "Only"],
     }
 
