@@ -300,11 +300,13 @@ export function initAppearance() {
    async listing) landing inside its own section rather than at the end of
    the modal.
 
-   Collapsed on open, every time: Settings had grown to seven sections and
-   ~900px of scroll, so the thing you came for was rarely the thing you
-   could see. Expansion state is deliberately not remembered — "open where
-   I left it" and "collapsed by default" are different promises, and this
-   one is the asked-for one. Several can be open at once; opening one
+   Collapsed on open, every time — except Shut down, which is open (it's
+   one button, and the thing people open Settings for most often on the
+   way out). Settings had grown to eleven sections and ~900px of scroll,
+   so the thing you came for was rarely the thing you could see.
+   Expansion state is deliberately not remembered — "open where I left
+   it" and "collapsed by default" are different promises, and this one
+   is the asked-for one. Several can be open at once; opening one
    doesn't close another.
 
    The header is a real <button> rather than a styled h4 so it's tabbable,
@@ -534,16 +536,24 @@ export function openSettings() {
        is something an analyst does once, while the settings below it get
        revisited. */
     const currentRow = el('div', 'appearance-current');
-    const currentCard = styleCard(S.appearance.style, { interactive: false });
     const browse = el('button', 'btn ghost', 'Change skin…');
+    // The card is the obvious thing to click, so it opens the picker too
+    // — it stays the read-only tile visually, just with a pointer.
+    const currentCard = () => {
+      const card = styleCard(S.appearance.style, { interactive: false });
+      card.classList.add('style-card-link');
+      card.title = 'Change skin…';
+      card.onclick = () => browse.onclick();
+      return card;
+    };
     browse.onclick = () => openSkinPicker(() => {
       // Repaint in place: the analyst comes back to Settings, not to a
       // closed modal, so the card and the accent row have to agree with
       // what they just picked.
-      currentRow.replaceChildren(styleCard(S.appearance.style, { interactive: false }), browse);
+      currentRow.replaceChildren(currentCard(), browse);
       syncAccentUi();
     });
-    currentRow.append(currentCard, browse);
+    currentRow.append(currentCard(), browse);
     secLook.append(currentRow);
 
     function syncAccentUi() {
@@ -941,7 +951,9 @@ export function openSettings() {
       + `builder's "Save filter…" button.`));
     const fActs = el('div', 'row-actions');
     const openBtn = el('button', 'btn', 'Open saved filters…');
-    openBtn.onclick = () => openSavedFiltersModal();
+    // Came from Settings, goes back to Settings: the modal is shared, so
+    // without this the × dropped the analyst on the grid.
+    openBtn.onclick = () => openSavedFiltersModal({ returnTo: openSettings });
     const exp = el('button', 'btn ghost', 'Export filters…');
     exp.onclick = () => { window.location = '/api/saved_filters/export'; };
     const impLabel = el('label', 'btn ghost', 'Import filters…');
@@ -980,7 +992,7 @@ export function openSettings() {
        entry both reach the same shutdownWinnow — including its "still
        running" warning, which is the part that must not be bypassed by
        adding a second button. */
-    const secOff = settingsSection(b, 'Shut down');
+    const secOff = settingsSection(b, 'Shut down', { open: true });
     secOff.append(el('p', null,
       'Stops the Winnow server. Everything already committed is saved in the case file — '
       + 'tags, notes and finished imports are never lost. This page, and any other tab using '

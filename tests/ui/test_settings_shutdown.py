@@ -25,7 +25,7 @@ def _shutdown_section(page):
 
 def test_settings_offers_a_shutdown_and_it_is_last(page):
     _open_settings(page)
-    page.click(".settings-section-head:has-text('Shut down')")
+    # Open on arrival — the one section that is — so no click to expand it.
     assert _shutdown_section(page).count() == 1
     # The headings are uppercased by CSS, so compare case-insensitively.
     heads = [h.strip().lower() for h in page.locator("#modalBody .settings-section-title").all_inner_texts()]
@@ -37,7 +37,7 @@ def test_it_asks_before_stopping_the_server(page):
     """The button must route through the same confirmation as every other
     way out — declining leaves the server up."""
     _open_settings(page)
-    page.click(".settings-section-head:has-text('Shut down')")
+    # Open on arrival — the one section that is — so no click to expand it.
     _shutdown_section(page).locator("button", has_text="Shut down Winnow").click()
     page.wait_for_selector(".confirm-overlay")
     assert "Shut down the Winnow server?" in page.locator(".confirm-card").inner_text()
@@ -53,7 +53,7 @@ def test_the_dialog_gets_out_of_the_way_first(page):
     """The confirmation is the thing to read; Settings closing behind it is
     what makes it readable."""
     _open_settings(page)
-    page.click(".settings-section-head:has-text('Shut down')")
+    # Open on arrival — the one section that is — so no click to expand it.
     _shutdown_section(page).locator("button", has_text="Shut down Winnow").click()
     page.wait_for_selector(".confirm-overlay")
     assert page.locator("#modal").is_hidden()
