@@ -3,22 +3,8 @@ case_settings, and a save route that only writes the keys it was sent."""
 
 from __future__ import annotations
 
-import pytest
-from fastapi.testclient import TestClient
-
-import server
-from winnow.store import Store
-
-
-@pytest.fixture
-def client(tmp_path):
-    store = Store(str(tmp_path / "case.db-winnow"))
-    server.STORE = store
-    server.ALLOWED_HOSTS = server.ALLOWED_HOSTS | {"testserver"}
-    try:
-        yield TestClient(server.app, headers={"X-Timeline-Lite-Client": "1"})
-    finally:
-        store.close()
+# `client` comes from tests/conftest.py — its teardown closes any Store
+# a route opened, which a local fixture here would skip.
 
 
 def test_on_is_stored_as_1_and_off_removes_the_key(client):

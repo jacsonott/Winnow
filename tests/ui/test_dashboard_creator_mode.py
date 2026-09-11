@@ -4,19 +4,13 @@ default), none of them mention dashboards; on, all three do."""
 
 from __future__ import annotations
 
-import json
-import urllib.request
-
 import pytest
 
 pytestmark = pytest.mark.ui
 
 
-def _set(server, on):
-    req = urllib.request.Request(
-        server.rstrip("/") + "/api/case_settings", data=json.dumps({"dashboard_creator": on}).encode(),
-        headers={"Content-Type": "application/json", "X-Timeline-Lite-Client": "1"})
-    urllib.request.urlopen(req, timeout=10).read()
+def _set(server_post, on):
+    server_post("/api/case_settings", {"dashboard_creator": on})
 
 
 def _header_menu(page):
@@ -46,15 +40,15 @@ def _filters_menu(page):
     return text
 
 
-def test_off_by_default_the_menus_do_not_mention_dashboards(page, server):
-    _set(server, False)
+def test_off_by_default_the_menus_do_not_mention_dashboards(page, server_post):
+    _set(server_post, False)
     page.evaluate("() => __winnow.loadCaseSettings()")
     assert "dashboard" not in _header_menu(page).lower()
     assert "dashboard" not in _row_menu(page).lower()
     assert "dashboard" not in _filters_menu(page).lower()
 
 
-def test_the_case_settings_checkbox_turns_the_entries_on(page, server):
+def test_the_case_settings_checkbox_turns_the_entries_on(page, server_post):
     try:
         page.evaluate("() => __winnow.openCaseSettings()")
         page.wait_for_selector("#caseDashboardCreator")
@@ -77,5 +71,5 @@ def test_the_case_settings_checkbox_turns_the_entries_on(page, server):
         page.wait_for_selector("#modal", state="hidden")
         assert "dashboard" not in _header_menu(page).lower()
     finally:
-        _set(server, False)
+        _set(server_post, False)
         page.evaluate("() => __winnow.loadCaseSettings()")

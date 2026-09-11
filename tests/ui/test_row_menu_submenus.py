@@ -17,19 +17,10 @@ pytestmark = pytest.mark.ui
 # "Add to dashboard" only appears in the menus when the case has opted in
 # (Case settings → Dashboards); the whole module assumes it has.
 @pytest.fixture(autouse=True, scope="module")
-def _dashboard_creator_mode(server):
-    _post_setting(server, {"dashboard_creator": True})
+def _dashboard_creator_mode(server_post):
+    server_post("/api/case_settings", {"dashboard_creator": True})
     yield
-    _post_setting(server, {"dashboard_creator": False})
-
-
-def _post_setting(server, body):
-    import json
-    import urllib.request
-    req = urllib.request.Request(
-        server.rstrip("/") + "/api/case_settings", data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json", "X-Timeline-Lite-Client": "1"})
-    urllib.request.urlopen(req, timeout=10).read()
+    server_post("/api/case_settings", {"dashboard_creator": False})
 
 
 @pytest.fixture(autouse=True)
