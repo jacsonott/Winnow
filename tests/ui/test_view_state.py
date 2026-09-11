@@ -35,7 +35,9 @@ def test_filters_survive_switching_tables(page, tmp_path):
     page.wait_for_function("(id) => __winnow.S.sourceId === id && __winnow.S.view", arg=second)
     assert page.evaluate("() => __winnow.S.filters") == {}, "the other table must start clean"
     page.evaluate("(id) => __winnow.openSource(id)", first)
-    page.wait_for_function("(id) => __winnow.S.sourceId === id && __winnow.S.view", arg=first)
+    # S.view is reassigned when the restored view is BUILT, which is after
+    # sourceId flips; waiting on sourceId alone read the other table's view.
+    page.wait_for_function("(id) => __winnow.S.sourceId === id && __winnow.S.view && __winnow.S.view.row_count === 50", arg=first)
 
     assert page.evaluate("() => __winnow.S.filters") == {"EventId": "=4624"}
     assert page.evaluate("() => __winnow.S.view.row_count") == 50
