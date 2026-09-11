@@ -18,6 +18,7 @@ covered.
 
 from __future__ import annotations
 
+import json
 import os
 import socket
 import subprocess
@@ -125,6 +126,20 @@ def server(tmp_path_factory, ui_csv):
         proc.wait(timeout=10)
     except subprocess.TimeoutExpired:
         proc.kill()
+
+
+@pytest.fixture(scope="session")
+def server_post(server):
+    """POST JSON to the shared server from OUTSIDE the page — for
+    module-scoped setup (toggling a plugin, a case setting) that has no
+    `page` to go through. Carries the client header every non-GET route
+    requires. One copy here rather than one per test module."""
+    def _post(route, body):
+        req = urllib.request.Request(
+            server.rstrip("/") + route, data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json", "X-Timeline-Lite-Client": "1"})
+        return json.loads(urllib.request.urlopen(req, timeout=10).read())
+    return _post
 
 
 @pytest.fixture

@@ -3,19 +3,9 @@ they mark it stale and Refresh runs it — and the choice is remembered."""
 
 from __future__ import annotations
 
-import json
-import urllib.request
-
 import pytest
 
 pytestmark = pytest.mark.ui
-
-
-def _post(server, route, body):
-    req = urllib.request.Request(
-        server.rstrip("/") + route, data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json", "X-Timeline-Lite-Client": "1"})
-    return json.loads(urllib.request.urlopen(req, timeout=10).read())
 
 
 DRAG = """(args) => {
@@ -31,8 +21,8 @@ DRAG = """(args) => {
 
 
 @pytest.fixture(scope="module")
-def fl_page(browser, server):
-    _post(server, "/api/plugins/toggle", {"fs_name": "first_last", "scope": "on_all"})
+def fl_page(browser, server, server_post):
+    server_post("/api/plugins/toggle", {"fs_name": "first_last", "scope": "on_all"})
     ctx = browser.new_context(viewport={"width": 1500, "height": 900})
     ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen');"
                         "localStorage.removeItem('winnow.firstlast.auto');"
@@ -49,7 +39,7 @@ def fl_page(browser, server):
     pg.wait_for_selector("[data-zone='groupBy']", timeout=10_000)
     yield pg
     ctx.close()
-    _post(server, "/api/plugins/toggle", {"fs_name": "first_last", "scope": "off_all"})
+    server_post("/api/plugins/toggle", {"fs_name": "first_last", "scope": "off_all"})
     assert not errors, "uncaught JS errors: " + " | ".join(errors)
 
 
@@ -62,6 +52,16 @@ def test_auto_update_off_waits_for_refresh_and_is_remembered(fl_page):
     pg.wait_for_selector("table tbody tr", timeout=10_000)
     first_rows = pg.locator("table tbody tr").count()
     assert first_rows > 0
+
+    # Nothing to run (no grouping) is not "pending": the stale marker clears.
+    auto.uncheck()
+    pg.locator("[data-zone='groupBy'] [data-field='Host'] button, [data-zone='groupBy'] .chip-rm, [data-zone='groupBy'] button").first.click()
+    pg.locator("button.fl-refresh").click()
+    pg.wait_for_timeout(300)
+    assert not pg.evaluate("() => [...document.querySelectorAll('.note-status')].some((n) => n.textContent === 'Changed — press Refresh')")
+    pg.evaluate(DRAG, ["[data-field='Host']", "[data-zone='groupBy']"])
+    auto.check()
+    pg.wait_for_selector("table tbody tr", timeout=10_000)
 
     # Off: a description edit marks the preview stale, nothing re-runs.
     auto.uncheck()
@@ -96,4 +96,10 @@ def test_a_total_up_column_offers_a_sum_chip(fl_page):
     pg.locator("button", has_text="{sum:EventId}").click()
     tmpl_value = pg.evaluate("() => document.querySelector(\"input[style*='var(--mono)']\").value")
     assert "{sum:EventId}" in tmpl_value
-    pg.wait_for_function("() => /\\d/.test(document.querySelector('table tbody tr td:last-child').textContent)", timeout=10_000)
+    # The chip inserted the placeholder; now a template that renders the
+    # total on its own so the assertion is on the NUMBER — every group's
+    # EventId total is a 4+ digit figure here, and a bare "First of N"
+    # must not satisfy this.
+    assert "{sum:EventId}" in pg.evaluate("() => document.querySelector(\"input[style*='var(--mono)']\").value")
+    pg.locator("input[style*='var(--mono)']").first.fill("{which} of {count} — {sum:EventId}")
+    pg.wait_for_function("() => /^(First|Last|Only) of \\d+ — \\d{4,}$/.test(document.querySelector('table tbody tr td:last-child').textContent.trim())", timeout=10_000)

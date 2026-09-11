@@ -610,6 +610,7 @@ export default function mount(container, winnow) {
     if (!ready()) {
       state.preview = null;
       state.error = null;
+      state.stale = false;   // nothing to run, so nothing is pending either
       renderPreview();
       return;
     }
@@ -862,6 +863,7 @@ export default function mount(container, winnow) {
     state.rowJson = false;
     state.sortColumn = null;
     state.preview = null;
+    state.stale = false;
     state.selRows = new Set();
     renderControls();
     renderPreview();

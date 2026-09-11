@@ -336,7 +336,7 @@ def _agg_alias(kind, col):
 
 
 def _bookend_rows(req, src, group_cols, sort_col, carry, where, params, limit,
-                  row_json=False, sums=()):
+                  row_json=False, sums=(), template=""):
     """One windowed pass: rank each row inside its group both directions,
     keep rank 1 of each. Selected values are the *row's own* — the first
     row's user, not the group's."""
@@ -356,9 +356,14 @@ def _bookend_rows(req, src, group_cols, sort_col, carry, where, params, limit,
     # _numeric's guarded cast, not a bare CAST: a number column can still
     # hold the odd "-" or "n/a", and CAST turns those into 0, which is a
     # wrong total rather than a missing one.
+    # The sum is always an output column; min and max only exist for the
+    # {min:}/{max:} placeholders, and each window term re-runs the
+    # REGEXP-guarded cast per row, so they are added only when the
+    # template actually names one.
+    wanted = {"sum"} | {k for k in ("min", "max") if f"{{{k}:" in (template or "")}
     sum_sel = "".join(
         f", {fn}({_numeric(src, c)}) OVER (PARTITION BY {part}) AS {q(_agg_alias(kind, c))}"
-        for c in sums for kind, fn in AGGREGATES.items())
+        for c in sums for kind, fn in AGGREGATES.items() if kind in wanted)
     # Direction must be stated PER COLUMN: "ORDER BY ts, rid DESC" flips only
     # rid, leaving the last-window ranked by ascending time — every group's
     # "Last" would be its earliest row with the biggest rid. On a merge,
@@ -501,7 +506,7 @@ def preview(req):
     total_groups = req.store.run_sql(_inline(count_sql, params), limit=1)["rows"][0][0]
 
     rows, _ = _bookend_rows(req, src, group_cols, sort_col, carry, where, params,
-                            limit=PREVIEW_GROUPS * 2 + 2, row_json=row_json, sums=sums)
+                            limit=PREVIEW_GROUPS * 2 + 2, row_json=row_json, sums=sums, template=template)
     json_cols = [c["name"] for c in src["columns"]] if row_json else None
     header = ([sort_col] + carry + [_sum_alias(c) for c in sums]
               + ([ROW_JSON_COLUMN] if row_json else []) + ["Description"])
@@ -516,7 +521,7 @@ def rows(req):
     body = req.body or {}
     src, group_cols, sort_col, carry, sums, where, params, template, row_json = _validated(req, body)
     bookends, truncated = _bookend_rows(req, src, group_cols, sort_col, carry, where, params,
-                                        limit=MAX_COPY_ROWS, row_json=row_json, sums=sums)
+                                        limit=MAX_COPY_ROWS, row_json=row_json, sums=sums, template=template)
     json_cols = [c["name"] for c in src["columns"]] if row_json else None
     header = ([sort_col] + carry + [_sum_alias(c) for c in sums]
               + ([ROW_JSON_COLUMN] if row_json else []) + ["Description"])
@@ -537,7 +542,7 @@ def create(req):
     body = req.body or {}
     src, group_cols, sort_col, carry, sums, where, params, template, row_json = _validated(req, body)
     bookends, truncated = _bookend_rows(req, src, group_cols, sort_col, carry, where, params,
-                                        limit=MAX_GROUPS * 2, row_json=row_json, sums=sums)
+                                        limit=MAX_GROUPS * 2, row_json=row_json, sums=sums, template=template)
     if truncated:
         raise ValueError(f"More than {MAX_GROUPS:,} groups — narrow the grouping or add a filter")
     json_cols = [c["name"] for c in src["columns"]] if row_json else None
