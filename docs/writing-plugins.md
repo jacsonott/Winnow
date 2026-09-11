@@ -1160,9 +1160,16 @@ matter most to a panel, which sits beside the grid and has to follow it.
 ### `register_dashboard(*, id, label, widgets, description="")`
 
 A board your plugin offers. It appears under **Dashboards ▸ Library** in
-the sidebar, named `label`, and the analyst adds it to a case with ＋ —
-which copies the widgets in, create-or-replace by name, so adding it
-twice refreshes rather than duplicates.
+the sidebar, named `label`, and the analyst adds it to a case with ＋ (or
+by clicking its name) — which copies the widgets in, create-or-replace by
+name, so adding it twice refreshes rather than duplicates. Ship a new
+version of the board and re-adding it is how the analyst picks that up.
+
+That refresh is for **your** copy specifically. If the case already has a
+board of that name that your plugin did not write — one the analyst built
+by hand, or another plugin's — Winnow asks before replacing it, because
+`label` is yours to choose and the collision may be pure coincidence.
+Their widgets do not go without them saying so.
 
 **Offered, never applied.** Loading your plugin does not put a board in
 anyone's case. A plugin that dropped one into every case it could see

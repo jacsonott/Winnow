@@ -122,13 +122,102 @@ def test_adding_one_copies_it_into_the_open_case(client, store, write_csv, monke
 
 
 def test_adding_twice_refreshes_rather_than_duplicates(client, store, write_csv, monkeypatch, tmp_path):
+    """Both calls must SUCCEED. Asserting only the board count let this pass
+    while the second add was refused with a 409 — one board, for the wrong
+    reason, and the refresh the guide promises never happened."""
     import server
 
     store.ingest_csv(write_csv([["a"], ["1"]], "e.csv"), name="e", build_fts=False)
     monkeypatch.setattr(server, "PLUGINS", _plugin(tmp_path, _register(GOOD)))
-    client.post("/api/plugin_dashboards/boards/b1/add", json={})
-    client.post("/api/plugin_dashboards/boards/b1/add", json={})
+    first = client.post("/api/plugin_dashboards/boards/b1/add", json={})
+    assert first.status_code == 200, first.text
+
+    # The plugin ships a new version of the same board; adding it again is
+    # how an analyst picks that up, so it must not ask about a collision
+    # with the copy it wrote itself a moment ago.
+    updated = [{"title": "Rows (v2)", "source": "sql", "render": "stat",
+                "query": {"sql": "SELECT COUNT(*) FROM {{evtx}}"}}]
+    v2 = tmp_path / "v2"
+    v2.mkdir()
+    monkeypatch.setattr(server, "PLUGINS", _plugin(v2, _register(updated)))
+    second = client.post("/api/plugin_dashboards/boards/b1/add", json={})
+    assert second.status_code == 200, second.text
+
     assert len(store.list_dashboards()) == 1
+    assert second.json()["id"] == first.json()["id"]
+    assert store.get_dashboard(first.json()["id"])[0]["title"] == "Rows (v2)", \
+        "the second add returned 200 without refreshing the widgets"
+
+
+def test_another_plugins_board_of_the_same_name_still_asks(client, store, write_csv, monkeypatch, tmp_path):
+    """`origin` says whose copy a board is, not merely that some plugin made
+    it — so a second plugin claiming the same label is still a question."""
+    import server
+
+    store.ingest_csv(write_csv([["a"], ["1"]], "e.csv"), name="e", build_fts=False)
+    monkeypatch.setattr(server, "PLUGINS", _plugin(tmp_path, _register(GOOD)))
+    first = client.post("/api/plugin_dashboards/boards/b1/add", json={})
+    assert first.status_code == 200, first.text
+
+    monkeypatch.setattr(server, "PLUGINS",
+                        _plugin(tmp_path, _register(GOOD), name="others"))
+    r = client.post("/api/plugin_dashboards/others/b1/add", json={})
+    assert r.status_code == 409
+    assert r.json()["detail"]["dashboard_id"] == first.json()["id"]
+
+
+def test_renaming_the_board_makes_it_the_analysts_too(client, store, write_csv, monkeypatch, tmp_path):
+    """A rename is the other hand edit. Only reachable through the API's
+    custom name today, but the ownership rule should be one rule."""
+    import server
+
+    store.ingest_csv(write_csv([["a"], ["1"]], "e.csv"), name="e", build_fts=False)
+    monkeypatch.setattr(server, "PLUGINS", _plugin(tmp_path, _register(GOOD)))
+    first = client.post("/api/plugin_dashboards/boards/b1/add", json={})
+    assert first.status_code == 200, first.text
+    store.rename_dashboard(first.json()["id"], "Host overview — Q3")
+    assert store.find_dashboard_by_name("Host overview — Q3")["origin"] is None
+    r = client.post("/api/plugin_dashboards/boards/b1/add", json={"name": "Host overview — Q3"})
+    assert r.status_code == 409, "the renamed copy is the analyst's now"
+
+
+def test_editing_the_board_by_hand_makes_it_the_analysts(client, store, write_csv, monkeypatch, tmp_path):
+    """The silent refresh lasts exactly as long as the widgets are still the
+    plugin's. Change one card and there IS work of the analyst's to lose,
+    so the next add asks like any other collision."""
+    import server
+
+    store.ingest_csv(write_csv([["a"], ["1"]], "e.csv"), name="e", build_fts=False)
+    monkeypatch.setattr(server, "PLUGINS", _plugin(tmp_path, _register(GOOD)))
+    first = client.post("/api/plugin_dashboards/boards/b1/add", json={})
+    assert first.status_code == 200, first.text
+
+    store.set_dashboard_widgets(
+        first.json()["id"], [{"title": "Mine", "source": "tags", "render": "stat"}])
+
+    r = client.post("/api/plugin_dashboards/boards/b1/add", json={})
+    assert r.status_code == 409
+    assert store.get_dashboard(first.json()["id"])[0]["title"] == "Mine", \
+        "it refreshed over the analyst's edit"
+
+
+def test_a_profile_writing_the_board_takes_it_back_from_the_plugin(client, store, write_csv, monkeypatch, tmp_path):
+    """A profile applies ITS widgets under that name, so the board stops
+    being the plugin's copy — the same rule as a hand edit, reached the way
+    `upsert_dashboard_by_name` is reached from a profile apply."""
+    import server
+
+    store.ingest_csv(write_csv([["a"], ["1"]], "e.csv"), name="e", build_fts=False)
+    monkeypatch.setattr(server, "PLUGINS", _plugin(tmp_path, _register(GOOD)))
+    first = client.post("/api/plugin_dashboards/boards/b1/add", json={})
+    assert first.status_code == 200, first.text
+
+    store.upsert_dashboard_by_name(
+        "Board one", [{"title": "From a profile", "source": "tags", "render": "stat"}])
+
+    r = client.post("/api/plugin_dashboards/boards/b1/add", json={})
+    assert r.status_code == 409
+    assert store.get_dashboard(first.json()["id"])[0]["title"] == "From a profile"
 
 
 def test_an_unknown_board_is_a_404(client, monkeypatch, tmp_path):

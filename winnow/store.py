@@ -339,7 +339,8 @@ CREATE TABLE IF NOT EXISTS dashboards (
     name    TEXT NOT NULL,
     widgets TEXT NOT NULL DEFAULT '[]',
     pos     INTEGER NOT NULL DEFAULT 0,
-    pinned  INTEGER NOT NULL DEFAULT 0           -- 1: shown as a page tab in the top strip
+    pinned  INTEGER NOT NULL DEFAULT 0,          -- 1: shown as a page tab in the top strip
+    origin  TEXT                                 -- 'plugin:<fs_name>:<local_id>' for a copy of an offered board; NULL if the analyst built it
 );
 """
 
@@ -1230,6 +1231,12 @@ class Store:
             # Same for dashboards.pinned (a board promoted into the page strip).
             if not any(r[1] == "pinned" for r in self.db.execute("PRAGMA table_info(dashboards)")):
                 self.db.execute("ALTER TABLE dashboards ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
+            # ...and dashboards.origin. A case from before this column has
+            # NULL everywhere, which reads as "the analyst built it" — so a
+            # plugin re-offering a board still asks before replacing it.
+            # That is the safe direction to be wrong in.
+            if not any(r[1] == "origin" for r in self.db.execute("PRAGMA table_info(dashboards)")):
+                self.db.execute("ALTER TABLE dashboards ADD COLUMN origin TEXT")
             # The single-row `dashboard` becomes one named "Dashboard" entry
             # the first time a case with that older shape is opened.
             has_named = self.db.execute("SELECT 1 FROM dashboards LIMIT 1").fetchone()
@@ -7445,16 +7452,25 @@ class Store:
         return self._loads_widgets(row["widgets"])
 
     def set_dashboard_widgets(self, dashboard_id: int, widgets: list) -> list:
+        """Edited by hand, which also clears `origin`.
+
+        `origin` means "these widgets are exactly what the plugin wrote" —
+        that is the whole basis for re-adding the board refreshing it
+        without asking. The moment the analyst changes a card, there IS
+        work of theirs to lose, so the board stops being the plugin's copy
+        and the next add goes back to asking."""
         if not isinstance(widgets, list):
             raise ValueError("A dashboard is a list of widgets")
         with self.lock, self.db:
             cur = self.db.execute(
-                "UPDATE dashboards SET widgets=? WHERE id=?", (json.dumps(widgets), dashboard_id))
+                "UPDATE dashboards SET widgets=?, origin=NULL WHERE id=?",
+                (json.dumps(widgets), dashboard_id))
             if cur.rowcount == 0:
                 raise KeyError(f"No dashboard {dashboard_id}")
         return widgets
 
-    def create_dashboard(self, name: str, widgets: list | None = None) -> dict:
+    def create_dashboard(self, name: str, widgets: list | None = None,
+                         origin: str | None = None) -> dict:
         name = (name or "").strip()
         if not name:
             raise ValueError("A dashboard needs a name")
@@ -7463,8 +7479,8 @@ class Store:
         with self.lock, self.db:
             pos = self.db.execute("SELECT COALESCE(MAX(pos), -1) + 1 FROM dashboards").fetchone()[0]
             cur = self.db.execute(
-                "INSERT INTO dashboards(name, widgets, pos) VALUES (?,?,?)",
-                (name, json.dumps(widgets or []), pos))
+                "INSERT INTO dashboards(name, widgets, pos, origin) VALUES (?,?,?,?)",
+                (name, json.dumps(widgets or []), pos, origin))
             did = cur.lastrowid
         return {"id": did, "name": name, "pos": pos, "widget_count": len(widgets or [])}
 
@@ -7474,8 +7490,11 @@ class Store:
             raise ValueError("A dashboard needs a name")
         if len(name) > 200:
             raise ValueError("That dashboard name is too long")
+        # A rename is a hand edit like changing a card: the board stops
+        # being the plugin's copy, so a later add of the offered board asks
+        # before replacing it rather than refreshing silently.
         with self.lock, self.db:
-            if self.db.execute("UPDATE dashboards SET name=? WHERE id=?",
+            if self.db.execute("UPDATE dashboards SET name=?, origin=NULL WHERE id=?",
                                (name, dashboard_id)).rowcount == 0:
                 raise KeyError(f"No dashboard {dashboard_id}")
 
@@ -7492,10 +7511,15 @@ class Store:
     def find_dashboard_by_name(self, name: str) -> dict | None:
         """The board that name would land on, if any — so a caller can ask
         before replacing one it did not create (see the plugin-board add
-        route). NOCASE, matching upsert_dashboard_by_name's own lookup."""
+        route). NOCASE, matching upsert_dashboard_by_name's own lookup.
+
+        `origin` is what makes that question answerable: a board stamped
+        with the same plugin board this caller is about to write is that
+        caller's own earlier copy, and refreshing it discards nothing the
+        analyst wrote."""
         with self._reader() as ro:
             row = ro.execute(
-                "SELECT id, name, widgets FROM dashboards WHERE name=? COLLATE NOCASE",
+                "SELECT id, name, widgets, origin FROM dashboards WHERE name=? COLLATE NOCASE",
                 (name,)).fetchone()
         if not row:
             return None
@@ -7503,20 +7527,29 @@ class Store:
             n = len(json.loads(row["widgets"]) or [])
         except (TypeError, ValueError):
             n = 0
-        return {"id": row["id"], "name": row["name"], "widget_count": n}
+        return {"id": row["id"], "name": row["name"], "widget_count": n,
+                "origin": row["origin"]}
 
-    def upsert_dashboard_by_name(self, name: str, widgets: list) -> dict:
+    def upsert_dashboard_by_name(self, name: str, widgets: list,
+                                 origin: str | None = None) -> dict:
         """Create-or-replace a dashboard by name — how a profile applies its
         board (a second apply of the same profile refreshes rather than
-        duplicates)."""
+        duplicates).
+
+        `origin` says whose widgets these now are, and is written every
+        time — including as NULL. Whoever last wrote the board owns it: the
+        plugin add stamps itself so re-adding refreshes silently, and a
+        profile apply (which writes ITS widgets, not the plugin's) clears
+        the stamp so the plugin has to ask before overwriting them. One
+        rule, and it errs toward asking."""
         with self.lock, self.db:
             row = self.db.execute(
                 "SELECT id FROM dashboards WHERE name=? COLLATE NOCASE", (name,)).fetchone()
             if row:
-                self.db.execute("UPDATE dashboards SET widgets=? WHERE id=?",
-                               (json.dumps(widgets), row["id"]))
+                self.db.execute("UPDATE dashboards SET widgets=?, origin=? WHERE id=?",
+                               (json.dumps(widgets), origin, row["id"]))
                 return {"id": row["id"], "name": name}
-        return self.create_dashboard(name, widgets)
+        return self.create_dashboard(name, widgets, origin=origin)
 
     # Shorthands a SHIPPED dashboard uses so its SQL is portable across
     # cases — the table's src_<id> varies, but its header set doesn't.
