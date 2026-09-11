@@ -571,7 +571,7 @@ export function buildColumnsPanel(container, refresh = openTableMenu) {
   // one to hide or pin is somewhere in the middle. Rows not matching are
   // hidden, not removed — the drag order still runs over all of S.order,
   // so a drop between two visible rows lands where the list shows it.
-  const search = el('input', 'collist-search');
+  const search = el('input', 'panel-search collist-search');
   search.type = 'search';
   search.placeholder = 'Filter columns…';
   search.autocomplete = 'off';
@@ -661,7 +661,10 @@ export function buildColumnsPanel(container, refresh = openTableMenu) {
       onReorder: (order) => {
         S.order = order;
         renderHead(); render(); saveLayout();
-        refresh();
+        // Rows follow the new order in place — like ⤒ ⤓, so a filter
+        // typed above survives the drop instead of the panel re-rendering
+        // with an empty box and every column back.
+        for (const n of order) { const rw = rows.get(n); if (rw) list.append(rw); }
       },
     });
     list.append(row);

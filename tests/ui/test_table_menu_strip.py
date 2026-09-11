@@ -85,3 +85,23 @@ def test_moving_a_column_keeps_the_typed_filter(page):
         assert page.evaluate("() => __winnow.S.order[0]") == target
     finally:
         _restore(page, orig)
+
+
+def test_dragging_a_row_keeps_the_typed_filter(page):
+    _open(page)
+    orig = page.evaluate("() => [...__winnow.S.order]")
+    try:
+        # A filter matching at least two rows, then drag the second onto the first.
+        page.locator("#modalBody .collist-search").fill("e")
+        rows = page.locator(".collist-row:visible")
+        assert rows.count() >= 2
+        first, second = rows.nth(0).inner_text().split()[0], rows.nth(1).inner_text().split()[0]
+        rows.nth(1).drag_to(rows.nth(0), target_position={"x": 10, "y": 3})
+        page.wait_for_timeout(300)
+        assert page.locator("#modalBody .collist-search").input_value() == "e", "the drop re-rendered the panel"
+        after = page.evaluate("() => [...__winnow.S.order]")
+        assert after.index(second) < after.index(first)
+        shown = [r.split()[0] for r in page.locator(".collist-row:visible").all_inner_texts()]
+        assert shown[:2] == [second, first], "the panel's rows follow the new order in place"
+    finally:
+        _restore(page, orig)
