@@ -1428,6 +1428,21 @@ textarea:focus { border-color: var(--accent); outline: none; }
    rule for all of them so a new section needs no CSS of its own. */
 .table-menu-section + .table-menu-section { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 6px; }
 .table-menu-section h4 { margin: 10px 0 8px; }
+/* The top strip: no heading, the three everyday actions in a row, with
+   "Close this tab" pushed to the far side so it isn't the neighbour of
+   "Reset view". */
+.table-menu-strip { display: flex; gap: 6px; align-items: center; }
+.table-menu-strip .table-menu-close { margin-left: auto; }
+.collist-search {
+  width: 100%; box-sizing: border-box; margin-bottom: 6px;
+  background: var(--ink); color: var(--text);
+  border: var(--border-w) solid var(--line-2); border-radius: var(--radius-sm);
+  padding: 5px 8px; font: inherit; font-size: 12px;
+}
+/* ⤒ ⤓ read as clutter on every row, so they stay faint until the row is
+   under the pointer — the same treatment .menu-item-action gets. */
+.collist-move { flex: 0 0 auto; font-size: 11px; line-height: 1; padding: 0 5px; opacity: .35; }
+.collist-row:hover .collist-move, .collist-move:focus-visible { opacity: 1; }
 .collist-pick { flex: 0 0 auto; font-size: 10px; padding: 2px 6px; font-family: var(--mono); }
 .collist-pick[aria-pressed="true"] { color: var(--accent); border-color: var(--accent-dim); }
 
