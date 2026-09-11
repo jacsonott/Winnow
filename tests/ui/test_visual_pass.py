@@ -135,11 +135,18 @@ def test_settings_dialog_holds_still_while_sections_expand(page):
     page.wait_for_selector("#modal:not([hidden])")
     heads = page.locator("#modal .settings-section-head")
     before = _rect(page, ".modal-card")
+    vh = page.evaluate("() => window.innerHeight")
+    # The card is sized to content and anchored at the top: a section
+    # opening grows it DOWNWARD, so the top edge (and everything above the
+    # click) stays put, and it never passes the 82vh it used to be pinned to.
+    prev_h = before["h"]
     for i in (3, 5, 8):
         heads.nth(i).click()
         page.wait_for_timeout(100)
         after = _rect(page, ".modal-card")
-        assert (after["y"], after["h"]) == (before["y"], before["h"]), (i, before, after)
+        assert after["y"] == before["y"], (i, before, after)
+        assert after["h"] >= prev_h and after["h"] <= vh * 0.82 + 1, (i, prev_h, after)
+        prev_h = after["h"]
     page.keyboard.press("Escape")
 
 

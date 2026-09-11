@@ -385,10 +385,37 @@ export async function moveSavedFilter(f, dir) {
   S.savedFilters = await post('/api/saved_filters/reorder', { ids });
 }
 
-export function openSavedFiltersModal() {
+/* `returnTo`: where the × (and Escape) should land. Settings opens this
+   in the same shared modal, so closing it used to drop the analyst on the
+   grid — one level up, not back where they were. A one-shot listener on
+   the close event, guarded by the title so that a filter applied from
+   here (which hides the modal without the event) or a builder opened
+   from here (which replaces the title) doesn't bounce back to Settings
+   at the wrong moment. */
+export function openSavedFiltersModal({ returnTo = null } = {}) {
+  if (returnTo) {
+    const back = () => {
+      document.removeEventListener('winnow:modalclose', back);
+      if ($('modalTitle').textContent === 'Saved filters' && $('modalBody').dataset.sfReturn === '1') returnTo();
+    };
+    document.addEventListener('winnow:modalclose', back);
+  }
+  const backBtn = () => {
+    if (!returnTo) return null;
+    const btn = el('button', 'btn ghost sf-back', '‹ Settings');
+    btn.style.marginLeft = 'auto';
+    btn.onclick = () => returnTo();
+    return btn;
+  };
   modal('Saved filters', (b) => {
+    // Marks THIS opening as the one with a way back, so a listener left
+    // armed by a close that bypassed the event can't fire for a later
+    // Saved filters opened from Filters ▾.
+    b.dataset.sfReturn = returnTo ? '1' : '';
     if (!S.savedFilters.length) {
       b.append(el('div', 'note-status', 'No saved filters yet. Build one in the Filter builder, then "Save filter…".'));
+      const back = backBtn();
+      if (back) { const row = el('div', 'row-actions'); row.append(back); b.append(row); }
       return;
     }
     const search = el('input');
@@ -548,6 +575,8 @@ export function openSavedFiltersModal() {
     };
     impLabel.append(impInput);
     acts.append(exp, impLabel);
+    const back = backBtn();
+    if (back) acts.append(back);
     b.append(acts);
 
     b.append(el('p', null,

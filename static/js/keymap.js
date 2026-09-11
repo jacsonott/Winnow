@@ -4,7 +4,7 @@
 import { autofitAllColumnWidths, resetAllColumnWidths, saveDefaultLayout, visibleCols } from './columns.js';
 import { openFilterBuilder } from './filterbuilder.js';
 import { $, ROW_H } from './core.js';
-import { currentModalAction, repaintOpenMenus } from './ui.js';
+import { currentModalAction, repaintOpenMenus, closeModal } from './ui.js';
 import { toggleDetailPane } from './detail.js';
 import { filterBySelectedCell, openValuePickerForColumn, selectedCellTarget } from './filters.js';
 import { headH, moveCursor, render } from './grid.js';
@@ -336,7 +336,16 @@ export function wireKeymap() {
 document.addEventListener('keydown', (e) => {
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName);
   if (e.key === 'Escape') {
-    if (!$('modal').hidden) { $('modal').hidden = true; return; }
+    // A confirm/prompt overlay owns this Escape: its capture-phase
+    // listener has already closed it (so the overlay is gone from the DOM
+    // by the time this bubble listener runs) and called preventDefault,
+    // which is the trace it leaves. The modal underneath must not close
+    // too, or a declined confirm inside Saved filters would also fire the
+    // return-to-Settings hook.
+    if (e.defaultPrevented) return;
+    // closeModal, not a bare hide: whatever armed itself for the close
+    // (a return-to-Settings hook, the keybinding capture) has to hear it.
+    if (!$('modal').hidden) { closeModal(); return; }
     if (typing) { e.target.blur(); $('body').focus(); return; }
     if (S.activeTab === 'sql' && sqlClearSelection()) return;
     selClear(); render(); return;

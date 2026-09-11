@@ -1327,10 +1327,17 @@ textarea:focus { border-color: var(--accent); outline: none; }
   width: min(680px, 92vw); max-height: 82vh; display: flex; flex-direction: column;
 }
 .modal-card.wide { width: min(920px, 96vw); }
-/* Settings: ten collapsible sections. A card that grows re-centres itself
-   on every click, so the header jumped up to 165px; a fixed height keeps it
-   still and scrolls the body instead. */
-.modal-card.tall { height: 82vh; }
+/* Settings: eleven collapsible sections. A card that grows re-centres
+   itself on every click, so the header jumped up to 165px. It used to be a
+   fixed height, which kept it still — and also kept an all-collapsed
+   Settings at 82vh of mostly empty panel. Now it's sized to content and
+   anchored to the top of the viewport instead: it grows downward from a
+   fixed edge, so nothing above the click moves, and stops at the same
+   82vh, scrolling the body from there. */
+.modal-card.tall { max-height: 82vh; align-self: start; margin-top: 9vh; }
+/* The read-only skin tile in Settings opens the picker on click. */
+.style-card-static.style-card-link { cursor: pointer; }
+.style-card-static.style-card-link:hover { border-color: var(--accent-dim); }
 /* The Tables manager: five buttons, three stats and an index status per
    row — 920px truncated the buttons off the right edge on any real name. */
 .modal-card.xwide { width: min(1240px, 96vw); }

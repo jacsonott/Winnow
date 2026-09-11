@@ -129,8 +129,14 @@ def test_settings_sections_start_collapsed_and_expand_on_click(page):
     page.keyboard.press("?")
     page.wait_for_selector("#modal:not([hidden])")
     assert page.locator(".settings-section-head").count() >= 6
-    assert page.locator(".settings-section-body:not([hidden])").count() == 0
+    # Everything collapsed on arrival except Shut down, the one section
+    # that is a single button and the thing Settings is opened for on the
+    # way out.
+    open_titles = page.evaluate("""() => [...document.querySelectorAll('.settings-section')]
+        .filter((s) => !s.querySelector('.settings-section-body').hidden)
+        .map((s) => s.querySelector('.settings-section-title').textContent.trim().toLowerCase())""")
+    assert open_titles == ["shut down"], open_titles
     page.click(".settings-section-head:has-text('Appearance')")
     page.wait_for_timeout(200)
-    assert page.locator(".settings-section-body:not([hidden])").count() == 1
+    assert page.locator(".settings-section-body:not([hidden])").count() == 2
     assert page.locator(".style-card").first.is_visible()
