@@ -3,23 +3,13 @@
 
 from __future__ import annotations
 
-import json
-import urllib.request
-
 import pytest
 
 pytestmark = pytest.mark.ui
 
 
-def _post(server, route, body):
-    req = urllib.request.Request(
-        server.rstrip("/") + route, data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json", "X-Timeline-Lite-Client": "1"})
-    return json.loads(urllib.request.urlopen(req, timeout=10).read())
-
-
-def test_no_rows_collapses_the_panel_to_a_sentence(page, server):
-    _post(server, "/api/plugins/toggle", {"fs_name": "table_histogram", "scope": "on_all"})
+def test_no_rows_collapses_the_panel_to_a_sentence(page, server_post):
+    server_post("/api/plugins/toggle", {"fs_name": "table_histogram", "scope": "on_all"})
     try:
         page.evaluate("() => __winnow.loadPlugins()")
         btn = page.locator("#pluginToolbarButtons .plugin-panel-btn", has_text="Histogram")
@@ -36,7 +26,8 @@ def test_no_rows_collapses_the_panel_to_a_sentence(page, server):
         page.wait_for_selector(".plugin-panel .th-empty", state="visible", timeout=10_000)
         assert page.locator(".plugin-panel .th-empty").inner_text() == "No rows with a parsable timestamp in this view."
         assert page.locator(".plugin-panel canvas.th-canvas").is_hidden()
-        assert page.locator(".plugin-panel .btn", has_text="Clear timeframe").is_hidden()
+        # ...but the way back from a timeframe that emptied the view stays.
+        assert page.locator(".plugin-panel .btn", has_text="Clear timeframe").is_visible()
         assert "Drag across" not in page.locator(".plugin-panel").inner_text()
         small = page.locator(".plugin-panel").bounding_box()["height"]
         assert small < full / 2, (small, full)
@@ -53,5 +44,5 @@ def test_no_rows_collapses_the_panel_to_a_sentence(page, server):
     finally:
         page.locator('.fcell input[data-col="Host"]').fill("")
         page.keyboard.press("Enter")
-        _post(server, "/api/plugins/toggle", {"fs_name": "table_histogram", "scope": "off_all"})
+        server_post("/api/plugins/toggle", {"fs_name": "table_histogram", "scope": "off_all"})
         page.evaluate("() => __winnow.loadPlugins()")

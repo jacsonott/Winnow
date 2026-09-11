@@ -647,9 +647,16 @@ function annotationTagsIdx(r) {
   if (wt !== -1) return wt;
   const t = lower.indexOf('tags');
   if (t === -1) return -1;
-  const sid = r.tags.ref.sidIdx === -1 ? r.tags.ref.sid : null;
-  const src = sid != null ? S.sources.find((s) => s.id === sid) : null;
-  const own = src && src.columns.some((c) => String(c.name).toLowerCase() === 'tags');
+  // Every source the rows came from: the one src_N, or — for a merge, or
+  // any result carrying source_id — each id the rows actually name. If
+  // ANY of them has a file column called Tags, the bare "Tags" here is
+  // (at least sometimes) the file's text, and text it stays.
+  const { sidIdx, sid } = r.tags.ref;
+  const sids = sidIdx === -1 ? [sid] : [...new Set(r.rows.map((row) => Number(row[sidIdx])))];
+  const own = sids.some((id) => {
+    const src = S.sources.find((s) => s.id === id);
+    return src && src.columns.some((c) => String(c.name).toLowerCase() === 'tags');
+  });
   return own ? -1 : t;
 }
 

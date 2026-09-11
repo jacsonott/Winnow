@@ -55,10 +55,12 @@ export default function mount(container, winnow) {
   empty.style.cssText = 'padding:2px 10px 6px;font-size:11px;white-space:normal';
   empty.hidden = true;
   container.append(empty);
+  // Clear timeframe stays through the empty state: the drag that emptied
+  // the view is the most likely reason it IS empty, and the button is the
+  // way back from it.
   function showEmpty(text) {
     canvas.hidden = true;
     hint.hidden = true;
-    clearBtn.hidden = true;
     empty.textContent = text;
     empty.hidden = false;
   }
@@ -66,7 +68,6 @@ export default function mount(container, winnow) {
     empty.hidden = true;
     canvas.hidden = false;
     hint.hidden = false;
-    clearBtn.hidden = false;
   }
 
   /* --------------------------------------------------------- helpers */
