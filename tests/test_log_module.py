@@ -6,11 +6,9 @@ from __future__ import annotations
 import csv
 
 import pytest
-from fastapi.testclient import TestClient
 
 import server
 from winnow import log as wlog
-from winnow.store import Store
 
 
 @pytest.fixture(autouse=True)
@@ -18,20 +16,6 @@ def _clean_log():
     wlog.reset()
     yield
     wlog.reset()
-
-
-@pytest.fixture
-def store(tmp_path):
-    s = Store(str(tmp_path / "case.db-winnow"))
-    yield s
-    s.close()
-
-
-@pytest.fixture
-def client(store):
-    server.STORE = store
-    server.ALLOWED_HOSTS = server.ALLOWED_HOSTS | {"testserver"}
-    return TestClient(server.app, headers={"X-Timeline-Lite-Client": "1"})
 
 
 def _csv(path, rows, header=("A", "B")):
@@ -67,9 +51,13 @@ def test_the_ring_is_bounded_and_seq_keeps_counting():
 def test_the_route_returns_the_snapshot_shape(client):
     wlog.record("error", "boom")
     data = client.get("/api/log").json()
-    assert set(data) == {"entries", "seq", "error_seq"}
+    assert set(data) == {"entries", "seq", "error_seq", "boot"}
     assert data["error_seq"] == data["seq"] == 1
     assert data["entries"][0]["message"] == "boom"
+    # The badge poll gets the three numbers and never the ring.
+    marks = client.get("/api/log/marks").json()
+    assert marks == {"seq": 1, "error_seq": 1, "boot": data["boot"]}
+    assert marks["boot"] == wlog.BOOT and marks["boot"] > 0
 
 
 def test_record_log_alias_still_works(client):
@@ -100,6 +88,17 @@ def test_an_ingest_job_logs_queued_and_finished(store, tmp_path):
     assert wlog.error_seq() == 0
 
 
+def test_a_derive_job_logs_its_finish_too(store, tmp_path):
+    """Derives ride the same job machinery; the log must close them out."""
+    sid = store.ingest_csv(_csv(tmp_path / "d.csv", [["2024-01-01 00:00:00", "x"]], header=("When", "B")))["id"]
+    res = store.add_derived_column(sid, "Parsed", "When", "iso8601", {})
+    store.wait_for_ingest_job(res["job_id"], timeout=30)
+    msgs = [e["message"] for e in wlog.entries()]
+    assert any(m.startswith("Derive queued: Parsed (derive)") for m in msgs), msgs
+    assert any(m.startswith("Derive finished: Parsed — 1 rows") for m in msgs), msgs
+    assert not any(m.startswith("Import queued: Parsed") for m in msgs), "a derive is not an import"
+
+
 def test_a_failing_ingest_job_is_an_error_entry(store, tmp_path):
     job = store.start_ingest_job("csv", str(tmp_path / "missing.csv"), name="missing.csv")
     store.wait_for_ingest_job(job["job_id"], timeout=30)
@@ -123,3 +122,26 @@ def test_exports_log_start_and_finish(store, client, tmp_path):
     msgs = [e["message"] for e in wlog.entries()]
     assert any(m.startswith("Export finished: tagged rows from all tables (.xlsx)") and "bytes" in m for m in msgs), msgs
     assert wlog.error_seq() == 0
+
+
+def test_an_export_that_fails_mid_stream_is_an_error_entry(store, client, tmp_path, monkeypatch):
+    """Headers are out by the time the generator raises, so the catch-all
+    handler never sees it — the wrapper is where it gets recorded."""
+    sid = store.ingest_csv(_csv(tmp_path / "e.csv", [["a", "b"]]))["id"]
+    view = store.build_view(sid, {})
+
+    def boom(*a, **k):
+        yield "A,B\n"
+        raise RuntimeError("disk full")
+    monkeypatch.setattr(store, "export_view_csv", boom)
+    try:
+        client.get(f"/api/export?view_id={view['view_id']}")
+    except RuntimeError:
+        pass   # TestClient re-raises what the stream raised; the download is what's truncated
+    # The wrapper's line is the one that exists in production (headers are
+    # out, so the catch-all never runs); under TestClient the exception
+    # also reaches the catch-all, which is a second entry, not a failure.
+    failed = [e for e in wlog.entries() if e["message"].startswith(f"Export failed: CSV view {view['view_id']}")]
+    assert len(failed) == 1 and failed[0]["level"] == "error"
+    assert "RuntimeError: disk full" in failed[0]["message"]
+    assert wlog.error_seq() >= failed[0]["seq"], "the badge lights for it"

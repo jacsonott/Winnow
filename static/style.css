@@ -1216,11 +1216,15 @@ textarea:focus { border-color: var(--accent); outline: none; }
   content: ""; position: absolute; inset: 0 3px; background: var(--accent-dim);
 }
 .sidebar-head { flex: 0 0 auto; padding: 8px; border-bottom: 1px solid var(--line); display: flex; gap: 6px; align-items: center; }
-#sidebarFilter {
+/* The one filter-box look: the sidebar's, and any panel's `.panel-search`
+   (Columns, the Log, the file picker). One rule, so a border or padding
+   change reaches every box, and the focus ring is the same everywhere. */
+#sidebarFilter, .panel-search {
   flex: 1 1 auto; min-width: 0; background: var(--ink); color: var(--text);
   border: var(--border-w) solid var(--line-2); border-radius: var(--radius-sm);
   padding: 5px 8px; font: inherit; font-size: 12px;
 }
+#sidebarFilter:focus, .panel-search:focus { border-color: var(--accent); outline: none; }
 .sidebar-newfolder {
   flex: 0 0 auto; background: var(--ink); color: var(--dim);
   border: var(--border-w) solid var(--line-2); border-radius: var(--radius-sm);
@@ -2221,13 +2225,6 @@ html.remote .row.selected:hover { background: var(--row-selected); }
   width: 6px; height: 6px; border-radius: 50%; background: var(--danger);
 }
 .errlog-bar { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
-.errlog-seg { display: flex; gap: 2px; }
-.errlog-seg .btn[aria-pressed="true"] { color: var(--accent); border-color: var(--accent-dim); }
-.errlog-search {
-  flex: 1 1 auto; min-width: 0; background: var(--ink); color: var(--text);
-  border: var(--border-w) solid var(--line-2); border-radius: var(--radius-sm);
-  padding: 5px 8px; font: inherit; font-size: 12px;
-}
 .errlog-list { max-height: 60vh; overflow: auto; font-family: var(--mono); font-size: 12px; }
 .errlog-row { display: grid; grid-template-columns: 150px 56px 1fr; gap: 8px;
   padding: 5px 4px; border-bottom: 1px solid var(--line); align-items: start; }

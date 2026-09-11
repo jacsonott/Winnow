@@ -23,6 +23,11 @@ import threading
 
 LEVELS = ("error", "warn", "info")
 RING = 2000
+# seq restarts at 0 with every process; the browser's "seen up to" mark
+# doesn't. BOOT tells it which process the seq belongs to, so a mark from
+# a previous run is discarded rather than hiding this run's first errors.
+import time as _time
+BOOT = int(_time.time() * 1000)
 
 _ring: "collections.deque[dict]" = collections.deque(maxlen=RING)
 _lock = threading.Lock()
@@ -71,11 +76,18 @@ def error_seq() -> int:
         return _error_seq
 
 
-def snapshot() -> dict:
-    """What /api/log returns: the ring, the high-water seq, and the seq of
-    the latest error (0 if none)."""
+def marks() -> dict:
+    """The three numbers the badge poll needs and nothing else — the
+    ring is 2000 entries and this is asked every 20 s per open tab."""
     with _lock:
-        return {"entries": list(_ring), "seq": _seq, "error_seq": _error_seq}
+        return {"seq": _seq, "error_seq": _error_seq, "boot": BOOT}
+
+
+def snapshot() -> dict:
+    """What /api/log returns: the ring, the high-water seq, the seq of the
+    latest error (0 if none) and the process token."""
+    with _lock:
+        return {"entries": list(_ring), "seq": _seq, "error_seq": _error_seq, "boot": BOOT}
 
 
 def reset() -> None:

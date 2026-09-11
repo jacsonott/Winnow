@@ -15,11 +15,22 @@ const SEEN_KEY = 'winnow.log.seen';
 /* Poll the log and light the Case button's dot when an error newer than
    the last-viewed one exists. Keyed to error_seq, not seq: an import
    finishing is news, not a problem. */
+/* The mark is "<boot>:<error_seq>": seq restarts at 0 with every server
+   process, so a bare number from a previous run would hide this run's
+   first errors (a plugin failing at startup lands at seq 1). A mark from
+   another boot counts as nothing seen. */
+function seenErrorSeq(boot) {
+  const [b, n] = String(localStorage.getItem(SEEN_KEY) || '').split(':');
+  return String(b) === String(boot) ? Number(n || 0) : 0;
+}
+function markSeen(boot, errorSeq) {
+  localStorage.setItem(SEEN_KEY, `${boot}:${errorSeq || 0}`);
+}
+
 export async function refreshLogBadge() {
-  let data;
-  try { data = await api('/api/log'); } catch { return; }
-  const seen = Number(localStorage.getItem(SEEN_KEY) || 0);
-  const unseen = (data.error_seq || 0) > seen;
+  let m;
+  try { m = await api('/api/log/marks'); } catch { return; }   // three numbers, not the ring
+  const unseen = (m.error_seq || 0) > seenErrorSeq(m.boot);
   const btn = $('btnCase');
   if (btn) btn.classList.toggle('has-errors', unseen);
 }
@@ -43,8 +54,10 @@ export async function openLog() {
   let data;
   try { data = await api('/api/log'); } catch { data = { entries: [], seq: 0, error_seq: 0 }; }
   // Opening the log is "I've seen these" — clear the dot and remember the
-  // latest error we showed.
-  localStorage.setItem(SEEN_KEY, String(data.error_seq || 0));
+  // latest error we showed, keyed to this server process. (If the ring
+  // has wrapped past that error, there is nothing left to show for it;
+  // the badge clears and the All view is what's left.)
+  markSeen(data.boot, data.error_seq);
   $('btnCase')?.classList.remove('has-errors');
   const entries = [...(data.entries || [])].reverse();   // newest first
   const hasErrors = entries.some((e) => e.level === 'error');
@@ -54,7 +67,7 @@ export async function openLog() {
       'This session, newest first: imports and exports as they start and finish, plus server-side '
       + 'warnings and errors. Everything here also prints to the terminal Winnow was started from.'));
     const bar = el('div', 'errlog-bar');
-    const seg = el('div', 'errlog-seg');
+    const seg = el('div', 'vp-seg');   // the app's one segmented control, contrast already fixed
     const segBtns = {};
     for (const [key, label] of [['errors', 'Errors'], ['all', 'All']]) {
       const btn = el('button', 'btn ghost', label);
@@ -62,7 +75,7 @@ export async function openLog() {
       segBtns[key] = btn;
       seg.append(btn);
     }
-    const search = el('input', 'errlog-search');
+    const search = el('input', 'panel-search errlog-search');
     search.type = 'search';
     search.placeholder = 'Filter…';
     search.autocomplete = 'off';

@@ -352,6 +352,11 @@ def api_log():
     return wlog.snapshot()
 
 
+@app.get("/api/log/marks")
+def api_log_marks():
+    return wlog.marks()
+
+
 class ClientLogBody(BaseModel):
     level: str = "warn"
     message: str = ""
@@ -4059,16 +4064,25 @@ def api_export(view_id: str, tagged_only: bool = False, filename: str = "timelin
 
     def logged():
         # Counted as it streams: the row count isn't known up front, and
-        # an aborted download (browser closed) is worth a line too.
+        # an aborted download (browser closed) is worth a line too. A
+        # failure mid-stream can't reach the catch-all handler (headers
+        # are already out), so it is recorded here or nowhere.
         rows, nbytes, t0 = 0, 0, time.time()
         wlog.record("info", f"Export started: {what} → {filename}")
         try:
             for chunk in gen:
-                rows += chunk.count("\n") if isinstance(chunk, str) else chunk.count(b"\n")
-                nbytes += len(chunk)
+                if isinstance(chunk, str):
+                    rows += chunk.count("\n")
+                    nbytes += len(chunk.encode("utf-8"))
+                else:
+                    rows += chunk.count(b"\n")
+                    nbytes += len(chunk)
                 yield chunk
         except GeneratorExit:
             wlog.record("warn", f"Export aborted: {what} after {rows:,} lines, {nbytes:,} bytes")
+            raise
+        except Exception as e:  # noqa: BLE001 — the download is already truncated; say why
+            wlog.record("error", f"Export failed: {what} after {rows:,} lines — {type(e).__name__}: {e}")
             raise
         wlog.record("info", f"Export finished: {what} — {max(rows - 1, 0):,} rows, {nbytes:,} bytes "
                             f"in {time.time() - t0:.1f}s")

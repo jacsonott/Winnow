@@ -27,6 +27,6 @@ def test_log_opens_from_case_menu(page):
     page.wait_for_selector("#modal:not([hidden])")
     assert page.locator("#modalTitle").inner_text().lower() == "log"
     # Errors | All, and a filter box.
-    assert page.locator("#modalBody .errlog-seg .btn").all_inner_texts() == ["Errors", "All"]
+    assert page.locator("#modalBody .vp-seg .btn").all_inner_texts() == ["Errors", "All"]
     assert page.locator("#modalBody .errlog-search").count() == 1
     page.keyboard.press("Escape")
