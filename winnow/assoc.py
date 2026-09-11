@@ -389,6 +389,10 @@ class LinuxAssoc:
                                    capture_output=True, timeout=30)
         return refresh
 
+    def refresh_verb(self) -> bool:
+        """Windows-only concern (the .desktop entry's Name= is the name)."""
+        return False
+
     def refresh_icons(self, catalogue: list[dict]) -> bool:
         """Re-sync the theme copies against the committed icon — called at
         server startup so an update that changed the icon propagates
@@ -565,6 +569,23 @@ class WindowsAssoc:
             return False
         self._set(f"{base}\\DefaultIcon", None, f"{icon_file('ico')},0")
         self._set(base, "IconHash", current)
+        self._notify()
+        return True
+
+    def refresh_verb(self) -> bool:
+        """Stamp FriendlyAppName/Icon onto a registration made before the
+        open verb carried them. Startup-time: a registered install whose
+        verb already says Winnow is a no-op, and so is an unregistered
+        one — creating the ProgId here would be registration by
+        surprise. Without this, only a fresh register() or the
+        hidden-launch toggle would ever write the name, and the install
+        the fix is for keeps reading "Python" in Open With."""
+        base = f"Software\\Classes\\{self.PROGID}"
+        if self._get(base, None) is None:
+            return False
+        if self._get(f"{base}\\shell\\open", "FriendlyAppName") == "Winnow":
+            return False
+        self._ensure_progid()
         self._notify()
         return True
 

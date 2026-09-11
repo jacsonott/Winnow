@@ -53,3 +53,21 @@ def test_unregistering_the_last_type_removes_the_verb_too():
     win.register(picked, cat)
     win.unregister(picked, cat)
     assert not any(k.startswith("Software\\Classes\\Winnow.File") for k in win.reg.keys)
+
+
+def test_startup_refresh_stamps_a_registration_that_predates_the_name():
+    """The install the fix is for registered with the old build: the verb
+    exists, the name doesn't. refresh_verb (called at startup) writes it
+    once and is a no-op after — and never creates a ProgId from nothing."""
+    win = _win()
+    assert win.refresh_verb() is False, "unregistered: nothing to stamp"
+    picked, cat = _cat(".csv")
+    win.register(picked, cat)
+    # Simulate the old build's registration: strip the new values.
+    for key in ("Software\\Classes\\Winnow.File", "Software\\Classes\\Winnow.File\\shell\\open"):
+        win.reg.keys[key].pop("FriendlyAppName", None)
+        win.reg.keys[key].pop("Icon", None)
+    assert win.refresh_verb() is True
+    verb = win.reg.keys["Software\\Classes\\Winnow.File\\shell\\open"]
+    assert verb["FriendlyAppName"] == "Winnow" and verb["Icon"].endswith("winnow.ico,0")
+    assert win.refresh_verb() is False, "already named: no rewrite, no Explorer poke"
