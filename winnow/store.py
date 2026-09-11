@@ -42,10 +42,10 @@ except ImportError:  # pragma: no cover - Windows
 
 from . import enrich  # noqa: F401 — registers the cross-table lookup op into timeparse.OPERATIONS
 from . import structparse  # noqa: F401 — registers the JSON/XML extraction ops into timeparse.OPERATIONS
-from . import log as wlog
 from . import timeparse
 from . import plasoread
 from . import xlsxread
+from . import log as wlog
 
 BATCH = 20_000
 SAMPLE_ROWS = 500
