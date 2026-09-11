@@ -184,6 +184,11 @@ async def _lifespan(_app: FastAPI):
         a = file_assoc.adapter(background=_assoc_background())
         if a and a.refresh_icons(_assoc_catalogue()):
             print("File-association icon refreshed after an icon update")
+        # Same idea for the Open With entry's name and icon: an install
+        # registered before the verb carried them gets them on the next
+        # start rather than on the next re-registration.
+        if a and a.refresh_verb():
+            print("File-association Open With entry renamed to Winnow")
     if swept["removed"]:
         print(f"Cleaned up {swept['removed']} orphaned temp file(s) from previous runs "
               f"({swept['bytes_freed'] / (1 << 20):.1f} MB)")
@@ -1567,7 +1572,8 @@ def api_browse_dir_new(request: Request, body: MakeDirBody):
 
 
 @app.get("/api/browse_dir")
-def api_browse_dir(request: Request, path: str = "", files: bool = False):
+def api_browse_dir(request: Request, path: str = "", files: bool = False,
+                   sort: str = "name", dir: str = "asc"):
     """One directory level — backs the "Browse..." folder picker in the
     new-case modal and, with files=true, the import modal's "Add from this
     machine…" file picker (the fast path: a picked path imports in place
@@ -1628,11 +1634,24 @@ def api_browse_dir(request: Request, path: str = "", files: bool = False):
         if files:
             truncated = len(all_dirs) > BROWSE_LIST_CAP or len(all_files) > BROWSE_LIST_CAP
             dirs = heapq.nsmallest(BROWSE_LIST_CAP, all_dirs, key=str.lower)
-            for e in heapq.nsmallest(BROWSE_LIST_CAP, all_files, key=lambda e: e.name.lower()):
+            # The cap is taken in the order the picker is showing. Sorting
+            # a name-capped 2000 by size or mtime client-side would show
+            # "the newest of the alphabetically-first 2000", which is not
+            # what "Modified ↓" promises on a 5000-file folder.
+            stats = []
+            for e in all_files:
                 try:
-                    file_entries.append({"name": e.name, "size": e.stat().st_size})
+                    st = e.stat()
                 except OSError:
                     continue
+                stats.append((e.name, st.st_size, int(st.st_mtime)))
+            key = {"size": lambda t: (t[1], t[0].lower()), "mtime": lambda t: (t[2], t[0].lower())}.get(
+                sort, lambda t: t[0].lower())
+            pick = heapq.nlargest if dir == "desc" else heapq.nsmallest
+            for name, size, mtime in pick(BROWSE_LIST_CAP, stats, key=key):
+                # mtime so the picker can sort by it — collections are
+                # often "the newest files from the tool run".
+                file_entries.append({"name": name, "size": size, "mtime": mtime})
         else:
             dirs = sorted(all_dirs, key=str.lower)
     except PermissionError:
@@ -3422,17 +3441,23 @@ def api_plugin_dashboard_add(fs_name: str, local_id: str, body: PluginBoardAddBo
     share it by coincidence, and replacing it would discard their widgets
     with no undo. A name already in use is a 409 carrying the existing
     board, and the UI asks; `replace=true` is the answer to that question,
-    never the default."""
+    never the default.
+
+    Unless the board already there is this plugin board's own earlier copy,
+    which `origin` identifies. Then there is nothing of the analyst's to
+    discard and no question to ask: adding again refreshes it, which is
+    what the plugin guide promises adding again does."""
     b = PLUGINS.get_dashboard(fs_name, local_id)
     if not b:
         raise HTTPException(404, f"No dashboard {local_id} from {fs_name}")
     name = (body.name or b["label"]).strip() or b["label"]
+    origin = f"plugin:{fs_name}:{local_id}"
     existing = store().find_dashboard_by_name(name)
-    if existing and not body.replace:
+    if existing and not body.replace and existing.get("origin") != origin:
         raise HTTPException(409, {"error": "name_taken", "name": name,
                                   "dashboard_id": existing["id"],
                                   "widget_count": existing["widget_count"]})
-    return store().upsert_dashboard_by_name(name, b["widgets"])
+    return store().upsert_dashboard_by_name(name, b["widgets"], origin=origin)
 
 
 @app.post("/api/dashboard/widget/preview")

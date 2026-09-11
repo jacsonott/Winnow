@@ -96,7 +96,8 @@ for (const ns of Object.values(NAMESPACES)) {
 // mouseup, where browsers fire their own history navigation from.
 window.addEventListener('mouseup', tabhistory.onMouseNav);
 
-core.$('btnAcrossCases').onclick = () => multicase.openMultiCase();
+// Across cases has no button for now: the modal is reachable as
+// __winnow.openMultiCase() (multicase.js says why), not from the header.
 notes.wireNotes();
 session.wireSession();
 watchlist.wireWatchlist();

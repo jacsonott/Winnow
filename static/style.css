@@ -80,6 +80,7 @@ html[data-style="panel"][data-theme="dark"] {
   --row-even: #161a1f; --row-hover: #1d232a; --row-selected: #223142; --cell-selected-bg: #2a3f52;
   --border-hairline: #1b1f24; --text-faint: #333a43;
   --danger: #e0796a; --danger-bg: #4a2530; --danger-border: #7a3b48;
+  --diff-a: #ff7a66; --diff-a-bg: #3a2320; --diff-b: #3fc1c9; --diff-b-bg: #173236;
   --str: #9fd0a0; --num: #7fb0d8; --kw: #c98fd6;
   --radius-sm: 2px; --radius-md: 3px; --border-w: 1px;
   --ease: ease; --transition-fast: 120ms;
@@ -93,6 +94,7 @@ html[data-style="panel"][data-theme="light"] {
   --row-even: #f7f8fa; --row-hover: #eef1f5; --row-selected: #d9e6f0; --cell-selected-bg: #cfe0ee;
   --border-hairline: #e1e4e9; --text-faint: #aab1bd;
   --danger: #c0392b; --danger-bg: #fbe1de; --danger-border: #e3a89c;
+  --diff-a: #c0392b; --diff-a-bg: #fbe1dd; --diff-b: #0e7c86; --diff-b-bg: #d8f1f3;
   --str: #2f8f52; --num: #2f6fa8; --kw: #8a4fa0;
   --radius-sm: 2px; --radius-md: 3px; --border-w: 1px;
   --ease: ease; --transition-fast: 120ms;
@@ -112,6 +114,7 @@ html[data-style="phosphor"][data-theme="dark"] {
   --row-even: #08110c; --row-hover: #0f1a13; --row-selected: #123420; --cell-selected-bg: #17462b;
   --border-hairline: #0e1712; --text-faint: #3c5b4a;
   --danger: #ff6b6b; --danger-bg: #3a1414; --danger-border: #6b2323;
+  --diff-a: #ff6b6b; --diff-a-bg: #3a1c1c; --diff-b: #39e881; --diff-b-bg: #123324;
   --str: #7be8a0; --num: #6fd0e0; --kw: #d9a8ff;
   --radius-sm: 0px; --radius-md: 0px; --border-w: 1px;
   --ease: linear; --transition-fast: 80ms;
@@ -129,6 +132,7 @@ html[data-style="phosphor"][data-theme="light"] {
   --row-even: #efe7d0; --row-hover: #e9ddc0; --row-selected: #ddd0a0; --cell-selected-bg: #d4c48a;
   --border-hairline: #ddcda3; --text-faint: #a3936a;
   --danger: #b23a2e; --danger-bg: #f0d9ce; --danger-border: #cf9a86;
+  --diff-a: #b23a2e; --diff-a-bg: #f4d9d2; --diff-b: #1f8a4c; --diff-b-bg: #d5ecd9;
   --str: #2f7d46; --num: #2f6f8a; --kw: #7a4f8a;
   --radius-sm: 0px; --radius-md: 0px; --border-w: 1px;
   --ease: linear; --transition-fast: 80ms;
@@ -147,6 +151,7 @@ html[data-style="blueprint"][data-theme="dark"] {
   --row-even: #16181d; --row-hover: #1b1e24; --row-selected: #22262d; --cell-selected-bg: #2a2e36;
   --border-hairline: #33383f; --text-faint: #565c66;
   --danger: #ff4d4d; --danger-bg: #3a1414; --danger-border: #7a2020;
+  --diff-a: #ff4d4d; --diff-a-bg: #3a1a1a; --diff-b: #ffd23f; --diff-b-bg: #3a3214;
   --str: #4dd08a; --num: #4d9fff; --kw: #d685ff;
   --radius-sm: 0px; --radius-md: 0px; --border-w: 2px;
   --ease: ease-out; --transition-fast: 80ms;
@@ -161,6 +166,7 @@ html[data-style="blueprint"][data-theme="light"] {
   --row-even: #f1eee4; --row-hover: #eae6d8; --row-selected: #ffdcc2; --cell-selected-bg: #ffcda3;
   --border-hairline: #1c1c1c; --text-faint: #9a9484;
   --danger: #c0392b; --danger-bg: #fbe1de; --danger-border: #1c1c1c;
+  --diff-a: #c0392b; --diff-a-bg: #f7dcd8; --diff-b: #8a6d00; --diff-b-bg: #f6efc9;
   --str: #1f7a3f; --num: #1f5f9f; --kw: #7a3f9f;
   --radius-sm: 0px; --radius-md: 0px; --border-w: 2px;
   --ease: ease-out; --transition-fast: 80ms;
@@ -213,6 +219,7 @@ html[data-style="harvest"][data-theme="dark"] {
   --row-even: #111514; --row-hover: #171b19; --row-selected: #201d14; --cell-selected-bg: #2c2519;
   --border-hairline: #171b19; --text-faint: #5d6459;
   --danger: #d9866f; --danger-bg: #2f1f1b; --danger-border: #5e3a2f;
+  --diff-a: #ff6b57; --diff-a-bg: #3a1f18; --diff-b: #4fd08a; --diff-b-bg: #173226;
   --str: #a6bd8f; --num: #c9a066; --kw: #b09ac6;
   --radius-sm: 2px; --radius-md: 3px; --border-w: 1px;
   --ease: ease; --transition-fast: 120ms;
@@ -232,6 +239,7 @@ html[data-style="harvest"][data-theme="light"] {
   --row-even: #f9f6ee; --row-hover: #f3eee0; --row-selected: #f0e9d6; --cell-selected-bg: #e7ddc3;
   --border-hairline: #ece7d9; --text-faint: #b2a996;
   --danger: #9e4a31; --danger-bg: #f5e3db; --danger-border: #dcb6a6;
+  --diff-a: #c8321b; --diff-a-bg: #fbe3dc; --diff-b: #1f8a4c; --diff-b-bg: #d9f2e3;
   --str: #52682f; --num: #8a6420; --kw: #75507f;
   --radius-sm: 2px; --radius-md: 3px; --border-w: 1px;
   --ease: ease; --transition-fast: 120ms;
@@ -245,6 +253,7 @@ html[data-style="studio"][data-theme="dark"] {
   --row-even: #15161d; --row-hover: #1b1c26; --row-selected: #23213a; --cell-selected-bg: #2a2748;
   --border-hairline: #23252f; --text-faint: #4a4c5c;
   --danger: #ff6b81; --danger-bg: #3a1420; --danger-border: #6b2035;
+  --diff-a: #ff6b81; --diff-a-bg: #3a1c26; --diff-b: #7c6cf6; --diff-b-bg: #262244;
   --str: #6fe0b0; --num: #6fa8f0; --kw: #c69cf0;
   --radius-sm: 8px; --radius-md: 14px; --border-w: 1px;
   --ease: cubic-bezier(.2,.8,.2,1); --transition-fast: 150ms;
@@ -258,6 +267,7 @@ html[data-style="studio"][data-theme="light"] {
   --row-even: #f9f9fc; --row-hover: #f2f1fa; --row-selected: #e7e3fc; --cell-selected-bg: #ddd7fb;
   --border-hairline: #ececf5; --text-faint: #b6b8c8;
   --danger: #d9534f; --danger-bg: #fbe4e3; --danger-border: #eab3b0;
+  --diff-a: #d9534f; --diff-a-bg: #f9dcdb; --diff-b: #7c6cf6; --diff-b-bg: #e4e1fb;
   --str: #1f9a5c; --num: #1f6fd0; --kw: #9a5cd0;
   --radius-sm: 8px; --radius-md: 14px; --border-w: 1px;
   --ease: cubic-bezier(.2,.8,.2,1); --transition-fast: 150ms;
@@ -750,6 +760,9 @@ html[data-style="studio"][data-theme="light"] {
 .fcell.pinned { background: var(--panel); box-shadow: inset -1px 0 0 var(--line-2); }
 .cell.pinned { background: var(--ink); box-shadow: inset -1px 0 0 var(--line); }
 .row:nth-child(even) .cell.pinned { background: var(--row-even); }
+.row.diff-a .cell.pinned { background: var(--diff-a-bg); }
+.row.diff-b .cell.pinned { background: var(--diff-b-bg); }
+.row.diff-ab .cell.pinned { background: linear-gradient(90deg, var(--diff-a-bg), var(--diff-b-bg)); }
 .row:hover .cell.pinned { background: var(--row-hover); }
 .row.selected .cell.pinned { background: var(--row-selected); }
 .cell.pinned.cell-selected { background: var(--cell-selected-bg); }
@@ -826,6 +839,11 @@ html[data-style="studio"][data-theme="light"] {
   background: var(--ink); /* opaque base so .gutter's sticky `background: inherit` never shows scrolled-under cells through odd rows */
 }
 .row:nth-child(even) { background: var(--row-even); }
+/* A pivoted session comparison's wash: after the zebra, BEFORE hover,
+   cursor and selection, which must still read over it. */
+.row.diff-a { background: var(--diff-a-bg); }
+.row.diff-b { background: var(--diff-b-bg); }
+.row.diff-ab { background: linear-gradient(90deg, var(--diff-a-bg), var(--diff-b-bg)); }
 .row:hover { background: var(--row-hover); }
 .row.cursor { background: var(--sel); box-shadow: inset 0 0 0 1px var(--sel-line); }
 .row.selected { background: var(--row-selected); }
@@ -1327,10 +1345,17 @@ textarea:focus { border-color: var(--accent); outline: none; }
   width: min(680px, 92vw); max-height: 82vh; display: flex; flex-direction: column;
 }
 .modal-card.wide { width: min(920px, 96vw); }
-/* Settings: ten collapsible sections. A card that grows re-centres itself
-   on every click, so the header jumped up to 165px; a fixed height keeps it
-   still and scrolls the body instead. */
-.modal-card.tall { height: 82vh; }
+/* Settings: eleven collapsible sections. A card that grows re-centres
+   itself on every click, so the header jumped up to 165px. It used to be a
+   fixed height, which kept it still — and also kept an all-collapsed
+   Settings at 82vh of mostly empty panel. Now it's sized to content and
+   anchored to the top of the viewport instead: it grows downward from a
+   fixed edge, so nothing above the click moves, and stops at the same
+   82vh, scrolling the body from there. */
+.modal-card.tall { max-height: 82vh; align-self: start; margin-top: 9vh; }
+/* The read-only skin tile in Settings opens the picker on click. */
+.style-card-static.style-card-link { cursor: pointer; }
+.style-card-static.style-card-link:hover { border-color: var(--accent-dim); }
 /* The Tables manager: five buttons, three stats and an index status per
    row — 920px truncated the buttons off the right edge on any real name. */
 .modal-card.xwide { width: min(1240px, 96vw); }
@@ -1432,6 +1457,16 @@ textarea:focus { border-color: var(--accent); outline: none; }
    rule for all of them so a new section needs no CSS of its own. */
 .table-menu-section + .table-menu-section { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 6px; }
 .table-menu-section h4 { margin: 10px 0 8px; }
+/* The top strip: no heading, the three everyday actions in a row, with
+   "Close this tab" pushed to the far side so it isn't the neighbour of
+   "Reset view". */
+.table-menu-strip { display: flex; gap: 6px; align-items: center; }
+.table-menu-strip .table-menu-close { margin-left: auto; }
+.collist-search { width: 100%; box-sizing: border-box; margin-bottom: 6px; }
+/* ⤒ ⤓ read as clutter on every row, so they stay faint until the row is
+   under the pointer — the same treatment .menu-item-action gets. */
+.collist-move { flex: 0 0 auto; font-size: 11px; line-height: 1; padding: 0 5px; opacity: .35; }
+.collist-row:hover .collist-move, .collist-move:focus-visible { opacity: 1; }
 .collist-pick { flex: 0 0 auto; font-size: 10px; padding: 2px 6px; font-family: var(--mono); }
 .collist-pick[aria-pressed="true"] { color: var(--accent); border-color: var(--accent-dim); }
 
@@ -1463,6 +1498,13 @@ textarea:focus { border-color: var(--accent); outline: none; }
    buttons to the same pitch. */
 .browse-row { display: flex; gap: 8px; align-items: center; margin: 0; padding: 3px 8px; }
 .session-row .count { color: var(--dim); font-size: 11px; margin-right: auto; }
+/* The file picker's filter/sort row, and the modified column each file
+   row grew — mono like the size beside it. */
+.browse-tools { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; }
+.browse-sort { font-size: 12px; }
+.browse-sort-dir { padding: 2px 8px; }
+.browse-row .browse-mtime { flex: 0 0 auto; margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--dim); }
+.browse-row .browse-mtime + .count { margin-right: 0; margin-left: 12px; }
 
 .index-status {
   font-family: var(--mono); font-size: 11px; white-space: nowrap;
@@ -1600,16 +1642,36 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .diff-stats td { padding: 3px 8px; border-bottom: 1px solid var(--border-hairline); }
 .diff-stats td.n .btn { font-family: var(--mono); font-size: 12px; padding: 1px 8px; min-width: 3em; }
 .diff-stats td.n .zero { color: var(--text-faint); font-family: var(--mono); padding: 1px 8px; }
-.diff-stats .diff-n-removed .btn { color: var(--danger); }
-.diff-stats .diff-n-added .btn { color: var(--accent); }
+/* A session comparison's two sides. Their own tokens, not --danger and
+   --accent: on harvest (the default skin) those are salmon and gold, two
+   warm hues a step apart, and A-vs-B was carried by the letters alone.
+   Each skin picks a red and a green/teal that sit on its neutrals. */
+.diff-stats .diff-n-removed .btn { color: var(--diff-a); border-color: var(--diff-a); }
+.diff-stats .diff-n-added .btn { color: var(--diff-b); border-color: var(--diff-b); }
+.diff-stats .diff-n-changed .btn { color: var(--diff-b); border-color: var(--diff-a); }
 .diff-legend { display: flex; gap: 14px; margin-top: 6px; font-size: 11px; color: var(--dim); }
+/* The Sessions panel's "a comparison is on" line: a tinted strip, so it
+   isn't mistaken for the help text under the heading. */
+.diff-applied { margin: 6px 0 10px; padding: 8px 10px; border: 1px solid var(--diff-b); border-radius: var(--radius-sm);
+  background: var(--diff-b-bg); font-size: 12px; }
+.diff-applied[hidden] { display: none; }
+.diff-applied-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.diff-applied-check { color: var(--diff-b); font-weight: 700; margin-right: 2px; }
+.diff-applied .row-actions { margin-top: 6px; }
 .diff-legend b { color: var(--text); font-weight: 500; }
 .diff-mark {
   flex: 0 0 auto; font-family: var(--mono); font-size: 9px; line-height: 12px; padding: 0 3px;
   border-radius: var(--radius-sm); border: 1px solid var(--line-2); color: var(--text); background: var(--panel-2);
 }
-.diff-mark-removed { color: var(--danger); border-color: var(--danger-border); }
-.diff-mark-added { color: var(--accent); border-color: var(--accent-dim); }
+.diff-mark-removed { color: var(--diff-a); border-color: var(--diff-a); background: var(--diff-a-bg); }
+.diff-mark-added { color: var(--diff-b); border-color: var(--diff-b); background: var(--diff-b-bg); }
+.diff-mark-changed { color: var(--diff-b); border-color: var(--diff-a); background: var(--diff-b-bg); }
+/* The row itself carries a wash of its side, so a pivoted comparison
+   reads at a glance down the grid rather than pill by pill. Selection
+   still wins — that highlight has one job. */
+/* The wash rules themselves sit with the row background rules (above
+   .row:hover / .row.cursor / .row.selected in source order, at equal
+   specificity), so hover, the keyboard cursor and selection still win. */
 /* The session-comparison banner wears the quick-look banner's look (the
    shared rule above): another accent-tinted "something is in progress"
    strip, in its own grid track. */

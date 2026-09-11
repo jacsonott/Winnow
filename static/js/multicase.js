@@ -6,7 +6,16 @@
    collections at once. Everything here is READ-ONLY by construction
    (winnow/multicase.py): the open case keeps its lock and its writer, the
    others are opened mode=ro. Acting on a hit means opening it in the case
-   that owns it, which is what every row here offers. */
+   that owns it, which is what every row here offers.
+
+   WITHDRAWN FROM THE HEADER, September 2026. The feature isn't finished
+   enough to sit beside Search all: the three panes answer three
+   different questions with three different result shapes, and the
+   sweep's output stops short of the thing an analyst does next (tag the
+   hits, pivot to the case). The routes, this module and its UI test all
+   stay — openMultiCase() is still reachable via __winnow for whoever
+   picks the redesign up — but nothing in index.html points here until
+   it earns the space back. */
 import { $, api, el, post, toast } from './core.js';
 import { openCase } from './home.js';
 import { markModalAction, modal } from './ui.js';

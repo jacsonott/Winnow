@@ -9,6 +9,7 @@ something, and a plugin does not get to decide what.
 from __future__ import annotations
 
 import json
+import time
 import urllib.request
 
 import pytest
@@ -59,6 +60,29 @@ def _row(page):
     return page.locator("#sidebarList .sidebar-dash-library", has_text=BOARD)
 
 
+def _add_calls(page):
+    """Collect the status of every POST to the add route.
+
+    Counting boards afterwards cannot tell success from refusal — a 409
+    also leaves exactly one board — which is how a broken second add sat
+    behind a passing test. The status is the thing to assert."""
+    seen: list[int] = []
+
+    def note(r):
+        if "/api/plugin_dashboards/" in r.url and r.url.endswith("/add"):
+            seen.append(r.status)
+
+    page.on("response", note)
+    return seen
+
+
+def _wait_for_calls(seen, n, timeout=10.0):
+    deadline = time.monotonic() + timeout
+    while len(seen) < n and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert len(seen) == n, f"expected {n} add calls, saw {seen}"
+
+
 def test_enabling_the_plugin_offers_the_board_without_adding_it(page, offered):
     # Drawn by the toggle itself — nothing here redraws the sidebar.
     _row(page).wait_for(state="visible", timeout=10_000)
@@ -94,15 +118,54 @@ def test_the_plus_copies_it_into_the_case_and_opens_it(page, offered):
     assert page.locator("#dashboardview .dash-card:not(.dash-add)").count() == 5
 
 
+def _click_add(page, row):
+    """Click ＋ and wait for the add request it fires. The sidebar row is
+    re-rendered by the previous add (loadDashboards → renderSidebar), and
+    on CI a click has landed in that gap and fired nothing — not a
+    refusal, just a click on a node that was being replaced. So: the
+    click is retried until a request is seen, and it's the request's
+    STATUS the test is about."""
+    for attempt in range(3):
+        row.hover()
+        try:
+            with page.expect_response(
+                    lambda r: "/api/plugin_dashboards/" in r.url and r.url.endswith("/add"),
+                    timeout=4_000) as resp:
+                row.locator(".menu-item-action[title^='Add this board']").click()
+            return resp.value.status
+        except Exception:   # noqa: BLE001 — a missed click, try again
+            if attempt == 2:
+                raise
+
+
 def test_adding_it_twice_refreshes_rather_than_duplicating(page, offered):
+    """Both adds must come back 200. The second one is the plugin's own
+    copy being refreshed — there is nothing of the analyst's to discard,
+    so it must not stop to ask."""
+    calls = []
     row = _row(page)
     for _ in range(2):
-        row.hover()
-        row.locator(".menu-item-action[title^='Add this board']").click()
+        calls.append(_click_add(page, row))
         page.wait_for_selector("#dashboardview:not([hidden])")
         page.wait_for_function("() => __winnow.S.dashboards.some((d) => d.name.includes('host overview'))")
+    assert calls == [200, 200], "the second add was refused, not refreshed"
+    assert page.locator(".confirm-overlay").count() == 0, "it asked about its own copy"
     assert page.evaluate(
         "() => __winnow.S.dashboards.filter((d) => d.name.includes('host overview')).length") == 1
+    assert page.locator("#dashboardview .dash-card:not(.dash-add)").count() == 5
+
+
+def test_clicking_the_name_adds_it_like_the_plus(page, offered):
+    """The name and the ＋ are one action. `label.onclick = addToCase` handed
+    the click event to the `replace` parameter, which survived JSON as {}
+    and came back 422 — the obvious target was the dead one."""
+    calls = _add_calls(page)
+    _row(page).locator("button.menu-item").click()
+    page.wait_for_selector("#dashboardview:not([hidden])")
+    page.wait_for_function("() => __winnow.S.dashboards.some((d) => d.name.includes('host overview'))")
+    _wait_for_calls(calls, 1)
+    assert calls == [200], "clicking the board's name did not add it"
+    assert page.locator("#dashboardview .dash-card:not(.dash-add)").count() == 5
 
 
 def test_a_name_collision_asks_before_replacing(page, offered):

@@ -122,7 +122,16 @@ def register_op(op: dict) -> None:
     less ambiguous / more common interpretation first."""
     if "detect" not in op:
         op["detect"] = _success_rate_detect(op)
-    op.setdefault("two_input", False)
+    # Ops that read several columns of a row at once. `parse_multi(values,
+    # params, state)` gets them in op_inputs() order: the input column
+    # first, then whatever the op's `column`/`columns` params name. An op
+    # written against the older parse_pair(a, b, params) is wrapped here,
+    # so the store has exactly one multi-column calling convention.
+    op.setdefault("parse_multi", None)
+    if op.get("parse_pair") and op["parse_multi"] is None:
+        pair = op["parse_pair"]
+        op["parse_multi"] = lambda vals, params, state: pair(vals[0], vals[1], params)
+    op["multi_input"] = op["parse_multi"] is not None
     op.setdefault("stateful", False)
     op.setdefault("value_type", "datetime")
     op.setdefault("hidden_from_detect", False)
@@ -216,6 +225,26 @@ def validate_params(op_id: str, params: dict | None) -> dict:
         elif kind == "offset":
             val = str(val).strip()
             _parse_utc_offset(val)  # raises on garbage
+        elif kind == "columns":
+            # An ordered list of column names. A comma-joined string is
+            # accepted for hand-written specs; the UI sends a list. Order
+            # is meaning (coalesce tries them in turn), duplicates are not.
+            if isinstance(val, str):
+                val = val.split(",")
+            if not isinstance(val, (list, tuple)):
+                raise ValueError(f"{spec.get('label', name)} must be a list of column names")
+            seen: set[str] = set()
+            cleaned: list[str] = []
+            for v in val:
+                item = str(v).strip()
+                if item and item.lower() not in seen:
+                    seen.add(item.lower())
+                    cleaned.append(item)
+            if not cleaned:
+                if spec.get("required"):
+                    raise ValueError(f"Operation {op['label']!r} needs at least one column under {spec.get('label', name)!r}")
+                continue
+            val = cleaned
         else:
             val = str(val).strip()
         out[name] = val
@@ -230,6 +259,32 @@ def validate_params(op_id: str, params: dict | None) -> dict:
     return out
 
 
+def op_inputs(op_id: str, input_column: str, params: dict | None) -> list[str]:
+    """Every column an operation reads, in the order parse_multi receives
+    them: the input column, then each `column`/`columns` param's value(s)
+    in declaration order. The one place that knows which params name
+    columns — the store's validation, backfill, preview, dependency checks
+    and session round-trip all ask this rather than spelling
+    `params["other_column"]` out five times over. Tolerates unvalidated
+    params (a raw list or a comma string) so it can run before
+    validate_params on a merge's member check."""
+    out = [input_column]
+    op = OPERATIONS.get(op_id)
+    if op is None:
+        return out
+    for spec in op["params"]:
+        v = (params or {}).get(spec["name"])
+        if not v:
+            continue
+        kind = spec.get("type")
+        if kind == "column":
+            out.append(str(v))
+        elif kind == "columns":
+            items = v.split(",") if isinstance(v, str) else list(v)
+            out.extend(str(x).strip() for x in items if str(x).strip())
+    return out
+
+
 def list_ops() -> list[dict]:
     """JSON-able registry listing for the UI — everything but the callables."""
     out = []
@@ -239,7 +294,7 @@ def list_ops() -> list[dict]:
             "label": op["label"],
             "description": op["description"],
             "params": op["params"],
-            "two_input": op["two_input"],
+            "multi_input": op["multi_input"],
             "value_type": op["value_type"],
             "derived_kind": op.get("derived_kind", "datetime"),
             "family": op["family"],
@@ -734,7 +789,6 @@ register_op({
         "help": "The start time; the derived value is this column's time minus that column's.",
     }],
     "subsecond": True,
-    "two_input": True,
     "value_type": "number",
     "derived_kind": "duration",
     "hidden_from_detect": True,

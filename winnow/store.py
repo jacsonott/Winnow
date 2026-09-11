@@ -41,6 +41,7 @@ except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
 
 from . import enrich  # noqa: F401 — registers the cross-table lookup op into timeparse.OPERATIONS
+from . import combine  # noqa: F401 — registers the multi-column ops (coalesce) the same way
 from . import structparse  # noqa: F401 — registers the JSON/XML extraction ops into timeparse.OPERATIONS
 from . import timeparse
 from . import plasoread
@@ -340,7 +341,8 @@ CREATE TABLE IF NOT EXISTS dashboards (
     name    TEXT NOT NULL,
     widgets TEXT NOT NULL DEFAULT '[]',
     pos     INTEGER NOT NULL DEFAULT 0,
-    pinned  INTEGER NOT NULL DEFAULT 0           -- 1: shown as a page tab in the top strip
+    pinned  INTEGER NOT NULL DEFAULT 0,          -- 1: shown as a page tab in the top strip
+    origin  TEXT                                 -- 'plugin:<fs_name>:<local_id>' for a copy of an offered board; NULL if the analyst built it
 );
 """
 
@@ -1231,6 +1233,12 @@ class Store:
             # Same for dashboards.pinned (a board promoted into the page strip).
             if not any(r[1] == "pinned" for r in self.db.execute("PRAGMA table_info(dashboards)")):
                 self.db.execute("ALTER TABLE dashboards ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
+            # ...and dashboards.origin. A case from before this column has
+            # NULL everywhere, which reads as "the analyst built it" — so a
+            # plugin re-offering a board still asks before replacing it.
+            # That is the safe direction to be wrong in.
+            if not any(r[1] == "origin" for r in self.db.execute("PRAGMA table_info(dashboards)")):
+                self.db.execute("ALTER TABLE dashboards ADD COLUMN origin TEXT")
             # The single-row `dashboard` becomes one named "Dashboard" entry
             # the first time a case with that older shape is opened.
             has_named = self.db.execute("SELECT 1 FROM dashboards LIMIT 1").fetchone()
@@ -4072,8 +4080,9 @@ class Store:
                 if self._find_column(msrc, (name or "").strip()):
                     raise ValueError(
                         f"Member table {msrc['name']!r} already has a column called {(name or '').strip()!r}")
-                if self._find_column(msrc, input_column) is None:
-                    raise ValueError(f"Member table {msrc['name']!r} has no column {input_column!r}")
+                for col in timeparse.op_inputs(op_id, input_column, params):
+                    if self._find_column(msrc, col) is None:
+                        raise ValueError(f"Member table {msrc['name']!r} has no column {col!r}")
             results = [self.add_derived_column(m["source_id"], name, input_column, op_id, params)
                        for m in members]
             return {"definition": results[0]["definition"],
@@ -4114,8 +4123,8 @@ class Store:
             return entry
 
         _check_input(input_column, "input column")
-        if op["two_input"]:
-            _check_input(params["other_column"], "second column")
+        for col in timeparse.op_inputs(op_id, input_column, params)[1:]:
+            _check_input(col, "other column")
         if op.get("check"):
             op["check"](self, params)  # ops that reference the case (lookup) validate NOW, not mid-backfill
 
@@ -4221,8 +4230,8 @@ class Store:
             op = timeparse.OPERATIONS.get(op_id)
             if op is None:
                 raise ValueError(f"Unknown operation: {op_id}")
-            if op["two_input"]:
-                raise ValueError(f"{op['label']!r} takes two columns and can't be added in a batch")
+            if op["multi_input"]:
+                raise ValueError(f"{op['label']!r} reads several columns and can't be added in a batch")
             if not name:
                 raise ValueError("Every new column needs a name")
             if len(name) > 200:
@@ -4285,8 +4294,8 @@ class Store:
             ).fetchall()
         for o in others:
             o_params = json.loads(o["params"] or "{}")
-            if (o["input_column"].lower() == d["name"].lower()
-                    or str(o_params.get("other_column", "")).lower() == d["name"].lower()):
+            reads = {c.lower() for c in timeparse.op_inputs(o["op_id"], o["input_column"], o_params)}
+            if d["name"].lower() in reads:
                 raise ValueError(f"{o['name']!r} is computed from this column — remove that one first")
         drv = self._derived_table(d["source_id"])
         with self.lock, self.db:
@@ -4305,8 +4314,8 @@ class Store:
         lower = {n.lower() for n in names}
         out = []
         for d in self.list_derived_columns(source_id):
-            other = str((d.get("params") or {}).get("other_column", ""))
-            if d["input_column"].lower() in lower or other.lower() in lower:
+            reads = {c.lower() for c in timeparse.op_inputs(d["op_id"], d["input_column"], d.get("params"))}
+            if reads & lower:
                 out.append(d)
         return out
 
@@ -4411,9 +4420,8 @@ class Store:
         plans = []
         for d in defs:
             op = timeparse.OPERATIONS[d["op_id"]]
-            plan = {"d": d, "op": op, "state": {}, "a": slot(d["input_column"])}
-            if op["two_input"]:
-                plan["b"] = slot(d["params"]["other_column"])
+            inputs = timeparse.op_inputs(d["op_id"], d["input_column"], d["params"])
+            plan = {"d": d, "op": op, "state": {}, "slots": [slot(c) for c in inputs]}
             if op.get("prepare"):
                 # e.g. lookup loading its whole mapping once — per
                 # definition, before the scan, so the scan stays dict hits
@@ -4423,10 +4431,8 @@ class Store:
         # slot() keys case-insensitively but _col_ref needs the real name.
         real = {}
         for d in defs:
-            real[d["input_column"].lower()] = d["input_column"]
-            if timeparse.OPERATIONS[d["op_id"]]["two_input"]:
-                other = d["params"]["other_column"]
-                real[other.lower()] = other
+            for c in timeparse.op_inputs(d["op_id"], d["input_column"], d["params"]):
+                real[c.lower()] = c
         sel = ", ".join(self._col_ref(src, real[c]) for c in cols)
 
         names = [d["name"] for d in defs]
@@ -4452,10 +4458,11 @@ class Store:
                     out = [t[0]]
                     for plan in plans:
                         op = plan["op"]
-                        if op["two_input"]:
-                            out.append(op["parse_pair"](t[1 + plan["a"]], t[1 + plan["b"]], plan["d"]["params"]))
+                        if op["multi_input"]:
+                            out.append(op["parse_multi"]([t[1 + i] for i in plan["slots"]],
+                                                         plan["d"]["params"], plan["state"]))
                         else:
-                            out.append(op["parse"](t[1 + plan["a"]], plan["d"]["params"], plan["state"]))
+                            out.append(op["parse"](t[1 + plan["slots"][0]], plan["d"]["params"], plan["state"]))
                     vals.append(tuple(out))
                 last_rid = vals[-1][0]
                 with self.lock, self.db:
@@ -4498,12 +4505,25 @@ class Store:
         the number the analyst needs to decide whether they picked the wrong
         format. An empty input cell isn't a failure, it's an empty cell."""
         drv = self._derived_table(d["source_id"])
-        inp = self._col_ref(src, d["input_column"], "s")
         with self._reader() as ro:
             return ro.execute(
                 f"SELECT COUNT(*) FROM {self._from_clause(src, 's')} "
-                f"WHERE {inp} IS NOT NULL AND {inp} <> '' AND {q(drv)}.{q(d['name'])} IS NULL"
+                f"WHERE {self._had_input_sql(src, d, 's')} AND {q(drv)}.{q(d['name'])} IS NULL"
             ).fetchone()[0]
+
+    def _had_input_sql(self, src: dict, d: dict, alias: str | None = None) -> str:
+        """The row had something to read. One column, non-empty, for the
+        ordinary op; for a multi-column op (coalesce) ANY of its inputs
+        non-blank — the op's own contract is that whitespace is blank, so
+        TRIM there, and a row where every listed column is empty is an
+        empty row, not a failed one (the preview counts the same way)."""
+        inputs = timeparse.op_inputs(d["op_id"], d["input_column"], d.get("params"))
+        refs = [self._col_ref(src, c, alias) if alias else self._col_ref(src, c) for c in inputs]
+        if len(refs) == 1:
+            return f"({refs[0]} IS NOT NULL AND {refs[0]} <> '')"
+        # TRIM's default strips spaces only; the op's blank is Python's
+        # str.strip(), so name the whitespace explicitly.
+        return "(" + " OR ".join(f"({r} IS NOT NULL AND TRIM({r}, ' \t\r\n') <> '')" for r in refs) + ")"
 
     def unparsed_where_fragment(self, def_id: int) -> str:
         """An advanced-filter fragment selecting exactly the rows that
@@ -4511,7 +4531,11 @@ class Store:
         which 12". Built here rather than in the frontend because it has
         to quote two analyst-named columns into SQL (invariant #5)."""
         d = self.get_derived_column(def_id)
-        return f"{q(d['name'])} IS NULL AND {q(d['input_column'])} <> ''"
+        inputs = timeparse.op_inputs(d["op_id"], d["input_column"], d.get("params"))
+        if len(inputs) == 1:
+            return f"{q(d['name'])} IS NULL AND {q(d['input_column'])} <> ''"
+        had = " OR ".join(f"TRIM(COALESCE({q(c)}, ''), ' \t\r\n') <> ''" for c in inputs)
+        return f"{q(d['name'])} IS NULL AND ({had})"
 
     DETECT_SAMPLE = 200
 
@@ -4595,17 +4619,25 @@ class Store:
         src = self._source_lite(source_id)
         if self._find_column(src, column) is None:
             raise KeyError(column)
-        if op["two_input"]:
-            other = params["other_column"]
-            if self._find_column(src, other) is None:
-                raise KeyError(other)
+        if op["multi_input"]:
+            inputs = timeparse.op_inputs(op_id, column, params)
+            for other in inputs[1:]:
+                if self._find_column(src, other) is None:
+                    raise KeyError(other)
+            state: dict = {}
+            if op.get("prepare"):
+                op["prepare"](self, params, state)
+            sel = ", ".join(self._col_ref(src, c) for c in inputs)
             with self._reader() as ro:
                 rows = ro.execute(
-                    f"SELECT {self._col_ref(src, column)}, {self._col_ref(src, other)} "
-                    f"FROM {self._from_clause(src)} LIMIT ?", (limit,),
+                    f"SELECT {sel} FROM {self._from_clause(src)} LIMIT ?", (limit,),
                 ).fetchall()
-            preview = [{"input": r[0], "output": op["parse_pair"](r[0], r[1], params)} for r in rows]
-            failures = sum(1 for p in preview if p["output"] is None)
+            preview = [{"input": r[0], "output": op["parse_multi"](list(r), params, state)} for r in rows]
+            # A failure is a NULL from a row that HAD something to read —
+            # the same rule _count_parse_failures applies after the
+            # backfill, so the modal's verdict and the column's count agree.
+            failures = sum(1 for r, p in zip(rows, preview)
+                           if p["output"] is None and any(v is not None and str(v).strip() for v in r))
             return {"preview": preview, "sampled": len(preview), "failures": failures}
         samples = self._sample_column(src, column)
         preview = self._preview_rows(samples[:limit], op_id, params)
@@ -7473,16 +7505,25 @@ class Store:
         return self._loads_widgets(row["widgets"])
 
     def set_dashboard_widgets(self, dashboard_id: int, widgets: list) -> list:
+        """Edited by hand, which also clears `origin`.
+
+        `origin` means "these widgets are exactly what the plugin wrote" —
+        that is the whole basis for re-adding the board refreshing it
+        without asking. The moment the analyst changes a card, there IS
+        work of theirs to lose, so the board stops being the plugin's copy
+        and the next add goes back to asking."""
         if not isinstance(widgets, list):
             raise ValueError("A dashboard is a list of widgets")
         with self.lock, self.db:
             cur = self.db.execute(
-                "UPDATE dashboards SET widgets=? WHERE id=?", (json.dumps(widgets), dashboard_id))
+                "UPDATE dashboards SET widgets=?, origin=NULL WHERE id=?",
+                (json.dumps(widgets), dashboard_id))
             if cur.rowcount == 0:
                 raise KeyError(f"No dashboard {dashboard_id}")
         return widgets
 
-    def create_dashboard(self, name: str, widgets: list | None = None) -> dict:
+    def create_dashboard(self, name: str, widgets: list | None = None,
+                         origin: str | None = None) -> dict:
         name = (name or "").strip()
         if not name:
             raise ValueError("A dashboard needs a name")
@@ -7491,8 +7532,8 @@ class Store:
         with self.lock, self.db:
             pos = self.db.execute("SELECT COALESCE(MAX(pos), -1) + 1 FROM dashboards").fetchone()[0]
             cur = self.db.execute(
-                "INSERT INTO dashboards(name, widgets, pos) VALUES (?,?,?)",
-                (name, json.dumps(widgets or []), pos))
+                "INSERT INTO dashboards(name, widgets, pos, origin) VALUES (?,?,?,?)",
+                (name, json.dumps(widgets or []), pos, origin))
             did = cur.lastrowid
         return {"id": did, "name": name, "pos": pos, "widget_count": len(widgets or [])}
 
@@ -7502,8 +7543,11 @@ class Store:
             raise ValueError("A dashboard needs a name")
         if len(name) > 200:
             raise ValueError("That dashboard name is too long")
+        # A rename is a hand edit like changing a card: the board stops
+        # being the plugin's copy, so a later add of the offered board asks
+        # before replacing it rather than refreshing silently.
         with self.lock, self.db:
-            if self.db.execute("UPDATE dashboards SET name=? WHERE id=?",
+            if self.db.execute("UPDATE dashboards SET name=?, origin=NULL WHERE id=?",
                                (name, dashboard_id)).rowcount == 0:
                 raise KeyError(f"No dashboard {dashboard_id}")
 
@@ -7520,10 +7564,15 @@ class Store:
     def find_dashboard_by_name(self, name: str) -> dict | None:
         """The board that name would land on, if any — so a caller can ask
         before replacing one it did not create (see the plugin-board add
-        route). NOCASE, matching upsert_dashboard_by_name's own lookup."""
+        route). NOCASE, matching upsert_dashboard_by_name's own lookup.
+
+        `origin` is what makes that question answerable: a board stamped
+        with the same plugin board this caller is about to write is that
+        caller's own earlier copy, and refreshing it discards nothing the
+        analyst wrote."""
         with self._reader() as ro:
             row = ro.execute(
-                "SELECT id, name, widgets FROM dashboards WHERE name=? COLLATE NOCASE",
+                "SELECT id, name, widgets, origin FROM dashboards WHERE name=? COLLATE NOCASE",
                 (name,)).fetchone()
         if not row:
             return None
@@ -7531,20 +7580,29 @@ class Store:
             n = len(json.loads(row["widgets"]) or [])
         except (TypeError, ValueError):
             n = 0
-        return {"id": row["id"], "name": row["name"], "widget_count": n}
+        return {"id": row["id"], "name": row["name"], "widget_count": n,
+                "origin": row["origin"]}
 
-    def upsert_dashboard_by_name(self, name: str, widgets: list) -> dict:
+    def upsert_dashboard_by_name(self, name: str, widgets: list,
+                                 origin: str | None = None) -> dict:
         """Create-or-replace a dashboard by name — how a profile applies its
         board (a second apply of the same profile refreshes rather than
-        duplicates)."""
+        duplicates).
+
+        `origin` says whose widgets these now are, and is written every
+        time — including as NULL. Whoever last wrote the board owns it: the
+        plugin add stamps itself so re-adding refreshes silently, and a
+        profile apply (which writes ITS widgets, not the plugin's) clears
+        the stamp so the plugin has to ask before overwriting them. One
+        rule, and it errs toward asking."""
         with self.lock, self.db:
             row = self.db.execute(
                 "SELECT id FROM dashboards WHERE name=? COLLATE NOCASE", (name,)).fetchone()
             if row:
-                self.db.execute("UPDATE dashboards SET widgets=? WHERE id=?",
-                               (json.dumps(widgets), row["id"]))
+                self.db.execute("UPDATE dashboards SET widgets=?, origin=? WHERE id=?",
+                               (json.dumps(widgets), origin, row["id"]))
                 return {"id": row["id"], "name": name}
-        return self.create_dashboard(name, widgets)
+        return self.create_dashboard(name, widgets, origin=origin)
 
     # Shorthands a SHIPPED dashboard uses so its SQL is portable across
     # cases — the table's src_<id> varies, but its header set doesn't.
@@ -7838,7 +7896,7 @@ class Store:
                 # A chained column's parent was created a moment ago and its
                 # backfill is an async job — wait for that link, or the
                 # "still building" guard (correctly) refuses the child.
-                for inp in (d["input_column"], str((d.get("params") or {}).get("other_column", ""))):
+                for inp in timeparse.op_inputs(d["op_id"], d["input_column"], d.get("params")):
                     jid = pending_jobs.get(inp.lower())
                     if jid:
                         self.wait_for_ingest_job(jid, timeout=600)

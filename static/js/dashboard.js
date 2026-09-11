@@ -209,7 +209,11 @@ export function renderDashboardsInto(list) {
           if (go) addToCase(true);
         }
       };
-      label.onclick = addToCase;
+      // Not `= addToCase`: onclick hands the handler the click event, which
+      // would arrive as `replace`. It survives JSON.stringify as {}, so the
+      // body says replace: {} and the route 422s — clicking the name failed
+      // while clicking ＋ beside it worked.
+      label.onclick = () => addToCase();
       row.append(label, el('span', 'sidebar-row-count', String(b.widget_count)));
       const acts = el('div', 'sidebar-row-actions');
       const plus = el('button', 'menu-item-action', '＋');

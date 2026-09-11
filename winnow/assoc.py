@@ -389,6 +389,10 @@ class LinuxAssoc:
                                    capture_output=True, timeout=30)
         return refresh
 
+    def refresh_verb(self) -> bool:
+        """Windows-only concern (the .desktop entry's Name= is the name)."""
+        return False
+
     def refresh_icons(self, catalogue: list[dict]) -> bool:
         """Re-sync the theme copies against the committed icon — called at
         server startup so an update that changed the icon propagates
@@ -532,11 +536,21 @@ class WindowsAssoc:
     def _ensure_progid(self) -> None:
         base = f"Software\\Classes\\{self.PROGID}"
         self._set(base, None, "Winnow")
-        # DefaultIcon is what puts the brand mark on the Open With → Winnow
-        # menu entry and on any file type Winnow is the default for (a
-        # .db-winnow case, above all). ",0" = the first icon in the .ico.
-        self._set(f"{base}\\DefaultIcon", None, f"{icon_file('ico')},0")
+        # DefaultIcon is what puts the brand mark on any file type Winnow is
+        # the default for (a .db-winnow case, above all). ",0" = the first
+        # icon in the .ico.
+        icon = f"{icon_file('ico')},0"
+        self._set(f"{base}\\DefaultIcon", None, icon)
         self._set(base, "IconHash", _icon_hash())
+        # The Open With menu names a handler by asking its open verb for a
+        # FriendlyAppName and, absent one, falls back to the executable
+        # in the command — which is python.exe, so the entry for a .txt
+        # read "Python" with the interpreter's icon. Name and icon on the
+        # verb (and the name on the ProgId, which some shells read
+        # instead) make it "Winnow" with the mark.
+        self._set(base, "FriendlyAppName", "Winnow")
+        self._set(f"{base}\\shell\\open", "FriendlyAppName", "Winnow")
+        self._set(f"{base}\\shell\\open", "Icon", icon)
         self._set(f"{base}\\shell\\open\\command", None,
                   subprocess.list2cmdline(launch_command(self.background)) + ' "%1"')
 
@@ -555,6 +569,23 @@ class WindowsAssoc:
             return False
         self._set(f"{base}\\DefaultIcon", None, f"{icon_file('ico')},0")
         self._set(base, "IconHash", current)
+        self._notify()
+        return True
+
+    def refresh_verb(self) -> bool:
+        """Stamp FriendlyAppName/Icon onto a registration made before the
+        open verb carried them. Startup-time: a registered install whose
+        verb already says Winnow is a no-op, and so is an unregistered
+        one — creating the ProgId here would be registration by
+        surprise. Without this, only a fresh register() or the
+        hidden-launch toggle would ever write the name, and the install
+        the fix is for keeps reading "Python" in Open With."""
+        base = f"Software\\Classes\\{self.PROGID}"
+        if self._get(base, None) is None:
+            return False
+        if self._get(f"{base}\\shell\\open", "FriendlyAppName") == "Winnow":
+            return False
+        self._ensure_progid()
         self._notify()
         return True
 

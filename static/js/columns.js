@@ -71,6 +71,19 @@ export function togglePin(name) {
   return now;
 }
 
+/* Send a column to either end of the order. Drag covers every other
+   position, but "put this first" on a 200-column table is a drag across
+   the whole list — and a hidden column can't be dragged in the grid at
+   all. Same save path as a drag, so the layout remembers it. */
+export function moveColumn(name, where) {
+  if (!S.order.includes(name)) return;
+  const rest = S.order.filter((n) => n !== name);
+  S.order = where === 'top' ? [name, ...rest] : [...rest, name];
+  renderHead();
+  render();
+  saveLayout();
+}
+
 /* ----------------------------------------------------------- column drag */
 
 /* Native HTML5 drag-and-drop, reordering S.order directly. draggedCol is
