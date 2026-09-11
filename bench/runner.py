@@ -65,6 +65,14 @@ class Env:
             from fastapi.testclient import TestClient
 
             server.STORE = self.case().store
+            # TestClient sends `Host: testserver`, which server.py's Host
+            # gate refuses like any other name nobody configured — that gate
+            # is what keeps the client-header gate meaningful against a page
+            # that has made itself same-origin by rebinding DNS. The pytest
+            # suite allows it from an autouse fixture; bench builds its own
+            # client and needs the same line, or every api/* benchmark
+            # measures the time to render a 421.
+            server.ALLOWED_HOSTS = server.ALLOWED_HOSTS | {"testserver"}
             self._client = TestClient(server.app,
                                       headers={"X-Timeline-Lite-Client": "1"})
         return self._client
