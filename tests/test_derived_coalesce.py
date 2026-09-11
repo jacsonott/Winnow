@@ -71,6 +71,7 @@ def test_registry_advertises_the_op_as_multi_input_and_hidden_from_detect():
     assert op["derived_kind"] == "combine" and op["value_type"] == "text"
     assert listed["duration_delta"]["multi_input"] is True
     assert listed["iso8601"]["multi_input"] is False
+    assert "two_input" not in listed["iso8601"], "one flag, not two"
     assert all(r["op_id"] != "coalesce" for r in timeparse.detect(["a", "b"]))
 
 
@@ -78,15 +79,17 @@ def test_registry_advertises_the_op_as_multi_input_and_hidden_from_detect():
 
 def test_backfill_writes_first_non_empty_per_row(store, tmp_path):
     sid = store.ingest_csv(_write(tmp_path / "u.csv", [
-        ["alice", "", ""], ["", "bob", ""], ["", "  ", "carol"], ["", "", ""], ["  ", "dave", "erin"],
+        ["alice", "", ""], ["", "bob", ""], ["", "  ", "carol"], ["", "", ""], ["  ", "dave", "erin"], ["  ", "", "\t"],
     ]))["id"]
     res = store.add_derived_column(sid, "User", "A", "coalesce", {"extra_columns": ["B", "C"]})
     store.wait_for_ingest_job(res["job_id"], timeout=30)
-    assert _values(store, sid, "User") == ["alice", "bob", "carol", None, "dave"]
+    assert _values(store, sid, "User") == ["alice", "bob", "carol", None, "dave", None]
     d = next(d for d in store.list_derived_columns(sid) if d["name"] == "User")
-    # parse_failures counts NON-EMPTY inputs that produced NULL. A row whose
-    # every listed column is blank had no input, so it isn't one.
+    # parse_failures counts rows that HAD input and produced NULL. A row
+    # whose every listed column is blank — including whitespace-only,
+    # which the op treats as blank — had no input, so it isn't one.
     assert d["status"] == "ready" and d["parse_failures"] == 0
+    assert "TRIM" in store.unparsed_where_fragment(d["id"])
     # A text column like any other to the rest of the app.
     col = next(c for c in store._source_lite(sid)["columns"] if c["name"] == "User")
     assert col["type"] == "text" and col["derived"]
@@ -99,9 +102,11 @@ def test_every_named_column_must_exist(store, tmp_path):
 
 
 def test_preview_reads_all_inputs(store, tmp_path):
-    sid = store.ingest_csv(_write(tmp_path / "u.csv", [["", "bob", ""], ["", "", "carol"]]))["id"]
+    sid = store.ingest_csv(_write(tmp_path / "u.csv", [["", "bob", ""], ["", "", "carol"], ["", "  ", ""]]))["id"]
     res = store.preview_derived(sid, "A", "coalesce", {"extra_columns": ["B", "C"]})
-    assert [p["output"] for p in res["preview"]] == ["bob", "carol"]
+    assert [p["output"] for p in res["preview"]] == ["bob", "carol", None]
+    # The all-blank row is not a failure in the preview either — the
+    # modal's verdict and the column's count after backfill agree.
     assert res["failures"] == 0
     with pytest.raises(KeyError):
         store.preview_derived(sid, "A", "coalesce", {"extra_columns": ["Nope"]})

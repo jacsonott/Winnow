@@ -122,13 +122,11 @@ def register_op(op: dict) -> None:
     less ambiguous / more common interpretation first."""
     if "detect" not in op:
         op["detect"] = _success_rate_detect(op)
-    op.setdefault("two_input", False)
     # Ops that read several columns of a row at once. `parse_multi(values,
     # params, state)` gets them in op_inputs() order: the input column
     # first, then whatever the op's `column`/`columns` params name. An op
     # written against the older parse_pair(a, b, params) is wrapped here,
-    # so the store has exactly one multi-column calling convention to know
-    # about and `two_input` survives only as the UI's word for "two".
+    # so the store has exactly one multi-column calling convention.
     op.setdefault("parse_multi", None)
     if op.get("parse_pair") and op["parse_multi"] is None:
         pair = op["parse_pair"]
@@ -296,7 +294,6 @@ def list_ops() -> list[dict]:
             "label": op["label"],
             "description": op["description"],
             "params": op["params"],
-            "two_input": op["two_input"],
             "multi_input": op["multi_input"],
             "value_type": op["value_type"],
             "derived_kind": op.get("derived_kind", "datetime"),
@@ -792,7 +789,6 @@ register_op({
         "help": "The start time; the derived value is this column's time minus that column's.",
     }],
     "subsecond": True,
-    "two_input": True,
     "value_type": "number",
     "derived_kind": "duration",
     "hidden_from_detect": True,

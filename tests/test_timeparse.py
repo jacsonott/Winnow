@@ -235,7 +235,7 @@ def test_detect_syslog_uses_provisional_year():
     assert got[0]["confidence"] == 1.0
 
 
-def test_detect_hides_two_input_ops_and_zero_confidence():
+def test_detect_hides_multi_input_ops_and_zero_confidence():
     got = timeparse.detect(["completely", "unparseable", "text"])
     assert got == []
     got = timeparse.detect(["2024-01-05T10:00:00"])

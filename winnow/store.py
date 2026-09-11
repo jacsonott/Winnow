@@ -4470,12 +4470,25 @@ class Store:
         the number the analyst needs to decide whether they picked the wrong
         format. An empty input cell isn't a failure, it's an empty cell."""
         drv = self._derived_table(d["source_id"])
-        inp = self._col_ref(src, d["input_column"], "s")
         with self._reader() as ro:
             return ro.execute(
                 f"SELECT COUNT(*) FROM {self._from_clause(src, 's')} "
-                f"WHERE {inp} IS NOT NULL AND {inp} <> '' AND {q(drv)}.{q(d['name'])} IS NULL"
+                f"WHERE {self._had_input_sql(src, d, 's')} AND {q(drv)}.{q(d['name'])} IS NULL"
             ).fetchone()[0]
+
+    def _had_input_sql(self, src: dict, d: dict, alias: str | None = None) -> str:
+        """The row had something to read. One column, non-empty, for the
+        ordinary op; for a multi-column op (coalesce) ANY of its inputs
+        non-blank — the op's own contract is that whitespace is blank, so
+        TRIM there, and a row where every listed column is empty is an
+        empty row, not a failed one (the preview counts the same way)."""
+        inputs = timeparse.op_inputs(d["op_id"], d["input_column"], d.get("params"))
+        refs = [self._col_ref(src, c, alias) if alias else self._col_ref(src, c) for c in inputs]
+        if len(refs) == 1:
+            return f"({refs[0]} IS NOT NULL AND {refs[0]} <> '')"
+        # TRIM's default strips spaces only; the op's blank is Python's
+        # str.strip(), so name the whitespace explicitly.
+        return "(" + " OR ".join(f"({r} IS NOT NULL AND TRIM({r}, ' \t\r\n') <> '')" for r in refs) + ")"
 
     def unparsed_where_fragment(self, def_id: int) -> str:
         """An advanced-filter fragment selecting exactly the rows that
@@ -4483,7 +4496,11 @@ class Store:
         which 12". Built here rather than in the frontend because it has
         to quote two analyst-named columns into SQL (invariant #5)."""
         d = self.get_derived_column(def_id)
-        return f"{q(d['name'])} IS NULL AND {q(d['input_column'])} <> ''"
+        inputs = timeparse.op_inputs(d["op_id"], d["input_column"], d.get("params"))
+        if len(inputs) == 1:
+            return f"{q(d['name'])} IS NULL AND {q(d['input_column'])} <> ''"
+        had = " OR ".join(f"TRIM(COALESCE({q(c)}, ''), ' \t\r\n') <> ''" for c in inputs)
+        return f"{q(d['name'])} IS NULL AND ({had})"
 
     DETECT_SAMPLE = 200
 
@@ -4581,7 +4598,11 @@ class Store:
                     f"SELECT {sel} FROM {self._from_clause(src)} LIMIT ?", (limit,),
                 ).fetchall()
             preview = [{"input": r[0], "output": op["parse_multi"](list(r), params, state)} for r in rows]
-            failures = sum(1 for p in preview if p["output"] is None)
+            # A failure is a NULL from a row that HAD something to read —
+            # the same rule _count_parse_failures applies after the
+            # backfill, so the modal's verdict and the column's count agree.
+            failures = sum(1 for r, p in zip(rows, preview)
+                           if p["output"] is None and any(v is not None and str(v).strip() for v in r))
             return {"preview": preview, "sampled": len(preview), "failures": failures}
         samples = self._sample_column(src, column)
         preview = self._preview_rows(samples[:limit], op_id, params)

@@ -33,6 +33,18 @@ def test_combine_type_offers_coalesce_and_the_chips_build_the_param(page):
     left = page.evaluate(
         "() => [...document.querySelector('.derived-columns select.fb-groupby-add').options].map((o) => o.value)")
     assert "EventId" not in left and "CommandLine" not in left and "Host" not in left
+    # Clicking the row's label text, or a chip's name, must not remove a
+    # chip (a <label> would forward that click to the first ✕).
+    page.locator(".derived-param-label", has_text="Then try").click()
+    page.locator(".derived-columns .fb-groupby-chip").first.click(position={"x": 8, "y": 6})
+    assert page.locator(".derived-columns .fb-groupby-chip").count() == 2
+    # Changing the Parse column keeps the chosen Type and its chips.
+    page.locator("#modalBody select").nth(1).select_option("Timestamp")
+    page.wait_for_timeout(400)
+    assert page.locator("#modalBody select").nth(0).input_value() == "Combine columns"
+    assert page.locator(".derived-columns .fb-groupby-chip").count() == 2
+    page.locator("#modalBody select").nth(1).select_option("Host")
+    page.wait_for_timeout(300)
     # Removing the first chip keeps the second in place.
     page.locator(".derived-columns .fb-groupby-rm").first.click()
     chips = page.locator(".derived-columns .fb-groupby-chip").all_inner_texts()

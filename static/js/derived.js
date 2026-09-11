@@ -490,7 +490,11 @@ export async function openDerivedColumnModal(prefill, editing) {
       const op = currentOp();
       if (!op) return;
       for (const spec of op.params) {
-        const row = el('label', 'derived-param');
+        // A chips widget can't live in a <label>: a label forwards a click
+        // on its text (or on a chip's name) to its first labelable
+        // descendant, which is the first chip's ✕ — clicking "Then try"
+        // removed a column. A div row for that kind, a label for the rest.
+        const row = el(spec.type === 'columns' ? 'div' : 'label', 'derived-param');
         row.append(el('span', 'derived-param-label', spec.label + (spec.required ? ' *' : '')));
         let input;
         if (spec.type === 'select') {
@@ -636,7 +640,11 @@ export async function openDerivedColumnModal(prefill, editing) {
         const best = ranked[0];
         suggestNote.textContent =
           `Suggested: ${best.label} — ${Math.round(best.confidence * 100)}% of sampled values parse.`;
-        if (!editing) {
+        // Detection only ranks timestamp formats, so it may move Type
+        // only while Type IS Timestamp (or untouched). An analyst who has
+        // picked Combine and listed columns, then changed the parse
+        // column, keeps that choice — the suggestion is shown, not applied.
+        if (!editing && typeSelect.value === 'Timestamp') {
           const bop = ops.find((o) => o.id === best.op_id);
           if (bop) { typeSelect.value = typeOf(bop); fillOpSelect(typeSelect.value); }
           opSelect.value = best.op_id;
