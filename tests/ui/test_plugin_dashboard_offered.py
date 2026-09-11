@@ -118,18 +118,36 @@ def test_the_plus_copies_it_into_the_case_and_opens_it(page, offered):
     assert page.locator("#dashboardview .dash-card:not(.dash-add)").count() == 5
 
 
+def _click_add(page, row):
+    """Click ＋ and wait for the add request it fires. The sidebar row is
+    re-rendered by the previous add (loadDashboards → renderSidebar), and
+    on CI a click has landed in that gap and fired nothing — not a
+    refusal, just a click on a node that was being replaced. So: the
+    click is retried until a request is seen, and it's the request's
+    STATUS the test is about."""
+    for attempt in range(3):
+        row.hover()
+        try:
+            with page.expect_response(
+                    lambda r: "/api/plugin_dashboards/" in r.url and r.url.endswith("/add"),
+                    timeout=4_000) as resp:
+                row.locator(".menu-item-action[title^='Add this board']").click()
+            return resp.value.status
+        except Exception:   # noqa: BLE001 — a missed click, try again
+            if attempt == 2:
+                raise
+
+
 def test_adding_it_twice_refreshes_rather_than_duplicating(page, offered):
     """Both adds must come back 200. The second one is the plugin's own
     copy being refreshed — there is nothing of the analyst's to discard,
     so it must not stop to ask."""
-    calls = _add_calls(page)
+    calls = []
     row = _row(page)
     for _ in range(2):
-        row.hover()
-        row.locator(".menu-item-action[title^='Add this board']").click()
+        calls.append(_click_add(page, row))
         page.wait_for_selector("#dashboardview:not([hidden])")
         page.wait_for_function("() => __winnow.S.dashboards.some((d) => d.name.includes('host overview'))")
-    _wait_for_calls(calls, 2)
     assert calls == [200, 200], "the second add was refused, not refreshed"
     assert page.locator(".confirm-overlay").count() == 0, "it asked about its own copy"
     assert page.evaluate(
