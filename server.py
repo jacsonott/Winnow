@@ -3417,17 +3417,23 @@ def api_plugin_dashboard_add(fs_name: str, local_id: str, body: PluginBoardAddBo
     share it by coincidence, and replacing it would discard their widgets
     with no undo. A name already in use is a 409 carrying the existing
     board, and the UI asks; `replace=true` is the answer to that question,
-    never the default."""
+    never the default.
+
+    Unless the board already there is this plugin board's own earlier copy,
+    which `origin` identifies. Then there is nothing of the analyst's to
+    discard and no question to ask: adding again refreshes it, which is
+    what the plugin guide promises adding again does."""
     b = PLUGINS.get_dashboard(fs_name, local_id)
     if not b:
         raise HTTPException(404, f"No dashboard {local_id} from {fs_name}")
     name = (body.name or b["label"]).strip() or b["label"]
+    origin = f"plugin:{fs_name}:{local_id}"
     existing = store().find_dashboard_by_name(name)
-    if existing and not body.replace:
+    if existing and not body.replace and existing.get("origin") != origin:
         raise HTTPException(409, {"error": "name_taken", "name": name,
                                   "dashboard_id": existing["id"],
                                   "widget_count": existing["widget_count"]})
-    return store().upsert_dashboard_by_name(name, b["widgets"])
+    return store().upsert_dashboard_by_name(name, b["widgets"], origin=origin)
 
 
 @app.post("/api/dashboard/widget/preview")
