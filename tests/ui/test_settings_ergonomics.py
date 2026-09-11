@@ -51,8 +51,11 @@ def test_clicking_the_skin_tile_opens_the_picker(page):
     tile = page.locator(".appearance-current .style-card-static")
     assert tile.count() == 1
     assert page.evaluate("() => getComputedStyle(document.querySelector('.appearance-current .style-card-static')).cursor") == "pointer"
+    top_before = page.locator(".modal-card").bounding_box()["y"]
     tile.click()
     page.wait_for_function("() => document.getElementById('modalTitle').textContent === 'Skins'")
+    # Same top anchor as Settings: the card must not jump to centre.
+    assert abs(page.locator(".modal-card").bounding_box()["y"] - top_before) < 2
     page.locator("#modalBody .btn", has_text="Done").click()
     page.wait_for_function("() => document.getElementById('modalTitle').textContent === 'Settings'")
     page.keyboard.press("Escape")
@@ -80,5 +83,24 @@ def test_saved_filters_opened_from_settings_returns_to_settings(page):
     page.locator(".menu .menu-item", has_text="Saved filters…").click()
     page.wait_for_function("() => document.getElementById('modalTitle').textContent === 'Saved filters'")
     assert page.locator("#modalBody .sf-back").count() == 0
+    page.click("#modalClose")
+    page.wait_for_selector("#modal", state="hidden")
+
+
+def test_escape_on_a_confirm_inside_saved_filters_stays_there(page):
+    """The confirm's own Escape closes the confirm; the keymap's must not
+    also close the modal behind it (and so bounce to Settings)."""
+    _open_settings(page)
+    page.click(".settings-section-head:has-text('Saved filters')")
+    page.locator("#modalBody .btn", has_text="Open saved filters…").click()
+    page.wait_for_function("() => document.getElementById('modalTitle').textContent === 'Saved filters'")
+    page.evaluate("() => { __winnow.confirmDialog('Keep going?'); }")   # not awaited: it resolves when the dialog closes
+    page.wait_for_selector(".confirm-overlay")
+    page.keyboard.press("Escape")
+    page.wait_for_selector(".confirm-overlay", state="detached")
+    assert page.evaluate("() => document.getElementById('modalTitle').textContent") == "Saved filters"
+    assert page.locator("#modal").is_visible()
+    page.click("#modalClose")
+    page.wait_for_function("() => document.getElementById('modalTitle').textContent === 'Settings'")
     page.click("#modalClose")
     page.wait_for_selector("#modal", state="hidden")

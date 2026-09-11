@@ -372,7 +372,7 @@ export function openSkinPicker(onPicked) {
     done.onclick = () => openSettings();   // back where they came from
     acts.append(done);
     b.append(acts);
-  }, { wide: true });
+  }, { wide: true, tall: true });   // tall like Settings, so the card doesn't jump to centre and back
 }
 
 /* Settings that belong to the OPEN CASE rather than to this machine —

@@ -336,6 +336,13 @@ export function wireKeymap() {
 document.addEventListener('keydown', (e) => {
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName);
   if (e.key === 'Escape') {
+    // A confirm/prompt overlay owns this Escape: its capture-phase
+    // listener has already closed it (so the overlay is gone from the DOM
+    // by the time this bubble listener runs) and called preventDefault,
+    // which is the trace it leaves. The modal underneath must not close
+    // too, or a declined confirm inside Saved filters would also fire the
+    // return-to-Settings hook.
+    if (e.defaultPrevented) return;
     // closeModal, not a bare hide: whatever armed itself for the close
     // (a return-to-Settings hook, the keybinding capture) has to hear it.
     if (!$('modal').hidden) { closeModal(); return; }
