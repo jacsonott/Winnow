@@ -35,6 +35,17 @@ see [docs/notes/README.md](README.md) for the whole set.
     member has its own `drv_` table and its own definitions, and a UNION
     ALL across mismatched sets would need per-member NULL padding nothing
     does yet.
+  - **An op that reads several columns declares them as params and the
+    store asks `timeparse.op_inputs(op_id, input_column, params)`** for
+    the full ordered list — never `params["other_column"]` by name. The
+    op implements `parse_multi(values, params, state)` (values in that
+    order; an older `parse_pair(a, b, params)` is wrapped automatically).
+    Validation, backfill (`slots`), preview, the remove/re-derive
+    dependency checks and the session round-trip all go through that one
+    helper, so a new `column`/`columns`-typed param is read everywhere
+    the moment it's declared. `combine.py`'s coalesce (`family:
+    "combine"`, `derived_kind: "combine"` — not `"text"`, which the
+    header menu treats as "has a field path to edit") is the model.
   - **`_from_clause(src)` is the one place the join is spelled** —
     `LEFT JOIN drv_<id> USING(rid)`, so an unqualified `rid` stays legal
     on both sides. `drv`'s rid is an INTEGER PRIMARY KEY, so the join

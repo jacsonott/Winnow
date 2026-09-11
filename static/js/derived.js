@@ -461,6 +461,7 @@ export async function openDerivedColumnModal(prefill, editing) {
       ['Extract part of a value', (op) => op.family === 'extract'],
       ['Join from another table', (op) => op.family === 'lookup'],
       ['Compare (elapsed time)', (op) => op.derived_kind === 'duration'],
+      ['Combine columns', (op) => op.family === 'combine'],
     ];
     const typeOf = (op) => { for (const [label, m] of OP_TYPES) if (m(op)) return label; return 'Other'; };
     // Only offer types that actually have ops (a future family lands under
@@ -480,6 +481,7 @@ export async function openDerivedColumnModal(prefill, editing) {
       const op = currentOp();
       if (op && op.derived_kind === 'duration') return `${state.column} elapsed`;
       if (op && op.derived_kind === 'text') return `${state.column} (extract)`;
+      if (op && op.derived_kind === 'combine') return `${state.column} (combined)`;
       return `${state.column} (parsed)`;
     }
 
@@ -533,6 +535,41 @@ export async function openDerivedColumnModal(prefill, editing) {
             o.value = c.name;
             input.append(o);
           }
+        } else if (spec.type === 'columns') {
+          // An ORDERED list of columns — chips plus an add-one select, the
+          // shape the filter builder's group-by uses. Order is the
+          // meaning (coalesce tries them in turn), so it isn't a
+          // multi-select, whose order is the option order. The state
+          // holds an array, not a string, so the scalar `.value` sync
+          // below is skipped for this kind.
+          const chosen = Array.isArray(state.params[spec.name]) ? [...state.params[spec.name]] : [];
+          state.params[spec.name] = chosen;
+          input = el('div', 'fb-groupby-chips derived-columns');
+          const paint = () => {
+            input.replaceChildren();
+            chosen.forEach((name, i) => {
+              const chip = el('span', 'fb-groupby-chip', name);
+              const rm = el('button', 'fb-groupby-rm', '✕');
+              rm.type = 'button';
+              rm.title = `Stop reading ${name}`;
+              rm.onclick = () => { chosen.splice(i, 1); paint(); refreshPreview(); };
+              chip.append(rm);
+              input.append(chip);
+            });
+            const add = el('select', 'fb-groupby-add');
+            add.append(new Option(chosen.length ? '+ then…' : '+ column…', ''));
+            for (const c of textCols) {
+              if (c.name === state.column || c.name === state.name || chosen.includes(c.name)) continue;
+              add.append(new Option(c.name, c.name));
+            }
+            add.onchange = () => { if (add.value) { chosen.push(add.value); paint(); refreshPreview(); } };
+            input.append(add);
+          };
+          paint();
+          row.append(input);
+          if (spec.help) row.append(el('span', 'fb-help derived-param-help', spec.help));
+          paramBox.append(row);
+          continue;
         } else {
           input = el('input');
           if (spec.type === 'int') input.type = 'number';
@@ -627,9 +664,14 @@ export async function openDerivedColumnModal(prefill, editing) {
     typeSelect.onchange = () => { fillOpSelect(typeSelect.value); onOpChanged(); };
     nameInput.oninput = () => { nameTouched = true; state.name = nameInput.value; };
 
+    // Type before the column: "what am I making" is the question the
+    // analyst arrives with, and it decides what the column list means
+    // (a timestamp to parse, a document to extract from, the first of
+    // several to combine). The format suggestion still runs off the
+    // column pick and moves Type on its own when it finds something.
+    body.append(labeledRow('Type', typeSelect));
     body.append(labeledRow('Parse column', colSelect));
     body.append(suggestNote);
-    body.append(labeledRow('Type', typeSelect));
     body.append(labeledRow('Operation', opSelect));
     body.append(paramBox);
     if (!editing) {

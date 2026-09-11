@@ -41,11 +41,11 @@ def test_modal_offers_derived_inputs_and_builds_a_chain(page):
         page.evaluate("() => __winnow.openDerivedColumnModal('ChainParent')")
         page.wait_for_selector("#modal:not([hidden])")
         # the parse-column list offers the derived parent, marked
-        opts = page.evaluate("""() => [...document.querySelectorAll('#modalBody select')[0].options]
+        opts = page.evaluate("""() => [...document.querySelectorAll('#modalBody select')[1].options]
           .map((o) => [o.value, o.textContent])""")
         assert ["ChainParent", "ChainParent · derived"] in opts
 
-        page.locator("#modalBody select").nth(1).select_option(label="Extract part of a value")  # type
+        page.locator("#modalBody select").nth(0).select_option(label="Extract part of a value")  # type
         page.locator("#modalBody select").nth(2).select_option(label="Regex capture")            # operation
         page.locator(".derived-param input").first.fill(r"^(\w+)")
         page.wait_for_selector(".derived-preview-row")
