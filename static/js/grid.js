@@ -377,6 +377,7 @@ export function rowPaintContext() {
    Shared with the panel's legend and the banner, so the pill in the
    gutter and the key explaining it can't drift apart. */
 const DIFF_GLYPH = { removed: 'A', added: 'B', changed: 'A→B' };
+const DIFF_ROW_CLASS = { removed: 'diff-a', added: 'diff-b', changed: 'diff-ab' };
 export function diffMarkNode(kind, title) {
   const m = el('span', 'diff-mark diff-mark-' + kind, DIFF_GLYPH[kind]);
   if (title) m.title = title;
@@ -435,7 +436,12 @@ export function buildDataRow(pos, r, ctx) {
     // A session comparison's mark: which side tagged this row (see
     // session.js pivotDiff).
     const dm = ctx.diffRows && ctx.diffRows[r.rid];
-    if (dm) mid.append(diffMarkNode(diffKind(dm), diffMarkTitle(dm)));
+    if (dm) {
+      const kind = diffKind(dm);
+      mid.append(diffMarkNode(kind, diffMarkTitle(dm)));
+      // The whole row wears its side's wash, not just the pill.
+      row.classList.add(DIFF_ROW_CLASS[kind]);
+    }
   }
   g.append(cb, mid, el('span', 'rid', r ? String(r.rid) : '·'));
   row.append(g);

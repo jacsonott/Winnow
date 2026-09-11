@@ -176,6 +176,41 @@ export function openSessionManager() {
     b.append(acts);
 
     b.append(el('h4', null, 'Compare two sessions'));
+    // Said here as well as in the grid's banner: someone who opens this
+    // panel with a comparison still pivoted in is usually asking "is one
+    // on?", and the answer was two clicks away in another surface.
+    const applied = el('div', 'diff-applied');
+    b.append(applied);
+    const paintApplied = () => {
+      applied.replaceChildren();
+      const dm = S.diffMarks;
+      applied.hidden = !dm;
+      if (!dm) return;
+      const src = (S.sources || []).find((x) => x.id === dm.sourceId);
+      const line = el('div', 'diff-applied-line');
+      line.append(el('span', 'diff-applied-check', '✔'),
+        el('b', null, 'Comparison applied'),
+        el('span', null, ` — showing ${dm.what.toLowerCase()} between `),
+        diffMarkNode('removed'), ' ', el('b', null, dm.left),
+        el('span', null, ' and '),
+        diffMarkNode('added'), ' ', el('b', null, dm.right),
+        el('span', null, src ? ` in ${src.name}` : ''),
+        el('span', 'fb-help', ` (${dm.n.toLocaleString()} row${dm.n === 1 ? '' : 's'})`));
+      const acts = el('div', 'row-actions');
+      const total = Object.keys(dm.rows).length;
+      const all = el('button', 'btn ghost', `Show all differences (${total.toLocaleString()})`);
+      all.onclick = () => openDiffRows(dm.sourceId, Object.keys(dm.rows).map(Number),
+        { left: dm.left, right: dm.right, rows: dm.rows, what: 'All differences' });
+      const clear = el('button', 'btn ghost', 'Clear');
+      clear.title = 'Drop the marks and the row filter — the same as the banner\'s Done';
+      clear.onclick = async () => {
+        await clearDiff();
+        paintApplied();
+      };
+      acts.append(all, clear);
+      applied.append(line, acts);
+    };
+    paintApplied();
     b.append(el('p', 'fb-help',
       'What one has that the other does not — for reviewing an analyst\'s work, or checking '
       + 'what a second pass changed. Tags are matched by NAME, so a session from another '
@@ -210,8 +245,19 @@ function diffPanel(getSessions) {
       }
       if (keep) sel.value = keep;
     }
+    // A comparison already pivoted in preselects its two sides, so the
+    // dropdowns agree with the status line above them.
+    const dm = S.diffMarks;
+    if (dm && !left.dataset.touched && !right.dataset.touched) {
+      const toValue = (name) => (name === LIVE_LABEL ? LIVE : name);
+      const l = toValue(dm.left), r = toValue(dm.right);
+      if ([...left.options].some((o) => o.value === l)) left.value = l;
+      if ([...right.options].some((o) => o.value === r)) right.value = r;
+    }
     if (!right.value || right.value === left.value) right.value = LIVE;
   }
+  left.onchange = () => { left.dataset.touched = '1'; };
+  right.onchange = () => { right.dataset.touched = '1'; };
 
   controls.append(el('span', 'fb-help', 'From'), left,
                   el('span', 'fb-help', 'to'), right, go);
@@ -378,6 +424,17 @@ export async function openDiffRows(sourceId, rids, marks) {
   if (hadTimeframe) toast('Timeframe filter turned off — these are all the differing rows', 4000);
 }
 
+/* The one way out of a pivoted comparison, shared by the banner's Done
+   and the Sessions panel's Clear: drop the marks, land on the filter the
+   table had before. */
+export async function clearDiff() {
+  const dm = S.diffMarks;
+  if (!dm) return;
+  const back = dm.prevTree || { type: 'group', op: 'AND', children: [] };
+  S.diffMarks = null;
+  await replaceFilters(back);
+}
+
 /* The banner above the grid while a comparison is pivoted in. Drawn from
    S.diffMarks alone, so every caller shows the same thing: it appears on
    the compared table's grid and hides anywhere else (another table, the
@@ -402,11 +459,7 @@ export function syncDiffBanner() {
     { left: dm.left, right: dm.right, rows: dm.rows, what: 'All differences' });
   const done = el('button', 'btn ghost', 'Done');
   done.title = 'Drop the marks and the row filter';
-  done.onclick = async () => {
-    const back = dm.prevTree || { type: 'group', op: 'AND', children: [] };
-    S.diffMarks = null;
-    await replaceFilters(back);
-  };
+  done.onclick = () => clearDiff();
   acts.append(all, done);
   b.append(acts);
   b.hidden = false;
