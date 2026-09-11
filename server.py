@@ -1625,9 +1625,12 @@ def api_browse_dir(request: Request, path: str = "", files: bool = False):
             dirs = heapq.nsmallest(BROWSE_LIST_CAP, all_dirs, key=str.lower)
             for e in heapq.nsmallest(BROWSE_LIST_CAP, all_files, key=lambda e: e.name.lower()):
                 try:
-                    file_entries.append({"name": e.name, "size": e.stat().st_size})
+                    st = e.stat()
                 except OSError:
                     continue
+                # mtime so the picker can sort by it — collections are
+                # often "the newest files from the tool run".
+                file_entries.append({"name": e.name, "size": st.st_size, "mtime": int(st.st_mtime)})
         else:
             dirs = sorted(all_dirs, key=str.lower)
     except PermissionError:

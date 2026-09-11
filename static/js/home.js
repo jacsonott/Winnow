@@ -225,6 +225,36 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
       if (typed) load(typed);
     };
     b.append(pathInput);
+    // Files mode gets a filter box and a sort: a tool's output folder is
+    // hundreds of files, and the ones wanted are "the big ones" or "the
+    // ones from this run" as often as they are a name. Folders always
+    // list first; the sort is remembered across folders and sessions.
+    const SORT_KEY = 'winnow.browse.sort';
+    let sort = { by: 'name', dir: 'asc' };
+    try { sort = { ...sort, ...JSON.parse(localStorage.getItem(SORT_KEY) || '{}') }; } catch { /* default */ }
+    let query = '';
+    const filterBox = el('input', 'browse-filter');
+    const sortSel = el('select', 'browse-sort');
+    const sortDir = el('button', 'btn ghost browse-sort-dir');
+    if (filesMode) {
+      const tools = el('div', 'browse-tools');
+      filterBox.type = 'search';
+      filterBox.placeholder = 'Filter this folder…';
+      filterBox.autocomplete = 'off';
+      filterBox.oninput = () => { query = filterBox.value.trim().toLowerCase(); paint(); };
+      for (const [v, l] of [['name', 'Name'], ['size', 'Size'], ['mtime', 'Modified']]) sortSel.append(new Option(l, v));
+      sortSel.value = sort.by;
+      const paintDir = () => {
+        sortDir.textContent = sort.dir === 'asc' ? '↑' : '↓';
+        sortDir.title = sort.dir === 'asc' ? 'Ascending — click for descending' : 'Descending — click for ascending';
+      };
+      const remember = () => { try { localStorage.setItem(SORT_KEY, JSON.stringify(sort)); } catch { /* private mode */ } };
+      sortSel.onchange = () => { sort.by = sortSel.value; remember(); paint(); };
+      sortDir.onclick = () => { sort.dir = sort.dir === 'asc' ? 'desc' : 'asc'; paintDir(); remember(); paint(); };
+      paintDir();
+      tools.append(filterBox, el('span', 'fb-help', 'Sort'), sortSel, sortDir);
+      b.append(tools);
+    }
     const list = el('div', 'session-list');
     list.style.maxHeight = '42vh';
     list.style.overflow = 'auto';
@@ -318,8 +348,30 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
       }
       listing = res;
       pathInput.value = listing.path;
+      // A filter is about the folder it was typed over.
+      if (filesMode) { query = ''; filterBox.value = ''; }
       paint();
     }
+
+    /* The listing arrives name-sorted from the server; the picker's own
+       sort and filter are applied here, over what it already has, so a
+       change is a repaint and not a round trip. */
+    function sortedFiles(files) {
+      const shown = query ? files.filter((f) => f.name.toLowerCase().includes(query)) : files.slice();
+      const dir = sort.dir === 'asc' ? 1 : -1;
+      const key = sort.by;
+      shown.sort((a, b) => {
+        if (key === 'name') return a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true }) * dir;
+        const x = a[key] || 0, y = b[key] || 0;
+        return (x === y ? a.name.localeCompare(b.name) : (x - y) * dir);
+      });
+      return shown;
+    }
+    const pad2 = (n) => String(n).padStart(2, '0');
+    const fmtDay = (epoch) => {
+      const d = new Date(epoch * 1000);
+      return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+    };
 
     function paint() {
       // Built off-DOM: up to 2×BROWSE_LIST_CAP rows appended one at a time
@@ -338,7 +390,8 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
         frag.append(row);
       }
       if (filesMode) {
-        for (const f of listing.files || []) {
+        const files = sortedFiles(listing.files || []);
+        for (const f of files) {
           const path = listing.path + '/' + f.name;
           const row = el('label', 'session-row browse-row');
           row.style.cssText = 'cursor:pointer';
@@ -350,10 +403,14 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
             else picked.delete(path);
             paintStatus();
           };
-          row.append(cb, el('span', 'session-name', f.name), el('span', 'count', fmtBytes(f.size)));
+          row.append(cb, el('span', 'session-name', f.name),
+            el('span', 'browse-mtime', f.mtime ? fmtDay(f.mtime) : ''),
+            el('span', 'count', fmtBytes(f.size)));
           frag.append(row);
         }
-        if (!(listing.files || []).length && !listing.dirs.length) {
+        if (!files.length && (listing.files || []).length) {
+          frag.append(el('div', 'note-status', 'No files here match that filter.'));
+        } else if (!(listing.files || []).length && !listing.dirs.length) {
           frag.append(el('div', 'note-status', 'Nothing here.'));
         }
       } else if (!listing.dirs.length) {

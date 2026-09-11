@@ -1459,6 +1459,18 @@ textarea:focus { border-color: var(--accent); outline: none; }
    buttons to the same pitch. */
 .browse-row { display: flex; gap: 8px; align-items: center; margin: 0; padding: 3px 8px; }
 .session-row .count { color: var(--dim); font-size: 11px; margin-right: auto; }
+/* The file picker's filter/sort row, and the modified column each file
+   row grew — mono like the size beside it. */
+.browse-tools { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; }
+.browse-filter {
+  flex: 1 1 auto; min-width: 0; background: var(--ink); color: var(--text);
+  border: var(--border-w) solid var(--line-2); border-radius: var(--radius-sm);
+  padding: 5px 8px; font: inherit; font-size: 12px;
+}
+.browse-sort { font-size: 12px; }
+.browse-sort-dir { padding: 2px 8px; }
+.browse-row .browse-mtime { flex: 0 0 auto; margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--dim); }
+.browse-row .browse-mtime + .count { margin-right: 0; margin-left: 12px; }
 
 .index-status {
   font-family: var(--mono); font-size: 11px; white-space: nowrap;
