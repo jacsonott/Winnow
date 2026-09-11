@@ -26,6 +26,11 @@ see [docs/notes/README.md](README.md) for the whole set.
   opening those cases read-write and fighting the one-Winnow-per-case
   lock. The supported move is "open it in its own case", which every row
   offers.
+  **The header button is withdrawn** (September 2026) until the feature
+  is redesigned — three panes with three result shapes, and a sweep that
+  stops short of what an analyst does with a hit. Routes, `multicase.py`,
+  `multicase.js` and `tests/ui/test_multicase_ui.py` all stay;
+  `__winnow.openMultiCase()` still opens it.
 
 - **An `async def` route runs ON the event loop; a plain `def` route does
   not.** FastAPI threadpools sync handlers for you, so most of this file is

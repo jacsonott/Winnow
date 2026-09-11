@@ -47,6 +47,28 @@ export default function mount(container, winnow) {
   const hint = el('div', 'note-status', 'Drag across the bars to set the timeframe filter to that range.');
   hint.style.cssText = 'padding:0 10px 4px;font-size:10px';
   container.append(hint);
+  // The empty states are one line of DOM text, not a sentence painted
+  // onto a 96px canvas: text on the canvas neither wraps nor shrinks, so
+  // a narrow window clipped it, and the panel kept its full chart height
+  // (plus the drag hint, plus Clear) to say there was nothing to chart.
+  const empty = el('div', 'note-status th-empty');
+  empty.style.cssText = 'padding:2px 10px 6px;font-size:11px;white-space:normal';
+  empty.hidden = true;
+  container.append(empty);
+  // Clear timeframe stays through the empty state: the drag that emptied
+  // the view is the most likely reason it IS empty, and the button is the
+  // way back from it.
+  function showEmpty(text) {
+    canvas.hidden = true;
+    hint.hidden = true;
+    empty.textContent = text;
+    empty.hidden = false;
+  }
+  function showChart() {
+    empty.hidden = true;
+    canvas.hidden = false;
+    hint.hidden = false;
+  }
 
   /* --------------------------------------------------------- helpers */
   const tokens = () => {
@@ -98,6 +120,17 @@ export default function mount(container, winnow) {
 
   /* ------------------------------------------------------------ draw */
   function draw() {
+    if (!column) {
+      showEmpty('No datetime column in this table — derive one from a column header to chart it.');
+      info.textContent = '';
+      return;
+    }
+    if (!data || !data.total) {
+      showEmpty(inflight ? 'Loading…' : 'No rows with a parsable timestamp in this view.');
+      info.textContent = data ? '0 rows' : '';
+      return;
+    }
+    showChart();   // before measuring: a hidden canvas has no width
     const w = canvas.clientWidth || container.clientWidth || 600;
     const dpr = window.devicePixelRatio || 1;
     canvas.width = Math.round(w * dpr);
@@ -107,18 +140,6 @@ export default function mount(container, winnow) {
     ctx.clearRect(0, 0, w, HEIGHT);
     const t = tokens();
     ctx.font = `10px ${t.mono}`;
-    if (!column) {
-      ctx.fillStyle = t.dim;
-      ctx.fillText('No datetime column in this table — derive one from a column header to chart it.', 10, HEIGHT / 2);
-      info.textContent = '';
-      return;
-    }
-    if (!data || !data.total) {
-      ctx.fillStyle = t.dim;
-      ctx.fillText(inflight ? 'Loading…' : 'No rows with a parsable timestamp in this view.', 10, HEIGHT / 2);
-      info.textContent = data ? '0 rows' : '';
-      return;
-    }
     const top = 6, bottom = HEIGHT - 16, plotH = bottom - top;
     const max = Math.max(...data.buckets.map((b) => b[1]));
     const s = span();
