@@ -42,6 +42,7 @@ except ImportError:  # pragma: no cover - Windows
 
 from . import enrich  # noqa: F401 — registers the cross-table lookup op into timeparse.OPERATIONS
 from . import structparse  # noqa: F401 — registers the JSON/XML extraction ops into timeparse.OPERATIONS
+from . import log as wlog
 from . import timeparse
 from . import plasoread
 from . import xlsxread
@@ -3093,8 +3094,14 @@ class Store:
         t = threading.Thread(target=self._ingest_job_worker, args=(job,), daemon=True)
         with self._ingest_jobs_lock:
             job["thread"] = t
+        wlog.record("info", f"Import queued: {job['name']} ({job['kind']}) — job #{job['job_id']}")
         t.start()
         return self._ingest_job_snapshot(job)
+
+    @staticmethod
+    def _job_elapsed(job: dict) -> float:
+        started = job.get("started_at")
+        return max(0.0, time.time() - started) if started else 0.0
 
     def _ingest_job_worker(self, job: dict) -> None:
         acquired = False
@@ -3205,13 +3212,22 @@ class Store:
                                            "first_bad_line")}
                     for r in results
                 ]
+            wlog.record("info", f"Import finished: {job['name']} ({job['kind']}) — "
+                                f"{job['rows_done']:,} rows in {self._job_elapsed(job):.1f}s"
+                                f" (table{'s' if len(job['source_ids']) != 1 else ''} "
+                                f"{', '.join(str(i) for i in job['source_ids'])})")
         except IngestCancelled:
             with self._ingest_jobs_lock:
                 job["status"] = "cancelled"
+            wlog.record("info", f"Import cancelled: {job['name']} ({job['kind']}) "
+                                f"after {self._job_elapsed(job):.1f}s")
         except Exception as e:  # noqa: BLE001 — surfaced to the UI as job.error
             with self._ingest_jobs_lock:
                 job["status"] = "error"
                 job["error"] = str(e)
+            # The toast this becomes is gone in seconds; this is the record.
+            wlog.record("error", f"Import failed: {job['name']} ({job['kind']}) — "
+                                 f"{type(e).__name__}: {e}")
         finally:
             with self._ingest_jobs_lock:
                 job["finished_at"] = time.time()

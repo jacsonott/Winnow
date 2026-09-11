@@ -21,7 +21,7 @@ import { showNotesTab } from './notes.js';
 import { paintWatchlistBadge, refreshWatchlistBadge, showWatchlistTab } from './watchlist.js';
 import { dashDrag, loadDashboards, renderDashboardsInto, showDashboard } from './dashboard.js';
 import { openCaseSettings } from './settings.js';
-import { openErrorLog } from './errlog.js';
+import { openLog } from './errlog.js';
 import { S, selClear, selCount, selFirst, specKey } from './state.js';
 import { compactCaseFile, openTablesManager } from './tables.js';
 import { loadTags, refreshTagCounts, renderTagRibbon } from './tags.js';
@@ -1521,7 +1521,7 @@ $('btnCase').onclick = () => dropdownMenu($('btnCase'), [
   { label: 'Case settings…', onclick: openCaseSettings },
   { label: 'Compact case file…', onclick: () => compactCaseFile() },
   '-',
-  { label: 'Error log…', onclick: openErrorLog },
+  { label: 'Log…', onclick: openLog },
   { label: 'Shut down Winnow…', onclick: shutdownWinnow },
 ]);
 

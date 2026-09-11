@@ -1,4 +1,4 @@
-"""Shutdown warns when work is in flight; the error log opens from the Case
+"""Shutdown warns when work is in flight; the log opens from the Case
 menu (errors used to go only to the terminal)."""
 
 from __future__ import annotations
@@ -20,10 +20,13 @@ def test_shutdown_warns_about_in_flight_work(page):
     page.evaluate("() => { __winnow.S.searchAll = null; }")
 
 
-def test_error_log_opens_from_case_menu(page):
+def test_log_opens_from_case_menu(page):
     page.locator("#btnCase").click()
     page.wait_for_selector(".menu")
-    page.locator(".menu >> text=Error log").click()
+    page.locator(".menu >> text=Log…").click()
     page.wait_for_selector("#modal:not([hidden])")
-    assert page.locator("#modalTitle").inner_text().lower() == "error log"
+    assert page.locator("#modalTitle").inner_text().lower() == "log"
+    # Errors | All, and a filter box.
+    assert page.locator("#modalBody .errlog-seg .btn").all_inner_texts() == ["Errors", "All"]
+    assert page.locator("#modalBody .errlog-search").count() == 1
     page.keyboard.press("Escape")

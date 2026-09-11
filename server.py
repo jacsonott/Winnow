@@ -336,38 +336,38 @@ def _host_is_allowed(raw: str) -> bool:
         return False
 
 
-# ------------------------------------------------------------ error log
+# ------------------------------------------------------------ log
 #
-# Errors used to go only to the terminal Winnow was started from, which an
-# analyst rarely has in front of them. Capture them into a bounded ring the
-# UI can show (Case menu -> Error log). record_log ALSO prints, so the
-# terminal behaviour is unchanged for anyone watching it.
-import collections as _collections
-import datetime as _datetime
-import threading as _threading
+# The ring itself lives in winnow/log.py so the store's job threads can
+# write to it too (an import failing inside a job used to be a toast and
+# nothing else). Case menu -> Log shows it; only "error" entries light the
+# badge. record_log stays as the name the routes here use.
+from winnow import log as wlog
 
-_ERRLOG: "_collections.deque" = _collections.deque(maxlen=500)
-_ERRLOG_LOCK = _threading.Lock()
-_errlog_seq = 0
-
-
-def record_log(level: str, message) -> None:
-    global _errlog_seq
-    with _ERRLOG_LOCK:
-        _errlog_seq += 1
-        _ERRLOG.append({
-            "seq": _errlog_seq,
-            "ts": _datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "level": level,
-            "message": str(message),
-        })
-    print(f"[{level}] {message}", file=sys.stderr, flush=True)
+record_log = wlog.record
 
 
 @app.get("/api/log")
 def api_log():
-    with _ERRLOG_LOCK:
-        return {"entries": list(_ERRLOG), "seq": _errlog_seq}
+    return wlog.snapshot()
+
+
+class ClientLogBody(BaseModel):
+    level: str = "warn"
+    message: str = ""
+
+
+@app.post("/api/log/client")
+def api_log_client(body: ClientLogBody):
+    """The browser's side of the story — a job poll whose fetch rejected, a
+    response that wouldn't parse. Those never reach a route, so the
+    catch-all below can't see them, and they are exactly what a "the
+    progress bar stopped updating" report is made of. Never "error": the
+    badge means the SERVER hit something, and a client can't vouch for
+    that."""
+    level = "info" if body.level.strip().lower() == "info" else "warn"
+    wlog.record(level, "[client] " + body.message.strip()[:500])
+    return {"seq": wlog.seq()}
 
 
 @app.exception_handler(Exception)
@@ -4055,8 +4055,26 @@ def api_export(view_id: str, tagged_only: bool = False, filename: str = "timelin
         gen = store().export_view_csv(view_id, tagged_only)
     except KeyError as e:
         raise HTTPException(409, str(e))
+    what = f"CSV {'tagged rows of ' if tagged_only else ''}view {view_id}"
+
+    def logged():
+        # Counted as it streams: the row count isn't known up front, and
+        # an aborted download (browser closed) is worth a line too.
+        rows, nbytes, t0 = 0, 0, time.time()
+        wlog.record("info", f"Export started: {what} → {filename}")
+        try:
+            for chunk in gen:
+                rows += chunk.count("\n") if isinstance(chunk, str) else chunk.count(b"\n")
+                nbytes += len(chunk)
+                yield chunk
+        except GeneratorExit:
+            wlog.record("warn", f"Export aborted: {what} after {rows:,} lines, {nbytes:,} bytes")
+            raise
+        wlog.record("info", f"Export finished: {what} — {max(rows - 1, 0):,} rows, {nbytes:,} bytes "
+                            f"in {time.time() - t0:.1f}s")
+
     return StreamingResponse(
-        gen,
+        logged(),
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
@@ -4064,7 +4082,11 @@ def api_export(view_id: str, tagged_only: bool = False, filename: str = "timelin
 
 @app.get("/api/export/tagged_xlsx")
 def api_export_tagged_xlsx(filename: str = "tagged-export.xlsx"):
+    t0 = time.time()
+    wlog.record("info", f"Export started: tagged rows from all tables (.xlsx) → {filename}")
     buf = store().export_tagged_xlsx()
+    wlog.record("info", f"Export finished: tagged rows from all tables (.xlsx) — "
+                        f"{buf.getbuffer().nbytes:,} bytes in {time.time() - t0:.1f}s")
     return StreamingResponse(
         buf,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
