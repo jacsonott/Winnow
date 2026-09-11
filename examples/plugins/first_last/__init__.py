@@ -374,9 +374,14 @@ def _bookend_rows(req, src, group_cols, sort_col, carry, where, params, limit,
     return [dict(zip(cols, r)) for r in res["rows"]], res["truncated"]
 
 
-def _render(template, row, which):
+def _render(template, row, which, sums=()):
     """{ColumnName} → the row's value, {count} → group size, {which} →
-    First/Last. Unknown names raise, naming the offender."""
+    First/Last/Only, {sum:Column} → that column's group total, formatted
+    like the Sum column. Unknown names raise, naming the offender.
+
+    The colon form is the namespace for anything computed rather than
+    read: a plain name is always a field, so no column name can shadow a
+    function and no function can shadow a column."""
     out, i, n = [], 0, len(template)
     while i < n:
         ch = template[i]
@@ -389,11 +394,18 @@ def _render(template, row, which):
                 out.append(which)
             elif key == "count":
                 out.append(str(row.get("group_n", "")))
+            elif key.startswith("sum:"):
+                col = key[4:].strip()
+                if col not in sums:
+                    raise ValueError(
+                        f"{{{key}}} needs {col!r} under Total up first"
+                        + (f" — totals available: {', '.join(sums)}" if sums else ""))
+                out.append(_fmt_sum(row.get(_sum_alias(col))))
             elif key in row:
                 val = row.get(key)
                 out.append("" if val is None else str(val))
             else:
-                raise ValueError(f"Unknown placeholder {{{key}}} — use a column name, {{count}} or {{which}}")
+                raise ValueError(f"Unknown placeholder {{{key}}} — use a column name, {{count}}, {{which}} or {{sum:Column}}")
             i = j + 1
             continue
         out.append(ch)
@@ -414,19 +426,22 @@ def _fmt_sum(v):
 
 def _emit(rows, sort_col, carry, template, json_cols=None, sums=()):
     """The output rows: one per bookend. A single-row group is both its own
-    first and its last — emitted once, labelled First (a story with one
-    event has no separate ending). `json_cols` non-None adds a cell with
-    the bookend's ENTIRE row as a JSON object — the synthetic window
-    columns (rn_first/rn_last/group_n) never appear in it."""
+    first and its last — emitted once, labelled Only (a story with one
+    event has no separate ending, and "First of 1" read as if a Last had
+    gone missing). `json_cols` non-None adds a cell with the bookend's
+    ENTIRE row as a JSON object — the synthetic window columns
+    (rn_first/rn_last/group_n) never appear in it."""
     out = []
     for r in rows:
         labels = []
-        if r.get("rn_first") == 1:
+        if r.get("rn_first") == 1 and r.get("rn_last") == 1:
+            labels.append("Only")
+        elif r.get("rn_first") == 1:
             labels.append("First")
-        if r.get("rn_last") == 1 and r.get("rn_first") != 1:
+        elif r.get("rn_last") == 1:
             labels.append("Last")
         for which in labels:
-            desc = _render(template, r, which)
+            desc = _render(template, r, which, sums)
             row = ([r.get(sort_col, "")]
                    + [("" if r.get(c) is None else str(r.get(c))) for c in carry]
                    + [_fmt_sum(r.get(_sum_alias(c))) for c in sums])
@@ -443,7 +458,8 @@ def meta(req):
     return {
         "operators": [{"id": k, "label": v[0], "value_kind": v[1]} for k, v in OPERATORS.items()],
         "limits": {"groups": MAX_GROUPS, "group_cols": MAX_GROUP_COLS, "preview_groups": PREVIEW_GROUPS},
-        "placeholders": ["which", "count"],
+        "placeholders": ["which", "count", "sum:<column>"],
+        "which_values": ["First", "Last", "Only"],
     }
 
 

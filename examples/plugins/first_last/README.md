@@ -29,15 +29,17 @@ placements — the keyboard/trackpad path):
 | **Include columns** | Carried into the output next to the description, valued from each bookend's own row — drag the chips **or the preview's headers** to set their order |
 | **Total up** | Number columns summed over each group's **whole** set of rows, not just its two bookends — bytes moved across a session, events in a burst. Both bookends of a group carry the same total. A non-number column is refused rather than summed to zero |
 | **Filters** | Scope which rows participate — same operators as the grid |
-| **Description** | Free text + placeholders: `{which}` → First/Last, `{count}` → group size, `{Column}` → that row's own value. Click a chip to insert. A typo'd placeholder fails the preview by name, never ships garbage |
+| **Description** | Free text + placeholders: `{which}` → First/Last (or Only, for a one-row group), `{count}` → group size, `{Column}` → that row's own value, `{sum:Column}` → a Total-up column's group total, formatted like the Sum column. Click a chip to insert. A typo'd placeholder fails the preview by name, never ships garbage. The colon form is the namespace for computed values: a plain name is always a field, so a column called `count` or `sum` can't collide with a function |
+| **Auto-update** | On by default: the preview re-runs ~350 ms after any change. Off (remembered on this machine), changes mark the preview *Changed — press Refresh* and nothing runs until you do — easier on a very large table |
 
 Several **sheets** live as sub-tabs (like the SQL pane's queries), so two
 groupings can sit side by side without saving either. The preview's rows
 select like a table tab's — click, Shift extends, Ctrl toggles — and
 Ctrl+C copies the selection as TSV.
 
-A one-event group emits a single row labelled `First` — a story with one
-event has no separate ending.
+A one-event group emits a single row whose `{which}` is `Only` — a story
+with one event has no separate ending, and `First of 1` read as if a Last
+had gone missing.
 
 Totals ride the window that is already partitioned by the group (the same
 one behind `{count}`), so asking for them costs no extra pass over the
