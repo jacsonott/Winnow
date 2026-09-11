@@ -184,6 +184,11 @@ async def _lifespan(_app: FastAPI):
         a = file_assoc.adapter(background=_assoc_background())
         if a and a.refresh_icons(_assoc_catalogue()):
             print("File-association icon refreshed after an icon update")
+        # Same idea for the Open With entry's name and icon: an install
+        # registered before the verb carried them gets them on the next
+        # start rather than on the next re-registration.
+        if a and a.refresh_verb():
+            print("File-association Open With entry renamed to Winnow")
     if swept["removed"]:
         print(f"Cleaned up {swept['removed']} orphaned temp file(s) from previous runs "
               f"({swept['bytes_freed'] / (1 << 20):.1f} MB)")
