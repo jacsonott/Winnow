@@ -432,7 +432,10 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
    rejects, the widget editor's From list excludes them, and every "Add
    to dashboard" entry is disabled on one. The Timeline configures real
    sources (a merge's tags live on its members, so they appear
-   regardless).
+   regardless). The two **whole-case xlsx exports** (tagged rows from
+   all tables, all tables) write one sheet per real source and none for
+   a merge: every merge row is a member row and lands on that member's
+   sheet — only a merge-level derived column doesn't travel.
 
 10. **A session is a snapshot, not a dimension.** Named sessions live in
    the case file's `sessions` table as whole `winnow-case-session/1`

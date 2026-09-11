@@ -8711,7 +8711,11 @@ class Store:
 
     def export_all_xlsx(self, path: str) -> dict:
         """Every real table, every row, one worksheet per table — the
-        whole case as a workbook. Same header convention as the tagged
+        whole case as a workbook. Merges are not tables of their own here:
+        every one of a merge's rows is a member's row and lands on that
+        member's sheet (a merge-level derived column is the one thing
+        that doesn't travel — recorded as an export exception under
+        invariant #9). Same header convention as the tagged
         export (Line, Tags, Note, then the analyst's layout columns), same
         formula guard. Differences from export_tagged_xlsx, each because
         "all rows" is a different size of thing:
@@ -8751,11 +8755,14 @@ class Store:
                     "SELECT rid, note FROM row_notes WHERE source_id=?", (source_id,))}
 
                 header = ["Line", "Tags", "Note", *cols]
-                # Continuations keep enough of the name to stay recognisable
-                # beside the first sheet: "<name> (2)" within the 31-char cap.
-                base = src["name"]
+                # Continuations derive from the name the FIRST sheet actually
+                # got — two tables both called Security.evtx.csv become
+                # "Security.evtx.csv" and "Security.evtx.csv_1", and the
+                # second one's overflow must read "…_1 (2)", not "… (2)",
+                # which would look like the first table continuing.
+                first = _xlsx_sheet_name(src["name"], used_names)
                 part = 1
-                ws = wb.create_sheet(_xlsx_sheet_name(base, used_names))
+                ws = wb.create_sheet(first)
                 ws.append(header)
                 sheets += 1
                 written = 0
@@ -8771,7 +8778,7 @@ class Store:
                         if written == per:
                             part += 1
                             suffix = f" ({part})"
-                            ws = wb.create_sheet(_xlsx_sheet_name(base[: 31 - len(suffix)] + suffix, used_names))
+                            ws = wb.create_sheet(_xlsx_sheet_name(first[: 31 - len(suffix)] + suffix, used_names))
                             ws.append(header)
                             sheets += 1
                             written = 0

@@ -1455,7 +1455,7 @@ export function openExportModal() {
       b.append(acts);
     }
     b.append(el('p', null, 'Exports every table in this case — not just the one open now — one worksheet per table. '
-      + 'Tagged rows only, or everything.'));
+      + 'Tagged rows only, or everything. A merge has no sheet of its own: its rows are on its members’ sheets.'));
     const xlsxActs = el('div', 'row-actions');
     const xlsx = el('button', 'btn', 'Export tagged rows from all tables (.xlsx)');
     xlsx.onclick = () => { window.location = '/api/export/tagged_xlsx'; $('modal').hidden = true; };

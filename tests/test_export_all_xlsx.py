@@ -106,3 +106,16 @@ def test_the_route_streams_the_file_logs_and_cleans_up(client, store, write_csv)
     import glob
     import tempfile
     assert not glob.glob(os.path.join(tempfile.gettempdir(), "winnow-export-*.xlsx"))
+
+
+def test_same_named_tables_keep_their_continuations_apart(store, write_csv, tmp_path, monkeypatch):
+    """Two hosts' Security.evtx.csv: the second table's first sheet is
+    deduped to '…_1', so its overflow must be '…_1 (2)' — not '… (2)',
+    which would read as the first table continuing."""
+    monkeypatch.setattr(store_mod, "XLSX_MAX_ROWS", 4)     # 3 data rows per sheet
+    store.ingest_csv(write_csv([["N"], ["1"], ["2"]], "dup.csv"), name="Security.evtx.csv")
+    store.ingest_csv(write_csv([["N"], ["a"], ["b"], ["c"], ["d"], ["e"]], "dup2.csv"), name="Security.evtx.csv")
+    out = str(tmp_path / "dup.xlsx")
+    store.export_all_xlsx(out)
+    assert _sheetnames(out) == ["Security.evtx.csv", "Security.evtx.csv_1", "Security.evtx.csv_1 (2)"]
+    assert [r[0] for r in _rows(out, "Security.evtx.csv_1 (2)")[1:]] == [4, 5]
