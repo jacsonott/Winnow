@@ -14,6 +14,14 @@
    unified Timeline. All styling rides Winnow's CSS tokens. */
 
 const REFRESH_MS = 350;
+/* Auto-update: every change to the controls re-runs the preview after a
+   short debounce. On a big table that is a lag on every keystroke of the
+   description, so it can be turned off — then edits mark the preview
+   stale and Refresh runs it. Remembered in localStorage: the analyst who
+   turned it off on this machine has the same data tomorrow. */
+const AUTO_KEY = 'winnow.firstlast.auto';
+const readAuto = () => { try { return localStorage.getItem(AUTO_KEY) !== '0'; } catch { return true; } };
+const writeAuto = (on) => { try { localStorage.setItem(AUTO_KEY, on ? '1' : '0'); } catch { /* private mode */ } };
 
 let state = null;
 let refresh = null;
@@ -32,7 +40,7 @@ export default function mount(container, winnow) {
     groupBy: [], carry: [], sums: [], filters: [], tags: { mode: '', ids: [] }, rowJson: false,
     sortColumn: null,
     template: '{which} of {count}',
-    meta: sharedMeta, preview: null, error: null, loading: false,
+    meta: sharedMeta, preview: null, error: null, loading: false, stale: false,
     selRows: new Set(), selAnchor: null,
   });
   const sheets = [newSheet('Bookends 1')];
@@ -118,6 +126,26 @@ export default function mount(container, winnow) {
   srcSel.onchange = () => selectSource(Number(srcSel.value));
   const status = el('span', 'note-status', '');
   status.style.cssText = 'margin-left:auto;text-align:right';
+  // Auto-update and its manual counterpart sit between the status and
+  // the result actions: they're about the preview, not the result.
+  let auto = readAuto();
+  const autoRow = el('label');
+  autoRow.style.cssText = 'display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;white-space:nowrap';
+  const autoCb = el('input');
+  autoCb.type = 'checkbox';
+  autoCb.className = 'fl-auto';
+  autoCb.checked = auto;
+  autoCb.onchange = () => {
+    auto = autoCb.checked;
+    writeAuto(auto);
+    // Turning it back on catches up on whatever was edited meanwhile.
+    if (auto && state.stale) schedule();
+  };
+  autoRow.append(autoCb, el('span', null, 'Auto-update'));
+  autoRow.title = 'Re-run the preview as you change the controls. Off, changes wait for Refresh — easier on a large table.';
+  const refreshBtn = el('button', 'btn ghost fl-refresh', 'Refresh');
+  refreshBtn.title = 'Run the preview now';
+  refreshBtn.onclick = () => { clearTimeout(timer); runPreview(); };
   // Result actions live top-right, like every other tab's bar.
   const copyBtn = el('button', 'btn ghost', 'Copy result');
   copyBtn.title = 'Copy the ENTIRE result (not just the preview) as TSV — paste into a spreadsheet or notes';
@@ -125,7 +153,7 @@ export default function mount(container, winnow) {
   const createBtn = el('button', 'btn', 'Create table…');
   createBtn.title = 'Land the full result as a new table in this case — name it, optionally tag it onto the Timeline';
   createBtn.onclick = openCreateModal;
-  bar.append(srcSel, status, copyBtn, createBtn);
+  bar.append(srcSel, status, autoRow, refreshBtn, copyBtn, createBtn);
   container.append(bar);
 
   const body = el('div');
@@ -213,8 +241,9 @@ export default function mount(container, winnow) {
   const chipRow = el('div');
   chipRow.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px';
   tmplWrap.append(tmplInput, chipRow, el('div', 'note-status',
-    'Free text plus placeholders — {which} is First/Last, {count} the group size, '
-    + '{Column} that row’s value. Click a chip to insert it.'));
+    'Free text plus placeholders — {which} is First/Last (Only, for a one-row group), {count} the '
+    + 'group size, {Column} that row’s value, {sum:Column} / {min:Column} / {max:Column} a Total-up '
+    + 'column’s group total, smallest and largest. Click a chip to insert it.'));
   side.append(tmplWrap);
 
   /* --------------------------------------------------- drag and drop */
@@ -371,7 +400,10 @@ export default function mount(container, winnow) {
       tmplInput.focus();
       schedule();
     };
-    for (const ph of ['{which}', '{count}', ...cols.map((c) => `{${c.name}}`)]) {
+    // Totals first among the computed ones: a chip per Total-up column,
+    // in the colon form that keeps functions and fields from colliding.
+    const sumChips = state.sums.flatMap((c) => [`{sum:${c}}`, `{min:${c}}`, `{max:${c}}`]);
+    for (const ph of ['{which}', '{count}', ...sumChips, ...cols.map((c) => `{${c.name}}`)]) {
       const chipBtn = el('button', 'btn ghost', ph);
       chipBtn.style.cssText = 'font-size:10px;padding:1px 5px;font-family:var(--mono)';
       chipBtn.onclick = () => insert(ph);
@@ -548,6 +580,13 @@ export default function mount(container, winnow) {
   let timer = null;
   function schedule() {
     clearTimeout(timer);
+    if (!auto) {
+      // Nothing runs until Refresh — but the status says the preview on
+      // screen is behind the controls, so it isn't mistaken for current.
+      state.stale = true;
+      updateStatus();
+      return;
+    }
     timer = setTimeout(runPreview, REFRESH_MS);
   }
 
@@ -571,10 +610,12 @@ export default function mount(container, winnow) {
     if (!ready()) {
       state.preview = null;
       state.error = null;
+      state.stale = false;   // nothing to run, so nothing is pending either
       renderPreview();
       return;
     }
     state.loading = true;
+    state.stale = false;
     renderPreview();
     const mine = state;
     try {
@@ -606,6 +647,7 @@ export default function mount(container, winnow) {
 
   function updateStatus() {
     if (state.loading) { status.textContent = 'Previewing…'; return; }
+    if (state.stale) { status.textContent = 'Changed — press Refresh'; return; }
     if (!state.preview) { status.textContent = ''; return; }
     const n = state.preview.total_groups;
     const sel = state.selRows.size;
@@ -815,11 +857,13 @@ export default function mount(container, winnow) {
     state.sourceId = id;
     state.groupBy = [];
     state.carry = [];
+    state.sums = [];      // a total from the old table would 400 on the new one
     state.filters = [];
     state.tags = { mode: '', ids: [] };
     state.rowJson = false;
     state.sortColumn = null;
     state.preview = null;
+    state.stale = false;
     state.selRows = new Set();
     renderControls();
     renderPreview();

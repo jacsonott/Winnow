@@ -324,8 +324,19 @@ def _sum_alias(col):
     return f"Sum of {col}"
 
 
+# Group-wide aggregates a Total-up column carries besides its sum. Only the
+# sum becomes an output column; min and max ride the same window for the
+# {min:Column} / {max:Column} placeholders, so asking for either costs no
+# extra pass and needs nothing new under Total up.
+AGGREGATES = {"sum": "SUM", "min": "MIN", "max": "MAX"}
+
+
+def _agg_alias(kind, col):
+    return _sum_alias(col) if kind == "sum" else f"{kind.capitalize()} of {col}"
+
+
 def _bookend_rows(req, src, group_cols, sort_col, carry, where, params, limit,
-                  row_json=False, sums=()):
+                  row_json=False, sums=(), template=""):
     """One windowed pass: rank each row inside its group both directions,
     keep rank 1 of each. Selected values are the *row's own* — the first
     row's user, not the group's."""
@@ -345,9 +356,14 @@ def _bookend_rows(req, src, group_cols, sort_col, carry, where, params, limit,
     # _numeric's guarded cast, not a bare CAST: a number column can still
     # hold the odd "-" or "n/a", and CAST turns those into 0, which is a
     # wrong total rather than a missing one.
+    # The sum is always an output column; min and max only exist for the
+    # {min:}/{max:} placeholders, and each window term re-runs the
+    # REGEXP-guarded cast per row, so they are added only when the
+    # template actually names one.
+    wanted = {"sum"} | {k for k in ("min", "max") if f"{{{k}:" in (template or "")}
     sum_sel = "".join(
-        f", SUM({_numeric(src, c)}) OVER (PARTITION BY {part}) AS {q(_sum_alias(c))}"
-        for c in sums)
+        f", {fn}({_numeric(src, c)}) OVER (PARTITION BY {part}) AS {q(_agg_alias(kind, c))}"
+        for c in sums for kind, fn in AGGREGATES.items() if kind in wanted)
     # Direction must be stated PER COLUMN: "ORDER BY ts, rid DESC" flips only
     # rid, leaving the last-window ranked by ascending time — every group's
     # "Last" would be its earliest row with the biggest rid. On a merge,
@@ -374,9 +390,15 @@ def _bookend_rows(req, src, group_cols, sort_col, carry, where, params, limit,
     return [dict(zip(cols, r)) for r in res["rows"]], res["truncated"]
 
 
-def _render(template, row, which):
+def _render(template, row, which, sums=()):
     """{ColumnName} → the row's value, {count} → group size, {which} →
-    First/Last. Unknown names raise, naming the offender."""
+    First/Last/Only, {sum:Column} / {min:Column} / {max:Column} → that
+    Total-up column's group total, smallest and largest, formatted like
+    the Sum column. Unknown names raise, naming the offender.
+
+    The colon form is the namespace for anything computed rather than
+    read: a plain name is always a field, so no column name can shadow a
+    function and no function can shadow a column."""
     out, i, n = [], 0, len(template)
     while i < n:
         ch = template[i]
@@ -389,11 +411,20 @@ def _render(template, row, which):
                 out.append(which)
             elif key == "count":
                 out.append(str(row.get("group_n", "")))
+            elif ":" in key and key.split(":", 1)[0] in AGGREGATES:
+                kind, col = key.split(":", 1)
+                col = col.strip()
+                if col not in sums:
+                    raise ValueError(
+                        f"{{{key}}} needs {col!r} under Total up first"
+                        + (f" — totals available: {', '.join(sums)}" if sums else ""))
+                out.append(_fmt_sum(row.get(_agg_alias(kind, col))))
             elif key in row:
                 val = row.get(key)
                 out.append("" if val is None else str(val))
             else:
-                raise ValueError(f"Unknown placeholder {{{key}}} — use a column name, {{count}} or {{which}}")
+                raise ValueError(f"Unknown placeholder {{{key}}} — use a column name, {{count}}, {{which}}, "
+                                 f"{{sum:Column}}, {{min:Column}} or {{max:Column}}")
             i = j + 1
             continue
         out.append(ch)
@@ -414,19 +445,22 @@ def _fmt_sum(v):
 
 def _emit(rows, sort_col, carry, template, json_cols=None, sums=()):
     """The output rows: one per bookend. A single-row group is both its own
-    first and its last — emitted once, labelled First (a story with one
-    event has no separate ending). `json_cols` non-None adds a cell with
-    the bookend's ENTIRE row as a JSON object — the synthetic window
-    columns (rn_first/rn_last/group_n) never appear in it."""
+    first and its last — emitted once, labelled Only (a story with one
+    event has no separate ending, and "First of 1" read as if a Last had
+    gone missing). `json_cols` non-None adds a cell with the bookend's
+    ENTIRE row as a JSON object — the synthetic window columns
+    (rn_first/rn_last/group_n) never appear in it."""
     out = []
     for r in rows:
         labels = []
-        if r.get("rn_first") == 1:
+        if r.get("rn_first") == 1 and r.get("rn_last") == 1:
+            labels.append("Only")
+        elif r.get("rn_first") == 1:
             labels.append("First")
-        if r.get("rn_last") == 1 and r.get("rn_first") != 1:
+        elif r.get("rn_last") == 1:
             labels.append("Last")
         for which in labels:
-            desc = _render(template, r, which)
+            desc = _render(template, r, which, sums)
             row = ([r.get(sort_col, "")]
                    + [("" if r.get(c) is None else str(r.get(c))) for c in carry]
                    + [_fmt_sum(r.get(_sum_alias(c))) for c in sums])
@@ -443,7 +477,8 @@ def meta(req):
     return {
         "operators": [{"id": k, "label": v[0], "value_kind": v[1]} for k, v in OPERATORS.items()],
         "limits": {"groups": MAX_GROUPS, "group_cols": MAX_GROUP_COLS, "preview_groups": PREVIEW_GROUPS},
-        "placeholders": ["which", "count"],
+        "placeholders": ["which", "count", "sum:<column>", "min:<column>", "max:<column>"],
+        "which_values": ["First", "Last", "Only"],
     }
 
 
@@ -471,7 +506,7 @@ def preview(req):
     total_groups = req.store.run_sql(_inline(count_sql, params), limit=1)["rows"][0][0]
 
     rows, _ = _bookend_rows(req, src, group_cols, sort_col, carry, where, params,
-                            limit=PREVIEW_GROUPS * 2 + 2, row_json=row_json, sums=sums)
+                            limit=PREVIEW_GROUPS * 2 + 2, row_json=row_json, sums=sums, template=template)
     json_cols = [c["name"] for c in src["columns"]] if row_json else None
     header = ([sort_col] + carry + [_sum_alias(c) for c in sums]
               + ([ROW_JSON_COLUMN] if row_json else []) + ["Description"])
@@ -486,7 +521,7 @@ def rows(req):
     body = req.body or {}
     src, group_cols, sort_col, carry, sums, where, params, template, row_json = _validated(req, body)
     bookends, truncated = _bookend_rows(req, src, group_cols, sort_col, carry, where, params,
-                                        limit=MAX_COPY_ROWS, row_json=row_json, sums=sums)
+                                        limit=MAX_COPY_ROWS, row_json=row_json, sums=sums, template=template)
     json_cols = [c["name"] for c in src["columns"]] if row_json else None
     header = ([sort_col] + carry + [_sum_alias(c) for c in sums]
               + ([ROW_JSON_COLUMN] if row_json else []) + ["Description"])
@@ -507,7 +542,7 @@ def create(req):
     body = req.body or {}
     src, group_cols, sort_col, carry, sums, where, params, template, row_json = _validated(req, body)
     bookends, truncated = _bookend_rows(req, src, group_cols, sort_col, carry, where, params,
-                                        limit=MAX_GROUPS * 2, row_json=row_json, sums=sums)
+                                        limit=MAX_GROUPS * 2, row_json=row_json, sums=sums, template=template)
     if truncated:
         raise ValueError(f"More than {MAX_GROUPS:,} groups — narrow the grouping or add a filter")
     json_cols = [c["name"] for c in src["columns"]] if row_json else None

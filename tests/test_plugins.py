@@ -1610,12 +1610,12 @@ def test_first_last_bookends_each_group_with_rendered_descriptions(fl_client):
 
 def test_first_last_single_row_group_emits_one_row(fl_client):
     """A one-event group is its own first and last — one row, labelled
-    First, not a duplicated pair saying nothing twice."""
+    Only, not a duplicated pair saying nothing twice."""
     client, sid = fl_client
     out = _fl(client, "preview", source_id=sid, group_by=["Host", "User"],
               sort_column="When", columns=["User"], template="{which} of {count}")
     bob = [r for r in out["rows"] if r[1] == "bob"]
-    assert len(bob) == 1 and bob[0][-1] == "First of 1"
+    assert len(bob) == 1 and bob[0][-1] == "Only of 1"
 
 
 def test_first_last_breaks_timestamp_ties_by_rid(fl_client):
@@ -1637,7 +1637,7 @@ def test_first_last_filters_scope_the_grouping(fl_client):
               template="{which} of {count}",
               filters=[{"column": "EventId", "op": "in", "values": ["4624"]}])
     assert out["total_groups"] == 2  # SRV1 (2x 4624), SRV2 (1x)
-    assert {r[-1] for r in out["rows"]} == {"First of 2", "Last of 2", "First of 1"}
+    assert {r[-1] for r in out["rows"]} == {"First of 2", "Last of 2", "Only of 1"}
 
 
 def test_first_last_create_lands_a_real_source(fl_client, store):
@@ -1704,7 +1704,7 @@ def test_first_last_tag_filter_scopes_the_grouping(fl_client, store):
               tags={"mode": "ids", "ids": [tag["id"]]},
               filters=[{"column": "EventId", "op": "in", "values": ["4624"]}])
     assert out["total_groups"] == 1
-    assert [r[-1] for r in out["rows"]] == ["First of 1"]
+    assert [r[-1] for r in out["rows"]] == ["Only of 1"]
 
 
 def test_first_last_rejects_a_bad_tag_filter(fl_client):
