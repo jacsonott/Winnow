@@ -8,7 +8,7 @@ import { displayValue, ellipsize, filterByValue, openValuePickerForColumn } from
 import { rowAt } from './grid.js';
 import { copyRowsAsText, loadRowsForPositions, writeClipboardText } from './grouping.js';
 import { showPluginTab } from './plugins.js';
-import { S, selCount, selPositions } from './state.js';
+import { S, selCount, selPositions, dashboardCreatorMode } from './state.js';
 import { UNDO_NEXT, applyTag, undoLastTagChange } from './tags.js';
 import { openTagEditor } from './timeframe.js';
 import { displayCell } from './tsformat.js';
@@ -212,6 +212,9 @@ export function rowMenuCellItems(ctx) {
    copy stays where the analyst put it rather than coming and going with
    where they right-clicked. */
 export function rowMenuDashboardItems(ctx) {
+  // Nothing at all unless the case opted in (Case settings → Dashboards):
+  // for a reader of boards the entry was a submenu they never wanted.
+  if (!dashboardCreatorMode()) return [];
   const merged = S.sourceId == null || S.sourceId < 0;
   // A derived column's values live in the drv_<id> sidecar, and a widget
   // queries src_<id> — counting one would produce "no such column".

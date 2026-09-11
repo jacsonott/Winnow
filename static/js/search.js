@@ -8,7 +8,7 @@ import { renderAdvancedChips, renderTermChips, updateSearchHint } from './filter
 import { applyPreset, matchingSavedFilters } from './savedfilters.js';
 import { openSettings } from './settings.js';
 import { loadSources, sourceLabel } from './sources.js';
-import { S } from './state.js';
+import { S, dashboardCreatorMode } from './state.js';
 import { openSavedFiltersModal, openTimeRangeModal } from './timeframe.js';
 import { markModalAction, confirmDialog, dropdownMenu, modal } from './ui.js';
 import { rebuildView } from './view.js';
@@ -439,7 +439,7 @@ $('btnFilters').onclick = () => dropdownMenu($('btnFilters'), () => {
     { label: 'Filter builder…', onclick: openFilterBuilder },
     { label: 'Saved filters…', onclick: openSavedFiltersModal },
   ];
-  if (S.sourceId != null && S.sourceId >= 0) {
+  if (dashboardCreatorMode() && S.sourceId != null && S.sourceId >= 0) {
     items.push({ label: 'Add to dashboard: count of this view',
       title: 'A number on a dashboard — the rows this view shows now — that reopens the view when clicked',
       onclick: () => addViewCountWidget() });

@@ -14,6 +14,21 @@ import pytest
 pytestmark = pytest.mark.ui
 
 
+# "Add to dashboard" only appears in the menus when the case has opted in
+# (Case settings → Dashboards); the whole module assumes it has.
+@pytest.fixture(autouse=True, scope="module")
+def _dashboard_creator_mode(server_post):
+    server_post("/api/case_settings", {"dashboard_creator": True})
+    yield
+    server_post("/api/case_settings", {"dashboard_creator": False})
+
+
+@pytest.fixture(autouse=True)
+def _fresh_case_settings(page, _dashboard_creator_mode):
+    """The page fixture is shared; make sure it has read the setting."""
+    page.evaluate("() => __winnow.loadCaseSettings()")
+
+
 def _root_text(page):
     return page.locator(".menu:not(.menu-sub)").inner_text()
 

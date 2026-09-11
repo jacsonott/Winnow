@@ -15,7 +15,7 @@ import { buildEnvPanel } from './userenv.js';
 import { loadCaseVariables, loadSavedFilters } from './savedfilters.js';
 import { applyPageTabsSize, renderPageTabs } from './sources.js';
 import { lastSplash, reducedMotion } from './splash.js';
-import { S, gridRowCount } from './state.js';
+import { S, gridRowCount, dashboardCreatorMode } from './state.js';
 import { openSavedFiltersModal, updateFiltersButton } from './timeframe.js';
 import { TS_FORMATS } from './tsformat.js';
 import { markModalAction, confirmDialog, modal, promptDialog } from './ui.js';
@@ -413,6 +413,28 @@ export function openCaseSettings() {
       }
     };
     b.append(labeledRow('Timestamp format', sel));
+
+    b.append(el('div', 'settings-sub-label', 'Dashboards'));
+    const dcRow = el('label', 'check-row');
+    const dcBox = el('input');
+    dcBox.type = 'checkbox';
+    dcBox.id = 'caseDashboardCreator';
+    dcBox.checked = dashboardCreatorMode();
+    dcBox.onchange = async () => {
+      try {
+        S.caseSettings = await post('/api/case_settings', { dashboard_creator: dcBox.checked });
+        toast(dcBox.checked ? 'Dashboard creator mode on — "Add to dashboard" is back in the menus'
+          : 'Dashboard creator mode off');
+      } catch (e) {
+        dcBox.checked = !dcBox.checked;
+        toast('Could not save: ' + e.message, 5000);
+      }
+    };
+    dcRow.append(dcBox, el('span', null, ' Dashboard creator mode'));
+    b.append(dcRow);
+    b.append(el('p', 'fb-help',
+      'Shows "Add to dashboard" in column-header menus, row menus and the Filters ▾ button. '
+      + 'Off, those menus stay short; boards themselves are always there under Dashboards.'));
 
     b.append(el('div', 'settings-sub-label', 'Variables'));
     b.append(el('p', 'fb-help',

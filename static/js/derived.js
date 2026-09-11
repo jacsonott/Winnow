@@ -11,7 +11,7 @@ import { ellipsize } from './filters.js';
 import { render } from './grid.js';
 import { startJobsPoll } from './jobs.js';
 import { loadSources, openSource } from './sources.js';
-import { S } from './state.js';
+import { S, dashboardCreatorMode } from './state.js';
 import { updateFiltersButton } from './timeframe.js';
 import { TS_FORMATS, baseColumns, columnMeta, tsFormatFor } from './tsformat.js';
 import { confirmDialog, modal, promptDialog } from './ui.js';
@@ -127,7 +127,7 @@ export function columnMenuItems(name) {
   // widget writes its own query and knows how to open these rows.
   // Not for a derived column itself: a widget queries src_<id>, where a
   // derived column's values are not (they are in the drv_<id> sidecar).
-  if (S.sourceId != null && S.sourceId >= 0 && !c.derived) {
+  if (dashboardCreatorMode() && S.sourceId != null && S.sourceId >= 0 && !c.derived) {
     const table = tableOf(S.sourceId);
     items.push('-', { header: 'Add to dashboard' });
     items.push({ label: `Top values of ${name}`, onclick: () => quickAddWidget(widgetFrom({ template: 'top', table, column: name })) });
