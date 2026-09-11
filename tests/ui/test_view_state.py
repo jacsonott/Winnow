@@ -24,19 +24,25 @@ def test_filters_survive_switching_tables(page, tmp_path):
     page.locator('.fcell input[data-col="EventId"]').fill("=4624")
     page.locator('.fcell input[data-col="EventId"]').press("Enter")
     page.wait_for_function("() => __winnow.S.view.row_count === 50")  # 200 rows, 4 EventId values
-    page.evaluate("() => { document.getElementById('body').scrollTop = 240; }")
+    # The spacer grows when the first page lands; a scrollTop set before
+    # that is clamped to 0 and stashed as 0. Keep setting it until it
+    # takes (lost under a loaded machine, where the page fetch is slower).
+    page.wait_for_function(
+        "() => { const b = document.getElementById('body'); b.scrollTop = 240; return b.scrollTop === 240; }")
 
     # Away and back.
     page.evaluate("(id) => __winnow.openSource(id)", second)
     page.wait_for_function("(id) => __winnow.S.sourceId === id && __winnow.S.view", arg=second)
     assert page.evaluate("() => __winnow.S.filters") == {}, "the other table must start clean"
     page.evaluate("(id) => __winnow.openSource(id)", first)
-    page.wait_for_function("(id) => __winnow.S.sourceId === id && __winnow.S.view", arg=first)
+    # S.view is reassigned when the restored view is BUILT, which is after
+    # sourceId flips; waiting on sourceId alone read the other table's view.
+    page.wait_for_function("(id) => __winnow.S.sourceId === id && __winnow.S.view && __winnow.S.view.row_count === 50", arg=first)
 
     assert page.evaluate("() => __winnow.S.filters") == {"EventId": "=4624"}
     assert page.evaluate("() => __winnow.S.view.row_count") == 50
     assert page.locator('.fcell input[data-col="EventId"]').input_value() == "=4624"
-    assert page.evaluate("() => document.getElementById('body').scrollTop") == 240
+    page.wait_for_function("() => document.getElementById('body').scrollTop === 240")
 
     # Clearing on the tab sticks across another round trip.
     page.click("#btnReset")
