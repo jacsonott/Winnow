@@ -279,8 +279,11 @@ export function openImportModal() {
     folderBtn.title = 'Scan a directory (e.g. KAPE output) against extension + glob patterns';
     folderBtn.onclick = () => openDirectoryImportModal();
     const importAll = el('button', 'btn', 'Import all queued');
+    // The one primary action in the row, pushed to the far right so it
+    // isn't the neighbour of "Import a whole folder…".
+    importAll.style.marginLeft = 'auto';
     importAll.onclick = () => {
-      if (!S.importQueue.length) return;
+      if (!S.importQueue.length) { toast('No files queued — add some first.', 3500); return; }
       const unpicked = S.importQueue.find((i) => (i.kind === 'sqlite' || i.kind === 'xlsx') && !i.configured);
       if (unpicked) {
         toast(`Pick which ${unpicked.kind === 'xlsx' ? 'sheets' : 'tables'} to import from ${unpicked.name} first`, 4500);
@@ -887,8 +890,9 @@ export async function openDirectoryImportModal(state = {}) {
     patRow.append(includeCol, excludeCol);
     b.append(patRow);
 
-    // --- save-as-profile
-    const saveRow = el('div', 'row-actions');
+    // --- save-as-profile (rendered into the bottom row, beside the
+    // import button — it's the last thing done with a set of choices, so
+    // it sits where the choices end rather than between them and the list)
     const saveBtn = el('button', 'btn ghost', st.profileId ? 'Update profile' : 'Save as profile…');
     saveBtn.onclick = async () => {
       let name = S.importProfiles.find((p) => p.id === st.profileId)?.name;
@@ -907,8 +911,6 @@ export async function openDirectoryImportModal(state = {}) {
       toast(`Saved profile "${rec.name}"`);
       openDirectoryImportModal({ ...st, profileId: rec.id });
     };
-    saveRow.append(saveBtn);
-    b.append(saveRow);
 
     b.append(resultsBox);
 
@@ -958,7 +960,10 @@ export async function openDirectoryImportModal(state = {}) {
       $('modal').hidden = true;
       toast(`Queued ${ok} import${ok === 1 ? '' : 's'}${failed ? ` — ${failed} failed to queue` : ''} — progress in the corner panel`, 4000);
     };
-    actions.append(importBtn, cancelBtn);
+    // Save-as-profile on the left, the import on the right: the profile
+    // is the last thing done with these choices, the import the first.
+    importBtn.style.marginLeft = 'auto';
+    actions.append(saveBtn, importBtn, cancelBtn);
     b.append(actions);
 
     renderResults();

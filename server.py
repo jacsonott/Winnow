@@ -1572,7 +1572,8 @@ def api_browse_dir_new(request: Request, body: MakeDirBody):
 
 
 @app.get("/api/browse_dir")
-def api_browse_dir(request: Request, path: str = "", files: bool = False):
+def api_browse_dir(request: Request, path: str = "", files: bool = False,
+                   sort: str = "name", dir: str = "asc"):
     """One directory level — backs the "Browse..." folder picker in the
     new-case modal and, with files=true, the import modal's "Add from this
     machine…" file picker (the fast path: a picked path imports in place
@@ -1633,11 +1634,24 @@ def api_browse_dir(request: Request, path: str = "", files: bool = False):
         if files:
             truncated = len(all_dirs) > BROWSE_LIST_CAP or len(all_files) > BROWSE_LIST_CAP
             dirs = heapq.nsmallest(BROWSE_LIST_CAP, all_dirs, key=str.lower)
-            for e in heapq.nsmallest(BROWSE_LIST_CAP, all_files, key=lambda e: e.name.lower()):
+            # The cap is taken in the order the picker is showing. Sorting
+            # a name-capped 2000 by size or mtime client-side would show
+            # "the newest of the alphabetically-first 2000", which is not
+            # what "Modified ↓" promises on a 5000-file folder.
+            stats = []
+            for e in all_files:
                 try:
-                    file_entries.append({"name": e.name, "size": e.stat().st_size})
+                    st = e.stat()
                 except OSError:
                     continue
+                stats.append((e.name, st.st_size, int(st.st_mtime)))
+            key = {"size": lambda t: (t[1], t[0].lower()), "mtime": lambda t: (t[2], t[0].lower())}.get(
+                sort, lambda t: t[0].lower())
+            pick = heapq.nlargest if dir == "desc" else heapq.nsmallest
+            for name, size, mtime in pick(BROWSE_LIST_CAP, stats, key=key):
+                # mtime so the picker can sort by it — collections are
+                # often "the newest files from the tool run".
+                file_entries.append({"name": name, "size": size, "mtime": mtime})
         else:
             dirs = sorted(all_dirs, key=str.lower)
     except PermissionError:

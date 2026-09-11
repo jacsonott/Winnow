@@ -3,6 +3,7 @@
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { applyBundle } from './bundles.js';
 import { $, api, dragHas, el, post, setBusy, toast } from './core.js';
+import { pad2 } from './tsformat.js';
 import { loadPlugins, openImportModal, queueFiles } from './importer.js';
 import { inFlightWork, startJobsPoll } from './jobs.js';
 import { resetPluginTabMounts } from './plugins.js';
@@ -225,6 +226,39 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
       if (typed) load(typed);
     };
     b.append(pathInput);
+    // Files mode gets a filter box and a sort: a tool's output folder is
+    // hundreds of files, and the ones wanted are "the big ones" or "the
+    // ones from this run" as often as they are a name. Folders always
+    // list first; the sort is remembered across folders and sessions.
+    const SORT_KEY = 'winnow.browse.sort';
+    let sort = { by: 'name', dir: 'asc' };
+    try { sort = { ...sort, ...JSON.parse(localStorage.getItem(SORT_KEY) || '{}') }; } catch { /* default */ }
+    let query = '';
+    const filterBox = el('input', 'panel-search browse-filter');
+    const sortSel = el('select', 'browse-sort');
+    const sortDir = el('button', 'btn ghost browse-sort-dir');
+    if (filesMode) {
+      const tools = el('div', 'browse-tools');
+      filterBox.type = 'search';
+      filterBox.placeholder = 'Filter this folder…';
+      filterBox.autocomplete = 'off';
+      filterBox.oninput = () => { query = filterBox.value.trim().toLowerCase(); if (listing) paint(); };
+      for (const [v, l] of [['name', 'Name'], ['size', 'Size'], ['mtime', 'Modified']]) sortSel.append(new Option(l, v));
+      sortSel.value = sort.by;
+      const paintDir = () => {
+        sortDir.textContent = sort.dir === 'asc' ? '↑' : '↓';
+        sortDir.title = sort.dir === 'asc' ? 'Ascending — click for descending' : 'Descending — click for ascending';
+      };
+      const remember = () => { try { localStorage.setItem(SORT_KEY, JSON.stringify(sort)); } catch { /* private mode */ } };
+      // A sort change re-asks the server: the listing is capped at 2000
+      // entries, and the cap has to be taken in the order being shown.
+      const resort = () => { remember(); if (listing) load(listing.path); };
+      sortSel.onchange = () => { sort.by = sortSel.value; resort(); };
+      sortDir.onclick = () => { sort.dir = sort.dir === 'asc' ? 'desc' : 'asc'; paintDir(); resort(); };
+      paintDir();
+      tools.append(filterBox, el('span', 'fb-help', 'Sort'), sortSel, sortDir);
+      b.append(tools);
+    }
     const list = el('div', 'session-list');
     list.style.maxHeight = '42vh';
     list.style.overflow = 'auto';
@@ -286,7 +320,8 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
       const seq = ++loadSeq;
       let res;
       try {
-        res = await api(`/api/browse_dir?path=${encodeURIComponent(path || '')}${filesMode ? '&files=true' : ''}`);
+        res = await api(`/api/browse_dir?path=${encodeURIComponent(path || '')}`
+          + (filesMode ? `&files=true&sort=${sort.by}&dir=${sort.dir}` : ''));
       } catch (e) {
         // The configured cases folder often doesn't exist yet — which is
         // exactly when someone reaches for "New folder". Opening onto an
@@ -318,10 +353,27 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
       }
       listing = res;
       pathInput.value = listing.path;
+      // A filter is about the folder it was typed over.
+      if (filesMode) { query = ''; filterBox.value = ''; }
       paint();
     }
 
+    /* The listing arrives name-sorted from the server; the picker's own
+       sort and filter are applied here, over what it already has, so a
+       change is a repaint and not a round trip. */
+    /* The server already returns the files in the picker's order (see
+       the sort= param) — only the filter is applied here, so a keystroke
+       is a repaint and not a round trip. */
+    function sortedFiles(files) {
+      return query ? files.filter((f) => f.name.toLowerCase().includes(query)) : files.slice();
+    }
+    const fmtDay = (epoch) => {
+      const d = new Date(epoch * 1000);
+      return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+    };
+
     function paint() {
+      if (!listing) return;   // a control poked before the first listing landed
       // Built off-DOM: up to 2×BROWSE_LIST_CAP rows appended one at a time
       // into a live scroll container re-layouts on every append.
       const frag = document.createDocumentFragment();
@@ -338,7 +390,8 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
         frag.append(row);
       }
       if (filesMode) {
-        for (const f of listing.files || []) {
+        const files = sortedFiles(listing.files || []);
+        for (const f of files) {
           const path = listing.path + '/' + f.name;
           const row = el('label', 'session-row browse-row');
           row.style.cssText = 'cursor:pointer';
@@ -350,10 +403,14 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
             else picked.delete(path);
             paintStatus();
           };
-          row.append(cb, el('span', 'session-name', f.name), el('span', 'count', fmtBytes(f.size)));
+          row.append(cb, el('span', 'session-name', f.name),
+            el('span', 'browse-mtime', f.mtime ? fmtDay(f.mtime) : ''),
+            el('span', 'count', fmtBytes(f.size)));
           frag.append(row);
         }
-        if (!(listing.files || []).length && !listing.dirs.length) {
+        if (!files.length && (listing.files || []).length) {
+          frag.append(el('div', 'note-status', 'No files here match that filter.'));
+        } else if (!(listing.files || []).length && !listing.dirs.length) {
           frag.append(el('div', 'note-status', 'Nothing here.'));
         }
       } else if (!listing.dirs.length) {
