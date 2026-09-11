@@ -8749,6 +8749,114 @@ class Store:
         buf.seek(0)
         return buf
 
+    def export_all_xlsx_plan(self) -> dict:
+        """What "export all tables" would write, before writing it: every
+        real table with its row count, how many worksheets it needs under
+        Excel's per-sheet cap, and which ones overflow — so the UI can say
+        so and ask before a multi-minute export starts. Merges are skipped
+        (their rows already belong to a member's sheet), as are sources
+        that failed to import."""
+        per = XLSX_MAX_ROWS - 1   # one row is the header
+        tables = []
+        for src in self.list_sources():
+            if src.get("is_merge") or src.get("error"):
+                continue
+            rows = src.get("row_count") or 0
+            tables.append({"id": src["id"], "name": src["name"], "rows": rows,
+                           "sheets": max(1, -(-rows // per)), "over_cap": rows > per})
+        return {"tables": tables, "rows_per_sheet": per,
+                "over_cap": [t["name"] for t in tables if t["over_cap"]]}
+
+    def export_all_xlsx(self, path: str) -> dict:
+        """Every real table, every row, one worksheet per table — the
+        whole case as a workbook. Merges are not tables of their own here:
+        every one of a merge's rows is a member's row and lands on that
+        member's sheet (a merge-level derived column is the one thing
+        that doesn't travel — recorded as an export exception under
+        invariant #9). Same header convention as the tagged
+        export (Line, Tags, Note, then the analyst's layout columns), same
+        formula guard. Differences from export_tagged_xlsx, each because
+        "all rows" is a different size of thing:
+
+        - openpyxl's write-only workbook, saved to `path` (a temp file the
+          route hands to FileResponse) rather than an in-memory BytesIO —
+          a 2M-row table as Python cell objects is gigabytes.
+        - Rows are read in keyset chunks (`WHERE rid > ? ORDER BY rid`)
+          on one _reader() checkout per source; never self.lock
+          (invariant #4). Tags and notes are preloaded per source with
+          two whole-source queries — bounded by tagged/noted rows, no
+          `IN (...)` list to grow.
+        - A table past Excel's sheet cap continues on "Name (2)", "Name
+          (3)"…, header re-emitted, so every row lands. The plan above is
+          how the analyst hears about it first.
+
+        Returns {"sheets": n, "rows": n} for the log line."""
+        per = XLSX_MAX_ROWS - 1
+        tagnames = {t["id"]: t["name"] for t in self.list_tags()}
+        wb = Workbook(write_only=True)
+        used_names: set[str] = set()
+        sheets = total_rows = 0
+
+        for src in self.list_sources():
+            if src.get("is_merge") or src.get("error"):
+                continue
+            source_id = src["id"]
+            with self._reader() as ro, self._dropped_view_is_expired():
+                cols = self._export_columns(ro, src)
+                sel = ", ".join(self._col_ref(src, c) for c in cols)
+                tmap: dict[int, list[str]] = {}
+                for rid, tid in ro.execute(
+                    "SELECT rid, tag_id FROM row_tags WHERE source_id=? ORDER BY rid", (source_id,)
+                ):
+                    tmap.setdefault(rid, []).append(tagnames.get(tid, str(tid)))
+                nmap = {rid: note for rid, note in ro.execute(
+                    "SELECT rid, note FROM row_notes WHERE source_id=?", (source_id,))}
+
+                header = ["Line", "Tags", "Note", *cols]
+                # Continuations derive from the name the FIRST sheet actually
+                # got — two tables both called Security.evtx.csv become
+                # "Security.evtx.csv" and "Security.evtx.csv_1", and the
+                # second one's overflow must read "…_1 (2)", not "… (2)",
+                # which would look like the first table continuing.
+                first = _xlsx_sheet_name(src["name"], used_names)
+                part = 1
+                ws = wb.create_sheet(first)
+                ws.append(header)
+                sheets += 1
+                written = 0
+                last_rid = 0
+                while True:
+                    rows = ro.execute(
+                        f"SELECT rid, {sel} FROM {self._from_clause(src)} "
+                        f"WHERE rid > ? ORDER BY rid LIMIT {BATCH}", (last_rid,),
+                    ).fetchall()
+                    if not rows:
+                        break
+                    for row in rows:
+                        if written == per:
+                            part += 1
+                            suffix = f" ({part})"
+                            ws = wb.create_sheet(_xlsx_sheet_name(first[: 31 - len(suffix)] + suffix, used_names))
+                            ws.append(header)
+                            sheets += 1
+                            written = 0
+                        rid = row[0]
+                        ws.append([
+                            rid,
+                            "; ".join(tmap.get(rid, [])),
+                            _csv_safe(nmap.get(rid, "")),
+                            *[_csv_safe(v) for v in row[1:]],
+                        ])
+                        written += 1
+                        total_rows += 1
+                    last_rid = rows[-1][0]
+
+        if not sheets:
+            wb.create_sheet("No tables").append(["This case has no tables to export."])
+            sheets = 1
+        wb.save(path)
+        return {"sheets": sheets, "rows": total_rows}
+
     def search_all_sources(self, query: str = "", terms: list[dict] | None = None) -> list[dict]:
         """Every source's match count, sorted heaviest-first — the whole
         sweep, run to completion. See _iter_search_all_sources for the
@@ -9254,6 +9362,12 @@ def _esc_like(s: str) -> str:
 
 
 _XLSX_SHEET_INVALID = re.compile(r"[\\/?*\[\]:]")
+
+
+# Excel's hard per-worksheet row limit (1,048,576 including the header).
+# Module-level so a test can shrink it to prove the continuation-sheet
+# path without writing a million rows; read at call time for that reason.
+XLSX_MAX_ROWS = 1_048_576
 
 
 def _xlsx_sheet_name(name: str, used: set[str]) -> str:
