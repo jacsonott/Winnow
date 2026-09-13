@@ -223,6 +223,24 @@ export function confirmDialog(message, opts = {}) {
   return _spawnDialog(build);
 }
 
+/* The window.alert() replacement — one button, resolves when it's read.
+   Enter, Escape and the backdrop all count as "read": there is nothing to
+   decide, so there is nothing to cancel. */
+export function alertDialog(message, opts = {}) {
+  const build = (card, close) => {
+    card.append(el('p', 'confirm-message', message));
+    const acts = el('div', 'confirm-actions');
+    const okBtn = el('button', 'btn', opts.okLabel || 'OK');
+    okBtn.onclick = () => close(undefined);
+    okBtn.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); close(undefined); } };
+    acts.append(okBtn);
+    card.append(acts);
+    setTimeout(() => okBtn.focus(), 0);
+  };
+  build.cancelValue = undefined;
+  return _spawnDialog(build);
+}
+
 export function promptDialog(message, defaultValue = '', opts = {}) {
   const build = (card, close) => {
     card.append(el('p', 'confirm-message', message));

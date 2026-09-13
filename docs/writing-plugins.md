@@ -356,7 +356,7 @@ Prefer it to reaching into the app's globals — this is what's supported.
 
 | Field | What it is |
 | --- | --- |
-| `apiVersion` | Contract version of this object (currently `2`) |
+| `apiVersion` | Contract version of this object (currently `3`) |
 | `plugin` | Your plugin's display name |
 | `base` | `/api/plugin/<fs_name>` — prefix for your own routes |
 | `assets` | `/plugin_assets/<fs_name>` — prefix for your own files |
@@ -364,10 +364,13 @@ Prefer it to reaching into the app's globals — this is what's supported.
 | `post(path, body)` | JSON POST shorthand |
 | `sql(sql, limit)` | Read-only query against the case file |
 | `schemaText()` | The case's schema as CREATE TABLE-ish SQL (LLM-ready) |
-| `toast(msg, ms)` | Transient status message |
+| `toast(msg, ms)` | Transient status message — one slot, no button; see [Feedback](#feedback-toasts-notifications-and-dialogs) |
+| `notify(opts)` | A row in the bottom-right jobs panel, the card an import gets — progress, detail, buttons; returns a handle (`update` / `done` / `fail` / `close`) |
 | `el(tag, cls, text)` | Winnow's element helper |
-| `modal(title, build, opts)` | Winnow's modal |
-| `confirmDialog(msg, opts)` / `promptDialog(msg, initial)` | Async dialogs |
+| `modal(title, build, opts)` / `closeModal()` | Winnow's modal singleton and its close |
+| `alertDialog(msg, opts)` / `confirmDialog(msg, opts)` / `promptDialog(msg, initial, opts)` | Themed replacements for `window.alert` / `confirm` / `prompt` — all async |
+| `showTab(localId?)` | Bring the analyst to one of **your** tabs (reopens it if closed); no argument when you register exactly one |
+| `showPage(name)` | Switch to a built-in page: `'grid'`, `'sql'`, `'notes'`, `'timeline'`, `'watchlist'` (reopens it if closed) |
 | `openSource(id)` | Switch the app to a source's grid tab |
 | `refreshSources()` | Re-fetch the app's source list — call after your backend creates a table via `ingest_rows` (a sync ingest announces itself through no job), then `openSource(new_id)` |
 | `state.sources` | Live source list (`{id, name, columns, row_count, is_merge, error}`) |
@@ -385,6 +388,72 @@ Prefer it to reaching into the app's globals — this is what's supported.
 **Always call your backend through `winnow.api` / `winnow.post`.** A raw
 `fetch()` won't carry the `X-Timeline-Lite-Client` header that Winnow's
 CSRF middleware requires on non-GET `/api/*` calls, and will 403.
+
+### Feedback: toasts, notifications and dialogs
+
+**Never call `window.alert()`, `window.confirm()` or `window.prompt()`.**
+They cannot be themed, they look like a different program next to the
+rest of the app, and they block the page while open. Winnow ships a
+replacement for each, and a test (`tests/test_no_native_dialogs.py`)
+fails the build if one of the natives appears in the app or in a
+bundled example. The replacements all return a Promise and stack above
+an open modal, so they work from inside a click handler in one:
+
+```js
+await winnow.alertDialog('The lookup service is unreachable.\nCheck WINNOW_VT_API_KEY under Settings → Environment.');
+                                                          // { okLabel } — resolves when read (OK, Enter, Escape, backdrop)
+const ok = await winnow.confirmDialog('Forget this case\'s conversation?', { danger: true, okLabel: 'Clear' });
+                                                          // → true / false; { okLabel, cancelLabel, danger }
+const name = await winnow.promptDialog('New table name:', 'results', { okLabel: 'Create' });
+                                                          // → the text, or null on Cancel / Escape (not '')
+```
+
+`winnow.modal(title, build, opts)` is the app's one modal: `build(body)`
+fills it, `opts` is `{ wide: true | 'x', tall: true, focus: <selector or
+fn> }`, and `winnow.closeModal()` closes it. Closing dispatches a
+`winnow:modalclose` event on `document` — listen for it if you armed a
+document-level handler inside the modal.
+
+`winnow.toast(msg, ms = 2600)` is for the small stuff — "Copied", "Saved".
+It has one slot: the next toast, yours or the app's, replaces it. For
+anything the analyst should still find when they look up, or that runs
+for a while, use a **notification**:
+
+```js
+const n = winnow.notify({ title: 'VirusTotal lookups', detail: '0 / 40 hashes', progress: 0 });
+for (const [i, hash] of hashes.entries()) {
+  await lookUp(hash);
+  n.update({ detail: `${i + 1} / 40 hashes`, progress: (i + 1) / 40 });
+}
+n.done({
+  detail: '40 hashes checked · 3 flagged',
+  actions: [{ label: 'Open VirusTotal', onClick: () => winnow.showTab() }],
+});
+```
+
+That is a row in the bottom-right jobs panel — the same card an upload or
+import gets, in the same stack. Options, all optional and all accepted by
+`update` too:
+
+| Option | What it does |
+| --- | --- |
+| `title` | The row's name (defaults to your plugin's id) |
+| `detail` | The line under the bar |
+| `progress` | `0..1` draws a bar; `null` an indeterminate one; `false` removes it; omitted leaves it alone |
+| `phase` | Free text for the badge instead of RUNNING / DONE / ERROR (the colour still follows the status) |
+| `actions` | `[{ label, onClick }]` — buttons under the detail; clicking one closes the row, then calls `onClick` |
+| `sticky` | A done row waits for the ✕ instead of fading after 8 s |
+
+The handle: `update(opts)` keeps the row running; `done(opts)` and
+`fail(opts)` finish it — a done row fades after eight seconds like a
+finished import, unless it carries a button or is sticky; an error row
+waits for the ✕. `close()` removes it. **Notices die with your mount**:
+when the case switches or your plugin reloads, the rows go and every
+handle becomes inert (each call a no-op), so a fetch that resolves late
+cannot bring one back. A notification is also the answer to "my tab was
+hidden when the answer arrived" — `container.hidden` says whether you
+are on screen, and `showTab()` from an action brings the analyst back
+(the bundled `claude_assistant` tab does exactly this).
 
 ### Theming
 
@@ -1290,7 +1359,7 @@ can drive a plugin parser from `curl` without touching the UI.
 
 **Paste this one file. That's the whole context budget.**
 
-Everything an author needs is here: the contract for all three hooks,
+Everything an author needs is here: the contract for every hook,
 the data shapes you'll consume, complete runnable examples of an ingest
 format and a tab, and a standalone test recipe. It deliberately does not
 assume you can read Winnow's source — every example in it was extracted
