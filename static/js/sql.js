@@ -27,7 +27,8 @@ export function showSqlTab() {
   // The toolbar and the "matching saved filter" banner are about a
   // specific table's grid — meaningless here (see syncTabChrome).
   syncTabChrome();
-  loadSqlTabs().then(() => $('sqlText').focus());
+  // Returned so a caller (winnow.showPage('sql')) can await the tabs.
+  return loadSqlTabs().then(() => $('sqlText').focus());
 }
 
 /* ------------------------------------------------------ sql pane sub-tabs */

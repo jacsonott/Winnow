@@ -8,7 +8,11 @@
 
    Nothing is kept in this module: the tab renders what GET history returns
    and the server builds the API context from the same table. A chat history
-   in a JS variable is one reload from gone. */
+   in a JS variable is one reload from gone.
+
+   An answer that arrives while the analyst is on another page announces
+   itself through winnow.notify — a row in the jobs panel with a button
+   back to this tab — rather than being found later, or missed. */
 
 export default function mount(container, winnow) {
   const { el, post } = winnow;
@@ -80,6 +84,12 @@ export default function mount(container, winnow) {
   bar.append(input, schemaLabel, send, clearBtn, stats);
   container.append(bar);
 
+  // The notice's button brings the analyst back here — reopening the tab
+  // if it had been closed from the strip.
+  const announce = (title, detail) => winnow.notify({
+    title, detail, actions: [{ label: 'Open Claude', onClick: () => winnow.showTab() }],
+  });
+
   async function submit() {
     const q = input.value.trim();
     if (!q || send.disabled) return;
@@ -97,9 +107,11 @@ export default function mount(container, winnow) {
       pending.textContent = r.answer || '(empty response)';
       const cached = r.usage.cache_read_input_tokens ? `, ${r.usage.cache_read_input_tokens.toLocaleString()} cached` : '';
       stats.textContent = `${r.model} · ${r.usage.input_tokens.toLocaleString()} in${cached} · ${r.usage.output_tokens.toLocaleString()} out`;
+      if (container.hidden) announce('Claude answered', (r.answer || '').split('\n')[0].slice(0, 160)).done();
     } catch (e) {
       pending.remove();
       line('error', e.message);
+      if (container.hidden) announce('Claude', e.message).fail();
     }
     send.disabled = false;
     input.focus();
