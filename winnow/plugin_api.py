@@ -8,7 +8,7 @@ Winnow's own source. Deleting the folder removes the plugin — there is no
 install step, no manifest database, nothing fetched from a network
 (CLAUDE.md: assume airgapped).
 
-Three extension points today, all on the PluginAPI object a plugin's
+Seven extension points today, all on the PluginAPI object a plugin's
 register() receives (deliberately an object rather than a bag of module
 functions — the seam future hooks get added to without any existing
 plugin needing to change):
@@ -114,6 +114,13 @@ A tab plus its backend route, the full custom-UI shape:
         entry="ui/panel.js",             # ES module: mount(container, winnow), onShow/onHide,
     )                                    #   and winnow.onViewChange(cb) to follow the grid
 
+    api.register_page_panel(             # the same thing on a built-in page
+        page="sql",                      # "sql" | "notes"
+        id="copilot",                    # unique within this plugin (shared with tabs/panels)
+        label="Copilot",                 # the toggle's caption in the page's toolbar
+        entry="ui/copilot.js",           # ES module: mount(container, winnow), onShow/onHide;
+    )                                    #   winnow.sqlPage / winnow.notesPage drive the page
+
     api.register_dashboard(              # a board this plugin OFFERS
         id="triage",                     # unique within this plugin
         label="ESXi triage",             # its name in Dashboards ▸ Library
@@ -183,13 +190,18 @@ from typing import Any, Callable, Iterable
 from .store import NUM_RE as _store_num_re, q as _store_q
 from . import userenv
 
+# Where a register_page_panel panel can sit. The grid's equivalent is
+# register_toolbar_panel; each page here has a button host and a
+# side-column host in static/index.html (plugins.js PANEL_HOSTS).
+PAGE_PANEL_PAGES = ("sql", "notes")
+
 # Bumped when PluginAPI's contract changes incompatibly. A plugin may
 # declare WINNOW_API_VERSION = N (the version it was written against);
 # loading refuses a plugin that asks for a newer API than this build
 # provides, with a message that says to update Winnow — the failure mode
 # is otherwise an AttributeError deep inside register() that reads like a
 # plugin bug.
-PLUGIN_API_VERSION = 8
+PLUGIN_API_VERSION = 9
 
 FORMAT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 # API routes may nest ("chat/stream") but each segment keeps the same shape.
@@ -612,15 +624,53 @@ class PluginAPI:
             raise ValueError(f"Panel id {id!r} must be lowercase [a-z0-9_-]")
         if not label:
             raise ValueError("register_toolbar_panel needs a label")
-        if not self._root.is_dir():
-            raise ValueError("register_toolbar_panel is for folder plugins — a single .py file has no module to serve")
-        rel = Path(str(entry).replace("\\", "/"))
-        if rel.is_absolute() or ".." in rel.parts or not (self._root / rel).is_file():
-            raise ValueError(f"Panel entry {entry!r} must be a file inside the plugin folder")
+        rel = self._entry_path(entry, "register_toolbar_panel", "Panel")
         self._registry._add_panel({
             "id": f"{self._plugin}.{id}",
             "plugin": self._plugin,
             "plugin_fs": self._fs,
+            "label": label,
+            "entry": rel.as_posix(),
+            "description": description,
+        })
+
+    def _entry_path(self, entry: str, hook: str, what: str) -> Path:
+        """A UI hook's `entry`, validated the way register_tab validates
+        its own: folder plugins only, a real file inside the folder, now."""
+        if not self._root.is_dir():
+            raise ValueError(f"{hook} is for folder plugins — a single .py file has no module to serve")
+        rel = Path(str(entry).replace("\\", "/"))
+        if rel.is_absolute() or ".." in rel.parts or not (self._root / rel).is_file():
+            raise ValueError(f"{what} entry {entry!r} must be a file inside the plugin folder")
+        return rel
+
+    def register_page_panel(self, *, page: str, id: str, label: str, entry: str,
+                            description: str = "") -> None:
+        """A toggle button in a built-in page's toolbar — the SQL pane's or
+        Notes' — that shows the plugin's own UI in a resizable column
+        beside that page. `page` names the page ("sql" or "notes"); the
+        rest is register_toolbar_panel's contract: `entry` is an ES module
+        exporting `mount(container, winnow)` and optional `onShow` /
+        `onHide`, the toggle persists per browser, and the column hides
+        with the page. The `winnow` context is a tab's; what makes this
+        hook useful is `winnow.sqlPage` (text/setText/run/result/
+        selectedRows/onRun/show) and `winnow.notesPage` (text/setText/
+        insert/onChange/show), which drive the page the panel sits on —
+        the copilot in the claude_assistant example inserts and runs the
+        queries it writes."""
+        if page not in PAGE_PANEL_PAGES:
+            raise ValueError(f"Page panel page {page!r} must be one of {', '.join(PAGE_PANEL_PAGES)}")
+        if not FORMAT_ID_RE.match(id or ""):
+            raise ValueError(f"Panel id {id!r} must be lowercase [a-z0-9_-]")
+        if not label:
+            raise ValueError("register_page_panel needs a label")
+        rel = self._entry_path(entry, "register_page_panel", "Panel")
+        self._registry._add_page_panel({
+            "id": f"{self._plugin}.{id}",
+            "local_id": id,
+            "plugin": self._plugin,
+            "plugin_fs": self._fs,
+            "page": page,
             "label": label,
             "entry": rel.as_posix(),
             "description": description,
@@ -725,6 +775,7 @@ class PluginRegistry:
         self._apis: dict[tuple[str, str], dict] = {}     # (fs_name, route) -> {handler, methods}
         self._row_actions: dict[str, dict] = {}          # namespaced action id -> see register_row_action
         self._panels: dict[str, dict] = {}               # namespaced panel id -> see register_toolbar_panel
+        self._page_panels: dict[str, dict] = {}          # namespaced panel id -> see register_page_panel
         self._dashboards: dict[str, dict] = {}           # namespaced board id -> see register_dashboard
         self._seq = 0  # unique module names across load() calls / same-named plugins in two dirs
 
@@ -770,6 +821,7 @@ class PluginRegistry:
         self._apis = {}
         self._row_actions = {}
         self._panels = {}
+        self._page_panels = {}
         self._dashboards = {}
         seen: set[str] = set()
         for directory in directories:
@@ -857,15 +909,26 @@ class PluginRegistry:
             raise ValueError(f"Duplicate ingest format id: {fmt.id}")
         self._formats[fmt.id] = fmt
 
+    # Tabs, toolbar panels and page panels share one `<plugin>.<id>`
+    # namespace: the frontend keys their mounts and everything a mount
+    # owns by that id, so a plugin naming a tab and a panel both
+    # "copilot" would have one teardown cut the other's state.
+    def _claim_ui_id(self, id: str, what: str) -> None:
+        for kind, table in (("tab", self._tabs), ("toolbar panel", self._panels), ("page panel", self._page_panels)):
+            if id in table:
+                raise ValueError(f"Duplicate {what} id: {id} (already a {kind} — tabs and panels share one id space)")
+
     def _add_tab(self, tab: dict) -> None:
-        if tab["id"] in self._tabs:
-            raise ValueError(f"Duplicate tab id: {tab['id']}")
+        self._claim_ui_id(tab["id"], "tab")
         self._tabs[tab["id"]] = tab
 
     def _add_panel(self, panel: dict) -> None:
-        if panel["id"] in self._panels:
-            raise ValueError(f"Duplicate toolbar panel id: {panel['id']}")
+        self._claim_ui_id(panel["id"], "toolbar panel")
         self._panels[panel["id"]] = panel
+
+    def _add_page_panel(self, panel: dict) -> None:
+        self._claim_ui_id(panel["id"], "page panel")
+        self._page_panels[panel["id"]] = panel
 
     def _add_dashboard(self, board: dict) -> None:
         if board["id"] in self._dashboards:
@@ -917,6 +980,12 @@ class PluginRegistry:
         entry module's cache-buster (same as list_tabs)."""
         gen_by_fs = {p["fs_name"]: p["gen"] for p in self.plugins}
         return [{**t, "gen": gen_by_fs.get(t["plugin_fs"], 0)} for t in self._panels.values()]
+
+    def list_page_panels(self) -> list[dict]:
+        """Every registered page panel (SQL / Notes side columns), with its
+        plugin's gen for the entry module's cache-buster."""
+        gen_by_fs = {p["fs_name"]: p["gen"] for p in self.plugins}
+        return [{**t, "gen": gen_by_fs.get(t["plugin_fs"], 0)} for t in self._page_panels.values()]
 
     def list_dashboards(self) -> list[dict]:
         """Every registered dashboard, without its widgets — the sidebar

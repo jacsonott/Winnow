@@ -324,6 +324,22 @@ export function sqlCopySelection() {
   return true;
 }
 
+/* The selected result rows, for a plugin (winnow.sqlPage.selectedRows):
+   {columns, rows}. Selection exists only when the result carries a rid
+   (sqlTagsFor resolved it) — otherwise rows is [] and that is the answer. */
+export function sqlSelectedRows() {
+  const r = activeResult;
+  if (!r) return { columns: [], rows: [] };
+  const rows = [];
+  if (r.tags && r.tags.sel.size) {
+    for (const row of r.rows) {
+      const key = sqlRowKey(r.tags.ref, row);
+      if (key && r.tags.sel.has(key)) rows.push(row);
+    }
+  }
+  return { columns: r.columns, rows };
+}
+
 /* Copy the result to the clipboard as TSV with a header row — the
    selected rows if there is a selection, the whole result otherwise.
    Selection-first because that's what Ctrl+C already does on this pane

@@ -6,12 +6,12 @@ import { $, api, el, post, setBusy, toast } from './core.js';
 import { loadPlugins, openImportModal, pluginFormatById, queueFilesForFormat } from './importer.js';
 import { clearAllFilters, loadSources, openSource, pageTabs, renderPageTabs, renderSidebar, reopenPageTab, syncTabSelection } from './sources.js';
 import { closeNoticesOwnedBy, createNotice } from './jobs.js';
-import { showNotesTab } from './notes.js';
+import { ensureNotesLoaded, insertAtCursor, showNotesTab } from './notes.js';
 import { showWatchlistTab } from './watchlist.js';
 import { setColumnFilter, valueFilterText } from './filters.js';
 import { rebuildView } from './view.js';
-import { activeSqlTab, hideMainViews, scheduleSqlTabSave, showGridTab, showTimelineTab, syncTabChrome } from './sql.js';
-import { setActiveSqlResult, sqlCopyResult, sqlDownloadCsv, sqlRowKey, sqlTagsFor, tagChips, wireSqlAssist } from './sqlassist.js';
+import { activeSqlTab, flushSqlTabSave, hideMainViews, loadSqlTabs, scheduleSqlTabSave, showGridTab, showSqlTab, showTimelineTab, syncTabChrome } from './sql.js';
+import { setActiveSqlResult, sqlCopyResult, sqlDownloadCsv, sqlRowKey, sqlSelectedRows, sqlTagsFor, tagChips, wireSqlAssist } from './sqlassist.js';
 import { moveCursor } from './grid.js';
 import { loadCaseVariables } from './savedfilters.js';
 import { S } from './state.js';
@@ -57,7 +57,10 @@ export function buildPluginsPanel(b) {
     // out of the row menu, which promises to hide it while its plugin is off.
     S.pluginRowActions = r.row_actions || [];
     S.pluginDashboards = r.dashboards || [];
+    S.pluginPanels = r.panels || [];
+    S.pluginPagePanels = r.page_panels || [];
     renderPluginTabs(); // a toggle/install can add or remove pinned tabs
+    renderPluginPanelButtons(); // …and toolbar / page panels
     // …and can add or remove offered boards. Without this the Dashboards
     // section keeps whatever it last drew: a board that is not offered
     // yet, or a phantom row whose ＋ 404s because its plugin is off.
@@ -453,7 +456,7 @@ export async function showPage(name) {
 
 export function buildPluginTabContext(tab, kind = 'tab') {
   return {
-    apiVersion: 3,
+    apiVersion: 4,
     plugin: tab.plugin,
     base: `/api/plugin/${tab.plugin_fs}`,      // the plugin's own register_api routes
     assets: `/plugin_assets/${tab.plugin_fs}`, // the plugin's own files (css, workers, data)
@@ -464,6 +467,11 @@ export function buildPluginTabContext(tab, kind = 'tab') {
     notify: (opts) => createNotice(mountKey(kind, tab.id), opts),
     showTab: (localId) => showOwnTab(tab, localId),
     showPage,
+    // The built-in pages, driven from a plugin — a page panel's reason to
+    // exist, but any tab can use them. Everything that may need a lazy
+    // load (the SQL sub-tabs, the notes body) is async.
+    sqlPage: sqlPageApi(mountKey(kind, tab.id)),
+    notesPage: notesPageApi(mountKey(kind, tab.id)),
     sql: (sql, limit = 5000) => post('/api/sql', { sql, limit }),
     schemaText: sqlSchemaForLLM,
     openSource,
@@ -578,17 +586,124 @@ export async function showPluginTab(tabId) {
   if (m.module && m.module.onShow) { try { m.module.onShow(m.container); } catch (e) { console.error(e); } }
 }
 
-/* ---------------------------------------------------- toolbar panels */
+/* ------------------------------------------------- the built-in pages */
 
-/* Plugin toolbar panels (PluginAPI.register_toolbar_panel): a toggle
-   button per panel in the table toolbar, and — while toggled on and the
-   grid is showing — the panel's own UI in the #pluginPanels strip between
-   the toolbar and the grid. Mounted once per plugin gen like a tab;
-   hidden/shown after that, with onShow/onHide. The toggle persists per
-   browser, keyed by the namespaced panel id, so an analyst who keeps the
-   histogram open gets it back on the next case. */
+/* winnow.sqlPage: the SQL pane as a plugin sees it. The sub-tabs load
+   lazily with the page, so every method that touches the editor loads
+   them first — otherwise the page's own first visit would repaint the
+   editor from the server copy over whatever the plugin wrote. setText
+   persists at once (the tab-switch flush) for the same reason: showSqlTab
+   re-fetches the tabs. */
+function sqlPageApi(key) {
+  const ready = async () => { if (!(S.sqlTabs || []).length) await loadSqlTabs(); };
+  return {
+    show: () => showSqlTab(),
+    text: async () => { await ready(); return $('sqlText').value; },
+    setText: async (sql, { newTab } = {}) => {
+      await ready();
+      const text = sql == null ? '' : String(sql);
+      if (newTab) {
+        await flushSqlTabSave();
+        const rec = await post('/api/sql_tabs', { name: String(newTab), sql: text });
+        rec.savedSql = rec.sql;
+        S.sqlTabs.push(rec);
+        S.sqlTabId = rec.id;   // loadSqlTabs (via showSqlTab) keeps a still-valid selection
+      } else {
+        const tab = activeSqlTab();
+        $('sqlText').value = text;
+        if (tab) tab.sql = text;
+        await flushSqlTabSave();
+      }
+      await showSqlTab();
+    },
+    run: async () => {
+      await ready();
+      const r = await runSql();
+      if (r && r.error) throw new Error(r.error);
+      return publicSqlResult(r);
+    },
+    result: () => { const r = S.sqlResults.get(S.sqlTabId); return r && !r.error ? publicSqlResult(r) : null; },
+    selectedRows: () => sqlSelectedRows(),
+    onRun: (cb) => {
+      const h = (e) => cb(e.detail);
+      document.addEventListener('winnow:sqlrun', h);
+      return trackMountListener(key, () => document.removeEventListener('winnow:sqlrun', h));
+    },
+  };
+}
+
+/* The result shape a plugin gets: what /api/sql returned, minus the
+   pane's own tag decoration (a Map and a selection Set). */
+function publicSqlResult(r) {
+  if (!r) return null;
+  if (r.error) return { error: r.error };
+  return { columns: r.columns, rows: r.rows, elapsed_ms: r.elapsed_ms, truncated: r.truncated };
+}
+
+/* winnow.notesPage: the case notes. The body loads lazily with the page;
+   ensureNotesLoaded first, always — an insert into an editor that was
+   never seeded would autosave plugin text over the case's narrative. */
+function notesPageApi(key) {
+  return {
+    show: () => showNotesTab(),
+    text: async () => { await ensureNotesLoaded(); return $('notesEditor').value; },
+    setText: async (md) => {
+      await ensureNotesLoaded();
+      const ed = $('notesEditor');
+      ed.value = md == null ? '' : String(md);
+      ed.dispatchEvent(new Event('input'));   // autosave sees it like typing
+    },
+    insert: async (text) => { await ensureNotesLoaded(); insertAtCursor(text == null ? '' : String(text)); },
+    onChange: (cb) => {
+      const ed = $('notesEditor');
+      const h = () => cb({ text: ed.value });
+      ed.addEventListener('input', h);
+      return trackMountListener(key, () => ed.removeEventListener('input', h));
+    },
+  };
+}
+
+/* ------------------------------------------------ toolbar and page panels */
+
+/* Plugin panels: a toggle button per panel in some toolbar, and — while
+   toggled on and that toolbar's page is showing — the panel's own UI in
+   a host next to it. Three hosts, one code path: the grid's
+   (register_toolbar_panel — a strip between the toolbar and the grid)
+   and the SQL and Notes pages' (register_page_panel — a side column).
+   Mounted once per plugin gen like a tab; hidden/shown after that, with
+   onShow/onHide. The toggle persists per browser, keyed by the
+   namespaced panel id, so an analyst who keeps the histogram open gets
+   it back on the next case. */
 const PANEL_PREFS_KEY = 'winnow.panels';
-const pluginPanelMounts = new Map();   // panel id -> {container, module, gen}
+const PAGE_PANEL_W_KEY = 'winnow.pagepanels.width';
+const PAGE_PANEL_MIN_W = 260;
+const pluginPanelMounts = new Map();   // panel id -> {container, module, gen, host}
+
+const PANEL_HOSTS = {
+  grid: {
+    kind: 'panel', buttons: 'pluginToolbarButtons', host: 'pluginPanels',
+    list: () => S.pluginPanels || [],
+    visible: () => S.activeTab === 'grid',
+  },
+  sql: {
+    kind: 'page', buttons: 'sqlPluginButtons', host: 'sqlPluginPanels', resize: 'sqlPanelResize',
+    list: () => (S.pluginPagePanels || []).filter((p) => p.page === 'sql'),
+    visible: () => S.activeTab === 'sql',
+  },
+  notes: {
+    kind: 'page', buttons: 'notesPluginButtons', host: 'notesPluginPanels', resize: 'notesPanelResize',
+    list: () => (S.pluginPagePanels || []).filter((p) => p.page === 'notes'),
+    visible: () => S.activeTab === 'notes',
+  },
+};
+
+function panelHostFor(id) {
+  for (const host of Object.values(PANEL_HOSTS)) {
+    const p = host.list().find((x) => x.id === id);
+    if (p) return { host, panel: p };
+  }
+  return null;
+}
 
 function panelPrefs() {
   try { return JSON.parse(localStorage.getItem(PANEL_PREFS_KEY) || '{}'); } catch { return {}; }
@@ -601,23 +716,28 @@ function setPanelPref(id, on) {
 }
 
 export function renderPluginPanelButtons() {
-  const host = $('pluginToolbarButtons');
-  if (!host) return;
-  host.replaceChildren();
-  const live = new Set((S.pluginPanels || []).map((p) => p.id));
   // A panel whose plugin was disabled or reloaded loses its mount.
   for (const [id, m] of [...pluginPanelMounts]) {
-    const p = (S.pluginPanels || []).find((x) => x.id === id);
-    if (!p || p.gen !== m.gen) { disposePluginMount(mountKey('panel', id)); m.container.remove(); pluginPanelMounts.delete(id); }
+    const found = panelHostFor(id);
+    if (!found || found.panel.gen !== m.gen) {
+      disposePluginMount(mountKey(m.host.kind, id));
+      m.container.remove();
+      pluginPanelMounts.delete(id);
+    }
   }
-  for (const p of S.pluginPanels || []) {
-    const b = el('button', 'btn ghost plugin-panel-btn', p.label);
-    b.dataset.panelId = p.id;
-    b.title = (p.description || `${p.label} — from the ${p.plugin} plugin`) + ' (click to toggle)';
-    b.setAttribute('aria-pressed', String(pluginPanelOpen(p.id)));
-    b.onclick = () => togglePluginPanel(p.id);
-    host.append(b);
-    if (pluginPanelOpen(p.id) && live.has(p.id)) mountPluginPanel(p.id);
+  for (const host of Object.values(PANEL_HOSTS)) {
+    const buttons = $(host.buttons);
+    if (!buttons) continue;
+    buttons.replaceChildren();
+    for (const p of host.list()) {
+      const b = el('button', 'btn ghost plugin-panel-btn', p.label);
+      b.dataset.panelId = p.id;
+      b.title = (p.description || `${p.label} — from the ${p.plugin} plugin`) + ' (click to toggle)';
+      b.setAttribute('aria-pressed', String(pluginPanelOpen(p.id)));
+      b.onclick = () => togglePluginPanel(p.id);
+      buttons.append(b);
+      if (pluginPanelOpen(p.id)) mountPluginPanel(p.id);
+    }
   }
   syncPluginPanels();
 }
@@ -631,17 +751,18 @@ export async function togglePluginPanel(id, on = !pluginPanelOpen(id)) {
 }
 
 async function mountPluginPanel(id) {
-  const panel = (S.pluginPanels || []).find((p) => p.id === id);
-  if (!panel) return;
+  const found = panelHostFor(id);
+  if (!found) return;
+  const { host, panel } = found;
   let m = pluginPanelMounts.get(id);
   if (m) return;
   const container = el('section', 'plugin-panel');
   container.dataset.panelId = id;
-  $('pluginPanels').append(container);
-  m = { container, module: null, gen: panel.gen };
+  $(host.host).append(container);
+  m = { container, module: null, gen: panel.gen, host };
   pluginPanelMounts.set(id, m);
   try {
-    const ctx = buildPluginTabContext(panel, 'panel');
+    const ctx = buildPluginTabContext(panel, host.kind);
     const mod = await import(`${ctx.assets}/${panel.entry}?v=${panel.gen}`);
     if (typeof mod.default !== 'function') throw new Error('panel module has no default export to mount');
     await mod.default(container, ctx);
@@ -653,27 +774,72 @@ async function mountPluginPanel(id) {
   syncPluginPanels();
 }
 
-/* Panels show only with the grid (the toolbar hides on page tabs, and so
-   does the strip) and only while toggled on; the host collapses to
-   nothing when no panel is visible, so the grid gets the row back. */
+/* Panels show only with their page (the grid's with the toolbar, which
+   hides on page tabs; a page's with that page) and only while toggled
+   on; a host collapses to nothing when no panel is visible, so the page
+   gets the space back. Called from syncTabChrome on every switch. */
 export function syncPluginPanels() {
-  const host = $('pluginPanels');
-  if (!host) return;
-  const isGrid = S.activeTab === 'grid';
-  let any = false;
-  for (const [id, m] of pluginPanelMounts) {
-    const show = isGrid && pluginPanelOpen(id);
-    const was = !m.container.hidden;
-    m.container.hidden = !show;
-    if (show) any = true;
-    if (m.module) {
-      try {
-        if (show && !was && m.module.onShow) m.module.onShow(m.container);
-        if (!show && was && m.module.onHide) m.module.onHide(m.container);
-      } catch (e) { console.error(e); }
+  for (const host of Object.values(PANEL_HOSTS)) {
+    const hostEl = $(host.host);
+    if (!hostEl) continue;
+    const isPage = host.visible();
+    let any = false;
+    for (const [id, m] of pluginPanelMounts) {
+      if (m.host !== host) continue;
+      const show = isPage && pluginPanelOpen(id);
+      const was = !m.container.hidden;
+      m.container.hidden = !show;
+      if (show) any = true;
+      if (m.module) {
+        try {
+          if (show && !was && m.module.onShow) m.module.onShow(m.container);
+          if (!show && was && m.module.onHide) m.module.onHide(m.container);
+        } catch (e) { console.error(e); }
+      }
     }
+    hostEl.hidden = !any;
+    if (host.resize) { const r = $(host.resize); if (r) r.hidden = !any; }
   }
-  host.hidden = !any;
+}
+
+/* The side column's drag handle. One width for both pages — it is the
+   same "how much room does the assistant get" preference — remembered
+   per browser like the panel toggles. */
+function wirePagePanelResize() {
+  const stored = Number(localStorage.getItem(PAGE_PANEL_W_KEY));
+  for (const host of Object.values(PANEL_HOSTS)) {
+    if (!host.resize) continue;
+    const handle = $(host.resize);
+    const aside = $(host.host);
+    if (!handle || !aside) continue;
+    if (stored >= PAGE_PANEL_MIN_W) aside.style.width = `${stored}px`;
+    handle.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      handle.setPointerCapture(e.pointerId);
+      handle.classList.add('dragging');
+      const startX = e.clientX;
+      const startW = aside.getBoundingClientRect().width;
+      const max = Math.max(PAGE_PANEL_MIN_W, aside.parentElement.getBoundingClientRect().width * 0.7);
+      const move = (ev) => {
+        const w = Math.min(max, Math.max(PAGE_PANEL_MIN_W, startW + (startX - ev.clientX)));
+        aside.style.width = `${Math.round(w)}px`;
+      };
+      const up = () => {
+        handle.removeEventListener('pointermove', move);
+        handle.removeEventListener('pointerup', up);
+        handle.classList.remove('dragging');
+        const w = Math.round(aside.getBoundingClientRect().width);
+        try { localStorage.setItem(PAGE_PANEL_W_KEY, String(w)); } catch { /* private mode */ }
+        // Both pages share the width: apply it to the other column too.
+        for (const other of Object.values(PANEL_HOSTS)) {
+          const o = other.resize && $(other.host);
+          if (o && o !== aside) o.style.width = `${w}px`;
+        }
+      };
+      handle.addEventListener('pointermove', move);
+      handle.addEventListener('pointerup', up);
+    });
+  }
 }
 
 /* Split out of runSql so applySqlTabToEditor can re-paint a cached result
@@ -879,12 +1045,23 @@ export async function runSql() {
       setActiveSqlResult(r);
       out.replaceChildren(...sqlResultNodes(r));
     }
+    announceSqlRun(tabId, sql, r);
+    return r;
   } catch (e) {
-    S.sqlResults.set(tabId, { error: e.message });
+    const r = { error: e.message };
+    S.sqlResults.set(tabId, r);
     if (S.sqlTabId === tabId) out.replaceChildren(el('div', 'sql-error', e.message));
+    announceSqlRun(tabId, $('sqlText').value, r);
+    return r;
   } finally {
     setBusy(false);
   }
+}
+
+/* winnow.sqlPage.onRun — every run, success or error, with the public
+   result shape (no tag decoration). */
+function announceSqlRun(tabId, sql, r) {
+  document.dispatchEvent(new CustomEvent('winnow:sqlrun', { detail: { tabId, sql, result: publicSqlResult(r) } }));
 }
 
 /* DOM wiring for this module, called once by main.js. Handlers can't
@@ -892,6 +1069,7 @@ export async function runSql() {
    startup steps that DO depend on order live in main.js instead. */
 export function wirePlugins() {
 $('btnRunSql').onclick = runSql;
+wirePagePanelResize();
 
 wireSqlAssist();
 

@@ -548,6 +548,24 @@ html[data-style="studio"][data-theme="light"] {
 .search-icon-btn { display: inline-flex; align-items: center; line-height: 1; padding: 4px 8px; }
 .plugin-toolbar-buttons { display: inline-flex; gap: 4px; }
 .plugin-toolbar-buttons:empty { display: none; }
+
+/* Page panels (register_page_panel): the SQL and Notes pages are a row —
+   the page itself, a drag handle, and a side column the panels stack in.
+   The column is display:none until a panel is toggled on, so the page
+   is exactly what it was when no plugin is involved. Width is shared by
+   both pages and remembered per browser (winnow.pagepanels.width). */
+.page-with-panels { flex-direction: row; }
+.page-with-panels > .page-main { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.page-panels {
+  flex: 0 0 auto; width: 380px; min-width: 260px; min-height: 0;
+  display: flex; flex-direction: column; overflow: hidden;
+  background: var(--panel); border-left: 1px solid var(--line);
+}
+.page-panels[hidden] { display: none; }
+.page-panels > .plugin-panel { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.page-panel-resize { flex: 0 0 5px; cursor: col-resize; touch-action: none; background: var(--line-2); }
+.page-panel-resize:hover, .page-panel-resize.dragging { background: var(--accent-dim); }
+.page-panel-resize[hidden] { display: none; }
 .plugin-panel-btn[aria-pressed="true"] { color: var(--accent); border-color: var(--accent-dim); }
 .plugin-panels[hidden] { display: none; }
 .plugin-panels { display: flex; flex-direction: column; min-width: 0; }

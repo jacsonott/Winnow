@@ -22,6 +22,22 @@ see [docs/notes/README.md](README.md) for the whole set.
   because the jobs poll stops when idle and would never redraw the
   panel on its own.
 
+- **Page panels write pages that load lazily.** The SQL sub-tabs load
+  on the pane's first visit and `applySqlTabToEditor` then repaints the
+  editor from the server copy; the notes body loads on Notes' first
+  visit and the editor's `input` event autosaves. So `winnow.sqlPage.*`
+  loads the tabs first and `setText` flushes at once, and
+  `winnow.notesPage.*` goes through `ensureNotesLoaded()` before
+  touching the editor — a plugin insert before the analyst ever opened
+  Notes would otherwise autosave plugin text over a body that was never
+  fetched. Any new page API keeps that order.
+
+- **The three panel hosts are one code path** (`PANEL_HOSTS` in
+  plugins.js): the grid strip and the SQL/Notes side columns differ only
+  in their button host, container, and which `S.activeTab` shows them.
+  Adding a page to `PAGE_PANEL_PAGES` means a row there, two elements in
+  index.html, and nothing else.
+
 - **`_reload_plugins()` mutates the registry in place, so a shared
   `PluginRegistry` in a test is a landmine.** It calls
   `PLUGINS.load(...)` on the existing object rather than building a new

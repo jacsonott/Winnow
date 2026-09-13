@@ -155,7 +155,12 @@ try {
       </div>
     </main>
 
-    <section class="sqlview" id="sqlview" hidden>
+    <!-- The SQL and Notes pages are two columns: the page itself, then a
+         resizable side column plugin page panels mount into
+         (PluginAPI.register_page_panel) — hidden until one is toggled on
+         from the button host in the page's toolbar. -->
+    <section class="sqlview page-with-panels" id="sqlview" hidden>
+      <div class="page-main">
       <nav id="sqlTabs" class="sql-tabs" aria-label="SQL queries"></nav>
       <div class="sql-head">
         <span>Read-only query against the case file — src_N and merge_N include your derived columns plus Tags and Note; main.src_N is the raw import</span>
@@ -163,12 +168,16 @@ try {
           <button class="btn ghost" id="btnSqlSchema" title="Copy every table's definition (names, columns, types) to the clipboard — paste it into notes or an LLM">Copy schema</button>
           <button class="btn ghost" id="btnSqlTables" title="Every table's src_N name — click one to insert it at the cursor">Tables ▾</button>
           <button class="btn ghost" id="btnSqlWidget" title="Turn this query into a dashboard widget">To dashboard…</button>
+          <span id="sqlPluginButtons" class="plugin-toolbar-buttons"></span>
           <button class="btn" id="btnRunSql">Run  ⌘⏎</button>
         </div>
       </div>
       <textarea id="sqlText" spellcheck="false" rows="5"></textarea>
       <div class="sql-resize" id="sqlResize" title="Drag to resize the query box"></div>
       <div class="sql-result" id="sqlResult"></div>
+    </div>
+      <div class="page-panel-resize" id="sqlPanelResize" title="Drag to resize the panel" hidden></div>
+      <aside id="sqlPluginPanels" class="page-panels" hidden></aside>
     </section>
 
     <section class="timelineview" id="timelineview" hidden>
@@ -230,12 +239,14 @@ try {
       </div>
     </section>
 
-    <section class="notesview" id="notesview" hidden>
+    <section class="notesview page-with-panels" id="notesview" hidden>
+      <div class="page-main">
       <div class="notes-head">
         <span class="notes-label">Case notes</span>
         <button class="btn ghost" id="btnNotesEdit" aria-pressed="true">Edit</button>
         <button class="btn ghost" id="btnNotesPreview" aria-pressed="false">Preview</button>
         <button class="btn ghost" id="btnNotesLink" title="Insert a link to a table, SQL query or dashboard — clickable in Preview">Link ▾</button>
+        <span id="notesPluginButtons" class="plugin-toolbar-buttons"></span>
         <div class="spacer"></div>
         <span class="note-status" id="notesSaved"></span>
       </div>
@@ -249,6 +260,9 @@ try {
 ## Leads
 - rclone.exe under \ProgramData"></textarea>
       <div class="notes-preview" id="notesPreview" hidden></div>
+    </div>
+      <div class="page-panel-resize" id="notesPanelResize" title="Drag to resize the panel" hidden></div>
+      <aside id="notesPluginPanels" class="page-panels" hidden></aside>
     </section>
   </div>
 

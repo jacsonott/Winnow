@@ -39,7 +39,7 @@ def test_every_hook_is_in_the_guide_and_its_reference():
 
 def test_guide_extension_point_count_matches():
     n = len(_hooks())
-    words = {3: "three", 4: "four", 5: "five", 6: "six"}
+    words = {3: "three", 4: "four", 5: "five", 6: "six", 7: "seven"}
     assert f"## 1. The {words[n]} extension points" in GUIDE
 
 
