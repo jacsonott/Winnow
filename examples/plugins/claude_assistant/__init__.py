@@ -5,6 +5,11 @@ case — with the case *schema* (never row data, unless the analyst pastes
 it into a question themselves) as context, so Claude can write queries
 for the SQL pane, suggest pivots, or explain an artifact.
 
+And a **Copilot** panel beside the SQL pane itself (register_page_panel):
+the same chat, told to answer with one SQL block, with the editor's
+current query as context — and each answer carries Insert / Run buttons
+wired to winnow.sqlPage. Two conversations, two tables in the case file.
+
 ⚠️ This plugin talks to the Anthropic API — it needs network access and
 credentials, so unlike everything else in Winnow it is NOT airgap-
 compatible. That's exactly why it's a plugin: connected analysis machines
@@ -30,10 +35,10 @@ from datetime import datetime, timezone
 PLUGIN = {
     "name": "claude-assistant",
     "version": "1.0.0",
-    "description": "Ask Claude about the open case — schema-aware help writing SQL pane queries and interpreting artifacts. Needs network + ANTHROPIC_API_KEY.",
+    "description": "Ask Claude about the open case — schema-aware help writing SQL pane queries and interpreting artifacts, plus a Copilot beside the SQL pane. Needs network + ANTHROPIC_API_KEY.",
 }
 
-WINNOW_API_VERSION = 6   # req.table (plugin-owned tables in the case file)
+WINNOW_API_VERSION = 9   # register_page_panel + winnow.sqlPage (the Copilot)
 
 SYSTEM_PROMPT = """You are a DFIR analyst's assistant embedded in Winnow, \
 a local SQLite-backed tool for triaging forensic CSV/EVTX/registry exports.
@@ -46,6 +51,25 @@ explicitly (CAST(col AS INTEGER)) for numeric comparisons and remember \
 timestamps are strings. Keep answers focused and practical; when you \
 reference an artifact or event ID, say why it matters for the investigation."""
 
+# The Copilot beside the SQL pane: same model, same schema, a narrower job.
+# Its answers are inserted and run by buttons, so the shape matters — one
+# fenced sql block the UI can lift out, and words kept to a minimum.
+COPILOT_PROMPT = """You are the SQL copilot inside Winnow's SQL pane, helping a DFIR \
+analyst query a case. The case is SQLite; the tables are the src_N and \
+merge_N in the provided schema. Every column is stored as TEXT whatever \
+the schema comments say — CAST explicitly for numeric comparisons, and \
+timestamps are ISO-like strings compared as text.
+
+Answer with exactly one fenced ```sql block holding a single read-only \
+SELECT, then at most two short sentences saying what it shows. Add \
+LIMIT 200 unless the analyst asks for everything or an aggregate. If the \
+analyst's message is about the query currently in the editor ("make this \
+faster", "add the host", "why no rows?"), answer about that query and \
+return the revised one. If a question cannot be answered with a query, \
+say so in one sentence and give no code block."""
+
+MODES = ("chat", "sql")   # the tab's conversation and the Copilot's — separate tables
+
 
 # The transcript lives in the CASE FILE, in this plugin's own table, so it
 # renders when the service is unreachable and travels with the .db when the
@@ -54,30 +78,42 @@ reference an artifact or event ID, say why it matters for the investigation."""
 HISTORY_COLUMNS = "id INTEGER PRIMARY KEY, role TEXT, content TEXT, at TEXT"
 
 
-def _history(req):
-    """This case's transcript table, or None with no case open (the plugin
-    still answers questions then — it just has nothing to remember with)."""
+def _mode(value):
+    mode = (value or "chat").strip().lower()
+    if mode not in MODES:
+        raise ValueError(f"mode must be one of {', '.join(MODES)}")
+    return mode
+
+
+def _history(req, mode="chat"):
+    """This case's transcript table for one conversation — "history" for
+    the tab, "copilot" for the SQL Copilot — or None with no case open
+    (the plugin still answers questions then — it just has nothing to
+    remember with)."""
     if req.store is None:
         return None
-    return req.table("history").create(HISTORY_COLUMNS)
+    return req.table("history" if mode == "chat" else "copilot").create(HISTORY_COLUMNS)
 
 
-def _turns(req, limit=None):
-    t = _history(req)
+def _turns(req, mode="chat", limit=None):
+    t = _history(req, mode)
     return t.rows("ORDER BY id", limit=limit) if t else []
 
 
 def history(req):
-    """GET /api/plugin/claude_assistant/history -> {turns: [{role, content, at}]}
-    What the tab renders on mount, with no network involved."""
+    """GET /api/plugin/claude_assistant/history?mode=chat|sql
+    -> {turns: [{role, content, at}], persisted}
+    What the tab (or the Copilot) renders on mount, with no network involved."""
+    mode = _mode((req.query or {}).get("mode"))
     return {"turns": [{"role": r["role"], "content": r["content"], "at": r["at"]}
-                      for r in _turns(req)],
+                      for r in _turns(req, mode)],
             "persisted": req.store is not None}
 
 
 def clear(req):
-    """POST /api/plugin/claude_assistant/clear — forget this case's chat."""
-    t = _history(req)
+    """POST /api/plugin/claude_assistant/clear {mode} — forget one of this
+    case's conversations."""
+    t = _history(req, _mode((req.body or {}).get("mode")))
     if t:
         t.execute("DELETE FROM {table}")
     return {"ok": True}
@@ -90,6 +126,13 @@ def register(api):
         entry="ui/tab.js",
         description="Ask Claude about the open case — it sees the table schemas (not the data) and writes SQL-pane queries.",
     )
+    api.register_page_panel(
+        page="sql",
+        id="copilot",
+        label="Copilot",
+        entry="ui/copilot.js",
+        description="Ask Claude for a query — it sees the schema and the editor's current text, and its answers insert or run right here.",
+    )
     api.register_api("ask", ask, methods=["POST"])
     api.register_api("history", history, methods=["GET"])
     api.register_api("clear", clear, methods=["POST"])
@@ -97,17 +140,19 @@ def register(api):
 
 def ask(req):
     """POST /api/plugin/claude_assistant/ask
-    body: {question, schema: str|null}
+    body: {question, schema: str|null, mode?: "chat"|"sql", current_sql?: str}
     -> {answer, model, stop_reason, usage}
 
     Context comes from this case's stored transcript, not from the browser:
     the tab can be closed, reopened or reloaded and the conversation carries
-    on where it left off.
+    on where it left off. mode "sql" is the Copilot: its own prompt, its
+    own transcript, and the editor's current query folded into the turn.
     """
     b = req.body or {}
     question = (b.get("question") or "").strip()
     if not question:
         raise ValueError("Ask something")
+    mode = _mode(b.get("mode"))
 
     try:
         import anthropic
@@ -119,7 +164,7 @@ def ask(req):
     # System prompt is [stable text, schema] with the cache breakpoint on
     # the schema block: the whole prefix is cached between questions and
     # only invalidates when the case's tables actually change.
-    system = [{"type": "text", "text": SYSTEM_PROMPT}]
+    system = [{"type": "text", "text": COPILOT_PROMPT if mode == "sql" else SYSTEM_PROMPT}]
     schema = (b.get("schema") or "").strip()
     if schema:
         system.append({
@@ -129,11 +174,17 @@ def ask(req):
         })
 
     messages = []
-    for turn in _turns(req)[-MAX_HISTORY:]:
+    for turn in _turns(req, mode)[-MAX_HISTORY:]:
         role, content = turn.get("role"), turn.get("content")
         if role in ("user", "assistant") and isinstance(content, str) and content.strip():
             messages.append({"role": role, "content": content})
-    messages.append({"role": "user", "content": question})
+    # The Copilot sees what is in the editor — "make this faster" needs
+    # "this". It rides in the turn, not the transcript: the stored question
+    # stays the analyst's words, and the next turn carries the editor's
+    # text as it is then.
+    current_sql = (b.get("current_sql") or "").strip() if mode == "sql" else ""
+    sent = question + (f"\n\nThe query currently in the editor:\n```sql\n{current_sql}\n```" if current_sql else "")
+    messages.append({"role": "user", "content": sent})
 
     # A key the analyst saved under Settings → Environment wins; otherwise
     # the SDK resolves ANTHROPIC_API_KEY / `ant auth login` as it always
@@ -180,7 +231,7 @@ def ask(req):
     # errored is shown in the tab but never becomes context for the next
     # one. SQLite serialises the write, so two tabs asking at once cannot
     # interleave a pair.
-    t = _history(req)
+    t = _history(req, mode)
     if t:
         at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         t.insert([{"role": "user", "content": question, "at": at},
