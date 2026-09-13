@@ -82,7 +82,7 @@ def test_toggle_sits_left_of_run_and_opens_the_column(page, sql_panel):
     shows = page.evaluate("() => window.__shows")
     _open_sql(page)
     page.wait_for_selector("#sqlPluginPanels:not([hidden])")
-    page.wait_for_function("(n) => window.__shows > n", shows)
+    page.wait_for_function("(n) => window.__shows > n", arg=shows)
     # The toggle is remembered
     assert json.loads(page.evaluate("() => localStorage.getItem('winnow.panels')"))["fake.helper"] is True
 
@@ -129,7 +129,7 @@ def test_set_text_in_a_new_tab_keeps_the_analysts_query(page, sql_panel):
     page.wait_for_function("() => !!window.__panelCtx")
     before = page.evaluate("() => __winnow.S.sqlTabs.length")
     page.evaluate("() => window.__panelCtx.sqlPage.setText('SELECT 2', { newTab: 'From plugin' })")
-    page.wait_for_function("(n) => __winnow.S.sqlTabs.length === n + 1", before)
+    page.wait_for_function("(n) => __winnow.S.sqlTabs.length === n + 1", arg=before)
     assert page.locator("#sqlTabs .sql-tab", has_text="From plugin").count() == 1
     assert page.locator("#sqlText").input_value() == "SELECT 2"
     assert any(t["sql"] == "SELECT 'mine'" for t in page.evaluate("() => __winnow.S.sqlTabs"))

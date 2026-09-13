@@ -554,7 +554,9 @@ html[data-style="studio"][data-theme="light"] {
    The column is display:none until a panel is toggled on, so the page
    is exactly what it was when no plugin is involved. Width is shared by
    both pages and remembered per browser (winnow.pagepanels.width). */
-.page-with-panels { flex-direction: row; }
+/* section.…: outranks the pages' own `.sqlview { flex-direction: column }`
+   rules, which come later in this file. */
+section.page-with-panels { flex-direction: row; }
 .page-with-panels > .page-main { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .page-panels {
   flex: 0 0 auto; width: 380px; min-width: 260px; min-height: 0;
