@@ -3,7 +3,7 @@
 The registrar validates like register_toolbar_panel (folder plugins, an
 entry that exists now, an id in the shared tab/panel namespace) plus the
 page name, and the listing carries the gen the frontend cache-busts
-with. The frontend half is tests/ui/test_plugin_page_panels.py.
+with. The frontend half is tests/ui/test_page_panels_ui.py.
 """
 import textwrap
 from pathlib import Path

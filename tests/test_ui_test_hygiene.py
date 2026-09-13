@@ -53,3 +53,19 @@ def test_no_bare_expect_without_assertion(path):
     bad = [i + 1 for i, line in enumerate(path.read_text(encoding="utf-8").splitlines())
            if re.match(r"^\s*page\.locator\([^)]*\)\s*$", line)]
     assert not bad, f"{path.name}: bare locator with no assertion at line(s) {bad}"
+
+
+def test_module_basenames_are_unique_across_tests_and_ui():
+    """pytest imports test modules by basename (no __init__.py here), so
+    tests/test_x.py and tests/ui/test_x.py collide: the second one to be
+    collected errors with "import file mismatch" and interrupts the whole
+    run — a backend-only run (`-m "not ui"`) included, since collection
+    happens before marker selection. Happened twice; now it fails here,
+    with names."""
+    tests = Path(__file__).resolve().parent
+    seen = {}
+    dupes = []
+    for path in sorted(tests.rglob("test_*.py")):
+        if seen.setdefault(path.name, path) != path:
+            dupes.append(f"{path.name}: {seen[path.name].relative_to(tests)} and {path.relative_to(tests)}")
+    assert not dupes, "test module basenames must be unique across tests/ and tests/ui/:\n" + "\n".join(dupes)
