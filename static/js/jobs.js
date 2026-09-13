@@ -409,7 +409,7 @@ export function closeNoticesOwnedBy(owner) {
 }
 
 function noticeRow(n) {
-  return jobPanelRow({
+  const row = jobPanelRow({
     label: n.title,
     phase: n.phase || n.status,
     cls: n.status,
@@ -428,6 +428,8 @@ function noticeRow(n) {
       },
     })),
   });
+  row.classList.add('job-notice');   // a plugin's row, for tests and styling alike
+  return row;
 }
 
 export function createNotice(owner, opts = {}) {

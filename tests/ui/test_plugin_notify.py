@@ -9,7 +9,8 @@ import pytest
 
 pytestmark = pytest.mark.ui
 
-ROWS = "#jobsPanel:not([hidden]) .job-row"
+# Only a plugin's rows: the shared server has import rows of its own in a full run.
+ROWS = "#jobsPanel:not([hidden]) .job-row.job-notice"
 
 
 def _bar_width(page):
@@ -76,7 +77,9 @@ def test_a_closed_handle_is_inert_and_a_case_switch_clears_rows(page, fake_plugi
     assert page.locator(ROWS).count() == 2
     page.evaluate("() => __winnow.resetJobState()")
     assert page.locator(ROWS).count() == 0
-    assert page.evaluate("() => document.getElementById('jobsPanel').hidden") is True
+    # …and the panel itself is re-rendered at once (the poll would not), so
+    # with nothing else in it, it is hidden.
+    assert page.evaluate("() => document.querySelectorAll('#jobsPanel .job-row').length === 0 === document.getElementById('jobsPanel').hidden") is True
 
 
 def test_a_mount_teardown_closes_only_its_own_rows(page, fake_plugin_mount):
