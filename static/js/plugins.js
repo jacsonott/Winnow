@@ -4,15 +4,18 @@
 import { recordTabVisit } from './tabhistory.js';
 import { $, api, el, post, setBusy, toast } from './core.js';
 import { loadPlugins, openImportModal, pluginFormatById, queueFilesForFormat } from './importer.js';
-import { clearAllFilters, loadSources, openSource, renderPageTabs, renderSidebar, syncTabSelection } from './sources.js';
+import { clearAllFilters, loadSources, openSource, pageTabs, renderPageTabs, renderSidebar, reopenPageTab, syncTabSelection } from './sources.js';
+import { closeNoticesOwnedBy, createNotice } from './jobs.js';
+import { showNotesTab } from './notes.js';
+import { showWatchlistTab } from './watchlist.js';
 import { setColumnFilter, valueFilterText } from './filters.js';
 import { rebuildView } from './view.js';
-import { activeSqlTab, hideMainViews, scheduleSqlTabSave, showGridTab, syncTabChrome } from './sql.js';
+import { activeSqlTab, hideMainViews, scheduleSqlTabSave, showGridTab, showTimelineTab, syncTabChrome } from './sql.js';
 import { setActiveSqlResult, sqlCopyResult, sqlDownloadCsv, sqlRowKey, sqlTagsFor, tagChips, wireSqlAssist } from './sqlassist.js';
 import { moveCursor } from './grid.js';
 import { loadCaseVariables } from './savedfilters.js';
 import { S } from './state.js';
-import { confirmDialog, modal, promptDialog } from './ui.js';
+import { alertDialog, closeModal, confirmDialog, modal, promptDialog } from './ui.js';
 import { updateTimeRangeButton } from './timeframe.js';
 
 /* Settings → Plugins: everything about drop-in extensions in one place —
@@ -357,7 +360,7 @@ export function hidePluginViews() {
 }
 
 export function resetPluginTabMounts() {
-  for (const [id, m] of pluginTabMounts) { disposePluginMount(id); m.container.remove(); }
+  for (const [id, m] of pluginTabMounts) { disposePluginMount(mountKey('tab', id)); m.container.remove(); }
   pluginTabMounts.clear();
 }
 
@@ -373,7 +376,7 @@ export function renderPluginTabs() {
   renderPageTabs();
   for (const [id, m] of [...pluginTabMounts]) {
     const t = pluginTabById(id);
-    if (!t || t.gen !== m.gen) { disposePluginMount(id); m.container.remove(); pluginTabMounts.delete(id); }
+    if (!t || t.gen !== m.gen) { disposePluginMount(mountKey('tab', id)); m.container.remove(); pluginTabMounts.delete(id); }
   }
   if (S.activeTab.startsWith('plugin:') && !pluginTabById(S.activeTab.slice(7))) showGridTab();
 }
@@ -393,31 +396,74 @@ export function renderPluginTabs() {
    drops every mount, so the listeners accumulated one set per case switch:
    each still firing on every grid rebuild, painting into detached DOM and
    re-issuing the panel's fetch. Tracked here and cut in disposePluginMount,
-   which every teardown path calls. */
-const mountListeners = new Map();   // mount id -> [unsubscribe]
+   which every teardown path calls.
 
-function trackMountListener(id, off) {
-  if (id == null) return off;
-  const list = mountListeners.get(id) || [];
+   Keyed by MOUNT, not by registered id: a tab and a panel share the
+   `<plugin>.<id>` namespace, so a plugin that names both "copilot" would
+   otherwise have one teardown cut the other's listeners. */
+const mountListeners = new Map();   // mount key -> [unsubscribe]
+
+export const mountKey = (kind, id) => `${kind}:${id}`;
+
+function trackMountListener(key, off) {
+  if (key == null) return off;
+  const list = mountListeners.get(key) || [];
   list.push(off);
-  mountListeners.set(id, list);
+  mountListeners.set(key, list);
   return off;
 }
 
-export function disposePluginMount(id) {
-  for (const off of mountListeners.get(id) || []) {
+export function disposePluginMount(key) {
+  for (const off of mountListeners.get(key) || []) {
     try { off(); } catch { /* a plugin's own teardown must not block ours */ }
   }
-  mountListeners.delete(id);
+  mountListeners.delete(key);
+  closeNoticesOwnedBy(key);   // its rows' click handlers point at code that's gone
 }
 
-export function buildPluginTabContext(tab) {
+/* winnow.showTab: back to one of the plugin's OWN pages — from a
+   notification's button, typically. Reopens the page tab if the analyst
+   had closed it from the strip, the way the sidebar's Pages rows do;
+   showPluginTab alone would show a view with no tab to stand on. */
+async function showOwnTab(owner, localId) {
+  const mine = S.pluginTabs.filter((t) => t.plugin_fs === owner.plugin_fs);
+  let target;
+  if (localId != null) {
+    target = mine.find((t) => t.id === `${owner.plugin}.${localId}`);
+    if (!target) throw new Error(`${owner.plugin} registers no tab "${localId}"`);
+  } else if (mine.length === 1) {
+    target = mine[0];
+  } else {
+    throw new Error(mine.length ? `${owner.plugin} registers ${mine.length} tabs — showTab(id) needs the id` : `${owner.plugin} registers no tab`);
+  }
+  reopenPageTab('plugin:' + target.id);
+  await showPluginTab(target.id);
+}
+
+/* winnow.showPage: the built-in pages by name. `pageTabs()` is the app's
+   own registry of them (plugin tabs and pinned boards ride in it too, so
+   those keys work as well, though the documented names are the five). */
+export async function showPage(name) {
+  if (name === 'grid') { showGridTab(); return; }
+  const t = pageTabs().find((p) => p.key === name);
+  if (!t) throw new Error(`unknown page "${name}"`);
+  reopenPageTab(t.key);
+  await t.show();
+}
+
+export function buildPluginTabContext(tab, kind = 'tab') {
   return {
-    apiVersion: 2,
+    apiVersion: 3,
     plugin: tab.plugin,
     base: `/api/plugin/${tab.plugin_fs}`,      // the plugin's own register_api routes
     assets: `/plugin_assets/${tab.plugin_fs}`, // the plugin's own files (css, workers, data)
-    api, post, toast, el, modal, confirmDialog, promptDialog,
+    api, post, toast, el, modal, confirmDialog, promptDialog, alertDialog, closeModal,
+    // A row in the bottom-right jobs panel — the card an import gets —
+    // driven through the returned handle (update/done/fail/close). Dies
+    // with this mount; see jobs.js createNotice for the lifecycle.
+    notify: (opts) => createNotice(mountKey(kind, tab.id), opts),
+    showTab: (localId) => showOwnTab(tab, localId),
+    showPage,
     sql: (sql, limit = 5000) => post('/api/sql', { sql, limit }),
     schemaText: sqlSchemaForLLM,
     openSource,
@@ -456,7 +502,7 @@ export function buildPluginTabContext(tab) {
     onViewChange: (cb) => {
       const h = (e) => cb(e.detail);
       document.addEventListener('winnow:viewchange', h);
-      return trackMountListener(tab.id, () => document.removeEventListener('winnow:viewchange', h));
+      return trackMountListener(mountKey(kind, tab.id), () => document.removeEventListener('winnow:viewchange', h));
     },
     // Fires after every skin / theme / accent change with {style, themeMode,
     // accent}. Canvases don't inherit CSS — a panel that painted with the
@@ -465,7 +511,7 @@ export function buildPluginTabContext(tab) {
     onAppearanceChange: (cb) => {
       const h = (e) => cb(e.detail);
       document.addEventListener('winnow:appearance', h);
-      return trackMountListener(tab.id, () => document.removeEventListener('winnow:appearance', h));
+      return trackMountListener(mountKey(kind, tab.id), () => document.removeEventListener('winnow:appearance', h));
     },
     // Drive the case timeframe filter (the toolbar's ⏱) from a plugin —
     // the same object the Timeframe dialog writes, so the button, the
@@ -507,7 +553,7 @@ export async function showPluginTab(tabId) {
   syncTabChrome();
 
   let m = pluginTabMounts.get(tabId);
-  if (m && m.gen !== tab.gen) { disposePluginMount(tabId); m.container.remove(); pluginTabMounts.delete(tabId); m = null; }
+  if (m && m.gen !== tab.gen) { disposePluginMount(mountKey('tab', tabId)); m.container.remove(); pluginTabMounts.delete(tabId); m = null; }
   if (m) {
     m.container.hidden = false;
   } else {
@@ -518,9 +564,10 @@ export async function showPluginTab(tabId) {
     try {
       // ?v=gen: a reloaded plugin gets a fresh module even though import()
       // caches by URL — see the gen note in plugin_api.PluginRegistry.
-      const mod = await import(`${buildPluginTabContext(tab).assets}/${tab.entry}?v=${tab.gen}`);
+      const ctx = buildPluginTabContext(tab, 'tab');
+      const mod = await import(`${ctx.assets}/${tab.entry}?v=${tab.gen}`);
       if (typeof mod.default !== 'function') throw new Error('tab module has no default export to mount');
-      await mod.default(container, buildPluginTabContext(tab));
+      await mod.default(container, ctx);
       m.module = mod;
     } catch (e) {
       console.error(e);
@@ -561,7 +608,7 @@ export function renderPluginPanelButtons() {
   // A panel whose plugin was disabled or reloaded loses its mount.
   for (const [id, m] of [...pluginPanelMounts]) {
     const p = (S.pluginPanels || []).find((x) => x.id === id);
-    if (!p || p.gen !== m.gen) { disposePluginMount(id); m.container.remove(); pluginPanelMounts.delete(id); }
+    if (!p || p.gen !== m.gen) { disposePluginMount(mountKey('panel', id)); m.container.remove(); pluginPanelMounts.delete(id); }
   }
   for (const p of S.pluginPanels || []) {
     const b = el('button', 'btn ghost plugin-panel-btn', p.label);
@@ -594,7 +641,7 @@ async function mountPluginPanel(id) {
   m = { container, module: null, gen: panel.gen };
   pluginPanelMounts.set(id, m);
   try {
-    const ctx = buildPluginTabContext(panel);
+    const ctx = buildPluginTabContext(panel, 'panel');
     const mod = await import(`${ctx.assets}/${panel.entry}?v=${panel.gen}`);
     if (typeof mod.default !== 'function') throw new Error('panel module has no default export to mount');
     await mod.default(container, ctx);

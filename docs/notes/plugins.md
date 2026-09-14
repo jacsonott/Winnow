@@ -11,6 +11,17 @@ see [docs/notes/README.md](README.md) for the whole set.
 
 ---
 
+- **Plugin notices (`winnow.notify`) are keyed by MOUNT, and so are the
+  context's tracked listeners.** `mountKey(kind, id)` — `tab:x.y` or
+  `panel:x.y` — not the bare namespaced id, because a tab and a panel of
+  the same plugin can share `<plugin>.<id>` and one teardown must not
+  cut the other's rows and listeners. Anything new that a mount owns and
+  the host cleans up goes under the same key in `disposePluginMount`.
+  The notice handle goes inert (no-ops) the moment its row is gone —
+  `resetJobState` on a case switch clears the map *and* re-renders,
+  because the jobs poll stops when idle and would never redraw the
+  panel on its own.
+
 - **`_reload_plugins()` mutates the registry in place, so a shared
   `PluginRegistry` in a test is a landmine.** It calls
   `PLUGINS.load(...)` on the existing object rather than building a new

@@ -219,6 +219,23 @@ def flyout(page):
 
 
 @pytest.fixture
+def fake_plugin_mount(page):
+    """A plugin tab that exists in client state only — 'fake.t' from a
+    plugin whose folder and display name are both 'fake' — plus the
+    `winnow` context object its mount() would receive, on `window.__ctx`.
+    Tests drive the context (notify, showTab, dialogs) without a plugin
+    on disk; showTab lands on a view whose module 404s, which is fine,
+    the assertion is on where the app went. Everything is taken away
+    again after the test."""
+    page.evaluate("() => { __winnow.S.pluginTabs = [{ id: 'fake.t', plugin: 'fake', plugin_fs: 'fake', "
+                  "label: 'Fake', entry: 'ui/tab.js', description: 'fake', gen: 0 }]; __winnow.renderPageTabs(); "
+                  "window.__ctx = __winnow.buildPluginTabContext(__winnow.S.pluginTabs[0], 'tab'); }")
+    yield
+    page.evaluate("() => { __winnow.disposePluginMount('tab:fake.t'); __winnow.S.pluginTabs = []; "
+                  "__winnow.resetPluginTabMounts(); __winnow.showGridTab(); __winnow.renderPageTabs(); delete window.__ctx; }")
+
+
+@pytest.fixture
 def fake_row_action(page):
     """Register a stand-in plugin row action ('Look up on VT' from a
     plugin whose folder and id are both 'demo' / 'vt' — the pair the pin

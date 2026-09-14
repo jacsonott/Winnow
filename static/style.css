@@ -337,6 +337,14 @@ html[data-style="studio"][data-theme="light"] {
   100% { margin-left: 100%; }
 }
 .job-detail { margin-top: 4px; color: var(--dim); font-size: 11px; }
+/* Buttons under a plugin notice (winnow.notify actions) — the toast's
+   action look, right-aligned like a dialog's. */
+.job-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 6px; }
+.job-action {
+  background: var(--accent-dim); color: var(--text); border: var(--border-w) solid var(--accent);
+  border-radius: var(--radius-sm); padding: 3px 9px; font: inherit; font-size: 11px; cursor: pointer;
+}
+.job-action:hover { background: var(--accent); }
 
 #app {
   height: 100%;

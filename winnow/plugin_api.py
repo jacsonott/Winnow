@@ -86,11 +86,16 @@ A tab plus its backend route, the full custom-UI shape:
 
     # ui/tab.js — mounted on first activation. `container` is an empty
     # <section> filling the main content area; `winnow` is the stable UI
-    # context (see buildPluginTabContext in app.js): winnow.api/post/toast/
-    # el/modal helpers, winnow.base ("/api/plugin/<fs_name>") for the
-    # plugin's own routes, winnow.assets for its other files, winnow.sql()
-    # for read-only case queries, winnow.schemaText() for an LLM-ready
-    # schema dump, and winnow.state (live sources/tags/selection getters).
+    # context (see buildPluginTabContext in static/js/plugins.js):
+    # winnow.api/post/toast/el/modal helpers, the themed dialogs
+    # (alertDialog/confirmDialog/promptDialog — never window.alert &co),
+    # winnow.notify() for a row in the jobs panel with progress and
+    # buttons, winnow.showTab()/showPage() to bring the analyst to one of
+    # the plugin's tabs or a built-in page, winnow.base
+    # ("/api/plugin/<fs_name>") for the plugin's own routes, winnow.assets
+    # for its other files, winnow.sql() for read-only case queries,
+    # winnow.schemaText() for an LLM-ready schema dump, and winnow.state
+    # (live sources/tags/selection getters).
     # Optional exports: onShow/onHide, called on every tab switch.
     #
     #   export default function mount(container, winnow) { ... }

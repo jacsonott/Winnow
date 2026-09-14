@@ -47,6 +47,12 @@ export function resetJobState() {
   seenJobStatus.clear();
   dismissedJobs.clear();
   ftsWatch.clear();
+  // A plugin's rows were about the previous case too — and the poll that
+  // would redraw the panel stops when nothing is running, so the DOM has
+  // to be cleared here, not left for the next tick.
+  for (const n of pluginNotices.values()) clearNoticeTimer(n);
+  pluginNotices.clear();
+  renderJobsPanel();
 }
 
       // source ids seen building, for the "ready" toast
@@ -221,10 +227,14 @@ export async function pollJobs() {
   if (active) jobsPollTimer = setTimeout(pollJobs, 900);
 }
 
-export function jobPanelRow({ label, phase, pct, detail, indeterminate, done, onCancel, onDismiss }) {
+/* `phase` is the badge text; `cls` is its class when the two differ (a
+   plugin notice can say "thinking" while still being styled as running —
+   free text never becomes a class name). `actions` is a row of buttons
+   under the detail line. */
+export function jobPanelRow({ label, phase, cls, pct, detail, indeterminate, done, onCancel, onDismiss, actions }) {
   const row = el('div', 'job-row');
   const head = el('div', 'job-head');
-  head.append(el('span', 'job-name', label), el('span', 'job-phase ' + phase, phase));
+  head.append(el('span', 'job-name', label), el('span', 'job-phase ' + (cls || phase), phase));
   if (onCancel) {
     const x = el('button', 'job-x', '✕');
     x.title = 'Cancel';
@@ -246,6 +256,15 @@ export function jobPanelRow({ label, phase, pct, detail, indeterminate, done, on
     row.append(bar);
   }
   if (detail) row.append(el('div', 'job-detail', detail));
+  if (actions && actions.length) {
+    const acts = el('div', 'job-actions');
+    for (const a of actions) {
+      const b = el('button', 'job-action', a.label);
+      b.onclick = a.onClick;
+      acts.append(b);
+    }
+    row.append(acts);
+  }
   return row;
 }
 
@@ -317,6 +336,10 @@ export function renderJobsPanel() {
     }));
     count++;
   }
+  for (const n of pluginNotices.values()) {
+    panel.append(noticeRow(n));
+    count++;
+  }
   for (const src of S.sources || []) {
     if (src.fts_building) {
       panel.append(jobPanelRow({ label: src.name, phase: 'indexing', indeterminate: true }));
@@ -324,6 +347,124 @@ export function renderJobsPanel() {
     }
   }
   panel.hidden = count === 0;
+}
+
+/* --------------------------------------------------------- plugin notices */
+
+/* Rows a plugin puts in this panel through winnow.notify() — the same
+   card an upload or import gets, so a plugin's background work reports
+   in the one place the analyst already looks. Purely client-side: the
+   plugin's mounted JS owns the row through a handle and drives it with
+   update/done/fail/close. The handle goes inert (every call a no-op) once
+   the row is closed, the owning mount is torn down (a reloaded plugin's
+   click handlers are dead code), or the case switches — so a fetch that
+   resolves late can never resurrect a row.
+
+   `status` (running/done/error) is set by which handle method ran and is
+   what the badge's colour follows; `phase` is optional free text the
+   badge shows instead of the status word. A done row lingers
+   NOTICE_LINGER_MS like a finished import unless it carries buttons or
+   asked to be sticky — then it waits for the ✕, or for a button click,
+   which also closes it. Error rows always wait. */
+export const NOTICE_LINGER_MS = 8000;
+export const pluginNotices = new Map();   // notice id -> record
+let noticeSeq = 0;
+
+function clearNoticeTimer(n) {
+  if (n.timer) { clearTimeout(n.timer); n.timer = null; }
+}
+
+function applyNoticeOpts(n, o) {
+  if (!o || typeof o !== 'object') return;
+  if (o.title !== undefined) n.title = String(o.title);
+  if (o.detail !== undefined) n.detail = o.detail == null ? '' : String(o.detail);
+  if (o.phase !== undefined) n.phase = o.phase == null ? null : String(o.phase);
+  // progress: a number clamps to 0..1 (a bar), null is an indeterminate
+  // bar, undefined leaves it alone; `progress: false` removes the bar.
+  if (o.progress !== undefined) n.progress = o.progress === null ? null : (o.progress === false ? undefined : Math.max(0, Math.min(1, Number(o.progress) || 0)));
+  if (o.sticky !== undefined) n.sticky = !!o.sticky;
+  if (o.actions !== undefined) {
+    n.actions = (Array.isArray(o.actions) ? o.actions : [])
+      .filter((a) => a && a.label)
+      .map((a) => ({ label: String(a.label), onClick: typeof a.onClick === 'function' ? a.onClick : null }));
+  }
+}
+
+export function closeNotice(id) {
+  const n = pluginNotices.get(id);
+  if (!n) return;
+  clearNoticeTimer(n);
+  pluginNotices.delete(id);
+  renderJobsPanel();
+}
+
+/* Mount teardown (plugins.js disposePluginMount) — the owner key is the
+   mount's, so a tab and a panel of the same plugin close only their own. */
+export function closeNoticesOwnedBy(owner) {
+  let any = false;
+  for (const [id, n] of [...pluginNotices]) {
+    if (n.owner === owner) { clearNoticeTimer(n); pluginNotices.delete(id); any = true; }
+  }
+  if (any) renderJobsPanel();
+}
+
+function noticeRow(n) {
+  const row = jobPanelRow({
+    label: n.title,
+    phase: n.phase || n.status,
+    cls: n.status,
+    // The bar exists only while running with a progress value; a finished
+    // row is text like a finished import's.
+    done: n.status !== 'running' || n.progress === undefined,
+    pct: n.progress || 0,
+    indeterminate: n.progress === null,
+    detail: n.detail,
+    onDismiss: () => closeNotice(n.id),
+    actions: n.actions.map((a) => ({
+      label: a.label,
+      onClick: () => {
+        closeNotice(n.id);
+        if (a.onClick) { try { a.onClick(); } catch (e) { console.error(e); } }
+      },
+    })),
+  });
+  row.classList.add('job-notice');   // a plugin's row, for tests and styling alike
+  return row;
+}
+
+export function createNotice(owner, opts = {}) {
+  const id = ++noticeSeq;
+  const n = { id, owner, status: 'running', title: '', detail: '', phase: null, progress: undefined, actions: [], sticky: false, timer: null };
+  applyNoticeOpts(n, opts);
+  if (!n.title) n.title = String(owner).replace(/^[a-z]+:/, '');
+  pluginNotices.set(id, n);
+  renderJobsPanel();
+  const live = () => pluginNotices.get(id) === n;
+  const settle = (status, o) => {
+    if (!live()) return handle;
+    clearNoticeTimer(n);
+    applyNoticeOpts(n, o);
+    n.status = status;
+    n.progress = undefined;
+    if (status === 'done' && !n.sticky && !n.actions.length) n.timer = setTimeout(() => closeNotice(id), NOTICE_LINGER_MS);
+    renderJobsPanel();
+    return handle;
+  };
+  const handle = {
+    get open() { return live(); },
+    update(o = {}) {
+      if (!live()) return handle;
+      clearNoticeTimer(n);
+      applyNoticeOpts(n, o);
+      n.status = 'running';
+      renderJobsPanel();
+      return handle;
+    },
+    done: (o = {}) => settle('done', o),
+    fail: (o = {}) => settle('error', o),
+    close() { closeNotice(id); },
+  };
+  return handle;
 }
 
 /* ----------------------------------------------------- cancellable ops */
