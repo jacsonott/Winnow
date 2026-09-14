@@ -2245,6 +2245,7 @@ def api_plugins():
         "row_actions": PLUGINS.list_row_actions(),
         "dashboards": PLUGINS.list_dashboards(),
         "panels": PLUGINS.list_panels(),
+        "page_panels": PLUGINS.list_page_panels(),
     }
 
 

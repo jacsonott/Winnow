@@ -27,9 +27,10 @@ export async function loadPlugins() {
     S.pluginRowActions = r.row_actions || [];
     S.pluginDashboards = r.dashboards || [];
     S.pluginPanels = r.panels || [];
+    S.pluginPagePanels = r.page_panels || [];
     S.pluginDirs = r.dirs || [];
     S.pluginsCaseOpen = !!r.case_open;
-  } catch { S.plugins = []; S.pluginFormats = []; S.pluginTabs = []; S.pluginRowActions = []; S.pluginDashboards = []; S.pluginPanels = []; S.pluginDirs = []; S.pluginsCaseOpen = false; }
+  } catch { S.plugins = []; S.pluginFormats = []; S.pluginTabs = []; S.pluginRowActions = []; S.pluginDashboards = []; S.pluginPanels = []; S.pluginPagePanels = []; S.pluginDirs = []; S.pluginsCaseOpen = false; }
   renderPluginTabs();
   renderPluginPanelButtons();
 }

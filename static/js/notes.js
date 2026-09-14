@@ -131,7 +131,7 @@ async function insertNotesLink(anchor) {
   dropdownMenu(anchor, items);
 }
 
-function insertAtCursor(text) {
+export function insertAtCursor(text) {
   const ed = $('notesEditor');
   const at = ed.selectionStart ?? ed.value.length;
   ed.value = ed.value.slice(0, at) + text + ed.value.slice(ed.selectionEnd ?? at);
@@ -168,22 +168,29 @@ export function resetNotes() {
   if (prev) prev.innerHTML = '';
 }
 
+/* The body loads lazily with the page. Anything that writes the editor
+   before the analyst has opened Notes — a plugin's notesPage.insert —
+   must go through here first, or its input event autosaves plugin text
+   over a case body that was never fetched. */
+export async function ensureNotesLoaded() {
+  if (loaded) return;
+  try {
+    const r = await api('/api/case/notes');
+    // Don't clobber text the analyst has already typed: the load is async,
+    // so typing into a just-opened Notes tab can race ahead of it. Only
+    // seed the editor from the saved body when it's still empty.
+    if (!$('notesEditor').value) $('notesEditor').value = r.body || '';
+    loaded = true;
+  } catch { /* leave whatever's there */ }
+}
+
 export async function showNotesTab() {
   recordTabVisit({ kind: 'page', key: 'notes' });
   S.activeTab = 'notes';
   showMainView('notesview');
   syncTabSelection();
   syncTabChrome();
-  if (!loaded) {
-    try {
-      const r = await api('/api/case/notes');
-      // Don't clobber text the analyst has already typed: the load is async,
-      // so typing into a just-opened Notes tab can race ahead of it. Only
-      // seed the editor from the saved body when it's still empty.
-      if (!$('notesEditor').value) $('notesEditor').value = r.body || '';
-      loaded = true;
-    } catch { /* leave whatever's there */ }
-  }
+  await ensureNotesLoaded();
   setMode(true);
   setTimeout(() => $('notesEditor').focus(), 0);
 }

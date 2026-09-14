@@ -15,29 +15,30 @@ reading. Start with the Quickstart.
 
 **Contents**
 
-1. [The six extension points](#1-the-six-extension-points)
+1. [The seven extension points](#1-the-seven-extension-points)
 2. [Quickstart: a parser in 20 lines](#2-quickstart-a-parser-in-20-lines)
 3. [Plugin anatomy](#3-plugin-anatomy)
 4. [Hook: ingest formats](#4-hook-ingest-formats)
 5. [Hook: tabs](#5-hook-tabs)
 6. [Hook: toolbar panels](#6-hook-toolbar-panels)
-7. [Hook: API routes](#7-hook-api-routes)
-8. [Hook: row actions](#8-hook-row-actions)
-9. [Talking to the case](#9-talking-to-the-case)
-10. [Testing a plugin](#10-testing-a-plugin)
-11. [Installing and sharing](#11-installing-and-sharing)
-12. [Security model](#12-security-model)
-13. [Troubleshooting](#13-troubleshooting)
-14. [Reference](#14-reference)
-15. [Writing a plugin with an LLM](#15-writing-a-plugin-with-an-llm)
+7. [Hook: page panels](#7-hook-page-panels)
+8. [Hook: API routes](#8-hook-api-routes)
+9. [Hook: row actions](#9-hook-row-actions)
+10. [Talking to the case](#10-talking-to-the-case)
+11. [Testing a plugin](#11-testing-a-plugin)
+12. [Installing and sharing](#12-installing-and-sharing)
+13. [Security model](#13-security-model)
+14. [Troubleshooting](#14-troubleshooting)
+15. [Reference](#15-reference)
+16. [Writing a plugin with an LLM](#16-writing-a-plugin-with-an-llm)
 
 > **This file is self-contained.** You do not need to read Winnow's
 > source to write a plugin against it, and neither does an LLM you're
-> working with — see [§15](#15-writing-a-plugin-with-an-llm).
+> working with — see [§16](#16-writing-a-plugin-with-an-llm).
 
 ---
 
-## 1. The six extension points
+## 1. The seven extension points
 
 Everything a plugin does, it does by calling methods on the `api` object
 handed to its `register()` function:
@@ -49,13 +50,14 @@ handed to its `register()` function:
 | `api.register_api(route, handler)` | A backend endpoint | Whatever your tab (or a script) needs the server to do |
 | `api.register_row_action(...)` | An entry under the row right-click menu's **Plugins ▸** submenu — analysts can pin it to the top of the menu | Anything that operates on the selected rows: a VirusTotal lookup on the highlighted hashes, an enrichment, a hand-off to another tool |
 | `api.register_toolbar_panel(...)` | A toggle in the table toolbar + a strip above the grid | Something that follows the current view: a histogram of when its rows happened, a sparkline, a legend |
+| `api.register_page_panel(...)` | A toggle in the SQL or Notes page's toolbar + a side column beside it | Something that works *with* the page: an assistant that writes and runs queries, a query library, a note template picker |
 | `api.register_dashboard(...)` | A board under **Dashboards ▸ Library**, added to a case with ＋ | The overview you would build by hand every time you open this kind of case: counts, top values, a timeline of what matters for the format your plugin reads |
 
 They compose: a tab usually pairs with one or more routes; a row action
 often pairs with a tab that shows its results; a toolbar panel usually
 pairs with a route that reads through the current view. Ingest formats
-and row actions work in a single-file plugin; tabs and panels need a
-folder plugin (there has to be somewhere to serve the JS from).
+and row actions work in a single-file plugin; tabs and panels (both
+kinds) need a folder plugin (there has to be somewhere to serve the JS from).
 
 The shipped examples map onto these:
 
@@ -63,7 +65,7 @@ The shipped examples map onto these:
 | --- | --- |
 | [`mft_usn/`](../examples/plugins/mft_usn/) | Ingest formats — two of them, with options, streaming parsers, extension *and* bare-filename matching |
 | [`lateral_movement/`](../examples/plugins/lateral_movement/) | A tab + a route — canvas UI, case queries, theming |
-| [`claude_assistant/`](../examples/plugins/claude_assistant/) | A tab + a route that calls an external service, with credentials and dependencies |
+| [`claude_assistant/`](../examples/plugins/claude_assistant/) | A tab + a route that calls an external service, with credentials and dependencies — and a **page panel**, the SQL Copilot, that inserts and runs the queries it writes |
 | [`table_histogram/`](../examples/plugins/table_histogram/) | A toolbar panel + a route — following the grid with `onViewChange`, driving the timeframe filter with `setTimeRange` |
 | [`first_last/`](../examples/plugins/first_last/) | A tab that writes a TABLE back — `ingest_rows` output an analyst browses, tags and exports like any other source |
 | [`pivot/`](../examples/plugins/pivot/) | A tab that aggregates the current view — drag-and-drop rows/columns/values over the case's own data |
@@ -356,7 +358,7 @@ Prefer it to reaching into the app's globals — this is what's supported.
 
 | Field | What it is |
 | --- | --- |
-| `apiVersion` | Contract version of this object (currently `3`) |
+| `apiVersion` | Contract version of this object (currently `4`) |
 | `plugin` | Your plugin's display name |
 | `base` | `/api/plugin/<fs_name>` — prefix for your own routes |
 | `assets` | `/plugin_assets/<fs_name>` — prefix for your own files |
@@ -371,6 +373,8 @@ Prefer it to reaching into the app's globals — this is what's supported.
 | `alertDialog(msg, opts)` / `confirmDialog(msg, opts)` / `promptDialog(msg, initial, opts)` | Themed replacements for `window.alert` / `confirm` / `prompt` — all async |
 | `showTab(localId?)` | Bring the analyst to one of **your** tabs (reopens it if closed); no argument when you register exactly one |
 | `showPage(name)` | Switch to a built-in page: `'grid'`, `'sql'`, `'notes'`, `'timeline'`, `'watchlist'` (reopens it if closed) |
+| `sqlPage` | The SQL pane: `show()`, `text()`, `setText(sql, {newTab})`, `run()`, `result()`, `selectedRows()`, `onRun(cb)` — see [Driving the page](#driving-the-page) |
+| `notesPage` | The case notes: `show()`, `text()`, `setText(md)`, `insert(text)`, `onChange(cb)` |
 | `openSource(id)` | Switch the app to a source's grid tab |
 | `refreshSources()` | Re-fetch the app's source list — call after your backend creates a table via `ingest_rows` (a sync ingest announces itself through no job), then `openSource(new_id)` |
 | `state.sources` | Live source list (`{id, name, columns, row_count, is_merge, error}`) |
@@ -636,7 +640,75 @@ whole thing re-queries on every view change.
 
 ---
 
-## 7. Hook: API routes
+## 7. Hook: page panels
+
+```python
+api.register_page_panel(
+    page="sql",              # "sql" or "notes" — which built-in page
+    id="copilot",            # unique within this plugin (shared with tabs/panels)
+    label="Copilot",         # the toggle's caption in the page's toolbar
+    entry="ui/copilot.js",   # ES module, relative to the plugin folder
+    description="…",         # the toggle's tooltip
+)
+```
+
+The same idea as a toolbar panel, on the **SQL** or **Notes** page: a
+toggle button in that page's toolbar (left of *Run* on SQL, after
+*Link ▾* on Notes), and while it's on — the state persists per browser —
+your module's UI occupies a **resizable side column** beside the page.
+The column hides with the page and takes no room until a panel is
+toggled on. Folder plugins only.
+
+### The module contract
+
+Identical to a tab's and a toolbar panel's: `export default function
+mount(container, winnow)`, plus optional `onShow(container)` /
+`onHide(container)`. `container` is an empty `<section>` filling the
+column's height (a flex column — give your scrolling area `flex: 1 1
+auto; min-height: 0`). The analyst drags the column's edge to size it,
+and the width is remembered.
+
+### Driving the page
+
+What makes this hook worth having: `winnow.sqlPage` and
+`winnow.notesPage` read and write the page the panel sits on. They are
+on every context (a tab can use them too); everything that may need a
+lazy load is async.
+
+```js
+// SQL
+await winnow.sqlPage.show();                          // switch to the page; resolves once the query tabs are loaded
+const current = await winnow.sqlPage.text();          // the editor's text
+await winnow.sqlPage.setText(sql);                    // replace the active query tab's text (autosaves like typing)
+await winnow.sqlPage.setText(sql, { newTab: 'From copilot' });   // …or a new named tab, leaving the analyst's alone
+const r = await winnow.sqlPage.run();                 // the page's own Run: {columns, rows, elapsed_ms, truncated}; rejects on a SQL error
+winnow.sqlPage.result();                              // the active tab's last result, or null
+winnow.sqlPage.selectedRows();                        // {columns, rows} the analyst selected — rows is [] when the result has no rid
+const off = winnow.sqlPage.onRun(({ tabId, sql, result }) => …);   // after every run; result may be {error}
+
+// Notes
+await winnow.notesPage.show();
+const md = await winnow.notesPage.text();
+await winnow.notesPage.insert('- 08:07 H2: powershell -Enc from wmiprvse\n');   // at the cursor
+await winnow.notesPage.setText(md);                   // replace the whole body
+const off2 = winnow.notesPage.onChange(({ text }) => …);
+```
+
+`setText` without `newTab` overwrites the active query tab — that is
+what "put this query in the editor" means, and the tab autosaves it as
+if typed. Use `newTab` when the analyst's own query should survive.
+`run()` paints the result in the pane whether or not the page is
+showing; call `show()` first if they should see it. Both `onRun` and
+`onChange` return an unsubscribe and are cut with your mount.
+
+The `claude_assistant/` example's **Copilot** is the worked example: a
+chat beside the SQL editor whose answers carry *Insert* and *Run*
+buttons wired to `setText` and `run`, with the editor's current text
+sent along as context.
+
+---
+
+## 8. Hook: API routes
 
 ```python
 api.register_api("edges", edges_handler, methods=["POST"])
@@ -712,7 +784,7 @@ below).
 
 ---
 
-## 8. Hook: row actions
+## 9. Hook: row actions
 
 ```python
 api.register_row_action(
@@ -762,7 +834,7 @@ from a plugin*).
 
 ---
 
-## 9. Talking to the case
+## 10. Talking to the case
 
 `req.store` is Winnow's `Store`. The safe, supported way to read from it:
 
@@ -975,7 +1047,7 @@ never in a variable.
 
 ---
 
-## 10. Testing a plugin
+## 11. Testing a plugin
 
 Plugins are ordinary Python, so ordinary tests work. Two levels:
 
@@ -1050,7 +1122,7 @@ section of [`CLAUDE.md`](../CLAUDE.md).
 
 ---
 
-## 11. Installing and sharing
+## 12. Installing and sharing
 
 **Install:** Settings → Plugins → *Install a plugin…* — pick the `.py`
 file for a single-file plugin, or the folder that directly contains
@@ -1083,7 +1155,8 @@ python server.py --plugins-dir ~/src/my-winnow-plugins
 
 Installs from the UI always land in the first directory (`plugins/`).
 
-**Versioning:** the current plugin API version is **8** (`api.register_dashboard`
+**Versioning:** the current plugin API version is **9** (`api.register_page_panel`
+and the tab context's `sqlPage` / `notesPage` / `notify` arrived in 9; `api.register_dashboard`
 arrived in 8; `req.set_env` /
 `req.unset_env` / `req.is_loopback` arrived in 7; `req.table` in 6; `req.env`,
 `req.variables` / `req.set_variable` and the tab context's
@@ -1096,7 +1169,7 @@ failing mysteriously somewhere inside `register()`.
 
 ---
 
-## 12. Security model
+## 13. Security model
 
 **A plugin is arbitrary Python running with Winnow's privileges.** It can
 read any file the analyst can, open sockets, and touch the case. There is
@@ -1177,7 +1250,7 @@ def lookup_handler(req):
 
 ---
 
-## 13. Troubleshooting
+## 14. Troubleshooting
 
 | Symptom | Cause |
 | --- | --- |
@@ -1197,7 +1270,7 @@ def lookup_handler(req):
 
 ---
 
-## 14. Reference
+## 15. Reference
 
 ### `register_ingest_format(*, id, label, parse, extensions=(), filename_patterns=(), description="", options=())`
 
@@ -1225,6 +1298,15 @@ context a tab does (one object builds both), so `onViewChange`,
 are available to tabs as well — they are listed under
 [The `winnow` context](#the-winnow-context), not additions here. They
 matter most to a panel, which sits beside the grid and has to follow it.
+
+### `register_page_panel(*, page, id, label, entry, description="")`
+
+`page` is `"sql"` or `"notes"`. Module: `export default function
+mount(container, winnow)`, plus optional `onShow(container)` /
+`onHide(container)` — the toolbar-panel contract, in a side column on
+that page. Ids are shared with tabs and toolbar panels within a plugin.
+Drive the page through `winnow.sqlPage` / `winnow.notesPage` ([Driving
+the page](#driving-the-page)).
 
 ### `register_dashboard(*, id, label, widgets, description="")`
 
@@ -1355,7 +1437,7 @@ can drive a plugin parser from `curl` without touching the UI.
 
 ---
 
-## 15. Writing a plugin with an LLM
+## 16. Writing a plugin with an LLM
 
 **Paste this one file. That's the whole context budget.**
 
@@ -1383,7 +1465,7 @@ step up to guide + contract is still under a tenth.
 > Here is the plugin development guide for Winnow, a local DFIR triage
 > tool. Write a plugin that <what you want>. Follow the contract in the
 > guide exactly — do not invent API surface that isn't documented in it.
-> Include a test file using the standalone recipe in §10.
+> Include a test file using the standalone recipe in §11.
 >
 > <paste this file>
 
@@ -1391,10 +1473,10 @@ step up to guide + contract is still under a tenth.
 
 - **Don't paste `tests/test_plugins.py`.** It mostly tests Winnow's
   plugin *host* — the loader, installs, traversal rejection — none of
-  which a plugin author implements. §10's recipe is the part that's
+  which a plugin author implements. §11's recipe is the part that's
   actually about testing your own plugin.
 - **Don't paste `store.py`.** The supported surface is the short list in
-  §9; the rest is internals a plugin must not reach into anyway. If you
+  §10; the rest is internals a plugin must not reach into anyway. If you
   paste it, an LLM will happily use a private method and you'll find out
   when Winnow refactors.
 - **Do paste an example plugin** if you're building something in the
@@ -1414,6 +1496,6 @@ Three things this guide can't do for you:
 - **Anything an LLM asserts that isn't in here.** The failure mode to
   watch for is a confidently invented method — `store.query()`,
   `api.register_command()`, `winnow.refresh()`. None of those exist.
-  Cross-check any API call against §14; if it isn't listed, it's a
+  Cross-check any API call against §15; if it isn't listed, it's a
   hallucination, and the plugin will fail at load or at first click with
   a message that says so.
