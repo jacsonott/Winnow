@@ -1143,6 +1143,50 @@ def test_claude_ask_request_shape(claude_client, monkeypatch):
     assert record["messages"][-1]["content"] == "Which src_ table has the 4624s?"
 
 
+def test_claude_copilot_mode_has_its_own_prompt_transcript_and_context(claude_client, monkeypatch):
+    """mode "sql" is the Copilot: the narrower system prompt, the editor's
+    current query folded into the turn (not into the stored transcript),
+    and a transcript of its own so the tab's chat and the Copilot's never
+    interleave."""
+    record = {}
+    reply = "```sql\nSELECT 1;\n```\nOne row."   # the fake answers every call with this
+    monkeypatch.setitem(sys.modules, "anthropic", _fake_anthropic(record, _claude_msg(text=reply)))
+    claude_client.post("/api/plugin/claude_assistant/clear")
+    claude_client.post("/api/plugin/claude_assistant/clear", json={"mode": "sql"})
+    # A tab turn first, so we can prove the Copilot does not see it
+    assert claude_client.post("/api/plugin/claude_assistant/ask", json={"question": "tab question"}).status_code == 200
+    r = claude_client.post("/api/plugin/claude_assistant/ask", json={
+        "question": "make this faster", "mode": "sql",
+        "schema": "CREATE TABLE src_1 (...);", "current_sql": "SELECT * FROM src_1",
+    })
+    assert r.status_code == 200, r.text
+    assert r.json()["answer"].startswith("```sql")
+    assert "copilot" in record["system"][0]["text"].lower()
+    assert "fenced" in record["system"][0]["text"]
+    assert record["system"][1]["cache_control"] == {"type": "ephemeral"}   # schema breakpoint, as in chat mode
+    # Only the Copilot's own turns replay, and the editor text rides in the turn
+    assert [m["role"] for m in record["messages"]] == ["user"]
+    assert record["messages"][0]["content"].startswith("make this faster")
+    assert "SELECT * FROM src_1" in record["messages"][0]["content"]
+    # …but the stored question is the analyst's words alone
+    sql_turns = claude_client.get("/api/plugin/claude_assistant/history?mode=sql").json()["turns"]
+    assert [t["content"] for t in sql_turns] == ["make this faster", reply]
+    chat_turns = claude_client.get("/api/plugin/claude_assistant/history").json()["turns"]
+    assert [t["content"] for t in chat_turns] == ["tab question", reply]
+    # Clearing one conversation leaves the other
+    assert claude_client.post("/api/plugin/claude_assistant/clear", json={"mode": "sql"}).json() == {"ok": True}
+    assert claude_client.get("/api/plugin/claude_assistant/history?mode=sql").json()["turns"] == []
+    assert len(claude_client.get("/api/plugin/claude_assistant/history").json()["turns"]) == 2
+    # An unknown mode is a 400, not a third table
+    assert claude_client.post("/api/plugin/claude_assistant/ask", json={"question": "q", "mode": "notes"}).status_code == 400
+    assert claude_client.get("/api/plugin/claude_assistant/history?mode=notes").status_code == 400
+
+
+def test_claude_registers_the_copilot_page_panel(example_registry):
+    (panel,) = [p for p in example_registry.list_page_panels() if p["plugin_fs"] == "claude_assistant"]
+    assert panel["page"] == "sql" and panel["id"] == "claude-assistant.copilot" and panel["entry"] == "ui/copilot.js"
+
+
 def test_claude_refusal_is_a_400_with_category(claude_client, monkeypatch):
     record = {}
     monkeypatch.setitem(sys.modules, "anthropic", _fake_anthropic(record, _claude_msg(stop_reason="refusal")))
