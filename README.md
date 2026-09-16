@@ -33,6 +33,10 @@ another analyst. The evidence files themselves are **never modified**.
   IOC watchlist scanned across every table, Markdown case notes that link
   back into the evidence, and named dashboards (a ready-made KAPE triage
   profile included).
+- **Any log file** — `hostd.log`, `auth.log.1`, a dump with no extension:
+  a file no parser claims imports as raw text, one line per row, nothing
+  split, so it filters, searches and tags like everything else. The
+  import preview's *Lines* option forces any file through that path.
 - **Plaso timelines** — drop a `.plaso` file in and the whole log2timeline
   output lands as one flat, filterable table. No plaso install needed.
 - **Zipped bundles** — drop in an ESXi support bundle or UAC collection

@@ -43,7 +43,7 @@ from winnow import userenv
 from winnow import version
 from winnow import archive
 from winnow import workspace as WS
-from winnow.store import (CASE_SUFFIX, PLASO_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, OpCancelled, Store,
+from winnow.store import (CASE_SUFFIX, DEFAULT_IMPORT_EXTENSIONS, PLASO_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, OpCancelled, Store,
                    describe_case_lock, probe_case_lock, q, sweep_orphan_views)
 
 HERE = paths.INSTALL_ROOT  # static/, plugins/, examples/plugins/ all hang off the install root
@@ -1877,10 +1877,13 @@ async def api_ingest_preview(
     file: UploadFile = File(...),
     delimiter: str | None = Form(None),
     has_header: bool = Form(True),
+    kind: str = Form("csv"),   # "text": the raw-text importer's line-per-row preview
 ):
     raw = await file.read(512 * 1024)  # bounded sample — full parse happens at real ingest time
     text = _decode_preview_bytes(raw)
     try:
+        if kind == "text":
+            return await run_in_threadpool(store().preview_text_lines, text)
         return await run_in_threadpool(
             store().preview_csv_text, text, delimiter=delimiter or None, has_header=has_header)
     except Exception as e:
@@ -2008,6 +2011,12 @@ _JSON_INGEST_EXTS = {".json", ".jsonl", ".ndjson"}
 
 
 def _ingest_kind_for_path(path: str) -> str:
+    """The built-in importer for a filename. Anything no built-in claims
+    is raw text (Store.ingest_text) — a log with a rotated, vendor-specific
+    or missing extension is still a log. Plugin formats are consulted
+    before this by the callers that honour them (_assoc_ingest, the
+    import queue); it used to fall through to csv, which is how a
+    hostd.log got a sniffed delimiter and its first line as a header."""
     suffix = Path(path).suffix.lower()
     if suffix in SQLITE_IMPORT_EXTENSIONS:
         return "sqlite"
@@ -2015,7 +2024,9 @@ def _ingest_kind_for_path(path: str) -> str:
         return "xlsx"
     if suffix in PLASO_IMPORT_EXTENSIONS:
         return "plaso"
-    return "json" if suffix in _JSON_INGEST_EXTS else "csv"
+    if suffix in _JSON_INGEST_EXTS:
+        return "json"
+    return "csv" if suffix in DEFAULT_IMPORT_EXTENSIONS else "text"
 
 
 class ArchiveExpandBody(BaseModel):
@@ -2082,11 +2093,13 @@ def api_ingest_preview_path(body: PreviewPath):
         raise HTTPException(400, f"No file at {body.path}")
     kind = body.kind or _ingest_kind_for_path(body.path)
     try:
-        if kind == "csv":
+        if kind in ("csv", "text"):
             # Same bounded sample the upload preview reads — never the file.
             with open(body.path, "rb") as f:
                 raw = f.read(512 * 1024)
             text = _decode_preview_bytes(raw)
+            if kind == "text":
+                return store().preview_text_lines(text)
             return store().preview_csv_text(text, delimiter=body.delimiter or None,
                                             has_header=body.has_header)
         if kind == "json":
@@ -2137,7 +2150,7 @@ def _ingest_job_options(kind: str, *, build_fts: bool, delimiter=None, has_heade
     if kind == "json":
         return {**base, "build_fts": build_fts, "flatten_mode": flatten_mode,
                 "flatten_depth": flatten_depth}
-    if kind == "plaso":
+    if kind in ("plaso", "text"):
         return {**base, "build_fts": build_fts}   # one file, one table, no options
     return {**base, "build_fts": build_fts, "tables": tables or []}
 
