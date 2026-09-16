@@ -499,6 +499,15 @@ see [docs/notes/README.md](README.md) for the whole set.
   the one on screen — not a convenience, a precondition, since every panel
   reads the live `S.layout`/`S.order`/`S.columns` rather than the record it
   was handed.
+- **"Hide empty rows" is a view predicate, not a layout edit.** Unlike
+  its neighbour "Hide empty columns" (a one-shot client-side sample that
+  writes `S.layout`), the row toggle is `S.hideEmptyRows` →
+  `currentSpec().hide_empty_rows` → one clause in `Store._compile_where`,
+  so it reaches both branches of `build_view` (merge parity) and
+  `spec_sql`, and the toolbar's "N of M rows" follows it. Remembered per
+  table in the layout payload (`hide_empty_rows`, beside
+  `value_filters`) and in the per-tab stash. "Reset view"/`clearAllFilters`
+  leave it alone, like the value-filter default.
 - **`clearAllFilters(seed)`** — Shift+F ("filter to this value and drop the
   rest") is that reset plus one filter, so it goes through the same
   function rather than a second implementation that would forget the

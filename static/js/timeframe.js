@@ -717,7 +717,21 @@ export function buildColumnsPanel(container, refresh = openTableMenu) {
     });
     renderHead(); render(); saveLayout(); refresh();
   };
-  acts.append(all, none);
+  // Rows, not columns: a toggle, since it's a view predicate the server
+  // applies (currentSpec's hide_empty_rows) rather than a one-shot edit
+  // to S.layout — the row count in the toolbar follows it. Remembered per
+  // table in the layout, like the value-filter default.
+  const hideRows = el('button', 'btn ghost', 'Hide empty rows');
+  hideRows.title = 'Drop rows whose every column is empty — blank lines in a raw-text import, padding rows in an export';
+  const paintHideRows = () => hideRows.setAttribute('aria-pressed', String(!!S.hideEmptyRows));
+  paintHideRows();
+  hideRows.onclick = async () => {
+    S.hideEmptyRows = !S.hideEmptyRows;
+    paintHideRows();
+    saveLayout();
+    await rebuildView({ keepScroll: false });
+  };
+  acts.append(all, none, hideRows);
   container.append(acts);
 }
 
