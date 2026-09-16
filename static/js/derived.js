@@ -219,9 +219,10 @@ export function takenColumnNames() {
   return new Set(S.columns.map((c) => c.name.toLowerCase()));
 }
 
-/* Suggests the column name the way structparse.suggest_name does — the
-   last meaningful component of the path, or an EVTX-style predicate's own
-   value, which is nearly always what the analyst would have typed. */
+/* Suggests the column name the way structparse.suggest_name does — for
+   JSON the full dotted path (target.ip, items[0].id: two fields with the
+   same leaf get names that say which is which), for XML the last
+   meaningful component or an EVTX-style predicate's own value. */
 export function suggestColumnName(path, kind) {
   const s = String(path);
   const pred = s.match(/\[@[\w:.-]+='([^']*)'\]$/);
@@ -234,12 +235,14 @@ export function suggestColumnName(path, kind) {
   }
   if (kind === 'json') {
     const parts = s.replace(/^\$/, '').match(/\["'](?:[^"']*)["']|\[\d+\]|[^.[\]]+/g) || [];
-    for (let i = parts.length - 1; i >= 0; i--) {
-      const seg = parts[i];
-      if (/^\[\d+\]$/.test(seg)) continue;
-      return seg.replace(/^\["']|["']\]$/g, '').replace(/^\[|\]$/g, '');
+    if (!parts.some((seg) => !/^\[\d+\]$/.test(seg))) return s.replace(/^\$\.?/, '');
+    let out = '';
+    for (const seg of parts) {
+      if (/^\[\d+\]$/.test(seg)) { out += seg; continue; }
+      const key = seg.replace(/^\["']|["']\]$/g, '').replace(/^\[|\]$/g, '');
+      out += (out ? '.' : '') + key;
     }
-    return s;
+    return out;
   }
   return s.replace(/\/$/, '').split('/').pop().replace(/\[\d+\]$/, '') || s;
 }
