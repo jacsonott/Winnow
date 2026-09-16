@@ -7281,16 +7281,63 @@ class Store:
             added += 1
         return {"added": added, "skipped": len(rows) - added}
 
+    WATCHLIST_PREVIEW_CHARS = 240
+
     def indicator_hits(self, wid: int, limit: int = 500) -> list[dict]:
+        """An indicator's hits with the context a hit list needs: which
+        column held the indicator and that cell's value, plus the row as
+        one line. The scan matched over the whole-row blob and stored only
+        (source, rid), so the column is found here by re-reading the hit
+        rows — first column in table order whose text contains the value,
+        case-insensitively, the same test the scan applied. Nothing is
+        stored, so old cases get the context too. `column` is None only if
+        the row no longer contains the value (an indicator edited since)."""
         with self.lock:
+            ind = self.db.execute("SELECT value FROM watchlist WHERE id=?", (wid,)).fetchone()
             rows = self.db.execute(
                 "SELECT source_id, rid FROM watchlist_hits WHERE watchlist_id=? LIMIT ?",
                 (wid, limit)).fetchall()
+        needle = (ind["value"] if ind else "").lower()
         names = {s["id"]: s["name"] for s in self.list_sources()}
+        by_source: dict[int, list[int]] = {}
+        for r in rows:
+            by_source.setdefault(r["source_id"], []).append(r["rid"])
+        context: dict[tuple[int, int], dict] = {}
+        for sid, rids in by_source.items():
+            try:
+                src = self._source_lite(sid)
+            except (KeyError, ValueError):
+                continue
+            cols = [c["name"] for c in self._base_cols(src)]
+            if not cols or not src.get("table_name"):
+                continue
+            sel = ", ".join(q(c) for c in cols)
+            table = q(src["table_name"])
+            for i in range(0, len(rids), 500):
+                chunk = rids[i:i + 500]
+                with self.lock:
+                    found = self.db.execute(
+                        f"SELECT rid, {sel} FROM {table} WHERE rid IN ({','.join('?' * len(chunk))})",
+                        chunk).fetchall()
+                for row in found:
+                    cells = [(c, row[k + 1]) for k, c in enumerate(cols)]
+                    col = val = None
+                    for c, v in cells:
+                        if v is not None and needle and needle in str(v).lower():
+                            col, val = c, str(v)
+                            break
+                    preview = " | ".join(str(v) for _, v in cells if v is not None and str(v).strip())
+                    context[(sid, row["rid"])] = {
+                        "column": col,
+                        "value": val[:self.WATCHLIST_PREVIEW_CHARS] if val is not None else None,
+                        "preview": preview[:self.WATCHLIST_PREVIEW_CHARS],
+                    }
         out = []
         for r in rows:
+            key = (r["source_id"], r["rid"])
             out.append({"source_id": r["source_id"], "rid": r["rid"],
-                        "source_name": names.get(r["source_id"], f"source {r['source_id']}")})
+                        "source_name": names.get(r["source_id"], f"source {r['source_id']}"),
+                        **context.get(key, {"column": None, "value": None, "preview": ""})})
         return out
 
     # --------------------------------------------------------- entity pivot
