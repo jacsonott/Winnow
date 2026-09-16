@@ -5898,6 +5898,17 @@ class Store:
                         params.append(end_norm)
                 clauses.append("(" + " OR ".join(parts) + ")")
 
+        # "Hide empty rows" (the table menu): drop a row whose EVERY column
+        # is empty — NULL or '', the same "empty" the per-column filter op
+        # and "Hide empty columns" use. Here, rather than appended to the
+        # SQL later, on purpose: a non-empty `where` is what keeps an
+        # otherwise unfiltered view off the root_virtual carve-out
+        # (invariant #2), whose positions are only exact when the view is
+        # every row of the source. colnames is the merge's own list when
+        # this compiles per member, so the clause is legal in each branch.
+        if spec.get("hide_empty_rows") and colnames:
+            clauses.append("(" + " OR ".join(f"({q(c)} IS NOT NULL AND {q(c)} <> '')" for c in colnames) + ")")
+
         return " AND ".join(clauses), params
 
     @staticmethod

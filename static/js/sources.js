@@ -647,6 +647,7 @@ function stashViewState() {
     groupBy: [...S.groupByCols],
     groupSort: S.groupSort,
     groupSortDir: S.groupSortDir,
+    hideEmptyRows: S.hideEmptyRows,
     scroll: $('body').scrollTop,
   });
 }
@@ -676,6 +677,7 @@ export async function openSource(id, { skipBuild = false } = {}) {
   S.filterTree = { type: 'group', op: 'AND', children: [] };
   S.sort = [];
   S.tagFilter = [];
+  S.hideEmptyRows = false;
   S.cursor = -1;
   selClear();
   await closeAllGroupViews();
@@ -709,6 +711,7 @@ export async function openSource(id, { skipBuild = false } = {}) {
   // a judgement about *this table's* size, and a cross-case default layout
   // (which is keyed by header set, not row count) has no business carrying it.
   S.valueFilterMode = saved.value_filters || 'auto';
+  S.hideEmptyRows = !!saved.hide_empty_rows;   // same per-source reasoning; the stash below wins if we're coming back
   S.order = (saved.order && saved.order.filter((n) => S.columns.some((c) => c.name === n)))
     || (defaultLayout && defaultLayout.order.filter((n) => S.columns.some((c) => c.name === n)))
     || S.columns.map((c) => c.name);
@@ -732,6 +735,7 @@ export async function openSource(id, { skipBuild = false } = {}) {
     S.filterTree = JSON.parse(JSON.stringify(stash.filterTree));
     S.sort = stash.sort.map((x) => ({ ...x }));
     S.tagFilter = [...stash.tagFilter];
+    if (stash.hideEmptyRows !== undefined) S.hideEmptyRows = stash.hideEmptyRows;
     $('search').value = S.searchMode === 'advanced' ? '' : S.search;
     document.querySelectorAll('#searchModeToggle button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.mode === S.searchMode)));
     if (S.searchMode === 'advanced') renderAdvancedChips();

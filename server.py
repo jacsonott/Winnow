@@ -514,6 +514,7 @@ class ViewSpec(BaseModel):
     filter_tree: dict | None = None  # guided filter-builder tree; group/cond/raw nodes
     tags: list = []
     time_range: dict | None = None  # {enabled, column, start, end} — see _compile_where; survives filter/preset changes
+    hide_empty_rows: bool = False   # the table menu's toggle — rows with every column NULL/'' are dropped; see _compile_where
     op_token: str | None = None  # client-generated cancel handle — see Store.cancel_op
 
 
