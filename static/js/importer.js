@@ -116,6 +116,9 @@ export function queueItem(transport, name, fmt = pluginFormatFor(name)) {
     : kind === 'plaso' ? { ...transport, name, kind, configured: true }
     // An archive expands on import, then you pick files from its contents.
     : kind === 'archive' ? { ...transport, name, kind, configured: true }
+    // Raw text (a log with an extension nothing else claims): one line per
+    // row, nothing to configure — the preview can still switch it to csv.
+    : kind === 'text' ? { ...transport, name, kind, delimiter: null, has_header: false, column_types: null, configured: false }
     : { ...transport, name, kind, delimiter: null, has_header: true, column_types: null, configured: false };
 }
 
@@ -141,16 +144,10 @@ export function queueFiles(files) {
    queue, same configure/preview steps — the transport is the only
    difference, carried as {path} instead of {file}. */
 export function queuePaths(entries) {
-  // Same gate the drop handler applies (recognizedImportFile) — the server
-  // lists every file on purpose, so the filter has to live here: an
-  // unrecognized extension would otherwise fall through importKindFor's
-  // default and ingest a .zip as a CSV.
-  const known = entries.filter((e) => recognizedImportFile(e.name));
-  const skipped = entries.filter((e) => !recognizedImportFile(e.name));
-  for (const e of known) S.importQueue.push(queueItem({ path: e.path }, e.name));
-  if (skipped.length) {
-    toast(`Skipped ${skipped.length} file${skipped.length === 1 ? '' : 's'} no importer recognizes: ${skipped.map((e) => e.name).join(', ')}`, 6000);
-  }
+  // No extension gate any more: a name nothing else claims queues as raw
+  // text (importKindFor). A binary file is refused by the importer itself,
+  // as a job error — the server has the bytes, the browser doesn't.
+  for (const e of entries) S.importQueue.push(queueItem({ path: e.path }, e.name));
 }
 
 /* Queue files against one plugin format explicitly — bypasses filename
@@ -190,7 +187,7 @@ export function openImportModal() {
         const row = el('div', 'row-actions session-row');
         const kindLabel = item.kind === 'plugin'
           ? (pluginFormatById(item.format_id)?.label || item.format_id)
-          : item.kind;
+          : item.kind === 'text' ? 'text · one line per row' : item.kind;
         const unitNoun = item.kind === 'xlsx' ? 'sheet' : 'table';
         const stateLabel = item.kind === 'sqlite' || item.kind === 'xlsx'
           ? (item.configured ? `${item.tables.length} ${unitNoun}${item.tables.length === 1 ? '' : 's'}` : `pick ${unitNoun}s`) + ` · ${kindLabel}`
@@ -267,7 +264,10 @@ export function openImportModal() {
     addLabel.title = 'A regular browser file picker — the file is copied up to the server before importing';
     const addInput = el('input');
     addInput.type = 'file';
-    addInput.accept = [...RECOGNIZED_IMPORT_EXTENSIONS, ...SQLITE_IMPORT_EXTENSIONS, ...XLSX_IMPORT_EXTENSIONS, ...PLASO_IMPORT_EXTENSIONS, ...ARCHIVE_IMPORT_EXTENSIONS, ...pluginExtensions()].join(',');
+    // No `accept`: every file is importable now (raw text is the
+    // catch-all), and the other two entry points — a drop, the server-disk
+    // picker — never filtered by extension. An accept list here would make
+    // the browser picker the one place a .log.1 could not be chosen.
     addInput.multiple = true;
     addInput.hidden = true;
     addInput.onchange = () => {
@@ -632,32 +632,19 @@ export function wireFileDrop() {
    modal "Choose files…" already uses. Unrecognized files are dropped
    silently from the queue but named in a toast — better than a mysterious
    partial import with no explanation. */
-/* Whether ANY importer will take this filename — built-in extensions or a
-   loaded plugin format. The shared gate for the two entry points that see
-   unfiltered listings: OS drops and the server-disk picker. */
+/* Whether ANY importer will take this filename. Since the raw-text
+   importer became the catch-all the answer is always yes for a filename —
+   a name nothing else claims imports one line per row — so this is kept
+   for its callers and its tests, and the only refusal left is the
+   importer's own binary check at ingest time. */
 export function recognizedImportFile(name) {
-  return RECOGNIZED_IMPORT_EXTENSIONS.includes(extOf(name))
-    || SQLITE_IMPORT_EXTENSIONS.includes(extOf(name))
-    || XLSX_IMPORT_EXTENSIONS.includes(extOf(name))
-    || PLASO_IMPORT_EXTENSIONS.includes(extOf(name))
-    || ARCHIVE_IMPORT_EXTENSIONS.includes(extOf(name))
-    || !!pluginFormatFor(name);
+  return !!name;
 }
 
 export function handleDroppedFiles(files) {
   if (!files.length) return;
-  const known = (f) => recognizedImportFile(f.name);
-  const recognized = files.filter(known);
-  const skipped = files.filter((f) => !known(f));
-  if (!recognized.length) {
-    toast(`No recognized files in the drop (${skipped.map((f) => f.name).join(', ')})`, 5000);
-    return;
-  }
-  queueFiles(recognized);
+  queueFiles(files);
   openImportModal();
-  if (skipped.length) {
-    toast(`Skipped ${skipped.length} unrecognized file${skipped.length === 1 ? '' : 's'}: ${skipped.map((f) => f.name).join(', ')}`, 5000);
-  }
 }
 
 export const patternLines = (text) => text.split('\n').map((l) => l.trim()).filter(Boolean);
@@ -849,8 +836,13 @@ export async function openDirectoryImportModal(state = {}) {
     b.append(el('label', null, 'File types'));
     const extRow = el('div', 'row-actions');
     extRow.style.flexWrap = 'wrap';
-    for (const ext of RECOGNIZED_IMPORT_EXTENSIONS.concat(PLASO_IMPORT_EXTENSIONS, pluginExtensions())) {
-      const chip = el('button', 'btn ghost', ext);
+    // '*' is the raw-text catch-all: any other file that isn't binary,
+    // one line per row. Off by default — a triage tree is full of text
+    // nobody wants as a table — and remembered by profiles like an
+    // extension (it rides in the same list).
+    for (const ext of RECOGNIZED_IMPORT_EXTENSIONS.concat(PLASO_IMPORT_EXTENSIONS, pluginExtensions(), ['*'])) {
+      const chip = el('button', 'btn ghost', ext === '*' ? 'other text files' : ext);
+      if (ext === '*') chip.title = 'Any other file that is not binary, imported as raw text — one line per row';
       chip.setAttribute('aria-pressed', String(st.extensions.includes(ext)));
       chip.onclick = () => {
         st.extensions = st.extensions.includes(ext)
@@ -948,7 +940,7 @@ export async function openDirectoryImportModal(state = {}) {
             });
             pluginOk++;
           } else {
-            await post('/api/ingest/jobs/path', { path: m.path, name: base, folder_path, kind: ['json', 'plaso'].includes(m.kind) ? m.kind : 'csv' });
+            await post('/api/ingest/jobs/path', { path: m.path, name: base, folder_path, kind: ['json', 'plaso', 'text'].includes(m.kind) ? m.kind : 'csv' });
           }
           ok++;
         } catch (e) {

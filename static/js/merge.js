@@ -124,17 +124,26 @@ export function openImportPreview(src, opts = {}) {
   modal(`Import: ${src.name}`, (b) => {
     const controls = el('div', 'row-actions');
     const delimSel = el('select');
-    for (const [label, val] of [['Auto-detect', ''], ['Comma', ','], ['Tab', '\t'], ['Semicolon', ';'], ['Pipe', '|']]) {
+    // 'lines' is not a delimiter: it switches the item to the raw-text
+    // importer (one line per row, nothing split, no header) — the way to
+    // force a .txt log, or a mis-sniffed .csv, into that path.
+    for (const [label, val] of [['Auto-detect', ''], ['Comma', ','], ['Tab', '\t'], ['Semicolon', ';'], ['Pipe', '|'],
+      ['Lines — one line per row (logs)', 'lines']]) {
       const opt = document.createElement('option');
       opt.value = val; opt.textContent = label;
       delimSel.append(opt);
     }
-    if (opts.initial && opts.initial.delimiter) delimSel.value = opts.initial.delimiter;
+    const initialKind = (opts.initial && opts.initial.kind) || src.kind;
+    if (initialKind === 'text') delimSel.value = 'lines';
+    else if (opts.initial && opts.initial.delimiter) delimSel.value = opts.initial.delimiter;
+    const isLines = () => delimSel.value === 'lines';
     const headerLabel = el('label');
     const headerCb = el('input');
     headerCb.type = 'checkbox';
     headerCb.checked = opts.initial ? opts.initial.has_header !== false : true;
     headerLabel.append(headerCb, document.createTextNode(' First row is headers'));
+    const syncHeader = () => { headerCb.disabled = isLines(); headerLabel.title = isLines() ? 'Raw text has no header row — every line is data' : ''; };
+    syncHeader();
     controls.append(delimSel, headerLabel);
     b.append(controls);
 
@@ -145,7 +154,9 @@ export function openImportPreview(src, opts = {}) {
 
     function renderTable() {
       tableWrap.replaceChildren();
-      status.textContent = `Detected delimiter: ${JSON.stringify(preview.delimiter)} · showing first ${preview.sample_rows.length} rows`;
+      status.textContent = isLines()
+        ? `One line per row, nothing split · showing first ${preview.sample_rows.length} lines`
+        : `Detected delimiter: ${JSON.stringify(preview.delimiter)} · showing first ${preview.sample_rows.length} rows`;
       const t = el('table', 'preview-tbl');
       const hr = el('tr');
       preview.columns.forEach((c, i) => {
@@ -177,15 +188,17 @@ export function openImportPreview(src, opts = {}) {
         // A path-queued item (the "Add from this machine…" picker) previews
         // in place; a browser-picked File uploads its sample. Which one is
         // a fact about how the item arrived, not a guess about the disk.
+        const kind = isLines() ? 'text' : 'csv';
         if (src.path) {
           preview = await post('/api/ingest/preview/path', {
-            path: src.path, kind: 'csv',
-            delimiter: delimSel.value || null, has_header: headerCb.checked,
+            path: src.path, kind,
+            delimiter: isLines() ? null : (delimSel.value || null), has_header: headerCb.checked,
           });
         } else {
           const fd = new FormData();
           fd.append('file', src.file);
-          if (delimSel.value) fd.append('delimiter', delimSel.value);
+          fd.append('kind', kind);
+          if (!isLines() && delimSel.value) fd.append('delimiter', delimSel.value);
           fd.append('has_header', headerCb.checked ? 'true' : 'false');
           preview = await api('/api/ingest/preview', { method: 'POST', body: fd });
         }
@@ -196,14 +209,18 @@ export function openImportPreview(src, opts = {}) {
       }
     }
 
-    delimSel.onchange = refreshPreview;
+    delimSel.onchange = () => { syncHeader(); columnTypes = null; refreshPreview(); };
     headerCb.onchange = refreshPreview;
     refreshPreview();
 
     const actions = el('div', 'row-actions');
     const importBtn = el('button', 'btn', opts.onConfirm ? 'Use these settings' : 'Import');
     importBtn.onclick = async () => {
-      const settings = { delimiter: delimSel.value || null, has_header: headerCb.checked, column_types: columnTypes };
+      // `kind` rides in the settings: choosing Lines turns a csv queue item
+      // into a text one (and back), which is what the queue row shows.
+      const settings = isLines()
+        ? { kind: 'text', delimiter: null, has_header: false, column_types: null }
+        : { kind: 'csv', delimiter: delimSel.value || null, has_header: headerCb.checked, column_types: columnTypes };
       if (opts.onConfirm) {
         $('modal').hidden = true;
         opts.onConfirm(settings);
@@ -213,7 +230,7 @@ export function openImportPreview(src, opts = {}) {
       if (src.path) { // added by path — import in place, no upload leg
         try {
           await post('/api/ingest/jobs/path', {
-            path: src.path, name: src.name, kind: 'csv',
+            path: src.path, name: src.name, kind: settings.kind,
             delimiter: settings.delimiter, has_header: settings.has_header,
             column_types: settings.column_types,
           });
@@ -225,10 +242,10 @@ export function openImportPreview(src, opts = {}) {
       }
       const fd = new FormData();
       fd.append('file', src.file);
-      fd.append('kind', 'csv');
+      fd.append('kind', settings.kind);
       if (settings.delimiter) fd.append('delimiter', settings.delimiter);
       fd.append('has_header', settings.has_header ? 'true' : 'false');
-      fd.append('column_types', JSON.stringify(settings.column_types));
+      if (settings.column_types) fd.append('column_types', JSON.stringify(settings.column_types));
       // Same background pipeline as the queue: transfer with progress, then
       // an ingest job the corner panel tracks.
       try {
@@ -416,5 +433,9 @@ export function importKindFor(filename) {
   if (PLASO_IMPORT_EXTENSIONS.includes(extOf(filename))) return 'plaso';
   if (ARCHIVE_IMPORT_EXTENSIONS.includes(extOf(filename))) return 'archive';
   const ext = extOf(filename).slice(1); // drop the leading '.' — json/jsonl/ndjson below are bare
-  return ext === 'json' || ext === 'jsonl' || ext === 'ndjson' ? 'json' : 'csv';
+  if (ext === 'json' || ext === 'jsonl' || ext === 'ndjson') return 'json';
+  // Anything no built-in claims is raw text — one line per row (see
+  // Store.ingest_text): auth.log.1, hostd.log, an extensionless dump.
+  // Plugin formats are consulted before this by queueItem.
+  return RECOGNIZED_IMPORT_EXTENSIONS.includes(extOf(filename)) ? 'csv' : 'text';
 }

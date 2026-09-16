@@ -1,4 +1,4 @@
-# Ingest: CSV, JSON, SQLite, Excel, Plaso, archives, folders, drops, jobs
+# Ingest: CSV, raw text, JSON, SQLite, Excel, Plaso, archives, folders, drops, jobs
 
 Every path that turns a file on disk into a `src_<id>` table, and the
 background-job machinery all of them run through. Invariant #1 (source
@@ -123,6 +123,24 @@ see [docs/notes/README.md](README.md) for the whole set.
   `S.savedFilters`/`S.tags`/etc., has no earlier source-open-triggered load
   point to piggyback on, so it just awaits a fresh copy before building the
   profile `<select>` at all.
+- **Raw text is the catch-all importer, and it is a different reader.**
+  `Store.ingest_text` (kind `text`): one row per physical line, the whole
+  line in the one `Message` column (`TEXT_COLUMN`), no header, nothing
+  split — a line iterator, not the csv module, so there is no 128 KB
+  field limit and a stray quote swallows nothing. Blank lines are kept
+  as empty rows so `rid` is the line number. `_ingest_kind_for_path`
+  (server) and `importKindFor` (client) send any name no built-in claims
+  here — `hostd.log`, `auth.log.1`, an extensionless dump — *after* plugin
+  formats have had their say (`queueItem` / `_assoc_ingest` consult them
+  first). `.txt` keeps the delimited path on purpose (KAPE emits
+  delimited `.txt`); the CSV preview's **Lines** option forces any file
+  into raw text, and that choice rides on the queue item as `kind`.
+  The only refusal left is `looks_binary` (a NUL in the first 8 KB; a
+  UTF-16 BOM is exempt) — the browser cannot check bytes, so a dropped
+  binary becomes a job error, not a silent skip. Folder import stays
+  extension-gated: the `*` chip ("other text files", off by default)
+  admits everything non-binary as kind `text`, with binaries excluded
+  under their own reason; profiles carry `*` in their extension list.
 - **Include patterns narrow; they never widen.** The folder scan's
   extension gate runs first, and a file it drops is gone before
   `include_patterns` are consulted — so `*.log` in the include box cannot

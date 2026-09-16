@@ -574,6 +574,28 @@ TAG_GROUP_COLUMN = "__tag__"
 # import with a confusing error, even though the data itself was fine.
 RESERVED_COLUMN_NAMES = {"rid", "rank", "rowid", TAG_GROUP_COLUMN}
 
+# The one column a raw-text import has (ingest_text): every physical line
+# of the file, verbatim, one row each. Not "Line" — the grid's own row-
+# number header already reads that.
+TEXT_COLUMN = "Message"
+
+
+def looks_binary(path: str) -> bool:
+    """Whether a file is plainly not text — a NUL in its first 8 KB. The
+    guard in front of the raw-text importer, which would otherwise happily
+    turn an .exe or an .evtx into a million rows of mojibake. A UTF-16 BOM
+    is exempt: that encoding IS text with NULs in it (sniff_text_encoding
+    reads it correctly). BOM-less UTF-16 reads as binary here, which is
+    the same "left alone" call sniff_text_encoding makes."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(8192)
+    except OSError:
+        return False
+    if head[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return False
+    return b"\x00" in head
+
 
 def sniff_text_encoding(path: str) -> str:
     """The encoding to open a text evidence file with — utf-8-sig unless a
@@ -2218,6 +2240,119 @@ class Store:
         rec["suspect_quote_rows"] = suspect_quotes
         return rec
 
+    def ingest_text(self, path: str, name: str | None = None, build_fts: bool = True,
+                    progress=None, cancel=None) -> dict:
+        """Import a file as raw text: one row per physical line, the whole
+        line in the one TEXT_COLUMN, nothing split, nothing treated as a
+        header. For log files — syslog, hostd.log, auth.log.1, an
+        extensionless dump — which the CSV path mangled: it sniffed a
+        delimiter that was always one of four, took line 1 as the header,
+        split lines on stray commas and truncated the wider ones, and let
+        an unbalanced quote swallow the lines after it.
+
+        Deliberately not the csv module: iterating lines has no field-size
+        limit and no quoting rules, and the row id IS the line number
+        (blank lines are kept as empty rows for exactly that reason — the
+        grid has a hide-empty-rows option for the analyst who'd rather not
+        see them). Same batching, progress, cancel and keep-what-committed
+        contract as ingest_csv; same encoding sniff."""
+        name = name or os.path.basename(path)
+        if looks_binary(path):
+            raise ValueError(f"{name} looks like a binary file (NUL bytes in its first 8 KB) — not importable as text")
+        size = os.path.getsize(path)
+        file_hash = self._quick_hash(path)
+        fh = open(path, "r", encoding=sniff_text_encoding(path), errors="replace", buffering=1 << 20)
+        try:
+            first = fh.readline()
+        except Exception:
+            fh.close()
+            raise
+        if first == "":
+            fh.close()
+            raise ValueError("File is empty")
+        fh.seek(0)
+
+        cols = [TEXT_COLUMN]
+        with self.lock, self.db:
+            cur = self.db.execute(
+                "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at)"
+                " VALUES (?,?,?,?,?,?)",
+                (name, os.path.abspath(path), "", "[]", file_hash,
+                 time.strftime("%Y-%m-%dT%H:%M:%S")),
+            )
+            source_id = cur.lastrowid
+            self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
+            table = f"src_{source_id}"
+            self.db.execute(f"CREATE TABLE {q(table)} (rid INTEGER PRIMARY KEY, {q(TEXT_COLUMN)} TEXT)")
+            self.db.execute("UPDATE sources SET table_name=? WHERE id=?", (table, source_id))
+        insert = f"INSERT INTO {q(table)} ({q(TEXT_COLUMN)}) VALUES (?)"
+
+        batch: list[tuple] = []
+        total = 0
+        t0 = time.time()
+        error: Exception | None = None
+        with self._ingest_synchronous_off():
+            try:
+                for line in fh:
+                    # Universal newlines already folded \r\n to \n; the
+                    # final line may have no terminator at all.
+                    batch.append((line[:-1] if line.endswith("\n") else line,))
+                    if len(batch) >= BATCH:
+                        if cancel is not None and cancel():
+                            raise IngestCancelled(f"Import of {name} cancelled")
+                        total = self._commit_ingest_batch(insert, batch, source_id, total)
+                        batch.clear()
+                        if progress:
+                            progress(total, fh.buffer.tell(), size)
+                if batch:
+                    if cancel is not None and cancel():
+                        raise IngestCancelled(f"Import of {name} cancelled")
+                    total = self._commit_ingest_batch(insert, batch, source_id, total)
+                    batch.clear()
+                if progress:
+                    progress(total, size, size)
+            except IngestCancelled:
+                self.drop_source(source_id)   # as ingest_csv: a cancel discards the partial import
+                raise
+            except Exception as e:
+                if batch:
+                    with contextlib.suppress(Exception):
+                        total = self._commit_ingest_batch(insert, batch, source_id, total)
+                        batch.clear()
+                kept = f" — import stopped there; the {total:,} lines before it were kept" if total else ""
+                error = ValueError(f"Line {total + 1:,}: {e}{kept}")
+                error.__cause__ = e
+            finally:
+                fh.close()
+
+        colmeta = [{"name": TEXT_COLUMN, "type": "text"}]
+        with self.lock, self.db:
+            self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
+        if error is not None:
+            if total == 0:
+                self.drop_source(source_id)
+            raise error
+        if build_fts and total:
+            self._ensure_fts_building(source_id)
+        elapsed = time.time() - t0
+        rec = self.get_source(source_id)
+        rec["elapsed_sec"] = round(elapsed, 2)
+        rec["rows_per_sec"] = int(total / elapsed) if elapsed > 0 else 0
+        rec["ragged_rows"] = 0
+        rec["suspect_quote_rows"] = 0
+        return rec
+
+    @staticmethod
+    def preview_text_lines(text: str, max_rows: int = 50) -> dict:
+        """The raw-text importer's preview: the first lines, one per row, in
+        the shape preview_csv_text returns so the import preview renders
+        them with the same table."""
+        lines = text.splitlines()
+        if not lines and not text:
+            raise ValueError("File is empty")
+        return {"delimiter": None, "columns": [TEXT_COLUMN],
+                "sample_rows": [[ln] for ln in lines[:max_rows]], "inferred_types": ["text"]}
+
     def _commit_ingest_batch(self, insert_sql: str, batch: list[tuple], source_id: int, total: int) -> int:
         """Insert+commit one ingest batch in its own short transaction,
         updating sources.row_count as we go. Only holds self.lock for this
@@ -2964,12 +3099,19 @@ class Store:
         "matches" means one thing in this scan. include/exclude patterns
         still apply to these files afterward, unchanged."""
         root_abs = os.path.abspath(root)
+        # "*" in the extension list means "and any other text file" — the
+        # raw-text importer's catch-all (ingest_text). Off unless asked: a
+        # triage tree is full of READMEs, hashes and scripts nobody wants
+        # as tables. A file that gets in this way is checked for NULs
+        # first; a binary is excluded with its own reason.
+        other_text = any(e in ("*", ".*") for e in (extensions or []))
         # None means "the defaults"; an empty list means exactly that — the
         # analyst turned every chip off. `or` conflated the two, so a scan
         # with nothing selected matched the default set.
         exts = {
             (e if e.startswith(".") else "." + e).lower()
             for e in (DEFAULT_IMPORT_EXTENSIONS if extensions is None else extensions)
+            if e not in ("*", ".*")
         }
         includes = [p for p in (include_patterns or []) if p.strip()]
         excludes = [p for p in (exclude_patterns or []) if p.strip()]
@@ -2999,9 +3141,14 @@ class Store:
                 entry = {"path": fpath, "rel_path": rel, "size_bytes": size}
                 ext = os.path.splitext(fname)[1].lower()
                 by_filename_pattern = any(fnmatch.fnmatch(fname.lower(), p.lower()) for p in fname_pats)
-                if ext not in exts and not by_filename_pattern:
-                    excluded.append({**entry, "reason": "extension"})
-                    continue
+                by_ext = ext in exts
+                if not by_ext and not by_filename_pattern:
+                    if not other_text:
+                        excluded.append({**entry, "reason": "extension"})
+                        continue
+                    if looks_binary(fpath):
+                        excluded.append({**entry, "reason": "binary"})
+                        continue
                 if includes and not any(self._import_pattern_matches(p, fname, rel) for p in includes):
                     excluded.append({**entry, "reason": "no include pattern matched"})
                     continue
@@ -3020,8 +3167,10 @@ class Store:
                     kind = "plaso"
                 elif ext in DEFAULT_IMPORT_EXTENSIONS:
                     kind = "csv"
-                else:
+                elif by_ext or by_filename_pattern:
                     kind = "plugin"
+                else:
+                    kind = "text"
                 matched.append({
                     **entry,
                     "kind": kind,
@@ -3048,7 +3197,7 @@ class Store:
         sat behind with no progress, no way to tell "working" from
         "crashed", and a browser tab they couldn't use meanwhile.
 
-        `kind` is 'csv' | 'json' | 'sqlite'. For 'sqlite',
+        `kind` is 'csv' | 'text' | 'json' | 'sqlite' | 'xlsx' | 'plaso'. For 'sqlite',
         options['tables'] is [{table, name?, timestamp_columns?}, ...] —
         one uploaded file, one job, N sources, so the file is spooled and
         read once rather than re-uploaded per table. `delete_after` removes
@@ -3069,7 +3218,7 @@ class Store:
         system because it wants exactly what this one provides — a progress
         bar over a multi-million-row pass, per-BATCH cancellation, the jobs
         panel, and close()'s cancel-and-join."""
-        if kind not in ("csv", "json", "sqlite", "xlsx", "plaso", "derive"):
+        if kind not in ("csv", "text", "json", "sqlite", "xlsx", "plaso", "derive"):
             raise ValueError(f"Unknown ingest kind: {kind}")
         try:
             size = os.path.getsize(path)
@@ -3085,8 +3234,8 @@ class Store:
                 "status": "queued",
                 "rows_done": 0,
                 "units_done": 0,
-                "units_total": size if kind == "csv" else ((options or {}).get("units_total") or 0),
-                "unit": "bytes" if kind == "csv" else ("records" if kind == "json" else "rows"),
+                "units_total": size if kind in ("csv", "text") else ((options or {}).get("units_total") or 0),
+                "unit": "bytes" if kind in ("csv", "text") else ("records" if kind == "json" else "rows"),
                 "tables_done": 0,
                 "tables_total": len((options or {}).get("tables") or []) if kind in ("sqlite", "xlsx") else 0,
                 "current_table": None,
@@ -3175,6 +3324,11 @@ class Store:
                 wlog.record("info", f"Derive finished: {job['name']} — {res['rows']:,} rows in "
                                     f"{self._job_elapsed(job):.1f}s (table {res['source_id']})")
                 return
+            elif job["kind"] == "text":
+                results = [self.ingest_text(
+                    job["path"], name=job["name"], build_fts=opts.get("build_fts", True),
+                    progress=progress, cancel=cancel,
+                )]
             elif job["kind"] == "plaso":
                 results = [self.ingest_plaso(
                     job["path"], name=job["name"],

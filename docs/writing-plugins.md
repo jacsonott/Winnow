@@ -245,7 +245,10 @@ imports to pick them up.
 **Built-in extensions always win.** If you register `.csv`, files still
 route to Winnow's CSV parser by default — your format stays reachable
 through its own picker in Settings → Plugins, but it won't hijack
-existing behavior.
+existing behavior. Everything else goes to your format *before* the
+raw-text catch-all: a name nothing claims imports as plain text, one
+line per row, so a plugin that registers `hostd*` gets `hostd.log` and
+an unregistered `vpxa.log` still imports — as lines.
 
 ### The `parse` contract
 
