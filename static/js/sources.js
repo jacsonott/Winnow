@@ -712,10 +712,28 @@ export async function openSource(id, { skipBuild = false } = {}) {
   // (which is keyed by header set, not row count) has no business carrying it.
   S.valueFilterMode = saved.value_filters || 'auto';
   S.hideEmptyRows = !!saved.hide_empty_rows;   // same per-source reasoning; the stash below wins if we're coming back
+  // The no-layout seed is the BASE columns only: a derived column is placed
+  // by the loop below, next to its input, rather than trailing the list
+  // in creation order.
   S.order = (saved.order && saved.order.filter((n) => S.columns.some((c) => c.name === n)))
     || (defaultLayout && defaultLayout.order.filter((n) => S.columns.some((c) => c.name === n)))
-    || S.columns.map((c) => c.name);
-  for (const c of S.columns) if (!S.order.includes(c.name)) S.order.push(c.name);
+    || S.columns.filter((c) => !c.derived).map((c) => c.name);
+  // A column the order has never seen — a derived column added since the
+  // layout was last saved — goes right after the column it was derived
+  // from, after any siblings already sitting there (a flatten adds several
+  // from one input, in order), not at the far end where nobody scrolls.
+  // Anything else (no derived_from, or an input that's hidden from the
+  // order) appends as before. Re-derive keeps its name, so it never moves.
+  for (const c of S.columns) {
+    if (S.order.includes(c.name)) continue;
+    let at = c.derived_from ? S.order.indexOf(c.derived_from) : -1;
+    if (at === -1) { S.order.push(c.name); continue; }
+    while (at + 1 < S.order.length) {
+      const next = S.columns.find((x) => x.name === S.order[at + 1]);
+      if (next && next.derived_from === c.derived_from) at++; else break;
+    }
+    S.order.splice(at + 1, 0, c.name);
+  }
 
   // Default sort: first datetime column, ascending — a timeline wants time order.
   const dt = S.columns.find((c) => c.type === 'datetime');
