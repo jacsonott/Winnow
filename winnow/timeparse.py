@@ -124,9 +124,11 @@ def register_op(op: dict) -> None:
         op["detect"] = _success_rate_detect(op)
     # Ops that read several columns of a row at once. `parse_multi(values,
     # params, state)` gets them in op_inputs() order: the input column
-    # first, then whatever the op's `column`/`columns` params name. An op
-    # written against the older parse_pair(a, b, params) is wrapped here,
-    # so the store has exactly one multi-column calling convention.
+    # first, then whatever the op's `column`/`columns` params name — and
+    # the store puts those names in state["inputs"], same order, for an
+    # op whose output names its inputs (row_json). An op written against
+    # the older parse_pair(a, b, params) is wrapped here, so the store has
+    # exactly one multi-column calling convention.
     op.setdefault("parse_multi", None)
     if op.get("parse_pair") and op["parse_multi"] is None:
         pair = op["parse_pair"]
@@ -225,6 +227,17 @@ def validate_params(op_id: str, params: dict | None) -> dict:
         elif kind == "offset":
             val = str(val).strip()
             _parse_utc_offset(val)  # raises on garbage
+        elif kind == "bool":
+            # A checkbox: the UI sends true/false, a hand-written spec may
+            # say "yes"/"no"/"1"/"0". `default` carries the unchecked value.
+            if not isinstance(val, bool):
+                s = str(val).strip().lower()
+                if s in ("1", "true", "yes", "on"):
+                    val = True
+                elif s in ("0", "false", "no", "off"):
+                    val = False
+                else:
+                    raise ValueError(f"{spec.get('label', name)} must be yes or no")
         elif kind == "columns":
             # An ordered list of column names. A comma-joined string is
             # accepted for hand-written specs; the UI sends a list. Order

@@ -17,7 +17,7 @@ def test_combine_type_offers_coalesce_and_the_chips_build_the_param(page):
     page.wait_for_timeout(150)
     ops = page.evaluate(
         "() => [...document.querySelectorAll('#modalBody select')[2].options].map((o) => o.textContent)")
-    assert ops == ["First non-empty value"], ops
+    assert ops == ["First non-empty value", "Row as JSON"], ops
     assert page.locator(".derived-name").input_value() == "Host (combined)"
     # The chips widget, not a select: order is the meaning.
     add = page.locator(".derived-columns select.fb-groupby-add")
