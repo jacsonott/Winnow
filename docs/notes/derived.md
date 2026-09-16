@@ -46,6 +46,14 @@ see [docs/notes/README.md](README.md) for the whole set.
     the moment it's declared. `combine.py`'s coalesce (`family:
     "combine"`, `derived_kind: "combine"` — not `"text"`, which the
     header menu treats as "has a field path to edit") is the model.
+    `row_json` (same family) is the second: the store puts the ordered
+    input names in `state["inputs"]` before any `parse_multi` call —
+    backfill and preview both — so an op whose output names its columns
+    reads them there instead of growing a second calling shape. Its
+    `columns` param carries two UI-only keys, `any_type` (offer every
+    column, not just text) and `prefill: "all"` (start with every other
+    column chosen); `validate_params` ignores both. `bool` is a param
+    type now (a checkbox; the state holds a real boolean).
   - **`_from_clause(src)` is the one place the join is spelled** —
     `LEFT JOIN drv_<id> USING(rid)`, so an unqualified `rid` stays legal
     on both sides. `drv`'s rid is an INTEGER PRIMARY KEY, so the join

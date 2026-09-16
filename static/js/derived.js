@@ -481,6 +481,7 @@ export async function openDerivedColumnModal(prefill, editing) {
       const op = currentOp();
       if (op && op.derived_kind === 'duration') return `${state.column} elapsed`;
       if (op && op.derived_kind === 'text') return `${state.column} (extract)`;
+      if (op && op.id === 'row_json') return 'Row as JSON';
       if (op && op.derived_kind === 'combine') return `${state.column} (combined)`;
       return `${state.column} (parsed)`;
     }
@@ -539,6 +540,20 @@ export async function openDerivedColumnModal(prefill, editing) {
             o.value = c.name;
             input.append(o);
           }
+        } else if (spec.type === 'bool') {
+          // A checkbox; the state holds a real boolean (the server's bool
+          // param type), so the scalar `.value` sync below is skipped.
+          input = el('input');
+          input.type = 'checkbox';
+          const existingBool = state.params[spec.name];
+          input.checked = existingBool === true || existingBool === 'true' || (existingBool == null && spec.default === true);
+          state.params[spec.name] = input.checked;
+          input.onchange = () => { state.params[spec.name] = input.checked; refreshPreview(); };
+          row.classList.add('derived-param-bool');
+          row.append(input);
+          if (spec.help) row.append(el('span', 'fb-help derived-param-help', spec.help));
+          paramBox.append(row);
+          continue;
         } else if (spec.type === 'columns') {
           // An ORDERED list of columns — chips plus an add-one select, the
           // shape the filter builder's group-by uses. Order is the
@@ -546,7 +561,13 @@ export async function openDerivedColumnModal(prefill, editing) {
           // multi-select, whose order is the option order. The state
           // holds an array, not a string, so the scalar `.value` sync
           // below is skipped for this kind.
-          const chosen = Array.isArray(state.params[spec.name]) ? [...state.params[spec.name]] : [];
+          // any_type: every column may go in (row_json), not just text
+          // ones; prefill "all": start with every other column listed,
+          // the analyst removes rather than adds.
+          const pool = spec.any_type ? S.columns : textCols;
+          const chosen = Array.isArray(state.params[spec.name]) ? [...state.params[spec.name]]
+            : spec.prefill === 'all' ? pool.filter((c) => c.name !== state.column && c.name !== state.name).map((c) => c.name)
+              : [];
           state.params[spec.name] = chosen;
           input = el('div', 'fb-groupby-chips derived-columns');
           const paint = () => {
@@ -562,7 +583,7 @@ export async function openDerivedColumnModal(prefill, editing) {
             });
             const add = el('select', 'fb-groupby-add');
             add.append(new Option(chosen.length ? '+ then…' : '+ column…', ''));
-            for (const c of textCols) {
+            for (const c of pool) {
               if (c.name === state.column || c.name === state.name || chosen.includes(c.name)) continue;
               add.append(new Option(c.name, c.name));
             }

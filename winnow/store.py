@@ -4421,7 +4421,13 @@ class Store:
         for d in defs:
             op = timeparse.OPERATIONS[d["op_id"]]
             inputs = timeparse.op_inputs(d["op_id"], d["input_column"], d["params"])
-            plan = {"d": d, "op": op, "state": {}, "slots": [slot(c) for c in inputs]}
+            # state["inputs"]: the ordered column names behind the values
+            # parse_multi receives — an op that needs them (row_json's keys)
+            # reads them here rather than growing a second calling shape.
+            # Multi-input ops only: a stateful single-input op (syslog's
+            # year rollover) takes an empty dict as "fresh" and seeds it.
+            state = {"inputs": list(inputs)} if op["multi_input"] else {}
+            plan = {"d": d, "op": op, "state": state, "slots": [slot(c) for c in inputs]}
             if op.get("prepare"):
                 # e.g. lookup loading its whole mapping once — per
                 # definition, before the scan, so the scan stays dict hits
@@ -4624,7 +4630,7 @@ class Store:
             for other in inputs[1:]:
                 if self._find_column(src, other) is None:
                     raise KeyError(other)
-            state: dict = {}
+            state: dict = {"inputs": list(inputs)}   # see backfill_derived_columns
             if op.get("prepare"):
                 op["prepare"](self, params, state)
             sel = ", ".join(self._col_ref(src, c) for c in inputs)
