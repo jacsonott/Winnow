@@ -27,6 +27,7 @@ export const S = {
   layout: {},           // name -> {w, hidden, pinned, tsFormat, durFormat, valuePicker}
   order: [],            // column names in display order
   valueFilterMode: 'auto', // 'auto' (on under VALUE_FILTER_AUTO_MAX rows) | 'on' | 'off' — this table's value-picker default, per-column overrides live in S.layout
+  hideEmptyRows: false, // the table menu's "Hide empty rows" — a per-table view preference, saved in the layout like valueFilterMode
   filters: {},          // name -> raw filter text
   sort: [],             // [{column, dir}]
   search: '',

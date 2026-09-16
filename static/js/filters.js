@@ -56,6 +56,7 @@ export function currentSpec() {
     })(),
     tags: S.tagFilter,
     time_range: S.timeRange,
+    hide_empty_rows: !!S.hideEmptyRows,
   };
 }
 
