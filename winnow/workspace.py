@@ -792,7 +792,7 @@ class AppSettings:
     # quick-look starts a server on a free port — a different origin, so it
     # came up in the default skin every time. The machine copy is what a
     # fresh origin adopts on boot; localStorage stays the flash-free cache.
-    APPEARANCE_KEYS = {"style", "themeMode", "accent", "accentCustomized", "splash", "density", "pagesMenu"}
+    APPEARANCE_KEYS = {"style", "themeMode", "accent", "accentCustomized", "splash", "density", "pagesMenu", "openNewTables"}
 
     def save(self, values: dict) -> dict:
         fmt = values.get("default_ts_format")

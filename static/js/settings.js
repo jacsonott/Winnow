@@ -63,6 +63,10 @@ export function defaultAppearance() {
     // width back and is the better default for everyone who has not
     // deliberately chosen otherwise.
     pagesMenu: true,
+    // Off unless turned on: a finished import updates the tab strip and
+    // leaves the analyst where they are (see jobs.js). On, the first table
+    // of an import batch to finish opens; the rest land quietly.
+    openNewTables: false,
   };
 }
 
@@ -777,6 +781,23 @@ export function openSettings() {
     secLook.append(pagesLabel);
     secLook.append(el('p', 'fb-help',
       'Collapse SQL, Timeline, Notes, Watchlist and plugin tabs into one Pages \u25be button, the way Filters \u25be works.'));
+
+    /* Imports: how a finished import behaves. A machine preference like
+       the look (per browser, mirrored to the machine), not case data. */
+    const secImports = settingsSection(b, 'Imports');
+    const openLabel = el('label', 'check-row');
+    const openCb = el('input');
+    openCb.type = 'checkbox';
+    openCb.checked = !!S.appearance.openNewTables;
+    openCb.onchange = () => {
+      S.appearance.openNewTables = openCb.checked;
+      saveAppearance();
+    };
+    openLabel.append(openCb, el('span', null, 'Open new tables when an import finishes'));
+    secImports.append(openLabel);
+    secImports.append(el('p', 'fb-help',
+      'Off: a finished import updates the tab strip and leaves you where you are. '
+      + 'On: the first table of a batch to finish opens; the rest of that batch land without moving you again.'));
 
     const secKeys = settingsSection(b, 'Keyboard shortcuts');
     secKeys.append(el('p', null, 'Tag hotkeys (1–9) are set per-tag in Edit tags. Escape always clears the selection or closes a panel. '
