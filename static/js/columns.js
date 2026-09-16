@@ -311,7 +311,7 @@ export const saveLayout = debounce(() => {
   if (!S.sourceId) return;
   post('/api/layout', {
     source_id: S.sourceId,
-    payload: { columns: S.layout, order: S.order, sort: S.sort, value_filters: S.valueFilterMode },
+    payload: { columns: S.layout, order: S.order, sort: S.sort, value_filters: S.valueFilterMode, hide_empty_rows: S.hideEmptyRows },
   }).catch(() => {});
 }, 400);
 

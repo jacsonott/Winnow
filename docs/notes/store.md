@@ -85,6 +85,11 @@ see [docs/notes/README.md](README.md) for the whole set.
   patterns a plain index can't accelerate (trigram FTS is the answer for
   substring search instead), and numeric `>`/`<` go through `_numeric_expr`,
   a functional expression a plain index on the raw column wouldn't match.
+  `_compile_where` is also where `hide_empty_rows` lands (every column
+  NULL or '' → dropped): a predicate emitted from inside it makes `where`
+  non-empty, which is what keeps an otherwise unfiltered view off the
+  `root_virtual` carve-out — appended to the SQL text after that gate it
+  would silently take the virtual path with every position wrong.
   This matters a lot more for a **merge**: `build_view` compiles the filter
   once per member and `UNION ALL`s the results (see `_resolve_members`), so
   an unindexed sargable filter is a full scan repeated across every member,

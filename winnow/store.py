@@ -3105,9 +3105,12 @@ class Store:
         # as tables. A file that gets in this way is checked for NULs
         # first; a binary is excluded with its own reason.
         other_text = any(e in ("*", ".*") for e in (extensions or []))
+        # None means "the defaults"; an empty list means exactly that — the
+        # analyst turned every chip off. `or` conflated the two, so a scan
+        # with nothing selected matched the default set.
         exts = {
             (e if e.startswith(".") else "." + e).lower()
-            for e in (extensions or DEFAULT_IMPORT_EXTENSIONS)
+            for e in (DEFAULT_IMPORT_EXTENSIONS if extensions is None else extensions)
             if e not in ("*", ".*")
         }
         includes = [p for p in (include_patterns or []) if p.strip()]
@@ -6051,6 +6054,17 @@ class Store:
                         parts.append(f"{expr} <= ?")
                         params.append(end_norm)
                 clauses.append("(" + " OR ".join(parts) + ")")
+
+        # "Hide empty rows" (the table menu): drop a row whose EVERY column
+        # is empty — NULL or '', the same "empty" the per-column filter op
+        # and "Hide empty columns" use. Here, rather than appended to the
+        # SQL later, on purpose: a non-empty `where` is what keeps an
+        # otherwise unfiltered view off the root_virtual carve-out
+        # (invariant #2), whose positions are only exact when the view is
+        # every row of the source. colnames is the merge's own list when
+        # this compiles per member, so the clause is legal in each branch.
+        if spec.get("hide_empty_rows") and colnames:
+            clauses.append("(" + " OR ".join(f"({q(c)} IS NOT NULL AND {q(c)} <> '')" for c in colnames) + ")")
 
         return " AND ".join(clauses), params
 

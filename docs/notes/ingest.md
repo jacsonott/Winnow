@@ -141,6 +141,20 @@ see [docs/notes/README.md](README.md) for the whole set.
   extension-gated: the `*` chip ("other text files", off by default)
   admits everything non-binary as kind `text`, with binaries excluded
   under their own reason; profiles carry `*` in their extension list.
+- **Include patterns narrow; they never widen.** The folder scan's
+  extension gate runs first, and a file it drops is gone before
+  `include_patterns` are consulted — so `*.log` in the include box cannot
+  admit a `.log` the chips don't carry. The two ways past the gate are a
+  chip (built-in extensions plus every extension a loaded plugin format
+  claims) and a plugin's bare-name `filename_patterns`. That is why the
+  esxi_logs plugin claims `.log` by extension as well as its fourteen
+  stems by name: patterns alone left `vmkwarning.log`, `clomd.log` and
+  the rest of a bundle behind, "unrecognized" with the plugin enabled,
+  while the parser had an "other" type for them all along. A plugin that
+  parses a whole family of files claims the extension; patterns are for
+  the extensionless ones. Also: `extensions=[]` on the scan means no
+  chips (nothing but patterns gets through), `None` means the defaults —
+  `or` used to conflate them.
 - **There is one import entry point** — the Case menu's "Import…" →
   `openImportModal`, whose queue now takes CSV/TSV, JSON/JSONL *and*
   SQLite files (`importKindFor` routes by extension; a sqlite item's
