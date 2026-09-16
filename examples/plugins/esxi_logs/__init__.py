@@ -219,14 +219,24 @@ def register(api):
     api.register_ingest_format(
         id="esxi_log",
         label="ESXi / Linux host log",
-        extensions=[],                       # matched by name, not extension
+        # Both: the known stems by NAME (rotated copies too — hostd.1,
+        # vmkernel.0.gz once expanded), and every .log by EXTENSION, parsed
+        # as the "other" type. A bundle holds dozens of logs beyond the
+        # fourteen stems (vmkwarning, clomd, sdrsinjector, vsanmgmt…) and
+        # the parser always handled them — but patterns alone left them
+        # behind the folder scan's extension gate, where no include
+        # pattern can reach, so "import the bundle" silently imported a
+        # third of it. Claiming the extension is also what puts a .log
+        # chip in the folder-import modal.
+        extensions=[".log"],
         filename_patterns=FILENAME_PATTERNS,
         description=(
             "ESXi support-bundle and UAC Linux logs (hostd, vmkernel, auth, "
             "shell, vobd, vpxa, syslog, rhttpproxy, esxupdate, and rotated "
-            "copies) parsed into one schema: Timestamp, Log type, Severity, "
-            "Component, PID, CPU, User, SourceIP, Message. Powers the "
-            "ESXi / UAC triage profile's overview dashboard."
+            "copies), plus any other .log in the bundle, parsed into one "
+            "schema: Timestamp, Log type, Severity, Component, PID, CPU, "
+            "User, SourceIP, Message. Powers the ESXi / UAC triage "
+            "profile's overview dashboard."
         ),
         options=[
             {"name": "log_type", "label": "Log type", "type": "choice",
