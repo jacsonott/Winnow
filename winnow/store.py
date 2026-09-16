@@ -2964,9 +2964,12 @@ class Store:
         "matches" means one thing in this scan. include/exclude patterns
         still apply to these files afterward, unchanged."""
         root_abs = os.path.abspath(root)
+        # None means "the defaults"; an empty list means exactly that — the
+        # analyst turned every chip off. `or` conflated the two, so a scan
+        # with nothing selected matched the default set.
         exts = {
             (e if e.startswith(".") else "." + e).lower()
-            for e in (extensions or DEFAULT_IMPORT_EXTENSIONS)
+            for e in (DEFAULT_IMPORT_EXTENSIONS if extensions is None else extensions)
         }
         includes = [p for p in (include_patterns or []) if p.strip()]
         excludes = [p for p in (exclude_patterns or []) if p.strip()]
