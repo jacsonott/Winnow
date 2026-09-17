@@ -933,14 +933,19 @@ section.page-with-panels { flex-direction: row; }
   cursor: pointer; padding-left: 6px; border-radius: var(--radius-sm);
   user-select: none;
 }
-.gutter .rid:hover { background: var(--panel-3); color: var(--text); }
+/* The whole gutter is the row handle (grid.js): a hover lights all of
+   it, not the digits, so it reads as one target; a selected row's gutter
+   simply wears the row's own background. */
+.gutter { cursor: pointer; }
+.row:hover .gutter { background: var(--panel-3); }
+.row.selected .gutter { background: var(--row-selected); }
 .row.selected .gutter .rid { color: var(--text); }
 
 .gutter input.rowcheck, .hcell input.select-all-rows {
   width: 12px; height: 12px; accent-color: var(--accent);
   flex: 0 0 auto; margin: 0; cursor: pointer;
 }
-.gutter input.rowcheck { opacity: .55; transition: opacity var(--transition-fast) var(--ease); }
+.gutter input.rowcheck { opacity: .85; width: 14px; height: 14px; transition: opacity var(--transition-fast) var(--ease); }
 .row:hover .rowcheck, .row.selected .rowcheck, .rowcheck:checked, .rowcheck:focus-visible { opacity: 1; }
 .hcell input.select-all-rows:disabled { cursor: default; opacity: .35; }
 
@@ -951,6 +956,7 @@ section.page-with-panels { flex-direction: row; }
   padding: 8px 12px; z-index: 55; box-shadow: var(--shadow-tag);
 }
 .tag-toolbar-count { font-family: var(--mono); font-size: 11px; color: var(--dim); margin-right: 4px; white-space: nowrap; }
+.tag-toolbar-warn { color: var(--danger); }
 
 .cell {
   flex: 0 0 auto; padding: 0 8px; line-height: calc(var(--row-h) - 1px);

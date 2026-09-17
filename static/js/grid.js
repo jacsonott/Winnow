@@ -5,7 +5,7 @@ import { applyPin, colWidth, pinnedOffsets, visibleCols } from './columns.js';
 import { $, GUTTER_W, MAX_SPACER_PX, OVERSCAN, PAGE, ROW_H, api, el } from './core.js';
 import { maybeShowDetail, showDetail } from './detail.js';
 import { ensureGroupPage, findGroupAt, groupCoordAt, groupDataRowAt, isLeafLevel, renderGrouped, toggleGroup } from './grouping.js';
-import { S, cellInRange, gridRowCount, selAdd, selClear, selCount, selHas, selRemove, selSetRange, selToggle } from './state.js';
+import { S, cellInRange, gridRowCount, selAdd, selClear, selCount, selHas, selRangeApply, selRanges, selRemove, selSetRange, selSnapshot, selToggle, selUndoLast } from './state.js';
 import { applyTag } from './tags.js';
 import { displayCell } from './tsformat.js';
 import { rebuildView } from './view.js';
@@ -474,20 +474,45 @@ export function renderTagToolbar() {
   // selected" rows that nothing on that page has, beside a Clear selection
   // button for a selection they could not see. The selection itself is
   // kept: coming back to the grid brings the bar back with it.
-  if (!count || S.activeTab !== 'grid') { bar.hidden = true; return; }
+  // A cell range spanning several rows is what a tag key would hit when
+  // nothing is picked (applyTag) — say so, rather than tagging silently.
+  const rangeRows = !count && S.cellRange && S.cellRange.r1 > S.cellRange.r0
+    ? S.cellRange.r1 - S.cellRange.r0 + 1 : 0;
+  if ((!count && !rangeRows) || S.activeTab !== 'grid') { bar.hidden = true; return; }
   bar.hidden = false;
-  bar.replaceChildren(el('span', 'tag-toolbar-count', `${count.toLocaleString()} selected`));
+  const label = count
+    ? `${count.toLocaleString()} selected` + (!S.selectAll && selRanges() > 1 ? ` · ${selRanges()} ranges` : '')
+    : `${rangeRows.toLocaleString()} rows in the cell range`;
+  const countEl = el('span', 'tag-toolbar-count', label);
+  if (S.selHidden) {
+    countEl.append(el('span', 'tag-toolbar-warn', ` · ${S.selHidden.toLocaleString()} filtered out`));
+    countEl.title = `${S.selHidden.toLocaleString()} picked row(s) are not in the current view — a tag applies to the ${count.toLocaleString()} it shows`;
+  }
+  bar.replaceChildren(countEl);
+  const n = count || rangeRows;
   for (const t of S.tags) {
     const btn = el('button', 'tag-chip');
     const sw = el('span', 'swatch');
     sw.style.background = t.color;
     btn.append(sw, el('span', null, t.name));
-    btn.title = `Tag ${count.toLocaleString()} selected row(s) as ${t.name}`;
+    btn.title = `Tag ${n.toLocaleString()} row(s) as ${t.name}`;
     btn.onclick = () => applyTag(t);
     bar.append(btn);
   }
-  const clear = el('button', 'btn ghost', 'Clear selection');
-  clear.onclick = () => { selClear(); render(); };
+  if (count && !S.groupByCols.length) {
+    const inv = el('button', 'btn ghost', 'Invert');
+    inv.title = 'Select every row that is not picked, and drop the ones that are';
+    inv.onclick = () => { selSnapshot(); if (S.selectAll) { S.selectAll = false; } else { S.selectAll = true; } render(); };
+    bar.append(inv);
+  }
+  if (S.selUndo.length) {
+    const undo = el('button', 'btn ghost', 'Undo');
+    undo.title = 'Take back the last selection change';
+    undo.onclick = () => { if (selUndoLast()) { S.selHidden = 0; render(); } };
+    bar.append(undo);
+  }
+  const clear = el('button', 'btn ghost', count ? 'Clear selection' : 'Clear');
+  clear.onclick = () => { selSnapshot(); selClear(); S.cellRange = null; S.cellAnchor = null; S.selHidden = 0; render(); };
   bar.append(clear);
 }
 
@@ -505,22 +530,33 @@ export function highlight(node, text, needle) {
 
 /* ------------------------------------------------------------- movement */
 
+/* Shift+Arrow extends a run from the anchor; what was picked BEFORE the
+   run started is kept underneath it, so the run can shrink back without
+   eating earlier picks and the picks survive the arrow keys. */
+let kbBase = null;
+
 export function moveCursor(to, extend) {
   const total = gridRowCount();
   if (!S.view || !total) return;
   to = Math.max(0, Math.min(total - 1, to));
   if (extend) {
     if (S.anchor < 0) S.anchor = S.cursor < 0 ? to : S.cursor;
-    selSetRange(S.anchor, to);
+    if (!kbBase) { selSnapshot(); kbBase = { selectAll: S.selectAll, selection: new Set(S.selection) }; }
+    S.selectAll = kbBase.selectAll;
+    S.selection = new Set(kbBase.selection);
+    selRangeApply(S.anchor, to, true);
   } else {
+    // A plain move keeps the picks: moving the cursor is looking, not
+    // choosing. The picks go with Escape, the chip, or a new pick.
     S.anchor = to;
-    selClear();
+    kbBase = null;
   }
   S.cursor = to;
   scrollIntoView(to);
   render();
   maybeShowDetail(to);
 }
+export function endKeyboardRun() { kbBase = null; }
 
 export function scrollIntoView(pos) {
   const body = $('body');
@@ -575,9 +611,13 @@ export function activateRow(pos, e) {
     && lastActivate && lastActivate.pos === pos && (now - lastActivate.time) < 400;
   lastActivate = isDoubleActivate ? null : { pos, time: now };
 
-  if (e.shiftKey) moveCursor(pos, true);
-  else if (e.metaKey || e.ctrlKey) {
+  if (e.metaKey || e.ctrlKey) {
+    // Ctrl+click on a cell: add or drop that row — the one modifier that
+    // still means rows on the cell surface. Shift means the cell range.
+    selSnapshot();
     selToggle(pos);
+    endKeyboardRun();
+    S.anchor = pos;
     S.cursor = pos; render(); maybeShowDetail(pos);
   } else moveCursor(pos, false);
 
@@ -619,6 +659,29 @@ export function setCellRange(a, b) {
 export let cellDragging = false;
 
 export let cellDragRaf = null;
+
+/* Space: toggle the cursor row. Shift+Space: the rows a cell range spans
+   become picks (and the range is done with). Called from keymap.js. */
+export function toggleCursorRow() {
+  if (!S.view || S.cursor < 0) return;
+  if (S.groupByCols.length && !groupCoordAt(S.cursor)) return;
+  selSnapshot();
+  endKeyboardRun();
+  selToggle(S.cursor);
+  S.anchor = S.cursor;
+  render();
+}
+export function selectCellRangeRows() {
+  if (!S.cellRange) return false;
+  selSnapshot();
+  endKeyboardRun();
+  selRangeApply(S.cellRange.r0, S.cellRange.r1, true);
+  S.anchor = S.cellRange.r0;
+  S.cellRange = null;
+  S.cellAnchor = null;
+  render();
+  return true;
+}
 
 /* DOM wiring for this module, called once by main.js. Handlers can't
    fire during load, so the order these run in doesn't matter — the
@@ -664,88 +727,122 @@ $('body').addEventListener('click', (e) => {
     toggleGroup(Number(groupHeader.dataset.groupIdx));
     return;
   }
-  if (e.target.closest('.rowcheck')) return; // owned by the delegated `change` listener below
-  // .cell clicks are handled synchronously from `mousedown` below (see the
-  // comment there), and so is the row number — this handler is left for the
-  // rest of the gutter (note icon, tag stripes, blank space).
-  if (e.target.closest('.cell') || e.target.closest('.rid')) return;
-  const row = e.target.closest('.row');
-  if (!row) return;
-  const pos = Number(row.dataset.pos);
-  activateRow(pos, e);
-  $('body').focus();
+  // The gutter is the row handle and is handled on mousedown below; the
+  // checkbox's native toggle is suppressed there too (its state is
+  // painted from the selection). .cell clicks are handled from mousedown
+  // as well. Nothing is left for a click on a row.
+  if (e.target.closest('.rowcheck')) e.preventDefault();
 });
 
-$('body').addEventListener('change', (e) => {
-  if (!e.target.classList.contains('rowcheck')) return;
-  const row = e.target.closest('.row');
-  const pos = Number(row.dataset.pos);
-  e.target.checked ? selAdd(pos) : selRemove(pos);
-  S.cellRange = null; // checking a box is a fresh "what to copy" choice — don't let a stale cell click win
-  S.cellAnchor = null;
-  render();
-});
+/* The gutter is the row handle — all 104 px of it.
 
-/* The row number is the checkbox, in cell form.
+   The 12px box and the digits beside it were the only targets, with a
+   dead strip between them that CLEARED the selection when hit. Now a
+   mousedown anywhere in the gutter toggles that row; Shift+click adds the
+   run from the last pick (Ctrl+Shift+click removes it) without dropping
+   what was picked before; and dragging selects the span from the press to
+   the pointer — worked out from the pointer's y, not from whatever element
+   it happens to be over, so a fast drag never skips a row and dragging
+   back shrinks the span. Past the top or bottom edge the grid scrolls and
+   the span follows.
 
-   The checkbox was the only way to select a row, which is a 12px target
-   that has to be aimed at, and nothing about the number beside it said it
-   was inert. Clicking the number now does exactly what ticking the box
-   does — toggles that one row, leaving the others alone — and dragging
-   down the column paints the same choice onto every row it crosses, the
-   way dragging across data cells extends a cell range.
+   Deliberately NOT routed through activateRow/moveCursor: the cursor
+   follows, so the detail pane and the keyboard stay on the row you just
+   picked, but picking is never clearing. */
+let gutterDrag = null;   // {from, on, base: {selectAll, selection}} while the button is down
+let dragLastY = 0;
+let dragRaf = null;
+let autoScroll = null;
+const AUTOSCROLL_EDGE = 28;
 
-   Deliberately NOT routed through activateRow/moveCursor: those clear the
-   row selection on a plain click, which is right for "I clicked a cell"
-   and exactly wrong for "I ticked a box". The cursor still follows, so
-   the detail pane and the keyboard stay on the row you just picked. */
-let ridPainting = null;   // the state a drag is painting: true = select
-let ridAnchor = -1;       // last row-number click, for shift-extend
-
-function ridRowAt(target) {
-  const rid = target.closest('.rid');
-  if (!rid) return -1;
-  const row = rid.closest('.row');
+function gutterRowAt(target) {
+  const g = target.closest('.gutter');
+  if (!g) return -1;
+  const row = g.closest('.row');
   if (!row) return -1;
   const pos = Number(row.dataset.pos);
   // Grouped mode interleaves group headings into the position space, and a
-  // heading is not a row anything can select (selSetRange skips them too).
+  // heading is not a row anything can select (selRangeApply skips them too).
   if (S.groupByCols.length && !groupCoordAt(pos)) return -1;
   return pos;
 }
 
+/* The position under a viewport y, from geometry: the pointer may be
+   between rows, over the sticky header, or moving faster than mousemove
+   samples. Clamped to the view. */
+function rowAtClientY(clientY) {
+  const body = $('body');
+  const rect = body.getBoundingClientRect();
+  const y = clientY - rect.top + body.scrollTop - headH();
+  return Math.max(0, Math.min(gridRowCount() - 1, Math.floor(y / ROW_H)));
+}
+
+function applyGutterSpan(pos) {
+  S.selectAll = gutterDrag.base.selectAll;
+  S.selection = new Set(gutterDrag.base.selection);
+  selRangeApply(gutterDrag.from, pos, gutterDrag.on);
+  S.cursor = pos;
+  if (!dragRaf) dragRaf = requestAnimationFrame(() => { dragRaf = null; render(); });
+}
+
+function stopAutoScroll() { if (autoScroll) { clearInterval(autoScroll); autoScroll = null; } }
+
 $('body').addEventListener('mousedown', (e) => {
   if (e.button !== 0) return;
-  const pos = ridRowAt(e.target);
+  const pos = gutterRowAt(e.target);
   if (pos < 0) return;
-  e.preventDefault();   // no native text-drag off the digits
-  if (e.shiftKey && ridAnchor >= 0) {
-    selSetRange(ridAnchor, pos);
+  e.preventDefault();   // no native text-drag off the digits, no native checkbox toggle
+  selSnapshot();
+  endKeyboardRun();
+  if (e.shiftKey && S.anchor >= 0) {
+    selRangeApply(S.anchor, pos, !(e.ctrlKey || e.metaKey));
   } else {
-    ridPainting = !selHas(pos);
-    ridPainting ? selAdd(pos) : selRemove(pos);
-    ridAnchor = pos;
+    const on = !selHas(pos);
+    on ? selAdd(pos) : selRemove(pos);
+    gutterDrag = { from: pos, on, base: { selectAll: S.selectAll, selection: new Set(S.selection) } };
+    // The base is the state BEFORE this press: re-applying the span from
+    // it is what lets the drag shrink again on the way back.
+    gutterDrag.base.selectAll = S.selectAll;
+    gutterDrag.base.selection = new Set(S.selection);
+    on ? gutterDrag.base.selection.delete(pos) : gutterDrag.base.selection.add(pos);
+    if (S.selectAll) { on ? gutterDrag.base.selection.add(pos) : gutterDrag.base.selection.delete(pos); }
+    S.anchor = pos;
   }
-  // Same reasoning as the checkbox's own handler: picking rows is a fresh
-  // "what to copy" choice, so a stale cell rectangle must not win.
+  // Picking rows is a fresh "what to copy" choice, so a stale cell
+  // rectangle must not win over it.
   S.cellRange = null;
   S.cellAnchor = null;
   S.cursor = pos;
-  S.anchor = pos;
   render();
   maybeShowDetail(pos);
   $('body').focus();
 });
 
 $('body').addEventListener('mousemove', (e) => {
-  if (ridPainting === null) return;
-  const pos = ridRowAt(e.target);
-  if (pos < 0 || selHas(pos) === ridPainting) return;
-  ridPainting ? selAdd(pos) : selRemove(pos);
-  render();
+  if (!gutterDrag) return;
+  dragLastY = e.clientY;
+  const pos = rowAtClientY(e.clientY);
+  if (pos !== S.cursor) applyGutterSpan(pos);
+  const rect = $('body').getBoundingClientRect();
+  const dy = e.clientY < rect.top + headH() + AUTOSCROLL_EDGE ? -ROW_H / 2
+    : e.clientY > rect.bottom - AUTOSCROLL_EDGE ? ROW_H / 2 : 0;
+  stopAutoScroll();
+  if (dy) {
+    autoScroll = setInterval(() => {
+      if (!gutterDrag) { stopAutoScroll(); return; }
+      $('body').scrollTop += dy;
+      applyGutterSpan(rowAtClientY(dragLastY));
+    }, 40);
+  }
 });
 
-document.addEventListener('mouseup', () => { ridPainting = null; });
+document.addEventListener('mouseup', () => {
+  if (!gutterDrag) return;
+  gutterDrag = null;
+  stopAutoScroll();
+  if (dragRaf) { cancelAnimationFrame(dragRaf); dragRaf = null; }
+  render();
+});
 
 $('body').addEventListener('mousedown', (e) => {
   if (e.button !== 0) return;
@@ -755,15 +852,22 @@ $('body').addEventListener('mousedown', (e) => {
   const pos = Number(cell.closest('.row').dataset.pos);
   const col = Number(cell.dataset.col);
   if (e.shiftKey && S.cellAnchor) {
+    // Shift on a cell is the cell rectangle and nothing else: it no longer
+    // also picks rows (that ambiguity was what made Ctrl+C and a tag key
+    // disagree). The toolbar says how many rows the range spans, and
+    // Shift+Space turns it into row picks.
     setCellRange(S.cellAnchor, { pos, col });
+    S.cursor = pos;
+    render();
   } else {
     S.cellAnchor = { pos, col };
     setCellRange(S.cellAnchor, S.cellAnchor); // commit immediately so a plain click alone selects that one cell
     cellDragging = true;
+    activateRow(pos, e); // renders once, atomically, with the cell range above
   }
-  activateRow(pos, e); // renders once, atomically, with the cell range above
   $('body').focus();
 });
+
 
 $('body').addEventListener('mousemove', (e) => {
   if (!cellDragging) return;

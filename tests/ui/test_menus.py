@@ -45,9 +45,12 @@ def test_row_menu_scope_follows_the_selection(page, row_menu):
     assert page.locator(".menu").count() == 0
     assert page.locator(".row.selected").count() == 3
 
-    # Right-clicking outside the selection collapses onto that one row.
+    # Right-clicking outside the selection acts on that one row — and the
+    # selection itself is kept (picking is never clearing).
     row_menu(row=9)
     assert "THIS ROW" in page.locator(".menu .menu-item-sub").first.inner_text().upper()
+    page.keyboard.press("Escape")
+    assert page.locator(".row.selected").count() == 3
 
 
 def test_row_menu_filters_by_the_clicked_cell(page):

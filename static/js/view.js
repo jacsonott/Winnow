@@ -6,7 +6,7 @@ import { currentSpec } from './filters.js';
 import { clearPageCache, headH, rScroll, render, spacerPx, vScroll } from './grid.js';
 import { drawRail, regroupAll } from './grouping.js';
 import { armOpCancel, opToken } from './jobs.js';
-import { S, gridRowCount, selClear, specKey } from './state.js';
+import { S, gridRowCount, selAdd, selClear, selPositions, specKey } from './state.js';
 import { refreshTagCounts } from './tags.js';
 import { updateFiltersButton } from './timeframe.js';
 
@@ -18,6 +18,8 @@ import { updateFiltersButton } from './timeframe.js';
    the pre-swap row prefetch below widens the in-flight window enough to
    care. */
 export let rebuildSeq = 0;
+
+const SELECTION_REMAP_MAX = 20000;
 
 export async function rebuildView({ keepScroll = true } = {}) {
   if (!S.sourceId) return;
@@ -32,6 +34,15 @@ export async function rebuildView({ keepScroll = true } = {}) {
   const seq = ++rebuildSeq;
   // Which table this rebuild is for; checked again before it paints.
   const forSourceId = S.sourceId;
+  // See the remap below: what's picked, as row ids, while the old view is
+  // still there to ask. Explicit picks only — a select-all is a statement
+  // about THIS view. Capped: nobody remaps a hundred thousand hand-picks.
+  let keys = null;
+  if (S.view && !S.selectAll && S.selection.size && S.selection.size <= SELECTION_REMAP_MAX && !S.groupByCols.length) {
+    try {
+      keys = (await post('/api/view/keys', { view_id: S.view.view_id, positions: selPositions() })).keys;
+    } catch { keys = null; }
+  }
   let v;
   let seeded = [];
   setBusy(true);
@@ -111,7 +122,21 @@ export async function rebuildView({ keepScroll = true } = {}) {
     S.pages.set(idx, rows);
     for (const r of rows) S.rowsByPos.set(r.pos, r);
   }
+  // Picks are positions, and positions mean different rows now — but the
+  // ROWS the analyst picked are the same rows. Carry them over by id
+  // (keys captured before the rebuild, positions looked up after) so a
+  // sort or filter to check something doesn't cost the selection; the
+  // ones the new view no longer shows are counted, not silently lost.
   selClear();
+  S.selHidden = 0;
+  if (keys) {
+    try {
+      const r = await post('/api/view/positions', { view_id: v.view_id, keys });
+      if (seq !== rebuildSeq || S.sourceId !== forSourceId) return;
+      for (const p of r.positions) selAdd(p);
+      S.selHidden = r.missing;
+    } catch { /* a lost selection is not worth a failed rebuild */ }
+  }
   S.anchor = -1;
   S.cellRange = null;
   S.cellAnchor = null;

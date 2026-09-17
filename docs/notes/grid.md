@@ -36,9 +36,12 @@ see [docs/notes/README.md](README.md) for the whole set.
   selected position** — `S.selectAll` off means `S.selection` holds the
   selected view *positions*; on means it holds the *exclusions* (everything
   else in the view is selected). Nothing outside the `sel*` helper block at
-  the `sel*` block in state.js touches either field directly. Positions, not rids, so
-  it's still cleared on every view rebuild (positions no longer mean the
-  same rows). The inversion isn't just to avoid allocating a 1.2M-entry Set
+  the `sel*` block in state.js touches either field directly. Positions, not rids — but a rebuild no longer simply drops them:
+  `rebuildView` asks `/api/view/keys` for the picked rows' ids while the
+  old view is still there, builds, then `/api/view/positions` maps them
+  into the new one and counts the ones it no longer shows
+  (`S.selHidden`, the toolbar's "N filtered out"). Explicit picks only —
+  a select-all is a statement about *this* view — and capped at 20,000. The inversion isn't just to avoid allocating a 1.2M-entry Set
   for "everything": it's what lets `applyTag` *recognise* a whole-view
   selection and hand it to `/api/row_tags/view` as one server-side set
   operation. That matters because the page cache only ever holds the pages
@@ -166,17 +169,22 @@ see [docs/notes/README.md](README.md) for the whole set.
   `.hcell`'s `cursor: pointer` and hover tint — it's the one header cell
   that doesn't sort. The select-all box's indeterminate state was already
   handled by `syncSelectAllCheckbox`.
-- **The row number IS the checkbox** (grid.js's `.rid` mousedown handler).
-  The 12px box was the only way to pick a row, and the number beside it
-  looked equally clickable while doing nothing — people aimed at the box.
-  Clicking the number toggles that one row, exactly as ticking the box
-  does; shift-click extends from the last one; dragging down the column
-  paints the same choice onto the rows it crosses, the way dragging across
-  data cells extends a cell range. Deliberately **not** routed through
-  `activateRow`/`moveCursor`: those `selClear()` on a plain click, which
-  is right for "I clicked a cell" and exactly wrong for "I ticked a box" —
-  wiring it that way silently wipes the selection it was meant to add to.
-  The `click` handler skips `.rid` for the same reason. Its padding is
-  left-only: the digits stay flush right, where the "Line" header is
-  measured against, and the padding only widens the target into empty
-  gutter, so the three-slot contract above is untouched.
+- **The whole gutter is the row handle** (grid.js's `.gutter` mousedown).
+  The 12px box and the digits were the only targets, with a dead strip
+  between them that *cleared* the selection when hit. A mousedown
+  anywhere in the gutter toggles that row; Shift+click adds the run from
+  the anchor (Ctrl+Shift+click removes it) without dropping earlier picks;
+  a drag selects the span from the press to the pointer — computed from
+  the pointer's y (`rowAtClientY`), never from the element under it, so a
+  fast drag can't skip rows and dragging back shrinks the span — with
+  autoscroll past either edge. Picking is never clearing: `moveCursor`'s
+  plain move keeps the picks (arrow keys are looking, not choosing), a
+  cell click keeps them, a right-click outside them keeps them. They go
+  with Escape, the toolbar's Clear, or a new pick; every gesture snapshots
+  first so the toolbar's Undo can take it back. Shift+click on a *cell*
+  is the cell rectangle and nothing else — it used to also pick rows,
+  which is why Ctrl+C and a tag key disagreed about "the selection";
+  `Shift+Space` turns a range into picks, `Space` toggles the cursor row,
+  and with nothing picked a multi-row cell range is the scope of a tag
+  key and the row menu alike (`rowMenuTargets`), and the toolbar says so.
+  One anchor (`S.anchor`) serves the gutter, the cells and the keyboard.

@@ -54,6 +54,8 @@ export const S = {
   selectAll: false,
   selection: new Set(),
   anchor: -1,
+  selHidden: 0,          // picked rows that the current view no longer shows (filtered/sorted out) — see view.js remap
+  selUndo: [],           // snapshots of {selectAll, selection} before each selection gesture, for the chip's Undo
   rowsByPos: new Map(),
   reqId: 0,
   viewCache: new Map(), // source_id -> { key, view_id, row_count, elapsed_ms }
@@ -162,6 +164,40 @@ export const selToggle = (pos) => { selHas(pos) ? selRemove(pos) : selAdd(pos); 
 export function selClear() { S.selectAll = false; S.selection.clear(); }
 
 export function selSetAll() { S.selectAll = true; S.selection.clear(); }
+
+/* Every selection GESTURE snapshots first, so the chip's Undo (and a
+   stray Escape) can be taken back. Bounded; the newest wins. */
+export function selSnapshot() {
+  S.selUndo.push({ selectAll: S.selectAll, selection: new Set(S.selection) });
+  if (S.selUndo.length > 30) S.selUndo.shift();
+}
+export function selUndoLast() {
+  const s = S.selUndo.pop();
+  if (!s) return false;
+  S.selectAll = s.selectAll;
+  S.selection = s.selection;
+  return true;
+}
+
+/* Add (on) or remove (!on) every real row between two positions, keeping
+   whatever else is picked — the additive half of a Shift+click or a drag.
+   selSetRange below is the replacing form the keyboard's own extend uses. */
+export function selRangeApply(from, to, on = true) {
+  const lo = Math.min(from, to), hi = Math.max(from, to);
+  for (let p = lo; p <= hi; p++) {
+    if (S.groupByCols.length && !groupCoordAt(p)) continue;
+    on ? selAdd(p) : selRemove(p);
+  }
+}
+
+/* Contiguous runs among the picked rows — the chip's "N ranges". */
+export function selRanges() {
+  if (S.selectAll) return 1;
+  const ps = [...S.selection].sort((a, b) => a - b);
+  let n = 0;
+  for (let i = 0; i < ps.length; i++) if (i === 0 || ps[i] !== ps[i - 1] + 1) n++;
+  return n;
+}
 
 export function selSetRange(from, to) {
   S.selectAll = false;
