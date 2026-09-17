@@ -24,12 +24,15 @@ def test_row_appears_and_update_moves_the_bar(page, fake_plugin_mount):
     assert page.locator(f"{ROWS} .job-phase").inner_text().lower() == "running"
     assert page.locator(f"{ROWS} .job-detail").inner_text() == "0 / 40"
     assert _bar_width(page) == "30%"
+    # update() repaints on the next frame (a tight progress loop is one
+    # repaint per frame), so the row is read after the frame, not at once.
     page.evaluate("() => __n.update({ detail: '24 / 40', progress: 0.6 })")
-    assert _bar_width(page) == "60%"
+    page.wait_for_function(f"() => document.querySelector('{ROWS} .job-bar-fill').style.width === '60%'")
     assert page.locator(f"{ROWS} .job-detail").inner_text() == "24 / 40"
     # A free-text phase changes the badge text, never its class.
     page.evaluate("() => __n.update({ phase: 'thinking' })")
     badge = page.locator(f"{ROWS} .job-phase")
+    page.wait_for_function(f"() => document.querySelector('{ROWS} .job-phase').textContent.toLowerCase() === 'thinking'")
     assert badge.inner_text().lower() == "thinking"
     assert "running" in badge.get_attribute("class")
     page.evaluate("() => __n.close()")
