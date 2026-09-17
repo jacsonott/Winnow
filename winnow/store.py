@@ -6445,6 +6445,80 @@ class Store:
             ).fetchone()
         return row["pos"] - 1 if row else None
 
+    SELECTION_REMAP_MAX = 20000
+
+    def view_keys(self, view_id: str, positions: list[int]) -> list[list[int]]:
+        """The (source_id, rid) behind each 0-indexed position of a view —
+        what a selection IS once the view that gave those positions meaning
+        is about to be rebuilt. Pairs with view_positions: the grid asks for
+        the keys before a rebuild and for their new positions after it, so
+        a sort or a filter keeps the rows the analyst picked. Positions the
+        view doesn't have are skipped; capped like the remap itself."""
+        handle = self._views.get(view_id)
+        if not handle:
+            raise KeyError("View expired — rebuild it")
+        if handle.get("kind") == "group_virtual":
+            return []
+        wanted = sorted({int(p) for p in positions})[:self.SELECTION_REMAP_MAX]
+        if not wanted:
+            return []
+        out: list[list[int]] = []
+        with self._reader() as ro, self._dropped_view_is_expired():
+            if handle.get("kind") == "root_virtual":
+                src = self._source_lite_on(ro, handle["source_id"])
+                table = q(src["table_name"])
+                for i in range(0, len(wanted), 500):
+                    chunk = [p + 1 for p in wanted[i:i + 500]]   # pos = rid - 1, exact (invariant #2)
+                    rows = ro.execute(f"SELECT rid FROM {table} WHERE rid IN ({','.join('?' * len(chunk))})", chunk).fetchall()
+                    out.extend([handle["source_id"], r["rid"]] for r in rows)
+                return out
+            for i in range(0, len(wanted), 500):
+                chunk = [p + 1 for p in wanted[i:i + 500]]
+                rows = ro.execute(
+                    f"SELECT source_id, rid FROM v.{q(view_id)} WHERE pos IN ({','.join('?' * len(chunk))})", chunk).fetchall()
+                out.extend([r["source_id"], r["rid"]] for r in rows)
+        return out
+
+    def view_positions(self, view_id: str, keys: list) -> dict:
+        """The 0-indexed positions a list of (source_id, rid) keys hold in a
+        view, plus how many of them the view does not contain — the rows a
+        filter took out from under a selection. See view_keys."""
+        handle = self._views.get(view_id)
+        if not handle:
+            raise KeyError("View expired — rebuild it")
+        pairs: list[tuple[int, int]] = []
+        for k in list(keys)[:self.SELECTION_REMAP_MAX]:
+            try:
+                pairs.append((int(k[0]), int(k[1])))
+            except (TypeError, ValueError, IndexError):
+                continue
+        if not pairs or handle.get("kind") == "group_virtual":
+            return {"positions": [], "missing": len(pairs)}
+        found: list[int] = []
+        by_source: dict[int, list[int]] = {}
+        for sid, rid in pairs:
+            by_source.setdefault(sid, []).append(rid)
+        with self._reader() as ro, self._dropped_view_is_expired():
+            for sid, rids in by_source.items():
+                if handle.get("kind") == "root_virtual":
+                    if sid != handle["source_id"]:
+                        continue
+                    src = self._source_lite_on(ro, sid)
+                    table = q(src["table_name"])
+                    for i in range(0, len(rids), 500):
+                        chunk = rids[i:i + 500]
+                        rows = ro.execute(f"SELECT rid FROM {table} WHERE rid IN ({','.join('?' * len(chunk))})", chunk).fetchall()
+                        found.extend(r["rid"] - 1 for r in rows)
+                    continue
+                for i in range(0, len(rids), 500):
+                    chunk = rids[i:i + 500]
+                    rows = ro.execute(
+                        f"SELECT pos FROM v.{q(view_id)} WHERE source_id=? AND rid IN ({','.join('?' * len(chunk))})",
+                        [sid, *chunk]).fetchall()
+                    found.extend(r["pos"] - 1 for r in rows)
+        found.sort()
+        return {"positions": found, "missing": len(pairs) - len(found)}
+
     def find_nearest_timestamp(self, view_id: str, value: str, column: str | None = None) -> dict | None:
         """Position (0-indexed, within this view) of the row whose timestamp
         is closest in time to `value` — "jump to timestamp". `column` picks

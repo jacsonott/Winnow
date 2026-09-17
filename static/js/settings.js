@@ -800,7 +800,7 @@ export function openSettings() {
       + 'On: the first table of a batch to finish opens; the rest of that batch land without moving you again.'));
 
     const secKeys = settingsSection(b, 'Keyboard shortcuts');
-    secKeys.append(el('p', null, 'Tag hotkeys (1–9) are set per-tag in Edit tags. Escape always clears the selection or closes a panel. '
+    secKeys.append(el('p', null, 'Tag hotkeys (1–9) are set per-tag in Edit tags. Escape always clears the selection or closes a panel. Space toggles the cursor row; Shift+Space picks every row a cell range spans. '
       + '"+ key" waits for a full press — hold modifiers for a combination (e.g. Ctrl+Shift+K), or Shift+letter for a capital.'));
     const list = el('div', 'settings-keys');
 

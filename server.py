@@ -3017,6 +3017,34 @@ def api_row_position(view_id: str, source_id: int, rid: int):
         raise HTTPException(409, str(e))
 
 
+class ViewKeysBody(BaseModel):
+    view_id: str
+    positions: list[int] = []
+
+
+class ViewPositionsBody(BaseModel):
+    view_id: str
+    keys: list = []   # [[source_id, rid], ...]
+
+
+@app.post("/api/view/keys")
+def api_view_keys(body: ViewKeysBody):
+    """A selection's row ids, asked for before the view is rebuilt (see
+    Store.view_keys / view.js rebuildView)."""
+    try:
+        return {"keys": store().view_keys(body.view_id, body.positions)}
+    except KeyError as e:
+        raise HTTPException(409, str(e))
+
+
+@app.post("/api/view/positions")
+def api_view_positions(body: ViewPositionsBody):
+    try:
+        return store().view_positions(body.view_id, body.keys)
+    except KeyError as e:
+        raise HTTPException(409, str(e))
+
+
 @app.get("/api/column_values")
 def api_column_values(source_id: int, column: str, limit: int = 200):
     try:

@@ -7,7 +7,7 @@ import { displayValue, ellipsize, filterByValue } from './filters.js';
 import { buildDataRow, ensurePage, headH, moveCursor, render, renderTagToolbar, rowAt, rowPaintContext, rowsPaintY, schedulePrefetch, setCellRange, spacerPx, syncRowsTop, syncRowsWidth, vScroll } from './grid.js';
 import { armOpCancel, opToken } from './jobs.js';
 import { openRowContextMenu } from './rowmenu.js';
-import { S, selClear, selCount, selHas, selPositions, selRemap, selSetRange } from './state.js';
+import { S, cellInRange, selClear, selCount, selHas, selPositions, selRemap, selSetRange } from './state.js';
 import { BULK_TAG_CONFIRM_AT, refreshTagCounts, refreshUndoState, renderTagRibbon } from './tags.js';
 import { confirmDialog, contextMenu, dropdownMenu } from './ui.js';
 import { displayCell } from './tsformat.js';
@@ -1013,10 +1013,12 @@ $('body').addEventListener('contextmenu', (e) => {
   // pointer); right-clicking outside it moves there first, which is what
   // every file manager does and what makes "this row" unambiguous.
   const inSelection = selCount() && selHas(pos);
-  if (colIndex != null) {
+  if (colIndex != null && !cellInRange(pos, colIndex)) {
     // Highlight the cell the menu is about — and make it the thing Ctrl+C
     // and the `f` keybind act on next, so the menu and the keyboard agree.
-    // Set before moveCursor so its render paints both changes at once.
+    // Set before moveCursor so its render paints both changes at once. A
+    // right-click INSIDE an existing range keeps the range: the menu's
+    // scope is the rows it spans (rowMenuTargets), same as a tag key's.
     S.cellAnchor = { pos, col: colIndex };
     setCellRange(S.cellAnchor, S.cellAnchor);
   }

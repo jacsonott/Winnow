@@ -8,7 +8,7 @@ import { displayValue, ellipsize, filterByValue, openValuePickerForColumn } from
 import { rowAt } from './grid.js';
 import { copyRowsAsText, loadRowsForPositions, writeClipboardText } from './grouping.js';
 import { showPluginTab } from './plugins.js';
-import { S, selCount, selPositions, dashboardCreatorMode } from './state.js';
+import { S, dashboardCreatorMode, selCount, selHas, selPositions } from './state.js';
 import { UNDO_NEXT, applyTag, undoLastTagChange } from './tags.js';
 import { openTagEditor } from './timeframe.js';
 import { displayCell } from './tsformat.js';
@@ -112,11 +112,19 @@ export async function runPluginRowAction(action, positions, ctx) {
    right-clicked row is part of it, otherwise just that row (openRowContextMenu
    has already moved the cursor there). */
 export function rowMenuTargets(ctx) {
-  const n = selCount();
-  const count = n || 1;
+  // Right-clicking a row that isn't picked acts on THAT row — and leaves
+  // the picks alone (picking is never clearing); inside the picks, on all
+  // of them. What every file manager does, minus the discard.
+  const n = selCount() && selHas(ctx.pos) ? selCount() : 0;
+  // No picks but a cell range across several rows: those rows are the
+  // scope, the same rule a tag key applies (applyTag) — so the menu, the
+  // key and Ctrl+C agree about what "the selection" is.
+  const range = !n && S.cellRange && S.cellRange.r1 > S.cellRange.r0 ? S.cellRange : null;
+  const rangeRows = range ? [...Array(range.r1 - range.r0 + 1).keys()].map((i) => range.r0 + i) : null;
+  const count = n || (rangeRows ? rangeRows.length : 1);
   return {
     count,
-    positions: n ? () => selPositions() : () => [ctx.pos],
+    positions: n ? () => selPositions() : rangeRows ? () => rangeRows : () => [ctx.pos],
     // The wording that tells the analyst how many rows an action hits —
     // every section reads it from here, and the UI tests assert on it.
     scope: count > 1 ? `${count.toLocaleString()} selected rows` : 'this row',

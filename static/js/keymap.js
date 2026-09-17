@@ -7,7 +7,7 @@ import { $, ROW_H } from './core.js';
 import { currentModalAction, repaintOpenMenus, closeModal } from './ui.js';
 import { toggleDetailPane } from './detail.js';
 import { filterBySelectedCell, openValuePickerForColumn, selectedCellTarget } from './filters.js';
-import { headH, moveCursor, render } from './grid.js';
+import { headH, moveCursor, render, selectCellRangeRows, toggleCursorRow } from './grid.js';
 import { dropGrouping, handleCopyShortcut, toggleGrouping } from './grouping.js';
 import { openPluginBundlesModal } from './bundles.js';
 import { cycleSavedFilter, openFilterSqlTab } from './savedfilters.js';
@@ -16,7 +16,7 @@ import { applySqlTabToEditor } from './sql.js';
 import { sqlClearSelection, sqlCopySelection, sqlSelectionCount, sqlTagHotkey } from './sqlassist.js';
 import { openSettings } from './settings.js';
 import { activateTabSlot, clearAllFilters, setSidebarVisible } from './sources.js';
-import { S, gridRowCount, selClear, selCount, selSetAll } from './state.js';
+import { S, gridRowCount, selClear, selCount, selSetAll, selSnapshot } from './state.js';
 import { openTablesManager } from './tables.js';
 import { applyTag, applyTagToView, undoLastTagChange } from './tags.js';
 import { doJumpTs, openJumpTsModal, openTableMenu, openTimeRangeModal, toggleTimeRange } from './timeframe.js';
@@ -348,7 +348,18 @@ document.addEventListener('keydown', (e) => {
     if (!$('modal').hidden) { closeModal(); return; }
     if (typing) { e.target.blur(); $('body').focus(); return; }
     if (S.activeTab === 'sql' && sqlClearSelection()) return;
-    selClear(); render(); return;
+    // Escape lets go of everything picked — rows and the cell range — and
+    // the chip's Undo brings it back if it was a slip.
+    if (selCount() || S.cellRange) selSnapshot();
+    selClear(); S.cellRange = null; S.cellAnchor = null; S.selHidden = 0; render(); return;
+  }
+  // Space toggles the cursor row; Shift+Space turns a cell range into row
+  // picks. Not in the rebindable map: a bare space is what the map can't
+  // spell, and the grid is the only place it means anything.
+  if (e.key === ' ' && S.activeTab === 'grid' && !typing && $('modal').hidden) {
+    e.preventDefault();
+    if (e.shiftKey) { if (!selectCellRangeRows()) toggleCursorRow(); } else toggleCursorRow();
+    return;
   }
   /* Everything below acts on the case UI — the grid's cursor, its tabs, its
      modals (Tables, Search all, the timeframe dialog). On the home screen
