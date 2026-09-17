@@ -727,10 +727,16 @@ def discover_paths(values: list, kind: str) -> list[dict]:
 
 
 def suggest_name(path: str, kind: str) -> str:
-    """A column name from a path — the last meaningful component, which is
-    what the analyst would have typed. Collisions with existing columns are
-    the caller's problem (store.add_derived_column already refuses them and
-    the batch path disambiguates)."""
+    """A column name from a path. JSON: the FULL dotted path without the
+    `$.` — `target.ip`, `items[0].id` — so a document with `target.ip`
+    and `source.ip` flattens to two columns that say which is which,
+    rather than `ip` and `ip 2`; the analyst who wants shorter names
+    edits them in the picker. XML: the last meaningful component, since
+    EVTX paths already carry their meaning in the predicate
+    (`Data[@Name='TargetUserName']` names itself) and a full element path
+    would be unreadable. Collisions with existing columns are the caller's
+    problem (store.add_derived_column already refuses them and the batch
+    path disambiguates)."""
     s = str(path)
     # `Data[@Name='TargetUserName']` names itself — that predicate value is
     # a better column name than anything its tag or position could give.
@@ -747,9 +753,11 @@ def suggest_name(path: str, kind: str) -> str:
             segs = parse_json_path(s)
         except ValueError:
             return s
-        for seg in reversed(segs):
-            if not isinstance(seg, int):
-                return str(seg)
-        return s.lstrip("$.")
+        if not any(not isinstance(seg, int) for seg in segs):
+            return s.lstrip("$.")
+        out = ""
+        for seg in segs:
+            out += f"[{seg}]" if isinstance(seg, int) else (("." if out else "") + str(seg))
+        return out
     last = s.rstrip("/").split("/")[-1]
     return re.sub(r"\[\d+\]$", "", last) or s

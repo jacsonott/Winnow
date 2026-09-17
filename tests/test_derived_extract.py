@@ -62,7 +62,10 @@ def test_detect_struct_paths_finds_json_fields_with_coverage(store, write_csv):
     by_path = {p["path"]: p for p in found["paths"]}
     assert by_path["$.user.name"]["count"] == 3
     assert by_path["$.src.ip"]["count"] == 2       # one row has no src
-    assert by_path["$.user.name"]["suggested_name"] == "name"
+    # The full path, so two fields sharing a leaf name flatten to two
+    # columns that say which is which (target.ip / source.ip), not ip / ip 2
+    assert by_path["$.user.name"]["suggested_name"] == "user.name"
+    assert by_path["$.src.ip"]["suggested_name"] == "src.ip"
 
 
 def test_detect_struct_paths_on_xml(store, write_csv):
