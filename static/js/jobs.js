@@ -38,6 +38,14 @@ export const dismissedJobs = new Set();
 
 export const ftsWatch = new Set();
 
+/* Settings → Imports → "Open new tables when an import finishes". One
+   navigation per BATCH: the first table to finish opens, and nothing
+   else moves the analyst until the queue has gone idle — a folder import
+   is dozens of files, and being dragged to each one is the bug that made
+   "never navigate" the rule in the first place. Reset when the poll finds
+   nothing running (and on a case switch). */
+let batchNavigated = false;
+
 /* Job ids and source ids both restart at 1 in a new case (`_ingest_job_seq`
    is per Store; `sources.id` is a plain INTEGER PRIMARY KEY). Everything
    above is keyed by one of them, so carrying it across a case switch makes
@@ -47,6 +55,7 @@ export function resetJobState() {
   seenJobStatus.clear();
   dismissedJobs.clear();
   ftsWatch.clear();
+  batchNavigated = false;
   // A plugin's rows were about the previous case too — and the poll that
   // would redraw the panel stops when nothing is running, so the DOM has
   // to be cleared here, not left for the next tick.
@@ -202,10 +211,16 @@ export async function pollJobs() {
     }
   }
   if (!$('app').hidden) {
-    if (finishedNow.some((j) => j.status === 'done')) {
+    const landed = finishedNow.filter((j) => j.status === 'done' && (j.source_ids || []).length)
+      .sort((a, b) => a.job_id - b.job_id);   // the server lists newest first; "first" means lowest id
+    if (landed.length && S.appearance && S.appearance.openNewTables && !batchNavigated) {
+      batchNavigated = true;
+      try { await loadSources(landed[0].source_ids[0]); } catch {}
+    } else if (finishedNow.some((j) => j.status === 'done')) {
       // navigate:false — a finished import refreshes the tab strip, the
       // sidebar and the dashboards, but never takes the analyst somewhere
-      // they didn't ask to go (see loadSources).
+      // they didn't ask to go (see loadSources). The setting above is the
+      // one exception, and it spends itself on the batch's first table.
       try { await loadSources(undefined, { navigate: false }); } catch {}
     } else if (ftsWatch.size) {
       // Keep the index-build rows honest without loadSources()'s tab
@@ -225,6 +240,7 @@ export async function pollJobs() {
     || ingestJobs.some((j) => j.status === 'running' || j.status === 'queued')
     || ftsWatch.size > 0;
   if (active) jobsPollTimer = setTimeout(pollJobs, 900);
+  else batchNavigated = false;   // the batch is over; the next import may open its first table
 }
 
 /* `phase` is the badge text; `cls` is its class when the two differ (a
