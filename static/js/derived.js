@@ -225,14 +225,11 @@ export function takenColumnNames() {
    meaningful component or an EVTX-style predicate's own value. */
 export function suggestColumnName(path, kind) {
   const s = String(path);
-  const pred = s.match(/\[@[\w:.-]+='([^']*)'\]$/);
-  if (pred && pred[1].trim()) return pred[1].trim();
-  if (s.includes('@') && !s.trim().endsWith(']')) {
-    const at = s.lastIndexOf('@');
-    const attr = s.slice(at + 1);
-    const tail = s.slice(0, at).replace(/\/$/, '').split('/').pop().replace(/\[[^\]]*\]$/, '');
-    return (tail ? `${tail} ${attr}` : attr).trim();
-  }
+  // JSON first: the "@" rules below are XML's (Provider/@Name), and an
+  // EvtxECmd payload is full of keys that merely START with "@" — the
+  // XML-to-JSON convention for attributes. Sent down the XML branch,
+  // $.EventData.Data[0].@Name came out as "$.EventData.Data[0]. Name"
+  // beside a clean "EventData.Data[0].#text" from the sibling key.
   if (kind === 'json') {
     const parts = s.replace(/^\$/, '').match(/\["'](?:[^"']*)["']|\[\d+\]|[^.[\]]+/g) || [];
     if (!parts.some((seg) => !/^\[\d+\]$/.test(seg))) return s.replace(/^\$\.?/, '');
@@ -243,6 +240,14 @@ export function suggestColumnName(path, kind) {
       out += (out ? '.' : '') + key;
     }
     return out;
+  }
+  const pred = s.match(/\[@[\w:.-]+='([^']*)'\]$/);
+  if (pred && pred[1].trim()) return pred[1].trim();
+  if (s.includes('@') && !s.trim().endsWith(']')) {
+    const at = s.lastIndexOf('@');
+    const attr = s.slice(at + 1);
+    const tail = s.slice(0, at).replace(/\/$/, '').split('/').pop().replace(/\[[^\]]*\]$/, '');
+    return (tail ? `${tail} ${attr}` : attr).trim();
   }
   return s.replace(/\/$/, '').split('/').pop().replace(/\[\d+\]$/, '') || s;
 }
