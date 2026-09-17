@@ -738,16 +738,11 @@ def suggest_name(path: str, kind: str) -> str:
     problem (store.add_derived_column already refuses them and the batch
     path disambiguates)."""
     s = str(path)
-    # `Data[@Name='TargetUserName']` names itself — that predicate value is
-    # a better column name than anything its tag or position could give.
-    pred = re.search(r"\[@[\w:.-]+='([^']*)'\]$", s)
-    if pred and pred.group(1).strip():
-        return pred.group(1).strip()
-    if "@" in s and not s.rstrip().endswith("]"):
-        head, _, attr = s.rpartition("@")
-        tail = head.rstrip("/").split("/")[-1] if head.strip("/") else ""
-        tail = re.sub(r"\[[^\]]*\]$", "", tail)
-        return f"{tail} {attr}".strip() if tail else attr
+    # JSON is decided first: the "@" rules below are XML's, and an
+    # EvtxECmd payload is full of keys that merely start with "@" — the
+    # XML-to-JSON convention for attributes. Sent down the XML branch,
+    # $.EventData.Data[0].@Name came out "$.EventData.Data[0]. Name" next
+    # to a clean "EventData.Data[0].#text" from its sibling key.
     if kind == "json":
         try:
             segs = parse_json_path(s)
@@ -759,5 +754,15 @@ def suggest_name(path: str, kind: str) -> str:
         for seg in segs:
             out += f"[{seg}]" if isinstance(seg, int) else (("." if out else "") + str(seg))
         return out
+    # `Data[@Name='TargetUserName']` names itself — that predicate value is
+    # a better column name than anything its tag or position could give.
+    pred = re.search(r"\[@[\w:.-]+='([^']*)'\]$", s)
+    if pred and pred.group(1).strip():
+        return pred.group(1).strip()
+    if "@" in s and not s.rstrip().endswith("]"):
+        head, _, attr = s.rpartition("@")
+        tail = head.rstrip("/").split("/")[-1] if head.strip("/") else ""
+        tail = re.sub(r"\[[^\]]*\]$", "", tail)
+        return f"{tail} {attr}".strip() if tail else attr
     last = s.rstrip("/").split("/")[-1]
     return re.sub(r"\[\d+\]$", "", last) or s

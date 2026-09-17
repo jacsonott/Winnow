@@ -22,6 +22,17 @@ see [docs/notes/README.md](README.md) for the whole set.
   its offset, so an unpinned column between two pinned ones simply slides
   underneath, and reordering would also have silently changed export column
   order, which follows the arrangement.
+- **A one-column table is its column.** `colWidth` sizes an unset text
+  column from its header (`name.length * 9 + 30`, 90–360px), which made a
+  log imported one line per row — nothing but `Message` — a 93px column
+  with every line cut to `2026-03-1…` and the rest of the grid empty. When
+  the table has exactly one base column (`columns.fillsGrid`) that column
+  takes the grid body's width minus the gutter instead, and the resize
+  handler repaints the header as well as the rows so the two stay the
+  same width. A dragged width (`S.layout[name].w`) still wins, and
+  columns derived from it keep the ordinary defaults — it is the base
+  column count that decides, not the visible one, so extracting a field
+  from the log doesn't snap Message back to 93px.
 - **A pinned column is not immovable.** It scrolls with everything else
   until it reaches its offset, then holds — so a test asserting "it did not
   move" is only right once it has parked. Assert across two scrolls, with

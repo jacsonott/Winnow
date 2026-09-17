@@ -20,6 +20,13 @@ export const ROW_H_COMFORTABLE = 24;
 
 export const ROW_H_COMPACT = 20;
 
+/* The Cmd/Ctrl+Enter shortcut, spelled for this machine. Both keys run
+   the query everywhere (plugins.js, search.js); the label used to say ⌘⏎
+   on every platform, which on the Windows boxes most analysts triage from
+   names a key that isn't there. */
+export const IS_MAC = /Mac|iPhone|iPad/.test((navigator.platform || '') + (navigator.userAgent || ''));
+export const MOD_ENTER = IS_MAC ? '⌘⏎' : 'Ctrl+⏎';
+
 export let ROW_H = ROW_H_COMFORTABLE;
 /* Rebinding has to happen in this module: an imported binding is readable
    (live — importers see the new value) but not assignable, and the old

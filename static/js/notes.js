@@ -35,8 +35,9 @@ export function renderMarkdown(src) {
              '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
   const out = [];
   const lines = (src || '').split('\n');
-  let inList = false, inCode = false;
+  let inList = false, inCode = false, inQuote = false;
   const closeList = () => { if (inList) { out.push('</ul>'); inList = false; } };
+  const closeQuote = () => { if (inQuote) { out.push('</blockquote>'); inQuote = false; } };
   // GitHub-style tables: a header row, a |---|---| separator, then rows.
   const cells = (l) => l.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
   const isSep = (l) => /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$/.test(l || '');
@@ -59,6 +60,10 @@ export function renderMarkdown(src) {
       continue;
     }
     if (inCode) { out.push(esc(line)); continue; }
+    // > quoted — consecutive lines make one blockquote, a paragraph each.
+    const bq = /^\s*>\s?(.*)$/.exec(line);
+    if (bq) { closeList(); if (!inQuote) { out.push('<blockquote>'); inQuote = true; } out.push(`<p>${inline(bq[1])}</p>`); continue; }
+    closeQuote();
     const h = /^(#{1,4})\s+(.*)$/.exec(line);
     if (h) { closeList(); out.push(`<h${h[1].length}>${inline(h[2])}</h${h[1].length}>`); continue; }
     const li = /^\s*[-*]\s+(.*)$/.exec(line);
@@ -69,6 +74,7 @@ export function renderMarkdown(src) {
   }
   if (inCode) out.push('</code></pre>');
   closeList();
+  closeQuote();
   return out.join('\n');
 }
 

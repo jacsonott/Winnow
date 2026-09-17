@@ -17,3 +17,12 @@ def test_xml_keeps_the_leaf_and_the_predicate():
     assert suggest_name("Event/System/EventID", "xml") == "EventID"
     assert suggest_name("Event/EventData/Data[@Name='TargetUserName']", "xml") == "TargetUserName"
     assert suggest_name("Event/System/TimeCreated@SystemTime", "xml") == "TimeCreated SystemTime"
+
+
+def test_json_keys_that_start_with_at_are_keys_not_xml_attributes():
+    # EvtxECmd payloads follow the XML-to-JSON convention: attributes
+    # become "@Name" keys, text becomes "#text". Both are plain keys here;
+    # the "@" rules are XML's, and they used to catch these first.
+    assert suggest_name("$.EventData.Data[0].@Name", "json") == "EventData.Data[0].@Name"
+    assert suggest_name("$.EventData.Data[0].#text", "json") == "EventData.Data[0].#text"
+    assert suggest_name("$.System.Provider.@Name", "json") == "System.Provider.@Name"

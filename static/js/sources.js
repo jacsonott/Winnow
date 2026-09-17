@@ -240,7 +240,23 @@ export function renderTabs() {
     tabs.append(t);
   }
   renderSidebar(); // every caller here (loadSources, the tab drag-drop handler) means S.sources or S.tabOrder just changed
+  requestAnimationFrame(syncTabOverflow);
   return openTabs;
+}
+
+/* Which edges of each tab strip have tabs scrolled past them, as a
+   data-overflow attribute the stylesheet fades. Geometry only exists
+   after layout, so callers that just repainted a strip go through
+   requestAnimationFrame. */
+export function syncTabOverflow() {
+  for (const id of ['sourceTabs', 'pageTabs']) {
+    const strip = $(id);
+    if (!strip) continue;
+    const left = strip.scrollLeft > 1;
+    const right = strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 1;
+    const v = [left && 'left', right && 'right'].filter(Boolean).join(' ');
+    if (v) strip.dataset.overflow = v; else delete strip.dataset.overflow;
+  }
 }
 
 /* -------------------------------------------------------------- page tabs */
@@ -473,6 +489,7 @@ export function renderPageTabs() {
   strip.replaceChildren(...nodes);
   syncTabSelection();
   paintWatchlistBadge();
+  requestAnimationFrame(syncTabOverflow);
 }
 
 /* One place paints "which tab is current". S.activeTab is either a page
@@ -561,6 +578,7 @@ export function applyPageTabsSize() {
   }
   strip.style.maxWidth = 'none'; // an explicit width IS the cap now
   strip.style.flexBasis = clampPageTabsWidth(S.pageTabPrefs.width) + 'px';
+  requestAnimationFrame(syncTabOverflow);
 }
 
  // paints the saved order onto SQL/Timeline before plugins load
@@ -1528,6 +1546,16 @@ export function openExportModal() {
    fire during load, so the order these run in doesn't matter — the
    startup steps that DO depend on order live in main.js instead. */
 export function wireSources() {
+for (const id of ['sourceTabs', 'pageTabs']) $(id).addEventListener('scroll', syncTabOverflow, { passive: true });
+// A strip's room changes without any render of its own — plugin tabs
+// landing in the other strip, the divider dragged, the window resized —
+// so the fade follows the strip's box, not just its contents.
+if (typeof ResizeObserver !== 'undefined') {
+  const ro = new ResizeObserver(() => syncTabOverflow());
+  ro.observe($('sourceTabs'));
+  ro.observe($('pageTabs'));
+}
+
 $('tabSplit').addEventListener('mousedown', (e) => {
   e.preventDefault();
   const strip = $('pageTabs'), handle = $('tabSplit');

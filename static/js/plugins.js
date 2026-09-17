@@ -2,7 +2,7 @@
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { recordTabVisit } from './tabhistory.js';
-import { $, api, el, post, setBusy, toast } from './core.js';
+import { $, MOD_ENTER, api, el, post, setBusy, toast } from './core.js';
 import { loadPlugins, openImportModal, pluginFormatById, queueFilesForFormat } from './importer.js';
 import { clearAllFilters, loadSources, openSource, pageTabs, renderPageTabs, renderSidebar, reopenPageTab, syncTabSelection } from './sources.js';
 import { closeNoticesOwnedBy, createNotice } from './jobs.js';
@@ -238,13 +238,18 @@ export function buildPluginsPanel(b) {
         : !p.enabled ? 'off'
         : (parts.join(', ') || 'loaded');
       const nameSpan = el('span', 'session-name', p.name + (p.version ? ` v${p.version}` : ''));
+      nameSpan.style.whiteSpace = 'nowrap';
       row.append(scopeSel, nameSpan);
       if (p.bundled) {
         const badge = el('span', 'count', 'example — ships with Winnow');
-        badge.style.cssText = 'border:1px solid var(--line-2);border-radius:var(--radius-sm);padding:0 5px';
+        // margin-right 0 beats .session-row .count's `auto`, which shared
+        // the slack between badge and status and left the statuses ragged.
+        badge.style.cssText = 'border:1px solid var(--line-2);border-radius:var(--radius-sm);padding:0 5px;white-space:nowrap;margin-right:0';
         row.append(badge);
       }
-      row.append(el('span', 'count', status));
+      const statusSpan = el('span', 'count', status);
+      statusSpan.style.cssText = 'white-space:nowrap;margin-left:auto;margin-right:0';
+      row.append(statusSpan);
       box.append(row);
       if (p.error) {
         const err = el('div', 'note-status', p.error);
@@ -1065,6 +1070,7 @@ function announceSqlRun(tabId, sql, r) {
    startup steps that DO depend on order live in main.js instead. */
 export function wirePlugins() {
 $('btnRunSql').onclick = runSql;
+$('btnRunSql').textContent = `Run  ${MOD_ENTER}`;
 wirePagePanelResize();
 
 wireSqlAssist();

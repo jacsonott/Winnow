@@ -20,7 +20,21 @@ export function colWidth(name) {
   if (!c) return 140;
   if (c.type === 'datetime') return 190;
   if (c.type === 'number') return 100;
+  if (fillsGrid(c)) return fillWidth();
   return Math.min(360, Math.max(90, name.length * 9 + 30));
+}
+
+/* A one-column table IS its column: a log imported one line per row has
+   nothing but Message. Sized from that header it came out 93px wide with
+   every line cut to "2026-03-1…" and the rest of the grid empty, so the
+   lone base column takes the viewport instead (the gutter and a little
+   for the scrollbar excepted). A dragged width still wins (S.layout), and
+   columns the analyst derives from it keep their own defaults. */
+export function fillsGrid(c) { return !!c && !c.derived && baseColumns().length === 1; }
+
+export function fillWidth() {
+  const body = $('body');
+  return Math.max(360, (body ? body.clientWidth : 0) - GUTTER_W - 20);
 }
 
 export const visibleCols = () => S.order.filter((n) => !(S.layout[n] || {}).hidden);

@@ -41,7 +41,17 @@ see [docs/notes/README.md](README.md) for the whole set.
   its hint ellipsizes, 150px floor keeps the label and `+ Tag`) and then the
   tag ribbon, whose chips wrap onto a second line — the designed behaviour.
   Before this every flex item shared the squeeze evenly and each button
-  folded into a two-line pill. A pressed segment (`.vp-seg`, `.segmented`)
+  folded into a two-line pill. Two more rules since a walk through the app
+  at 1024px: **the ribbon's floor is `min-content`, not 0** (at 0 the
+  chips spilled out of the ribbon's box and under the row count, and each
+  chip — a `.tag-chip`, not a `.btn` — broke its own label, so they are
+  `nowrap` too), and **the toolbar itself `flex-wrap`s**, so once even
+  that isn't enough (the search box open on a laptop) the stats and
+  buttons move to a second line as a whole instead of the ribbon folding
+  into a one-chip column. The header bar has the same shape:
+  `.bar-actions` never shrinks and its buttons never wrap, `#sourceTabs`
+  keeps `SOURCE_TABS_MIN` (140px) and it is `#pageTabs` — which scrolls —
+  that shrinks (`flex: 0 1 auto`, 60px floor). A pressed segment (`.vp-seg`, `.segmented`)
   is the filled accent with `--accent-fg` text; accent text on the dim
   accent fill measured 1.4–2.7:1 across the skins, and accent-on-panel
   fails in Phosphor light.
@@ -188,6 +198,14 @@ see [docs/notes/README.md](README.md) for the whole set.
     either strip, and it ends with the sidebar re-render for the same
     reason `renderTabs()` does — every caller has just changed what's
     active.
+  - A strip with tabs scrolled out of view **fades that edge**
+    (`data-overflow="left|right|left right"`, a `mask-image` in the
+    stylesheet), set by `syncTabOverflow()` from the strip's own scroll
+    geometry — after every `renderTabs`/`applyPageTabsSize` (through
+    `requestAnimationFrame`, since there is no geometry before layout), on
+    each strip's `scroll`, and on window resize. Without it a second table
+    tab cut mid-word beside a row of plugin tabs read as a broken tab, not
+    as "more this way".
   - `renderPageTabs` **moves** `#tabSql`/`#tabTimeline` into place rather
     than rebuilding them (a dozen places reach them by id) and builds the
     plugin ones. Each node is drag-wired exactly once
