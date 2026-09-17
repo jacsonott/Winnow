@@ -6,9 +6,10 @@
    docs/design/analysis-suite.md. */
 
 import { $, api, el, post, toast } from './core.js';
+import { createNotice } from './jobs.js';
 import { recordTabVisit } from './tabhistory.js';
-import { showMainView, syncTabChrome } from './sql.js';
-import { openSource, renderSidebar, syncTabSelection } from './sources.js';
+import { showGridTab, showMainView, syncTabChrome } from './sql.js';
+import { openSource, recenterOnRow, renderSidebar, sourceLabel, syncTabSelection } from './sources.js';
 import { S } from './state.js';
 import { modal } from './ui.js';
 
@@ -44,10 +45,37 @@ export async function scanWatchlistForSources(sourceIds) {
   try {
     const wl = await api('/api/watchlist');
     if (!wl.length) return;            // nothing to scan for
-    for (const sid of sourceIds) await post(`/api/watchlist/scan?source_id=${sid}`, {});
-    if (S.activeTab === 'watchlist') await load();
-    else await refreshWatchlistBadge();  // new hits while the analyst is elsewhere → dot
+    // Per-source hit totals — the scan already reports them, and they are
+    // the alert: a badge on a tab the analyst isn't looking at was the
+    // only signal before.
+    const found = [];
+    for (const sid of sourceIds) {
+      const res = await post(`/api/watchlist/scan?source_id=${sid}`, {});
+      const n = Object.values((res && res.matched) || {}).reduce((a, b) => a + b, 0);
+      if (n) found.push({ sid, n });
+    }
+    if (S.activeTab === 'watchlist') { await load(); return; }
+    await refreshWatchlistBadge();  // new hits while the analyst is elsewhere → the tab's pill
+    if (found.length) announceHits(found);
   } catch { /* best effort */ }
+}
+
+/* The alert itself: a row in the jobs panel — the card an import gets,
+   in the corner the analyst already watches while files land — with the
+   way to the hits on it. Sticky: a hit is news until it's looked at.
+   Owned by 'watchlist' so a case switch clears it with the rest. */
+function announceHits(found) {
+  const total = found.reduce((a, f) => a + f.n, 0);
+  const names = found.map((f) => {
+    const src = S.sources.find((s) => s.id === f.sid);
+    return `${f.n} in ${src ? sourceLabel(src) : `table ${f.sid}`}`;
+  });
+  createNotice('watchlist', {
+    title: `Watchlist: ${total.toLocaleString()} hit${total === 1 ? '' : 's'}`,
+    detail: names.join(' · '),
+    sticky: true,
+    actions: [{ label: 'Open watchlist', onClick: () => showWatchlistTab() }],
+  }).done();
 }
 
 /* The tab's new-hit dot: total hits vs the count last seen (case_settings,
@@ -162,11 +190,33 @@ async function renderHits() {
   if (!hits.length) { box.append(el('div', 'note-status', 'No hits — scan tables, or this indicator matched nothing.')); return; }
   for (const h of hits) {
     const r = el('div', 'wl-hit');
-    r.append(el('span', 'wl-hit-src', h.source_name), el('span', 'wl-hit-rid', `row ${h.rid}`));
-    r.title = 'Open this table';
-    r.onclick = () => openSource(h.source_id);
+    const top = el('div', 'wl-hit-top');
+    top.append(el('span', 'wl-hit-src', h.source_name), el('span', 'wl-hit-rid', `row ${h.rid}`));
+    // Where in the row it matched: the column and that cell.
+    if (h.column) {
+      const where = el('span', 'wl-hit-col');
+      where.append(el('span', 'wl-hit-colname', h.column + ': '), document.createTextNode(h.value || ''));
+      where.title = `${h.column}: ${h.value || ''}`;
+      top.append(where);
+    }
+    r.append(top);
+    if (h.preview) {
+      const pv = el('div', 'wl-hit-preview', h.preview);
+      pv.title = h.preview;
+      r.append(pv);
+    }
+    r.title = 'Open this table at the row';
+    r.onclick = () => jumpToHit(h);
     box.append(r);
   }
+}
+
+/* Land ON the row, not at the top of its table — the same three steps
+   the timeline's row jump takes. */
+async function jumpToHit(h) {
+  await openSource(h.source_id);
+  showGridTab();
+  await recenterOnRow({ source_id: h.source_id, rid: h.rid });
 }
 
 /* Copy indicators in from another recent case — the standing IOC set an
