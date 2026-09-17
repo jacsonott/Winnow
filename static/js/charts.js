@@ -32,6 +32,18 @@ function fit(canvas) {
   return { ctx, w, h };
 }
 
+/* `text` cut to `maxW` pixels with an ellipsis — measured, so it holds
+   for any font and any string, which a character count never did. */
+export function fitText(ctx, text, maxW) {
+  if (ctx.measureText(text).width <= maxW) return text;
+  let lo = 0, hi = text.length;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (ctx.measureText(text.slice(0, mid) + '…').width <= maxW) lo = mid; else hi = mid - 1;
+  }
+  return lo ? text.slice(0, lo) + '…' : '…';
+}
+
 export function drawBars(canvas, spec) {
   const { ctx, w, h } = fit(canvas);
   const rows = spec.rows || [];
@@ -48,26 +60,35 @@ export function drawBars(canvas, spec) {
   if (spec.horizontal !== false) {
     // Horizontal: a labelled row per value — reads long strings cleanly.
     const rowH = Math.max(16, Math.min(30, h / rows.length));
-    const labelW = Math.min(spec.labelWidth || 220, w * 0.5);
-    const barMax = w - labelW - 54;
+    const labels = rows.map((r) => String(r[labKey] == null || r[labKey] === '' ? '(empty)' : r[labKey]));
+    // The label gutter: the caller's width (220 by default), widened up to
+    // half the canvas when the values need it — a stack of command lines
+    // is exactly where every label is long — and never past that.
+    const need = Math.max(...labels.map((l) => ctx.measureText(l).width)) + 8;
+    const labelW = Math.min(Math.max(spec.labelWidth || 220, need), w * 0.5);
+    const countW = ctx.measureText(max.toLocaleString()).width + 10;
+    const barMax = w - labelW - countW;
     rows.forEach((r, i) => {
       const y = i * rowH;
       if (y > h) return;
       const val = +r[valKey] || 0;
       ctx.fillStyle = text;
       ctx.textBaseline = 'middle';
-      const lab = String(r[labKey] == null || r[labKey] === '' ? '(empty)' : r[labKey]);
-      ctx.fillText(lab.length > 40 ? lab.slice(0, 39) + '…' : lab, 2, y + rowH / 2);
+      ctx.textAlign = 'left';
+      // Truncated by MEASURED width to the gutter, never by character
+      // count: the bar is painted after the label, so a label that ran
+      // past the gutter used to disappear under it.
+      ctx.fillText(fitText(ctx, labels[i], labelW - 6), 2, y + rowH / 2);
       const bw = Math.max(1, (val / max) * barMax);
       ctx.fillStyle = spec.color ? (r[spec.color] || accent) : accent;
       ctx.globalAlpha = 0.85;
       ctx.fillRect(labelW, y + 3, bw, rowH - 6);
       ctx.globalAlpha = 1;
       ctx.fillStyle = dim;
-      ctx.textAlign = 'left';
-      ctx.fillText(val.toLocaleString(), labelW + bw + 5, y + rowH / 2);
+      ctx.fillText(val.toLocaleString(), labelW + bw + 5, y + rowH / 2);   // barMax reserved its room
       boxes.push({ row: r, x: 0, y, w, h: rowH });
     });
+    return { boxes, labelWidth: labelW };
   } else {
     const bw = w / rows.length;
     rows.forEach((r, i) => {
