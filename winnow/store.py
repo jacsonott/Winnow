@@ -8712,8 +8712,23 @@ class Store:
             layout = {}
         per_col = layout.get("columns") or {}
         known = set(all_names)
-        order = [n for n in (layout.get("order") or []) if n in known]
-        ordered = order + [n for n in all_names if n not in set(order)]
+        ordered = [n for n in (layout.get("order") or []) if n in known]
+        # Mirrors sources.js's placement of a column the layout never saw:
+        # a derived column lands right after its input (after siblings
+        # already there), anything else at the end — so an export before
+        # the next layout save agrees with the screen.
+        from_by_name = {c["name"]: c.get("derived_from") for c in src["columns"]}
+        for name in all_names:
+            if name in ordered:
+                continue
+            src_col = from_by_name.get(name)
+            if not src_col or src_col not in ordered:
+                ordered.append(name)
+                continue
+            at = ordered.index(src_col)
+            while at + 1 < len(ordered) and from_by_name.get(ordered[at + 1]) == src_col:
+                at += 1
+            ordered.insert(at + 1, name)
         visible = [n for n in ordered if not (per_col.get(n) or {}).get("hidden")]
         return visible or all_names
 

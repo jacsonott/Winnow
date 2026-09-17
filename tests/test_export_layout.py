@@ -28,13 +28,19 @@ def test_no_layout_means_storage_order(store, write_csv):
 
 
 def test_columns_the_layout_never_saw_still_export(store, write_csv):
-    """A derived column added after the layout was saved must append, not
-    silently vanish from the export."""
+    """A derived column added after the layout was saved must not vanish
+    from the export — and it lands right after its input, where the grid
+    puts it, not at the end."""
     sid = store.ingest_csv(write_csv(ROWS, "s.csv"), name="s", build_fts=False)["id"]
     store.save_layout(sid, {"order": ["C", "A", "B"], "columns": {}})
     res = store.add_derived_column(sid, "D", "A", "regex_extract", {"pattern": "(.)"})
     store.wait_for_ingest_job(res["job_id"], timeout=30)
-    assert _csv_header(store, sid) == "Line,Tags,Note,C,A,B,D"
+    assert _csv_header(store, sid) == "Line,Tags,Note,C,A,D,B"
+    # A second from the same input follows the first; one from a column the
+    # layout hides from its order still appends.
+    res = store.add_derived_column(sid, "E", "A", "regex_extract", {"pattern": "(.)"})
+    store.wait_for_ingest_job(res["job_id"], timeout=30)
+    assert _csv_header(store, sid) == "Line,Tags,Note,C,A,D,E,B"
 
 
 def test_hide_everything_falls_back_to_all(store, write_csv):
