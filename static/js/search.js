@@ -1,7 +1,7 @@
 /* The toolbar search box and the search-all-tables job.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { $, api, el, post, toast } from './core.js';
+import { $, MOD_ENTER, api, el, post, toast } from './core.js';
 import { addViewCountWidget } from './dashboard.js';
 import { openFilterBuilder } from './filterbuilder.js';
 import { renderAdvancedChips, renderTermChips, updateSearchHint } from './filters.js';
@@ -308,7 +308,7 @@ export function openSearchAllModal() {
           : 'All of those are already on the watchlist', 5000);
       } catch (e) { toast('Could not add to the watchlist: ' + e.message, 6000); }
     };
-    const searchBtn = el('button', 'btn', 'Search  ⌘⏎');
+    const searchBtn = el('button', 'btn', `Search  ${MOD_ENTER}`);
     const cancelBtn = el('button', 'btn ghost', 'Stop');
     cancelBtn.title = 'Stop the sweep — tables already counted keep their results';
     cancelBtn.onclick = async () => {
