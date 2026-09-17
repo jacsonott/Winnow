@@ -1,7 +1,7 @@
 /* The Settings modal — appearance, keyboard shortcuts, timestamps, tags.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { autofitMaxWidth } from './columns.js';
+import { autofitMaxWidth, fillsGrid, renderHead } from './columns.js';
 import { $, AUTOFIT_MAX_W_DEFAULT, ROW_H, ROW_H_COMFORTABLE, ROW_H_COMPACT, api, debounce, el, post, setRowH, toast } from './core.js';
 import { labeledRow } from './derived.js';
 import { VALUE_FILTER_AUTO_MAX } from './filters.js';
@@ -13,7 +13,7 @@ import { buildPluginsPanel } from './plugins.js';
 import { buildAssocPanel } from './assoc.js';
 import { buildEnvPanel } from './userenv.js';
 import { loadCaseVariables, loadSavedFilters } from './savedfilters.js';
-import { applyPageTabsSize, renderPageTabs } from './sources.js';
+import { applyPageTabsSize, renderPageTabs, syncTabOverflow } from './sources.js';
 import { lastSplash, reducedMotion } from './splash.js';
 import { S, gridRowCount, dashboardCreatorMode } from './state.js';
 import { openSavedFiltersModal, updateFiltersButton } from './timeframe.js';
@@ -1146,5 +1146,10 @@ export function buildUpdatesPanel(b) {
    fire during load, so the order these run in doesn't matter — the
    startup steps that DO depend on order live in main.js instead. */
 export function wireSettings() {
-window.addEventListener('resize', () => { render(); drawRail(); applyPageTabsSize(); });
+window.addEventListener('resize', () => {
+  // A lone base column is sized from the viewport (columns.fillsGrid), so
+  // the header has to follow the window as well as the rows.
+  if (S.columns.some(fillsGrid)) renderHead();
+  render(); drawRail(); applyPageTabsSize(); syncTabOverflow();
+});
 }

@@ -406,6 +406,11 @@ html[data-style="studio"][data-theme="light"] {
   overflow: auto;
 }
 
+/* A placeholder longer than its box ("Filter tables and pages…" in the
+   sidebar, the case-variable name hint) ends in an ellipsis instead of a
+   cut letter. Chromium honours text-overflow on the pseudo-element. */
+input::placeholder { text-overflow: ellipsis; }
+
 /* ---------------------------------------------------------------- chrome */
 
 .bar {
@@ -434,6 +439,12 @@ html[data-style="studio"][data-theme="light"] {
 }
 .tab-jump:hover { color: var(--text); background: var(--panel-2); }
 .tabs { display: flex; align-items: stretch; overflow-x: auto; flex: 1; min-width: 0; }
+/* A strip with tabs scrolled out of view fades that edge, so a label cut
+   mid-word reads as "more this way" rather than as a broken tab. Set by
+   sources.syncTabOverflow from the strip's own scroll geometry. */
+.tabs[data-overflow~="right"] { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); }
+.tabs[data-overflow~="left"] { -webkit-mask-image: linear-gradient(to right, transparent, #000 28px); mask-image: linear-gradient(to right, transparent, #000 28px); }
+.tabs[data-overflow="left right"] { -webkit-mask-image: linear-gradient(to right, transparent, #000 28px, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(to right, transparent, #000 28px, #000 calc(100% - 28px), transparent); }
 /* The bar's flexible middle is shared by two scrolling strips: #sourceTabs
    (tables) takes whatever #pageTabs (SQL/Timeline/plugin tabs) doesn't.
    Untouched, the page strip is content-width and never shrinks — what it
@@ -443,7 +454,7 @@ html[data-style="studio"][data-theme="light"] {
    strip has always done. Drag the divider and applyPageTabsSize() sets an
    explicit flex-basis inline instead (and clears the cap, since an
    explicit width IS the user saying how much room this gets). */
-#pageTabs { flex: 0 0 auto; max-width: 60%; }
+#pageTabs { flex: 0 1 auto; max-width: 60%; min-width: 60px; }
 /* Same handle idiom as .detail-resize: a hit target wider than the line it
    paints, pulled back into the bar's 12px gap by a negative margin so it
    doesn't push the strips apart. The line itself runs the full height of
@@ -500,7 +511,14 @@ html[data-style="studio"][data-theme="light"] {
 .tab.drop-before { box-shadow: inset 2px 0 0 var(--accent); }
 .tab.drop-after { box-shadow: inset -2px 0 0 var(--accent); }
 
-.bar-actions { display: flex; align-items: center; gap: 6px; padding-right: 10px; }
+/* Never shrinks and its buttons never wrap: at 1024px "Search all" and
+   "Case ▾" used to fold into two-line pills while the table strip beside
+   them went to zero width. The page strip gives way instead — it scrolls,
+   so it can (PAGE_TABS_MIN in sources.js is the floor); the table strip
+   keeps SOURCE_TABS_MIN so at least the active table stays reachable. */
+.bar-actions { display: flex; align-items: center; gap: 6px; padding-right: 10px; flex: 0 0 auto; }
+.bar-actions .btn { white-space: nowrap; }
+#sourceTabs { min-width: 140px; }
 
 .btn {
   background: var(--panel-2); color: var(--text);
@@ -525,7 +543,7 @@ html[data-style="studio"][data-theme="light"] {
    grid-row, so row 2 simply resolves to zero height when empty. */
 .toolbar[hidden] { display: none; }
 .toolbar {
-  display: flex; align-items: center; gap: 10px;
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap; row-gap: 4px;
   padding: 6px 10px; background: var(--ink);
   border-bottom: 1px solid var(--line);
 }
@@ -538,12 +556,25 @@ html[data-style="studio"][data-theme="light"] {
    "drag a column header here" hint costs nothing. */
 .toolbar .btn, .sql-head .btn, .detail-head .btn, .dash-bar .btn, .wl-head .btn { white-space: nowrap; flex: 0 0 auto; }
 .toolbar > .group-strip { flex: 0 6 auto; min-width: 150px; } /* the first to give: its hint is decoration; 150px keeps the label and + Tag */
-.toolbar > .tag-ribbon { flex: 0 1 auto; min-width: 0; }     /* then the chips wrap onto a second line */
+/* min-content, not 0: the ribbon may wrap its chips but never shrink
+   past its widest chip, which is what let the chips spill out under the
+   row count. And the toolbar itself wraps (above): when even that isn't
+   enough — the search box open on a 1024px window — the stats and buttons
+   move to a second line as a whole, rather than the ribbon folding into a
+   one-chip column and every button breaking its label. */
+.toolbar > .tag-ribbon { flex: 0 1 auto; min-width: min-content; }
+.toolbar > .spacer { flex: 1 1 0; }
 .toolbar > .search-wrap { flex: 0 0 auto; }                  /* the box you type in never shrinks */
 .group-strip-hint { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 /* Empty, the strip is one line — label, hint, + Tag — and clips rather than
    folding "+ Tag" under the label. With pills in it, it wraps as before. */
 .group-strip:not(.has-groups) { flex-wrap: nowrap; overflow: hidden; }
+/* Now that the toolbar wraps, an item's flex-basis is what decides where
+   the line breaks — and the empty strip's content width (its hint) would
+   push the buttons onto a second row on a 1366px laptop with nothing
+   else in the way. A 150px basis that grows back to content width when
+   there is room keeps it the first thing to give, as before. */
+.toolbar > .group-strip:not(.has-groups) { flex: 1 6 150px; max-width: max-content; }
 
 .search-icon-btn { display: inline-flex; align-items: center; line-height: 1; padding: 4px 8px; }
 .plugin-toolbar-buttons { display: inline-flex; gap: 4px; }
@@ -643,7 +674,7 @@ section.page-with-panels { flex-direction: row; }
 
 .tag-ribbon { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; }
 .tag-chip {
-  display: inline-flex; align-items: center; gap: 6px;
+  display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; flex: 0 0 auto;
   border: var(--border-w) solid var(--line-2); border-radius: var(--radius-sm);
   background: var(--panel); color: var(--dim);
   padding: 3px 8px; font-size: 11px; cursor: pointer;
@@ -2177,6 +2208,8 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 .notes-preview code { background: var(--panel-3); padding: 1px 4px; border-radius: 2px; }
 .notes-preview pre { background: var(--panel-3); padding: 10px 12px; overflow: auto; }
 .notes-preview pre code { background: none; padding: 0; }
+.notes-preview blockquote { margin: 8px 0; padding: 2px 14px; border-left: 3px solid var(--line-2); color: var(--dim); }
+.notes-preview blockquote p { margin: 4px 0; }
 .notes-preview li { margin: 2px 0; }
 .notes-preview table { border-collapse: collapse; margin: 8px 0; font-size: 13px; }
 .notes-preview th, .notes-preview td { border: 1px solid var(--line-2); padding: 4px 10px; text-align: left; }
