@@ -10,7 +10,7 @@ import { ensureNotesLoaded, insertAtCursor, showNotesTab } from './notes.js';
 import { showWatchlistTab } from './watchlist.js';
 import { setColumnFilter, valueFilterText } from './filters.js';
 import { rebuildView } from './view.js';
-import { activeSqlTab, flushSqlTabSave, hideMainViews, loadSqlTabs, scheduleSqlTabSave, showGridTab, showSqlTab, showTimelineTab, syncTabChrome } from './sql.js';
+import { activeSqlTab, flushSqlTabSave, hideMainViews, loadSqlTabs, newSqlTab, scheduleSqlTabSave, showGridTab, showSqlTab, showTimelineTab, syncTabChrome } from './sql.js';
 import { setActiveSqlResult, sqlCopyResult, sqlDownloadCsv, sqlRowKey, sqlSelectedRows, sqlTagsFor, tagChips, wireSqlAssist } from './sqlassist.js';
 import { moveCursor } from './grid.js';
 import { loadCaseVariables } from './savedfilters.js';
@@ -603,11 +603,7 @@ function sqlPageApi(key) {
       await ready();
       const text = sql == null ? '' : String(sql);
       if (newTab) {
-        await flushSqlTabSave();
-        const rec = await post('/api/sql_tabs', { name: String(newTab), sql: text });
-        rec.savedSql = rec.sql;
-        S.sqlTabs.push(rec);
-        S.sqlTabId = rec.id;   // loadSqlTabs (via showSqlTab) keeps a still-valid selection
+        await newSqlTab(String(newTab), text);   // the "+" tab's own path; showSqlTab keeps the selection
       } else {
         const tab = activeSqlTab();
         $('sqlText').value = text;

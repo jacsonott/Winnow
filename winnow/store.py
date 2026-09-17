@@ -3142,19 +3142,22 @@ class Store:
                 ext = os.path.splitext(fname)[1].lower()
                 by_filename_pattern = any(fnmatch.fnmatch(fname.lower(), p.lower()) for p in fname_pats)
                 by_ext = ext in exts
-                if not by_ext and not by_filename_pattern:
-                    if not other_text:
-                        excluded.append({**entry, "reason": "extension"})
-                        continue
-                    if looks_binary(fpath):
-                        excluded.append({**entry, "reason": "binary"})
-                        continue
+                unclaimed = not by_ext and not by_filename_pattern
+                if unclaimed and not other_text:
+                    excluded.append({**entry, "reason": "extension"})
+                    continue
                 if includes and not any(self._import_pattern_matches(p, fname, rel) for p in includes):
                     excluded.append({**entry, "reason": "no include pattern matched"})
                     continue
                 hit = next((p for p in excludes if self._import_pattern_matches(p, fname, rel)), None)
                 if hit:
                     excluded.append({**entry, "reason": f"excluded by pattern: {hit}"})
+                    continue
+                # The binary probe reads the file, so it runs last: only a
+                # file the name gates let through gets opened — a tree of
+                # excluded build output is never sniffed.
+                if unclaimed and looks_binary(fpath):
+                    excluded.append({**entry, "reason": "binary"})
                     continue
                 # kind routes the frontend's per-file import call: the two
                 # built-in parsers by their own extensions, everything else
@@ -6070,7 +6073,12 @@ class Store:
         # every row of the source. colnames is the merge's own list when
         # this compiles per member, so the clause is legal in each branch.
         if spec.get("hide_empty_rows") and colnames:
-            clauses.append("(" + " OR ".join(f"({q(c)} IS NOT NULL AND {q(c)} <> '')" for c in colnames) + ")")
+            parts = []
+            for c in colnames:
+                clause, p = self._compile_condition(c, "not_empty", "", colnames)
+                parts.append(clause)
+                params.extend(p)
+            clauses.append("(" + " OR ".join(parts) + ")")
 
         return " AND ".join(clauses), params
 
@@ -6419,6 +6427,33 @@ class Store:
             ).fetchall()
         return [[r["p"], r["tag_id"]] for r in rows]
 
+    def _positions_of(self, ro: sqlite3.Connection, view_id: str, handle: dict,
+                      source_id: int, rids: list[int]) -> list[int]:
+        """0-indexed positions of one source's rids inside a view, in the
+        order found — however the view keeps its rows. A root_virtual view
+        is the source itself, so pos = rid - 1 (invariant #2) and only the
+        rid's existence is checked; anything else has a pos column to ask.
+        Rids the view doesn't have are simply absent. The one lookup behind
+        find_position (one row) and view_positions (a selection's worth);
+        caller holds the reader and _dropped_view_is_expired."""
+        out: list[int] = []
+        if handle.get("kind") == "root_virtual":
+            if source_id != handle["source_id"]:
+                return out
+            table = q(self._source_lite_on(ro, source_id)["table_name"])
+            for i in range(0, len(rids), 500):
+                chunk = rids[i:i + 500]
+                rows = ro.execute(f"SELECT rid FROM {table} WHERE rid IN ({','.join('?' * len(chunk))})", chunk).fetchall()
+                out.extend(r["rid"] - 1 for r in rows)
+            return out
+        for i in range(0, len(rids), 500):
+            chunk = rids[i:i + 500]
+            rows = ro.execute(
+                f"SELECT pos FROM v.{q(view_id)} WHERE source_id=? AND rid IN ({','.join('?' * len(chunk))})",
+                [source_id, *chunk]).fetchall()
+            out.extend(r["pos"] - 1 for r in rows)
+        return out
+
     def find_position(self, view_id: str, source_id: int, rid: int) -> int | None:
         """0-indexed position of one (source_id, rid) row inside a view, or
         None if it's not in this view. Positions are view-specific and get
@@ -6431,19 +6466,8 @@ class Store:
         if handle.get("kind") == "group_virtual":
             return None  # no pos-ordered backing table for a small ungathered group
         with self._reader() as ro, self._dropped_view_is_expired():
-            if handle.get("kind") == "root_virtual":
-                if source_id != handle["source_id"]:
-                    return None
-                src = self._source_lite_on(ro, source_id)
-                row = ro.execute(
-                    f"SELECT 1 FROM {q(src['table_name'])} WHERE rid=?", (rid,)
-                ).fetchone()
-                return rid - 1 if row else None
-            row = ro.execute(
-                f"SELECT pos FROM v.{q(view_id)} WHERE source_id=? AND rid=?",
-                (source_id, rid),
-            ).fetchone()
-        return row["pos"] - 1 if row else None
+            found = self._positions_of(ro, view_id, handle, source_id, [int(rid)])
+        return found[0] if found else None
 
     SELECTION_REMAP_MAX = 20000
 
@@ -6500,22 +6524,7 @@ class Store:
             by_source.setdefault(sid, []).append(rid)
         with self._reader() as ro, self._dropped_view_is_expired():
             for sid, rids in by_source.items():
-                if handle.get("kind") == "root_virtual":
-                    if sid != handle["source_id"]:
-                        continue
-                    src = self._source_lite_on(ro, sid)
-                    table = q(src["table_name"])
-                    for i in range(0, len(rids), 500):
-                        chunk = rids[i:i + 500]
-                        rows = ro.execute(f"SELECT rid FROM {table} WHERE rid IN ({','.join('?' * len(chunk))})", chunk).fetchall()
-                        found.extend(r["rid"] - 1 for r in rows)
-                    continue
-                for i in range(0, len(rids), 500):
-                    chunk = rids[i:i + 500]
-                    rows = ro.execute(
-                        f"SELECT pos FROM v.{q(view_id)} WHERE source_id=? AND rid IN ({','.join('?' * len(chunk))})",
-                        [sid, *chunk]).fetchall()
-                    found.extend(r["pos"] - 1 for r in rows)
+                found.extend(self._positions_of(ro, view_id, handle, sid, rids))
         found.sort()
         return {"positions": found, "missing": len(pairs) - len(found)}
 
@@ -7363,49 +7372,62 @@ class Store:
         one line. The scan matched over the whole-row blob and stored only
         (source, rid), so the column is found here by re-reading the hit
         rows — first column in table order whose text contains the value,
-        case-insensitively, the same test the scan applied. Nothing is
-        stored, so old cases get the context too. `column` is None only if
-        the row no longer contains the value (an indicator edited since)."""
-        with self.lock:
-            ind = self.db.execute("SELECT value FROM watchlist WHERE id=?", (wid,)).fetchone()
-            rows = self.db.execute(
+        case-insensitively. Nothing is stored, so old cases get the context
+        too. The scan matched the row's columns joined into one blob, so a
+        value that straddles two cells is a real hit no single column
+        holds: `column` is None then, and `value` is the stretch of the
+        joined row around the match. A row that no longer contains the
+        value at all (an indicator edited since) gets neither.
+
+        A pure read, on the reader pool (invariant #4): the hit list is
+        opened while imports run, and the writer lock is theirs."""
+        context: dict[tuple[int, int], dict] = {}
+        with self._reader() as ro:
+            names = {r["id"]: r["name"] for r in ro.execute("SELECT id, name FROM sources")}
+            ind = ro.execute("SELECT value FROM watchlist WHERE id=?", (wid,)).fetchone()
+            rows = ro.execute(
                 "SELECT source_id, rid FROM watchlist_hits WHERE watchlist_id=? LIMIT ?",
                 (wid, limit)).fetchall()
-        needle = (ind["value"] if ind else "").lower()
-        names = {s["id"]: s["name"] for s in self.list_sources()}
-        by_source: dict[int, list[int]] = {}
-        for r in rows:
-            by_source.setdefault(r["source_id"], []).append(r["rid"])
-        context: dict[tuple[int, int], dict] = {}
-        for sid, rids in by_source.items():
-            try:
-                src = self._source_lite(sid)
-            except (KeyError, ValueError):
-                continue
-            cols = [c["name"] for c in self._base_cols(src)]
-            if not cols or not src.get("table_name"):
-                continue
-            sel = ", ".join(q(c) for c in cols)
-            table = q(src["table_name"])
-            for i in range(0, len(rids), 500):
-                chunk = rids[i:i + 500]
-                with self.lock:
-                    found = self.db.execute(
-                        f"SELECT rid, {sel} FROM {table} WHERE rid IN ({','.join('?' * len(chunk))})",
+            needle = (ind["value"] if ind else "").lower()
+            by_source: dict[int, list[int]] = {}
+            for r in rows:
+                by_source.setdefault(r["source_id"], []).append(r["rid"])
+            for sid, rids in by_source.items():
+                try:
+                    src = self._source_lite_on(ro, sid)
+                except (KeyError, ValueError):
+                    continue
+                cols = [c["name"] for c in self._base_cols(src)]
+                if not cols or not src.get("table_name"):
+                    continue
+                sel = ", ".join(q(c) for c in cols)
+                blob = _blob_expr(cols)
+                table = q(src["table_name"])
+                for i in range(0, len(rids), 500):
+                    chunk = rids[i:i + 500]
+                    found = ro.execute(
+                        f"SELECT rid, {sel}, lower({blob}) AS blob_ FROM {table} "
+                        f"WHERE rid IN ({','.join('?' * len(chunk))})",
                         chunk).fetchall()
-                for row in found:
-                    cells = [(c, row[k + 1]) for k, c in enumerate(cols)]
-                    col = val = None
-                    for c, v in cells:
-                        if v is not None and needle and needle in str(v).lower():
-                            col, val = c, str(v)
-                            break
-                    preview = " | ".join(str(v) for _, v in cells if v is not None and str(v).strip())
-                    context[(sid, row["rid"])] = {
-                        "column": col,
-                        "value": val[:self.WATCHLIST_PREVIEW_CHARS] if val is not None else None,
-                        "preview": preview[:self.WATCHLIST_PREVIEW_CHARS],
-                    }
+                    for row in found:
+                        cells = [(c, row[k + 1]) for k, c in enumerate(cols)]
+                        col = val = None
+                        for c, v in cells:
+                            if v is not None and needle and needle in str(v).lower():
+                                col, val = c, str(v)
+                                break
+                        if col is None and needle:
+                            # The scan's own test, on the scan's own blob.
+                            at = (row["blob_"] or "").find(needle)
+                            if at >= 0:
+                                lo = max(0, at - 40)
+                                val = (row["blob_"] or "")[lo:at + len(needle) + 40]
+                        preview = " | ".join(str(v) for _, v in cells if v is not None and str(v).strip())
+                        context[(sid, row["rid"])] = {
+                            "column": col,
+                            "value": val[:self.WATCHLIST_PREVIEW_CHARS] if val is not None else None,
+                            "preview": preview[:self.WATCHLIST_PREVIEW_CHARS],
+                        }
         out = []
         for r in rows:
             key = (r["source_id"], r["rid"])

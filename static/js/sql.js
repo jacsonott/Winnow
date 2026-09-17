@@ -153,7 +153,7 @@ export function renderSqlTabs() {
   }
   const add = el('button', 'sql-tab sql-tab-add', '+');
   add.title = 'New query';
-  add.onclick = newSqlTab;
+  add.onclick = () => newSqlTab();
   strip.append(add);
 }
 
@@ -166,7 +166,10 @@ export async function activateSqlTab(id) {
   $('sqlText').focus();
 }
 
-export async function newSqlTab() {
+/* A new query tab: the "+" button's (unnamed, empty) and a plugin's
+   (sqlPage.setText with newTab — named, filled). One path, so both land
+   the same way: created, selected, in the editor. */
+export async function newSqlTab(name = null, sql = '') {
   await flushSqlTabSave();
   // "Query N" by highest existing number, not by count — otherwise closing
   // "Query 2" of 3 makes the next new tab a duplicate "Query 3".
@@ -175,7 +178,7 @@ export async function newSqlTab() {
     return m ? Math.max(max, Number(m[1])) : max;
   }, 0) + 1;
   try {
-    const rec = await post('/api/sql_tabs', { name: `Query ${n}`, sql: '' });
+    const rec = await post('/api/sql_tabs', { name: name || `Query ${n}`, sql });
     rec.savedSql = rec.sql;
     S.sqlTabs.push(rec);
     S.sqlTabId = rec.id;
