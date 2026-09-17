@@ -110,3 +110,65 @@ def test_undo_takes_back_the_last_gesture(page):
     assert page.evaluate("() => __winnow.S.selectAll") is True and page.evaluate("() => __winnow.selCount()") == 199
     page.locator("#tagToolbar button", has_text="Undo").click()
     assert _picked(page) == [2]
+
+
+def test_a_tag_from_the_row_menu_outside_the_picks_tags_that_row_only(page, row_menu, flyout):
+    """The menu's header says "this row" when the right-click lands outside
+    the picks — and the tag entries used to tag the picks anyway."""
+    _gutter(page, 1).click(); _gutter(page, 2).click()
+    try:
+        row_menu(row=8)
+        flyout("Tag this row").locator(".menu-item").first.click()
+        page.wait_for_function("() => (__winnow.rowAt(8) || { tags: [] }).tags.length === 1")
+        assert page.evaluate("() => [1, 2].map((p) => (__winnow.rowAt(p) || { tags: [] }).tags.length)") == [0, 0]
+        assert _picked(page) == [1, 2]
+        page.keyboard.press("Escape")
+        # …and from inside the picks, the whole selection
+        row_menu(row=1)
+        flyout("Tag").locator(".menu-item").first.click()
+        page.wait_for_function("() => [1, 2].every((p) => (__winnow.rowAt(p) || { tags: [] }).tags.length === 1)")
+        page.keyboard.press("Escape")
+    finally:
+        page.evaluate("() => __winnow.tagRowsAtPositions(__winnow.S.tags[0], [1, 2, 8], false)")
+        page.wait_for_function("() => [1, 2, 8].every((p) => (__winnow.rowAt(p) || { tags: [] }).tags.length === 0)")
+
+
+def test_undo_does_not_outlive_the_view_that_gave_it_positions(page):
+    _gutter(page, 2).click(); _gutter(page, 3).click()
+    assert page.locator("#tagToolbar button", has_text="Undo").count() == 1
+    page.locator('.hcell[data-col="Timestamp"] .label').click()      # a sort: new positions, same rows
+    page.wait_for_function("() => __winnow.selCount() === 2 && __winnow.S.selUndo.length === 0", timeout=10_000)
+    assert page.locator("#tagToolbar button", has_text="Undo").count() == 0
+
+
+def test_select_all_from_the_keyboard_can_be_undone(page):
+    _gutter(page, 2).click()
+    page.keyboard.press("Control+a")
+    page.wait_for_function("() => __winnow.S.selectAll === true")
+    page.locator("#tagToolbar button", has_text="Undo").click()
+    assert _picked(page) == [2]
+
+
+def test_space_on_a_focused_button_is_the_buttons_not_a_row_toggle(page):
+    _gutter(page, 2).click(); _gutter(page, 3).click()
+    page.locator("#tagToolbar button", has_text="Undo").focus()
+    page.keyboard.press("Space")      # the button's own Space: it activates Undo, nothing toggles
+    page.wait_for_timeout(150)
+    assert _picked(page) == [2]
+
+
+def test_picks_survive_two_rebuilds_in_quick_succession(page):
+    """A rebuild that starts while the previous one is still putting the
+    picks back (the position lookup is a round trip) used to find them
+    cleared and carry nothing."""
+    _gutter(page, 0).click(); _gutter(page, 4).click(); _gutter(page, 8).click()
+    page.evaluate("""() => { window.__realFetch = window.fetch;
+      window.fetch = (u, o) => String(u).includes('/api/view/positions')
+        ? new Promise((r) => setTimeout(r, 400)).then(() => window.__realFetch(u, o)) : window.__realFetch(u, o); }""")
+    try:
+        page.evaluate("() => { __winnow.rebuildView(); }")
+        page.wait_for_function("() => __winnow.selCount() === 0", timeout=10_000)   # cleared; the lookup is in flight
+        page.evaluate("() => { __winnow.rebuildView(); }")
+        page.wait_for_function("() => __winnow.selCount() === 3 && __winnow.S.selHidden === 0", timeout=10_000)
+    finally:
+        page.evaluate("() => { window.fetch = window.__realFetch; }")

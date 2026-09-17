@@ -7,7 +7,7 @@ import { displayValue, ellipsize, filterByValue } from './filters.js';
 import { buildDataRow, ensurePage, headH, moveCursor, render, renderTagToolbar, rowAt, rowPaintContext, rowsPaintY, schedulePrefetch, setCellRange, spacerPx, syncRowsTop, syncRowsWidth, vScroll } from './grid.js';
 import { armOpCancel, opToken } from './jobs.js';
 import { openRowContextMenu } from './rowmenu.js';
-import { S, cellInRange, selClear, selCount, selHas, selPositions, selRemap, selSetRange } from './state.js';
+import { S, cellInRange, cellRangeRows, selClear, selCount, selHas, selPositions, selRemap, selSetRange, selSnapshot } from './state.js';
 import { BULK_TAG_CONFIRM_AT, refreshTagCounts, refreshUndoState, renderTagRibbon } from './tags.js';
 import { confirmDialog, contextMenu, dropdownMenu } from './ui.js';
 import { displayCell } from './tsformat.js';
@@ -264,6 +264,8 @@ export async function fetchGroupLevel(path) {
    silently land on different rows. */
 export function clearGroupSelectionState() {
   selClear();
+  S.selUndo = [];      // its positions meant the old row set
+  S.selHidden = 0;
   S.cursor = -1;
   S.anchor = -1;
   S.cellRange = null;
@@ -744,7 +746,7 @@ export function groupMenuItems(gi) {
   if (span) {
     items.push({
       label: `Select these ${scope}`,
-      onclick: () => { selSetRange(span.start, span.end); S.anchor = span.start; S.cursor = span.start; render(); },
+      onclick: () => { selSnapshot(); selSetRange(span.start, span.end); S.anchor = span.start; S.cursor = span.start; render(); },
     });
   }
   const on = !groupMenuUntagMode;
@@ -904,12 +906,11 @@ export async function writeClipboardText(textPromise, successMsg) {
 
 export async function copySelectedCells(withHeaders) {
   if (!S.cellRange) return;
-  const { r0, r1, c0, c1 } = S.cellRange;
-  const rowCount = r1 - r0 + 1;
+  const { c0, c1 } = S.cellRange;
+  const spanned = cellRangeRows();   // headings excluded, so the counts below are rows
+  const rowCount = spanned.length;
   if (rowCount > 20000) { toast('Selection too large to copy (max 20,000 rows)', 4000); return; }
   const cols = visibleCols().slice(c0, c1 + 1);
-  const spanned = [];
-  for (let pos = r0; pos <= r1; pos++) spanned.push(pos);
   if (positionsNeedLoading(spanned)) toast(`Copying ${rowCount.toLocaleString()} row${rowCount > 1 ? 's' : ''}…`, 8000);
   const textPromise = (async () => {
     await loadRowsForPositions(spanned); // no-op fast path once everything's already cached
@@ -917,11 +918,9 @@ export async function copySelectedCells(withHeaders) {
     const lines = [];
     if (withHeaders) lines.push(cols.join('\t'));
     for (const pos of spanned) {
-      // A grouped range can span group headers, which aren't rows — skip
-      // those. Anything else missing here would be a bug, not a slow fetch
-      // (the load above threw if it couldn't get a page), so refuse rather
-      // than emit a blank line.
-      if (S.groupByCols.length && !groupCoordAt(pos)) continue;
+      // Anything missing here would be a bug, not a slow fetch (the load
+      // above threw if it couldn't get a page), so refuse rather than
+      // emit a blank line.
       const r = rowAt(pos);
       if (!r) throw new Error(`row ${pos + 1} could not be loaded`);
       // What's copied is what's shown: a column's chosen timestamp or
@@ -948,6 +947,7 @@ export async function copyRowsAsText(positions, withHeaders) {
     const lines = [];
     if (withHeaders) lines.push(cols.join('\t'));
     for (const pos of positions) {
+      if (S.groupByCols.length && !groupCoordAt(pos)) continue;   // a heading, never a row
       const r = rowAt(pos);
       if (!r) throw new Error(`row ${pos + 1} could not be loaded`);
       lines.push(cols.map((name) => displayCell(name, r.cells[colIdx[name]] ?? '')).join('\t'));

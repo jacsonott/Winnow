@@ -8,8 +8,8 @@ import { displayValue, ellipsize, filterByValue, openValuePickerForColumn } from
 import { rowAt } from './grid.js';
 import { copyRowsAsText, loadRowsForPositions, writeClipboardText } from './grouping.js';
 import { showPluginTab } from './plugins.js';
-import { S, dashboardCreatorMode, selCount, selHas, selPositions } from './state.js';
-import { UNDO_NEXT, applyTag, undoLastTagChange } from './tags.js';
+import { S, cellRangeRows, dashboardCreatorMode, selCount, selHas, selPositions } from './state.js';
+import { UNDO_NEXT, applyTag, tagRowsAtPositions, undoLastTagChange } from './tags.js';
 import { openTagEditor } from './timeframe.js';
 import { displayCell } from './tsformat.js';
 import { contextMenu } from './ui.js';
@@ -115,16 +115,19 @@ export function rowMenuTargets(ctx) {
   // Right-clicking a row that isn't picked acts on THAT row — and leaves
   // the picks alone (picking is never clearing); inside the picks, on all
   // of them. What every file manager does, minus the discard.
-  const n = selCount() && selHas(ctx.pos) ? selCount() : 0;
+  const inSelection = !!(selCount() && selHas(ctx.pos));
+  const n = inSelection ? selCount() : 0;
   // No picks but a cell range across several rows: those rows are the
-  // scope, the same rule a tag key applies (applyTag) — so the menu, the
-  // key and Ctrl+C agree about what "the selection" is.
-  const range = !n && S.cellRange && S.cellRange.r1 > S.cellRange.r0 ? S.cellRange : null;
-  const rangeRows = range ? [...Array(range.r1 - range.r0 + 1).keys()].map((i) => range.r0 + i) : null;
-  const count = n || (rangeRows ? rangeRows.length : 1);
+  // scope, the same rows a tag key hits (cellRangeRows — headings
+  // excluded) — so the menu, the key and Ctrl+C agree about what "the
+  // selection" is.
+  const rangeRows = !n ? cellRangeRows() : [];
+  const range = rangeRows.length > 1 ? rangeRows : null;
+  const count = n || (range ? range.length : 1);
   return {
     count,
-    positions: n ? () => selPositions() : rangeRows ? () => rangeRows : () => [ctx.pos],
+    inSelection,
+    positions: n ? () => selPositions() : range ? () => range : () => [ctx.pos],
     // The wording that tells the analyst how many rows an action hits —
     // every section reads it from here, and the UI tests assert on it.
     scope: count > 1 ? `${count.toLocaleString()} selected rows` : 'this row',
@@ -135,7 +138,7 @@ export function rowMenuTargets(ctx) {
 /* The tag list is a function, not an array: a keepOpen tag item repaints
    the flyout after tagging, and the ✓ has to read the row as it is now. */
 export function rowMenuTagList(ctx) {
-  const { scope } = rowMenuTargets(ctx);
+  const { scope, inSelection, positions } = rowMenuTargets(ctx);
   const items = [];
   const row = rowAt(ctx.pos);
   for (const t of S.tags) {
@@ -154,7 +157,10 @@ export function rowMenuTagList(ctx) {
       pinId: `tag:${t.name}`,
       keepOpen: true, // tagging three tags in a row shouldn't need three right-clicks
       title: `${on ? 'Remove' : 'Apply'} "${t.name}" — ${scope}`,
-      onclick: () => applyTag(t, !on),
+      // Inside the picks: the whole selection (applyTag keeps a select-all
+      // server-side). Outside them: exactly the rows the header names —
+      // applyTag would have tagged the picks instead of the clicked row.
+      onclick: () => (inSelection ? applyTag(t, !on) : tagRowsAtPositions(t, positions(), !on)),
     });
   }
   if (!S.tags.length) items.push({ label: 'No tags in this case yet', disabled: true });

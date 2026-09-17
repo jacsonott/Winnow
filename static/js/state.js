@@ -55,7 +55,8 @@ export const S = {
   selection: new Set(),
   anchor: -1,
   selHidden: 0,          // picked rows that the current view no longer shows (filtered/sorted out) — see view.js remap
-  selUndo: [],           // snapshots of {selectAll, selection} before each selection gesture, for the chip's Undo
+  selUndo: [],           // snapshots of {selectAll, selection, viewId} before each selection gesture, for the chip's Undo
+  selVersion: 0,         // bumped by every sel* mutation — memo key for selRanges()
   rowsByPos: new Map(),
   reqId: 0,
   viewCache: new Map(), // source_id -> { key, view_id, row_count, elapsed_ms }
@@ -155,27 +156,55 @@ export function selCount() {
 
 export const selHas = (pos) => (S.selectAll ? !S.selection.has(pos) : S.selection.has(pos));
 
-export const selAdd = (pos) => { S.selectAll ? S.selection.delete(pos) : S.selection.add(pos); };
+export const selAdd = (pos) => { S.selectAll ? S.selection.delete(pos) : S.selection.add(pos); S.selVersion++; };
 
-export const selRemove = (pos) => { S.selectAll ? S.selection.add(pos) : S.selection.delete(pos); };
+export const selRemove = (pos) => { S.selectAll ? S.selection.add(pos) : S.selection.delete(pos); S.selVersion++; };
 
 export const selToggle = (pos) => { selHas(pos) ? selRemove(pos) : selAdd(pos); };
 
-export function selClear() { S.selectAll = false; S.selection.clear(); }
+/* Replace the selection wholesale. The one door for it, so the version
+   bump and the end of any keyboard run happen every time. */
+export function selReplace(selectAll, selection) {
+  S.selectAll = selectAll;
+  S.selection = selection;
+  S.selVersion++;
+  kbBase = null;
+}
 
-export function selSetAll() { S.selectAll = true; S.selection.clear(); }
+export function selClear() { selReplace(false, new Set()); }
+
+export function selSetAll() { selReplace(true, new Set()); }
+
+/* The keyboard's Shift+Arrow run: what was picked BEFORE the run started,
+   kept so the run can shrink back without eating earlier picks. Lives here
+   so every sanctioned replacement of the selection (clear, select-all, an
+   undo, a rebuild's remap, a table switch) ends the run — a stale base
+   used to survive all of those and restore rows nobody had picked. */
+let kbBase = null;
+export function startKeyboardRun() {
+  if (!kbBase) { selSnapshot(); kbBase = { selectAll: S.selectAll, selection: new Set(S.selection) }; }
+  return kbBase;
+}
+export function endKeyboardRun() { kbBase = null; }
 
 /* Every selection GESTURE snapshots first, so the chip's Undo (and a
-   stray Escape) can be taken back. Bounded; the newest wins. */
+   stray Escape) can be taken back. Bounded; the newest wins. Stamped with
+   the view: positions from another view or table mean other rows, so an
+   entry from a rebuilt or switched-away view is discarded, never applied. */
 export function selSnapshot() {
-  S.selUndo.push({ selectAll: S.selectAll, selection: new Set(S.selection) });
+  S.selUndo.push({ selectAll: S.selectAll, selection: new Set(S.selection), viewId: S.view ? S.view.view_id : null });
   if (S.selUndo.length > 30) S.selUndo.shift();
 }
+function pruneSelUndo() {
+  const vid = S.view ? S.view.view_id : null;
+  S.selUndo = S.selUndo.filter((s) => s.viewId === vid);
+}
+export function selUndoAvailable() { pruneSelUndo(); return S.selUndo.length > 0; }
 export function selUndoLast() {
+  pruneSelUndo();
   const s = S.selUndo.pop();
   if (!s) return false;
-  S.selectAll = s.selectAll;
-  S.selection = s.selection;
+  selReplace(s.selectAll, s.selection);
   return true;
 }
 
@@ -190,18 +219,35 @@ export function selRangeApply(from, to, on = true) {
   }
 }
 
-/* Contiguous runs among the picked rows — the chip's "N ranges". */
+/* The rows a cell range spans, as positions — group headings excluded,
+   since a heading is not a row anything can tag or copy. The ONE answer
+   to "which rows does the range mean" for the tag key, the row menu, the
+   toolbar and copy, which used to compute it three ways. */
+export function cellRangeRows() {
+  if (!S.cellRange) return [];
+  const out = [];
+  for (let p = S.cellRange.r0; p <= S.cellRange.r1; p++) {
+    if (S.groupByCols.length && !groupCoordAt(p)) continue;
+    out.push(p);
+  }
+  return out;
+}
+
+/* Contiguous runs among the picked rows — the chip's "N ranges". Memoised
+   on selVersion: render() runs per scroll frame and this sorts the Set. */
+let rangesMemo = { version: -1, ranges: 0 };
 export function selRanges() {
   if (S.selectAll) return 1;
+  if (rangesMemo.version === S.selVersion) return rangesMemo.ranges;
   const ps = [...S.selection].sort((a, b) => a - b);
   let n = 0;
   for (let i = 0; i < ps.length; i++) if (i === 0 || ps[i] !== ps[i - 1] + 1) n++;
+  rangesMemo = { version: S.selVersion, ranges: n };
   return n;
 }
 
 export function selSetRange(from, to) {
-  S.selectAll = false;
-  S.selection.clear();
+  selReplace(false, new Set());
   const lo = Math.min(from, to), hi = Math.max(from, to);
   // Grouped mode's position space interleaves group-header rows with data
   // rows, and a header isn't a row anything can tag or copy. groupCoordAt
@@ -212,6 +258,7 @@ export function selSetRange(from, to) {
     if (S.groupByCols.length && !groupCoordAt(p)) continue;
     S.selection.add(p);
   }
+  S.selVersion++;
 }
 
 /* The lowest selected position, without materializing the rest. */

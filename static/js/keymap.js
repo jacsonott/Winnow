@@ -294,6 +294,7 @@ export const ACTION_HANDLERS = {
   autofitColumnWidths: () => autofitAllColumnWidths(),
   selectAllRows: () => {
     if (S.groupByCols.length || !S.view || !S.view.row_count) return;
+    selSnapshot();
     selSetAll();
     S.cellRange = null; // same mutual exclusion the header checkbox applies
     S.cellAnchor = null;
@@ -356,7 +357,10 @@ document.addEventListener('keydown', (e) => {
   // Space toggles the cursor row; Shift+Space turns a cell range into row
   // picks. Not in the rebindable map: a bare space is what the map can't
   // spell, and the grid is the only place it means anything.
-  if (e.key === ' ' && S.activeTab === 'grid' && !typing && $('modal').hidden) {
+  // Only when the grid itself has focus: a focused button, menu item or a
+  // confirm dialog's OK gets its native Space, not a row toggle.
+  const gridFocused = e.target === document.body || e.target === $('body') || $('body').contains(e.target);
+  if (e.key === ' ' && S.activeTab === 'grid' && !typing && gridFocused && $('modal').hidden && !document.querySelector('.confirm-overlay')) {
     e.preventDefault();
     if (e.shiftKey) { if (!selectCellRangeRows()) toggleCursorRow(); } else toggleCursorRow();
     return;

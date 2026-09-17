@@ -5,7 +5,7 @@ import { applyPin, colWidth, pinnedOffsets, visibleCols } from './columns.js';
 import { $, GUTTER_W, MAX_SPACER_PX, OVERSCAN, PAGE, ROW_H, api, el } from './core.js';
 import { maybeShowDetail, showDetail } from './detail.js';
 import { ensureGroupPage, findGroupAt, groupCoordAt, groupDataRowAt, isLeafLevel, renderGrouped, toggleGroup } from './grouping.js';
-import { S, cellInRange, gridRowCount, selAdd, selClear, selCount, selHas, selRangeApply, selRanges, selRemove, selSetRange, selSnapshot, selToggle, selUndoLast } from './state.js';
+import { S, cellInRange, cellRangeRows, endKeyboardRun, gridRowCount, selAdd, selClear, selCount, selHas, selRangeApply, selRanges, selRemove, selReplace, selSnapshot, selToggle, selUndoAvailable, selUndoLast, startKeyboardRun } from './state.js';
 import { applyTag } from './tags.js';
 import { displayCell } from './tsformat.js';
 import { rebuildView } from './view.js';
@@ -476,12 +476,12 @@ export function renderTagToolbar() {
   // kept: coming back to the grid brings the bar back with it.
   // A cell range spanning several rows is what a tag key would hit when
   // nothing is picked (applyTag) — say so, rather than tagging silently.
-  const rangeRows = !count && S.cellRange && S.cellRange.r1 > S.cellRange.r0
-    ? S.cellRange.r1 - S.cellRange.r0 + 1 : 0;
-  if ((!count && !rangeRows) || S.activeTab !== 'grid') { bar.hidden = true; return; }
+  const rangeRows = !count ? cellRangeRows().length : 0;   // headings excluded — the same rows a tag key hits
+  if ((!count && rangeRows < 2) || S.activeTab !== 'grid') { bar.hidden = true; return; }
   bar.hidden = false;
+  const ranges = count && !S.selectAll ? selRanges() : 0;
   const label = count
-    ? `${count.toLocaleString()} selected` + (!S.selectAll && selRanges() > 1 ? ` · ${selRanges()} ranges` : '')
+    ? `${count.toLocaleString()} selected` + (ranges > 1 ? ` · ${ranges} ranges` : '')
     : `${rangeRows.toLocaleString()} rows in the cell range`;
   const countEl = el('span', 'tag-toolbar-count', label);
   if (S.selHidden) {
@@ -502,10 +502,10 @@ export function renderTagToolbar() {
   if (count && !S.groupByCols.length) {
     const inv = el('button', 'btn ghost', 'Invert');
     inv.title = 'Select every row that is not picked, and drop the ones that are';
-    inv.onclick = () => { selSnapshot(); if (S.selectAll) { S.selectAll = false; } else { S.selectAll = true; } render(); };
+    inv.onclick = () => { selSnapshot(); selReplace(!S.selectAll, S.selection); render(); };
     bar.append(inv);
   }
-  if (S.selUndo.length) {
+  if (selUndoAvailable()) {
     const undo = el('button', 'btn ghost', 'Undo');
     undo.title = 'Take back the last selection change';
     undo.onclick = () => { if (selUndoLast()) { S.selHidden = 0; render(); } };
@@ -531,32 +531,32 @@ export function highlight(node, text, needle) {
 /* ------------------------------------------------------------- movement */
 
 /* Shift+Arrow extends a run from the anchor; what was picked BEFORE the
-   run started is kept underneath it, so the run can shrink back without
-   eating earlier picks and the picks survive the arrow keys. */
-let kbBase = null;
-
+   run started is kept underneath it (state.js keyboardRunBase), so the
+   run can shrink back without eating earlier picks and the picks survive
+   the arrow keys. */
 export function moveCursor(to, extend) {
   const total = gridRowCount();
   if (!S.view || !total) return;
   to = Math.max(0, Math.min(total - 1, to));
   if (extend) {
-    if (S.anchor < 0) S.anchor = S.cursor < 0 ? to : S.cursor;
-    if (!kbBase) { selSnapshot(); kbBase = { selectAll: S.selectAll, selection: new Set(S.selection) }; }
-    S.selectAll = kbBase.selectAll;
-    S.selection = new Set(kbBase.selection);
+    // A cleared anchor (a rebuild, a table switch) is a new run.
+    if (S.anchor < 0) { endKeyboardRun(); S.anchor = S.cursor < 0 ? to : S.cursor; }
+    const base = startKeyboardRun();
+    S.selectAll = base.selectAll;
+    S.selection = new Set(base.selection);
+    S.selVersion++;
     selRangeApply(S.anchor, to, true);
   } else {
     // A plain move keeps the picks: moving the cursor is looking, not
     // choosing. The picks go with Escape, the chip, or a new pick.
     S.anchor = to;
-    kbBase = null;
+    endKeyboardRun();
   }
   S.cursor = to;
   scrollIntoView(to);
   render();
   maybeShowDetail(to);
 }
-export function endKeyboardRun() { kbBase = null; }
 
 export function scrollIntoView(pos) {
   const body = $('body');
@@ -778,14 +778,18 @@ function rowAtClientY(clientY) {
 }
 
 function applyGutterSpan(pos) {
+  if (pos === gutterDrag.last) return;
+  gutterDrag.last = pos;
   S.selectAll = gutterDrag.base.selectAll;
   S.selection = new Set(gutterDrag.base.selection);
+  S.selVersion++;
   selRangeApply(gutterDrag.from, pos, gutterDrag.on);
   S.cursor = pos;
   if (!dragRaf) dragRaf = requestAnimationFrame(() => { dragRaf = null; render(); });
 }
 
-function stopAutoScroll() { if (autoScroll) { clearInterval(autoScroll); autoScroll = null; } }
+let autoDy = 0;
+function stopAutoScroll() { if (autoScroll) { clearInterval(autoScroll); autoScroll = null; } autoDy = 0; }
 
 $('body').addEventListener('mousedown', (e) => {
   if (e.button !== 0) return;
@@ -797,15 +801,12 @@ $('body').addEventListener('mousedown', (e) => {
   if (e.shiftKey && S.anchor >= 0) {
     selRangeApply(S.anchor, pos, !(e.ctrlKey || e.metaKey));
   } else {
+    // The base is the state BEFORE this press, captured before the toggle:
+    // re-applying the span from it is what lets the drag shrink again.
+    const base = { selectAll: S.selectAll, selection: new Set(S.selection) };
     const on = !selHas(pos);
     on ? selAdd(pos) : selRemove(pos);
-    gutterDrag = { from: pos, on, base: { selectAll: S.selectAll, selection: new Set(S.selection) } };
-    // The base is the state BEFORE this press: re-applying the span from
-    // it is what lets the drag shrink again on the way back.
-    gutterDrag.base.selectAll = S.selectAll;
-    gutterDrag.base.selection = new Set(S.selection);
-    on ? gutterDrag.base.selection.delete(pos) : gutterDrag.base.selection.add(pos);
-    if (S.selectAll) { on ? gutterDrag.base.selection.add(pos) : gutterDrag.base.selection.delete(pos); }
+    gutterDrag = { from: pos, on, base, last: pos };
     S.anchor = pos;
   }
   // Picking rows is a fresh "what to copy" choice, so a stale cell
@@ -824,15 +825,21 @@ $('body').addEventListener('mousemove', (e) => {
   const pos = rowAtClientY(e.clientY);
   if (pos !== S.cursor) applyGutterSpan(pos);
   const rect = $('body').getBoundingClientRect();
-  const dy = e.clientY < rect.top + headH() + AUTOSCROLL_EDGE ? -ROW_H / 2
-    : e.clientY > rect.bottom - AUTOSCROLL_EDGE ? ROW_H / 2 : 0;
-  stopAutoScroll();
-  if (dy) {
-    autoScroll = setInterval(() => {
-      if (!gutterDrag) { stopAutoScroll(); return; }
-      $('body').scrollTop += dy;
-      applyGutterSpan(rowAtClientY(dragLastY));
-    }, 40);
+  const dy = e.clientY < rect.top + headH() + AUTOSCROLL_EDGE ? -ROW_H
+    : e.clientY > rect.bottom - AUTOSCROLL_EDGE ? ROW_H : 0;
+  // Restart the interval only when the direction changes: tearing it down
+  // on every mousemove meant it never fired while the pointer moved, and
+  // a pointer at the edge always moves a little.
+  if (dy !== autoDy) {
+    stopAutoScroll();
+    autoDy = dy;
+    if (dy) {
+      autoScroll = setInterval(() => {
+        if (!gutterDrag) { stopAutoScroll(); return; }
+        $('body').scrollTop += dy;
+        applyGutterSpan(rowAtClientY(dragLastY));
+      }, 40);
+    }
   }
 });
 
