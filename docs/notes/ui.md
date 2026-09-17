@@ -102,7 +102,11 @@ see [docs/notes/README.md](README.md) for the whole set.
   not the view they were found through. Tagging while grouped *by tag* —
   and undoing — calls `regroupIfGroupedByTag()`: the tag just changed which
   group those rows belong to, and the expanded sub-views are server-side
-  with nothing here to patch them with.
+  with nothing here to patch them with. Either way it ends with
+  `clearRowCaches()`, not `clearGroupPageCache()` alone: the flat page
+  cache is still alive under the grouping and would otherwise paint the
+  pre-tag rows back on Ungroup (grid.md, "Grouped mode's rows are ordinary
+  rows").
 - **The sidebar** (`renderSidebar`, replacing the old `openTabJumpMenu`
   dropdown) is a *persistent* list of every table, open or closed — the
   horizontal tab strip (`.tabs`/`renderTabs`) is untouched and still the
@@ -436,8 +440,8 @@ see [docs/notes/README.md](README.md) for the whole set.
   are before and after the broken-out filter block (`cell`), and every
   other section contributes one folded `{label, submenu}` entry. The row is re-resolved (`rowAt(ctx.pos)`) on
   every repaint rather than captured, because a keepOpen tag item
-  re-renders after tagging and the bulk tag path clears the page cache
-  underneath it. Scope follows the selection: right-clicking *inside* one
+  re-renders after tagging and the bulk tag path clears the row caches
+  (`clearRowCaches`, both the flat and the grouped one) underneath it. Scope follows the selection: right-clicking *inside* one
   acts on the whole selection (tagging 200 checked rows shouldn't collapse
   to the row under the pointer), right-clicking outside it moves the
   cursor there first. Works in grouped mode too now (see "Grouped mode's

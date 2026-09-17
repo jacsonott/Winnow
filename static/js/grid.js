@@ -65,7 +65,14 @@ export function trimPageCache(keep) {
    it would land afterwards and repopulate the cache with stale `tags`
    arrays. ensurePage checks the generation before storing, and clearing
    S.pending lets render() start fresh fetches for whatever's on screen
-   instead of waiting on the now-discarded ones. */
+   instead of waiting on the now-discarded ones.
+
+   This is only the flat half. A grouping keeps its own page cache for the
+   same view id (S.groupPages) and this one stays alive underneath it, so
+   a tag write reaches for tags.js's clearRowCaches, which drops both; the
+   two places that call this alone from a tag or note write do so because
+   they patched the group-page rows in place and only the flat copies of
+   those rids are stale. */
 export function clearPageCache() {
   S.pages.clear();
   S.rowsByPos.clear();

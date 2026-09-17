@@ -11,6 +11,7 @@ import { sqlSchemaForLLM } from './plugins.js';
 import { sourceLabel } from './sources.js';
 import { activeSqlTab } from './sql.js';
 import { S } from './state.js';
+import { clearRowCaches } from './tags.js';
 import { dropdownMenu, promptDialog } from './ui.js';
 
 const SQL_KEYWORDS = [
@@ -415,6 +416,10 @@ export async function sqlTagHotkey(tag, repaint) {
     if (on) cur.add(tag.id); else cur.delete(tag.id);
     r.tags.map[k] = [...cur];
   }
+  // The grid's row caches (flat and grouped) still hold these rids with
+  // the tags they had before; the next paint back on the grid tab would
+  // otherwise show them as they were.
+  clearRowCaches();
   if (repaint) repaint();
 }
 

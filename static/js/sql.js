@@ -4,7 +4,7 @@
 import { recordTabVisit } from './tabhistory.js';
 import { $, api, debounce, el, post, toast } from './core.js';
 import { hideDetailPane } from './detail.js';
-import { renderTagToolbar } from './grid.js';
+import { render, renderTagToolbar } from './grid.js';
 import { hidePluginViews, sqlResultNodes, syncPluginPanels } from './plugins.js';
 import { setActiveSqlResult } from './sqlassist.js';
 import { checkPresets } from './savedfilters.js';
@@ -275,6 +275,11 @@ export function showGridTab() {
   showMainView('grid');
   syncTabSelection();
   syncTabChrome();
+  // Same reason the Timeline rebuilds on arrival: tags can change while
+  // this tab isn't showing (the SQL pane's tag hotkey drops the row caches
+  // but can't paint a hidden grid), and the rows on screen are whatever
+  // was painted before leaving. render() is a cache hit when nothing did.
+  render();
   if (S.sourceId) checkPresets(S.sourceId); // refresh the Filters button's suggestion state
 }
 

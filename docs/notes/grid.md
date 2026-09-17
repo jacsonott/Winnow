@@ -71,7 +71,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   `pos`, so selection, the cursor, the cell range, the row menu, copy,
   tagging and the detail pane all work in both modes off one
   implementation. `rowAt(pos)` is the pivot: a `S.rowsByPos` lookup when
-  flat, `groupDataRowAt(pos)` when grouped. Four things follow from sharing
+  flat, `groupDataRowAt(pos)` when grouped. Five things follow from sharing
   the address space:
   - A grouped `pos` indexes the *flattened tree* (`S.groups` +
     `S.groupPrefix`), which interleaves group headers with data rows.
@@ -99,6 +99,30 @@ see [docs/notes/README.md](README.md) for the whole set.
     ends to `waitForPages`; grouped pages are per-group-sub-view and can't
     share the root view's page index space. `waitForGroupPages` throws
     rather than returning short for the same reason `waitForPages` does.
+  - **Two row caches, one view id, and a write invalidates the one it did
+    not patch.** Grouping leaves the flat `S.pages`/`S.rowsByPos` alive
+    underneath `S.groupPages` (`regroupAll` clears only the group cache;
+    `S.view.view_id` doesn't change), so while grouped the flat rows sit
+    off-screen with the `tags` arrays they were fetched with, and
+    `dropGrouping` paints them straight back — `ensurePage` short-circuits
+    on `S.pages.has(idx)`, so nothing refetches. A tag applied while
+    grouped therefore showed on the rail and in the ribbon (both
+    server-read) and not on the rows after Ungroup, until something else
+    rebuilt the view. The rule now: a write the server did on this
+    client's behalf (whole view, whole group, undo, the SQL pane's tag
+    hotkey) calls `tags.clearRowCaches()`, which drops *both*; a write that
+    patched row objects in place (`tagRowsAtPositions`, `saveNote`) keeps
+    the patch — that is the instant feedback — and, when grouped, drops
+    the flat cache alone, since the objects it patched were group-page
+    rows. Clearing the flat cache from grouped mode is safe because no
+    flat fetch can be in flight there (`schedulePrefetch` and
+    `loadRowsForPositions` both route to group pages, and select-all is
+    refused under a grouping), so the `S.pageGen` bump strands nothing.
+    The same one-sidedness ran the other way — Shift+hotkey and Ctrl+Z
+    cleared only the flat cache, so under a grouping by an ordinary column
+    the rows on screen kept their old stripes — and the helper closes both.
+    The visible cost is one round trip of `pending` placeholders on the
+    next paint, the same thing a bulk tag already costs in flat mode.
 - `waitForPages` has **no deadline and bounded concurrency**
   (`PAGE_FETCH_CONCURRENCY`), and throws rather than returning short. It
   used to fire one `ensurePage` per missing page at once — ~2,400
