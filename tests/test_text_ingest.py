@@ -129,6 +129,26 @@ def test_scan_star_admits_other_text_files_as_text_kind(store, tmp_path):
     assert "var/log/auth.log.1" not in {m["rel_path"] for m in r2["matched"]}
 
 
+def test_scan_probes_for_binary_only_after_the_pattern_gates(store, tmp_path, monkeypatch):
+    """The binary probe opens the file, so it runs last: a tree of build
+    output excluded by pattern is never read, and a file the patterns
+    exclude reports the pattern, not "binary"."""
+    import winnow.store as st
+    root = _tree(tmp_path)
+    opened = []
+    real = st.looks_binary
+    monkeypatch.setattr(st, "looks_binary", lambda path: (opened.append(path), real(path))[1])
+    r = store.scan_import_directory(root, extensions=["*"], exclude_patterns=["*.exe"])
+    reasons = {e["rel_path"]: e["reason"] for e in r["excluded"]}
+    assert reasons["tool.exe"] == "excluded by pattern: *.exe"
+    assert not any(p.endswith("tool.exe") for p in opened)
+    r = store.scan_import_directory(root, extensions=["*"], include_patterns=["*.log"])
+    assert not any(p.endswith("tool.exe") for p in opened)
+    # …and one nothing gates is still probed and refused
+    r = store.scan_import_directory(root, extensions=["*"])
+    assert ("tool.exe", "binary") in {(e["rel_path"], e["reason"]) for e in r["excluded"]}
+
+
 # ------------------------------------------------------------------ routes
 
 def test_unknown_extension_routes_to_text(client, tmp_path):

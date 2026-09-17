@@ -6,7 +6,7 @@ import { columnMenuItems, opLabel } from './derived.js';
 import { openValuePicker, pickerTreeNode, valueFilterEnabled } from './filters.js';
 import { render } from './grid.js';
 import { renderGroupStrip } from './grouping.js';
-import { S, selClear, selSetAll } from './state.js';
+import { S, selClear, selSetAll, selSnapshot } from './state.js';
 import { baseColumns, columnMeta } from './tsformat.js';
 import { contextMenu } from './ui.js';
 import { rebuildSoon, rebuildView } from './view.js';
@@ -153,6 +153,7 @@ export function renderHead() {
   selectAllCb.title = 'Select every row in the current view';
   selectAllCb.onchange = () => {
     if (S.groupByCols.length || !S.view) { selectAllCb.checked = false; return; }
+    selSnapshot();
     selectAllCb.checked ? selSetAll() : selClear();
     S.cellRange = null;
     S.cellAnchor = null;

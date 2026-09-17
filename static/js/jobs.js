@@ -211,7 +211,10 @@ export async function pollJobs() {
     }
   }
   if (!$('app').hidden) {
-    const landed = finishedNow.filter((j) => j.status === 'done' && (j.source_ids || []).length)
+    // Imports only: a derive job's source_ids is the table it added a
+    // column TO, and re-opening that would drop the cursor, the picks and
+    // whatever page the analyst was on for a table they already have open.
+    const landed = finishedNow.filter((j) => j.status === 'done' && j.kind !== 'derive' && (j.source_ids || []).length)
       .sort((a, b) => a.job_id - b.job_id);   // the server lists newest first; "first" means lowest id
     if (landed.length && S.appearance && S.appearance.openNewTables && !batchNavigated) {
       batchNavigated = true;
@@ -236,11 +239,13 @@ export async function pollJobs() {
     }
   }
   renderJobsPanel();
-  const active = activeUploads.size > 0
-    || ingestJobs.some((j) => j.status === 'running' || j.status === 'queued')
-    || ftsWatch.size > 0;
-  if (active) jobsPollTimer = setTimeout(pollJobs, 900);
-  else batchNavigated = false;   // the batch is over; the next import may open its first table
+  const batchActive = activeUploads.size > 0
+    || ingestJobs.some((j) => j.status === 'running' || j.status === 'queued');
+  // The batch is over once nothing is uploading or importing; the next
+  // import may open its first table. An FTS build still being watched
+  // keeps the poll alive but is not part of the batch.
+  if (!batchActive) batchNavigated = false;
+  if (batchActive || ftsWatch.size > 0) jobsPollTimer = setTimeout(pollJobs, 900);
 }
 
 /* `phase` is the badge text; `cls` is its class when the two differ (a
@@ -448,6 +453,16 @@ function noticeRow(n) {
   return row;
 }
 
+/* A progress update rebuilds the panel like anything else — but a plugin
+   reporting per-item progress calls update() in a tight loop, so those
+   are coalesced to one repaint per frame. Create, done, fail and close
+   stay synchronous: a caller (and a test) can look for the row at once. */
+let noticeRaf = 0;
+function renderJobsPanelSoon() {
+  if (noticeRaf) return;
+  noticeRaf = requestAnimationFrame(() => { noticeRaf = 0; renderJobsPanel(); });
+}
+
 export function createNotice(owner, opts = {}) {
   const id = ++noticeSeq;
   const n = { id, owner, status: 'running', title: '', detail: '', phase: null, progress: undefined, actions: [], sticky: false, timer: null };
@@ -473,7 +488,7 @@ export function createNotice(owner, opts = {}) {
       clearNoticeTimer(n);
       applyNoticeOpts(n, o);
       n.status = 'running';
-      renderJobsPanel();
+      renderJobsPanelSoon();
       return handle;
     },
     done: (o = {}) => settle('done', o),

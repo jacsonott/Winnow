@@ -12,7 +12,6 @@ pytestmark = pytest.mark.ui
 
 def test_archives_route_as_their_own_kind(page):
     for name in ("esx-support.zip", "uac-host.tar.gz", "bundle.tgz", "auth.log.1.gz"):
-        assert page.evaluate("(n) => __winnow.recognizedImportFile(n)", name), name
         assert page.evaluate("(n) => __winnow.importKindFor(n)", name) == "archive", name
     item = page.evaluate("() => __winnow.queueItem({ path: '/x/esx-support.zip' }, 'esx-support.zip')")
     assert item["kind"] == "archive"

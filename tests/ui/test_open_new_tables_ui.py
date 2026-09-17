@@ -88,3 +88,25 @@ def test_the_checkbox_lives_under_imports_and_persists(page):
         page.wait_for_timeout(200)
     assert (machine.get("appearance") or {}).get("openNewTables") is True, machine
     page.evaluate("() => __winnow.closeModal()")
+
+
+def test_a_finished_derive_does_not_open_its_table(page, tmp_path):
+    """A derive job lists the table it added a column to; it is not a new
+    table, and opening it would drop the analyst's place in another one."""
+    home = page.evaluate("() => __winnow.S.sourceId")
+    page.evaluate("() => { __winnow.S.appearance.openNewTables = true; __winnow.saveAppearance(); }")
+    _import(page, _csv(tmp_path, "other.csv"), "other.csv")
+    _wait_landed(page, ["other.csv"])
+    page.wait_for_function("(h) => __winnow.S.sourceId !== h", arg=home, timeout=10_000)
+    here = page.evaluate("() => __winnow.S.sourceId")
+    rec = page.evaluate("""(sid) => fetch('/api/derived', { method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Timeline-Lite-Client': '1' },
+      body: JSON.stringify({ source_id: sid, name: 'DeriveNoOpen', input_column: 'EventId', op_id: 'regex_extract', params: { pattern: '(.)' } }) })
+      .then((r) => r.json()).then((r) => { __winnow.startJobsPoll(); return r; })""", home)
+    try:
+        page.wait_for_function("() => __winnow.ingestJobs.some((j) => j.kind === 'derive' && j.status === 'done')", timeout=30_000)
+        page.wait_for_timeout(1200)      # two more poll ticks
+        assert page.evaluate("() => __winnow.S.sourceId") == here
+    finally:
+        page.evaluate("""(id) => fetch('/api/derived/' + id, { method: 'DELETE',
+          headers: { 'X-Timeline-Lite-Client': '1' } })""", rec["definition"]["id"])

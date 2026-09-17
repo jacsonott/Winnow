@@ -183,11 +183,13 @@ def _iter_rows(path: str, logtype: str):
             row = _parse_line(raw, logtype)
             if row is None:
                 continue
-            # A line with no timestamp that isn't itself parseable is almost
+            # A line with no timestamp after a timestamped line is almost
             # always a continuation (a stack trace, a wrapped message) — fold
-            # it onto the previous row's Message rather than emitting a
-            # timestamp-less orphan.
-            if not row[0] and pending is not None:
+            # it onto that row's Message rather than emitting a
+            # timestamp-less orphan. Only onto a row that HAS a timestamp,
+            # though: a file with no ESXi timestamps at all (any .log this
+            # plugin claims by extension) used to fold into ONE row.
+            if not row[0] and pending is not None and pending[0]:
                 pending[-1] = (pending[-1] + " " + raw.strip()).strip()
                 continue
             if pending is not None:

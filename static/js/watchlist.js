@@ -8,10 +8,11 @@
 import { $, api, el, post, toast } from './core.js';
 import { createNotice } from './jobs.js';
 import { recordTabVisit } from './tabhistory.js';
-import { showGridTab, showMainView, syncTabChrome } from './sql.js';
-import { openSource, recenterOnRow, renderSidebar, sourceLabel, syncTabSelection } from './sources.js';
+import { showMainView, syncTabChrome } from './sql.js';
+import { renderSidebar, sourceLabel, syncTabSelection } from './sources.js';
 import { S } from './state.js';
 import { modal } from './ui.js';
+import { jumpToTimelineRow } from './timeline.js';
 
 const KIND_COLOR = { hash: '#7c6cf6', ip: '#39a8e8', domain: '#39e881',
                      filename: '#d9a441', other: '#8a8a90' };
@@ -206,17 +207,9 @@ async function renderHits() {
       r.append(pv);
     }
     r.title = 'Open this table at the row';
-    r.onclick = () => jumpToHit(h);
+    r.onclick = () => jumpToTimelineRow(h.source_id, h.rid);
     box.append(r);
   }
-}
-
-/* Land ON the row, not at the top of its table — the same three steps
-   the timeline's row jump takes. */
-async function jumpToHit(h) {
-  await openSource(h.source_id);
-  showGridTab();
-  await recenterOnRow({ source_id: h.source_id, rid: h.rid });
 }
 
 /* Copy indicators in from another recent case — the standing IOC set an

@@ -3,7 +3,7 @@ in the case.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { recordTabVisit } from './tabhistory.js';
-import { renderHead } from './columns.js';
+import { renderHead, saveLayout } from './columns.js';
 import { $, ROW_H, api, el, post, toast } from './core.js';
 import { derivedOps } from './derived.js';
 import { currentSpec, renderAdvancedChips, setSearchMode, updateSearchHint } from './filters.js';
@@ -28,7 +28,7 @@ import { loadTags, refreshTagCounts, renderTagRibbon } from './tags.js';
 import { openTableMenu, updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
 import { baseColumns } from './tsformat.js';
 import { confirmDialog, dropdownMenu, modal, promptDialog } from './ui.js';
-import { rebuildView } from './view.js';
+import { dropPendingSelection, rebuildView } from './view.js';
 
 /* --------------------------------------------------------------- sources */
 
@@ -680,6 +680,9 @@ export async function openSource(id, { skipBuild = false } = {}) {
   S.hideEmptyRows = false;
   S.cursor = -1;
   selClear();
+  S.selUndo = [];      // another table's positions
+  S.selHidden = 0;
+  dropPendingSelection();
   await closeAllGroupViews();
   S.groupByCols = [];
   S.preGroupOrder = null;
@@ -724,6 +727,7 @@ export async function openSource(id, { skipBuild = false } = {}) {
   // from one input, in order), not at the far end where nobody scrolls.
   // Anything else (no derived_from, or an input that's hidden from the
   // order) appends as before. Re-derive keeps its name, so it never moves.
+  let placed = false;
   for (const c of S.columns) {
     if (S.order.includes(c.name)) continue;
     let at = c.derived_from ? S.order.indexOf(c.derived_from) : -1;
@@ -733,12 +737,19 @@ export async function openSource(id, { skipBuild = false } = {}) {
       if (next && next.derived_from === c.derived_from) at++; else break;
     }
     S.order.splice(at + 1, 0, c.name);
+    placed = true;
   }
 
   // Default sort: first datetime column, ascending — a timeline wants time order.
   const dt = S.columns.find((c) => c.type === 'datetime');
   if (dt && !saved.sort) S.sort = [{ column: dt.name, dir: 'asc' }];
   if (saved.sort) S.sort = saved.sort;
+  // A placement made against a saved layout is saved back at once, so the
+  // layout on disk — what an export orders its columns by — agrees with
+  // the grid without waiting for the next drag. (Store._export_columns
+  // places the same way for a layout that never saw the column; this
+  // keeps that a fallback rather than a second opinion.)
+  if (placed && saved.order) saveLayout();
 
   // Coming BACK to a table: reapply what was on screen when we left it.
   // After the reset above and the layout/sort defaults, before renderHead
@@ -783,7 +794,10 @@ export async function openSource(id, { skipBuild = false } = {}) {
                elapsed_ms: cached.elapsed_ms, source_id: id };
     clearPageCache();
     selClear();
+    S.selHidden = 0;
     S.anchor = -1;
+    S.cellRange = null;
+    S.cellAnchor = null;
     $('spacerY').style.height = spacerPx(cached.row_count) + 'px';
     $('viewStats').innerHTML =
       `<b>${cached.row_count.toLocaleString()}</b> of ${src.row_count.toLocaleString()} rows · cached`;

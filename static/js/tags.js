@@ -4,7 +4,7 @@
 import { $, PAGE, api, el, post, setBusy, toast } from './core.js';
 import { clearPageCache, render, rowAt } from './grid.js';
 import { drawRail, groupCoordAt, loadRowsForPositions, positionsNeedLoading, regroupIfGroupedByTag, waitForPages } from './grouping.js';
-import { S, selCount, selExcludedPairs, selExcludedPositions, selFirst, selPositions } from './state.js';
+import { S, cellRangeRows, selCount, selExcludedPairs, selExcludedPositions, selFirst, selPositions } from './state.js';
 import { openTagEditor } from './timeframe.js';
 import { renderTimelineTagFilter } from './timeline.js';
 import { confirmDialog } from './ui.js';
@@ -129,12 +129,8 @@ export async function applyTag(tag, on) {
     // meant: highlighting cells across four rows and pressing a tag key
     // should tag those four rows, not just the anchor row the cursor
     // happens to sit on. Group headers inside the span are skipped.
-    if (S.cellRange) {
-      let positions = [];
-      for (let p = S.cellRange.r0; p <= S.cellRange.r1; p++) positions.push(p);
-      if (S.groupByCols.length) positions = positions.filter((p) => groupCoordAt(p));
-      if (positions.length) { await tagRowsAtPositions(tag, positions, on); return; }
-    }
+    const positions = cellRangeRows();
+    if (positions.length) { await tagRowsAtPositions(tag, positions, on); return; }
     if (S.cursor < 0) return;
     // In grouped mode the cursor can sit on a group header, which isn't a
     // row — tag the whole group from its right-click menu instead.

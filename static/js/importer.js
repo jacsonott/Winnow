@@ -116,17 +116,37 @@ export function queueItem(transport, name, fmt = pluginFormatFor(name)) {
     : kind === 'plaso' ? { ...transport, name, kind, configured: true }
     // An archive expands on import, then you pick files from its contents.
     : kind === 'archive' ? { ...transport, name, kind, configured: true }
-    // Raw text (a log with an extension nothing else claims): one line per
-    // row, nothing to configure — the preview can still switch it to csv.
-    : kind === 'text' ? { ...transport, name, kind, delimiter: null, has_header: false, column_types: null, configured: false }
-    : { ...transport, name, kind, delimiter: null, has_header: true, column_types: null, configured: false };
+    // Raw text (a log with an extension nothing else claims) is the delimited
+    // shape with no header — one line per row, nothing to configure; the
+    // preview can still switch it to csv.
+    : { ...transport, name, kind, delimiter: null, has_header: kind !== 'text', column_types: null, configured: false };
 }
 
-export function queueFiles(files) {
+/* The server's looks_binary, on the client: a NUL in the first 8 KB, a
+   UTF-16 BOM exempt. Checked BEFORE a raw-text upload, so an .exe or an
+   .evtx picked by mistake is refused here rather than copied up in full
+   and refused on arrival. Unreadable here means "let the server say". */
+const BINARY_PROBE_BYTES = 8192;
+async function looksBinaryFile(f) {
+  try {
+    const head = new Uint8Array(await f.slice(0, BINARY_PROBE_BYTES).arrayBuffer());
+    if (head.length >= 2 && ((head[0] === 0xFF && head[1] === 0xFE) || (head[0] === 0xFE && head[1] === 0xFF))) return false;
+    return head.includes(0);
+  } catch { return false; }
+}
+
+export async function queueFiles(files) {
   let bigNamed = null, bigCount = 0;
-  for (const f of files) {
+  const skipped = [];
+  for (const f of [...files]) {
+    const item = queueItem({ file: f }, f.name);
+    if (item.kind === 'text' && await looksBinaryFile(f)) { skipped.push(f.name); continue; }
     if (f.size >= UPLOAD_ADVISORY_BYTES) { bigCount++; bigNamed = bigNamed || f; }
-    S.importQueue.push(queueItem({ file: f }, f.name));
+    S.importQueue.push(item);
+  }
+  if (skipped.length) {
+    const names = skipped.slice(0, 3).join(', ') + (skipped.length > 3 ? ', …' : '');
+    toast(`Skipped ${skipped.length} binary file${skipped.length === 1 ? '' : 's'} (not text): ${names}`, 6000);
   }
   if (bigCount) {
     // Advisory, never a gate — the upload still works, it's just the slow
@@ -238,7 +258,19 @@ export function openImportModal() {
         };
         const rm = el('button', 'btn ghost', '✕');
         rm.onclick = () => { S.importQueue.splice(i, 1); renderQueue(); };
-        row.append(cfg, rm);
+        if (item.kind === 'plugin' && !item.path) {
+          // A plugin claimed this by extension (.log is ESXi's, say) — the
+          // way out when it is some other program's log: one line per row.
+          const asText = el('button', 'btn ghost', 'As text');
+          asText.title = 'Skip the plugin and import this file as raw text, one line per row';
+          asText.onclick = () => {
+            Object.assign(item, { kind: 'text', format_id: null, options: null, delimiter: null, has_header: false, column_types: null, configured: false });
+            renderQueue();
+          };
+          row.append(cfg, asText, rm);
+        } else {
+          row.append(cfg, rm);
+        }
         queueList.append(row);
       });
     }
@@ -270,9 +302,10 @@ export function openImportModal() {
     // the browser picker the one place a .log.1 could not be chosen.
     addInput.multiple = true;
     addInput.hidden = true;
-    addInput.onchange = () => {
-      queueFiles(addInput.files);
+    addInput.onchange = async () => {
+      const files = [...addInput.files];
       addInput.value = '';
+      await queueFiles(files);
       renderQueue();
     };
     addLabel.append(addInput);
@@ -632,18 +665,12 @@ export function wireFileDrop() {
    modal "Choose files…" already uses. Unrecognized files are dropped
    silently from the queue but named in a toast — better than a mysterious
    partial import with no explanation. */
-/* Whether ANY importer will take this filename. Since the raw-text
-   importer became the catch-all the answer is always yes for a filename —
-   a name nothing else claims imports one line per row — so this is kept
-   for its callers and its tests, and the only refusal left is the
-   importer's own binary check at ingest time. */
-export function recognizedImportFile(name) {
-  return !!name;
-}
-
-export function handleDroppedFiles(files) {
+/* Every filename is importable now — a name nothing else claims imports
+   one line per row — so the only refusal left is the binary check in
+   queueFiles (and the importer's own, at ingest). */
+export async function handleDroppedFiles(files) {
   if (!files.length) return;
-  queueFiles(files);
+  await queueFiles(files);
   openImportModal();
 }
 

@@ -21,6 +21,8 @@ export function mountChat(container, winnow, opts) {
   log.style.cssText = 'flex:1 1 auto;min-height:0;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:10px';
   container.append(log);
 
+  let replaying = false;   // history replay: append silently, scroll once at the end
+  const scrollDown = () => { log.scrollTop = log.scrollHeight; };
   const line = (role, text) => {
     const d = el('div');
     d.style.cssText = 'max-width:56em;white-space:pre-wrap;padding:8px 12px;border:1px solid var(--line-2);'
@@ -31,7 +33,7 @@ export function mountChat(container, winnow, opts) {
           : 'align-self:flex-start;background:var(--panel-2);');
     d.textContent = text;
     log.append(d);
-    log.scrollTop = log.scrollHeight;
+    if (!replaying) scrollDown();
     return d;
   };
   // An assistant bubble, rendered the surface's way (the Copilot lifts
@@ -39,7 +41,7 @@ export function mountChat(container, winnow, opts) {
   const answer = (text) => {
     const d = line('assistant', '');
     if (opts.renderAnswer) opts.renderAnswer(d, text); else d.textContent = text;
-    log.scrollTop = log.scrollHeight;
+    if (!replaying) scrollDown();   // rendered content is taller than the empty bubble line() measured
     return d;
   };
   const intro = () => line('assistant', opts.intro);
@@ -49,8 +51,12 @@ export function mountChat(container, winnow, opts) {
     try {
       const r = await winnow.api(`${winnow.base}/history?mode=${mode}`);
       if (r.turns.length) {
-        for (const t of r.turns) { if (t.role === 'user') line('user', t.content); else answer(t.content); }
-        if (!r.persisted) line('error', 'No case is open, so this conversation will not be kept.');
+        replaying = true;
+        try {
+          for (const t of r.turns) { if (t.role === 'user') line('user', t.content); else answer(t.content); }
+          if (!r.persisted) line('error', 'No case is open, so this conversation will not be kept.');
+        } finally { replaying = false; }
+        scrollDown();
       } else {
         intro();
       }

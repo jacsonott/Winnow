@@ -34,3 +34,33 @@ def test_long_cells_are_capped_and_a_stale_hit_has_no_column(client, store, writ
     store.db.commit()
     (h,) = client.get(f"/api/watchlist/hits?watchlist_id={wid}").json()
     assert h["column"] is None and h["value"] is None and h["preview"].startswith("x")
+
+
+def test_a_value_straddling_two_cells_is_a_hit_with_no_column(client, store, write_csv):
+    """The scan matches the row's cells joined with a space, so an
+    indicator can match across a cell boundary: no single column holds it,
+    but the row IS a hit. The hit list says so — column None, value the
+    stretch of the joined row around the match — rather than reporting the
+    row as if the indicator had been edited away."""
+    sid = store.ingest_csv(write_csv([["A", "B"], ["alpha", "beta"], ["nothing", "here"]], "s.csv"), build_fts=False)["id"]
+    wid = client.post("/api/watchlist", json={"value": "alpha beta", "kind": "other"}).json()["id"]
+    assert client.post(f"/api/watchlist/scan?source_id={sid}").json()["matched"][str(wid)] == 1
+    (h,) = client.get(f"/api/watchlist/hits?watchlist_id={wid}").json()
+    assert h["rid"] == 1 and h["column"] is None
+    assert h["value"] == "alpha beta" and h["preview"] == "alpha | beta"
+
+
+def test_hits_are_read_while_the_writer_lock_is_held(client, store, write_csv):
+    """The hit list is a read, on the reader pool (invariant #4) — it opens
+    while an import holds the writer lock, rather than queueing behind it."""
+    import threading
+    sid = store.ingest_csv(write_csv([["A"], ["rclone"]], "w.csv"), build_fts=False)["id"]
+    wid = client.post("/api/watchlist", json={"value": "rclone", "kind": "other"}).json()["id"]
+    client.post(f"/api/watchlist/scan?source_id={sid}")
+    out = []
+    with store.lock:
+        t = threading.Thread(target=lambda: out.append(store.indicator_hits(wid)))
+        t.start()
+        t.join(timeout=5)
+        assert not t.is_alive(), "indicator_hits waited on the writer lock"
+    assert out and out[0][0]["column"] == "A"

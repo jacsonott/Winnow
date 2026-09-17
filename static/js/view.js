@@ -21,6 +21,14 @@ export let rebuildSeq = 0;
 
 const SELECTION_REMAP_MAX = 20000;
 
+/* The picks a rebuild is carrying across, as row ids, until it has put
+   them back. A rebuild that starts while another's remap is still in
+   flight finds the picks already cleared (or still in the OLD view's
+   positions) — so it takes over these keys instead of reading S.selection.
+   Cleared once a rebuild restores them, and on a table switch. */
+let pendingKeys = null;
+export function dropPendingSelection() { pendingKeys = null; }
+
 export async function rebuildView({ keepScroll = true } = {}) {
   if (!S.sourceId) return;
   // Captured in virtual (row-space) pixels rather than as a raw scrollTop:
@@ -30,6 +38,9 @@ export async function rebuildView({ keepScroll = true } = {}) {
   const oldTotal = gridRowCount();
   const scroll = keepScroll ? vScroll($('body'), oldTotal, headH()) : 0;
   const spec = currentSpec();
+  // The cache key is the spec as the analyst set it: the op_token added
+  // next is fresh per rebuild, and keying on it meant no reopen ever hit.
+  const cacheKey = specKey(spec);
   spec.op_token = opToken();
   const seq = ++rebuildSeq;
   // Which table this rebuild is for; checked again before it paints.
@@ -38,11 +49,14 @@ export async function rebuildView({ keepScroll = true } = {}) {
   // still there to ask. Explicit picks only — a select-all is a statement
   // about THIS view. Capped: nobody remaps a hundred thousand hand-picks.
   let keys = null;
-  if (S.view && !S.selectAll && S.selection.size && S.selection.size <= SELECTION_REMAP_MAX && !S.groupByCols.length) {
+  if (pendingKeys && pendingKeys.sourceId === forSourceId && !S.selectAll && !S.selection.size) {
+    keys = pendingKeys.keys;   // a superseded rebuild's picks, not yet put back
+  } else if (S.view && !S.selectAll && S.selection.size && S.selection.size <= SELECTION_REMAP_MAX && !S.groupByCols.length) {
     try {
       keys = (await post('/api/view/keys', { view_id: S.view.view_id, positions: selPositions() })).keys;
     } catch { keys = null; }
   }
+  pendingKeys = keys ? { sourceId: forSourceId, keys } : null;
   let v;
   let seeded = [];
   setBusy(true);
@@ -116,7 +130,7 @@ export async function rebuildView({ keepScroll = true } = {}) {
   // wrong id, so the poison survives the next open.
   if (S.sourceId !== forSourceId) return;
   S.view = v;
-  S.viewCache.set(S.sourceId, { key: specKey(spec), view_id: v.view_id, row_count: v.row_count, elapsed_ms: v.elapsed_ms });
+  S.viewCache.set(S.sourceId, { key: cacheKey, view_id: v.view_id, row_count: v.row_count, elapsed_ms: v.elapsed_ms });
   clearPageCache();
   for (const [idx, rows] of seeded) {
     S.pages.set(idx, rows);
@@ -128,13 +142,15 @@ export async function rebuildView({ keepScroll = true } = {}) {
   // sort or filter to check something doesn't cost the selection; the
   // ones the new view no longer shows are counted, not silently lost.
   selClear();
+  S.selUndo = [];   // snapshots of the old positions would land on other rows
   S.selHidden = 0;
   if (keys) {
     try {
       const r = await post('/api/view/positions', { view_id: v.view_id, keys });
-      if (seq !== rebuildSeq || S.sourceId !== forSourceId) return;
+      if (seq !== rebuildSeq || S.sourceId !== forSourceId) return;   // pendingKeys stays for the rebuild that won
       for (const p of r.positions) selAdd(p);
       S.selHidden = r.missing;
+      pendingKeys = null;
     } catch { /* a lost selection is not worth a failed rebuild */ }
   }
   S.anchor = -1;
