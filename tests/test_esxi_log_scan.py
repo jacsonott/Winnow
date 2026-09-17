@@ -85,3 +85,22 @@ def test_no_chips_means_no_extensions_not_the_defaults(store, bundle, esxi_forma
     assert all(e["reason"] == "extension" for e in r["excluded"])
     r_default = store.scan_import_directory(str(bundle), filename_patterns=esxi_format.filename_patterns)
     assert "commands/localcli_network-ip.txt" in {m["rel_path"] for m in r_default["matched"]}
+
+
+def test_a_log_with_no_esxi_timestamps_is_one_row_per_line(esxi_format, tmp_path):
+    """The format claims every .log, so an Apache or application log lands
+    here too. Its lines carry no ESXi timestamp; the continuation fold
+    (a timestamp-less line joins the row before it) used to fold the whole
+    file into ONE row. A continuation only joins a row that HAS a
+    timestamp; everything else is a row of its own."""
+    p = tmp_path / "access.log"
+    p.write_text("".join(f'10.0.0.{i % 250} - - [14/Mar/2026:08:00:{i % 60:02d} +0000] "GET /{i} HTTP/1.1" 200 12\n' for i in range(300)))
+    out = esxi_format.parse(str(p), esxi_format.resolve_options({}))
+    rows = list(out["rows"])
+    assert len(rows) == 300
+    # …while a real continuation still folds onto its timestamped line
+    p2 = tmp_path / "hostd.log"
+    p2.write_text(LINE + "    at Foo.bar (foo.py:1)\n" + LINE)
+    out = esxi_format.parse(str(p2), esxi_format.resolve_options({}))
+    rows = list(out["rows"])
+    assert len(rows) == 2 and rows[0][-1].endswith("at Foo.bar (foo.py:1)")
