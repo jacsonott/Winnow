@@ -1,0 +1,104 @@
+"""The row detail pane goes with the grid.
+
+`#detail` and `#detailResize` sit beside `.main-content`, not inside the
+grid, so a page switch that only swapped the main views left the pane
+standing next to the SQL editor, the notes page or a plugin tab, showing a
+row of a grid that wasn't on screen — and with `d` and Escape gated to the
+grid, its own Close button was the only way out. Now it closes when a page
+takes over the main area, stays closed when the grid comes back, and closes
+on a table switch, where the row it shows belongs to the table being left.
+"""
+import pytest
+
+pytestmark = pytest.mark.ui
+
+
+def _open_pane(page):
+    # A click first, so the cursor sits on the row the pane shows — that is
+    # what the `d` toggle keys off when the pane is reopened later.
+    page.locator(".row").first.locator(".cell").first.click()
+    page.evaluate("() => __winnow.showDetail(0)")
+    page.wait_for_selector("#detail:not([hidden])")
+    assert page.locator("#detailResize").is_visible()
+
+
+def _assert_pane_closed(page):
+    assert not page.locator("#detail").is_visible()
+    assert not page.locator("#detailResize").is_visible()
+
+
+def _back_to_grid(page):
+    page.evaluate("() => __winnow.showGridTab()")
+    page.wait_for_selector("#grid:not([hidden])")
+    page.wait_for_function("() => __winnow.S.activeTab === 'grid'")
+
+
+def test_the_sql_page_closes_the_pane_and_it_stays_closed_on_return(page):
+    _open_pane(page)
+    page.locator("#tabSql").click()
+    page.wait_for_selector("#sqlview:not([hidden])")
+    _assert_pane_closed(page)
+    _back_to_grid(page)
+    _assert_pane_closed(page)
+    # Closed, not broken: the row is still current, so the toggle brings it
+    # back on request, and its own Close button still works.
+    page.evaluate("() => __winnow.toggleDetailPane()")
+    page.wait_for_selector("#detail:not([hidden])")
+    page.locator("#btnCloseDetail").click()
+    page.wait_for_selector("#detail", state="hidden")
+    _assert_pane_closed(page)
+
+
+def test_the_notes_page_closes_the_pane(page):
+    _open_pane(page)
+    try:
+        page.evaluate("() => __winnow.showNotesTab()")
+        page.wait_for_selector("#notesview:not([hidden])")
+        _assert_pane_closed(page)
+    finally:
+        _back_to_grid(page)
+    _assert_pane_closed(page)
+
+
+def test_a_plugin_tab_closes_the_pane(page, fake_plugin_mount):
+    # showPluginTab swaps views itself rather than through showMainView, so
+    # it is the route a hide placed in showMainView would have missed.
+    _open_pane(page)
+    page.evaluate("() => __winnow.showPluginTab('fake.t')")
+    page.wait_for_function("() => __winnow.S.activeTab === 'plugin:fake.t'")
+    _assert_pane_closed(page)
+
+
+def test_switching_tables_closes_the_pane_without_unbinding_the_note_box(page, tmp_path):
+    other = tmp_path / "other.csv"
+    other.write_text("Host,User\nh0,u0\nh1,u1\n", encoding="utf-8")
+    status = page.evaluate("""(path) => fetch('/api/ingest/path', { method: 'POST',
+      headers: { 'X-Timeline-Lite-Client': '1', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path, build_fts: false }) }).then((r) => r.status)""", str(other))
+    assert status == 200
+    page.evaluate("() => __winnow.loadSources(undefined, { navigate: false })")
+    page.wait_for_function("() => __winnow.S.sources.some((s) => s.name === 'other.csv')")
+    other_id = page.evaluate("() => __winnow.S.sources.find((s) => s.name === 'other.csv').id")
+    home_id = page.evaluate("() => __winnow.S.sourceId")
+    binding = "() => [document.getElementById('noteInput').dataset.rid, document.getElementById('noteInput').dataset.sourceId]"
+    try:
+        _open_pane(page)
+        bound = page.evaluate(binding)
+        assert bound[0] and bound[1]
+        page.evaluate("(id) => __winnow.openSource(id)", other_id)
+        page.wait_for_function("(id) => __winnow.S.sourceId === id && !!__winnow.S.view", arg=other_id)
+        _assert_pane_closed(page)
+        # Hidden, not unbound: the note autosave is a debounce that reads the
+        # box's rid/source_id when it fires, so a note typed just before the
+        # switch has to post against the row it was typed for.
+        assert page.evaluate(binding) == bound
+    finally:
+        # Shared server: take the extra table away and put the grid back on
+        # the fixture table the other modules expect.
+        page.evaluate("""(id) => fetch('/api/source/' + id, { method: 'DELETE',
+          headers: { 'X-Timeline-Lite-Client': '1' } })""", other_id)
+        page.evaluate("(id) => __winnow.loadSources(id)", home_id)
+        page.evaluate("(id) => __winnow.openSource(id)", home_id)
+        page.wait_for_function("(id) => __winnow.S.sourceId === id && !!__winnow.S.view", arg=home_id)
+        page.wait_for_selector(".row")
+    assert page.evaluate("() => __winnow.S.sources.some((s) => s.name === 'other.csv')") is False

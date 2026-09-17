@@ -6,6 +6,7 @@ import { recordTabVisit } from './tabhistory.js';
 import { renderHead, saveLayout } from './columns.js';
 import { $, ROW_H, api, el, post, toast } from './core.js';
 import { derivedOps } from './derived.js';
+import { hideDetailPane } from './detail.js';
 import { currentSpec, renderAdvancedChips, setSearchMode, updateSearchHint } from './filters.js';
 import { clearPageCache, headH, rScroll, render, rowAt, spacerPx } from './grid.js';
 import { closeAllGroupViews, drawRail, dropGrouping, regroupAll, renderGroupStrip, setGrouping } from './grouping.js';
@@ -697,6 +698,7 @@ export async function openSource(id, { skipBuild = false } = {}) {
   S.tagFilter = [];
   S.hideEmptyRows = false;
   S.cursor = -1;
+  hideDetailPane();    // it showed a row of the table being left (hide only — see detail.js)
   selClear();
   S.selUndo = [];      // another table's positions
   S.selHidden = 0;

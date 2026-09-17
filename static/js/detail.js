@@ -312,7 +312,7 @@ export function maybeShowDetail(pos) {
 export function showDetail(pos) {
   const r = rowAt(pos);
   const d = $('detail');
-  if (!r) { d.hidden = true; $('detailResize').hidden = true; return; }
+  if (!r) { hideDetailPane(); return; }
   d.hidden = false;
   $('detailResize').hidden = false;
   $('detailTitle').textContent = `Line ${r.rid}`;
@@ -506,10 +506,20 @@ export function applyDetailPrefs() {
   $('btnDetailDock').title = S.detailPrefs.dock === 'right' ? 'Dock to the bottom' : 'Dock to the right';
 }
 
+/* The pane and its resize handle hide together. Hiding never touches
+   #noteInput's dataset (rid/sourceId): saveNote is a 500 ms debounce that
+   reads them when it fires, so a note typed just before the pane went
+   away still posts against the row it was typed for. Called on every
+   page switch (syncTabChrome), table switch (openSource) and case open,
+   as well as by the pane's own Close button and the `d` toggle. */
+export function hideDetailPane() {
+  $('detail').hidden = true;
+  $('detailResize').hidden = true;
+}
+
 export function toggleDetailPane() {
-  const d = $('detail');
-  if (d.hidden) { if (S.cursor >= 0 && rowAt(S.cursor)) showDetail(S.cursor); }
-  else { d.hidden = true; $('detailResize').hidden = true; }
+  if ($('detail').hidden) { if (S.cursor >= 0 && rowAt(S.cursor)) showDetail(S.cursor); }
+  else hideDetailPane();
 }
 
 /* DOM wiring for this module, called once by main.js. Handlers can't
@@ -566,7 +576,7 @@ $('detailResize').addEventListener('mousedown', (e) => {
   document.addEventListener('mouseup', up);
 });
 
-$('btnCloseDetail').onclick = () => { $('detail').hidden = true; $('detailResize').hidden = true; };
+$('btnCloseDetail').onclick = () => hideDetailPane();
 
 $('btnCopyRow').onclick = () => {
   const r = rowAt(S.cursor);

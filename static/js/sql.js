@@ -3,6 +3,7 @@
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { recordTabVisit } from './tabhistory.js';
 import { $, api, debounce, el, post, toast } from './core.js';
+import { hideDetailPane } from './detail.js';
 import { renderTagToolbar } from './grid.js';
 import { hidePluginViews, sqlResultNodes, syncPluginPanels } from './plugins.js';
 import { setActiveSqlResult } from './sqlassist.js';
@@ -233,12 +234,22 @@ export async function closeSqlTab(t) {
    a row of controls that silently does nothing reads as broken, and the
    space belongs to the pane you actually switched to.
 
-   Called by every show*Tab, so there's one place this rule lives rather
-   than four copies drifting apart. Grid: showGridTab re-runs checkPresets
-   afterward, which is what brings the banner back when it applies. */
+   The row detail pane is the same kind of thing: it shows a grid row, and
+   it sits beside .main-content rather than inside the grid, so the view
+   swap the pages do never reaches it (docs/notes/ui.md).
+
+   Called by every writer of S.activeTab — including showPluginTab, which
+   swaps views itself rather than through showMainView — so there's one
+   place this rule lives rather than copies drifting apart. Grid:
+   showGridTab re-runs checkPresets afterward, which is what brings the
+   banner back when it applies. */
 export function syncTabChrome() {
   const isGrid = S.activeTab === 'grid';
   $('toolbar').hidden = !isGrid;
+  // The detail pane reads a grid row, and no page shows the grid — but a
+  // one-way hide only: `hidden = !isGrid` would force it open, possibly
+  // empty, on every return to the grid.
+  if (!isGrid) hideDetailPane();
   syncPluginPanels();   // plugin toolbar panels live and die with the toolbar
   syncDiffBanner();     // as does a session comparison's banner
   renderTagToolbar();   // and the "N selected" tagging bar

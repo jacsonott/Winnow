@@ -8,6 +8,7 @@ import { loadPlugins, openImportModal, queueFiles } from './importer.js';
 import { inFlightWork, startJobsPoll } from './jobs.js';
 import { resetPluginTabMounts } from './plugins.js';
 import { resetDerivedSuggestions } from './derived.js';
+import { hideDetailPane } from './detail.js';
 import { resetJobState } from './jobs.js';
 import { resetNotes } from './notes.js';
 import { resetWatchlist } from './watchlist.js';
@@ -164,6 +165,10 @@ export async function openCase(path, opts = {}) {
   // machine default), and the server reloaded its registry when this case
   // opened — refetch so tabs/formats/panel reflect THIS case's plugins.
   await loadPlugins();
+  // The pane shows a row of the previous case's table; the grid it
+  // belongs to is about to be rebuilt against this one. Before showApp,
+  // so it is never on screen for a frame beside the new case.
+  hideDetailPane();
   if (S.activeTab !== 'grid') showGridTab();
   setBrandLabel(res.name);
   showApp();
