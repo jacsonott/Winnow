@@ -5,7 +5,7 @@ import { $, OVERSCAN, PAGE, ROW_H, api, debounce, post, setBusy, toast } from '.
 import { currentSpec } from './filters.js';
 import { clearPageCache, headH, rScroll, render, rowAt, spacerPx, vScroll } from './grid.js';
 import { drawRail, regroupAll } from './grouping.js';
-import { armOpCancel, opToken } from './jobs.js';
+import { armOpCancel, followFtsBuild, opCancelCurrent, opToken } from './jobs.js';
 import { S, gridRowCount, selAdd, selClear, selCount, selFirst, selPositions, specKey } from './state.js';
 import { refreshTagCounts } from './tags.js';
 import { updateFiltersButton } from './timeframe.js';
@@ -41,18 +41,26 @@ export function dropPendingSelection() { pendingKeys = null; }
    (one is the presence stream) until its build reached the lock and
    failed fast there: a pre-cancelled token is only checked once the lock
    is HELD (Store._interruptible), so cancel alone shortens the work, not
-   the wait. Two or three of those and even reader-pool page fetches
-   queued in the browser — the one way the grid itself can freeze. */
+   the wait. Two or three of those plus the jobs poll could use the budget
+   up, and then even reader-pool page fetches would queue in the browser —
+   the one way the grid itself can freeze. (Reasoning from the connection
+   budget; nobody measured it.) */
 let inflight = null;   // { token, controller, seq, sourceId }
 
+/* Cancels the build in flight, if any. Returns whether its cancel chip
+   was already up: the build superseding it arms its own at once then
+   rather than after the usual 1.2s, since a chip that blinks off on
+   every keystroke of a long search is a button the analyst reaches for
+   and finds gone. */
 function cancelInflight() {
   const prev = inflight;
-  if (!prev) return;
+  if (!prev) return false;
   inflight = null;
   // Fire-and-forget: a miss (the build already finished, or never
   // reached the server) is a no-op there and of no interest here.
   post('/api/cancel_op', { token: prev.token }).catch(() => {});
   prev.controller.abort();
+  return opCancelCurrent === prev.token;
 }
 
 /* Whether a rebuild for the open table is in flight. The grid's expired-
@@ -187,7 +195,7 @@ export async function rebuildView({ keepScroll = true, keepRow = true } = {}) {
   // starts during the keys lookup below finds this one registered and
   // aborts it before it ever posts: fetch rejects at once on a signal
   // that is already aborted.
-  cancelInflight();
+  const chipUp = cancelInflight();
   const controller = new AbortController();
   inflight = { token: spec.op_token, controller, seq, sourceId: forSourceId };
   // See the remap below: what's picked, as row ids, while the old view is
@@ -201,12 +209,19 @@ export async function rebuildView({ keepScroll = true, keepRow = true } = {}) {
       keys = (await post('/api/view/keys', { view_id: S.view.view_id, positions: selPositions() })).keys;
     } catch { keys = null; }
   }
+  // Superseded during that lookup: the newer rebuild has already cancelled
+  // this one's token and aborted its controller, and none of this one's
+  // chrome — busy bar, chip, indicator — has started, so there is nothing
+  // to undo. Starting it now would put this rebuild's indicator over the
+  // newer one's and then, in the finally below, take it down and restore
+  // the old count while the build that is actually running goes unmarked.
+  if (seq !== rebuildSeq) return;
   pendingKeys = keys ? { sourceId: forSourceId, keys } : null;
   let v;
   let seeded = [];
   let pos = null;
   setBusy(true);
-  const disarmCancel = armOpCancel(spec.op_token);
+  const disarmCancel = chipUp ? armOpCancel(spec.op_token, 0) : armOpCancel(spec.op_token);
   startIndicator(seq, forSourceId, spec);
   try {
     try {
@@ -312,6 +327,15 @@ export async function rebuildView({ keepScroll = true, keepRow = true } = {}) {
     S.pages.set(idx, rows);
     for (const r of rows) S.rowsByPos.set(r.pos, r);
   }
+  // The count goes in before the selection remap below awaits. The
+  // indicator, stopped in the finally, left its last "Searching… 3.2 s"
+  // frozen in #viewStats, and a rebuild that started during that await
+  // read the frozen label as the text to come back to on a cancel — then
+  // put it back as the permanent stats line. The remap doesn't change
+  // the count, so nothing here waits on it.
+  const src = S.sources.find((s) => s.id === S.sourceId);
+  $('viewStats').innerHTML =
+    `<b>${v.row_count.toLocaleString()}</b> of ${src.row_count.toLocaleString()} rows · ${v.elapsed_ms} ms`;
   // Picks are positions, and positions mean different rows now — but the
   // ROWS the analyst picked are the same rows. Carry them over by id
   // (keys captured before the rebuild, positions looked up after) so a
@@ -344,11 +368,8 @@ export async function rebuildView({ keepScroll = true, keepRow = true } = {}) {
     if (pos != null) S.cursor = pos;
     else if (S.cursor >= 0) { S.cursor = -1; $('detail').hidden = true; $('detailResize').hidden = true; }
   }
-  const src = S.sources.find((s) => s.id === S.sourceId);
   $('spacerY').style.height = spacerPx(v.row_count) + 'px';
   $('noRows').hidden = v.row_count > 0;
-  $('viewStats').innerHTML =
-    `<b>${v.row_count.toLocaleString()}</b> of ${src.row_count.toLocaleString()} rows · ${v.elapsed_ms} ms`;
   $('body').scrollTop = rScroll($('body'), v.row_count, scroll, headH());
   if (S.groupByCols.length) {
     // The old view_id (and any expanded groups' sub-views) is gone now —
@@ -365,6 +386,11 @@ export async function rebuildView({ keepScroll = true, keepRow = true } = {}) {
     { detail: { sourceId: S.sourceId, viewId: v.view_id, rowCount: v.row_count } }));
   refreshTagCounts(); // the scope changed, so every ribbon count did too
   updateFiltersButton();
+  // A search on a table with no trigram index is what starts the build —
+  // server-side, from inside build_view's contains and advanced branches
+  // (Store._ensure_fts_building; regex never indexes) — and the view's
+  // payload says nothing about it. The client has to ask: followFtsBuild.
+  if (!src.has_fts && spec.search_mode !== 'regex' && specSearchTerm(spec)) followFtsBuild(src.id);
 }
 
 export const rebuildSoon = debounce(() => rebuildView(), 220);

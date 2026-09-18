@@ -204,22 +204,69 @@ def test_a_filter_build_says_filtering(page):
         _reset(page)
 
 
-def test_the_hint_names_the_index_build_and_the_regex_scan(page):
+def test_the_first_search_on_an_unindexed_table_follows_the_index_build(page):
+    """The server starts the trigram build from inside the search's own
+    build (Store._ensure_fts_building), the view's payload says nothing
+    about it, and the jobs poll is not running on an idle case. So the
+    client has to ask: a search build landing on a table whose record says
+    no index refetches the sources, and the poll then follows the build to
+    its end — the hint, the panel row, the toast.
+
+    The fixture's table was imported --no-fts, but the session's first
+    search had it indexed long ago, so this test plays the server's part
+    for /api/sources: an unindexed table with nothing running, then — once
+    the search is in — the build it started, then the finished index. What
+    the page does with each answer is the thing under test; nothing here
+    writes client state by hand."""
+    sid = page.evaluate("() => __winnow.S.sourceId")
+    phase = {"n": 0}
+    asks = []
+
+    def on_sources(route):
+        asks.append(phase["n"])
+        resp = route.fetch()
+        rows = resp.json()
+        for s in rows:
+            if s["id"] == sid:
+                s["has_fts"] = 1 if phase["n"] == 2 else 0
+                s["fts_building"] = phase["n"] == 1
+        route.fulfill(response=resp, json=rows)
+
+    page.route("**/api/sources", on_sources)
+    # Boot against that server: the page's record of the table says no
+    # index, as it would on a machine where nobody has searched it yet.
+    page.reload(wait_until="networkidle")
+    page.wait_for_selector(".row")
+    page.wait_for_function("() => __winnow.S.view && __winnow.busyCount === 0")
+    _arm_recorders(page)
+    asked = len(asks)
+    page.click("#btnSearchToggle")
     try:
-        page.evaluate("""() => {
-          const s = __winnow.S.sources.find((x) => x.id === __winnow.S.sourceId);
-          s.fts_building = true; s.has_fts = false;
-          __winnow.updateSearchHint();
-        }""")
-        assert page.locator("#searchMode").text_content() == "substring · index building"
-        page.evaluate("() => { __winnow.S.searchMode = 'advanced'; __winnow.updateSearchHint(); }")
-        assert page.locator("#searchMode").text_content() == "advanced · index building"
-        page.evaluate("() => { __winnow.S.searchMode = 'regex'; __winnow.updateSearchHint(); }")
-        assert page.locator("#searchMode").text_content() == "regex · full scan"
+        assert page.locator("#searchMode").text_content() == "substring"
+        assert len(asks) == asked   # an idle case asks nothing
+        page.locator("#search").fill("4624")
+        phase["n"] = 1   # the search's build has started the index build
+        page.wait_for_function("() => __winnow.S.view && __winnow.S.view.row_count === 50")
+        # Landing is what asks, and the hint says what the answer was.
+        page.wait_for_function("() => document.getElementById('searchMode').textContent === 'substring · index building'")
+        assert len(asks) > asked
+        page.wait_for_selector("#jobsPanel .job-phase.indexing")
+        phase["n"] = 2   # the index landed
+        page.wait_for_function("() => document.getElementById('searchMode').textContent === 'substring'")
+        page.wait_for_function("() => (window.__toasts || []).some((t) => t.includes('Search index ready'))")
+        page.wait_for_function("() => !document.querySelector('#jobsPanel .job-phase.indexing')")
     finally:
-        page.evaluate("""() => {
-          const s = __winnow.S.sources.find((x) => x.id === __winnow.S.sourceId);
-          s.fts_building = false;
-          __winnow.S.searchMode = 'contains';
-          __winnow.updateSearchHint();
-        }""")
+        page.unroute("**/api/sources")
+        _reset(page)
+
+
+def test_the_hint_names_the_regex_scan(page):
+    """Regex never uses the index, whatever state it is in."""
+    page.click("#btnSearchToggle")
+    try:
+        page.click('#searchModeToggle button[data-mode="regex"]')
+        page.wait_for_function("() => document.getElementById('searchMode').textContent === 'regex · full scan'")
+    finally:
+        page.click('#searchModeToggle button[data-mode="contains"]')
+        page.wait_for_function("() => document.getElementById('searchMode').textContent === 'substring'")
+        _reset(page)
