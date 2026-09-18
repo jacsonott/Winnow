@@ -325,6 +325,27 @@ see [docs/notes/README.md](README.md) for the whole set.
   server.py maps `OpCancelled` → HTTP 499 in one exception handler; the frontend
   arms a cancel chip (`armOpCancel`) only after ~1.2s in flight, so fast
   rebuilds never flash it.
+  **The frontend also cancels on supersede** (view.js `rebuildView`,
+  module-level `inflight`): a rebuild that starts while another is in
+  flight POSTs `cancel_op` for that one's token *and* aborts its fetch
+  (an `AbortController`, threaded through core.js `api()`/`post()`'s
+  `{ signal }`) before posting its own. Both halves are load-bearing.
+  Without the cancel, every keystroke past the search box's debounce
+  queued a whole build on the writer lock and each stale one still
+  committed — evicting the live view, so the grid's next page fetch
+  409'd into yet another rebuild — while every lock-taking read (the tab
+  strip, ribbon counts, tagging) waited behind the queue. Without the
+  abort, the superseded request kept one of the browser's six per-host
+  connections (one is the presence stream) until its build reached the
+  lock: a pre-cancelled token is only checked once `self.lock` is *held*
+  (`with self.lock, self._interruptible(...)`), so the cancel shortens the
+  work, not the wait, and two or three queued builds plus the jobs poll
+  could starve even reader-pool page fetches in the browser. A superseded
+  build's 499/abort is silent (the same seq/source guard the success path
+  paints behind); only the chip's cancel toasts. The grid's expired-view
+  recovery declines to rebuild while a build for the open table is in
+  flight (`rebuildInFlight`) — that build's landing is the recovery, and
+  a rebuild from the 409 would cancel it and start the same spec over.
 - **The 2026-08 hot-path perf pass** (validated with `python3 -m bench
   --vs-ref` at both the 200k and 1.2M tiers — 0 slower, footprint
   unchanged), the shapes and their reasons:

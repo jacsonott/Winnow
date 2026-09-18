@@ -5,6 +5,7 @@ progress, and armOpCancel.
 import { $, api, el, post, toast } from './core.js';
 import { clientLog } from './errlog.js';
 import { offerTimestampColumns } from './derived.js';
+import { updateSearchHint } from './filters.js';
 import { scanWatchlistForSources } from './watchlist.js';
 import { loadSources } from './sources.js';
 import { S } from './state.js';
@@ -232,10 +233,17 @@ export async function pollJobs() {
     }
   }
   for (const src of S.sources || []) {
-    if (src.fts_building) ftsWatch.add(src.id);
-    else if (ftsWatch.has(src.id)) {
+    if (src.fts_building) {
+      if (ftsWatch.has(src.id)) continue;
+      ftsWatch.add(src.id);
+      // The open table's search hint names the build while it runs
+      // (updateSearchHint) — it is only ever computed on demand, so the
+      // start and the end of the build are the two moments to recompute it.
+      if (src.id === S.sourceId) updateSearchHint();
+    } else if (ftsWatch.has(src.id)) {
       ftsWatch.delete(src.id);
       if (src.has_fts) toast(`Search index ready for ${src.name}`, 3000);
+      if (src.id === S.sourceId) updateSearchHint();
     }
   }
   renderJobsPanel();

@@ -8,7 +8,7 @@ import { ensureGroupPage, findGroupAt, groupCoordAt, groupDataRowAt, isLeafLevel
 import { S, cellInRange, cellRangeRows, endKeyboardRun, gridRowCount, selAdd, selClear, selCount, selHas, selRangeApply, selRanges, selRemove, selReplace, selSnapshot, selToggle, selUndoAvailable, selUndoLast, startKeyboardRun } from './state.js';
 import { applyTag } from './tags.js';
 import { displayCell } from './tsformat.js';
-import { rebuildView } from './view.js';
+import { rebuildInFlight, rebuildView } from './view.js';
 
 /* ------------------------------------------------------------ row paging */
 
@@ -119,7 +119,11 @@ export function ensurePage(idx, { keep, prefetch } = {}) {
         if (!$('detail').hidden && S.cursor >= 0 && rowAt(S.cursor)) showDetail(S.cursor);
       }
     } catch (e) {
-      if (String(e.message).includes('expired')) rebuildView();
+      // Expired = evicted by a build that finished after it was superseded.
+      // If the superseding build is still in flight its landing is the
+      // recovery — a rebuild from here would cancel it and start the same
+      // spec over. Nothing in flight means nobody else will: rebuild.
+      if (String(e.message).includes('expired') && !rebuildInFlight()) rebuildView();
     } finally {
       S.pending.delete(idx);
     }

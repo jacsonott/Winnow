@@ -616,6 +616,16 @@ section.page-with-panels { flex-direction: row; }
   transition: border-color var(--transition-fast) var(--ease);
 }
 #search:focus { border-color: var(--accent); outline: none; }
+/* A build the box is the cause of (view.js startIndicator sets aria-busy
+   for a spec with a search): the border breathes accent-dim → accent
+   until the view lands. Tokens only. Under reduced motion and remote
+   mode the global kill-switch stops the animation and the static
+   accent-dim border is what remains — still a state, just a still one. */
+#search[aria-busy="true"] { border-color: var(--accent-dim); animation: search-busy 1.2s var(--ease) infinite; }
+@keyframes search-busy {
+  0%, 100% { border-color: var(--accent-dim); }
+  50%      { border-color: var(--accent); }
+}
 .hint {
   position: absolute; right: 7px; font-size: 10px; color: var(--dim);
   letter-spacing: .08em; text-transform: uppercase; pointer-events: none;

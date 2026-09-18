@@ -566,6 +566,31 @@ see [docs/notes/README.md](README.md) for the whole set.
   `tests/ui/test_tag_filter_keeps_row.py`; the materialised branch of
   `find_position` (every sort, filter and merge) by
   `tests/test_row_position_merge.py`.
+- **A running build says so, and a superseded one says nothing.** While
+  `rebuildView` has a build in flight, `#viewStats` reads
+  `Searching "term"… 3.2 s` (the spec has a search — the box's text, or
+  the advanced terms) or `Filtering… 3.2 s`, on a 250ms timer
+  (`BUILD_TICK_MS`; a build that lands inside the first tick never shows
+  it, the same rule the cancel chip's 1.2s follows), and `#search` carries
+  `aria-busy="true"` — a token-only border pulse — for a build with a
+  search in it, not for a header-box filter. The count from before the
+  build comes back when it is cancelled or fails (the old rows are still
+  the rows on screen); a build that lands writes its own. The indicator
+  belongs to the newest rebuild: a burst of keystrokes hands the text
+  from before the *first* of them along, so a cancel never restores
+  `Filtering… 0.3 s`, and a table switch under it stops it without
+  restoring anything (the stats are the other table's now). The 2px bar
+  and the chip were the only running state before; an analyst watching
+  a full-table scan saw the old count and nothing moving. `updateSearchHint`
+  adds `index building` while the open table's trigram index is still
+  being built (`fts_building && !has_fts` — the first search on a table
+  starts it, and scans the table until it lands), recomputed by the jobs
+  poll when the build starts and when it finishes; regex is always
+  `full scan`. A rebuild that supersedes one in flight cancels it —
+  server-side token and client-side fetch both, see
+  [store.md](store.md)'s cancellable-ops entry — and the superseded
+  build's 499/abort is silent: no toast, no repaint. Only the chip's
+  cancel toasts. `tests/ui/test_search_supersede.py`.
 - **Stored keymaps are migrated on load, not merged blindly.**
   `loadKeymap` used to be `{...DEFAULT_KEYMAP, ...stored}`, which means a
   returning analyst's localStorage outranks every later change to the
