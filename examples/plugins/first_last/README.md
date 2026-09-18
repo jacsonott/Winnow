@@ -28,8 +28,8 @@ placements — the keyboard/trackpad path):
 | **Ordered by** | One column that defines first/last (defaults to the first datetime column); ties break by file order, deterministically |
 | **Include columns** | Carried into the output next to the description, valued from each bookend's own row — drag the chips **or the preview's headers** to set their order |
 | **Total up** | Number columns summed over each group's **whole** set of rows, not just its two bookends — bytes moved across a session, events in a burst. Both bookends of a group carry the same total. A non-number column is refused rather than summed to zero |
-| **Filters** | Scope which rows participate — same operators as the grid |
-| **Description** | Free text + placeholders: `{which}` → First/Last (or Only, for a one-row group), `{count}` → group size, `{Column}` → that row's own value, `{sum:Column}` / `{min:Column}` / `{max:Column}` → a Total-up column's group total, smallest and largest, formatted like the Sum column (min and max ride the same window; only the sum is an output column). Click a chip to insert. A typo'd placeholder fails the preview by name, never ships garbage. The colon form is the namespace for computed values: a plain name is always a field, so a column called `count` or `sum` can't collide with a function |
+| **Filters** | Scope which rows participate — same operators as the grid. The value list behind *is any of* / *is none of* has a search box; **All** and **None** act on what the search leaves (so "type `jsmith`, All, Apply" works), and a note says when the list is the 500 most common values rather than every one. The tag list under *Only rows with tags* has the same search |
+| **Description** | Free text + placeholders: `{which}` → First/Last (or Only, for a one-row group), `{count}` → group size, `{Column}` → that row's own value — **any** column of the table, whether or not it is grouped, ordered or included (the windowed pass projects whatever the template names), `{sum:Column}` / `{min:Column}` / `{max:Column}` → a Total-up column's group total, smallest and largest, formatted like the Sum column (min and max ride the same window; only the sum is an output column). Click a chip to insert (the column chips follow the field search), or type `{` in the box to complete a name: what follows the brace narrows the list, ↑/↓ pick, Enter or Tab inserts, Escape closes, Ctrl+Space opens it anywhere. A typo'd placeholder fails the preview by name, never ships garbage. The colon form is the namespace for computed values: a plain name is always a field, so a column called `count` or `sum` can't collide with a function |
 | **Layout** | Drag the rail's right edge to resize it (remembered on this machine; double-click resets). Drag a preview header's right edge to resize that column (per sheet; double-click fits) |
 | **Auto-update** | On by default: the preview re-runs ~350 ms after any change. Off (remembered on this machine), changes mark the preview *Changed — press Refresh* and nothing runs until you do — easier on a very large table |
 
@@ -73,4 +73,5 @@ first_last/
 
 Backend tests live in `tests/test_plugins.py` (`-k first_last`) and
 `tests/test_firstlast_timeline.py`; the tab itself is driven by
-`tests/ui/test_firstlast_rework.py`.
+`tests/ui/test_firstlast_rework.py`, `tests/ui/test_firstlast_autocomplete.py` and
+`tests/ui/test_firstlast_filter_search.py`.

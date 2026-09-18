@@ -17,6 +17,7 @@ import { loadCaseVariables } from './savedfilters.js';
 import { S } from './state.js';
 import { alertDialog, closeModal, confirmDialog, modal, promptDialog } from './ui.js';
 import { updateTimeRangeButton } from './timeframe.js';
+import { histogramOpen } from './histogram.js';
 
 /* Settings → Plugins: everything about drop-in extensions in one place —
    every plugin found in the plugins directory (enabled, disabled, or
@@ -497,8 +498,8 @@ export function buildPluginTabContext(tab, kind = 'tab') {
       // The grid's current view — what the table is showing right now,
       // filters/search/timeframe applied — or null before a table is open.
       // Hand view_id to a plugin route that reads THROUGH the view (the
-      // table_histogram example's Store.time_histogram) to describe
-      // exactly the rows on screen.
+      // shape Store.time_histogram gives the built-in histogram strip,
+      // static/js/histogram.js) to describe exactly the rows on screen.
       get view() { return S.view ? { view_id: S.view.view_id, row_count: S.view.row_count } : null; },
       // The case's variables as {name: value} — engagement name, API base
       // URL, a document link. Case data, never secrets.
@@ -673,8 +674,11 @@ function notesPageApi(key) {
    and the SQL and Notes pages' (register_page_panel — a side column).
    Mounted once per plugin gen like a tab; hidden/shown after that, with
    onShow/onHide. The toggle persists per browser, keyed by the
-   namespaced panel id, so an analyst who keeps the histogram open gets
-   it back on the next case. */
+   namespaced panel id, so an analyst who keeps a panel open gets it
+   back on the next case. The grid host is shared with the built-in
+   histogram strip (histogram.js, its own pref and section): this module
+   still owns the host's `hidden`, and asks histogramOpen() so the strip
+   shows for either kind. */
 const PANEL_PREFS_KEY = 'winnow.panels';
 const PAGE_PANEL_W_KEY = 'winnow.pagepanels.width';
 const PAGE_PANEL_MIN_W = 260;
@@ -784,7 +788,9 @@ export function syncPluginPanels() {
     const hostEl = $(host.host);
     if (!hostEl) continue;
     const isPage = host.visible();
-    let any = false;
+    // The built-in histogram counts as an open panel in the grid host —
+    // without this a plugin toggled off would hide an open histogram.
+    let any = host === PANEL_HOSTS.grid && isPage && histogramOpen();
     for (const [id, m] of pluginPanelMounts) {
       if (m.host !== host) continue;
       const show = isPage && pluginPanelOpen(id);
