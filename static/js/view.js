@@ -155,16 +155,20 @@ export function cursorRowAnchor({ cursorOnly = false } = {}) {
   return r ? { source_id: r.source_id, rid: r.rid } : null;
 }
 
-/* Where `anchor` sits in the view just built — or null when the view no
-   longer has that row, or the view itself is already gone (a 409: evicted
-   by a newer rebuild before this asked). Never rejects: the tag chips and
-   the timeframe toggle call rebuildView without awaiting it, so a throw
-   here would be an unhandled rejection over a grid that is otherwise fine. */
+/* Where `anchor` sits in the view just built: a position; null when the
+   view no longer has that row; undefined when the question couldn't be
+   asked — the view was already gone (a 409: evicted by a newer rebuild
+   before this landed) or the request itself failed. The two non-answers
+   are kept apart because they mean different things to the cursor: null
+   clears it, undefined leaves it alone, since the row may well still be
+   there. Never rejects: the tag chips and the timeframe toggle call
+   rebuildView without awaiting it, so a throw here would be an unhandled
+   rejection over a grid that is otherwise fine. */
 export async function rowPositionIn(v, anchor, signal) {
   try {
     const { pos } = await api(`/api/row_position?view_id=${v.view_id}&source_id=${anchor.source_id}&rid=${anchor.rid}`, { signal });
     return pos == null ? null : pos;
-  } catch { return null; }
+  } catch { return undefined; }
 }
 
 export async function rebuildView({ keepScroll = true, keepRow = true } = {}) {
@@ -179,8 +183,14 @@ export async function rebuildView({ keepScroll = true, keepRow = true } = {}) {
   // resolve it. keepRow:false is for a navigation that means "the top of a
   // fresh table" — a dashboard drill, openSource's first build — where
   // there is no place to keep. With keepScroll the viewport stays where it
-  // is and only the cursor follows the row, so only the cursor counts.
-  const anchor = keepRow ? cursorRowAnchor({ cursorOnly: keepScroll }) : null;
+  // is, and the one thing that would notice a re-pointed cursor is an open
+  // detail pane (grid.js re-points it at rowAt(S.cursor) as pages land, so
+  // a number left behind puts a stranger in it): the row is captured for
+  // the pane's sake alone — the cursor only, and only while the pane is
+  // open. Pane closed, nothing is captured and the cursor keeps its number,
+  // which is what the header box always did — the highlight stays at its
+  // screen spot — and typing pays for no lookup (see the one below).
+  const anchor = keepRow && (!keepScroll || !$('detail').hidden) ? cursorRowAnchor({ cursorOnly: keepScroll }) : null;
   const spec = currentSpec();
   // The cache key is the spec as the analyst set it: the op_token added
   // next is fresh per rebuild, and keying on it meant no reopen ever hit.
@@ -262,8 +272,12 @@ export async function rebuildView({ keepScroll = true, keepRow = true } = {}) {
     // and recentring afterwards painted the target rows as placeholders for
     // a round trip, the exact flash the seed exists to remove. With
     // keepScroll the viewport doesn't move and the answer only re-points
-    // the cursor, so the lookup rides alongside the seed instead of ahead
-    // of it and costs the paint nothing.
+    // the cursor for the open pane, so the lookup is issued alongside the
+    // seed and awaited after it — the paint still waits for the slower of
+    // the two. That is why it isn't issued at all with the pane closed (see
+    // the anchor above): on a materialised view find_position is a scan of
+    // the whole view table (pos is its only key), and every debounced
+    // keystroke in a header box would pay it before the grid could repaint.
     const posP = anchor && v.row_count ? rowPositionIn(v, anchor, controller.signal) : Promise.resolve(null);
     if (!keepScroll) {
       pos = await posP;
@@ -360,13 +374,27 @@ export async function rebuildView({ keepScroll = true, keepRow = true } = {}) {
   // carry. Left as a number it names whatever row now holds that position
   // — off-screen after a chip toggle widened the view, and with the detail
   // pane open (grid.js re-points it at rowAt(S.cursor) as pages land) a
-  // silent wrong-row display. Re-point it at the same row by identity, or
-  // clear it, pane and all, when this view no longer has that row: an
-  // honest empty is better than a highlight on a stranger. Untouched under
-  // a grouping (regroupAll owns the cursor there) and for keepRow:false.
+  // silent wrong-row display. Where a row was captured: re-point the
+  // cursor at it by identity, or clear it, pane and all, when this view no
+  // longer has that row (null) — an honest empty is better than a
+  // highlight on a stranger. A lookup that failed (undefined) is neither
+  // answer; the row may well still be here, so the cursor is left as it
+  // was for the next rebuild to resolve. Where no row was captured, only a
+  // landing at the top with a cursor still set is acted on: its page had
+  // left the cache (trimPageCache, once the analyst scrolled far from it)
+  // and the number would name a stranger at the top of the new view. A
+  // keepScroll rebuild that captured nothing — pane closed, or that page
+  // gone — touches nothing: the viewport didn't move, and the highlight
+  // stays where it was. Untouched under a grouping (regroupAll owns the
+  // cursor there) and for keepRow:false.
   if (keepRow && !S.groupByCols.length) {
-    if (pos != null) S.cursor = pos;
-    else if (S.cursor >= 0) { S.cursor = -1; $('detail').hidden = true; $('detailResize').hidden = true; }
+    const drop = () => { S.cursor = -1; $('detail').hidden = true; $('detailResize').hidden = true; };
+    if (anchor) {
+      if (pos != null) S.cursor = pos;
+      else if (pos === null) drop();
+    } else if (!keepScroll && S.cursor >= 0) {
+      drop();
+    }
   }
   $('spacerY').style.height = spacerPx(v.row_count) + 'px';
   $('noRows').hidden = v.row_count > 0;

@@ -550,11 +550,24 @@ see [docs/notes/README.md](README.md) for the whole set.
   page-0 seed painted the target rows as placeholders for a round trip),
   and after the seq/source guards the cursor is re-pointed by identity.
   Three rules. With `keepScroll: true` (header-box typing, a sort click)
-  the viewport never moves and only the cursor follows — the lookup runs
-  alongside the seed rather than ahead of it, so typing pays no latency
-  for it, and it is skipped outright when there is no cursor. A row the
-  narrower view no longer has clears the cursor and hides the detail pane
-  rather than leaving a stale number. `keepRow: false` is for a navigation
+  the viewport never moves, so the one thing that would notice a
+  re-pointed cursor is an open detail pane (grid.js re-points it at
+  `rowAt(S.cursor)` as pages land — a number left behind puts a stranger
+  in it): the lookup is issued only while the pane is open, alongside the
+  seed and awaited before the paint, and skipped otherwise, leaving the
+  cursor the number it was — the header box's old behaviour, the highlight
+  keeping its screen spot. The skip is not a nicety: on a materialised
+  view `find_position` is a scan of the whole view table (`pos` is its
+  only key), and every debounced keystroke would pay it before the grid
+  could repaint. A row the narrower view no longer has (`pos: null`)
+  clears the cursor and hides the detail pane rather than leaving a stale
+  number; a lookup that failed (a 409 from a view a newer rebuild already
+  evicted, a dropped request — `rowPositionIn` returns `undefined`) is
+  not that answer and leaves the cursor alone for the next rebuild to
+  resolve. A cursor whose page has left the cache can't be captured at all
+  (`cursorRowAnchor` is null): a `keepScroll: true` rebuild then touches
+  nothing, and a landing at the top clears it, since the number would
+  name a stranger there. `keepRow: false` is for a navigation
   that means "the top of a fresh table" (a dashboard drill, `openSource`'s
   first build). The `/api/row_position` GET has its own catch: the chip
   handlers don't await the rebuild, so a 409 from a view a newer rebuild
