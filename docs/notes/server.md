@@ -134,9 +134,11 @@ see [docs/notes/README.md](README.md) for the whole set.
   /api/watchlist/scan/job?job_id=`, `POST /api/watchlist/scan/cancel?job_id=`
   — are plain `def` like the search-all job's; the scan runs on a Store
   thread and start answers with the record at once (see
-  [store.md](store.md)). `/api/watchlist/scan/job` 404s for a superseded
-  id (the poller's cue to stop), cancel's miss is `cancelled: false`, and
-  `_jobs_running` counts a running scan. The synchronous `POST
+  [store.md](store.md)). A start that displaces a running scan folds
+  its remaining scope into the new job and answers with the widened
+  `source_ids`/`watchlist_ids`; `/api/watchlist/scan/job` 404s for a
+  superseded id (the poller's cue to stop), cancel's miss is
+  `cancelled: false`, and `_jobs_running` counts a running scan. The synchronous `POST
   /api/watchlist/scan?source_id=&watchlist_id=` stays: profile apply
   scans inline while it seeds a watchlist, and tests use it. `POST
   /api/watchlist` answers 400 for an exact duplicate value; the two

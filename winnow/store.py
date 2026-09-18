@@ -788,6 +788,14 @@ class OpCancelled(Exception):
     not an error, not the analyst's fault, keep what you had."""
 
 
+def _union_scope(a: list[int] | None, b: list[int] | None) -> list[int] | None:
+    """The scope covering both of two scan-job scopes, None meaning every
+    table (or every indicator) — see Store.start_watchlist_scan_job."""
+    if a is None or b is None:
+        return None
+    return sorted(set(a) | set(b))
+
+
 class _JobRegistry:
     """Background jobs with one live job per slot — the bookkeeping the
     search-all job (`_search_job`) does inline, pulled out so the view job
@@ -7507,7 +7515,9 @@ class Store:
         (match count, whether an auto-tag was written), or None when the
         unit wrote nothing: the indicator was deleted while the match ran
         — or its id was reused by another value, watchlist.id not being
-        AUTOINCREMENT — or the source went away, or the store is closing.
+        AUTOINCREMENT — or the source was dropped, or the store is closing.
+        A dropped trigram index is not a skip: the match retries on the
+        LIKE path. Any other database error is the caller's to surface.
 
         The match never holds self.lock. It is a full LIKE scan on a table
         with no index yet, and under the lock (where it used to run, once
@@ -7520,12 +7530,29 @@ class Store:
         through _apply_tag_change inside the same transaction (invariant
         #7), so a unit's hits and its tags land together or not at all."""
         source_id, wid, value = src["id"], ind["id"], ind["value"]
-        sql, params = self._watchlist_match_sql(src, cols, value)
-        try:
-            with self._reader() as ro:
-                rids = [r[0] for r in ro.execute(sql, params)]
-        except sqlite3.Error:
-            return None   # the source (or its index) was dropped mid-scan; the next scan repairs
+        while True:
+            sql, params = self._watchlist_match_sql(src, cols, value)
+            try:
+                with self._reader() as ro:
+                    rids = [r[0] for r in ro.execute(sql, params)]
+                break
+            except sqlite3.OperationalError as e:
+                # "no such table" is the one error a unit absorbs, and it
+                # means one of two things. The trigram table: an index
+                # rebuild dropped it between listing the source and now,
+                # and the escaped LIKE gives the same rows without it. The
+                # source's own table: the source was dropped mid-scan, and
+                # there is nothing left to record the unit against. Anything
+                # else — an I/O error, a corrupt index — surfaces as the
+                # job's error: a unit quietly missing from the totals, with
+                # the table's old hits left in place, would say "done" over
+                # a scan that was not.
+                if "no such table" not in str(e).lower():
+                    raise
+                if src.get("has_fts") and ("fts_" + str(source_id)) in str(e):
+                    src = dict(src, has_fts=0)
+                    continue
+                return None
         with self.lock:
             # close() joins the scan worker before closing the connection,
             # but the join is bounded; a worker that outlived it must not
@@ -7533,6 +7560,12 @@ class Store:
             if self._scan_jobs.closing:
                 return None
             with self.db:
+                # The source too can have gone between the match and here:
+                # drop_source deletes its hits, and its id is the next
+                # import's, so a write for it now would file this value's
+                # rows under whatever table takes the id.
+                if not self.db.execute("SELECT 1 FROM sources WHERE id=?", (source_id,)).fetchone():
+                    return None
                 row = self.db.execute("SELECT value, auto_tag_id FROM watchlist WHERE id=?", (wid,)).fetchone()
                 if row is None or row["value"] != value:
                     return None
@@ -7625,8 +7658,9 @@ class Store:
         job's snapshot — the Add button used to sit in one POST for the
         length of a scan of every table, with the new row invisible until
         it ended. One live job per case (_JobRegistry): starting another
-        asks the running one to stop and makes its id unpollable, so a
-        poller on the old id gets None → 404 → stops. The record carries
+        asks the running one to stop, folds its remaining scope into the
+        new job (below) and makes its id unpollable, so a poller on the
+        old id gets None → 404 → stops. The record carries
         progress (scanned/total), per-indicator and per-table match totals
         as they land, and which tables an auto-tag was written to — the
         client invalidates its row caches for the open one."""
@@ -7636,8 +7670,22 @@ class Store:
             "scanned": 0, "total": 0, "matched": {}, "by_source": {}, "auto_tagged": [],
             "elapsed_ms": None,
         })
-        if old is not None:
-            self._scan_jobs.request_discard(old)
+        if old is not None and self._scan_jobs.request_discard(old):
+            # The scan this one displaces was still running: it stops at
+            # its next unit, and its remaining scope is this job's. Without
+            # that, a scoped scan's work would be left half done — an Add's
+            # indicator scanned against three tables of twelve, its count
+            # and its auto-tags partial with nothing to say so — every time
+            # another Add, an import landing or Search-all's "Add to
+            # watchlist" started a scan behind it. Re-doing the units it
+            # finished is safe (a unit replaces its slice). None wins on
+            # either axis: the union of a source-scoped scan and an
+            # indicator-scoped one is the whole case, a superset cheaper
+            # than a second job shape. A scan that already finished widens
+            # nothing — its work is complete. The job's scope is read by
+            # the worker and by snapshots, both of which begin below.
+            job["source_ids"] = _union_scope(job["source_ids"], old["source_ids"])
+            job["watchlist_ids"] = _union_scope(job["watchlist_ids"], old["watchlist_ids"])
         t = threading.Thread(target=self._watchlist_scan_worker, args=(job,), daemon=True)
         job["thread"] = t
         t.start()

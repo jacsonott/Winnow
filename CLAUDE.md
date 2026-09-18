@@ -440,7 +440,9 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
    `scan_source` of a negative id matches nothing): its hits are keyed
    `(source_id, rid)` on the real table, so a merge's rows are scanned
    and tagged through their members and its hits pane lists real
-   tables only.
+   tables only — and the client's cache invalidation after a scan
+   matches the open merge through its `member_source_ids`, since the
+   job names the member.
 
 10. **A session is a snapshot, not a dimension.** Named sessions live in
    the case file's `sessions` table as whole `winnow-case-session/1`

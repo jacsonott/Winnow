@@ -11,7 +11,10 @@ Timing is shaped with page.route, not sleeps: the scan's start request
 is held (never answered) while the row is asserted, then released; the
 second test aborts it outright to pin that a scan that cannot start
 leaves the row with its real count rather than a marker that never
-resolves (the trap the search-all badge documents).
+resolves (the trap the search-all badge documents). The third holds the
+job polls instead, so the first Add's scan is still being followed when
+the second Add starts its own: the row the newer scan displaces settles
+at once, and nothing is left in the running state.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ import pytest
 pytestmark = pytest.mark.ui
 
 START = re.compile(r".*/api/watchlist/scan/start$")
+JOB = re.compile(r".*/api/watchlist/scan/job\?.*")
 
 
 def _clear_watchlist(page):
@@ -89,4 +93,54 @@ def test_a_scan_that_cannot_start_leaves_a_real_count_not_a_marker(page):
         assert "scan" in page.locator("#toast").inner_text().lower()
     finally:
         page.unroute(START)
+        _clear_watchlist(page)
+
+
+def test_a_second_add_settles_the_first_scans_row_and_leaves_none_running(page):
+    """One scan is followed at a time. The row of the scan a newer one
+    displaces settles the moment the newer start lands — as folded (the
+    server widened the new job to its scope) or, had it already finished,
+    as done — rather than staying a running row whose Cancel reaches a job
+    the server no longer has. The polls are held so the first scan cannot
+    land on its own before the second Add; the first start's answer is
+    read as still running so the two scans overlap on the client whatever
+    the server's timing."""
+    _clear_watchlist(page)
+    page.locator("#tabWatchlist").click()
+    page.wait_for_selector("#watchlistview:not([hidden])")
+    held = []
+    page.route(JOB, lambda route: held.append(route))
+
+    def still_running(route):
+        resp = route.fetch()
+        body = resp.json()
+        body["status"] = "running"
+        route.fulfill(response=resp, json=body)
+
+    page.route(START, still_running, times=1)
+    try:
+        page.locator("#wlValue").fill("H1")
+        page.locator("#wlAdd").click()
+        page.wait_for_function("() => document.querySelectorAll('#jobsPanel .job-notice .job-phase.running').length === 1")
+        page.locator("#wlValue").fill("H2")
+        page.locator("#wlAdd").click()
+        # The first row settled when the second start landed; one row runs.
+        page.wait_for_function("() => document.querySelectorAll('#jobsPanel .job-notice').length === 2")
+        assert page.locator("#jobsPanel .job-notice .job-phase.running").count() == 1
+        settled = page.locator("#jobsPanel .job-notice", has=page.locator(".job-phase.done"))
+        assert settled.count() == 1
+        assert re.search(r"folded into the newer scan|finished", settled.inner_text())
+        page.unroute(JOB)
+        for r in held:
+            r.continue_()
+        # Both counts land (H1 and H2 are 40 rows each of ui.csv), no marker
+        # and no running row is left behind.
+        page.wait_for_function(f"() => ({_row_state('H1')})() === '40' && ({_row_state('H2')})() === '40'",
+                               timeout=15_000)
+        page.wait_for_function("() => document.querySelectorAll('#jobsPanel .job-notice .job-phase.running').length === 0")
+        assert page.locator(".wl-count.scanning").count() == 0
+    finally:
+        page.unroute(JOB)
+        page.unroute(START)
+        page.evaluate("() => { __winnow.closeNoticesOwnedBy('watchlist'); }")
         _clear_watchlist(page)

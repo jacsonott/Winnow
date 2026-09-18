@@ -3,7 +3,8 @@
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { recordTabVisit } from './tabhistory.js';
 import { $, api, debounce, el, post, toast } from './core.js';
-import { renderTagToolbar } from './grid.js';
+import { render, renderTagToolbar } from './grid.js';
+import { drawRail } from './grouping.js';
 import { hidePluginViews, sqlResultNodes, syncPluginPanels } from './plugins.js';
 import { setActiveSqlResult } from './sqlassist.js';
 import { checkPresets } from './savedfilters.js';
@@ -265,6 +266,16 @@ export function showGridTab() {
   syncTabSelection();
   syncTabChrome();
   if (S.sourceId) checkPresets(S.sourceId); // refresh the Filters button's suggestion state
+  // A background job (the watchlist scan's auto-tags) that invalidated
+  // the row caches while a page tab hid the grid left the repaint for
+  // here: against a hidden grid, render() measures nothing and paints
+  // the first rows at the top of a viewport that comes back scrolled
+  // elsewhere. openSource() rebuilds anyway; this is for the paths that
+  // only re-show the grid (Alt+1, tab history, the mouse thumb buttons).
+  if (S.gridRepaintPending) {
+    S.gridRepaintPending = false;
+    if (S.view) { render(); drawRail(); }
+  }
 }
 
 export function showTimelineTab() {

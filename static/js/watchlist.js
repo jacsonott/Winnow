@@ -4,9 +4,11 @@
    scanWatchlistForSources). Its own page tab: add/import indicators, see
    per-indicator hit counts, and drill into where each landed — the hits
    pane groups them by table. The scan is a background job (runScan):
-   started, polled at 400 ms, shown as a jobs-panel row; a new entry is
-   in the list the moment the server has it, with "…" for a count until
-   its scan lands. See docs/design/analysis-suite.md. */
+   started, polled at 400 ms, shown as a jobs-panel row; a newer scan
+   takes over a running one's remaining work (the server folds the
+   scopes), so a new entry is in the list the moment the server has it,
+   with "…" for a count until the scan covering it lands. See
+   docs/design/analysis-suite.md. */
 
 import { $, api, el, post, toast } from './core.js';
 import { clearPageCache, render } from './grid.js';
@@ -35,10 +37,19 @@ let selected = null;
 const scanning = new Set();
 /* Tables the analyst folded in the hits pane, by source id. */
 const collapsed = new Set();
-/* The scan being polled, if any: { jobId, notice, timer, label }. One at
-   a time — the server keeps one live scan per case, and starting another
-   supersedes it (its poller then 404s and stops). */
+/* The scan being polled, if any: { jobId, notice, timer, label,
+   watchlistIds, done, failures }. One at a time — the server keeps one live scan per case,
+   and a newer start folds the running one's remaining scope into the new
+   job, so the row being followed settles as folded and the new one is
+   followed instead. Starts from this window go out one at a time
+   (`starting`): the one in flight answers before the next leaves, so the
+   server sees them in the order they were asked for and the scan a start
+   displaces is always the one being followed here. */
 let scanJob = null;
+let starting = Promise.resolve();
+/* Consecutive poll failures (not 404/409) a scan is given before it is
+   taken as gone — the server exited or crashed under it. */
+const SCAN_POLL_FAILURES = 3;
 
 /* One CSV cell, RFC-4180-quoted only when it has to be. */
 function csvCell(v) {
@@ -101,6 +112,36 @@ function stopScanPoll() {
   scanJob = null;
 }
 
+/* The scan being followed gives way to the newer one that `job` is. Its
+   row settles either way — never left in the running state with a Cancel
+   that reaches nothing — and whoever awaited it gets null. Which way is
+   read off the new job's scope: the server widens a job to a displaced
+   scan's scope only while that scan is still running, so a new job that
+   covers the old one's ids folded it (its "…" markers stay for the job
+   that now carries them), and one that does not means the old scan had
+   already finished — its counts are on the server, nothing of it is
+   left to follow, and its markers come off now, all but the ids the new
+   scan is for. */
+function foldScan(rec, job, keep) {
+  if (scanJob !== rec) return;
+  clearTimeout(rec.timer);
+  scanJob = null;
+  const own = rec.label ? `"${rec.label}" · ` : '';
+  const covered = job.watchlist_ids == null
+    || (rec.watchlistIds != null && rec.watchlistIds.every((id) => job.watchlist_ids.includes(id)));
+  if (covered) {
+    rec.notice.done({ detail: `${own}folded into the newer scan`, sticky: false, actions: [] });
+  } else {
+    const keepSet = new Set(keep || []);
+    for (const id of [...scanning]) {
+      if (!keepSet.has(id) && (rec.watchlistIds == null || rec.watchlistIds.includes(id))) scanning.delete(id);
+    }
+    rec.notice.done({ detail: `${own}finished`, sticky: false, actions: [] });
+    if (S.activeTab === 'watchlist') load(); else renderList();
+  }
+  if (rec.done) rec.done(null);
+}
+
 /* Every scan goes through here — Add, Scan all, the file import, From a
    case, the import hook and Search-all's "Add to watchlist". Starts the
    job, stands a jobs-panel row for it (progress = tables scanned),
@@ -108,34 +149,55 @@ function stopScanPoll() {
    looking at: the list if the tab is showing, else the tab's badge and
    — when it found something — the sticky "Watchlist: N hits" row with a
    way to the hits. Never rejects: callers fire it and move on. Returns
-   the finished job, or null when it could not start. */
+   the finished job, or null when it could not start or a later scan
+   folded it in. */
 export async function runScan({ sourceIds = null, watchlistIds = null, label = null } = {}) {
-  stopScanPoll();
-  let job;
+  const turn = starting;
+  let release;
+  starting = new Promise((r) => { release = r; });
+  await turn;
+  let rec, job;
   try {
-    job = await post('/api/watchlist/scan/start', { source_ids: sourceIds, watchlist_ids: watchlistIds });
-  } catch (e) {
-    // The entries marked "…" have no scan coming: back to their real
-    // counts rather than a marker that never resolves.
-    scanning.clear();
-    renderList();
-    paintScanStatus(null);
-    toast('Could not start the watchlist scan: ' + e.message, 6000);
-    return null;
+    // The scan already being followed pauses its poll while this start is
+    // in flight: once the start lands its row settles as folded (the
+    // server widened the new job to its scope) or done; should the start
+    // fail, its poll picks back up as if nothing had happened.
+    const prev = scanJob;
+    if (prev) clearTimeout(prev.timer);
+    try {
+      job = await post('/api/watchlist/scan/start', { source_ids: sourceIds, watchlist_ids: watchlistIds });
+    } catch (e) {
+      if (prev && scanJob === prev) pollScan(prev);
+      // The entries this call marked have no scan coming: back to their
+      // real counts rather than a marker that never resolves. Any a scan
+      // still being followed covers keep theirs until it lands.
+      if (scanJob) for (const id of watchlistIds || []) scanning.delete(id);
+      else { scanning.clear(); paintScanStatus(null); }
+      renderList();
+      toast('Could not start the watchlist scan: ' + e.message, 6000);
+      return null;
+    }
+    if (scanJob) foldScan(scanJob, job, watchlistIds);
+    // The label names the one indicator a scan is for; a job the server
+    // widened to cover a folded scan is no longer that.
+    const single = !!(job.watchlist_ids && job.watchlist_ids.length === 1);
+    rec = { jobId: job.job_id, label: single ? label : null, watchlistIds: job.watchlist_ids,
+            timer: null, notice: null, done: null, failures: 0 };
+    rec.notice = createNotice('watchlist', {
+      title: 'Watchlist scan',
+      detail: scanDetail(job, rec.label),
+      progress: job.total ? job.scanned / job.total : null,
+      actions: [{ label: 'Cancel', onClick: () => cancelScan(rec) }],
+    }, {
+      // The row's ✕ cancels a running scan rather than merely hiding it:
+      // a hidden scan would go on tagging rows with nothing on screen to
+      // stop it from.
+      onDismiss: () => cancelScan(rec),
+    });
+    scanJob = rec;
+  } finally {
+    release();   // the next start may go out, whatever became of this one
   }
-  const rec = { jobId: job.job_id, label, timer: null, notice: null, done: null };
-  rec.notice = createNotice('watchlist', {
-    title: 'Watchlist scan',
-    detail: scanDetail(job, label),
-    progress: job.total ? job.scanned / job.total : null,
-    actions: [{ label: 'Cancel', onClick: () => cancelScan(rec) }],
-  }, {
-    // The row's ✕ cancels a running scan rather than merely hiding it:
-    // a hidden scan would go on tagging rows with nothing on screen to
-    // stop it from.
-    onDismiss: () => cancelScan(rec),
-  });
-  scanJob = rec;
   paintScanStatus(job);
   if (job.status !== 'running') { await finishScan(rec, job); return job; }
   return new Promise((resolve) => { rec.done = resolve; pollScan(rec); });
@@ -151,9 +213,12 @@ function cancelScan(rec) {
    switch), so a late answer never touches a row that has moved on. A 404
    is the server's word that the job is gone — superseded from another
    window, or the case closed under it — and the poller stops on it,
-   dropping the "…" markers back to real counts; anything else is asked
-   again. */
+   dropping the "…" markers back to real counts. Anything else is asked
+   again, but not forever: with the server gone (idle shutdown, a crash)
+   every poll fails, and a chain that never stopped would keep the row
+   running and the markers unresolved for as long as the tab was open. */
 function pollScan(rec) {
+  clearTimeout(rec.timer);
   rec.timer = setTimeout(async () => {
     if (scanJob !== rec) return;
     let job;
@@ -165,10 +230,12 @@ function pollScan(rec) {
         await settleScan(rec, e.status === 404 ? 'replaced by a newer scan' : 'the case was closed');
         return;
       }
+      if (++rec.failures >= SCAN_POLL_FAILURES) { await settleScan(rec, e.message, { failed: true }); return; }
       pollScan(rec);
       return;
     }
     if (scanJob !== rec) return;
+    rec.failures = 0;
     if (job.status === 'running') {
       rec.notice.update({ detail: scanDetail(job, rec.label), progress: job.total ? job.scanned / job.total : null });
       paintScanStatus(job);
@@ -179,14 +246,28 @@ function pollScan(rec) {
   }, WATCHLIST_POLL_MS);
 }
 
-/* A scan that ended without a result to report on. */
-async function settleScan(rec, detail) {
+/* A scan that ended without a result to report on. Every marker comes
+   off: whatever scan they were waiting on is not one this window can
+   follow any more. */
+async function settleScan(rec, detail, { failed = false } = {}) {
   scanJob = null;
   scanning.clear();
-  rec.notice.done({ detail, sticky: false, actions: [] });
+  if (failed) rec.notice.fail({ detail, actions: [] });
+  else rec.notice.done({ detail, sticky: false, actions: [] });
   paintScanStatus(null);
   if (S.activeTab === 'watchlist') await load(); else renderList();
   if (rec.done) rec.done(null);
+}
+
+/* Whether the open table's rows are among the ones a scan auto-tagged:
+   the table itself, or — for a merge, whose rows are its members' and
+   are tagged there (invariant #9) — any member. */
+function openTableWasTagged(job) {
+  const open = S.sources.find((s) => s.id === S.sourceId);
+  if (!open) return false;
+  const touched = new Set(job.auto_tagged || []);
+  return touched.has(open.id)
+    || !!(open.is_merge && (open.member_source_ids || []).some((id) => touched.has(id)));
 }
 
 /* The job landed. Auto-tags on the open table mean its cached rows and
@@ -194,7 +275,10 @@ async function settleScan(rec, detail) {
    the tags would not paint until something else refreshed the grid. */
 async function finishScan(rec, job) {
   if (scanJob === rec) scanJob = null;
-  scanning.clear();
+  // Only the markers this job covered come off: a scan scoped to one
+  // entry says nothing about another's, whose own scan is still to come.
+  if (job.watchlist_ids == null) scanning.clear();
+  else for (const id of job.watchlist_ids) scanning.delete(id);
   const total = Object.values(job.matched || {}).reduce((a, b) => a + b, 0);
   const found = Object.entries(job.by_source || {}).filter(([, n]) => n > 0)
     .map(([sid, n]) => ({ sid: Number(sid), n }));
@@ -208,13 +292,18 @@ async function finishScan(rec, job) {
   } else {
     rec.notice.done({ detail: `${hitsLabel(total)} · ${tablesLabel(job.scanned)} · ${secs}`, sticky: false, actions: [] });
   }
-  if ((job.auto_tagged || []).includes(S.sourceId) && S.view) {
+  if (S.view && openTableWasTagged(job)) {
     // clearRowCaches() once PR 2 lands; both caches, for the same reason it exists.
     clearPageCache();
     clearGroupPageCache();
     refreshTagCounts();
-    render();
-    drawRail();
+    // The repaint itself waits for the grid to be showing. Against a grid
+    // a page tab hides, render() measures a zero-height viewport and
+    // paints the first rows at the top; the return to the tab then
+    // restores the real scroll position over an empty viewport. The
+    // paths that only re-show the grid (Alt+1, tab history, the mouse
+    // thumb buttons) repaint on the way back — showGridTab.
+    if (S.activeTab === 'grid') { render(); drawRail(); } else S.gridRepaintPending = true;
   }
   paintScanStatus(job);
   if (S.activeTab === 'watchlist') await load();

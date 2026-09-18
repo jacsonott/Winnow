@@ -48,8 +48,12 @@ then takes the writer lock for one transaction that replaces that
 unit's `watchlist_hits` and, if the indicator names an `auto_tag_id`,
 tags the hit rids through `_apply_tag_change` (undoable, shows on the
 rail like any tag). Merges are not scanned (their rows are member
-rows). The synchronous `POST /api/watchlist/scan` remains for profile
-apply and scripts. See docs/notes/store.md for the lock discipline.
+rows). One scan is live per case: a start that displaces a running
+scan folds its remaining scope into the new job, so a scoped scan
+(an Add's, an import's) is never left half done by the one that
+follows it. The synchronous `POST /api/watchlist/scan` remains for
+profile apply and scripts. See docs/notes/store.md for the lock
+discipline.
 
 **Matching.** v1: case-insensitive substring / exact per kind (hash =
 exact, ip/domain/filename = contains), reusing FTS where present. Kinds

@@ -19,6 +19,7 @@ Store.close().
 from __future__ import annotations
 
 import contextlib
+import sqlite3
 import threading
 import time
 
@@ -312,7 +313,8 @@ def test_a_merge_in_the_case_is_skipped_without_error(store, write_csv):
     b = _ingest(store, write_csv, "b.csv", [["Process"], ["svchost.exe"], ["svchost.exe"]])
     merge = store.create_merge("m", [a, b])
     assert merge["id"] < 0
-    wid = store.add_indicator("svchost", "filename")["id"]
+    tag = store.list_tags()[0]["id"]
+    wid = store.add_indicator("svchost", "filename", None, tag)["id"]
     assert store.scan_all()["matched"] == {wid: 3}
     assert store.scan_source(merge["id"]) == {"source_id": merge["id"], "matched": {}}
     assert {s["source_id"] for s in store.indicator_hits(wid)["sources"]} == {a, b}
@@ -321,6 +323,72 @@ def test_a_merge_in_the_case_is_skipped_without_error(store, write_csv):
     assert done["status"] == "done" and done["error"] is None
     assert done["total"] == done["scanned"] == 2          # the merge is not a table to scan
     assert done["matched"] == {wid: 3}
+    # The auto-tag lands on the members and the record names them — never
+    # the merge's id — which is what the client matches an open merge's
+    # member_source_ids against to invalidate its rows (invariant #9).
+    assert done["auto_tagged"] == [a, b]
+    assert [r[0] for r in store.db.execute(
+        "SELECT DISTINCT source_id FROM row_tags WHERE tag_id=? ORDER BY source_id", (tag,))] == [a, b]
+
+
+def test_a_dropped_index_falls_back_to_the_like_path_and_any_other_error_surfaces(store, write_csv):
+    """"No such table" is the one error a unit absorbs. The trigram table
+    gone (an index rebuild between listing the source and the match): the
+    escaped LIKE gives the same rows. Anything else is the job's error —
+    a unit quietly missing from the totals, its table's old hits left in
+    place, would say "done" over a scan that was not."""
+    sid = _ingest(store, write_csv, "e.csv", [["Cmd"], ["rclone copy"], ["notepad"], ["RCLONE sync"]], build_fts=True)
+    assert store.wait_for_fts(sid, timeout=10)
+    wid = store.add_indicator("rclone", "filename")["id"]
+    with store.lock, store.db:
+        store.db.execute(f"DROP TABLE fts_{sid}")
+    assert store.get_source(sid)["has_fts"]          # the flag still says indexed: the race this stands in for
+    assert store.scan_source(sid)["matched"] == {wid: 2}
+    assert _hit_rids(store, wid, sid) == [1, 3]
+
+    table = store.get_source(sid)["table_name"]
+    store._watchlist_match_sql = lambda src, cols, value: (f'SELECT rid FROM "{table}" WHERE no_such_fn(rid)', ())
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="no such function"):
+            store.scan_source(sid)
+        job = store.start_watchlist_scan_job()
+        done = store.wait_for_watchlist_scan_job(job["job_id"], timeout=20)
+        assert done["status"] == "error" and "no such function" in done["error"]
+    finally:
+        del store._watchlist_match_sql
+    assert _hit_rids(store, wid, sid) == [1, 3]      # the failed unit replaced nothing
+
+
+def test_a_source_dropped_while_its_match_runs_writes_nothing_for_it(store, write_csv):
+    """The write re-reads the source under the lock as it does the
+    indicator: drop_source deletes a table's hits and its id is the next
+    import's, so a unit landing after the drop would file this value's
+    rows under whatever table takes the id."""
+    gone = _ingest(store, write_csv, "gone.csv", [["Cmd"], ["rclone copy"], ["notepad"]])
+    kept = _ingest(store, write_csv, "kept.csv", [["Cmd"], ["rclone sync"]])
+    wid = store.add_indicator("rclone", "filename")["id"]
+    table = store.get_source(gone)["table_name"]
+    real_reader = store._reader
+    fired = []
+
+    @contextlib.contextmanager
+    def reader_then_drop():
+        log: list[tuple[str, str]] = []
+        with real_reader() as ro:
+            yield _SqlSpy(ro, log, "reader")
+        if not fired and any(_is_match(sql) and table in sql for _, sql in log):
+            fired.append(1)
+            store.drop_source(gone)
+
+    store._reader = reader_then_drop
+    try:
+        res = store.scan_all()
+    finally:
+        del store._reader
+    assert fired
+    assert res["matched"] == {wid: 1}                                 # the surviving table's unit only
+    assert store.db.execute("SELECT COUNT(*) FROM watchlist_hits WHERE source_id=?", (gone,)).fetchone()[0] == 0
+    assert _hit_rids(store, wid, kept) == [1]
 
 
 # ------------------------------------------------------------------ the job
@@ -378,6 +446,7 @@ def test_a_second_scan_supersedes_the_first_and_cancel_stops_between_units(store
         # A newer scan replaces it: the old id is unpollable at once.
         second = store.start_watchlist_scan_job()
         assert second["job_id"] != first["job_id"]
+        assert second["source_ids"] is None and second["watchlist_ids"] is None   # everything, as both asked
         assert store.get_watchlist_scan_job(first["job_id"]) is None
         assert store.cancel_watchlist_scan_job(first["job_id"]) is False
         gate.set()
@@ -403,6 +472,72 @@ def test_a_second_scan_supersedes_the_first_and_cancel_stops_between_units(store
         assert len(units) == 1
         assert store.cancel_watchlist_scan_job(job["job_id"]) is False    # finished: a miss, not an error
         assert store.cancel_watchlist_scan_job(999999) is False
+    finally:
+        gate.set()
+        del store._scan_unit
+
+
+def test_a_start_folds_a_running_scans_remaining_scope_into_the_new_job(store, write_csv):
+    """The scan a newer start displaces stops at its next unit — but its
+    remaining scope becomes the new job's, so a scoped scan is never left
+    half done: an Add's indicator scanned against some of the tables, its
+    count and auto-tags partial with nothing to say so, because another
+    Add (or an import landing) started a scan behind it. None wins on
+    either axis; a scan that already finished widens nothing."""
+    sids = [_ingest(store, write_csv, f"u{i}.csv", [["Process"], ["svchost.exe"], ["lsass.exe"], ["svchost.exe"]])
+            for i in range(3)]
+    tag = store.list_tags()[0]["id"]
+    wa = store.add_indicator("svchost", "filename", None, tag)["id"]
+    wb = store.add_indicator("lsass", "filename")["id"]
+    gate = threading.Event()
+    entered = threading.Event()
+    units: list[tuple[int, int, threading.Thread]] = []
+    real_unit = store._scan_unit
+
+    def gated_unit(src, cols, ind):
+        units.append((src["id"], ind["id"], threading.current_thread()))
+        entered.set()
+        gate.wait(10)
+        return real_unit(src, cols, ind)
+
+    store._scan_unit = gated_unit
+    try:
+        first = store.start_watchlist_scan_job(watchlist_ids=[wa])
+        assert entered.wait(5)
+        second = store.start_watchlist_scan_job(watchlist_ids=[wb])
+        assert store.get_watchlist_scan_job(first["job_id"]) is None
+        assert second["watchlist_ids"] == sorted([wa, wb]) and second["source_ids"] is None
+        gate.set()
+        done = store.wait_for_watchlist_scan_job(second["job_id"], timeout=20)
+        assert done["status"] == "done"
+        for _, _, t in units:
+            t.join(10)
+        first_thread = units[0][2]
+        assert len([u for u in units if u[2] is first_thread]) == 1       # the first stopped after its unit
+        assert len(units) == 1 + 3 * 2                                     # the second ran both over every table
+        assert done["matched"] == {wa: 6, wb: 3}
+        assert done["auto_tagged"] == sids
+        for sid in sids:
+            assert _hit_rids(store, wa, sid) == [1, 3]
+            assert _hit_rids(store, wb, sid) == [2]
+        assert {i["id"]: i["hit_count"] for i in store.list_indicators()} == {wa: 6, wb: 3}
+
+        # None wins: a source-scoped scan (the import hook's) folded into an
+        # indicator-scoped one is the whole case.
+        del units[:]
+        gate.clear()
+        entered.clear()
+        first = store.start_watchlist_scan_job(source_ids=[sids[0]])
+        assert entered.wait(5)
+        second = store.start_watchlist_scan_job(watchlist_ids=[wb])
+        assert second["source_ids"] is None and second["watchlist_ids"] is None
+        gate.set()
+        assert store.wait_for_watchlist_scan_job(second["job_id"], timeout=20)["total"] == 3
+
+        # A scan that already finished widens nothing.
+        third = store.start_watchlist_scan_job(watchlist_ids=[wb])
+        assert third["watchlist_ids"] == [wb] and third["source_ids"] is None
+        assert store.wait_for_watchlist_scan_job(third["job_id"], timeout=20)["matched"] == {wb: 3}
     finally:
         gate.set()
         del store._scan_unit
