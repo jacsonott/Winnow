@@ -265,12 +265,16 @@ def _case_plugin_overrides() -> dict[str, bool]:
         return {}
 
 
-# Bundled examples that became part of the app. The updater removes the
-# folder (examples/ is not in updater.PROTECTED), but a zip install that has
-# never run an update carries no manifest and keeps every folder it shipped
-# with — so a copy can outlive the feature it demonstrated, and loading it
-# would put a second Histogram button and route beside the built-in one.
-RETIRED_BUNDLED_EXAMPLES = frozenset({"table_histogram"})
+# Bundled examples that became part of the app, each with the one line the
+# analyst sees in its Settings → Plugins row. The updater removes the folder
+# (examples/ is not in updater.PROTECTED), but a zip install that has never
+# run an update carries no manifest and keeps every folder it shipped with —
+# so a copy can outlive the feature it demonstrated, and loading it would
+# put a second Histogram button and route beside the built-in one.
+RETIRED_BUNDLED_EXAMPLES = {
+    "table_histogram": "Retired — the histogram is built into Winnow (the Histogram button in the toolbar); "
+                       "delete examples/plugins/table_histogram",
+}
 
 
 def _reload_plugins() -> None:
@@ -297,6 +301,12 @@ def _reload_plugins() -> None:
         return WS.plugin_prefs.machine_enabled(fs_name, default_on)
 
     PLUGINS.load(PLUGIN_DIRS, enabled_for=enabled_for, bundled_dirs=[BUNDLED_PLUGIN_DIR])
+    # The tombstoned folder is still listed (load has no discovery filter,
+    # and the folder is the thing to delete), so say why it is off where the
+    # panel will show it; api_plugins_toggle refuses the name outright.
+    for p in PLUGINS.plugins:
+        if p["bundled"] and p["fs_name"] in RETIRED_BUNDLED_EXAMPLES:
+            p["error"] = RETIRED_BUNDLED_EXAMPLES[p["fs_name"]]
 
 
 _reload_plugins()
@@ -2433,6 +2443,10 @@ def api_plugins_toggle(body: PluginToggle):
     rec = next((p for p in PLUGINS.describe() if p["fs_name"] == body.fs_name), None)
     if rec is None:
         raise HTTPException(404, f"No installed plugin named {body.fs_name}")
+    if rec.get("bundled") and body.fs_name in RETIRED_BUNDLED_EXAMPLES:
+        # Nothing to persist: _reload_plugins would ignore the pref or the
+        # override, and the dropdown would then show a state that is not.
+        raise HTTPException(400, RETIRED_BUNDLED_EXAMPLES[body.fs_name])
     scope = body.scope
     if scope is None:
         if body.enabled is None:
@@ -2982,7 +2996,7 @@ def api_histogram(view_id: str, column: str, max_buckets: int = 160, op_token: s
     column just removed, say) or one that is not a datetime is a 400 the
     strip shows as text. Store.time_histogram raises KeyError for both an
     expired view and an unknown column, so the message decides (the same
-    split api_case_copy makes); folding the second into the 409 would
+    split api_case_copy_sources makes); folding the second into the 409 would
     leave the strip waiting for a view change that fixes nothing."""
     try:
         return JSONResponse(store().time_histogram(
@@ -4502,7 +4516,10 @@ def main() -> None:
         PLUGIN_DIRS = _plugin_dirs(args.plugins_dir)
         _reload_plugins()
     for p in PLUGINS.describe():
-        if p["error"]:
+        if p["bundled"] and p["fs_name"] in RETIRED_BUNDLED_EXAMPLES:
+            # Stamped with its reason by _reload_plugins; not a failure.
+            print(f"Plugin retired: {p['name']} ({p['path']}): {p['error']}")
+        elif p["error"]:
             record_log("error", f"Plugin FAILED: {p['name']} ({p['path']}): {p['error']}")
         elif not p["enabled"]:
             print(f"Plugin disabled: {p['name']} (toggle in Settings → Plugins)")

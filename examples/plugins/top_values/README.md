@@ -20,7 +20,7 @@ default). The state of the toggle is remembered per browser.
 
 ```
 top_values/
-├── __init__.py    register_toolbar_panel — ~20 lines, no routes
+├── __init__.py    register_toolbar_panel — a dozen lines of code, no routes
 ├── ui/panel.js    the panel: column picker, the list, copy on click
 └── README.md
 ```

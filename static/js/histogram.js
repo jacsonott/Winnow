@@ -371,8 +371,13 @@ async function load() {
   // back just as dense as the one it zoomed out of, which is what made
   // narrowing the timeframe feel like it had changed nothing. ~7px a bar
   // is readable, and the server picks the nearest clean width from
-  // Store.HISTOGRAM_BUCKETS for the span it is given.
-  const maxBuckets = Math.max(20, Math.min(400, Math.floor((ui.canvas.clientWidth || 600) / 7)));
+  // Store.HISTOGRAM_BUCKETS for the span it is given. The draw() above
+  // hides the canvas behind "Loading…" while there is nothing to draw, so
+  // the first ask after opening measures the section the canvas fills:
+  // measuring the hidden canvas fell through to 600px (85 bars), and the
+  // first chart stayed coarser than the strip until the next view change.
+  const width = ui.canvas.clientWidth || ui.canvas.parentElement.clientWidth || 600;
+  const maxBuckets = Math.max(20, Math.min(400, Math.floor(width / 7)));
   let next = null, err = null;
   try {
     next = await api(`/api/histogram?view_id=${encodeURIComponent(v.view_id)}`
@@ -395,9 +400,12 @@ export function wireHistogram() {
   migrateHistogramPrefs();
   buildChrome($('histogramPanel'));
   $('btnHistogram').onclick = () => toggleHistogram();
-  // Attached once, for the page's life. Closed, the strip costs nothing:
-  // no fetch until it opens, when syncHistogramPanel's show edge fetches.
-  document.addEventListener('winnow:viewchange', () => { if (histogramOpen()) schedule(); });
+  // Attached once, for the page's life. Closed, or open but hidden behind
+  // a page tab, the strip costs nothing: no fetch until it is on screen,
+  // and syncHistogramPanel's show edge fetches then. Keying on the pref
+  // alone ran the aggregate twice for a view rebuilt behind the SQL tab —
+  // once for a canvas nobody could see, again on the way back.
+  document.addEventListener('winnow:viewchange', () => { if (shown) schedule(); });
   // Tokens are read at draw time, so a skin/accent change is one redraw.
   document.addEventListener('winnow:appearance', () => { if (shown) draw(); });
   window.addEventListener('resize', () => { if (shown) draw(); });

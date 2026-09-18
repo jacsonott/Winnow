@@ -82,7 +82,13 @@ see [docs/notes/README.md](README.md) for the whole set.
   drawn and lets that rebuild's own view change refetch. Only an
   'expired' KeyError is a 409; an unknown column (a derived column just
   removed) or a non-datetime one is a 400 the strip shows as text in
-  `.th-empty`, because waiting for a view change would never fix it.
+  `.th-empty`, because waiting for a view change would never fix it. It
+  listens only while it is on screen: open but hidden behind a page tab,
+  a view change is left for the show edge in `syncHistogramPanel` to
+  refetch (keying on the pref alone aggregated a view rebuilt behind the
+  SQL tab twice), and the first ask after opening measures the section
+  rather than the canvas, which "Loading…" has hidden — measuring the
+  canvas fell through to a 600px fallback and an 85-bar first chart.
   **The drag snaps to a unit chosen from the drag, not from the bar
   width**: rounding outwards to the current bucket made any drag inside
   one 6h bar that whole bar, so the view never narrowed enough for the

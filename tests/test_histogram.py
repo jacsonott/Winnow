@@ -127,34 +127,69 @@ STALE_EXAMPLE = """
 """
 
 
-def test_a_stale_copy_of_the_retired_example_is_never_enabled(client, store, tmp_path, monkeypatch):
-    """A zip install that never ran an update keeps examples/plugins/
-    table_histogram beside the built-in strip. The tombstone lives in the
-    per-case enablement policy, which case-level overrides pass through
-    too — so neither the machine toggle nor a case file carrying an
-    override for it can bring back a second Histogram button."""
+def _copy_of_the_example(root):
+    (root / "table_histogram" / "ui").mkdir(parents=True)
+    (root / "table_histogram" / "__init__.py").write_text(textwrap.dedent(STALE_EXAMPLE))
+    (root / "table_histogram" / "ui" / "panel.js").write_text("export default function mount() {}\n")
+
+
+def _plugins_from(monkeypatch, installed, bundled):
     import server
 
-    bundled = tmp_path / "bundled"
-    (bundled / "table_histogram" / "ui").mkdir(parents=True)
-    (bundled / "table_histogram" / "__init__.py").write_text(textwrap.dedent(STALE_EXAMPLE))
-    (bundled / "table_histogram" / "ui" / "panel.js").write_text("export default function mount() {}\n")
-    installed = tmp_path / "plugins"
-    installed.mkdir()
-    reg = PluginRegistry()
-    monkeypatch.setattr(server, "PLUGINS", reg)
+    monkeypatch.setattr(server, "PLUGINS", PluginRegistry())
     monkeypatch.setattr(server, "PLUGIN_DIRS", [installed, bundled])
     monkeypatch.setattr(server, "BUNDLED_PLUGIN_DIR", bundled)
     server._reload_plugins()
+    return server
+
+
+def test_a_stale_copy_of_the_retired_example_is_never_enabled(client, store, tmp_path, monkeypatch):
+    """A zip install that never ran an update keeps examples/plugins/
+    table_histogram beside the built-in strip. The folder is still listed —
+    it is the thing to delete — with the reason in its row; the toggle
+    refuses it in either scope and persists nothing; and a case file that
+    already carries an override for it passes through the same policy the
+    tombstone sits in, so it cannot bring back a second Histogram button."""
+    bundled, installed = tmp_path / "bundled", tmp_path / "plugins"
+    _copy_of_the_example(bundled)
+    installed.mkdir()
+    server = _plugins_from(monkeypatch, installed, bundled)
 
     def state():
         r = client.get("/api/plugins").json()
         rec = next(p for p in r["plugins"] if p["fs_name"] == "table_histogram")
-        return rec["enabled"], [p["id"] for p in r["panels"]]
+        return rec["enabled"], rec["error"], [p["id"] for p in r["panels"]]
 
-    assert state() == (False, [])
-    client.post("/api/plugins/toggle", json={"fs_name": "table_histogram", "scope": "on_all"})
-    assert state() == (False, [])
-    client.post("/api/plugins/toggle", json={"fs_name": "table_histogram", "scope": "on_case"})
-    assert json.loads(store.get_case_settings()["plugin_overrides"]) == {"table_histogram": True}
-    assert state() == (False, [])
+    enabled, why, panels = state()
+    assert (enabled, panels) == (False, [])
+    assert why and "built into Winnow" in why and "examples/plugins/table_histogram" in why
+
+    r = client.post("/api/plugins/toggle", json={"fs_name": "table_histogram", "scope": "on_all"})
+    assert r.status_code == 400 and "built into Winnow" in r.json()["detail"]
+    assert "table_histogram" not in server.WS.plugin_prefs.enabled_bundled()
+    r = client.post("/api/plugins/toggle", json={"fs_name": "table_histogram", "scope": "on_case"})
+    assert r.status_code == 400
+    assert store.get_case_settings().get("plugin_overrides") is None
+    assert state()[0] is False and state()[2] == []
+
+    store.set_case_setting("plugin_overrides", json.dumps({"table_histogram": True}))
+    server._reload_plugins()
+    assert state()[0] is False and state()[2] == []
+
+
+def test_an_analysts_own_copy_of_the_example_is_theirs(client, tmp_path, monkeypatch):
+    """The tombstone is about the shipped folder. The same code installed
+    into plugins/ is the analyst's plugin: it loads, and its toggle is an
+    ordinary toggle."""
+    bundled, installed = tmp_path / "bundled", tmp_path / "plugins"
+    bundled.mkdir()
+    _copy_of_the_example(installed)
+    _plugins_from(monkeypatch, installed, bundled)
+
+    listing = client.get("/api/plugins").json()
+    rec = next(p for p in listing["plugins"] if p["fs_name"] == "table_histogram")
+    assert rec["enabled"] is True and rec["error"] is None and not rec["bundled"]
+    assert [p["id"] for p in listing["panels"]] == ["table-histogram.histogram"]
+    r = client.post("/api/plugins/toggle", json={"fs_name": "table_histogram", "scope": "off_all"})
+    assert r.status_code == 200, r.text
+    assert next(p for p in r.json()["plugins"] if p["fs_name"] == "table_histogram")["enabled"] is False

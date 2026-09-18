@@ -34,7 +34,7 @@ export default function mount(container, winnow) {
   list.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px 6px;padding:4px 10px 6px';
   // One line of DOM text for the empty states, so it wraps in a narrow
   // window instead of clipping.
-  const note = el('div', 'note-status th-empty');
+  const note = el('div', 'note-status');
   note.style.cssText = 'padding:2px 10px 6px;white-space:normal';
   note.hidden = true;
   container.append(head, list, note);

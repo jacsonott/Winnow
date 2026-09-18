@@ -4,9 +4,15 @@ the strip between the toolbar and the grid, the histogram follows a
 filter, a drag on it writes the timeframe filter (narrowing the view),
 Clear removes it, the strip hides with the toolbar on page tabs, a plugin
 reload leaves the toggle where it is, the bars follow the accent, `h`
-toggles it, and the retired plugin's per-browser toggle carries over."""
+toggles it, the first chart is asked for at the canvas width, a view
+rebuilt behind a page tab is fetched once on the way back, the button
+tooltips follow a rebinding, and the retired plugin's per-browser toggle
+carries over."""
 
 from __future__ import annotations
+
+import time
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -148,14 +154,95 @@ def test_h_toggles_the_strip_from_the_grid(page):
         page.evaluate("() => { __winnow.showGridTab(); __winnow.toggleHistogram(false); localStorage.removeItem('winnow.histogram'); }")
 
 
-def test_the_retired_plugins_toggle_carries_over(browser, server):
+def _histogram_asks(page):
+    """Every /api/histogram request the page makes from here on."""
+    asks = []
+    page.on("request", lambda r: asks.append(r.url) if "/api/histogram" in r.url else None)
+    return asks
+
+
+def test_the_first_chart_is_asked_for_at_the_canvas_width(page):
+    """Opening the strip measured the canvas for its bucket count while
+    "Loading…" had it hidden, so the first ask fell through to a 600px
+    fallback (85 bars): on a wide window the first chart was coarser than
+    the strip could show until the next view change asked again."""
+    asks = _histogram_asks(page)
+    try:
+        page.locator("#btnHistogram").click()
+        page.wait_for_selector(CANVAS, timeout=10_000)
+        page.wait_for_function("() => /200 rows/.test(document.getElementById('histogramPanel').textContent)", timeout=10_000)
+        width = page.evaluate("() => document.querySelector('#histogramPanel canvas.th-canvas').clientWidth")
+        assert width > 700, width          # wide enough that 85 bars is visibly the wrong answer
+        got = [int(parse_qs(urlparse(a).query)["max_buckets"][0]) for a in asks]
+        assert got, "the strip never asked for a histogram"
+        assert got[0] == max(20, min(400, width // 7)), (got, width)
+    finally:
+        page.evaluate("() => { __winnow.toggleHistogram(false); localStorage.removeItem('winnow.histogram'); }")
+
+
+def test_a_view_rebuilt_behind_a_page_tab_is_fetched_once_on_return(page):
+    """Open but hidden behind a page tab, the strip used to fetch on every
+    view change — for a canvas nobody could see — and again on the way
+    back to the grid: two aggregate passes for one chart."""
+    asks = _histogram_asks(page)
+    try:
+        page.locator("#btnHistogram").click()
+        page.wait_for_selector(CANVAS, timeout=10_000)
+        page.wait_for_function("() => /200 rows/.test(document.getElementById('histogramPanel').textContent)", timeout=10_000)
+        page.locator("#tabSql").click()
+        page.wait_for_selector("#pluginPanels", state="hidden")
+        before = len(asks)
+        page.evaluate("() => { window.__viewChanges = 0; document.addEventListener('winnow:viewchange', () => { window.__viewChanges++; }); }")
+        page.evaluate("() => __winnow.rebuildView({ keepScroll: false })")
+        page.wait_for_function("() => window.__viewChanges > 0", timeout=10_000)
+        page.wait_for_timeout(600)         # well past the strip's 150 ms debounce
+        assert len(asks) == before, "the hidden strip fetched: " + " | ".join(asks[before:])
+        # Back on the grid, the show edge fetches — once.
+        page.evaluate("() => __winnow.showGridTab()")
+        page.wait_for_selector(CANVAS)
+        deadline = time.monotonic() + 10
+        while len(asks) < before + 1 and time.monotonic() < deadline:
+            time.sleep(0.1)
+        page.wait_for_timeout(600)
+        assert len(asks) == before + 1, asks[before:]
+    finally:
+        page.evaluate("() => { __winnow.showGridTab(); __winnow.toggleHistogram(false); localStorage.removeItem('winnow.histogram'); }")
+
+
+def test_the_button_tooltips_follow_a_rebinding(page):
+    """The Histogram and ⏱ Timeframe tooltips spell their keys from
+    S.keymap when the buttons sync; Settings saved a rebinding and redrew
+    its own list only, so both named the old key until the next tab
+    switch."""
+    hist, tr = page.locator("#btnHistogram"), page.locator("#btnTimeRange")
+    assert '"h" to show/hide' in hist.get_attribute("title")
+    assert '"r" to toggle' in tr.get_attribute("title")
+    page.keyboard.press("?")
+    page.wait_for_selector("#modal:not([hidden])")
+    page.click(".settings-section-head:has-text('Keyboard shortcuts')")
+    hrow = page.locator(".settings-key-row", has_text="histogram")
+    trow = page.locator(".settings-key-row", has_text="Toggle the timeframe filter")
+    assert hrow.count() == 1 and trow.count() == 1
+    hrow.locator(".settings-key-chip .btn").first.click()       # ✕ on "h"
+    assert "to show/hide" not in hist.get_attribute("title")
+    trow.locator(".settings-key-chip .btn").first.click()       # ✕ on "r"
+    assert '"r" to toggle' not in tr.get_attribute("title")
+    hrow.locator(".btn", has_text="+ key").click()
+    page.keyboard.press("y")
+    page.wait_for_function(
+        "() => /\"y\" to show\\/hide/.test(document.getElementById('btnHistogram').title)", timeout=5_000)
+    page.click("#modalBody .btn:has-text('Reset to defaults')")
+    assert '"h" to show/hide' in hist.get_attribute("title")
+    assert '"r" to toggle' in tr.get_attribute("title")
+
+
+def test_the_retired_plugins_toggle_carries_over(browser, server, first_run_init):
     """An analyst who kept the table_histogram plugin's panel open (one key
     in winnow.panels, the plugin host's map) gets the built-in strip open on
     first load — once: the key goes, the rest of the map stays."""
     ctx = browser.new_context(viewport={"width": 1500, "height": 900})
     ctx.add_init_script(
-        "localStorage.setItem('winnow.remotePrompt', 'seen');"
-        "localStorage.setItem('winnow.appearance', JSON.stringify({ splash: false, pagesMenu: false }));"
+        first_run_init + ";"
         "if (!localStorage.getItem('winnow.histogram')) localStorage.setItem('winnow.panels',"
         " JSON.stringify({ 'table-histogram.histogram': true, 'other.panel': true }));")
     pg = ctx.new_page()
