@@ -788,6 +788,63 @@ class OpCancelled(Exception):
     not an error, not the analyst's fault, keep what you had."""
 
 
+class _JobRegistry:
+    """Background jobs with one live job per slot — the bookkeeping the
+    search-all job (`_search_job`) does inline, pulled out so the view job
+    (and any later one shaped like it: a watchlist scan, say) is the same
+    few lines. A slot is whatever "one at a time" is scoped to: a source
+    id for view builds, a single constant for a case-wide job.
+
+    Its own lock, never Store.lock — a worker recording "done" must not
+    queue behind a multi-second build, which is the whole reason these
+    jobs exist. Records are plain dicts (status running|done|error|
+    cancelled plus whatever the owner adds); `start` registers one and
+    hands back the record it displaced, so the owner can cancel that
+    one's work. `get` answers only for a job that is still its slot's
+    live one — a poller on a superseded id gets None, which server.py
+    turns into a 404 ("stop polling"), never a stale result. `closing`
+    is set by Store.close(); a worker checks it before touching the
+    connection."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.seq = 0
+        self.by_slot: dict[Any, dict] = {}
+        self.closing = False
+
+    def start(self, slot: Any, record: dict) -> tuple[dict, dict | None]:
+        with self.lock:
+            self.seq += 1
+            record.update(job_id=self.seq, slot=slot, status="running",
+                          error=None, started_at=time.time(), finished_at=None,
+                          thread=None, done_event=threading.Event())
+            old = self.by_slot.get(slot)
+            self.by_slot[slot] = record
+            return record, old
+
+    def get(self, job_id: int) -> dict | None:
+        with self.lock:
+            for job in self.by_slot.values():
+                if job["job_id"] == job_id:
+                    return job
+            return None
+
+    def finish(self, job: dict, status: str, **fields: Any) -> None:
+        with self.lock:
+            job.update(fields)
+            job["status"] = status
+            job["finished_at"] = time.time()
+        job["done_event"].set()
+
+    def live(self) -> list[dict]:
+        with self.lock:
+            return list(self.by_slot.values())
+
+    def running(self) -> int:
+        with self.lock:
+            return sum(1 for j in self.by_slot.values() if j["status"] == "running")
+
+
 # ------------------------------------------------- the views scratch database
 
 # Naming for the per-Store views database (invariant #3). The prefix is the
@@ -1322,6 +1379,10 @@ class Store:
         self._search_job: dict | None = None
         self._search_job_thread: threading.Thread | None = None
         self._search_job_seq = 0
+        # View builds run in the background (start_view_job): one live job
+        # per source, each building a *held* view that evicts nothing until
+        # the client adopts it — see build_view(hold=True) / adopt_view.
+        self._view_jobs = _JobRegistry()
 
         # Ingest jobs — same fire-and-forget-with-a-registry shape as the
         # search-all job above, but plural: a directory import legitimately
@@ -1844,6 +1905,20 @@ class Store:
             for j in jobs:
                 j["cancelled"] = True
         for j in jobs:
+            t = j.get("thread")
+            if t and t is not threading.current_thread() and t.is_alive():
+                t.join(15)
+        # Same for view builds running in the background: a worker queued
+        # on self.lock at this point would otherwise take it after the
+        # close below and run its INSERT on a closed connection. `closing`
+        # stops one that hasn't started; cancel_op interrupts one that has
+        # (or fails it fast at registration, if it is still queued).
+        self._view_jobs.closing = True
+        view_jobs = self._view_jobs.live()
+        for j in view_jobs:
+            if j["status"] == "running":
+                self.cancel_op(j["token"])
+        for j in view_jobs:
             t = j.get("thread")
             if t and t is not threading.current_thread() and t.is_alive():
                 t.join(15)
@@ -4832,7 +4907,7 @@ class Store:
 
     # ------------------------------------------------------------------- views
 
-    def build_view(self, source_id: int, spec: dict) -> dict:
+    def build_view(self, source_id: int, spec: dict, *, hold: bool = False) -> dict:
         """Materialise (pos, source_id, rid) for a filter+sort spec. Returns
         view handle. source_id is a constant column here (every row comes
         from the same source) — kept as a real column rather than a
@@ -4845,7 +4920,20 @@ class Store:
         "sort" is just rid order, which INTEGER PRIMARY KEY already gives
         for free (verified: `EXPLAIN QUERY PLAN SELECT rid FROM t ORDER BY
         rid ASC` is a bare `SCAN`, no temp b-tree). See
-        _build_virtual_root_view."""
+        _build_virtual_root_view.
+
+        `hold`: build a *pending* view — one that leaves the source's live
+        view alone instead of evicting it, so the grid keeps paging the
+        rows it has while a long search runs in the background
+        (start_view_job). The handle carries `pending: True` until
+        adopt_view installs it, which is when the others go. A held build
+        still evicts an EARLIER pending view of the same source (one
+        pending per source, or every abandoned search would leave a table
+        behind in the views db), and a normal build evicts pending views
+        along with everything else — the newer intent wins. Threaded
+        through both the materialised block and the virtual-root path: a
+        cleared search box lands in the latter, which evicts under the
+        lock before it has a handle to mint."""
         src = self._source_lite(source_id)
         colnames = {c["name"]: c["type"] for c in src["columns"]}
         order = self._compile_order(spec, colnames)
@@ -4901,7 +4989,7 @@ class Store:
                     self._derived_table(source_id) if col in derived_names else table,
                 )
             if not where and not has_sort:
-                return self._build_virtual_root_view(source_id, src)
+                return self._build_virtual_root_view(source_id, src, hold=hold)
             vid = self._next_view_id()
             sql = (
                 f"INSERT INTO v.{q(vid)}(source_id, rid) "
@@ -4931,8 +5019,9 @@ class Store:
             # (interrupted) build rolls back to a world where the previous
             # view still exists — the frontend keeps its rows instead of
             # every open handle 409ing. The new view's handle isn't in
-            # self._views yet, so the eviction loop can't touch it.
-            self._evict_root_views(source_id)
+            # self._views yet, so the eviction loop can't touch it. A held
+            # build evicts only an earlier pending view (see the docstring).
+            self._evict_root_views(source_id, pending_only=hold)
 
         handle = {
             "view_id": vid,
@@ -4941,14 +5030,21 @@ class Store:
             "kind": "root",
             "elapsed_ms": int((time.time() - t0) * 1000),
         }
+        if hold:
+            handle["pending"] = True
         self._views[vid] = handle
         return handle
 
-    def _evict_root_views(self, source_id: int) -> None:
+    def _evict_root_views(self, source_id: int, *, keep: str | None = None,
+                          pending_only: bool = False) -> None:
         """Evicts every existing root (materialised or virtual) view for
         this source, so opening a new one leaves only the new view live.
         Caller must hold self.lock (and be inside a self.db transaction —
         eviction of a materialised view drops its backing table).
+
+        `keep` spares one view id (adopt_view: the view being installed is
+        already registered); `pending_only` evicts only held views that
+        were never adopted (a held build superseding an earlier one).
 
         Only root views for this source are eligible here. Group sub-views
         (kind='group'/'group_virtual') are never evicted by this loop
@@ -4958,9 +5054,30 @@ class Store:
         time we reach it (a previous iteration's cascade can remove a later
         entry in this same snapshot) — .get() and skip, don't [ ]."""
         for old in list(self._views):
+            if old == keep:
+                continue
             handle = self._views.get(old)
-            if handle and handle.get("kind") in ("root", "root_virtual") and handle["source_id"] == source_id:
-                self._evict_view_and_children(old)
+            if not handle or handle.get("kind") not in ("root", "root_virtual") or handle["source_id"] != source_id:
+                continue
+            if pending_only and not handle.get("pending"):
+                continue
+            self._evict_view_and_children(old)
+
+    def adopt_view(self, view_id: str) -> dict:
+        """Installs a held view (build_view(hold=True)) as the source's live
+        one: clears `pending` and evicts every other root view for that
+        source — the same world a normal build leaves behind, arrived at a
+        step later. Returns the handle, the same payload build_view does.
+        KeyError when the view is gone: a normal build, a newer held build
+        or a case switch evicted it in the meantime, and server.py answers
+        409 "expired" so the client runs the search again instead."""
+        with self.lock, self.db:
+            handle = self._views.get(view_id)
+            if handle is None or handle.get("kind") not in ("root", "root_virtual"):
+                raise KeyError("View expired — rebuild it")
+            handle["pending"] = False
+            self._evict_root_views(handle["source_id"], keep=view_id)
+        return handle
 
     def _next_view_id(self) -> str:
         """The one place a view id is minted. See _view_seq_lock."""
@@ -4968,7 +5085,7 @@ class Store:
             self._view_seq += 1
             return f"view_{self._view_seq}"
 
-    def _build_virtual_root_view(self, source_id: int, src: dict) -> dict:
+    def _build_virtual_root_view(self, source_id: int, src: dict, *, hold: bool = False) -> dict:
         """No filters, no sort: the view IS the source table in its natural
         rid order, which INTEGER PRIMARY KEY already gives for free — no
         v.view_N to build. row_count is read straight off `src` (already
@@ -4994,9 +5111,14 @@ class Store:
         one materialise. Change 2 already makes that case's materialise
         cheap (index supplies the order, no temp b-tree); this virtual
         path targets the single biggest and most common case instead:
-        opening a table."""
+        opening a table.
+
+        `hold` as in build_view: a held virtual view evicts only an earlier
+        pending view. The eviction here happens before the handle exists,
+        which is exactly why hold has to reach this path too — a search box
+        cleared while a search is pending lands here."""
         with self.lock, self.db:
-            self._evict_root_views(source_id)
+            self._evict_root_views(source_id, pending_only=hold)
             vid = self._next_view_id()
             handle = {
                 "view_id": vid,
@@ -5005,6 +5127,8 @@ class Store:
                 "kind": "root_virtual",
                 "elapsed_ms": 0,
             }
+            if hold:
+                handle["pending"] = True
             self._views[vid] = handle
         return handle
 
@@ -9486,6 +9610,106 @@ class Store:
         if t:
             t.join(timeout)
         return self.get_search_all_job()
+
+    # ------------------------------------------------------------- view jobs
+
+    VIEW_JOB_INLINE_WAIT_MS = 250
+
+    def start_view_job(self, source_id: int, spec: dict, wait_ms: int | None = None) -> dict:
+        """Runs build_view(hold=True) on a daemon thread and returns the
+        job's snapshot — after waiting up to `wait_ms` for it, so a search
+        that finishes at once comes back with its view inline and costs
+        the client no poll. The grid's live view is untouched throughout
+        (held builds evict nothing); the client adopts the result when it
+        wants it (adopt_view) or leaves it, and a later build evicts it.
+
+        One live job per source: starting another cancels the previous
+        one's build through its op_token (cancel_op — effective whether
+        the build is running, still queued on the writer lock, or not yet
+        registered) and makes its id unpollable. The spec's op_token is
+        what the cancel routes act on; one is minted here when the client
+        sent none."""
+        spec = dict(spec)
+        if not spec.get("op_token"):
+            spec["op_token"] = f"vj_{time.time_ns():x}"
+        job, old = self._view_jobs.start(source_id, {
+            "source_id": source_id, "spec": spec, "token": spec["op_token"],
+            "view": None, "error_status": None, "elapsed_ms": None,
+        })
+        if old is not None and old["status"] == "running":
+            self.cancel_op(old["token"])
+        t = threading.Thread(target=self._view_job_worker, args=(job,), daemon=True)
+        job["thread"] = t
+        t.start()
+        job["done_event"].wait((self.VIEW_JOB_INLINE_WAIT_MS if wait_ms is None else max(0, wait_ms)) / 1000)
+        return self._view_job_snapshot(job)
+
+    def _view_job_worker(self, job: dict) -> None:
+        t0 = time.time()
+        try:
+            # close() sets this before it cancels and joins; a worker that
+            # was queued behind that must not touch the connection at all.
+            if self._view_jobs.closing:
+                raise OpCancelled("Cancelled")
+            view = self.build_view(job["source_id"], job["spec"], hold=True)
+        except OpCancelled:
+            self._view_jobs.finish(job, "cancelled", elapsed_ms=int((time.time() - t0) * 1000))
+        except (ValueError, KeyError) as e:
+            # The analyst-fixable failures api_view answers 400 with — a bad
+            # filter, an unknown column, a source that's gone.
+            self._view_jobs.finish(job, "error", error=str(e), error_status=400,
+                                   elapsed_ms=int((time.time() - t0) * 1000))
+        except Exception as e:  # noqa: BLE001 — surfaced to the UI as job.error
+            self._view_jobs.finish(job, "error", error=str(e), error_status=500,
+                                   elapsed_ms=int((time.time() - t0) * 1000))
+        else:
+            self._view_jobs.finish(job, "done", view=view, elapsed_ms=int((time.time() - t0) * 1000))
+
+    def _view_job_snapshot(self, job: dict) -> dict:
+        with self._view_jobs.lock:
+            return {k: job[k] for k in ("job_id", "source_id", "status", "view", "error",
+                                        "error_status", "elapsed_ms", "started_at")}
+
+    def get_view_job(self, job_id: int) -> dict | None:
+        """Snapshot of a live job, or None once a newer job for the same
+        source has replaced it (server.py: 404, the poller stops)."""
+        job = self._view_jobs.get(job_id)
+        return None if job is None else self._view_job_snapshot(job)
+
+    def cancel_view_job(self, job_id: int) -> bool:
+        """Ends a job the client no longer wants. Running: cancel_op on its
+        token — the build rolls back and, being held, evicted nothing.
+        Finished with a view still pending: that view is dropped (the
+        client's Discard). Returns whether there was anything to do."""
+        job = self._view_jobs.get(job_id)
+        if job is None:
+            return False
+        if job["status"] == "running":
+            self.cancel_op(job["token"])
+            return True
+        view = job.get("view")
+        if job["status"] == "done" and view and self._views.get(view["view_id"], {}).get("pending"):
+            with self.lock, self.db:
+                handle = self._views.get(view["view_id"])
+                if handle and handle.get("pending"):
+                    self._evict_view_and_children(view["view_id"])
+            with self._view_jobs.lock:
+                job["status"] = "cancelled"
+            return True
+        return False
+
+    def running_view_jobs(self) -> int:
+        """How many view builds are running in the background — server.py's
+        idle-shutdown hold counts them alongside ingest jobs."""
+        return self._view_jobs.running()
+
+    def wait_for_view_job(self, job_id: int, timeout: float | None = None) -> dict | None:
+        """Blocks until that job finishes. Tests only."""
+        job = self._view_jobs.get(job_id)
+        if job is None:
+            return None
+        job["done_event"].wait(timeout)
+        return self._view_job_snapshot(job)
 
     # -------------------------------------------------------------- sql window
 

@@ -58,6 +58,11 @@ export function resetJobState() {
   ftsWatch.clear();
   ftsAsked.clear();
   batchNavigated = false;
+  // A search left running in the background belongs to the Store the
+  // server just closed (its job was cancelled with it); its poller stops
+  // once its record is gone from here. Its notice row is one of the
+  // notices cleared below.
+  S.pendingViews.clear();
   // A plugin's rows were about the previous case too — and the poll that
   // would redraw the panel stops when nothing is running, so the DOM has
   // to be cleared here, not left for the next tick.
@@ -114,6 +119,8 @@ export function inFlightWork() {
     + activeUploads.size;
   if (imports) bits.push(`${imports} import${imports === 1 ? '' : 's'} in progress`);
   if (S.searchAll && S.searchAll.running) bits.push('a Search-all sweep');
+  const searching = [...S.pendingViews.values()].filter((p) => p.status === 'running').length;
+  if (searching) bits.push(`${searching} search${searching === 1 ? '' : 'es'} running in the background`);
   const indexing = (S.sources || []).filter((s) => s.fts_building).length;
   if (indexing) bits.push(`${indexing} index build${indexing === 1 ? '' : 's'}`);
   if (opCancelCurrent) bits.push('a running query');

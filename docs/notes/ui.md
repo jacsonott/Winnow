@@ -614,6 +614,44 @@ see [docs/notes/README.md](README.md) for the whole set.
   — the index-build test plays the server for `/api/sources` (route +
   reload) rather than writing `fts_building` into client state, so it
   proves the refresh is issued, not just that the hint renders.
+- **A search-box build goes to the background after `SEARCH_DETACH_MS`
+  (5 s) and its result waits for Apply.** The box's debounce, Enter,
+  Escape, the mode switch and the advanced chips pass `detachAfterMs` to
+  `rebuildView`; the build then runs as a job (`POST /api/view/start`,
+  polled 150→400 ms) with the same busy bar, chip and "Searching… N s"
+  as a blocking build, and a fast one adopts its view and lands exactly
+  as before. Past the deadline the chrome comes down, the old rows stay
+  (a held build evicted nothing — [store.md](store.md)), the build is
+  stashed in `S.pendingViews` (keyed by source: one per table, which is
+  what "one pending per source" means server-side too), a jobs-panel
+  notice with Cancel stands for it, `#viewStats` reads "Searching in
+  background…" and `inFlightWork` lists it for the shutdown guard. When
+  it lands the notice offers Apply and Discard and a `toastAction`
+  offers Apply — **a finished search never installs itself**; the
+  analyst may be three tables away. `applyPendingView` opens the table
+  first if it isn't the open one (`openSource(id, {skipBuild: true})`
+  restores that table's stash into S, so the job's state has to go in
+  AFTER it), puts back the box/filters/sort/tags/timeframe the search
+  was run with (a snapshot of S, not the compiled spec — `S.filters` is
+  raw header-box text), repaints the chrome from them, and adopts the
+  view through the same landing every rebuild takes, so the cursor row,
+  the picks and the seeded pages resolve against the adopted view. A
+  409 "expired" on the adopt (a build landed in between and evicted the
+  held view) toasts and runs the same spec again inside the chrome that
+  is already up. Only search-box rebuilds detach: filter, sort, tag-chip
+  and timeframe rebuilds are awaited by code that acts on the NEW view
+  afterwards (a restored scroll offset, `recenterOnRow`, a dashboard
+  drill), and a rebuild that resolved with the old view still installed
+  would run that against the wrong rows. `installView` is the tail of
+  every rebuild and the only place `winnow:viewchange` fires from, so a
+  search still pending has not "changed the view" until it is applied
+  (docs/writing-plugins.md says so). A new search-box rebuild for the
+  table cancels its pending search first — restoring the stats text
+  before its own indicator reads it as the "before" — so Escape in the
+  box is also how a pending search is called off. `setSearchDetachMs(0)`
+  is the test hook; `tests/ui/test_search_background.py` masks the real
+  job as still running via `page.route` rather than sleeping, and the
+  Apply it clicks does the real adopt.
 - **Stored keymaps are migrated on load, not merged blindly.**
   `loadKeymap` used to be `{...DEFAULT_KEYMAP, ...stored}`, which means a
   returning analyst's localStorage outranks every later change to the

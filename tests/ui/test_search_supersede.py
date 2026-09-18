@@ -25,15 +25,22 @@ pytestmark = pytest.mark.ui
 
 
 class _HeldViews:
-    """Intercepts POST /api/view. The first `hold` requests stay pending
-    until release(); the rest pass straight through."""
+    """Intercepts the build request — POST /api/view for a header-box
+    filter, POST /api/view/start for the search box, whose builds run as
+    a job (see test_search_background.py; within the detach window the
+    two behave the same, and a start held here never reaches the deadline
+    because the detach clock only runs once the start has answered). The
+    first `hold` requests stay pending until release(); the rest pass
+    straight through."""
+
+    ROUTE = re.compile(r".*/api/view(/start)?(\?.*)?$")
 
     def __init__(self, page, hold=1):
         self.page = page
         self.hold = hold
         self.held = []
         self.seen = []     # every request's JSON body, in order
-        page.route("**/api/view", self._on)
+        page.route(self.ROUTE, self._on)
 
     def _on(self, route):
         self.seen.append(route.request.post_data_json)
@@ -55,7 +62,7 @@ class _HeldViews:
 
     def close(self):
         self.release()
-        self.page.unroute("**/api/view")
+        self.page.unroute(self.ROUTE)
 
 
 def _until(page, pred, what, timeout=10):

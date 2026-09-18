@@ -387,7 +387,7 @@ Prefer it to reaching into the app's globals — this is what's supported.
 | `state.timeRange` | The case timeframe filter verbatim — `{enabled, column, start, end}`. Honouring it is what makes "the timeframe applies everywhere" true for your tab too |
 | `state.view` | What the grid is showing right now — `{view_id, row_count}`, filters/search/timeframe applied, or `null` before a table is open. Hand `view_id` to a route that reads THROUGH the view |
 | `setVariable(name, value)` | Set one case variable (creates it if new) |
-| `onViewChange(cb)` | Fires after every grid rebuild — filter, sort, search, timeframe, table switch — with `{sourceId, viewId, rowCount}`. Returns an unsubscribe |
+| `onViewChange(cb)` | Fires after every grid rebuild that installs a view — filter, sort, search, timeframe, table switch — with `{sourceId, viewId, rowCount}`. A search left running in the background fires when it is applied, not when it finishes. Returns an unsubscribe |
 | `onAppearanceChange(cb)` | Fires after every skin / theme / accent change with `{style, themeMode, accent}`. A canvas doesn't inherit CSS, so redraw here. Returns an unsubscribe |
 | `setTimeRange({column, start, end, enabled})` / `clearTimeRange()` | Drive the case timeframe filter (the toolbar's ⏱) — the same object the Timeframe dialog writes, so every other consumer sees it as if typed there |
 | `openFiltered(sourceId, pairs)` | Jump from your visualization to the EVIDENCE: opens the source and exact-filters it to `[{column, value}, …]`. Clears existing filters — it is a navigation, not a refinement |
@@ -621,8 +621,13 @@ export default function mount(container, winnow) {
 }
 ```
 
-- `winnow.onViewChange(cb)` fires after **every** grid rebuild — filter,
-  search, sort, timeframe, table switch. Returns an unsubscribe.
+- `winnow.onViewChange(cb)` fires after **every** grid rebuild that
+  installs a view — filter, search, sort, timeframe, table switch.
+  Returns an unsubscribe. One timing detail: a search the analyst leaves
+  to finish in the background (past five seconds the grid keeps its rows
+  and a jobs-panel row offers Apply) has not changed the grid yet, so
+  nothing fires until they apply it — and nothing fires if they discard
+  it. `winnow.state.view` is the view on screen throughout.
 - `winnow.state.view` is what the table is showing right now. Hand its
   `view_id` to a route of yours that reads *through the view* (see
   `Store.time_histogram` for the shape: reader pool, both view kinds,

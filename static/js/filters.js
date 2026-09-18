@@ -10,9 +10,17 @@ import { clearAllFilters } from './sources.js';
 import { S, normalizeTree } from './state.js';
 import { updateFiltersButton } from './timeframe.js';
 import { anchoredPanel, closeMenu } from './ui.js';
-import { rebuildSoon, rebuildView } from './view.js';
+import { SEARCH_DETACH_MS, rebuildView } from './view.js';
 
 /* -------------------------------------------------------------- filters */
+
+/* The search box's rebuilds — the debounce below, Enter, Escape, the
+   mode switch, the advanced chips — are the ones that go to the
+   background after SEARCH_DETACH_MS (view.js): the old rows stay on
+   screen and the result waits for Apply. A header-box filter uses
+   view.js's rebuildSoon and blocks with the cancel chip like every
+   other rebuild — see SEARCH_DETACH_MS for why the two differ. */
+const searchSoon = debounce(() => rebuildView({ detachAfterMs: SEARCH_DETACH_MS }), 220);
 
 /* Compact filter syntax, typed straight into the column box:
      foo      contains          !foo    does not contain
@@ -606,7 +614,7 @@ export function renderAdvancedChips() {
     bar.append(btn);
     return;
   }
-  renderTermChips(bar, S.searchTerms, () => rebuildView({ keepScroll: false }), {
+  renderTermChips(bar, S.searchTerms, () => rebuildView({ keepScroll: false, detachAfterMs: SEARCH_DETACH_MS }), {
     debounceMs: 220, blurTarget: $('body'), onInputBlur: collapseSearchIfEmpty,
     trailing: (container) => {
       if (S.searchTerms.length <= ADV_COLLAPSE_AT) return;
@@ -627,7 +635,7 @@ export function setSearchMode(mode) {
   }
   syncSearchExpansion(true);
   updateSearchHint();
-  return rebuildView({ keepScroll: false });
+  return rebuildView({ keepScroll: false, detachAfterMs: SEARCH_DETACH_MS });
 }
 
 /* DOM wiring for this module, called once by main.js. Handlers can't
@@ -638,11 +646,14 @@ document.querySelectorAll('#searchModeToggle button').forEach((b) => {
   b.onclick = () => setSearchMode(b.dataset.mode);
 });
 
-$('search').oninput = (e) => { S.search = e.target.value; syncSearchExpansion(true); rebuildSoon(); };
+$('search').oninput = (e) => { S.search = e.target.value; syncSearchExpansion(true); searchSoon(); };
 
 $('search').onkeydown = (e) => {
-  if (e.key === 'Escape') { e.target.value = ''; S.search = ''; rebuildView({ keepScroll: false }); $('body').focus(); }
-  if (e.key === 'Enter') { rebuildView({ keepScroll: false }); $('body').focus(); }
+  // Escape is also how a search left running in the background is
+  // called off from the box: a search-box rebuild cancels this table's
+  // pending search before it starts its own (view.js runBuild).
+  if (e.key === 'Escape') { e.target.value = ''; S.search = ''; rebuildView({ keepScroll: false, detachAfterMs: SEARCH_DETACH_MS }); $('body').focus(); }
+  if (e.key === 'Enter') { rebuildView({ keepScroll: false, detachAfterMs: SEARCH_DETACH_MS }); $('body').focus(); }
 };
 
 $('search').addEventListener('blur', collapseSearchIfEmpty);
