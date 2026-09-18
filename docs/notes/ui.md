@@ -672,16 +672,25 @@ see [docs/notes/README.md](README.md) for the whole set.
   `Filtering… 0.3 s`, and a table switch under it stops it without
   restoring anything (the stats are the other table's now). Two guards
   keep that true. A rebuild superseded while it awaited `/api/view/keys`
-  leaves before it starts any chrome (`seq !== rebuildSeq` right after
-  the lookup) — otherwise its indicator replaced the newer build's and
-  its `finally` then took both down. And a landed build writes its count
-  *before* the selection remap's `await /api/view/positions`: the
-  indicator stops in the `finally` with its last `Searching… 3.2 s`
-  frozen in `#viewStats`, and a rebuild starting inside that await read
-  the frozen label as the text to come back to. The chip survives a
-  supersede too: `cancelInflight` reports whether the superseded build's
-  chip was up, and the new build then arms its own with no delay rather
-  than 1.2s later. The 2px bar and the chip were the only running state
+  leaves before it starts any chrome of its own (`seq !== rebuildSeq`
+  right after the lookup) — otherwise its indicator replaced the newer
+  build's and its `finally` then took both down. Its one exception is
+  the cancel chip, which it claims at the supersede rather than here
+  (below): a chip claimed that way is handed straight to the rebuild
+  that supersedes this one in turn, so the disarm on the way out finds
+  it owned by another token and leaves it standing. And a landed build
+  writes its count *before* the selection remap's `await
+  /api/view/positions`: the indicator stops in the `finally` with its
+  last `Searching… 3.2 s` frozen in `#viewStats`, and a rebuild starting
+  inside that await read the frozen label as the text to come back to.
+  The chip survives a supersede too: `cancelInflight` reports whether
+  the superseded build's chip was up, and the new build claims its own
+  at that moment rather than 1.2s later — at the supersede itself, not
+  after the keys lookup, since the build being displaced disarms as soon
+  as its aborted fetch rejects and the lookup is a whole round trip
+  wide. `armOpCancel(token, 0)` claims it synchronously for the same
+  reason: a zero-delay timer still loses to a disarm that runs on a
+  rejection. The 2px bar and the chip were the only running state
   before; an analyst watching a full-table scan saw the old count and
   nothing moving. `updateSearchHint` adds `index building` while the open
   table's trigram index is still being built (`fts_building && !has_fts`);
@@ -743,8 +752,16 @@ see [docs/notes/README.md](README.md) for the whole set.
   and keeps the detaching form. `installView` is the tail of
   every rebuild and the only place `winnow:viewchange` fires from, so a
   search still pending has not "changed the view" until it is applied
-  (docs/writing-plugins.md says so). A new search-box rebuild for the
-  table cancels its pending search first — restoring the stats text
+  (docs/writing-plugins.md says so). **The table's own record is
+  optional there.** Remove takes it out of `S.sources` while a build for
+  it can still be in flight, so both readers treat a missing record as
+  an answer rather than an error: the stats line denominates with the
+  view's own count (the rows it holds are the rows it found), and the
+  trigram-index question a search build ends in is simply not asked. A
+  throw instead left the view half installed — `S.view` swapped, nothing
+  painted, no `winnow:viewchange` — which is what
+  `tests/ui/test_rebuild_handoffs.py` pins. A new search-box rebuild for
+  the table cancels its pending search first — restoring the stats text
   before its own indicator reads it as the "before" — so Escape in the
   box is also how a pending search is called off. `setSearchDetachMs(0)`
   is the test hook; `tests/ui/test_search_background.py` masks the real

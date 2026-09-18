@@ -19,8 +19,13 @@ the moment its aborted fetch rejects, which is before the newer build has
 finished asking the server where the analyst's picks went. The chip is
 therefore claimed at the supersede itself.
 
-Neither test changes anything the server keeps: filters, picks and the
-search box are client state, and both put the full table back.
+The third handoff is to nobody: the table a build was for can be removed
+while it is in flight, and the landing then runs against an S.sources
+that no longer holds its record.
+
+No test here changes anything the server keeps: filters, picks, the
+search box and the client's copy of the source list are all client
+state, and each puts the full table back.
 """
 from __future__ import annotations
 
@@ -181,4 +186,48 @@ def test_the_cancel_chip_does_not_blink_when_a_build_supersedes_another(page):
         keys.close()
         builds.close()
         page.wait_for_function("() => __winnow.busyCount === 0")
+        _reset(page)
+
+
+def test_a_build_lands_after_its_table_is_removed_under_it(page):
+    """Remove takes the table out of S.sources; a build already out for it
+    lands a beat later and asks that list for the record — for the total
+    the stats line denominates with, and for whether the table has a
+    trigram index worth following. Both threw when the record had gone,
+    which left the view half installed: S.view swapped, nothing painted,
+    no winnow:viewchange, and an uncaught error in the console.
+
+    The build is held here so the window is as wide as the test likes; in
+    the app it is whatever the round trip costs. The search in the spec is
+    what makes the index question get asked at all."""
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    sid = page.evaluate("() => __winnow.S.sourceId")
+    builds = _Held(page, r".*/api/view(\?.*)?$")
+    try:
+        page.evaluate("""() => {
+          window.__landed = 0;
+          document.addEventListener('winnow:viewchange', () => { window.__landed++; });
+          document.getElementById('search').value = '4625';
+          __winnow.S.search = '4625';
+          __winnow.rebuildView({ keepScroll: false, keepRow: false });
+        }""")
+        builds.wait_held()
+        # What Remove does to the client's list, with the build already out.
+        page.evaluate("(id) => { __winnow.S.sources = __winnow.S.sources.filter((s) => s.id !== id); }", sid)
+        builds.release()
+        # All the way through: the event fires from the tail of
+        # installView, after the paint.
+        page.wait_for_function("() => window.__landed === 1 && __winnow.busyCount === 0", timeout=15_000)
+        assert page.evaluate("() => __winnow.S.view.row_count") == 50
+        # With no table record to give a total, the view's own count is
+        # the denominator — the rows it holds are the rows it found.
+        stats = page.evaluate("() => document.getElementById('viewStats').textContent")
+        assert re.fullmatch(r"50 of 50 rows · [\d.]+ ms", stats), stats
+        assert errors == []
+    finally:
+        builds.close()
+        page.evaluate("(id) => { __winnow.loadSources(id); }", sid)
+        page.wait_for_function("(id) => __winnow.S.sourceId === id && !!__winnow.S.view"
+                               " && __winnow.S.view.source_id === id", arg=sid, timeout=30_000)
         _reset(page)

@@ -143,10 +143,17 @@ function stopIndicator(seq, restore) {
   return before;
 }
 
-/* The stats line a landed view writes. */
+/* The stats line a landed view writes. The table it is for can be gone
+   by then — Remove drops the record from S.sources while a build for it
+   is still in flight, and the landing is a beat behind — so the record is
+   optional here: with no table to give a total, the view's own count is
+   the honest denominator (it held every row it found). A throw instead
+   would take the rest of installView with it, leaving the grid half
+   swapped. */
 function statsLine(v) {
   const src = S.sources.find((s) => s.id === S.sourceId);
-  return `<b>${v.row_count.toLocaleString()}</b> of ${src.row_count.toLocaleString()} rows · ${v.elapsed_ms} ms`;
+  const total = src ? src.row_count : v.row_count;
+  return `<b>${v.row_count.toLocaleString()}</b> of ${total.toLocaleString()} rows · ${v.elapsed_ms} ms`;
 }
 
 /* The row the analyst is at, as an identity that survives a rebuild
@@ -756,6 +763,10 @@ export async function installView(v, { seq, forSourceId, cacheKey, seeded = [], 
   // read the frozen label as the text to come back to on a cancel — then
   // put it back as the permanent stats line. The remap doesn't change
   // the count, so nothing here waits on it.
+  //
+  // The record is optional, for the reason statsLine's is: Remove takes
+  // the table out of S.sources while a build for it can still be in
+  // flight, and this landing runs against the list as it is now.
   const src = S.sources.find((s) => s.id === S.sourceId);
   $('viewStats').innerHTML = statsLine(v);
   // Picks are positions, and positions mean different rows now — but the
@@ -826,7 +837,8 @@ export async function installView(v, { seq, forSourceId, cacheKey, seeded = [], 
   // server-side, from inside build_view's contains and advanced branches
   // (Store._ensure_fts_building; regex never indexes) — and the view's
   // payload says nothing about it. The client has to ask: followFtsBuild.
-  if (!src.has_fts && spec.search_mode !== 'regex' && specSearchTerm(spec)) followFtsBuild(src.id);
+  // …and a table that is gone has no index build to follow.
+  if (src && !src.has_fts && spec.search_mode !== 'regex' && specSearchTerm(spec)) followFtsBuild(src.id);
 }
 
 /* `detachAfterMs`: leave the build to finish in the background once it
