@@ -28,7 +28,11 @@ does constantly.
 that row's value (so the first row shows the first event's user),
 `{count}` the group's row count, `{which}` the literal First/Last. Unknown
 placeholders are a ValueError naming the offender — a template typo should
-fail the preview, not silently emit `{Usre}` into 400 descriptions.
+fail the preview, not silently emit `{Usre}` into 400 descriptions. Any
+column of the source can be named: the windowed pass projects whatever the
+template references on top of the grouped/ordered/carried columns
+(`_template_columns`), so a column need not be dragged into Include
+columns just to appear in the description.
 
 The filter helpers (_where/_esc_like/OPERATORS) are copied from the pivot
 example rather than imported — plugins are deliberately standalone
@@ -335,15 +339,41 @@ def _agg_alias(kind, col):
     return _sum_alias(col) if kind == "sum" else f"{kind.capitalize()} of {col}"
 
 
+def _template_columns(template, src):
+    """The source columns a description template names as plain `{Name}`
+    placeholders, in first-mention order. Tokenised exactly as _render
+    does (a `{` runs to the next `}`), so what gets projected is what
+    _render will look up; anything that is not a column — {which},
+    {count}, the colon forms, a typo — is left for _render to resolve or
+    refuse by name."""
+    names = {c["name"] for c in src["columns"]}
+    out, i, n = [], 0, len(template or "")
+    while i < n:
+        if template[i] != "{":
+            i += 1
+            continue
+        j = template.find("}", i + 1)
+        if j == -1:
+            break
+        key = template[i + 1:j]
+        if key in names and key not in out:
+            out.append(key)
+        i = j + 1
+    return out
+
+
 def _bookend_rows(req, src, group_cols, sort_col, carry, where, params, limit,
                   row_json=False, sums=(), template=""):
     """One windowed pass: rank each row inside its group both directions,
     keep rank 1 of each. Selected values are the *row's own* — the first
     row's user, not the group's."""
     # Every column the template or output might need, deduped, stable order
-    # — or the whole row when the JSON cell is requested.
+    # — or the whole row when the JSON cell is requested. The template's
+    # own columns ride along so {Col} resolves for ANY column, not only
+    # one that happens to be grouped, ordered or carried; they are
+    # projected for _render alone and never become output columns.
     pool = ([c["name"] for c in src["columns"]] if row_json
-            else group_cols + [sort_col] + carry)
+            else group_cols + [sort_col] + carry + _template_columns(template, src))
     needed = []
     for c in pool:
         if c not in needed:

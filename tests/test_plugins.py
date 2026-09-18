@@ -1707,6 +1707,58 @@ def test_first_last_template_typo_is_a_400_naming_the_placeholder(fl_client):
     assert "{Usre}" in r.json()["detail"]
 
 
+def test_first_last_template_names_a_column_it_does_not_carry(fl_client, store, write_csv):
+    """{Column} resolves for ANY column of the table, not only one that is
+    grouped, ordered or carried: the template's columns ride the windowed
+    pass for the renderer alone and never become output columns. A typo is
+    still refused by name. Same over a merge (invariant #9), where the
+    column arrives through the union."""
+    client, sid = fl_client
+    out = _fl(client, "preview", source_id=sid, group_by=["Host", "User"],
+              sort_column="When", columns=[], template="{which} of {count} — {EventId}")
+    assert out["columns"] == ["When", "Description"]
+    descs = {r[-1] for r in out["rows"]}
+    assert "First of 3 — 4624" in descs and "Last of 3 — 4634" in descs
+    r = client.post("/api/plugin/first_last/preview", json={
+        "source_id": sid, "group_by": ["Host"], "sort_column": "When",
+        "columns": [], "template": "{EventId} {Evnt}"})
+    assert r.status_code == 400 and "{Evnt}" in r.json()["detail"]
+
+    rows2 = [["When", "Host", "User", "EventId"],
+             ["2026-03-15 08:00:00", "SRV9", "erin", "7001"],
+             ["2026-03-15 17:00:00", "SRV9", "erin", "7002"]]
+    sid2 = store.ingest_csv(write_csv(rows2, "fltc2.csv"), name="fltc2", build_fts=False)["id"]
+    mid = store.create_merge("fltcm", [sid, sid2])["id"]
+    out = _fl(client, "preview", source_id=mid, group_by=["User"], sort_column="When",
+              columns=[], template="{which} {EventId} on {Host}")
+    assert out["columns"] == ["When", "Description"]
+    descs = {r[-1] for r in out["rows"]}
+    assert "First 7001 on SRV9" in descs and "Last 7002 on SRV9" in descs
+
+
+def test_first_last_values_are_most_common_first(fl_client, store, write_csv):
+    """The filter editor's value list: most common first, and the cap
+    reported as `truncated` so the tab can say the list is partial. Over a
+    merge the counts come through the union (invariant #9)."""
+    client, sid = fl_client
+    out = _fl(client, "values", source_id=sid, column="Host")
+    assert [(v["value"], v["count"]) for v in out["values"]] == [("SRV1", 5), ("SRV2", 1)]
+    assert out["truncated"] is False
+    out = _fl(client, "values", source_id=sid, column="Host", limit=1)
+    assert [v["value"] for v in out["values"]] == ["SRV1"] and out["truncated"] is True
+    r = client.post("/api/plugin/first_last/values", json={"source_id": sid, "column": "Nope"})
+    assert r.status_code == 400
+
+    rows2 = [["When", "Host", "User", "EventId"],
+             ["2026-03-15 08:00:00", "SRV9", "erin", "4624"],
+             ["2026-03-15 17:00:00", "SRV9", "erin", "4634"]]
+    sid2 = store.ingest_csv(write_csv(rows2, "flv2.csv"), name="flv2", build_fts=False)["id"]
+    mid = store.create_merge("flvm", [sid, sid2])["id"]
+    out = _fl(client, "values", source_id=mid, column="Host")
+    assert [(v["value"], v["count"]) for v in out["values"]] == [("SRV1", 5), ("SRV9", 2), ("SRV2", 1)]
+    assert out["truncated"] is False
+
+
 @pytest.mark.parametrize("body, fragment", [
     ({"group_by": [], "sort_column": "When"}, "at least one column"),
     ({"group_by": ["Host"]}, "orders each group"),
