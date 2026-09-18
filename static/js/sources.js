@@ -847,7 +847,7 @@ export async function openSource(id, { skipBuild = false } = {}) {
     document.dispatchEvent(new CustomEvent('winnow:viewchange',
       { detail: { sourceId: S.sourceId, viewId: cached.view_id, rowCount: cached.row_count } }));
   } else {
-    await rebuildView({ keepScroll: false });
+    await rebuildView({ keepScroll: false, keepRow: false });
     // Same view spec as when we left (the stash IS the spec), so the raw
     // scrollTop still points at the same rows.
     if (stash && !S.groupByCols.length) $('body').scrollTop = stash.scroll;
@@ -1422,9 +1422,11 @@ export function wireSidebarResize() {
 /* Row identity (source_id, rid) survives a view rebuild even though pos
    doesn't (see CLAUDE.md — positions are view-specific and get wiped on
    every rebuild). Capture whichever row was under the selection/cell-range/
-   cursor before the rebuild so clearAllFilters can find that same row again
-   afterward and re-center the grid on it instead of dropping the analyst
-   back at row 0. */
+   cursor so a caller can find that same row again after a rebuild and
+   re-center the grid on it (recenterOnRow). A flat view's filter changes no
+   longer need this pair — rebuildView carries the cursor row itself
+   (keepRow, view.js); it remains for the grouped case in landOnFilters
+   and for landings that come from elsewhere (the timeline, a plugin). */
 export function selectedRowAnchor() {
   let pos = -1;
   if (S.cellRange) pos = S.cellRange.r0;
@@ -1480,7 +1482,13 @@ async function landOnFilters(filters, tree, { clearTimeframe = false } = {}) {
   // to survive exactly this ("apply/clear filters shouldn't lose my
   // timeframe"), same as it survives applyPreset() and a tab switch. Use
   // the Timeframe filter's own "Clear" button, or toggleTimeRange, for that.
-  const anchor = selectedRowAnchor();
+  //
+  // Landing on the same row afterwards is rebuildView's job now (keepRow)
+  // — except under a grouping, where it has nothing to anchor on: grouped
+  // positions are another address space, and dropGrouping below clears
+  // the cursor before the build. Capture the row here, while the tree can
+  // still resolve it, and recentre once the flat view is up.
+  const anchor = S.groupByCols.length ? selectedRowAnchor() : null;
   // Grouping goes with the filters (stashed first, so toggleGrouping can
   // bring it back) — clearing "the filters" should land on the plain
   // table, not on an empty filter under the old grouping.
