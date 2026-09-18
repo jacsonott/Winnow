@@ -2195,11 +2195,46 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 .notes-head .notes-label { color: var(--dim); text-transform: uppercase;
   letter-spacing: .07em; font-size: 11px; }
 .notes-head .spacer { flex: 1; }
-.notes-editor { flex: 1 1 auto; min-height: 0; width: 100%; resize: none;
+/* Editor and live preview side by side, split by a draggable divider. The
+   editor's share is the --notes-split custom property (a ratio, set by
+   notes.js from winnow.notes — a ratio rather than px, because the row's
+   width changes whenever the plugin side column opens or the window
+   resizes, and a 50/50 that stays 50/50 is what "remembered" means here);
+   the preview takes the rest. data-mode collapses one pane or the other. */
+.notes-split { flex: 1 1 auto; min-height: 0; display: flex; --notes-split: 50%; }
+.notes-editor { flex: 0 0 var(--notes-split); min-width: 0; min-height: 0; resize: none;
   background: var(--panel); color: var(--text); border: none; outline: none;
   padding: 16px 18px; font: 13px/1.6 var(--mono); }
-.notes-preview { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 8px 22px 40px;
-  color: var(--text); max-width: 82ch; }
+/* The pane itself fills its half (otherwise the divider sits against dead
+   space); the 82ch measure cap lives on the inner body. It paints its own
+   background: the editor beside it is solid var(--panel), and without one
+   here #app's skin backdrop (the blueprint graph paper) showed through one
+   half of what reads as a single surface. */
+.notes-preview { flex: 1 1 0; min-width: 0; min-height: 0; overflow: auto; padding: 8px 22px 40px;
+  color: var(--text); background: var(--panel); }
+.notes-preview-body { max-width: 82ch; }
+.notes-split[data-mode="edit"] .notes-preview, .notes-split[data-mode="edit"] .notes-divider,
+.notes-split[data-mode="preview"] .notes-editor, .notes-split[data-mode="preview"] .notes-divider { display: none; }
+.notes-split[data-mode="edit"] .notes-editor { flex: 1 1 auto; }
+/* Same handle idiom as .tab-split — a 9px hit target wider than the 1px
+   line it paints — but pulled into ONE neighbour only. The line sits at
+   the editor's right edge and the other 8px overlap the preview's inert
+   left padding, never the editor: on platforms with classic scrollbars
+   (Windows/Linux headed Chromium, the Edge --app window) the textarea's
+   vertical scrollbar occupies exactly that strip, and a symmetric overlap
+   turned a grab of the scrollbar thumb into a split drag. Positioned so it
+   paints above the preview it overlaps. NOT .page-panel-resize — that is
+   the plugin column's handle, which syncPluginPanels shows and hides. */
+.notes-divider {
+  flex: 0 0 auto; width: 9px; margin: 0 -8px 0 0; position: relative; z-index: 1;
+  cursor: col-resize; touch-action: none;
+}
+.notes-divider::after {
+  content: ""; position: absolute; inset: 0 8px 0 0;
+  background: var(--line-2);
+  transition: background var(--transition-fast) var(--ease);
+}
+.notes-divider:hover::after, .notes-divider.dragging::after { background: var(--accent-dim); }
 .notes-preview h1, .notes-preview h2, .notes-preview h3, .notes-preview h4 {
   color: var(--text); border-bottom: 1px solid var(--line); padding-bottom: 3px; }
 .notes-preview a { color: var(--accent); }
