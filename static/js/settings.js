@@ -7,6 +7,7 @@ import { labeledRow } from './derived.js';
 import { VALUE_FILTER_AUTO_MAX } from './filters.js';
 import { headH, rScroll, render, spacerPx, vScroll } from './grid.js';
 import { drawRail, rebuildGroupPrefix, renderGrouped } from './grouping.js';
+import { syncHistogramPanel } from './histogram.js';
 import { shutdownWinnow } from './home.js';
 import { ACTION_LABELS, defaultKeymap, findKeyConflict, keySpecFromEvent, saveKeymap } from './keymap.js';
 import { buildPluginsPanel } from './plugins.js';
@@ -16,11 +17,9 @@ import { loadCaseVariables, loadSavedFilters } from './savedfilters.js';
 import { applyPageTabsSize, renderPageTabs, syncTabOverflow } from './sources.js';
 import { lastSplash, reducedMotion } from './splash.js';
 import { S, gridRowCount, dashboardCreatorMode } from './state.js';
-import { openSavedFiltersModal, updateFiltersButton } from './timeframe.js';
+import { openSavedFiltersModal, updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
 import { TS_FORMATS } from './tsformat.js';
 import { markModalAction, confirmDialog, modal, promptDialog } from './ui.js';
-
- // reads S.keymap.toggleTimeRange for its tooltip — must come after the line above
 
 /* ------------------------------------------------------------ appearance */
 
@@ -804,6 +803,18 @@ export function openSettings() {
       + '"+ key" waits for a full press — hold modifiers for a combination (e.g. Ctrl+Shift+K), or Shift+letter for a capital.'));
     const list = el('div', 'settings-keys');
 
+    // Every change to a binding goes through here: the two toolbar
+    // tooltips that spell a key (⏱ Timeframe's toggle/open keys, the
+    // Histogram button's show/hide key) are built from S.keymap when
+    // their button syncs, so a rebinding has to rebuild them too or they
+    // name the old key until the next tab switch.
+    function keymapChanged() {
+      saveKeymap();
+      updateTimeRangeButton();
+      syncHistogramPanel();
+      renderList();
+    }
+
     function renderList() {
       list.replaceChildren();
       for (const [action, keys] of Object.entries(S.keymap)) {
@@ -815,7 +826,7 @@ export function openSettings() {
           chip.append(el('kbd', null, k));
           const rm = el('button', 'btn ghost', '✕');
           rm.title = 'Remove this binding';
-          rm.onclick = () => { keys.splice(i, 1); saveKeymap(); renderList(); };
+          rm.onclick = () => { keys.splice(i, 1); keymapChanged(); };
           chip.append(rm);
           chips.append(chip);
         });
@@ -856,8 +867,7 @@ export function openSettings() {
             const conflict = findKeyConflict(spec, action);
             if (conflict) { toast(`"${spec}" is already used by ${conflict}`, 4000); return; }
             keys.push(spec);
-            saveKeymap();
-            renderList();
+            keymapChanged();
           };
           document.addEventListener('keydown', capture, true);
         };
@@ -871,7 +881,7 @@ export function openSettings() {
 
     const reset = el('button', 'btn ghost', 'Reset to defaults');
     reset.style.marginTop = '14px';
-    reset.onclick = () => { S.keymap = defaultKeymap(); saveKeymap(); renderList(); };
+    reset.onclick = () => { S.keymap = defaultKeymap(); keymapChanged(); };
     secKeys.append(reset);
 
     const fixedKeys = el('div', 'kv');

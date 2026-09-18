@@ -72,6 +72,41 @@ see [docs/notes/README.md](README.md) for the whole set.
   `parseTimestamp`) is what both the column values and the start/end
   bounds get compared through — a bare text/numeric comparison on the raw
   stored value sorts the US `M/D/YYYY` shape wrong.
+- **The histogram strip** (`static/js/histogram.js`, `GET /api/histogram`
+  over `Store.time_histogram`, toggled by `#btnHistogram` or `h`) was the
+  `table_histogram` example plugin until 2026-09 and is built in now;
+  three things from its life as a plugin are worth knowing before touching
+  it. **A 409 from the route means mid-rebuild, not an error**: the strip
+  fetches 150 ms after `winnow:viewchange`, and a second rebuild in that
+  window evicts the view it asked about — so on a 409 it keeps what is
+  drawn and lets that rebuild's own view change refetch. Only an
+  'expired' KeyError is a 409; an unknown column (a derived column just
+  removed) or a non-datetime one is a 400 the strip shows as text in
+  `.th-empty`, because waiting for a view change would never fix it. It
+  listens only while it is on screen: open but hidden behind a page tab,
+  a view change is left for the show edge in `syncHistogramPanel` to
+  refetch (keying on the pref alone aggregated a view rebuilt behind the
+  SQL tab twice), and the first ask after opening measures the section
+  rather than the canvas, which "Loading…" has hidden — measuring the
+  canvas fell through to a 600px fallback and an 85-bar first chart.
+  **The drag snaps to a unit chosen from the drag, not from the bar
+  width**: rounding outwards to the current bucket made any drag inside
+  one 6h bar that whole bar, so the view never narrowed enough for the
+  server to re-bucket and "zoom in" did nothing; the unit is fine enough
+  that the rounding adds ≤ ~8 % per end, never finer than a second, never
+  coarser than the bar (`snapUnit`). And **the canvas redraws on
+  `winnow:appearance`** — a canvas does not inherit CSS, so the tokens are
+  read at draw time and a skin/accent change is one redraw, or the bars
+  keep the old colour until the next view change. Two host rules: the
+  strip shares `#pluginPanels` with plugin toolbar panels, and
+  `syncPluginPanels()` (plugins.js) stays the only writer of the host's
+  `hidden` — it asks `histogramOpen()`, which is what keeps a plugin
+  toggled off from hiding an open histogram; and `#btnHistogram` sits
+  AFTER `#pluginToolbarButtons`, never inside it, because
+  `renderPluginPanelButtons` wipes that span on every plugin reload (boot
+  and every case switch). Prefs are `winnow.histogram` `{open, column}`
+  per browser; the plugin's `winnow.panels['table-histogram.histogram']`
+  is migrated to `open` once and deleted.
 - There's no separate "preset" concept anymore — a preset is just a saved
   filter (`workspace.SavedFilters`, cross-case) whose `col_names` happens to
   match (exactly, or "similar" per the same Jaccard/subset heuristic the old

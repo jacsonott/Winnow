@@ -103,8 +103,11 @@ try {
   <div id="tagRibbon" class="tag-ribbon" aria-label="Tags"></div>
   <div class="spacer"></div>
   <div id="viewStats" class="stats"></div>
-  <!-- Plugin toolbar-panel toggles (PluginAPI.register_toolbar_panel) land here, left of the timeframe. -->
+  <!-- Plugin toolbar-panel toggles (PluginAPI.register_toolbar_panel) land here, left of the built-in
+       histogram toggle and the timeframe. The span is wiped and refilled on every plugin reload
+       (renderPluginPanelButtons), which is why #btnHistogram sits after it rather than inside it. -->
   <span id="pluginToolbarButtons" class="plugin-toolbar-buttons"></span>
+  <button class="btn ghost" id="btnHistogram" aria-pressed="false" title="When the rows in this view happened, as time buckets — drag across the bars to set the timeframe filter">Histogram</button>
   <button class="btn ghost" id="btnTimeRange" aria-pressed="false">⏱ Timeframe</button>
   <button class="btn ghost" id="btnFilters" aria-haspopup="true" aria-expanded="false" aria-pressed="false">Filters ▾</button>
   <button class="btn ghost" id="btnReset">Clear filters</button>
@@ -121,9 +124,13 @@ try {
   <div id="advancedSearchBar" class="advanced-search-bar" hidden></div>
 </section>
 
-<!-- Plugin toolbar panels (a histogram of the view, …): a strip between the
-     toolbar and the grid, hidden when no panel is toggled on. -->
-<div id="pluginPanels" class="plugin-panels" hidden></div>
+<!-- The strip between the toolbar and the grid: the built-in histogram
+     (static/js/histogram.js) first, then plugin toolbar panels. Hidden when
+     nothing in it is toggled on — plugins.js syncPluginPanels owns the
+     host's `hidden`, histogram.js syncHistogramPanel its own section's. -->
+<div id="pluginPanels" class="plugin-panels" hidden>
+  <section id="histogramPanel" class="plugin-panel histogram-panel" hidden></section>
+</div>
 <!-- A session comparison pivoted into the grid: which two sessions, what
      the marks mean, and the way out. -->
 <div id="diffBanner" class="diff-banner" role="status" hidden></div>

@@ -15,7 +15,8 @@ exactly the same; the panel picks it up on next open.
 Seven ready-made examples ship in [`examples/plugins/`](../examples/plugins/):
 `mft_usn` (raw NTFS `$MFT`/`$J` parsing — an ingest-format plugin),
 `lateral_movement` (a pinned graph tab — a custom-UI plugin),
-`table_histogram` (a toolbar panel you drag on to set the timeframe),
+`top_values` (a toolbar panel that follows the grid — the most common
+values of a column),
 `first_last`, `pivot`, `esxi_logs`, and `claude_assistant` (a Claude chat
 tab — an external-integration plugin; needs network + API key).
 
@@ -27,8 +28,8 @@ maintaining two.
 
 Writing one? Start with
 **[docs/writing-plugins.md](../docs/writing-plugins.md)** — quickstart,
-the six extension points (ingest formats, tabs, API routes, row actions,
-toolbar panels, dashboards), testing, and troubleshooting. The contract is also
+the seven extension points (ingest formats, tabs, API routes, row actions,
+toolbar panels, page panels, dashboards), testing, and troubleshooting. The contract is also
 spelled out at the top of
 [`winnow/plugin_api.py`](../winnow/plugin_api.py). A plugin that fails to load never
 takes the server down — it's listed with its error in Settings → Plugins

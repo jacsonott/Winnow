@@ -1,4 +1,4 @@
-"""Selecting a smaller timeframe on the histogram, and seeing it.
+"""Selecting a smaller timeframe on the histogram strip, and seeing it.
 
 Two complaints, one cause and one consequence.
 
@@ -20,6 +20,7 @@ import datetime
 import json
 import time
 import urllib.request
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -33,11 +34,11 @@ def _post(server, route, body):
     return json.loads(urllib.request.urlopen(req, timeout=10).read())
 
 
-def _put_back(page, server, sid):
+def _put_back(page, sid):
     """Undo everything the fixture did. Called from teardown AND from a
     failed setup: a yield fixture that raises before its yield runs no
-    teardown, and a wide.csv left open (with the plugin left on) fails the
-    tab-strip, watchlist-badge and any later histogram test after it —
+    teardown, and a wide.csv left open (with the strip left open) fails
+    the tab-strip, watchlist-badge and any later histogram test after it —
     one slow import on a CI runner read as three unrelated failures."""
     page.evaluate("() => { __winnow.S.timeRange = { enabled: false, column: null, start: '', end: '' }; }")
     page.evaluate("""async (id) => {
@@ -50,9 +51,7 @@ def _put_back(page, server, sid):
       const first = __winnow.S.sources.find((s) => !s.is_merge);
       if (first) __winnow.openSource(first.id);
     }""", sid)
-    page.evaluate("() => localStorage.removeItem('winnow.panels')")
-    _post(server, "/api/plugins/toggle", {"fs_name": "table_histogram", "scope": "off_all"})
-    page.evaluate("() => __winnow.loadPlugins()")
+    page.evaluate("() => { __winnow.toggleHistogram(false); localStorage.removeItem('winnow.histogram'); }")
     page.wait_for_selector(".row")
 
 
@@ -86,27 +85,25 @@ def wide_table(page, server, tmp_path):
         page.evaluate("(id) => __winnow.openSource(id)", sid)
         page.wait_for_function("(id) => __winnow.S.sourceId === id", arg=sid)
 
-        _post(server, "/api/plugins/toggle", {"fs_name": "table_histogram", "scope": "on_all"})
-        page.evaluate("() => __winnow.loadPlugins()")
-        btn = page.locator("#pluginToolbarButtons .plugin-panel-btn", has_text="Histogram")
-        # Generous: a CI runner fetching the plugin module and the first
-        # histogram of a fresh table has taken more than ten seconds.
+        btn = page.locator("#btnHistogram")
+        # Generous: a CI runner drawing the first histogram of a fresh
+        # table has taken more than ten seconds.
         btn.wait_for(state="visible", timeout=30_000)
         if btn.get_attribute("aria-pressed") == "false":
             btn.click()
-        page.wait_for_selector("#pluginPanels:not([hidden]) canvas.th-canvas", timeout=30_000)
-        page.wait_for_function("() => /rows/.test(document.querySelector('.plugin-panel').textContent)",
+        page.wait_for_selector("#pluginPanels:not([hidden]) #histogramPanel canvas.th-canvas", timeout=30_000)
+        page.wait_for_function("() => /rows/.test(document.getElementById('histogramPanel').textContent)",
                                timeout=30_000)
     except Exception:
-        _put_back(page, server, sid)
+        _put_back(page, sid)
         raise
     yield sid
-    _put_back(page, server, sid)
+    _put_back(page, sid)
 
 
 def _bucket_seconds(page):
-    """Read the bucket width off the panel's own caption ("… 1h buckets …")."""
-    txt = page.locator(".plugin-panel").inner_text()
+    """Read the bucket width off the strip's own caption ("… 1h buckets …")."""
+    txt = page.locator("#histogramPanel").inner_text()
     import re
     m = re.search(r"·\s*(\d+)([smhd])\s*buckets", txt)
     assert m, txt
@@ -151,7 +148,7 @@ def test_the_bars_get_finer_for_the_smaller_range(page, wide_table):
     page.wait_for_function(
         """() => { const v = __winnow.S.view;
              if (!v) return false;          // mid-rebuild: S.view is briefly unset
-             const p = document.querySelector('.plugin-panel');
+             const p = document.getElementById('histogramPanel');
              if (!p) return false;
              const m = /(\\d[\\d,]*) rows/.exec(p.textContent);
              return !!m && Number(m[1].replace(/,/g, '')) === v.row_count; }""",
@@ -165,8 +162,7 @@ def test_the_panel_asks_for_as_many_bars_as_it_can_show(page, wide_table):
     at every zoom level. The ask comes from the canvas now, so it changes
     when the canvas does."""
     asks = []
-    page.on("request", lambda r: asks.append(r.post_data)
-            if r.url.endswith("/histogram") and r.post_data else None)
+    page.on("request", lambda r: asks.append(r.url) if "/api/histogram" in r.url else None)
 
     wide = page.locator("canvas.th-canvas").bounding_box()["width"]
     page.set_viewport_size({"width": 900, "height": 900})
@@ -178,7 +174,7 @@ def test_the_panel_asks_for_as_many_bars_as_it_can_show(page, wide_table):
     page.wait_for_timeout(1200)
 
     narrow = page.locator("canvas.th-canvas").bounding_box()["width"]
-    got = [json.loads(a).get("max_buckets") for a in asks if a]
+    got = [int(parse_qs(urlparse(a).query)["max_buckets"][0]) for a in asks]
     assert got, "the panel never asked for a histogram"
     assert all(isinstance(n, int) and 20 <= n <= 400 for n in got), got
     # The last ask was made for the narrower canvas, and fits it.

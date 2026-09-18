@@ -6,6 +6,7 @@ import { $, api, debounce, el, post, toast } from './core.js';
 import { hideDetailPane } from './detail.js';
 import { renderTagToolbar } from './grid.js';
 import { hidePluginViews, sqlResultNodes, syncPluginPanels } from './plugins.js';
+import { syncHistogramPanel } from './histogram.js';
 import { setActiveSqlResult } from './sqlassist.js';
 import { checkPresets } from './savedfilters.js';
 import { syncDiffBanner } from './session.js';
@@ -251,6 +252,7 @@ export function syncTabChrome() {
   // empty, on every return to the grid.
   if (!isGrid) hideDetailPane();
   syncPluginPanels();   // plugin toolbar panels live and die with the toolbar
+  syncHistogramPanel(); // as does the built-in histogram strip beside them
   syncDiffBanner();     // as does a session comparison's banner
   renderTagToolbar();   // and the "N selected" tagging bar
 }

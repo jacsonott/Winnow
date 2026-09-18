@@ -49,7 +49,7 @@ handed to its `register()` function:
 | `api.register_tab(...)` | A pinned tab with your own UI | A whole feature surface: a graph, a dashboard, an assistant, a report builder |
 | `api.register_api(route, handler)` | A backend endpoint | Whatever your tab (or a script) needs the server to do |
 | `api.register_row_action(...)` | An entry under the row right-click menu's **Plugins ▸** submenu — analysts can pin it to the top of the menu | Anything that operates on the selected rows: a VirusTotal lookup on the highlighted hashes, an enrichment, a hand-off to another tool |
-| `api.register_toolbar_panel(...)` | A toggle in the table toolbar + a strip above the grid | Something that follows the current view: a histogram of when its rows happened, a sparkline, a legend |
+| `api.register_toolbar_panel(...)` | A toggle in the table toolbar + a strip above the grid | Something that follows the current view: the top values of a column, a sparkline, a legend — the built-in histogram strip (`static/js/histogram.js`) is this shape |
 | `api.register_page_panel(...)` | A toggle in the SQL or Notes page's toolbar + a side column beside it | Something that works *with* the page: an assistant that writes and runs queries, a query library, a note template picker |
 | `api.register_dashboard(...)` | A board under **Dashboards ▸ Library**, added to a case with ＋ | The overview you would build by hand every time you open this kind of case: counts, top values, a timeline of what matters for the format your plugin reads |
 
@@ -66,7 +66,7 @@ The shipped examples map onto these:
 | [`mft_usn/`](../examples/plugins/mft_usn/) | Ingest formats — two of them, with options, streaming parsers, extension *and* bare-filename matching |
 | [`lateral_movement/`](../examples/plugins/lateral_movement/) | A tab + a route — canvas UI, case queries, theming |
 | [`claude_assistant/`](../examples/plugins/claude_assistant/) | A tab + a route that calls an external service, with credentials and dependencies — and a **page panel**, the SQL Copilot, that inserts and runs the queries it writes |
-| [`table_histogram/`](../examples/plugins/table_histogram/) | A toolbar panel + a route — following the grid with `onViewChange`, driving the timeframe filter with `setTimeRange` |
+| [`top_values/`](../examples/plugins/top_values/) | A toolbar panel with no backend — following the grid with `onViewChange`, reading the current view through the app's own `/api/group_summary` |
 | [`first_last/`](../examples/plugins/first_last/) | A tab that writes a TABLE back — `ingest_rows` output an analyst browses, tags and exports like any other source |
 | [`pivot/`](../examples/plugins/pivot/) | A tab that aggregates the current view — drag-and-drop rows/columns/values over the case's own data |
 | [`esxi_logs/`](../examples/plugins/esxi_logs/) | Ingest formats for a support bundle's ESXi/Linux logs, the profile that pairs them with a dashboard, and the reference `register_dashboard` board |
@@ -637,9 +637,14 @@ export default function mount(container, winnow) {
   and friends) at draw time and redraw here, and your panel follows the
   analyst's look — including a custom accent — like the rest of the app.
 
-`table_histogram/` is the worked example: bars per time bucket of a
-datetime column, a drag on them becomes the timeframe filter, and the
-whole thing re-queries on every view change.
+`top_values/` is the worked example: the ten most common values of a
+column for the current view, listed from the app's own
+`/api/group_summary` and re-asked on every view change — no route of its
+own. For the canvas-and-route shape (bars painted with the accent, a drag
+that becomes the timeframe filter, a route that reads through the view),
+read the built-in histogram strip, `static/js/histogram.js`: it was this
+hook's example until it was built in, and `GET /api/histogram` over
+`Store.time_histogram` is the route half.
 
 ---
 

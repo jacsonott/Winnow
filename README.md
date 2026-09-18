@@ -26,9 +26,11 @@ another analyst. The evidence files themselves are **never modified**.
   triage filters ship in the box** (logon sweeps, RDP both directions,
   Defender tampering, persistence run keys, …) and appear automatically
   when a matching table opens.
-- **Time navigation** — pin a timeframe that survives every filter change,
-  jump to the same timestamp across tables, derive real sortable datetime
-  columns from epochs/FILETIME/Excel serials/whatever your tool emitted.
+- **Time navigation** — a histogram of when the rows in the current view
+  happened (press `h`; drag across it to narrow to that range), a pinned
+  timeframe that survives every filter change, jump to the same timestamp
+  across tables, derive real sortable datetime columns from
+  epochs/FILETIME/Excel serials/whatever your tool emitted.
 - **Case-wide pages** — a unified Timeline of everything you've tagged, an
   IOC watchlist scanned across every table, Markdown case notes that link
   back into the evidence, and named dashboards (a ready-made KAPE triage
@@ -335,9 +337,9 @@ listed there and switched off until you enable them:
   logs (hostd, vmkernel, auth, shell, vobd, vpxa, rhttpproxy, esxupdate)
   into one schema; pairs with the shipped ESXi / UAC triage dashboard
   profile.
-- **`table_histogram/`** — a toolbar panel showing when the open table's
-  events happened; drag across it to set the timeframe. The reference for
-  `register_toolbar_panel`.
+- **`top_values/`** — a toolbar panel listing the ten most common values
+  of a column for the rows the grid is showing; click one to copy it. The
+  reference for `register_toolbar_panel`.
 
 A plugin is local Python running with Winnow's own privileges, and nothing
 is ever fetched from a network — installing one is the consent step, so
