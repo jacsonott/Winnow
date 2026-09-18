@@ -266,3 +266,20 @@ see [docs/notes/README.md](README.md) for the whole set.
   differs from the .ico on disk), and the Linux theme copy is re-synced
   by content comparison, not only-when-missing — the only-if-missing
   version pinned the first-registered design forever.
+
+- **`subset_rids` is deliberately not in `_WORK_TABLES`.** It only ever
+  accompanies a `sources` row (Store.save_view_as_source writes both, and
+  `drop_source` removes both), and `sources` is kept out of the sweep's
+  definition of work on purpose: every quick-look has one. A subset table
+  with nothing tagged or noted on it is a derived copy of rows the case
+  already held, so a quick-look holding only that should still be
+  reaped after 7 days; the moment the analyst tags or notes a row of it,
+  `row_tags`/`row_notes` hold it like any other table's work. Listing the
+  map would have made any quick-look that ever saved a subset immortal.
+
+- **`_jobs_running` counts a view-as-table copy** (`Store.copies_in_flight`)
+  alongside queued and running ingest jobs. The source a copy is filling
+  has a growing `row_count` and `columns='[]'` until it finishes, so the
+  two routes that refuse mid-import for that reason — copy_sources and a
+  quick-look save-as, which close the store and would cancel the copy —
+  refuse mid-copy too, with the same 409.

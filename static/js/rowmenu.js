@@ -9,6 +9,7 @@ import { rowAt } from './grid.js';
 import { copyRowsAsText, loadRowsForPositions, writeClipboardText } from './grouping.js';
 import { showPluginTab } from './plugins.js';
 import { S, cellRangeRows, dashboardCreatorMode, selCount, selHas, selPositions } from './state.js';
+import { saveCurrentViewAsTable, saveRowsAsTable, saveSelectAllAsTable } from './subset.js';
 import { UNDO_NEXT, applyTag, tagRowsAtPositions, undoLastTagChange } from './tags.js';
 import { openTagEditor } from './timeframe.js';
 import { displayCell } from './tsformat.js';
@@ -38,6 +39,7 @@ export const ROW_MENU_SECTIONS = [
   { id: 'cell', build: rowMenuCellItems },
   { id: 'dashboard', build: rowMenuDashboardItems },
   { id: 'clipboard', build: rowMenuClipboardItems },
+  { id: 'subset', build: rowMenuSubsetItems },
   { id: 'plugins', build: rowMenuPluginItems },
 ];
 
@@ -265,6 +267,39 @@ export function rowMenuClipboardItems(ctx) {
       },
       { label: `Copy ${rows}`, pinId: 'copy:rows', onclick: () => copyRowsAsText(positions(), false) },
       { label: `Copy ${rows} with headers`, pinId: 'copy:rows-headers', onclick: () => copyRowsAsText(positions(), true) },
+    ],
+  }];
+}
+
+/* "Keep these rows": the selection (or the clicked row), or the whole
+   view, copied into a new table of the case badged as a subset of this
+   one (subset.js). Folded like Copy so the top level stays short; both
+   items pin. The two items mean two different things and say so: the
+   scope-worded one is the SELECTION — under a select-all that is the
+   view minus its unchecked rows, sent as exactly that (applyTag's rule —
+   never as positions() would materialise it); the whole-view one is
+   every row the view shows, unchecked rows included. */
+export function rowMenuSubsetItems(ctx) {
+  const { scope, inSelection, positions } = rowMenuTargets(ctx);
+  const selectAll = inSelection && S.selectAll;
+  return [{
+    label: 'Save as table',
+    title: 'Copy rows into a new table of this case, badged as a subset of this one — tags and notes stay here',
+    submenu: [
+      {
+        label: `Save ${scope} as new table…`,
+        pinId: 'subset:rows',
+        title: selectAll
+          ? 'Every row in this view minus the ones you unchecked, as a new table'
+          : 'These rows as a new table of the case — tags and notes stay on this one',
+        onclick: () => (selectAll ? saveSelectAllAsTable() : saveRowsAsTable(positions())),
+      },
+      {
+        label: 'Save this whole view as a table…',
+        pinId: 'subset:view',
+        title: 'Every row the current filters, search and timeframe show — unchecked rows included — as a new table',
+        onclick: () => saveCurrentViewAsTable(),
+      },
     ],
   }];
 }

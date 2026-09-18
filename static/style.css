@@ -487,6 +487,11 @@ input::placeholder { text-overflow: ellipsis; }
 .tab .count { color: var(--dim); font-family: var(--mono); font-size: 11px; }
 .tab-merge { box-shadow: inset 0 2px 0 var(--accent-dim); }
 .tab-merge[aria-selected="true"] { box-shadow: inset 0 2px 0 var(--accent-dim), inset 0 -2px 0 var(--accent); }
+/* A subset table (rows saved out of a view or a selection — subset.js) gets
+   the same top-edge mark a merge does, in the quiet grey, beside its ⊂ glyph:
+   derived from another table of the case, not a file on disk. */
+.tab-subset { box-shadow: inset 0 2px 0 var(--dim); }
+.tab-subset[aria-selected="true"] { box-shadow: inset 0 2px 0 var(--dim), inset 0 -2px 0 var(--accent); }
 .tab-sql { flex: 0 0 auto; border-left: 1px solid var(--line); font-family: var(--mono); color: var(--accent-dim); }
 /* First tab in the strip sits against the divider, which is separator
    enough — the left border only ever existed to fence the page tabs off

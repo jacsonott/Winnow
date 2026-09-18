@@ -60,9 +60,13 @@ def test_top_level_is_short_and_keeps_the_filters_broken_out(page, row_menu):
     assert any(l.startswith("Tag this row") for l in subs)
     assert any(l.startswith("Add to dashboard") for l in subs)
     assert any(l.startswith("Copy") for l in subs)
+    assert any(l.startswith("Save as table") for l in subs)
     # the filters are plain items at the top, not folded
     assert any(l.startswith("Filter to") for l in labels) and any(l.startswith("Exclude") for l in labels)
-    assert len(labels) <= 8, labels
+    # Eight at most, the folds included. Undo is counted apart: it is only
+    # there while a tag write is on the stack, which depends on what ran
+    # before this module, and the budget should not depend on that.
+    assert len([l for l in labels if not l.startswith("Undo")]) <= 8, labels
     page.keyboard.press("Escape")
 
 
