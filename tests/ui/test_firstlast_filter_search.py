@@ -125,7 +125,11 @@ def test_the_tag_list_has_the_same_search(fl_page):
     tag_search = pg.locator("input[placeholder='Find a tag…']")
     tag_search.wait_for(timeout=5_000)
     rows = "input[placeholder='Find a tag…'] + div label"
-    assert pg.locator(rows).count() == 3   # the case's default tags
+    # The plugin lists winnow.state.tags, so the expected count is read
+    # from there rather than from the seed: a tag some earlier module left
+    # on the shared server must not fail a test about the search box.
+    expected = pg.evaluate("() => __winnow.S.tags.length")
+    assert expected >= 2 and pg.locator(rows).count() == expected
     tag_search.fill("sus")
     pg.wait_for_function(f"() => document.querySelectorAll(\"{rows}\").length === 1")
     assert pg.locator(rows).first.inner_text().strip() == "Suspicious"
