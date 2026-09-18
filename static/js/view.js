@@ -249,13 +249,16 @@ function viewOfJob(job) {
    409 "expired" means a build that landed in between — a filter change,
    another search — evicted the held view (newer intent wins), and the
    honest answer is to run the same spec again, right here, inside the
-   chrome the caller already has up. */
-async function adoptOrRebuild(view, spec, signal) {
+   chrome the caller already has up. `onRebuild` is told before that
+   build is posted — runBuild arms the cancel chip there for an adopt,
+   which has nothing for a chip to cancel until it becomes a build. */
+async function adoptOrRebuild(view, spec, signal, onRebuild = null) {
   try {
     return await post('/api/view/adopt', { view_id: view.view_id }, { signal });
   } catch (e) {
     if (e.status !== 409 || !/expired/i.test(e.message || '')) throw e;
     toast('That search’s view expired — running it again', 4000);
+    if (onRebuild) onRebuild();
     return post('/api/view', spec, { signal });
   }
 }
@@ -308,13 +311,28 @@ function repaintSearchChrome() {
 
 /* Puts the stats line back to what it said before a search that never
    installed (cancelled, discarded, failed) — when the analyst is looking
-   at that table. Recomputed from the live view when the text from before
-   the build is gone (the table was switched under the build, which stops
-   the indicator without keeping it). */
+   at that table AND the view on screen is still the one that text
+   described (`rec.viewId`, captured as the build started). Recomputed
+   from the live view otherwise: another build landed in between and
+   wrote its own count, which the pre-search text would miscaption
+   ("200 of 200 rows" over 37); or the text from before the build is
+   gone (the table was switched under it, which stops the indicator
+   without keeping it). */
 function restoreStats(rec) {
   if (S.sourceId !== rec.sourceId) return;
-  if (rec.before) $('viewStats').innerHTML = rec.before;
+  if (rec.before && S.view && S.view.view_id === rec.viewId) $('viewStats').innerHTML = rec.before;
   else if (S.view && S.view.source_id === S.sourceId) $('viewStats').innerHTML = statsLine(S.view);
+}
+
+function rowsLabel(n) { return `${n.toLocaleString()} row${n === 1 ? '' : 's'}`; }
+
+/* What #viewStats says for a table whose search is in the background:
+   while it runs, and once it has landed and waits for Apply. Written at
+   the detach, when the result comes in, and by openSource when the
+   analyst comes back to the table with that search still in the box. */
+export function pendingViewStatsText(rec) {
+  if (rec.status !== 'done') return 'Searching in background…';
+  return `Search finished — ${rowsLabel(rec.view.row_count)} · Apply from the jobs panel`;
 }
 
 /* A search-box build still running at the detach deadline goes on in
@@ -335,9 +353,14 @@ function detachBuild(rec) {
     progress: null,
     sticky: true,
     actions: [{ label: 'Cancel', onClick: () => cancelPendingView(rec.sourceId) }],
+  }, {
+    // The row's ✕ is this search's Cancel while it runs and its Discard
+    // once it has landed — never a plain dismiss, which would leave the
+    // search polling with nothing on screen to apply or drop it from.
+    onDismiss: () => cancelPendingView(rec.sourceId),
   });
   S.pendingViews.set(rec.sourceId, rec);
-  if (S.sourceId === rec.sourceId) $('viewStats').textContent = 'Searching in background…';
+  if (S.sourceId === rec.sourceId) $('viewStats').textContent = pendingViewStatsText(rec);
   followPendingView(rec);
 }
 
@@ -362,9 +385,13 @@ async function followPendingView(rec) {
       if (!live()) return;
       // 404: a newer job for this table replaced it server-side (another
       // window, say); 409: the case was closed under it. Either way there
-      // is nothing left to wait for. Anything else — the server not
-      // answering while the connection banner is up — is asked again.
-      if (e.status === 404 || e.status === 409) { settlePending(rec, 'error', 'the search is no longer on the server'); return; }
+      // is nothing left to wait for, and neither is this search's fault.
+      // Anything else — the server not answering while the connection
+      // banner is up — is asked again.
+      if (e.status === 404 || e.status === 409) {
+        settlePending(rec, 'cancelled', e.status === 404 ? 'replaced by a newer search' : 'the case was closed');
+        return;
+      }
       continue;
     }
     if (!live()) return;
@@ -372,8 +399,7 @@ async function followPendingView(rec) {
     if (job.status !== 'done') { settlePending(rec, job.status, job.error); return; }
     rec.status = 'done';
     rec.view = job.view;
-    const n = job.view.row_count;
-    const rows = `${n.toLocaleString()} row${n === 1 ? '' : 's'}`;
+    const rows = rowsLabel(job.view.row_count);
     rec.notice.done({
       detail: `${rows} · ${((job.elapsed_ms || 0) / 1000).toFixed(1)} s`,
       sticky: true,
@@ -383,16 +409,24 @@ async function followPendingView(rec) {
       ],
     });
     toastAction(`Search finished — ${rows}`, 'Apply', () => applyPendingView(rec.sourceId));
-    if (S.sourceId === rec.sourceId) $('viewStats').textContent = `Search finished — ${rows} · Apply from the jobs panel`;
+    // Over the count the search was started against only: a view that
+    // landed since has its own line (such a build cancels the search,
+    // but this poll's answer may already have been on its way).
+    if (S.sourceId === rec.sourceId && S.view && S.view.view_id === rec.viewId) $('viewStats').textContent = pendingViewStatsText(rec);
     return;
   }
 }
 
-/* A detached build that ended without a view to offer. */
+/* A detached build that ended without a view to offer. A build error
+   waits for the ✕ like any failed job's row; a cancel — the chip's, or a
+   newer search from another window superseding it server-side — is not
+   an error, so its row finishes, lingers NOTICE_LINGER_MS and closes on
+   its own. */
 function settlePending(rec, status, detail) {
   S.pendingViews.delete(rec.sourceId);
   rec.status = status;
-  rec.notice.fail({ detail: status === 'cancelled' ? 'cancelled' : (detail || 'the search failed') });
+  if (status === 'error') rec.notice.fail({ detail: detail || 'the search failed' });
+  else rec.notice.done({ detail: detail || 'cancelled', sticky: false, actions: [] });
   restoreStats(rec);
 }
 
@@ -423,6 +457,15 @@ export function cancelPendingView(sourceId = S.sourceId) {
 export async function applyPendingView(sourceId = S.sourceId) {
   const rec = S.pendingViews.get(sourceId);
   if (!rec || rec.status !== 'done') return;
+  if (!S.sources.some((s) => s.id === sourceId)) {
+    // The table was removed while its search waited (Remove drops the
+    // record too, but a toast's Apply can land in the beat before the
+    // source list is refetched): nothing to open, and the held view is
+    // dropped rather than left on the server for nobody.
+    toast('That table is gone — the search result was discarded', 4000);
+    cancelPendingView(sourceId);
+    return;
+  }
   S.pendingViews.delete(sourceId);
   rec.notice.close();
   if (S.sourceId !== sourceId) {
@@ -434,7 +477,7 @@ export async function applyPendingView(sourceId = S.sourceId) {
   await runBuild({
     keepScroll: false,
     keepRow: true,
-    fetchView: (spec, signal) => adoptOrRebuild(rec.view, spec, signal),
+    fetchView: (spec, signal, onRebuild) => adoptOrRebuild(rec.view, spec, signal, onRebuild),
   });
 }
 
@@ -468,13 +511,27 @@ async function runBuild({ keepScroll = true, keepRow = true, detachAfterMs = nul
   const seq = ++rebuildSeq;
   // Which table this rebuild is for; checked again before it paints.
   const forSourceId = S.sourceId;
+  // The view on screen for it, by id — what a detached search's stats
+  // text will describe, and what restoreStats checks is still there
+  // before putting that text back.
+  const oldViewId = S.view && S.view.source_id === forSourceId ? S.view.view_id : null;
   const detach = detachAfterMs != null;
-  // A search-box rebuild is this table's newest intent: the search left
-  // running for it in the background, if any, is cancelled and its
-  // notice replaced by this build's own. (Its stats text comes back
-  // first, so the indicator below captures the real count, not
-  // "Searching in background…".)
-  if (detach) cancelPendingView(forSourceId);
+  // This table's search in the background, if any, cannot survive this
+  // build, so it is called off first — whichever way this build lands.
+  // A search-box rebuild is the newer search: its notice replaces the
+  // old one. Any other rebuild (a header filter, a sort, a tag chip, the
+  // timeframe, a return to the table with a different spec) lands as a
+  // normal build, which evicts the held view server-side (newer intent
+  // wins — store.md), and a notice left standing would offer an Apply
+  // that could only 409 into a blocking re-run of the search. Cancelling
+  // first also frees the writer lock a running one holds: told the
+  // search was in the background, the analyst would otherwise find a
+  // header-box keystroke blocked for the rest of it and then the same
+  // scan run again. An adopt (fetchView) is a pending record's own
+  // landing; applyPendingView has taken the record already. (The cancel
+  // restores the stats text first, so the indicator below captures the
+  // real count, not "Searching in background…".)
+  if (!fetchView) cancelPendingView(forSourceId);
   // What this build would put back if it detaches and is applied later.
   const state = detach ? viewStateSnapshot() : null;
   // Supersede the build in flight — before this one's own work, so the
@@ -510,7 +567,14 @@ async function runBuild({ keepScroll = true, keepRow = true, detachAfterMs = nul
   let pos = null;
   const t0 = performance.now();
   setBusy(true);
-  const disarmCancel = chipUp ? armOpCancel(spec.op_token, 0) : armOpCancel(spec.op_token);
+  // The chip cancels a BUILD — cancel_op interrupts the statement its
+  // token is registered under. An adopt registers nothing, and its wait,
+  // if any, is for the writer lock, which no cancel shortens: the chip
+  // stays down for one, and comes up only if the adopt 409s into a
+  // rebuild (adoptOrRebuild arms it before posting /api/view).
+  let disarmCancel = null;
+  const armChip = () => { if (!disarmCancel) disarmCancel = chipUp ? armOpCancel(spec.op_token, 0) : armOpCancel(spec.op_token); };
+  if (!fetchView) armChip();
   startIndicator(seq, forSourceId, spec);
   // The chrome comes down once, whichever way this build leaves — the
   // detach takes it down early and keeps the stats text from before the
@@ -520,14 +584,14 @@ async function runBuild({ keepScroll = true, keepRow = true, detachAfterMs = nul
     if (settled) return '';
     settled = true;
     setBusy(false);
-    disarmCancel();
+    if (disarmCancel) disarmCancel();
     if (inflight && inflight.seq === seq) inflight = null;
     return stopIndicator(seq, restore);
   };
   try {
     try {
       if (fetchView) {
-        v = await fetchView(spec, controller.signal);
+        v = await fetchView(spec, controller.signal, armChip);
       } else if (detach) {
         const job = await startAndPoll(spec, controller.signal, t0, detachAfterMs);
         if (job.status === 'running') {
@@ -538,7 +602,7 @@ async function runBuild({ keepScroll = true, keepRow = true, detachAfterMs = nul
           const before = settle(false);
           // The picks stay live in the old view; an apply re-reads them.
           pendingKeys = null;
-          detachBuild({ jobId: job.job_id, token: spec.op_token, sourceId: forSourceId, spec, cacheKey, state, before });
+          detachBuild({ jobId: job.job_id, token: spec.op_token, sourceId: forSourceId, spec, cacheKey, state, before, viewId: oldViewId });
           return;
         }
         v = await adoptOrRebuild(viewOfJob(job), spec, controller.signal);

@@ -13,6 +13,14 @@ Discard closes it and the old count comes back.
 rebound to 0 (setSearchDetachMs), and /api/view/start's answer is the
 real job masked as still running, with the polls held until the test
 lets them through. The adopt that Apply does is real.
+
+Two rules around the pending search are pinned here too. Any other
+rebuild of its table — a header-box filter here — calls it off FIRST:
+that build lands as a normal build, which evicts the held view, and
+while the search runs it would queue on the writer lock behind it. And
+coming back to the table with the search still in the box shows the
+rows the table had, with the search still pending — not a second build
+of the same search.
 """
 from __future__ import annotations
 
@@ -36,6 +44,7 @@ class _Background:
     def __init__(self, page):
         self.page = page
         self.released = False
+        self.final = None   # a status the polls answer instead of "running" (finish_as)
         self.jobs = []      # every job /api/view/start really returned, in order
         self.polls = 0
         page.route(re.compile(r".*/api/view/start(\?.*)?$"), self._on_start)
@@ -53,13 +62,20 @@ class _Background:
             route.continue_()
             return
         job = self.jobs[-1] if self.jobs else {"job_id": 0, "source_id": 0}
-        route.fulfill(status=200, content_type="application/json",
-                      body=json.dumps({"job_id": job["job_id"], "source_id": job["source_id"],
-                                       "status": "running", "view": None, "error": None,
-                                       "error_status": None, "elapsed_ms": None, "started_at": 0}))
+        body = {"job_id": job["job_id"], "source_id": job["source_id"],
+                "status": "running", "view": None, "error": None,
+                "error_status": None, "elapsed_ms": None, "started_at": 0}
+        if self.final:
+            body.update(self.final)
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
 
     def release(self):
         self.released = True
+
+    def finish_as(self, status, error=None):
+        """The polls answer `status` from now on — the server's word that
+        the job ended without a view (cancelled, superseded, an error)."""
+        self.final = {"status": status, "error": error}
 
     def close(self):
         self.released = True
@@ -84,6 +100,36 @@ def _cancels(page):
     return seen
 
 
+class _Requests:
+    """Every request the page sent, in the order it sent them, as
+    (method, path) with the host stripped — for asserting what a build
+    did and did not post, and in which order."""
+
+    def __init__(self, page):
+        self.seen = []
+        page.on("request", lambda r: self.seen.append((r.method, re.sub(r"^.*?/api/", "/api/", r.url))))
+
+    def posts(self, start, pattern):
+        """The POSTs since index `start` whose path matches `pattern`."""
+        return [u for m, u in self.seen[start:] if m == "POST" and re.search(pattern, u)]
+
+
+def _second_table(page, tmp_path):
+    """A second table in the shared case (tests/ui/test_view_state.py
+    adds one the same way, and a later test finds it already there).
+    Returns (the open table's id, the other's)."""
+    if page.evaluate("() => __winnow.S.sources.length") < 2:
+        csv2 = tmp_path / "second.csv"
+        csv2.write_text("Alpha,Beta\n" + "".join(f"{i},x{i}\n" for i in range(30)), encoding="utf-8")
+        status = page.evaluate("""(path) => fetch('/api/ingest/path', { method: 'POST',
+          headers: { 'X-Timeline-Lite-Client': '1', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path }) }).then((r) => r.status)""", str(csv2))
+        assert status == 200
+        page.evaluate("() => __winnow.loadSources()")
+        page.wait_for_function("() => __winnow.S.sources.length >= 2 && __winnow.S.view && __winnow.busyCount === 0")
+    return page.evaluate("() => [__winnow.S.sourceId, __winnow.S.sources.find((s) => s.id !== __winnow.S.sourceId).id]")
+
+
 def _arm(page):
     page.evaluate("""() => {
       __winnow.setSearchDetachMs(0);
@@ -106,6 +152,7 @@ def _reset(page):
     page.evaluate("""() => {
       __winnow.setSearchDetachMs(5000);
       for (const id of [...__winnow.S.pendingViews.keys()]) __winnow.cancelPendingView(id);
+      for (const id of [...__winnow.pluginNotices.keys()]) __winnow.closeNotice(id);   // a finished row still lingering
       document.getElementById('search').value = '';
       __winnow.S.search = ''; __winnow.S.searchMode = 'contains'; __winnow.S.filters = {};
       __winnow.renderHead(); __winnow.syncSearchExpansion(false); __winnow.updateSearchHint();
@@ -248,14 +295,133 @@ def test_escape_in_the_box_cancels_the_pending_search(page):
         page.wait_for_selector(ROWS)
         first = bg.jobs[0]["job_id"]
         page.locator("#search").press("Escape")
-        page.wait_for_function("() => !document.querySelector('#jobsPanel .job-notice')")
+        # The cleared box is its own (instant) build — masked as running
+        # here like every other start, so it detaches too and stands a
+        # row of its own ("Filtering …"). The end state is what counts:
+        # the search it replaced is gone, its job cancelled, the box empty.
+        page.wait_for_function("""() => [...document.querySelectorAll('#jobsPanel .job-notice')]
+          .every((r) => !r.textContent.includes('Searching "4624"'))""")
         _until(page, lambda: cancels, "Escape sent no cancel")
         assert cancels[0].endswith(f"job_id={first}")
-        # The cleared box is its own (instant) build — masked as running
-        # here like every other start, so it detaches too; what matters
-        # is that the search it replaced is gone and the box is empty.
         assert page.locator("#search").input_value() == ""
         assert page.evaluate("() => __winnow.S.search") == ""
+    finally:
+        bg.close()
+        _reset(page)
+
+
+def test_the_notice_x_cancels_the_pending_search(page):
+    """✕ on the row is the search's Cancel (and its Discard once it has
+    landed) — a plain dismiss would leave the search polling with
+    nothing on screen to apply or drop it from."""
+    bg = _Background(page)
+    cancels = _cancels(page)
+    _arm(page)
+    page.click("#btnSearchToggle")
+    try:
+        page.locator("#search").fill("4624")
+        page.wait_for_selector(f"{ROWS} .job-x")
+        page.locator(f"{ROWS} .job-x").click()
+        page.wait_for_function("() => !document.querySelector('#jobsPanel .job-notice')")
+        _until(page, lambda: cancels, "the ✕ sent no cancel")
+        page.wait_for_function("() => document.getElementById('viewStats').textContent.startsWith('200 of 200 rows')")
+        assert page.evaluate("() => __winnow.S.pendingViews.size") == 0
+        assert not any("search" in b for b in page.evaluate("() => __winnow.inFlightWork()"))
+    finally:
+        bg.close()
+        _reset(page)
+
+
+def test_a_search_cancelled_server_side_ends_as_a_finished_row_not_an_error(page):
+    """Superseded by another window's search on the same table, or
+    cancelled through the chip just before the deadline: the poll answers
+    `cancelled`. Not this search's fault, so its row finishes and lingers
+    like a finished import's instead of waiting for a ✕ in error red."""
+    bg = _Background(page)
+    _arm(page)
+    page.click("#btnSearchToggle")
+    try:
+        page.locator("#search").fill("4624")
+        page.wait_for_selector(ROWS)
+        bg.finish_as("cancelled")
+        page.wait_for_function("""() => { const r = document.querySelector('#jobsPanel .job-notice');
+          return !!(r && r.querySelector('.job-phase.done') && r.textContent.includes('cancelled')); }""")
+        assert page.locator(f"{ROWS} .job-phase.error").count() == 0
+        assert page.locator(f"{ROWS} .job-action").count() == 0
+        assert page.evaluate("() => __winnow.S.pendingViews.size") == 0
+        page.wait_for_function("() => document.getElementById('viewStats').textContent.startsWith('200 of 200 rows')")
+    finally:
+        bg.close()
+        _reset(page)
+
+
+def test_a_header_filter_calls_the_pending_search_off_before_it_builds(page):
+    """A header-box filter on a table whose search is in the background
+    lands as a normal build — which evicts the held view, and which,
+    while the search runs, would queue on the writer lock behind it. So
+    the search is cancelled FIRST (its cancel leaves before /api/view
+    does), its row goes, and the filter build blocks with the chip as it
+    always has; nothing starts a second job."""
+    bg = _Background(page)
+    reqs = _Requests(page)
+    _arm(page)
+    page.click("#btnSearchToggle")
+    box = page.locator('.fcell input[data-col="EventId"]')
+    try:
+        page.locator("#search").fill("4624")
+        page.wait_for_selector(ROWS)
+        job = bg.jobs[0]["job_id"]
+        since = len(reqs.seen)
+        box.fill("4")   # with "4624" still in the box: the 50 rows whose EventId is 4624
+        page.wait_for_function("() => __winnow.S.view && __winnow.S.view.row_count === 50 && __winnow.busyCount === 0")
+        assert reqs.posts(since, r"/api/view(/job/cancel\?.*)?$") == [f"/api/view/job/cancel?job_id={job}", "/api/view"]
+        assert reqs.posts(since, r"/api/view/start") == []
+        assert page.evaluate("() => __winnow.S.pendingViews.size") == 0
+        assert page.locator(ROWS).count() == 0
+        page.wait_for_function("() => document.getElementById('viewStats').textContent.includes('of 200 rows')")
+        assert not page.evaluate("() => document.getElementById('viewStats').textContent").startswith("Search")
+    finally:
+        bg.close()
+        _reset(page)
+
+
+def test_coming_back_to_the_table_keeps_the_old_rows_and_the_search_pending(page, tmp_path):
+    """Leave the table while its search runs, come back: the stash puts
+    the search in the box again, and that spec IS the pending search —
+    so the table shows the rows it had (the held build touched nothing),
+    the stats say the search is still out, and nothing posts a second,
+    blocking build of the same search to queue behind the first on the
+    writer lock. Apply still installs it, here."""
+    bg = _Background(page)
+    reqs = _Requests(page)
+    _arm(page)
+    first, second = _second_table(page, tmp_path)
+    page.click("#btnSearchToggle")
+    try:
+        page.locator("#search").fill("4624")
+        page.wait_for_selector(ROWS)
+        page.evaluate("(id) => __winnow.openSource(id)", second)
+        page.wait_for_function("(id) => __winnow.S.sourceId === id && __winnow.S.view && __winnow.busyCount === 0", arg=second)
+        since = len(reqs.seen)
+        page.evaluate("(id) => __winnow.openSource(id)", first)
+        page.wait_for_function("(id) => __winnow.S.sourceId === id && __winnow.S.view && __winnow.busyCount === 0", arg=first)
+        assert reqs.posts(since, r"/api/view(/start)?(\?.*)?$") == []
+        assert page.evaluate("() => __winnow.S.view.row_count") == 200
+        assert page.locator("#body .row").count() > 0
+        assert page.locator("#search").input_value() == "4624"
+        assert page.evaluate("() => __winnow.S.pendingViews.size") == 1
+        assert page.locator(ROWS).count() == 1
+        assert 'Searching "4624"' in _notice_text(page)
+        assert _stats(page).startswith("Searching in background")
+        assert len(bg.jobs) == 1
+        installed = page.evaluate("() => window.__installed")
+        bg.release()
+        page.wait_for_selector(f"{ROWS} .job-action:has-text('Apply')")
+        page.wait_for_function("() => document.getElementById('viewStats').textContent.startsWith('Search finished')")
+        page.locator(f"{ROWS} .job-action", has_text="Apply").click()
+        page.wait_for_function("() => __winnow.S.view && __winnow.S.view.row_count === 50 && __winnow.busyCount === 0")
+        assert page.evaluate("() => window.__installed") == installed + 1
+        assert page.evaluate("(id) => __winnow.S.sourceId === id", first)
     finally:
         bg.close()
         _reset(page)

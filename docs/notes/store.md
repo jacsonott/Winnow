@@ -384,7 +384,20 @@ see [docs/notes/README.md](README.md) for the whole set.
   shutdown cannot reap a long search whose window was closed. A build
   error lands in the record (`error`, `error_status` 400 for the
   analyst-fixable kind api_view answers 400 with), never as the start
-  route's status. `tests/test_view_hold.py` / `tests/test_view_jobs.py`.
+  route's status. **A cancel is decided under the registry lock, not by
+  what `cancel_op` found**: `cancel_view_job` reads "running", and in
+  the gap before its `cancel_op` the worker can commit the held view —
+  `cancel_op` then has nothing to interrupt (the same is true of a build
+  between statements), the client has been told True and dropped its
+  record, and the pending table would sit in `/dev/shm` for nobody
+  until the next build for that source. So `_JobRegistry.request_discard`
+  flags the job under the lock `finish` records the outcome under: a
+  "done" that arrives after the flag is recorded "cancelled" and handed
+  back to the worker, which drops the view (`_drop_pending_view`).
+  Whichever runs first, the view is kept or dropped exactly once. The
+  inline wait is clamped (`VIEW_JOB_INLINE_WAIT_MAX_MS`): over HTTP it
+  parks a shared threadpool worker, and the client never sends a figure.
+  `tests/test_view_hold.py` / `tests/test_view_jobs.py`.
 - **The 2026-08 hot-path perf pass** (validated with `python3 -m bench
   --vs-ref` at both the 200k and 1.2M tiers — 0 slower, footprint
   unchanged), the shapes and their reasons:

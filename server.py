@@ -2882,11 +2882,13 @@ def api_view(spec: ViewSpec):
 def api_view_start(spec: ViewSpec, wait_ms: int | None = None):
     """The same build as /api/view, run in the background as a *held*
     view (Store.start_view_job): the grid keeps its rows until the client
-    adopts the result. Waits up to `wait_ms` (Store default 250) so a fast
-    search answers with `status: "done"` and its view inline; otherwise
-    `running`, and the client polls /api/view/job. A build error lands in
-    the record (`error`, `error_status` 400 for the analyst-fixable
-    kind), never as this route's status."""
+    adopts the result. Waits up to `wait_ms` (Store default 250, clamped
+    to Store.VIEW_JOB_INLINE_WAIT_MAX_MS — the wait parks one of the
+    shared threadpool workers, and the client never sends the parameter)
+    so a fast search answers with `status: "done"` and its view inline;
+    otherwise `running`, and the client polls /api/view/job. A build
+    error lands in the record (`error`, `error_status` 400 for the
+    analyst-fixable kind), never as this route's status."""
     return store().start_view_job(spec.source_id, spec.model_dump(), wait_ms=wait_ms)
 
 

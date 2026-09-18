@@ -652,6 +652,38 @@ see [docs/notes/README.md](README.md) for the whole set.
   is the test hook; `tests/ui/test_search_background.py` masks the real
   job as still running via `page.route` rather than sleeping, and the
   Apply it clicks does the real adopt.
+- **Any other rebuild of the table calls its pending search off first;
+  coming back to the table does not.** `runBuild` cancels the table's
+  pending search for every build that is not that record's own adopt.
+  A search-box rebuild is the newer search (its notice replaces the old
+  one); any other — a header filter, a sort, a tag chip, the timeframe,
+  a return to the table with a different spec — lands as a normal build,
+  which evicts the held view server-side (newer intent wins), so a
+  notice left standing would offer an Apply that could only 409 into a
+  blocking re-run of the search. Cancelling first also frees the writer
+  lock a running search holds: told it was in the background, the
+  analyst would otherwise find a header-box keystroke queued for the
+  rest of the scan and then the same scan run again. A finished search
+  waiting for Apply goes the same way (its row closes) — the analyst's
+  newer action is the newer intent. Coming BACK to the table is the
+  exception: the stash puts the search in the box again, that spec is
+  the pending record's (`rec.cacheKey`), and `openSource` takes the
+  cached path — the old live view, still exactly what the server pages
+  — and writes the stats from the record (`pendingViewStatsText`)
+  instead of posting the same search as a second, blocking build queued
+  behind the first. Smaller rules that follow from the same shape: the
+  row's ✕ is Cancel while it runs and Discard once it has landed
+  (`createNotice`'s app-only third argument, `onDismiss` — plugins pass
+  `opts` only and cannot reach it), never a plain dismiss that would
+  leave the search polling with nothing to apply or drop it from; a
+  search that ends cancelled or superseded server-side finishes its row
+  (lingers, closes) and only a build error waits in red; `restoreStats`
+  puts the pre-search count back only over the view it described
+  (`rec.viewId`) and recomputes from the live view otherwise; the cancel
+  chip is not armed for an adopt — it cancels a build's statement, and
+  an adopt's wait is the writer lock's — and comes up only if the adopt
+  409s into a rebuild; removing a table cancels its pending search, and
+  Apply for a table since removed discards the result with a toast.
 - **Stored keymaps are migrated on load, not merged blindly.**
   `loadKeymap` used to be `{...DEFAULT_KEYMAP, ...stored}`, which means a
   returning analyst's localStorage outranks every later change to the

@@ -804,7 +804,16 @@ class _JobRegistry:
     live one — a poller on a superseded id gets None, which server.py
     turns into a 404 ("stop polling"), never a stale result. `closing`
     is set by Store.close(); a worker checks it before touching the
-    connection."""
+    connection.
+
+    `request_discard` + `finish` close the race a cancel has with the
+    work finishing: an owner whose cancel can miss (cancel_op has nothing
+    to interrupt while a build is between statements, committing, or
+    already done) flags the job under this lock, and `finish` — under the
+    same lock — records a "done" that arrives after the flag as
+    "cancelled" and tells the worker so, which then drops the result
+    itself. Whichever of the two runs first, the result is recorded
+    exactly once or dropped exactly once, never leaked."""
 
     def __init__(self) -> None:
         self.lock = threading.Lock()
@@ -816,8 +825,8 @@ class _JobRegistry:
         with self.lock:
             self.seq += 1
             record.update(job_id=self.seq, slot=slot, status="running",
-                          error=None, started_at=time.time(), finished_at=None,
-                          thread=None, done_event=threading.Event())
+                          error=None, discard=False, started_at=time.time(),
+                          finished_at=None, thread=None, done_event=threading.Event())
             old = self.by_slot.get(slot)
             self.by_slot[slot] = record
             return record, old
@@ -829,12 +838,33 @@ class _JobRegistry:
                     return job
             return None
 
-    def finish(self, job: dict, status: str, **fields: Any) -> None:
+    def request_discard(self, job: dict) -> bool:
+        """Flags a still-running job so that its result, should the work
+        land anyway, is recorded cancelled and handed back to the worker
+        to drop (see finish). Returns whether the job was running — False
+        means it already finished, and the owner deals with the recorded
+        result instead."""
         with self.lock:
-            job.update(fields)
+            if job["status"] != "running":
+                return False
+            job["discard"] = True
+            return True
+
+    def finish(self, job: dict, status: str, *, elapsed_ms: int | None = None, **result: Any) -> str:
+        """Records the outcome and wakes waiters. Returns the status
+        recorded — "cancelled" in place of a "done" that arrives after
+        request_discard, in which case `result` is NOT recorded: the
+        worker still holds it and is the one to drop it."""
+        with self.lock:
+            if status == "done" and job.get("discard"):
+                status = "cancelled"
+                result = {}
+            job.update(result)
             job["status"] = status
+            job["elapsed_ms"] = elapsed_ms
             job["finished_at"] = time.time()
         job["done_event"].set()
+        return status
 
     def live(self) -> list[dict]:
         with self.lock:
@@ -9614,14 +9644,20 @@ class Store:
     # ------------------------------------------------------------- view jobs
 
     VIEW_JOB_INLINE_WAIT_MS = 250
+    # The inline wait parks the calling thread — over HTTP one of the
+    # threadpool's shared workers — for its whole length, so a caller's
+    # own figure is bounded: the client never sends one, and a stuck
+    # retry loop asking for minutes must not park every worker.
+    VIEW_JOB_INLINE_WAIT_MAX_MS = 5000
 
     def start_view_job(self, source_id: int, spec: dict, wait_ms: int | None = None) -> dict:
         """Runs build_view(hold=True) on a daemon thread and returns the
-        job's snapshot — after waiting up to `wait_ms` for it, so a search
-        that finishes at once comes back with its view inline and costs
-        the client no poll. The grid's live view is untouched throughout
-        (held builds evict nothing); the client adopts the result when it
-        wants it (adopt_view) or leaves it, and a later build evicts it.
+        job's snapshot — after waiting up to `wait_ms` (clamped to
+        VIEW_JOB_INLINE_WAIT_MAX_MS) for it, so a search that finishes at
+        once comes back with its view inline and costs the client no
+        poll. The grid's live view is untouched throughout (held builds
+        evict nothing); the client adopts the result when it wants it
+        (adopt_view) or leaves it, and a later build evicts it.
 
         One live job per source: starting another cancels the previous
         one's build through its op_token (cancel_op — effective whether
@@ -9641,7 +9677,9 @@ class Store:
         t = threading.Thread(target=self._view_job_worker, args=(job,), daemon=True)
         job["thread"] = t
         t.start()
-        job["done_event"].wait((self.VIEW_JOB_INLINE_WAIT_MS if wait_ms is None else max(0, wait_ms)) / 1000)
+        wait = (self.VIEW_JOB_INLINE_WAIT_MS if wait_ms is None
+                else min(max(0, wait_ms), self.VIEW_JOB_INLINE_WAIT_MAX_MS))
+        job["done_event"].wait(wait / 1000)
         return self._view_job_snapshot(job)
 
     def _view_job_worker(self, job: dict) -> None:
@@ -9663,7 +9701,14 @@ class Store:
             self._view_jobs.finish(job, "error", error=str(e), error_status=500,
                                    elapsed_ms=int((time.time() - t0) * 1000))
         else:
-            self._view_jobs.finish(job, "done", view=view, elapsed_ms=int((time.time() - t0) * 1000))
+            # A cancel that arrived while the build was committing — or
+            # between the client's read of "running" and its cancel — had
+            # no statement to interrupt; the registry recorded its flag
+            # instead, and the view the build landed anyway is dropped
+            # here rather than left pending for nobody (cancel_view_job).
+            if self._view_jobs.finish(job, "done", view=view,
+                                      elapsed_ms=int((time.time() - t0) * 1000)) == "cancelled":
+                self._drop_pending_view(view["view_id"])
 
     def _view_job_snapshot(self, job: dict) -> dict:
         with self._view_jobs.lock:
@@ -9680,23 +9725,42 @@ class Store:
         """Ends a job the client no longer wants. Running: cancel_op on its
         token — the build rolls back and, being held, evicted nothing.
         Finished with a view still pending: that view is dropped (the
-        client's Discard). Returns whether there was anything to do."""
+        client's Discard). Returns whether there was anything to do.
+
+        The running case is decided under the registry lock (request
+        discard), not by trusting cancel_op: a build that is between
+        statements, committing, or finished since the status was read
+        gives cancel_op nothing to interrupt, and the client — told True
+        — has already dropped its record. The flag makes the worker
+        record such a build cancelled and drop its view (see
+        _view_job_worker), so no held table outlives its job unreached.
+        A build still queued on the writer lock is covered the old way:
+        the marked token fails it fast at registration."""
         job = self._view_jobs.get(job_id)
         if job is None:
             return False
-        if job["status"] == "running":
+        if self._view_jobs.request_discard(job):
             self.cancel_op(job["token"])
             return True
         view = job.get("view")
-        if job["status"] == "done" and view and self._views.get(view["view_id"], {}).get("pending"):
-            with self.lock, self.db:
-                handle = self._views.get(view["view_id"])
-                if handle and handle.get("pending"):
-                    self._evict_view_and_children(view["view_id"])
+        if job["status"] == "done" and view is not None and self._drop_pending_view(view["view_id"]):
             with self._view_jobs.lock:
                 job["status"] = "cancelled"
+                job["view"] = None
             return True
         return False
+
+    def _drop_pending_view(self, view_id: str) -> bool:
+        """Drops a held view that was never adopted — a Discard, or a
+        cancel that landed as its build committed. A view already adopted
+        (pending cleared) or already evicted is left alone; returns
+        whether there was one to drop."""
+        with self.lock, self.db:
+            handle = self._views.get(view_id)
+            if not handle or not handle.get("pending"):
+                return False
+            self._evict_view_and_children(view_id)
+            return True
 
     def running_view_jobs(self) -> int:
         """How many view builds are running in the background — server.py's

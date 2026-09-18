@@ -28,7 +28,7 @@ import { loadTags, refreshTagCounts, renderTagRibbon } from './tags.js';
 import { openTableMenu, updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
 import { baseColumns } from './tsformat.js';
 import { confirmDialog, dropdownMenu, modal, promptDialog } from './ui.js';
-import { dropPendingSelection, rebuildView } from './view.js';
+import { dropPendingSelection, pendingViewStatsText, rebuildView } from './view.js';
 
 /* --------------------------------------------------------------- sources */
 
@@ -801,7 +801,19 @@ export async function openSource(id, { skipBuild = false } = {}) {
 
   const spec = currentSpec();
   const cached = S.viewCache.get(id);
-  if (cached && cached.key === specKey(spec)) {
+  // A search left running in the background for this table — or landed
+  // and waiting for Apply — is the spec the stash just put back, most of
+  // the time the analyst comes back to it. The cached view is still the
+  // right one to show then: a held build evicts nothing, so the rows the
+  // grid had are still what the server pages, and the notice's Apply is
+  // how the result installs. Posting the spec again as a normal build
+  // would queue on the writer lock behind the search's own scan, run it
+  // a second time, evict the held result when it landed, and leave that
+  // Apply to 409 into a third run. Any OTHER spec rebuilds below, and
+  // that rebuild calls the pending search off (view.js runBuild).
+  const pending = S.pendingViews.get(id);
+  const pendingIsSpec = !!(pending && cached && pending.cacheKey === specKey(spec));
+  if (cached && (cached.key === specKey(spec) || pendingIsSpec)) {
     // Same filter/sort/search as last time we had this source open — the
     // materialized v.view_N table is still alive server-side (Store only
     // evicts views for the SAME source on rebuild), so skip re-materializing.
@@ -817,7 +829,8 @@ export async function openSource(id, { skipBuild = false } = {}) {
     S.cellRange = null;
     S.cellAnchor = null;
     $('spacerY').style.height = spacerPx(cached.row_count) + 'px';
-    $('viewStats').innerHTML =
+    if (pendingIsSpec) $('viewStats').textContent = pendingViewStatsText(pending);
+    else $('viewStats').innerHTML =
       `<b>${cached.row_count.toLocaleString()}</b> of ${src.row_count.toLocaleString()} rows · cached`;
     $('body').scrollTop = stash ? stash.scroll : 0;
     render();

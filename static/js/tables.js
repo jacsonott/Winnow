@@ -8,6 +8,7 @@ import { sqlSchemaForLLM } from './plugins.js';
 import { dropViewStateFor, editSourceNickname, loadSources, sourceLabel, sourceTitle } from './sources.js';
 import { S } from './state.js';
 import { markModalAction, confirmDialog, modal } from './ui.js';
+import { cancelPendingView } from './view.js';
 
 /* Every source/merge in the case, open or not — the counterpart to the tab
    strip's now-nondestructive ✕. Open/Close just flips visibility; Remove is
@@ -168,6 +169,10 @@ export function openTablesManager() {
             ? `Delete merge "${sourceLabel(s)}"? The underlying sources are untouched.`
             : `Remove ${sourceLabel(s)} from this case? Tags and notes for it are deleted too.`;
           if (!(await confirmDialog(warn, { danger: true, okLabel: 'Remove' }))) return;
+          // A search running in the background for it, or landed and
+          // waiting for Apply, is for a table that is about to not exist:
+          // its row goes, and the server drops the build or the held view.
+          cancelPendingView(s.id);
           if (s.is_merge) {
             await api(`/api/merges/${-s.id}`, { method: 'DELETE' });
           } else {

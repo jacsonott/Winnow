@@ -10,7 +10,12 @@ while a job runs."""
 
 from __future__ import annotations
 
+import threading
+import time
+
 import pytest
+
+from winnow.store import Store
 
 SLOW_REGEX = "(a+)+$"
 
@@ -85,6 +90,33 @@ def test_a_slow_search_polls_and_cancels(client, slow_source):
     assert client.get(f"/api/rows?view_id={live['view_id']}&start=0&count=1").status_code == 200
     # A miss is reported, not raised.
     assert client.post(f"/api/view/job/cancel?job_id={job['job_id']}").json() == {"cancelled": False}
+
+
+def test_the_inline_wait_is_bounded(client, ingested, monkeypatch):
+    """`wait_ms` parks one of the shared threadpool workers for its whole
+    length, so a caller's own figure is clamped to
+    Store.VIEW_JOB_INLINE_WAIT_MAX_MS — the client never sends one, and a
+    stuck retry loop asking for minutes must not park every worker. The
+    build waits at a gate rather than being slow (a slow regex holds the
+    GIL, which would make the timing here about that, not the wait);
+    unclamped, the start would answer `done` once the gate let the build
+    through, not `running` within the bound."""
+    store, sid = ingested
+    gate = threading.Event()
+    real_build = store.build_view
+
+    def gated_build(*args, **kwargs):
+        gate.wait(10)
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(store, "build_view", gated_build)
+    monkeypatch.setattr(Store, "VIEW_JOB_INLINE_WAIT_MAX_MS", 20)
+    t0 = time.monotonic()
+    job = client.post("/api/view/start?wait_ms=600000", json={"source_id": sid, "search": "svchost"}).json()
+    assert job["status"] == "running"
+    assert time.monotonic() - t0 < 5
+    gate.set()
+    assert store.wait_for_view_job(job["job_id"], timeout=10)["status"] == "done"
 
 
 def test_the_chip_cancel_token_reaches_the_job(client, slow_source):

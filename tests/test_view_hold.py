@@ -182,6 +182,47 @@ def test_cancel_of_a_held_build_evicts_nothing(slow_source):
     assert store.adopt_view(pending["view_id"])["pending"] is False
 
 
+def test_a_cancel_that_lands_as_the_build_commits_still_drops_the_view(ingested, monkeypatch):
+    """cancel_view_job reads "running"; between that read and its
+    cancel_op the worker commits the held view. cancel_op then finds
+    nothing registered under the token — yet the client, answered True,
+    has dropped its record, and the pending table would stay alive for
+    nobody until the next build for that source. The registry's discard
+    flag, set under its lock where the worker records the outcome, is
+    what makes such a build land as cancelled and its view be dropped.
+    The race is played deterministically rather than raced: the build
+    waits at a gate the cancel opens, and the cancel waits for the build
+    to finish before it interrupts anything."""
+    store, sid = ingested
+    gate = threading.Event()
+    real_build = store.build_view
+
+    def gated_build(*args, **kwargs):
+        gate.wait(10)
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(store, "build_view", gated_build)
+    job = store.start_view_job(sid, _contains("Process", "exe"), wait_ms=0)
+    assert job["status"] == "running"
+    before = set(store._views)
+    real_cancel = store.cancel_op
+
+    def cancel_after_the_build(token):
+        gate.set()
+        store.wait_for_view_job(job["job_id"], timeout=10)
+        return real_cancel(token)
+
+    monkeypatch.setattr(store, "cancel_op", cancel_after_the_build)
+    assert store.cancel_view_job(job["job_id"]) is True
+    store._view_jobs.get(job["job_id"])["thread"].join(10)
+    done = store.get_view_job(job["job_id"])
+    assert done["status"] == "cancelled"
+    assert done["view"] is None
+    assert not any(h.get("pending") for h in store._views.values())
+    assert set(store._views) == before
+    assert store.running_view_jobs() == 0
+
+
 # ------------------------------------------------------------------ merges
 
 

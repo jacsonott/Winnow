@@ -28,10 +28,12 @@ class _HeldViews:
     """Intercepts the build request — POST /api/view for a header-box
     filter, POST /api/view/start for the search box, whose builds run as
     a job (see test_search_background.py; within the detach window the
-    two behave the same, and a start held here never reaches the deadline
-    because the detach clock only runs once the start has answered). The
-    first `hold` requests stay pending until release(); the rest pass
-    straight through."""
+    two behave the same). The detach clock starts before the start is
+    posted, but the deadline is only checked once the start has
+    answered — and the fixture's real answer is `done` (200 rows search
+    in microseconds), so a start held here installs on release rather
+    than detaching. The first `hold` requests stay pending until
+    release(); the rest pass straight through."""
 
     ROUTE = re.compile(r".*/api/view(/start)?(\?.*)?$")
 

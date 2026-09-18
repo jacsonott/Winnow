@@ -429,7 +429,15 @@ export function renderJobsPanel() {
    badge shows instead of the status word. A done row lingers
    NOTICE_LINGER_MS like a finished import unless it carries buttons or
    asked to be sticky — then it waits for the ✕, or for a button click,
-   which also closes it. Error rows always wait. */
+   which also closes it. Error rows always wait.
+
+   The third argument to createNotice is the app's own, not part of the
+   plugin contract (plugins.js's `notify` passes `opts` through and
+   nothing else): `onDismiss` runs after the ✕ has closed the row, for a
+   row that stands for something the ✕ must act on rather than merely
+   hide — a search running in the background is cancelled by it, and a
+   finished one's result discarded, since a dismissed row would leave
+   that search polling with nothing on screen to apply or drop it from. */
 export const NOTICE_LINGER_MS = 8000;
 export const pluginNotices = new Map();   // notice id -> record
 let noticeSeq = 0;
@@ -483,7 +491,10 @@ function noticeRow(n) {
     pct: n.progress || 0,
     indeterminate: n.progress === null,
     detail: n.detail,
-    onDismiss: () => closeNotice(n.id),
+    onDismiss: () => {
+      closeNotice(n.id);
+      if (n.onDismiss) { try { n.onDismiss(); } catch (e) { console.error(e); } }
+    },
     actions: n.actions.map((a) => ({
       label: a.label,
       onClick: () => {
@@ -506,9 +517,10 @@ function renderJobsPanelSoon() {
   noticeRaf = requestAnimationFrame(() => { noticeRaf = 0; renderJobsPanel(); });
 }
 
-export function createNotice(owner, opts = {}) {
+export function createNotice(owner, opts = {}, { onDismiss = null } = {}) {
   const id = ++noticeSeq;
-  const n = { id, owner, status: 'running', title: '', detail: '', phase: null, progress: undefined, actions: [], sticky: false, timer: null };
+  const n = { id, owner, status: 'running', title: '', detail: '', phase: null, progress: undefined, actions: [], sticky: false, timer: null,
+              onDismiss: typeof onDismiss === 'function' ? onDismiss : null };
   applyNoticeOpts(n, opts);
   if (!n.title) n.title = String(owner).replace(/^[a-z]+:/, '');
   pluginNotices.set(id, n);
