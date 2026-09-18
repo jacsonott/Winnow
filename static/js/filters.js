@@ -496,11 +496,19 @@ export function currentSourceHasFts() {
 }
 
 export function updateSearchHint() {
+  const src = S.sources.find((s) => s.id === S.sourceId);
   const hasFts = currentSourceHasFts();
+  // The first search on an unindexed table starts the trigram build in
+  // the background (Store._ensure_fts_building) and scans the whole table
+  // until it lands. A slow first search that says why is a wait; one
+  // that doesn't is a hang. Regex never uses the index, so it stays a
+  // full scan whatever the index is doing.
+  const building = !!(src && src.fts_building && !hasFts);
   const hint = $('searchMode');
   if (S.searchMode === 'regex') hint.textContent = 'regex · full scan';
-  else if (S.searchMode === 'advanced') hint.textContent = hasFts ? 'advanced · full-text' : 'advanced · substring chain';
-  else hint.textContent = 'substring';
+  else if (S.searchMode === 'advanced') {
+    hint.textContent = hasFts ? 'advanced · full-text' : (building ? 'advanced · index building' : 'advanced · substring chain');
+  } else hint.textContent = building ? 'substring · index building' : 'substring';
   // The hint sits inside the box's right padding, which was a fixed 74px —
   // the longer hints painted straight over the typed text. Size the padding
   // to the hint; while the box is hidden (no layout yet) estimate from the

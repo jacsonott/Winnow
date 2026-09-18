@@ -5,6 +5,7 @@ progress, and armOpCancel.
 import { $, api, el, post, toast } from './core.js';
 import { clientLog } from './errlog.js';
 import { offerTimestampColumns } from './derived.js';
+import { updateSearchHint } from './filters.js';
 import { scanWatchlistForSources } from './watchlist.js';
 import { loadSources } from './sources.js';
 import { S } from './state.js';
@@ -55,6 +56,7 @@ export function resetJobState() {
   seenJobStatus.clear();
   dismissedJobs.clear();
   ftsWatch.clear();
+  ftsAsked.clear();
   batchNavigated = false;
   // A plugin's rows were about the previous case too — and the poll that
   // would redraw the panel stops when nothing is running, so the DOM has
@@ -120,6 +122,33 @@ export function inFlightWork() {
 
 export function startJobsPoll() {
   if (!jobsPollTimer) pollJobs();
+}
+
+/* A search on a table with no trigram index is what starts the build —
+   server-side, from inside build_view (Store._ensure_fts_building) — and
+   nothing tells the client: the view's payload says nothing about the
+   index, and the poll below only runs while it has something to watch,
+   so on an idle case there is no poll to notice a new fts_building.
+   rebuildView calls this once a build with a search in it lands on a
+   table whose record says no index. Refetch the sources; recompute the
+   open table's hint (a small table's index is ready before the search
+   that started it lands, so the hint may have nothing to say); then let
+   the poll take over — it watches the build (the indexing row, the hint
+   while it runs, the toast when it is ready) and stops when it lands.
+   `ftsAsked`: a table that answered "no index, no build" is not asked
+   again — a runtime whose SQLite predates the trigram pushdown never
+   builds one (store.py TRIGRAM_LIKE_MIN_SQLITE), and asking after every
+   search there is three lock-taking requests for an answer that doesn't
+   change. Source ids restart per case; resetJobState clears it. */
+const ftsAsked = new Set();
+
+export async function followFtsBuild(sourceId) {
+  if (ftsAsked.has(sourceId)) return;
+  try { await refreshSourcesQuietly(); } catch { return; }
+  const src = (S.sources || []).find((s) => s.id === sourceId);
+  if (src && !src.has_fts && !src.fts_building) ftsAsked.add(sourceId);
+  if (sourceId === S.sourceId) updateSearchHint();
+  startJobsPoll();
 }
 
 /* Jobs that finished before this page existed are history, not news.
@@ -232,10 +261,17 @@ export async function pollJobs() {
     }
   }
   for (const src of S.sources || []) {
-    if (src.fts_building) ftsWatch.add(src.id);
-    else if (ftsWatch.has(src.id)) {
+    if (src.fts_building) {
+      if (ftsWatch.has(src.id)) continue;
+      ftsWatch.add(src.id);
+      // The open table's search hint names the build while it runs
+      // (updateSearchHint) — it is only ever computed on demand, so the
+      // start and the end of the build are the two moments to recompute it.
+      if (src.id === S.sourceId) updateSearchHint();
+    } else if (ftsWatch.has(src.id)) {
       ftsWatch.delete(src.id);
       if (src.has_fts) toast(`Search index ready for ${src.name}`, 3000);
+      if (src.id === S.sourceId) updateSearchHint();
     }
   }
   renderJobsPanel();

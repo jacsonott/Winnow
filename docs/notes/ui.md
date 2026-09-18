@@ -657,6 +657,54 @@ see [docs/notes/README.md](README.md) for the whole set.
   `tests/ui/test_tag_filter_keeps_row.py`; the materialised branch of
   `find_position` (every sort, filter and merge) by
   `tests/test_row_position_merge.py`.
+- **A running build says so, and a superseded one says nothing.** While
+  `rebuildView` has a build in flight, `#viewStats` reads
+  `Searching "term"… 3.2 s` (the spec has a search — the box's text, or
+  the advanced terms) or `Filtering… 3.2 s`, on a 250ms timer
+  (`BUILD_TICK_MS`; a build that lands inside the first tick never shows
+  it, the same rule the cancel chip's 1.2s follows), and `#search` carries
+  `aria-busy="true"` — a token-only border pulse — for a build with a
+  search in it, not for a header-box filter. The count from before the
+  build comes back when it is cancelled or fails (the old rows are still
+  the rows on screen); a build that lands writes its own. The indicator
+  belongs to the newest rebuild: a burst of keystrokes hands the text
+  from before the *first* of them along, so a cancel never restores
+  `Filtering… 0.3 s`, and a table switch under it stops it without
+  restoring anything (the stats are the other table's now). Two guards
+  keep that true. A rebuild superseded while it awaited `/api/view/keys`
+  leaves before it starts any chrome (`seq !== rebuildSeq` right after
+  the lookup) — otherwise its indicator replaced the newer build's and
+  its `finally` then took both down. And a landed build writes its count
+  *before* the selection remap's `await /api/view/positions`: the
+  indicator stops in the `finally` with its last `Searching… 3.2 s`
+  frozen in `#viewStats`, and a rebuild starting inside that await read
+  the frozen label as the text to come back to. The chip survives a
+  supersede too: `cancelInflight` reports whether the superseded build's
+  chip was up, and the new build then arms its own with no delay rather
+  than 1.2s later. The 2px bar and the chip were the only running state
+  before; an analyst watching a full-table scan saw the old count and
+  nothing moving. `updateSearchHint` adds `index building` while the open
+  table's trigram index is still being built (`fts_building && !has_fts`);
+  regex is always `full scan`. **The client has to ask about that build.**
+  The first search on an unindexed table is what starts it — server-side,
+  from inside `build_view` (`_ensure_fts_building`, contains and advanced
+  only; regex never indexes) — and the view's payload says nothing about
+  it; the jobs poll does not run on an idle case and only refetches the
+  sources while `ftsWatch` already has something in it. So `rebuildView`,
+  when a build with a search in it lands on a table whose record says
+  `!has_fts`, calls `followFtsBuild` (jobs.js): `refreshSourcesQuietly`,
+  recompute the hint, `startJobsPoll` — the poll then sees
+  `fts_building`, watches the source (the indexing row in the panel,
+  the hint while it runs) and toasts `Search index ready` when it lands.
+  A table that answers "no index, no build" (a SQLite older than the
+  trigram pushdown never builds one) is not asked again that case. A
+  rebuild that supersedes one in flight cancels it — server-side token
+  and client-side fetch both, see [store.md](store.md)'s cancellable-ops
+  entry — and the superseded build's 499/abort is silent: no toast, no
+  repaint. Only the chip's cancel toasts. `tests/ui/test_search_supersede.py`
+  — the index-build test plays the server for `/api/sources` (route +
+  reload) rather than writing `fts_building` into client state, so it
+  proves the refresh is issued, not just that the hint renders.
 - **Stored keymaps are migrated on load, not merged blindly.**
   `loadKeymap` used to be `{...DEFAULT_KEYMAP, ...stored}`, which means a
   returning analyst's localStorage outranks every later change to the

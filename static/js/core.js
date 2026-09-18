@@ -97,6 +97,11 @@ const connListeners = [];
 export function onConnectionChange(fn) { connListeners.push(fn); }
 function announce(up) { for (const fn of connListeners) fn(up); }
 
+/* `opts.signal` (an AbortController's) rides through to fetch. A request
+   this client aborted itself — a view build a newer one superseded, see
+   view.js — rejects with `aborted: true` and no status, and says nothing
+   about the connection: the server never answered because it was never
+   allowed to, not because it is gone. */
 export async function api(path, opts) {
   const o = { ...opts };
   if (o.method && o.method !== 'GET') {
@@ -106,6 +111,12 @@ export async function api(path, opts) {
   try {
     r = await fetch(path, o);
   } catch (e) {
+    if (e && e.name === 'AbortError') {
+      const err = new Error('Cancelled');
+      err.aborted = true;
+      err.cause = e;
+      throw err;
+    }
     const err = new Error(OFFLINE_MESSAGE);
     err.offline = true;      // callers that want to say more can branch on it
     err.cause = e;
@@ -137,8 +148,8 @@ export async function api(path, opts) {
   return r.json();
 }
 
-export const post = (path, body) =>
-  api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+export const post = (path, body, { signal } = {}) =>
+  api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal });
 
 /* Thin top-of-viewport progress indicator for anything that can take a
    real amount of time on a large source (a view rebuild — filter/sort/
