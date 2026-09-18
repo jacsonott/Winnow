@@ -189,13 +189,13 @@ def test_a_running_view_job_holds_idle_shutdown(client, slow_source):
     import server
 
     store, sid = slow_source
-    assert server._jobs_running() is False
+    assert server._busy_reason() is None
     job = client.post("/api/view/start?wait_ms=50", json=_slow_body(sid, "tok-idle")).json()
     assert job["status"] == "running"
-    assert server._jobs_running() is True
+    assert server._busy_reason() == "A search is still running"
     client.post(f"/api/view/job/cancel?job_id={job['job_id']}")
     store.wait_for_view_job(job["job_id"], timeout=30)
-    assert server._jobs_running() is False
+    assert server._busy_reason() is None
 
 
 def test_a_merge_search_runs_as_a_job_too(client, store, write_csv):

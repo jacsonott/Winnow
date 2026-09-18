@@ -1471,6 +1471,10 @@ class Store:
         # writer is still open. `_closing` is set in the same locked step
         # as that snapshot, and a copy registering afterwards sees it and
         # aborts with nothing created — no gap for a copy to slip through.
+        # `_closing` covers the job registry above on the same terms:
+        # start_ingest_job refuses while it is set, because a derive
+        # cascade asks for a job from inside a worker close() is draining
+        # and would otherwise land one behind the snapshot.
         self._subset_copies: dict[int, dict] = {}
         self._closing = False
 
@@ -1983,7 +1987,10 @@ class Store:
         # runs on the request's pool thread, which outlives it), so it is
         # waited on through its `done` event; `_closing` is raised in the
         # same locked step as the snapshot so a copy registering after it
-        # aborts on its own (see save_view_as_source).
+        # aborts on its own (see save_view_as_source) — and so does a job
+        # asked for after it (see start_ingest_job), which is how a derive
+        # cascade running on one of the workers below cannot queue a
+        # backfill behind this snapshot.
         with self._ingest_jobs_lock:
             self._closing = True
             jobs = list(self._ingest_jobs.values())
@@ -3423,7 +3430,18 @@ class Store:
         case. It rides this machinery rather than growing a second job
         system because it wants exactly what this one provides — a progress
         bar over a multi-million-row pass, per-BATCH cancellation, the jobs
-        panel, and close()'s cancel-and-join."""
+        panel, and close()'s cancel-and-join.
+
+        A job asked for while the case is closing is refused with
+        OpCancelled (499 on a route, the same answer save_view_as_source
+        gives) rather than started. Registration reads `_closing` inside
+        the one locked step that registers, so either the job is in the
+        snapshot close() took — and gets cancelled and joined — or it
+        never exists: no thread left running a backfill into a connection
+        close() is about to shut. The caller this is really for is
+        _cascade_dependent_derives, which runs on a worker close() is
+        *already draining* and would otherwise queue its child job behind
+        the snapshot."""
         if kind not in ("csv", "text", "json", "sqlite", "xlsx", "plaso", "derive"):
             raise ValueError(f"Unknown ingest kind: {kind}")
         try:
@@ -3431,6 +3449,9 @@ class Store:
         except OSError:
             size = 0
         with self._ingest_jobs_lock:
+            if self._closing:
+                noun = self._job_noun({"kind": kind}).lower()
+                raise OpCancelled(f"The case is closing — the {noun} was not started")
             self._ingest_job_seq += 1
             job = {
                 "job_id": self._ingest_job_seq,
@@ -3668,7 +3689,7 @@ class Store:
         """How many save_view_as_source copies are mid-way right now. A
         source mid-copy has a growing row_count and columns='[]', so the
         routes that refuse while an import is running (copy_sources,
-        save-as) read this too — server.py's _jobs_running."""
+        save-as) read this too — server.py's _busy_reason."""
         with self._ingest_jobs_lock:
             return len(self._subset_copies)
 
@@ -4727,6 +4748,11 @@ class Store:
                 # not be left stuck 'building' with no job either: 'ready'
                 # with stale-but-present values is recoverable (re-derive),
                 # a permanent 'building' blocks the whole chain below it.
+                # The case closing arrives here too: this runs on a worker
+                # close() is draining, start_ingest_job refuses once
+                # `_closing` is set, and its OpCancelled is a failure like
+                # any other — the child stays re-derivable and the parent
+                # job, already recorded 'done', keeps that status.
                 try:
                     with self.lock, self.db:
                         self.db.execute(
@@ -7694,8 +7720,22 @@ class Store:
         caller can report progress. `stop` is asked between (indicator,
         source) units and ends the scan early. One implementation behind
         the synchronous scan_source/scan_all (profile apply, tests) and the
-        background job the UI runs, like _iter_search_all_sources."""
-        sources = [s for s in self.list_sources() if not s.get("is_merge") and not s.get("error")]
+        background job the UI runs, like _iter_search_all_sources.
+
+        A source whose columns are still `'[]'` is skipped as well, both
+        here and through scan_source: that is the shell every fill leaves
+        standing while it works — `_create_source_shell` writes it up
+        front and the caller fills `columns` in at the end, so an ingest
+        job and a save-view-as-table copy each keep one alive for their
+        whole run — and `_require_columns` already reads that gap as
+        "still importing". A scan cannot read it either: `_blob_expr([])`
+        is empty, so the unit would compile `WHERE () LIKE ?`, whose
+        syntax error is not the "no such table" `_scan_unit` absorbs and
+        so would end the whole job in error with every later table
+        unscanned. Skipping costs nothing — the rows aren't committed
+        yet, and the scan that runs when the fill finishes covers them."""
+        sources = [s for s in self.list_sources()
+                   if not s.get("is_merge") and not s.get("error") and s.get("columns")]
         if source_ids is not None:
             wanted = set(source_ids)
             sources = [s for s in sources if s["id"] in wanted]
@@ -7730,9 +7770,10 @@ class Store:
         """Synchronous scan of one source for every indicator (or the given
         ones): the profile-apply path and tests; the UI runs the job below.
         A merge (negative id) has no src_N of its own and scans as nothing
-        — its rows are its members', scanned there. Idempotent: a source's
-        hits for an indicator are replaced each scan. Returns per-indicator
-        match counts."""
+        — its rows are its members', scanned there. So does a table that
+        is still filling (columns `'[]'`; see _iter_watchlist_scan).
+        Idempotent: a source's hits for an indicator are replaced each
+        scan. Returns per-indicator match counts."""
         matched: dict[int, int] = {}
         for _scanned, _total, info in self._iter_watchlist_scan([source_id], watchlist_ids):
             if info:

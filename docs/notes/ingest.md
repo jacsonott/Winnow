@@ -256,7 +256,15 @@ see [docs/notes/README.md](README.md) for the whole set.
   what committed: the analyst asked for the source not to exist, and a
   half-table looks exactly like a complete import in every list.
   `Store.close()` cancels and joins running jobs so a case switch can't
-  strand a worker on a closed connection. One sqlite job takes N tables
+  strand a worker on a closed connection — and, in the same locked step
+  as that snapshot, sets `_closing`, which `start_ingest_job` reads:
+  a job asked for after the snapshot is refused with `OpCancelled` (499
+  on a route) instead of started, since nothing would ever cancel or
+  join it. The caller that makes this real is
+  `_cascade_dependent_derives`, which starts a child backfill from
+  inside a derive worker close() is already draining; it treats the
+  refusal like any other failure, leaving the child `ready` (stale but
+  re-derivable) rather than stuck `building`. One sqlite job takes N tables
   from one spooled upload (`options["tables"]`) rather than re-uploading
   the file per table. Upload spools are deleted when the job ends —
   the old sync upload endpoints (kept for compat, same `finally` added)

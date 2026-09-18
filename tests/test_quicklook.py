@@ -348,10 +348,18 @@ def test_save_as_refuses_while_an_import_runs(client, tmp_path, monkeypatch):
     server, c = client
     res = c.post("/api/assoc/open", json={"files": [_csv(tmp_path)]}, headers=HEADERS)
     server.STORE.wait_for_ingest_job(res.json()["started"][0]["job_id"], timeout=30)
-    monkeypatch.setattr(server, "_jobs_running", lambda: True)
+    monkeypatch.setattr(server, "_busy_reason", lambda: "Still importing")
     r = c.post("/api/case/save_as", json={"name": "Too soon"}, headers=HEADERS)
     assert r.status_code == 409
     assert "importing" in r.json()["detail"].lower()
+    # The same gate holds for the other three kinds of background work a
+    # close would cancel, and the 409 names whichever one is running —
+    # an analyst sent to find an import that isn't there looks for a bug.
+    monkeypatch.setattr(server, "_busy_reason", lambda: "A watchlist scan is still running")
+    r = c.post("/api/case/save_as", json={"name": "Also too soon"}, headers=HEADERS)
+    assert r.status_code == 409
+    assert "watchlist scan" in r.json()["detail"]
+    assert "importing" not in r.json()["detail"].lower()
     # The quick-look is untouched — still open, still temp.
     assert c.get("/api/case/current", headers=HEADERS).json()["temp"] is True
     server.STORE.close()

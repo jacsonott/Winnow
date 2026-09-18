@@ -613,14 +613,14 @@ def test_a_running_scan_holds_idle_shutdown(client, store, write_csv):
 
     store._scan_unit = gated_unit
     try:
-        assert server._jobs_running() is False
+        assert server._busy_reason() is None
         job = client.post("/api/watchlist/scan/start", json={}).json()
         assert entered.wait(5)
         assert job["status"] == "running"
-        assert server._jobs_running() is True
+        assert server._busy_reason() == "A watchlist scan is still running"
         gate.set()
         store.wait_for_watchlist_scan_job(job["job_id"], timeout=20)
-        assert server._jobs_running() is False
+        assert server._busy_reason() is None
     finally:
         gate.set()
         del store._scan_unit
