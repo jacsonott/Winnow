@@ -1,7 +1,9 @@
 """Notes: the editor and a live preview side by side. Typing renders
 without a click, the three buttons choose which panes show, the divider
 drags (its position remembered per browser) and double-clicks back to
-half, and a plugin's notesPage.setText lands in the preview like typing.
+half, a plugin's notesPage.setText lands in the preview like typing, the
+220px floor holds when the row narrows underneath a set split, and the
+editor's right edge belongs to the editor rather than the divider.
 
 The server and its case are session-scoped, so every test here leaves
 the notes body empty again — through the editor's own input event, so
@@ -154,10 +156,120 @@ def test_a_plugin_set_text_lands_in_the_preview(page, notes_panel):
         page.wait_for_function(
             "() => document.getElementById('notesPreview').innerHTML.includes('<h1>From a plugin</h1>')", timeout=3000)
         assert _mode(page) == "split"
-        # Both panes still clear the 220px floor beside the plugin column.
-        assert page.locator("#notesEditor").bounding_box()["width"] >= 220
-        assert page.locator("#notesPreview").bounding_box()["width"] >= 220
+        # (The floor beside the column is pinned where it actually binds —
+        # test_the_row_narrowing_re_clamps_and_widening_gives_it_back — not
+        # here, where a 50/50 of ~895px clears 220px without trying.)
         page.wait_for_function(
             "() => ['Saved', ''].includes(document.getElementById('notesSaved').textContent)", timeout=6000)
     finally:
         _leave_clean(page)
+
+
+def test_the_clamp_floors_each_pane_and_falls_back_to_even(page):
+    """clampNotesSplit pinned as a function: on a narrow row the 220px floor
+    beats the 0.2–0.8 clamp, a row too narrow for two floors splits evenly
+    whatever was asked for, and no layout at all (width 0) leaves only the
+    ratio clamp. The function is pure, so the bare-clamp implementation
+    that the layout assertions can't tell apart fails here."""
+    def clamp(ratio, width):
+        return page.evaluate(f"() => __winnow.clampNotesSplit({ratio}, {width})")
+    # 500px row: the floor is 220/500 = 0.44 of it, so 0.9 stops at 0.56.
+    assert clamp(0.9, 500) == pytest.approx(1 - 220 / 500)
+    assert clamp(0.1, 500) == pytest.approx(220 / 500)
+    assert clamp(0.5, 500) == 0.5
+    # 300px: two floors need 440 — even split, whatever was asked for.
+    assert clamp(0.1, 300) == 0.5
+    assert clamp(0.9, 300) == 0.5
+    # No layout yet: the ratio clamp alone.
+    assert clamp(0.8, 0) == 0.8
+    assert clamp(0.95, 0) == 0.8
+    assert clamp(0.05, 0) == 0.2
+    assert page.evaluate("() => __winnow.clampNotesSplit('junk', 500)") == 0.5
+
+
+def test_the_row_narrowing_re_clamps_and_widening_gives_it_back(page, notes_panel):
+    """A stored 0.8 split, then the plugin column opened and dragged wider —
+    the sequence an analyst actually performs — squeezes the preview only
+    to the floor, leaves the stored ratio alone, and closing the column
+    hands the editor its 0.8 back. Nothing touches the divider."""
+    page.evaluate("() => localStorage.setItem('winnow.notes', JSON.stringify({ split: 0.8 }))")
+    _open_notes(page)
+    try:
+        row0 = page.locator("#notesSplit").bounding_box()["width"]
+        ed0 = page.locator("#notesEditor").bounding_box()["width"]
+        pv0 = page.locator("#notesPreview").bounding_box()["width"]
+        # Wide row: 0.8 fits over the floor, so 0.8 it is.
+        assert abs(ed0 - row0 * 0.8) < 6 and pv0 >= 220, (row0, ed0, pv0)
+        # Open the plugin column. Nothing on the Notes page ran; only the row got narrower.
+        page.locator("#notesPluginButtons .plugin-panel-btn", has_text="Helper").click()
+        page.wait_for_function("() => !!window.__panelCtx")
+        page.wait_for_function(
+            "(w) => document.getElementById('notesSplit').getBoundingClientRect().width < w",
+            arg=row0 - 300, timeout=3000)
+        row1 = page.locator("#notesSplit").bounding_box()["width"]
+        # Here 0.8 of the row leaves the preview under 220px: the floor binds, not the 0.8 cap.
+        assert row1 * 0.2 < 220 < row1 * 0.8 - 20, row1
+        page.wait_for_function(
+            "() => { const w = document.getElementById('notesPreview').getBoundingClientRect().width; "
+            "return w >= 218 && w < 240; }", timeout=3000)
+        ed1 = page.locator("#notesEditor").bounding_box()["width"]
+        assert ed1 < row1 * 0.8 - 20, (row1, ed1)
+        # The stored ratio is untouched: this was the floor, not a new choice.
+        assert json.loads(page.evaluate("() => localStorage.getItem('winnow.notes')"))["split"] == 0.8
+        # Drag the COLUMN wider (its own handle, not the divider): the preview
+        # holds at the floor and the editor is what gives.
+        h = page.locator("#notesPanelResize").bounding_box()
+        page.mouse.move(h["x"] + h["width"] / 2, h["y"] + 100)
+        page.mouse.down()
+        page.mouse.move(h["x"] + h["width"] / 2 - 250, h["y"] + 100, steps=8)
+        page.mouse.up()
+        page.wait_for_function(
+            "(w) => document.getElementById('notesSplit').getBoundingClientRect().width < w",
+            arg=row1 - 200, timeout=3000)
+        row2 = page.locator("#notesSplit").bounding_box()["width"]
+        page.wait_for_function(
+            "() => { const w = document.getElementById('notesPreview').getBoundingClientRect().width; "
+            "return w >= 218 && w < 240; }", timeout=3000)
+        ed2 = page.locator("#notesEditor").bounding_box()["width"]
+        assert ed2 < ed1 - 150, (ed1, ed2)
+        assert ed2 + page.locator("#notesPreview").bounding_box()["width"] <= row2 + 1, (ed2, row2)
+        assert json.loads(page.evaluate("() => localStorage.getItem('winnow.notes')"))["split"] == 0.8
+        # Close the column: the room comes back, and so does the 0.8.
+        page.evaluate("() => __winnow.togglePluginPanel('fake.helper', false)")
+        page.wait_for_function(
+            "() => Math.abs(document.getElementById('notesEditor').getBoundingClientRect().width - "
+            "document.getElementById('notesSplit').getBoundingClientRect().width * 0.8) < 6", timeout=3000)
+        assert page.locator("#notesPreview").bounding_box()["width"] >= 220
+    finally:
+        _leave_clean(page)
+
+
+def test_the_editor_edge_belongs_to_the_editor_not_the_divider(page):
+    """The divider's hit target reaches into the preview only. The editor's
+    right edge is where the textarea's vertical scrollbar sits on
+    classic-scrollbar platforms (headless Chromium's overlay scrollbars
+    take no width, so the strip is asserted by position), and a handle
+    that reached into it made grabbing the scrollbar thumb start a split
+    drag instead of a scroll."""
+    _open_notes(page)
+    ed = page.locator("#notesEditor").bounding_box()
+    right = ed["x"] + ed["width"]
+    y = ed["y"] + ed["height"] / 2
+
+    def under(x):
+        return page.evaluate("([x, y]) => document.elementFromPoint(x, y).id", [x, y])
+    for dx in (1, 2, 3, 4):
+        assert under(right - dx) == "notesEditor", (dx, under(right - dx))
+    # The handle starts at the editor's edge and reaches over the preview's padding.
+    assert under(right + 1) == "notesDivider"
+    assert under(right + 7) == "notesDivider"
+    h = page.locator("#notesDivider").bounding_box()
+    assert abs(h["x"] - right) < 1, (h, right)
+    # A drag started 2px inside the editor's edge is the editor's (a scroll,
+    # a text selection) — the split does not move and nothing is remembered.
+    page.mouse.move(right - 2, y)
+    page.mouse.down()
+    page.mouse.move(right - 2 - 200, y, steps=8)
+    page.mouse.up()
+    assert abs(page.locator("#notesEditor").bounding_box()["width"] - ed["width"]) < 1
+    assert page.evaluate("() => localStorage.getItem('winnow.notes')") is None

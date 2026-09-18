@@ -123,7 +123,9 @@ export function saveNotesPrefs(patch) {
    when the row is wide enough to honour that — the plugin side column
    (up to 70% of the section) plus the ratio clamp alone could squeeze
    the editor to a few characters on a laptop. `width` 0 (page hidden,
-   nothing laid out yet) falls back to the ratio clamp alone. */
+   nothing laid out yet) falls back to the ratio clamp alone. Applied
+   whenever the ratio is written AND whenever the row's width changes
+   underneath it (the ResizeObserver in wireNotes). */
 export function clampNotesSplit(ratio, width) {
   let lo = NOTES_SPLIT_MIN, hi = NOTES_SPLIT_MAX;
   if (width > 0) {
@@ -295,6 +297,17 @@ export function wireNotes() {
   };
   wireNotesDivider();
   applyNotesSplit(loadNotesPrefs().split);
+  // The row's width changes without this page doing anything — the plugin
+  // column toggled or dragged wider, the window resized — and the 220px
+  // floor is only a floor if it holds then too. Re-apply the STORED ratio,
+  // not the one on the row, so a pane squeezed to the floor gets its share
+  // back the moment the room returns. The callback only moves the
+  // children's flex-basis, never the row's own box, so it cannot loop.
+  if (typeof ResizeObserver !== 'undefined') {
+    new ResizeObserver(() => {
+      if (!$('notesview').hidden) applyNotesSplit(loadNotesPrefs().split);
+    }).observe($('notesSplit'));
+  }
   // Delegated — the preview re-renders wholesale (innerHTML) on every
   // edit, so a handler bound to a link would be gone after the next keystroke.
   $('notesPreview').addEventListener('click', (e) => {
