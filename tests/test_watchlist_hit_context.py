@@ -1,6 +1,8 @@
 """Watchlist hits carry where they matched: the column and cell that held
 the indicator, and the row as one line — found by re-reading the hit
-rows, so nothing is stored and old cases get it too."""
+rows, so nothing is stored and old cases get it too. The route answers
+`{sources, hits}` (grouped per table — tests/test_watchlist_grouped_hits.py);
+the context rides on each hit."""
 
 
 def test_hits_carry_column_value_and_preview(client, store, write_csv):
@@ -9,7 +11,7 @@ def test_hits_carry_column_value_and_preview(client, store, write_csv):
         build_fts=False)["id"]
     wid = client.post("/api/watchlist", json={"value": "rclone", "kind": "filename"}).json()["id"]
     assert client.post(f"/api/watchlist/scan?source_id={sid}").json()["matched"][str(wid)] == 2
-    hits = client.get(f"/api/watchlist/hits?watchlist_id={wid}").json()
+    hits = client.get(f"/api/watchlist/hits?watchlist_id={wid}").json()["hits"]
     by_rid = {h["rid"]: h for h in hits}
     assert set(by_rid) == {1, 2}
     # First column in table order that contains the value, case-insensitively; the cell verbatim
@@ -26,13 +28,13 @@ def test_long_cells_are_capped_and_a_stale_hit_has_no_column(client, store, writ
     sid = store.ingest_csv(write_csv([["A"], [long]], "l.csv"), build_fts=False)["id"]
     wid = client.post("/api/watchlist", json={"value": "needle", "kind": "other"}).json()["id"]
     client.post(f"/api/watchlist/scan?source_id={sid}")
-    (h,) = client.get(f"/api/watchlist/hits?watchlist_id={wid}").json()
+    (h,) = client.get(f"/api/watchlist/hits?watchlist_id={wid}").json()["hits"]
     assert h["column"] == "A" and len(h["value"]) == store.WATCHLIST_PREVIEW_CHARS
     assert len(h["preview"]) == store.WATCHLIST_PREVIEW_CHARS
     # An indicator whose value changed after the scan: the hit stays, the column is None
     store.db.execute("UPDATE watchlist SET value='other' WHERE id=?", (wid,))
     store.db.commit()
-    (h,) = client.get(f"/api/watchlist/hits?watchlist_id={wid}").json()
+    (h,) = client.get(f"/api/watchlist/hits?watchlist_id={wid}").json()["hits"]
     assert h["column"] is None and h["value"] is None and h["preview"].startswith("x")
 
 
@@ -45,7 +47,7 @@ def test_a_value_straddling_two_cells_is_a_hit_with_no_column(client, store, wri
     sid = store.ingest_csv(write_csv([["A", "B"], ["alpha", "beta"], ["nothing", "here"]], "s.csv"), build_fts=False)["id"]
     wid = client.post("/api/watchlist", json={"value": "alpha beta", "kind": "other"}).json()["id"]
     assert client.post(f"/api/watchlist/scan?source_id={sid}").json()["matched"][str(wid)] == 1
-    (h,) = client.get(f"/api/watchlist/hits?watchlist_id={wid}").json()
+    (h,) = client.get(f"/api/watchlist/hits?watchlist_id={wid}").json()["hits"]
     assert h["rid"] == 1 and h["column"] is None
     assert h["value"] == "alpha beta" and h["preview"] == "alpha | beta"
 
@@ -63,4 +65,4 @@ def test_hits_are_read_while_the_writer_lock_is_held(client, store, write_csv):
         t.start()
         t.join(timeout=5)
         assert not t.is_alive(), "indicator_hits waited on the writer lock"
-    assert out and out[0][0]["column"] == "A"
+    assert out and out[0]["hits"][0]["column"] == "A"

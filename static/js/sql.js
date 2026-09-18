@@ -5,6 +5,7 @@ import { recordTabVisit } from './tabhistory.js';
 import { $, api, debounce, el, post, toast } from './core.js';
 import { hideDetailPane } from './detail.js';
 import { render, renderTagToolbar } from './grid.js';
+import { drawRail } from './grouping.js';
 import { hidePluginViews, sqlResultNodes, syncPluginPanels } from './plugins.js';
 import { syncHistogramPanel } from './histogram.js';
 import { setActiveSqlResult } from './sqlassist.js';
@@ -290,6 +291,16 @@ export function showGridTab({ repaint = true } = {}) {
   // with no S.view at all.
   if (repaint) render();
   if (S.sourceId) checkPresets(S.sourceId); // refresh the Filters button's suggestion state
+  // A background job (the watchlist scan's auto-tags) that invalidated
+  // the row caches while a page tab hid the grid left the repaint for
+  // here: against a hidden grid, render() measures nothing and paints
+  // the first rows at the top of a viewport that comes back scrolled
+  // elsewhere. openSource() rebuilds anyway; this is for the paths that
+  // only re-show the grid (Alt+1, tab history, the mouse thumb buttons).
+  if (S.gridRepaintPending) {
+    S.gridRepaintPending = false;
+    if (S.view) { render(); drawRail(); }
+  }
 }
 
 export function showTimelineTab() {

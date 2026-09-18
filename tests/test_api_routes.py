@@ -745,7 +745,8 @@ def test_watchlist_add_scan_autotag_and_hits(client, store, write_csv):
     listed = {i["value"]: i for i in client.get("/api/watchlist").json()}
     assert listed["rclone"]["hit_count"] == 1
     hits = client.get(f"/api/watchlist/hits?watchlist_id={wid}").json()
-    assert hits[0]["source_id"] == sid and hits[0]["rid"] == 1
+    assert hits["sources"] == [{"source_id": sid, "source_name": "e.csv", "count": 1, "shown": 1}]
+    assert hits["hits"][0]["source_id"] == sid and hits["hits"][0]["rid"] == 1
     # auto-tag landed on the matching row
     n = store.db.execute("SELECT COUNT(*) c FROM row_tags WHERE source_id=? AND tag_id=?",
                          (sid, tag)).fetchone()["c"]

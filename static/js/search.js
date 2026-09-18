@@ -13,6 +13,7 @@ import { saveCurrentViewAsTable } from './subset.js';
 import { openSavedFiltersModal, openTimeRangeModal } from './timeframe.js';
 import { markModalAction, confirmDialog, dropdownMenu, modal } from './ui.js';
 import { rebuildView } from './view.js';
+import { runScan } from './watchlist.js';
 
 /* Checked against every real table in the case (plain contains-mode only —
    same as the grid's default search — not regex). Clicking a result opens
@@ -294,7 +295,8 @@ export function openSearchAllModal() {
     impLabel.append(impInput);
     // The terms you're about to sweep for are usually exactly the IOCs
     // worth watching as new data lands — add them to the watchlist in one
-    // click (it dedupes against what's already there, then scans).
+    // click (it dedupes against what's already there, then scans for the
+    // new ones in the background — runScan's jobs-panel row stands for it).
     const wlBtn = el('button', 'btn ghost', 'Add to watchlist');
     wlBtn.title = 'Add these terms to the case watchlist and scan every table for them';
     wlBtn.onclick = async () => {
@@ -302,7 +304,7 @@ export function openSearchAllModal() {
       if (!terms.length) { toast('Enter a term or two first'); return; }
       try {
         const r = await post('/api/watchlist/import', { text: terms.join('\n'), kind: 'other' });
-        await post('/api/watchlist/scan', {});
+        if (r.added_ids && r.added_ids.length) runScan({ watchlistIds: r.added_ids });
         const dupes = terms.length - r.added;
         toast(r.added
           ? `${r.added} added to the watchlist${dupes > 0 ? ` · ${dupes} already there` : ''}`

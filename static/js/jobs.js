@@ -6,7 +6,7 @@ import { $, api, el, post, toast } from './core.js';
 import { clientLog } from './errlog.js';
 import { offerTimestampColumns } from './derived.js';
 import { updateSearchHint } from './filters.js';
-import { scanWatchlistForSources } from './watchlist.js';
+import { scanWatchlistForSources, watchlistScanRunning } from './watchlist.js';
 import { loadSources } from './sources.js';
 import { S } from './state.js';
 import { refreshSourcesQuietly } from './tables.js';
@@ -119,6 +119,7 @@ export function inFlightWork() {
     + activeUploads.size;
   if (imports) bits.push(`${imports} import${imports === 1 ? '' : 's'} in progress`);
   if (S.searchAll && S.searchAll.running) bits.push('a Search-all sweep');
+  if (watchlistScanRunning()) bits.push('a watchlist scan');
   const searching = [...S.pendingViews.values()].filter((p) => p.status === 'running').length;
   if (searching) bits.push(`${searching} search${searching === 1 ? '' : 'es'} running in the background`);
   const indexing = (S.sources || []).filter((s) => s.fts_building).length;

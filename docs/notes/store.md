@@ -305,6 +305,76 @@ see [docs/notes/README.md](README.md) for the whole set.
   opening any other modal supersedes it). Switching builder mode no longer
   auto-runs a search — with a real job that would abandon a sweep in
   progress just because you glanced at the other tab.
+- **The watchlist scan runs on the reader pool, one locked write per
+  (indicator, source), as a background job** (`scan_source`/`scan_all`
+  synchronous for profile apply and tests, `start_watchlist_scan_job` /
+  `get_watchlist_scan_job` / `cancel_watchlist_scan_job` for the UI,
+  all over `_iter_watchlist_scan` — one implementation, two callers,
+  the search-all shape). It used to run one
+  `instr(lower(blob), lower(?))` full scan PER INDICATOR PER TABLE
+  *under `self.lock`*, inside one POST the Add button awaited: every
+  locked read — the tab strip, the ribbon counts, tagging, the
+  watchlist list itself (N+1 locked queries) — stalled for the whole
+  scan while paging kept working — the lock-up where scrolling still
+  answered. Now each unit's match is a rid
+  SELECT on a `_reader()` connection in the two WHERE shapes
+  `_search_all_count_sql` uses — the trigram index's bare `doc LIKE ?`
+  when the source has one and `_fts_like_pattern` accepts the value,
+  the escaped blob LIKE otherwise (both ASCII case folds, like the
+  `lower()` they replaced, so the hits are the same rows) — **without
+  the LIMIT**: a scan writes every hit and auto-tags them, and a capped
+  scan would tag part of the matches and say nothing (invariant #7's
+  silent-partial-triage failure). `_ensure_fts_building` fires for an
+  unindexed table so the next scan gets the index. The write is one
+  `with self.lock, self.db:` per unit (invariant #4) that **re-reads
+  the indicator under the lock** before writing: the match's copy is
+  stale by then, `delete_indicator` can have landed in between, and
+  `watchlist.id` is not AUTOINCREMENT, so a deleted-then-re-added id
+  would have inherited the old value's hits — and re-reads the source
+  the same way, since `drop_source` deletes a table's hits and its id
+  is the next import's. The auto-tag goes through `_apply_tag_change`
+  in that same transaction, so hits and tags land together. A unit
+  absorbs exactly one error from its match, "no such table": the
+  source's own table means it was dropped mid-scan (the unit is
+  skipped, there is nothing to record it against); its trigram table
+  means an index rebuild dropped it between listing and now, and the
+  unit retries on the LIKE path. Anything else surfaces as the job's
+  error — a unit quietly missing from the totals, with the table's old
+  hits left in place, would say "done" over a scan that was not.
+  `list_indicators` is one LEFT JOIN … GROUP BY on a reader.
+  The job is a `_JobRegistry` slot (one live scan per case; a poll on
+  a superseded id → None → 404 → the client stops). **A start that
+  displaces a running scan folds its remaining scope into the new
+  job** (`_union_scope`, None winning on either axis): the old scan
+  stops at its next unit as before, but a scoped scan is never left
+  half done — an Add's indicator scanned against three tables of
+  twelve, its count and auto-tags partial with nothing to say so,
+  every time another Add, an import landing or Search-all's "Add to
+  watchlist" started a scan behind it. Re-doing the units it finished
+  is safe (a unit replaces its slice); a scan that already finished
+  widens nothing. The registry's discard flag is the cooperative stop,
+  checked between units, and a unit's write re-checks `closing` under
+  the lock, so `Store.close()` — which sets it, flags the live job and
+  joins the thread before `self.db.close()`, as for view jobs — can
+  never be followed by a write on the closed connection even if the
+  join outwaits a slow unit. The record carries `scanned/total`,
+  `matched` per indicator, `by_source`, `auto_tagged` (the tables an
+  auto-tag was written to — the client invalidates its row caches
+  when the open table, or a member of the open merge, is among them)
+  and the scope it ended up with (`source_ids`/`watchlist_ids`, the
+  union) so the client knows which entries' counts it settles.
+  `_jobs_running` counts a running scan. Merges are skipped by design
+  (their rows are member rows, scanned there — invariant #9's list).
+  `indicator_hits` answers `{sources: [{source_id, source_name, count,
+  shown}], hits}`: the count per table is a GROUP BY, never derived
+  from the rows returned, and the cap (`WATCHLIST_HITS_PER_SOURCE`,
+  200) applies per table in rid order — the flat `LIMIT 500` with no
+  ORDER BY it replaced dropped a hot indicator's later tables outright.
+  `drop_source` deletes the table's `watchlist_hits` too: the id is
+  reused by the next import and stale hits would sit under its name.
+  `tests/test_watchlist_scan.py` pins the lock discipline structurally
+  (every match statement on a reader checked out with the lock unheld,
+  none on the writer), `tests/test_watchlist_grouped_hits.py` the shape.
 - **Long view work is cancellable via a client-generated `op_token`**
   (`Store.cancel_op` / `_interruptible`, `POST /api/cancel_op`;
   `build_view`, `build_timeline`, `group_summary`). cancel_op marks the

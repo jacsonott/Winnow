@@ -440,7 +440,15 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
    regardless). The two **whole-case xlsx exports** (tagged rows from
    all tables, all tables) write one sheet per real source and none for
    a merge: every merge row is a member row and lands on that member's
-   sheet — only a merge-level derived column doesn't travel. **Saving a
+   sheet — only a merge-level derived column doesn't travel. The
+   **watchlist scan** skips merges the same way (`_iter_watchlist_scan`;
+   `scan_source` of a negative id matches nothing): its hits are keyed
+   `(source_id, rid)` on the real table, so a merge's rows are scanned
+   and tagged through their members and its hits pane lists real
+   tables only — and the client's cache invalidation after a scan
+   matches the open merge through its `member_source_ids`, since the
+   job names the member.
+ **Saving a
    view as a table** (`save_view_as_source`) works on a merge — the copy
    resolves each row through its own member and `subset_rids` records
    the member per row — and the result is a real single source, not a

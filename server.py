@@ -119,6 +119,7 @@ def _jobs_running() -> bool:
         # now would file a half table as a whole one.
         return (any(j["status"] in ("running", "queued") for j in STORE.list_ingest_jobs())
                 or STORE.running_view_jobs() > 0
+                or STORE.running_watchlist_scan_jobs() > 0
                 or STORE.copies_in_flight() > 0)
     except Exception:  # noqa: BLE001 — a store mid-close must read as "not busy"
         return False
@@ -3363,7 +3364,7 @@ def api_watchlist_import(body: WatchlistImportBody):
     'value,kind' per line overrides the body default. Deduped against
     what's already in the list."""
     have = {i["value"] for i in store().list_indicators()}
-    added = 0
+    added_ids: list[int] = []
     for line in (body.text or "").splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
@@ -3372,10 +3373,11 @@ def api_watchlist_import(body: WatchlistImportBody):
         value = value.strip()
         if not value or value in have:
             continue
-        store().add_indicator(value, (kind.strip() or body.kind), None, body.auto_tag_id)
+        added_ids.append(store().add_indicator(value, (kind.strip() or body.kind), None, body.auto_tag_id)["id"])
         have.add(value)
-        added += 1
-    return {"added": added, "indicators": store().list_indicators()}
+    # `added_ids` is what the client scans for — the new entries only,
+    # not the whole list again.
+    return {"added": len(added_ids), "added_ids": added_ids, "indicators": store().list_indicators()}
 
 
 @app.delete("/api/watchlist/{wid}")
@@ -3385,8 +3387,45 @@ def api_watchlist_delete(wid: int):
 
 
 @app.post("/api/watchlist/scan")
-def api_watchlist_scan(source_id: int | None = None):
-    return store().scan_source(source_id) if source_id is not None else store().scan_all()
+def api_watchlist_scan(source_id: int | None = None, watchlist_id: int | None = None):
+    """Synchronous scan — one source or every one, every indicator or
+    one. Kept for profile apply (which scans inline while it seeds a
+    watchlist) and scripts; the UI runs the job routes below."""
+    wids = None if watchlist_id is None else [watchlist_id]
+    return store().scan_source(source_id, wids) if source_id is not None else store().scan_all(wids)
+
+
+class WatchlistScanStart(BaseModel):
+    source_ids: list[int] | None = None     # None = every table
+    watchlist_ids: list[int] | None = None  # None = every indicator
+
+
+@app.post("/api/watchlist/scan/start")
+def api_watchlist_scan_start(body: WatchlistScanStart | None = None):
+    """The scan the UI runs: on a Store thread, answered at once with
+    the job's snapshot (Store.start_watchlist_scan_job) — progress and
+    per-indicator/per-table totals land in the record as each table
+    finishes. One live scan per case; starting another stops the
+    running one. Poll /api/watchlist/scan/job."""
+    body = body or WatchlistScanStart()
+    return store().start_watchlist_scan_job(body.source_ids, body.watchlist_ids)
+
+
+@app.get("/api/watchlist/scan/job")
+def api_watchlist_scan_job(job_id: int):
+    """404 when the job is gone — superseded by a newer scan, or from a
+    case since closed. The poller stops on it."""
+    job = store().get_watchlist_scan_job(job_id)
+    if job is None:
+        raise HTTPException(404, "No such scan job")
+    return job
+
+
+@app.post("/api/watchlist/scan/cancel")
+def api_watchlist_scan_cancel(job_id: int):
+    """Stop a running scan at its next (indicator, source) unit. A miss
+    is `cancelled: false`, not an error."""
+    return {"cancelled": store().cancel_watchlist_scan_job(job_id)}
 
 
 @app.get("/api/watchlist/hits")
@@ -3427,11 +3466,15 @@ def api_watchlist_import_case(body: WatchlistImportCaseBody):
     rec = WS.cases.get(body.case_id)
     if rec is None or not os.path.isfile(rec["path"]):
         raise HTTPException(400, "No such case on this machine")
+    before = {i["id"] for i in store().list_indicators()}
     try:
         res = store().import_watchlist_from_case(rec["path"])
     except ValueError as e:
         raise HTTPException(400, str(e))
-    return {**res, "indicators": store().list_indicators()}
+    indicators = store().list_indicators()
+    # The new entries' ids, for the client to scan for just those.
+    return {**res, "added_ids": [i["id"] for i in indicators if i["id"] not in before],
+            "indicators": indicators}
 
 
 @app.get("/api/watchlist/badge")

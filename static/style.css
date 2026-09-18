@@ -2318,6 +2318,7 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 .wl-count { flex: 0 0 auto; min-width: 2.2em; text-align: center; color: var(--dim);
   font-family: var(--mono); font-size: 11px; padding: 1px 5px; border-radius: 8px; }
 .wl-count.hot { color: var(--bg); background: var(--accent); font-weight: 600; }
+.wl-count.scanning { color: var(--dim); letter-spacing: .1em; }
 .wl-del { flex: 0 0 auto; background: none; border: none; color: var(--line-2);
   cursor: pointer; font-size: 12px; visibility: hidden; }
 .wl-row:hover .wl-del { visibility: visible; }
@@ -2327,8 +2328,20 @@ html.remote .row.selected:hover { background: var(--row-selected); }
   font-size: 10px; padding: 10px 14px 6px; }
 .wl-hit { padding: 5px 14px; cursor: pointer; border-bottom: 1px solid var(--line); }
 .wl-hit:hover { background: var(--panel-2); }
+/* One group per table the indicator hit: a header styled like a grouped
+   view's (.group-header-row / .group-header-count) that sticks to the
+   top of the pane while its rows scroll, then the hit rows. */
+.wl-hit-group-head { display: flex; align-items: center; gap: 8px; padding: 6px 14px; cursor: pointer;
+  background: var(--panel-3); border-bottom: 1px solid var(--line-2); box-shadow: inset 2px 0 0 var(--line-2);
+  position: sticky; top: 0; z-index: 1; font-family: var(--mono); font-size: 12px; min-width: 0; }
+.wl-hit-group-head:hover { background: var(--panel-2); }
+.wl-hit-group-arrow { color: var(--dim); flex: 0 0 auto; }
+.wl-hit-group-label { color: var(--text); font-weight: 600; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.wl-hit-group-count { color: var(--dim); font-size: 11px; margin-left: 8px; flex: 0 0 auto; }
+.wl-hit-more { cursor: pointer; }
+.wl-hit-more:hover { color: var(--text); }
 .wl-hit-top { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
-.wl-hit-src { color: var(--text); flex: 0 0 auto; }
 .wl-hit-rid { color: var(--dim); flex: 0 0 auto; }
 /* Where it matched: the column and that cell, one line, cut with an
    ellipsis; the whole row underneath in the dim colour. Both carry the
