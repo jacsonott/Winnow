@@ -6,7 +6,8 @@ Three seams, all of them between features that were green apart:
   the shell `_create_source_shell` leaves standing (`columns='[]'`) for
   the length of a save-view-as-table copy or an import;
 * a derive cascade asking `start_ingest_job` for a backfill from inside a
-  worker that `close()` is already draining;
+  worker that `close()` is already draining, and the three create paths
+  that ask for one with their definition rows already committed;
 * the idle-shutdown predicate, which grew three more kinds of background
   work and went on telling the analyst that all four were an import.
 """
@@ -20,6 +21,7 @@ import time
 
 import pytest
 
+from winnow import log as wlog
 from winnow.store import DEFAULT_TAGS, OpCancelled, Store
 
 ROWS = [["Cmd"], ["rclone copy \\\\srv\\share"], ["notepad.exe"]]
@@ -126,14 +128,67 @@ def test_an_ingest_job_asked_for_while_the_case_closes_is_refused(case_path, wri
         s.close()
 
 
-def test_a_derive_cascade_mid_close_starts_no_backfill_and_leaves_the_child_ready(
+def test_the_derive_create_paths_leave_no_definition_behind_when_the_case_closes(case_path, write_csv):
+    """All three commit their definition row and THEN ask for the backfill
+    job, so a refusal has to take the definition with it. A column left
+    'building' with no job in existence never becomes anything else: the
+    header reads "(building…)" after every reopen, save_view_as_source
+    refuses the whole table while it stands, and nothing can chain off it.
+    Deterministic — the flag is set the way close() sets it."""
+    s = Store(case_path, default_tags=DEFAULT_TAGS)
+    sid = None
+    try:
+        sid = s.ingest_csv(write_csv(CHAIN_ROWS, "c.csv"), name="c", build_fts=False)["id"]
+        made = s.add_derived_column(sid, "Addr", "Payload", "json_field", {"path": "$.addr"})
+        s.wait_for_ingest_job(made["job_id"], timeout=30)
+        before = s.get_derived_column(made["definition"]["id"])
+        assert before["status"] == "ready"
+
+        with s._ingest_jobs_lock:
+            s._closing = True
+
+        with pytest.raises(OpCancelled):
+            s.add_derived_column(sid, "User", "Payload", "json_field", {"path": "$.user"})
+        with pytest.raises(OpCancelled):
+            s.add_derived_columns(sid, [
+                {"name": "U1", "input_column": "Payload", "op_id": "json_field",
+                 "params": {"path": "$.user"}},
+                {"name": "U2", "input_column": "Payload", "op_id": "json_field",
+                 "params": {"path": "$.addr"}},
+            ])
+        with pytest.raises(OpCancelled):
+            s.rederive_column(before["id"], {"path": "$.user"})
+
+        assert [d["name"] for d in s.list_derived_columns(sid)] == ["Addr"], \
+            "a create whose backfill never started leaves no column"
+        assert s.get_derived_column(before["id"]) == before, \
+            "a re-derive that never ran changes nothing about the definition"
+        assert [j["job_id"] for j in s.list_ingest_jobs()] == [made["job_id"]]
+    finally:
+        s._closing = False
+        s.close()
+    # And the case says the same thing when it is opened again — which is
+    # where a stuck 'building' would have shown up.
+    s2 = Store(case_path, default_tags=DEFAULT_TAGS)
+    try:
+        assert [(c["name"], c["derived_status"]) for c in s2.get_source(sid)["columns"]
+                if c.get("derived")] == [("Addr", "ready")]
+    finally:
+        s2.close()
+
+
+def test_a_derive_cascade_mid_close_starts_no_backfill_and_marks_the_child_partial(
         case_path, write_csv, monkeypatch):
     """A re-derive cascades to its children by starting another job — from
     a worker close() is draining, so the child job would land after the
     snapshot and back-fill into a closing connection. The cascade treats
-    the refusal like any other failure: the child stays re-derivable
-    rather than stuck 'building', and the parent job keeps its 'done'."""
+    the refusal like any other failure, which means recording it: the
+    child is marked 'partial' (its values were computed from the parent's
+    data as it stood BEFORE the re-derive, and 'ready' would call that
+    finished) with a line in the log naming it, rather than left stuck
+    'building'. The parent job keeps its 'done'."""
     s = Store(case_path, default_tags=DEFAULT_TAGS)
+    mark = wlog.seq()
     closed = False
     try:
         sid = s.ingest_csv(write_csv(CHAIN_ROWS, "c.csv"), name="c", build_fts=False)["id"]
@@ -174,9 +229,17 @@ def test_a_derive_cascade_mid_close_starts_no_backfill_and_leaves_the_child_read
     con = sqlite3.connect(case_path)
     try:
         assert dict(con.execute("SELECT name, status FROM derived_columns")) == {
-            "Addr": "ready", "Net": "ready"}, "a child left 'building' blocks the chain below it"
+            "Addr": "ready", "Net": "partial"}, \
+            "'ready' calls pre-re-derive values finished; 'building' blocks the chain below it"
     finally:
         con.close()
+    # Net's own create and its first backfill log too; the one this is
+    # about is the warning, and it has to name the column and say what to
+    # do about it — the log is where a reopened case explains itself.
+    said = [e for e in wlog.entries()
+            if e["seq"] > mark and e["level"] == "warn" and "Net" in e["message"]]
+    assert len(said) == 1, [e["message"] for e in wlog.entries() if e["seq"] > mark]
+    assert "re-derive" in said[0]["message"], said[0]
 
 
 # ------------------------------------------ what the 409 says is holding it up

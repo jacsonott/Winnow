@@ -263,8 +263,15 @@ see [docs/notes/README.md](README.md) for the whole set.
   join it. The caller that makes this real is
   `_cascade_dependent_derives`, which starts a child backfill from
   inside a derive worker close() is already draining; it treats the
-  refusal like any other failure, leaving the child `ready` (stale but
-  re-derivable) rather than stuck `building`. One sqlite job takes N tables
+  refusal like any other failure — the child is marked `partial` (its
+  values predate the parent's change, and the header says "incomplete —
+  re-derive to finish") and the reason is written to the log, rather
+  than being left stuck `building`. The three paths that commit a
+  definition *before* asking for the job — `add_derived_column`,
+  `add_derived_columns`, `rederive_column` — roll that definition back
+  instead and let the refusal out: a create drops the column (what its
+  `drop_on_cancel` already promises), a re-derive restores the
+  definition it had just overwritten. One sqlite job takes N tables
   from one spooled upload (`options["tables"]`) rather than re-uploading
   the file per table. Upload spools are deleted when the job ends —
   the old sync upload endpoints (kept for compat, same `finally` added)

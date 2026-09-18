@@ -85,6 +85,18 @@ see [docs/notes/README.md](README.md) for the whole set.
     indistinguishable from a finished one in the grid); cancelling a
     *re-derive* keeps it and marks it `partial`, since that wasn't a
     request to delete the analyst's column.
+  - **A backfill that is refused lands the same way a cancelled one
+    does, one step earlier.** `start_ingest_job` raises `OpCancelled`
+    while the case is closing, and the definition rows are already
+    committed by then: a create drops them
+    (`_rollback_derive_definitions`), a re-derive restores the
+    definition it had just overwritten (`_restore_derive_definition`),
+    and a cascade marks the stale child `partial` and says so in the
+    log. The state being avoided in all three is the same one — a
+    column left `'building'` with no job in existence, which reads
+    `(building…)` in the header after every reopen, makes
+    `save_view_as_source` refuse the whole table, and blocks anything
+    chaining off it, with no way back except deleting the column.
   - **Canonical output is `YYYY-MM-DD HH:MM:SS[.ffffff]`**, sub-second only
     when the source has that resolution. That exact shape is why there are
     **no new regexes to hand-sync**: `_TS_ISO_RE`/`TS_NORMALIZE`/`DAY_BUCKET`

@@ -371,8 +371,14 @@ see [docs/notes/README.md](README.md) for the whole set.
   and a scan cannot read it either: `_blob_expr([])` is empty, so the
   unit would compile `WHERE () LIKE ?`, and that syntax error is not the
   "no such table" a unit absorbs — it ended the whole job in error, with
-  every table after it unscanned. The scan that runs when the fill
-  finishes covers those rows.
+  every table after it unscanned. What covers those rows afterwards
+  depends on the fill: an import's tables are scanned when the job
+  reports done (jobs.js starts it), while a **save-view-as-table copy
+  has no post-copy scan**, so a scan that overlapped one leaves that
+  table without hits of its own until the next scan. Case-wide nothing
+  is missed — a subset's rows are copies of the parent's, scanned
+  there — and a scan-on-copy would be a new behaviour, not this fix: a
+  subset table has never been scanned on creation.
   `indicator_hits` answers `{sources: [{source_id, source_name, count,
   shown}], hits}`: the count per table is a GROUP BY, never derived
   from the rows returned, and the cap (`WATCHLIST_HITS_PER_SOURCE`,
