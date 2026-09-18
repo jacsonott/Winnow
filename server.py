@@ -113,9 +113,13 @@ def _jobs_running() -> bool:
     try:
         # A view build running in the background (a search the analyst
         # left to finish) holds the server open too: its result is what
-        # they will come back for.
+        # they will come back for. A view-as-table copy counts as well: the
+        # source it is filling has a growing row_count and columns='[]'
+        # until it finishes, so a save-as or copy_sources snapshot taken
+        # now would file a half table as a whole one.
         return (any(j["status"] in ("running", "queued") for j in STORE.list_ingest_jobs())
-                or STORE.running_view_jobs() > 0)
+                or STORE.running_view_jobs() > 0
+                or STORE.copies_in_flight() > 0)
     except Exception:  # noqa: BLE001 — a store mid-close must read as "not busy"
         return False
 
@@ -269,6 +273,18 @@ def _case_plugin_overrides() -> dict[str, bool]:
         return {}
 
 
+# Bundled examples that became part of the app, each with the one line the
+# analyst sees in its Settings → Plugins row. The updater removes the folder
+# (examples/ is not in updater.PROTECTED), but a zip install that has never
+# run an update carries no manifest and keeps every folder it shipped with —
+# so a copy can outlive the feature it demonstrated, and loading it would
+# put a second Histogram button and route beside the built-in one.
+RETIRED_BUNDLED_EXAMPLES = {
+    "table_histogram": "Retired — the histogram is built into Winnow (the Histogram button in the toolbar); "
+                       "delete examples/plugins/table_histogram",
+}
+
+
 def _reload_plugins() -> None:
     """Rescan PLUGIN_DIRS under the effective enablement policy: the open
     case's override wins where set, else the machine default (installed
@@ -280,12 +296,25 @@ def _reload_plugins() -> None:
     overrides = _case_plugin_overrides()
 
     def enabled_for(fs_name: str, directory: str) -> bool:
+        # A retired example is never loaded from examples/, whatever the
+        # prefs or the case file say. This is the one place both layers
+        # pass through — a case-level override is consulted right below,
+        # so a tombstone in PluginPrefs would be one a case could undo.
+        # An analyst's own copy in plugins/ is theirs and still loads.
+        if fs_name in RETIRED_BUNDLED_EXAMPLES and Path(directory) == BUNDLED_PLUGIN_DIR:
+            return False
         if fs_name in overrides:
             return overrides[fs_name]
         default_on = Path(directory) != BUNDLED_PLUGIN_DIR
         return WS.plugin_prefs.machine_enabled(fs_name, default_on)
 
     PLUGINS.load(PLUGIN_DIRS, enabled_for=enabled_for, bundled_dirs=[BUNDLED_PLUGIN_DIR])
+    # The tombstoned folder is still listed (load has no discovery filter,
+    # and the folder is the thing to delete), so say why it is off where the
+    # panel will show it; api_plugins_toggle refuses the name outright.
+    for p in PLUGINS.plugins:
+        if p["bundled"] and p["fs_name"] in RETIRED_BUNDLED_EXAMPLES:
+            p["error"] = RETIRED_BUNDLED_EXAMPLES[p["fs_name"]]
 
 
 _reload_plugins()
@@ -701,9 +730,12 @@ def is_winnow_case_file(path: str) -> bool:
 #
 # Deliberately not here: `open_tabs` and `tag_defs`, which a fresh case is
 # born with (1 and 3 rows), `sources`, which every quick-look has by
-# definition, and `layouts`/`case_settings`, which are incidental UI state
-# rather than findings. Everything else in the case file got there because
-# an analyst — or a plugin acting for them — put it there.
+# definition, `subset_rids`, which only ever accompanies a `sources` row (a
+# subset table with nothing tagged or noted on it is a derived copy of rows
+# the case already had, not work — see docs/notes/server.md), and
+# `layouts`/`case_settings`, which are incidental UI state rather than
+# findings. Everything else in the case file got there because an analyst
+# — or a plugin acting for them — put it there.
 _WORK_TABLES = (
     "row_tags", "row_notes", "sessions",        # the original three
     "case_notes", "case_variables",
@@ -2422,6 +2454,10 @@ def api_plugins_toggle(body: PluginToggle):
     rec = next((p for p in PLUGINS.describe() if p["fs_name"] == body.fs_name), None)
     if rec is None:
         raise HTTPException(404, f"No installed plugin named {body.fs_name}")
+    if rec.get("bundled") and body.fs_name in RETIRED_BUNDLED_EXAMPLES:
+        # Nothing to persist: _reload_plugins would ignore the pref or the
+        # override, and the dropdown would then show a state that is not.
+        raise HTTPException(400, RETIRED_BUNDLED_EXAMPLES[body.fs_name])
     scope = body.scope
     if scope is None:
         if body.enabled is None:
@@ -3003,6 +3039,33 @@ def api_group_summary(view_id: str, column: str, order: str = "count", direction
                                                   op_token=op_token, bucket_datetime=bucket_datetime))
     except KeyError as e:
         raise HTTPException(409, str(e))
+
+
+@app.get("/api/histogram")
+def api_histogram(view_id: str, column: str, max_buckets: int = 160, op_token: str | None = None):
+    """Time buckets of a datetime column over the CURRENT view — what the
+    histogram strip between the toolbar and the grid draws
+    (static/js/histogram.js). A side-effect-free view-summary read like
+    group_summary, so a GET; max_buckets is clamped to what a canvas can
+    usefully show.
+
+    The errors split the way the strip keys on them. An expired view is
+    the 409 every view read returns — a rebuild is under way and its own
+    view change refetches. A column the table does not have (a derived
+    column just removed, say) or one that is not a datetime is a 400 the
+    strip shows as text. Store.time_histogram raises KeyError for both an
+    expired view and an unknown column, so the message decides (the same
+    split api_case_copy_sources makes); folding the second into the 409 would
+    leave the strip waiting for a view change that fixes nothing."""
+    try:
+        return JSONResponse(store().time_histogram(
+            view_id, column, max_buckets=max(20, min(max_buckets, 400)), op_token=op_token))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except KeyError as e:
+        if "expired" in str(e):
+            raise HTTPException(409, str(e))
+        raise HTTPException(400, f"No column named {column!r} on this table")
 
 
 class GroupExpand(BaseModel):
@@ -4185,6 +4248,40 @@ def api_sql_to_table(body: SqlToTable):
     return res
 
 
+class SaveViewAsTable(BaseModel):
+    view_id: str
+    name: str
+    keys: list[list[int]] | None = None   # explicit [[source_id, rid], ...] picks; None = the whole view
+    exclude: list[list[int]] = []         # rows to leave out — a select-all with a few unchecked
+    spec: dict | None = None              # the filters/sort/search that produced the view; provenance only
+    # Off by default: the Timeline and the whole-case tagged export list
+    # every source's tagged rows, a subset's included, so a seeded copy
+    # would show each finding twice. Scripts that want a tagged copy send
+    # true; the UI never does.
+    copy_tags: bool = False
+    force: bool = False
+    op_token: str | None = None           # client-generated cancel handle — see Store.cancel_op
+
+
+@app.post("/api/view/save_as_table")
+def api_view_save_as_table(body: SaveViewAsTable):
+    """Copy a view — or a pick of its rows — into a new table of the case
+    (Store.save_view_as_source). Same soft cap as /api/sql/to_table:
+    over it the response asks for confirmation ({needs_confirm, rows});
+    resend with force=true. 400 while a derived column of the parent is
+    still building (its values would copy as blanks); 409 on an expired
+    view, the contract every view read has; a cancel via op_token — or
+    the case closing under the copy — is the 499 OpCancelled maps to."""
+    try:
+        return store().save_view_as_source(
+            body.view_id, body.name, keys=body.keys, exclude=body.exclude, spec=body.spec,
+            copy_tags=body.copy_tags, force=body.force, op_token=body.op_token)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except KeyError as e:
+        raise HTTPException(409, str(e))
+
+
 @app.get("/api/export")
 def api_export(view_id: str, tagged_only: bool = False, filename: str = "timeline-export.csv"):
     try:
@@ -4512,7 +4609,10 @@ def main() -> None:
         PLUGIN_DIRS = _plugin_dirs(args.plugins_dir)
         _reload_plugins()
     for p in PLUGINS.describe():
-        if p["error"]:
+        if p["bundled"] and p["fs_name"] in RETIRED_BUNDLED_EXAMPLES:
+            # Stamped with its reason by _reload_plugins; not a failure.
+            print(f"Plugin retired: {p['name']} ({p['path']}): {p['error']}")
+        elif p["error"]:
             record_log("error", f"Plugin FAILED: {p['name']} ({p['path']}): {p['error']}")
         elif not p["enabled"]:
             print(f"Plugin disabled: {p['name']} (toggle in Settings → Plugins)")

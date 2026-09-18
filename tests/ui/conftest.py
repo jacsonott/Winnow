@@ -142,6 +142,34 @@ def server_post(server):
     return _post
 
 
+# Every shared context is a "first run on this machine" — pre-answer the
+# one-time remote-mode prompt so it can't overlay the app mid-test, and
+# turn the launch animation off. The splash covers the whole viewport
+# for several seconds, which every click in every test would otherwise
+# wait out. test_first_run_prompt.py and test_splash.py build their own
+# contexts without this.
+# `pagesMenu: false` for the same reason as the sidebar below: the Pages
+# dropdown is the default now, and most tests predate it and click the
+# individual #tabSql/#tabTimeline nodes it hides. The shared context
+# models an analyst who expanded the strip; the default itself is
+# covered by tests/ui/test_pages_dropdown.py, which turns it back on.
+# A test that builds its own context to seed something more takes the
+# `first_run_init` fixture and appends to this, so the seed stays one.
+FIRST_RUN_INIT = ("localStorage.setItem('winnow.remotePrompt', 'seen');"
+                  "localStorage.setItem('winnow.appearance',"
+                  " JSON.stringify({ splash: false, pagesMenu: false }));"
+                  # The sidebar defaults CLOSED now; most tests predate
+                  # that and address rows in it, so the shared context
+                  # models an analyst who chose to keep it open.
+                  "localStorage.setItem('winnow.sidebar',"
+                  " JSON.stringify({ collapsed: false }))")
+
+
+@pytest.fixture
+def first_run_init():
+    return FIRST_RUN_INIT
+
+
 @pytest.fixture
 def page(browser, server):
     """A fresh browser context per test: localStorage is where the keymap,
@@ -149,25 +177,7 @@ def page(browser, server):
     rebinds a key or changes the autofit cap decide the next test's outcome."""
     ctx = browser.new_context(viewport={"width": 1500, "height": 900},
                               permissions=["clipboard-read", "clipboard-write"])
-    # Every context is a "first run on this machine" — pre-answer the
-    # one-time remote-mode prompt so it can't overlay the app mid-test, and
-    # turn the launch animation off. The splash covers the whole viewport
-    # for several seconds, which every click in every test would otherwise
-    # wait out. test_first_run_prompt.py and test_splash.py build their own
-    # contexts without this.
-    # `pagesMenu: false` for the same reason as the sidebar below: the Pages
-    # dropdown is the default now, and most tests predate it and click the
-    # individual #tabSql/#tabTimeline nodes it hides. The shared context
-    # models an analyst who expanded the strip; the default itself is
-    # covered by tests/ui/test_pages_dropdown.py, which turns it back on.
-    ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen');"
-                        "localStorage.setItem('winnow.appearance',"
-                        " JSON.stringify({ splash: false, pagesMenu: false }));"
-                        # The sidebar defaults CLOSED now; most tests predate
-                        # that and address rows in it, so the shared context
-                        # models an analyst who chose to keep it open.
-                        "localStorage.setItem('winnow.sidebar',"
-                        " JSON.stringify({ collapsed: false }))")
+    ctx.add_init_script(FIRST_RUN_INIT)
     pg = ctx.new_page()
     errors: list[str] = []
     pg.on("pageerror", lambda e: errors.append(str(e)))

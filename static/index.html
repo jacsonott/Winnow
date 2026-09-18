@@ -103,8 +103,11 @@ try {
   <div id="tagRibbon" class="tag-ribbon" aria-label="Tags"></div>
   <div class="spacer"></div>
   <div id="viewStats" class="stats"></div>
-  <!-- Plugin toolbar-panel toggles (PluginAPI.register_toolbar_panel) land here, left of the timeframe. -->
+  <!-- Plugin toolbar-panel toggles (PluginAPI.register_toolbar_panel) land here, left of the built-in
+       histogram toggle and the timeframe. The span is wiped and refilled on every plugin reload
+       (renderPluginPanelButtons), which is why #btnHistogram sits after it rather than inside it. -->
   <span id="pluginToolbarButtons" class="plugin-toolbar-buttons"></span>
+  <button class="btn ghost" id="btnHistogram" aria-pressed="false" title="When the rows in this view happened, as time buckets — drag across the bars to set the timeframe filter">Histogram</button>
   <button class="btn ghost" id="btnTimeRange" aria-pressed="false">⏱ Timeframe</button>
   <button class="btn ghost" id="btnFilters" aria-haspopup="true" aria-expanded="false" aria-pressed="false">Filters ▾</button>
   <button class="btn ghost" id="btnReset">Clear filters</button>
@@ -121,9 +124,13 @@ try {
   <div id="advancedSearchBar" class="advanced-search-bar" hidden></div>
 </section>
 
-<!-- Plugin toolbar panels (a histogram of the view, …): a strip between the
-     toolbar and the grid, hidden when no panel is toggled on. -->
-<div id="pluginPanels" class="plugin-panels" hidden></div>
+<!-- The strip between the toolbar and the grid: the built-in histogram
+     (static/js/histogram.js) first, then plugin toolbar panels. Hidden when
+     nothing in it is toggled on — plugins.js syncPluginPanels owns the
+     host's `hidden`, histogram.js syncHistogramPanel its own section's. -->
+<div id="pluginPanels" class="plugin-panels" hidden>
+  <section id="histogramPanel" class="plugin-panel histogram-panel" hidden></section>
+</div>
 <!-- A session comparison pivoted into the grid: which two sessions, what
      the marks mean, and the way out. -->
 <div id="diffBanner" class="diff-banner" role="status" hidden></div>
@@ -243,13 +250,22 @@ try {
       <div class="page-main">
       <div class="notes-head">
         <span class="notes-label">Case notes</span>
-        <button class="btn ghost" id="btnNotesEdit" aria-pressed="true">Edit</button>
-        <button class="btn ghost" id="btnNotesPreview" aria-pressed="false">Preview</button>
-        <button class="btn ghost" id="btnNotesLink" title="Insert a link to a table, SQL query or dashboard — clickable in Preview">Link ▾</button>
+        <!-- Edit / Split / Preview: which of the two panes below show. The
+             page always opens in Split; only the divider position persists
+             (winnow.notes). Edit and Preview ids are load-bearing for tests. -->
+        <button class="btn ghost" id="btnNotesEdit" aria-pressed="false" title="Editor only">Edit</button>
+        <button class="btn" id="btnNotesSplit" aria-pressed="true" title="Editor and preview side by side">Split</button>
+        <button class="btn ghost" id="btnNotesPreview" aria-pressed="false" title="Preview only">Preview</button>
+        <button class="btn ghost" id="btnNotesLink" title="Insert a link to a table, SQL query or dashboard — clickable in the preview">Link ▾</button>
         <span id="notesPluginButtons" class="plugin-toolbar-buttons"></span>
         <div class="spacer"></div>
         <span class="note-status" id="notesSaved"></span>
       </div>
+      <!-- Editor | divider | live preview, a flex row inside .page-main so the
+           plugin side column (#notesPanelResize + #notesPluginPanels) stays
+           the outermost sibling. The divider has its OWN id: syncPluginPanels
+           hides #notesPanelResize by id and must never touch this one. -->
+      <div class="notes-split" id="notesSplit" data-mode="split">
       <textarea class="notes-editor" id="notesEditor" spellcheck="true"
         placeholder="The story of this investigation — Markdown. Saved in the case file and travels with it.
 
@@ -259,7 +275,10 @@ try {
 
 ## Leads
 - rclone.exe under \ProgramData"></textarea>
-      <div class="notes-preview" id="notesPreview" hidden></div>
+      <div class="notes-divider" id="notesDivider" role="separator" aria-orientation="vertical"
+           title="Drag to resize · double-click to reset"></div>
+      <div class="notes-preview" id="notesPreview"><div class="notes-preview-body" id="notesPreviewBody"></div></div>
+      </div>
     </div>
       <div class="page-panel-resize" id="notesPanelResize" title="Drag to resize the panel" hidden></div>
       <aside id="notesPluginPanels" class="page-panels" hidden></aside>

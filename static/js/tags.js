@@ -3,7 +3,7 @@
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { $, PAGE, api, el, post, setBusy, toast } from './core.js';
 import { clearPageCache, render, rowAt } from './grid.js';
-import { drawRail, groupCoordAt, loadRowsForPositions, positionsNeedLoading, regroupIfGroupedByTag, waitForPages } from './grouping.js';
+import { clearGroupPageCache, drawRail, groupCoordAt, loadRowsForPositions, positionsNeedLoading, regroupIfGroupedByTag, waitForPages } from './grouping.js';
 import { S, cellRangeRows, selCount, selExcludedPairs, selExcludedPositions, selFirst, selPositions } from './state.js';
 import { openTagEditor } from './timeframe.js';
 import { renderTimelineTagFilter } from './timeline.js';
@@ -105,6 +105,22 @@ export function renderTagRibbon() {
    that many rows also means a lot of pages to fetch before it can start. */
 export const BULK_TAG_CONFIRM_AT = 10000;
 
+/* Two row caches share one view id and neither knows the other exists:
+   the flat `S.pages`/`S.rowsByPos` and the grouped `S.groupPages`.
+   Grouping doesn't empty the flat cache (regroupAll touches only the group
+   one, and S.view.view_id doesn't change), so while grouped the flat rows
+   sit off-screen, still holding the `tags` arrays they were fetched with —
+   and dropGrouping paints them straight back. A tag write the server did
+   on this client's behalf (a whole view, a whole group, an undo, a tag
+   deleted outright) therefore has to drop BOTH, whatever mode is showing;
+   the one that isn't on screen is exactly the one nobody would otherwise
+   remember. Each half bumps its own generation so a fetch already in
+   flight can't repopulate it. */
+export function clearRowCaches() {
+  clearPageCache();
+  clearGroupPageCache();
+}
+
 /* Tagging a selection.
 
    This used to be `positions.map(rowAt).filter(Boolean)` — which silently
@@ -183,7 +199,7 @@ export async function tagWholeViewSelection(tag, on) {
   refreshTagCounts();
   // Every cached row's `tags` array is now stale — the server changed rows
   // this client never fetched, so there's nothing to patch up in place.
-  clearPageCache();
+  clearRowCaches();
   renderTagRibbon();
   render();
   drawRail();
@@ -223,6 +239,14 @@ export async function tagRowsAtPositions(tag, positions, on) {
   for (const r of rows) {
     r.tags = on ? [...new Set([...r.tags, tag.id])] : r.tags.filter((x) => x !== tag.id);
   }
+  // Under a grouping the objects just patched are group-page rows; the
+  // flat cache holds *other* objects for the same rids, off-screen and
+  // still pre-tag, and dropGrouping would paint them as they are. Drop it
+  // now, while it costs nothing — the group cache keeps the patch, which
+  // is the instant feedback, and no flat fetch can be in flight while
+  // grouped (schedulePrefetch and loadRowsForPositions both route to the
+  // group pages), so bumping S.pageGen here strands nothing.
+  if (S.groupByCols.length) clearPageCache();
   S.tagCountsAll = res.counts || {};  // whole-table; refreshTagCounts re-reads the view-scoped half
   refreshTagCounts();
   renderTagRibbon();
@@ -271,7 +295,7 @@ export async function undoLastTagChange() {
   setUndoState(res.next);
   // Same reasoning as the bulk tag path: the server changed rows this
   // client may never have fetched, so there is nothing to patch in place.
-  clearPageCache();
+  clearRowCaches();
   renderTagRibbon();
   render();
   drawRail();
@@ -288,7 +312,7 @@ export async function applyTagToView(tag) {
   finally { setBusy(false); }
   S.tagCountsAll = res.counts || {};  // whole-table; refreshTagCounts re-reads the view-scoped half
   refreshTagCounts();
-  clearPageCache();
+  clearRowCaches();
   renderTagRibbon();
   render();
   drawRail();

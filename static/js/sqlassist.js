@@ -6,11 +6,12 @@
    query against row_tags. Dependency-free by CLAUDE.md's rule, so the
    autocomplete dropdown and the caret measurement are hand-rolled. */
 import { toast, $, el, post } from './core.js';
-import { writeClipboardText } from './grouping.js';
+import { regroupIfGroupedByTag, writeClipboardText } from './grouping.js';
 import { sqlSchemaForLLM } from './plugins.js';
 import { sourceLabel } from './sources.js';
 import { activeSqlTab } from './sql.js';
 import { S } from './state.js';
+import { clearRowCaches } from './tags.js';
 import { dropdownMenu, promptDialog } from './ui.js';
 
 const SQL_KEYWORDS = [
@@ -415,6 +416,14 @@ export async function sqlTagHotkey(tag, repaint) {
     if (on) cur.add(tag.id); else cur.delete(tag.id);
     r.tags.map[k] = [...cur];
   }
+  // The grid's row caches (flat and grouped) still hold these rids with
+  // the tags they had before; the next paint back on the grid tab would
+  // otherwise show them as they were. Under a grouping BY TAG the rows
+  // also just changed bucket, and the expanded sub-views are server-side
+  // with nothing here to patch them with — same call the grid's own tag
+  // paths make.
+  clearRowCaches();
+  regroupIfGroupedByTag();
   if (repaint) repaint();
 }
 

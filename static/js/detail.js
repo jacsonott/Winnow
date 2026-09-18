@@ -4,7 +4,7 @@
 import { $, debounce, el, post, toast } from './core.js';
 import { addExtractedColumn, openFlattenModal } from './derived.js';
 import { ellipsize, setColumnFilter, setSearchMode } from './filters.js';
-import { render, rowAt } from './grid.js';
+import { clearPageCache, render, rowAt } from './grid.js';
 import { writeClipboardText } from './grouping.js';
 import { syncSearchExpansion } from './search.js';
 import { clearAllFilters } from './sources.js';
@@ -312,7 +312,7 @@ export function maybeShowDetail(pos) {
 export function showDetail(pos) {
   const r = rowAt(pos);
   const d = $('detail');
-  if (!r) { d.hidden = true; $('detailResize').hidden = true; return; }
+  if (!r) { hideDetailPane(); return; }
   d.hidden = false;
   $('detailResize').hidden = false;
   $('detailTitle').textContent = `Line ${r.rid}`;
@@ -475,6 +475,14 @@ export const saveNote = debounce(async () => {
   await post('/api/note', { source_id: sourceId, rid, note: note.value });
   const r = rowAt(S.cursor);
   if (r && r.rid === rid) r.note = note.value;
+  // Same rule as tagRowsAtPositions: under a grouping the row just patched
+  // is a group-page object, and the flat cache still holds this rid with
+  // the old note for dropGrouping to paint — the ✎ mark would go missing
+  // on Ungroup exactly the way a tag stripe did. The mismatch arms cover
+  // the 500 ms debounce: an Ungroup or a cursor move inside that window
+  // means the object under the cursor is not the input's row, so nothing
+  // above was patched and the cached copy of this rid is the stale one.
+  if (!r || r.rid !== rid || S.groupByCols.length) clearPageCache();
   $('noteStatus').textContent = 'Saved';
   render();
 }, 500);
@@ -506,10 +514,25 @@ export function applyDetailPrefs() {
   $('btnDetailDock').title = S.detailPrefs.dock === 'right' ? 'Dock to the bottom' : 'Dock to the right';
 }
 
+/* The pane and its resize handle hide together. Hiding never touches
+   #noteInput's dataset (rid/sourceId): saveNote is a 500 ms debounce that
+   reads them when it fires, so a note typed just before the pane went
+   away on a page or table switch still posts against the row it was
+   typed for — that row is still in the case. A case open is the one
+   place that does blank the rid, in home.js before the /api/case/open
+   POST, because a save that fired after the store swap would land the
+   previous case's {source_id, rid} in the new one. Called on every page
+   switch (syncTabChrome), on leaving a table (openSource, and the empty
+   state loadSources lands on when the last tab closes) and on case open,
+   as well as by the pane's own Close button and the `d` toggle. */
+export function hideDetailPane() {
+  $('detail').hidden = true;
+  $('detailResize').hidden = true;
+}
+
 export function toggleDetailPane() {
-  const d = $('detail');
-  if (d.hidden) { if (S.cursor >= 0 && rowAt(S.cursor)) showDetail(S.cursor); }
-  else { d.hidden = true; $('detailResize').hidden = true; }
+  if ($('detail').hidden) { if (S.cursor >= 0 && rowAt(S.cursor)) showDetail(S.cursor); }
+  else hideDetailPane();
 }
 
 /* DOM wiring for this module, called once by main.js. Handlers can't
@@ -566,7 +589,7 @@ $('detailResize').addEventListener('mousedown', (e) => {
   document.addEventListener('mouseup', up);
 });
 
-$('btnCloseDetail').onclick = () => { $('detail').hidden = true; $('detailResize').hidden = true; };
+$('btnCloseDetail').onclick = () => hideDetailPane();
 
 $('btnCopyRow').onclick = () => {
   const r = rowAt(S.cursor);

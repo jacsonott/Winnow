@@ -136,7 +136,9 @@ CREATE TABLE IF NOT EXISTS sources (
     file_hash   TEXT,
     imported_at TEXT,
     has_fts     INTEGER NOT NULL DEFAULT 0,
-    nickname    TEXT                    -- analyst display name; `name` stays the imported file's identity
+    nickname    TEXT,                   -- analyst display name; `name` stays the imported file's identity
+    origin      TEXT,                   -- NULL = an imported file; 'sql' = saved from the SQL pane; 'subset' = saved from a view/selection
+    origin_meta TEXT                    -- json, per origin: {sql} / {parent_source_id, parent_name, spec, ...} — see save_view_as_source
 );
 CREATE TABLE IF NOT EXISTS tag_defs (
     id     INTEGER PRIMARY KEY,
@@ -155,6 +157,16 @@ CREATE TABLE IF NOT EXISTS row_notes (
     source_id INTEGER NOT NULL,
     rid       INTEGER NOT NULL,
     note      TEXT NOT NULL,
+    PRIMARY KEY (source_id, rid)
+) WITHOUT ROWID;
+-- Where a subset table's rows came from: one row per subset rid naming the
+-- parent source and rid it was copied from — per ROW, so a subset of a merge
+-- maps each row back to the member it belongs to. See save_view_as_source.
+CREATE TABLE IF NOT EXISTS subset_rids (
+    source_id        INTEGER NOT NULL,
+    rid              INTEGER NOT NULL,
+    parent_source_id INTEGER NOT NULL,
+    parent_rid       INTEGER NOT NULL,
     PRIMARY KEY (source_id, rid)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS layouts (
@@ -573,6 +585,11 @@ TAG_GROUP_COLUMN = "__tag__"
 # "Rank" (a real column name in e.g. some log formats) failed the *entire*
 # import with a confusing error, even though the data itself was fine.
 RESERVED_COLUMN_NAMES = {"rid", "rank", "rowid", TAG_GROUP_COLUMN}
+
+# sources.origin values for tables that were not imported from a file.
+# NULL is an import; these two are derived from what is already in the case.
+SQL_ORIGIN = "sql"          # sql_to_table — origin_meta = {sql}
+SUBSET_ORIGIN = "subset"    # save_view_as_source — origin_meta names the parent and the selection
 
 # The one column a raw-text import has (ingest_text): every physical line
 # of the file, verbatim, one row each. Not "Line" — the grid's own row-
@@ -1339,6 +1356,13 @@ class Store:
             # from before nicknames existed — patch those in place.
             if not any(r[1] == "nickname" for r in self.db.execute("PRAGMA table_info(sources)")):
                 self.db.execute("ALTER TABLE sources ADD COLUMN nickname TEXT")
+            # ...and sources.origin / origin_meta (where a derived table came
+            # from — a SQL-pane save, a saved view or selection). NULL reads
+            # as "an imported file", which every pre-existing row is.
+            have = {r[1] for r in self.db.execute("PRAGMA table_info(sources)")}
+            for col in ("origin", "origin_meta"):
+                if col not in have:
+                    self.db.execute(f"ALTER TABLE sources ADD COLUMN {col} TEXT")
             # Same for dashboards.pinned (a board promoted into the page strip).
             if not any(r[1] == "pinned" for r in self.db.execute("PRAGMA table_info(dashboards)")):
                 self.db.execute("ALTER TABLE dashboards ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
@@ -1425,6 +1449,18 @@ class Store:
         self._ingest_jobs_lock = threading.Lock()
         self._ingest_job_seq = 0
         self._ingest_sem = threading.Semaphore(self.MAX_CONCURRENT_INGESTS)
+        # Synchronous copies that build a source batch by batch on the
+        # request's own thread (save_view_as_source), keyed by the new
+        # source id: {"cancelled", "done" (an Event), "name"}, under the
+        # jobs lock. Not _ingest_jobs — a job owns a thread close() can
+        # join and a jobs-panel entry, and a copy has neither (its pool
+        # thread outlives the request). close() flags each one cancelled,
+        # then waits on `done`, so the partial source is dropped while the
+        # writer is still open. `_closing` is set in the same locked step
+        # as that snapshot, and a copy registering afterwards sees it and
+        # aborts with nothing created — no gap for a copy to slip through.
+        self._subset_copies: dict[int, dict] = {}
+        self._closing = False
 
         # Cancellable-op registry (see _interruptible/cancel_op): token →
         # the connection running that op, so a cancel can interrupt() it.
@@ -1926,14 +1962,24 @@ class Store:
 
     def close(self) -> None:
         self._drain_idle_readers(permanent=True)
-        # Stop any running ingest jobs before the connection goes away — a
-        # worker mid-batch would otherwise die on a closed database. Cancel
-        # is cooperative (checked per BATCH), so the join is bounded by one
-        # batch commit plus the partial-source drop.
+        # Stop any running ingest job, and any view-as-table copy, before
+        # the connection goes away — a worker mid-batch would otherwise die
+        # on a closed database, and a copy would strand a half-filled
+        # source nothing can open. Cancel is cooperative (checked per
+        # BATCH), so the wait is bounded by one batch commit plus the
+        # partial-source drop. A copy has no thread of its own to join (it
+        # runs on the request's pool thread, which outlives it), so it is
+        # waited on through its `done` event; `_closing` is raised in the
+        # same locked step as the snapshot so a copy registering after it
+        # aborts on its own (see save_view_as_source).
         with self._ingest_jobs_lock:
+            self._closing = True
             jobs = list(self._ingest_jobs.values())
             for j in jobs:
                 j["cancelled"] = True
+            copies = list(self._subset_copies.values())
+            for c in copies:
+                c["cancelled"] = True
         for j in jobs:
             t = j.get("thread")
             if t and t is not threading.current_thread() and t.is_alive():
@@ -1952,6 +1998,8 @@ class Store:
             t = j.get("thread")
             if t and t is not threading.current_thread() and t.is_alive():
                 t.join(15)
+        for c in copies:
+            c["done"].wait(15)
         with self.lock:
             self.db.close()
         # Release the flock (see __init__) before unlinking, so that if the
@@ -2458,12 +2506,21 @@ class Store:
         return {"delimiter": None, "columns": [TEXT_COLUMN],
                 "sample_rows": [[ln] for ln in lines[:max_rows]], "inferred_types": ["text"]}
 
-    def _commit_ingest_batch(self, insert_sql: str, batch: list[tuple], source_id: int, total: int) -> int:
+    def _commit_ingest_batch(self, insert_sql: str, batch: list[tuple], source_id: int, total: int,
+                             also: tuple[str, list[tuple]] | None = None,
+                             op_token: str | None = None) -> int:
         """Insert+commit one ingest batch in its own short transaction,
         updating sources.row_count as we go. Only holds self.lock for this
-        one batch — see ingest_csv."""
-        with self.lock, self.db:
+        one batch — see ingest_csv. `also` is a second (sql, rows)
+        executemany that lands in the SAME transaction — save_view_as_source's
+        subset_rids map, which must commit with exactly the rows it
+        describes. `op_token` makes the batch interruptible (cancel_op):
+        registered while the lock is held, as the writer discipline in
+        _interruptible requires."""
+        with self.lock, self._interruptible(op_token, self.db), self.db:
             self.db.executemany(insert_sql, batch)
+            if also and also[1]:
+                self.db.executemany(also[0], also[1])
             total += len(batch)
             self.db.execute("UPDATE sources SET row_count=? WHERE id=?", (total, source_id))
         return total
@@ -3048,6 +3105,32 @@ class Store:
         rec["first_bad_line"] = bad["first_line"]
         return rec
 
+    def _create_source_shell(self, name: str, cols: list[str], *, path: str | None = None,
+                             file_hash: str | None = None, origin: str | None = None,
+                             origin_meta: dict | None = None) -> tuple[int, str]:
+        """The sources row, its open tab and an empty src_<id> for a table
+        about to be filled — one short transaction, so the id and the table
+        exist together or not at all. Shared by ingest_rows and
+        save_view_as_source. `columns` lands as '[]' here and the caller
+        writes it once it knows the types (ingest_rows samples, a subset
+        copies its parent's); _require_columns reads that gap as "still
+        importing". Returns (source_id, table_name)."""
+        with self.lock, self.db:
+            cur = self.db.execute(
+                "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at, origin, origin_meta)"
+                " VALUES (?,?,?,?,?,?,?,?)",
+                (name, os.path.abspath(path) if path else None, "", "[]", file_hash,
+                 time.strftime("%Y-%m-%dT%H:%M:%S"), origin,
+                 json.dumps(origin_meta) if origin_meta is not None else None),
+            )
+            source_id = cur.lastrowid
+            self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
+            table = f"src_{source_id}"
+            coldefs = ", ".join(f"{q(c)} TEXT" for c in cols)
+            self.db.execute(f"CREATE TABLE {q(table)} (rid INTEGER PRIMARY KEY, {coldefs})")
+            self.db.execute("UPDATE sources SET table_name=? WHERE id=?", (table, source_id))
+        return source_id, table
+
     def ingest_rows(
         self,
         columns: list[str],
@@ -3058,6 +3141,8 @@ class Store:
         build_fts: bool = True,
         column_types: list[str] | None = None,
         progress=None,
+        origin: str | None = None,
+        origin_meta: dict | None = None,
     ) -> dict:
         """Generic ingest for rows produced in-process — the path plugin
         ingest formats feed (see plugin_api.py), and the natural seam for
@@ -3085,19 +3170,8 @@ class Store:
         ncols = len(cols)
         file_hash = self._quick_hash(path) if path and os.path.isfile(path) else None
 
-        with self.lock, self.db:
-            cur = self.db.execute(
-                "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at)"
-                " VALUES (?,?,?,?,?,?)",
-                (name, os.path.abspath(path) if path else None, "", "[]", file_hash,
-                 time.strftime("%Y-%m-%dT%H:%M:%S")),
-            )
-            source_id = cur.lastrowid
-            self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
-            table = f"src_{source_id}"
-            coldefs = ", ".join(f"{q(c)} TEXT" for c in cols)
-            self.db.execute(f"CREATE TABLE {q(table)} (rid INTEGER PRIMARY KEY, {coldefs})")
-            self.db.execute("UPDATE sources SET table_name=? WHERE id=?", (table, source_id))
+        source_id, table = self._create_source_shell(
+            name, cols, path=path, file_hash=file_hash, origin=origin, origin_meta=origin_meta)
 
         placeholders = ",".join("?" * ncols)
         insert = f"INSERT INTO {q(table)} ({','.join(q(c) for c in cols)}) VALUES ({placeholders})"
@@ -3566,6 +3640,14 @@ class Store:
             snap = self._ingest_job_snapshot(j)
         return snap
 
+    def copies_in_flight(self) -> int:
+        """How many save_view_as_source copies are mid-way right now. A
+        source mid-copy has a growing row_count and columns='[]', so the
+        routes that refuse while an import is running (copy_sources,
+        save-as) read this too — server.py's _jobs_running."""
+        with self._ingest_jobs_lock:
+            return len(self._subset_copies)
+
     def build_fts(self, source_id: int) -> None:
         """(Re)builds the trigram substring index for a source: a single
         `doc` column (every column concatenated, via a `src_<id>_doc` view
@@ -3968,6 +4050,16 @@ class Store:
     def _src_dict(row: sqlite3.Row) -> dict:
         d = dict(row)
         d["columns"] = json.loads(d["columns"])
+        # origin_meta is JSON text in the row; every consumer (the UI's
+        # tab titles, copy_sources_to's remap) wants the object. Tolerant
+        # of a row from a case whose migration somehow left it unparseable —
+        # provenance is a label, never worth failing a source listing over.
+        raw = d.get("origin_meta")
+        try:
+            d["origin_meta"] = json.loads(raw) if raw else None
+        except (TypeError, ValueError):
+            d["origin_meta"] = None
+        d.setdefault("origin", None)
         return d
 
     @staticmethod
@@ -4192,6 +4284,12 @@ class Store:
             self.db.execute("DELETE FROM sources WHERE id=?", (source_id,))
             self.db.execute(f"DROP TABLE IF EXISTS {q(self._derived_table(source_id))}")
             self.db.execute("DELETE FROM derived_columns WHERE source_id=?", (source_id,))
+            # The subset provenance map, in BOTH directions: this table's
+            # own rows, and every subset that named it as the parent. The
+            # id gets reused (below), and a map left behind would point a
+            # subset's rows at whatever file lands on it next.
+            self.db.execute("DELETE FROM subset_rids WHERE source_id=? OR parent_source_id=?",
+                            (source_id, source_id))
         # SQLite reuses this id on the next import, so anything still keyed
         # by it would silently attach to a different file.
         self._drop_undo_for_source(source_id)
@@ -8098,7 +8196,12 @@ class Store:
             return []
         out = []
         for meta in self.list_sources():
-            if meta.get("is_merge") or meta.get("error"):
+            # A subset is a copy of rows another table already contributes
+            # to the union — counting it too would count those rows twice.
+            # (build_timeline and export_tagged_xlsx do NOT skip subsets: a
+            # tag put on one is real work, which is why the copy starts
+            # untagged — see save_view_as_source.)
+            if meta.get("is_merge") or meta.get("error") or meta.get("origin") == SUBSET_ORIGIN:
                 continue
             cols = {c["name"] for c in self._base_cols(self.get_source(meta["id"]))}
             if all(c in cols for c in want):
@@ -8519,12 +8622,14 @@ class Store:
             tag_defs = [dict(r) for r in self.db.execute("SELECT * FROM tag_defs ORDER BY id")]
 
         copied = []
+        id_map: dict[int, int] = {}   # this case's source id -> its id in the target
         with t.lock, t.db:
             t.db.execute("ATTACH ? AS srccase", (self.path,))
             try:
                 tag_map = t._map_tags_by_name(tag_defs)
                 shared_cols = [c for c in ("name", "path", "table_name", "row_count",
-                                           "columns", "file_hash", "imported_at", "nickname")]
+                                           "columns", "file_hash", "imported_at", "nickname",
+                                           "origin", "origin_meta")]
                 for sid in source_ids:
                     src = src_rows[sid]
                     cur = t.db.execute(
@@ -8586,8 +8691,36 @@ class Store:
                     stats["derived"] = len(dcols)
 
                     t.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (new_id,))
+                    id_map[sid] = new_id
                     copied.append({"id": new_id, "name": src["name"],
                                    "rows": src["row_count"], **stats})
+
+                # Subset provenance travels only as far as its parent does:
+                # parent_source_id is THIS case's numbering, and a later
+                # import into the target could land on that id. Map rows
+                # whose parent came along in this same copy are re-pointed;
+                # the rest stay behind, and origin_meta drops the id while
+                # keeping the parent's name for display. The table itself
+                # copied whole above either way — the map is bookkeeping,
+                # not evidence.
+                for sid, new_id in id_map.items():
+                    for old_parent, new_parent in id_map.items():
+                        t.db.execute(
+                            "INSERT OR IGNORE INTO subset_rids(source_id, rid, parent_source_id, parent_rid) "
+                            "SELECT ?, rid, ?, parent_rid FROM srccase.subset_rids "
+                            "WHERE source_id=? AND parent_source_id=?",
+                            (new_id, new_parent, sid, old_parent))
+                    raw = src_rows[sid].get("origin_meta")
+                    if not raw:
+                        continue
+                    try:
+                        meta = json.loads(raw)
+                    except ValueError:
+                        continue
+                    if isinstance(meta, dict) and "parent_source_id" in meta:
+                        meta["parent_source_id"] = id_map.get(meta["parent_source_id"])
+                        t.db.execute("UPDATE sources SET origin_meta=? WHERE id=?",
+                                     (json.dumps(meta), new_id))
             finally:
                 with contextlib.suppress(sqlite3.Error):
                     t.db.execute("DETACH srccase")
@@ -9923,8 +10056,374 @@ class Store:
                     return {"needs_confirm": True, "rows": None}  # count unknowable cheaply
         finally:
             ro.close()
-        rec = self.ingest_rows(cols, rows, name=name)
+        # Provenance: the query that produced it, so the table reads as
+        # derived (the SQL pane's own "Saved from…" badge) rather than as a
+        # file nobody can find on disk.
+        rec = self.ingest_rows(cols, rows, name=name, origin=SQL_ORIGIN, origin_meta={"sql": sql})
         return {"source": {"id": rec["id"], "name": rec["name"], "row_count": rec["row_count"]}}
+
+    # ------------------------------------------- saving a view as a table
+
+    def save_view_as_source(self, view_id: str, name: str, *, keys: list | None = None,
+                            exclude: list | None = None, spec: dict | None = None,
+                            copy_tags: bool = False, force: bool = False,
+                            op_token: str | None = None, build_fts: bool = True) -> dict:
+        """Copy the rows a view shows — or an explicit pick of them — into a
+        new, ordinary source of this case, badged as a subset of the view's
+        table (sources.origin = 'subset'; origin_meta names the parent, the
+        spec that produced the view and the selection shape). The move it
+        serves: 2M rows filtered down to the 300 that matter, wanted as a
+        table of their own — to tag and note separately, to hand over via
+        copy_sources_to, to group or join in the SQL pane. Nothing about it
+        is temporary: it is deleted like any table and nothing auto-deletes
+        it.
+
+        Rows land in VIEW order with rid contiguous from 1 (invariant #2's
+        root_virtual carve-out needs that of every source), as plain TEXT
+        columns: the parent's base columns AND its derived columns, the
+        derived ones copied as VALUES rather than re-derived — instant, no
+        backfill to wait on. Column types come from the parent's metadata,
+        not a fresh sample: a pick whose numeric column happens to be blank
+        would otherwise re-type it as text. rid/source_id/Tags/Note are
+        never data columns here (that is the SQL pane's SELECT * leak,
+        which this route exists to avoid).
+
+        The copy streams. A pooled reader walks the view's keys BATCH at a
+        time (the same four kinds fetch_rows pages — root: v.view_N by
+        pos; root_virtual: the source by rid range; group: its own
+        v.view_N; group_virtual: the member under _virtual_group_where),
+        _subset_cells pulls each batch's cells through ITS member's
+        _from_clause (the fetch_rows shape — which is what makes a subset
+        of a MERGE resolve every row through its own member with the
+        merge's canonical columns, invariant #9), and _commit_ingest_batch
+        commits under the writer lock per batch. Never a Python list of
+        the whole result (sql_to_table's rows.extend is gigabytes on a
+        2M x 27 view) and never the lock for the whole loop (invariant #4;
+        _ingest_synchronous_off is deliberately NOT taken — a subset is
+        usually small, and the relaxed-fsync window would cover every
+        concurrent tag write). subset_rids records each new rid's
+        (parent_source_id, parent_rid) in the SAME transaction as the rows
+        it describes, so the map can never outrun or lag the table.
+
+        `keys` is an explicit [[source_id, rid], ...] pick — capped at
+        SELECTION_REMAP_MAX like a selection remap; rows the view doesn't
+        hold are skipped, the rest land in view order. `exclude` is the
+        select-all-minus-a-few shape tag_view takes. Past
+        SQL_TO_TABLE_SOFT_CAP rows the call returns {needs_confirm, rows}
+        unless `force` — sql_to_table's contract.
+
+        Any failure mid-copy — a cancel through `op_token`, the view
+        evicted under the reader (KeyError → 409, every view read's
+        contract), an error — DROPS the partial source: a half-table looks
+        exactly like a whole one in every list (the cancel-drops-partial
+        rule in docs/notes/ingest.md).
+
+        Afterwards the parent's layout is copied so the subset opens
+        looking the same (its sort included, so it opens materialised
+        rather than root_virtual — fine). The subset starts UNTAGGED:
+        `copy_tags` defaults off, and the route and the UI leave it off.
+        build_timeline and export_tagged_xlsx walk every source with a
+        tagged row — a subset included, on purpose, since a tag put on a
+        subset is real work — so seeding the parent's tags would list each
+        finding twice in the Timeline and give it a second worksheet in
+        the hand-over workbook. With `copy_tags=True` (a script that wants
+        a tagged copy) the parent rows' tags and notes are seeded onto the
+        new rows by one INSERT..SELECT over subset_rids: a documented
+        exception to invariant #7 (every tag write through
+        _apply_tag_change) — a direct row_tags write, the
+        _copy_sources_into precedent, a brand-new table nobody could have
+        tagged yet — and deliberately NOT an undo entry (undoing "create
+        table" is deleting it). Either way, tags applied to the subset
+        later do not write back to the parent; the map is stored so that
+        can come.
+
+        Refused up front (ValueError → 400) while any derived column the
+        copy would take is not 'ready': the values are copied as they
+        stand, so a backfill mid-way would land '' for every row it had
+        not reached, in a plain column nothing can re-derive — the rule
+        add_derived_column applies to its own inputs. On a merge that
+        means every member's copy of a canonical derived column.
+
+        The copy sits in _subset_copies from the shell to the metadata
+        write that makes the table openable, so close() (a case switch, a
+        shutdown) flags it cancelled and waits for it: the flag is read
+        once per batch, surfaces as OpCancelled, and the partial source is
+        dropped while the writer is still open rather than stranded — the
+        cancel-and-drain contract close() gives ingest jobs, minus their
+        thread and their panel entry. The shell and its registration
+        happen under one hold of self.lock against close()'s flag-and-
+        snapshot step, so a copy that loses that race drops its shell and
+        gives up rather than running on into a closed writer.
+
+        file_hash gets a synthetic 'subset:<sha256>': a subset has no file
+        on disk, and a NULL hash is exactly what makes import_case_session
+        skip a source, so a saved session would never give a subset its
+        tags back (SQL-saved tables have that gap today). The prefix keeps
+        it from ever reading as a _quick_hash of something on disk."""
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("Name the new table")
+        handle = self._views.get(view_id)
+        if not handle:
+            raise KeyError("View expired — rebuild it")
+        parent_id = handle["source_id"]
+        parent = self._source_lite(parent_id)
+        self._require_columns(parent)
+        cols = [c["name"] for c in parent["columns"]]
+        types = [c.get("type") if c.get("type") in ("text", "number", "datetime") else "text"
+                 for c in parent["columns"]]
+        # A derived column mid-backfill copies as blanks nothing can
+        # re-derive — refuse until it is ready. A merge exposes a derived
+        # column only when every member has it, and each member's status is
+        # its own, so every member's copy is checked (invariant #9).
+        derived = {c["name"].lower() for c in parent["columns"] if c.get("derived")}
+        if derived:
+            members = [parent] if parent_id >= 0 else [self._source_lite(m) for m in parent["member_source_ids"]]
+            for m in members:
+                for c in m["columns"]:
+                    if c.get("derived") and c["name"].lower() in derived and c.get("derived_status") != "ready":
+                        raise ValueError(f"{c['name']!r} is still building — wait for it to finish, "
+                                         "then save the view as a table")
+
+        skip: set[tuple[int, int]] = set()
+        for pair in exclude or []:
+            try:
+                skip.add((int(pair[0]), int(pair[1])))
+            except (TypeError, ValueError, IndexError):
+                continue
+        picks: list[tuple[int, int]] | None = None
+        if keys is not None:
+            picks = []
+            seen: set[tuple[int, int]] = set()
+            for k in keys:
+                try:
+                    pair = (int(k[0]), int(k[1]))
+                except (TypeError, ValueError, IndexError):
+                    continue
+                if pair in skip or pair in seen:
+                    continue
+                seen.add(pair)
+                picks.append(pair)
+            if len(picks) > self.SELECTION_REMAP_MAX:
+                raise ValueError(
+                    f"At most {self.SELECTION_REMAP_MAX:,} picked rows can be saved at once — "
+                    "filter the view down to them and save the view instead")
+            expected = len(picks)
+        else:
+            expected = max(0, int(handle["row_count"]) - len(skip))
+        if not force and expected > self.SQL_TO_TABLE_SOFT_CAP:
+            return {"needs_confirm": True, "rows": expected}
+
+        created_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+        meta = {
+            "parent_source_id": parent_id,
+            "parent_name": parent["name"],
+            "parent_row_count": parent["row_count"],
+            "spec": spec,
+            "selection": "picks" if picks is not None else "view",
+            "excluded": len(skip),
+            "rows": 0,
+            "created_at": created_at,
+        }
+        copy = {"source_id": None, "name": name, "cancelled": False, "done": threading.Event()}
+        # One hold of the (re-entrant) writer lock across the shell and its
+        # registration: close() sets _closing and snapshots the registry in
+        # a single locked step, so either this copy is in that snapshot and
+        # gets waited for, or it sees _closing here and backs out with the
+        # shell dropped — never a registered-too-late copy running its
+        # batches into a closed writer.
+        with self.lock:
+            new_id, table = self._create_source_shell(name, cols, origin=SUBSET_ORIGIN, origin_meta=meta)
+            copy["source_id"] = new_id
+            with self._ingest_jobs_lock:
+                closing = self._closing
+                if not closing:
+                    self._subset_copies[new_id] = copy
+            if closing:
+                self.drop_source(new_id)
+                raise OpCancelled("The case is closing — nothing was saved")
+        insert = (f"INSERT INTO {q(table)} ({','.join(q(c) for c in cols)}) "
+                  f"VALUES ({','.join('?' * len(cols))})")
+        map_sql = "INSERT INTO subset_rids(source_id, rid, parent_source_id, parent_rid) VALUES (?,?,?,?)"
+        total = 0
+        try:
+            try:
+                with self._reader() as ro, self._dropped_view_is_expired():
+                    for chunk in self._iter_subset_keys(ro, view_id, handle, picks, skip, op_token):
+                        if copy["cancelled"]:   # close() — read once per batch, ingest_csv's cadence
+                            raise OpCancelled("The case is closing — the copy was cancelled")
+                        cells = self._subset_cells(ro, cols, chunk, op_token)
+                        rows: list[tuple] = []
+                        mapping: list[tuple] = []
+                        for pair in chunk:
+                            vals = cells.get(pair)
+                            if vals is None:
+                                continue   # not in its source table — never invent a row for it
+                            rows.append(vals)
+                            # rid is assigned 1..N in insertion order on the one
+                            # writer (invariant #2), so the new rid is known
+                            # before the INSERT runs — the map rides the same
+                            # transaction as the rows it describes.
+                            mapping.append((new_id, total + len(rows), pair[0], pair[1]))
+                        if rows:
+                            total = self._commit_ingest_batch(insert, rows, new_id, total,
+                                                              also=(map_sql, mapping), op_token=op_token)
+
+                # The metadata write is what makes the table openable
+                # (_require_columns reads columns='[]' as "still importing"),
+                # so it stays inside the drop-on-failure frame and the
+                # registry: a close() landing between the last batch and
+                # this write still waits for it.
+                meta["rows"] = total
+                colmeta = [{"name": c, "type": t} for c, t in zip(cols, types)]
+                digest = hashlib.sha256(
+                    f"{parent.get('file_hash') or parent['name']}|{json.dumps(spec, sort_keys=True, default=str)}"
+                    f"|{created_at}|{new_id}".encode("utf-8")).hexdigest()
+                with self.lock, self.db:
+                    self.db.execute(
+                        "UPDATE sources SET columns=?, origin_meta=?, file_hash=? WHERE id=?",
+                        (json.dumps(colmeta), json.dumps(meta), "subset:" + digest, new_id))
+                    if copy_tags:
+                        self.db.execute(
+                            "INSERT OR IGNORE INTO row_tags(source_id, rid, tag_id) "
+                            "SELECT m.source_id, m.rid, rt.tag_id FROM subset_rids m "
+                            "JOIN row_tags rt ON rt.source_id = m.parent_source_id AND rt.rid = m.parent_rid "
+                            "WHERE m.source_id=?", (new_id,))
+                        self.db.execute(
+                            "INSERT OR IGNORE INTO row_notes(source_id, rid, note) "
+                            "SELECT m.source_id, m.rid, rn.note FROM subset_rids m "
+                            "JOIN row_notes rn ON rn.source_id = m.parent_source_id AND rn.rid = m.parent_rid "
+                            "WHERE m.source_id=?", (new_id,))
+            except BaseException:
+                with contextlib.suppress(Exception):
+                    self.drop_source(new_id)
+                raise
+        finally:
+            with self._ingest_jobs_lock:
+                self._subset_copies.pop(new_id, None)
+            copy["done"].set()
+        layout = self.get_layout(parent_id)
+        if layout:
+            self.save_layout(new_id, layout)
+        if build_fts and total:
+            self._ensure_fts_building(new_id)
+        return {"source": {"id": new_id, "name": name, "row_count": total}}
+
+    def _iter_subset_keys(self, ro: sqlite3.Connection, view_id: str, handle: dict,
+                          picks: list[tuple[int, int]] | None, skip: set,
+                          op_token: str | None) -> Iterator[list[tuple[int, int]]]:
+        """(source_id, rid) pairs of a view in its pos order, BATCH at a
+        time, on the caller's reader — one walk per view kind, the same
+        four fetch_rows pages. Keyset-paged (`> last`), never LIMIT/OFFSET
+        (invariant #2's reasoning applies to a full walk too). `picks`
+        narrows to those rows, view order kept and absent ones skipped;
+        `skip` drops select-all exclusions. Each statement runs inside
+        _interruptible, innermost, so a cancel surfaces as OpCancelled
+        before the caller's _dropped_view_is_expired can misread it."""
+        kind = handle.get("kind", "root")
+        sid = handle["source_id"]
+        if picks is not None:
+            by_source: dict[int, list[int]] = {}
+            for s, r in picks:
+                by_source.setdefault(s, []).append(r)
+            ordered: list[tuple[int, int, int]] = []   # (order key, source_id, rid)
+            with self._interruptible(op_token, ro):
+                if kind == "group_virtual":
+                    # One member, rows in rid order: keep the picks the
+                    # group's own predicate admits.
+                    msid = handle["members"][0]["source_id"]
+                    rids = by_source.get(msid, [])
+                    if rids:
+                        msrc = self._source_lite_on(ro, msid)
+                        where_sql, where_params = self._virtual_group_where(handle, ro)
+                        for i in range(0, len(rids), 500):
+                            chunk = rids[i:i + 500]
+                            for r in ro.execute(
+                                    f"SELECT rid FROM {self._from_clause(msrc)} WHERE {where_sql} "
+                                    f"AND rid IN ({','.join('?' * len(chunk))})", [*where_params, *chunk]):
+                                ordered.append((r["rid"], msid, r["rid"]))
+                elif kind == "root_virtual":
+                    rids = by_source.get(sid, [])
+                    table = q(self._source_lite_on(ro, sid)["table_name"])
+                    for i in range(0, len(rids), 500):
+                        chunk = rids[i:i + 500]
+                        for r in ro.execute(
+                                f"SELECT rid FROM {table} WHERE rid IN ({','.join('?' * len(chunk))})", chunk):
+                            ordered.append((r["rid"], sid, r["rid"]))   # pos = rid - 1, exact
+                else:
+                    for s, rids in by_source.items():
+                        for i in range(0, len(rids), 500):
+                            chunk = rids[i:i + 500]
+                            for r in ro.execute(
+                                    f"SELECT pos, rid FROM v.{q(view_id)} WHERE source_id=? "
+                                    f"AND rid IN ({','.join('?' * len(chunk))})", [s, *chunk]):
+                                ordered.append((r["pos"], s, r["rid"]))
+            ordered.sort()
+            for i in range(0, len(ordered), BATCH):
+                yield [(s, r) for _, s, r in ordered[i:i + BATCH]]
+            return
+
+        if kind == "root_virtual":
+            table = q(self._source_lite_on(ro, sid)["table_name"])
+            last = 0
+            while True:
+                with self._interruptible(op_token, ro):
+                    rows = ro.execute(f"SELECT rid FROM {table} WHERE rid > ? ORDER BY rid LIMIT ?",
+                                      (last, BATCH)).fetchall()
+                if not rows:
+                    return
+                last = rows[-1]["rid"]
+                yield [(sid, r["rid"]) for r in rows if (sid, r["rid"]) not in skip]
+        elif kind == "group_virtual":
+            msid = handle["members"][0]["source_id"]
+            msrc = self._source_lite_on(ro, msid)
+            where_sql, where_params = self._virtual_group_where(handle, ro)
+            last = 0
+            while True:
+                with self._interruptible(op_token, ro):
+                    rows = ro.execute(
+                        f"SELECT rid FROM {self._from_clause(msrc)} WHERE {where_sql} AND rid > ? "
+                        f"ORDER BY rid LIMIT ?", [*where_params, last, BATCH]).fetchall()
+                if not rows:
+                    return
+                last = rows[-1]["rid"]
+                yield [(msid, r["rid"]) for r in rows if (msid, r["rid"]) not in skip]
+        else:
+            last = 0
+            while True:
+                with self._interruptible(op_token, ro):
+                    rows = ro.execute(
+                        f"SELECT pos, source_id, rid FROM v.{q(view_id)} WHERE pos > ? ORDER BY pos LIMIT ?",
+                        (last, BATCH)).fetchall()
+                if not rows:
+                    return
+                last = rows[-1]["pos"]
+                yield [(r["source_id"], r["rid"]) for r in rows if (r["source_id"], r["rid"]) not in skip]
+
+    def _subset_cells(self, ro: sqlite3.Connection, cols: list[str], chunk: list[tuple[int, int]],
+                      op_token: str | None) -> dict[tuple[int, int], tuple]:
+        """{(source_id, rid): cells} for one batch of keys, each row read
+        through ITS member's _from_clause — derived sidecar joined
+        USING(rid), so base and derived columns are both addressable bare
+        — the fetch_rows shape, which is what lets a merge's canonical
+        column list run unchanged against every member. NULL → '' as
+        ingest_rows stores it."""
+        by_source: dict[int, list[int]] = {}
+        for s, r in chunk:
+            by_source.setdefault(s, []).append(r)
+        sel = ", ".join(q(c) for c in cols)
+        out: dict[tuple[int, int], tuple] = {}
+        with self._interruptible(op_token, ro):
+            for s, rids in by_source.items():
+                frm = self._from_clause(self._source_lite_on(ro, s))
+                for i in range(0, len(rids), 900):
+                    part = rids[i:i + 900]
+                    for row in ro.execute(
+                            f"SELECT rid, {sel} FROM {frm} WHERE rid IN ({','.join('?' * len(part))})", part):
+                        t = tuple(row)
+                        out[(s, t[0])] = tuple("" if v is None else v if isinstance(v, str) else str(v)
+                                               for v in t[1:])
+        return out
 
     def run_sql(self, sql: str, limit: int = 5000) -> dict:
         """Read-only ad-hoc query against the case file.

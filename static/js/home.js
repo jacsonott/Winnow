@@ -8,6 +8,7 @@ import { loadPlugins, openImportModal, queueFiles } from './importer.js';
 import { inFlightWork, startJobsPoll } from './jobs.js';
 import { resetPluginTabMounts } from './plugins.js';
 import { resetDerivedSuggestions } from './derived.js';
+import { hideDetailPane } from './detail.js';
 import { resetJobState } from './jobs.js';
 import { resetNotes } from './notes.js';
 import { resetWatchlist } from './watchlist.js';
@@ -105,10 +106,21 @@ export function describeCaseHolder(holder) {
 }
 
 export async function openCase(path, opts = {}) {
+  // A note save still inside its 500 ms debounce fires after the server
+  // has swapped stores, and /api/note writes into whichever store is
+  // current — the previous case's {source_id, rid} landing on an unrelated
+  // row of this one. saveNote drops a write with no rid, so the binding
+  // is blanked before the POST rather than after it. Only here: a page or
+  // table switch within a case leaves the binding alone, since the row it
+  // names is still in the case (see hideDetailPane in detail.js).
+  const note = $('noteInput');
+  const boundRid = note.dataset.rid;
+  note.dataset.rid = '';
   let res;
   try {
     res = await post('/api/case/open', { path, force: !!opts.force });
   } catch (e) {
+    note.dataset.rid = boundRid;   // nothing was opened: same case, same row
     if (e.status === 409 && e.detail && e.detail.error === 'case_in_use') {
       const go = await confirmDialog(describeCaseHolder(e.detail.holder), {
         okLabel: 'Open anyway', cancelLabel: 'Don\u2019t open', danger: true,
@@ -164,7 +176,16 @@ export async function openCase(path, opts = {}) {
   // machine default), and the server reloaded its registry when this case
   // opened — refetch so tabs/formats/panel reflect THIS case's plugins.
   await loadPlugins();
-  if (S.activeTab !== 'grid') showGridTab();
+  // The pane shows a row of the previous case's table; the grid it
+  // belongs to is about to be rebuilt against this one. Before showApp,
+  // so it is never on screen for a frame beside the new case.
+  hideDetailPane();
+  // repaint:false — S.view/S.sourceId are still the previous case's here
+  // (loadSources says why S.sourceId survives a switch); loadSources below
+  // opens and paints this case's table. A render() against the old view id
+  // would hit the new Store, 409 as expired, and rebuild the old filters
+  // against whichever of this case's sources shares the number.
+  if (S.activeTab !== 'grid') showGridTab({ repaint: false });
   setBrandLabel(res.name);
   showApp();
   // A quick-look (temp) case — e.g. one made by dropping files on the home

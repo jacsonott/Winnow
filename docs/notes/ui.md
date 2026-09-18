@@ -72,6 +72,41 @@ see [docs/notes/README.md](README.md) for the whole set.
   `parseTimestamp`) is what both the column values and the start/end
   bounds get compared through — a bare text/numeric comparison on the raw
   stored value sorts the US `M/D/YYYY` shape wrong.
+- **The histogram strip** (`static/js/histogram.js`, `GET /api/histogram`
+  over `Store.time_histogram`, toggled by `#btnHistogram` or `h`) was the
+  `table_histogram` example plugin until 2026-09 and is built in now;
+  three things from its life as a plugin are worth knowing before touching
+  it. **A 409 from the route means mid-rebuild, not an error**: the strip
+  fetches 150 ms after `winnow:viewchange`, and a second rebuild in that
+  window evicts the view it asked about — so on a 409 it keeps what is
+  drawn and lets that rebuild's own view change refetch. Only an
+  'expired' KeyError is a 409; an unknown column (a derived column just
+  removed) or a non-datetime one is a 400 the strip shows as text in
+  `.th-empty`, because waiting for a view change would never fix it. It
+  listens only while it is on screen: open but hidden behind a page tab,
+  a view change is left for the show edge in `syncHistogramPanel` to
+  refetch (keying on the pref alone aggregated a view rebuilt behind the
+  SQL tab twice), and the first ask after opening measures the section
+  rather than the canvas, which "Loading…" has hidden — measuring the
+  canvas fell through to a 600px fallback and an 85-bar first chart.
+  **The drag snaps to a unit chosen from the drag, not from the bar
+  width**: rounding outwards to the current bucket made any drag inside
+  one 6h bar that whole bar, so the view never narrowed enough for the
+  server to re-bucket and "zoom in" did nothing; the unit is fine enough
+  that the rounding adds ≤ ~8 % per end, never finer than a second, never
+  coarser than the bar (`snapUnit`). And **the canvas redraws on
+  `winnow:appearance`** — a canvas does not inherit CSS, so the tokens are
+  read at draw time and a skin/accent change is one redraw, or the bars
+  keep the old colour until the next view change. Two host rules: the
+  strip shares `#pluginPanels` with plugin toolbar panels, and
+  `syncPluginPanels()` (plugins.js) stays the only writer of the host's
+  `hidden` — it asks `histogramOpen()`, which is what keeps a plugin
+  toggled off from hiding an open histogram; and `#btnHistogram` sits
+  AFTER `#pluginToolbarButtons`, never inside it, because
+  `renderPluginPanelButtons` wipes that span on every plugin reload (boot
+  and every case switch). Prefs are `winnow.histogram` `{open, column}`
+  per browser; the plugin's `winnow.panels['table-histogram.histogram']`
+  is migrated to `open` once and deleted.
 - There's no separate "preset" concept anymore — a preset is just a saved
   filter (`workspace.SavedFilters`, cross-case) whose `col_names` happens to
   match (exactly, or "similar" per the same Jaccard/subset heuristic the old
@@ -100,9 +135,14 @@ see [docs/notes/README.md](README.md) for the whole set.
   `rowMenuTagList` does. The throwaway view is safe to drop immediately
   because undo records the *rows* (invariant #7's `v.undo_<n>` delta table),
   not the view they were found through. Tagging while grouped *by tag* —
-  and undoing — calls `regroupIfGroupedByTag()`: the tag just changed which
+  undoing, the SQL pane's tag hotkey and the tag editor's Delete included
+  — calls `regroupIfGroupedByTag()`: the tag just changed which
   group those rows belong to, and the expanded sub-views are server-side
-  with nothing here to patch them with.
+  with nothing here to patch them with. Either way it ends with
+  `clearRowCaches()`, not `clearGroupPageCache()` alone: the flat page
+  cache is still alive under the grouping and would otherwise paint the
+  pre-tag rows back on Ungroup (grid.md, "Grouped mode's rows are ordinary
+  rows").
 - **The sidebar** (`renderSidebar`, replacing the old `openTabJumpMenu`
   dropdown) is a *persistent* list of every table, open or closed — the
   horizontal tab strip (`.tabs`/`renderTabs`) is untouched and still the
@@ -248,6 +288,44 @@ see [docs/notes/README.md](README.md) for the whole set.
     is 0 before a case is open, which would otherwise pin the strip at 0px
     for the whole session, since only `showApp()` and the window `resize`
     handler re-run it.
+- **`syncTabChrome` is the registry of grid-only chrome.** The toolbar,
+  a plugin's toolbar panels, the session-comparison banner, the "N
+  selected" tag bar and the row detail pane all describe one table's
+  grid, and every writer of `S.activeTab` — `showGridTab`/`showSqlTab`/
+  `showTimelineTab`, `showNotesTab`, `showWatchlistTab`, `showDashboard`
+  and `showPluginTab` — ends in `syncTabChrome()`, which is what makes it
+  the one place. A new grid-only surface hides itself there, **not in
+  `showMainView`**: `showPluginTab` swaps views with `hideMainViews`/
+  `hidePluginViews` directly and never passes through `showMainView`, so a
+  hide put there works for the built-in pages and leaves the surface
+  standing beside every plugin tab. That is how the detail pane was left
+  open next to the SQL editor — `#detail` and `#detailResize` are siblings
+  of `.main-content`, not children of the grid, so the view swap never
+  touched them, and with `d` and Escape gated to the grid the pane's own
+  Close button was the only way out. Two rules for the pane's entry: it is
+  a **one-way hide** (`if (!isGrid) hideDetailPane()`; the toolbar's
+  `hidden = !isGrid` idiom would force the pane open, possibly on no row,
+  every time the grid comes back — closed-and-forgotten is what an analyst
+  expects, and `d` or a double-click reopens it), and hiding **never clears
+  `#noteInput.dataset.rid/sourceId`**: `saveNote` is a 500 ms debounce that
+  reads them when it fires, so a note typed just before a page or table
+  switch still posts against the row it was typed for. A case open is the
+  one exception, and it is home.js's to make, not the hide's: `/api/note`
+  writes into whichever store is current, so a save that fired after the
+  `/api/case/open` swap would attach the previous case's `{source_id, rid}`
+  to an unrelated row of the new one — `openCase` blanks the rid before
+  the POST (and puts it back if the open fails). `openSource` hides the
+  pane only when it is actually **leaving** a table (`leaving = S.sourceId
+  !== id`, decided before `S.sourceId` is overwritten): every refresh idiom
+  — `loadSources()` with no select after a column add, a sidebar folder
+  op or closing some *other* tab, `openSource(S.sourceId)` from the
+  derived-column modal, the plugin API's `refreshSources()` — re-enters
+  `openSource` for the table already open, and an unconditional hide there
+  took the pane away under the analyst on all of them. `loadSources`'
+  empty-state branch (last tab closed, the table on screen removed) and
+  the case-open reset in home.js hide it too. Nothing reopens it in the
+  background: `ensurePage` and `maybeShowDetail` are gated on the pane
+  already being visible.
 - **The SQL pane has named sub-tabs** (`sql_tabs`, a per-case sidecar
   table; `list/create/update/delete/reorder_sql_tabs`, `/api/sql_tabs`,
   `renderSqlTabs` and friends in `static/js/sql.js`). Stored in the **case file**, not
@@ -398,8 +476,8 @@ see [docs/notes/README.md](README.md) for the whole set.
   are before and after the broken-out filter block (`cell`), and every
   other section contributes one folded `{label, submenu}` entry. The row is re-resolved (`rowAt(ctx.pos)`) on
   every repaint rather than captured, because a keepOpen tag item
-  re-renders after tagging and the bulk tag path clears the page cache
-  underneath it. Scope follows the selection: right-clicking *inside* one
+  re-renders after tagging and the bulk tag path clears the row caches
+  (`clearRowCaches`, both the flat and the grouped one) underneath it. Scope follows the selection: right-clicking *inside* one
   acts on the whole selection (tagging 200 checked rows shouldn't collapse
   to the row under the pointer), right-clicking outside it moves the
   cursor there first. Works in grouped mode too now (see "Grouped mode's
@@ -758,10 +836,64 @@ see [docs/notes/README.md](README.md) for the whole set.
 
 - **Stack view** (stack.js) — the column-header menu's "Stack values (rarest first)…" opens a modal of the current view's distinct values by count (via group_summary, order=count direction=asc), drawn with charts.js. Click a bar to filter the grid to that value. Least-frequency-of-occurrence triage. See docs/design/analysis-suite.md.
 
-- **Case notes tab** (notes.js) — a free-form Markdown scratchpad for the investigation narrative, stored in the case file (Store.case_notes) so it travels with the .db, distinct from per-row notes. Edit/preview toggle, debounced autosave, a tiny dependency-free Markdown renderer (airgap). Page tabs now route visibility through sql.js's showMainView(id)/MAIN_VIEWS registry so adding a tab is a one-place edit. See docs/design/analysis-suite.md.
+- **Case notes tab** (notes.js) — a free-form Markdown scratchpad for the investigation narrative, stored in the case file (Store.case_notes) so it travels with the .db, distinct from per-row notes. The editor and a live preview sit side by side (`#notesSplit`, a flex row inside `.page-main`) split by a draggable divider; Edit / Split / Preview collapse one pane or the other through `data-mode` on the row, and the stylesheet does the hiding. Debounced autosave, a tiny dependency-free Markdown renderer (airgap). Page tabs now route visibility through sql.js's showMainView(id)/MAIN_VIEWS registry so adding a tab is a one-place edit. See docs/design/analysis-suite.md. Things that bite here:
+  - **Only the divider position persists** (`winnow.notes = { split }`, a ratio of the row, per browser like `winnow.sidebar`), never the mode: Notes always opens in Split, and `showNotesTab` re-applies both *synchronously before* `await ensureNotesLoaded()` — the page is already showing by then, so applying them after the fetch paints the markup's 50/50 default and then jumps. A remembered preview-only mode would also hide the editor from Playwright's `fill()` in tests/ui/test_case_notes.py after its reload.
+  - **The divider is `#notesDivider`, not a `.page-panel-resize`.** `syncPluginPanels` shows and hides `#notesPanelResize` (the plugin column's handle) by id, and the plugin column stays the outermost sibling of `.page-main`, so a notes page panel and the split coexist untouched.
+  - **One `input` listener drives autosave and the live render.** Every write path — typing, Link ▾, a plugin's `notesPage.setText`/`insert` — dispatches `input`; `ensureNotesLoaded`'s seed assigns `.value` directly (an input event there would autosave the body straight back) and calls `renderPreview()` by hand. The render is skipped and marked stale in editor-only mode or while the page is hidden; `setNotesMode`/`showNotesTab` catch up. It swaps `innerHTML` wholesale (why the link clicks are delegated) and puts the pane's own `scrollTop` back afterwards so editing the bottom of a long note doesn't jump the preview to its top.
+  - The clamp is 0.2–0.8 of the row *and* a 220px floor per pane (`clampNotesSplit`; a row too narrow for two floors splits evenly): with a plugin column open at 70% of the section the ratio alone could leave the editor a few characters wide. **It is re-applied by a `ResizeObserver` on `#notesSplit`, not only when the ratio is written** — the row narrows without the page doing anything (the plugin column toggled or dragged wider, the window resized), and the observer re-applies the *stored* ratio against the new width, so a pane squeezed to the floor gets its share back when the room returns. `.notes-editor` is flex-basis-driven (`--notes-split`), not `width: 100%`, and the 82ch measure cap sits on the inner `.notes-preview-body` so the pane itself fills its half rather than leaving dead space against the divider.
+  - **The divider's hit target overlaps the preview only** (`margin: 0 -8px 0 0`; the 1px line sits at the editor's edge). The editor's right edge is where the textarea's vertical scrollbar sits on classic-scrollbar platforms, and the symmetric `.tab-split` overlap turned a grab of the scrollbar thumb into a split drag. Headless Chromium's overlay scrollbars can't show it, so tests/ui/test_notes_split.py pins it with `elementFromPoint` and a drag started inside the editor's edge. `.notes-preview` paints `var(--panel)` itself — `#app`'s skin backdrop (the blueprint graph paper) otherwise showed through one half of what reads as a single surface.
 
 - **IOC watchlist tab** (watchlist.js) — case-level indicators (Store.watchlist / watchlist_hits, in the .db) scanned across every table via the blob substring search-all uses; matches are counted, listed, and optionally auto-tagged through the normal tag path. Auto-scans new imports (jobs.js source-done hook). Import a list / paste / scan-all. See docs/design/analysis-suite.md.
 
 - **Entity pivot tab** (entity.js) — pick any value and see everywhere it appears across every table: per-source counts, which columns it landed in, a merged time histogram (charts.js) and a chronological evidence stream. Reachable from any cell's right-click ('Pivot on X'), the watchlist, or the tab's search box. Backend entity_pivot reuses the blob search + TS_NORMALIZE (shared with a future super-timeline). See docs/design/analysis-suite.md.
 
 - **Case dashboards** (dashboard.js, dashwidgets.js) — named boards of widgets, each a data source (sql via read-only run_sql, watchlist, tags) plus a render kind (stat/kv/chips/list/bar/histogram). Widgets are built from RECIPES (dashwidgets.js `WIDGET_TEMPLATES` + `widgetFrom`): a template, a table and the column/value it needs produce the SQL, the render, a `build` (the recipe, so the editor reopens guided) and a `drill` — `{table, where:[{column,op,value}] | tree: <filter-tree node>, column?, bucket?}` or `{table, spec}` for a count-of-this-view widget — which `drillInto` turns into the grid opened on those rows: `openSource(id, { skipBuild: true })`, every stashed filter/search/tag/timeframe reset, then one view build (placeholder tables resolve through `POST /api/dashboard/resolve`, which lists every source a `{{all:…}}` spans so the analyst picks one; a widget with SQL but no drill opens as a query in the SQL pane; a bucket the timeframe can't express is refused, and a bucket on a column not typed datetime filters by the label's prefix instead). The shipped KAPE drills are checked against their SQL on a fixture in tests/test_dashboard_drill.py: a stat's drill opens exactly the rows it counted. Hand-editing a recipe's SQL drops `build` and `drill` rather than leaving them describing a query they no longer match. Entry points that skip the editor: the column header menu (top values / distinct / over time), the row menu (count of this value) and the Filters menu (count of this view), all through `quickAddWidget`, which asks which board only when there are several. `createDashboard` offers a starting point — blank, a starter built from the open table (`buildStarter`: count, activity window, over time, top values of 2–12-distinct columns), a shipped board, or a library board. Layout lives in the case .db; 'Save as profile' extends a plugin bundle with the board. The shipped KAPE triage board carries hand-written drills (checked against the header sets in tests/test_dashboard_drill.py). See docs/design/analysis-suite.md.
+
+- **Save a view, or a selection, as a table** (subset.js, `POST
+  /api/view/save_as_table`). Two entry points, one helper: the row menu's
+  **Save as table ▸** fold ("Save N selected rows as new table…" for the
+  picks / cell range / clicked row, plus "Save this whole view as a
+  table…"), and Filters ▾ → "Save this view as a table…". Folded rather
+  than broken out so the row menu's top level keeps its shape (the two
+  rules sit around the filter block only — pinned by
+  tests/ui/test_row_menu_submenus.py); both items pin. Two shapes go to
+  the server, and each item says which it is. The **whole view** —
+  `exclude: []`, every row the filters, search and timeframe show, a
+  select-all's unchecked rows included — is what "Save this whole view as
+  a table…" and Filters ▾ send (`saveCurrentViewAsTable`; both titles
+  read "unchecked rows included"). The **selection** is the scope-worded
+  item only: under a select-all that is the view minus its unchecked
+  rows, sent as `view_id` + `exclude` pairs (`saveSelectAllAsTable`,
+  `applyTag`'s rule — never through `positions()`, which under select-all
+  is `selPositions()` walking every position of a 2M-row view into an
+  array before anything else happens), and its title says "minus the
+  ones you unchecked". Explicit picks go through `loadRowsForPositions` +
+  `rowAt` (so grouped mode works — a tree position resolves to its row,
+  and the keys are resolved server-side against the ROOT view, which
+  holds every group's rows), a hole is refused rather than papered over,
+  and there is a **20,000-pick cap** (`SUBSET_PICK_CAP`, the server's
+  selection-remap ceiling) with a toast pointing at "filter the view
+  down, then save the view" — the view route has no cap beyond the 500k
+  soft confirm. The name prompt defaults to `<parent label> — subset`.
+  The POST runs under `setBusy` and a module-level in-flight guard held
+  from the name prompt through the response (`tagWholeViewSelection`'s
+  shape plus the re-entry guard the prompt needs): a long copy shows the
+  busy bar, and a second click while one is saving gets a toast, not a
+  second prompt and a second identical table. The new table starts
+  **untagged** — the UI never sends `copy_tags` (store.md has the
+  Timeline/export double-count reason) — and the success toast says so:
+  `Created "<name>" · N rows · tags and notes stay on <parent>`. Then it
+  is opened (`loadSources(); openSource(id)` — an explicit save may
+  navigate; only background refreshes may not). The badge: `tab-subset`
+  + a ⊂ glyph from `sourceGlyph(s)` in the tab strip, sidebar and Tables
+  manager (⛓ for merges, same function), and `sourceTitle` adds
+  `subsetDescription(s)` — "Subset of <parent> (N of M rows) · tags and
+  notes on it are its own — none write back" from `origin_meta`, which
+  keeps the parent's name and size from creation so a deleted parent
+  still reads right (ids are reused, so the live table under
+  `parent_source_id` only counts while its name still matches). The
+  Tables manager row uses `subsetParentLabel(s)` — the same line without
+  the "(N of M rows)", since the row count follows on the same line. The
+  its-own-tags line is deliberate: an analyst may expect the parent's
+  tags to have come along, or the subset's to appear on the parent, and
+  the tooltip is where both expectations get corrected.
