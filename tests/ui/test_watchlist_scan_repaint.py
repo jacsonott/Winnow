@@ -11,13 +11,22 @@ names the member the tags landed on, and the open merge is matched
 through its members (invariant #9) or its rows stay untagged until the
 analyst rebuilds the view.
 
-Both tests leave the shared case as found: the indicator removed, the
-rows it tagged untagged, the merge and the second table dropped.
+Two more things the owed repaint has to get right. It belongs to the
+table it was owed to: openSource comes through showGridTab before it has
+swapped S.view/S.sourceId, so paying it there would page the table being
+left. And under a grouping BY TAG the rows the scan tagged changed
+bucket, and the tree is server-side — so coming back regroups rather
+than repainting the old counts.
+
+Every test leaves the shared case as found: the indicator removed, the
+rows it tagged untagged, the grouping dropped, the merge and the second
+table dropped.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import urllib.request
 
 import pytest
@@ -45,6 +54,13 @@ PAINTED_WITH_TAGS = f"""() => {{
   const tagged = (r) => (__winnow.rowAt(+r.dataset.pos)?.tags || []).length > 0;
   return rows.some(tagged) && rows.every((r) => !!r.querySelector('.stripe') === tagged(r));
 }}"""
+
+# The precondition each test needs is its own: no row on screen already
+# wears the tag the scan is about to apply, so every stripe that appears
+# is the scan's. A stripe from some other tag is somebody else's business
+# — PAINTED_WITH_TAGS reads each row against the cache, not against zero.
+NONE_CARRY_TAG = f"""(tag) => ({INTERSECTING_ROWS})()
+  .every((r) => !(__winnow.rowAt(+r.dataset.pos)?.tags || []).includes(tag))"""
 
 
 def _count_is(value, text):
@@ -91,7 +107,7 @@ def test_an_auto_tag_scan_from_the_watchlist_tab_repaints_the_grid_where_it_was(
         "() => { const b = document.getElementById('body'); b.scrollTop = b.scrollHeight; return b.scrollTop > 1000; }")
     deep = page.evaluate("() => document.getElementById('body').scrollTop")
     page.wait_for_function(f"() => ({INTERSECTING_ROWS})().some((r) => !r.classList.contains('pending') && +r.dataset.pos > 150)")
-    assert page.locator("#body .row .stripe").count() == 0
+    assert page.evaluate(NONE_CARRY_TAG, tag)
     try:
         _add_auto_tag_indicator(page, tag, "H2", "40")
         # The grid was hidden throughout: the repaint is owed, not done.
@@ -105,6 +121,95 @@ def test_an_auto_tag_scan_from_the_watchlist_tab_repaints_the_grid_where_it_was(
         page.wait_for_function("(tag) => __winnow.S.tagCounts[tag] === 40", arg=tag)
     finally:
         page.evaluate("() => { __winnow.closeNoticesOwnedBy('watchlist'); }")
+        _restore(server, server_post, tag)
+
+
+@pytest.fixture
+def plain_second_table(page, server, tmp_path):
+    """A second small table in the shared case, holding nothing the H2
+    indicator matches (so the hit count the tests wait on is the same with
+    it here), dropped again afterwards."""
+    csv2 = tmp_path / "wl_other.csv"
+    csv2.write_text("Timestamp,EventId,Host,ExtremelyLongColumnHeaderName,CommandLine\n"
+                    "2026-03-16 10:00:00,4624,HX,v,notepad.exe\n"
+                    "2026-03-16 10:00:01,4625,HY,v,calc.exe\n", encoding="utf-8")
+    status = page.evaluate("""(path) => fetch('/api/ingest/path', { method: 'POST',
+      headers: { 'X-Timeline-Lite-Client': '1', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path }) }).then((r) => r.status)""", str(csv2))
+    assert status == 200
+    page.evaluate("() => __winnow.loadSources(undefined, { navigate: false })")
+    page.wait_for_function("() => __winnow.S.sources.some((s) => s.name === 'wl_other.csv')", timeout=15_000)
+    sid = page.evaluate("() => __winnow.S.sources.find((s) => s.name === 'wl_other.csv').id")
+    yield sid
+    _delete(server, f"/api/source/{sid}")
+    assert not [x for x in _get(server, "/api/sources") if x["id"] == sid]
+
+
+def test_an_owed_repaint_is_never_spent_on_the_table_being_left(page, server, server_post, plain_second_table):
+    """Opening another table while the repaint is owed must not pay it:
+    openSource comes through showGridTab BEFORE it swaps S.view/S.sourceId,
+    so a paint there fetches a page of the table being left (and, on a case
+    switch, asks the new Store about the old case's view). It passes
+    repaint:false and paints the new table itself — the owed repaint goes
+    with the table it was owed to, which still has it when the analyst
+    comes back."""
+    tag = page.evaluate("() => __winnow.S.tags[0].id")
+    _restore(server, server_post, tag)
+    first = page.evaluate("() => __winnow.S.sourceId")
+    page.wait_for_function(f"() => ({INTERSECTING_ROWS})().some((r) => !r.classList.contains('pending'))")
+    assert page.evaluate(NONE_CARRY_TAG, tag)
+    urls = []
+    page.on("request", lambda r: urls.append(r.url))
+    try:
+        _add_auto_tag_indicator(page, tag, "H2", "40")
+        assert page.evaluate("() => __winnow.S.gridRepaintPending") is True
+        left_behind = page.evaluate("() => __winnow.S.view.view_id")
+        mark = len(urls)
+        page.evaluate("(id) => __winnow.openSource(id)", plain_second_table)
+        page.wait_for_function("(id) => __winnow.S.sourceId === id && !!__winnow.S.view"
+                               " && __winnow.S.view.source_id === id && __winnow.busyCount === 0",
+                               arg=plain_second_table, timeout=15_000)
+        assert not [u for u in urls[mark:] if re.search(rf"view_id={left_behind}(?![0-9])", u)]
+        assert page.evaluate("() => __winnow.S.gridRepaintPending") is False
+        # Back to the table the scan tagged: its rows wear the tags,
+        # whoever did the painting.
+        page.evaluate("(id) => __winnow.openSource(id)", first)
+        page.wait_for_function("(id) => __winnow.S.sourceId === id && !!__winnow.S.view"
+                               " && __winnow.S.view.source_id === id", arg=first, timeout=15_000)
+        page.wait_for_function(PAINTED_WITH_TAGS, timeout=15_000)
+    finally:
+        page.evaluate("() => { __winnow.closeNoticesOwnedBy('watchlist'); }")
+        if page.evaluate("() => __winnow.S.sourceId") != first:
+            page.evaluate("(id) => __winnow.openSource(id)", first)
+            page.wait_for_function("(id) => __winnow.S.sourceId === id", arg=first)
+        _restore(server, server_post, tag)
+
+
+def test_an_auto_tag_scan_regroups_a_grouping_by_tag_on_the_way_back(page, server, server_post):
+    """A grouping BY TAG buckets rows by the tags on them, so an auto-tag
+    moves rows between buckets — the tree the analyst comes back to must
+    not still say every row is untagged. The tree is server-side (the
+    counts and each expanded group's sub-view), so there is nothing here
+    to patch it with: the repaint owed from the hidden grid regroups."""
+    tag = page.evaluate("() => __winnow.S.tags[0].id")
+    _restore(server, server_post, tag)
+    page.evaluate("() => __winnow.addGroupLevel(__winnow.TAG_GROUP_COLUMN)")
+    page.wait_for_function("() => __winnow.S.groups.length > 0")
+    assert page.evaluate("(t) => !__winnow.S.groups.some((g) => g.value === t)", tag)
+    try:
+        _add_auto_tag_indicator(page, tag, "H2", "40")
+        assert page.evaluate("() => __winnow.S.gridRepaintPending") is True
+        page.keyboard.press("Alt+1")
+        page.wait_for_selector("#grid:not([hidden])")
+        # The 40 rows the scan tagged are in the tag's own group now, and
+        # the group the tree had for them is that much shorter.
+        page.wait_for_function("(t) => __winnow.S.groups.some((g) => g.value === t && g.count === 40)",
+                               arg=tag, timeout=15_000)
+        assert page.evaluate("() => __winnow.S.groups.some((g) => g.value === null && g.count === 160)")
+    finally:
+        page.evaluate("() => { __winnow.closeNoticesOwnedBy('watchlist'); }")
+        page.evaluate("() => __winnow.dropGrouping()")
+        page.wait_for_function("() => !__winnow.S.groupByCols.length")
         _restore(server, server_post, tag)
 
 
@@ -148,7 +253,7 @@ def test_an_auto_tag_on_a_member_repaints_the_open_merge(page, server, server_po
     page.wait_for_function("(id) => __winnow.S.sourceId === id && !!__winnow.S.view && __winnow.S.view.source_id === id",
                            arg=merge_of_two)
     page.wait_for_function(f"() => ({INTERSECTING_ROWS})().some((r) => !r.classList.contains('pending'))")
-    assert page.locator("#body .row .stripe").count() == 0
+    assert page.evaluate(NONE_CARRY_TAG, tag)
     try:
         # 40 rows of the shared table and one of the member: the job names
         # both members, never the merge.

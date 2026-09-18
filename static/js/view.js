@@ -553,6 +553,21 @@ async function runBuild({ keepScroll = true, keepRow = true, detachAfterMs = nul
   const chipUp = cancelInflight();
   const controller = new AbortController();
   inflight = { token: spec.op_token, controller, seq, sourceId: forSourceId };
+  // The chip cancels a BUILD — cancel_op interrupts the statement its
+  // token is registered under. An adopt registers nothing, and its wait,
+  // if any, is for the writer lock, which no cancel shortens: the chip
+  // stays down for one, and comes up only if the adopt 409s into a
+  // rebuild (adoptOrRebuild arms it before posting /api/view). Armed
+  // here, at the supersede, when the build being superseded already had
+  // its chip up: that build disarms the moment its aborted fetch
+  // rejects, which is long before the keys lookup below lets this one
+  // reach its own arming point, and the chip a long search put up would
+  // blink off on every keystroke — a button the analyst reaches for and
+  // finds gone. Idempotent, so the call below is still the one that arms
+  // a build nobody was cancelling yet.
+  let disarmCancel = null;
+  const armChip = () => { if (!disarmCancel) disarmCancel = chipUp ? armOpCancel(spec.op_token, 0) : armOpCancel(spec.op_token); };
+  if (chipUp && !fetchView) armChip();
   // See the remap below: what's picked, as row ids, while the old view is
   // still there to ask. Explicit picks only — a select-all is a statement
   // about THIS view. Capped: nobody remaps a hundred thousand hand-picks.
@@ -566,24 +581,20 @@ async function runBuild({ keepScroll = true, keepRow = true, detachAfterMs = nul
   }
   // Superseded during that lookup: the newer rebuild has already cancelled
   // this one's token and aborted its controller, and none of this one's
-  // chrome — busy bar, chip, indicator — has started, so there is nothing
+  // chrome — busy bar, indicator — has started, so there is nothing else
   // to undo. Starting it now would put this rebuild's indicator over the
   // newer one's and then, in the finally below, take it down and restore
   // the old count while the build that is actually running goes unmarked.
-  if (seq !== rebuildSeq) return;
+  // The chip claimed above is handed straight on: that newer rebuild
+  // claimed it in turn as it superseded this one, so this disarm finds
+  // the chip owned by another token and leaves it standing.
+  if (seq !== rebuildSeq) { if (disarmCancel) disarmCancel(); return; }
   pendingKeys = keys ? { sourceId: forSourceId, keys } : null;
   let v;
   let seeded = [];
   let pos = null;
   const t0 = performance.now();
   setBusy(true);
-  // The chip cancels a BUILD — cancel_op interrupts the statement its
-  // token is registered under. An adopt registers nothing, and its wait,
-  // if any, is for the writer lock, which no cancel shortens: the chip
-  // stays down for one, and comes up only if the adopt 409s into a
-  // rebuild (adoptOrRebuild arms it before posting /api/view).
-  let disarmCancel = null;
-  const armChip = () => { if (!disarmCancel) disarmCancel = chipUp ? armOpCancel(spec.op_token, 0) : armOpCancel(spec.op_token); };
   if (!fetchView) armChip();
   startIndicator(seq, forSourceId, spec);
   // The chrome comes down once, whichever way this build leaves — the

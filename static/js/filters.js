@@ -626,7 +626,20 @@ export function renderAdvancedChips() {
   });
 }
 
-export function setSearchMode(mode) {
+/* Switching the box between substring / regex / advanced, and rebuilding
+   under the new mode. The rebuild detaches like every other search-box
+   one — the analyst changed the mode to run a search, and a slow one
+   belongs in the background.
+
+   `detach: false` is for a caller that is not the search box: landing on
+   a set of filters (Reset, Shift+F, the row menu's "…only", a session
+   comparison's pivot) normalises the mode back to contains on its way,
+   and then goes on to act on the view that build produces — expanding
+   the search bar, recentring on the row it kept. A build left to finish
+   in the background resolves with the OLD view still installed, so that
+   work would land on the rows the analyst just cleared away
+   (docs/notes/ui.md: only search-box rebuilds detach). */
+export function setSearchMode(mode, { detach = true } = {}) {
   S.searchMode = mode;
   document.querySelectorAll('#searchModeToggle button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.mode === mode)));
   if (mode === 'advanced') {
@@ -635,7 +648,7 @@ export function setSearchMode(mode) {
   }
   syncSearchExpansion(true);
   updateSearchHint();
-  return rebuildView({ keepScroll: false, detachAfterMs: SEARCH_DETACH_MS });
+  return rebuildView({ keepScroll: false, detachAfterMs: detach ? SEARCH_DETACH_MS : null });
 }
 
 /* DOM wiring for this module, called once by main.js. Handlers can't

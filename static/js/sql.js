@@ -5,7 +5,7 @@ import { recordTabVisit } from './tabhistory.js';
 import { $, api, debounce, el, post, toast } from './core.js';
 import { hideDetailPane } from './detail.js';
 import { render, renderTagToolbar } from './grid.js';
-import { drawRail } from './grouping.js';
+import { drawRail, regroupIfGroupedByTag } from './grouping.js';
 import { hidePluginViews, sqlResultNodes, syncPluginPanels } from './plugins.js';
 import { syncHistogramPanel } from './histogram.js';
 import { setActiveSqlResult } from './sqlassist.js';
@@ -273,34 +273,53 @@ export function showMainView(id) {
   if (e) e.hidden = false;
 }
 
+/* Whether the grid is actually on screen, rather than merely the tab the
+   app would return to. S.activeTab stays 'grid' on the home screen, which
+   hides #app wholesale (#home and #app are siblings, only one visible), so
+   a background job that painted on "the grid tab is active" would measure
+   a zero-height viewport there exactly as it would behind a page tab.
+   One predicate, so the two answers can't drift apart. */
+export function gridIsShowing() {
+  return S.activeTab === 'grid' && !$('app').hidden;
+}
+
+/* Arriving at the grid, from a page tab or from a table that was opened
+   while one was showing. One paint on the way in, at most, and only for a
+   caller that wants this function to do the painting.
+
+   Two things owe that paint. Tags can change while the grid isn't
+   showing — the SQL pane's tag hotkey drops the row caches but can't
+   paint a hidden grid — so the rows on screen are whatever was painted
+   before leaving; and a background job (the watchlist scan's auto-tags)
+   that dropped the caches with the grid hidden left `S.gridRepaintPending`
+   behind rather than painting into nothing. The owed repaint carries the
+   rest of what a tag write does: the rail, and a regroup when the
+   grouping is BY TAG, since the rows the scan tagged changed bucket and
+   the tree still holds its pre-tag counts.
+
+   openSource and openCase come through here BEFORE swapping
+   S.view/S.sourceId and paint for themselves next; with the caches just
+   dropped, a render() here would fetch a page of the previous table's
+   view (or, on a case switch, ask the new Store for the old case's view
+   id and spin a spurious rebuild off the 409). Those two pass
+   repaint:false — for the owed repaint as much as the ordinary one, which
+   is why the flag is consumed either way: they satisfy it themselves
+   (installView renders, draws the rail and regroups; openSource's
+   cached-view path does the same), and honouring it here is exactly what
+   repaint:false exists to prevent. render() is a no-op with no S.view at
+   all. */
 export function showGridTab({ repaint = true } = {}) {
   S.activeTab = 'grid';
   showMainView('grid');
   syncTabSelection();
   syncTabChrome();
-  // Same reason the Timeline rebuilds on arrival: tags can change while
-  // this tab isn't showing (the SQL pane's tag hotkey drops the row caches
-  // but can't paint a hidden grid), and the rows on screen are whatever
-  // was painted before leaving. A cache hit when nothing did — but only
-  // against the view that is staying on screen. openSource and openCase
-  // come through here BEFORE swapping S.view/S.sourceId and paint for
-  // themselves next; with the caches just dropped, a render() here would
-  // fetch a page of the previous table's view (or, on a case switch, ask
-  // the new Store for the old case's view id and spin a spurious rebuild
-  // off the 409), so those two pass repaint:false. render() is a no-op
-  // with no S.view at all.
-  if (repaint) render();
-  if (S.sourceId) checkPresets(S.sourceId); // refresh the Filters button's suggestion state
-  // A background job (the watchlist scan's auto-tags) that invalidated
-  // the row caches while a page tab hid the grid left the repaint for
-  // here: against a hidden grid, render() measures nothing and paints
-  // the first rows at the top of a viewport that comes back scrolled
-  // elsewhere. openSource() rebuilds anyway; this is for the paths that
-  // only re-show the grid (Alt+1, tab history, the mouse thumb buttons).
-  if (S.gridRepaintPending) {
-    S.gridRepaintPending = false;
-    if (S.view) { render(); drawRail(); }
+  const owed = S.gridRepaintPending;
+  S.gridRepaintPending = false;
+  if (repaint) {
+    render();
+    if (owed && S.view) { drawRail(); regroupIfGroupedByTag(); }
   }
+  if (S.sourceId) checkPresets(S.sourceId); // refresh the Filters button's suggestion state
 }
 
 export function showTimelineTab() {
