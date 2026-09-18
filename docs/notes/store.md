@@ -363,8 +363,22 @@ see [docs/notes/README.md](README.md) for the whole set.
   when the open table, or a member of the open merge, is among them)
   and the scope it ended up with (`source_ids`/`watchlist_ids`, the
   union) so the client knows which entries' counts it settles.
-  `_jobs_running` counts a running scan. Merges are skipped by design
-  (their rows are member rows, scanned there — invariant #9's list).
+  `_busy_reason` counts a running scan. Merges are skipped by design
+  (their rows are member rows, scanned there — invariant #9's list), and
+  so is a table that is **still filling** — a source whose `columns` is
+  still `'[]'` because an ingest job or a save-view-as-table copy has
+  the shell open. `_require_columns` calls that state "still importing"
+  and a scan cannot read it either: `_blob_expr([])` is empty, so the
+  unit would compile `WHERE () LIKE ?`, and that syntax error is not the
+  "no such table" a unit absorbs — it ended the whole job in error, with
+  every table after it unscanned. What covers those rows afterwards
+  depends on the fill: an import's tables are scanned when the job
+  reports done (jobs.js starts it), while a **save-view-as-table copy
+  has no post-copy scan**, so a scan that overlapped one leaves that
+  table without hits of its own until the next scan. Case-wide nothing
+  is missed — a subset's rows are copies of the parent's, scanned
+  there — and a scan-on-copy would be a new behaviour, not this fix: a
+  subset table has never been scanned on creation.
   `indicator_hits` answers `{sources: [{source_id, source_name, count,
   shown}], hits}`: the count per table is a GROUP BY, never derived
   from the rows returned, and the cap (`WATCHLIST_HITS_PER_SOURCE`,
@@ -450,7 +464,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   cancels every running job's token and joins the threads **before**
   `self.db.close()`, mirroring the ingest block: a worker queued on
   `self.lock` at close time would otherwise take it after the connection
-  was gone. server.py's `_jobs_running` counts running view jobs, so idle
+  was gone. server.py's `_busy_reason` counts running view jobs, so idle
   shutdown cannot reap a long search whose window was closed. A build
   error lands in the record (`error`, `error_status` 400 for the
   analyst-fixable kind api_view answers 400 with), never as the start
@@ -638,8 +652,8 @@ see [docs/notes/README.md](README.md) for the whole set.
   and registered under one hold of the re-entrant writer lock, so a copy
   that arrives after the snapshot sees `_closing` and drops its own
   shell instead of running into a closed database. `copies_in_flight()`
-  feeds server.py's `_jobs_running`, so save-as and copy_sources refuse
-  mid-copy as they do mid-import. Refused up front (ValueError → 400,
+  feeds server.py's `_busy_reason`, so save-as and copy_sources refuse
+  mid-copy as they do mid-import, in those words. Refused up front (ValueError → 400,
   the column named) while any derived column the copy would take has
   `derived_status != 'ready'`: values are copied as they stand, and a
   backfill mid-way would land `''` for every row it had not reached in a

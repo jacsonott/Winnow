@@ -238,7 +238,7 @@ def test_copy_refuses_while_an_import_runs(store, write_csv, target, monkeypatch
     import server
     from fastapi.testclient import TestClient
     monkeypatch.setattr(server, "STORE", store)
-    monkeypatch.setattr(server, "_jobs_running", lambda: True)
+    monkeypatch.setattr(server, "_busy_reason", lambda: "Still importing")
     client = TestClient(server.app)
     sid = _fill(store, write_csv)
     target_path = target.path

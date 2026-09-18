@@ -107,22 +107,39 @@ class _Presence:
 PRESENCE = _Presence()
 
 
-def _jobs_running() -> bool:
+def _busy_reason() -> str | None:
+    """What background work the case has running right now, named the way
+    an analyst would name it, or None if it has none.
+
+    Four kinds qualify, and all four block the same two things. An import
+    (queued or running) is the original one: a source mid-ingest has an
+    accurate-but-growing row_count. A view-as-table copy is the same
+    situation under another name — the source it fills has a growing
+    row_count and columns='[]' until it finishes. A watchlist scan is a
+    writer too: it replaces hits per table and writes auto-tags. A
+    background view build is the analyst's pending search, whose result is
+    what they will come back for.
+
+    The idle monitor only wants "is anything running" and reads this as a
+    boolean. The two routes that refuse while it is (copy_sources,
+    save_as) put the answer in their 409 — the predicate stopped being
+    "an import is running" when the other three joined it, and a scan
+    reported as "Still importing" sends the analyst to look at a jobs
+    panel with no import in it."""
     if STORE is None or STORE.closed:
-        return False
+        return None
     try:
-        # A view build running in the background (a search the analyst
-        # left to finish) holds the server open too: its result is what
-        # they will come back for. A view-as-table copy counts as well: the
-        # source it is filling has a growing row_count and columns='[]'
-        # until it finishes, so a save-as or copy_sources snapshot taken
-        # now would file a half table as a whole one.
-        return (any(j["status"] in ("running", "queued") for j in STORE.list_ingest_jobs())
-                or STORE.running_view_jobs() > 0
-                or STORE.running_watchlist_scan_jobs() > 0
-                or STORE.copies_in_flight() > 0)
+        if any(j["status"] in ("running", "queued") for j in STORE.list_ingest_jobs()):
+            return "Still importing"
+        if STORE.copies_in_flight() > 0:
+            return "A table is still being saved"
+        if STORE.running_watchlist_scan_jobs() > 0:
+            return "A watchlist scan is still running"
+        if STORE.running_view_jobs() > 0:
+            return "A search is still running"
     except Exception:  # noqa: BLE001 — a store mid-close must read as "not busy"
-        return False
+        return None
+    return None
 
 
 def _idle_exit_reason(now: float, p: _Presence, busy: bool) -> str | None:
@@ -153,7 +170,7 @@ async def _idle_monitor():
     while True:
         await asyncio.sleep(IDLE_TICK_S)
         reason = _idle_exit_reason(time.monotonic(), PRESENCE,
-                                   PRESENCE.inflight > 0 or _jobs_running())
+                                   PRESENCE.inflight > 0 or _busy_reason() is not None)
         if reason:
             print(reason, flush=True)
             _trigger_shutdown()
@@ -1118,11 +1135,14 @@ def api_case_copy_sources(body: CopySourcesBody):
     these quick-look tables into my real case" flow. A target open in
     another Winnow is refused with the holder named (409, same contract as
     opening a locked case)."""
-    if _jobs_running():
-        # A source mid-ingest has an accurate-but-growing row_count; the
-        # ATTACH copy would snapshot whatever happened to be committed
-        # and file it in the target as a complete table.
-        raise HTTPException(409, "Still importing — copy again when the import finishes")
+    busy = _busy_reason()
+    if busy:
+        # A source mid-ingest (or mid-copy) has an accurate-but-growing
+        # row_count; the ATTACH copy would snapshot whatever happened to
+        # be committed and file it in the target as a complete table. A
+        # scan's hits and auto-tags land in the same rows. The message
+        # names whichever it is — see _busy_reason.
+        raise HTTPException(409, f"{busy} — copy again when it finishes")
     try:
         return store().copy_sources_to(body.target_path, body.source_ids)
     except KeyError as e:
@@ -1433,13 +1453,16 @@ def api_case_save_as(body: CaseSaveAsBody):
     if not _is_temp_case(STORE.path):
         raise HTTPException(400, "Only a quick-look case can be saved this way — "
                                  "this one already has a home")
-    if _jobs_running():
-        # Closing the store cancels running ingest jobs, and a cancelled
-        # ingest DROPS its partial source (the cancel contract) — so
-        # "save while the file is still importing" would quietly produce
-        # an empty saved case. Natural timing, too: double-click a big
-        # file, banner appears, analyst clicks Save immediately.
-        raise HTTPException(409, "Still importing — save again when the import finishes")
+    busy = _busy_reason()
+    if busy:
+        # This route closes the store, and closing cancels every kind of
+        # background work: a cancelled ingest DROPS its partial source
+        # (the cancel contract) and so does a cancelled copy, so "save
+        # while the file is still importing" would quietly produce an
+        # empty saved case. Natural timing, too: double-click a big file,
+        # banner appears, analyst clicks Save immediately. The message
+        # names what is actually running — see _busy_reason.
+        raise HTTPException(409, f"{busy} — save again when it finishes")
     name = (body.name or "").strip()
     if not name:
         raise HTTPException(400, "Give the case a name")

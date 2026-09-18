@@ -390,7 +390,7 @@ def test_close_with_a_copy_in_flight_drops_the_partial_source(case_path, write_c
     t.start()
     try:
         assert started.wait(10)
-        assert s.copies_in_flight() == 1, "what server.py's _jobs_running reads"
+        assert s.copies_in_flight() == 1, "what server.py's _busy_reason reads"
         t0 = time.time()
         s.close()  # must cancel the copy and return, not hang or crash
         assert time.time() - t0 < 30

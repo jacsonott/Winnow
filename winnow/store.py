@@ -1471,6 +1471,10 @@ class Store:
         # writer is still open. `_closing` is set in the same locked step
         # as that snapshot, and a copy registering afterwards sees it and
         # aborts with nothing created — no gap for a copy to slip through.
+        # `_closing` covers the job registry above on the same terms:
+        # start_ingest_job refuses while it is set, because a derive
+        # cascade asks for a job from inside a worker close() is draining
+        # and would otherwise land one behind the snapshot.
         self._subset_copies: dict[int, dict] = {}
         self._closing = False
 
@@ -1983,7 +1987,10 @@ class Store:
         # runs on the request's pool thread, which outlives it), so it is
         # waited on through its `done` event; `_closing` is raised in the
         # same locked step as the snapshot so a copy registering after it
-        # aborts on its own (see save_view_as_source).
+        # aborts on its own (see save_view_as_source) — and so does a job
+        # asked for after it (see start_ingest_job), which is how a derive
+        # cascade running on one of the workers below cannot queue a
+        # backfill behind this snapshot.
         with self._ingest_jobs_lock:
             self._closing = True
             jobs = list(self._ingest_jobs.values())
@@ -3423,7 +3430,22 @@ class Store:
         case. It rides this machinery rather than growing a second job
         system because it wants exactly what this one provides — a progress
         bar over a multi-million-row pass, per-BATCH cancellation, the jobs
-        panel, and close()'s cancel-and-join."""
+        panel, and close()'s cancel-and-join.
+
+        A job asked for while the case is closing is refused with
+        OpCancelled (499 on a route, the same answer save_view_as_source
+        gives) rather than started. Registration reads `_closing` inside
+        the one locked step that registers, so either the job is in the
+        snapshot close() took — and gets cancelled and joined — or it
+        never exists: no thread left running a backfill into a connection
+        close() is about to shut. The caller this is really for is
+        _cascade_dependent_derives, which runs on a worker close() is
+        *already draining* and would otherwise queue its child job behind
+        the snapshot; it marks the child 'partial' and logs why. The derive
+        paths that commit a definition BEFORE asking for the job
+        (add_derived_column, add_derived_columns, rederive_column) undo
+        that definition on the refusal — a column whose only job was never
+        started would otherwise be 'building' for good."""
         if kind not in ("csv", "text", "json", "sqlite", "xlsx", "plaso", "derive"):
             raise ValueError(f"Unknown ingest kind: {kind}")
         try:
@@ -3431,6 +3453,9 @@ class Store:
         except OSError:
             size = 0
         with self._ingest_jobs_lock:
+            if self._closing:
+                noun = self._job_noun({"kind": kind}).lower()
+                raise OpCancelled(f"The case is closing — the {noun} was not started")
             self._ingest_job_seq += 1
             job = {
                 "job_id": self._ingest_job_seq,
@@ -3668,7 +3693,7 @@ class Store:
         """How many save_view_as_source copies are mid-way right now. A
         source mid-copy has a growing row_count and columns='[]', so the
         routes that refuse while an import is running (copy_sources,
-        save-as) read this too — server.py's _jobs_running."""
+        save-as) read this too — server.py's _busy_reason."""
         with self._ingest_jobs_lock:
             return len(self._subset_copies)
 
@@ -4455,7 +4480,13 @@ class Store:
         than computed per query: they have to be sortable, filterable,
         groupable and exportable, all of which are server-side SQL over a
         column that either exists or doesn't. The source table itself is
-        never touched (invariant #1)."""
+        never touched (invariant #1).
+
+        The definition and the job are one unit as far as the analyst is
+        concerned: if the job cannot be started (OpCancelled, the case
+        closing), the definition is rolled back and the refusal raised —
+        the same cancel-drops-the-partial-column contract this job carries
+        in `drop_on_cancel`."""
         if source_id < 0:
             # A merge has no table of its own — creating "on the merge"
             # means creating the same column on every member, after which
@@ -4535,10 +4566,23 @@ class Store:
                  time.strftime("%Y-%m-%dT%H:%M:%S")),
             )
             def_id = cur.lastrowid
-        job = self.start_ingest_job(
-            "derive", "", name=name,
-            options={"def_id": def_id, "drop_on_cancel": True, "units_total": src["row_count"]},
-        )
+        try:
+            job = self.start_ingest_job(
+                "derive", "", name=name,
+                options={"def_id": def_id, "drop_on_cancel": True, "units_total": src["row_count"]},
+            )
+        except OpCancelled:
+            # The definition is committed and the backfill was refused (the
+            # case is closing). `drop_on_cancel` above is this path's own
+            # promise that a cancelled create leaves no half-column behind,
+            # and a job that never started is that same cancel one moment
+            # earlier — so drop the definition and let the refusal out.
+            # Left standing it survives the close as a column stuck
+            # 'building' with nothing to finish it: "(building…)" in the
+            # header on every reopen, save_view_as_source refusing the
+            # whole table, and nothing able to chain off it.
+            self._rollback_derive_definitions([def_id])
+            raise
         return {"definition": self.get_derived_column(def_id), "job_id": job["job_id"]}
 
     STRUCT_SAMPLE = 200
@@ -4579,7 +4623,9 @@ class Store:
 
         Definitions are created up front and all-or-nothing — a name
         collision in the fifth spec fails before the first column exists,
-        rather than leaving four behind for the analyst to clean up."""
+        rather than leaving four behind for the analyst to clean up. That
+        holds through the job start too: a backfill refused because the
+        case is closing takes every definition in the batch with it."""
         if not specs:
             raise ValueError("Nothing to add")
         if source_id < 0:
@@ -4665,14 +4711,53 @@ class Store:
                 def_ids.append(cur.lastrowid)
 
         label = prepared[0]["name"] if len(prepared) == 1 else f"{len(prepared)} columns"
-        job = self.start_ingest_job(
-            "derive", "", name=label,
-            options={"def_ids": def_ids, "drop_on_cancel": True, "units_total": src["row_count"]},
-        )
+        try:
+            job = self.start_ingest_job(
+                "derive", "", name=label,
+                options={"def_ids": def_ids, "drop_on_cancel": True, "units_total": src["row_count"]},
+            )
+        except OpCancelled:
+            # All-or-nothing all the way to the job: this batch is
+            # created in one step and cancelled in one step (the backfill
+            # drops every column it was filling), so a refused job takes
+            # the whole batch with it rather than leaving eight columns
+            # stuck 'building' — see add_derived_column.
+            self._rollback_derive_definitions(def_ids)
+            raise
         return {
             "definitions": [self.get_derived_column(d) for d in def_ids],
             "job_id": job["job_id"],
         }
+
+    def _rollback_derive_definitions(self, def_ids: list[int]) -> None:
+        """Undo the definition rows a create has just committed, for a
+        backfill job that was refused rather than started (OpCancelled —
+        the case is closing). The caller re-raises; this is what makes the
+        refusal true of the case FILE as well, so nothing comes back from
+        the reopen as a column stuck 'building' with no job to finish it.
+
+        A rollback that fails is swallowed deliberately. The only way it
+        can is by losing the race to close()'s `self.db.close()`, and the
+        OpCancelled underneath is the answer the caller has to act on
+        either way — a ProgrammingError raised over it would report a
+        broken case where there is a closing one."""
+        for def_id in reversed(list(def_ids)):
+            with contextlib.suppress(Exception):
+                self.remove_derived_column(def_id)
+
+    def _restore_derive_definition(self, before: dict) -> None:
+        """Put one definition back as `before` (a get_derived_column
+        snapshot taken ahead of the UPDATE) found it — the re-derive half
+        of _rollback_derive_definitions, where the column already existed
+        and still holds the values it always had, so the row is restored
+        rather than removed. Same reason for swallowing a failure."""
+        with contextlib.suppress(Exception):
+            with self.lock, self.db:
+                self.db.execute(
+                    "UPDATE derived_columns SET params=?, status=?, parse_failures=? WHERE id=?",
+                    (json.dumps(before["params"]), before["status"],
+                     before["parse_failures"], before["id"]),
+                )
 
     def remove_derived_column(self, def_id: int) -> None:
         d = self.get_derived_column(def_id)
@@ -4722,24 +4807,46 @@ class Store:
                     options={"def_id": d["id"], "drop_on_cancel": False,
                              "units_total": src["row_count"]},
                 )
-            except Exception:
+            except Exception as e:  # noqa: BLE001 — recorded below, then on to the next child
                 # One broken child shouldn't stop its siblings — but it must
-                # not be left stuck 'building' with no job either: 'ready'
-                # with stale-but-present values is recoverable (re-derive),
-                # a permanent 'building' blocks the whole chain below it.
+                # not be left stuck 'building' with no job either: a
+                # permanent 'building' blocks the whole chain below it.
+                # 'partial' is what the column actually is. Its values are
+                # real but were computed from the parent's data as it stood
+                # BEFORE the re-derive, and 'ready' says "finished" about
+                # them — columns.js renders 'partial' as "incomplete —
+                # re-derive to finish", which is the one hint that survives
+                # a reopen, and the same status a cancelled re-derive
+                # leaves. The case closing arrives here too: this runs on a
+                # worker close() is draining and start_ingest_job refuses
+                # once `_closing` is set. That refusal is a failure like any
+                # other, including being written down — every other derive
+                # outcome reaches the log, and a cascade that silently did
+                # not happen is exactly the quietly-partial result the log
+                # exists for. This column's OWN children are left as they
+                # are: re-deriving it cascades to them in turn, which is
+                # the recovery the message asks for.
+                wlog.record("warn", f"Derive not recomputed: {d['name']} still holds values from before "
+                                    f"{', '.join(names)} changed — re-derive it "
+                                    f"({type(e).__name__}: {e})")
                 try:
                     with self.lock, self.db:
                         self.db.execute(
-                            "UPDATE derived_columns SET status='ready' WHERE id=? AND status='building'",
+                            "UPDATE derived_columns SET status='partial' WHERE id=? AND status='building'",
                             (d["id"],),
                         )
-                except Exception:
+                except Exception:  # noqa: BLE001 — a closing connection has nothing left to record on
                     pass
                 continue
 
     def rederive_column(self, def_id: int, params: dict | None = None) -> dict:
         """Recompute a derived column in place — the path for "I set the
-        wrong syslog year" or "these were local time, not UTC"."""
+        wrong syslog year" or "these were local time, not UTC".
+
+        The new params are written before the job starts, so a job that is
+        refused (OpCancelled, the case closing) restores the definition
+        exactly as it was rather than leaving it 'building' under params
+        nothing computed."""
         d = self.get_derived_column(def_id)
         new_params = timeparse.validate_params(d["op_id"], params if params is not None else d["params"])
         with self.lock, self.db:
@@ -4748,10 +4855,22 @@ class Store:
                 (json.dumps(new_params), def_id),
             )
         src = self._source_lite(d["source_id"])
-        job = self.start_ingest_job(
-            "derive", "", name=d["name"],
-            options={"def_id": def_id, "drop_on_cancel": False, "units_total": src["row_count"]},
-        )
+        try:
+            job = self.start_ingest_job(
+                "derive", "", name=d["name"],
+                options={"def_id": def_id, "drop_on_cancel": False, "units_total": src["row_count"]},
+            )
+        except OpCancelled:
+            # Refused because the case is closing. The row above now says
+            # 'building' under the new params and no job will ever make
+            # that true — the column would come back from the reopen
+            # reading "(building…)" over the values it had all along. A
+            # re-derive is not a delete (the cancelled-mid-backfill case
+            # keeps the column and marks it 'partial'), so put the
+            # definition back exactly as it was: this call raised, so
+            # nothing about it took effect.
+            self._restore_derive_definition(d)
+            raise
         return {"definition": self.get_derived_column(def_id), "job_id": job["job_id"],
                 "cascades_to": [c["name"] for c in
                                 self.dependent_derived_columns(d["source_id"], [d["name"]])]}
@@ -7694,8 +7813,30 @@ class Store:
         caller can report progress. `stop` is asked between (indicator,
         source) units and ends the scan early. One implementation behind
         the synchronous scan_source/scan_all (profile apply, tests) and the
-        background job the UI runs, like _iter_search_all_sources."""
-        sources = [s for s in self.list_sources() if not s.get("is_merge") and not s.get("error")]
+        background job the UI runs, like _iter_search_all_sources.
+
+        A source whose columns are still `'[]'` is skipped as well, both
+        here and through scan_source: that is the shell every fill leaves
+        standing while it works — `_create_source_shell` writes it up
+        front and the caller fills `columns` in at the end, so an ingest
+        job and a save-view-as-table copy each keep one alive for their
+        whole run — and `_require_columns` already reads that gap as
+        "still importing". A scan cannot read it either: `_blob_expr([])`
+        is empty, so the unit would compile `WHERE () LIKE ?`, whose
+        syntax error is not the "no such table" `_scan_unit` absorbs and
+        so would end the whole job in error with every later table
+        unscanned. Skipping costs this run nothing — those rows aren't
+        committed yet — but what picks them up afterwards depends on which
+        fill it was. An import's tables are scanned as soon as the job
+        reports done (jobs.js starts that scan); a save-view-as-table copy
+        has no post-copy scan, so a scan that overlapped one leaves that
+        table with no hits of its own until the next scan someone starts.
+        Nothing is missed case-wide either way — a subset's rows are
+        copies of the parent's, which the same run did scan — and giving
+        the copy a scan of its own is a change of its own: a subset table
+        has never been scanned on creation, overlapping scan or not."""
+        sources = [s for s in self.list_sources()
+                   if not s.get("is_merge") and not s.get("error") and s.get("columns")]
         if source_ids is not None:
             wanted = set(source_ids)
             sources = [s for s in sources if s["id"] in wanted]
@@ -7730,9 +7871,10 @@ class Store:
         """Synchronous scan of one source for every indicator (or the given
         ones): the profile-apply path and tests; the UI runs the job below.
         A merge (negative id) has no src_N of its own and scans as nothing
-        — its rows are its members', scanned there. Idempotent: a source's
-        hits for an indicator are replaced each scan. Returns per-indicator
-        match counts."""
+        — its rows are its members', scanned there. So does a table that
+        is still filling (columns `'[]'`; see _iter_watchlist_scan).
+        Idempotent: a source's hits for an indicator are replaced each
+        scan. Returns per-indicator match counts."""
         matched: dict[int, int] = {}
         for _scanned, _total, info in self._iter_watchlist_scan([source_id], watchlist_ids):
             if info:

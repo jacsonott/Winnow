@@ -126,7 +126,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   `/api/view/job` 404s for a superseded id, which is the poller's cue to
   stop; adopt's 409 says "expired" — the word the client keys on to run
   the search again — and the closed-case 409 from
-  `closed_database_handler` deliberately still does not. `_jobs_running`
+  `closed_database_handler` deliberately still does not. `_busy_reason`
   counts running view jobs, so idle shutdown cannot reap a search whose
   window was closed. `tests/test_view_jobs.py`.
 - **The watchlist scan routes** — `POST /api/watchlist/scan/start` (body
@@ -138,7 +138,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   its remaining scope into the new job and answers with the widened
   `source_ids`/`watchlist_ids`; `/api/watchlist/scan/job` 404s for a
   superseded id (the poller's cue to stop), cancel's miss is
-  `cancelled: false`, and `_jobs_running` counts a running scan. The synchronous `POST
+  `cancelled: false`, and `_busy_reason` counts a running scan. The synchronous `POST
   /api/watchlist/scan?source_id=&watchlist_id=` stays: profile apply
   scans inline while it seeds a watchlist, and tests use it. `POST
   /api/watchlist` answers 400 for an exact duplicate value; the two
@@ -307,9 +307,21 @@ see [docs/notes/README.md](README.md) for the whole set.
   `row_tags`/`row_notes` hold it like any other table's work. Listing the
   map would have made any quick-look that ever saved a subset immortal.
 
-- **`_jobs_running` counts a view-as-table copy** (`Store.copies_in_flight`)
-  alongside queued and running ingest jobs. The source a copy is filling
-  has a growing `row_count` and `columns='[]'` until it finishes, so the
-  two routes that refuse mid-import for that reason — copy_sources and a
-  quick-look save-as, which close the store and would cancel the copy —
-  refuse mid-copy too, with the same 409.
+- **`_busy_reason` answers what is running, not just whether anything
+  is** — a string an analyst would recognise, or None. Four kinds of
+  background work count: a queued or running ingest job, a view-as-table
+  copy (`Store.copies_in_flight` — the source it fills has a growing
+  `row_count` and `columns='[]'` until it finishes, exactly the
+  mid-import problem under another name), a watchlist scan (a writer:
+  hits and auto-tags), and a background view build (the analyst's
+  pending search). All four hold idle shutdown open — the monitor reads
+  this as a boolean — and all four block the same two routes,
+  `/api/case/copy_sources` and the quick-look `/api/case/save_as`, both
+  of which would either snapshot a half-filled table or close the store
+  out from under work that a close cancels.
+  The reason it returns a string rather than a bool is the 409 those two
+  raise: it used to say "Still importing" whatever was running, so a
+  scan or a copy sent the analyst to a jobs panel with no import in it.
+  The routes interpolate the cause and add their own advice ("copy again
+  when it finishes"). Adding a fifth kind means adding its wording here,
+  not just another `or`.
