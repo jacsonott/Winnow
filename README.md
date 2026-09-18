@@ -47,6 +47,10 @@ another analyst. The evidence files themselves are **never modified**.
 - **One view over several tables** — merge same-shaped exports from a
   fleet of hosts and filter, sort, tag and export them as one, with each
   row still knowing which file it came from.
+- **Keep the rows that matter** — save the filtered view, or just the
+  rows you picked, as a new table of the case (right-click → *Save as
+  table*, or Filters ▾). Tags and notes come along, the table is badged
+  ⊂ as a subset of its parent, and it is removed like any other.
 - **Answer a column** — stack a column's values rarest-first to find the
   one odd service name, pull fields out of nested JSON or XML into real
   columns, capture part of a value with a regex, or look one column up

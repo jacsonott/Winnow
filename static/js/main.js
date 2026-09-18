@@ -55,6 +55,7 @@ import * as session from './session.js';
 import * as sql from './sql.js';
 import * as timeline from './timeline.js';
 import * as rowmenu from './rowmenu.js';
+import * as subset from './subset.js';
 import * as keymap from './keymap.js';
 import * as profilebuilder from './profilebuilder.js';
 import * as settings from './settings.js';
@@ -87,7 +88,7 @@ import { wireUi } from './ui.js';
    spread would freeze the value of a rebindable export like ROW_H at boot.
    Collision-free by construction — these names all shared one scope until
    the file was split. Not an API; nothing in the app reads it. */
-const NAMESPACES = { splash, core, connection, state, jobs, tabhistory, charts, stack, notes, watchlist, dashboard, dashwidgets, filters, sources, view, columns, tsformat, derived, grid, grouping, tags, detail, ui, filterbuilder, savedfilters, timeframe, histogram, merge, multicase, importer, tables, plugins, search, session, sql, timeline, rowmenu, keymap, settings, profilebuilder, userenv, home, errlog };
+const NAMESPACES = { splash, core, connection, state, jobs, tabhistory, charts, stack, notes, watchlist, dashboard, dashwidgets, filters, sources, view, columns, tsformat, derived, grid, grouping, tags, detail, ui, filterbuilder, savedfilters, timeframe, histogram, merge, multicase, importer, tables, plugins, search, session, sql, timeline, rowmenu, subset, keymap, settings, profilebuilder, userenv, home, errlog };
 window.__winnow = {};
 for (const ns of Object.values(NAMESPACES)) {
   for (const key of Object.keys(ns)) {

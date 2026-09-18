@@ -636,3 +636,37 @@ see [docs/notes/README.md](README.md) for the whole set.
 - **Entity pivot tab** (entity.js) — pick any value and see everywhere it appears across every table: per-source counts, which columns it landed in, a merged time histogram (charts.js) and a chronological evidence stream. Reachable from any cell's right-click ('Pivot on X'), the watchlist, or the tab's search box. Backend entity_pivot reuses the blob search + TS_NORMALIZE (shared with a future super-timeline). See docs/design/analysis-suite.md.
 
 - **Case dashboards** (dashboard.js, dashwidgets.js) — named boards of widgets, each a data source (sql via read-only run_sql, watchlist, tags) plus a render kind (stat/kv/chips/list/bar/histogram). Widgets are built from RECIPES (dashwidgets.js `WIDGET_TEMPLATES` + `widgetFrom`): a template, a table and the column/value it needs produce the SQL, the render, a `build` (the recipe, so the editor reopens guided) and a `drill` — `{table, where:[{column,op,value}] | tree: <filter-tree node>, column?, bucket?}` or `{table, spec}` for a count-of-this-view widget — which `drillInto` turns into the grid opened on those rows: `openSource(id, { skipBuild: true })`, every stashed filter/search/tag/timeframe reset, then one view build (placeholder tables resolve through `POST /api/dashboard/resolve`, which lists every source a `{{all:…}}` spans so the analyst picks one; a widget with SQL but no drill opens as a query in the SQL pane; a bucket the timeframe can't express is refused, and a bucket on a column not typed datetime filters by the label's prefix instead). The shipped KAPE drills are checked against their SQL on a fixture in tests/test_dashboard_drill.py: a stat's drill opens exactly the rows it counted. Hand-editing a recipe's SQL drops `build` and `drill` rather than leaving them describing a query they no longer match. Entry points that skip the editor: the column header menu (top values / distinct / over time), the row menu (count of this value) and the Filters menu (count of this view), all through `quickAddWidget`, which asks which board only when there are several. `createDashboard` offers a starting point — blank, a starter built from the open table (`buildStarter`: count, activity window, over time, top values of 2–12-distinct columns), a shipped board, or a library board. Layout lives in the case .db; 'Save as profile' extends a plugin bundle with the board. The shipped KAPE triage board carries hand-written drills (checked against the header sets in tests/test_dashboard_drill.py). See docs/design/analysis-suite.md.
+
+- **Save a view, or a selection, as a table** (subset.js, `POST
+  /api/view/save_as_table`). Two entry points, one helper: the row menu's
+  **Save as table ▸** fold ("Save N selected rows as new table…" for the
+  picks / cell range / clicked row, plus "Save this whole view as a
+  table…"), and Filters ▾ → "Save this view as a table…". Folded rather
+  than broken out so the row menu's top level keeps its shape (the two
+  rules sit around the filter block only — pinned by
+  tests/ui/test_row_menu_submenus.py); both items pin. The shape rule is
+  `applyTag`'s and it is the whole point: when the right-clicked row is
+  part of a **select-all**, the selection is the view minus its unchecked
+  rows and is sent as `view_id` + `exclude` pairs — never through
+  `positions()`, which under select-all is `selPositions()` walking every
+  position of a 2M-row view into an array before anything else happens.
+  Explicit picks go through `loadRowsForPositions` + `rowAt` (so grouped
+  mode works — a tree position resolves to its row, and the keys are
+  resolved server-side against the ROOT view, which holds every group's
+  rows), a hole is refused rather than papered over, and there is a
+  **20,000-pick cap** (`SUBSET_PICK_CAP`, the server's selection-remap
+  ceiling) with a toast pointing at "filter the view down, then save the
+  view" — the view route has no cap beyond the 500k soft confirm. The
+  name prompt defaults to `<parent label> — subset`. The new table is
+  opened on success (`loadSources(); openSource(id)` — an explicit save
+  may navigate; only background refreshes may not). The badge:
+  `tab-subset` + a ⊂ glyph from `sourceGlyph(s)` in the tab strip,
+  sidebar and Tables manager (⛓ for merges, same function), and
+  `sourceTitle` adds `subsetDescription(s)` — "Subset of <parent> (N of M
+  rows) · tags on it do not write back" from `origin_meta`, which keeps
+  the parent's name and size from creation so a deleted parent still
+  reads right (ids are reused, so the live table under
+  `parent_source_id` only counts while its name still matches). The
+  tags-do-not-write-back line is deliberate: an analyst may expect the
+  subset's tags to appear on the parent, and the tooltip is where that
+  expectation gets corrected.

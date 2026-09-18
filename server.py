@@ -722,9 +722,12 @@ def is_winnow_case_file(path: str) -> bool:
 #
 # Deliberately not here: `open_tabs` and `tag_defs`, which a fresh case is
 # born with (1 and 3 rows), `sources`, which every quick-look has by
-# definition, and `layouts`/`case_settings`, which are incidental UI state
-# rather than findings. Everything else in the case file got there because
-# an analyst — or a plugin acting for them — put it there.
+# definition, `subset_rids`, which only ever accompanies a `sources` row (a
+# subset table with nothing tagged or noted on it is a derived copy of rows
+# the case already had, not work — see docs/notes/server.md), and
+# `layouts`/`case_settings`, which are incidental UI state rather than
+# findings. Everything else in the case file got there because an analyst
+# — or a plugin acting for them — put it there.
 _WORK_TABLES = (
     "row_tags", "row_notes", "sessions",        # the original three
     "case_notes", "case_variables",
@@ -4187,6 +4190,34 @@ def api_sql_to_table(body: SqlToTable):
     except sqlite3.Error as e:
         raise HTTPException(400, str(e))
     return res
+
+
+class SaveViewAsTable(BaseModel):
+    view_id: str
+    name: str
+    keys: list[list[int]] | None = None   # explicit [[source_id, rid], ...] picks; None = the whole view
+    exclude: list[list[int]] = []         # rows to leave out — a select-all with a few unchecked
+    spec: dict | None = None              # the filters/sort/search that produced the view; provenance only
+    copy_tags: bool = True
+    force: bool = False
+    op_token: str | None = None           # client-generated cancel handle — see Store.cancel_op
+
+
+@app.post("/api/view/save_as_table")
+def api_view_save_as_table(body: SaveViewAsTable):
+    """Copy a view — or a pick of its rows — into a new table of the case
+    (Store.save_view_as_source). Same soft cap as /api/sql/to_table:
+    over it the response asks for confirmation ({needs_confirm, rows});
+    resend with force=true. 409 on an expired view, the contract every
+    view read has; a cancel via op_token is the 499 OpCancelled maps to."""
+    try:
+        return store().save_view_as_source(
+            body.view_id, body.name, keys=body.keys, exclude=body.exclude, spec=body.spec,
+            copy_tags=body.copy_tags, force=body.force, op_token=body.op_token)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except KeyError as e:
+        raise HTTPException(409, str(e))
 
 
 @app.get("/api/export")

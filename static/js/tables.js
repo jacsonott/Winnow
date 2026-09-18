@@ -5,7 +5,7 @@ import { openTableMenu } from './timeframe.js';
 import { $, api, el, post, setBusy, toast } from './core.js';
 import { writeClipboardText } from './grouping.js';
 import { sqlSchemaForLLM } from './plugins.js';
-import { dropViewStateFor, editSourceNickname, loadSources, sourceLabel, sourceTitle } from './sources.js';
+import { dropViewStateFor, editSourceNickname, loadSources, sourceGlyph, sourceLabel, sourceTitle, subsetDescription } from './sources.js';
 import { S } from './state.js';
 import { markModalAction, confirmDialog, modal } from './ui.js';
 
@@ -132,12 +132,16 @@ export function openTablesManager() {
         // A grid row, not a flex scatter — the name ellipsizes in the
         // flexible column, everything else right-aligns in steady columns.
         const row = el('div', 'session-row tables-row' + (s.error ? ' no-index' : ''));
-        const nameSpan = el('span', 'session-name', (s.is_merge ? '⛓ ' : '') + sourceLabel(s) + (s.error ? ' ⚠' : ''));
+        const nameSpan = el('span', 'session-name', sourceGlyph(s) + sourceLabel(s) + (s.error ? ' ⚠' : ''));
         nameSpan.title = sourceTitle(s);
         row.append(nameSpan);
+        // A subset says whose rows it holds right in the row, not only on
+        // hover — the manager is where it gets removed, and "subset of X"
+        // is what makes removing it an easy call.
+        const origin = s.origin === 'subset' ? `${subsetDescription(s).split(' · ')[0]} · ` : '';
         row.append(el('span', 'count', s.error
           ? s.error
-          : `${s.row_count.toLocaleString()} rows · ${s.tagged_row_count.toLocaleString()} tagged · ${s.note_count.toLocaleString()} notes`));
+          : `${origin}${s.row_count.toLocaleString()} rows · ${s.tagged_row_count.toLocaleString()} tagged · ${s.note_count.toLocaleString()} notes`));
         if (!s.error) {
           const status = indexStatusFor(s);
           row.append(el('span', 'index-status index-status-' + status.cls, status.text));

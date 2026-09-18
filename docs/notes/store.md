@@ -417,3 +417,67 @@ see [docs/notes/README.md](README.md) for the whole set.
   elsewhere. One trap: `create_merge` returns the SIGNED id (negative), so
   callers must not re-negate it — a double negation lands on a real
   source id and copies the wrong table without an error.
+
+- **`save_view_as_source` copies a view — or a pick of its rows — into a
+  new source batch by batch, never through a Python list.** It is the
+  store half of "Save as table" (row menu, Filters ▾; `subset.js`) and
+  the second thing after `sql_to_table` that makes a table out of rows
+  already in the case. The shape, and why: a pooled `_reader()` walks the
+  view's keys `BATCH` at a time, keyset-paged (`WHERE pos > ?` / `rid >
+  ?`, never LIMIT/OFFSET), one walk per view kind — the same four
+  `fetch_rows` pages (root by `pos`, root_virtual by rid range, `group`
+  through its own `v.view_N`, `group_virtual` through
+  `_virtual_group_where`) — then reads each batch's cells through ITS
+  member's `_from_clause` (`WHERE rid IN (...)`, the `fetch_rows` shape:
+  derived sidecar joined `USING(rid)`, so a merge's canonical column list
+  runs unchanged against every member and a subset of a merge is a real
+  single source, rows resolved per member) and commits each batch under
+  the writer lock through `_commit_ingest_batch`. `sql_to_table` pulls
+  its whole result into a list first; on a 2M × 27 view that is
+  gigabytes, which is why this does not share its shape. The writer lock
+  is never held across the loop (invariant #4), and
+  `_ingest_synchronous_off` is deliberately not taken: a subset is
+  usually small, and that relaxed-fsync window covers every concurrent
+  tag write, not just the copy. `_create_source_shell` is the sources
+  row + open tab + empty `src_N` transaction factored out of
+  `ingest_rows` so both fill the same shell. Derived columns are copied
+  as VALUES (plain columns, the parent's types passed through — never
+  re-sampled, since a pick of blanks would re-type a numeric column), and
+  rid/source_id/Tags/Note are never data columns — that is the SQL
+  pane's `SELECT *` leak this exists to avoid.
+  `subset_rids(source_id, rid, parent_source_id, parent_rid)` records
+  where every new rid came from, per row (so a merge subset maps to its
+  members), written in the same transaction as the rows it describes —
+  the new rid is known before the INSERT because rid is assigned 1..N in
+  insertion order on the one writer (invariant #2). `drop_source` clears
+  it in BOTH directions (a subset's own rows, and every map naming the
+  dropped table as parent — the id is reused), and `_copy_sources_into`
+  carries `origin`/`origin_meta` and re-points the map only when the
+  parent travels in the same copy (otherwise `parent_source_id` becomes
+  null; `parent_name` stays for display).
+  Two rules that look breakable and aren't: the tag/note seed after the
+  copy is one `INSERT OR IGNORE ... SELECT` over `subset_rids` into
+  `row_tags`/`row_notes` directly — an **invariant #7 exception** with
+  the `_copy_sources_into` precedent (a brand-new table nobody could have
+  tagged yet), and it is deliberately not an undo entry, since undoing
+  "create this table" is deleting it; tagging the subset later does not
+  write back to the parent (the map is stored so that could come). And a
+  subset gets a synthetic `file_hash = 'subset:' + sha256(parent hash |
+  spec | created_at | id)`: `import_case_session` matches sources by hash
+  only and skips a hashless one, so without it a saved session would
+  never give a subset its tags back — the gap SQL-saved tables still
+  have. `_session_source_resolver` and `diff_sessions` key on the same
+  hash and need nothing else; nothing treats `file_hash` as "a file on
+  disk" (that is `path`, which stays NULL). Failure of any kind mid-copy
+  — `op_token` cancel via `_interruptible` (registered per statement:
+  innermost on the reader, and by `_commit_ingest_batch` while it holds
+  the lock, the writer discipline), the view evicted under the reader
+  (`_dropped_view_is_expired` → KeyError → 409), anything — drops the
+  partial source, ingest.md's cancel-drops-partial rule. Not temporary:
+  a subset is an ordinary table, badged `origin='subset'`, removed from
+  the Tables manager like any other; nothing auto-deletes it (a drop on
+  `close()` never runs after a crash, and would take the analyst's tags
+  on it along). `scan_all` scans a subset like any table, on purpose —
+  the watchlist counts are per table and a subset is one; only
+  `_sources_for_header_set` skips `origin='subset'`, because a
+  `{{all:…}}` dashboard would count those rows twice.

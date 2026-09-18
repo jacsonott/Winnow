@@ -440,7 +440,14 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
    regardless). The two **whole-case xlsx exports** (tagged rows from
    all tables, all tables) write one sheet per real source and none for
    a merge: every merge row is a member row and lands on that member's
-   sheet — only a merge-level derived column doesn't travel.
+   sheet — only a merge-level derived column doesn't travel. **Saving a
+   view as a table** (`save_view_as_source`) works on a merge — the copy
+   resolves each row through its own member and `subset_rids` records
+   the member per row — and the result is a real single source, not a
+   merge; the one deliberate skip on the other side is that
+   `_sources_for_header_set` (the `{{all:…}}` dashboard union) ignores
+   `origin='subset'` sources, since their rows already count under the
+   parent.
 
 10. **A session is a snapshot, not a dimension.** Named sessions live in
    the case file's `sessions` table as whole `winnow-case-session/1`
@@ -499,7 +506,10 @@ A new trap goes in the file for its subsystem, not back here — see
 4. **Drag-to-reorder columns.** `S.order` is already persisted in the layout;
    only the drag handler is missing.
 5. **Saved views UI.** Endpoints (`/api/saved_views`) exist and work; nothing in
-   the frontend calls them yet.
+   the frontend calls them yet. (Related but not it: "Save as table" —
+   `Store.save_view_as_source` — records the spec that produced a subset
+   in `sources.origin_meta`, the first place a view spec is persisted per
+   result; a saved *view* would replay one, a subset copies its rows.)
 6. `.tle_sess` import, so existing Timeline Explorer sessions carry over.
 
 ## Plugin-facing changes ship with their docs

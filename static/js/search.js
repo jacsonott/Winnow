@@ -9,6 +9,7 @@ import { applyPreset, matchingSavedFilters } from './savedfilters.js';
 import { openSettings } from './settings.js';
 import { loadSources, sourceLabel } from './sources.js';
 import { S, dashboardCreatorMode } from './state.js';
+import { saveCurrentViewAsTable } from './subset.js';
 import { openSavedFiltersModal, openTimeRangeModal } from './timeframe.js';
 import { markModalAction, confirmDialog, dropdownMenu, modal } from './ui.js';
 import { rebuildView } from './view.js';
@@ -438,6 +439,11 @@ $('btnFilters').onclick = () => dropdownMenu($('btnFilters'), () => {
   const items = [
     { label: 'Filter builder…', onclick: openFilterBuilder },
     { label: 'Saved filters…', onclick: openSavedFiltersModal },
+    // The view as it stands — filters, search, timeframe, minus any rows
+    // unchecked out of a select-all — copied into a new table (subset.js).
+    { label: 'Save this view as a table…',
+      title: 'The rows this view shows now become a new table in the case, badged as a subset of this one — tags and notes come along',
+      onclick: () => saveCurrentViewAsTable() },
   ];
   if (dashboardCreatorMode() && S.sourceId != null && S.sourceId >= 0) {
     items.push({ label: 'Add to dashboard: count of this view',
