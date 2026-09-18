@@ -265,6 +265,14 @@ def _case_plugin_overrides() -> dict[str, bool]:
         return {}
 
 
+# Bundled examples that became part of the app. The updater removes the
+# folder (examples/ is not in updater.PROTECTED), but a zip install that has
+# never run an update carries no manifest and keeps every folder it shipped
+# with — so a copy can outlive the feature it demonstrated, and loading it
+# would put a second Histogram button and route beside the built-in one.
+RETIRED_BUNDLED_EXAMPLES = frozenset({"table_histogram"})
+
+
 def _reload_plugins() -> None:
     """Rescan PLUGIN_DIRS under the effective enablement policy: the open
     case's override wins where set, else the machine default (installed
@@ -276,6 +284,13 @@ def _reload_plugins() -> None:
     overrides = _case_plugin_overrides()
 
     def enabled_for(fs_name: str, directory: str) -> bool:
+        # A retired example is never loaded from examples/, whatever the
+        # prefs or the case file say. This is the one place both layers
+        # pass through — a case-level override is consulted right below,
+        # so a tombstone in PluginPrefs would be one a case could undo.
+        # An analyst's own copy in plugins/ is theirs and still loads.
+        if fs_name in RETIRED_BUNDLED_EXAMPLES and Path(directory) == BUNDLED_PLUGIN_DIR:
+            return False
         if fs_name in overrides:
             return overrides[fs_name]
         default_on = Path(directory) != BUNDLED_PLUGIN_DIR
@@ -2951,6 +2966,33 @@ def api_group_summary(view_id: str, column: str, order: str = "count", direction
                                                   op_token=op_token, bucket_datetime=bucket_datetime))
     except KeyError as e:
         raise HTTPException(409, str(e))
+
+
+@app.get("/api/histogram")
+def api_histogram(view_id: str, column: str, max_buckets: int = 160, op_token: str | None = None):
+    """Time buckets of a datetime column over the CURRENT view — what the
+    histogram strip between the toolbar and the grid draws
+    (static/js/histogram.js). A side-effect-free view-summary read like
+    group_summary, so a GET; max_buckets is clamped to what a canvas can
+    usefully show.
+
+    The errors split the way the strip keys on them. An expired view is
+    the 409 every view read returns — a rebuild is under way and its own
+    view change refetches. A column the table does not have (a derived
+    column just removed, say) or one that is not a datetime is a 400 the
+    strip shows as text. Store.time_histogram raises KeyError for both an
+    expired view and an unknown column, so the message decides (the same
+    split api_case_copy makes); folding the second into the 409 would
+    leave the strip waiting for a view change that fixes nothing."""
+    try:
+        return JSONResponse(store().time_histogram(
+            view_id, column, max_buckets=max(20, min(max_buckets, 400)), op_token=op_token))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except KeyError as e:
+        if "expired" in str(e):
+            raise HTTPException(409, str(e))
+        raise HTTPException(400, f"No column named {column!r} on this table")
 
 
 class GroupExpand(BaseModel):

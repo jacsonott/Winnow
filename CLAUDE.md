@@ -232,6 +232,11 @@ examples/plugins/  Committed example plugins, one per extension point — treat
                     NTFS $MFT/$J parsing (ingest formats, stdlib-only).
                     lateral_movement: a pinned graph tab (register_tab +
                     register_api + a canvas ES module, offline).
+                    top_values: a toolbar panel that follows the grid
+                    (register_toolbar_panel, no routes — the built-in
+                    histogram strip in static/js/histogram.js is the
+                    same shape, and was this hook's example before it
+                    was built in).
                     claude_assistant: a Claude chat tab (external service from
                     a plugin route; needs network + `pip install anthropic` —
                     deliberately NOT airgap-compatible, which is why it's a

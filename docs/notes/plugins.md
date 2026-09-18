@@ -1,7 +1,7 @@
 # Plugins: the extension host and the example plugins
 
 `plugin_api.py`, `plugins/`, `examples/plugins/` (mft_usn, lateral_movement,
-pivot, claude_assistant). The authoring contract
+pivot, claude_assistant, top_values, …). The authoring contract
 lives in `plugin_api.py`'s module docstring and
 [docs/writing-plugins.md](../writing-plugins.md); this is what bites the
 *host*.
@@ -219,6 +219,25 @@ see [docs/notes/README.md](README.md) for the whole set.
   `PluginRegistry.load` is first-directory-wins on fs_name, so an
   analyst's installed copy of an example shadows the bundled one instead
   of both loading and fighting over tab ids.
+
+- **The `table_histogram` example is retired; `top_values` holds the
+  `register_toolbar_panel` slot.** The histogram is built in
+  (static/js/histogram.js and `GET /api/histogram`; `Store.time_histogram`
+  was always core), so the example that showed it went, and a smaller one
+  with no backend took its place — one example per extension point stays
+  true. `server.RETIRED_BUNDLED_EXAMPLES` tombstones the old folder name
+  in `_reload_plugins.enabled_for`: the updater removes
+  `examples/plugins/table_histogram` on the next update (examples/ is not
+  in `updater.PROTECTED`), but a zip install that has never updated has no
+  manifest and keeps every folder it shipped with, and with
+  `table_histogram` still in `enabled_bundled` it would load a second
+  Histogram button and route beside the built-in. The tombstone lives in
+  `enabled_for` rather than `PluginPrefs` because case-level overrides are
+  consulted there first — a `plugin_overrides` entry in a case file would
+  undo a prefs-level one. It is scoped to the bundled directory: an
+  analyst's own copy in `plugins/` is theirs and still loads. Retiring
+  another example means a name there and another example covering its
+  hook.
 
 - **The `esxi_logs` example and the {{all:...}} widget placeholder.**
   The ESXi / UAC triage profile (winnow/defaults/profiles.json) needs to

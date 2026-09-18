@@ -5,6 +5,7 @@ import { recordTabVisit } from './tabhistory.js';
 import { $, api, debounce, el, post, toast } from './core.js';
 import { renderTagToolbar } from './grid.js';
 import { hidePluginViews, sqlResultNodes, syncPluginPanels } from './plugins.js';
+import { syncHistogramPanel } from './histogram.js';
 import { setActiveSqlResult } from './sqlassist.js';
 import { checkPresets } from './savedfilters.js';
 import { syncDiffBanner } from './session.js';
@@ -240,6 +241,7 @@ export function syncTabChrome() {
   const isGrid = S.activeTab === 'grid';
   $('toolbar').hidden = !isGrid;
   syncPluginPanels();   // plugin toolbar panels live and die with the toolbar
+  syncHistogramPanel(); // as does the built-in histogram strip beside them
   syncDiffBanner();     // as does a session comparison's banner
   renderTagToolbar();   // and the "N selected" tagging bar
 }
