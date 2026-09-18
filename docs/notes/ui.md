@@ -533,6 +533,39 @@ see [docs/notes/README.md](README.md) for the whole set.
   `S.lastGroupBy` rather than lost. Note `$('btnReset').onclick` is now a
   wrapper — passing `clearAllFilters` directly would hand it the MouseEvent
   as `seed`.
+- **A filter change lands on the same row, and that lives in `rebuildView`
+  (`keepRow`, on by default), not in the callers.** The tag chips, the
+  timeframe toggle and its Clear, the value picker, search Escape and a
+  saved filter all rebuild with `keepScroll: false`, and each used to land
+  at row 0 with `S.cursor` left as the number it had been — a number that,
+  once the view widened and renumbered, named an unrelated row far below
+  the fold (and, with the detail pane open, put that stranger in the pane
+  as its page landed). Only `clearAllFilters` found the row again, by
+  bracketing its rebuild with `selectedRowAnchor` → `/api/row_position` →
+  `recenterOnRow`. That bracket is inside the rebuild now: `cursorRowAnchor`
+  (cursor first — the highlighted row is the place; picks and the cell
+  range only stand in for a missing cursor) is captured before the build,
+  its position in the new view is asked for **before the seed fetch** so
+  the pages seeded are the ones the grid will show (recentring after a
+  page-0 seed painted the target rows as placeholders for a round trip),
+  and after the seq/source guards the cursor is re-pointed by identity.
+  Three rules. With `keepScroll: true` (header-box typing, a sort click)
+  the viewport never moves and only the cursor follows — the lookup runs
+  alongside the seed rather than ahead of it, so typing pays no latency
+  for it, and it is skipped outright when there is no cursor. A row the
+  narrower view no longer has clears the cursor and hides the detail pane
+  rather than leaving a stale number. `keepRow: false` is for a navigation
+  that means "the top of a fresh table" (a dashboard drill, `openSource`'s
+  first build). The `/api/row_position` GET has its own catch: the chip
+  handlers don't await the rebuild, so a 409 from a view a newer rebuild
+  already evicted would be an unhandled rejection, which the UI fixture
+  fails the test on. Grouped views are untouched (grouped positions are
+  another address space and `regroupAll` resets the cursor), which is why
+  `landOnFilters` keeps its own bracket for exactly the grouped case — it
+  drops the grouping before the build, and the cursor with it. Pinned by
+  `tests/ui/test_tag_filter_keeps_row.py`; the materialised branch of
+  `find_position` (every sort, filter and merge) by
+  `tests/test_row_position_merge.py`.
 - **Stored keymaps are migrated on load, not merged blindly.**
   `loadKeymap` used to be `{...DEFAULT_KEYMAP, ...stored}`, which means a
   returning analyst's localStorage outranks every later change to the
