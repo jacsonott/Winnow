@@ -59,18 +59,27 @@ export function sourceGlyph(s) {
   return '';
 }
 
-/* "Subset of <parent> (N of M rows)" from origin_meta — the parent's name
-   and size as they were when the subset was made, so it still reads right
-   after the parent is removed. Ids are reused by SQLite, so the live table
-   under parent_source_id only counts as the parent while its name still
-   matches. */
-export function subsetDescription(s) {
+/* "Subset of <parent>" from origin_meta — the parent's name as it was
+   when the subset was made, so it still reads right after the parent is
+   removed. Ids are reused by SQLite, so the live table under
+   parent_source_id only counts as the parent while its name still
+   matches. `withCount` adds "(N of M rows)"; the Tables manager leaves it
+   off because the row count follows on the same line. */
+export function subsetParentLabel(s, { withCount = false } = {}) {
   const m = (s && s.origin_meta) || {};
   const parent = m.parent_name || 'another table';
   const live = S.sources.some((x) => x.id === m.parent_source_id && x.name === m.parent_name);
-  const of = m.parent_row_count != null
-    ? ` (${(s.row_count || 0).toLocaleString()} of ${Number(m.parent_row_count).toLocaleString()} rows)` : '';
-  return `Subset of ${parent}${of}${live ? '' : ' — parent since removed'} · tags on it do not write back`;
+  const of = withCount && m.parent_row_count != null
+    ? ` (${((s && s.row_count) || 0).toLocaleString()} of ${Number(m.parent_row_count).toLocaleString()} rows)` : '';
+  return `Subset of ${parent}${of}${live ? '' : ' — parent since removed'}`;
+}
+
+/* The hover line for a subset: where it came from, its size against the
+   parent's, and the rule an analyst might otherwise assume the other way
+   — its tags and notes are its own (none were copied from the parent,
+   none write back to it). */
+export function subsetDescription(s) {
+  return `${subsetParentLabel(s, { withCount: true })} · tags and notes on it are its own — none write back`;
 }
 
 /* The hover title for a nicknamed source — keeps the real file name one

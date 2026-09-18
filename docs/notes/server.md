@@ -276,3 +276,10 @@ see [docs/notes/README.md](README.md) for the whole set.
   reaped after 7 days; the moment the analyst tags or notes a row of it,
   `row_tags`/`row_notes` hold it like any other table's work. Listing the
   map would have made any quick-look that ever saved a subset immortal.
+
+- **`_jobs_running` counts a view-as-table copy** (`Store.copies_in_flight`)
+  alongside queued and running ingest jobs. The source a copy is filling
+  has a growing `row_count` and `columns='[]'` until it finishes, so the
+  two routes that refuse mid-import for that reason — copy_sources and a
+  quick-look save-as, which close the store and would cancel the copy —
+  refuse mid-copy too, with the same 409.

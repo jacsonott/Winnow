@@ -1,6 +1,10 @@
 """Saving picked rows as a new table from the row menu: the rows the
 analyst chose become a table of their own, opened on the spot with their
-count and the ⊂ subset badge, and Filters ▾ offers the whole-view form.
+count and the ⊂ subset badge, the toast says the tags and notes stayed
+behind, the Tables manager row reads the count once, and Filters ▾ offers
+the whole-view form. Under a select-all the two row-menu items mean what
+they say: the whole-view one keeps the unchecked rows, the scope-worded
+one drops them.
 
 The server and its case are session-scoped, so the table this creates is
 removed again and the original tab put back — with the fetch-quiet dance
@@ -85,10 +89,51 @@ def test_row_menu_saves_the_picked_rows_as_a_badged_table(page, row_menu, flyout
         assert tab.count() == 1 and tab.get_attribute("aria-selected") == "true"
         assert tab.inner_text().startswith("⊂ picked-rows")
         assert "Subset of ui.csv (3 of 200 rows)" in tab.get_attribute("title")
+        # the toast says where the tags and notes are: on the parent, not here
+        page.wait_for_function("""() => { const t = document.getElementById('toast');
+          return !t.hidden && t.textContent.includes('Created "picked-rows" · 3 rows · tags and notes stay on ui.csv'); }""")
         # every sidebar row for it (Open, All tables) wears the same glyph
         rows = page.locator(".sidebar-row .menu-item", has_text="picked-rows")
         assert rows.count() >= 1
         assert rows.count() == page.locator(".sidebar-row .menu-item", has_text="⊂ picked-rows").count()
+        # the Tables manager row names the parent and reads the count ONCE
+        page.keyboard.press("t")
+        page.wait_for_selector("#modal:not([hidden])")
+        line = page.locator("#modal .session-row", has_text="picked-rows").locator(".count").inner_text()
+        assert line.startswith("Subset of ui.csv · 3 rows ·"), line
+        assert "(3 of 200 rows)" not in line
+        page.keyboard.press("Escape")
+        page.wait_for_selector("#modal[hidden]", state="attached")
+    finally:
+        _remove_table(page, sid)
+
+
+def test_under_a_select_all_the_whole_view_item_keeps_the_unchecked_rows(page, row_menu, flyout):
+    """Select all, uncheck one, right-click a checked row: the scope-worded
+    item is the 199-row selection and says it subtracts; the whole-view
+    item says it does not, and saves all 200."""
+    _count_fetches(page)
+    page.evaluate("() => { __winnow.selReplace(true, new Set([1])); __winnow.render(); }")
+    row_menu(row=3, cell=1)
+    sub = flyout("Save as table")
+    scoped = sub.locator(".menu-item", has_text="Save 199 selected rows as new table")
+    assert scoped.count() == 1
+    assert "minus the ones you unchecked" in scoped.get_attribute("title")
+    whole = sub.locator(".menu-item", has_text="Save this whole view as a table")
+    assert whole.count() == 1
+    assert "unchecked rows included" in whole.get_attribute("title")
+    whole.click()
+    page.wait_for_selector(".confirm-overlay input")
+    page.locator(".confirm-overlay input").fill("whole-view")
+    page.locator(".confirm-card .btn", has_text="OK").first.click()
+
+    page.wait_for_function("() => __winnow.S.sources.some((s) => s.name === 'whole-view')")
+    sid = page.evaluate("() => __winnow.S.sources.find((s) => s.name === 'whole-view').id")
+    try:
+        src = page.evaluate("(id) => __winnow.S.sources.find((s) => s.id === id)", sid)
+        assert src["row_count"] == 200, "every row the view shows — the unchecked one included"
+        assert src["origin_meta"]["excluded"] == 0 and src["origin_meta"]["selection"] == "view"
+        page.wait_for_function("(id) => __winnow.S.sourceId === id", arg=sid)
     finally:
         _remove_table(page, sid)
 
@@ -96,6 +141,10 @@ def test_row_menu_saves_the_picked_rows_as_a_badged_table(page, row_menu, flyout
 def test_filters_menu_offers_the_whole_view(page):
     page.click("#btnFilters")
     page.wait_for_selector(".menu")
-    assert page.locator(".menu .menu-item", has_text="Save this view as a table").count() == 1
+    item = page.locator(".menu .menu-item", has_text="Save this view as a table")
+    assert item.count() == 1
+    # the whole view, and it says so — the selection subtraction lives on
+    # the row menu's scope-worded item only
+    assert "unchecked rows included" in item.get_attribute("title")
     page.keyboard.press("Escape")
     page.wait_for_selector(".menu", state="detached")

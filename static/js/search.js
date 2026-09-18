@@ -439,10 +439,12 @@ $('btnFilters').onclick = () => dropdownMenu($('btnFilters'), () => {
   const items = [
     { label: 'Filter builder…', onclick: openFilterBuilder },
     { label: 'Saved filters…', onclick: openSavedFiltersModal },
-    // The view as it stands — filters, search, timeframe, minus any rows
-    // unchecked out of a select-all — copied into a new table (subset.js).
+    // The WHOLE view as it stands — filters, search, timeframe; a
+    // select-all's unchecked rows included — copied into a new table
+    // (subset.js). The row menu's scope-worded item is where a selection
+    // is subtracted; this one never is, and the title says so.
     { label: 'Save this view as a table…',
-      title: 'The rows this view shows now become a new table in the case, badged as a subset of this one — tags and notes come along',
+      title: 'Every row this view shows — unchecked rows included — becomes a new table in the case, badged as a subset of this one; tags and notes stay here',
       onclick: () => saveCurrentViewAsTable() },
   ];
   if (dashboardCreatorMode() && S.sourceId != null && S.sourceId >= 0) {

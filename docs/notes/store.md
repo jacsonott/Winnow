@@ -455,12 +455,20 @@ see [docs/notes/README.md](README.md) for the whole set.
   carries `origin`/`origin_meta` and re-points the map only when the
   parent travels in the same copy (otherwise `parent_source_id` becomes
   null; `parent_name` stays for display).
-  Two rules that look breakable and aren't: the tag/note seed after the
-  copy is one `INSERT OR IGNORE ... SELECT` over `subset_rids` into
+  A subset starts **untagged**: `copy_tags` defaults off at the store,
+  the route and the UI. The reason is double counting — `build_timeline`
+  and `export_tagged_xlsx` walk every source with a tagged row, a subset
+  included and on purpose (a tag put on a subset is real work, so they
+  must not skip `origin='subset'` the way `_sources_for_header_set`
+  does), which means a seeded copy would list each of the parent's
+  findings twice in the Timeline and give it a second worksheet in the
+  hand-over workbook. `copy_tags=True` stays available for a script that
+  wants a tagged copy, and is one rule that looks breakable and isn't:
+  one `INSERT OR IGNORE ... SELECT` over `subset_rids` into
   `row_tags`/`row_notes` directly — an **invariant #7 exception** with
   the `_copy_sources_into` precedent (a brand-new table nobody could have
-  tagged yet), and it is deliberately not an undo entry, since undoing
-  "create this table" is deleting it; tagging the subset later does not
+  tagged yet), deliberately not an undo entry, since undoing "create this
+  table" is deleting it. Either way, tagging the subset later does not
   write back to the parent (the map is stored so that could come). And a
   subset gets a synthetic `file_hash = 'subset:' + sha256(parent hash |
   spec | created_at | id)`: `import_case_session` matches sources by hash
@@ -472,12 +480,35 @@ see [docs/notes/README.md](README.md) for the whole set.
   — `op_token` cancel via `_interruptible` (registered per statement:
   innermost on the reader, and by `_commit_ingest_batch` while it holds
   the lock, the writer discipline), the view evicted under the reader
-  (`_dropped_view_is_expired` → KeyError → 409), anything — drops the
-  partial source, ingest.md's cancel-drops-partial rule. Not temporary:
-  a subset is an ordinary table, badged `origin='subset'`, removed from
-  the Tables manager like any other; nothing auto-deletes it (a drop on
-  `close()` never runs after a crash, and would take the analyst's tags
-  on it along). `scan_all` scans a subset like any table, on purpose —
-  the watchlist counts are per table and a subset is one; only
-  `_sources_for_header_set` skips `origin='subset'`, because a
-  `{{all:…}}` dashboard would count those rows twice.
+  (`_dropped_view_is_expired` → KeyError → 409), the case closing
+  (next), anything — drops the partial source, ingest.md's
+  cancel-drops-partial rule. **`close()` drains a copy the way it drains
+  ingest jobs**, through `_subset_copies` rather than `_ingest_jobs`: a
+  job owns a thread `close()` joins and a jobs-panel entry, and a copy
+  has neither (it runs on the request's threadpool thread, which
+  outlives the request), so its entry is `{cancelled, done}` — `close()`
+  sets `_closing` and flags every copy in one locked step, waits on each
+  `done` (bounded like the job join), then closes the writer; the copy
+  reads the flag once per batch, raises `OpCancelled`, and its drop runs
+  against a still-open writer. The entry spans the shell through the
+  metadata write that makes the table openable, and the shell is created
+  and registered under one hold of the re-entrant writer lock, so a copy
+  that arrives after the snapshot sees `_closing` and drops its own
+  shell instead of running into a closed database. `copies_in_flight()`
+  feeds server.py's `_jobs_running`, so save-as and copy_sources refuse
+  mid-copy as they do mid-import. Refused up front (ValueError → 400,
+  the column named) while any derived column the copy would take has
+  `derived_status != 'ready'`: values are copied as they stand, and a
+  backfill mid-way would land `''` for every row it had not reached in a
+  plain column nothing can re-derive — `add_derived_column`'s own rule
+  for its inputs; on a merge every member's copy of a canonical derived
+  column is checked. Not temporary: a subset is an ordinary table,
+  badged `origin='subset'`, removed from the Tables manager like any
+  other; nothing auto-deletes it (a drop on `close()` never runs after a
+  crash, and would take the analyst's tags on it along). `scan_all`
+  scans a subset like any table, on purpose — the watchlist counts are
+  per table and a subset is one. `_sources_for_header_set` skips
+  `origin='subset'` because a `{{all:…}}` dashboard would count those
+  rows twice; the Timeline and the tagged xlsx export deliberately do
+  not, which is the untagged-by-default rule above seen from the other
+  side.

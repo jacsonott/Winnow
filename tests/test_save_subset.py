@@ -4,16 +4,21 @@ Store.save_view_as_source and POST /api/view/save_as_table.
 The load-bearing assertions: rows land in VIEW order with rids contiguous
 from 1 (invariant #2), the columns are the parent's — derived values
 included, as plain columns — and never rid/source_id/Tags/Note, a subset of
-a MERGE resolves every row through its own member (invariant #9), tags and
-notes are seeded once and never recorded as an undo entry (invariant #7's
-documented exception), and a cancel or an eviction mid-copy leaves no
-half-table behind."""
+a MERGE resolves every row through its own member (invariant #9), the
+subset starts untagged unless copy_tags is asked for — and that seed is
+never recorded as an undo entry (invariant #7's documented exception) — a
+still-building derived column refuses the copy by name, and a cancel, an
+eviction or the case closing mid-copy leaves no half-table behind."""
 
 from __future__ import annotations
 
+import sqlite3
+import threading
+import time
+
 import pytest
 
-from winnow.store import OpCancelled, Store
+from winnow.store import DEFAULT_TAGS, OpCancelled, Store
 
 ROWS = [
     ["Timestamp", "EventId", "Host"],
@@ -182,7 +187,9 @@ def test_copy_streams_batch_by_batch(store, write_csv, monkeypatch):
 
 # --------------------------------------------------- tags, notes, layout
 
-def test_tags_and_notes_are_seeded_once_and_never_undoable(store, write_csv):
+def test_tags_and_notes_are_seeded_on_request_once_and_never_undoable(store, write_csv):
+    """copy_tags=True is the explicit, scripts-only seed; the default is a
+    clean slate (test_the_default_is_untagged_because_the_timeline_and_export_would_double_count)."""
     sid = _ingest(store, write_csv)
     ta = _tag_id(store)
     store.set_tags(sid, [1, 3], ta, True)
@@ -190,7 +197,7 @@ def test_tags_and_notes_are_seeded_once_and_never_undoable(store, write_csv):
     store.save_layout(sid, {"columns": {"Host": {"w": 240}}, "order": ["Host", "EventId", "Timestamp"]})
     v = _view(store, sid, sort=BY_HOST)
     undo_before = store.undo_peek()
-    new = _save(store, v["view_id"])
+    new = _save(store, v["view_id"], copy_tags=True)
     # parent rids 1 and 3 sit at subset rids 1 and 5 under the Host sort
     assert {r[0] for r in store.db.execute("SELECT rid FROM row_tags WHERE source_id=?", (new,))} == {1, 5}
     assert store.db.execute("SELECT note FROM row_notes WHERE source_id=? AND rid=5", (new,)).fetchone()[0] == "pivot host"
@@ -200,8 +207,35 @@ def test_tags_and_notes_are_seeded_once_and_never_undoable(store, write_csv):
     # the parent's tags are untouched, and untagging the subset later stays on the subset
     store.set_tags(new, [1], ta, False)
     assert store.get_source(sid)["tagged_row_count"] == 2
-    bare = _save(store, v["view_id"], "bare", copy_tags=False)
+    # the layout still comes along without the seed
+    bare = _save(store, v["view_id"], "bare")
     assert store.get_source(bare)["tagged_row_count"] == 0 and store.get_source(bare)["note_count"] == 0
+    assert store.get_layout(bare) == store.get_layout(sid)
+
+
+def test_the_default_is_untagged_because_the_timeline_and_export_would_double_count(client, store, write_csv):
+    """build_timeline and export_tagged_xlsx list every source's tagged
+    rows — a subset's included, on purpose, since a tag put on a subset
+    is real work — so a seeded copy shows each of the parent's findings
+    twice. Hence the default at the store and the route: a clean slate."""
+    from openpyxl import load_workbook
+    sid = _ingest(store, write_csv)
+    store.set_tags(sid, [1, 3], _tag_id(store), True)
+    store.set_note(sid, 1, "n")
+    v = _view(store, sid)
+    r = client.post("/api/view/save_as_table", json={"view_id": v["view_id"], "name": "clean"})
+    assert r.status_code == 200, r.text
+    clean = store.get_source(r.json()["source"]["id"])
+    assert clean["tagged_row_count"] == 0 and clean["note_count"] == 0
+    assert store.get_source(sid)["tagged_row_count"] == 2, "the parent keeps its own"
+    assert store.build_timeline()["row_count"] == 2, "each finding once"
+    assert load_workbook(store.export_tagged_xlsx()).sheetnames == ["events.csv"]
+    # the opt-in, and what it does to the Timeline and the whole-case
+    # export: each finding twice, a second sheet of the same rows
+    r = client.post("/api/view/save_as_table", json={"view_id": v["view_id"], "name": "seeded", "copy_tags": True})
+    assert store.get_source(r.json()["source"]["id"])["tagged_row_count"] == 2
+    assert store.build_timeline()["row_count"] == 4
+    assert load_workbook(store.export_tagged_xlsx()).sheetnames == ["events.csv", "seeded"]
 
 
 def test_subset_rids_go_with_the_table_in_both_directions(store, write_csv):
@@ -229,7 +263,7 @@ def test_a_subset_of_a_merge_resolves_each_row_through_its_member(store, write_c
     store.set_note(a, 2, "from a")
     mid = store.create_merge("both", [a, b])["id"]
     v = _view(store, mid, sort=[{"column": "When", "dir": "asc"}])
-    new = _save(store, v["view_id"], "merged slice")
+    new = _save(store, v["view_id"], "merged slice", copy_tags=True)
     assert [r[0] for r in store.db.execute(f"SELECT Msg FROM src_{new} ORDER BY rid")] == ["alpha", "gamma", "beta", "delta"]
     assert _map(store, new) == [(1, a, 1), (2, b, 1), (3, a, 2), (4, b, 2)]
     src = store.get_source(new)
@@ -269,6 +303,131 @@ def test_eviction_mid_copy_is_409_shaped_and_drops_the_partial_source(store, wri
     with pytest.raises(KeyError, match="expired"):
         store.save_view_as_source(v["view_id"], "gone", build_fts=False)
     assert {s["id"] for s in store.list_sources()} == before
+
+
+def test_a_derived_column_still_building_refuses_the_copy_by_name(client, store, write_csv):
+    """Derived values are copied as they stand, so a backfill mid-way
+    would land blanks in a plain column nothing can re-derive. The status
+    is pinned rather than raced against the job: the rule reads
+    derived_status, and that is what is set here."""
+    sid = _ingest(store, write_csv)
+    res = store.add_derived_column(sid, "HostNum", "Host", "regex_extract", {"pattern": r"h(\d)"})
+    store.wait_for_ingest_job(res["job_id"], timeout=30)
+    v = _view(store, sid)
+    with store.lock, store.db:
+        store.db.execute("UPDATE derived_columns SET status='building' WHERE source_id=? AND name='HostNum'", (sid,))
+    before = {s["id"] for s in store.list_sources()}
+    with pytest.raises(ValueError, match="HostNum"):
+        store.save_view_as_source(v["view_id"], "early", build_fts=False)
+    assert {s["id"] for s in store.list_sources()} == before, "refused before any shell exists"
+    r = client.post("/api/view/save_as_table", json={"view_id": v["view_id"], "name": "early"})
+    assert r.status_code == 400 and "HostNum" in r.json()["detail"]
+    with store.lock, store.db:
+        store.db.execute("UPDATE derived_columns SET status='ready' WHERE source_id=?", (sid,))
+    new = _save(store, v["view_id"], "later")
+    assert [r[0] for r in store.db.execute(f"SELECT HostNum FROM src_{new} ORDER BY rid")] == ["1", "2", "3", "1", "2"]
+
+
+def test_a_merge_refuses_while_any_member_copy_of_a_derived_column_is_building(store, write_csv):
+    """Invariant #9: a merge exposes a derived column only when every
+    member has it, and each member's status is its own — one member
+    still building is enough to refuse."""
+    a = _ingest(store, write_csv, "a.csv")
+    b = _ingest(store, write_csv, "b.csv", rows=[ROWS[0], ["2024-02-01 10:00:00", "4624", "h4"], ["2024-02-01 11:00:00", "4625", "h5"]])
+    for m in (a, b):
+        res = store.add_derived_column(m, "HostNum", "Host", "regex_extract", {"pattern": r"h(\d)"})
+        store.wait_for_ingest_job(res["job_id"], timeout=30)
+    mid = store.create_merge("both", [a, b])["id"]
+    assert "HostNum" in [c["name"] for c in store._source_lite(mid)["columns"]], "canonical: on every member"
+    v = _view(store, mid, sort=BY_HOST)
+    with store.lock, store.db:
+        store.db.execute("UPDATE derived_columns SET status='building' WHERE source_id=? AND name='HostNum'", (b,))
+    with pytest.raises(ValueError, match="HostNum"):
+        store.save_view_as_source(v["view_id"], "early", build_fts=False)
+    with store.lock, store.db:
+        store.db.execute("UPDATE derived_columns SET status='ready' WHERE source_id=?", (b,))
+    new = _save(store, v["view_id"], "later")
+    assert store.get_source(new)["row_count"] == 7
+    assert sorted(r[0] for r in store.db.execute(f"SELECT HostNum FROM src_{new}")) == ["1", "1", "2", "2", "3", "4", "5"]
+
+
+def test_close_with_a_copy_in_flight_drops_the_partial_source(case_path, write_csv, monkeypatch):
+    """A case switch or a shutdown mid-copy: close() flags the copy, waits
+    for it to drop its partial source, and only then closes the writer —
+    the contract tests/test_ingest_jobs.py's close case pins for a job,
+    for a copy that runs on the request's own thread instead."""
+    import winnow.store as st
+    monkeypatch.setattr(st, "BATCH", 2)
+    s = Store(case_path, default_tags=DEFAULT_TAGS)
+    sid = s.ingest_csv(write_csv(ROWS, "events.csv"), name="events.csv", build_fts=False)["id"]
+    v = _view(s, sid, sort=BY_HOST)
+    real = Store._subset_cells
+    started = threading.Event()
+
+    def stalling(self, ro, cols, chunk, op_token):
+        # The first batch is read, then held until close() has flagged the
+        # copy — so the cancel lands mid-copy, after one committed batch,
+        # every time rather than when the scheduler feels like it.
+        out = real(self, ro, cols, chunk, op_token)
+        started.set()
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            with self._ingest_jobs_lock:
+                if any(c["cancelled"] for c in self._subset_copies.values()):
+                    break
+            time.sleep(0.01)
+        return out
+    monkeypatch.setattr(Store, "_subset_cells", stalling)
+    outcome = {}
+
+    def run():
+        try:
+            s.save_view_as_source(v["view_id"], "doomed", build_fts=False)
+            outcome["result"] = "finished"
+        except BaseException as e:  # noqa: BLE001 — recorded for the assertion below
+            outcome["error"] = e
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    try:
+        assert started.wait(10)
+        assert s.copies_in_flight() == 1, "what server.py's _jobs_running reads"
+        t0 = time.time()
+        s.close()  # must cancel the copy and return, not hang or crash
+        assert time.time() - t0 < 30
+        t.join(10)
+        assert not t.is_alive()
+        assert isinstance(outcome.get("error"), OpCancelled), outcome
+    finally:
+        if not s.closed:
+            s.close()
+    con = sqlite3.connect(case_path)
+    try:
+        assert [r[0] for r in con.execute("SELECT name FROM sources ORDER BY id")] == ["events.csv"]
+        assert [r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'src_%' ORDER BY name")] == [f"src_{sid}"]
+        assert con.execute("SELECT COUNT(*) FROM subset_rids").fetchone()[0] == 0
+        assert con.execute("SELECT COUNT(*) FROM open_tabs WHERE source_id<>?", (sid,)).fetchone()[0] == 0
+    finally:
+        con.close()
+
+
+def test_a_copy_arriving_while_the_case_closes_backs_out_with_nothing_created(case_path, write_csv, monkeypatch):
+    """The other side of the race: close() has already taken its snapshot
+    when the copy creates its shell — the copy sees _closing under the
+    same lock hold, drops the shell itself and gives up, rather than
+    running its batches into a writer that is about to close."""
+    s = Store(case_path, default_tags=DEFAULT_TAGS)
+    sid = s.ingest_csv(write_csv(ROWS, "events.csv"), name="events.csv", build_fts=False)["id"]
+    v = _view(s, sid)
+    with s._ingest_jobs_lock:
+        s._closing = True   # what close() sets in its flag-and-snapshot step
+    try:
+        with pytest.raises(OpCancelled):
+            s.save_view_as_source(v["view_id"], "late", build_fts=False)
+        assert [x["name"] for x in s.list_sources()] == ["events.csv"]
+        assert s.copies_in_flight() == 0
+    finally:
+        s.close()
 
 
 # --------------------------------------------------- the route, sessions

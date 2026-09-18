@@ -1358,6 +1358,18 @@ class Store:
         self._ingest_jobs_lock = threading.Lock()
         self._ingest_job_seq = 0
         self._ingest_sem = threading.Semaphore(self.MAX_CONCURRENT_INGESTS)
+        # Synchronous copies that build a source batch by batch on the
+        # request's own thread (save_view_as_source), keyed by the new
+        # source id: {"cancelled", "done" (an Event), "name"}, under the
+        # jobs lock. Not _ingest_jobs — a job owns a thread close() can
+        # join and a jobs-panel entry, and a copy has neither (its pool
+        # thread outlives the request). close() flags each one cancelled,
+        # then waits on `done`, so the partial source is dropped while the
+        # writer is still open. `_closing` is set in the same locked step
+        # as that snapshot, and a copy registering afterwards sees it and
+        # aborts with nothing created — no gap for a copy to slip through.
+        self._subset_copies: dict[int, dict] = {}
+        self._closing = False
 
         # Cancellable-op registry (see _interruptible/cancel_op): token →
         # the connection running that op, so a cancel can interrupt() it.
@@ -1859,18 +1871,30 @@ class Store:
 
     def close(self) -> None:
         self._drain_idle_readers(permanent=True)
-        # Stop any running ingest jobs before the connection goes away — a
-        # worker mid-batch would otherwise die on a closed database. Cancel
-        # is cooperative (checked per BATCH), so the join is bounded by one
-        # batch commit plus the partial-source drop.
+        # Stop any running ingest job, and any view-as-table copy, before
+        # the connection goes away — a worker mid-batch would otherwise die
+        # on a closed database, and a copy would strand a half-filled
+        # source nothing can open. Cancel is cooperative (checked per
+        # BATCH), so the wait is bounded by one batch commit plus the
+        # partial-source drop. A copy has no thread of its own to join (it
+        # runs on the request's pool thread, which outlives it), so it is
+        # waited on through its `done` event; `_closing` is raised in the
+        # same locked step as the snapshot so a copy registering after it
+        # aborts on its own (see save_view_as_source).
         with self._ingest_jobs_lock:
+            self._closing = True
             jobs = list(self._ingest_jobs.values())
             for j in jobs:
                 j["cancelled"] = True
+            copies = list(self._subset_copies.values())
+            for c in copies:
+                c["cancelled"] = True
         for j in jobs:
             t = j.get("thread")
             if t and t is not threading.current_thread() and t.is_alive():
                 t.join(15)
+        for c in copies:
+            c["done"].wait(15)
         with self.lock:
             self.db.close()
         # Release the flock (see __init__) before unlinking, so that if the
@@ -3510,6 +3534,14 @@ class Store:
                 t.join(timeout)
             snap = self._ingest_job_snapshot(j)
         return snap
+
+    def copies_in_flight(self) -> int:
+        """How many save_view_as_source copies are mid-way right now. A
+        source mid-copy has a growing row_count and columns='[]', so the
+        routes that refuse while an import is running (copy_sources,
+        save-as) read this too — server.py's _jobs_running."""
+        with self._ingest_jobs_lock:
+            return len(self._subset_copies)
 
     def build_fts(self, source_id: int) -> None:
         """(Re)builds the trigram substring index for a source: a single
@@ -8012,6 +8044,9 @@ class Store:
         for meta in self.list_sources():
             # A subset is a copy of rows another table already contributes
             # to the union — counting it too would count those rows twice.
+            # (build_timeline and export_tagged_xlsx do NOT skip subsets: a
+            # tag put on one is real work, which is why the copy starts
+            # untagged — see save_view_as_source.)
             if meta.get("is_merge") or meta.get("error") or meta.get("origin") == SUBSET_ORIGIN:
                 continue
             cols = {c["name"] for c in self._base_cols(self.get_source(meta["id"]))}
@@ -9743,7 +9778,7 @@ class Store:
 
     def save_view_as_source(self, view_id: str, name: str, *, keys: list | None = None,
                             exclude: list | None = None, spec: dict | None = None,
-                            copy_tags: bool = True, force: bool = False,
+                            copy_tags: bool = False, force: bool = False,
                             op_token: str | None = None, build_fts: bool = True) -> dict:
         """Copy the rows a view shows — or an explicit pick of them — into a
         new, ordinary source of this case, badged as a subset of the view's
@@ -9797,15 +9832,40 @@ class Store:
 
         Afterwards the parent's layout is copied so the subset opens
         looking the same (its sort included, so it opens materialised
-        rather than root_virtual — fine), and with `copy_tags` the parent
-        rows' tags and notes are seeded onto the new rows by one
-        INSERT..SELECT over subset_rids. That seed is a documented
+        rather than root_virtual — fine). The subset starts UNTAGGED:
+        `copy_tags` defaults off, and the route and the UI leave it off.
+        build_timeline and export_tagged_xlsx walk every source with a
+        tagged row — a subset included, on purpose, since a tag put on a
+        subset is real work — so seeding the parent's tags would list each
+        finding twice in the Timeline and give it a second worksheet in
+        the hand-over workbook. With `copy_tags=True` (a script that wants
+        a tagged copy) the parent rows' tags and notes are seeded onto the
+        new rows by one INSERT..SELECT over subset_rids: a documented
         exception to invariant #7 (every tag write through
-        _apply_tag_change): a direct row_tags write, the _copy_sources_into
-        precedent — a brand-new table nobody could have tagged yet — and
-        deliberately NOT an undo entry (undoing "create table" is deleting
-        it). Tags applied to the subset later do not write back to the
-        parent; the map is stored so that can come.
+        _apply_tag_change) — a direct row_tags write, the
+        _copy_sources_into precedent, a brand-new table nobody could have
+        tagged yet — and deliberately NOT an undo entry (undoing "create
+        table" is deleting it). Either way, tags applied to the subset
+        later do not write back to the parent; the map is stored so that
+        can come.
+
+        Refused up front (ValueError → 400) while any derived column the
+        copy would take is not 'ready': the values are copied as they
+        stand, so a backfill mid-way would land '' for every row it had
+        not reached, in a plain column nothing can re-derive — the rule
+        add_derived_column applies to its own inputs. On a merge that
+        means every member's copy of a canonical derived column.
+
+        The copy sits in _subset_copies from the shell to the metadata
+        write that makes the table openable, so close() (a case switch, a
+        shutdown) flags it cancelled and waits for it: the flag is read
+        once per batch, surfaces as OpCancelled, and the partial source is
+        dropped while the writer is still open rather than stranded — the
+        cancel-and-drain contract close() gives ingest jobs, minus their
+        thread and their panel entry. The shell and its registration
+        happen under one hold of self.lock against close()'s flag-and-
+        snapshot step, so a copy that loses that race drops its shell and
+        gives up rather than running on into a closed writer.
 
         file_hash gets a synthetic 'subset:<sha256>': a subset has no file
         on disk, and a NULL hash is exactly what makes import_case_session
@@ -9824,6 +9884,18 @@ class Store:
         cols = [c["name"] for c in parent["columns"]]
         types = [c.get("type") if c.get("type") in ("text", "number", "datetime") else "text"
                  for c in parent["columns"]]
+        # A derived column mid-backfill copies as blanks nothing can
+        # re-derive — refuse until it is ready. A merge exposes a derived
+        # column only when every member has it, and each member's status is
+        # its own, so every member's copy is checked (invariant #9).
+        derived = {c["name"].lower() for c in parent["columns"] if c.get("derived")}
+        if derived:
+            members = [parent] if parent_id >= 0 else [self._source_lite(m) for m in parent["member_source_ids"]]
+            for m in members:
+                for c in m["columns"]:
+                    if c.get("derived") and c["name"].lower() in derived and c.get("derived_status") != "ready":
+                        raise ValueError(f"{c['name']!r} is still building — wait for it to finish, "
+                                         "then save the view as a table")
 
         skip: set[tuple[int, int]] = set()
         for pair in exclude or []:
@@ -9865,55 +9937,83 @@ class Store:
             "rows": 0,
             "created_at": created_at,
         }
-        new_id, table = self._create_source_shell(name, cols, origin=SUBSET_ORIGIN, origin_meta=meta)
+        copy = {"source_id": None, "name": name, "cancelled": False, "done": threading.Event()}
+        # One hold of the (re-entrant) writer lock across the shell and its
+        # registration: close() sets _closing and snapshots the registry in
+        # a single locked step, so either this copy is in that snapshot and
+        # gets waited for, or it sees _closing here and backs out with the
+        # shell dropped — never a registered-too-late copy running its
+        # batches into a closed writer.
+        with self.lock:
+            new_id, table = self._create_source_shell(name, cols, origin=SUBSET_ORIGIN, origin_meta=meta)
+            copy["source_id"] = new_id
+            with self._ingest_jobs_lock:
+                closing = self._closing
+                if not closing:
+                    self._subset_copies[new_id] = copy
+            if closing:
+                self.drop_source(new_id)
+                raise OpCancelled("The case is closing — nothing was saved")
         insert = (f"INSERT INTO {q(table)} ({','.join(q(c) for c in cols)}) "
                   f"VALUES ({','.join('?' * len(cols))})")
         map_sql = "INSERT INTO subset_rids(source_id, rid, parent_source_id, parent_rid) VALUES (?,?,?,?)"
         total = 0
         try:
-            with self._reader() as ro, self._dropped_view_is_expired():
-                for chunk in self._iter_subset_keys(ro, view_id, handle, picks, skip, op_token):
-                    cells = self._subset_cells(ro, cols, chunk, op_token)
-                    rows: list[tuple] = []
-                    mapping: list[tuple] = []
-                    for pair in chunk:
-                        vals = cells.get(pair)
-                        if vals is None:
-                            continue   # not in its source table — never invent a row for it
-                        rows.append(vals)
-                        # rid is assigned 1..N in insertion order on the one
-                        # writer (invariant #2), so the new rid is known
-                        # before the INSERT runs — the map rides the same
-                        # transaction as the rows it describes.
-                        mapping.append((new_id, total + len(rows), pair[0], pair[1]))
-                    if rows:
-                        total = self._commit_ingest_batch(insert, rows, new_id, total,
-                                                          also=(map_sql, mapping), op_token=op_token)
-        except BaseException:
-            with contextlib.suppress(Exception):
-                self.drop_source(new_id)
-            raise
+            try:
+                with self._reader() as ro, self._dropped_view_is_expired():
+                    for chunk in self._iter_subset_keys(ro, view_id, handle, picks, skip, op_token):
+                        if copy["cancelled"]:   # close() — read once per batch, ingest_csv's cadence
+                            raise OpCancelled("The case is closing — the copy was cancelled")
+                        cells = self._subset_cells(ro, cols, chunk, op_token)
+                        rows: list[tuple] = []
+                        mapping: list[tuple] = []
+                        for pair in chunk:
+                            vals = cells.get(pair)
+                            if vals is None:
+                                continue   # not in its source table — never invent a row for it
+                            rows.append(vals)
+                            # rid is assigned 1..N in insertion order on the one
+                            # writer (invariant #2), so the new rid is known
+                            # before the INSERT runs — the map rides the same
+                            # transaction as the rows it describes.
+                            mapping.append((new_id, total + len(rows), pair[0], pair[1]))
+                        if rows:
+                            total = self._commit_ingest_batch(insert, rows, new_id, total,
+                                                              also=(map_sql, mapping), op_token=op_token)
 
-        meta["rows"] = total
-        colmeta = [{"name": c, "type": t} for c, t in zip(cols, types)]
-        digest = hashlib.sha256(
-            f"{parent.get('file_hash') or parent['name']}|{json.dumps(spec, sort_keys=True, default=str)}"
-            f"|{created_at}|{new_id}".encode("utf-8")).hexdigest()
-        with self.lock, self.db:
-            self.db.execute(
-                "UPDATE sources SET columns=?, origin_meta=?, file_hash=? WHERE id=?",
-                (json.dumps(colmeta), json.dumps(meta), "subset:" + digest, new_id))
-            if copy_tags:
-                self.db.execute(
-                    "INSERT OR IGNORE INTO row_tags(source_id, rid, tag_id) "
-                    "SELECT m.source_id, m.rid, rt.tag_id FROM subset_rids m "
-                    "JOIN row_tags rt ON rt.source_id = m.parent_source_id AND rt.rid = m.parent_rid "
-                    "WHERE m.source_id=?", (new_id,))
-                self.db.execute(
-                    "INSERT OR IGNORE INTO row_notes(source_id, rid, note) "
-                    "SELECT m.source_id, m.rid, rn.note FROM subset_rids m "
-                    "JOIN row_notes rn ON rn.source_id = m.parent_source_id AND rn.rid = m.parent_rid "
-                    "WHERE m.source_id=?", (new_id,))
+                # The metadata write is what makes the table openable
+                # (_require_columns reads columns='[]' as "still importing"),
+                # so it stays inside the drop-on-failure frame and the
+                # registry: a close() landing between the last batch and
+                # this write still waits for it.
+                meta["rows"] = total
+                colmeta = [{"name": c, "type": t} for c, t in zip(cols, types)]
+                digest = hashlib.sha256(
+                    f"{parent.get('file_hash') or parent['name']}|{json.dumps(spec, sort_keys=True, default=str)}"
+                    f"|{created_at}|{new_id}".encode("utf-8")).hexdigest()
+                with self.lock, self.db:
+                    self.db.execute(
+                        "UPDATE sources SET columns=?, origin_meta=?, file_hash=? WHERE id=?",
+                        (json.dumps(colmeta), json.dumps(meta), "subset:" + digest, new_id))
+                    if copy_tags:
+                        self.db.execute(
+                            "INSERT OR IGNORE INTO row_tags(source_id, rid, tag_id) "
+                            "SELECT m.source_id, m.rid, rt.tag_id FROM subset_rids m "
+                            "JOIN row_tags rt ON rt.source_id = m.parent_source_id AND rt.rid = m.parent_rid "
+                            "WHERE m.source_id=?", (new_id,))
+                        self.db.execute(
+                            "INSERT OR IGNORE INTO row_notes(source_id, rid, note) "
+                            "SELECT m.source_id, m.rid, rn.note FROM subset_rids m "
+                            "JOIN row_notes rn ON rn.source_id = m.parent_source_id AND rn.rid = m.parent_rid "
+                            "WHERE m.source_id=?", (new_id,))
+            except BaseException:
+                with contextlib.suppress(Exception):
+                    self.drop_source(new_id)
+                raise
+        finally:
+            with self._ingest_jobs_lock:
+                self._subset_copies.pop(new_id, None)
+            copy["done"].set()
         layout = self.get_layout(parent_id)
         if layout:
             self.save_layout(new_id, layout)

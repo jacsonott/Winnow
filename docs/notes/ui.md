@@ -644,29 +644,44 @@ see [docs/notes/README.md](README.md) for the whole set.
   table…"), and Filters ▾ → "Save this view as a table…". Folded rather
   than broken out so the row menu's top level keeps its shape (the two
   rules sit around the filter block only — pinned by
-  tests/ui/test_row_menu_submenus.py); both items pin. The shape rule is
-  `applyTag`'s and it is the whole point: when the right-clicked row is
-  part of a **select-all**, the selection is the view minus its unchecked
-  rows and is sent as `view_id` + `exclude` pairs — never through
-  `positions()`, which under select-all is `selPositions()` walking every
-  position of a 2M-row view into an array before anything else happens.
-  Explicit picks go through `loadRowsForPositions` + `rowAt` (so grouped
-  mode works — a tree position resolves to its row, and the keys are
-  resolved server-side against the ROOT view, which holds every group's
-  rows), a hole is refused rather than papered over, and there is a
-  **20,000-pick cap** (`SUBSET_PICK_CAP`, the server's selection-remap
-  ceiling) with a toast pointing at "filter the view down, then save the
-  view" — the view route has no cap beyond the 500k soft confirm. The
-  name prompt defaults to `<parent label> — subset`. The new table is
-  opened on success (`loadSources(); openSource(id)` — an explicit save
-  may navigate; only background refreshes may not). The badge:
-  `tab-subset` + a ⊂ glyph from `sourceGlyph(s)` in the tab strip,
-  sidebar and Tables manager (⛓ for merges, same function), and
-  `sourceTitle` adds `subsetDescription(s)` — "Subset of <parent> (N of M
-  rows) · tags on it do not write back" from `origin_meta`, which keeps
-  the parent's name and size from creation so a deleted parent still
-  reads right (ids are reused, so the live table under
+  tests/ui/test_row_menu_submenus.py); both items pin. Two shapes go to
+  the server, and each item says which it is. The **whole view** —
+  `exclude: []`, every row the filters, search and timeframe show, a
+  select-all's unchecked rows included — is what "Save this whole view as
+  a table…" and Filters ▾ send (`saveCurrentViewAsTable`; both titles
+  read "unchecked rows included"). The **selection** is the scope-worded
+  item only: under a select-all that is the view minus its unchecked
+  rows, sent as `view_id` + `exclude` pairs (`saveSelectAllAsTable`,
+  `applyTag`'s rule — never through `positions()`, which under select-all
+  is `selPositions()` walking every position of a 2M-row view into an
+  array before anything else happens), and its title says "minus the
+  ones you unchecked". Explicit picks go through `loadRowsForPositions` +
+  `rowAt` (so grouped mode works — a tree position resolves to its row,
+  and the keys are resolved server-side against the ROOT view, which
+  holds every group's rows), a hole is refused rather than papered over,
+  and there is a **20,000-pick cap** (`SUBSET_PICK_CAP`, the server's
+  selection-remap ceiling) with a toast pointing at "filter the view
+  down, then save the view" — the view route has no cap beyond the 500k
+  soft confirm. The name prompt defaults to `<parent label> — subset`.
+  The POST runs under `setBusy` and a module-level in-flight guard held
+  from the name prompt through the response (`tagWholeViewSelection`'s
+  shape plus the re-entry guard the prompt needs): a long copy shows the
+  busy bar, and a second click while one is saving gets a toast, not a
+  second prompt and a second identical table. The new table starts
+  **untagged** — the UI never sends `copy_tags` (store.md has the
+  Timeline/export double-count reason) — and the success toast says so:
+  `Created "<name>" · N rows · tags and notes stay on <parent>`. Then it
+  is opened (`loadSources(); openSource(id)` — an explicit save may
+  navigate; only background refreshes may not). The badge: `tab-subset`
+  + a ⊂ glyph from `sourceGlyph(s)` in the tab strip, sidebar and Tables
+  manager (⛓ for merges, same function), and `sourceTitle` adds
+  `subsetDescription(s)` — "Subset of <parent> (N of M rows) · tags and
+  notes on it are its own — none write back" from `origin_meta`, which
+  keeps the parent's name and size from creation so a deleted parent
+  still reads right (ids are reused, so the live table under
   `parent_source_id` only counts while its name still matches). The
-  tags-do-not-write-back line is deliberate: an analyst may expect the
-  subset's tags to appear on the parent, and the tooltip is where that
-  expectation gets corrected.
+  Tables manager row uses `subsetParentLabel(s)` — the same line without
+  the "(N of M rows)", since the row count follows on the same line. The
+  its-own-tags line is deliberate: an analyst may expect the parent's
+  tags to have come along, or the subset's to appear on the parent, and
+  the tooltip is where both expectations get corrected.

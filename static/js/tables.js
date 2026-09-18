@@ -5,7 +5,7 @@ import { openTableMenu } from './timeframe.js';
 import { $, api, el, post, setBusy, toast } from './core.js';
 import { writeClipboardText } from './grouping.js';
 import { sqlSchemaForLLM } from './plugins.js';
-import { dropViewStateFor, editSourceNickname, loadSources, sourceGlyph, sourceLabel, sourceTitle, subsetDescription } from './sources.js';
+import { dropViewStateFor, editSourceNickname, loadSources, sourceGlyph, sourceLabel, sourceTitle, subsetParentLabel } from './sources.js';
 import { S } from './state.js';
 import { markModalAction, confirmDialog, modal } from './ui.js';
 
@@ -137,8 +137,9 @@ export function openTablesManager() {
         row.append(nameSpan);
         // A subset says whose rows it holds right in the row, not only on
         // hover — the manager is where it gets removed, and "subset of X"
-        // is what makes removing it an easy call.
-        const origin = s.origin === 'subset' ? `${subsetDescription(s).split(' · ')[0]} · ` : '';
+        // is what makes removing it an easy call. Without the "(N of M
+        // rows)" the tooltip carries: the count follows on this line.
+        const origin = s.origin === 'subset' ? `${subsetParentLabel(s)} · ` : '';
         row.append(el('span', 'count', s.error
           ? s.error
           : `${origin}${s.row_count.toLocaleString()} rows · ${s.tagged_row_count.toLocaleString()} tagged · ${s.note_count.toLocaleString()} notes`));

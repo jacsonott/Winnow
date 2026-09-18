@@ -444,10 +444,13 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
    view as a table** (`save_view_as_source`) works on a merge — the copy
    resolves each row through its own member and `subset_rids` records
    the member per row — and the result is a real single source, not a
-   merge; the one deliberate skip on the other side is that
-   `_sources_for_header_set` (the `{{all:…}}` dashboard union) ignores
-   `origin='subset'` sources, since their rows already count under the
-   parent.
+   merge. On the other side, `_sources_for_header_set` (the `{{all:…}}`
+   dashboard union) skips `origin='subset'` sources so a union does not
+   count the parent's rows twice, while the Timeline and the whole-case
+   tagged xlsx export deliberately do not skip them — a tag put on a
+   subset is real work — which is why a subset starts untagged
+   (`copy_tags` defaults off; seeding the parent's tags would list every
+   finding twice there).
 
 10. **A session is a snapshot, not a dimension.** Named sessions live in
    the case file's `sessions` table as whole `winnow-case-session/1`
