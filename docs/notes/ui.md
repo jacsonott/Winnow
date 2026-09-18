@@ -268,12 +268,24 @@ see [docs/notes/README.md](README.md) for the whole set.
   every time the grid comes back — closed-and-forgotten is what an analyst
   expects, and `d` or a double-click reopens it), and hiding **never clears
   `#noteInput.dataset.rid/sourceId`**: `saveNote` is a 500 ms debounce that
-  reads them when it fires, so a note typed just before a page, table or
-  case switch still posts against the row it was typed for. `openSource`
-  (next to `S.cursor = -1`) and the case-open reset in home.js hide the
-  pane the same way, since the row it shows belongs to the table being
-  left. Nothing reopens it in the background: `ensurePage` and
-  `maybeShowDetail` are gated on the pane already being visible.
+  reads them when it fires, so a note typed just before a page or table
+  switch still posts against the row it was typed for. A case open is the
+  one exception, and it is home.js's to make, not the hide's: `/api/note`
+  writes into whichever store is current, so a save that fired after the
+  `/api/case/open` swap would attach the previous case's `{source_id, rid}`
+  to an unrelated row of the new one — `openCase` blanks the rid before
+  the POST (and puts it back if the open fails). `openSource` hides the
+  pane only when it is actually **leaving** a table (`leaving = S.sourceId
+  !== id`, decided before `S.sourceId` is overwritten): every refresh idiom
+  — `loadSources()` with no select after a column add, a sidebar folder
+  op or closing some *other* tab, `openSource(S.sourceId)` from the
+  derived-column modal, the plugin API's `refreshSources()` — re-enters
+  `openSource` for the table already open, and an unconditional hide there
+  took the pane away under the analyst on all of them. `loadSources`'
+  empty-state branch (last tab closed, the table on screen removed) and
+  the case-open reset in home.js hide it too. Nothing reopens it in the
+  background: `ensurePage` and `maybeShowDetail` are gated on the pane
+  already being visible.
 - **The SQL pane has named sub-tabs** (`sql_tabs`, a per-case sidecar
   table; `list/create/update/delete/reorder_sql_tabs`, `/api/sql_tabs`,
   `renderSqlTabs` and friends in `static/js/sql.js`). Stored in the **case file**, not

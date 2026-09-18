@@ -6,11 +6,16 @@ standing next to the SQL editor, the notes page or a plugin tab, showing a
 row of a grid that wasn't on screen — and with `d` and Escape gated to the
 grid, its own Close button was the only way out. Now it closes when a page
 takes over the main area, stays closed when the grid comes back, and closes
-on a table switch, where the row it shows belongs to the table being left.
+when the grid leaves the table it was showing — a switch to another table,
+or the last tab closing — while a refresh of the table already open, the
+idiom behind adding a column or closing some other tab, leaves it be.
 """
 import pytest
 
 pytestmark = pytest.mark.ui
+
+NOTE_BINDING = ("() => [document.getElementById('noteInput').dataset.rid,"
+                " document.getElementById('noteInput').dataset.sourceId]")
 
 
 def _open_pane(page):
@@ -80,10 +85,9 @@ def test_switching_tables_closes_the_pane_without_unbinding_the_note_box(page, t
     page.wait_for_function("() => __winnow.S.sources.some((s) => s.name === 'other.csv')")
     other_id = page.evaluate("() => __winnow.S.sources.find((s) => s.name === 'other.csv').id")
     home_id = page.evaluate("() => __winnow.S.sourceId")
-    binding = "() => [document.getElementById('noteInput').dataset.rid, document.getElementById('noteInput').dataset.sourceId]"
     try:
         _open_pane(page)
-        bound = page.evaluate(binding)
+        bound = page.evaluate(NOTE_BINDING)
         assert bound[0] and bound[1]
         page.evaluate("(id) => __winnow.openSource(id)", other_id)
         page.wait_for_function("(id) => __winnow.S.sourceId === id && !!__winnow.S.view", arg=other_id)
@@ -91,14 +95,47 @@ def test_switching_tables_closes_the_pane_without_unbinding_the_note_box(page, t
         # Hidden, not unbound: the note autosave is a debounce that reads the
         # box's rid/source_id when it fires, so a note typed just before the
         # switch has to post against the row it was typed for.
-        assert page.evaluate(binding) == bound
+        assert page.evaluate(NOTE_BINDING) == bound
     finally:
         # Shared server: take the extra table away and put the grid back on
         # the fixture table the other modules expect.
         page.evaluate("""(id) => fetch('/api/source/' + id, { method: 'DELETE',
           headers: { 'X-Timeline-Lite-Client': '1' } })""", other_id)
         page.evaluate("(id) => __winnow.loadSources(id)", home_id)
-        page.evaluate("(id) => __winnow.openSource(id)", home_id)
         page.wait_for_function("(id) => __winnow.S.sourceId === id && !!__winnow.S.view", arg=home_id)
-        page.wait_for_selector(".row")
     assert page.evaluate("() => __winnow.S.sources.some((s) => s.name === 'other.csv')") is False
+
+
+def test_a_refresh_of_the_same_table_leaves_the_pane_open(page):
+    # loadSources() with no select re-enters openSource for the table that is
+    # already open. That is the refresh idiom behind adding a column from the
+    # pane's own menu, a sidebar folder op and closing some OTHER tab — none
+    # of which leaves the table, so none of which should take the pane away.
+    _open_pane(page)
+    bound = page.evaluate(NOTE_BINDING)
+    reopened = page.evaluate("() => { const before = __winnow.S.view;"
+                             " return __winnow.loadSources().then(() => __winnow.S.view !== before); }")
+    assert reopened, "loadSources() did not go back through openSource"
+    assert page.locator("#detail").is_visible()
+    assert page.locator("#detailResize").is_visible()
+    assert page.evaluate(NOTE_BINDING) == bound
+
+
+def test_closing_the_last_tab_closes_the_pane(page):
+    # With no tab left, loadSources lands on the empty state rather than on
+    # another table — but the pane was still showing a row of the table just
+    # closed, note box bound to it.
+    home_id = page.evaluate("() => __winnow.S.sourceId")
+    _open_pane(page)
+    try:
+        page.evaluate("() => __winnow.closeAllTabs()")
+        page.wait_for_function("() => __winnow.S.sourceId === null && !document.getElementById('empty').hidden")
+        _assert_pane_closed(page)
+    finally:
+        # Shared server: give the fixture table its tab back.
+        page.evaluate("""(id) => fetch('/api/source/' + id + '/open', { method: 'POST',
+          headers: { 'X-Timeline-Lite-Client': '1', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ open: true }) }).then((r) => r.status)""", home_id)
+        page.evaluate("(id) => __winnow.loadSources(id)", home_id)
+        page.wait_for_function("(id) => __winnow.S.sourceId === id && !!__winnow.S.view", arg=home_id)
+    assert page.locator("#grid").is_visible()

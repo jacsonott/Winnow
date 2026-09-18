@@ -509,8 +509,13 @@ export function applyDetailPrefs() {
 /* The pane and its resize handle hide together. Hiding never touches
    #noteInput's dataset (rid/sourceId): saveNote is a 500 ms debounce that
    reads them when it fires, so a note typed just before the pane went
-   away still posts against the row it was typed for. Called on every
-   page switch (syncTabChrome), table switch (openSource) and case open,
+   away on a page or table switch still posts against the row it was
+   typed for — that row is still in the case. A case open is the one
+   place that does blank the rid, in home.js before the /api/case/open
+   POST, because a save that fired after the store swap would land the
+   previous case's {source_id, rid} in the new one. Called on every page
+   switch (syncTabChrome), on leaving a table (openSource, and the empty
+   state loadSources lands on when the last tab closes) and on case open,
    as well as by the pane's own Close button and the `d` toggle. */
 export function hideDetailPane() {
   $('detail').hidden = true;

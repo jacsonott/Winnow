@@ -106,10 +106,21 @@ export function describeCaseHolder(holder) {
 }
 
 export async function openCase(path, opts = {}) {
+  // A note save still inside its 500 ms debounce fires after the server
+  // has swapped stores, and /api/note writes into whichever store is
+  // current — the previous case's {source_id, rid} landing on an unrelated
+  // row of this one. saveNote drops a write with no rid, so the binding
+  // is blanked before the POST rather than after it. Only here: a page or
+  // table switch within a case leaves the binding alone, since the row it
+  // names is still in the case (see hideDetailPane in detail.js).
+  const note = $('noteInput');
+  const boundRid = note.dataset.rid;
+  note.dataset.rid = '';
   let res;
   try {
     res = await post('/api/case/open', { path, force: !!opts.force });
   } catch (e) {
+    note.dataset.rid = boundRid;   // nothing was opened: same case, same row
     if (e.status === 409 && e.detail && e.detail.error === 'case_in_use') {
       const go = await confirmDialog(describeCaseHolder(e.detail.holder), {
         okLabel: 'Open anyway', cancelLabel: 'Don\u2019t open', danger: true,
