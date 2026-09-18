@@ -6,6 +6,7 @@ import { openFilterBuilder } from './filterbuilder.js';
 import { $, ROW_H } from './core.js';
 import { currentModalAction, repaintOpenMenus, closeModal } from './ui.js';
 import { toggleDetailPane } from './detail.js';
+import { toggleHistogram } from './histogram.js';
 import { filterBySelectedCell, openValuePickerForColumn, selectedCellTarget } from './filters.js';
 import { headH, moveCursor, render, selectCellRangeRows, toggleCursorRow } from './grid.js';
 import { dropGrouping, handleCopyShortcut, toggleGrouping } from './grouping.js';
@@ -67,6 +68,7 @@ export const DEFAULT_KEYMAP = {
   saveDefaultLayout: ['L'],
   toggleTimeRange: ['r'],
   openTimeRange: ['R'],
+  toggleHistogram: ['h'],
   toggleGrouping: ['X'],
   openFilterSql: ['Q'],
   openJumpTs: ['J', 'a'],
@@ -98,6 +100,7 @@ export const ACTION_LABELS = {
   saveDefaultLayout: "Save this column order/visibility as the default for this header set",
   toggleTimeRange: 'Toggle the timeframe filter on/off',
   openTimeRange: 'Open the timeframe filter (set column/range)',
+  toggleHistogram: 'Show/hide the histogram of when the rows in this view happened',
   toggleGrouping: 'Toggle grouping off/on (remembers the last grouping)',
   openFilterSql: 'Open the current filter as a query in the SQL pane',
   openJumpTs: 'Jump to timestamp… (set the moment and column)',
@@ -322,6 +325,7 @@ export const ACTION_HANDLERS = {
   saveDefaultLayout: () => saveDefaultLayout(),
   toggleTimeRange: () => toggleTimeRange(),
   openTimeRange: () => openTimeRangeModal(),
+  toggleHistogram: () => toggleHistogram(),
   toggleGrouping: () => toggleGrouping(),
   openFilterSql: () => openFilterSqlTab(),
   openJumpTs: () => openJumpTsModal(),

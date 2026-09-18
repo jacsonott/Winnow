@@ -68,6 +68,7 @@ split, found by loading the app:
 | `grouping` `tags` `rowmenu` `detail` | group-by; tagging and undo; the row right-click menu; the detail pane |
 | `sources` `importer` `merge` `tables` | sources/tabs/sidebar; every import path; the merge builder; the Tables manager |
 | `search` `sql` `timeline` `session` `plugins` | toolbar + search-all; the SQL pane; the timeline tab; session files; the plugin host frontend |
+| `histogram` | the built-in histogram strip between the toolbar and the grid — the time-proportional canvas, the brush that writes the timeframe filter, the `winnow.histogram` prefs; shares `#pluginPanels` with plugin toolbar panels (see [ui.md](ui.md)) |
 | `ui` `keymap` `settings` `home` | modal/dialog/menu primitives; keybindings; the Settings modal; the home screen and `boot()` |
 | `main` | imports everything, calls each `wire*()`, runs the startup sequence, exposes `window.__winnow` |
 
