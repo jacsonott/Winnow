@@ -566,7 +566,7 @@ export let opCancelCurrent = null;
 
 export function armOpCancel(token, delay = 1200) {
   const btn = $('busyCancel');
-  const timer = setTimeout(() => {
+  const show = () => {
     opCancelCurrent = token;
     btn.onclick = () => {
       btn.disabled = true;
@@ -574,7 +574,13 @@ export function armOpCancel(token, delay = 1200) {
     };
     btn.disabled = false;
     btn.hidden = false;
-  }, delay);
+  };
+  // No delay means claim it NOW, not on the next turn of the event loop:
+  // the only caller that asks for one is a build taking the chip over
+  // from the build it just superseded (view.js), and that build's disarm
+  // runs on the rejection its abort caused — a microtask, ahead of any
+  // timer — so a zero timer here would still let the chip blink off.
+  const timer = delay ? setTimeout(show, delay) : (show(), 0);
   return () => {
     clearTimeout(timer);
     if (opCancelCurrent === token) {

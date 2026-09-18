@@ -102,7 +102,12 @@ def test_switching_tables_closes_the_pane_without_unbinding_the_note_box(page, s
         bound = page.evaluate(NOTE_BINDING)
         assert bound[0] and bound[1]
         page.evaluate("(id) => { __winnow.openSource(id); }", other_id)
-        page.wait_for_function("(id) => __winnow.S.sourceId === id && !!__winnow.S.view", arg=other_id, timeout=30_000)
+        # The NEW table's own view, not merely a truthy S.view: S.sourceId
+        # is swapped before the build for it lands, so the weaker wait
+        # passes with the previous table's view still installed — and the
+        # finally below then removes a table whose build is in flight.
+        page.wait_for_function("(id) => __winnow.S.sourceId === id && !!__winnow.S.view"
+                               " && __winnow.S.view.source_id === id", arg=other_id, timeout=30_000)
         _assert_pane_closed(page)
         # Hidden, not unbound: the note autosave is a debounce that reads the
         # box's rid/source_id when it fires, so a note typed just before the

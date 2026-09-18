@@ -143,10 +143,17 @@ function stopIndicator(seq, restore) {
   return before;
 }
 
-/* The stats line a landed view writes. */
+/* The stats line a landed view writes. The table it is for can be gone
+   by then — Remove drops the record from S.sources while a build for it
+   is still in flight, and the landing is a beat behind — so the record is
+   optional here: with no table to give a total, the view's own count is
+   the honest denominator (it held every row it found). A throw instead
+   would take the rest of installView with it, leaving the grid half
+   swapped. */
 function statsLine(v) {
   const src = S.sources.find((s) => s.id === S.sourceId);
-  return `<b>${v.row_count.toLocaleString()}</b> of ${src.row_count.toLocaleString()} rows · ${v.elapsed_ms} ms`;
+  const total = src ? src.row_count : v.row_count;
+  return `<b>${v.row_count.toLocaleString()}</b> of ${total.toLocaleString()} rows · ${v.elapsed_ms} ms`;
 }
 
 /* The row the analyst is at, as an identity that survives a rebuild
@@ -553,6 +560,21 @@ async function runBuild({ keepScroll = true, keepRow = true, detachAfterMs = nul
   const chipUp = cancelInflight();
   const controller = new AbortController();
   inflight = { token: spec.op_token, controller, seq, sourceId: forSourceId };
+  // The chip cancels a BUILD — cancel_op interrupts the statement its
+  // token is registered under. An adopt registers nothing, and its wait,
+  // if any, is for the writer lock, which no cancel shortens: the chip
+  // stays down for one, and comes up only if the adopt 409s into a
+  // rebuild (adoptOrRebuild arms it before posting /api/view). Armed
+  // here, at the supersede, when the build being superseded already had
+  // its chip up: that build disarms the moment its aborted fetch
+  // rejects, which is long before the keys lookup below lets this one
+  // reach its own arming point, and the chip a long search put up would
+  // blink off on every keystroke — a button the analyst reaches for and
+  // finds gone. Idempotent, so the call below is still the one that arms
+  // a build nobody was cancelling yet.
+  let disarmCancel = null;
+  const armChip = () => { if (!disarmCancel) disarmCancel = chipUp ? armOpCancel(spec.op_token, 0) : armOpCancel(spec.op_token); };
+  if (chipUp && !fetchView) armChip();
   // See the remap below: what's picked, as row ids, while the old view is
   // still there to ask. Explicit picks only — a select-all is a statement
   // about THIS view. Capped: nobody remaps a hundred thousand hand-picks.
@@ -566,24 +588,20 @@ async function runBuild({ keepScroll = true, keepRow = true, detachAfterMs = nul
   }
   // Superseded during that lookup: the newer rebuild has already cancelled
   // this one's token and aborted its controller, and none of this one's
-  // chrome — busy bar, chip, indicator — has started, so there is nothing
+  // chrome — busy bar, indicator — has started, so there is nothing else
   // to undo. Starting it now would put this rebuild's indicator over the
   // newer one's and then, in the finally below, take it down and restore
   // the old count while the build that is actually running goes unmarked.
-  if (seq !== rebuildSeq) return;
+  // The chip claimed above is handed straight on: that newer rebuild
+  // claimed it in turn as it superseded this one, so this disarm finds
+  // the chip owned by another token and leaves it standing.
+  if (seq !== rebuildSeq) { if (disarmCancel) disarmCancel(); return; }
   pendingKeys = keys ? { sourceId: forSourceId, keys } : null;
   let v;
   let seeded = [];
   let pos = null;
   const t0 = performance.now();
   setBusy(true);
-  // The chip cancels a BUILD — cancel_op interrupts the statement its
-  // token is registered under. An adopt registers nothing, and its wait,
-  // if any, is for the writer lock, which no cancel shortens: the chip
-  // stays down for one, and comes up only if the adopt 409s into a
-  // rebuild (adoptOrRebuild arms it before posting /api/view).
-  let disarmCancel = null;
-  const armChip = () => { if (!disarmCancel) disarmCancel = chipUp ? armOpCancel(spec.op_token, 0) : armOpCancel(spec.op_token); };
   if (!fetchView) armChip();
   startIndicator(seq, forSourceId, spec);
   // The chrome comes down once, whichever way this build leaves — the
@@ -745,6 +763,10 @@ export async function installView(v, { seq, forSourceId, cacheKey, seeded = [], 
   // read the frozen label as the text to come back to on a cancel — then
   // put it back as the permanent stats line. The remap doesn't change
   // the count, so nothing here waits on it.
+  //
+  // The record is optional, for the reason statsLine's is: Remove takes
+  // the table out of S.sources while a build for it can still be in
+  // flight, and this landing runs against the list as it is now.
   const src = S.sources.find((s) => s.id === S.sourceId);
   $('viewStats').innerHTML = statsLine(v);
   // Picks are positions, and positions mean different rows now — but the
@@ -815,7 +837,8 @@ export async function installView(v, { seq, forSourceId, cacheKey, seeded = [], 
   // server-side, from inside build_view's contains and advanced branches
   // (Store._ensure_fts_building; regex never indexes) — and the view's
   // payload says nothing about it. The client has to ask: followFtsBuild.
-  if (!src.has_fts && spec.search_mode !== 'regex' && specSearchTerm(spec)) followFtsBuild(src.id);
+  // …and a table that is gone has no index build to follow.
+  if (src && !src.has_fts && spec.search_mode !== 'regex' && specSearchTerm(spec)) followFtsBuild(src.id);
 }
 
 /* `detachAfterMs`: leave the build to finish in the background once it

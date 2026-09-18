@@ -11,14 +11,14 @@
    docs/design/analysis-suite.md. */
 
 import { $, api, el, post, toast } from './core.js';
-import { clearPageCache, render } from './grid.js';
-import { clearGroupPageCache, drawRail } from './grouping.js';
+import { render } from './grid.js';
+import { drawRail, regroupIfGroupedByTag } from './grouping.js';
 import { createNotice } from './jobs.js';
 import { recordTabVisit } from './tabhistory.js';
-import { showMainView, syncTabChrome } from './sql.js';
+import { gridIsShowing, showMainView, syncTabChrome } from './sql.js';
 import { renderSidebar, sourceLabel, syncTabSelection } from './sources.js';
 import { S } from './state.js';
-import { refreshTagCounts } from './tags.js';
+import { clearRowCaches, refreshTagCounts } from './tags.js';
 import { modal } from './ui.js';
 import { jumpToTimelineRow } from './timeline.js';
 
@@ -293,17 +293,21 @@ async function finishScan(rec, job) {
     rec.notice.done({ detail: `${hitsLabel(total)} · ${tablesLabel(job.scanned)} · ${secs}`, sticky: false, actions: [] });
   }
   if (S.view && openTableWasTagged(job)) {
-    // clearRowCaches() once PR 2 lands; both caches, for the same reason it exists.
-    clearPageCache();
-    clearGroupPageCache();
+    clearRowCaches();
     refreshTagCounts();
+    // The same trio every other tag path ends in: the rows, the rail, and
+    // — under a grouping BY TAG — the tree, whose buckets and counts are
+    // the pre-tag ones, so the rows this scan tagged would sit in
+    // "(untagged)" until the analyst regrouped by hand.
+    //
     // The repaint itself waits for the grid to be showing. Against a grid
-    // a page tab hides, render() measures a zero-height viewport and
-    // paints the first rows at the top; the return to the tab then
-    // restores the real scroll position over an empty viewport. The
-    // paths that only re-show the grid (Alt+1, tab history, the mouse
-    // thumb buttons) repaint on the way back — showGridTab.
-    if (S.activeTab === 'grid') { render(); drawRail(); } else S.gridRepaintPending = true;
+    // a page tab (or the home screen) hides, render() measures a
+    // zero-height viewport and paints the first rows at the top; the
+    // return then restores the real scroll position over an empty
+    // viewport. The paths that only re-show the grid (Alt+1, tab history,
+    // the mouse thumb buttons) pay the owed repaint on the way back —
+    // showGridTab, which regroups with it.
+    if (gridIsShowing()) { render(); drawRail(); regroupIfGroupedByTag(); } else S.gridRepaintPending = true;
   }
   paintScanStatus(job);
   if (S.activeTab === 'watchlist') await load();

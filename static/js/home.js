@@ -143,6 +143,14 @@ export async function openCase(path, opts = {}) {
   resetJobState();
   resetDerivedSuggestions();
   S.diffMarks = null;    // a comparison's rids belong to the previous case's tables too
+  // A repaint a watchlist scan left owed was owed to the PREVIOUS case's
+  // grid — its rows are gone with the Store that held them, and this
+  // case's table paints itself on the way in (loadSources below). Carried
+  // over, the first return to the grid here would pay a debt nobody owes:
+  // a second pass over the new rows, rail and regroup included. The
+  // showGridTab call further down consumes it, but only from a page tab;
+  // a case opened with the grid already showing never goes through it.
+  S.gridRepaintPending = false;
   S.tabOrder = [];
   // Another case's tab history points at ids that mean nothing here.
   clearTabHistory();

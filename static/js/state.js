@@ -108,7 +108,7 @@ export const S = {
   homeSearch: '',          // home screen's case/group name filter, persisted across re-renders
   homeShowOlder: false,    // reveals cases not opened in >30 days once toggled
   activeTab: 'grid',       // 'grid' or a page tab's key ('sql' | 'timeline' | 'plugin:<id>') — which of #grid/#sqlview/#timelineview/.pluginview is up
-  gridRepaintPending: false, // a background job (the watchlist scan's auto-tags) invalidated the row caches while a page tab hid the grid — showGridTab repaints on the way back
+  gridRepaintPending: false, // a background job (the watchlist scan's auto-tags) dropped the row caches while the grid was off screen (a page tab, or the home screen) — showGridTab consumes it on the way back and pays it (render, rail, regroup-by-tag) unless the caller is painting for itself
   tabOrder: [],            // source/merge ids, drag-reordered — ids not listed here sort after, in loadSources() order
   tempCase: false,         // the open case is a quick look — gates the home-navigation guard
   tabHistory: [],          // recently visited page tabs, mouse back/forward — see tabhistory.js

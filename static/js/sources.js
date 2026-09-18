@@ -1564,7 +1564,13 @@ async function landOnFilters(filters, tree, { clearTimeframe = false } = {}) {
   updateFiltersButton();
   $('search').value = '';
   renderHead(); renderTagRibbon();
-  if (S.searchMode !== 'contains') await setSearchMode('contains'); // also rebuilds the view
+  // Either way one awaited build, never a detaching one: the two lines
+  // below act on the view it lands (docs/notes/ui.md — a build that goes
+  // to the background resolves with the old view still installed, and
+  // syncSearchExpansion and recenterOnRow would then run against the
+  // rows this function just cleared, under chrome already showing the
+  // cleared state).
+  if (S.searchMode !== 'contains') await setSearchMode('contains', { detach: false }); // also rebuilds the view
   else await rebuildView({ keepScroll: false });
   syncSearchExpansion(false);
   await recenterOnRow(anchor);

@@ -62,31 +62,65 @@ def test_a_one_column_table_takes_the_whole_grid(page, api, ui_csv):
         api(f"/api/sources/{sid}", "DELETE")
 
 
-def test_toolbar_and_header_keep_their_shape_on_a_laptop(page):
-    # Tag a couple of rows so the chips carry counts, as a real case's do.
-    page.locator("#body .row").nth(0).click(); page.keyboard.press("1")
-    page.locator("#body .row").nth(1).click(); page.keyboard.press("2")
-    page.wait_for_function("() => [...document.querySelectorAll('.tag-chip .n')].some((n) => n.textContent === '1')")
-    page.set_viewport_size({"width": 1024, "height": 640})
-    page.click("#btnSearchToggle")
-    page.wait_for_selector("#search:visible")
-    page.wait_for_timeout(200)
-    # Every chip is one line; no chip sits under the row count.
-    chips = page.evaluate("() => [...document.querySelectorAll('#tagRibbon .tag-chip')].map((c) => { const r = c.getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height }; })")
-    assert chips and all(c["h"] < 30 for c in chips), chips
-    stats = _rect(page, "#viewStats")
-    for c in chips:
-        overlap = not (c["x"] + c["w"] <= stats["x"] or stats["x"] + stats["w"] <= c["x"]
-                       or c["y"] + c["h"] <= stats["y"] or stats["y"] + stats["h"] <= c["y"])
-        assert not overlap, (c, stats)
-    # The header's buttons never break their labels, and the table strip
-    # keeps enough room to show the open table.
-    assert _single_line(page, "#btnSearchAll") and _single_line(page, "#btnCase")
-    assert _rect(page, "#sourceTabs")["w"] >= 140
-    assert page.locator("#sourceTabs .tab").first.is_visible()
-    # And the toolbar's own buttons are still one line each.
-    for sel in ("#btnTimeRange", "#btnFilters", "#btnReset"):
-        assert _single_line(page, sel), sel
+def _tag_row_with_hotkey(page, nth, hotkey):
+    """Tag the nth painted row by pressing its tag's hotkey, and hand back
+    what it takes to put that row back: (tag id, source id, rid)."""
+    row = page.locator("#body .row").nth(nth)
+    pos = int(row.get_attribute("data-pos"))
+    source_id, rid = page.evaluate("(p) => { const r = __winnow.rowAt(p); return [r.source_id, r.rid]; }", pos)
+    tag_id = page.evaluate("(k) => __winnow.S.tags.find((t) => String(t.hotkey) === k).id", hotkey)
+    # The hotkey toggles: on a row that already wears the tag it would take
+    # it off, and the wait below would sit there. Say so instead.
+    has = "([p, id]) => (__winnow.rowAt(p)?.tags || []).includes(id)"
+    assert not page.evaluate(has, [pos, tag_id]), f"row {pos} already carries tag {tag_id}"
+    row.click()
+    page.keyboard.press(hotkey)
+    page.wait_for_function(has, arg=[pos, tag_id])
+    return tag_id, source_id, rid
+
+
+def test_toolbar_and_header_keep_their_shape_on_a_laptop(page, api):
+    # Tag a couple of rows so the chips carry counts, as a real case's do —
+    # the counts are what these measurements are about, so they have to be
+    # real. The server's case is shared by the whole UI session, though, so
+    # the tags come off again before this test hands it on: a row left
+    # striped is a row the next module finds already tagged (the watchlist
+    # scan's repaint tests read the stripes in the viewport). Untagged by
+    # row identity, straight to the server, so the cleanup leans on neither
+    # the cached row object nor a hotkey press resolving to "untag" from
+    # it — and the ribbon's own counts say the case really is as it was
+    # found.
+    source_id = page.evaluate("() => __winnow.S.sourceId")
+    counts = api(f"/api/tags?source_id={source_id}")["counts"]
+    tagged = []
+    try:
+        tagged.append(_tag_row_with_hotkey(page, 0, "1"))
+        tagged.append(_tag_row_with_hotkey(page, 1, "2"))
+        page.wait_for_function("() => [...document.querySelectorAll('.tag-chip .n')].some((n) => n.textContent === '1')")
+        page.set_viewport_size({"width": 1024, "height": 640})
+        page.click("#btnSearchToggle")
+        page.wait_for_selector("#search:visible")
+        page.wait_for_timeout(200)
+        # Every chip is one line; no chip sits under the row count.
+        chips = page.evaluate("() => [...document.querySelectorAll('#tagRibbon .tag-chip')].map((c) => { const r = c.getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height }; })")
+        assert chips and all(c["h"] < 30 for c in chips), chips
+        stats = _rect(page, "#viewStats")
+        for c in chips:
+            overlap = not (c["x"] + c["w"] <= stats["x"] or stats["x"] + stats["w"] <= c["x"]
+                           or c["y"] + c["h"] <= stats["y"] or stats["y"] + stats["h"] <= c["y"])
+            assert not overlap, (c, stats)
+        # The header's buttons never break their labels, and the table strip
+        # keeps enough room to show the open table.
+        assert _single_line(page, "#btnSearchAll") and _single_line(page, "#btnCase")
+        assert _rect(page, "#sourceTabs")["w"] >= 140
+        assert page.locator("#sourceTabs .tab").first.is_visible()
+        # And the toolbar's own buttons are still one line each.
+        for sel in ("#btnTimeRange", "#btnFilters", "#btnReset"):
+            assert _single_line(page, sel), sel
+    finally:
+        for tag_id, sid, rid in tagged:
+            api("/api/row_tags", "POST", {"pairs": [[sid, rid]], "tag_id": tag_id, "on": False})
+        assert api(f"/api/tags?source_id={source_id}")["counts"] == counts
 
 
 def test_tab_strip_fades_the_edge_with_more_tabs_behind_it(page):
