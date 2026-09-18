@@ -435,7 +435,12 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
    regardless). The two **whole-case xlsx exports** (tagged rows from
    all tables, all tables) write one sheet per real source and none for
    a merge: every merge row is a member row and lands on that member's
-   sheet — only a merge-level derived column doesn't travel.
+   sheet — only a merge-level derived column doesn't travel. The
+   **watchlist scan** skips merges the same way (`_iter_watchlist_scan`;
+   `scan_source` of a negative id matches nothing): its hits are keyed
+   `(source_id, rid)` on the real table, so a merge's rows are scanned
+   and tagged through their members and its hits pane lists real
+   tables only.
 
 10. **A session is a snapshot, not a dimension.** Named sessions live in
    the case file's `sessions` table as whole `winnow-case-session/1`

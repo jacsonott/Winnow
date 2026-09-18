@@ -50,7 +50,9 @@ def test_scan_elsewhere_raises_a_notice_with_a_way_to_the_hits(page, indicator):
     page.evaluate("() => __winnow.showSqlTab()")
     page.wait_for_selector("#sqlview:not([hidden])")
     page.evaluate("() => __winnow.scanWatchlistForSources([1])")
-    row = page.locator("#jobsPanel .job-notice", has_text="Watchlist")
+    # The scan's own progress row becomes the alert when it lands, so wait
+    # for the finished form — the one carrying the way to the hits.
+    row = page.locator("#jobsPanel .job-notice", has_text="Open watchlist")
     row.wait_for(state="visible", timeout=10_000)
     assert "hits" in row.locator(".job-name").inner_text()
     assert "in ui.csv" in row.locator(".job-detail").inner_text()

@@ -129,6 +129,19 @@ see [docs/notes/README.md](README.md) for the whole set.
   `closed_database_handler` deliberately still does not. `_jobs_running`
   counts running view jobs, so idle shutdown cannot reap a search whose
   window was closed. `tests/test_view_jobs.py`.
+- **The watchlist scan routes** — `POST /api/watchlist/scan/start` (body
+  `{source_ids?, watchlist_ids?}`, both optional), `GET
+  /api/watchlist/scan/job?job_id=`, `POST /api/watchlist/scan/cancel?job_id=`
+  — are plain `def` like the search-all job's; the scan runs on a Store
+  thread and start answers with the record at once (see
+  [store.md](store.md)). `/api/watchlist/scan/job` 404s for a superseded
+  id (the poller's cue to stop), cancel's miss is `cancelled: false`, and
+  `_jobs_running` counts a running scan. The synchronous `POST
+  /api/watchlist/scan?source_id=&watchlist_id=` stays: profile apply
+  scans inline while it seeds a watchlist, and tests use it. `POST
+  /api/watchlist` answers 400 for an exact duplicate value; the two
+  import routes return `added_ids` so the client scans for the new
+  entries only; `GET /api/watchlist/hits` answers `{sources, hits}`.
 - `run_sql` (the SQL pane) allows arbitrary SELECT/EXPLAIN on purpose, but
   blacklists `ATTACH`/`DETACH`/`PRAGMA`/`VACUUM` as defense-in-depth — none of
   those serve a read-only ad-hoc query pane. CSV export runs every cell through

@@ -31,7 +31,7 @@ import sqlite3
 import tempfile
 import threading
 import time
-from typing import Any, Iterable, Iterator, Sequence
+from typing import Any, Callable, Iterable, Iterator, Sequence
 
 from openpyxl import Workbook
 
@@ -1413,6 +1413,10 @@ class Store:
         # per source, each building a *held* view that evicts nothing until
         # the client adopts it — see build_view(hold=True) / adopt_view.
         self._view_jobs = _JobRegistry()
+        # The watchlist scan runs the same way (start_watchlist_scan_job):
+        # one live job for the case, its writes one locked unit per
+        # (indicator, source), cancelled between units.
+        self._scan_jobs = _JobRegistry()
 
         # Ingest jobs — same fire-and-forget-with-a-registry shape as the
         # search-all job above, but plural: a directory import legitimately
@@ -1949,6 +1953,18 @@ class Store:
             if j["status"] == "running":
                 self.cancel_op(j["token"])
         for j in view_jobs:
+            t = j.get("thread")
+            if t and t is not threading.current_thread() and t.is_alive():
+                t.join(15)
+        # The watchlist scan is a writer too (hits, auto-tags). Its stop
+        # is cooperative between (indicator, source) units and a unit's
+        # write re-checks `closing` under the lock, so a worker the join
+        # outwaits still never reaches the closed connection.
+        self._scan_jobs.closing = True
+        scan_jobs = self._scan_jobs.live()
+        for j in scan_jobs:
+            self._scan_jobs.request_discard(j)
+        for j in scan_jobs:
             t = j.get("thread")
             if t and t is not threading.current_thread() and t.is_alive():
                 t.join(15)
@@ -4184,7 +4200,9 @@ class Store:
             self.db.execute(f"DROP TABLE IF EXISTS {q(src['table_name'])}")
             self.db.execute(f"DROP TABLE IF EXISTS {q('fts_' + str(source_id))}")
             self.db.execute(f"DROP VIEW IF EXISTS {q(src['table_name'] + '_doc')}")
-            for t in ("row_tags", "row_notes"):
+            # watchlist_hits too: the id is reused by the next import (below),
+            # and a hit left keyed by it would sit under that file's name.
+            for t in ("row_tags", "row_notes", "watchlist_hits"):
                 self.db.execute(f"DELETE FROM {t} WHERE source_id=?", (source_id,))
             self.db.execute("DELETE FROM layouts WHERE source_id=?", (source_id,))
             self.db.execute("DELETE FROM saved_views WHERE source_id=?", (source_id,))
@@ -7418,68 +7436,276 @@ class Store:
         if not value:
             raise ValueError("An indicator needs a value")
         with self.lock, self.db:
+            # An exact duplicate is refused, not added twice. The imports
+            # already dedupe by value; a second Add of the same value — the
+            # retype after "nothing happened" — made a second row carrying
+            # the same hits, and nothing ever told the analyst.
+            if self.db.execute("SELECT 1 FROM watchlist WHERE value=?", (value,)).fetchone():
+                raise ValueError(f"{value} is already on the watchlist")
             cur = self.db.execute(
                 "INSERT INTO watchlist(value, kind, note, auto_tag_id, created_at)"
                 " VALUES (?,?,?,?,?)",
                 (value, kind or "other", note, auto_tag_id, time.strftime("%Y-%m-%dT%H:%M:%S")))
         return self._indicator(cur.lastrowid)
 
-    def _indicator(self, wid: int) -> dict:
-        with self.lock:
-            r = self.db.execute("SELECT * FROM watchlist WHERE id=?", (wid,)).fetchone()
-            n = self.db.execute("SELECT COUNT(*) c FROM watchlist_hits WHERE watchlist_id=?", (wid,)).fetchone()["c"]
+    _INDICATOR_SQL = (
+        "SELECT w.id, w.value, w.kind, w.note, w.auto_tag_id, COUNT(h.rid) AS hit_count"
+        " FROM watchlist w LEFT JOIN watchlist_hits h ON h.watchlist_id = w.id"
+    )
+
+    @staticmethod
+    def _indicator_dict(r: sqlite3.Row) -> dict:
         return {"id": r["id"], "value": r["value"], "kind": r["kind"], "note": r["note"],
-                "auto_tag_id": r["auto_tag_id"], "hit_count": n}
+                "auto_tag_id": r["auto_tag_id"], "hit_count": r["hit_count"]}
+
+    def _indicator(self, wid: int) -> dict:
+        with self._reader() as ro:
+            r = ro.execute(self._INDICATOR_SQL + " WHERE w.id=? GROUP BY w.id", (wid,)).fetchone()
+        if r is None:
+            raise KeyError(f"No indicator {wid}")
+        return self._indicator_dict(r)
 
     def list_indicators(self) -> list[dict]:
-        with self.lock:
-            rows = self.db.execute("SELECT id FROM watchlist ORDER BY id").fetchall()
-        return [self._indicator(r["id"]) for r in rows]
+        """Every indicator with its hit count: one LEFT JOIN … GROUP BY on
+        the reader pool. This is behind /api/watchlist and the tab-badge
+        poll, and as N+1 queries under self.lock it queued behind every
+        scan and view build in progress (invariant #4)."""
+        with self._reader() as ro:
+            rows = ro.execute(self._INDICATOR_SQL + " GROUP BY w.id ORDER BY w.id").fetchall()
+        return [self._indicator_dict(r) for r in rows]
 
     def delete_indicator(self, wid: int) -> None:
         with self.lock, self.db:
             self.db.execute("DELETE FROM watchlist WHERE id=?", (wid,))
             self.db.execute("DELETE FROM watchlist_hits WHERE watchlist_id=?", (wid,))
 
-    def scan_source(self, source_id: int) -> dict:
-        """Scan one source for every indicator: find matching rids (a
-        substring match over all columns, the same blob search-all uses),
-        record them in watchlist_hits, and — for indicators with an
-        auto_tag_id — tag those rows through the normal tag path (undoable,
-        on the rail). Idempotent: a source's hits for a watchlist are
-        replaced each scan. Returns per-indicator match counts."""
-        src = self.get_source(source_id)
-        if src.get("is_merge"):
-            return {"source_id": source_id, "matched": {}}   # merges have no src_N of their own
-        blob = _blob_expr([c["name"] for c in self._base_cols(src)])
+    def _watchlist_match_sql(self, src: dict, cols: list[str], value: str) -> tuple[str, tuple]:
+        """The rid SELECT for one indicator against one source: the two
+        WHERE shapes _search_all_count_sql uses — the trigram index's bare
+        `doc LIKE ?` when the source has one built and _fts_like_pattern
+        accepts the value, the escaped blob LIKE otherwise — without its
+        LIMIT. A scan is not a count: every matching rid is written to
+        watchlist_hits and, for an auto-tag indicator, tagged, so it has to
+        be complete — a capped scan would tag part of the matches and say
+        nothing, the silent-partial-triage failure invariant #7 exists to
+        prevent. Both shapes fold case for ASCII only, exactly as the
+        `instr(lower(blob), lower(?))` scan this replaced did, so the hits
+        are the same rows by construction."""
         table = q(src["table_name"])
+        pattern = _fts_like_pattern(value)
+        if src.get("has_fts") and pattern is not None:
+            fts_ident = q("fts_" + str(src["id"]))
+            return (f"SELECT rid FROM {table} WHERE rid IN "
+                    f"(SELECT rowid FROM {fts_ident} WHERE doc LIKE ?) ORDER BY rid", (pattern,))
+        return (f"SELECT rid FROM {table} WHERE ({_blob_expr(cols)}) LIKE ? ESCAPE '\\' ORDER BY rid",
+                (f"%{_esc_like(value)}%",))
+
+    def _scan_unit(self, src: dict, cols: list[str], ind: dict) -> tuple[int, bool] | None:
+        """One (indicator, source) unit of a scan: the match on a reader
+        connection, then one locked transaction that replaces that unit's
+        slice of watchlist_hits and auto-tags the matches. Returns
+        (match count, whether an auto-tag was written), or None when the
+        unit wrote nothing: the indicator was deleted while the match ran
+        — or its id was reused by another value, watchlist.id not being
+        AUTOINCREMENT — or the source went away, or the store is closing.
+
+        The match never holds self.lock. It is a full LIKE scan on a table
+        with no index yet, and under the lock (where it used to run, once
+        per indicator per table) it stalled every locked read — the tab
+        strip, the ribbon counts, tagging — for the length of the whole
+        scan. The write is one unit of committed work (invariant #4). It
+        re-reads the indicator under the lock because the match's copy is
+        stale by the time the write lands: hits written for a dead or
+        reused id would attach to the wrong indicator. The auto-tag goes
+        through _apply_tag_change inside the same transaction (invariant
+        #7), so a unit's hits and its tags land together or not at all."""
+        source_id, wid, value = src["id"], ind["id"], ind["value"]
+        sql, params = self._watchlist_match_sql(src, cols, value)
+        try:
+            with self._reader() as ro:
+                rids = [r[0] for r in ro.execute(sql, params)]
+        except sqlite3.Error:
+            return None   # the source (or its index) was dropped mid-scan; the next scan repairs
+        with self.lock:
+            # close() joins the scan worker before closing the connection,
+            # but the join is bounded; a worker that outlived it must not
+            # touch a connection that is going or gone.
+            if self._scan_jobs.closing:
+                return None
+            with self.db:
+                row = self.db.execute("SELECT value, auto_tag_id FROM watchlist WHERE id=?", (wid,)).fetchone()
+                if row is None or row["value"] != value:
+                    return None
+                self.db.execute("DELETE FROM watchlist_hits WHERE watchlist_id=? AND source_id=?",
+                                (wid, source_id))
+                tagged = False
+                if rids:
+                    self.db.executemany(
+                        "INSERT OR IGNORE INTO watchlist_hits(watchlist_id, source_id, rid) VALUES (?,?,?)",
+                        [(wid, source_id, rid) for rid in rids])
+                    if row["auto_tag_id"]:
+                        self._apply_tag_change(tag_id=int(row["auto_tag_id"]), on=True, source_id=source_id,
+                                               scope="rows", pairs=[(source_id, rid) for rid in rids])
+                        tagged = True
+        return len(rids), tagged
+
+    def _iter_watchlist_scan(
+        self, source_ids: list[int] | None = None, watchlist_ids: list[int] | None = None,
+        stop: Callable[[], bool] | None = None,
+    ) -> Iterator[tuple[int, int, dict | None]]:
+        """The scan itself — every indicator against every real source, or
+        the given subsets. Merges are skipped by design: a merge has no
+        src_N of its own, its rows are its members' and are scanned there
+        (CLAUDE.md invariant #9 lists this); errored sources too. Yields
+        `(0, total, None)` once up front, then `(scanned, total, info)` after
+        each source with info = {source_id, matched: {watchlist_id: count},
+        auto_tagged: bool} for the units that wrote (see _scan_unit), so a
+        caller can report progress. `stop` is asked between (indicator,
+        source) units and ends the scan early. One implementation behind
+        the synchronous scan_source/scan_all (profile apply, tests) and the
+        background job the UI runs, like _iter_search_all_sources."""
+        sources = [s for s in self.list_sources() if not s.get("is_merge") and not s.get("error")]
+        if source_ids is not None:
+            wanted = set(source_ids)
+            sources = [s for s in sources if s["id"] in wanted]
         indicators = self.list_indicators()
+        if watchlist_ids is not None:
+            wanted = set(watchlist_ids)
+            indicators = [i for i in indicators if i["id"] in wanted]
+        total = len(sources)
+        yield 0, total, None
+        for scanned, src in enumerate(sources, 1):
+            if scanned > 1:
+                # The same scheduling courtesy the search-all sweep takes
+                # between tables: back-to-back full scans must not pin a
+                # core against interactive requests.
+                time.sleep(0.02)
+            matched: dict[int, int] = {}
+            auto_tagged = False
+            if indicators:
+                cols = [c["name"] for c in self._base_cols(src)]
+                if not src.get("has_fts"):
+                    self._ensure_fts_building(src["id"])   # this scan takes the LIKE path; the next gets the index
+                for ind in indicators:
+                    if stop is not None and stop():
+                        return
+                    unit = self._scan_unit(src, cols, ind)
+                    if unit is not None:
+                        matched[ind["id"]] = unit[0]
+                        auto_tagged = auto_tagged or unit[1]
+            yield scanned, total, {"source_id": src["id"], "matched": matched, "auto_tagged": auto_tagged}
+
+    def scan_source(self, source_id: int, watchlist_ids: list[int] | None = None) -> dict:
+        """Synchronous scan of one source for every indicator (or the given
+        ones): the profile-apply path and tests; the UI runs the job below.
+        A merge (negative id) has no src_N of its own and scans as nothing
+        — its rows are its members', scanned there. Idempotent: a source's
+        hits for an indicator are replaced each scan. Returns per-indicator
+        match counts."""
         matched: dict[int, int] = {}
-        for ind in indicators:
-            wid = ind["id"]
-            with self.lock:
-                rids = [r["rid"] for r in self.db.execute(
-                    f"SELECT rid FROM {table} WHERE instr(lower({blob}), lower(?)) > 0",
-                    (ind["value"],)).fetchall()]
-            with self.lock, self.db:
-                self.db.execute(
-                    "DELETE FROM watchlist_hits WHERE watchlist_id=? AND source_id=?", (wid, source_id))
-                self.db.executemany(
-                    "INSERT OR IGNORE INTO watchlist_hits(watchlist_id, source_id, rid) VALUES (?,?,?)",
-                    [(wid, source_id, rid) for rid in rids])
-            matched[wid] = len(rids)
-            if ind["auto_tag_id"] and rids:
-                self.set_tags(source_id, rids, int(ind["auto_tag_id"]), True)
+        for _scanned, _total, info in self._iter_watchlist_scan([source_id], watchlist_ids):
+            if info:
+                matched.update(info["matched"])
         return {"source_id": source_id, "matched": matched}
 
-    def scan_all(self) -> dict:
+    def scan_all(self, watchlist_ids: list[int] | None = None) -> dict:
         total: dict[int, int] = {}
-        for s in self.list_sources():
-            if s.get("is_merge") or s.get("error"):
-                continue
-            for wid, n in self.scan_source(s["id"])["matched"].items():
+        for _scanned, _total, info in self._iter_watchlist_scan(None, watchlist_ids):
+            for wid, n in (info["matched"] if info else {}).items():
                 total[wid] = total.get(wid, 0) + n
         return {"matched": total}
+
+    # ----------------------------------------------- the scan as a job
+
+    WATCHLIST_SCAN_SLOT = "watchlist"   # one scan at a time for the whole case
+
+    def start_watchlist_scan_job(self, source_ids: list[int] | None = None,
+                                 watchlist_ids: list[int] | None = None) -> dict:
+        """Runs the scan on a daemon thread and answers at once with the
+        job's snapshot — the Add button used to sit in one POST for the
+        length of a scan of every table, with the new row invisible until
+        it ended. One live job per case (_JobRegistry): starting another
+        asks the running one to stop and makes its id unpollable, so a
+        poller on the old id gets None → 404 → stops. The record carries
+        progress (scanned/total), per-indicator and per-table match totals
+        as they land, and which tables an auto-tag was written to — the
+        client invalidates its row caches for the open one."""
+        job, old = self._scan_jobs.start(self.WATCHLIST_SCAN_SLOT, {
+            "source_ids": None if source_ids is None else [int(s) for s in source_ids],
+            "watchlist_ids": None if watchlist_ids is None else [int(w) for w in watchlist_ids],
+            "scanned": 0, "total": 0, "matched": {}, "by_source": {}, "auto_tagged": [],
+            "elapsed_ms": None,
+        })
+        if old is not None:
+            self._scan_jobs.request_discard(old)
+        t = threading.Thread(target=self._watchlist_scan_worker, args=(job,), daemon=True)
+        job["thread"] = t
+        t.start()
+        return self._scan_job_snapshot(job)
+
+    def _watchlist_scan_worker(self, job: dict) -> None:
+        """Cancellation is cooperative and checked between (indicator,
+        source) units — the registry's discard flag doubles as the stop
+        flag, since the scan has no result to drop — and close() sets the
+        registry closing before it joins this thread."""
+        t0 = time.time()
+        reg = self._scan_jobs
+
+        def stop() -> bool:
+            with reg.lock:
+                return reg.closing or bool(job["discard"])
+
+        try:
+            for scanned, total, info in self._iter_watchlist_scan(job["source_ids"], job["watchlist_ids"], stop):
+                with reg.lock:
+                    job["scanned"] = scanned
+                    job["total"] = total
+                    if info:
+                        for wid, n in info["matched"].items():
+                            job["matched"][wid] = job["matched"].get(wid, 0) + n
+                        job["by_source"][info["source_id"]] = sum(info["matched"].values())
+                        if info["auto_tagged"]:
+                            job["auto_tagged"].append(info["source_id"])
+        except Exception as e:  # noqa: BLE001 — surfaced to the UI as job.error
+            reg.finish(job, "error", error=str(e), elapsed_ms=int((time.time() - t0) * 1000))
+            return
+        reg.finish(job, "cancelled" if stop() else "done", elapsed_ms=int((time.time() - t0) * 1000))
+
+    def _scan_job_snapshot(self, job: dict) -> dict:
+        with self._scan_jobs.lock:
+            return {
+                "job_id": job["job_id"], "status": job["status"],
+                "scanned": job["scanned"], "total": job["total"],
+                "matched": dict(job["matched"]), "by_source": dict(job["by_source"]),
+                "auto_tagged": list(job["auto_tagged"]),
+                "error": job["error"], "elapsed_ms": job["elapsed_ms"],
+                "source_ids": job["source_ids"], "watchlist_ids": job["watchlist_ids"],
+            }
+
+    def get_watchlist_scan_job(self, job_id: int) -> dict | None:
+        """Snapshot of the live job, or None once a newer scan has replaced
+        it (server.py: 404, the poller stops)."""
+        job = self._scan_jobs.get(job_id)
+        return None if job is None else self._scan_job_snapshot(job)
+
+    def cancel_watchlist_scan_job(self, job_id: int) -> bool:
+        """Asks a running scan to stop at its next unit. A finished or
+        unknown job is a miss (False), not an error."""
+        job = self._scan_jobs.get(job_id)
+        return job is not None and self._scan_jobs.request_discard(job)
+
+    def running_watchlist_scan_jobs(self) -> int:
+        """How many scans are running — server.py's idle-shutdown hold
+        counts them with the ingest and view jobs."""
+        return self._scan_jobs.running()
+
+    def wait_for_watchlist_scan_job(self, job_id: int, timeout: float | None = None) -> dict | None:
+        """Blocks until that job finishes. Tests only."""
+        job = self._scan_jobs.get(job_id)
+        if job is None:
+            return None
+        job["done_event"].wait(timeout)
+        return self._scan_job_snapshot(job)
 
     def import_watchlist_from_case(self, path: str) -> dict:
         """Copy another case file's watchlist into this one — the standing
@@ -7519,29 +7745,45 @@ class Store:
         return {"added": added, "skipped": len(rows) - added}
 
     WATCHLIST_PREVIEW_CHARS = 240
+    WATCHLIST_HITS_PER_SOURCE = 200
 
-    def indicator_hits(self, wid: int, limit: int = 500) -> list[dict]:
-        """An indicator's hits with the context a hit list needs: which
-        column held the indicator and that cell's value, plus the row as
-        one line. The scan matched over the whole-row blob and stored only
-        (source, rid), so the column is found here by re-reading the hit
-        rows — first column in table order whose text contains the value,
-        case-insensitively. Nothing is stored, so old cases get the context
-        too. The scan matched the row's columns joined into one blob, so a
-        value that straddles two cells is a real hit no single column
-        holds: `column` is None then, and `value` is the stretch of the
-        joined row around the match. A row that no longer contains the
-        value at all (an indicator edited since) gets neither.
+    def indicator_hits(self, wid: int, per_source_limit: int | None = None) -> dict:
+        """An indicator's hits grouped by the table they landed in, with the
+        context a hit list needs: which column held the indicator and that
+        cell's value, plus the row as one line. Returns
+        `{sources: [{source_id, source_name, count, shown}], hits: [...]}`:
+        one entry per table with its EXACT hit count (a GROUP BY over
+        watchlist_hits, never derived from the rows returned), tables in
+        count-desc-then-id order, and for each the first `per_source_limit`
+        hits in rid order — so a hot indicator's later tables are listed
+        with their counts rather than vanishing past a global cap, and the
+        pane can say "…and N more" per table. `hits` come in that same
+        table order.
+
+        The column is found by re-reading the hit rows — first column in
+        table order whose text contains the value, case-insensitively.
+        Nothing is stored, so old cases get the context too. The scan
+        matched the row's columns joined into one blob, so a value that
+        straddles two cells is a real hit no single column holds: `column`
+        is None then, and `value` is the stretch of the joined row around
+        the match. A row that no longer contains the value at all (an
+        indicator edited since) gets neither.
 
         A pure read, on the reader pool (invariant #4): the hit list is
         opened while imports run, and the writer lock is theirs."""
+        limit = self.WATCHLIST_HITS_PER_SOURCE if per_source_limit is None else max(1, int(per_source_limit))
         context: dict[tuple[int, int], dict] = {}
         with self._reader() as ro:
             names = {r["id"]: r["name"] for r in ro.execute("SELECT id, name FROM sources")}
             ind = ro.execute("SELECT value FROM watchlist WHERE id=?", (wid,)).fetchone()
-            rows = ro.execute(
-                "SELECT source_id, rid FROM watchlist_hits WHERE watchlist_id=? LIMIT ?",
-                (wid, limit)).fetchall()
+            groups = ro.execute(
+                "SELECT source_id, COUNT(*) AS c FROM watchlist_hits WHERE watchlist_id=?"
+                " GROUP BY source_id ORDER BY c DESC, source_id", (wid,)).fetchall()
+            rows: list[sqlite3.Row] = []
+            for g in groups:
+                rows.extend(ro.execute(
+                    "SELECT source_id, rid FROM watchlist_hits WHERE watchlist_id=? AND source_id=?"
+                    " ORDER BY rid LIMIT ?", (wid, g["source_id"], limit)).fetchall())
             needle = (ind["value"] if ind else "").lower()
             by_source: dict[int, list[int]] = {}
             for r in rows:
@@ -7582,13 +7824,19 @@ class Store:
                             "value": val[:self.WATCHLIST_PREVIEW_CHARS] if val is not None else None,
                             "preview": preview[:self.WATCHLIST_PREVIEW_CHARS],
                         }
-        out = []
+        sources = [{
+            "source_id": g["source_id"],
+            "source_name": names.get(g["source_id"], f"source {g['source_id']}"),
+            "count": g["c"],
+            "shown": min(g["c"], limit),
+        } for g in groups]
+        hits = []
         for r in rows:
             key = (r["source_id"], r["rid"])
-            out.append({"source_id": r["source_id"], "rid": r["rid"],
-                        "source_name": names.get(r["source_id"], f"source {r['source_id']}"),
-                        **context.get(key, {"column": None, "value": None, "preview": ""})})
-        return out
+            hits.append({"source_id": r["source_id"], "rid": r["rid"],
+                         "source_name": names.get(r["source_id"], f"source {r['source_id']}"),
+                         **context.get(key, {"column": None, "value": None, "preview": ""})})
+        return {"sources": sources, "hits": hits}
 
     # --------------------------------------------------------- entity pivot
 

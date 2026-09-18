@@ -36,12 +36,20 @@ created_at)` + a materialized `watchlist_hits(watchlist_id, source_id,
 rid)` so hits survive and are taggable/exportable). This is the one place
 we diverge from search-all, which is ephemeral.
 
-**Auto-scan.** On ingest completion (`jobs.js` source-done hook) the
-client POSTs `/api/watchlist/scan?source_id=…`; the server runs each
-indicator through the same substring/FTS path `search_all_sources` uses,
-writes `watchlist_hits`, and — if the indicator names an `auto_tag_id` —
-routes the hit rids through `set_tags` (undoable, shows on the rail like
-any tag). A "Scan all tables" button re-runs everything.
+**Scan.** A background job (`POST /api/watchlist/scan/start` →
+`Store.start_watchlist_scan_job`, polled at `/api/watchlist/scan/job`),
+started by every entry point — Add (scoped to the new indicator), the
+imports (scoped to the new ones), "Scan all", and on ingest completion
+the `jobs.js` source-done hook (scoped to the new tables). Per
+(indicator, table) the server runs the rid SELECT on the reader pool in
+the WHERE shapes `search_all_sources` uses — the trigram index's
+`doc LIKE ?` when built, the escaped blob LIKE otherwise — uncapped,
+then takes the writer lock for one transaction that replaces that
+unit's `watchlist_hits` and, if the indicator names an `auto_tag_id`,
+tags the hit rids through `_apply_tag_change` (undoable, shows on the
+rail like any tag). Merges are not scanned (their rows are member
+rows). The synchronous `POST /api/watchlist/scan` remains for profile
+apply and scripts. See docs/notes/store.md for the lock discipline.
 
 **Matching.** v1: case-insensitive substring / exact per kind (hash =
 exact, ip/domain/filename = contains), reusing FTS where present. Kinds
@@ -53,14 +61,19 @@ per line, `#` comments, optional `value,kind` — plus paste. A watchlist
 can be **saved to workspace** and re-applied to any case (a standing IOC
 set), the same save/apply pattern bundles use.
 
-**Tab UI.** Left: indicator list with hit counts + color swatch. Right:
-hits for the selected indicator (table, time, matched field, context),
-each double-clickable to open that source filtered to the row (the
-`openFiltered` seam from the plugin work generalizes here). Top: import /
-paste / scan-all / "auto-tag hits as…".
+**Tab UI.** Left: indicator list with hit counts + color swatch — a new
+entry appears at once with "…" until its scan lands. Right: hits for
+the selected indicator **grouped by table** (a collapsible header per
+table with its exact count; up to 200 rows per table, then "…and N
+more — open the table"), each hit showing the matched column and the
+row as one line, clickable to open that table at the row. Top: import /
+from a case / export / scan-all / "auto-tag hits as…".
 
-**Routes.** `GET/POST/DELETE /api/watchlist`, `POST /api/watchlist/scan`,
-`GET /api/watchlist/hits?watchlist_id=…`, `POST /api/watchlist/import`.
+**Routes.** `GET/POST/DELETE /api/watchlist`, `POST /api/watchlist/scan`
+(synchronous), `POST /api/watchlist/scan/start` + `GET
+/api/watchlist/scan/job` + `POST /api/watchlist/scan/cancel` (the job),
+`GET /api/watchlist/hits?watchlist_id=…` (`{sources, hits}`), `POST
+/api/watchlist/import`, `POST /api/watchlist/import_case`.
 
 ---
 
