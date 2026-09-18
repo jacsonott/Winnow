@@ -8,12 +8,12 @@ import { openDerivedColumnModal } from './derived.js';
 import { hasActiveFilterTree, openFilterBuilder } from './filterbuilder.js';
 import { VALUE_FILTER_AUTO_MAX, setColumnValueFilter, setValueFilterMode, valueFilterAutoOn, valueFilterEnabled } from './filters.js';
 import { moveCursor, render } from './grid.js';
-import { drawRail } from './grouping.js';
+import { drawRail, regroupIfGroupedByTag } from './grouping.js';
 import { applyPreset, filtersForCurrentSource, headerSig, loadSavedFilters, matchingSavedFilters, nicknameFor, setNicknameFor } from './savedfilters.js';
 import { clearAllFilters, closeTab, editSourceNickname, openSource, sourceLabel, wireDragReorder } from './sources.js';
 import { normalizeTree, S } from './state.js';
 import { openTablesManager } from './tables.js';
-import { loadTags } from './tags.js';
+import { clearRowCaches, loadTags } from './tags.js';
 import { baseColumns, columnMeta, parseTimestamp } from './tsformat.js';
 import { datePickerButton, markModalAction, confirmDialog, modal, promptDialog } from './ui.js';
 import { rebuildView } from './view.js';
@@ -873,7 +873,14 @@ export function openTagEditor() {
       del.onclick = async () => {
         if (!(await confirmDialog(`Delete "${t.name}" and remove it from every row?`, { danger: true, okLabel: 'Delete' }))) return;
         await api(`/api/tags/${t.id}`, { method: 'DELETE' });
-        await loadTags(); render(); drawRail(); openTagEditor();
+        await loadTags();
+        // The server took the tag off every row, but the cached rows (flat
+        // and grouped) still carry its id, which buildDataRow paints as a
+        // grey stripe for a tag it can't name. Same rule as a bulk tag —
+        // drop both — and a grouping by tag has just lost a bucket.
+        clearRowCaches();
+        regroupIfGroupedByTag();
+        render(); drawRail(); openTagEditor();
       };
       row.append(color, name, key, save, del);
       b.append(row);

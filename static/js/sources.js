@@ -688,7 +688,9 @@ export async function openSource(id, { skipBuild = false } = {}) {
   const leaving = S.sourceId !== id;
   recordTabVisit({ kind: 'source', id });
   stashViewState();
-  if (S.activeTab !== 'grid') showGridTab();
+  // repaint:false — S.view still belongs to the table being left, and this
+  // function paints the new one itself once it has swapped state.
+  if (S.activeTab !== 'grid') showGridTab({ repaint: false });
   S.sourceId = id;
   S.columns = src.columns;
   /* A cached row's `cells` is an array positional to S.columns, so changing

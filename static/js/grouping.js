@@ -8,7 +8,7 @@ import { buildDataRow, ensurePage, headH, moveCursor, render, renderTagToolbar, 
 import { armOpCancel, opToken } from './jobs.js';
 import { openRowContextMenu } from './rowmenu.js';
 import { S, cellInRange, cellRangeRows, selClear, selCount, selHas, selPositions, selRemap, selSetRange, selSnapshot } from './state.js';
-import { BULK_TAG_CONFIRM_AT, refreshTagCounts, refreshUndoState, renderTagRibbon } from './tags.js';
+import { BULK_TAG_CONFIRM_AT, clearRowCaches, refreshTagCounts, refreshUndoState, renderTagRibbon } from './tags.js';
 import { confirmDialog, contextMenu, dropdownMenu } from './ui.js';
 import { displayCell } from './tsformat.js';
 import { rebuildView } from './view.js';
@@ -90,7 +90,13 @@ export function ensureGroupPage(g, pageIdx, { prefetch } = {}) {
    changed rows this client never fetched, so every cached page's `tags`
    array is suspect. Bumping the generation is the half that's easy to miss
    — a fetch issued before the tag would otherwise land afterwards and put
-   the pre-tag rows straight back. */
+   the pre-tag rows straight back.
+
+   Rarely the right call on its own. The flat cache for the same view is
+   still alive underneath a grouping (regroupAll never touches it), so a
+   write that invalidates this one almost always has to invalidate that
+   one too — tags.js's clearRowCaches does both; this is its grouped
+   half. */
 export function clearGroupPageCache() {
   S.groupPages.clear();
   S.groupPending.clear();
@@ -703,7 +709,10 @@ export async function tagWholeGroup(g, tag, on) {
   }
   S.tagCountsAll = res.counts || {};  // whole-table; refreshTagCounts re-reads the view-scoped half
   refreshTagCounts();
-  clearGroupPageCache(); // the server changed rows this client may never have fetched
+  // The server changed rows this client may never have fetched — and the
+  // flat cache under this grouping holds the ones it *has*, pre-tag, for
+  // dropGrouping to paint back. Both go.
+  clearRowCaches();
   renderTagRibbon();
   render();
   drawRail();

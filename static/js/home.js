@@ -180,7 +180,12 @@ export async function openCase(path, opts = {}) {
   // belongs to is about to be rebuilt against this one. Before showApp,
   // so it is never on screen for a frame beside the new case.
   hideDetailPane();
-  if (S.activeTab !== 'grid') showGridTab();
+  // repaint:false — S.view/S.sourceId are still the previous case's here
+  // (loadSources says why S.sourceId survives a switch); loadSources below
+  // opens and paints this case's table. A render() against the old view id
+  // would hit the new Store, 409 as expired, and rebuild the old filters
+  // against whichever of this case's sources shares the number.
+  if (S.activeTab !== 'grid') showGridTab({ repaint: false });
   setBrandLabel(res.name);
   showApp();
   // A quick-look (temp) case — e.g. one made by dropping files on the home

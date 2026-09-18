@@ -4,7 +4,7 @@
 import { $, debounce, el, post, toast } from './core.js';
 import { addExtractedColumn, openFlattenModal } from './derived.js';
 import { ellipsize, setColumnFilter, setSearchMode } from './filters.js';
-import { render, rowAt } from './grid.js';
+import { clearPageCache, render, rowAt } from './grid.js';
 import { writeClipboardText } from './grouping.js';
 import { syncSearchExpansion } from './search.js';
 import { clearAllFilters } from './sources.js';
@@ -475,6 +475,14 @@ export const saveNote = debounce(async () => {
   await post('/api/note', { source_id: sourceId, rid, note: note.value });
   const r = rowAt(S.cursor);
   if (r && r.rid === rid) r.note = note.value;
+  // Same rule as tagRowsAtPositions: under a grouping the row just patched
+  // is a group-page object, and the flat cache still holds this rid with
+  // the old note for dropGrouping to paint — the ✎ mark would go missing
+  // on Ungroup exactly the way a tag stripe did. The mismatch arms cover
+  // the 500 ms debounce: an Ungroup or a cursor move inside that window
+  // means the object under the cursor is not the input's row, so nothing
+  // above was patched and the cached copy of this rid is the stale one.
+  if (!r || r.rid !== rid || S.groupByCols.length) clearPageCache();
   $('noteStatus').textContent = 'Saved';
   render();
 }, 500);
