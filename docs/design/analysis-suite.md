@@ -93,8 +93,9 @@ draw through it.
 ## 3. Case notes  (Markdown, own tab, travels in the .db)
 
 **What.** A free-form Markdown scratchpad per case — the running
-narrative, distinct from per-row notes. A **Notes** page tab with an
-edit/preview toggle.
+narrative, distinct from per-row notes. A **Notes** page tab with the
+editor and a live preview side by side (Edit and Preview collapse the
+other pane; the divider position is remembered per browser).
 
 **Where.** In the case file (`case_notes(id, body, updated_at)` — one row,
 read/written whole, same shape as session documents). Evidence-adjacent

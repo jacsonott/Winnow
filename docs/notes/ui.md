@@ -283,6 +283,44 @@ see [docs/notes/README.md](README.md) for the whole set.
     is 0 before a case is open, which would otherwise pin the strip at 0px
     for the whole session, since only `showApp()` and the window `resize`
     handler re-run it.
+- **`syncTabChrome` is the registry of grid-only chrome.** The toolbar,
+  a plugin's toolbar panels, the session-comparison banner, the "N
+  selected" tag bar and the row detail pane all describe one table's
+  grid, and every writer of `S.activeTab` — `showGridTab`/`showSqlTab`/
+  `showTimelineTab`, `showNotesTab`, `showWatchlistTab`, `showDashboard`
+  and `showPluginTab` — ends in `syncTabChrome()`, which is what makes it
+  the one place. A new grid-only surface hides itself there, **not in
+  `showMainView`**: `showPluginTab` swaps views with `hideMainViews`/
+  `hidePluginViews` directly and never passes through `showMainView`, so a
+  hide put there works for the built-in pages and leaves the surface
+  standing beside every plugin tab. That is how the detail pane was left
+  open next to the SQL editor — `#detail` and `#detailResize` are siblings
+  of `.main-content`, not children of the grid, so the view swap never
+  touched them, and with `d` and Escape gated to the grid the pane's own
+  Close button was the only way out. Two rules for the pane's entry: it is
+  a **one-way hide** (`if (!isGrid) hideDetailPane()`; the toolbar's
+  `hidden = !isGrid` idiom would force the pane open, possibly on no row,
+  every time the grid comes back — closed-and-forgotten is what an analyst
+  expects, and `d` or a double-click reopens it), and hiding **never clears
+  `#noteInput.dataset.rid/sourceId`**: `saveNote` is a 500 ms debounce that
+  reads them when it fires, so a note typed just before a page or table
+  switch still posts against the row it was typed for. A case open is the
+  one exception, and it is home.js's to make, not the hide's: `/api/note`
+  writes into whichever store is current, so a save that fired after the
+  `/api/case/open` swap would attach the previous case's `{source_id, rid}`
+  to an unrelated row of the new one — `openCase` blanks the rid before
+  the POST (and puts it back if the open fails). `openSource` hides the
+  pane only when it is actually **leaving** a table (`leaving = S.sourceId
+  !== id`, decided before `S.sourceId` is overwritten): every refresh idiom
+  — `loadSources()` with no select after a column add, a sidebar folder
+  op or closing some *other* tab, `openSource(S.sourceId)` from the
+  derived-column modal, the plugin API's `refreshSources()` — re-enters
+  `openSource` for the table already open, and an unconditional hide there
+  took the pane away under the analyst on all of them. `loadSources`'
+  empty-state branch (last tab closed, the table on screen removed) and
+  the case-open reset in home.js hide it too. Nothing reopens it in the
+  background: `ensurePage` and `maybeShowDetail` are gated on the pane
+  already being visible.
 - **The SQL pane has named sub-tabs** (`sql_tabs`, a per-case sidecar
   table; `list/create/update/delete/reorder_sql_tabs`, `/api/sql_tabs`,
   `renderSqlTabs` and friends in `static/js/sql.js`). Stored in the **case file**, not
@@ -568,6 +606,52 @@ see [docs/notes/README.md](README.md) for the whole set.
   `S.lastGroupBy` rather than lost. Note `$('btnReset').onclick` is now a
   wrapper — passing `clearAllFilters` directly would hand it the MouseEvent
   as `seed`.
+- **A filter change lands on the same row, and that lives in `rebuildView`
+  (`keepRow`, on by default), not in the callers.** The tag chips, the
+  timeframe toggle and its Clear, the value picker, search Escape and a
+  saved filter all rebuild with `keepScroll: false`, and each used to land
+  at row 0 with `S.cursor` left as the number it had been — a number that,
+  once the view widened and renumbered, named an unrelated row far below
+  the fold (and, with the detail pane open, put that stranger in the pane
+  as its page landed). Only `clearAllFilters` found the row again, by
+  bracketing its rebuild with `selectedRowAnchor` → `/api/row_position` →
+  `recenterOnRow`. That bracket is inside the rebuild now: `cursorRowAnchor`
+  (cursor first — the highlighted row is the place; picks and the cell
+  range only stand in for a missing cursor) is captured before the build,
+  its position in the new view is asked for **before the seed fetch** so
+  the pages seeded are the ones the grid will show (recentring after a
+  page-0 seed painted the target rows as placeholders for a round trip),
+  and after the seq/source guards the cursor is re-pointed by identity.
+  Three rules. With `keepScroll: true` (header-box typing, a sort click)
+  the viewport never moves, so the one thing that would notice a
+  re-pointed cursor is an open detail pane (grid.js re-points it at
+  `rowAt(S.cursor)` as pages land — a number left behind puts a stranger
+  in it): the lookup is issued only while the pane is open, alongside the
+  seed and awaited before the paint, and skipped otherwise, leaving the
+  cursor the number it was — the header box's old behaviour, the highlight
+  keeping its screen spot. The skip is not a nicety: on a materialised
+  view `find_position` is a scan of the whole view table (`pos` is its
+  only key), and every debounced keystroke would pay it before the grid
+  could repaint. A row the narrower view no longer has (`pos: null`)
+  clears the cursor and hides the detail pane rather than leaving a stale
+  number; a lookup that failed (a 409 from a view a newer rebuild already
+  evicted, a dropped request — `rowPositionIn` returns `undefined`) is
+  not that answer and leaves the cursor alone for the next rebuild to
+  resolve. A cursor whose page has left the cache can't be captured at all
+  (`cursorRowAnchor` is null): a `keepScroll: true` rebuild then touches
+  nothing, and a landing at the top clears it, since the number would
+  name a stranger there. `keepRow: false` is for a navigation
+  that means "the top of a fresh table" (a dashboard drill, `openSource`'s
+  first build). The `/api/row_position` GET has its own catch: the chip
+  handlers don't await the rebuild, so a 409 from a view a newer rebuild
+  already evicted would be an unhandled rejection, which the UI fixture
+  fails the test on. Grouped views are untouched (grouped positions are
+  another address space and `regroupAll` resets the cursor), which is why
+  `landOnFilters` keeps its own bracket for exactly the grouped case — it
+  drops the grouping before the build, and the cursor with it. Pinned by
+  `tests/ui/test_tag_filter_keeps_row.py`; the materialised branch of
+  `find_position` (every sort, filter and merge) by
+  `tests/test_row_position_merge.py`.
 - **Stored keymaps are migrated on load, not merged blindly.**
   `loadKeymap` used to be `{...DEFAULT_KEYMAP, ...stored}`, which means a
   returning analyst's localStorage outranks every later change to the
@@ -629,7 +713,12 @@ see [docs/notes/README.md](README.md) for the whole set.
 
 - **Stack view** (stack.js) — the column-header menu's "Stack values (rarest first)…" opens a modal of the current view's distinct values by count (via group_summary, order=count direction=asc), drawn with charts.js. Click a bar to filter the grid to that value. Least-frequency-of-occurrence triage. See docs/design/analysis-suite.md.
 
-- **Case notes tab** (notes.js) — a free-form Markdown scratchpad for the investigation narrative, stored in the case file (Store.case_notes) so it travels with the .db, distinct from per-row notes. Edit/preview toggle, debounced autosave, a tiny dependency-free Markdown renderer (airgap). Page tabs now route visibility through sql.js's showMainView(id)/MAIN_VIEWS registry so adding a tab is a one-place edit. See docs/design/analysis-suite.md.
+- **Case notes tab** (notes.js) — a free-form Markdown scratchpad for the investigation narrative, stored in the case file (Store.case_notes) so it travels with the .db, distinct from per-row notes. The editor and a live preview sit side by side (`#notesSplit`, a flex row inside `.page-main`) split by a draggable divider; Edit / Split / Preview collapse one pane or the other through `data-mode` on the row, and the stylesheet does the hiding. Debounced autosave, a tiny dependency-free Markdown renderer (airgap). Page tabs now route visibility through sql.js's showMainView(id)/MAIN_VIEWS registry so adding a tab is a one-place edit. See docs/design/analysis-suite.md. Things that bite here:
+  - **Only the divider position persists** (`winnow.notes = { split }`, a ratio of the row, per browser like `winnow.sidebar`), never the mode: Notes always opens in Split, and `showNotesTab` re-applies both *synchronously before* `await ensureNotesLoaded()` — the page is already showing by then, so applying them after the fetch paints the markup's 50/50 default and then jumps. A remembered preview-only mode would also hide the editor from Playwright's `fill()` in tests/ui/test_case_notes.py after its reload.
+  - **The divider is `#notesDivider`, not a `.page-panel-resize`.** `syncPluginPanels` shows and hides `#notesPanelResize` (the plugin column's handle) by id, and the plugin column stays the outermost sibling of `.page-main`, so a notes page panel and the split coexist untouched.
+  - **One `input` listener drives autosave and the live render.** Every write path — typing, Link ▾, a plugin's `notesPage.setText`/`insert` — dispatches `input`; `ensureNotesLoaded`'s seed assigns `.value` directly (an input event there would autosave the body straight back) and calls `renderPreview()` by hand. The render is skipped and marked stale in editor-only mode or while the page is hidden; `setNotesMode`/`showNotesTab` catch up. It swaps `innerHTML` wholesale (why the link clicks are delegated) and puts the pane's own `scrollTop` back afterwards so editing the bottom of a long note doesn't jump the preview to its top.
+  - The clamp is 0.2–0.8 of the row *and* a 220px floor per pane (`clampNotesSplit`; a row too narrow for two floors splits evenly): with a plugin column open at 70% of the section the ratio alone could leave the editor a few characters wide. **It is re-applied by a `ResizeObserver` on `#notesSplit`, not only when the ratio is written** — the row narrows without the page doing anything (the plugin column toggled or dragged wider, the window resized), and the observer re-applies the *stored* ratio against the new width, so a pane squeezed to the floor gets its share back when the room returns. `.notes-editor` is flex-basis-driven (`--notes-split`), not `width: 100%`, and the 82ch measure cap sits on the inner `.notes-preview-body` so the pane itself fills its half rather than leaving dead space against the divider.
+  - **The divider's hit target overlaps the preview only** (`margin: 0 -8px 0 0`; the 1px line sits at the editor's edge). The editor's right edge is where the textarea's vertical scrollbar sits on classic-scrollbar platforms, and the symmetric `.tab-split` overlap turned a grab of the scrollbar thumb into a split drag. Headless Chromium's overlay scrollbars can't show it, so tests/ui/test_notes_split.py pins it with `elementFromPoint` and a drag started inside the editor's edge. `.notes-preview` paints `var(--panel)` itself — `#app`'s skin backdrop (the blueprint graph paper) otherwise showed through one half of what reads as a single surface.
 
 - **IOC watchlist tab** (watchlist.js) — case-level indicators (Store.watchlist / watchlist_hits, in the .db) scanned across every table via the blob substring search-all uses; matches are counted, listed, and optionally auto-tagged through the normal tag path. Auto-scans new imports (jobs.js source-done hook). Import a list / paste / scan-all. See docs/design/analysis-suite.md.
 

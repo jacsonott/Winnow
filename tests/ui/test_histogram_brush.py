@@ -34,6 +34,27 @@ def _post(server, route, body):
     return json.loads(urllib.request.urlopen(req, timeout=10).read())
 
 
+def _put_back(page, sid):
+    """Undo everything the fixture did. Called from teardown AND from a
+    failed setup: a yield fixture that raises before its yield runs no
+    teardown, and a wide.csv left open (with the strip left open) fails
+    the tab-strip, watchlist-badge and any later histogram test after it —
+    one slow import on a CI runner read as three unrelated failures."""
+    page.evaluate("() => { __winnow.S.timeRange = { enabled: false, column: null, start: '', end: '' }; }")
+    page.evaluate("""async (id) => {
+      const h = { 'X-Timeline-Lite-Client': '1' };
+      if (id != null) {
+        await fetch('/api/source/' + id, { method: 'DELETE', headers: h });
+        __winnow.S.viewCache.delete(id);
+      }
+      await __winnow.loadSources();
+      const first = __winnow.S.sources.find((s) => !s.is_merge);
+      if (first) __winnow.openSource(first.id);
+    }""", sid)
+    page.evaluate("() => { __winnow.toggleHistogram(false); localStorage.removeItem('winnow.histogram'); }")
+    page.wait_for_selector(".row")
+
+
 @pytest.fixture
 def wide_table(page, server, tmp_path):
     """Three days of events, so the bars are hours wide — the shared
@@ -45,42 +66,39 @@ def wide_table(page, server, tmp_path):
         lines.append(f"{(base + datetime.timedelta(minutes=6 * i)):%Y-%m-%d %H:%M:%S},H{i % 3}")
     f = tmp_path / "wide.csv"
     f.write_text("\n".join(lines) + "\n")
-    _post(server, "/api/ingest/jobs/path", {"path": str(f), "name": "wide.csv", "kind": "csv"})
-    # Polled from Python: wait_for_function does not await a promise
-    # predicate, so the .then() form passes instantly and races the import
-    # (tests/test_ui_test_hygiene.py enforces this).
-    deadline = time.monotonic() + 25
-    while time.monotonic() < deadline:
-        names = page.evaluate(
-            "() => __winnow.loadSources().then(() => __winnow.S.sources.map((s) => s.name))")
-        if "wide.csv" in names:
-            break
-        time.sleep(0.25)
-    else:
-        raise AssertionError("wide.csv never appeared in S.sources")
-    sid = page.evaluate("() => __winnow.S.sources.find((s) => s.name === 'wide.csv').id")
-    page.evaluate("(id) => __winnow.openSource(id)", sid)
-    page.wait_for_function("(id) => __winnow.S.sourceId === id", arg=sid)
+    sid = None
+    try:
+        _post(server, "/api/ingest/jobs/path", {"path": str(f), "name": "wide.csv", "kind": "csv"})
+        # Polled from Python: wait_for_function does not await a promise
+        # predicate, so the .then() form passes instantly and races the import
+        # (tests/test_ui_test_hygiene.py enforces this).
+        deadline = time.monotonic() + 25
+        while time.monotonic() < deadline:
+            names = page.evaluate(
+                "() => __winnow.loadSources().then(() => __winnow.S.sources.map((s) => s.name))")
+            if "wide.csv" in names:
+                break
+            time.sleep(0.25)
+        else:
+            raise AssertionError("wide.csv never appeared in S.sources")
+        sid = page.evaluate("() => __winnow.S.sources.find((s) => s.name === 'wide.csv').id")
+        page.evaluate("(id) => __winnow.openSource(id)", sid)
+        page.wait_for_function("(id) => __winnow.S.sourceId === id", arg=sid)
 
-    btn = page.locator("#btnHistogram")
-    btn.wait_for(state="visible", timeout=10_000)
-    if btn.get_attribute("aria-pressed") == "false":
-        btn.click()
-    page.wait_for_selector("#pluginPanels:not([hidden]) #histogramPanel canvas.th-canvas", timeout=10_000)
-    page.wait_for_function("() => /rows/.test(document.getElementById('histogramPanel').textContent)",
-                           timeout=10_000)
+        btn = page.locator("#btnHistogram")
+        # Generous: a CI runner drawing the first histogram of a fresh
+        # table has taken more than ten seconds.
+        btn.wait_for(state="visible", timeout=30_000)
+        if btn.get_attribute("aria-pressed") == "false":
+            btn.click()
+        page.wait_for_selector("#pluginPanels:not([hidden]) #histogramPanel canvas.th-canvas", timeout=30_000)
+        page.wait_for_function("() => /rows/.test(document.getElementById('histogramPanel').textContent)",
+                               timeout=30_000)
+    except Exception:
+        _put_back(page, sid)
+        raise
     yield sid
-    page.evaluate("() => { __winnow.S.timeRange = { enabled: false, column: null, start: '', end: '' }; }")
-    page.evaluate("""async (id) => {
-      const h = { 'X-Timeline-Lite-Client': '1' };
-      await fetch('/api/source/' + id, { method: 'DELETE', headers: h });
-      __winnow.S.viewCache.delete(id);
-      await __winnow.loadSources();
-      const first = __winnow.S.sources.find((s) => !s.is_merge);
-      if (first) __winnow.openSource(first.id);
-    }""", sid)
-    page.evaluate("() => { __winnow.toggleHistogram(false); localStorage.removeItem('winnow.histogram'); }")
-    page.wait_for_selector(".row")
+    _put_back(page, sid)
 
 
 def _bucket_seconds(page):

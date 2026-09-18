@@ -561,7 +561,9 @@ export async function drillInto(w, extra = {}) {
   updateTimeRangeButton();
   updateFiltersButton();
   renderHead();
-  await rebuildView({ keepScroll: false });
+  // A drill is a navigation — the rows behind a number, from the top —
+  // not a filter change on a table the analyst was reading.
+  await rebuildView({ keepScroll: false, keepRow: false });
   toast(`Rows behind “${w.title}”` + (extra.value != null && drill.column ? ` · ${drill.column} = ${extra.value}` : '')
     + (extra.bucket != null ? ` · ${extra.bucket}` : ''), 3500);
 }

@@ -221,7 +221,9 @@ evidence folder tree there automatically.
 - **Watchlist** — case-level indicators (hashes, IPs, domains, filenames)
   scanned across every table, with per-indicator hit counts, optional
   auto-tagging, import/export, and a dot on the tab when new hits land.
-- **Notes** — a Markdown scratchpad saved in the case file. Links like
+- **Notes** — a Markdown scratchpad saved in the case file, with the
+  editor and a live preview side by side (drag the divider; Edit and
+  Preview collapse the other pane). Links like
   `[the 4624 sweep](winnow:table/3)` navigate to tables, queries and
   dashboards from the preview — the Link ▾ button writes them for you.
 - **Dashboards** — named boards of widgets (counts, charts, top-N lists).
