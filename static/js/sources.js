@@ -6,6 +6,7 @@ import { recordTabVisit } from './tabhistory.js';
 import { renderHead, saveLayout } from './columns.js';
 import { $, ROW_H, api, el, post, toast } from './core.js';
 import { derivedOps } from './derived.js';
+import { hideDetailPane } from './detail.js';
 import { currentSpec, renderAdvancedChips, setSearchMode, updateSearchHint } from './filters.js';
 import { clearPageCache, headH, rScroll, render, rowAt, spacerPx } from './grid.js';
 import { closeAllGroupViews, drawRail, dropGrouping, regroupAll, renderGroupStrip, setGrouping } from './grouping.js';
@@ -48,6 +49,40 @@ import { dropPendingSelection, pendingViewStatsText, rebuildView } from './view.
    falls through to name for them. */
 export function sourceLabel(s) { return (s && (s.nickname || s.name)) || ''; }
 
+/* The glyph that prefixes a source's label wherever it is listed (tab
+   strip, sidebar, Tables manager): ⛓ for a merge, ⊂ for a subset table
+   saved out of another table's view or selection (sources.origin —
+   see subset.js), nothing for an imported file. */
+export function sourceGlyph(s) {
+  if (!s) return '';
+  if (s.is_merge) return '⛓ ';
+  if (s.origin === 'subset') return '⊂ ';
+  return '';
+}
+
+/* "Subset of <parent>" from origin_meta — the parent's name as it was
+   when the subset was made, so it still reads right after the parent is
+   removed. Ids are reused by SQLite, so the live table under
+   parent_source_id only counts as the parent while its name still
+   matches. `withCount` adds "(N of M rows)"; the Tables manager leaves it
+   off because the row count follows on the same line. */
+export function subsetParentLabel(s, { withCount = false } = {}) {
+  const m = (s && s.origin_meta) || {};
+  const parent = m.parent_name || 'another table';
+  const live = S.sources.some((x) => x.id === m.parent_source_id && x.name === m.parent_name);
+  const of = withCount && m.parent_row_count != null
+    ? ` (${((s && s.row_count) || 0).toLocaleString()} of ${Number(m.parent_row_count).toLocaleString()} rows)` : '';
+  return `Subset of ${parent}${of}${live ? '' : ' — parent since removed'}`;
+}
+
+/* The hover line for a subset: where it came from, its size against the
+   parent's, and the rule an analyst might otherwise assume the other way
+   — its tags and notes are its own (none were copied from the parent,
+   none write back to it). */
+export function subsetDescription(s) {
+  return `${subsetParentLabel(s, { withCount: true })} · tags and notes on it are its own — none write back`;
+}
+
 /* The hover title for a nicknamed source — keeps the real file name one
    hover away wherever the nickname replaced it. */
 /* The hover text for a table, wherever its name appears (tab strip,
@@ -68,6 +103,9 @@ export function sourceTitle(s, suffix) {
     if (s.is_merge) parts.push(`Merge of ${(s.members || []).length || 'several'} tables`);
     else if (s.nickname) parts.push(`${s.nickname} — from ${s.name}`);
     else parts.push(s.name);
+    // A derived table has no file on disk; say where it came from instead.
+    if (s.origin === 'subset') parts.push(subsetDescription(s));
+    else if (s.origin === 'sql') parts.push('Saved from a SQL pane query');
     if (s.path) parts.push(s.path);
     if (s.imported_at) parts.push(`Imported ${s.imported_at.replace('T', ' ')}`);
   }
@@ -212,7 +250,7 @@ export function renderTabs() {
   const tabs = $('sourceTabs');
   tabs.replaceChildren();
   for (const s of openTabs) {
-    const t = el('button', 'tab' + (s.is_merge ? ' tab-merge' : ''));
+    const t = el('button', 'tab' + (s.is_merge ? ' tab-merge' : '') + (s.origin === 'subset' ? ' tab-subset' : ''));
     t.dataset.id = String(s.id);
     // Same condition syncTabSelection applies, for the same reason: a
     // background loadSources() (an import finishing, say) can land while a
@@ -222,7 +260,7 @@ export function renderTabs() {
       t.append(el('span', null, `⚠ ${s.name}`));
       t.title = s.error;
     } else {
-      t.append(el('span', null, (s.is_merge ? '⛓ ' : '') + sourceLabel(s)), el('span', 'count', s.row_count.toLocaleString()));
+      t.append(el('span', null, sourceGlyph(s) + sourceLabel(s)), el('span', 'count', s.row_count.toLocaleString()));
     }
     const x = el('span', 'x', '✕');
     x.title = 'Close tab — stays in this case, reopen it from Tables';
@@ -623,6 +661,11 @@ export async function loadSources(select, { navigate = true } = {}) {
   if (target) await openSource(target);
   else {
     S.sourceId = null;
+    // The last tab closed, or the table on screen was removed: the same
+    // leave-the-table event as a switch, minus a table to switch to. The
+    // pane was showing a row of the one just gone — and a note typed into
+    // it after a Remove would post against a deleted source_id.
+    hideDetailPane();
     $('empty').hidden = false;
     $('noRows').hidden = true;
     $('viewStats').textContent = '';
@@ -673,9 +716,18 @@ function stashViewState() {
 export async function openSource(id, { skipBuild = false } = {}) {
   const src = S.sources.find((s) => s.id === id);
   if (!src) return;
+  // Every refresh idiom re-enters here for the table already open —
+  // loadSources() with no select after a column add, a folder op or
+  // closing some OTHER tab, openSource(S.sourceId) from the derived-column
+  // modal, the plugin API's refreshSources() — and none of those leaves
+  // the table, so none of them is a reason to take the detail pane away.
+  // Decided before S.sourceId is overwritten below.
+  const leaving = S.sourceId !== id;
   recordTabVisit({ kind: 'source', id });
   stashViewState();
-  if (S.activeTab !== 'grid') showGridTab();
+  // repaint:false — S.view still belongs to the table being left, and this
+  // function paints the new one itself once it has swapped state.
+  if (S.activeTab !== 'grid') showGridTab({ repaint: false });
   S.sourceId = id;
   S.columns = src.columns;
   /* A cached row's `cells` is an array positional to S.columns, so changing
@@ -697,6 +749,7 @@ export async function openSource(id, { skipBuild = false } = {}) {
   S.tagFilter = [];
   S.hideEmptyRows = false;
   S.cursor = -1;
+  if (leaving) hideDetailPane();   // it showed a row of the table being left (hide only — see detail.js)
   selClear();
   S.selUndo = [];      // another table's positions
   S.selHidden = 0;
@@ -1226,7 +1279,7 @@ function wirePagesDrop(node) {
 export function openSidebarRow(s, index, total) {
   const active = s.id === S.sourceId && S.activeTab === 'grid';
   const row = el('div', 'sidebar-row sidebar-openrow' + (active ? ' active' : ''));
-  const label = el('button', 'menu-item', (s.is_merge ? '⛓ ' : '') + sourceLabel(s) + (s.error ? ' ⚠' : ''));
+  const label = el('button', 'menu-item', sourceGlyph(s) + sourceLabel(s) + (s.error ? ' ⚠' : ''));
   label.disabled = !!s.error;
   label.title = s.error || sourceTitle(s, 'Right-click for the table menu');
   label.onclick = () => openSource(s.id);
@@ -1313,7 +1366,7 @@ export function sidebarRow(s, { depth = 0 } = {}) {
   const active = open && s.id === S.sourceId && S.activeTab === 'grid';
   const row = el('div', 'sidebar-row' + (active ? ' active' : ''));
   row.style.setProperty('--depth', String(depth));
-  const label = el('button', 'menu-item', (s.is_merge ? '⛓ ' : '') + sourceLabel(s) + (s.error ? ' ⚠' : ''));
+  const label = el('button', 'menu-item', sourceGlyph(s) + sourceLabel(s) + (s.error ? ' ⚠' : ''));
   label.disabled = !!s.error;
   if (s.error) label.title = s.error;
   label.onclick = open ? () => openSource(s.id) : async () => {

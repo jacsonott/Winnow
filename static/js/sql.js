@@ -3,9 +3,11 @@
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { recordTabVisit } from './tabhistory.js';
 import { $, api, debounce, el, post, toast } from './core.js';
+import { hideDetailPane } from './detail.js';
 import { render, renderTagToolbar } from './grid.js';
 import { drawRail } from './grouping.js';
 import { hidePluginViews, sqlResultNodes, syncPluginPanels } from './plugins.js';
+import { syncHistogramPanel } from './histogram.js';
 import { setActiveSqlResult } from './sqlassist.js';
 import { checkPresets } from './savedfilters.js';
 import { syncDiffBanner } from './session.js';
@@ -234,13 +236,24 @@ export async function closeSqlTab(t) {
    a row of controls that silently does nothing reads as broken, and the
    space belongs to the pane you actually switched to.
 
-   Called by every show*Tab, so there's one place this rule lives rather
-   than four copies drifting apart. Grid: showGridTab re-runs checkPresets
-   afterward, which is what brings the banner back when it applies. */
+   The row detail pane is the same kind of thing: it shows a grid row, and
+   it sits beside .main-content rather than inside the grid, so the view
+   swap the pages do never reaches it (docs/notes/ui.md).
+
+   Called by every writer of S.activeTab — including showPluginTab, which
+   swaps views itself rather than through showMainView — so there's one
+   place this rule lives rather than copies drifting apart. Grid:
+   showGridTab re-runs checkPresets afterward, which is what brings the
+   banner back when it applies. */
 export function syncTabChrome() {
   const isGrid = S.activeTab === 'grid';
   $('toolbar').hidden = !isGrid;
+  // The detail pane reads a grid row, and no page shows the grid — but a
+  // one-way hide only: `hidden = !isGrid` would force it open, possibly
+  // empty, on every return to the grid.
+  if (!isGrid) hideDetailPane();
   syncPluginPanels();   // plugin toolbar panels live and die with the toolbar
+  syncHistogramPanel(); // as does the built-in histogram strip beside them
   syncDiffBanner();     // as does a session comparison's banner
   renderTagToolbar();   // and the "N selected" tagging bar
 }
@@ -260,11 +273,23 @@ export function showMainView(id) {
   if (e) e.hidden = false;
 }
 
-export function showGridTab() {
+export function showGridTab({ repaint = true } = {}) {
   S.activeTab = 'grid';
   showMainView('grid');
   syncTabSelection();
   syncTabChrome();
+  // Same reason the Timeline rebuilds on arrival: tags can change while
+  // this tab isn't showing (the SQL pane's tag hotkey drops the row caches
+  // but can't paint a hidden grid), and the rows on screen are whatever
+  // was painted before leaving. A cache hit when nothing did — but only
+  // against the view that is staying on screen. openSource and openCase
+  // come through here BEFORE swapping S.view/S.sourceId and paint for
+  // themselves next; with the caches just dropped, a render() here would
+  // fetch a page of the previous table's view (or, on a case switch, ask
+  // the new Store for the old case's view id and spin a spurious rebuild
+  // off the 409), so those two pass repaint:false. render() is a no-op
+  // with no S.view at all.
+  if (repaint) render();
   if (S.sourceId) checkPresets(S.sourceId); // refresh the Filters button's suggestion state
   // A background job (the watchlist scan's auto-tags) that invalidated
   // the row caches while a page tab hid the grid left the repaint for

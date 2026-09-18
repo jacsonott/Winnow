@@ -232,6 +232,11 @@ examples/plugins/  Committed example plugins, one per extension point — treat
                     NTFS $MFT/$J parsing (ingest formats, stdlib-only).
                     lateral_movement: a pinned graph tab (register_tab +
                     register_api + a canvas ES module, offline).
+                    top_values: a toolbar panel that follows the grid
+                    (register_toolbar_panel, no routes — the built-in
+                    histogram strip in static/js/histogram.js is the
+                    same shape, and was this hook's example before it
+                    was built in).
                     claude_assistant: a Claude chat tab (external service from
                     a plugin route; needs network + `pip install anthropic` —
                     deliberately NOT airgap-compatible, which is why it's a
@@ -443,6 +448,17 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
    tables only — and the client's cache invalidation after a scan
    matches the open merge through its `member_source_ids`, since the
    job names the member.
+ **Saving a
+   view as a table** (`save_view_as_source`) works on a merge — the copy
+   resolves each row through its own member and `subset_rids` records
+   the member per row — and the result is a real single source, not a
+   merge. On the other side, `_sources_for_header_set` (the `{{all:…}}`
+   dashboard union) skips `origin='subset'` sources so a union does not
+   count the parent's rows twice, while the Timeline and the whole-case
+   tagged xlsx export deliberately do not skip them — a tag put on a
+   subset is real work — which is why a subset starts untagged
+   (`copy_tags` defaults off; seeding the parent's tags would list every
+   finding twice there).
 
 10. **A session is a snapshot, not a dimension.** Named sessions live in
    the case file's `sessions` table as whole `winnow-case-session/1`
@@ -506,7 +522,10 @@ A new trap goes in the file for its subsystem, not back here — see
 4. **Drag-to-reorder columns.** `S.order` is already persisted in the layout;
    only the drag handler is missing.
 5. **Saved views UI.** Endpoints (`/api/saved_views`) exist and work; nothing in
-   the frontend calls them yet.
+   the frontend calls them yet. (Related but not it: "Save as table" —
+   `Store.save_view_as_source` — records the spec that produced a subset
+   in `sources.origin_meta`, the first place a view spec is persisted per
+   result; a saved *view* would replay one, a subset copies its rows.)
 6. `.tle_sess` import, so existing Timeline Explorer sessions carry over.
 
 ## Plugin-facing changes ship with their docs
