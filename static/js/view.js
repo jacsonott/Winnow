@@ -705,7 +705,9 @@ async function runBuild({ keepScroll = true, keepRow = true, detachAfterMs = nul
     // no-op.)
     settle(!v);
   }
-  await installView(v, { seq, forSourceId, cacheKey, seeded, keys, pos, scroll, keepRow, spec });
+  // anchored, not the anchor itself: installView only needs to know whether
+  // a row was captured to resolve (the rule the comment below spells out).
+  await installView(v, { seq, forSourceId, cacheKey, seeded, keys, pos, scroll, keepRow, keepScroll, anchored: !!anchor, spec });
 }
 
 /* Makes `v` the grid's view: state, page cache, stats, the selection and
@@ -718,7 +720,8 @@ async function runBuild({ keepScroll = true, keepRow = true, detachAfterMs = nul
    view" until it is applied. `ctx` is what runBuild resolved before the
    swap: the seq/table guards, the seeded pages, the picks by id, the
    cursor row's new position and the scroll to land at. */
-export async function installView(v, { seq, forSourceId, cacheKey, seeded = [], keys = null, pos = null, scroll = 0, keepRow = true, spec }) {
+export async function installView(v, { seq, forSourceId, cacheKey, seeded = [], keys = null, pos = null, scroll = 0,
+                                      keepRow = true, keepScroll = true, anchored = false, spec }) {
   // A newer rebuild started while this one was in flight — its view has
   // already evicted ours server-side (or this one's cancel landed first);
   // let it win.
@@ -783,7 +786,7 @@ export async function installView(v, { seq, forSourceId, cacheKey, seeded = [], 
   // cursor there) and for keepRow:false.
   if (keepRow && !S.groupByCols.length) {
     const drop = () => { S.cursor = -1; $('detail').hidden = true; $('detailResize').hidden = true; };
-    if (anchor) {
+    if (anchored) {
       if (pos != null) S.cursor = pos;
       else if (pos === null) drop();
     } else if (!keepScroll && S.cursor >= 0) {
