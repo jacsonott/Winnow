@@ -58,6 +58,11 @@ export function resetJobState() {
   ftsWatch.clear();
   ftsAsked.clear();
   batchNavigated = false;
+  // A search left running in the background belongs to the Store the
+  // server just closed (its job was cancelled with it); its poller stops
+  // once its record is gone from here. Its notice row is one of the
+  // notices cleared below.
+  S.pendingViews.clear();
   // A plugin's rows were about the previous case too — and the poll that
   // would redraw the panel stops when nothing is running, so the DOM has
   // to be cleared here, not left for the next tick.
@@ -114,6 +119,8 @@ export function inFlightWork() {
     + activeUploads.size;
   if (imports) bits.push(`${imports} import${imports === 1 ? '' : 's'} in progress`);
   if (S.searchAll && S.searchAll.running) bits.push('a Search-all sweep');
+  const searching = [...S.pendingViews.values()].filter((p) => p.status === 'running').length;
+  if (searching) bits.push(`${searching} search${searching === 1 ? '' : 'es'} running in the background`);
   const indexing = (S.sources || []).filter((s) => s.fts_building).length;
   if (indexing) bits.push(`${indexing} index build${indexing === 1 ? '' : 's'}`);
   if (opCancelCurrent) bits.push('a running query');
@@ -422,7 +429,15 @@ export function renderJobsPanel() {
    badge shows instead of the status word. A done row lingers
    NOTICE_LINGER_MS like a finished import unless it carries buttons or
    asked to be sticky — then it waits for the ✕, or for a button click,
-   which also closes it. Error rows always wait. */
+   which also closes it. Error rows always wait.
+
+   The third argument to createNotice is the app's own, not part of the
+   plugin contract (plugins.js's `notify` passes `opts` through and
+   nothing else): `onDismiss` runs after the ✕ has closed the row, for a
+   row that stands for something the ✕ must act on rather than merely
+   hide — a search running in the background is cancelled by it, and a
+   finished one's result discarded, since a dismissed row would leave
+   that search polling with nothing on screen to apply or drop it from. */
 export const NOTICE_LINGER_MS = 8000;
 export const pluginNotices = new Map();   // notice id -> record
 let noticeSeq = 0;
@@ -476,7 +491,10 @@ function noticeRow(n) {
     pct: n.progress || 0,
     indeterminate: n.progress === null,
     detail: n.detail,
-    onDismiss: () => closeNotice(n.id),
+    onDismiss: () => {
+      closeNotice(n.id);
+      if (n.onDismiss) { try { n.onDismiss(); } catch (e) { console.error(e); } }
+    },
     actions: n.actions.map((a) => ({
       label: a.label,
       onClick: () => {
@@ -499,9 +517,10 @@ function renderJobsPanelSoon() {
   noticeRaf = requestAnimationFrame(() => { noticeRaf = 0; renderJobsPanel(); });
 }
 
-export function createNotice(owner, opts = {}) {
+export function createNotice(owner, opts = {}, { onDismiss = null } = {}) {
   const id = ++noticeSeq;
-  const n = { id, owner, status: 'running', title: '', detail: '', phase: null, progress: undefined, actions: [], sticky: false, timer: null };
+  const n = { id, owner, status: 'running', title: '', detail: '', phase: null, progress: undefined, actions: [], sticky: false, timer: null,
+              onDismiss: typeof onDismiss === 'function' ? onDismiss : null };
   applyNoticeOpts(n, opts);
   if (!n.title) n.title = String(owner).replace(/^[a-z]+:/, '');
   pluginNotices.set(id, n);

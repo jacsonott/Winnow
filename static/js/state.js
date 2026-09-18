@@ -120,6 +120,7 @@ export const S = {
   sqlTabId: null,          // which sql tab the editor/result pane is currently showing
   sqlResults: new Map(),   // sql tab id -> last {columns, rows, elapsed_ms, truncated} | {error}, in memory only
   searchAll: null,         // in-flight/finished Search-all job — see searchAllState(); survives closing the modal
+  pendingViews: new Map(), // source_id -> a search-box build left to finish in the background — see view.js detach/applyPendingView
 };
 
 /* ------------------------------------------------------- row selection */

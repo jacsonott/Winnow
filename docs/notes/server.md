@@ -114,6 +114,21 @@ see [docs/notes/README.md](README.md) for the whole set.
   callers can tell the two apart. Nothing that a user can actually type
   reaches the 500 path: `validate_where_fragment` converts SQL errors to
   `ValueError`, and `_regexp` swallows `re.error`.
+- **The background-search routes** — `POST /api/view/start`, `GET
+  /api/view/job`, `POST /api/view/job/cancel`, `POST /api/view/adopt`
+  (the search box's build, run as a job that builds a *held* view; see
+  [store.md](store.md)) — are plain `def` like `/api/view`. The build
+  runs on a Store thread; the start route only waits for it, up to
+  `wait_ms`, clamped to `Store.VIEW_JOB_INLINE_WAIT_MAX_MS` because that
+  wait parks one of the 40 shared workers and the client never sends the
+  parameter. A build error is a field of the job record (`error_status`
+  400 for the analyst-fixable kind), never the start route's status;
+  `/api/view/job` 404s for a superseded id, which is the poller's cue to
+  stop; adopt's 409 says "expired" — the word the client keys on to run
+  the search again — and the closed-case 409 from
+  `closed_database_handler` deliberately still does not. `_jobs_running`
+  counts running view jobs, so idle shutdown cannot reap a search whose
+  window was closed. `tests/test_view_jobs.py`.
 - `run_sql` (the SQL pane) allows arbitrary SELECT/EXPLAIN on purpose, but
   blacklists `ATTACH`/`DETACH`/`PRAGMA`/`VACUUM` as defense-in-depth — none of
   those serve a read-only ad-hoc query pane. CSV export runs every cell through

@@ -705,6 +705,76 @@ see [docs/notes/README.md](README.md) for the whole set.
   — the index-build test plays the server for `/api/sources` (route +
   reload) rather than writing `fts_building` into client state, so it
   proves the refresh is issued, not just that the hint renders.
+- **A search-box build goes to the background after `SEARCH_DETACH_MS`
+  (5 s) and its result waits for Apply.** The box's debounce, Enter,
+  Escape, the mode switch and the advanced chips pass `detachAfterMs` to
+  `rebuildView`; the build then runs as a job (`POST /api/view/start`,
+  polled 150→400 ms) with the same busy bar, chip and "Searching… N s"
+  as a blocking build, and a fast one adopts its view and lands exactly
+  as before. Past the deadline the chrome comes down, the old rows stay
+  (a held build evicted nothing — [store.md](store.md)), the build is
+  stashed in `S.pendingViews` (keyed by source: one per table, which is
+  what "one pending per source" means server-side too), a jobs-panel
+  notice with Cancel stands for it, `#viewStats` reads "Searching in
+  background…" and `inFlightWork` lists it for the shutdown guard. When
+  it lands the notice offers Apply and Discard and a `toastAction`
+  offers Apply — **a finished search never installs itself**; the
+  analyst may be three tables away. `applyPendingView` opens the table
+  first if it isn't the open one (`openSource(id, {skipBuild: true})`
+  restores that table's stash into S, so the job's state has to go in
+  AFTER it), puts back the box/filters/sort/tags/timeframe the search
+  was run with (a snapshot of S, not the compiled spec — `S.filters` is
+  raw header-box text), repaints the chrome from them, and adopts the
+  view through the same landing every rebuild takes, so the cursor row,
+  the picks and the seeded pages resolve against the adopted view. A
+  409 "expired" on the adopt (a build landed in between and evicted the
+  held view) toasts and runs the same spec again inside the chrome that
+  is already up. Only search-box rebuilds detach: filter, sort, tag-chip
+  and timeframe rebuilds are awaited by code that acts on the NEW view
+  afterwards (a restored scroll offset, `recenterOnRow`, a dashboard
+  drill), and a rebuild that resolved with the old view still installed
+  would run that against the wrong rows. `installView` is the tail of
+  every rebuild and the only place `winnow:viewchange` fires from, so a
+  search still pending has not "changed the view" until it is applied
+  (docs/writing-plugins.md says so). A new search-box rebuild for the
+  table cancels its pending search first — restoring the stats text
+  before its own indicator reads it as the "before" — so Escape in the
+  box is also how a pending search is called off. `setSearchDetachMs(0)`
+  is the test hook; `tests/ui/test_search_background.py` masks the real
+  job as still running via `page.route` rather than sleeping, and the
+  Apply it clicks does the real adopt.
+- **Any other rebuild of the table calls its pending search off first;
+  coming back to the table does not.** `runBuild` cancels the table's
+  pending search for every build that is not that record's own adopt.
+  A search-box rebuild is the newer search (its notice replaces the old
+  one); any other — a header filter, a sort, a tag chip, the timeframe,
+  a return to the table with a different spec — lands as a normal build,
+  which evicts the held view server-side (newer intent wins), so a
+  notice left standing would offer an Apply that could only 409 into a
+  blocking re-run of the search. Cancelling first also frees the writer
+  lock a running search holds: told it was in the background, the
+  analyst would otherwise find a header-box keystroke queued for the
+  rest of the scan and then the same scan run again. A finished search
+  waiting for Apply goes the same way (its row closes) — the analyst's
+  newer action is the newer intent. Coming BACK to the table is the
+  exception: the stash puts the search in the box again, that spec is
+  the pending record's (`rec.cacheKey`), and `openSource` takes the
+  cached path — the old live view, still exactly what the server pages
+  — and writes the stats from the record (`pendingViewStatsText`)
+  instead of posting the same search as a second, blocking build queued
+  behind the first. Smaller rules that follow from the same shape: the
+  row's ✕ is Cancel while it runs and Discard once it has landed
+  (`createNotice`'s app-only third argument, `onDismiss` — plugins pass
+  `opts` only and cannot reach it), never a plain dismiss that would
+  leave the search polling with nothing to apply or drop it from; a
+  search that ends cancelled or superseded server-side finishes its row
+  (lingers, closes) and only a build error waits in red; `restoreStats`
+  puts the pre-search count back only over the view it described
+  (`rec.viewId`) and recomputes from the live view otherwise; the cancel
+  chip is not armed for an adopt — it cancels a build's statement, and
+  an adopt's wait is the writer lock's — and comes up only if the adopt
+  409s into a rebuild; removing a table cancels its pending search, and
+  Apply for a table since removed discards the result with a toast.
 - **Stored keymaps are migrated on load, not merged blindly.**
   `loadKeymap` used to be `{...DEFAULT_KEYMAP, ...stored}`, which means a
   returning analyst's localStorage outranks every later change to the

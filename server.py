@@ -111,11 +111,14 @@ def _jobs_running() -> bool:
     if STORE is None or STORE.closed:
         return False
     try:
-        # A view-as-table copy counts too: the source it is filling has a
-        # growing row_count and columns='[]' until it finishes, so a
-        # save-as or copy_sources snapshot taken now would file a half
-        # table as a whole one (Store.copies_in_flight).
+        # A view build running in the background (a search the analyst
+        # left to finish) holds the server open too: its result is what
+        # they will come back for. A view-as-table copy counts as well: the
+        # source it is filling has a growing row_count and columns='[]'
+        # until it finishes, so a save-as or copy_sources snapshot taken
+        # now would file a half table as a whole one.
         return (any(j["status"] in ("running", "queued") for j in STORE.list_ingest_jobs())
+                or STORE.running_view_jobs() > 0
                 or STORE.copies_in_flight() > 0)
     except Exception:  # noqa: BLE001 — a store mid-close must read as "not busy"
         return False
@@ -2909,6 +2912,54 @@ def api_view(spec: ViewSpec):
         # blaming the analyst's filter for something they can't fix and
         # burying the traceback.
         raise HTTPException(400, str(e))
+
+
+@app.post("/api/view/start")
+def api_view_start(spec: ViewSpec, wait_ms: int | None = None):
+    """The same build as /api/view, run in the background as a *held*
+    view (Store.start_view_job): the grid keeps its rows until the client
+    adopts the result. Waits up to `wait_ms` (Store default 250, clamped
+    to Store.VIEW_JOB_INLINE_WAIT_MAX_MS — the wait parks one of the
+    shared threadpool workers, and the client never sends the parameter)
+    so a fast search answers with `status: "done"` and its view inline;
+    otherwise `running`, and the client polls /api/view/job. A build
+    error lands in the record (`error`, `error_status` 400 for the
+    analyst-fixable kind), never as this route's status."""
+    return store().start_view_job(spec.source_id, spec.model_dump(), wait_ms=wait_ms)
+
+
+@app.get("/api/view/job")
+def api_view_job(job_id: int):
+    """404 when the job is gone — superseded by a newer build for the same
+    source, or from a case since closed. The poller stops on it."""
+    job = store().get_view_job(job_id)
+    if job is None:
+        raise HTTPException(404, "No such view job")
+    return job
+
+
+@app.post("/api/view/job/cancel")
+def api_view_job_cancel(job_id: int):
+    """Cancel a running background build, or discard a finished one's
+    still-pending view. A miss is `cancelled: false`, not an error."""
+    return {"cancelled": store().cancel_view_job(job_id)}
+
+
+class ViewAdopt(BaseModel):
+    view_id: str
+
+
+@app.post("/api/view/adopt")
+def api_view_adopt(body: ViewAdopt):
+    """Install a held view as its source's live one (Store.adopt_view);
+    returns the same payload /api/view does. 409 with "expired" in the
+    detail when the view is gone — a newer build evicted it — which the
+    client answers by running the search again. (The closed-case 409 from
+    closed_database_handler deliberately does NOT say "expired".)"""
+    try:
+        return store().adopt_view(body.view_id)
+    except KeyError as e:
+        raise HTTPException(409, str(e))
 
 
 @app.post("/api/view/sql")

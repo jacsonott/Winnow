@@ -502,8 +502,13 @@ A new trap goes in the file for its subsystem, not back here — see
    ~150k rows/s. `read_csv_auto` into DuckDB then copy to SQLite should be 5–10×
    faster with better type sniffing. Keep SQLite as the store — the sidecar and
    session model depend on it.
-2. **Multiple live views per source** (filter tabs). `Store._views` currently
-   evicts any other view for the same source on rebuild.
+2. **Multiple live views per source** (filter tabs). `Store._views` still
+   evicts any other view for the same source when a normal build lands —
+   but a *held* view (`build_view(hold=True)` + `adopt_view`, what a
+   search running in the background builds; see docs/notes/store.md) is
+   the first step: a second view already lives beside the live one until
+   it is adopted or discarded. Filter tabs need that plus a way to keep
+   several adopted at once.
 3. **Merged multi-source timeline** — one view across several `src_` tables with
    a normalised timestamp column. The big one for real triage.
 4. **Drag-to-reorder columns.** `S.order` is already persisted in the layout;

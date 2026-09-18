@@ -346,6 +346,58 @@ see [docs/notes/README.md](README.md) for the whole set.
   recovery declines to rebuild while a build for the open table is in
   flight (`rebuildInFlight`) — that build's landing is the recovery, and
   a rebuild from the 409 would cancel it and start the same spec over.
+- **A search-box build runs as a job that builds a *held* view**
+  (`start_view_job` / `get_view_job` / `cancel_view_job`, `POST
+  /api/view/start`, `GET /api/view/job`, `POST /api/view/job/cancel`,
+  `POST /api/view/adopt`). `build_view(hold=True)` skips
+  `_evict_root_views` for everything but an earlier *pending* view of the
+  same source and registers its handle with `pending: True`; the grid's
+  live view stays exactly where it is — the reader paths only consult
+  `_views` by id, so both page — and `adopt_view` is the step that makes
+  the held one live: clear `pending`, evict the rest (`keep=` spares the
+  one being installed). That is what lets the client keep the old rows on
+  screen while a long search runs and offer Apply when it lands, instead
+  of every search evicting the view under the grid the moment it
+  commits. Three rules keep held views from piling up: a normal build
+  still evicts pending views along with everything else (newer intent
+  wins — a filter change makes a pending search moot, and the client's
+  adopt then 409s "expired" into a fresh build); a second held build for
+  a source evicts the first (one pending per source); and Discard
+  (`cancel_view_job` on a finished job) drops the view. `hold` reaches
+  **both** build paths on purpose — `_build_virtual_root_view` evicts
+  under the lock before it has a handle, and a cleared search box lands
+  there, so a hold that only covered the materialised block evicted the
+  live view on the most common search rebuild of all. The job registry
+  is `_JobRegistry` (own lock, one live job per slot, `get` answers only
+  for the slot's live job → 404 for a superseded id), written so the
+  next job of this shape is the same few lines; the worker's build
+  carries the spec's `op_token` (minted server-side when the client sent
+  none), so starting a second job for the source `cancel_op`s the first
+  and the cancel chip's `/api/cancel_op` works on a job exactly as on a
+  blocking build. `start_view_job` waits up to `wait_ms` (250) before
+  answering, so a fast search comes back `done` with its view inline and
+  costs the client no poll. `Store.close()` sets the registry `closing`,
+  cancels every running job's token and joins the threads **before**
+  `self.db.close()`, mirroring the ingest block: a worker queued on
+  `self.lock` at close time would otherwise take it after the connection
+  was gone. server.py's `_jobs_running` counts running view jobs, so idle
+  shutdown cannot reap a long search whose window was closed. A build
+  error lands in the record (`error`, `error_status` 400 for the
+  analyst-fixable kind api_view answers 400 with), never as the start
+  route's status. **A cancel is decided under the registry lock, not by
+  what `cancel_op` found**: `cancel_view_job` reads "running", and in
+  the gap before its `cancel_op` the worker can commit the held view —
+  `cancel_op` then has nothing to interrupt (the same is true of a build
+  between statements), the client has been told True and dropped its
+  record, and the pending table would sit in `/dev/shm` for nobody
+  until the next build for that source. So `_JobRegistry.request_discard`
+  flags the job under the lock `finish` records the outcome under: a
+  "done" that arrives after the flag is recorded "cancelled" and handed
+  back to the worker, which drops the view (`_drop_pending_view`).
+  Whichever runs first, the view is kept or dropped exactly once. The
+  inline wait is clamped (`VIEW_JOB_INLINE_WAIT_MAX_MS`): over HTTP it
+  parks a shared threadpool worker, and the client never sends a figure.
+  `tests/test_view_hold.py` / `tests/test_view_jobs.py`.
 - **The 2026-08 hot-path perf pass** (validated with `python3 -m bench
   --vs-ref` at both the 200k and 1.2M tiers — 0 slower, footprint
   unchanged), the shapes and their reasons:
