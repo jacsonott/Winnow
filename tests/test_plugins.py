@@ -1707,6 +1707,107 @@ def test_first_last_template_typo_is_a_400_naming_the_placeholder(fl_client):
     assert "{Usre}" in r.json()["detail"]
 
 
+def test_first_last_template_names_a_column_it_does_not_carry(fl_client, store, write_csv):
+    """{Column} resolves for ANY column of the table, not only one that is
+    grouped, ordered or carried: the template's columns ride the windowed
+    pass for the renderer alone and never become output columns. A typo is
+    still refused by name. Same over a merge (invariant #9), where the
+    column arrives through the union."""
+    client, sid = fl_client
+    out = _fl(client, "preview", source_id=sid, group_by=["Host", "User"],
+              sort_column="When", columns=[], template="{which} of {count} — {EventId}")
+    assert out["columns"] == ["When", "Description"]
+    descs = {r[-1] for r in out["rows"]}
+    assert "First of 3 — 4624" in descs and "Last of 3 — 4634" in descs
+    r = client.post("/api/plugin/first_last/preview", json={
+        "source_id": sid, "group_by": ["Host"], "sort_column": "When",
+        "columns": [], "template": "{EventId} {Evnt}"})
+    assert r.status_code == 400 and "{Evnt}" in r.json()["detail"]
+
+    rows2 = [["When", "Host", "User", "EventId"],
+             ["2026-03-15 08:00:00", "SRV9", "erin", "7001"],
+             ["2026-03-15 17:00:00", "SRV9", "erin", "7002"]]
+    sid2 = store.ingest_csv(write_csv(rows2, "fltc2.csv"), name="fltc2", build_fts=False)["id"]
+    mid = store.create_merge("fltcm", [sid, sid2])["id"]
+    out = _fl(client, "preview", source_id=mid, group_by=["User"], sort_column="When",
+              columns=[], template="{which} {EventId} on {Host}")
+    assert out["columns"] == ["When", "Description"]
+    descs = {r[-1] for r in out["rows"]}
+    assert "First 7001 on SRV9" in descs and "Last 7002 on SRV9" in descs
+
+
+def test_first_last_values_are_most_common_first(fl_client, store, write_csv):
+    """The filter editor's value list: most common first, and the cap
+    reported as `truncated` so the tab can say the list is partial. Over a
+    merge the counts come through the union (invariant #9)."""
+    client, sid = fl_client
+    out = _fl(client, "values", source_id=sid, column="Host")
+    assert [(v["value"], v["count"]) for v in out["values"]] == [("SRV1", 5), ("SRV2", 1)]
+    assert out["truncated"] is False
+    out = _fl(client, "values", source_id=sid, column="Host", limit=1)
+    assert [v["value"] for v in out["values"]] == ["SRV1"] and out["truncated"] is True
+    r = client.post("/api/plugin/first_last/values", json={"source_id": sid, "column": "Nope"})
+    assert r.status_code == 400
+
+    rows2 = [["When", "Host", "User", "EventId"],
+             ["2026-03-15 08:00:00", "SRV9", "erin", "4624"],
+             ["2026-03-15 17:00:00", "SRV9", "erin", "4634"]]
+    sid2 = store.ingest_csv(write_csv(rows2, "flv2.csv"), name="flv2", build_fts=False)["id"]
+    mid = store.create_merge("flvm", [sid, sid2])["id"]
+    out = _fl(client, "values", source_id=mid, column="Host")
+    assert [(v["value"], v["count"]) for v in out["values"]] == [("SRV1", 5), ("SRV9", 2), ("SRV2", 1)]
+    assert out["truncated"] is False
+
+
+FL_ALIAS_ROWS = [
+    # Headers named like the pass's own window aliases, with values that
+    # could never be a group size or a total, so a leak is unmistakable.
+    ["When", "Host", "Bytes", "group_n", "Sum of Bytes"],
+    ["2026-03-14 08:00:00", "SRV1", "10", "999", "-1"],
+    ["2026-03-14 09:00:00", "SRV1", "20", "998", "-1"],
+    ["2026-03-14 10:00:00", "SRV2", "5", "997", "-1"],
+]
+
+FL_ALIAS_TEMPLATE = "{which} of {count} ({group_n}) {sum:Bytes}|{Sum of Bytes}"
+
+
+def _alias_preview(client, sid):
+    """The preview over FL_ALIAS_ROWS-shaped data: {desc: (Sum column,
+    plain {Sum of Bytes} placeholder)} keyed by the part before the bar."""
+    out = _fl(client, "preview", source_id=sid, group_by=["Host"], sort_column="When",
+              columns=[], sum_columns=["Bytes"], template=FL_ALIAS_TEMPLATE)
+    assert out["columns"] == ["When", "Sum of Bytes", "Description"]
+    return {r[-1].split("|")[0]: (r[1], float(r[-1].split("|")[1])) for r in out["rows"]}
+
+
+def test_first_last_template_cannot_shadow_the_pass_own_aliases(fl_client, store, write_csv):
+    """A source column named like one of the pass's own outputs (group_n,
+    rn_first/rn_last, a Sum/Min/Max-of alias) is not projected on the
+    template's behalf. Projected, the inner SELECT would carry the name
+    twice — the file's, then the window's — the outer SELECT * would label
+    the window's copy `group_n:1`, and {count} and the Sum column would
+    silently read the file's values instead of the group's. The reserved
+    names are skipped, so {count} is the group size, the Sum column is the
+    total, and the plain {group_n}/{Sum of Bytes} placeholders read the
+    pass's own numbers, never the file's. Same over a merge (invariant #9),
+    where the columns arrive through the union."""
+    client, _ = fl_client
+    sid = store.ingest_csv(write_csv(FL_ALIAS_ROWS, "flal.csv"), name="flal", build_fts=False)["id"]
+    got = _alias_preview(client, sid)
+    assert got == {"First of 2 (2) 30": ("30", 30.0), "Last of 2 (2) 30": ("30", 30.0),
+                   "Only of 1 (1) 5": ("5", 5.0)}
+
+    rows2 = [FL_ALIAS_ROWS[0],
+             ["2026-03-15 08:00:00", "SRV9", "1", "996", "-1"],
+             ["2026-03-15 17:00:00", "SRV9", "2", "995", "-1"]]
+    sid2 = store.ingest_csv(write_csv(rows2, "flal2.csv"), name="flal2", build_fts=False)["id"]
+    mid = store.create_merge("flalm", [sid, sid2])["id"]
+    got = _alias_preview(client, mid)
+    assert got == {"First of 2 (2) 30": ("30", 30.0), "Last of 2 (2) 30": ("30", 30.0),
+                   "Only of 1 (1) 5": ("5", 5.0),
+                   "First of 2 (2) 3": ("3", 3.0), "Last of 2 (2) 3": ("3", 3.0)}
+
+
 @pytest.mark.parametrize("body, fragment", [
     ({"group_by": [], "sort_column": "When"}, "at least one column"),
     ({"group_by": ["Host"]}, "orders each group"),

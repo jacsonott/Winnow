@@ -35,6 +35,7 @@ const writeAuto = (on) => { try { localStorage.setItem(AUTO_KEY, on ? '1' : '0')
 
 let state = null;
 let refresh = null;
+let hideCompletion = null;
 
 export default function mount(container, winnow) {
   const { el, post, api, toast, modal } = winnow;
@@ -108,6 +109,7 @@ export default function mount(container, winnow) {
     strip.append(add);
   }
   function activateSheet(i) {
+    acHide();   // state swaps under the input — an accept must not land in another sheet
     active = i;
     state = sheets[i];
     if (state.sourceId != null) srcSel.value = String(state.sourceId);
@@ -285,14 +287,106 @@ export default function mount(container, winnow) {
   const tmplInput = el('input');
   tmplInput.style.cssText = 'background:var(--ink);color:var(--text);border:1px solid var(--line-2);'
     + 'padding:5px 8px;font:12px var(--mono);width:100%';
-  tmplInput.oninput = () => { state.template = tmplInput.value; schedule(); };
+  tmplInput.oninput = () => { state.template = tmplInput.value; schedule(); acRefresh(); };
   const chipRow = el('div');
   chipRow.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px';
   tmplWrap.append(tmplInput, chipRow, el('div', 'note-status',
     'Free text plus placeholders — {which} is First/Last (Only, for a one-row group), {count} the '
-    + 'group size, {Column} that row’s value, {sum:Column} / {min:Column} / {max:Column} a Total-up '
-    + 'column’s group total, smallest and largest. Click a chip to insert it.'));
+    + 'group size, {Column} that row’s value (any column — it need not be grouped or included), '
+    + '{sum:Column} / {min:Column} / {max:Column} a Total-up column’s group total, smallest and '
+    + 'largest. Click a chip to insert it, or type { in the box to complete a name.'));
   side.append(tmplWrap);
+
+  /* ------------------------------------------- placeholder completion */
+
+  /* Typing `{` in the description offers every name the template can
+     resolve — {which}, {count}, the sum:/min:/max: forms of each Total-up
+     column, and every column of the table (the backend projects whatever
+     the template names, so none has to be grouped or carried first) —
+     narrowed by what follows the brace. Hand-rolled the way the SQL
+     pane's is: the winnow context exposes no dropdown, and riding the same
+     .menu/.sql-ac classes makes it look identical across the five styles.
+     It lives in this container rather than document.body so it dies with
+     the mount (case switch, plugin reload) and is hidden with the tab —
+     .menu is position:fixed, which the rail's overflow does not clip. */
+  let acEl = null, acItems = [], acIdx = 0, acFrom = 0;
+  function acHide() {
+    if (acEl) acEl.remove();
+    acEl = null;
+    acItems = [];
+  }
+  hideCompletion = acHide;
+  function acCandidates(partial) {
+    const needle = partial.toLowerCase();
+    const all = [{ name: 'which', kind: 'First/Last' }, { name: 'count', kind: 'group size' }];
+    for (const c of state.sums) for (const k of ['sum', 'min', 'max']) all.push({ name: `${k}:${c}`, kind: 'total' });
+    const src = currentSource();
+    for (const c of (src ? src.columns : [])) {
+      // A brace inside a column name cannot be a placeholder at all — the
+      // renderer stops at the first `}` — so it is not offered.
+      if (!/[{}]/.test(c.name)) all.push({ name: c.name, kind: c.derived ? 'derived' : 'column' });
+    }
+    return all.filter((it) => it.name.toLowerCase().includes(needle)).slice(0, 12);
+  }
+  function acPaint() {
+    if (!acEl) {
+      acEl = el('div', 'menu sql-ac fl-ac');
+      container.append(acEl);
+    }
+    acEl.replaceChildren();
+    acItems.forEach((it, i) => {
+      const row = el('button', 'menu-item' + (i === acIdx ? ' sql-ac-active' : ''));
+      row.append(el('span', null, it.name), el('span', 'count', it.kind));
+      // mousedown, not click: a click would blur the input first and the
+      // blur handler would take the popup down before the click landed.
+      row.onmousedown = (e) => { e.preventDefault(); acAccept(it); };
+      acEl.append(row);
+    });
+    const r = tmplInput.getBoundingClientRect();
+    acEl.style.top = Math.min(r.bottom + 2, window.innerHeight - acEl.offsetHeight - 8) + 'px';
+    acEl.style.left = Math.min(r.left, window.innerWidth - acEl.offsetWidth - 8) + 'px';
+  }
+  function acAccept(item) {
+    // The chips' two lines, not renderControls(): that rewrites the
+    // input's value and drops the caret mid-edit.
+    tmplInput.setRangeText(`{${item.name}}`, acFrom, tmplInput.selectionStart, 'end');
+    acHide();
+    state.template = tmplInput.value;
+    schedule();
+    tmplInput.focus();
+  }
+  function acRefresh({ force = false } = {}) {
+    const caret = tmplInput.selectionStart;
+    const m = /\{([^{}]*)$/.exec(tmplInput.value.slice(0, caret));
+    if (!m && !force) { acHide(); return; }
+    // An unclosed brace before the caret is the trigger; Ctrl+Space with
+    // none inserts a whole {name} at the caret.
+    acFrom = m ? caret - m[0].length : caret;
+    acItems = acCandidates(m ? m[1] : '');
+    acIdx = 0;
+    if (!acItems.length) { acHide(); return; }
+    acPaint();
+  }
+  tmplInput.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === ' ') { e.preventDefault(); acRefresh({ force: true }); return; }
+    if (!acEl) return;
+    if (e.key === 'ArrowDown') { e.preventDefault(); acIdx = (acIdx + 1) % acItems.length; acPaint(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); acIdx = (acIdx + acItems.length - 1) % acItems.length; acPaint(); }
+    else if (e.key === 'Tab' || e.key === 'Enter') {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      acAccept(acItems[acIdx]);
+    } else if (e.key === 'Escape') {
+      // Consumed here — the app's own Escape would blur the field.
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      acHide();
+    } else if (/^(ArrowLeft|ArrowRight|Home|End)$/.test(e.key)) {
+      acHide();   // the caret leaves the token the popup was built for
+    }
+  });
+  tmplInput.addEventListener('blur', () => setTimeout(acHide, 150));
+  tmplInput.addEventListener('click', acHide);
 
   /* --------------------------------------------------- drag and drop */
 
@@ -440,6 +534,7 @@ export default function mount(container, winnow) {
     }
 
     chipRow.replaceChildren();
+    acHide();   // the value is rewritten below; the popup's brace index was for the old one
     tmplInput.value = state.template;
     const insert = (text) => {
       const at = tmplInput.selectionStart ?? tmplInput.value.length;
@@ -451,7 +546,10 @@ export default function mount(container, winnow) {
     // Totals first among the computed ones: a chip per Total-up column,
     // in the colon form that keeps functions and fields from colliding.
     const sumChips = state.sums.flatMap((c) => [`{sum:${c}}`, `{min:${c}}`, `{max:${c}}`]);
-    for (const ph of ['{which}', '{count}', ...sumChips, ...cols.map((c) => `{${c.name}}`)]) {
+    // The column chips follow the field search above, so a wide table is
+    // not sixty buttons; typing { in the input completes the same names.
+    const colChips = cols.filter((c) => !needle || c.name.toLowerCase().includes(needle)).map((c) => `{${c.name}}`);
+    for (const ph of ['{which}', '{count}', ...sumChips, ...colChips]) {
       const chipBtn = el('button', 'btn ghost', ph);
       chipBtn.style.cssText = 'font-size:10px;padding:1px 5px;font-family:var(--mono)';
       chipBtn.onclick = () => insert(ph);
@@ -504,6 +602,7 @@ export default function mount(container, winnow) {
   /* Tag filter — its own control rather than a column filter, because tags
      aren't a column and "only what I've tagged TA" is the most common way
      to scope a bookend pass. */
+  let tagNeedle = '';
   function renderTagFilter() {
     tagBox.replaceChildren();
     const sel = mkSel('Keep only rows with (or without) tags');
@@ -515,26 +614,44 @@ export default function mount(container, winnow) {
       sel.append(o);
     }
     sel.value = state.tags.mode;
-    sel.onchange = () => { state.tags.mode = sel.value; renderTagFilter(); schedule(); };
+    sel.onchange = () => { state.tags.mode = sel.value; tagNeedle = ''; renderTagFilter(); schedule(); };
     tagBox.append(sel);
     if (state.tags.mode !== 'ids') return;
     const tags = winnow.state.tags || [];
     if (!tags.length) { tagBox.append(el('div', 'note-status', 'No tags in this case yet.')); return; }
-    for (const t of tags) {
-      const row = el('label');
-      row.style.cssText = 'display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer';
-      const cb = el('input');
-      cb.type = 'checkbox';
-      cb.checked = state.tags.ids.includes(t.id);
-      cb.onchange = () => {
-        state.tags.ids = cb.checked ? [...state.tags.ids, t.id] : state.tags.ids.filter((x) => x !== t.id);
-        schedule();
-      };
-      const dot = el('span');
-      dot.style.cssText = `width:10px;height:10px;border-radius:2px;background:${t.color};flex:0 0 auto`;
-      row.append(cb, dot, el('span', null, t.name));
-      tagBox.append(row);
-    }
+    // The same search the value list has — a case with forty tags wants it.
+    const search = el('input');
+    search.type = 'search';
+    search.placeholder = 'Find a tag…';
+    search.value = tagNeedle;
+    search.style.cssText = 'background:var(--ink);color:var(--text);border:1px solid var(--line-2);'
+      + 'padding:4px 7px;font:inherit;font-size:12px;margin:2px 0';
+    const rows = el('div');
+    rows.style.cssText = 'display:flex;flex-direction:column;gap:2px';
+    const paintRows = () => {
+      rows.replaceChildren();
+      const needle = tagNeedle.trim().toLowerCase();
+      for (const t of tags) {
+        if (needle && !t.name.toLowerCase().includes(needle)) continue;
+        const row = el('label');
+        row.style.cssText = 'display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer';
+        const cb = el('input');
+        cb.type = 'checkbox';
+        cb.checked = state.tags.ids.includes(t.id);
+        cb.onchange = () => {
+          state.tags.ids = cb.checked ? [...state.tags.ids, t.id] : state.tags.ids.filter((x) => x !== t.id);
+          schedule();
+        };
+        const dot = el('span');
+        dot.style.cssText = `width:10px;height:10px;border-radius:2px;background:${t.color};flex:0 0 auto`;
+        row.append(cb, dot, el('span', null, t.name));
+        rows.append(row);
+      }
+      if (!rows.children.length) rows.append(el('div', 'note-status', 'No tag matches that.'));
+    };
+    search.oninput = () => { tagNeedle = search.value; paintRows(); };
+    tagBox.append(search, rows);
+    paintRows();
   }
 
   function filterSummary(f) {
@@ -570,13 +687,14 @@ export default function mount(container, winnow) {
       const area = el('div');
       area.style.cssText = 'margin-top:10px';
       b.append(area);
-      const apply = el('button', 'btn', 'Apply');
-      apply.style.marginTop = '12px';
-      apply.onclick = () => {
+      const applyNow = () => {
         document.getElementById('modal').hidden = true;
         renderControls();
         schedule();
       };
+      const apply = el('button', 'btn', 'Apply');
+      apply.style.marginTop = '12px';
+      apply.onclick = applyNow;
       b.append(apply);
 
       const paint = async () => {
@@ -601,22 +719,60 @@ export default function mount(container, winnow) {
           return;
         }
         area.replaceChildren();
+        // The pivot editor's shape, copied rather than imported (plugins
+        // are standalone): a search over the values, All/None, and a note
+        // when the list is the capped most-common set, not every value.
+        const search = el('input');
+        search.type = 'search';
+        search.placeholder = 'Find a value…';
+        search.style.cssText = 'background:var(--ink);color:var(--text);border:1px solid var(--line-2);padding:4px 7px;font:inherit;width:100%';
         const list = el('div');
-        list.style.cssText = 'max-height:44vh;overflow:auto;display:flex;flex-direction:column;gap:2px';
+        list.style.cssText = 'max-height:44vh;overflow:auto;display:flex;flex-direction:column;gap:2px;margin-top:8px';
         const chosen = new Set(filter.values || []);
-        for (const v of res.values) {
-          const text = v.value == null || v.value === '' ? '(blank)' : String(v.value);
-          const row = el('label');
-          row.style.cssText = 'display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:11px';
-          const cb = el('input');
-          cb.type = 'checkbox';
-          const key = v.value == null ? '' : String(v.value);
-          cb.checked = chosen.has(key);
-          cb.onchange = () => { cb.checked ? chosen.add(key) : chosen.delete(key); filter.values = [...chosen]; };
-          row.append(cb, el('span', null, text), el('span', 'count', v.count.toLocaleString()));
-          list.append(row);
+        const keyOf = (v) => (v.value == null ? '' : String(v.value));
+        const textOf = (v) => (v.value == null || v.value === '' ? '(blank)' : String(v.value));
+        // What the needle leaves is what the list shows AND what All/None
+        // act on — the app's own value picker works the same way, and
+        // "type jsmith, All, Apply" is the workflow a search is for.
+        const shown = () => {
+          const needle = search.value.trim().toLowerCase();
+          return needle ? res.values.filter((v) => textOf(v).toLowerCase().includes(needle)) : res.values;
+        };
+        const paintList = () => {
+          list.replaceChildren();
+          const rows = shown();
+          for (const v of rows) {
+            const key = keyOf(v);
+            const row = el('label');
+            row.style.cssText = 'display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:11px';
+            const cb = el('input');
+            cb.type = 'checkbox';
+            cb.checked = chosen.has(key);
+            cb.onchange = () => { cb.checked ? chosen.add(key) : chosen.delete(key); filter.values = [...chosen]; };
+            const name = el('span', null, textOf(v));
+            name.style.cssText = 'flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+            row.append(cb, name, el('span', 'count', v.count.toLocaleString()));
+            list.append(row);
+          }
+          if (!rows.length) list.append(el('div', 'note-status', res.values.length ? 'No value matches that.' : 'No values.'));
+        };
+        search.oninput = paintList;
+        search.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); applyNow(); } };
+        const acts = el('div', 'row-actions');
+        const all = el('button', 'btn ghost', 'All');
+        all.title = 'Tick every value listed — with a search, only the matches';
+        all.onclick = () => { for (const v of shown()) chosen.add(keyOf(v)); filter.values = [...chosen]; paintList(); };
+        const none = el('button', 'btn ghost', 'None');
+        none.title = 'Untick every value listed — with a search, only the matches';
+        none.onclick = () => { for (const v of shown()) chosen.delete(keyOf(v)); filter.values = [...chosen]; paintList(); };
+        acts.append(all, none);
+        if (res.truncated) {
+          acts.append(el('span', 'note-status', `showing the ${res.values.length.toLocaleString()} most common`));
         }
-        area.append(list);
+        area.append(search, acts, list);
+        paintList();
+        // modal(opts.focus) cannot reach this — the list paints after the fetch.
+        search.focus();
       };
       opSel.onchange = paint;
       paint();
@@ -955,6 +1111,7 @@ export default function mount(container, winnow) {
 
   function selectSource(id) {
     if (state.sourceId === id) return;
+    acHide();   // the column set changes under the popup
     state.sourceId = id;
     state.groupBy = [];
     state.carry = [];
@@ -991,4 +1148,11 @@ export default function mount(container, winnow) {
 
 export function onShow() {
   if (refresh) refresh();
+}
+
+/* Tab switches reach here (Alt+digit works while typing, so the popup can
+   be open); the container's `hidden` already hides the popup with it, but
+   the accept state must not survive to the next visit. */
+export function onHide() {
+  if (hideCompletion) hideCompletion();
 }
