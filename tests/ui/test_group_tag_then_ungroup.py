@@ -10,7 +10,9 @@ until something else rebuilt the view. The rail and the ribbon read the
 server and were right all along, which is what made it look like the rows
 had merely not caught up yet. The inverse held too: Shift+hotkey and undo
 dropped only the flat cache, so under a grouping by an ordinary column the
-rows on screen kept their old stripes.
+rows on screen kept their old stripes — and the tag editor's Delete, a
+server-side removal from every row, cleared neither cache, so the dead id
+painted as a grey stripe until something else refetched.
 
 The fixture's view is sorted by Timestamp (openSource's default) and a
 sort can be left persisted by an earlier module, so a row's flat position
@@ -149,4 +151,44 @@ def test_a_note_written_while_grouped_keeps_its_mark_after_ungroup(page, api):
         # Straight to the server: cleanup must not depend on which cached
         # row object the detail pane happens to be looking at.
         api("/api/note", "POST", {"source_id": source_id, "rid": rid, "note": ""})
+        _ungroup(page)
+
+
+def test_a_tag_deleted_from_the_editor_leaves_no_stripe_on_its_rows(page, api):
+    """Delete in the tag editor is the server taking a tag off every row.
+    The cached rows kept the dead id, and buildDataRow paints an id it can
+    no longer name as a grey stripe — on the open group's rows and, after
+    Ungroup, on the flat copies."""
+    rid = _group_and_expand_first(page)
+    name = "deleted while on screen"
+    tag = api("/api/tags", "POST", {"name": name, "color": "#ff0000", "hotkey": None})
+    try:
+        page.evaluate("() => __winnow.loadTags()")
+        page.wait_for_function("(id) => __winnow.S.tags.some((t) => t.id === id)", arg=tag["id"])
+        page.evaluate("(id) => __winnow.tagRowsAtPositions(__winnow.S.tags.find((t) => t.id === id), [1], true)", tag["id"])
+        page.wait_for_function(GROUP_ROW_TAGGED)
+        page.evaluate("() => __winnow.render()")
+        assert page.locator(".row[data-pos='1'] .gutter .stripe").count() == 1
+        page.evaluate("() => __winnow.openTagEditor()")
+        rows = page.locator("#modalBody .row-actions")
+        mine = next(i for i in range(rows.count()) if rows.nth(i).locator("input").nth(1).input_value() == name)
+        rows.nth(mine).locator("button", has_text="Delete").click()
+        page.wait_for_selector(".confirm-overlay")
+        page.locator(".confirm-card .btn", has_text="Delete").click()
+        page.wait_for_function("(id) => !__winnow.S.tags.some((t) => t.id === id)", arg=tag["id"])
+        # The group-page row used to keep answering with the dead id from
+        # the cache; this waits for its refetched copy.
+        page.wait_for_function("() => !!__winnow.rowAt(1) && __winnow.rowAt(1).tags.length === 0")
+        page.evaluate("() => { __winnow.closeModal(); __winnow.render(); }")
+        assert page.locator(".row[data-pos='1'] .gutter .stripe").count() == 0
+        _ungroup(page)
+        page.wait_for_function(FLAT_ROW_CLEAN, arg=rid)
+        assert _gutter_mark_count(page, rid, "stripe") == 0
+    finally:
+        page.evaluate("() => { if (!document.getElementById('modal').hidden) __winnow.closeModal(); }")
+        # The delete IS the cleanup; only a failure before it leaves the tag
+        # (and the row wearing it) behind.
+        if any(t["id"] == tag["id"] for t in api("/api/tags")["tags"]):
+            api(f"/api/tags/{tag['id']}", "DELETE")
+            page.evaluate("() => __winnow.loadTags()")
         _ungroup(page)

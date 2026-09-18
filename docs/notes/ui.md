@@ -100,7 +100,8 @@ see [docs/notes/README.md](README.md) for the whole set.
   `rowMenuTagList` does. The throwaway view is safe to drop immediately
   because undo records the *rows* (invariant #7's `v.undo_<n>` delta table),
   not the view they were found through. Tagging while grouped *by tag* —
-  and undoing — calls `regroupIfGroupedByTag()`: the tag just changed which
+  undoing, the SQL pane's tag hotkey and the tag editor's Delete included
+  — calls `regroupIfGroupedByTag()`: the tag just changed which
   group those rows belong to, and the expanded sub-views are server-side
   with nothing here to patch them with. Either way it ends with
   `clearRowCaches()`, not `clearGroupPageCache()` alone: the flat page

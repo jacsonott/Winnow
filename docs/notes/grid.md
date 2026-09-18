@@ -110,11 +110,14 @@ see [docs/notes/README.md](README.md) for the whole set.
     server-read) and not on the rows after Ungroup, until something else
     rebuilt the view. The rule now: a write the server did on this
     client's behalf (whole view, whole group, undo, the SQL pane's tag
-    hotkey) calls `tags.clearRowCaches()`, which drops *both*; a write that
-    patched row objects in place (`tagRowsAtPositions`, `saveNote`) keeps
-    the patch — that is the instant feedback — and, when grouped, drops
-    the flat cache alone, since the objects it patched were group-page
-    rows. Clearing the flat cache from grouped mode is safe because no
+    hotkey, the tag editor's Delete) calls `tags.clearRowCaches()`, which
+    drops *both*; a write that patched row objects in place
+    (`tagRowsAtPositions`, `saveNote`) keeps the patch — that is the
+    instant feedback — and drops the flat cache when grouped, since the
+    objects it patched were group-page rows (`saveNote` also drops it when
+    the row under the cursor is no longer the input's row: it is debounced
+    500 ms, and an Ungroup or a cursor move inside that window means it
+    patched nothing). Clearing the flat cache from grouped mode is safe because no
     flat fetch can be in flight there (`schedulePrefetch` and
     `loadRowsForPositions` both route to group pages, and select-all is
     refused under a grouping), so the `S.pageGen` bump strands nothing.

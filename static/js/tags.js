@@ -111,10 +111,11 @@ export const BULK_TAG_CONFIRM_AT = 10000;
    one, and S.view.view_id doesn't change), so while grouped the flat rows
    sit off-screen, still holding the `tags` arrays they were fetched with —
    and dropGrouping paints them straight back. A tag write the server did
-   on this client's behalf (a whole view, a whole group, an undo) therefore
-   has to drop BOTH, whatever mode is showing; the one that isn't on screen
-   is exactly the one nobody would otherwise remember. Each half bumps its
-   own generation so a fetch already in flight can't repopulate it. */
+   on this client's behalf (a whole view, a whole group, an undo, a tag
+   deleted outright) therefore has to drop BOTH, whatever mode is showing;
+   the one that isn't on screen is exactly the one nobody would otherwise
+   remember. Each half bumps its own generation so a fetch already in
+   flight can't repopulate it. */
 export function clearRowCaches() {
   clearPageCache();
   clearGroupPageCache();

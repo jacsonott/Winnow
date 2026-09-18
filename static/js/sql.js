@@ -270,7 +270,7 @@ export function showMainView(id) {
   if (e) e.hidden = false;
 }
 
-export function showGridTab() {
+export function showGridTab({ repaint = true } = {}) {
   S.activeTab = 'grid';
   showMainView('grid');
   syncTabSelection();
@@ -278,8 +278,15 @@ export function showGridTab() {
   // Same reason the Timeline rebuilds on arrival: tags can change while
   // this tab isn't showing (the SQL pane's tag hotkey drops the row caches
   // but can't paint a hidden grid), and the rows on screen are whatever
-  // was painted before leaving. render() is a cache hit when nothing did.
-  render();
+  // was painted before leaving. A cache hit when nothing did — but only
+  // against the view that is staying on screen. openSource and openCase
+  // come through here BEFORE swapping S.view/S.sourceId and paint for
+  // themselves next; with the caches just dropped, a render() here would
+  // fetch a page of the previous table's view (or, on a case switch, ask
+  // the new Store for the old case's view id and spin a spurious rebuild
+  // off the 409), so those two pass repaint:false. render() is a no-op
+  // with no S.view at all.
+  if (repaint) render();
   if (S.sourceId) checkPresets(S.sourceId); // refresh the Filters button's suggestion state
 }
 

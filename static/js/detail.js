@@ -478,8 +478,11 @@ export const saveNote = debounce(async () => {
   // Same rule as tagRowsAtPositions: under a grouping the row just patched
   // is a group-page object, and the flat cache still holds this rid with
   // the old note for dropGrouping to paint — the ✎ mark would go missing
-  // on Ungroup exactly the way a tag stripe did.
-  if (S.groupByCols.length) clearPageCache();
+  // on Ungroup exactly the way a tag stripe did. The mismatch arms cover
+  // the 500 ms debounce: an Ungroup or a cursor move inside that window
+  // means the object under the cursor is not the input's row, so nothing
+  // above was patched and the cached copy of this rid is the stale one.
+  if (!r || r.rid !== rid || S.groupByCols.length) clearPageCache();
   $('noteStatus').textContent = 'Saved';
   render();
 }, 500);
