@@ -3558,6 +3558,17 @@ class DashboardReorder(BaseModel):
 class WidgetPreviewBody(BaseModel):
     source: str
     query: dict = {}
+    # Which card on which board this run is for. Both present and the
+    # result is cached under that widget, so the next open of the board
+    # paints it instead of re-running the query. Absent — the editor
+    # previewing a draft, a plugin calling the route — and nothing is
+    # cached, which is what "Preview" has to mean to be worth pressing.
+    dashboard_id: int | None = None
+    widget_id: str | None = None
+
+
+class DashboardRefreshBody(BaseModel):
+    widget_id: str | None = None
 
 
 @app.get("/api/dashboards")
@@ -3581,26 +3592,56 @@ def api_dashboards_reorder(body: DashboardReorder):
 
 @app.get("/api/dashboards/{dashboard_id}")
 def api_dashboard_widgets_get(dashboard_id: int):
+    """A board's widget definitions AND what each one last returned.
+
+    One request, because the alternative is what this replaces: the client
+    painting an empty grid and then issuing one query per card on every
+    open. `cache` is keyed by widget id and carries `ran_at` so the board
+    can say how old each number is; a result whose widget has changed
+    since is simply absent, and that card runs."""
+    st = store()
     try:
-        return {"widgets": store().get_dashboard(dashboard_id)}
+        widgets = st.get_dashboard(dashboard_id)
     except KeyError as e:
         raise HTTPException(404, str(e))
+    return {"widgets": widgets, "cache": st.get_dashboard_cache(dashboard_id, widgets)}
 
 
 @app.post("/api/dashboards/{dashboard_id}")
 def api_dashboard_update(dashboard_id: int, body: DashboardUpdate):
+    """Returns the stored widgets when widgets were sent, because the
+    store mints an id for any widget that arrived without one — a card the
+    analyst just added has no cached result to find until the client knows
+    what that card is called."""
+    stored = None
     try:
         if body.name is not None:
             store().rename_dashboard(dashboard_id, body.name)
         if body.widgets is not None:
-            store().set_dashboard_widgets(dashboard_id, body.widgets)
+            stored = store().set_dashboard_widgets(dashboard_id, body.widgets)
         if body.pinned is not None:
             store().set_dashboard_pinned(dashboard_id, body.pinned)
     except ValueError as e:
         raise HTTPException(400, str(e))
     except KeyError as e:
         raise HTTPException(404, str(e))
-    return {"ok": True}
+    return {"ok": True} if stored is None else {"ok": True, "widgets": stored}
+
+
+@app.post("/api/dashboards/{dashboard_id}/refresh")
+def api_dashboard_refresh(dashboard_id: int, body: DashboardRefreshBody):
+    """Re-run a board's widgets now and cache what they return — the whole
+    board, or the one named by `widget_id`.
+
+    A plain `def` on the threadpool, like every other Store route: one
+    worker runs the board rather than the event loop
+    (tests/test_event_loop_blocking.py)."""
+    try:
+        return store().refresh_dashboard(dashboard_id, body.widget_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.delete("/api/dashboards/{dashboard_id}")
@@ -3700,10 +3741,30 @@ def api_plugin_dashboard_add(fs_name: str, local_id: str, body: PluginBoardAddBo
 
 @app.post("/api/dashboard/widget/preview")
 def api_dashboard_widget_preview(body: WidgetPreviewBody):
+    st = store()
+    t0 = time.time()
     try:
-        return store().dashboard_widget_preview(body.source, body.query)
+        out = st.dashboard_widget_preview(body.source, body.query)
     except ValueError as e:
         raise HTTPException(400, str(e))
+    elapsed = int((time.time() - t0) * 1000)
+    out["elapsed_ms"] = elapsed
+    if body.dashboard_id is not None and body.widget_id:
+        # Caching is best-effort on purpose: the analyst asked for a
+        # number, and they have it. A board that has been deleted or a
+        # widget that has moved on since the request went out is a reason
+        # not to store the result, not a reason to fail the request — and
+        # so is anything else, which is why this catches Exception rather
+        # than a list. A narrower list said "best-effort" and meant "unless
+        # I forgot one": a widget whose result would not encode turned a
+        # 200 into a 500 on the way to the filing cabinet.
+        try:
+            stamp = st.cache_widget_result(body.dashboard_id, body.widget_id, out, elapsed)
+        except Exception:
+            stamp = None
+        if stamp:
+            out["ran_at"] = stamp["ran_at"]
+    return out
 
 
 class ResolveBody(BaseModel):
@@ -4445,19 +4506,43 @@ def api_export_all_xlsx(filename: str = "all-tables.xlsx"):
 class SearchAllReq(BaseModel):
     query: str = ""
     terms: list[dict] = []  # advanced mode: [{term, connector: "AND"|"OR", exclude: bool}]
+    # None = every real table in the case, which is what the sweep has
+    # always done. A list scopes it; a merge id in that list expands to the
+    # merge's members (Store.resolve_search_all_scope).
+    source_ids: list[int] | None = None
 
 
 @app.post("/api/search_all")
 def api_search_all(body: SearchAllReq):
     """Synchronous whole-sweep search. Kept for scripted/one-shot use; the
     UI goes through the job routes below so it can show partial results and
-    let the analyst close the modal mid-sweep."""
-    return store().search_all_sources(body.query, body.terms)
+    let the analyst close the modal mid-sweep.
+
+    The scope is resolved on its own line, and only that line is inside the
+    try: a KeyError is the caller naming a table this case doesn't have,
+    and an `except KeyError` wrapped around the whole sweep would turn any
+    dict-key defect inside the scan into a 400 blaming the request for
+    something the analyst can't fix (api_view's old bare `except
+    Exception`, which docs/notes/server.md records)."""
+    st = store()
+    try:
+        scope = st.resolve_search_all_scope(body.source_ids)["source_ids"]
+    except KeyError as e:
+        raise HTTPException(400, e.args[0])
+    return st.search_all_sources(body.query, body.terms, scope)
 
 
 @app.post("/api/search_all/start")
 def api_search_all_start(body: SearchAllReq):
-    return store().start_search_all_job(body.query, body.terms)
+    """400 (not a job that quietly scans nothing) when the scope names a
+    source this case doesn't have — an empty result set reads as "no
+    matches", which would be an answer rather than the error it is. The
+    scope resolve is the only thing here that can raise KeyError, and it
+    runs before the thread starts (Store.start_search_all_job)."""
+    try:
+        return store().start_search_all_job(body.query, body.terms, body.source_ids)
+    except KeyError as e:
+        raise HTTPException(400, e.args[0])
 
 
 @app.get("/api/search_all/job")

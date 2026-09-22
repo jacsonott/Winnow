@@ -118,7 +118,13 @@ def test_adding_one_copies_it_into_the_open_case(client, store, write_csv, monke
     r = client.post("/api/plugin_dashboards/boards/b1/add", json={})
     assert r.status_code == 200, r.text
     assert [b["name"] for b in store.list_dashboards()] == ["Board one"]
-    assert store.get_dashboard(r.json()["id"]) == widgets
+    # Verbatim but for the id the store mints per widget (it is what the
+    # board's cached results hang off). The plugin's own registered list
+    # must NOT gain one — it is shared with every other case that adds it.
+    copied = store.get_dashboard(r.json()["id"])
+    assert [{k: v for k, v in w.items() if k != "id"} for w in copied] == widgets
+    assert all(w.get("id") for w in copied)
+    assert "id" not in widgets[0]
 
 
 def test_adding_twice_refreshes_rather_than_duplicates(client, store, write_csv, monkeypatch, tmp_path):

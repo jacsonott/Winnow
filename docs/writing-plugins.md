@@ -1243,8 +1243,10 @@ python server.py --plugins-dir ~/src/my-winnow-plugins
 
 Installs from the UI always land in the first directory (`plugins/`).
 
-**Versioning:** the current plugin API version is **10** (the tab context's
-`tabState` arrived in 10, with `apiVersion` 5; `api.register_page_panel`
+**Versioning:** the current plugin API version is **10** (two things
+arrived in it: a dashboard widget's `live` flag, and the tab context's
+`tabState`, which took the context's own `apiVersion` to 5;
+`api.register_page_panel`
 and the tab context's `sqlPage` / `notesPage` / `notify` arrived in 9; `api.register_dashboard`
 arrived in 8; `req.set_env` /
 `req.unset_env` / `req.is_loopback` arrived in 7; `req.table` in 6; `req.env`,
@@ -1444,7 +1446,37 @@ api.register_dashboard(
 | `render` | `"stat"`, `"kv"`, `"chips"`, `"list"`, `"bar"` or `"histogram"` (required) |
 | `query.sql` | required for `source: "sql"`; runs on the read-only pane connection, so a board is data, not code |
 | `span` | `1` or `2` — how wide the card sits |
+| `live` | `true` — re-run this widget every time the board opens, instead of showing its last result |
+| `id` | assigned by Winnow when the board lands in a case — don't set it, but preserve it if you read a board and write it back |
 | `drill` | makes the card clickable; see below |
+
+**A board is not re-run from scratch every time it is opened.** Each
+widget's last result is kept in the case file, painted the instant the
+board appears, and labelled with its age; the board carries an "as of"
+stamp and a ↻ Refresh that re-runs everything. This matters to you
+because a board of twenty-six widgets used to mean twenty-six queries per
+open, and "open" includes reopening the case tomorrow — so you can write
+the expensive card you actually wanted.
+
+`"live": true` opts a single widget out and runs it on every open. Reach
+for it where a stale number would be *wrong* rather than merely old and
+the query is cheap: a tag count, a watchlist count, a row count on a small
+table. Not a `GROUP BY` over the whole log — that is the card the cache
+exists for, and the analyst can ↻ it. The shipped KAPE profile marks two
+of its twenty-six widgets live, which is about the right ratio.
+
+An imported table or a tag write does not silently replace a cached
+number; it marks it stale, and the card and the board bar say so. Numbers
+an analyst is going to draw conclusions from are dated, always.
+
+The cached result is filed under the widget's `id`, which Winnow assigns
+when the board is written into a case. The list you register here is left
+unstamped, so there is nothing to set — but a board you READ back
+(`req.store.get_dashboard()`, `GET /api/dashboards/{id}`) carries one per
+widget, and a plugin that edits a board and writes it back with
+`req.store.set_dashboard_widgets()` has to carry the `id` through. Drop it
+and every card on that board is a new widget: the cached results are
+pruned and the whole board re-runs on its next open.
 
 **Write the SQL against a placeholder, not a table id**, which is
 different in every case: `{{evtx}}`-style shorthands and

@@ -810,7 +810,17 @@ see [docs/notes/README.md](README.md) for the whole set.
   The v1 migration carries `openColumns` → `openTableMenu` and moves the
   `f`/`Shift+F` pair (focus-first-filter → filter-by-this-value, plus the
   new drop-the-others variant) *only* for analysts still on the old
-  defaults — a binding someone chose themselves is never touched.
+  defaults — a binding someone chose themselves is never touched. v5 adds
+  `Ctrl+f` beside `/` on `focusSearch` the same way, with a second guard
+  the earlier ones did not need: it stands down when any other action
+  already holds one of the four chord spellings, because Ctrl+F matched
+  nothing before that release, Settings therefore accepted it for
+  anything, and the pre-gate below would shadow such a binding.
+  **A change to `DEFAULT_KEYMAP` with no migration entry reaches nobody
+  who has run Winnow before**: `loadKeymap` persists the whole expanded
+  default map on a profile's very first load, so by the second run the
+  stored map — which outranks the defaults — already has the old value
+  written down.
 - **Table nicknames** (`sources.nickname`, `Store.set_source_nickname`,
   `POST /api/source/{id}/nickname`) are display-only: `name` is never
   rewritten — it's the file's identity (session hash warnings, the record
@@ -835,15 +845,64 @@ see [docs/notes/README.md](README.md) for the whole set.
   first keydown, so pressing Ctrl for Ctrl+K bound "Control" and combos
   were impossible). findKeyConflict also refuses the hardcoded
   modifier shortcuts (Ctrl/Meta+C copy, Ctrl/Meta+z undo, Alt+digit tab
-  switching) since those are handled before matchAction and would shadow
-  a binding silently. Side effect worth knowing: a bare-key binding no
-  longer fires when Ctrl/Alt/Meta is held (matchAction used to look at
-  e.key alone, so Ctrl+T opened the Tables manager).
+  switching, and Ctrl/⌘+F while search still holds it) since those are
+  handled before matchAction and would shadow a binding silently. Side
+  effect worth knowing: a bare-key binding no longer fires when
+  Ctrl/Alt/Meta is held (matchAction used to look at e.key alone, so
+  Ctrl+T opened the Tables manager).
 - **Shortcuts are gated off the home screen**: the document keydown
   listener returns early when `$('app').hidden` — every keymap action, tag
   hotkey, Alt+digit and the copy/undo combos act on case UI that isn't on
   screen there (`t` opened the previous case's Tables manager from home).
   Escape stays above the gate: home has modals of its own to close.
+
+- **Ctrl/⌘+F opens the search box, and the browser's find bar is refused.**
+  Find-in-page reads the DOM and invariant #6 keeps only the visible window
+  of rows in it, so Chromium answers "not found" for a value that is in the
+  table — a wrong answer, not a missing one, which is the failure class
+  worth spending a reserved chord on. The binding lives on `focusSearch`
+  (`'/'` and `'Ctrl+f'`, KEYMAP_MIGRATIONS v5) but the *dispatch* is
+  hardcoded in `wireKeymap`, above the `typing` guard like Alt+digit,
+  because the box is exactly what you want from a filter cell or the SQL
+  editor and `matchAction` never looks there. Four things that gate is
+  carrying, each deliberate:
+  - It matches `(e.ctrlKey || e.metaKey)` and `'f'` or `'F'` — the copy
+    handler's shape, giving ⌘ for macOS (the keymap has no platform branch)
+    and the capital for Caps Lock and Shift — plus a term neither the copy
+    nor the undo handler has: `!e.altKey`, because Ctrl+Alt is AltGr on a
+    European layout and AltGr+F there is a character being typed. The
+    keymap stores the one spelling `'Ctrl+f'`; `findKeyConflict` refuses
+    all four to another action, since the gate would shadow them silently.
+  - It is conditional on `focusSearch` still holding the chord
+    (`searchChordBound`), so unbinding it in Settings really does hand
+    Ctrl+F back to the browser rather than leaving a dead chip.
+  - It sits *below* the `$('app').hidden` gate (the home screen has no
+    search box and is entirely in the DOM, where find-in-page tells the
+    truth) and returns without `preventDefault` while `#modal` or a
+    `.confirm-overlay` is up — a dialog owns the keyboard, Ctrl+C already
+    falls through to the native copy there, and a dialog's text really is
+    all in the DOM. A dropdown menu is neither of those, so it is closed
+    (`closeMenu`) and the chord taken; otherwise the bar would open behind
+    a menu still floating over it.
+  - Off the grid it calls `showGridTab()` first. `syncTabChrome` hides the
+    whole toolbar on a page tab, so focusing `#search` there would put the
+    caret in a `display:none` input and read as a keystroke that did
+    nothing. `expandSearch` then focuses the box; `collapseSearchIfEmpty`
+    leaves it alone because focus landed inside `.search-wrap`.
+
+  The two strings that name the key — the magnifier's tooltip and the box's
+  placeholder — are built from the binding by `syncSearchKeyCopy`
+  (filters.js), not written into `static/index.html`, for the same reason
+  the gate is conditional: unbind the chord and copy naming it would be
+  advertising a key the browser has taken back. `updateSearchHint` calls it
+  after setting the padding, `keymapChanged` after every rebinding, and
+  main.js once at startup. Keys print exactly as the Settings chips spell
+  them (`Ctrl+f`, not `Ctrl+F`), so the two agree character for character.
+  The placeholder is measured against what is left of the box's 320px after
+  the mode chip's padding, and drops to the bare `"All columns"` when the
+  keys will not fit — in regex and advanced mode they do not, and a hint
+  clipped mid-chord is worse than a terse one. The tooltip has no width
+  limit and always names them.
 
 - **The 2026-08 left-hand keybind pass** is additive on purpose: q/w beside
   [/] for saved-filter cycling (the highest-traffic key in a triage pass,
@@ -867,11 +926,15 @@ see [docs/notes/README.md](README.md) for the whole set.
   - The clamp is 0.2–0.8 of the row *and* a 220px floor per pane (`clampNotesSplit`; a row too narrow for two floors splits evenly): with a plugin column open at 70% of the section the ratio alone could leave the editor a few characters wide. **It is re-applied by a `ResizeObserver` on `#notesSplit`, not only when the ratio is written** — the row narrows without the page doing anything (the plugin column toggled or dragged wider, the window resized), and the observer re-applies the *stored* ratio against the new width, so a pane squeezed to the floor gets its share back when the room returns. `.notes-editor` is flex-basis-driven (`--notes-split`), not `width: 100%`, and the 82ch measure cap sits on the inner `.notes-preview-body` so the pane itself fills its half rather than leaving dead space against the divider.
   - **The divider's hit target overlaps the preview only** (`margin: 0 -8px 0 0`; the 1px line sits at the editor's edge). The editor's right edge is where the textarea's vertical scrollbar sits on classic-scrollbar platforms, and the symmetric `.tab-split` overlap turned a grab of the scrollbar thumb into a split drag. Headless Chromium's overlay scrollbars can't show it, so tests/ui/test_notes_split.py pins it with `elementFromPoint` and a drag started inside the editor's edge. `.notes-preview` paints `var(--panel)` itself — `#app`'s skin backdrop (the blueprint graph paper) otherwise showed through one half of what reads as a single surface.
 
+- **The search dialog carries a scope** (search.js, `openSearchAllModal`) — titled "Search tables" rather than "Search all tables", because a scope row above the term builder now decides how much of the case it covers: **Every table / This table / Choose…** (the value picker's `.vp-seg` idiom, `aria-pressed`), with the case's real tables as chips under it, open ones first and the tail folded behind "+ N more". The default is *This table* when one is open and *Every table* otherwise. Clicking a chip from either fixed scope means "start from what is in scope and take this one out", so it seeds a Choose… scope and toggles that chip; a pick the analyst empties by hand stays empty (Search refuses it with a toast) rather than quietly widening back to the whole case. A pick whose tables have *all* since left the case is a different thing and does widen back to every table — with the scope row saying so, because a three-table check silently becoming a whole-case sweep is minutes nobody asked for. **A pick is keyed by id *and* name** (`searchAllLivePickIds`): SQLite reuses a source id once the table holding it is dropped, so an id whose live table is now a different file is not one of the tables that was ticked — the rule `subsetParentLabel` follows, for the same reason. `S.searchAll.scope` is the pending choice, `S.searchAll.ranScope` is the scope **the results on screen came from** — the same rule `terms` follows, so re-scoping without re-running cannot re-label numbers nobody re-ran, and the badge and the finished toast read from it too. On the wire it is `source_ids` (null = every table); a merged table is sent AS the merge and the server expands it to its members (invariant #9), which the results pane reports. Three things that bite: the poller used to decide "is this pane on screen" by comparing `$('modalTitle').textContent` to the literal 'Search all tables', which a title that varies with scope silently breaks — it asks `currentModalAction() === 'openSearchAll'` now; one search job runs per case, so a scoped start stops a sweep that may be four minutes in, which is why Search is no longer disabled while one runs and `startSearchAll` asks first instead — and why an empty box while a sweep runs is refused with a toast rather than taking the "nothing to search for" path, which would drop the job id and the partial hits while the server kept scanning, Stop button and all (a poll that 404s because the start it raced superseded its job is ignored for the same reason: only the job still being followed ends the run); and the 1,000-row count cap is unchanged at every scope — scoping does not make a table smaller — so the pane names the cap and points at "Open ↦", where the grid's own count is exact.
+
 - **IOC watchlist tab** (watchlist.js) — case-level indicators (Store.watchlist / watchlist_hits, in the .db) scanned across every table; matches are counted, listed, and optionally auto-tagged through the normal tag path. **The scan is a background job** (`runScan`, the one helper behind Add, Scan all, the file import, From a case, the jobs.js source-done hook and Search-all's "Add to watchlist"): `POST /api/watchlist/scan/start`, a jobs-panel row with the tables-scanned progress (its ✕ and its Cancel both stop the scan), a 400 ms poll with the search-all rule that a **404 means stop** (superseded from another window, or the case closed) and a bound on any other failure (three in a row — the server exited or crashed — settle the row and the markers rather than polling forever), `#wlStatus` mirroring "Scanning 3/12 tables…" while the tab shows. Starts from one window go out one at a time, and **a newer scan folds the running one**: the server widens the new job to the old one's remaining scope, so the row being followed settles as "folded into the newer scan" (never orphaned in the running state with a Cancel that reaches nothing) and its "…" markers stay until the job that covers them lands — `finishScan` clears only the markers in the finished job's `watchlist_ids` (all of them when it was unscoped). **A new entry is in the list the moment the server has it** — the add/import responses already carry the indicator(s), so the row renders from them with "…" for a count (the in-flight ids live in a module-level Set, not on the row object: any `load()` mid-scan replaces `indicators` wholesale and would drop a flag carried there) and the scan that follows is scoped to the new ids. When the job lands: `load()` if the tab is showing, else the badge refresh and — when it found something — the row turns into the sticky "Watchlist: N hits · Open watchlist" alert; and when an auto-tag landed on the OPEN table — or on a member of the open merge, whose rows are the member's (invariant #9) — both row caches are cleared and the ribbon counts refreshed, or the tags would not paint until something else refreshed the grid. A grouping BY TAG is regrouped with it (`regroupIfGroupedByTag`, the same trio every other tag path ends in), or the auto-tagged rows would sit in "(untagged)" with the pre-tag counts until the analyst regrouped by hand. The repaint itself waits for the grid to be showing: `render()` against a grid a page tab hides measures a zero-height viewport and paints the first rows at the top, and the return to the tab restores the real scroll position over an empty viewport — so `finishScan` sets `S.gridRepaintPending` and `showGridTab` (the Alt+1, tab-history and mouse-thumb return paths) pays it on the way back, rail and regroup included. "Showing" is `gridIsShowing()` (sql.js), not `S.activeTab === 'grid'`: the home screen hides `#app` wholesale with the grid still the active tab. `showGridTab` consumes the flag whether or not it repaints — `openSource` and `openCase` pass `repaint: false` precisely because S.view/S.sourceId are still the OLD table's there, and they satisfy the owed repaint themselves once they have swapped (`installView`, or the cached-view path's own render/rail/regroup). A duplicate value is refused by the server (400 → toast). **The hits pane groups by table**: `/api/watchlist/hits` answers `{sources, hits}` with an exact per-table count and up to 200 rows per table in rid order; one sticky `.wl-hit-group-head` per table (label via `sourceLabel`, arrow and count styled like `.group-header-row`/`.group-header-count`), folding is client state, and a table past the cap ends in "…and N more — open the table" (jumpToTimelineRow). See docs/design/analysis-suite.md and the scan entry in store.md.
 
 - **Entity pivot** — a plugin, not a module: `examples/plugins/pivot` (there is no `entity.js`). The store's `entity_pivot` reuses the blob search + TS_NORMALIZE.
 
 - **Case dashboards** (dashboard.js, dashwidgets.js) — named boards of widgets, each a data source (sql via read-only run_sql, watchlist, tags) plus a render kind (stat/kv/chips/list/bar/histogram). Widgets are built from RECIPES (dashwidgets.js `WIDGET_TEMPLATES` + `widgetFrom`): a template, a table and the column/value it needs produce the SQL, the render, a `build` (the recipe, so the editor reopens guided) and a `drill` — `{table, where:[{column,op,value}] | tree: <filter-tree node>, column?, bucket?}` or `{table, spec}` for a count-of-this-view widget — which `drillInto` turns into the grid opened on those rows: `openSource(id, { skipBuild: true })`, every stashed filter/search/tag/timeframe reset, then one view build (placeholder tables resolve through `POST /api/dashboard/resolve`, which lists every source a `{{all:…}}` spans so the analyst picks one; a widget with SQL but no drill opens as a query in the SQL pane; a bucket the timeframe can't express is refused, and a bucket on a column not typed datetime filters by the label's prefix instead). The shipped KAPE drills are checked against their SQL on a fixture in tests/test_dashboard_drill.py: a stat's drill opens exactly the rows it counted. Hand-editing a recipe's SQL drops `build` and `drill` rather than leaving them describing a query they no longer match. Entry points that skip the editor: the column header menu (top values / distinct / over time), the row menu (count of this value) and the Filters menu (count of this view), all through `quickAddWidget`, which asks which board only when there are several. `createDashboard` offers a starting point — blank, a starter built from the open table (`buildStarter`: count, activity window, over time, top values of 2–12-distinct columns), a shipped board, or a library board. Layout lives in the case .db; 'Save as profile' extends a plugin bundle with the board. The shipped KAPE triage board carries hand-written drills (checked against the header sets in tests/test_dashboard_drill.py). See docs/design/analysis-suite.md.
+
+- **A board paints from its last results, it does not re-run itself** (dashboard.js `cache`, Store `dashboard_widget_cache`) — the shipped KAPE board is 26 widgets, and opening it used to be 26 `POST /api/dashboard/widget/preview` calls, every open, every card drag and every edit of any other card (measured: 26 previews per reopen; now 2). `GET /api/dashboards/{id}` returns the widget definitions AND the cached payloads, `render()` paints them at once and runs only the widgets carrying `"live": true`, and `↻ Refresh all` (or Run now in one widget's editor) is what re-runs the rest. Traps, in the order they bite: **widgets had no ids** — position in a JSON list was the only identity and a drag rewrites it, so `Store._mint_widget_ids` assigns one on write and `get_dashboard` back-fills one DETERMINISTICALLY on read (a random back-fill would hand a board that nobody has edited a new key on every open, and it would never see a hit). **The cache cannot live in the widget dict**: `saveToLibrary`, `saveAsProfile` and `upsert_dashboard_by_name` copy widget dicts verbatim into workspace JSON and into other cases, and `set_dashboard_widgets` clears `origin` on every write — so a payload in there would carry case A's numbers into case B and silently un-stamp a plugin-offered board. **The editor's Preview must not read the cache** (it runs an unsaved draft, and a Preview that answered from the cache is not previewing), which is why caching keys off `dashboard_id`+`widget_id` in the request rather than off `runWidget`. **A cached number with no date on it reads as a live one** — hence the bar's "As of 10:42 · 3 minutes ago", the per-card age in `.dash-mark`, and `Store.data_generation` (source count + row total + max id, read off `sources`, plus `STATE_GENERATION_KEY`, a counter the conclusion writes bump because `row_tags` and `watchlist_hits` are both WITHOUT ROWID and too big to count on every board open), which marks a result stale rather than hiding it. The counter is the half that can be FORGOTTEN, so every writer of those tables bumps it inside its own transaction — the tag delta path and its undo, but also the three writes that replace tag state wholesale and bypass that path (`delete_tag`, `import_session`, `start_new_session`), `upsert_tag` (a tags widget lists one row per definition), and the watchlist's add/delete/scan (a watchlist widget's number is the sum of the hit counts). What it does NOT cover is stated in its docstring rather than left to be discovered. **Staleness is only computed when a board loads**, so a board left open through a twenty-minute import would go on claiming to be current: `markDashboardStale()` is called from the jobs poll and the watchlist scan, and it ASKS the server rather than assuming, so a re-scan that changed nothing does not redden a board that is fine. **A board switch mid-flight** would file the old board's answers under this one's widget ids, so `boardGen` guards the write the way `S.pageGen` guards the page cache. **A failed ↻ Refresh keeps the numbers**: blanking 26 cards because the server blinked throws away the only thing the cache was for, so a quiet run that fails leaves the card alone and marks it `!3m`.
 
 - **Save a view, or a selection, as a table** (subset.js, `POST
   /api/view/save_as_table`). Two entry points, one helper: the row menu's

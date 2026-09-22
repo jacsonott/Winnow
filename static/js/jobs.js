@@ -3,6 +3,7 @@ progress, and armOpCancel.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { $, api, el, post, toast } from './core.js';
+import { markDashboardStale } from './dashboard.js';
 import { clientLog } from './errlog.js';
 import { offerTimestampColumns } from './derived.js';
 import { updateSearchHint } from './filters.js';
@@ -266,6 +267,12 @@ export async function pollJobs() {
       // Keep the index-build rows honest without loadSources()'s tab
       // re-select side effects (same reasoning as the Tables modal poll).
       try { await refreshSourcesQuietly(); } catch {}
+    }
+    // Rows just arrived, so every number on an open dashboard was worked
+    // out before them. The board is only told when it LOADS otherwise,
+    // which for an analyst who opened it to watch the import land is never.
+    if (finishedNow.some((j) => j.status === 'done' && j.kind !== 'derive' && (j.source_ids || []).length)) {
+      markDashboardStale();
     }
   }
   for (const src of S.sources || []) {

@@ -1624,6 +1624,31 @@ textarea:focus { border-color: var(--accent); outline: none; }
 
 /* ---------------------------------------------------------- search all */
 
+/* The scope row above the term builder. The segmented control is the
+   value picker's (.vp-seg), deliberately: "This view / Whole table" there
+   and "Every table / This table" here are the same question asked about
+   different things, and one pressed-state rule is easier to keep honest
+   than two. */
+.search-all-scope { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.search-all-scope-label {
+  font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim);
+}
+.search-all-scope-note { font-size: 11px; color: var(--dim); margin-left: auto; }
+.search-all-picks { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 10px; }
+.search-all-pick {
+  font: inherit; font-size: 11px; cursor: pointer;
+  background: none; color: var(--dim);
+  border: 1px solid var(--line-2); border-radius: 999px; padding: 2px 9px;
+}
+.search-all-pick:hover { color: var(--text); }
+.search-all-pick[aria-pressed="true"] {
+  color: var(--accent); border-color: var(--accent-dim); background: var(--panel-2);
+}
+/* The line above the results naming the scope they came from, and the one
+   below them naming the count cap. Quiet — they explain the numbers, they
+   are not numbers themselves. */
+.search-all-scope-ran { font-size: 11px; color: var(--dim); padding: 2px 0; }
+
 .search-all-paste {
   width: 100%; resize: vertical; min-height: 120px; margin-bottom: 12px;
   background: var(--ink); color: var(--text); border: var(--border-w) solid var(--line-2);
@@ -1631,7 +1656,7 @@ textarea:focus { border-color: var(--accent); outline: none; }
 }
 .search-all-paste:focus { border-color: var(--accent); outline: none; }
 .search-all-terms { margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
-.search-all-results { display: grid; gap: 4px; max-height: 50vh; overflow: auto; }
+.search-all-results { display: grid; gap: 4px; margin-top: 8px; max-height: 50vh; overflow: auto; }
 .search-all-row {
   display: flex; align-items: center; gap: 12px;
   background: var(--panel-2); border-radius: var(--radius-sm); padding: 8px 10px;
@@ -2368,6 +2393,30 @@ html.remote .row.selected:hover { background: var(--row-selected); }
   background: var(--panel); z-index: 1; }
 .dash-bar .dash-title { color: var(--text); font-weight: 600; }
 .dash-bar .spacer { flex: 1; }
+
+/* Freshness. A cached number that does not say how old it is reads as a
+   live one, so the stamp is chrome the board cannot be shown without. */
+.dash-stamp { font-size: 11px; color: var(--dim); white-space: nowrap; }
+.dash-stamp b { color: var(--text); font-weight: 600; }
+.dash-stamp.stale, .dash-stamp.stale b { color: var(--danger); }
+.dash-live-note { display: inline-flex; align-items: center; gap: 5px; font-size: 11px;
+  color: var(--dim); white-space: nowrap; }
+.dash-dot, .dash-live-dot { width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent); display: inline-block; flex: 0 0 auto; }
+.dash-mark { margin: 0 4px 8px; font: 9px var(--mono); color: var(--dim); flex: 0 0 auto; }
+.dash-mark.stale { color: var(--danger); }
+/* The last re-run of this card did not come back. The number it is
+   showing is the previous one, and the mark carries a "!" as well as the
+   colour so it is not just another shade of red. */
+.dash-mark.failed { color: var(--danger); }
+.dash-mark.dash-live-dot { margin-bottom: 12px; }
+.dash-live-row { align-items: flex-start; gap: 9px; margin-top: 12px;
+  padding: 9px 10px; background: var(--ink); border-radius: var(--radius-sm); }
+.dash-live-row input { margin: 2px 0 0; flex: 0 0 auto; }
+.dash-live-text .t { display: block; font-size: 12px; color: var(--text); }
+.dash-live-text .d { display: block; font-size: 11px; color: var(--dim); margin-top: 3px; line-height: 1.5; }
+.dash-cost { margin-top: 10px; font-size: 11px; color: var(--dim); }
+.dash-cost b { color: var(--text); font-family: var(--mono); font-weight: 400; }
 .dash-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; padding: 12px; }
 .dash-card { background: var(--panel); border: 1px solid var(--line-2); border-radius: 3px;
   padding: 12px; min-height: 120px; position: relative; display: flex; flex-direction: column; }
