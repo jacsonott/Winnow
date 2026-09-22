@@ -171,6 +171,16 @@ def test_the_board_is_ten_cards_that_fill_their_rows():
     assert rows == [4, 4, 4, 4] and row == 2   # four full rows, then the last card beside ＋ Add
 
 
+def test_a_card_only_carries_copy_its_render_kind_can_show():
+    """`sub` is drawn by `stat` and by `signals`, and by nothing else. A
+    kv or chart card carrying one is a sentence written for a screen that
+    never shows it — which is how the two chips cards it replaced came to
+    carry subs nobody had ever read."""
+    for w in _board()["widgets"]:
+        if w.get("sub"):
+            assert w["render"] in ("stat", "signals"), (w["title"], w["render"])
+
+
 def test_only_the_cheap_card_runs_on_every_open():
     """A board paints from its cached results and re-runs only the widgets
     marked live, so `live` is a claim that the query is cheap enough to pay

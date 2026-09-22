@@ -1403,6 +1403,10 @@ own drill**:
 | `tone` | `"warn"` draws the number in the danger colour |
 | `chip` | `True` draws a yes/no pill instead of a number, above the numeric cells |
 
+A signals card shows the widget's own `sub` under the grid, the way a
+`stat` card shows one under its number — a card of ten numbers is the one
+that most needs a line saying what they are numbers of.
+
 Reach for it when a row of single-number cards is really one subject. The
 shipped KAPE board folded eleven stats into one of these: a `kv` card
 would have folded eleven working drill-throughs into one

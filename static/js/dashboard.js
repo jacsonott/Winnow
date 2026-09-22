@@ -1199,6 +1199,11 @@ function paintSignals(w, body, data) {
     }
     body.append(grid);
   }
+  // The card's sub-label, under the grid rather than under a number —
+  // the same `.dash-sub` a stat card carries, which is the only other
+  // render kind that shows one. A card of ten numbers is exactly the one
+  // that needs a line saying what they are numbers OF.
+  if (w.sub) body.append(el('div', 'dash-sub', w.sub));
 }
 
 /* One cell, as the drilldown sees it: a widget of its own. Keeping the

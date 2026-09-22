@@ -36,7 +36,6 @@
           "source": "sql",
           "render": "kv",
           "span": 2,
-          "sub": "from the RECmd batch; a fact the batch did not carry is simply not listed",
           "query": {
             "sql": "SELECT k, v FROM (SELECT 10 AS ord, 'Computer name' AS k, ValueData AS v FROM {{registry}} WHERE KeyPath LIKE '%Control\\ComputerName\\ComputerName' AND ValueName = 'ComputerName' AND ValueData <> '' UNION ALL SELECT 11, 'Hostname (TCP/IP)', ValueData FROM {{registry}} WHERE KeyPath LIKE '%Services\\Tcpip\\Parameters' AND ValueName = 'Hostname' AND ValueData <> '' UNION ALL SELECT 20 + CASE ValueName WHEN 'DhcpIPAddress' THEN 0 WHEN 'IPAddress' THEN 1 ELSE 2 END, CASE ValueName WHEN 'DhcpIPAddress' THEN 'IP (DHCP)' WHEN 'IPAddress' THEN 'IP (static)' ELSE 'Gateway' END, ValueData FROM {{registry}} WHERE KeyPath LIKE '%Tcpip\\Parameters\\Interfaces\\%' AND ValueName IN ('DhcpIPAddress','IPAddress','DhcpDefaultGateway') AND ValueData NOT IN ('','0.0.0.0') UNION ALL SELECT 30 + CASE ValueName WHEN 'Domain' THEN 0 ELSE 1 END, ValueName, CASE WHEN ValueData = '' THEN '(none — workgroup)' ELSE ValueData END FROM {{registry}} WHERE KeyPath LIKE '%Services\\Tcpip\\Parameters' AND ValueName IN ('Domain','NV Domain') UNION ALL SELECT 40 + CASE ValueName WHEN 'ProductName' THEN 0 WHEN 'DisplayVersion' THEN 1 WHEN 'ReleaseId' THEN 2 WHEN 'CurrentBuild' THEN 3 ELSE 4 END, ValueName, ValueData FROM {{registry}} WHERE KeyPath LIKE '%Microsoft\\Windows NT\\CurrentVersion' AND ValueName IN ('ProductName','DisplayVersion','ReleaseId','CurrentBuild','UBR') AND ValueData <> '' UNION ALL SELECT 50, 'Function', CASE ValueData WHEN 'WinNT' THEN 'Workstation' WHEN 'ServerNT' THEN 'Member / standalone server' WHEN 'LanmanNT' THEN 'Domain controller' ELSE ValueData END FROM {{registry}} WHERE KeyPath LIKE '%Control\\ProductOptions' AND ValueName = 'ProductType' ORDER BY ord) UNION ALL SELECT 'Host', '(no host facts in this RECmd output)' WHERE NOT EXISTS (SELECT 1 FROM {{registry}} WHERE (KeyPath LIKE '%Control\\ComputerName\\ComputerName' AND ValueName = 'ComputerName' AND ValueData <> '') OR (KeyPath LIKE '%Services\\Tcpip\\Parameters' AND ValueName IN ('Hostname','Domain','NV Domain')) OR (KeyPath LIKE '%Tcpip\\Parameters\\Interfaces\\%' AND ValueName IN ('DhcpIPAddress','IPAddress','DhcpDefaultGateway') AND ValueData NOT IN ('','0.0.0.0')) OR (KeyPath LIKE '%Microsoft\\Windows NT\\CurrentVersion' AND ValueName IN ('ProductName','DisplayVersion','ReleaseId','CurrentBuild','UBR') AND ValueData <> '') OR (KeyPath LIKE '%Control\\ProductOptions' AND ValueName = 'ProductType'))"
           },
@@ -371,7 +370,6 @@
           "source": "sql",
           "render": "kv",
           "span": 1,
-          "sub": "the Security log, and the window every channel covers",
           "query": {
             "sql": "SELECT 'Oldest event' AS k, COALESCE(MIN(TS_NORMALIZE(TimeCreated)), '(no Security channel events)') AS v FROM {{evtx}} WHERE Channel = 'Security' AND TimeCreated <> '' UNION ALL SELECT 'Newest event', COALESCE(MAX(TS_NORMALIZE(TimeCreated)), '') FROM {{evtx}} WHERE Channel = 'Security' AND TimeCreated <> '' UNION ALL SELECT 'Span (days)', COALESCE(ROUND(julianday(MAX(TS_NORMALIZE(TimeCreated))) - julianday(MIN(TS_NORMALIZE(TimeCreated))), 1), '') FROM {{evtx}} WHERE Channel = 'Security' AND TimeCreated <> '' UNION ALL SELECT 'Events', COUNT(*) FROM {{evtx}} WHERE Channel = 'Security' UNION ALL SELECT 'Any channel', CASE WHEN COUNT(*) = 0 THEN '(no timestamps)' WHEN substr(MIN(TS_NORMALIZE(TimeCreated)), 1, 10) = substr(MAX(TS_NORMALIZE(TimeCreated)), 1, 10) THEN MIN(TS_NORMALIZE(TimeCreated)) || ' → ' || substr(MAX(TS_NORMALIZE(TimeCreated)), 12) ELSE MIN(TS_NORMALIZE(TimeCreated)) || ' → ' || MAX(TS_NORMALIZE(TimeCreated)) END FROM {{evtx}} WHERE TimeCreated <> ''"
           },
@@ -717,7 +715,7 @@
           "render": "signals",
           "span": 1,
           "live": true,
-          "sub": "your own marks on the case — these re-run every time the board opens",
+          "sub": "your own marks on the case",
           "cells": [
             {
               "label": "Watchlist hits",
