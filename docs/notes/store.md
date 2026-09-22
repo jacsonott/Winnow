@@ -13,6 +13,17 @@ see [docs/notes/README.md](README.md) for the whole set.
 
 ---
 
+- **The tag filter is a UNION, compiled part by part.** `spec.tags` may
+  hold tag ids, `__any__`, `__none__`, or a mix; each part compiles on
+  its own and the parts are OR'd. It used to compare the whole list
+  against `["__any__"]` and `["__none__"]` as exact values, so a list
+  holding a sentinel alongside ids fell through to the ids branch and
+  dropped the sentinel silently — "untagged, plus the ones I marked"
+  answered "the ones I marked". OR and not AND is deliberate: two ticked
+  ribbon chips mean rows carrying either, the way two ticked values in
+  the value picker do, and an intersection belongs in the filter
+  builder, which can say it.
+
 - The **unified Timeline tab** (`build_timeline`/`fetch_timeline_rows` in
   store.py, a pinned tab like SQL) unions every *tagged* row across every
   real source in the case — open or closed, since it's "every finding in

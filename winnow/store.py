@@ -6474,22 +6474,37 @@ class Store:
                 clauses.append(f"({blob}) LIKE ? ESCAPE '\\'")
                 params.append(f"%{_esc_like(search)}%")
 
+        # The tag filter is a UNION of whatever it names: any of these tags,
+        # or untagged, or both. OR rather than AND because that is what the
+        # ribbon's chips mean — ticking Malware and Lateral movement asks
+        # for rows carrying either, the way ticking two values in the value
+        # picker does. (An intersection is expressible in the filter
+        # builder, which is where a query that needs one belongs.)
+        #
+        # It used to compare the whole list against ["__any__"] and
+        # ["__none__"] as exact matches, so a list holding a sentinel
+        # alongside ids fell through to the ids branch and dropped the
+        # sentinel silently. Each part is compiled on its own now and the
+        # parts are OR'd, which also makes "untagged, plus the ones I
+        # marked" a filter the ribbon can express.
         tag_filter = spec.get("tags") or []
         if tag_filter:
-            if tag_filter == ["__any__"]:
-                clauses.append("rid IN (SELECT rid FROM row_tags WHERE source_id=?)")
+            parts: list[str] = []
+            if "__any__" in tag_filter:
+                parts.append("rid IN (SELECT rid FROM row_tags WHERE source_id=?)")
                 params.append(source_id)
-            elif tag_filter == ["__none__"]:
-                clauses.append("rid NOT IN (SELECT rid FROM row_tags WHERE source_id=?)")
+            if "__none__" in tag_filter:
+                parts.append("rid NOT IN (SELECT rid FROM row_tags WHERE source_id=?)")
                 params.append(source_id)
-            else:
-                ids = [int(t) for t in tag_filter if str(t).isdigit()]
-                if ids:
-                    clauses.append(
-                        f"rid IN (SELECT rid FROM row_tags WHERE source_id=? AND tag_id IN ({','.join('?' * len(ids))}))"
-                    )
-                    params.append(source_id)
-                    params.extend(ids)
+            ids = [int(t) for t in tag_filter if str(t).isdigit()]
+            if ids:
+                parts.append(
+                    f"rid IN (SELECT rid FROM row_tags WHERE source_id=? AND tag_id IN ({','.join('?' * len(ids))}))"
+                )
+                params.append(source_id)
+                params.extend(ids)
+            if parts:
+                clauses.append("(" + " OR ".join(parts) + ")")
 
         time_range = spec.get("time_range")
         if time_range and time_range.get("enabled") and (time_range.get("start") or time_range.get("end")):

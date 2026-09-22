@@ -56,6 +56,28 @@ export async function refreshTagCounts() {
   renderTagRibbon();
 }
 
+/* Puts the tag filter where `next` says and rebuilds. One place, because
+   the chips all mean the same kind of thing and the exclusions between
+   them are a rule, not five handlers: "Any tag" is every specific tag at
+   once, so it cannot usefully sit beside one. Everything else unions —
+   two tags means rows carrying either, and "No tags" beside a tag means
+   untagged rows plus that tag's (Store._compile_where OR's the parts). */
+function setTagFilter(next) {
+  S.tagFilter = next;
+  renderTagRibbon();
+  rebuildView({ keepScroll: false });
+}
+
+/* Click semantics shared by every chip: click adds, click again removes,
+   and picking anything specific drops "Any tag". */
+function toggleTagFilterKey(key) {
+  const has = S.tagFilter.includes(key);
+  let next = S.tagFilter.filter((k) => k !== key);
+  if (key === '__any__') next = has ? [] : ['__any__'];
+  else if (!has) next = [...next.filter((k) => k !== '__any__'), key];
+  setTagFilter(next);
+}
+
 export function renderTagRibbon() {
   const rib = $('tagRibbon');
   rib.replaceChildren();
@@ -78,25 +100,30 @@ export function renderTagRibbon() {
     const scope = n === all
       ? `${all.toLocaleString()} tagged`
       : `${n.toLocaleString()} tagged in this view · ${all.toLocaleString()} in the table`;
-    chip.title = `${scope}. Click to filter to ${t.name}. Press ${t.hotkey || '—'} to tag the selection`
+    // Both halves of what a chip does: click to narrow (and chips add
+    // up), press to tag. The Shift form is named here because the ribbon
+    // is where an analyst looks to find out what the keys do.
+    chip.title = `${scope}. Click to filter to ${t.name} — chips add up, so two of them mean rows carrying either.`
+      + ` Press ${t.hotkey || '—'} to tag the selection`
       + (t.hotkey ? `, Shift+${t.hotkey} for every row in this view — or to take it off them, once they all have it` : '')
       + '.';
-    chip.onclick = () => {
-      S.tagFilter = S.tagFilter.includes(t.id) ? [] : [t.id];
-      renderTagRibbon();
-      rebuildView({ keepScroll: false });
-    };
+    chip.onclick = () => toggleTagFilterKey(t.id);
     rib.append(chip);
   }
   const any = el('button', 'tag-chip');
-  any.setAttribute('aria-pressed', String(S.tagFilter[0] === '__any__'));
+  any.setAttribute('aria-pressed', String(S.tagFilter.includes('__any__')));
+  any.title = 'Rows carrying any tag at all. Picking a specific tag replaces it — it already includes every tag.';
   any.append(el('span', null, 'Any tag'));
-  any.onclick = () => {
-    S.tagFilter = S.tagFilter[0] === '__any__' ? [] : ['__any__'];
-    renderTagRibbon();
-    rebuildView({ keepScroll: false });
-  };
+  any.onclick = () => toggleTagFilterKey('__any__');
   rib.append(any);
+  // The other end of the same question, and the one an analyst working
+  // through a table actually needs: what have I not looked at yet.
+  const none = el('button', 'tag-chip');
+  none.setAttribute('aria-pressed', String(S.tagFilter.includes('__none__')));
+  none.title = 'Rows with no tag on them — what is left to go through. Adds to any tags picked beside it.';
+  none.append(el('span', null, 'No tags'));
+  none.onclick = () => toggleTagFilterKey('__none__');
+  rib.append(none);
   const edit = el('button', 'tag-chip');
   edit.append(el('span', null, 'Edit tags'));
   edit.onclick = openTagEditor;
