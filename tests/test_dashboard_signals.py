@@ -133,6 +133,52 @@ def test_a_signals_card_caches_and_refreshes_like_any_other(client, logs):
     assert r["results"][wid]["payload"]["rows"][0] == ["Logons", 1]
 
 
+def test_a_card_one_of_whose_cells_failed_is_not_cached(client, logs):
+    """A widget that fails is reported and not cached, so the next open
+    retries it rather than painting an error forever. A cell is a widget,
+    and a card that answered nine numbers and one error is that same
+    failure in a smaller box: cached, it would paint the failed cell's em
+    dash until somebody pressed ↻ Refresh. One rule for both — a partial
+    answer is not a cached answer, through the preview route and through
+    the board refresh alike."""
+    store, _ = logs
+    card = {"title": "Mixed", "source": "cells", "render": "signals", "cells": [
+        _cell("Logons", "SELECT COUNT(*) FROM {{evtx}} WHERE EventId='4624'"),
+        _cell("Registry values", "SELECT COUNT(*) FROM {{registry}}"),
+    ]}
+    did = store.create_dashboard("Half a card", [card])["id"]
+    wid = store.get_dashboard(did)[0]["id"]
+
+    out = client.post("/api/dashboard/widget/preview", json={
+        "source": "cells", "query": {}, "cells": card["cells"],
+        "dashboard_id": did, "widget_id": wid}).json()
+    assert out["rows"] == [["Logons", 1], ["Registry values", None]]
+    assert "ran_at" not in out                       # the client files what the server filed
+    assert client.get(f"/api/dashboards/{did}").json()["cache"] == {}
+
+    r = client.post(f"/api/dashboards/{did}/refresh", json={}).json()["results"][wid]
+    assert r["payload"]["rows"][0] == ["Logons", 1]  # the numbers that came back, still returned
+    assert "ran_at" not in r and "error" not in r
+    assert store.get_dashboard_cache(did) == {}
+
+
+def test_the_cell_that_could_not_answer_yet_caches_once_it_can(client, store, write_csv):
+    """Which is the point of not caching it: the usual reason a cell fails
+    is that the table it reads is not imported YET."""
+    reg_cols = dict(defaults.headers()["nicknames"])["Registry (RECmd batch)"]
+    card = {"title": "Mixed", "source": "cells", "render": "signals",
+            "cells": [_cell("Registry values", "SELECT COUNT(*) FROM {{registry}}")]}
+    did = store.create_dashboard("Waiting on a batch", [card])["id"]
+    wid = store.get_dashboard(did)[0]["id"]
+    assert store.refresh_dashboard(did)["results"][wid]["payload"]["rows"] == [["Registry values", None]]
+    assert store.get_dashboard_cache(did) == {}
+
+    store.ingest_csv(write_csv([reg_cols, ["" for _ in reg_cols]], "recmd.csv"),
+                     name="recmd", build_fts=False)
+    assert store.refresh_dashboard(did)["results"][wid]["ran_at"]
+    assert store.get_dashboard_cache(did)[wid]["payload"]["rows"] == [["Registry values", 1]]
+
+
 def test_the_whole_card_is_one_request(client, logs):
     """Eleven cards were eleven round trips; eleven cells are one."""
     store, _ = logs

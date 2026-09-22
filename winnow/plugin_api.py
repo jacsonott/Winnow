@@ -742,6 +742,12 @@ class PluginAPI:
         count, not a GROUP BY over the whole log. Everything else is
         re-run by the board's ↻ Refresh, or per widget from its editor.
 
+        A run that did not fully answer is not kept — a widget that
+        errored, and a signals card any of whose cells errored, are re-run
+        on the next open rather than painted from the cache, since the
+        usual reason a cell cannot answer is that its table has not been
+        imported yet.
+
         ``id`` is what that cached result hangs off. You do not set it —
         Winnow assigns one when the board is written into a case, and the
         board you register here is never stamped. But you will SEE it on

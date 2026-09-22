@@ -8914,6 +8914,28 @@ class Store:
                                    "stale": r["generation"] != gen}
         return out
 
+    @staticmethod
+    def _answered_in_full(payload) -> bool:
+        """False when a `cells` payload carries a cell that did not answer.
+
+        A widget that fails is reported and NOT cached, so the next open
+        retries it rather than painting an error forever. A cell IS a
+        widget — its own source, its own query, its own drill — so a card
+        where one cell of ten errored is that same failure in a smaller
+        box, and filing it would leave that cell reading "—" until
+        somebody pressed ↻ Refresh. One rule for both: a partial answer
+        is not a cached answer.
+
+        The other half of the trade is real and deliberate. A card that
+        can never answer in full — the five registry cells of Logging
+        posture on a case with no RECmd batch — re-runs on every open
+        instead of painting from the cache. That is exactly what a whole
+        widget in the same state already costs, and it is the price of a
+        transient failure healing itself the next time the board opens."""
+        if not isinstance(payload, dict):
+            return True
+        return not any(e for e in (payload.get("cell_errors") or []))
+
     def cache_widget_result(self, dashboard_id: int, widget_id: str, payload: dict,
                             elapsed_ms: int = 0) -> dict | None:
         """Record what a widget just returned, so the next open paints it
@@ -8922,11 +8944,12 @@ class Store:
         The widget is looked up on the board by id: a run of something that
         is not on this board (the editor previewing an unsaved draft, a
         widget removed while its query was in flight) is not cached, rather
-        than cached under a key nothing will ever match. Returns the
+        than cached under a key nothing will ever match. Nor is a signals
+        card one of whose cells failed (`_answered_in_full`). Returns the
         stamp the client shows, or None when nothing was written."""
         widgets = self.get_dashboard(dashboard_id)
         w = next((x for x in widgets if isinstance(x, dict) and x.get("id") == widget_id), None)
-        if w is None:
+        if w is None or not self._answered_in_full(payload):
             return None
         # default=str for the same reason _widget_fingerprint uses it: a
         # hand-written widget can SELECT a BLOB (unhex, randomblob, CAST),
@@ -8954,9 +8977,13 @@ class Store:
 
         Every widget, or the one named. A widget that fails is reported and
         NOT cached: the next open retries it rather than painting an error
-        forever. Runs come first and the cache write comes last, in one
-        transaction, because a widget run reads through the reader pool and
-        invariant #4 forbids that inside an open writer transaction."""
+        forever — and a signals card whose cells did not all answer is the
+        same failure by the cell (`_answered_in_full`), so it is returned
+        with the numbers it did get and no `ran_at`, which is how this and
+        the preview route both say "nothing was filed". Runs come first
+        and the cache write comes last, in one transaction, because a
+        widget run reads through the reader pool and invariant #4 forbids
+        that inside an open writer transaction."""
         widgets = self.get_dashboard(dashboard_id)
         if widget_id is not None:
             widgets = [w for w in widgets if isinstance(w, dict) and w.get("id") == widget_id]
@@ -8980,6 +9007,10 @@ class Store:
                 blob = json.dumps(payload, default=str)
             except (ValueError, KeyError, TypeError, sqlite3.Error) as e:
                 results[w.get("id")] = {"error": str(e)}
+                continue
+            if not self._answered_in_full(payload):
+                # The numbers that came back, none of them filed.
+                results[w["id"]] = {"payload": payload, "elapsed_ms": ms}
                 continue
             writes.append((dashboard_id, w["id"], self._widget_fingerprint(w), gen,
                            blob, ran_at, ms))

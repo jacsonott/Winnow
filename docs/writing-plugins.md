@@ -1441,6 +1441,12 @@ An imported table or a tag write does not silently replace a cached
 number; it marks it stale, and the card and the board bar say so. Numbers
 an analyst is going to draw conclusions from are dated, always.
 
+A run that did not fully answer is not kept: a widget that errored, and a
+signals card *any* of whose cells errored, are re-run the next time the
+board is opened rather than painted from the cache. The usual reason a
+cell cannot answer is that the table it reads has not been imported yet,
+and a cached "—" would outlive the import.
+
 The cached result is filed under the widget's `id`, which Winnow assigns
 when the board is written into a case. The list you register here is left
 unstamped, so there is nothing to set — but a board you READ back

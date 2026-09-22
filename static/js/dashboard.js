@@ -1500,8 +1500,14 @@ function openWidgetEditor(existing, prefill = null) {
           const r = await post(`/api/dashboards/${S.dashboardId}/refresh`, { widget_id: existing.id });
           const res = (r.results || {})[existing.id] || {};
           if (res.error) { toast(res.error, 6000); return; }
-          cache[existing.id] = { payload: res.payload, ran_at: res.ran_at,
-            elapsed_ms: res.elapsed_ms, stale: false };
+          // No ran_at means the server did not file it — a signals card
+          // one of whose cells failed — so neither does this, the same
+          // rule runWidget applies. Filing it would mark the card with an
+          // age the case file does not have and the next open re-runs.
+          if (res.ran_at) {
+            cache[existing.id] = { payload: res.payload, ran_at: res.ran_at,
+              elapsed_ms: res.elapsed_ms, stale: false };
+          }
           paintWidget(existing, previewBody, res.payload);
           const cards = [...$('dashGrid').querySelectorAll('.dash-card:not(.dash-add)')];
           const onBoard = cards[widgets.indexOf(existing)];
