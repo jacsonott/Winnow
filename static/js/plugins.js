@@ -457,7 +457,10 @@ export function disposePluginMount(key) {
    Nothing here rejects. An unhandled rejection from a background save
    would surface as a page error in whatever the analyst was doing at the
    time, which is both useless and alarming; failures are logged, said out
-   loud once per mount, and reported through the resolved value. */
+   loud once per mount, and reported through the resolved value — which is
+   why get() resolves {error: true} rather than null when the read fails.
+   Those two are the same picture to a mount that cannot tell them apart,
+   and the wrong one of them ends with a save over unread state. */
 const TAB_STATE_DEBOUNCE_MS = 500;
 // store.PLUGIN_UI_STATE_MAX_BYTES. Counted in characters here, which only
 // ever under-counts UTF-8 — the server holds the real line and answers 400.
@@ -500,9 +503,16 @@ export function dropPendingTabState() {
 
 function tabStateApi(key) {
   return {
+    // null = nothing saved here; {payload, savedAt} = what was saved;
+    // {error: true} = the read FAILED, which is a different thing and has
+    // to stay different: a mount that reads a failure as "nothing saved"
+    // starts empty and writes that emptiness over a row it never saw.
     get: () => api(`/api/plugin_state?key=${encodeURIComponent(key)}`).then(
       (r) => (r && r.payload != null ? { payload: r.payload, savedAt: r.saved_at } : null),
-      (e) => { console.error(`winnow.tabState: ${key} could not be read`, e); return null; }),
+      (e) => {
+        console.error(`winnow.tabState: ${key} could not be read`, e);
+        return { error: true };
+      }),
     set: (value) => {
       let json;
       try {

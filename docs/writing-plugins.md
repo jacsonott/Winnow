@@ -412,7 +412,8 @@ row in the **case file**, scoped to this mount, for the state that should
 come back:
 
 ```js
-const saved = await winnow.tabState.get();      // {payload, savedAt} or null
+const saved = await winnow.tabState.get();      // {payload, savedAt} | null | {error:true}
+if (saved && saved.error) return;               // read failed: restore nothing, save nothing
 if (saved) restore(saved.payload);              // validate it — see below
 
 function onEdit() {
@@ -424,11 +425,11 @@ await winnow.tabState.clear();                  // the "start fresh" path
 
 | Call | What it does |
 | --- | --- |
-| `get()` | `{payload, savedAt}`, or `null` if this mount has never saved. Never rejects — an unreadable payload reads as nothing saved |
+| `get()` | `{payload, savedAt}`; `null` if this mount has never saved; `{error: true}` if the read itself failed — not the same thing, see below. Never rejects |
 | `set(obj)` | Replaces the row after a short debounce. Resolves `true` when the write lands, `false` if it was refused or superseded; never rejects |
 | `clear()` | Deletes the row and cancels anything pending |
 
-Four rules, and none of them is politeness:
+Five rules, and none of them is politeness:
 
 - **Save the definition, not the result.** Which fields sit in which well,
   which sub-tab was open, a column width — never rows. Rows belong to the
@@ -438,9 +439,21 @@ Four rules, and none of them is politeness:
 - **Validate on restore.** A payload says what somebody wanted, not what
   the case still holds. A source id is handed to the next import after a
   drop, so store the table's **name** beside its id and believe the id only
-  while the name matches; check every column against
+  while the name matches — except for a **merge**, whose name is the
+  display name the analyst renames it by, so keep its `member_source_ids`
+  and match on those instead. Check every column against
   `winnow.state.sources` before it goes into a query, and say what you
   dropped rather than opening on an error.
+- **Know what an empty case looks like, and what a failed read looks
+  like.** A `panel:`/`page:` mount is built during boot, *before* the app
+  has loaded its sources, so an empty `winnow.state.sources` there means
+  "not known yet" and not "your table is gone" — `await
+  winnow.refreshSources()` first, or hold the restore until the list is
+  non-empty. And never `set()` until a restore has resolved: a save that
+  goes out before the first `get()` comes back, or after one that answered
+  `{error: true}`, replaces the row you were about to read with whatever
+  your mount happened to start as. Both bundled examples keep a
+  `saveOn` flag off until then, and say so on screen when a read failed.
 - **Say that you restored.** Sub-tabs that quietly reappear, built against
   a case that has moved on, are worse than an empty tab. Both bundled
   examples show a line with the saved-at time and a "Start fresh" button

@@ -39,21 +39,52 @@ const emptySpec = (name) => ({
   subtotals: true, grandTotals: true,
 });
 
+/* How a pivot names its table, in two shapes because tables come in two
+   kinds. A real source's `name` is the imported file's own and nothing
+   edits it (a nickname is a separate field), so it is what makes the id
+   believable after SQLite has handed that id to the next import. A MERGE
+   has no file: its name IS its display name and Rename this merge rewrites
+   it (Store.set_source_nickname), so a name check there would read a
+   rename as "that table is gone". Its member tables are the identity that
+   survives a rename — and that tells it apart from a different merge that
+   took its id after a delete. */
+function savedSource(src) {
+  if (!src) return null;
+  const out = { id: src.id, name: src.name };
+  if (src.is_merge) out.members = (src.member_source_ids || []).map(Number);
+  return out;
+}
+
 /* One pivot, cut down to the spec: no data, no index, no meta, no
    loading/error/elapsed. Those describe a moment, not a question. */
 export function pivotSpec(p, sources) {
   const src = (sources || []).find((s) => s.id === p.sourceId) || null;
   return {
     name: p.name,
-    source: src ? { id: src.id, name: src.name } : null,
+    source: savedSource(src),
     rows: p.rows, cols: p.cols, values: p.values, filters: p.filters,
     subtotals: p.subtotals, grandTotals: p.grandTotals,
   };
 }
 
+const sameMembers = (a, b) => {
+  if (!Array.isArray(a) || !Array.isArray(b) || !a.length || a.length !== b.length) return false;
+  const x = a.map(Number).sort((p, q) => p - q);
+  const y = b.map(Number).sort((p, q) => p - q);
+  return x.every((n, i) => n === y[i]);
+};
+
 function resolveSource(saved, sources) {
   if (!saved || typeof saved !== 'object') return null;
   const name = saved.name == null ? null : String(saved.name);
+  if (saved.members) {
+    // A merge — matched on its members, never its name (savedSource says
+    // why). Its own id first, so two merges over the same tables stay
+    // apart; then any merge with those members, which is the merge rebuilt
+    // under a new id.
+    const same = sources.filter((s) => s.is_merge && sameMembers(saved.members, s.member_source_ids));
+    return same.find((s) => s.id === saved.id) || same[0] || null;
+  }
   const byId = sources.find((s) => s.id === saved.id) || null;
   if (byId && (name === null || byId.name === name)) return byId;
   // Re-imported under a new id: here the name is the stronger identity.
@@ -156,12 +187,20 @@ export default function mount(container, winnow) {
     || !p.subtotals || !p.grandTotals));
   function saveState() {
     if (!saveOn || !winnow.tabState) return;   // an older Winnow has no tabState
-    hideBanner();   // once something is edited, "restored" is no longer news
     winnow.tabState.set(worthKeeping() ? {
       v: STATE_VERSION,
       active,
       pivots: pivots.map((p) => pivotSpec(p, winnow.state.sources)),
     } : null);
+  }
+  /* The same save, plus the restore line going away: once something has
+     been EDITED, "these came back from last time" has stopped being news.
+     Clicking between restored pivots is not an edit and saves silently —
+     the banner carries what the restore dropped and the only Start fresh
+     there is. */
+  function saveEdit() {
+    hideBanner();
+    saveState();
   }
 
   /* Restoring silently would be worse than not restoring: the analyst
@@ -176,14 +215,32 @@ export default function mount(container, winnow) {
     + 'border-bottom:1px solid var(--line-2);font-size:12px;flex:0 0 auto';
   container.append(banner);
 
+  // The restore line is news that goes stale; the "could not read" line is
+  // about what is happening now — it stays until the tab is rebuilt.
+  let bannerSticky = false;
   function hideBanner() {
-    if (banner.hidden) return;
+    if (banner.hidden || bannerSticky) return;
     banner.hidden = true;
     banner.replaceChildren();
   }
 
+  /* The read failed, so what is in the case file is unknown — which is not
+     the same as nothing being there, and this tab must not write its empty
+     default over pivots it never saw. Saving stays off until the tab is
+     built again, and that is worth saying rather than leaving the analyst
+     to find out later. */
+  function showUnreadableBanner() {
+    banner.replaceChildren();
+    banner.className = 'pv-restored pv-state-unread';
+    banner.append(el('span', null, 'Could not read the pivots saved in this case, so nothing '
+      + 'here will be saved this time — close and reopen the tab to try again.'));
+    bannerSticky = true;
+    banner.hidden = false;
+  }
+
   function showRestoredBanner(savedAt, notes) {
     banner.replaceChildren();
+    banner.className = 'pv-restored';
     banner.append(el('span', null, 'Restored the pivots you left open when this case was last closed.'));
     const when = String(savedAt || '').replace('T', ' ').slice(0, 16);
     const stamp = el('span', 'note-status', when ? `saved ${when}` : '');
@@ -228,7 +285,7 @@ export default function mount(container, winnow) {
   srcSel.onchange = () => selectSource(Number(srcSel.value));
 
   const subBtn = toggleButton('Subtotals', () => state.subtotals, (v) => { state.subtotals = v; scheduleRefresh(); });
-  const gtBtn = toggleButton('Grand totals', () => state.grandTotals, (v) => { state.grandTotals = v; render(); saveState(); });
+  const gtBtn = toggleButton('Grand totals', () => state.grandTotals, (v) => { state.grandTotals = v; render(); saveEdit(); });
   const copyBtn = el('button', 'btn ghost', 'Copy');
   copyBtn.title = 'Copy the pivot as TSV — paste straight into a spreadsheet';
   copyBtn.onclick = () => copyOut('\t', 'Pivot copied');
@@ -257,7 +314,7 @@ export default function mount(container, winnow) {
           p.name = inp.value.trim() || p.name;
           renamingIdx = null;
           renderPivotTabs();
-          saveState();   // a rename is not a field change, so scheduleRefresh never sees it
+          saveEdit();   // a rename is not a field change, so scheduleRefresh never sees it
         };
         inp.onkeydown = (e) => {
           if (e.key === 'Enter') commit();
@@ -300,9 +357,10 @@ export default function mount(container, winnow) {
     renderFields();
     render();
     // Which pivot is on top is part of what gets restored, and one that
-    // was restored has no data until something asks for it.
+    // was restored has no data until something asks for it. Both silent:
+    // looking at another pivot is not an edit.
     saveState();
-    if (!state.data && !state.loading) scheduleRefresh();
+    if (!state.data && !state.loading) queueQuery();
   }
   function closePivot(i) {
     pivots.splice(i, 1);
@@ -668,7 +726,13 @@ export default function mount(container, winnow) {
 
   let timer = null;
   function scheduleRefresh() {
-    saveState();
+    saveEdit();
+    queueQuery();
+  }
+  /* The re-run on its own. Switching to a pivot that has not been run has
+     to fetch its cross-tab, but nothing about the pivot changed — so it is
+     not an edit, and it neither writes nor dismisses the restore line. */
+  function queueQuery() {
     clearTimeout(timer);
     timer = setTimeout(runQuery, REFRESH_MS);
   }
@@ -880,8 +944,10 @@ export default function mount(container, winnow) {
       if (!isSortedBy(mi, colVals)) state.sort = { measure: mi, colVals: colVals ?? null, dir: -1 };
       else if (state.sort.dir === -1) state.sort.dir = 1;   // biggest first, then smallest
       else state.sort = null;                               // then back to key order
+      // No save: the ordering is deliberately not part of pivotSpec (it
+      // indexes into the measures, which a restore may have thinned), so a
+      // save here would be a write of bytes identical to the stored ones.
       render();
-      saveState();
     };
     if (isSortedBy(mi, colVals)) th.textContent = (th.textContent || '') + (state.sort.dir === -1 ? ' ▾' : ' ▴');
   }
@@ -1185,7 +1251,7 @@ export default function mount(container, winnow) {
     state.sort = null; state.data = null;
     renderFields();
     render();
-    saveState();   // the table is the pivot's first fact; nothing else fires here
+    saveEdit();   // the table is the pivot's first fact; nothing else fires here
   }
 
   function placeMenu(anchor, name) {
@@ -1215,7 +1281,10 @@ export default function mount(container, winnow) {
     }
     sharedMeta = state.meta;
     const saved = winnow.tabState ? await winnow.tabState.get() : null;
-    const restored = saved ? planRestore(saved.payload, winnow.state.sources) : null;
+    // A read that FAILED is not a mount with nothing saved: the row may be
+    // sitting there unread. See saveOn below.
+    const unreadable = !!(saved && saved.error);
+    const restored = saved && !unreadable ? planRestore(saved.payload, winnow.state.sources) : null;
     if (restored) {
       pivots.splice(0, pivots.length,
         // The ordering a header click applied is deliberately not restored:
@@ -1225,6 +1294,8 @@ export default function mount(container, winnow) {
       active = restored.active;
       state = pivots[active];
       showRestoredBanner(saved.savedAt, restored.notes);
+    } else if (unreadable) {
+      showUnreadableBanner();
     }
     for (const p of pivots) p.meta = sharedMeta;
     state.meta = sharedMeta;
@@ -1232,7 +1303,8 @@ export default function mount(container, winnow) {
     fillSources();
     renderFields();
     render();
-    saveOn = true;
+    // Saving only starts once we know what a save would replace.
+    saveOn = !unreadable;
     // The cross-tab is re-queried against the case as it is now.
     if (restored) runQuery();
   })();

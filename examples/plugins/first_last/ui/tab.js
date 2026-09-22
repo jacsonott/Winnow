@@ -71,24 +71,56 @@ const emptySpec = (name) => ({
   sortColumn: null, colWidths: {}, template: '{which} of {count}',
 });
 
+/* How a sheet names its table, and it takes two shapes because tables come
+   in two kinds.
+
+   A real source's `name` is the imported file's own, and nothing in the app
+   edits it (a nickname is a separate field), so it is what makes the id
+   believable after SQLite has handed that id to the next import.
+
+   A MERGE has no file behind it, so its name IS its display name and
+   Rename this merge rewrites it (Store.set_source_nickname) — checking the
+   name there would read a rename as "that table is gone". Its member
+   tables are the identity that survives, and they are also what tells it
+   apart from a different merge that took its id after a delete. */
+function savedSource(src) {
+  if (!src) return null;
+  const out = { id: src.id, name: src.name };
+  if (src.is_merge) out.members = (src.member_source_ids || []).map(Number);
+  return out;
+}
+
 /* One sheet, cut down to the spec — no preview, no meta, no selection, no
    loading/stale flags. Those describe a moment, not a question. */
 export function sheetSpec(sh, sources) {
   const src = (sources || []).find((s) => s.id === sh.sourceId) || null;
   return {
     name: sh.name,
-    // Id AND name: the id alone can point at a different table by the time
-    // this is read back.
-    source: src ? { id: src.id, name: src.name } : null,
+    source: savedSource(src),
     groupBy: sh.groupBy, carry: sh.carry, sums: sh.sums, filters: sh.filters,
     tags: sh.tags, rowJson: sh.rowJson, sortColumn: sh.sortColumn,
     colWidths: sh.colWidths, template: sh.template,
   };
 }
 
+const sameMembers = (a, b) => {
+  if (!Array.isArray(a) || !Array.isArray(b) || !a.length || a.length !== b.length) return false;
+  const x = a.map(Number).sort((p, q) => p - q);
+  const y = b.map(Number).sort((p, q) => p - q);
+  return x.every((n, i) => n === y[i]);
+};
+
 function resolveSource(saved, sources) {
   if (!saved || typeof saved !== 'object') return null;
   const name = saved.name == null ? null : String(saved.name);
+  if (saved.members) {
+    // A merge — matched on its members, never its name (savedSource says
+    // why). Its own id first, so two merges over the same tables stay
+    // apart; then any merge with those members, which is the merge rebuilt
+    // under a new id.
+    const same = sources.filter((s) => s.is_merge && sameMembers(saved.members, s.member_source_ids));
+    return same.find((s) => s.id === saved.id) || same[0] || null;
+  }
   const byId = sources.find((s) => s.id === saved.id) || null;
   if (byId && (name === null || byId.name === name)) return byId;
   // Re-imported under a new id: here the name is the stronger identity.
@@ -223,12 +255,20 @@ export default function mount(container, winnow) {
     || sh.template !== '{which} of {count}'));
   function saveState() {
     if (!saveOn || !winnow.tabState) return;   // an older Winnow has no tabState
-    hideBanner();   // once something is edited, "restored" is no longer news
     winnow.tabState.set(worthKeeping() ? {
       v: STATE_VERSION,
       active,
       sheets: sheets.map((sh) => sheetSpec(sh, winnow.state.sources)),
     } : null);
+  }
+  /* The same save, plus the restore line going away: once something has
+     been EDITED, "these came back from last time" has stopped being news.
+     Clicking between restored sheets is not an edit and saves silently —
+     the banner carries what the restore dropped and the only Start fresh
+     there is, and reading it must not be what destroys it. */
+  function saveEdit() {
+    hideBanner();
+    saveState();
   }
 
   /* ------------------------------------------------------- the banner */
@@ -245,14 +285,32 @@ export default function mount(container, winnow) {
     + 'border-bottom:1px solid var(--line-2);font-size:12px;flex:0 0 auto';
   container.append(banner);
 
+  // The restore line is news that goes stale; the "could not read" line is
+  // about what is happening now — it stays until the tab is rebuilt.
+  let bannerSticky = false;
   function hideBanner() {
-    if (banner.hidden) return;
+    if (banner.hidden || bannerSticky) return;
     banner.hidden = true;
     banner.replaceChildren();
   }
 
+  /* The read failed, so what is in the case file is unknown — which is not
+     the same as nothing being there, and this tab must not write its empty
+     default over sheets it never saw. Saving stays off until the tab is
+     built again, and that is worth saying out loud rather than leaving the
+     analyst to find out later. */
+  function showUnreadableBanner() {
+    banner.replaceChildren();
+    banner.className = 'fl-restored fl-state-unread';
+    banner.append(el('span', null, 'Could not read the sheets saved in this case, so nothing '
+      + 'here will be saved this time — close and reopen the tab to try again.'));
+    bannerSticky = true;
+    banner.hidden = false;
+  }
+
   function showRestoredBanner(savedAt, notes) {
     banner.replaceChildren();
+    banner.className = 'fl-restored';
     banner.append(el('span', null, 'Restored the sheets you left open when this case was last closed.'));
     const when = String(savedAt || '').replace('T', ' ').slice(0, 16);
     const stamp = el('span', 'note-status', when ? `saved ${when}` : '');
@@ -302,7 +360,7 @@ export default function mount(container, winnow) {
           sh.name = inp.value.trim() || sh.name;
           renamingIdx = null;
           renderSheetTabs();
-          saveState();   // a rename is not a control change, so schedule() never sees it
+          saveEdit();   // a rename is not a control change, so schedule() never sees it
         };
         inp.onkeydown = (e) => {
           if (e.key === 'Enter') commit();
@@ -347,8 +405,9 @@ export default function mount(container, winnow) {
     renderPreview();
     // Which sheet is on top is part of what gets restored, and a sheet
     // restored but never run has nothing on screen until something asks.
+    // Both silent: looking at another sheet is not an edit.
     saveState();
-    if (state.stale) schedule();
+    if (state.stale) queuePreview();
   }
   function closeSheet(i) {
     sheets.splice(i, 1);
@@ -1017,7 +1076,13 @@ export default function mount(container, winnow) {
   function schedule() {
     // Above the auto-update gate on purpose: with it off, edits still have
     // to be saved — they just do not re-run the preview.
-    saveState();
+    saveEdit();
+    queuePreview();
+  }
+  /* The re-run on its own. Switching to a sheet that has not been run has
+     to fetch its rows, but nothing about the sheet changed — so it is not
+     an edit, and it neither writes nor dismisses the restore line. */
+  function queuePreview() {
     clearTimeout(timer);
     if (!auto) {
       // Nothing runs until Refresh — but the status says the preview on
@@ -1164,7 +1229,7 @@ export default function mount(container, winnow) {
           grip.removeEventListener('pointercancel', up);
           grip.style.background = '';
           th.draggable = wasDraggable;
-          saveState();   // once, at the end of the drag, not per pointermove
+          saveEdit();   // once, at the end of the drag, not per pointermove
         };
         grip.addEventListener('pointermove', move);
         grip.addEventListener('pointerup', up);
@@ -1173,7 +1238,7 @@ export default function mount(container, winnow) {
       grip.addEventListener('dblclick', (e) => {
         e.stopPropagation();
         delete state.colWidths[c];
-        saveState();
+        saveEdit();
         for (const node of [th, ...[...t.querySelectorAll('tbody tr')].map((tr) => tr.children[ci])]) {
           if (node) { node.style.width = ''; node.style.minWidth = ''; node.style.maxWidth = ''; }
         }
@@ -1363,7 +1428,7 @@ export default function mount(container, winnow) {
     state.selRows = new Set();
     renderControls();
     renderPreview();
-    saveState();   // the table is the sheet's first fact; nothing else fires here
+    saveEdit();   // the table is the sheet's first fact; nothing else fires here
   }
 
   refresh = () => { fillSources(); renderControls(); };
@@ -1376,7 +1441,11 @@ export default function mount(container, winnow) {
       return;
     }
     const saved = winnow.tabState ? await winnow.tabState.get() : null;
-    const restored = saved ? planRestore(saved.payload, winnow.state.sources, winnow.state.tags) : null;
+    // A read that FAILED is not a mount with nothing saved: the row may be
+    // sitting there unread. See saveOn below.
+    const unreadable = !!(saved && saved.error);
+    const restored = saved && !unreadable
+      ? planRestore(saved.payload, winnow.state.sources, winnow.state.tags) : null;
     if (restored) {
       // Restored sheets start stale: the definitions are back, the rows
       // are not, and the active one runs below.
@@ -1385,6 +1454,8 @@ export default function mount(container, winnow) {
       active = restored.active;
       state = sheets[active];
       showRestoredBanner(saved.savedAt, restored.notes);
+    } else if (unreadable) {
+      showUnreadableBanner();
     }
     for (const sh of sheets) sh.meta = sharedMeta;
     state.meta = sharedMeta;
@@ -1392,7 +1463,8 @@ export default function mount(container, winnow) {
     fillSources();
     renderControls();
     renderPreview();
-    saveOn = true;
+    // Saving only starts once we know what a save would replace.
+    saveOn = !unreadable;
     // The rows are re-run against the case as it is NOW. Regardless of
     // Auto-update: this is the restore, not an edit, and restored controls
     // over an empty table read as a broken tab.

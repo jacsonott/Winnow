@@ -101,7 +101,10 @@ A tab plus its backend route, the full custom-UI shape:
     # is torn down with no callback, so it is written as the analyst works
     # rather than flushed at the end. Definitions only (a cap of 64 KiB
     # says so), validated against the case on the way back in: a source id
-    # is reused after a drop and a column can be gone.
+    # is reused after a drop, a merge's name is editable, and a column can
+    # be gone. get() answers {error: true} rather than null when the read
+    # itself failed, so a mount can refuse to save over state it could not
+    # see.
     # Optional exports: onShow/onHide, called on every tab switch.
     #
     #   export default function mount(container, winnow) { ... }

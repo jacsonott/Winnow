@@ -124,9 +124,14 @@ def test_a_key_that_is_not_a_mount_key_is_a_400(client):
     """The key names a mount ('tab:'/'panel:'/'page:' plus the mount id).
     Anything else is a caller getting the contract wrong, and saying so is
     cheaper than a table of rows nothing will ever read."""
-    for bad in ["", "firstlast", "sql_tabs", "widget:x.y", "tab:" + "x" * 400]:
-        assert client.get("/api/plugin_state", params={"key": bad}).status_code == 400
-        assert client.post("/api/plugin_state", json={"key": bad, "payload": {"v": 1}}).status_code == 400
+    # The newline is the one that looks fine: a key ending in one would
+    # otherwise validate and then be a SECOND row, under a key no mount
+    # ever asks for.
+    for bad in ["", "firstlast", "sql_tabs", "widget:x.y", "tab:" + "x" * 400,
+                "tab:first-last.firstlast\n", "tab:a\nb"]:
+        assert client.get("/api/plugin_state", params={"key": bad}).status_code == 400, bad
+        assert client.post("/api/plugin_state",
+                           json={"key": bad, "payload": {"v": 1}}).status_code == 400, bad
 
 
 def test_the_key_survives_a_plugin_display_name_with_punctuation(client):

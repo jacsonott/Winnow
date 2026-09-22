@@ -12,6 +12,10 @@ list rather than sending into a 400.
 
 from __future__ import annotations
 
+import json
+from urllib.parse import quote
+from urllib.request import Request, urlopen
+
 import pytest
 
 pytestmark = pytest.mark.ui
@@ -43,6 +47,12 @@ PIVOT_PLAN = """(args) => {
   import('/plugin_assets/pivot/ui/tab.js?restoretest=1')
     .then((m) => { window.__plan = m.planRestore(args[0], args[1]); });
 }"""
+# The other half of the round trip: what a sheet is written AS.
+SPEC = """(args) => {
+  window.__spec = undefined;
+  import('/plugin_assets/first_last/ui/tab.js?restoretest=1')
+    .then((m) => { window.__spec = m.sheetSpec(args[0], args[1]); });
+}"""
 
 
 def _saved_post(response):
@@ -55,6 +65,12 @@ def _plan(pg, script, payload, sources, tags=()):
     pg.evaluate(script, [payload, sources, list(tags)])
     pg.wait_for_function("() => window.__plan !== undefined", timeout=10_000)
     return pg.evaluate("() => window.__plan")
+
+
+def _spec(pg, sheet, sources):
+    pg.evaluate(SPEC, [sheet, sources])
+    pg.wait_for_function("() => window.__spec !== undefined", timeout=10_000)
+    return pg.evaluate("() => window.__spec")
 
 
 def _is_state_post(r):
@@ -138,6 +154,13 @@ def test_two_sheets_come_back_and_their_rows_are_re_run(fl_page):
     banner = pg.locator(".pluginview .fl-restored")
     assert banner.is_visible()
     assert "Restored the sheets" in banner.inner_text()
+
+    # Reading the other restored sheet is not an edit. The line carries
+    # what the restore dropped and the only Start fresh there is, so going
+    # to look at a sheet must not be what destroys it.
+    pg.locator(".pluginview .sql-tabs .sql-tab").first.click()
+    pg.wait_for_selector(".pluginview [data-zone='groupBy'] [data-field='Host']", timeout=10_000)
+    assert banner.is_visible(), "clicking another restored sheet took the restore line with it"
     assert "saved 20" in banner.inner_text()
 
 
@@ -232,6 +255,55 @@ def test_a_sheet_on_a_merge_restores(fl_page):
     assert plan["notes"] == []
 
 
+def test_a_merge_renamed_since_it_was_saved_still_restores(fl_page):
+    """A merge has no file behind it, so its name IS the display name —
+    Rename this merge rewrites merges.name. Identifying a saved merge by
+    its name would therefore turn a rename into "your table is gone", and
+    the sheet would come back empty with the merge sitting in the dropdown
+    one row below."""
+    members = [1, 3]
+    merge = _src(-2, "Merged (2 tables)", is_merge=True, member_source_ids=members)
+    sheet = {"name": "Logons", "sourceId": -2, "groupBy": ["Host"], "carry": [], "sums": [],
+             "filters": [], "tags": {"mode": "", "ids": []}, "rowJson": False,
+             "sortColumn": "Timestamp", "colWidths": {}, "template": "{which} of {count}"}
+    spec = _spec(fl_page, sheet, [_src(1, "ui.csv"), _src(3, "other.csv"), merge])
+    assert spec["source"]["members"] == members, "a merge is saved by its member tables"
+
+    payload = {"v": 1, "active": 0, "sheets": [spec]}
+    renamed = _src(-2, "All logons", is_merge=True, member_source_ids=members)
+    plan = _plan(fl_page, PLAN, payload, [_src(1, "ui.csv"), _src(3, "other.csv"), renamed])
+    assert plan["sheets"][0]["sourceId"] == -2
+    assert plan["sheets"][0]["groupBy"] == ["Host"]
+    assert plan["notes"] == []
+
+    # Deleted and built again over the same tables, under a new id: the
+    # same evidence, so the same answer the re-imported table gets.
+    rebuilt = _src(-5, "All logons", is_merge=True, member_source_ids=[3, 1])
+    plan = _plan(fl_page, PLAN, payload, [_src(1, "ui.csv"), _src(3, "other.csv"), rebuilt])
+    assert plan["sheets"][0]["sourceId"] == -5
+
+
+def test_a_merge_id_taken_by_a_different_merge_does_not_restore_onto_it(fl_page):
+    """merges.id is reused after a delete the way a source id is, so the
+    id alone is not the merge — its members are."""
+    payload = _payload(source={"id": -2, "name": "Merged (2 tables)", "members": [1, 3]})
+    other = _src(-2, "Merged (2 tables)", is_merge=True, member_source_ids=[4, 5])
+    plan = _plan(fl_page, PLAN, payload, [_src(1, "ui.csv"), other])
+    assert plan["sheets"][0]["sourceId"] is None
+    assert plan["sheets"][0]["groupBy"] == []
+    assert "not in this case" in plan["notes"][0]
+
+
+def test_pivot_identifies_a_merge_the_same_way(fl_page):
+    payload = {"v": 1, "active": 0, "pivots": [{
+        "name": "By host", "source": {"id": -2, "name": "Merged (2 tables)", "members": [1, 3]},
+        "rows": ["Host"], "cols": [], "values": [], "filters": [],
+        "subtotals": True, "grandTotals": True}]}
+    renamed = _src(-2, "All logons", is_merge=True, member_source_ids=[1, 3])
+    plan = _plan(fl_page, PIVOT_PLAN, payload, [_src(1, "ui.csv"), renamed])
+    assert plan["pivots"][0]["sourceId"] == -2 and plan["pivots"][0]["rows"] == ["Host"]
+
+
 def test_a_payload_from_another_version_is_ignored(fl_page):
     """An older or newer shape starts the tab fresh rather than half
     restoring into it."""
@@ -259,3 +331,66 @@ def test_pivot_validates_the_same_way(fl_page):
 
     # And the reused-id rule is the same one.
     assert _plan(fl_page, PIVOT_PLAN, payload, [_src(1, "other.csv")])["pivots"][0]["sourceId"] is None
+
+
+# ------------------------------------------------- when the read itself fails
+
+def test_a_read_that_failed_is_not_mistaken_for_nothing_saved(fl_page, server):
+    """The dangerous failure is the quiet one: if the GET fails and the tab
+    reads that as "this mount has never saved", it starts on one empty
+    sheet and the analyst's first drag writes that over the sheets that are
+    still sitting in the case file. Nothing may be saved from a mount that
+    could not read."""
+    pg = fl_page
+    keep = {"v": 1, "active": 0, "sheets": [{
+        "name": "Logons by host", "source": {"id": 1, "name": "ui.csv"},
+        "groupBy": ["Host"], "carry": [], "sums": [], "filters": [],
+        "tags": {"mode": "", "ids": []}, "rowJson": False, "sortColumn": None,
+        "colWidths": {}, "template": "{which} of {count}"}]}
+    urlopen(Request(server + "/api/plugin_state", data=json.dumps({"key": KEY, "payload": keep}).encode(),
+                    headers={"Content-Type": "application/json", "X-Timeline-Lite-Client": "1"}),
+            timeout=10).read()
+
+    writes: list[str] = []
+
+    def watch(request):   # a Request here, not a Response — no .request on it
+        if request.method == "POST" and "/api/plugin_state" in request.url:
+            writes.append(request.url)
+
+    pg.on("request", watch)
+
+    def fail_the_read(route, request):
+        if request.method == "GET":
+            route.fulfill(status=500, content_type="application/json", body='{"detail": "nope"}')
+        else:
+            route.continue_()
+
+    pg.route("**/api/plugin_state**", fail_the_read)
+    try:
+        pg.reload(wait_until="networkidle")
+        pg.wait_for_selector(".row", timeout=30_000)
+        pg.evaluate("() => __winnow.loadPlugins()")
+        pg.wait_for_function("() => __winnow.S.pluginTabs.some((t) => t.id.includes('firstlast'))",
+                             timeout=10_000)
+        _open_tab(pg)
+
+        # It says so rather than looking like an ordinary empty tab.
+        unread = pg.locator(".pluginview .fl-state-unread")
+        assert unread.is_visible()
+        assert "Could not read" in unread.inner_text()
+
+        # Two edits, each waited out through its own preview round trip —
+        # well past the save debounce that would otherwise have fired.
+        for field in ("Host", "EventId"):
+            with pg.expect_response(lambda r: "/api/plugin/first_last/preview" in r.url, timeout=15_000):
+                pg.evaluate(DRAG, [f"[data-field='{field}']", "[data-zone='groupBy']"])
+        pg.wait_for_selector(".pluginview tbody tr", timeout=15_000)
+        assert not writes, f"a mount that could not read wrote anyway: {writes}"
+        # And the warning stays: it is about what is happening now.
+        assert unread.is_visible()
+    finally:
+        pg.unroute("**/api/plugin_state**", fail_the_read)
+        pg.remove_listener("request", watch)
+
+    with urlopen(server + "/api/plugin_state?key=" + quote(KEY), timeout=10) as r:
+        assert json.loads(r.read())["payload"] == keep

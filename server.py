@@ -4532,11 +4532,14 @@ def api_sql_tabs_reorder(body: SqlTabReorder):
 # hold anything an author typed — a slash included. That is why the key
 # travels as a parameter rather than a path segment: "First/Last" in a path
 # is two segments by the time uvicorn has unquoted it.
-_PLUGIN_STATE_KEY_RE = re.compile(r"^(tab|panel|page):[^\x00-\x1f]{1,180}$")
+# fullmatch, not match: `$` also matches just before a trailing newline, so
+# "tab:x.y\n" would pass and become a second row under a key no mount ever
+# reads back.
+_PLUGIN_STATE_KEY_RE = re.compile(r"(tab|panel|page):[^\x00-\x1f]{1,180}")
 
 
 def _plugin_state_key(key: str) -> str:
-    if not _PLUGIN_STATE_KEY_RE.match(key or ""):
+    if not _PLUGIN_STATE_KEY_RE.fullmatch(key or ""):
         raise HTTPException(400, "A plugin state key is 'tab:'/'panel:'/'page:' plus the mount id")
     return key
 

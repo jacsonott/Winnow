@@ -137,14 +137,22 @@ see [docs/notes/README.md](README.md) for the whole set.
   `openCase` calls `dropPendingTabState()` *before* `/api/case/open`
   rather than flushing after it — a save still inside its debounce would
   land the old case's spec in the new case's file. Restoring is the
-  plugin's job and has two traps in it: a source id is handed to the next
-  import after a drop (so the saved table NAME is what makes the id
-  believable) and a column named by the payload may be gone (the
-  first_last/pivot backends answer that with a 400), so both bundled
-  examples validate against the live source list, say what they dropped,
-  and offer "Start fresh". The rows are never collected: a plugin toggled
-  off keeps its state for when it comes back;
-  the module's default export gets `(container, winnow)` where
+  plugin's job and has three traps in it: a source id is handed to the
+  next import after a drop (so the saved table NAME is what makes the id
+  believable); a MERGE's name is its *editable* display name
+  (`set_source_nickname` rewrites `merges.name`), so a rename would read
+  as "table gone" and the saved member ids are the identity there
+  instead; and a column named by the payload may be gone (the
+  first_last/pivot backends answer that with a 400). Both bundled
+  examples therefore validate against the live source list, say what they
+  dropped, and offer "Start fresh" — and when the READ fails (`get()`
+  resolves `{error: true}`, not null) they stay read-only for that mount,
+  because "nothing saved" and "could not tell" are the same picture to a
+  plugin that does not distinguish them and the second one ends in a save
+  over unread state. The rows are never collected: a plugin toggled off
+  keeps its state for when it comes back.
+
+  The module's default export gets `(container, winnow)` where
   `winnow` is `buildPluginTabContext`'s stable surface (api/post/el/
   modal helpers, `sql()` → run_sql's own RO connection, `schemaText()`,
   live state getters incl. state.timeRange, plus openFiltered(source_id, [{column, value}]) to jump to the evidence); optional onShow/onHide exports fire per switch.

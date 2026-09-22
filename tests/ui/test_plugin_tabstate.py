@@ -6,9 +6,10 @@ out, and the host writes as the analyst works instead. These drive the
 context object a mount receives, through the fake plugin from conftest, and
 cover what that shape has to guarantee: what one mount saves another mount
 of the same tab reads back, a tab and a panel of one plugin do not share a
-row, a burst of edits is one write, and a write still inside its debounce
-when the case changes is dropped rather than landed in the case that just
-opened.
+row, a burst of edits is one write, a write still inside its debounce when
+the case changes is dropped rather than landed in the case that just
+opened, and a read that FAILED is told apart from a mount that has never
+saved.
 """
 
 from __future__ import annotations
@@ -123,3 +124,24 @@ def test_clear_takes_the_row_away(page, tabstate):
     page.wait_for_function("() => window.__c !== undefined", timeout=10_000)
     assert page.evaluate("() => window.__c") is True
     assert _get(page) is None
+
+
+def test_a_read_that_fails_is_not_reported_as_nothing_saved(page, tabstate):
+    """`null` means "this mount has never saved", which is an invitation to
+    start from an empty tab — and the first edit after that replaces the
+    row. A read that failed has to be a different answer, because a mount
+    cannot protect state it was never shown."""
+    _set(page, {"v": 1, "sheets": ["still there"]})
+
+    def fail_the_read(route, request):
+        if request.method == "GET":
+            route.fulfill(status=500, content_type="application/json", body='{"detail": "nope"}')
+        else:
+            route.continue_()
+
+    page.route("**/api/plugin_state**", fail_the_read)
+    try:
+        assert _get(page) == {"error": True}
+    finally:
+        page.unroute("**/api/plugin_state**", fail_the_read)
+    assert _get(page)["payload"]["sheets"] == ["still there"]
