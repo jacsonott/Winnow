@@ -113,6 +113,9 @@ REG_ROWS = [
     _reg(KeyPath="Microsoft\\Windows NT\\CurrentVersion\\Winlogon", ValueName="ProductName", ValueData="decoy", Category="OS"),
     _reg(KeyPath="ControlSet001\\Control\\ComputerName\\ComputerName", ValueName="ComputerName", ValueData="WKSTN-014", Category="System"),
     _reg(KeyPath="ControlSet001\\Control\\ProductOptions", ValueName="ProductType", ValueData="WinNT", Category="System"),
+    # A second ProductType with no value: the card does not print it, so
+    # the drill must not open it either.
+    _reg(KeyPath="ControlSet001\\Control\\ProductOptions", ValueName="ProductType", ValueData="", Category="System"),
     _reg(KeyPath="ControlSet001\\Control\\ProductOptions", ValueName="ProductSuite", ValueData="Terminal Server", Category="System"),
     _reg(KeyPath="ControlSet001\\Services\\Tcpip\\Parameters", ValueName="Hostname", ValueData="wkstn-014", Category="Network"),
     _reg(KeyPath="ControlSet001\\Services\\Tcpip\\Parameters", ValueName="Domain", ValueData="corp.example.com", Category="Network"),

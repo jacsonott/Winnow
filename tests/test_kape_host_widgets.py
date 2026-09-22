@@ -148,6 +148,39 @@ def test_a_batch_with_no_host_facts_at_all_says_so_once(store, write_csv):
     assert _rows(store, "Host") == [("Host", "(no host facts in this RECmd output)")]
 
 
+def test_a_fact_whose_only_row_is_empty_is_not_a_fact(store, write_csv):
+    """The guard each of the five cards carried, and the one the merge has
+    to keep: a ValueName RECmd wrote with no ValueData is a row, not a host
+    fact. Without it the card reads its own fallback out of existence —
+    every key path below matches, so the "(no host facts…)" line is
+    suppressed and what lands on screen is a full-looking Host card whose
+    values are blank."""
+    rows = [
+        _row(HiveType="SYSTEM", KeyPath="ControlSet001\\Control\\ComputerName\\ComputerName",
+             ValueName="ComputerName", ValueData=""),
+        _row(HiveType="SYSTEM", KeyPath="ControlSet001\\Services\\Tcpip\\Parameters",
+             ValueName="Hostname", ValueData=""),
+        _row(HiveType="SYSTEM", KeyPath="ControlSet001\\Services\\Tcpip\\Parameters\\Interfaces\\{9ec42dd6}",
+             ValueName="DhcpIPAddress", ValueData=""),
+        _row(HiveType="SOFTWARE", KeyPath="Microsoft\\Windows NT\\CurrentVersion",
+             ValueName="ProductName", ValueData=""),
+        _row(HiveType="SYSTEM", KeyPath="ControlSet001\\Control\\ProductOptions",
+             ValueName="ProductType", ValueData=""),
+    ]
+    store.ingest_csv(write_csv([REG_COLS] + rows, "blank.csv"), name="blank", build_fts=False)
+    assert _rows(store, "Host") == [("Host", "(no host facts in this RECmd output)")]
+
+
+def test_an_empty_domain_is_the_one_empty_value_that_is_an_answer(store, write_csv):
+    """Which is why the guard is per fact rather than one WHERE over the
+    union: `Domain` with no value means the host is in a workgroup, and
+    the card has always said so."""
+    row = _row(HiveType="SYSTEM", KeyPath="ControlSet001\\Services\\Tcpip\\Parameters",
+               ValueName="Domain", ValueData="")
+    store.ingest_csv(write_csv([REG_COLS, row], "workgroup.csv"), name="workgroup", build_fts=False)
+    assert _rows(store, "Host") == [("Domain", "(none — workgroup)")]
+
+
 @pytest.mark.parametrize("product_type, reads", [
     ("WinNT", "Workstation"),
     ("ServerNT", "Member / standalone server"),
