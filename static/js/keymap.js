@@ -4,7 +4,7 @@
 import { autofitAllColumnWidths, resetAllColumnWidths, saveDefaultLayout, visibleCols } from './columns.js';
 import { openFilterBuilder } from './filterbuilder.js';
 import { $, ROW_H } from './core.js';
-import { currentModalAction, repaintOpenMenus, closeModal } from './ui.js';
+import { currentModalAction, repaintOpenMenus, closeMenu, closeModal } from './ui.js';
 import { toggleDetailPane } from './detail.js';
 import { toggleHistogram } from './histogram.js';
 import { filterBySelectedCell, openValuePickerForColumn, selectedCellTarget } from './filters.js';
@@ -13,7 +13,7 @@ import { dropGrouping, handleCopyShortcut, toggleGrouping } from './grouping.js'
 import { openPluginBundlesModal } from './bundles.js';
 import { cycleSavedFilter, openFilterSqlTab } from './savedfilters.js';
 import { expandSearch, openSearchAllModal } from './search.js';
-import { applySqlTabToEditor } from './sql.js';
+import { applySqlTabToEditor, showGridTab } from './sql.js';
 import { sqlClearSelection, sqlCopySelection, sqlSelectionCount, sqlTagHotkey } from './sqlassist.js';
 import { openSettings } from './settings.js';
 import { activateTabSlot, clearAllFilters, setSidebarVisible } from './sources.js';
@@ -36,7 +36,13 @@ export const DEFAULT_KEYMAP = {
   pageUp: ['PageUp'],
   jumpFirst: ['g'],
   jumpLast: ['G'],
-  focusSearch: ['/'],
+  // '/' and the chord every analyst's hands already do. Ctrl+F is worth
+  // taking rather than leaving to the browser: find-in-page can only
+  // see the rows the virtualised grid has in the DOM (invariant #6), so
+  // it answers "not found" on data that is right there. ⌘+F comes with
+  // it, spelled in the dispatcher's pre-gate rather than as a second
+  // binding here — see wireKeymap.
+  focusSearch: ['/', 'Ctrl+f'],
   // No default: `f` is worth more as "filter to the value I'm looking at"
   // (below) than as "focus the first column's filter box", which is a click
   // away and was the less-used of the two. Still bindable in Settings.
@@ -120,7 +126,16 @@ export const ACTION_LABELS = {
    over it on every load. */
 export const KEYMAP_VERSION_KEY = 'winnow.keymap.v';
 
-export const KEYMAP_VERSION = 4;
+export const KEYMAP_VERSION = 5;
+
+/* The four spec strings one Ctrl/⌘+F press can produce. keySpecFromEvent
+   spells the plain chord 'Ctrl+f'; ⌘ makes it 'Meta+f', and Shift — or Caps
+   Lock, which is the one that bites — makes e.key 'F'. It is the same chord
+   under the analyst's fingers in all four cases, so the dispatcher matches
+   the set rather than the one spelling the keymap stores, the way the copy
+   handler matches 'c' or 'C'. Declared up here because the v5 migration
+   below has to know the whole set too. */
+const SEARCH_CHORD_SPECS = ['Ctrl+f', 'Ctrl+F', 'Meta+f', 'Meta+F'];
 
 export const KEYMAP_MIGRATIONS = [
   // v1 (2026-08): the column chooser grew into the table menu, and `f`
@@ -168,6 +183,24 @@ export const KEYMAP_MIGRATIONS = [
     if (wasDefault('toggleTimeRange', ['r', 'a'])) map.toggleTimeRange = ['r'];
     if (wasDefault('openTimeRange', ['R', 'A'])) map.openTimeRange = ['R'];
     if (wasDefault('openJumpTs', ['J'])) map.openJumpTs = ['J', 'a'];
+  },
+  // v5 (2026-09): Ctrl+F joins '/' on the search box. Additive, and only
+  // where '/' is still the whole binding — an analyst who moved search
+  // somewhere else keeps what they chose, and loses nothing, since the
+  // pre-gate only claims the chord while focusSearch still holds it.
+  // The second condition is the one this chord needs and the others
+  // didn't: Ctrl+F matched nothing in Winnow until now, so Settings
+  // accepted it for any action, and handing focusSearch the chord would
+  // put the pre-gate in front of a binding someone chose — shadowed with
+  // the chip still sitting in Settings. Where that has happened the
+  // migration does nothing and their binding keeps working, since the
+  // gate is off while focusSearch does not hold the chord.
+  (map) => {
+    const wasDefault = (action, keys) =>
+      JSON.stringify((map[action] || []).slice().sort()) === JSON.stringify(keys.slice().sort());
+    const chordTaken = Object.entries(map).some(([action, keys]) => action !== 'focusSearch'
+      && Array.isArray(keys) && keys.some((k) => SEARCH_CHORD_SPECS.includes(k)));
+    if (!chordTaken && wasDefault('focusSearch', ['/'])) map.focusSearch = ['/', 'Ctrl+f'];
   },
 ];
 
@@ -253,6 +286,13 @@ export function matchAction(e) {
   return null;
 }
 
+/* Whether the search box still owns the chord. It is dispatched by hand,
+   above the typing guard where matchAction never looks — but not
+   unconditionally: take the binding off focusSearch in Settings and the
+   browser's find-in-page comes back, which is what keeps the chip in
+   Settings a statement about the app rather than decoration. */
+const searchChordBound = () => (S.keymap.focusSearch || []).some((k) => SEARCH_CHORD_SPECS.includes(k));
+
 /* Returns a human-readable description of what already owns `key`, or null
    if it's free. Checked against other keymap actions, tag hotkeys (which
    can change independently at any time via the tag editor), Escape, and
@@ -267,6 +307,15 @@ export function findKeyConflict(key, currentAction) {
   if (/^(Ctrl|Meta)\+(c|C)$/.test(key)) return 'the copy shortcut';
   if (/^(Ctrl|Meta)\+z$/.test(key)) return 'the tag-undo shortcut';
   if (/^Alt\+[0-9]$/.test(key)) return 'tab switching (Alt+1–0)';
+  // The search chord is dispatched before matchAction and in every
+  // spelling of itself, so binding any of the four to another action
+  // would silently do nothing — including the two the keymap has no way
+  // to store on focusSearch ('Meta+f' and 'Meta+F'). Answered here rather
+  // than left to the loop below, which only knows the one spelling
+  // focusSearch actually holds.
+  if (currentAction !== 'focusSearch' && SEARCH_CHORD_SPECS.includes(key) && searchChordBound()) {
+    return ACTION_LABELS.focusSearch;
+  }
   for (const [action, keys] of Object.entries(S.keymap)) {
     if (action !== currentAction && keys.includes(key)) return ACTION_LABELS[action] || action;
   }
@@ -394,6 +443,47 @@ document.addEventListener('keydown', (e) => {
     if (!$('modal').hidden || document.querySelector('.confirm-overlay')) return;
     e.preventDefault();
     activateTabSlot(digit);
+    return;
+  }
+
+  /* Ctrl/⌘+F — the find chord, taken rather than left to the browser.
+     Chromium's find-in-page searches the DOM, and invariant #6 keeps only
+     the visible window of rows in it, so on a two-million-row table it
+     reports "not found" for a value that is certainly there. A wrong
+     answer is worse than no answer in a tool people write reports from,
+     so Winnow answers instead and preventDefault stops the native bar.
+
+     Above the `typing` guard for the same reason Alt+digit is: the search
+     box is exactly what you want from a filter cell or the SQL editor,
+     and a chord that gave up there would hand back the bar that lies.
+     Below the $('app').hidden gate, though — the home screen has no
+     search box, and it is small enough to be entirely in the DOM, which
+     is the one place find-in-page tells the truth.
+
+     The match is the copy handler's shape — (ctrl || meta) on 'f' or 'F',
+     so ⌘ arrives here rather than as a second binding, and Caps Lock
+     (which makes e.key 'F') still opens the box — plus one term neither
+     the copy nor the undo handler has: `!e.altKey`. Ctrl+Alt is AltGr on
+     a European layout, and AltGr+F there is a character somebody is
+     trying to type, not a chord.
+
+     A dialog keeps its own find. #modal and a spawned confirm overlay own
+     the keyboard (the gate below says so for every other key, and Ctrl+C
+     already falls through to the native copy there), and a dialog's text
+     really is all in the DOM. A dropdown menu is neither of those and is
+     not a dialog — it is transient chrome that any other interaction
+     dismisses — so it is dismissed and the chord taken, rather than left
+     floating over a search box that just opened behind it.
+
+     Off the grid, switch first: syncTabChrome hides the whole toolbar on
+     a page tab, so focusing #search there would put the caret in a
+     display:none input and read as a keystroke that did nothing. */
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'f' || e.key === 'F') && searchChordBound()) {
+    if (!$('modal').hidden || document.querySelector('.confirm-overlay')) return;
+    e.preventDefault();
+    closeMenu();
+    if (S.activeTab !== 'grid') showGridTab();
+    expandSearch();
     return;
   }
 

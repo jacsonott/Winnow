@@ -125,6 +125,14 @@ DEFAULT_TAGS = [
     ("Benign", "#5d8a66", "3"),
 ]
 
+# A plugin tab's saved UI state (plugin_ui_state) is a SPEC — which fields
+# sit in which well, which sheet was open — never a result set. 64 KiB is
+# far more than any such spec needs (First/Last's whole sheet list is under
+# a kilobyte) and small enough that no plugin can quietly park a query
+# result in the case file, where it would go stale against the evidence it
+# claims to describe.
+PLUGIN_UI_STATE_MAX_BYTES = 64 * 1024
+
 META_SCHEMA = """
 CREATE TABLE IF NOT EXISTS sources (
     id          INTEGER PRIMARY KEY,
@@ -215,6 +223,26 @@ CREATE TABLE IF NOT EXISTS sql_tabs (
     sql  TEXT NOT NULL DEFAULT '',
     pos  INTEGER NOT NULL DEFAULT 0     -- left-to-right strip order; ties break by id
 );
+-- What a plugin tab (or panel) had on screen, per mount: the sheets
+-- First/Last was showing, the fields a pivot had in its wells. In the case
+-- file for the same reason as sql_tabs — a grouping somebody worked out is
+-- analysis *about this evidence* — and per case, so a spec naming this
+-- case's columns can never be restored over another case's tables.
+--
+-- Written only by the plugin, through winnow.tabState (static/js/plugins.js);
+-- the host never writes here on a plugin's behalf. Nothing collects the
+-- rows: a plugin toggled off for a while keeps its state for when it comes
+-- back, and an uninstalled one leaves a row nobody reads. Both are
+-- deliberate — the rows are bytes, and losing an analyst's sheets to a
+-- checkbox would be the bug this table exists to fix.
+--
+-- SPEC ONLY, capped at PLUGIN_UI_STATE_MAX_BYTES: rows belong to the tables
+-- they came from and are re-run on restore, never replayed from here.
+CREATE TABLE IF NOT EXISTS plugin_ui_state (
+    mount_key TEXT PRIMARY KEY,   -- 'tab:<plugin>.<id>', 'panel:…', 'page:…' (plugins.js mountKey)
+    payload   TEXT NOT NULL,      -- a JSON document whose shape the plugin owns
+    saved_at  TEXT NOT NULL
+) WITHOUT ROWID;
 -- Derived (computed) column definitions. The VALUES live in a per-source
 -- sidecar table drv_<source_id> (rid INTEGER PRIMARY KEY, one TEXT column
 -- per derived column) created lazily by add_derived_column — the
@@ -7729,6 +7757,58 @@ class Store:
             )
         return self.list_sql_tabs()
 
+    # -------------------------------------------- plugin tab/panel UI state
+
+    def get_plugin_ui_state(self, mount_key: str) -> dict | None:
+        """What a plugin mount saved here, or None if it never has.
+
+        A payload that no longer parses (a hand-edited case file, a
+        truncated copy) reads as nothing saved rather than raising: every
+        caller's fallback is "start fresh", which is the right answer to a
+        payload nobody can read anyway."""
+        with self.lock:
+            row = self.db.execute(
+                "SELECT payload, saved_at FROM plugin_ui_state WHERE mount_key=?",
+                (mount_key,),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            payload = json.loads(row["payload"])
+        except ValueError:
+            return None
+        return {"mount_key": mount_key, "payload": payload, "saved_at": row["saved_at"]}
+
+    def set_plugin_ui_state(self, mount_key: str, payload) -> dict:
+        """Replace a mount's saved state. Last write wins — two Winnows on
+        one case file do not merge, and a UI spec is not something that
+        could be merged meaningfully anyway.
+
+        Refuses anything past PLUGIN_UI_STATE_MAX_BYTES: the cap is what
+        keeps "save the definition" from drifting into "save the result"."""
+        if not mount_key:
+            raise ValueError("A plugin state key is required")
+        blob = json.dumps(payload)
+        size = len(blob.encode("utf-8"))
+        if size > PLUGIN_UI_STATE_MAX_BYTES:
+            raise ValueError(
+                f"Plugin tab state is {size} bytes, over the "
+                f"{PLUGIN_UI_STATE_MAX_BYTES}-byte cap — save the definition, not the rows")
+        saved_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+        with self.lock, self.db:
+            self.db.execute(
+                "INSERT INTO plugin_ui_state(mount_key, payload, saved_at) VALUES (?,?,?) "
+                "ON CONFLICT(mount_key) DO UPDATE SET payload=excluded.payload, "
+                "saved_at=excluded.saved_at",
+                (mount_key, blob, saved_at),
+            )
+        return {"mount_key": mount_key, "payload": payload, "saved_at": saved_at}
+
+    def clear_plugin_ui_state(self, mount_key: str) -> None:
+        """The "start fresh" path. Deleting a row nobody has is fine."""
+        with self.lock, self.db:
+            self.db.execute("DELETE FROM plugin_ui_state WHERE mount_key=?", (mount_key,))
+
     # ------------------------------------------ legacy filter-preset migration
 
     def get_case_notes(self) -> dict:
@@ -10393,24 +10473,76 @@ class Store:
         wb.save(path)
         return {"sheets": sheets, "rows": total_rows}
 
-    def search_all_sources(self, query: str = "", terms: list[dict] | None = None) -> list[dict]:
+    def resolve_search_all_scope(self, source_ids: list[int] | None) -> dict:
+        """The sweep's scope, turned into real source ids it can actually
+        scan: `{"source_ids": [...] | None, "merges": [...]}`.
+
+        None in, None out — the whole case, which is what the sweep has
+        always done. Otherwise every id is resolved, in the order asked,
+        deduped, and **a merge is expanded to its member_source_ids**: a
+        merge has no `src_N` of its own (CLAUDE.md invariant #9's
+        exceptions), so "search this table" on one can only mean searching
+        the tables its rows actually live in. The expansion is reported in
+        `merges` — `{id, name, member_source_ids}` per merge asked for — so
+        the caller can say so rather than quietly answering a different
+        question than the one asked.
+
+        An id naming nothing raises KeyError (the routes turn that into a
+        400): a typo'd id that silently scanned nothing would come back as
+        "no matches", which is the wrong answer rather than an error. An
+        empty list is a scope of no tables, and scans nothing.
+
+        Resolution happens once, at the point the scope is accepted — the
+        sweep itself never re-resolves. A table dropped between the scope
+        being chosen and the sweep reaching it simply isn't in the
+        `list_sources()` snapshot _iter_search_all_sources filters, so it
+        costs that table its scan rather than ending the run, the way the
+        unscoped sweep has always absorbed a source removed mid-sweep."""
+        if source_ids is None:
+            return {"source_ids": None, "merges": []}
+        out: list[int] = []
+        merges: list[dict] = []
+        for sid in source_ids:
+            src = self._source_lite(sid)          # KeyError: no such source/merge
+            members = list(src["member_source_ids"]) if src.get("is_merge") else [sid]
+            if src.get("is_merge"):
+                merges.append({"id": sid, "name": src["name"], "member_source_ids": members})
+            for m in members:
+                if m not in out:
+                    out.append(m)
+        return {"source_ids": out, "merges": merges}
+
+    def search_all_sources(self, query: str = "", terms: list[dict] | None = None,
+                           source_ids: list[int] | None = None) -> list[dict]:
         """Every source's match count, sorted heaviest-first — the whole
         sweep, run to completion. See _iter_search_all_sources for the
         actual scan and its lock discipline; this is the collect-it-all
         wrapper, used by the synchronous endpoint and the tests.
 
+        `source_ids` scopes it (resolve_search_all_scope); None is every
+        real source in the case. It is resolved HERE, before the scan, so
+        a caller naming a table this case doesn't have gets the KeyError
+        its route turns into a 400 rather than an empty answer that reads
+        like "no matches".
+
         start_search_all_job is the same sweep run on a background thread
         with incremental results, which is what the UI uses."""
-        out = [hit for _, _, hit in self._iter_search_all_sources(query, terms) if hit]
+        scope = self.resolve_search_all_scope(source_ids)["source_ids"]
+        out = [hit for _, _, hit in self._iter_search_all_sources(query, terms, scope) if hit]
         out.sort(key=lambda d: -d["match_count"])
         return out
 
     def _iter_search_all_sources(
-        self, query: str = "", terms: list[dict] | None = None
+        self, query: str = "", terms: list[dict] | None = None,
+        source_ids: list[int] | None = None,
     ) -> Iterator[tuple[int, int, dict | None]]:
         """Per-source match counts for a search across every real source in
         the case (merges excluded — their rows already belong to a real
-        source), no filter/sort/view materialisation involved.
+        source), or across the subset `source_ids` names, no filter/sort/
+        view materialisation involved. `source_ids` is REAL source ids,
+        already resolved: both entry points come through
+        resolve_search_all_scope, which is where a merge becomes its
+        members and an unknown id becomes a KeyError.
 
         Yields `(scanned, total, hit_or_None)` after each source so a caller
         can report progress and surface partial results while the sweep is
@@ -10458,6 +10590,15 @@ class Store:
         # itself); the per-source work below re-acquires it one count at a
         # time. A source removed mid-sweep just yields a SQL error we skip.
         sources = [s for s in self.list_sources() if not s.get("error")]
+        # Scope filtered straight onto that snapshot, the shape
+        # _iter_watchlist_scan uses: an id whose table has been dropped
+        # since the scope was chosen is not in the snapshot, so it costs
+        # that table its scan and nothing else. `total` therefore counts
+        # the tables this run will really scan — it is the progress
+        # denominator the modal shows.
+        if source_ids is not None:
+            wanted = set(source_ids)
+            sources = [s for s in sources if s["id"] in wanted]
         total = len(sources)
         scanned = 0
         for src in sources:
@@ -10472,8 +10613,10 @@ class Store:
             n = 0
             per_term: list[dict] = []
             if inner is not None:
-                # One _reader() checkout per source's count — the sweep
-                # never touches self.lock at all now, so even its worst
+                # One _reader() checkout per source's count — this loop
+                # never touches self.lock at all (a scoped run pays one
+                # locked resolve before it starts, not one per source), so
+                # even its worst
                 # case (N full LIKE scans on an unindexed 42 GB merge)
                 # can't stall a single paging/tagging/view-build request.
                 # Checked out per count rather than once for the sweep so
@@ -10593,10 +10736,18 @@ class Store:
         out.sort(key=lambda d: -d["match_count"])
         return out
 
-    def start_search_all_job(self, query: str = "", terms: list[dict] | None = None) -> dict:
+    def start_search_all_job(self, query: str = "", terms: list[dict] | None = None,
+                             source_ids: list[int] | None = None) -> dict:
         """Runs a search_all sweep on a background daemon thread and returns
         its job record immediately, so the HTTP request that started it
         doesn't sit open for the length of the sweep.
+
+        `source_ids` scopes the sweep (None = every real table). It is
+        resolved BEFORE the thread starts, so an unknown id is a KeyError
+        the caller's request carries back rather than an error buried in a
+        job record nobody is polling yet; the resolved scope — including
+        any merge expanded to its members — rides along in the record, so a
+        poller can say which tables the results in front of it came from.
 
         The sweep was already careful not to hold self.lock across the whole
         loop, so other requests were never actually blocked at the *server* —
@@ -10614,6 +10765,7 @@ class Store:
         Same fire-and-forget daemon-thread pattern as _ensure_fts_building.
         Cancellation is cooperative and only checked between sources, so a
         cancel during one huge table's count still waits out that count."""
+        scope = self.resolve_search_all_scope(source_ids)
         with self._search_job_lock:
             if self._search_job is not None:
                 self._search_job["cancelled"] = True
@@ -10622,6 +10774,9 @@ class Store:
                 "job_id": self._search_job_seq,
                 "query": query,
                 "terms": terms or [],
+                "scope": {"requested": list(source_ids) if source_ids is not None else None,
+                          "source_ids": scope["source_ids"],
+                          "merges": scope["merges"]},
                 "scanned": 0,
                 "total": 0,
                 "hits": [],
@@ -10639,7 +10794,8 @@ class Store:
 
     def _search_all_worker(self, job: dict) -> None:
         try:
-            for scanned, total, hit in self._iter_search_all_sources(job["query"], job["terms"]):
+            for scanned, total, hit in self._iter_search_all_sources(
+                    job["query"], job["terms"], job["scope"]["source_ids"]):
                 with self._search_job_lock:
                     if job["cancelled"]:
                         break
@@ -10666,6 +10822,10 @@ class Store:
                 return None
             return {
                 "job_id": job["job_id"],
+                # The scope the results in this snapshot came from, not
+                # whatever the modal has since been switched to — same rule
+                # the frontend's st.terms follows.
+                "scope": job["scope"],
                 "scanned": job["scanned"],
                 "total": job["total"],
                 "hits": sorted(job["hits"], key=lambda d: -d["match_count"]),

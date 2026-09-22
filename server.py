@@ -751,8 +751,11 @@ def is_winnow_case_file(path: str) -> bool:
 # definition, `subset_rids`, which only ever accompanies a `sources` row (a
 # subset table with nothing tagged or noted on it is a derived copy of rows
 # the case already had, not work — see docs/notes/server.md), and
-# `layouts`/`case_settings`, which are incidental UI state rather than
-# findings. Everything else in the case file got there because an analyst
+# `layouts`/`case_settings`/`plugin_ui_state`, which are incidental UI state
+# rather than findings (a plugin tab's saved sheet definitions are the shape
+# of a question, and the rows they would produce are still in the case
+# whether or not the sweep keeps it).
+# Everything else in the case file got there because an analyst
 # — or a plugin acting for them — put it there.
 _WORK_TABLES = (
     "row_tags", "row_notes", "sessions",        # the original three
@@ -4510,19 +4513,43 @@ def api_export_all_xlsx(filename: str = "all-tables.xlsx"):
 class SearchAllReq(BaseModel):
     query: str = ""
     terms: list[dict] = []  # advanced mode: [{term, connector: "AND"|"OR", exclude: bool}]
+    # None = every real table in the case, which is what the sweep has
+    # always done. A list scopes it; a merge id in that list expands to the
+    # merge's members (Store.resolve_search_all_scope).
+    source_ids: list[int] | None = None
 
 
 @app.post("/api/search_all")
 def api_search_all(body: SearchAllReq):
     """Synchronous whole-sweep search. Kept for scripted/one-shot use; the
     UI goes through the job routes below so it can show partial results and
-    let the analyst close the modal mid-sweep."""
-    return store().search_all_sources(body.query, body.terms)
+    let the analyst close the modal mid-sweep.
+
+    The scope is resolved on its own line, and only that line is inside the
+    try: a KeyError is the caller naming a table this case doesn't have,
+    and an `except KeyError` wrapped around the whole sweep would turn any
+    dict-key defect inside the scan into a 400 blaming the request for
+    something the analyst can't fix (api_view's old bare `except
+    Exception`, which docs/notes/server.md records)."""
+    st = store()
+    try:
+        scope = st.resolve_search_all_scope(body.source_ids)["source_ids"]
+    except KeyError as e:
+        raise HTTPException(400, e.args[0])
+    return st.search_all_sources(body.query, body.terms, scope)
 
 
 @app.post("/api/search_all/start")
 def api_search_all_start(body: SearchAllReq):
-    return store().start_search_all_job(body.query, body.terms)
+    """400 (not a job that quietly scans nothing) when the scope names a
+    source this case doesn't have — an empty result set reads as "no
+    matches", which would be an answer rather than the error it is. The
+    scope resolve is the only thing here that can raise KeyError, and it
+    runs before the thread starts (Store.start_search_all_job)."""
+    try:
+        return store().start_search_all_job(body.query, body.terms, body.source_ids)
+    except KeyError as e:
+        raise HTTPException(400, e.args[0])
 
 
 @app.get("/api/search_all/job")
@@ -4590,6 +4617,54 @@ def api_sql_tabs_delete(tab_id: int):
 @app.post("/api/sql_tabs/reorder")
 def api_sql_tabs_reorder(body: SqlTabReorder):
     return store().reorder_sql_tabs(body.ids)
+
+
+# A mount key is 'tab:'/'panel:'/'page:' plus the mount id (plugins.js
+# mountKey), and the mount id carries the plugin's DISPLAY name, which can
+# hold anything an author typed — a slash included. That is why the key
+# travels as a parameter rather than a path segment: "First/Last" in a path
+# is two segments by the time uvicorn has unquoted it.
+# fullmatch, not match: `$` also matches just before a trailing newline, so
+# "tab:x.y\n" would pass and become a second row under a key no mount ever
+# reads back.
+_PLUGIN_STATE_KEY_RE = re.compile(r"(tab|panel|page):[^\x00-\x1f]{1,180}")
+
+
+def _plugin_state_key(key: str) -> str:
+    if not _PLUGIN_STATE_KEY_RE.fullmatch(key or ""):
+        raise HTTPException(400, "A plugin state key is 'tab:'/'panel:'/'page:' plus the mount id")
+    return key
+
+
+class PluginStateWrite(BaseModel):
+    key: str
+    payload: Any = None      # null clears the row — winnow.tabState.clear()
+
+
+@app.get("/api/plugin_state")
+def api_plugin_state_get(key: str):
+    """What a plugin mount saved in THIS case, or nulls if it never has.
+    Nothing here is trusted on the way back in: the payload describes what
+    the analyst had, and the plugin validates it against the case as it
+    stands now (a table may be gone, a column dropped, an id reused)."""
+    rec = store().get_plugin_ui_state(_plugin_state_key(key))
+    return rec or {"mount_key": key, "payload": None, "saved_at": None}
+
+
+@app.post("/api/plugin_state")
+def api_plugin_state_set(body: PluginStateWrite):
+    """Replace (or, with a null payload, clear) a mount's saved state.
+    Over the size cap is a 400 with the number in it — a plugin saving rows
+    instead of a spec should hear about it in the console, not silently
+    grow the case file."""
+    key = _plugin_state_key(body.key)
+    if body.payload is None:
+        store().clear_plugin_ui_state(key)
+        return {"mount_key": key, "payload": None, "saved_at": None}
+    try:
+        return store().set_plugin_ui_state(key, body.payload)
+    except (TypeError, ValueError) as e:
+        raise HTTPException(400, str(e))
 
 
 @app.get("/")
