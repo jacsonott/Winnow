@@ -105,7 +105,7 @@ export const ACTION_LABELS = {
   openFilterSql: 'Open the current filter as a query in the SQL pane',
   openJumpTs: 'Jump to timestamp… (set the moment and column)',
   repeatJumpTs: 'Jump again to the saved timestamp (works across tables)',
-  openPluginBundles: 'Plugin bundles — named plugin sets ("case types") to apply per case',
+  openPluginBundles: 'Profiles — the plugins, boards, watchlist and variables a kind of case carries',
 };
 
 /* Stored keymaps are a merge over the defaults, which means a returning

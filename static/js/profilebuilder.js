@@ -244,9 +244,21 @@ export function openProfileBuilder(existing = null, { onSaved } = {}) {
           dashboards,
           variables,
           dashboard: keepOwnBoard && keepOwnBoard.cb.checked ? keepOwnBoard.widgets : [],
+          // The builder has no watchlist editor, so the profile's starter
+          // indicators ride through untouched rather than being dropped by
+          // a dialog that never asked about them — a copy of KAPE triage
+          // that silently lost its five IOCs looked like a bug from every
+          // angle except this one.
+          watchlist: (existing && existing.watchlist) || [],
+          // Lineage. A copy of a shipped profile records which one and at
+          // what version; editing that copy later must not erase the
+          // answer, which is why the non-copying branch passes what the
+          // record already carries rather than null.
+          from_profile: copying ? existing.name : ((existing && existing.from_profile) || null),
+          from_version: copying ? (existing.version || 1) : ((existing && existing.from_version) || null),
         };
         const rec = await post('/api/plugin_bundles', body);
-        toast(`Profile “${rec.name}” saved — apply it from the Plugin bundles menu, or pick it as the `
+        toast(`Profile “${rec.name}” saved — apply it from the profile manager, or pick it as the `
           + 'case type when creating a case', 7000);
         document.getElementById('modal').hidden = true;
         if (onSaved) onSaved(rec);

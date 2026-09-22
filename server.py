@@ -2517,6 +2517,14 @@ class PluginBundleBody(BaseModel):
     dashboards: list | None = None  # profile: extra named boards [{name, widgets}]
     variables: list | None = None   # profile: variable DEFINITIONS the case should carry
     description: str | None = None  # profile: what this profile is for, shown in the list
+    watchlist: list | None = None   # profile: the starter indicators it seeds
+    # Lineage: which shipped profile this is a copy of, and the version it
+    # was copied at. Written by "Copy to edit" and carried through every
+    # later edit, so the manager can offer the diff when the shipped one
+    # moves on. Named from_profile rather than the plain `from` the plan
+    # asked for — `from` is a Python keyword and cannot be a field name.
+    from_profile: str | None = None
+    from_version: int | None = None
 
 
 @app.get("/api/plugin_bundles")
@@ -2527,8 +2535,10 @@ def api_plugin_bundles():
 @app.post("/api/plugin_bundles")
 def api_plugin_bundles_save(body: PluginBundleBody):
     try:
-        return WS.plugin_bundles.save(body.name, body.plugins, body.dashboard, body.variables,
-                                      body.dashboards, body.description)
+        return WS.plugin_bundles.save(
+            body.name, body.plugins, dashboard=body.dashboard, variables=body.variables,
+            dashboards=body.dashboards, description=body.description, watchlist=body.watchlist,
+            from_profile=body.from_profile, from_version=body.from_version)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -2539,43 +2549,218 @@ def api_plugin_bundles_delete(bundle_id: int):
     return {"ok": True}
 
 
+@app.get("/api/plugin_bundles/{bundle_id}/export")
+def api_plugin_bundles_export(bundle_id: int):
+    """One profile as a file, the way saved filters already export — same
+    {"format": ..., <payload>} envelope, one profile instead of every
+    filter, because a profile is the unit an analyst hands to a
+    colleague."""
+    try:
+        data = WS.plugin_bundles.export_one(bundle_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", data["profile"]["name"]).strip("-") or "profile"
+    return JSONResponse(
+        data,
+        headers={"Content-Disposition": f'attachment; filename="winnow-profile-{slug}.json"'},
+    )
+
+
+@app.post("/api/plugin_bundles/import")
+async def api_plugin_bundles_import(file: UploadFile = File(...)):
+    """The other half. A malformed file, an unreadable one and one
+    carrying a key this version does not understand are all 400s with the
+    reason in them — an import that half-worked would leave a profile
+    that looks complete and is not."""
+    try:
+        data = json.loads(await file.read())
+    except Exception as e:
+        raise HTTPException(400, f"Not a valid profile file: {e}")
+    try:
+        return WS.plugin_bundles.import_one(data)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/plugin_bundles/{bundle_id}/diff")
+def api_plugin_bundles_diff(bundle_id: int):
+    """What the shipped profile a copy came from has that the copy does
+    not. 404 for a profile with no lineage — there is no question to
+    answer, rather than an empty one."""
+    try:
+        diff = WS.plugin_bundles.upstream_diff(bundle_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    if diff is None:
+        raise HTTPException(404, "That profile is not a copy of a shipped one")
+    return diff
+
+
+@app.post("/api/plugin_bundles/{bundle_id}/take_update")
+def api_plugin_bundles_take_update(bundle_id: int):
+    """Replace a copy's contents with the shipped profile's. Always a
+    button (see PluginBundles.take_upstream) — nothing here runs on its
+    own, and applying a profile never takes an update either."""
+    try:
+        return WS.plugin_bundles.take_upstream(bundle_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+# The four independently skippable parts of an apply, in the order the
+# sheet lists them. A profile apply used to be all four, silently: every
+# installed plugin got an explicit override, boards were replaced BY
+# NAME, indicators were seeded and a scan started. Each is now something
+# an analyst can decline — take the board, leave my plugins alone — and
+# the names below are the contract between the sheet and this route.
+APPLY_PARTS = ("plugins", "boards", "watchlist", "variables")
+
+
+def _profile_board_origin(name: str) -> str:
+    """What `origin` a board applied by this profile carries.
+
+    It is what makes "you have edited this board" answerable: any hand
+    edit clears origin (Store.set_dashboard_widgets), so a board still
+    stamped with this profile is the profile's own untouched copy and
+    replacing it discards nothing. A board applied before this stamp
+    existed reads as edited, which errs toward warning — the direction
+    the plugin-board add already errs in."""
+    return f"profile:{name}"
+
+
+@app.get("/api/plugin_bundles/{bundle_id}/plan")
+def api_plugin_bundles_plan(bundle_id: int):
+    """What applying this profile to the OPEN CASE would actually change,
+    counted against the case rather than described in general.
+
+    Read-only, and the numbers the apply sheet prints: which plugins go
+    on and which go off, which board is replaced and whether it has been
+    edited since, which indicators are new and how many tables seeding
+    them would scan, which variables will be asked for. Nothing here
+    writes — that is the whole point of the sheet."""
+    if STORE is None or STORE.closed:
+        raise HTTPException(400, "Open a case first — a profile applies per case")
+    try:
+        bundle = WS.plugin_bundles.get(bundle_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+
+    wanted = set(bundle["plugins"])
+    installed = PLUGINS.describe()
+    known = {p["fs_name"] for p in installed}
+    on_now = {p["fs_name"] for p in installed if p.get("enabled")}
+    plugins = {
+        "turn_on": sorted((wanted & known) - on_now),
+        "already_on": sorted(wanted & on_now),
+        "turn_off": sorted(on_now - wanted),
+        "stay_off": len(known - wanted - on_now),
+        "missing": sorted(wanted - known),   # named by the profile, not installed here
+    }
+
+    def _board(name, widgets):
+        existing = STORE.find_dashboard_by_name(name)
+        live = sum(1 for w in widgets if isinstance(w, dict) and w.get("live"))
+        out = {"name": name, "widgets": len(widgets), "live": live, "replaces": None}
+        if existing:
+            out["replaces"] = {"widget_count": existing["widget_count"],
+                               "edited": existing.get("origin") != _profile_board_origin(bundle["name"])}
+        return out
+
+    boards = []
+    if bundle.get("dashboard"):
+        boards.append(_board(bundle["name"], bundle["dashboard"]))
+    for board in bundle.get("dashboards") or []:
+        bname = str(board.get("name") or "").strip()
+        if bname and board.get("widgets"):
+            boards.append(_board(bname, board["widgets"]))
+
+    have = {i["value"] for i in STORE.list_indicators()}
+    wl_new, wl_have = [], []
+    for ind in bundle.get("watchlist") or []:
+        val = str(ind.get("value") or "").strip()
+        if not val:
+            continue
+        (wl_have if val in have else wl_new).append(val)
+
+    values = {v["name"]: v["value"] for v in STORE.list_variables()}
+    variables = []
+    for d in bundle.get("variables") or []:
+        vname = str(d.get("name") or "").strip()
+        if not vname:
+            continue
+        variables.append({"name": vname, "label": d.get("label") or "",
+                          "required": bool(d.get("required")),
+                          "set": bool(values.get(vname))})
+
+    return {"name": bundle["name"], "shipped": bool(bundle.get("shipped")),
+            "plugins": plugins, "boards": boards,
+            "watchlist": {"new": wl_new, "existing": wl_have,
+                          "scan_tables": len(STORE.watchlist_scan_sources()) if wl_new else 0},
+            "variables": variables}
+
+
+class BundleApplyBody(BaseModel):
+    """Which parts of the profile to apply, from APPLY_PARTS.
+
+    None means all four — what apply meant before the sheet existed, and
+    what the new-case dialog's Case type select and any script calling
+    this route still send."""
+    parts: list[str] | None = None
+
+
 @app.post("/api/plugin_bundles/{bundle_id}/apply")
-def api_plugin_bundles_apply(bundle_id: int):
-    """Set the open case's per-plugin overrides to exactly this bundle —
-    every installed plugin gets an explicit on/off override, so the case's
-    plugin set is the bundle regardless of machine defaults. One registry
-    reload, not one per plugin."""
+def api_plugin_bundles_apply(bundle_id: int, body: BundleApplyBody | None = None):
+    """Apply a profile to the open case, part by part.
+
+    With every part on (the default): the case's per-plugin overrides
+    become exactly this bundle — every installed plugin gets an explicit
+    on/off override, so the case's plugin set is the bundle regardless of
+    machine defaults, in one registry reload — its boards are upserted by
+    name, its indicators seeded and scanned, and its variable definitions
+    seeded. Each of those is skippable independently, because they are
+    four different decisions that only ever arrived as one."""
     if STORE is None or STORE.closed:
         raise HTTPException(400, "Open a case first — per-case scopes live in the case file")
     try:
         bundle = WS.plugin_bundles.get(bundle_id)
     except KeyError as e:
         raise HTTPException(404, str(e))
+    parts = list(APPLY_PARTS) if (body is None or body.parts is None) else list(body.parts)
+    unknown = [p for p in parts if p not in APPLY_PARTS]
+    if unknown:
+        raise HTTPException(400, f"Not a part of a profile: {', '.join(unknown)}")
     wanted = set(bundle["plugins"])
     known = {p["fs_name"] for p in PLUGINS.describe()}
-    overrides = _case_plugin_overrides()
-    for fs_name in known:
-        overrides[fs_name] = fs_name in wanted
-    STORE.set_case_setting("plugin_overrides", json.dumps(overrides))
-    _reload_plugins()
+    if "plugins" in parts:
+        overrides = _case_plugin_overrides()
+        for fs_name in known:
+            overrides[fs_name] = fs_name in wanted
+        STORE.set_case_setting("plugin_overrides", json.dumps(overrides))
+        _reload_plugins()
     # A profile's dashboard becomes a NAMED dashboard on apply, keyed by the
     # profile name (a second apply refreshes it rather than duplicating).
     # Applying a plain plugin bundle (no dashboard) leaves the case's own
     # dashboards untouched.
-    if bundle.get("dashboard"):
-        STORE.upsert_dashboard_by_name(bundle["name"], bundle["dashboard"])
-    # Extra named boards a profile carries (the KAPE host overview) land
-    # under their own names, same upsert-by-name rule.
     boards_applied = []
-    for board in bundle.get("dashboards") or []:
-        bname = str(board.get("name") or "").strip()
-        if bname and board.get("widgets"):
-            STORE.upsert_dashboard_by_name(bname, board["widgets"])
-            boards_applied.append(bname)
+    dashboard_applied = False
+    if "boards" in parts:
+        origin = _profile_board_origin(bundle["name"])
+        if bundle.get("dashboard"):
+            STORE.upsert_dashboard_by_name(bundle["name"], bundle["dashboard"], origin=origin)
+            dashboard_applied = True
+        # Extra named boards a profile carries land under their own names,
+        # same upsert-by-name rule and the same stamp.
+        for board in bundle.get("dashboards") or []:
+            bname = str(board.get("name") or "").strip()
+            if bname and board.get("widgets"):
+                STORE.upsert_dashboard_by_name(bname, board["widgets"], origin=origin)
+                boards_applied.append(bname)
     # A profile can seed a starter watchlist: add its indicators (dedup by
     # value) and scan the case, so the IOC rollups have data immediately.
     seeded = 0
-    if bundle.get("watchlist"):
+    if "watchlist" in parts and bundle.get("watchlist"):
         have = {i["value"] for i in STORE.list_indicators()}
         for ind in bundle["watchlist"]:
             val = (ind.get("value") or "").strip()
@@ -2588,12 +2773,28 @@ def api_plugin_bundles_apply(bundle_id: int):
                 STORE.scan_all()
     # A profile's variable definitions seed rows (values never overwritten);
     # the required ones still empty come back so the UI can ask for them.
-    variables_missing = STORE.seed_variables(bundle.get("variables") or [])
+    variables_missing = STORE.seed_variables(bundle.get("variables") or []) if "variables" in parts else []
+    # Which profiles this case has had applied, and when. In the case file
+    # because it is a fact about the investigation, not about the machine:
+    # the analyst who receives the .db should be able to see that it was
+    # opened as a KAPE triage. It is also the only honest way for the
+    # manager to badge a profile "applied" — a board of the same name
+    # could have been built by hand.
+    if parts:
+        try:
+            seen = json.loads(STORE.get_case_settings().get("profiles_applied") or "{}")
+            if not isinstance(seen, dict):
+                seen = {}
+        except (TypeError, ValueError):
+            seen = {}
+        seen[bundle["name"]] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        STORE.set_case_setting("profiles_applied", json.dumps(seen))
     return {"applied": bundle["name"],
+            "parts": parts,
             "variables_missing": variables_missing,
             "enabled": sorted(wanted & known),
             "missing": sorted(wanted - known),  # in the bundle, not installed here
-            "dashboard_applied": bool(bundle.get("dashboard")),
+            "dashboard_applied": dashboard_applied,
             "dashboards_applied": boards_applied,
             "watchlist_seeded": seeded,
             "plugins": api_plugins()}

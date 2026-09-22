@@ -35,8 +35,14 @@ stores longer than it was true:
                            freshly dropped-in plugin is on by default and
                            deleting workspace/ re-enables everything rather
                            than silently turning it all off
-  plugin_bundles.json     named sets of plugins ("case types") applied
-                           together from Settings → Plugins
+  plugin_bundles.json     PROFILES ("case types"): a named set of plugins
+                           plus the boards, starter watchlist and variable
+                           definitions a case of that kind carries, applied
+                           to a case as one unit from the profile manager.
+                           A copy of a shipped profile records which one it
+                           came from and at what version (from_profile /
+                           from_version), and one profile exports to a
+                           single "winnow-profile/1" file
   dashboards.json         the dashboard library — boards saved machine-wide
                            from a board's "Save to library…" and added to any
                            case from the sidebar's Dashboards → Library rows
@@ -903,15 +909,42 @@ class PluginBundles:
 
     FILE = "plugin_bundles.json"
 
+    # The one JSON file a profile travels in. Bumped only if the KEYS
+    # change meaning — a new optional key is readable by an older Winnow
+    # (it drops it) and writable by a newer one, which is the same
+    # bargain "winnow-filters/1" makes.
+    EXPORT_FORMAT = "winnow-profile/1"
+
+    # Everything a profile is allowed to carry in that file. An import
+    # REFUSES a key outside this set rather than dropping it: a file
+    # written by a newer Winnow, or by hand, is more likely to be a
+    # profile whose extra part would be silently lost than a typo worth
+    # absorbing — and losing half a profile without saying so is the
+    # failure this whole PR exists to stop. `id`, `shipped` and
+    # `created_at` are deliberately absent: they describe a record on ONE
+    # machine, not the profile.
+    IMPORTABLE = ("name", "description", "plugins", "watchlist", "dashboard",
+                  "dashboards", "variables", "from_profile", "from_version")
+
     @staticmethod
     def _shipped() -> list[dict]:
         """Shipped default profiles (defaults/profiles.json), given negative
         ids and a shipped flag so they list alongside saved bundles but
-        can't be overwritten in place — Save-as makes an editable copy."""
+        can't be overwritten in place — Save-as makes an editable copy.
+
+        `version` is the profile's own, from the JSON: a copy records the
+        version it was taken at (see `save`'s from_version) so the manager
+        can say the shipped one has moved on since. Absent means 1 — a
+        profile that has never been revised."""
         from . import defaults
         out = []
         for i, prof in enumerate(defaults.profiles()):
+            try:
+                version = int(prof.get("version") or 1)
+            except (TypeError, ValueError):
+                version = 1
             out.append({"id": -(i + 1), "shipped": True, "name": prof["name"],
+                        "version": version,
                         "description": prof.get("description", ""),
                         "plugins": list(prof.get("plugins") or []),
                         "watchlist": list(prof.get("watchlist") or []),
@@ -927,10 +960,25 @@ class PluginBundles:
             b.setdefault("description", "")
             b.setdefault("dashboards", [])
             b.setdefault("variables", [])
+            b.setdefault("watchlist", [])
+            b.setdefault("from_profile", None)
+            b.setdefault("from_version", None)
         try:
             shipped = self._shipped()
         except Exception:  # noqa: BLE001 — a broken profiles.json must not hide saved bundles
             shipped = []
+        # Lineage, answered here rather than by the client: a copy names
+        # the shipped profile it came from and the version it was taken
+        # at, so a shipped profile that has since been revised is
+        # something the manager can OFFER (one line, one button) instead
+        # of something that rewrites the analyst's copy behind them.
+        by_name = {s["name"].lower(): s for s in shipped}
+        for b in saved:
+            src = by_name.get(str(b.get("from_profile") or "").lower())
+            b["update_available"] = None
+            if src and isinstance(b.get("from_version"), int) and src["version"] > b["from_version"]:
+                b["update_available"] = {"name": src["name"], "taken_at": b["from_version"],
+                                         "now": src["version"]}
         return shipped + saved
 
     def get(self, bundle_id: int) -> dict:
@@ -941,13 +989,23 @@ class PluginBundles:
 
     def save(self, name: str, plugins: list[str], dashboard: list | None = None,
              variables: list | None = None, dashboards: list | None = None,
-             description: str | None = None) -> dict:
+             description: str | None = None, watchlist: list | None = None,
+             from_profile: str | None = None, from_version: int | None = None) -> dict:
         """Upsert by name — 'Triage' means one thing per machine. A bundle
         is a PROFILE: its plugins plus an optional dashboard (a list of
-        widget definitions) and optional variable DEFINITIONS
-        ([{name, label?, description?, required?, default?}] — never
-        values, a profile is a template), so 'how I analyze this kind of
-        case' is one saveable, shareable thing."""
+        widget definitions), an optional starter watchlist and optional
+        variable DEFINITIONS ([{name, label?, description?, required?,
+        default?}] — never values, a profile is a template), so 'how I
+        analyze this kind of case' is one saveable, shareable thing.
+
+        `from_profile`/`from_version` are LINEAGE, written by the copy of
+        a shipped profile: which shipped profile it started as and what
+        version that was. They are the whole basis for "the shipped one
+        has changed since you copied it" — kept on the copy rather than
+        derived from the contents, because a copy is meant to be edited
+        and a content comparison would lose the thread on the first
+        edit. Every field stays None-means-leave-alone, so an edit that
+        sends only a description cannot silently drop a profile's board."""
         name = (name or "").strip()
         if not name:
             raise ValueError("Name the bundle")
@@ -968,12 +1026,20 @@ class PluginBundles:
                     existing["dashboards"] = dashboards
                 if description is not None:
                     existing["description"] = description[:400]
+                if watchlist is not None:
+                    existing["watchlist"] = watchlist
+                if from_profile is not None:
+                    existing["from_profile"] = from_profile
+                if from_version is not None:
+                    existing["from_version"] = int(from_version)
                 rec = existing
             else:
                 rec = {"id": _next_id(items), "name": name, "plugins": plugins,
                        "description": (description or "")[:400],
                        "dashboard": dashboard or [], "dashboards": dashboards or [],
-                       "variables": variables or [],
+                       "variables": variables or [], "watchlist": watchlist or [],
+                       "from_profile": from_profile,
+                       "from_version": int(from_version) if from_version is not None else None,
                        "created_at": _now()}
                 items.append(rec)
             _write(self.FILE, data)
@@ -984,6 +1050,136 @@ class PluginBundles:
             data = _read(self.FILE, {"bundles": []})
             data["bundles"] = [b for b in data["bundles"] if b["id"] != bundle_id]
             _write(self.FILE, data)
+
+    # ------------------------------------------------------ one-file export
+
+    def export_one(self, bundle_id: int) -> dict:
+        """One profile as the file it travels in.
+
+        A SHIPPED profile exports as a copy, not as a shipped record: the
+        file carries no id and no `shipped` flag (both describe a record
+        on one machine), and it records the shipped profile and version
+        it came from, so importing it on another box produces an editable
+        profile that still knows its ancestry — the same thing "Copy to
+        edit" produces here."""
+        b = self.get(bundle_id)
+        prof = {k: b.get(k) for k in self.IMPORTABLE if k in b}
+        prof["name"] = b["name"]
+        if b.get("shipped"):
+            prof["from_profile"] = b["name"]
+            prof["from_version"] = b.get("version", 1)
+        return {"format": self.EXPORT_FORMAT, "profile": prof}
+
+    def import_one(self, data: dict) -> dict:
+        """Read one exported profile back, under a name that is free.
+
+        NOT an upsert: `save` replaces by name, and a file dropped in from
+        outside must not overwrite the profile an analyst spent an
+        afternoon on because the two happen to share a word. The imported
+        one is suffixed instead, and both are on screen to compare."""
+        if not isinstance(data, dict):
+            raise ValueError("That file is not a profile")
+        fmt = str(data.get("format") or "")
+        if fmt.split("/")[0] != self.EXPORT_FORMAT.split("/")[0]:
+            raise ValueError(f"Not a Winnow profile file (format is {fmt or 'missing'})")
+        prof = data.get("profile")
+        if not isinstance(prof, dict):
+            raise ValueError("That profile file has no profile in it")
+        unknown = sorted(set(prof) - set(self.IMPORTABLE))
+        if unknown:
+            raise ValueError("This profile carries something this version does not understand: "
+                             + ", ".join(unknown))
+        name = str(prof.get("name") or "").strip()
+        if not name:
+            raise ValueError("That profile has no name")
+        taken = {b["name"].lower() for b in self.list()}
+        candidate, n = name, 1
+        while candidate.lower() in taken:
+            n += 1
+            candidate = (f"{name} (imported)" if n == 2 else f"{name} (imported {n})")[:100]
+        version = prof.get("from_version")
+        return self.save(candidate, prof.get("plugins") or [],
+                         dashboard=prof.get("dashboard") or [],
+                         variables=prof.get("variables") or [],
+                         dashboards=prof.get("dashboards") or [],
+                         description=prof.get("description") or "",
+                         watchlist=prof.get("watchlist") or [],
+                         from_profile=prof.get("from_profile") or None,
+                         from_version=int(version) if isinstance(version, int) else None)
+
+    # ---------------------------------------------------------- lineage
+
+    def upstream_diff(self, bundle_id: int) -> dict | None:
+        """What the shipped profile a copy came from has that the copy does
+        not — or None when there is no lineage, or the shipped one is gone
+        from this install.
+
+        The comparison is copy-vs-shipped-NOW, not shipped-then-vs-now:
+        only the version number of "then" is recorded, and reconstructing
+        an old shipped profile would mean shipping every past version.
+        What an analyst is deciding is whether to take today's shipped
+        profile, and this is exactly that question — it just also lists
+        their own edits, on the other side of each line, which is the
+        thing they would otherwise lose without being told."""
+        b = self.get(bundle_id)
+        if b.get("shipped"):
+            return None
+        src_name = str(b.get("from_profile") or "")
+        if not src_name:
+            return None
+        try:
+            offered = self._shipped()
+        except Exception:  # noqa: BLE001 — a broken profiles.json is "nothing upstream", not a 500
+            return None
+        shipped = next((s for s in offered if s["name"].lower() == src_name.lower()), None)
+        if shipped is None:
+            return None
+
+        def _titles(widgets):
+            return [str(w.get("title") or "(untitled)") for w in widgets or [] if isinstance(w, dict)]
+
+        def _split(mine, theirs):
+            ms, ts = list(mine or []), list(theirs or [])
+            return {"added": [x for x in ts if x not in ms],
+                    "removed": [x for x in ms if x not in ts]}
+
+        mine_boards = {str(d.get("name") or "") for d in b.get("dashboards") or []}
+        their_boards = {str(d.get("name") or "") for d in shipped.get("dashboards") or []}
+        return {
+            "from": shipped["name"],
+            "taken_at": b.get("from_version"),
+            "now": shipped["version"],
+            "plugins": _split(b.get("plugins"), shipped.get("plugins")),
+            "board": {"was": len(b.get("dashboard") or []),
+                      "now": len(shipped.get("dashboard") or []),
+                      **_split(_titles(b.get("dashboard")), _titles(shipped.get("dashboard")))},
+            "boards": _split(sorted(mine_boards), sorted(their_boards)),
+            "watchlist": _split([str(i.get("value") or "") for i in b.get("watchlist") or []],
+                                [str(i.get("value") or "") for i in shipped.get("watchlist") or []]),
+            "variables": _split([str(v.get("name") or "") for v in b.get("variables") or []],
+                                [str(v.get("name") or "") for v in shipped.get("variables") or []]),
+        }
+
+    def take_upstream(self, bundle_id: int) -> dict:
+        """Replace a copy's contents with the shipped profile's, keeping
+        its name and its id, and re-stamp the version it is now taken at.
+
+        A button, never automatic, and never a merge: an analyst's copy
+        and a revised shipped profile can disagree about any part of a
+        board, and a three-way merge of SQL widgets would produce a board
+        neither of them wrote. The diff above is what makes the trade
+        visible before this is pressed."""
+        b = self.get(bundle_id)
+        if b.get("shipped"):
+            raise ValueError("A shipped profile has nothing upstream of it")
+        src_name = str(b.get("from_profile") or "")
+        shipped = next((s for s in self._shipped() if s["name"].lower() == src_name.lower()), None)
+        if shipped is None:
+            raise ValueError(f"“{src_name}” is not shipped by this Winnow any more")
+        return self.save(b["name"], shipped["plugins"], dashboard=shipped["dashboard"],
+                         variables=shipped["variables"], dashboards=shipped["dashboards"],
+                         description=shipped["description"], watchlist=shipped["watchlist"],
+                         from_profile=shipped["name"], from_version=shipped["version"])
 
 
 class DashboardLibrary:

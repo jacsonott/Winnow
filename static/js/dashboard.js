@@ -1429,7 +1429,7 @@ async function saveAsProfile() {
     name: v.name, description: v.description || '', required: !!v.required }));
   try {
     await post('/api/plugin_bundles', { name: name.trim(), plugins, dashboard: widgets, variables });
-    toast(`Profile "${name.trim()}" saved — apply it from the Plugin bundles menu on a new case`, 7000);
+    toast(`Profile "${name.trim()}" saved — apply it from the profile manager (M) on a new case`, 7000);
   } catch (e) { toast(e.message, 6000); }
 }
 

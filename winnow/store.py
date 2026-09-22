@@ -7914,6 +7914,25 @@ class Store:
                     self._bump_state_generation()
         return len(rids), tagged
 
+    def watchlist_scan_sources(self) -> list[dict]:
+        """The tables a scan would actually read — every real, finished,
+        error-free source.
+
+        One predicate, named, because two callers now depend on the same
+        answer: the scan itself, and the profile-apply sheet, which tells
+        an analyst how many tables seeding a watchlist is about to scan
+        before they agree to it. A count that disagreed with the scan
+        would be worse than no count.
+
+        Merges are absent by construction (CLAUDE.md invariant #9 lists
+        this exception): a merge has no src_N of its own, its rows belong
+        to its members and are scanned there, so counting it would
+        promise the analyst a table that is really two of the ones
+        already in the list. A source still filling (`columns` is `'[]'`)
+        is absent for the reason _iter_watchlist_scan gives below."""
+        return [s for s in self.list_sources()
+                if not s.get("is_merge") and not s.get("error") and s.get("columns")]
+
     def _iter_watchlist_scan(
         self, source_ids: list[int] | None = None, watchlist_ids: list[int] | None = None,
         stop: Callable[[], bool] | None = None,
@@ -7950,8 +7969,7 @@ class Store:
         copies of the parent's, which the same run did scan — and giving
         the copy a scan of its own is a change of its own: a subset table
         has never been scanned on creation, overlapping scan or not."""
-        sources = [s for s in self.list_sources()
-                   if not s.get("is_merge") and not s.get("error") and s.get("columns")]
+        sources = self.watchlist_scan_sources()
         if source_ids is not None:
             wanted = set(source_ids)
             sources = [s for s in sources if s["id"] in wanted]
