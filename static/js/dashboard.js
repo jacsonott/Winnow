@@ -76,8 +76,14 @@ const num = (v) => (typeof v === 'number' ? v : (parseFloat(String(v).replace(/,
 /* What a widget ASKS — its source and its query, and nothing else. The
    same pair the store fingerprints a cached result with, so the client and
    the case file agree about when an edit throws the old answer away. A
-   retitled card keeps its number; a rewritten query does not. */
-const questionOf = (w) => JSON.stringify([w.source || 'sql', w.query || {}]);
+   retitled card keeps its number; a rewritten query does not.
+
+   A `signals` card asks in its CELLS, and a cell's label is part of the
+   answer (the payload is label/value pairs and the card reads each drill
+   back off it by label), so a relabelled cell does throw its number away
+   — which is the store's rule too, in _widget_fingerprint. */
+const questionOf = (w) => JSON.stringify([w.source || 'sql', w.query || {},
+  (w.cells || []).map((c) => [c.label || '', c.source || 'sql', c.query || {}])]);
 
 /* ------------------------------------------------------------ data */
 
@@ -1017,6 +1023,7 @@ function card(w, i) {
 async function runWidget(w, body, opts = {}) {
   const gen = boardGen;
   const req = { source: w.source, query: w.query || {} };
+  if (w.cells) req.cells = w.cells;   // a signals card: one request, one answer per cell
   if (opts.boardId != null && w.id) { req.dashboard_id = opts.boardId; req.widget_id = w.id; }
   if (!opts.quiet) body.replaceChildren(el('div', 'note-status', 'Loading…'));
   const mine = () => gen === boardGen && S.dashboardId === opts.boardId;
@@ -1078,6 +1085,9 @@ export function paintWidget(w, body, data) {
         body.append(el('span', 'dash-chip ' + (on ? 'on' : 'off'), `${r[0]} ${on ? '✓' : '✗'}`));
       }
       break;
+    case 'signals':
+      paintSignals(w, body, data);
+      break;
     case 'list':
       for (const r of rows.slice(0, 12)) {
         const row = el('div', 'dash-list-row');
@@ -1135,6 +1145,86 @@ export function paintWidget(w, body, data) {
 }
 
 
+/* ------------------------------------------------------------ signals */
+
+/* A grid of labelled numbers where EVERY CELL KEEPS ITS OWN DRILL.
+
+   This is the render kind that let eleven single-number cards become one:
+   folding them into a `kv` card would have folded eleven working
+   drill-throughs into one OR-of-everything, and a click that opens a
+   superset of the rows you were reading is worse than one that opens
+   nothing. A cell is a small widget — its own source, its own query, its
+   own drill — so the number and the rows behind it stay the pair they
+   were on the card it came from.
+
+   Cells with `chip: true` draw as yes/no pills above the numbers, which
+   is what lets one card answer "is anything logging?" and "how much was
+   tampered with?" together. The server answers in cell order; the
+   metadata is looked up by LABEL so a payload cached before the card was
+   edited still lines its drills up with its numbers (and a cell it no
+   longer has simply renders without one). */
+function paintSignals(w, body, data) {
+  const rows = data.rows || [];
+  const errs = data.cell_errors || [];
+  const meta = new Map((w.cells || []).map((c) => [String(c.label == null ? '' : c.label), c]));
+  const chips = [], nums = [];
+  rows.forEach((r, i) => {
+    const label = String(r[0] == null ? '' : r[0]);
+    const cell = meta.get(label) || {};
+    const item = { label, value: r[r.length - 1], cell, err: errs[i] || null };
+    (cell.chip ? chips : nums).push(item);
+  });
+  if (!rows.length) { body.append(el('div', 'note-status', 'No signals on this card')); return; }
+  if (chips.length) {
+    const line = el('div', 'dash-chipline');
+    for (const s of chips) {
+      const on = num(s.value) > 0 || s.value === true || String(s.value).toLowerCase() === 'true';
+      // "?" rather than ✗: a cell whose table is not in this case has not
+      // answered "no", it has not answered.
+      const chip = el('span', 'dash-chip ' + (s.err ? 'unknown' : on ? 'on' : 'off'),
+        `${s.label} ${s.err ? '?' : on ? '✓' : '✗'}`);
+      wireSignal(chip, w, s);
+      line.append(chip);
+    }
+    body.append(line);
+  }
+  if (nums.length) {
+    const grid = el('div', 'dash-signals');
+    for (const s of nums) {
+      const cellEl = el('div', 'dash-signal' + (s.cell.tone ? ` ${s.cell.tone}` : ''));
+      cellEl.append(el('div', 'n', s.err || s.value == null ? '—' : num(s.value).toLocaleString()),
+        el('div', 'l', s.label));
+      wireSignal(cellEl, w, s);
+      grid.append(cellEl);
+    }
+    body.append(grid);
+  }
+  // The card's sub-label, under the grid rather than under a number —
+  // the same `.dash-sub` a stat card carries, which is the only other
+  // render kind that shows one. A card of ten numbers is exactly the one
+  // that needs a line saying what they are numbers OF.
+  if (w.sub) body.append(el('div', 'dash-sub', w.sub));
+}
+
+/* One cell, as the drilldown sees it: a widget of its own. Keeping the
+   card's title in front of the label is what makes the toast the drill
+   lands with ("Rows behind …") name the number that was clicked rather
+   than the card it lives on. */
+export function signalWidget(w, cell, label) {
+  return { title: `${w.title || 'Signals'} · ${label}`, source: cell.source || 'sql',
+    render: 'stat', query: cell.query || {}, drill: cell.drill };
+}
+
+function wireSignal(node, w, s) {
+  const target = signalWidget(w, s.cell, s.label);
+  if (!drillable(target)) { if (s.err) node.title = s.err; return; }
+  node.classList.add('drillable');
+  node.title = s.err ? s.err
+    : (s.cell.drill ? `Open the rows behind “${s.label}”` : `Open “${s.label}” as a query`);
+  node.onclick = (e) => { e.stopPropagation(); drillInto(target); };
+}
+
+
 /* The FROM options: this case's own tables (src_<id>), plus portable
    header-set placeholders that resolve on any case — so a widget built
    here survives being saved into a profile and applied elsewhere. */
@@ -1175,7 +1265,7 @@ function openWidgetEditor(existing, prefill = null) {
     };
     const title = el('input'); title.className = 'confirm-input'; title.value = existing?.title || prefill?.title || '';
     const source = el('select');
-    for (const o of ['sql', 'watchlist', 'tags']) source.append(new Option(o, o));
+    for (const o of ['sql', 'watchlist', 'tags', 'cells']) source.append(new Option(o, o));
     source.value = existing?.source || 'sql';
     const templ = el('select'); templ.className = 'dash-template';
     for (const t of WIDGET_TEMPLATES) templ.append(new Option(t.label, t.id));
@@ -1188,7 +1278,7 @@ function openWidgetEditor(existing, prefill = null) {
     const bucketSel = el('select'); bucketSel.className = 'dash-bucket';
     bucketSel.append(new Option('per day', 'day'), new Option('per hour', 'hour'));
     const renderSel = el('select');
-    for (const o of ['stat', 'kv', 'chips', 'list', 'bar', 'histogram']) renderSel.append(new Option(o, o));
+    for (const o of ['stat', 'kv', 'chips', 'list', 'bar', 'histogram', 'signals']) renderSel.append(new Option(o, o));
     renderSel.value = existing?.render || prefill?.render || 'stat';
     const span = el('select');
     for (const o of [1, 2, 3, 4]) span.append(new Option(`${o} column${o === 1 ? '' : 's'}`, String(o)));
@@ -1261,6 +1351,11 @@ function openWidgetEditor(existing, prefill = null) {
         span: Number(span.value), sub: sub.value.trim() || undefined,
         query: source.value === 'sql' ? { sql: sql.value.trim() } : {},
       };
+      // A signals card's questions live in its cells, which this editor
+      // shows and does not rewrite — one question per widget is its whole
+      // shape. Carrying them through is what keeps Save from turning a
+      // twelve-number card into an empty one.
+      if (source.value === 'cells') w.cells = (existing && existing.cells) || [];
       if (live.checked) w.live = true;   // absent means "use the cache" — see the save handler
       if (source.value === 'sql') {
         const gen = templ.value === 'blank' ? null : widgetFrom(picks());
@@ -1299,6 +1394,20 @@ function openWidgetEditor(existing, prefill = null) {
       + 'so the widget still works when this dashboard is saved as a profile.'));
     sqlWrap.append(advanced);
     form.append(sqlWrap);
+    // What a signals card holds, read-only: the editor asks one question
+    // per widget, and this card asks several. Saying so beats a form that
+    // silently drops them.
+    const cellsNote = el('div', 'dash-cells-note');
+    const cells0 = (existing && existing.cells) || [];
+    cellsNote.append(el('p', 'fb-help', cells0.length
+      ? `${cells0.length} signals on this card, each with its own drill: `
+        + cells0.map((c) => c.label).join(' · ')
+        + '. Title, width and “run every time” are edited here; the signals themselves '
+        + 'are part of the profile or board this card came from.'
+      : 'A signals card is a grid of labelled numbers, each keeping its own drill. '
+        + 'This editor writes one question per widget, so a new one is built by saving '
+        + 'a board that already has one — or by hand in the profile JSON.'));
+    form.append(cellsNote);
     const look = el('div', 'dash-form-row dash-form-row-3');
     mk('Render as', renderSel, look); mk('Sub-label (optional, for stat)', sub, look); mk('Width', span, look);
     form.append(look);
@@ -1325,7 +1434,10 @@ function openWidgetEditor(existing, prefill = null) {
       ' · ', el('b', null, String(liveNow)), ' run every time',
       st ? ` · oldest result ${clockOf(st.ran_at)} (${longAge(st.ran_at)})` : ' · nothing cached yet');
     b.append(cost);
-    const syncSql = () => { sqlWrap.style.display = source.value === 'sql' ? '' : 'none'; };
+    const syncSql = () => {
+      sqlWrap.style.display = source.value === 'sql' ? '' : 'none';
+      cellsNote.style.display = source.value === 'cells' ? '' : 'none';
+    };
     source.onchange = syncSql; syncSql();
 
     fillColumns(build0 ? build0.column : null);
@@ -1364,6 +1476,7 @@ function openWidgetEditor(existing, prefill = null) {
         delete existing.build;        // a stale recipe or drill must not outlive a hand edit
         delete existing.drill;
         delete existing.live;         // Object.assign can't clear a key draft() leaves out
+        delete existing.cells;        // ditto: a card moved off "cells" keeps none of them
         Object.assign(existing, w);
         // The server drops a cached result whose question changed; do the
         // same here, or the repaint below shows the old answer under the
@@ -1388,8 +1501,14 @@ function openWidgetEditor(existing, prefill = null) {
           const r = await post(`/api/dashboards/${S.dashboardId}/refresh`, { widget_id: existing.id });
           const res = (r.results || {})[existing.id] || {};
           if (res.error) { toast(res.error, 6000); return; }
-          cache[existing.id] = { payload: res.payload, ran_at: res.ran_at,
-            elapsed_ms: res.elapsed_ms, stale: false };
+          // No ran_at means the server did not file it — a signals card
+          // one of whose cells failed — so neither does this, the same
+          // rule runWidget applies. Filing it would mark the card with an
+          // age the case file does not have and the next open re-runs.
+          if (res.ran_at) {
+            cache[existing.id] = { payload: res.payload, ran_at: res.ran_at,
+              elapsed_ms: res.elapsed_ms, stale: false };
+          }
           paintWidget(existing, previewBody, res.payload);
           const cards = [...$('dashGrid').querySelectorAll('.dash-card:not(.dash-add)')];
           const onBoard = cards[widgets.indexOf(existing)];

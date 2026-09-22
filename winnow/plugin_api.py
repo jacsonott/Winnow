@@ -210,7 +210,7 @@ PAGE_PANEL_PAGES = ("sql", "notes")
 # provides, with a message that says to update Winnow — the failure mode
 # is otherwise an AttributeError deep inside register() that reads like a
 # plugin bug.
-PLUGIN_API_VERSION = 10
+PLUGIN_API_VERSION = 11
 
 FORMAT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 # API routes may nest ("chat/stream") but each segment keeps the same shape.
@@ -691,8 +691,11 @@ class PluginAPI:
     # a typo like "watchlst" or a render nobody implemented is a card
     # reading "Unknown render" in somebody's case, weeks later, with the
     # plugin looking innocent — and it is knowable right here.
-    WIDGET_SOURCES = ("sql", "tags", "watchlist")
-    WIDGET_RENDERS = ("stat", "kv", "chips", "list", "bar", "histogram")
+    WIDGET_SOURCES = ("sql", "tags", "watchlist", "cells")
+    WIDGET_RENDERS = ("stat", "kv", "chips", "list", "bar", "histogram", "signals")
+    # What a `signals` cell may ask — everything a widget can, except
+    # another grid of signals.
+    CELL_SOURCES = ("sql", "tags", "watchlist")
 
     def register_dashboard(self, *, id: str, label: str, widgets: list,
                            description: str = "") -> None:
@@ -707,13 +710,38 @@ class PluginAPI:
         dashboard editor writes and profiles carry:
 
             {"title": str,                  # the card's heading
-             "source": "sql"|"tags"|"watchlist",
-             "render": "stat"|"kv"|"chips"|"list"|"bar"|"histogram",
+             "source": "sql"|"tags"|"watchlist"|"cells",
+             "render": "stat"|"kv"|"chips"|"list"|"bar"|"histogram"|"signals",
              "query": {"sql": "SELECT …"},  # source "sql" only
-             "span": 1|2,                   # optional; card width
+             "cells": [...],                # source "cells" only — see below
+             "span": 1|2|3|4,               # optional; card width, in
+                                            #   grid columns (of four)
              "live": True,                  # optional; re-run on every open
              "id": str,                     # assigned by Winnow — see below
              "drill": {...}}                # optional; see below
+
+        ``render: "signals"`` with ``source: "cells"`` is one card holding
+        a GRID of labelled numbers, each of which keeps its own drill:
+
+            {"title": "Triage signals", "source": "cells",
+             "render": "signals", "span": 3,
+             "cells": [
+                 {"label": "Failed logons (4625)", "tone": "warn",
+                  "source": "sql",
+                  "query": {"sql": "SELECT COUNT(*) FROM {{evtx}} WHERE …"},
+                  "drill": {"table": "{{evtx}}", "where": [...]}},
+                 {"label": "Sysmon service", "chip": True, ...},
+             ]}
+
+        A cell is a small widget: its own `source` (anything but "cells"),
+        its own `query`, its own `drill`, an optional `tone: "warn"` and
+        an optional ``"chip": True``, which draws it as a yes/no pill
+        rather than a number — a cell's value is one number, the first one
+        its query returns. Labels are unique within a card, because the
+        card finds a cell's drill by its label. One card is one request,
+        whatever the cell count, and a cell whose table is missing from
+        the case reports in its own place instead of taking the card's
+        other numbers down with it.
 
         A widget's last result is kept in the case file and painted the
         moment the board opens, with its age on the card — a board is not
@@ -723,6 +751,12 @@ class PluginAPI:
         query is cheap enough to pay for on every open: a tag or watchlist
         count, not a GROUP BY over the whole log. Everything else is
         re-run by the board's ↻ Refresh, or per widget from its editor.
+
+        A run that did not fully answer is not kept — a widget that
+        errored, and a signals card any of whose cells errored, are re-run
+        on the next open rather than painted from the cache, since the
+        usual reason a cell cannot answer is that its table has not been
+        imported yet.
 
         ``id`` is what that cached result hangs off. You do not set it —
         Winnow assigns one when the board is written into a case, and the
@@ -777,6 +811,8 @@ class PluginAPI:
                     f"one of {', '.join(self.WIDGET_RENDERS)}")
             if w["source"] == "sql" and not (w.get("query") or {}).get("sql"):
                 raise ValueError(f"Widget {w['title']!r} is a sql widget with no query.sql")
+            if w["source"] == "cells":
+                self._check_cells(w)
         self._registry._add_dashboard({
             "id": f"{self._plugin}.{id}",
             "local_id": id,
@@ -786,6 +822,31 @@ class PluginAPI:
             "description": description,
             "widgets": widgets,
         })
+
+    def _check_cells(self, w: dict) -> None:
+        """A `signals` widget's cells, checked the same way and for the
+        same reason its source and render are: a cell with no label draws
+        a number nobody can read, and two cells sharing one are a card
+        whose second drill is unreachable — both are silent in a case
+        weeks later and knowable right here."""
+        cells = w.get("cells")
+        title = w.get("title")
+        if not isinstance(cells, list) or not cells:
+            raise ValueError(f"Widget {title!r} has source 'cells' and no cells")
+        seen = set()
+        for i, c in enumerate(cells):
+            if not isinstance(c, dict) or not c.get("label"):
+                raise ValueError(f"Widget {title!r}: cell {i} needs a label")
+            if c["label"] in seen:
+                raise ValueError(f"Widget {title!r}: two cells labelled {c['label']!r} — "
+                                 "a cell's label is how its drill is found")
+            seen.add(c["label"])
+            src = c.get("source") or "sql"
+            if src not in self.CELL_SOURCES:
+                raise ValueError(f"Widget {title!r}: cell {c['label']!r} has source {src!r} — "
+                                 f"one of {', '.join(self.CELL_SOURCES)}")
+            if src == "sql" and not (c.get("query") or {}).get("sql"):
+                raise ValueError(f"Widget {title!r}: cell {c['label']!r} is a sql cell with no query.sql")
 
 
 class PluginRegistry:

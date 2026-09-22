@@ -1243,9 +1243,10 @@ python server.py --plugins-dir ~/src/my-winnow-plugins
 
 Installs from the UI always land in the first directory (`plugins/`).
 
-**Versioning:** the current plugin API version is **10** (two things
-arrived in it: a dashboard widget's `live` flag, and the tab context's
-`tabState`, which took the context's own `apiVersion` to 5;
+**Versioning:** the current plugin API version is **11** (the `signals`
+render kind and its `cells` source arrived in 11; two things arrived in
+10: a dashboard widget's `live` flag, and the tab context's `tabState`,
+which took the context's own `apiVersion` to 5;
 `api.register_page_panel`
 and the tab context's `sqlPage` / `notesPage` / `notify` arrived in 9; `api.register_dashboard`
 arrived in 8; `req.set_env` /
@@ -1442,13 +1443,59 @@ api.register_dashboard(
 | key | |
 | --- | --- |
 | `title` | the card's heading (required) |
-| `source` | `"sql"`, `"tags"` or `"watchlist"` (required) |
-| `render` | `"stat"`, `"kv"`, `"chips"`, `"list"`, `"bar"` or `"histogram"` (required) |
+| `source` | `"sql"`, `"tags"`, `"watchlist"` or `"cells"` (required) |
+| `render` | `"stat"`, `"kv"`, `"chips"`, `"list"`, `"bar"`, `"histogram"` or `"signals"` (required) |
 | `query.sql` | required for `source: "sql"`; runs on the read-only pane connection, so a board is data, not code |
-| `span` | `1` or `2` — how wide the card sits |
+| `cells` | required for `source: "cells"` — see **A card of many numbers** below |
+| `span` | `1`–`4` — how many of the grid's four columns the card sits across |
 | `live` | `true` — re-run this widget every time the board opens, instead of showing its last result |
 | `id` | assigned by Winnow when the board lands in a case — don't set it, but preserve it if you read a board and write it back |
 | `drill` | makes the card clickable; see below |
+
+**A card of many numbers.** `render: "signals"` with `source: "cells"` is
+one card holding a grid of labelled numbers — and **every cell keeps its
+own drill**:
+
+```python
+{"title": "Triage signals", "source": "cells", "render": "signals", "span": 3,
+ "cells": [
+     {"label": "Failed logons (4625)", "tone": "warn", "source": "sql",
+      "query": {"sql": "SELECT COUNT(*) FROM {{evtx}} WHERE Channel='Security' AND EventId='4625'"},
+      "drill": {"table": "{{evtx}}", "where": [
+          {"column": "Channel", "op": "equals", "value": "Security"},
+          {"column": "EventId", "op": "equals", "value": "4625"}]}},
+     {"label": "Sysmon service", "chip": True, "source": "sql",
+      "query": {"sql": "SELECT COUNT(*) > 0 FROM {{registry}} WHERE KeyPath LIKE '%\\Services\\Sysmon%'"},
+      "drill": {"table": "{{registry}}", "where": [
+          {"column": "KeyPath", "op": "contains", "value": "\\Services\\Sysmon"}]}},
+ ]}
+```
+
+| cell key | |
+| --- | --- |
+| `label` | the caption under the number; unique within the card, because it is how the card finds the cell's drill (required) |
+| `source` | `"sql"`, `"tags"` or `"watchlist"` — anything a widget can be, except another grid of signals |
+| `query.sql` | required for a `sql` cell; the cell's value is the first number it returns |
+| `drill` | the rows behind THIS number — same shape and same rule as a widget's |
+| `tone` | `"warn"` draws the number in the danger colour |
+| `chip` | `True` draws a yes/no pill instead of a number, above the numeric cells |
+
+A signals card shows the widget's own `sub` under the grid, the way a
+`stat` card shows one under its number — a card of ten numbers is the one
+that most needs a line saying what they are numbers of.
+
+Reach for it when a row of single-number cards is really one subject. The
+shipped KAPE board folded eleven stats into one of these: a `kv` card
+would have folded eleven working drill-throughs into one
+OR-of-everything, and a click that opens a superset of the rows you were
+reading is worse than one that opens nothing.
+
+Two properties worth knowing. **One card is one request**, whatever the
+cell count — which is the other half of why that board got shorter.
+And **a cell fails alone**: a cell whose table is not in this case says
+so in its own place while its neighbours show their numbers, instead of
+taking the card down with it. That is strictly better than the cards it
+replaced, where a case with no registry meant five identical error cards.
 
 **A board is not re-run from scratch every time it is opened.** Each
 widget's last result is kept in the case file, painted the instant the
@@ -1462,12 +1509,20 @@ the expensive card you actually wanted.
 for it where a stale number would be *wrong* rather than merely old and
 the query is cheap: a tag count, a watchlist count, a row count on a small
 table. Not a `GROUP BY` over the whole log — that is the card the cache
-exists for, and the analyst can ↻ it. The shipped KAPE profile marks two
-of its twenty-six widgets live, which is about the right ratio.
+exists for, and the analyst can ↻ it. The shipped KAPE profile marks one
+of its ten cards live — the two-cell Findings card, which reads the
+watchlist and the tag table and nothing else. Everything else on that
+board scans a log, so one is the honest number, not a stingy one.
 
 An imported table or a tag write does not silently replace a cached
 number; it marks it stale, and the card and the board bar say so. Numbers
 an analyst is going to draw conclusions from are dated, always.
+
+A run that did not fully answer is not kept: a widget that errored, and a
+signals card *any* of whose cells errored, are re-run the next time the
+board is opened rather than painted from the cache. The usual reason a
+cell cannot answer is that the table it reads has not been imported yet,
+and a cached "—" would outlive the import.
 
 The cached result is filed under the widget's `id`, which Winnow assigns
 when the board is written into a case. The list you register here is left
