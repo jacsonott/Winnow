@@ -1476,6 +1476,7 @@ function openWidgetEditor(existing, prefill = null) {
         delete existing.build;        // a stale recipe or drill must not outlive a hand edit
         delete existing.drill;
         delete existing.live;         // Object.assign can't clear a key draft() leaves out
+        delete existing.cells;        // ditto: a card moved off "cells" keeps none of them
         Object.assign(existing, w);
         // The server drops a cached result whose question changed; do the
         // same here, or the repaint below shows the old answer under the

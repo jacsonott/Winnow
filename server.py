@@ -2564,8 +2564,10 @@ def api_plugin_bundles_apply(bundle_id: int):
     # dashboards untouched.
     if bundle.get("dashboard"):
         STORE.upsert_dashboard_by_name(bundle["name"], bundle["dashboard"])
-    # Extra named boards a profile carries (the KAPE host overview) land
-    # under their own names, same upsert-by-name rule.
+    # Extra named boards a profile carries land under their own names,
+    # same upsert-by-name rule. No SHIPPED profile has one — the KAPE host
+    # overview, which is what this was written for, is part of the triage
+    # board now — but Save-as-profile writes whatever boards it was given.
     boards_applied = []
     for board in bundle.get("dashboards") or []:
         bname = str(board.get("name") or "").strip()

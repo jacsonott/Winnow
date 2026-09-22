@@ -1370,7 +1370,7 @@ api.register_dashboard(
 | `render` | `"stat"`, `"kv"`, `"chips"`, `"list"`, `"bar"`, `"histogram"` or `"signals"` (required) |
 | `query.sql` | required for `source: "sql"`; runs on the read-only pane connection, so a board is data, not code |
 | `cells` | required for `source: "cells"` — see **A card of many numbers** below |
-| `span` | `1` or `2` — how wide the card sits |
+| `span` | `1`–`4` — how many of the grid's four columns the card sits across |
 | `live` | `true` — re-run this widget every time the board opens, instead of showing its last result |
 | `id` | assigned by Winnow when the board lands in a case — don't set it, but preserve it if you read a board and write it back |
 | `drill` | makes the card clickable; see below |

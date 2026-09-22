@@ -705,7 +705,8 @@ class PluginAPI:
              "render": "stat"|"kv"|"chips"|"list"|"bar"|"histogram"|"signals",
              "query": {"sql": "SELECT …"},  # source "sql" only
              "cells": [...],                # source "cells" only — see below
-             "span": 1|2,                   # optional; card width
+             "span": 1|2|3|4,               # optional; card width, in
+                                            #   grid columns (of four)
              "live": True,                  # optional; re-run on every open
              "id": str,                     # assigned by Winnow — see below
              "drill": {...}}                # optional; see below

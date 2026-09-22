@@ -301,15 +301,38 @@ def test_applying_the_profile_lands_one_board(client, host):
         assert pv.status_code == 200, (w["title"], pv.text)
 
 
-def test_an_existing_case_keeps_the_board_it_was_given(client, host):
-    """Consolidation changes the SHIPPED profile. `upsert_dashboard_by_name`
-    only runs on apply, so a case that already has the old 26-widget board
-    keeps it until someone re-applies the profile — nothing is migrated."""
-    old = client.post("/api/dashboards", json={
-        "name": "KAPE triage", "widgets": [{"title": "Old card", "source": "tags", "render": "stat"}]}).json()
-    assert client.get(f"/api/dashboards/{old['id']}").json()["widgets"][0]["title"] == "Old card"
-    # Reading the case does not touch it; only apply does.
-    assert [w["title"] for w in client.get(f"/api/dashboards/{old['id']}").json()["widgets"]] == ["Old card"]
+def test_an_existing_case_keeps_the_board_it_was_given(client, host, case_path):
+    """Consolidation changes the SHIPPED profile, and nothing migrates a
+    case that already carries a board under that name: the shipped widgets
+    are written by `upsert_dashboard_by_name`, which runs on apply and
+    nowhere else. What that buys the analyst is the edit they made to the
+    board surviving — so that is what is asserted, by making one and
+    reopening the case file around it.
+
+    And the other half of "only on apply": re-applying the profile really
+    does put the shipped board back. Between those two, the sentence has
+    a test."""
+    kape = next(b for b in client.get("/api/plugin_bundles").json() if b["name"] == "KAPE triage")
+    client.post(f"/api/plugin_bundles/{kape['id']}/apply")
+    did = next(b["id"] for b in client.get("/api/dashboards").json() if b["name"] == "KAPE triage")
+    shipped = client.get(f"/api/dashboards/{did}").json()["widgets"]
+
+    # The analyst makes the board theirs: one card renamed, one dropped.
+    mine = [dict(w) for w in shipped if w["title"] != "Findings"]
+    mine[0]["title"] = "Host — WKSTN-014"
+    assert client.post(f"/api/dashboards/{did}", json={"widgets": mine}).status_code == 200
+
+    # Reopening the case file is not an apply.
+    host.close()
+    assert client.post("/api/case/open", json={"path": case_path}).status_code == 200
+    after = [w["title"] for w in client.get(f"/api/dashboards/{did}").json()["widgets"]]
+    assert after == [w["title"] for w in mine]
+    assert "Findings" not in after and len(after) == len(shipped) - 1
+
+    # Re-applying is, and it is the only thing that is.
+    client.post(f"/api/plugin_bundles/{kape['id']}/apply")
+    back = [w["title"] for w in client.get(f"/api/dashboards/{did}").json()["widgets"]]
+    assert back == [w["title"] for w in shipped]
 
 
 def test_saved_bundles_keep_extra_boards(client):

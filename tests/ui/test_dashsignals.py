@@ -165,3 +165,32 @@ def test_saving_a_signals_card_in_the_editor_keeps_its_cells(page):
     finally:
         page.keyboard.press("Escape")
         _drop(page, did)
+
+
+def test_a_card_moved_off_signals_does_not_keep_its_cells(page):
+    """`cells` has to be deleted on save for the same reason `build`,
+    `drill` and `live` are: `Object.assign` cannot clear a key the draft
+    leaves out. A widget that is a stat over one query, still carrying the
+    four questions of the card it used to be, is a card whose cache
+    fingerprint and whose editor disagree with what it draws."""
+    did = _board(page, "Signals moved", [_card(page, _src(page))])
+    try:
+        _show(page, did)
+        page.wait_for_function(
+            "() => document.querySelectorAll('#dashGrid .dash-signal').length === 3", timeout=15_000)
+        page.locator("#dashGrid .dash-card:not(.dash-add) .dash-edit").first.click()
+        page.wait_for_selector("#modal:not([hidden]) .dash-form", timeout=15_000)
+        page.locator("#modal .dash-form select").first.select_option("sql")
+        page.locator("#modal .dash-form-row-3 select").first.select_option("stat")
+        page.locator("#modal textarea.dash-sql").fill(f"SELECT COUNT(*) FROM src_{_src(page)}")
+        page.locator("#modal button", has_text="Save widget").click()
+        page.wait_for_function("() => document.getElementById('modal').hidden", timeout=15_000)
+        page.wait_for_function(
+            "() => document.querySelectorAll('#dashGrid .dash-stat').length === 1"
+            " && document.querySelectorAll('#dashGrid .dash-signal').length === 0", timeout=15_000)
+        (w,) = _widgets(page, did)
+        assert w["source"] == "sql" and w["render"] == "stat"
+        assert "cells" not in w, w.get("cells")
+    finally:
+        page.keyboard.press("Escape")
+        _drop(page, did)
