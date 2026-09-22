@@ -9914,8 +9914,7 @@ class Store:
         wb.save(path)
         return {"sheets": sheets, "rows": total_rows}
 
-    def resolve_search_all_scope(self, source_ids: list[int] | None,
-                                 strict: bool = True) -> dict:
+    def resolve_search_all_scope(self, source_ids: list[int] | None) -> dict:
         """The sweep's scope, turned into real source ids it can actually
         scan: `{"source_ids": [...] | None, "merges": [...]}`.
 
@@ -9934,22 +9933,18 @@ class Store:
         "no matches", which is the wrong answer rather than an error. An
         empty list is a scope of no tables, and scans nothing.
 
-        `strict=False` skips an id that no longer resolves instead. That is
-        for the sweep itself, which re-resolves a scope chosen seconds or
-        minutes earlier: a table dropped in between should cost that table
-        its scan, not end the whole run in an error — the unscoped sweep
-        already absorbs a source removed mid-sweep the same way."""
+        Resolution happens once, at the point the scope is accepted — the
+        sweep itself never re-resolves. A table dropped between the scope
+        being chosen and the sweep reaching it simply isn't in the
+        `list_sources()` snapshot _iter_search_all_sources filters, so it
+        costs that table its scan rather than ending the run, the way the
+        unscoped sweep has always absorbed a source removed mid-sweep."""
         if source_ids is None:
             return {"source_ids": None, "merges": []}
         out: list[int] = []
         merges: list[dict] = []
         for sid in source_ids:
-            try:
-                src = self._source_lite(sid)      # KeyError: no such source/merge
-            except KeyError:
-                if strict:
-                    raise
-                continue
+            src = self._source_lite(sid)          # KeyError: no such source/merge
             members = list(src["member_source_ids"]) if src.get("is_merge") else [sid]
             if src.get("is_merge"):
                 merges.append({"id": sid, "name": src["name"], "member_source_ids": members})
@@ -9966,11 +9961,10 @@ class Store:
         wrapper, used by the synchronous endpoint and the tests.
 
         `source_ids` scopes it (resolve_search_all_scope); None is every
-        real source in the case. It is resolved strictly HERE, so a caller
-        naming a table this case doesn't have gets the KeyError its route
-        turns into a 400 — the sweep itself resolves leniently, which is
-        right for a scope it re-reads minutes later and wrong for one it
-        was just handed.
+        real source in the case. It is resolved HERE, before the scan, so
+        a caller naming a table this case doesn't have gets the KeyError
+        its route turns into a 400 rather than an empty answer that reads
+        like "no matches".
 
         start_search_all_job is the same sweep run on a background thread
         with incremental results, which is what the UI uses."""
@@ -9986,7 +9980,10 @@ class Store:
         """Per-source match counts for a search across every real source in
         the case (merges excluded — their rows already belong to a real
         source), or across the subset `source_ids` names, no filter/sort/
-        view materialisation involved.
+        view materialisation involved. `source_ids` is REAL source ids,
+        already resolved: both entry points come through
+        resolve_search_all_scope, which is where a merge becomes its
+        members and an unknown id becomes a KeyError.
 
         Yields `(scanned, total, hit_or_None)` after each source so a caller
         can report progress and surface partial results while the sweep is
@@ -10035,12 +10032,13 @@ class Store:
         # time. A source removed mid-sweep just yields a SQL error we skip.
         sources = [s for s in self.list_sources() if not s.get("error")]
         # Scope filtered straight onto that snapshot, the shape
-        # _iter_watchlist_scan uses. Resolved here rather than taken on
-        # trust so the sync wrapper and the job agree about what a merge id
-        # means, and `total` counts the tables this run will really scan —
-        # it is the progress denominator the modal shows.
+        # _iter_watchlist_scan uses: an id whose table has been dropped
+        # since the scope was chosen is not in the snapshot, so it costs
+        # that table its scan and nothing else. `total` therefore counts
+        # the tables this run will really scan — it is the progress
+        # denominator the modal shows.
         if source_ids is not None:
-            wanted = set(self.resolve_search_all_scope(source_ids, strict=False)["source_ids"])
+            wanted = set(source_ids)
             sources = [s for s in sources if s["id"] in wanted]
         total = len(sources)
         scanned = 0
@@ -10056,8 +10054,10 @@ class Store:
             n = 0
             per_term: list[dict] = []
             if inner is not None:
-                # One _reader() checkout per source's count — the sweep
-                # never touches self.lock at all now, so even its worst
+                # One _reader() checkout per source's count — this loop
+                # never touches self.lock at all (a scoped run pays one
+                # locked resolve before it starts, not one per source), so
+                # even its worst
                 # case (N full LIKE scans on an unindexed 42 GB merge)
                 # can't stall a single paging/tagging/view-build request.
                 # Checked out per count rather than once for the sweep so

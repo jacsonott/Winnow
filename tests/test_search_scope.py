@@ -16,6 +16,8 @@ different tables than the one that was named.
 
 from __future__ import annotations
 
+import pytest
+
 
 def _two_tables(store, write_csv):
     """Two real tables, each with a row only it matches."""
@@ -107,10 +109,19 @@ def test_an_unknown_table_in_the_scope_is_an_error_not_an_empty_answer(store, wr
             pass
         else:
             raise AssertionError(f"scope {bad} should not resolve")
-    # Lenient only where a scope chosen minutes ago is re-resolved by the
-    # sweep itself: a table dropped in between costs that table its scan,
-    # it does not end the run.
-    assert store.resolve_search_all_scope([a, a + 999], strict=False)["source_ids"] == [a]
+
+
+def test_a_table_dropped_after_the_scope_was_chosen_costs_only_its_own_scan(store, write_csv):
+    """The scope is resolved once, where it is accepted. What happens to a
+    table that goes away between then and the sweep reaching it is decided
+    by the `list_sources()` snapshot the sweep filters: the id is simply
+    not in it, so it loses its own scan rather than ending the run — which
+    is how the unscoped sweep has always treated a source removed under
+    it."""
+    a, b = _two_tables(store, write_csv)
+    store.drop_source(b)
+    hits = [h for _, _, h in store._iter_search_all_sources(query="svchost", source_ids=[a, b]) if h]
+    assert [h["source_id"] for h in hits] == [a]
 
 
 def test_an_empty_scope_scans_nothing(store, write_csv):
@@ -133,5 +144,22 @@ def test_the_route_carries_the_scope_and_rejects_an_unknown_table(client, store,
 
     bad = client.post("/api/search_all/start", json={"query": "svchost", "source_ids": [b + 999]})
     assert bad.status_code == 400
-    assert "No source" in bad.json()["detail"]
+    assert bad.json()["detail"] == f"No source {b + 999}"     # not the repr KeyError carries
     assert client.post("/api/search_all", json={"query": "x", "source_ids": [b + 999]}).status_code == 400
+
+
+def test_a_keyerror_inside_the_sweep_is_not_reported_as_a_bad_request(
+        client, store, write_csv, monkeypatch):
+    """Only the scope resolve gets to answer 400 here. A KeyError from the
+    scan itself is a defect in Winnow, and returning it as a 400 would
+    blame the analyst's request for something they cannot fix while
+    swallowing the traceback — the shape api_view was fixed out of (see
+    docs/notes/server.md)."""
+    a, _b = _two_tables(store, write_csv)
+
+    def boom(*_args, **_kw):
+        raise KeyError("a column the scan expected")
+
+    monkeypatch.setattr(store, "search_all_sources", boom)
+    with pytest.raises(KeyError):
+        client.post("/api/search_all", json={"query": "svchost", "source_ids": [a]})

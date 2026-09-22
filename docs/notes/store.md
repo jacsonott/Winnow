@@ -318,9 +318,14 @@ see [docs/notes/README.md](README.md) for the whole set.
   front of it came from rather than quietly answering about different
   ones. An id naming nothing is a **KeyError → 400** on the way in (a
   typo'd scope that scanned nothing would come back as "no matches",
-  which is a wrong answer rather than an error) and is **skipped** on the
-  way through the sweep, which re-resolves a scope chosen minutes
-  earlier and should lose one dropped table rather than the whole run.
+  which is a wrong answer rather than an error) — the route resolves the
+  scope on its own line and calls the sweep outside the `except KeyError`,
+  so an internal defect in the scan can't come back as a 400 blaming the
+  request. The scope is resolved **once, where it is accepted**, and the
+  sweep never re-resolves it: a table dropped between the choice and the
+  scan reaching it is simply not in the `list_sources()` snapshot
+  `_iter_search_all_sources` filters, so it costs that table its scan
+  rather than the run, and the scan loop still never touches `self.lock`.
   The **1,000-row count cap is unchanged at every scope**: scoping to one
   table doesn't make that table smaller, and an exact count on an
   unindexed one is the full scan the cap exists to prevent — the pane
