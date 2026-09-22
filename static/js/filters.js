@@ -523,6 +523,45 @@ export function updateSearchHint() {
   // 10px uppercase face and let the next call correct it.
   const w = hint.offsetWidth || Math.ceil(hint.textContent.length * 6.7);
   $('search').style.paddingRight = (w + 16) + 'px';
+  // The padding it just claimed is how much room the placeholder has left.
+  syncSearchKeyCopy();
+}
+
+/* The key that opens the search box is advertised in two places — the
+   magnifier's tooltip and the box's own placeholder — and the chord is
+   dispatched only while `focusSearch` still holds it (keymap.js's
+   pre-gate). So both strings are built from the binding rather than
+   written into index.html: take Ctrl+F off search in Settings, or move
+   search to another key, and the copy stops naming a key that now does
+   something else. It is the same reason updateTimeRangeButton spells its
+   tooltip out of S.keymap. Keys are printed exactly as the Settings chips
+   spell them, so the tooltip and the chip agree character for character.
+
+   The placeholder is the string with a width limit: #search is a fixed
+   320px and the mode hint above just claimed the right padding, which in
+   regex and advanced mode leaves too little for the keys. Measure the
+   text against what is left and fall back to the bare "All columns"
+   rather than let it clip mid-chord — a hint that names half a key is
+   worse than one that names none. The tooltip has no width limit and
+   always names them. */
+let placeholderMetrics = null;
+
+export function syncSearchKeyCopy() {
+  const keys = (S.keymap.focusSearch || []).filter(Boolean);
+  const spelled = keys.join(' or ');
+  $('btnSearchToggle').title = spelled ? `Search  —  press ${spelled}` : 'Search';
+  const box = $('search');
+  const withKeys = `All columns  —  ${spelled}`;
+  const cs = getComputedStyle(box);
+  placeholderMetrics = placeholderMetrics || document.createElement('canvas').getContext('2d');
+  placeholderMetrics.font = `${cs.fontSize} ${cs.fontFamily}`;
+  // clientWidth is 0 while the wrap is hidden — the CSS width is what the
+  // box will be when it opens, and it is border-box, so the padding is
+  // already inside it.
+  const room = (box.clientWidth || parseFloat(cs.width) || 320)
+    - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+  box.placeholder = spelled && placeholderMetrics.measureText(withKeys).width <= room
+    ? withKeys : 'All columns';
 }
 
 /* Generic multi-term AND/OR/NOT chip editor — shared by the toolbar's

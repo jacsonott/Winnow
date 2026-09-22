@@ -810,7 +810,17 @@ see [docs/notes/README.md](README.md) for the whole set.
   The v1 migration carries `openColumns` → `openTableMenu` and moves the
   `f`/`Shift+F` pair (focus-first-filter → filter-by-this-value, plus the
   new drop-the-others variant) *only* for analysts still on the old
-  defaults — a binding someone chose themselves is never touched.
+  defaults — a binding someone chose themselves is never touched. v5 adds
+  `Ctrl+f` beside `/` on `focusSearch` the same way, with a second guard
+  the earlier ones did not need: it stands down when any other action
+  already holds one of the four chord spellings, because Ctrl+F matched
+  nothing before that release, Settings therefore accepted it for
+  anything, and the pre-gate below would shadow such a binding.
+  **A change to `DEFAULT_KEYMAP` with no migration entry reaches nobody
+  who has run Winnow before**: `loadKeymap` persists the whole expanded
+  default map on a profile's very first load, so by the second run the
+  stored map — which outranks the defaults — already has the old value
+  written down.
 - **Table nicknames** (`sources.nickname`, `Store.set_source_nickname`,
   `POST /api/source/{id}/nickname`) are display-only: `name` is never
   rewritten — it's the file's identity (session hash warnings, the record
@@ -835,15 +845,64 @@ see [docs/notes/README.md](README.md) for the whole set.
   first keydown, so pressing Ctrl for Ctrl+K bound "Control" and combos
   were impossible). findKeyConflict also refuses the hardcoded
   modifier shortcuts (Ctrl/Meta+C copy, Ctrl/Meta+z undo, Alt+digit tab
-  switching) since those are handled before matchAction and would shadow
-  a binding silently. Side effect worth knowing: a bare-key binding no
-  longer fires when Ctrl/Alt/Meta is held (matchAction used to look at
-  e.key alone, so Ctrl+T opened the Tables manager).
+  switching, and Ctrl/⌘+F while search still holds it) since those are
+  handled before matchAction and would shadow a binding silently. Side
+  effect worth knowing: a bare-key binding no longer fires when
+  Ctrl/Alt/Meta is held (matchAction used to look at e.key alone, so
+  Ctrl+T opened the Tables manager).
 - **Shortcuts are gated off the home screen**: the document keydown
   listener returns early when `$('app').hidden` — every keymap action, tag
   hotkey, Alt+digit and the copy/undo combos act on case UI that isn't on
   screen there (`t` opened the previous case's Tables manager from home).
   Escape stays above the gate: home has modals of its own to close.
+
+- **Ctrl/⌘+F opens the search box, and the browser's find bar is refused.**
+  Find-in-page reads the DOM and invariant #6 keeps only the visible window
+  of rows in it, so Chromium answers "not found" for a value that is in the
+  table — a wrong answer, not a missing one, which is the failure class
+  worth spending a reserved chord on. The binding lives on `focusSearch`
+  (`'/'` and `'Ctrl+f'`, KEYMAP_MIGRATIONS v5) but the *dispatch* is
+  hardcoded in `wireKeymap`, above the `typing` guard like Alt+digit,
+  because the box is exactly what you want from a filter cell or the SQL
+  editor and `matchAction` never looks there. Four things that gate is
+  carrying, each deliberate:
+  - It matches `(e.ctrlKey || e.metaKey)` and `'f'` or `'F'` — the copy
+    handler's shape, giving ⌘ for macOS (the keymap has no platform branch)
+    and the capital for Caps Lock and Shift — plus a term neither the copy
+    nor the undo handler has: `!e.altKey`, because Ctrl+Alt is AltGr on a
+    European layout and AltGr+F there is a character being typed. The
+    keymap stores the one spelling `'Ctrl+f'`; `findKeyConflict` refuses
+    all four to another action, since the gate would shadow them silently.
+  - It is conditional on `focusSearch` still holding the chord
+    (`searchChordBound`), so unbinding it in Settings really does hand
+    Ctrl+F back to the browser rather than leaving a dead chip.
+  - It sits *below* the `$('app').hidden` gate (the home screen has no
+    search box and is entirely in the DOM, where find-in-page tells the
+    truth) and returns without `preventDefault` while `#modal` or a
+    `.confirm-overlay` is up — a dialog owns the keyboard, Ctrl+C already
+    falls through to the native copy there, and a dialog's text really is
+    all in the DOM. A dropdown menu is neither of those, so it is closed
+    (`closeMenu`) and the chord taken; otherwise the bar would open behind
+    a menu still floating over it.
+  - Off the grid it calls `showGridTab()` first. `syncTabChrome` hides the
+    whole toolbar on a page tab, so focusing `#search` there would put the
+    caret in a `display:none` input and read as a keystroke that did
+    nothing. `expandSearch` then focuses the box; `collapseSearchIfEmpty`
+    leaves it alone because focus landed inside `.search-wrap`.
+
+  The two strings that name the key — the magnifier's tooltip and the box's
+  placeholder — are built from the binding by `syncSearchKeyCopy`
+  (filters.js), not written into `static/index.html`, for the same reason
+  the gate is conditional: unbind the chord and copy naming it would be
+  advertising a key the browser has taken back. `updateSearchHint` calls it
+  after setting the padding, `keymapChanged` after every rebinding, and
+  main.js once at startup. Keys print exactly as the Settings chips spell
+  them (`Ctrl+f`, not `Ctrl+F`), so the two agree character for character.
+  The placeholder is measured against what is left of the box's 320px after
+  the mode chip's padding, and drops to the bare `"All columns"` when the
+  keys will not fit — in regex and advanced mode they do not, and a hint
+  clipped mid-chord is worse than a terse one. The tooltip has no width
+  limit and always names them.
 
 - **The 2026-08 left-hand keybind pass** is additive on purpose: q/w beside
   [/] for saved-filter cycling (the highest-traffic key in a triage pass,
