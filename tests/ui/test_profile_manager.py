@@ -255,6 +255,11 @@ def test_unticking_a_part_leaves_that_part_of_the_case_alone(page, api):
                                "query": {"sql": "SELECT 1"}}],
               dashboards=[{"name": BOARD, "widgets": [{"title": "Extra", "render": "kv"}]}])
         before_plugins = sorted(p["fs_name"] for p in api("/api/plugins")["plugins"] if p["enabled"])
+        # What the overrides ARE before, not an absolute: the session case is
+        # shared, and a module that ran earlier may have pinned one (applying a
+        # profile is how several of them set up). The claim under test is that
+        # unticking the part changes nothing, which is a comparison.
+        before_overrides = {p["fs_name"]: p["case_override"] for p in api("/api/plugins")["plugins"]}
         wl = api("/api/watchlist")
         before_iocs = sorted(i["value"] for i in (wl["indicators"] if isinstance(wl, dict) else wl))
         before_vars = sorted(v["name"] for v in api("/api/case/variables"))
@@ -274,8 +279,8 @@ def test_unticking_a_part_leaves_that_part_of_the_case_alone(page, api):
         assert PROF in names and BOARD in names, names
         after = api("/api/plugins")["plugins"]
         assert sorted(p["fs_name"] for p in after if p["enabled"]) == before_plugins
-        assert all(p["case_override"] is None for p in after), \
-            "the plugins part was unticked; no case override should have been written"
+        assert {p["fs_name"]: p["case_override"] for p in after} == before_overrides, \
+            "the plugins part was unticked; the case's overrides should be exactly as they were"
         wl = api("/api/watchlist")
         assert sorted(i["value"] for i in (wl["indicators"] if isinstance(wl, dict) else wl)) == before_iocs
         assert sorted(v["name"] for v in api("/api/case/variables")) == before_vars
