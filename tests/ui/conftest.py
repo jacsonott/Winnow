@@ -142,6 +142,22 @@ def server_post(server):
     return _post
 
 
+# The bundled tab plugins now restore what they had from the case file
+# (plugin_ui_state, via winnow.tabState), and the case here is shared by
+# the whole session — so one module's grouping would arrive in the next
+# module's supposedly fresh tab, complete with a restore banner. Every
+# module starts from nothing saved and leaves nothing behind; the module
+# that tests restoring does its own saving inside that window.
+@pytest.fixture(autouse=True, scope="module")
+def clean_plugin_tab_state(server_post):
+    keys = ("tab:first-last.firstlast", "tab:pivot-table.pivot")
+    for key in keys:
+        server_post("/api/plugin_state", {"key": key, "payload": None})
+    yield
+    for key in keys:
+        server_post("/api/plugin_state", {"key": key, "payload": None})
+
+
 # Every shared context is a "first run on this machine" — pre-answer the
 # one-time remote-mode prompt so it can't overlay the app mid-test, and
 # turn the launch animation off. The splash covers the whole viewport
