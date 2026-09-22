@@ -349,6 +349,13 @@ down and rebuilt when:
   carries a `?v=<gen>` cache-buster tied to the reload, so **toggling
   your plugin off and on is the reload button while you iterate on JS.**
 
+There is no `onDestroy`: a teardown removes the container without telling
+the module, so there is no moment at which you could flush what the
+analyst built. If your tab holds something worth keeping — which fields
+are in which well, which sub-tab was open — write it as it changes with
+[`winnow.tabState`](#keeping-a-tabs-state-across-a-case-close), not at
+the end.
+
 `onShow`/`onHide` fire on *every* switch, including the first. Use
 `onShow` to refresh anything that may have changed while you were hidden
 (new sources imported, theme changed) and `onHide` to pause timers or
@@ -361,7 +368,7 @@ Prefer it to reaching into the app's globals — this is what's supported.
 
 | Field | What it is |
 | --- | --- |
-| `apiVersion` | Contract version of this object (currently `4`) |
+| `apiVersion` | Contract version of this object (currently `5`) |
 | `plugin` | Your plugin's display name |
 | `base` | `/api/plugin/<fs_name>` — prefix for your own routes |
 | `assets` | `/plugin_assets/<fs_name>` — prefix for your own files |
@@ -378,6 +385,7 @@ Prefer it to reaching into the app's globals — this is what's supported.
 | `showPage(name)` | Switch to a built-in page: `'grid'`, `'sql'`, `'notes'`, `'timeline'`, `'watchlist'` (reopens it if closed) |
 | `sqlPage` | The SQL pane: `show()`, `text()`, `setText(sql, {newTab})`, `run()`, `result()`, `selectedRows()`, `onRun(cb)` — see [Driving the page](#driving-the-page) |
 | `notesPage` | The case notes: `show()`, `text()`, `setText(md)`, `insert(text)`, `onChange(cb)` |
+| `tabState` | This mount's own state in the case file: `get()`, `set(obj)`, `clear()` — see [Keeping a tab's state](#keeping-a-tabs-state-across-a-case-close) |
 | `openSource(id)` | Switch the app to a source's grid tab |
 | `refreshSources()` | Re-fetch the app's source list — call after your backend creates a table via `ingest_rows` (a sync ingest announces itself through no job), then `openSource(new_id)` |
 | `state.sources` | Live source list (`{id, name, columns, row_count, is_merge, error}`) |
@@ -395,6 +403,60 @@ Prefer it to reaching into the app's globals — this is what's supported.
 **Always call your backend through `winnow.api` / `winnow.post`.** A raw
 `fetch()` won't carry the `X-Timeline-Lite-Client` header that Winnow's
 CSRF middleware requires on non-GET `/api/*` calls, and will 403.
+
+### Keeping a tab's state across a case close
+
+A mount dies with the case — and with a plugin toggle, a profile apply and
+F5 — and takes everything in its closure with it. `winnow.tabState` is one
+row in the **case file**, scoped to this mount, for the state that should
+come back:
+
+```js
+const saved = await winnow.tabState.get();      // {payload, savedAt} or null
+if (saved) restore(saved.payload);              // validate it — see below
+
+function onEdit() {
+  winnow.tabState.set({ v: 1, fields: [...] }); // debounced ~500ms, coalesced
+}
+
+await winnow.tabState.clear();                  // the "start fresh" path
+```
+
+| Call | What it does |
+| --- | --- |
+| `get()` | `{payload, savedAt}`, or `null` if this mount has never saved. Never rejects — an unreadable payload reads as nothing saved |
+| `set(obj)` | Replaces the row after a short debounce. Resolves `true` when the write lands, `false` if it was refused or superseded; never rejects |
+| `clear()` | Deletes the row and cancels anything pending |
+
+Four rules, and none of them is politeness:
+
+- **Save the definition, not the result.** Which fields sit in which well,
+  which sub-tab was open, a column width — never rows. Rows belong to the
+  case and are re-run on restore; a preview kept from three weeks ago is a
+  picture of evidence rather than the evidence. The payload is capped at
+  **64 KiB**, which is where a plugin saving results finds out.
+- **Validate on restore.** A payload says what somebody wanted, not what
+  the case still holds. A source id is handed to the next import after a
+  drop, so store the table's **name** beside its id and believe the id only
+  while the name matches; check every column against
+  `winnow.state.sources` before it goes into a query, and say what you
+  dropped rather than opening on an error.
+- **Say that you restored.** Sub-tabs that quietly reappear, built against
+  a case that has moved on, are worse than an empty tab. Both bundled
+  examples show a line with the saved-at time and a "Start fresh" button
+  ([`first_last/`](../examples/plugins/first_last/), [`pivot/`](../examples/plugins/pivot/)).
+- **Last write wins.** Two Winnows on one case file do not merge, and
+  nothing here is a transaction.
+
+The state is keyed by MOUNT, so your tab and your panel each get their own
+row, and it travels with the `.db` — someone handed the case file gets the
+grouping you were working on (and simply will not see the tab if they do
+not have the plugin). Nothing collects these rows: a plugin toggled off
+keeps its state for when it comes back.
+
+Not the right home for: a machine preference (a rail width, a checkbox
+about how *you* like to work — use `localStorage`, as First/Last does for
+Auto-update) or anything cross-case (`req.storage`).
 
 ### Feedback: toasts, notifications and dialogs
 
@@ -1168,7 +1230,8 @@ python server.py --plugins-dir ~/src/my-winnow-plugins
 
 Installs from the UI always land in the first directory (`plugins/`).
 
-**Versioning:** the current plugin API version is **9** (`api.register_page_panel`
+**Versioning:** the current plugin API version is **10** (the tab context's
+`tabState` arrived in 10, with `apiVersion` 5; `api.register_page_panel`
 and the tab context's `sqlPage` / `notesPage` / `notify` arrived in 9; `api.register_dashboard`
 arrived in 8; `req.set_env` /
 `req.unset_env` / `req.is_loopback` arrived in 7; `req.table` in 6; `req.env`,
@@ -1438,6 +1501,8 @@ What every API-route and row-action handler receives:
 | `GET /plugin_assets/<fs_name>/<path>` | A plugin's own files |
 | `* /api/plugin/<fs_name>/<route>` | A plugin's registered routes |
 | `POST /api/plugins/row_action/<fs_name>/<id>` | Runs a row action on `{source_id, pairs: [[source_id, rid]…], column?, value?}` |
+| `GET /api/plugin_state?key=<mount key>` | What a mount saved in this case — `{mount_key, payload, saved_at}`, nulls if nothing. Driven by `winnow.tabState` |
+| `POST /api/plugin_state` | `{key, payload}` — replace a mount's state; a null payload clears it. Over 64 KiB is a 400 |
 | `GET /api/case/variables` | `[{name, value, description, required}]` for the open case |
 | `POST /api/case/variables` | `{name, value?, description?, required?}` — create or update one |
 | `DELETE /api/case/variables/<name>` | Remove one |

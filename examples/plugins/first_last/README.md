@@ -34,7 +34,14 @@ placements — the keyboard/trackpad path):
 | **Auto-update** | On by default: the preview re-runs ~350 ms after any change. Off (remembered on this machine), changes mark the preview *Changed — press Refresh* and nothing runs until you do — easier on a very large table |
 
 Several **sheets** live as sub-tabs (like the SQL pane's queries), so two
-groupings can sit side by side without saving either. The preview's rows
+groupings can sit side by side without saving either. They come back when
+the case is reopened: the sheet DEFINITIONS (zones, description, column
+widths, which sheet was on top) are kept in the case file through
+`winnow.tabState`, and the rows are re-run against the case as it is then
+— a preview from three weeks ago would be a picture of the evidence rather
+than the evidence. A line at the top says the sheets were restored, when
+they were saved, and offers **Start fresh**; a sheet whose table or columns
+are gone restores without them and names what it dropped. The preview's rows
 select like a table tab's — click, Shift extends, Ctrl toggles — and
 Ctrl+C copies the selection as TSV.
 
@@ -74,4 +81,5 @@ first_last/
 Backend tests live in `tests/test_plugins.py` (`-k first_last`) and
 `tests/test_firstlast_timeline.py`; the tab itself is driven by
 `tests/ui/test_firstlast_rework.py`, `tests/ui/test_firstlast_autocomplete.py` and
-`tests/ui/test_firstlast_filter_search.py`.
+`tests/ui/test_firstlast_filter_search.py`, and the saved sheets by
+`tests/ui/test_firstlast_state.py`.

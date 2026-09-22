@@ -16,6 +16,108 @@ const BLANK = '(blank)';           // Excel's spelling for an empty grouping key
 const REFRESH_MS = 250;            // debounce after a field change
 const MAX_COLS = 60;               // rendered column groups before we stop and say so
 
+/* ------------------------------------------------ saved pivots */
+
+/* The pivots survive the case being closed, because they live in the case
+   file: winnow.tabState (plugin API 10) is this mount's own row, written
+   as the analyst works. There is no teardown callback in the contract, so
+   saving on close is not something a plugin can do — it saves as it goes.
+
+   DEFINITIONS ONLY, and validated on the way back in. The cross-tab itself
+   is re-queried against the case as it stands now; a saved one would be a
+   picture of the evidence rather than the evidence. Two things a payload
+   cannot be trusted about: the table (a dropped source's id goes to the
+   next import, so the id is only believed when the name still matches) and
+   the fields (a column can be gone, and a grouping on a column the table
+   no longer has is a 400 from the backend's own checks). */
+
+const STATE_VERSION = 1;
+const MAX_SAVED_PIVOTS = 24;
+
+const emptySpec = (name) => ({
+  name, sourceId: null, rows: [], cols: [], values: [], filters: [],
+  subtotals: true, grandTotals: true,
+});
+
+/* One pivot, cut down to the spec: no data, no index, no meta, no
+   loading/error/elapsed. Those describe a moment, not a question. */
+export function pivotSpec(p, sources) {
+  const src = (sources || []).find((s) => s.id === p.sourceId) || null;
+  return {
+    name: p.name,
+    source: src ? { id: src.id, name: src.name } : null,
+    rows: p.rows, cols: p.cols, values: p.values, filters: p.filters,
+    subtotals: p.subtotals, grandTotals: p.grandTotals,
+  };
+}
+
+function resolveSource(saved, sources) {
+  if (!saved || typeof saved !== 'object') return null;
+  const name = saved.name == null ? null : String(saved.name);
+  const byId = sources.find((s) => s.id === saved.id) || null;
+  if (byId && (name === null || byId.name === name)) return byId;
+  // Re-imported under a new id: here the name is the stronger identity.
+  return (name === null ? null : sources.find((s) => s.name === name)) || null;
+}
+
+/* What of a saved payload this case can still honour: the pivot specs, the
+   one that was on top, and a line per pivot that lost something. Pure — it
+   reads the payload and the live source list and nothing else. */
+export function planRestore(payload, sources) {
+  if (!payload || payload.v !== STATE_VERSION) return null;
+  const saved = Array.isArray(payload.pivots) ? payload.pivots.slice(0, MAX_SAVED_PIVOTS) : [];
+  if (!saved.length) return null;
+  const live = (sources || []).filter((s) => !s.error);   // merges included — invariant #9
+  const pivots = [];
+  const notes = [];
+  for (const p of saved) {
+    if (!p || typeof p !== 'object') continue;
+    const name = String(p.name || `Pivot ${pivots.length + 1}`);
+    const spec = emptySpec(name);
+    spec.subtotals = p.subtotals !== false;
+    spec.grandTotals = p.grandTotals !== false;
+    const src = resolveSource(p.source, live);
+    if (!src) {
+      // A pivot that never picked a table is not a loss to report — it is
+      // a fresh pivot, and fillSources gives it this case's first table.
+      if (p.source) {
+        const was = p.source.name ? `“${p.source.name}”` : 'its table';
+        notes.push(`${name}: ${was} is not in this case any more`);
+      }
+      pivots.push(spec);
+      continue;
+    }
+    const cols = new Set((src.columns || []).map((c) => c.name));
+    const gone = [];
+    const kept = (list) => (Array.isArray(list) ? list : []).map(String).filter((n) => {
+      if (cols.has(n)) return true;
+      gone.push(n);
+      return false;
+    });
+    spec.sourceId = src.id;
+    spec.rows = kept(p.rows);
+    spec.cols = kept(p.cols);
+    spec.values = (Array.isArray(p.values) ? p.values : []).filter((m) => {
+      if (!m || typeof m !== 'object' || !m.agg) return false;
+      if (!m.column || cols.has(m.column)) return true;   // COUNT(*) names no column
+      gone.push(String(m.column));
+      return false;
+    });
+    spec.filters = (Array.isArray(p.filters) ? p.filters : []).filter((f) => {
+      if (!f || typeof f !== 'object' || !f.column) return false;
+      if (cols.has(f.column)) return true;
+      gone.push(String(f.column));
+      return false;
+    });
+    if (gone.length) notes.push(`${name}: dropped ${[...new Set(gone)].join(', ')} — not in ${src.name} any more`);
+    pivots.push(spec);
+  }
+  if (!pivots.length) return null;
+  const a = payload.active;
+  const active = Number.isInteger(a) && a >= 0 && a < pivots.length ? a : 0;
+  return { pivots, active, notes };
+}
+
 let state = null;
 let refresh = null;
 
@@ -42,6 +144,77 @@ export default function mount(container, winnow) {
   let renamingIdx = null;
   state = pivots[0];
 
+  /* Nothing is written until the saved pivots have been read back — the
+     first render would otherwise save the empty default over them. */
+  let saveOn = false;
+  /* One untouched pivot is what a fresh tab looks like, so saving it would
+     make the next open announce a restore of nothing. Emptying the areas
+     is also how an analyst says "forget this", and a null payload is how
+     that reaches the case file. */
+  const worthKeeping = () => pivots.length > 1 || pivots.some((p) => (
+    p.rows.length || p.cols.length || p.values.length || p.filters.length
+    || !p.subtotals || !p.grandTotals));
+  function saveState() {
+    if (!saveOn || !winnow.tabState) return;   // an older Winnow has no tabState
+    hideBanner();   // once something is edited, "restored" is no longer news
+    winnow.tabState.set(worthKeeping() ? {
+      v: STATE_VERSION,
+      active,
+      pivots: pivots.map((p) => pivotSpec(p, winnow.state.sources)),
+    } : null);
+  }
+
+  /* Restoring silently would be worse than not restoring: the analyst
+     needs to know these are from last time, when that was, and how to get
+     an empty one back. Above the pivot strip, so it reads before the thing
+     it is about. */
+  const banner = el('div');
+  banner.className = 'pv-restored';
+  banner.hidden = true;
+  banner.style.cssText = 'display:flex;align-items:center;gap:9px;flex-wrap:wrap;padding:7px 10px;'
+    + 'background:var(--panel-2);border-left:2px solid var(--accent);'
+    + 'border-bottom:1px solid var(--line-2);font-size:12px;flex:0 0 auto';
+  container.append(banner);
+
+  function hideBanner() {
+    if (banner.hidden) return;
+    banner.hidden = true;
+    banner.replaceChildren();
+  }
+
+  function showRestoredBanner(savedAt, notes) {
+    banner.replaceChildren();
+    banner.append(el('span', null, 'Restored the pivots you left open when this case was last closed.'));
+    const when = String(savedAt || '').replace('T', ' ').slice(0, 16);
+    const stamp = el('span', 'note-status', when ? `saved ${when}` : '');
+    stamp.style.cssText = 'margin-left:auto;font-size:11px';
+    // No link style exists in this app — a real button, sized to the line.
+    const fresh = el('button', 'btn ghost pv-start-fresh', 'Start fresh');
+    fresh.style.cssText = 'padding:0 6px;font-size:11px;color:var(--accent)';
+    fresh.title = 'Forget the saved pivots and start from an empty one';
+    fresh.onclick = startFresh;
+    banner.append(stamp, fresh);
+    if (notes.length) {
+      const why = el('div', 'note-status', notes.join(' · '));
+      why.style.cssText = 'flex:1 0 100%;font-size:11px';
+      banner.append(why);
+    }
+    banner.hidden = false;
+  }
+
+  async function startFresh() {
+    hideBanner();
+    if (winnow.tabState) await winnow.tabState.clear();
+    pivots.splice(0, pivots.length, newPivotState('Pivot 1'));
+    active = 0;
+    state = pivots[0];
+    state.meta = sharedMeta;
+    renderPivotTabs();
+    fillSources();
+    renderFields();
+    render();
+  }
+
   /* ---------------------------------------------------------- chrome */
 
   const bar = el('div');
@@ -55,7 +228,7 @@ export default function mount(container, winnow) {
   srcSel.onchange = () => selectSource(Number(srcSel.value));
 
   const subBtn = toggleButton('Subtotals', () => state.subtotals, (v) => { state.subtotals = v; scheduleRefresh(); });
-  const gtBtn = toggleButton('Grand totals', () => state.grandTotals, (v) => { state.grandTotals = v; render(); });
+  const gtBtn = toggleButton('Grand totals', () => state.grandTotals, (v) => { state.grandTotals = v; render(); saveState(); });
   const copyBtn = el('button', 'btn ghost', 'Copy');
   copyBtn.title = 'Copy the pivot as TSV — paste straight into a spreadsheet';
   copyBtn.onclick = () => copyOut('\t', 'Pivot copied');
@@ -84,6 +257,7 @@ export default function mount(container, winnow) {
           p.name = inp.value.trim() || p.name;
           renamingIdx = null;
           renderPivotTabs();
+          saveState();   // a rename is not a field change, so scheduleRefresh never sees it
         };
         inp.onkeydown = (e) => {
           if (e.key === 'Enter') commit();
@@ -125,6 +299,10 @@ export default function mount(container, winnow) {
     fillSources();
     renderFields();
     render();
+    // Which pivot is on top is part of what gets restored, and one that
+    // was restored has no data until something asks for it.
+    saveState();
+    if (!state.data && !state.loading) scheduleRefresh();
   }
   function closePivot(i) {
     pivots.splice(i, 1);
@@ -490,6 +668,7 @@ export default function mount(container, winnow) {
 
   let timer = null;
   function scheduleRefresh() {
+    saveState();
     clearTimeout(timer);
     timer = setTimeout(runQuery, REFRESH_MS);
   }
@@ -702,6 +881,7 @@ export default function mount(container, winnow) {
       else if (state.sort.dir === -1) state.sort.dir = 1;   // biggest first, then smallest
       else state.sort = null;                               // then back to key order
       render();
+      saveState();
     };
     if (isSortedBy(mi, colVals)) th.textContent = (th.textContent || '') + (state.sort.dir === -1 ? ' ▾' : ' ▴');
   }
@@ -984,8 +1164,14 @@ export default function mount(container, winnow) {
       state.sourceId = null;
       return;
     }
-    const keep = real.some((s) => String(s.id) === previous) ? previous
-      : String(winnow.state.sourceId ?? real[0].id);
+    // A restored pivot names its own table, and that beats both the
+    // select's last value and whatever the grid happens to be showing —
+    // otherwise the first fill after a restore would call selectSource and
+    // empty the wells it just filled. (First/Last reads the same way.)
+    const keep = state.sourceId != null && real.some((s) => s.id === state.sourceId)
+      ? String(state.sourceId)
+      : (real.some((s) => String(s.id) === previous) ? previous
+        : String(winnow.state.sourceId ?? real[0].id));
     srcSel.value = real.some((s) => String(s.id) === keep) ? keep : String(real[0].id);
     if (state.sourceId !== Number(srcSel.value)) selectSource(Number(srcSel.value));
   }
@@ -999,6 +1185,7 @@ export default function mount(container, winnow) {
     state.sort = null; state.data = null;
     renderFields();
     render();
+    saveState();   // the table is the pivot's first fact; nothing else fires here
   }
 
   function placeMenu(anchor, name) {
@@ -1027,11 +1214,27 @@ export default function mount(container, winnow) {
       return;
     }
     sharedMeta = state.meta;
+    const saved = winnow.tabState ? await winnow.tabState.get() : null;
+    const restored = saved ? planRestore(saved.payload, winnow.state.sources) : null;
+    if (restored) {
+      pivots.splice(0, pivots.length,
+        // The ordering a header click applied is deliberately not restored:
+        // it indexes into the measures, and a measure may have just been
+        // dropped for naming a column the table no longer has.
+        ...restored.pivots.map((spec) => Object.assign(newPivotState(spec.name), spec)));
+      active = restored.active;
+      state = pivots[active];
+      showRestoredBanner(saved.savedAt, restored.notes);
+    }
     for (const p of pivots) p.meta = sharedMeta;
+    state.meta = sharedMeta;
     renderPivotTabs();
     fillSources();
     renderFields();
     render();
+    saveOn = true;
+    // The cross-tab is re-queried against the case as it is now.
+    if (restored) runQuery();
   })();
 }
 

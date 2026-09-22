@@ -33,6 +33,155 @@ const writeRail = (w) => { try { localStorage.setItem(RAIL_KEY, String(w)); } ca
 const readAuto = () => { try { return localStorage.getItem(AUTO_KEY) !== '0'; } catch { return true; } };
 const writeAuto = (on) => { try { localStorage.setItem(AUTO_KEY, on ? '1' : '0'); } catch { /* private mode */ } };
 
+/* ------------------------------------------------- saved sheets */
+
+/* The sheets survive the case being closed, because they live in the case
+   file: winnow.tabState (plugin API 10) is this mount's own row, written
+   as the analyst works — there is no teardown callback in the contract, so
+   saving on close is not a thing a plugin can do.
+
+   DEFINITIONS ONLY. What is saved is the question — which fields are in
+   which zone, the description, the dragged column widths, which sheet was
+   on top. The ANSWER is re-run against the case on open: a preview kept
+   from three weeks ago is a picture of evidence rather than the evidence,
+   and the row it shows may since have been re-imported, filtered out or
+   tagged.
+
+   Two things a payload cannot be trusted about, both of them things this
+   plugin would otherwise open on an error banner:
+   - the table. A dropped source's id is handed straight to the next
+     import, so the id is only believed when the name still matches; a
+     table re-imported under a new id is found by name instead.
+   - the columns. groupBy/carry/sums/filters go into the request
+     unvalidated, and the backend's _check_columns answers a missing one
+     with a 400 (renderControls only ever re-defaults the sort column), so
+     restore drops what no longer resolves and says which. */
+
+const STATE_VERSION = 1;
+// A sheet is a few hundred bytes; two dozen of them is far past what
+// anyone builds and still nowhere near winnow.tabState's cap.
+const MAX_SAVED_SHEETS = 24;
+const TAG_MODES = ['', 'any', 'none', 'ids'];
+
+const emptySpec = (name) => ({
+  name,
+  sourceId: null,
+  groupBy: [], carry: [], sums: [], filters: [],
+  tags: { mode: '', ids: [] }, rowJson: false,
+  sortColumn: null, colWidths: {}, template: '{which} of {count}',
+});
+
+/* One sheet, cut down to the spec — no preview, no meta, no selection, no
+   loading/stale flags. Those describe a moment, not a question. */
+export function sheetSpec(sh, sources) {
+  const src = (sources || []).find((s) => s.id === sh.sourceId) || null;
+  return {
+    name: sh.name,
+    // Id AND name: the id alone can point at a different table by the time
+    // this is read back.
+    source: src ? { id: src.id, name: src.name } : null,
+    groupBy: sh.groupBy, carry: sh.carry, sums: sh.sums, filters: sh.filters,
+    tags: sh.tags, rowJson: sh.rowJson, sortColumn: sh.sortColumn,
+    colWidths: sh.colWidths, template: sh.template,
+  };
+}
+
+function resolveSource(saved, sources) {
+  if (!saved || typeof saved !== 'object') return null;
+  const name = saved.name == null ? null : String(saved.name);
+  const byId = sources.find((s) => s.id === saved.id) || null;
+  if (byId && (name === null || byId.name === name)) return byId;
+  // Re-imported under a new id: here the name is the stronger identity.
+  return (name === null ? null : sources.find((s) => s.name === name)) || null;
+}
+
+/* What of a saved payload this case can still honour: the sheet specs to
+   restore, which one was on top, and a line per sheet that lost something.
+   Pure — it reads the payload, the live source list and the case's tags and
+   nothing else, which is what makes the id-reuse, dead-column and
+   deleted-tag cases testable. */
+export function planRestore(payload, sources, tags) {
+  if (!payload || payload.v !== STATE_VERSION) return null;
+  const saved = Array.isArray(payload.sheets) ? payload.sheets.slice(0, MAX_SAVED_SHEETS) : [];
+  if (!saved.length) return null;
+  const live = (sources || []).filter((s) => !s.error);   // merges included — invariant #9
+  const sheets = [];
+  const notes = [];
+  for (const sh of saved) {
+    if (!sh || typeof sh !== 'object') continue;
+    const name = String(sh.name || `Bookends ${sheets.length + 1}`);
+    const spec = emptySpec(name);
+    if (typeof sh.template === 'string' && sh.template) spec.template = sh.template;
+    const src = resolveSource(sh.source, live);
+    if (!src) {
+      // A sheet that never picked a table is not a loss to report — it is
+      // a fresh sheet, and fillSources gives it this case's first table.
+      if (sh.source) {
+        const was = sh.source.name ? `“${sh.source.name}”` : 'its table';
+        notes.push(`${name}: ${was} is not in this case any more`);
+      }
+      sheets.push(spec);
+      continue;
+    }
+    const cols = new Set((src.columns || []).map((c) => c.name));
+    const gone = [];
+    const kept = (list) => (Array.isArray(list) ? list : []).map(String).filter((n) => {
+      if (cols.has(n)) return true;
+      gone.push(n);
+      return false;
+    });
+    spec.sourceId = src.id;
+    spec.groupBy = kept(sh.groupBy);
+    spec.carry = kept(sh.carry);
+    spec.sums = kept(sh.sums);
+    spec.filters = (Array.isArray(sh.filters) ? sh.filters : []).filter((f) => {
+      if (!f || typeof f !== 'object' || !f.column) return false;
+      if (cols.has(f.column)) return true;
+      gone.push(String(f.column));
+      return false;
+    });
+    if (typeof sh.sortColumn === 'string' && cols.has(sh.sortColumn)) spec.sortColumn = sh.sortColumn;
+    else if (sh.sortColumn) gone.push(String(sh.sortColumn));
+    if (sh.tags && typeof sh.tags === 'object') {
+      spec.tags = {
+        mode: TAG_MODES.includes(sh.tags.mode) ? sh.tags.mode : '',
+        ids: (Array.isArray(sh.tags.ids) ? sh.tags.ids : []).filter((n) => typeof n === 'number'),
+      };
+      // A deleted tag is a column that has gone by another name: "only
+      // these tags" against an id nothing carries any more is not an
+      // error, it is an empty result, which is the worse failure.
+      if (spec.tags.mode === 'ids') {
+        const liveTags = new Set((tags || []).map((t) => t.id));
+        const before = spec.tags.ids.length;
+        spec.tags.ids = spec.tags.ids.filter((id) => liveTags.has(id));
+        if (spec.tags.ids.length !== before) {
+          if (spec.tags.ids.length) {
+            notes.push(`${name}: dropped ${before - spec.tags.ids.length} tag filter(s) this case no longer has`);
+          } else {
+            spec.tags = { mode: '', ids: [] };
+            notes.push(`${name}: the tags it was filtered to are gone — every row is in again`);
+          }
+        }
+      }
+    }
+    spec.rowJson = !!sh.rowJson;
+    // Preview widths are keyed by OUTPUT column, which includes Which /
+    // Description / Row (JSON) — not names to look for in the table.
+    if (sh.colWidths && typeof sh.colWidths === 'object') {
+      for (const c of Object.keys(sh.colWidths)) {
+        const w = sh.colWidths[c];
+        if (typeof w === 'number' && w > 0) spec.colWidths[c] = w;
+      }
+    }
+    if (gone.length) notes.push(`${name}: dropped ${[...new Set(gone)].join(', ')} — not in ${src.name} any more`);
+    sheets.push(spec);
+  }
+  if (!sheets.length) return null;
+  const a = payload.active;
+  const active = Number.isInteger(a) && a >= 0 && a < sheets.length ? a : 0;
+  return { sheets, active, notes };
+}
+
 let state = null;
 let refresh = null;
 let hideCompletion = null;
@@ -60,6 +209,84 @@ export default function mount(container, winnow) {
   let renamingIdx = null;
   state = sheets[0];
 
+  /* Nothing is written until the saved sheets have been read back and
+     folded in — the first render would otherwise save the empty default
+     over whatever the analyst left here. */
+  let saveOn = false;
+  /* One untouched sheet is what a fresh tab looks like, so saving it would
+     make the next open announce a restore of nothing. Emptying the zones
+     is also how an analyst says "forget this", and a null payload is how
+     that reaches the case file. */
+  const worthKeeping = () => sheets.length > 1 || sheets.some((sh) => (
+    sh.groupBy.length || sh.carry.length || sh.sums.length || sh.filters.length
+    || sh.tags.mode || sh.rowJson || Object.keys(sh.colWidths).length
+    || sh.template !== '{which} of {count}'));
+  function saveState() {
+    if (!saveOn || !winnow.tabState) return;   // an older Winnow has no tabState
+    hideBanner();   // once something is edited, "restored" is no longer news
+    winnow.tabState.set(worthKeeping() ? {
+      v: STATE_VERSION,
+      active,
+      sheets: sheets.map((sh) => sheetSpec(sh, winnow.state.sources)),
+    } : null);
+  }
+
+  /* ------------------------------------------------------- the banner */
+
+  /* Restoring silently would be worse than not restoring: the analyst
+     needs to know these sheets are from last time (and possibly older than
+     the evidence), when that was, and how to get an empty one back. Above
+     the sheet strip, so it reads before the thing it is about. */
+  const banner = el('div');
+  banner.className = 'fl-restored';
+  banner.hidden = true;
+  banner.style.cssText = 'display:flex;align-items:center;gap:9px;flex-wrap:wrap;padding:7px 10px;'
+    + 'background:var(--panel-2);border-left:2px solid var(--accent);'
+    + 'border-bottom:1px solid var(--line-2);font-size:12px;flex:0 0 auto';
+  container.append(banner);
+
+  function hideBanner() {
+    if (banner.hidden) return;
+    banner.hidden = true;
+    banner.replaceChildren();
+  }
+
+  function showRestoredBanner(savedAt, notes) {
+    banner.replaceChildren();
+    banner.append(el('span', null, 'Restored the sheets you left open when this case was last closed.'));
+    const when = String(savedAt || '').replace('T', ' ').slice(0, 16);
+    const stamp = el('span', 'note-status', when ? `saved ${when}` : '');
+    stamp.style.cssText = 'margin-left:auto;font-size:11px';
+    // No link style exists in this app (see the .btn / .btn.ghost pair in
+    // static/style.css) — a real button, sized down to sit in the line.
+    const fresh = el('button', 'btn ghost fl-start-fresh', 'Start fresh');
+    fresh.style.cssText = 'padding:0 6px;font-size:11px;color:var(--accent)';
+    fresh.title = 'Forget the saved sheets and start from an empty one';
+    fresh.onclick = startFresh;
+    banner.append(stamp, fresh);
+    if (notes.length) {
+      // Its own row under the sentence — flex-wrap puts it there, and the
+      // dropped fields are the part worth reading twice.
+      const why = el('div', 'note-status', notes.join(' · '));
+      why.style.cssText = 'flex:1 0 100%;font-size:11px';
+      banner.append(why);
+    }
+    banner.hidden = false;
+  }
+
+  async function startFresh() {
+    hideBanner();
+    if (winnow.tabState) await winnow.tabState.clear();
+    sheets.splice(0, sheets.length, newSheet('Bookends 1'));
+    active = 0;
+    state = sheets[0];
+    state.meta = sharedMeta;
+    renderSheetTabs();
+    fillSources();
+    renderControls();
+    renderPreview();
+  }
+
   /* ------------------------------------------------------- sheet strip */
 
   const strip = el('div', 'sql-tabs');
@@ -75,6 +302,7 @@ export default function mount(container, winnow) {
           sh.name = inp.value.trim() || sh.name;
           renamingIdx = null;
           renderSheetTabs();
+          saveState();   // a rename is not a control change, so schedule() never sees it
         };
         inp.onkeydown = (e) => {
           if (e.key === 'Enter') commit();
@@ -117,6 +345,10 @@ export default function mount(container, winnow) {
     fillSources();
     renderControls();
     renderPreview();
+    // Which sheet is on top is part of what gets restored, and a sheet
+    // restored but never run has nothing on screen until something asks.
+    saveState();
+    if (state.stale) schedule();
   }
   function closeSheet(i) {
     sheets.splice(i, 1);
@@ -783,6 +1015,9 @@ export default function mount(container, winnow) {
 
   let timer = null;
   function schedule() {
+    // Above the auto-update gate on purpose: with it off, edits still have
+    // to be saved — they just do not re-run the preview.
+    saveState();
     clearTimeout(timer);
     if (!auto) {
       // Nothing runs until Refresh — but the status says the preview on
@@ -929,6 +1164,7 @@ export default function mount(container, winnow) {
           grip.removeEventListener('pointercancel', up);
           grip.style.background = '';
           th.draggable = wasDraggable;
+          saveState();   // once, at the end of the drag, not per pointermove
         };
         grip.addEventListener('pointermove', move);
         grip.addEventListener('pointerup', up);
@@ -937,6 +1173,7 @@ export default function mount(container, winnow) {
       grip.addEventListener('dblclick', (e) => {
         e.stopPropagation();
         delete state.colWidths[c];
+        saveState();
         for (const node of [th, ...[...t.querySelectorAll('tbody tr')].map((tr) => tr.children[ci])]) {
           if (node) { node.style.width = ''; node.style.minWidth = ''; node.style.maxWidth = ''; }
         }
@@ -1126,6 +1363,7 @@ export default function mount(container, winnow) {
     state.selRows = new Set();
     renderControls();
     renderPreview();
+    saveState();   // the table is the sheet's first fact; nothing else fires here
   }
 
   refresh = () => { fillSources(); renderControls(); };
@@ -1137,12 +1375,28 @@ export default function mount(container, winnow) {
       container.append(note('Could not load the plugin backend: ' + e.message, true));
       return;
     }
+    const saved = winnow.tabState ? await winnow.tabState.get() : null;
+    const restored = saved ? planRestore(saved.payload, winnow.state.sources, winnow.state.tags) : null;
+    if (restored) {
+      // Restored sheets start stale: the definitions are back, the rows
+      // are not, and the active one runs below.
+      sheets.splice(0, sheets.length,
+        ...restored.sheets.map((spec) => Object.assign(newSheet(spec.name), spec, { stale: true })));
+      active = restored.active;
+      state = sheets[active];
+      showRestoredBanner(saved.savedAt, restored.notes);
+    }
     for (const sh of sheets) sh.meta = sharedMeta;
     state.meta = sharedMeta;
     renderSheetTabs();
     fillSources();
     renderControls();
     renderPreview();
+    saveOn = true;
+    // The rows are re-run against the case as it is NOW. Regardless of
+    // Auto-update: this is the restore, not an edit, and restored controls
+    // over an empty table read as a broken tab.
+    if (restored) runPreview();
   })();
 }
 

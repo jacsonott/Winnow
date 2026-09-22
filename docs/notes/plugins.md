@@ -128,7 +128,23 @@ see [docs/notes/README.md](README.md) for the whole set.
   — `gen` is the registry load sequence, bumped on every reload, so a
   toggle-off/on picks up changed JS. One mount per tab, kept across tab
   switches, torn down on case switch (`resetPluginTabMounts`) and gen
-  change; the module's default export gets `(container, winnow)` where
+  change — and the plugin is told about none of it, since there is no
+  `onDestroy` in the contract. That is why `winnow.tabState` (get/set/
+  clear, one `plugin_ui_state` row per MOUNT key in the case file, via
+  `GET`/`POST /api/plugin_state`) writes as the analyst works instead of
+  flushing at teardown: a case switch has already swapped the server's
+  Store by the time `resetPluginTabMounts` runs, which is also why
+  `openCase` calls `dropPendingTabState()` *before* `/api/case/open`
+  rather than flushing after it — a save still inside its debounce would
+  land the old case's spec in the new case's file. Restoring is the
+  plugin's job and has two traps in it: a source id is handed to the next
+  import after a drop (so the saved table NAME is what makes the id
+  believable) and a column named by the payload may be gone (the
+  first_last/pivot backends answer that with a 400), so both bundled
+  examples validate against the live source list, say what they dropped,
+  and offer "Start fresh". The rows are never collected: a plugin toggled
+  off keeps its state for when it comes back;
+  the module's default export gets `(container, winnow)` where
   `winnow` is `buildPluginTabContext`'s stable surface (api/post/el/
   modal helpers, `sql()` → run_sql's own RO connection, `schemaText()`,
   live state getters incl. state.timeRange, plus openFiltered(source_id, [{column, value}]) to jump to the evidence); optional onShow/onHide exports fire per switch.

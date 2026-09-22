@@ -369,6 +369,10 @@ export function hidePluginViews() {
 }
 
 export function resetPluginTabMounts() {
+  // Anything a mount was about to save describes the case being left, and
+  // the server has already swapped stores by the time this runs — see
+  // dropPendingTabState.
+  dropPendingTabState();
   for (const [id, m] of pluginTabMounts) { disposePluginMount(mountKey('tab', id)); m.container.remove(); }
   pluginTabMounts.clear();
 }
@@ -430,6 +434,111 @@ export function disposePluginMount(key) {
   closeNoticesOwnedBy(key);   // its rows' click handlers point at code that's gone
 }
 
+/* ------------------------------------------------- winnow.tabState */
+
+/* A mount's own scrap of the case file, written as the analyst works.
+
+   A plugin tab is built from nothing every time its plugin's gen changes
+   — a case switch, a Settings toggle, a profile apply, F5 — and there is
+   no onDestroy in the contract (see mountListeners above), so there is no
+   moment at which a plugin could flush what somebody spent ten minutes
+   building. Eager is therefore the only shape that works: set() debounces,
+   the host owns the timer, and the row lands under this mount's key.
+
+   Three rules, all load-bearing, all said again in docs/writing-plugins.md:
+   - SPEC ONLY. Save which fields sit in which well, never the rows they
+     produced — rows belong to the case and are re-run on restore. The cap
+     is what keeps that from being a suggestion.
+   - VALIDATE ON RESTORE. A source id is reused after a drop and a column
+     can be gone; a payload records what somebody wanted, not what the case
+     still holds.
+   - LAST WRITE WINS. Two Winnows on one case do not merge.
+
+   Nothing here rejects. An unhandled rejection from a background save
+   would surface as a page error in whatever the analyst was doing at the
+   time, which is both useless and alarming; failures are logged, said out
+   loud once per mount, and reported through the resolved value. */
+const TAB_STATE_DEBOUNCE_MS = 500;
+// store.PLUGIN_UI_STATE_MAX_BYTES. Counted in characters here, which only
+// ever under-counts UTF-8 — the server holds the real line and answers 400.
+const TAB_STATE_MAX_CHARS = 64 * 1024;
+const pendingTabState = new Map();      // mount key -> {payload, timer, waiters}
+const tabStateComplained = new Set();   // mounts whose failure has been said once
+
+function flushTabState(key) {
+  const p = pendingTabState.get(key);
+  if (!p) return;
+  clearTimeout(p.timer);
+  pendingTabState.delete(key);
+  post('/api/plugin_state', { key, payload: p.payload }).then(
+    () => { for (const w of p.waiters) w(true); },
+    (e) => {
+      console.error(`winnow.tabState: ${key} was not saved`, e);
+      if (!tabStateComplained.has(key)) {
+        tabStateComplained.add(key);
+        toast('A plugin tab could not save its state — see the console', 5000);
+      }
+      for (const w of p.waiters) w(false);
+    });
+}
+
+/* Everything still inside its debounce, dropped rather than written.
+
+   openCase POSTs /api/case/open FIRST and the server swaps stores there,
+   so a save that fired a moment later would land the previous case's
+   grouping in the file that just opened — the same trap the note binding
+   at the top of openCase is blanked for. Dropping costs at most half a
+   second of edits in the case being left; writing would put them in the
+   wrong case file. */
+export function dropPendingTabState() {
+  for (const p of pendingTabState.values()) {
+    clearTimeout(p.timer);
+    for (const w of p.waiters) w(false);
+  }
+  pendingTabState.clear();
+}
+
+function tabStateApi(key) {
+  return {
+    get: () => api(`/api/plugin_state?key=${encodeURIComponent(key)}`).then(
+      (r) => (r && r.payload != null ? { payload: r.payload, savedAt: r.saved_at } : null),
+      (e) => { console.error(`winnow.tabState: ${key} could not be read`, e); return null; }),
+    set: (value) => {
+      let json;
+      try {
+        json = JSON.stringify(value === undefined ? null : value);
+      } catch (e) {
+        console.error(`winnow.tabState: ${key} is not JSON`, e);
+        return Promise.resolve(false);
+      }
+      if (json.length > TAB_STATE_MAX_CHARS) {
+        console.error(`winnow.tabState: ${key} is ${json.length} characters, over the `
+          + `${TAB_STATE_MAX_CHARS} cap — save the definition, not the rows`);
+        return Promise.resolve(false);
+      }
+      const p = pendingTabState.get(key) || { waiters: [], timer: null };
+      // A snapshot, not the plugin's object: it goes on being edited while
+      // this sits in the debounce, and what is saved must be what was set.
+      p.payload = JSON.parse(json);
+      clearTimeout(p.timer);
+      p.timer = setTimeout(() => flushTabState(key), TAB_STATE_DEBOUNCE_MS);
+      pendingTabState.set(key, p);
+      return new Promise((resolve) => p.waiters.push(resolve));
+    },
+    clear: () => {
+      const p = pendingTabState.get(key);
+      if (p) {
+        clearTimeout(p.timer);
+        pendingTabState.delete(key);
+        for (const w of p.waiters) w(false);
+      }
+      return post('/api/plugin_state', { key, payload: null }).then(
+        () => true,
+        (e) => { console.error(`winnow.tabState: ${key} was not cleared`, e); return false; });
+    },
+  };
+}
+
 /* winnow.showTab: back to one of the plugin's OWN pages — from a
    notification's button, typically. Reopens the page tab if the analyst
    had closed it from the strip, the way the sidebar's Pages rows do;
@@ -462,7 +571,7 @@ export async function showPage(name) {
 
 export function buildPluginTabContext(tab, kind = 'tab') {
   return {
-    apiVersion: 4,
+    apiVersion: 5,
     plugin: tab.plugin,
     base: `/api/plugin/${tab.plugin_fs}`,      // the plugin's own register_api routes
     assets: `/plugin_assets/${tab.plugin_fs}`, // the plugin's own files (css, workers, data)
@@ -478,6 +587,11 @@ export function buildPluginTabContext(tab, kind = 'tab') {
     // load (the SQL sub-tabs, the notes body) is async.
     sqlPage: sqlPageApi(mountKey(kind, tab.id)),
     notesPage: notesPageApi(mountKey(kind, tab.id)),
+    // This mount's own state in the case file — get/set/clear, scoped by
+    // mount key so a plugin's tab and its panel cannot overwrite each
+    // other. Spec only, and validated against the case on the way back in;
+    // see the tabStateApi comment and docs/writing-plugins.md.
+    tabState: tabStateApi(mountKey(kind, tab.id)),
     sql: (sql, limit = 5000) => post('/api/sql', { sql, limit }),
     schemaText: sqlSchemaForLLM,
     openSource,

@@ -96,6 +96,12 @@ A tab plus its backend route, the full custom-UI shape:
     # for its other files, winnow.sql() for read-only case queries,
     # winnow.schemaText() for an LLM-ready schema dump, and winnow.state
     # (live sources/tags/selection getters).
+    # winnow.tabState (get/set/clear) is this mount's own row in the CASE
+    # file, for state that should survive the case being closed — a mount
+    # is torn down with no callback, so it is written as the analyst works
+    # rather than flushed at the end. Definitions only (a cap of 64 KiB
+    # says so), validated against the case on the way back in: a source id
+    # is reused after a drop and a column can be gone.
     # Optional exports: onShow/onHide, called on every tab switch.
     #
     #   export default function mount(container, winnow) { ... }
@@ -201,7 +207,7 @@ PAGE_PANEL_PAGES = ("sql", "notes")
 # provides, with a message that says to update Winnow — the failure mode
 # is otherwise an AttributeError deep inside register() that reads like a
 # plugin bug.
-PLUGIN_API_VERSION = 9
+PLUGIN_API_VERSION = 10
 
 FORMAT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 # API routes may nest ("chat/stream") but each segment keeps the same shape.

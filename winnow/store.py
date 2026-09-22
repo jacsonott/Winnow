@@ -125,6 +125,14 @@ DEFAULT_TAGS = [
     ("Benign", "#5d8a66", "3"),
 ]
 
+# A plugin tab's saved UI state (plugin_ui_state) is a SPEC — which fields
+# sit in which well, which sheet was open — never a result set. 64 KiB is
+# far more than any such spec needs (First/Last's whole sheet list is under
+# a kilobyte) and small enough that no plugin can quietly park a query
+# result in the case file, where it would go stale against the evidence it
+# claims to describe.
+PLUGIN_UI_STATE_MAX_BYTES = 64 * 1024
+
 META_SCHEMA = """
 CREATE TABLE IF NOT EXISTS sources (
     id          INTEGER PRIMARY KEY,
@@ -215,6 +223,26 @@ CREATE TABLE IF NOT EXISTS sql_tabs (
     sql  TEXT NOT NULL DEFAULT '',
     pos  INTEGER NOT NULL DEFAULT 0     -- left-to-right strip order; ties break by id
 );
+-- What a plugin tab (or panel) had on screen, per mount: the sheets
+-- First/Last was showing, the fields a pivot had in its wells. In the case
+-- file for the same reason as sql_tabs — a grouping somebody worked out is
+-- analysis *about this evidence* — and per case, so a spec naming this
+-- case's columns can never be restored over another case's tables.
+--
+-- Written only by the plugin, through winnow.tabState (static/js/plugins.js);
+-- the host never writes here on a plugin's behalf. Nothing collects the
+-- rows: a plugin toggled off for a while keeps its state for when it comes
+-- back, and an uninstalled one leaves a row nobody reads. Both are
+-- deliberate — the rows are bytes, and losing an analyst's sheets to a
+-- checkbox would be the bug this table exists to fix.
+--
+-- SPEC ONLY, capped at PLUGIN_UI_STATE_MAX_BYTES: rows belong to the tables
+-- they came from and are re-run on restore, never replayed from here.
+CREATE TABLE IF NOT EXISTS plugin_ui_state (
+    mount_key TEXT PRIMARY KEY,   -- 'tab:<plugin>.<id>', 'panel:…', 'page:…' (plugins.js mountKey)
+    payload   TEXT NOT NULL,      -- a JSON document whose shape the plugin owns
+    saved_at  TEXT NOT NULL
+) WITHOUT ROWID;
 -- Derived (computed) column definitions. The VALUES live in a per-source
 -- sidecar table drv_<source_id> (rid INTEGER PRIMARY KEY, one TEXT column
 -- per derived column) created lazily by add_derived_column — the
@@ -7635,6 +7663,58 @@ class Store:
                 "UPDATE sql_tabs SET pos=? WHERE id=?", [(len(seq) + p, i) for p, i in enumerate(rest)],
             )
         return self.list_sql_tabs()
+
+    # -------------------------------------------- plugin tab/panel UI state
+
+    def get_plugin_ui_state(self, mount_key: str) -> dict | None:
+        """What a plugin mount saved here, or None if it never has.
+
+        A payload that no longer parses (a hand-edited case file, a
+        truncated copy) reads as nothing saved rather than raising: every
+        caller's fallback is "start fresh", which is the right answer to a
+        payload nobody can read anyway."""
+        with self.lock:
+            row = self.db.execute(
+                "SELECT payload, saved_at FROM plugin_ui_state WHERE mount_key=?",
+                (mount_key,),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            payload = json.loads(row["payload"])
+        except ValueError:
+            return None
+        return {"mount_key": mount_key, "payload": payload, "saved_at": row["saved_at"]}
+
+    def set_plugin_ui_state(self, mount_key: str, payload) -> dict:
+        """Replace a mount's saved state. Last write wins — two Winnows on
+        one case file do not merge, and a UI spec is not something that
+        could be merged meaningfully anyway.
+
+        Refuses anything past PLUGIN_UI_STATE_MAX_BYTES: the cap is what
+        keeps "save the definition" from drifting into "save the result"."""
+        if not mount_key:
+            raise ValueError("A plugin state key is required")
+        blob = json.dumps(payload)
+        size = len(blob.encode("utf-8"))
+        if size > PLUGIN_UI_STATE_MAX_BYTES:
+            raise ValueError(
+                f"Plugin tab state is {size} bytes, over the "
+                f"{PLUGIN_UI_STATE_MAX_BYTES}-byte cap — save the definition, not the rows")
+        saved_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+        with self.lock, self.db:
+            self.db.execute(
+                "INSERT INTO plugin_ui_state(mount_key, payload, saved_at) VALUES (?,?,?) "
+                "ON CONFLICT(mount_key) DO UPDATE SET payload=excluded.payload, "
+                "saved_at=excluded.saved_at",
+                (mount_key, blob, saved_at),
+            )
+        return {"mount_key": mount_key, "payload": payload, "saved_at": saved_at}
+
+    def clear_plugin_ui_state(self, mount_key: str) -> None:
+        """The "start fresh" path. Deleting a row nobody has is fine."""
+        with self.lock, self.db:
+            self.db.execute("DELETE FROM plugin_ui_state WHERE mount_key=?", (mount_key,))
 
     # ------------------------------------------ legacy filter-preset migration
 
