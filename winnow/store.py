@@ -8337,6 +8337,18 @@ class Store:
         if not isinstance(w, dict):
             return "0"
         key = {"source": w.get("source") or "sql", "query": w.get("query") or {}}
+        # A `signals` card asks its questions in `cells`, not in `query` —
+        # so that is where its answer can go out of date. Added only when
+        # present, or every board in every existing case would fingerprint
+        # differently on first read and throw its whole cache away.
+        # The label rides along, unlike a card's title: a cell's label is
+        # IN the answer (the payload is label/value pairs, and the card
+        # reads each cell's drill back off it by label), so renaming one
+        # does change the result in a way a repaint would get wrong.
+        if w.get("cells"):
+            key["cells"] = [{"label": c.get("label") or "", "source": c.get("source") or "sql",
+                             "query": c.get("query") or {}}
+                            for c in w["cells"] if isinstance(c, dict)]
         return hashlib.sha1(
             json.dumps(key, sort_keys=True, default=str).encode("utf-8", "replace")).hexdigest()[:16]
 
@@ -8958,7 +8970,8 @@ class Store:
                 continue
             t0 = time.time()
             try:
-                payload = self.dashboard_widget_preview(w.get("source") or "sql", w.get("query") or {})
+                payload = self.dashboard_widget_preview(w.get("source") or "sql", w.get("query") or {},
+                                                       cells=w.get("cells"))
                 ms = int((time.time() - t0) * 1000)
                 # Encoded inside the same try, and with default=str: one
                 # widget nobody can serialise must cost its own cache row,
@@ -9125,12 +9138,20 @@ class Store:
             raise ValueError(f"No \u201c{hs}\u201d table in this case yet")
         return int(src["id"])
 
-    def dashboard_widget_preview(self, source: str, query: dict, limit: int = 200) -> dict:
+    def dashboard_widget_preview(self, source: str, query: dict, limit: int = 200,
+                                 cells: list | None = None) -> dict:
         """Run one widget's data source and return normalized tabular data
         the client renders per the widget's kind. SQL rides the read-only
         run_sql path (own connection, statement checks) — so a dashboard is
-        data, not code. watchlist / tags read the case's own state."""
+        data, not code. watchlist / tags read the case's own state.
+
+        `source: "cells"` is the grid of labelled numbers the `signals`
+        render kind draws: `cells` is a list of small widgets, each with
+        its own source, query and drill, and this runs them all and
+        answers with one label/value row per cell."""
         query = query or {}
+        if source == "cells":
+            return self._cells_preview(cells or [], limit)
         if source == "sql":
             sql = (query.get("sql") or "").strip()
             if not sql:
@@ -9152,6 +9173,52 @@ class Store:
             return {"columns": ["tag", "count"], "rows": [[r["name"], r["n"]] for r in rows],
                     "total": sum(r["n"] for r in rows)}
         raise ValueError(f"Unknown widget source {source!r}")
+
+    @staticmethod
+    def _cell_value(payload: dict):
+        """One number out of a widget payload — the same rule the client's
+        `stat` render applies: the watchlist/tags total when there is one,
+        otherwise the last column of the first row."""
+        if payload.get("total") is not None:
+            return payload["total"]
+        rows = payload.get("rows") or []
+        return rows[0][-1] if rows and rows[0] else None
+
+    def _cells_preview(self, cells: list, limit: int = 200) -> dict:
+        """Every cell of a `signals` widget, in order: one label/value row
+        each, and `cell_errors` parallel to them.
+
+        A cell fails ALONE. Five host-fact cards on a case with no RECmd
+        batch used to be five cards reading "No Registry (RECmd batch)
+        table in this case yet"; folded into one card with one query they
+        would have been one error where six numbers used to be, and the
+        evtx cells beside them would have gone down with the registry
+        ones. So each cell is asked separately and an error is reported in
+        the cell's own place, next to the neighbours that did answer.
+
+        One request, N answers, which is the other half of why the board
+        got shorter: eleven cards were eleven round trips."""
+        rows, errors = [], []
+        for c in cells:
+            if not isinstance(c, dict):
+                continue
+            label = "" if c.get("label") is None else str(c["label"])
+            src = c.get("source") or "sql"
+            if src == "cells":
+                # A cell of cells has no meaning and would recurse; say so
+                # rather than answering something.
+                rows.append([label, None])
+                errors.append("A signals cell cannot itself be a grid of signals")
+                continue
+            try:
+                payload = self.dashboard_widget_preview(src, c.get("query") or {}, limit)
+            except (ValueError, KeyError, TypeError, sqlite3.Error) as e:
+                rows.append([label, None])
+                errors.append(str(e))
+                continue
+            rows.append([label, self._cell_value(payload)])
+            errors.append(None)
+        return {"columns": ["label", "value"], "rows": rows, "cell_errors": errors}
 
     def pop_legacy_presets(self) -> list[dict]:
         """filter_presets used to be this case's own SQLite-backed table of

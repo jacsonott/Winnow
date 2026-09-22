@@ -1168,7 +1168,8 @@ python server.py --plugins-dir ~/src/my-winnow-plugins
 
 Installs from the UI always land in the first directory (`plugins/`).
 
-**Versioning:** the current plugin API version is **10** (a dashboard
+**Versioning:** the current plugin API version is **11** (the `signals`
+render kind and its `cells` source arrived in 11; a dashboard
 widget's `live` flag arrived in 10; `api.register_page_panel`
 and the tab context's `sqlPage` / `notesPage` / `notify` arrived in 9; `api.register_dashboard`
 arrived in 8; `req.set_env` /
@@ -1365,13 +1366,55 @@ api.register_dashboard(
 | key | |
 | --- | --- |
 | `title` | the card's heading (required) |
-| `source` | `"sql"`, `"tags"` or `"watchlist"` (required) |
-| `render` | `"stat"`, `"kv"`, `"chips"`, `"list"`, `"bar"` or `"histogram"` (required) |
+| `source` | `"sql"`, `"tags"`, `"watchlist"` or `"cells"` (required) |
+| `render` | `"stat"`, `"kv"`, `"chips"`, `"list"`, `"bar"`, `"histogram"` or `"signals"` (required) |
 | `query.sql` | required for `source: "sql"`; runs on the read-only pane connection, so a board is data, not code |
+| `cells` | required for `source: "cells"` — see **A card of many numbers** below |
 | `span` | `1` or `2` — how wide the card sits |
 | `live` | `true` — re-run this widget every time the board opens, instead of showing its last result |
 | `id` | assigned by Winnow when the board lands in a case — don't set it, but preserve it if you read a board and write it back |
 | `drill` | makes the card clickable; see below |
+
+**A card of many numbers.** `render: "signals"` with `source: "cells"` is
+one card holding a grid of labelled numbers — and **every cell keeps its
+own drill**:
+
+```python
+{"title": "Triage signals", "source": "cells", "render": "signals", "span": 3,
+ "cells": [
+     {"label": "Failed logons (4625)", "tone": "warn", "source": "sql",
+      "query": {"sql": "SELECT COUNT(*) FROM {{evtx}} WHERE Channel='Security' AND EventId='4625'"},
+      "drill": {"table": "{{evtx}}", "where": [
+          {"column": "Channel", "op": "equals", "value": "Security"},
+          {"column": "EventId", "op": "equals", "value": "4625"}]}},
+     {"label": "Sysmon service", "chip": True, "source": "sql",
+      "query": {"sql": "SELECT COUNT(*) > 0 FROM {{registry}} WHERE KeyPath LIKE '%\\Services\\Sysmon%'"},
+      "drill": {"table": "{{registry}}", "where": [
+          {"column": "KeyPath", "op": "contains", "value": "\\Services\\Sysmon"}]}},
+ ]}
+```
+
+| cell key | |
+| --- | --- |
+| `label` | the caption under the number; unique within the card, because it is how the card finds the cell's drill (required) |
+| `source` | `"sql"`, `"tags"` or `"watchlist"` — anything a widget can be, except another grid of signals |
+| `query.sql` | required for a `sql` cell; the cell's value is the first number it returns |
+| `drill` | the rows behind THIS number — same shape and same rule as a widget's |
+| `tone` | `"warn"` draws the number in the danger colour |
+| `chip` | `True` draws a yes/no pill instead of a number, above the numeric cells |
+
+Reach for it when a row of single-number cards is really one subject. The
+shipped KAPE board folded eleven stats into one of these: a `kv` card
+would have folded eleven working drill-throughs into one
+OR-of-everything, and a click that opens a superset of the rows you were
+reading is worse than one that opens nothing.
+
+Two properties worth knowing. **One card is one request**, whatever the
+cell count — which is the other half of why that board got shorter.
+And **a cell fails alone**: a cell whose table is not in this case says
+so in its own place while its neighbours show their numbers, instead of
+taking the card down with it. That is strictly better than the cards it
+replaced, where a case with no registry meant five identical error cards.
 
 **A board is not re-run from scratch every time it is opened.** Each
 widget's last result is kept in the case file, painted the instant the

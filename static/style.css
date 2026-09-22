@@ -2443,6 +2443,28 @@ html.remote .row.selected:hover { background: var(--row-selected); }
   margin: 2px 3px 0 0; font-size: 11px; color: var(--dim); }
 .dash-chip.on { color: var(--good); border-color: var(--accent-dim, var(--line-2)); }
 .dash-chip.off { color: var(--danger); border-color: var(--danger-border, var(--line-2)); }
+/* `signals` — a grid of labelled numbers, each cell its own question and
+   its own drill. Eleven single-number cards fit in one of these, which is
+   what the KAPE board's fourth row is. `auto-fill` rather than a fixed
+   column count so the same card reads at span 1 and span 4. */
+.dash-signals { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 10px 14px; }
+.dash-signal { border-left: 2px solid var(--line-2); padding-left: 9px; min-width: 0; }
+.dash-signal.warn { border-left-color: var(--danger); }
+.dash-signal .n { font-size: 21px; color: var(--accent); line-height: 1.15; }
+.dash-signal.warn .n { color: var(--danger); }
+.dash-signal .l { font-size: 10px; color: var(--dim); letter-spacing: .04em;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dash-signal.drillable { cursor: pointer; }
+.dash-signal.drillable:hover .n { text-decoration: underline;
+  text-decoration-color: var(--accent-dim); text-underline-offset: 4px; }
+/* Chip cells sit above the numbers: one card answers "is anything
+   logging?" and "how much was tampered with?" together. */
+.dash-chipline { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 10px; }
+.dash-chipline .dash-chip { margin: 0; }
+.dash-chip.drillable { cursor: pointer; }
+/* Not "no" — not answered. The cell's table is not in this case. */
+.dash-chip.unknown { color: var(--dim); border-style: dashed; }
+.dash-cells-note { margin-top: 10px; }
 .dash-list-row { display: flex; justify-content: space-between; padding: 3px 0; }
 .dash-list-row .t { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dash-list-row .c { color: var(--accent); padding-left: 8px; }
