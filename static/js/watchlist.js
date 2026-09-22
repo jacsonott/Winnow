@@ -11,6 +11,7 @@
    docs/design/analysis-suite.md. */
 
 import { $, api, el, post, toast } from './core.js';
+import { markDashboardStale } from './dashboard.js';
 import { render } from './grid.js';
 import { drawRail, regroupIfGroupedByTag } from './grouping.js';
 import { createNotice } from './jobs.js';
@@ -292,6 +293,12 @@ async function finishScan(rec, job) {
   } else {
     rec.notice.done({ detail: `${hitsLabel(total)} · ${tablesLabel(job.scanned)} · ${secs}`, sticky: false, actions: [] });
   }
+  // Hits written and matches auto-tagged are both things a widget counts,
+  // and a scan is usually running because an import just landed — which is
+  // exactly when a board is open and being read. markDashboardStale asks
+  // the server whether anything actually moved, so a re-scan that found
+  // the same hits leaves the board alone.
+  if (job.status === 'done') markDashboardStale();
   if (S.view && openTableWasTagged(job)) {
     clearRowCaches();
     refreshTagCounts();
