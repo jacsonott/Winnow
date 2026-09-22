@@ -201,7 +201,7 @@ PAGE_PANEL_PAGES = ("sql", "notes")
 # provides, with a message that says to update Winnow — the failure mode
 # is otherwise an AttributeError deep inside register() that reads like a
 # plugin bug.
-PLUGIN_API_VERSION = 9
+PLUGIN_API_VERSION = 10
 
 FORMAT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 # API routes may nest ("chat/stream") but each segment keeps the same shape.
@@ -702,7 +702,17 @@ class PluginAPI:
              "render": "stat"|"kv"|"chips"|"list"|"bar"|"histogram",
              "query": {"sql": "SELECT …"},  # source "sql" only
              "span": 1|2,                   # optional; card width
+             "live": True,                   # optional; re-run on every open
              "drill": {...}}                # optional; see below
+
+        A widget's last result is kept in the case file and painted the
+        moment the board opens, with its age on the card — a board is not
+        re-run from scratch every time someone clicks it. ``"live": True``
+        opts one widget out of that and re-runs it on every open. Use it
+        only where the number would be wrong to show a minute old and the
+        query is cheap enough to pay for on every open: a tag or watchlist
+        count, not a GROUP BY over the whole log. Everything else is
+        re-run by the board's ↻ Refresh, or per widget from its editor.
 
         SQL rides the read-only pane connection, so a widget is data, not
         code. Two placeholders save you from hardcoding a table id that is

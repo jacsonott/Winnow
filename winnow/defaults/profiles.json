@@ -1,6 +1,6 @@
 {
   "version": 5,
-  "comment": "Shipped analysis profiles. A profile is 'how I analyze this kind of case' — the plugins to enable, an optional starter watchlist, and a dashboard of widgets. SQL widgets use {{evtx}} / {{header_set:Name}} placeholders that bind to whichever table matches that header set in the open case (and {{all:header_set:Name}} unions every matching table, for logs split across many files), so the dashboard is portable. Shipped profiles are read-only; Save-as-profile creates editable copies. A profile may also declare `variables`: [{name, label?, description?, required?, default?}] — case variables it seeds on apply (never overwriting a value the analyst set); required ones are asked for in the new-case dialog and after applying to an existing case. Definitions only, never values. A profile may carry extra named boards under `dashboards`: [{name, widgets}] — applied alongside `dashboard` (which keeps the profile's own name), each upserted by its own name.",
+  "comment": "Shipped analysis profiles. A profile is 'how I analyze this kind of case' — the plugins to enable, an optional starter watchlist, and a dashboard of widgets. SQL widgets use {{evtx}} / {{header_set:Name}} placeholders that bind to whichever table matches that header set in the open case (and {{all:header_set:Name}} unions every matching table, for logs split across many files), so the dashboard is portable. Shipped profiles are read-only; Save-as-profile creates editable copies. A profile may also declare `variables`: [{name, label?, description?, required?, default?}] — case variables it seeds on apply (never overwriting a value the analyst set); required ones are asked for in the new-case dialog and after applying to an existing case. Definitions only, never values. A profile may carry extra named boards under `dashboards`: [{name, widgets}] — applied alongside `dashboard` (which keeps the profile's own name), each upserted by its own name. A widget's results are cached in the case file and painted on open with their age; `\"live\": true` marks a widget that re-runs on every open instead — for the cheap ones whose number has to be current the moment the board appears (the watchlist and tag counts here), never for a GROUP BY over the whole log. Everything else is re-run by ↻ Refresh.",
   "profiles": [
     {
       "name": "KAPE triage",
@@ -379,14 +379,16 @@
           "source": "watchlist",
           "render": "stat",
           "sub": "IOC matches across all tables",
-          "span": 1
+          "span": 1,
+          "live": true
         },
         {
           "title": "Tagged findings",
           "source": "tags",
           "render": "stat",
           "sub": "rows you have marked",
-          "span": 1
+          "span": 1,
+          "live": true
         },
         {
           "title": "Computers seen",

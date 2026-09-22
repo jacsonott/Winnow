@@ -356,6 +356,39 @@ CREATE TABLE IF NOT EXISTS dashboards (
     pinned  INTEGER NOT NULL DEFAULT 0,          -- 1: shown as a page tab in the top strip
     origin  TEXT                                 -- 'plugin:<fs_name>:<local_id>' for a copy of an offered board; NULL if the analyst built it
 );
+
+-- What each widget last returned. A board used to be a pure function
+-- re-evaluated on every mount: the shipped KAPE board ran 26 queries on
+-- every open, every card drag and every edit, and "open" mostly means
+-- "reopen this case tomorrow morning". The last result is kept so a board
+-- paints immediately and only the widgets marked `"live": true` re-run.
+--
+-- In the case file rather than in memory, deliberately, and against the
+-- rule the SQL pane follows for its own results (sql.js: a result set is
+-- "a snapshot of the data rather than the analysis"). The difference is
+-- what the two are FOR. A SQL result is one step of a person's reasoning,
+-- re-derivable by pressing Run, and the pane keeps the query. A board is
+-- the standing summary of this evidence, re-derived by nobody, and the
+-- cost it is avoiding is paid at exactly the moment an analyst opens the
+-- case — which an in-memory cache never survives.
+--
+-- Keyed by the widget's own id (widgets grew one for this; see
+-- _mint_widget_ids), so a reorder keeps every result. `fingerprint` is a
+-- hash of the (source, query) the payload answers: change the question
+-- and the old answer is not served at all. `generation` is what the
+-- case's data looked like when it ran (Store.data_generation) — an
+-- import or a tag write since then does not hide the number, it marks it
+-- stale, and the board says so.
+CREATE TABLE IF NOT EXISTS dashboard_widget_cache (
+    dashboard_id INTEGER NOT NULL,
+    widget_id    TEXT NOT NULL,
+    fingerprint  TEXT NOT NULL,
+    generation   TEXT NOT NULL,
+    payload      TEXT NOT NULL,
+    ran_at       TEXT NOT NULL,
+    elapsed_ms   INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (dashboard_id, widget_id)
+) WITHOUT ROWID;
 """
 
 IDENT_OK = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -7160,6 +7193,13 @@ class Store:
     UNDO_LIMIT = 25
     UNDO_ROW_BUDGET = 5_000_000
 
+    # Bumped by every row_tags write, so a dashboard can tell that its
+    # cached "Tagged findings: 0" was counted before the analyst spent the
+    # morning tagging. A counter rather than a COUNT(*): row_tags is
+    # WITHOUT ROWID and can hold millions of rows, so counting it on every
+    # board open would cost more than the widget it is guarding.
+    TAG_GENERATION_KEY = "tag_generation"
+
     def _apply_tag_change(self, *, tag_id: int, on: bool, source_id: int, scope: str,
                           target_sql: str | None = None, target_params: Sequence = (),
                           pairs: Sequence[Sequence[int]] | None = None,
@@ -7245,19 +7285,34 @@ class Store:
         """Apply (or re-apply) one delta table's rows in the given
         direction. Both the original write and its undo go through here —
         undo is the same operation with `on` flipped, not a second
-        implementation of it."""
+        implementation of it.
+
+        Because it is the one place row_tags changes, it is also where the
+        tag generation is bumped (see TAG_GENERATION_KEY): a cached tag
+        count goes stale on an undo exactly as it does on the write."""
         if on:
-            self.db.execute(
+            cur = self.db.execute(
                 f"INSERT OR IGNORE INTO row_tags(source_id, rid, tag_id) "
                 f"SELECT source_id, rid, ? FROM v.{q(table)}",
                 (tag_id,),
             )
         else:
-            self.db.execute(
+            cur = self.db.execute(
                 f"DELETE FROM row_tags WHERE tag_id=? AND (source_id, rid) IN "
                 f"(SELECT source_id, rid FROM v.{q(table)})",
                 (tag_id,),
             )
+        if cur.rowcount > 0:
+            self._bump_tag_generation()
+
+    def _bump_tag_generation(self) -> None:
+        """Caller holds self.lock and is inside a self.db transaction — the
+        bump commits with the rows it describes, so a reader never sees a
+        generation that promises a write that rolled back."""
+        self.db.execute(
+            "INSERT INTO case_settings(key, value) VALUES (?, '1') "
+            "ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)",
+            (self.TAG_GENERATION_KEY,))
 
     def _trim_undo(self) -> None:
         """Evict from the oldest end until both limits hold. Caller must
@@ -8197,6 +8252,81 @@ class Store:
         except (TypeError, ValueError):
             return []
 
+    # ---- widget identity ----
+    #
+    # A widget was identified by its position in the JSON list, which a
+    # drag-reorder rewrites — fine while a board was stateless, useless the
+    # moment anything (a cached result, a per-widget setting) has to be
+    # attached to one card rather than to "whatever is third". So every
+    # widget carries an `id`: minted on write, and back-filled
+    # DETERMINISTICALLY on read for the boards that already exist, so a
+    # case nobody has edited since the upgrade still gets cache hits
+    # instead of a new key every open.
+
+    @staticmethod
+    def _widget_fingerprint(w: dict) -> str:
+        """A hash of the question a widget asks — its source and its query,
+        which are exactly the arguments dashboard_widget_preview takes.
+
+        Not the whole widget dict: renaming a card or making it two columns
+        wide does not change a single number in the answer, and throwing
+        away a result that took twelve seconds because someone fixed a typo
+        in a title is a cost with nothing on the other side of it. Changing
+        the SQL, the placeholder or the source does change the answer, and
+        that is what this catches."""
+        if not isinstance(w, dict):
+            return "0"
+        key = {"source": w.get("source") or "sql", "query": w.get("query") or {}}
+        return hashlib.sha1(
+            json.dumps(key, sort_keys=True, default=str).encode("utf-8", "replace")).hexdigest()[:16]
+
+    @classmethod
+    def _mint_widget_ids(cls, widgets: list) -> list:
+        """Give every widget on a board an id it keeps, in place.
+
+        Ids already present are left alone — a board round-trips through
+        the client on every edit, so re-minting would orphan the cache of
+        every widget on it each time a card moved. A duplicate (two copies
+        of one widget pasted into a profile, say) is re-minted: two cards
+        sharing an id would share a cached result, and marking one "live"
+        would quietly refresh the other.
+
+        Returns a new list of new dicts rather than stamping the caller's:
+        the widgets arriving here are often a plugin's registered board or
+        a profile's, and those are shared objects that get copied into
+        every case that asks for them."""
+        out, seen = [], set()
+        for i, w in enumerate(widgets):
+            if not isinstance(w, dict):
+                out.append(w)
+                continue
+            w = dict(w)
+            wid = w.get("id")
+            if not isinstance(wid, str) or not wid or wid in seen:
+                wid = cls._backfill_widget_id(w, i)
+                while wid in seen:
+                    wid = "w" + os.urandom(6).hex()
+                w["id"] = wid
+            seen.add(wid)
+            out.append(w)
+        return out
+
+    @classmethod
+    def _backfill_widget_id(cls, w: dict, index: int) -> str:
+        """The id an existing board's widget gets on read: derived from the
+        widget and its position, so two reads of an unchanged board agree
+        and the cache written under one open is found by the next. It stops
+        being derived the first time the board is written — from then on it
+        is just the id the widget carries."""
+        return f"w{index}-{cls._widget_fingerprint(w)[:10]}"
+
+    @classmethod
+    def _with_widget_ids(cls, widgets: list) -> list:
+        for i, w in enumerate(widgets):
+            if isinstance(w, dict) and not (isinstance(w.get("id"), str) and w.get("id")):
+                w["id"] = cls._backfill_widget_id(w, i)
+        return widgets
+
     # ------------------------------------------------------- case variables
 
     VARIABLE_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
@@ -8504,12 +8634,18 @@ class Store:
                 raise KeyError(f"No dashboard {dashboard_id}")
 
     def get_dashboard(self, dashboard_id: int) -> list:
-        """One board's widgets. Reader pool, same reason as list_dashboards."""
+        """One board's widgets. Reader pool, same reason as list_dashboards.
+
+        Widgets written before ids existed are given one here rather than
+        on the next write — a board nobody has edited would otherwise never
+        get a cache hit, which is precisely the board this change is for.
+        The back-filled id is derived, so two reads agree (see
+        _backfill_widget_id); the next write makes it permanent."""
         with self._reader() as db:
             row = db.execute("SELECT widgets FROM dashboards WHERE id=?", (dashboard_id,)).fetchone()
         if row is None:
             raise KeyError(f"No dashboard {dashboard_id}")
-        return self._loads_widgets(row["widgets"])
+        return self._with_widget_ids(self._loads_widgets(row["widgets"]))
 
     def set_dashboard_widgets(self, dashboard_id: int, widgets: list) -> list:
         """Edited by hand, which also clears `origin`.
@@ -8521,12 +8657,14 @@ class Store:
         and the next add goes back to asking."""
         if not isinstance(widgets, list):
             raise ValueError("A dashboard is a list of widgets")
+        widgets = self._mint_widget_ids(widgets)
         with self.lock, self.db:
             cur = self.db.execute(
                 "UPDATE dashboards SET widgets=?, origin=NULL WHERE id=?",
                 (json.dumps(widgets), dashboard_id))
             if cur.rowcount == 0:
                 raise KeyError(f"No dashboard {dashboard_id}")
+            self._prune_widget_cache(dashboard_id, widgets)
         return widgets
 
     def create_dashboard(self, name: str, widgets: list | None = None,
@@ -8536,13 +8674,14 @@ class Store:
             raise ValueError("A dashboard needs a name")
         if len(name) > 200:
             raise ValueError("That dashboard name is too long")
+        widgets = self._mint_widget_ids(widgets or [])
         with self.lock, self.db:
             pos = self.db.execute("SELECT COALESCE(MAX(pos), -1) + 1 FROM dashboards").fetchone()[0]
             cur = self.db.execute(
                 "INSERT INTO dashboards(name, widgets, pos, origin) VALUES (?,?,?,?)",
-                (name, json.dumps(widgets or []), pos, origin))
+                (name, json.dumps(widgets), pos, origin))
             did = cur.lastrowid
-        return {"id": did, "name": name, "pos": pos, "widget_count": len(widgets or [])}
+        return {"id": did, "name": name, "pos": pos, "widget_count": len(widgets)}
 
     def rename_dashboard(self, dashboard_id: int, name: str) -> None:
         name = (name or "").strip()
@@ -8561,6 +8700,10 @@ class Store:
     def delete_dashboard(self, dashboard_id: int) -> None:
         with self.lock, self.db:
             self.db.execute("DELETE FROM dashboards WHERE id=?", (dashboard_id,))
+            # The board's cached results go with it. They are keyed by its
+            # id, which SQLite hands out again after a delete — leaving them
+            # would show the previous board's numbers on the next one.
+            self.db.execute("DELETE FROM dashboard_widget_cache WHERE dashboard_id=?", (dashboard_id,))
 
     def reorder_dashboards(self, ordered_ids: list[int]) -> None:
         with self.lock, self.db:
@@ -8602,14 +8745,161 @@ class Store:
         profile apply (which writes ITS widgets, not the plugin's) clears
         the stamp so the plugin has to ask before overwriting them. One
         rule, and it errs toward asking."""
+        widgets = self._mint_widget_ids(widgets)
         with self.lock, self.db:
             row = self.db.execute(
                 "SELECT id FROM dashboards WHERE name=? COLLATE NOCASE", (name,)).fetchone()
             if row:
                 self.db.execute("UPDATE dashboards SET widgets=?, origin=? WHERE id=?",
                                (json.dumps(widgets), origin, row["id"]))
+                self._prune_widget_cache(row["id"], widgets)
                 return {"id": row["id"], "name": name}
         return self.create_dashboard(name, widgets, origin=origin)
+
+    # ---- cached widget results ----
+
+    def data_generation(self) -> str:
+        """A cheap marker for "something a widget could have counted has
+        changed". Not a checksum of the evidence — how many sources there
+        are, how many rows they hold between them, the highest source id,
+        and a counter every row_tags write bumps.
+
+        That is enough to notice the three things that move a dashboard's
+        numbers under it: an import finishing (row_count climbs), a table
+        arriving or being dropped, and the analyst tagging rows. It is
+        deliberately derived from the `sources` table rather than bumped by
+        each ingest path, because a derived marker cannot be forgotten by
+        the next import path somebody writes. Its job is to let a stale
+        number be SHOWN AND LABELLED, not to be cryptographically exact."""
+        with self._reader() as db:
+            n, rows, top = db.execute(
+                "SELECT COUNT(*), COALESCE(SUM(row_count), 0), COALESCE(MAX(id), 0) FROM sources"
+            ).fetchone()
+            tag = db.execute(
+                "SELECT value FROM case_settings WHERE key=?", (self.TAG_GENERATION_KEY,)).fetchone()
+        return f"{n}.{rows}.{top}.{tag['value'] if tag else '0'}"
+
+    def _prune_widget_cache(self, dashboard_id: int, widgets: list) -> None:
+        """Drop cached results the board no longer has a use for: a widget
+        that was removed, and a widget whose question changed.
+
+        Caller holds self.lock and is inside a self.db transaction — this
+        runs in the same committed unit of work as the widget write, so a
+        board and its cache are never briefly out of step."""
+        keep = {(w.get("id"), self._widget_fingerprint(w))
+                for w in widgets if isinstance(w, dict) and w.get("id")}
+        rows = self.db.execute(
+            "SELECT widget_id, fingerprint FROM dashboard_widget_cache WHERE dashboard_id=?",
+            (dashboard_id,)).fetchall()
+        dead = [(dashboard_id, r["widget_id"]) for r in rows
+                if (r["widget_id"], r["fingerprint"]) not in keep]
+        if dead:
+            self.db.executemany(
+                "DELETE FROM dashboard_widget_cache WHERE dashboard_id=? AND widget_id=?", dead)
+
+    def get_dashboard_cache(self, dashboard_id: int, widgets: list | None = None) -> dict:
+        """Every usable cached result for a board, keyed by widget id:
+        {payload, ran_at, elapsed_ms, stale}.
+
+        "Usable" excludes a result whose widget has changed since — the
+        fingerprint check is the same one _prune_widget_cache applies on
+        write, repeated here so a payload is never served for a question
+        nobody asked, whichever door the widgets came in through.
+
+        A result the case has moved on from IS returned, flagged
+        `stale`. Hiding it would trade a number that was true an hour ago
+        for no number at all; the board's job is to say which it is."""
+        if widgets is None:
+            widgets = self.get_dashboard(dashboard_id)
+        want = {w["id"]: self._widget_fingerprint(w)
+                for w in widgets if isinstance(w, dict) and w.get("id")}
+        gen = self.data_generation()
+        with self._reader() as db:
+            rows = db.execute(
+                "SELECT widget_id, fingerprint, generation, payload, ran_at, elapsed_ms"
+                " FROM dashboard_widget_cache WHERE dashboard_id=?", (dashboard_id,)).fetchall()
+        out = {}
+        for r in rows:
+            if want.get(r["widget_id"]) != r["fingerprint"]:
+                continue
+            try:
+                payload = json.loads(r["payload"])
+            except (TypeError, ValueError):
+                continue
+            out[r["widget_id"]] = {"payload": payload, "ran_at": r["ran_at"],
+                                   "elapsed_ms": r["elapsed_ms"],
+                                   "stale": r["generation"] != gen}
+        return out
+
+    def cache_widget_result(self, dashboard_id: int, widget_id: str, payload: dict,
+                            elapsed_ms: int = 0) -> dict | None:
+        """Record what a widget just returned, so the next open paints it
+        instead of running it again.
+
+        The widget is looked up on the board by id: a run of something that
+        is not on this board (the editor previewing an unsaved draft, a
+        widget removed while its query was in flight) is not cached, rather
+        than cached under a key nothing will ever match. Returns the
+        stamp the client shows, or None when nothing was written."""
+        widgets = self.get_dashboard(dashboard_id)
+        w = next((x for x in widgets if isinstance(x, dict) and x.get("id") == widget_id), None)
+        if w is None:
+            return None
+        rec = {"fingerprint": self._widget_fingerprint(w), "generation": self.data_generation(),
+               "ran_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "elapsed_ms": int(elapsed_ms or 0)}
+        with self.lock, self.db:
+            self.db.execute(
+                "INSERT INTO dashboard_widget_cache"
+                "(dashboard_id, widget_id, fingerprint, generation, payload, ran_at, elapsed_ms)"
+                " VALUES (?,?,?,?,?,?,?)"
+                " ON CONFLICT(dashboard_id, widget_id) DO UPDATE SET"
+                " fingerprint=excluded.fingerprint, generation=excluded.generation,"
+                " payload=excluded.payload, ran_at=excluded.ran_at, elapsed_ms=excluded.elapsed_ms",
+                (dashboard_id, widget_id, rec["fingerprint"], rec["generation"],
+                 json.dumps(payload), rec["ran_at"], rec["elapsed_ms"]))
+        return {"ran_at": rec["ran_at"], "elapsed_ms": rec["elapsed_ms"], "stale": False}
+
+    def refresh_dashboard(self, dashboard_id: int, widget_id: str | None = None) -> dict:
+        """Re-run a board's widgets and cache what they return — the ↻ a
+        cached number needs to be answerable for.
+
+        Every widget, or the one named. A widget that fails is reported and
+        NOT cached: the next open retries it rather than painting an error
+        forever. Runs come first and the cache write comes last, in one
+        transaction, because a widget run reads through the reader pool and
+        invariant #4 forbids that inside an open writer transaction."""
+        widgets = self.get_dashboard(dashboard_id)
+        if widget_id is not None:
+            widgets = [w for w in widgets if isinstance(w, dict) and w.get("id") == widget_id]
+            if not widgets:
+                raise KeyError(f"No widget {widget_id} on dashboard {dashboard_id}")
+        gen = self.data_generation()
+        ran_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+        results, writes = {}, []
+        for w in widgets:
+            if not isinstance(w, dict):
+                continue
+            t0 = time.time()
+            try:
+                payload = self.dashboard_widget_preview(w.get("source") or "sql", w.get("query") or {})
+            except (ValueError, KeyError, sqlite3.Error) as e:
+                results[w.get("id")] = {"error": str(e)}
+                continue
+            ms = int((time.time() - t0) * 1000)
+            writes.append((dashboard_id, w["id"], self._widget_fingerprint(w), gen,
+                           json.dumps(payload), ran_at, ms))
+            results[w["id"]] = {"payload": payload, "ran_at": ran_at, "elapsed_ms": ms, "stale": False}
+        if writes:
+            with self.lock, self.db:
+                self.db.executemany(
+                    "INSERT INTO dashboard_widget_cache"
+                    "(dashboard_id, widget_id, fingerprint, generation, payload, ran_at, elapsed_ms)"
+                    " VALUES (?,?,?,?,?,?,?)"
+                    " ON CONFLICT(dashboard_id, widget_id) DO UPDATE SET"
+                    " fingerprint=excluded.fingerprint, generation=excluded.generation,"
+                    " payload=excluded.payload, ran_at=excluded.ran_at, elapsed_ms=excluded.elapsed_ms",
+                    writes)
+        return {"ran_at": ran_at, "results": results}
 
     # Shorthands a SHIPPED dashboard uses so its SQL is portable across
     # cases — the table's src_<id> varies, but its header set doesn't.

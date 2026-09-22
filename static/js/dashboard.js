@@ -26,12 +26,38 @@ let loadError = null;   // why they aren't here, if they aren't — an empty
                         // board and an unreachable server look identical
                         // otherwise, and one of them is alarming
 
+/* What each widget last returned, keyed by its id — handed over by
+   GET /api/dashboards/<id> from the case file, so it survives closing the
+   case, and topped up here as widgets run. A board paints from this and
+   runs only the widgets marked `live`; ↻ Refresh is how everything else
+   gets re-run. Entries are {payload, ran_at, elapsed_ms, stale}. */
+let cache = {};
+
+/* Bumped whenever the open board changes. A board open fires one request
+   per widget that has to run, and switching boards mid-flight leaves those
+   in the air: without a generation to compare against, the answer to a
+   question about the PREVIOUS board lands in this one's cache under a
+   widget id that may well exist here too. The page cache learned this the
+   hard way (grid.js clearPageCache) — same guard, same reason. */
+let boardGen = 0;
+
+/* How many widgets ↻ Refresh is still waiting on. The bar is rebuilt
+   every time a widget lands (the "as of" moves), which would otherwise
+   hand the refresh back its enabled label halfway through the run. */
+let refreshing = 0;
+
 /* The dashboard being dragged from the sidebar, for the Pages header's
    drop target (sources.js) — a tiny shared holder rather than a
    dataTransfer read, which isn't available during dragover. */
 export const dashDrag = { id: null };
 
 const num = (v) => (typeof v === 'number' ? v : (parseFloat(String(v).replace(/,/g, '')) || 0));
+
+/* What a widget ASKS — its source and its query, and nothing else. The
+   same pair the store fingerprints a cached result with, so the client and
+   the case file agree about when an edit throws the old answer away. A
+   retitled card keeps its number; a rewritten query does not. */
+const questionOf = (w) => JSON.stringify([w.source || 'sql', w.query || {}]);
 
 /* ------------------------------------------------------------ data */
 
@@ -49,9 +75,16 @@ export async function loadDashboards() {
 }
 
 async function loadWidgets(id) {
-  try { widgets = (await api(`/api/dashboards/${id}`)).widgets || []; loadError = null; }
+  boardGen++;
+  try {
+    const d = await api(`/api/dashboards/${id}`);
+    widgets = d.widgets || [];
+    cache = d.cache || {};
+    loadError = null;
+  }
   catch (e) {
     widgets = [];
+    cache = {};
     loadError = e;
     // 404 means this board is not in this case (deleted elsewhere, or an
     // id left over from another case). Re-read the list so the sidebar
@@ -62,8 +95,15 @@ async function loadWidgets(id) {
 
 async function persist() {
   if (S.dashboardId == null) return;
-  try { await post(`/api/dashboards/${S.dashboardId}`, { widgets }); }
+  let saved;
+  try { saved = await post(`/api/dashboards/${S.dashboardId}`, { widgets }); }
   catch (e) { toast('Could not save dashboard: ' + e.message, 6000); return; }
+  // A widget added here has no id until the store mints one, and its
+  // cached result is filed under that id — so take the ids back, or the
+  // new card re-runs its query on every open for the rest of its life.
+  for (const [i, sw] of ((saved && saved.widgets) || []).entries()) {
+    if (widgets[i] && !widgets[i].id && sw && sw.id) widgets[i].id = sw.id;
+  }
   // The sidebar's per-board count comes from the list endpoint, so it
   // showed 0 after the first widget until something else reloaded it.
   try { await loadDashboards(); renderSidebar(); } catch { /* offline — the next reload catches up */ }
@@ -615,6 +655,97 @@ async function deleteDashboard(d) {
 
 /* --------------------------------------------------------------- render */
 
+/* ---------------------------------------------------- freshness chrome */
+
+/* A cached number with no date on it reads exactly like a live one, and
+   DFIR conclusions get drawn from these cards ("only 3 failed logons").
+   So every cached card says how old it is, and the bar says it for the
+   board. Short form on the card (no room), long form in the bar. */
+const WHEN = [[60, 's', 1], [3600, 'm', 60], [86400, 'h', 3600], [Infinity, 'd', 86400]];
+
+export function ranAtAge(ranAt) {
+  const t = Date.parse(String(ranAt || '').replace(' ', 'T'));
+  if (!Number.isFinite(t)) return null;
+  return Math.max(0, Math.round((Date.now() - t) / 1000));
+}
+
+export function shortAge(ranAt) {
+  const secs = ranAtAge(ranAt);
+  if (secs == null) return '';
+  if (secs < 45) return 'now';
+  const [, unit, div] = WHEN.find(([lim]) => secs < lim);
+  return `${Math.round(secs / div)}${unit}`;
+}
+
+export function longAge(ranAt) {
+  const secs = ranAtAge(ranAt);
+  if (secs == null) return '';
+  if (secs < 45) return 'just now';
+  if (secs < 3600) { const m = Math.round(secs / 60); return `${m} minute${m === 1 ? '' : 's'} ago`; }
+  if (secs < 86400) { const h = Math.round(secs / 3600); return `${h} hour${h === 1 ? '' : 's'} ago`; }
+  const d = Math.round(secs / 86400);
+  return `${d} day${d === 1 ? '' : 's'} ago`;
+}
+
+/* Milliseconds the way a person reads them: "0.0 s" for a query that took
+   40 ms is a worse answer than the number itself. */
+export function runtimeLabel(ms) {
+  const n = Number(ms) || 0;
+  return n < 1000 ? `${n} ms` : `${(n / 1000).toFixed(1)} s`;
+}
+
+export function clockOf(ranAt) {
+  const t = Date.parse(String(ranAt || '').replace(' ', 'T'));
+  if (!Number.isFinite(t)) return '';
+  const d = new Date(t);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+/* The board's own "as of": the OLDEST run on it, not the newest. The
+   number an analyst mistrusts is the one that has been sitting longest,
+   and a bar quoting the freshest card would be reassuring about exactly
+   the wrong thing. */
+function boardStamp() {
+  const hits = widgets.map((w) => w.id && cache[w.id]).filter(Boolean);
+  if (!hits.length) return null;
+  let oldest = hits[0];
+  let stale = false;
+  for (const h of hits) {
+    if (h.stale) stale = true;
+    if ((ranAtAge(h.ran_at) || 0) > (ranAtAge(oldest.ran_at) || 0)) oldest = h;
+  }
+  return { ran_at: oldest.ran_at, stale, cached: hits.length, total: widgets.length };
+}
+
+/* Rewrites the per-card corner marks in place. Not a re-render: render()
+   would re-run the live widgets, and this is called every time one
+   finishes. */
+function paintAges() {
+  const cards = [...$('dashGrid').querySelectorAll('.dash-card:not(.dash-add)')];
+  widgets.forEach((w, i) => {
+    const mark = cards[i] && cards[i].querySelector('.dash-mark');
+    if (mark) fillMark(mark, w);
+  });
+}
+
+function fillMark(mark, w) {
+  const hit = w.id ? cache[w.id] : null;
+  mark.className = 'dash-mark';
+  if (w.live) {
+    mark.classList.add('dash-live-dot');
+    mark.textContent = '';
+    mark.title = 'Runs every time this dashboard opens';
+    return;
+  }
+  mark.textContent = hit ? shortAge(hit.ran_at) : '';
+  if (!hit) { mark.title = ''; return; }
+  mark.classList.add('dash-age');
+  if (hit.stale) mark.classList.add('stale');
+  mark.title = `Last run ${clockOf(hit.ran_at)} · ${longAge(hit.ran_at)}`
+    + (hit.stale ? ' — the case has changed since. ↻ Refresh re-runs it.' : '')
+    + ` · took ${runtimeLabel(hit.elapsed_ms)}`;
+}
+
 function renderBar() {
   const bar = $('dashBar');
   bar.replaceChildren();
@@ -622,7 +753,35 @@ function renderBar() {
   const title = el('span', 'dash-title', d ? d.name : 'Dashboard');
   title.title = 'Double-click to rename';
   if (d) title.ondblclick = () => renameDashboard(d);
-  bar.append(title, el('div', 'spacer'));
+  bar.append(title);
+  const st = widgets.length ? boardStamp() : null;
+  if (st) {
+    const stamp = el('span', 'dash-stamp' + (st.stale ? ' stale' : ''));
+    stamp.append('As of ', el('b', null, clockOf(st.ran_at)), ' · ' + longAge(st.ran_at)
+      + (st.stale ? ' · the case has changed since' : ''));
+    stamp.title = st.stale
+      ? 'Rows were imported or tagged after these numbers were worked out. ↻ Refresh re-runs them.'
+      : 'The oldest result on this board — the rest are at least this fresh.';
+    bar.append(stamp);
+  }
+  const liveCount = widgets.filter((w) => w.live).length;
+  if (widgets.length) {
+    const note = el('span', 'dash-live-note');
+    note.append(el('span', 'dash-dot'),
+      liveCount ? `${liveCount} widget${liveCount === 1 ? ' runs' : 's run'} every time`
+        : 'no widget set to run every time');
+    note.title = 'A widget set to "run every time the dashboard opens" re-runs on every '
+      + 'open; the rest paint their last result. Set it per widget in ✎.';
+    bar.append(note);
+  }
+  bar.append(el('div', 'spacer'));
+  if (widgets.length) {
+    const refresh = el('button', 'btn dash-refresh', refreshing ? '↻ Refreshing…' : '↻ Refresh all');
+    refresh.title = 'Re-run every widget on this board now';
+    refresh.disabled = refreshing > 0;
+    refresh.onclick = () => refreshBoard();
+    bar.append(refresh);
+  }
   const add = el('button', 'btn', '＋ Add widget');
   add.onclick = () => openWidgetEditor(null);
   const lib = el('button', 'btn ghost', 'Save to library…');
@@ -632,6 +791,28 @@ function renderBar() {
   prof.title = 'Save this dashboard + the enabled plugins as a reusable profile';
   prof.onclick = saveAsProfile;
   bar.append(add, lib, prof);
+}
+
+/* Re-run everything on the board, keeping the numbers that are already up
+   while it happens. Widget by widget rather than through the board-level
+   refresh route on purpose: the cards fill in as answers arrive, the way
+   an open used to, and one widget that fails leaves the other 25 alone. */
+export async function refreshBoard() {
+  const grid = $('dashGrid');
+  const cards = [...grid.querySelectorAll('.dash-card:not(.dash-add)')];
+  const id = S.dashboardId;
+  const jobs = [];
+  widgets.forEach((w, i) => {
+    const body = cards[i] && cards[i].querySelector('.dash-widget-body');
+    if (body) jobs.push(runWidget(w, body, { boardId: id, quiet: true }));
+  });
+  refreshing += 1;
+  renderBar();
+  try { await Promise.all(jobs); }
+  finally {
+    refreshing -= 1;
+    renderBar();
+  }
 }
 
 function render() {
@@ -716,6 +897,12 @@ function card(w, i) {
   const grip = el('span', 'dash-grip', '⠿');
   grip.title = 'Drag to reorder';
   head.append(grip, el('h4', null, w.title || '(untitled)'));
+  // How old this card's number is, or a dot if it re-runs on every open.
+  // In the head rather than floating over the body because a bar and a
+  // histogram give their body a fixed height and a canvas that fills it.
+  const mark = el('span', 'dash-mark');
+  fillMark(mark, w);
+  head.append(mark);
   // ONE button per card — everything about the widget, removal included,
   // lives in the editor it opens.
   if (drillable(w)) {
@@ -739,16 +926,45 @@ function card(w, i) {
     body.onclick = () => drillInto(w);
   }
   c.append(body);
-  runWidget(w, body);
+  // Paint what it said last time FIRST, then re-run only if it has to.
+  // This is the whole point of the change: a 26-widget board used to be 26
+  // queries on every open, every card drag and every edit of any other
+  // card, and an analyst reopening a case in the morning paid for all of
+  // them before a single number appeared.
+  const hit = w.id ? cache[w.id] : null;
+  if (hit) paintWidget(w, body, hit.payload);
+  if (!hit || w.live) runWidget(w, body, { boardId: S.dashboardId, quiet: !!hit });
   return c;
 }
 
-async function runWidget(w, body) {
-  body.replaceChildren(el('div', 'note-status', 'Loading…'));
+/* Run one widget and paint it. `boardId` files the result in the case
+   file under this widget — omitted (the editor's Preview, which runs an
+   unsaved draft) it caches nothing, because a Preview that answered from
+   the cache would not be previewing anything. `quiet` keeps whatever is
+   already on the card while the query runs, instead of blanking a good
+   number to say "Loading…". */
+async function runWidget(w, body, opts = {}) {
+  const gen = boardGen;
+  const req = { source: w.source, query: w.query || {} };
+  if (opts.boardId != null && w.id) { req.dashboard_id = opts.boardId; req.widget_id = w.id; }
+  if (!opts.quiet) body.replaceChildren(el('div', 'note-status', 'Loading…'));
   let data;
-  try { data = await post('/api/dashboard/widget/preview', { source: w.source, query: w.query || {} }); }
+  try { data = await post('/api/dashboard/widget/preview', req); }
   catch (e) { body.replaceChildren(el('div', 'note-status', e.message)); return; }
+  // The board may have been closed or swapped while this was in flight;
+  // filing the answer would file it against another board's widget.
+  if (req.dashboard_id != null && gen === boardGen && S.dashboardId === opts.boardId) {
+    cache[w.id] = { payload: data, ran_at: data.ran_at || null,
+      elapsed_ms: data.elapsed_ms || 0, stale: false };
+    renderBar();
+    paintAges();
+  }
+  paintWidget(w, body, data);
+}
+
+export function paintWidget(w, body, data) {
   body.replaceChildren();
+  body.style.height = '';
   const rows = data.rows || [];
   switch (w.render) {
     case 'stat': {
@@ -891,6 +1107,8 @@ function openWidgetEditor(existing, prefill = null) {
     sql.value = existing?.query?.sql || prefill?.sql || '';
     sql.placeholder = 'SELECT COUNT(DISTINCT RemoteHost) AS hosts FROM src_1';
     const sub = el('input'); sub.className = 'confirm-input'; sub.value = existing?.sub || '';
+    const live = el('input'); live.type = 'checkbox'; live.className = 'dash-live-box';
+    live.checked = !!existing?.live;
 
     // The recipe this widget was built from, if it was.
     const build0 = existing?.build || prefill?.build || null;
@@ -953,6 +1171,7 @@ function openWidgetEditor(existing, prefill = null) {
         span: Number(span.value), sub: sub.value.trim() || undefined,
         query: source.value === 'sql' ? { sql: sql.value.trim() } : {},
       };
+      if (live.checked) w.live = true;   // absent means "use the cache" — see the save handler
       if (source.value === 'sql') {
         const gen = templ.value === 'blank' ? null : widgetFrom(picks());
         if (gen && gen.query.sql === sql.value.trim()) { w.build = gen.build; w.drill = gen.drill; }
@@ -993,6 +1212,29 @@ function openWidgetEditor(existing, prefill = null) {
     const look = el('div', 'dash-form-row dash-form-row-3');
     mk('Render as', renderSel, look); mk('Sub-label (optional, for stat)', sub, look); mk('Width', span, look);
     form.append(look);
+    // Run-every-time, and what it costs. The number beside it is this
+    // widget's own last runtime, because "is this one expensive?" is the
+    // only question that decides the checkbox, and nothing else in the app
+    // was answering it.
+    const hit = existing && existing.id ? cache[existing.id] : null;
+    const liveRow = el('label', 'check-row dash-live-row');
+    const liveText = el('span', 'dash-live-text');
+    liveText.append(el('span', 't', 'Run every time the dashboard opens'));
+    liveText.append(el('span', 'd', 'Off by default: the last result is shown with its age, and '
+      + '↻ Refresh re-runs it. Turn this on for a widget whose number has to be current the '
+      + 'moment the board is opened — a watchlist or tag count, say.'
+      + (hit ? ` This one took ${runtimeLabel(hit.elapsed_ms)} last run.` : '')));
+    liveRow.append(live, liveText);
+    // Outside .dash-form: its `label` rule is the uppercase field caption,
+    // and this label is a checkbox row, not a caption.
+    b.append(liveRow);
+    const liveNow = widgets.filter((w) => w.live).length;
+    const st = boardStamp();
+    const cost = el('div', 'dash-cost');
+    cost.append('This dashboard: ', el('b', null, `${widgets.length} widget${widgets.length === 1 ? '' : 's'}`),
+      ' · ', el('b', null, String(liveNow)), ' run every time',
+      st ? ` · oldest result ${clockOf(st.ran_at)} (${longAge(st.ran_at)})` : ' · nothing cached yet');
+    b.append(cost);
     const syncSql = () => { sqlWrap.style.display = source.value === 'sql' ? '' : 'none'; };
     source.onchange = syncSql; syncSql();
 
@@ -1028,15 +1270,47 @@ function openWidgetEditor(existing, prefill = null) {
       const w = draft();
       w.title = title.value.trim();   // draft() defaulted to "(untitled)"; keep the real one on save
       if (existing) {
+        const asked = questionOf(existing);
         delete existing.build;        // a stale recipe or drill must not outlive a hand edit
         delete existing.drill;
+        delete existing.live;         // Object.assign can't clear a key draft() leaves out
         Object.assign(existing, w);
+        // The server drops a cached result whose question changed; do the
+        // same here, or the repaint below shows the old answer under the
+        // new SQL until something else reloads the board.
+        if (asked !== questionOf(existing)) delete cache[existing.id];
       } else widgets.push(w);
       await persist();
       document.getElementById('modal').hidden = true;
       render();
     };
     acts.append(previewBtn, save);
+    if (existing && existing.id) {
+      // The per-card ↻. It lives here rather than as a third icon on the
+      // card head, which already carries ⠿, ⤴ and ✎ — the editor is
+      // where everything about one widget is, by the same rule that put
+      // Remove here.
+      const now = el('button', 'btn ghost dash-run-now', 'Run now');
+      now.title = 'Re-run this widget against the case and keep the result';
+      now.onclick = async () => {
+        now.disabled = true;
+        try {
+          const r = await post(`/api/dashboards/${S.dashboardId}/refresh`, { widget_id: existing.id });
+          const res = (r.results || {})[existing.id] || {};
+          if (res.error) { toast(res.error, 6000); return; }
+          cache[existing.id] = { payload: res.payload, ran_at: res.ran_at,
+            elapsed_ms: res.elapsed_ms, stale: false };
+          paintWidget(existing, previewBody, res.payload);
+          const cards = [...$('dashGrid').querySelectorAll('.dash-card:not(.dash-add)')];
+          const onBoard = cards[widgets.indexOf(existing)];
+          if (onBoard) paintWidget(existing, onBoard.querySelector('.dash-widget-body'), res.payload);
+          renderBar();
+          paintAges();
+        } catch (e) { toast('Could not run this widget: ' + e.message, 6000); }
+        finally { now.disabled = false; }
+      };
+      acts.append(now);
+    }
     if (existing) {
       const rm = el('button', 'btn ghost dash-remove', 'Remove widget…');
       rm.onclick = async () => {
@@ -1113,5 +1387,14 @@ export function wireDashboard() {
   if (btn) btn.onclick = () => sqlToWidget(btn);
 }
 
-// Dashboards live in the case; a case switch reloads them.
-export function resetDashboard() { widgets = []; S.dashboardId = null; S.dashboards = []; }
+// Dashboards live in the case; a case switch reloads them — and the
+// cached results go with them, since they are that case's numbers. The
+// generation bump is what stops a widget request still in the air from
+// the old case landing in the new one's cache (see boardGen).
+export function resetDashboard() {
+  widgets = [];
+  cache = {};
+  boardGen++;
+  S.dashboardId = null;
+  S.dashboards = [];
+}
