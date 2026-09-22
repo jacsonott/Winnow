@@ -66,6 +66,25 @@ function cancelInflight() {
   return opCancelCurrent === prev.token;
 }
 
+/* The "No rows match" overlay belongs to the view that is on screen, and
+   a build in flight has not produced one yet. It used to be written in
+   exactly one place (installView) and cleared in one (openSource), so it
+   outlived the view it was an answer about: start a search on a table
+   whose current filters match nothing and the grid says "no rows match"
+   over the whole scan — an answer, in the analyst's terms, to the
+   question being asked right now. Opening a search-all result was the
+   reliable way to see it, since that path builds twice.
+
+   So it is derived, not assigned: no overlay while this table is
+   building or while its search is in the background (the stats line
+   carries that state and says so in words), otherwise whatever the live
+   view's count makes true. */
+export function syncNoRows() {
+  const building = rebuildInFlight() || S.pendingViews.has(S.sourceId);
+  const v = S.view;
+  $('noRows').hidden = building || !v || v.source_id !== S.sourceId || v.row_count > 0;
+}
+
 /* Whether a rebuild for the open table is in flight. The grid's expired-
    view recovery asks before starting one of its own: a build that
    finished after being superseded has evicted the live view — and the
@@ -330,6 +349,10 @@ function repaintSearchChrome() {
    gone (the table was switched under it, which stops the indicator
    without keeping it). */
 function restoreStats(rec) {
+  // Both callers have already dropped the record, so the view on screen
+  // is the answer again — including its empty state, which was suppressed
+  // while the search ran.
+  syncNoRows();
   if (S.sourceId !== rec.sourceId) return;
   if (rec.before && S.view && S.view.view_id === rec.viewId) $('viewStats').innerHTML = rec.before;
   else if (S.view && S.view.source_id === S.sourceId) $('viewStats').innerHTML = statsLine(S.view);
@@ -371,6 +394,7 @@ function detachBuild(rec) {
     onDismiss: () => cancelPendingView(rec.sourceId),
   });
   S.pendingViews.set(rec.sourceId, rec);
+  syncNoRows();   // the search is still running; the old view's empty state is not its answer
   if (S.sourceId === rec.sourceId) $('viewStats').textContent = pendingViewStatsText(rec);
   followPendingView(rec);
 }
@@ -560,6 +584,7 @@ async function runBuild({ keepScroll = true, keepRow = true, detachAfterMs = nul
   const chipUp = cancelInflight();
   const controller = new AbortController();
   inflight = { token: spec.op_token, controller, seq, sourceId: forSourceId };
+  syncNoRows();   // this table is building; the last view's empty state is not the answer
   // The chip cancels a BUILD — cancel_op interrupts the statement its
   // token is registered under. An adopt registers nothing, and its wait,
   // if any, is for the writer lock, which no cancel shortens: the chip
@@ -614,6 +639,11 @@ async function runBuild({ keepScroll = true, keepRow = true, detachAfterMs = nul
     setBusy(false);
     if (disarmCancel) disarmCancel();
     if (inflight && inflight.seq === seq) inflight = null;
+    // After inflight is cleared: a build that did not land leaves the old
+    // view on screen, and the old view's empty state with it. (A detach
+    // clears inflight here too, but the record is in S.pendingViews by
+    // the time detachBuild returns — syncNoRows is called again there.)
+    syncNoRows();
     return stopIndicator(seq, restore);
   };
   try {
@@ -816,7 +846,7 @@ export async function installView(v, { seq, forSourceId, cacheKey, seeded = [], 
     }
   }
   $('spacerY').style.height = spacerPx(v.row_count) + 'px';
-  $('noRows').hidden = v.row_count > 0;
+  syncNoRows();
   $('body').scrollTop = rScroll($('body'), v.row_count, scroll, headH());
   if (S.groupByCols.length) {
     // The old view_id (and any expanded groups' sub-views) is gone now —

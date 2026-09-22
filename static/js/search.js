@@ -7,7 +7,7 @@ import { openFilterBuilder } from './filterbuilder.js';
 import { renderAdvancedChips, renderTermChips, updateSearchHint } from './filters.js';
 import { applyPreset, matchingSavedFilters } from './savedfilters.js';
 import { openSettings } from './settings.js';
-import { loadSources, sourceGlyph, sourceLabel } from './sources.js';
+import { clearViewNarrowing, loadSources, sourceGlyph, sourceLabel } from './sources.js';
 import { S, dashboardCreatorMode } from './state.js';
 import { saveCurrentViewAsTable } from './subset.js';
 import { openSavedFiltersModal, openTimeRangeModal } from './timeframe.js';
@@ -375,6 +375,13 @@ export function searchAllCountLabel(d) {
    table and opening it searches for just that term; without, it's the
    table's total and opening it carries the whole query across. Both share
    this so the open behaviour can't drift between the two. */
+/* ["a", "b", "c"] → "a, b and c". For a sentence that names what was
+   taken away; a bare comma list reads as a log line. */
+function listPhrase(items) {
+  if (items.length < 2) return items.join('');
+  return `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
+}
+
 export function searchAllHitRow(st, hit, term) {
   // The label goes through the live source record so a nickname shows here
   // too; the job's own hit.name (the file name) is the fallback for a
@@ -394,7 +401,17 @@ export function searchAllHitRow(st, hit, term) {
     const src = S.sources.find((s) => s.id === hit.source_id);
     if (src && !src.is_open) await post(`/api/source/${hit.source_id}/open`, { open: true });
     $('modal').hidden = true;
-    await loadSources(hit.source_id);
+    // skipBuild, then clear, then one build. Opening normally would build
+    // the table's STASHED spec first — the filters it was left with, which
+    // this row's count knows nothing about — and that build is what used
+    // to paint "No rows match" over the search that followed it.
+    await loadSources(hit.source_id, { openOpts: { skipBuild: true } });
+    if (S.sourceId !== hit.source_id) return;   // the table went away under the sweep
+    // A sweep counts rows in the table, ignoring every filter on it. So
+    // landing on this row's count means landing with none of them on:
+    // otherwise the grid shows fewer rows than the number just clicked,
+    // and nothing on screen says why.
+    const cleared = clearViewNarrowing();
     S.searchMode = 'advanced';
     // The terms the *results* came from, not whatever's since been typed
     // into the box — those are what this row's count describes.
@@ -406,7 +423,12 @@ export function searchAllHitRow(st, hit, term) {
     renderAdvancedChips();
     syncSearchExpansion(true);
     updateSearchHint();
-    await rebuildView({ keepScroll: false });
+    // keepRow:false — this is a navigation to a hit, not a filter change
+    // on rows already being read, so there is no row to come back to.
+    await rebuildView({ keepScroll: false, keepRow: false });
+    // Said out loud, because the analyst set those filters and would
+    // otherwise find them gone with no explanation.
+    if (cleared.length) toast(`Cleared ${listPhrase(cleared)} on ${hitName}`, 6000);
   };
   r.append(openBtn);
   return r;

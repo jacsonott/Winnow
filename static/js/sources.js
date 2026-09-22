@@ -29,7 +29,7 @@ import { loadTags, refreshTagCounts, renderTagRibbon } from './tags.js';
 import { openTableMenu, updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
 import { baseColumns } from './tsformat.js';
 import { confirmDialog, dropdownMenu, modal, promptDialog } from './ui.js';
-import { dropPendingSelection, pendingViewStatsText, rebuildView } from './view.js';
+import { dropPendingSelection, pendingViewStatsText, rebuildView, syncNoRows } from './view.js';
 
 /* --------------------------------------------------------------- sources */
 
@@ -621,7 +621,7 @@ export function applyPageTabsSize() {
 
  // paints the saved order onto SQL/Timeline before plugins load
 
-export async function loadSources(select, { navigate = true } = {}) {
+export async function loadSources(select, { navigate = true, openOpts = undefined } = {}) {
   const [sources, merges, folders] = await Promise.all([
     api('/api/sources'), api('/api/merges'), api('/api/folders'),
   ]);
@@ -658,7 +658,10 @@ export async function loadSources(select, { navigate = true } = {}) {
       && openTabs.some((s) => s.id === S.sourceId);
     if (onAPage || gridIsLive) return;
   }
-  if (target) await openSource(target);
+  // `openOpts` is passed straight through to openSource — search-all's
+  // "Open ↦" sends { skipBuild: true }, because it is about to replace
+  // the filters and wants to pay for one build, not two.
+  if (target) await openSource(target, openOpts);
   else {
     S.sourceId = null;
     // The last tab closed, or the table on screen was removed: the same
@@ -882,6 +885,10 @@ export async function openSource(id, { skipBuild = false } = {}) {
     S.cellRange = null;
     S.cellAnchor = null;
     $('spacerY').style.height = spacerPx(cached.row_count) + 'px';
+    // The cached view is a real answer, empty or not — this path never
+    // went through installView, so nothing else puts the empty state back
+    // after the blanket hide above.
+    syncNoRows();
     if (pendingIsSpec) $('viewStats').textContent = pendingViewStatsText(pending);
     else $('viewStats').innerHTML =
       `<b>${cached.row_count.toLocaleString()}</b> of ${src.row_count.toLocaleString()} rows · cached`;
@@ -1513,6 +1520,41 @@ export async function recenterOnRow(anchor) {
    nothing else" (Shift+F, the row menu's "…only") is precisely this reset
    plus one filter, and spelling the reset out a second time is how the
    timeframe carve-out below gets forgotten in the copy. */
+/* Everything narrowing the table that is open, dropped — and named, so a
+   caller can say what it took away. State only: no rebuild, no chrome, so
+   the caller can set up the view it wants and pay for exactly one build.
+
+   "Narrowing" is anything that can hide a row: the header boxes, the
+   filter builder's tree, the tag filter and the timeframe. Grouping is
+   not in the list — it reorganises the rows it is given, it does not
+   remove any — and the search box is not either, since the callers here
+   are the ones replacing it.
+
+   Used by search-all's "Open ↦". A sweep counts rows in the table itself,
+   ignoring every one of these, so landing the analyst on a filtered view
+   of it shows fewer rows than the count they just clicked — with nothing
+   on screen to say why. The timeframe is in the list for that reason and
+   not by analogy: it is case-level, so it is the one most likely to be
+   on for a table you have not looked at yet. */
+export function clearViewNarrowing() {
+  const cleared = [];
+  const n = Object.values(S.filters).filter((v) => v !== '' && v != null).length;
+  if (n) cleared.push(`${n} column filter${n === 1 ? '' : 's'}`);
+  if ((S.filterTree.children || []).length) cleared.push('the filter builder');
+  if (S.tagFilter.length) cleared.push('the tag filter');
+  if (S.timeRange && S.timeRange.enabled && (S.timeRange.start || S.timeRange.end)) cleared.push('the timeframe');
+  S.filters = {};
+  S.filterTree = { type: 'group', op: 'AND', children: [] };
+  S.tagFilter = [];
+  S.timeRange = { enabled: false, column: null, start: '', end: '' };
+  // A pivoted session comparison is a filter plus marks, and the marks go
+  // with the filter — same reasoning as clearAllFilters below.
+  S.diffMarks = null;
+  updateTimeRangeButton();
+  updateFiltersButton();
+  return cleared;
+}
+
 export async function clearAllFilters(seed = null) {
   // A pivoted session comparison is a filter plus marks; clearing the
   // filters clears the marks with it, so the grid never wears comparison
