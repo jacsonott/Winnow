@@ -148,7 +148,7 @@ def test_defender_alerts_newest_first_with_description_fallback(host):
     assert rows == [["2024-01-12 09:00:00", "1117 · Action taken: Quarantine"],
                     ["2024-01-11 09:00:00", "5001 · Real-time protection disabled"],
                     ["2024-01-10 09:00:00", "1116 · Malware detected"]]
-    assert _rows(host, "Defender detections") == [[2]]
+    assert _rows(host, "Defender alerts") == [[3]]   # the list is three rows long, and so is the count
 
 
 def test_defender_alerts_say_when_there_are_none(store, write_csv):

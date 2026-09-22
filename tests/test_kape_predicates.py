@@ -153,3 +153,56 @@ def test_the_logon_histogram_and_the_logon_counts_agree(logs):
     failed = next(s for lbl, s in qs.items() if _event_ids(s) == {"4625"})
     (n,) = store.dashboard_widget_preview("sql", {"sql": failed})["rows"][0]
     assert n == 1 and total == 3           # 4624 + 4625 + 4648, Security only
+
+
+# --------------------------------------------------- one Defender population
+
+DEFENDER_ROWS = [
+    _ev(TimeCreated="2026-03-14 10:00:00", EventId="1116", Channel="Microsoft-Windows-Windows Defender/Operational",
+        Provider="Microsoft-Windows-Windows Defender", MapDescription="Malware detected"),
+    _ev(TimeCreated="2026-03-14 10:05:00", EventId="1117", Channel="Microsoft-Windows-Windows Defender/Operational",
+        Provider="Microsoft-Windows-Windows Defender", MapDescription="Action taken"),
+    # Real-time protection switched off: an alert the four-id count never
+    # saw, and the one an intruder produces on purpose.
+    _ev(TimeCreated="2026-03-14 10:07:00", EventId="5001", Channel="Microsoft-Windows-Windows Defender/Operational",
+        Provider="Microsoft-Windows-Windows Defender", MapDescription="Real-time protection disabled"),
+    # Routine: a signature update is not an alert and is in neither.
+    _ev(TimeCreated="2026-03-14 10:09:00", EventId="2000", Channel="Microsoft-Windows-Windows Defender/Operational",
+        Provider="Microsoft-Windows-Windows Defender", MapDescription="Signature update"),
+]
+
+
+def _defender():
+    return [(label, sql, drill) for label, sql, drill in _questions() if "Windows Defender" in sql]
+
+
+def test_the_defender_number_and_the_defender_list_ask_one_question():
+    """There are two Defender cards — how many, and the most recent few.
+    They counted different populations, so the board showed "2" beside a
+    list of three. The ids are the question; both cards ask it."""
+    asked = _defender()
+    assert len(asked) == 2, [a[0] for a in asked]
+    ids = {frozenset(_event_ids(sql)) for _, sql, _ in asked}
+    assert len(ids) == 1, {label: sorted(_event_ids(sql)) for label, sql, _ in asked}
+    assert len(next(iter(ids))) == 17
+    drilled = {frozenset(c["value"]) for _, _, drill in asked
+               for c in _conds(drill) if c["column"] == "EventId"}
+    assert drilled == ids, drilled
+
+
+@pytest.fixture
+def defender(store, write_csv):
+    sid = store.ingest_csv(write_csv([EVTX_COLS] + DEFENDER_ROWS, "evtx.csv"), name="evtx", build_fts=False)["id"]
+    return store, sid
+
+
+def test_the_defender_number_is_the_length_of_the_defender_list(defender):
+    store, sid = defender
+    count_sql = next(sql for _, sql, _ in _defender() if "COUNT(*)" in sql)
+    list_sql = next(sql for _, sql, _ in _defender() if "COUNT(*)" not in sql)
+    (n,) = store.dashboard_widget_preview("sql", {"sql": count_sql})["rows"][0]
+    listed = store.dashboard_widget_preview("sql", {"sql": list_sql})["rows"]
+    assert n == 3 and len(listed) == 3          # the signature update is in neither
+    for _, _, drill in _defender():
+        opened = _drill_rows(store, sid, drill)
+        assert sorted(r["EventId"] for r in opened) == ["1116", "1117", "5001"]

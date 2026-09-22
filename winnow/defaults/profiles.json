@@ -667,14 +667,14 @@
           }
         },
         {
-          "title": "Defender detections",
+          "title": "Defender alerts",
           "source": "sql",
           "render": "stat",
           "span": 1,
           "tone": "warn",
-          "sub": "1006 / 1015 / 1116 / 1117",
+          "sub": "the events the alerts card lists",
           "query": {
-            "sql": "SELECT COUNT(*) FROM {{evtx}} WHERE Provider LIKE '%Windows Defender%' AND EventId IN ('1006','1015','1116','1117')"
+            "sql": "SELECT COUNT(*) FROM {{evtx}} WHERE Provider LIKE '%Windows Defender%' AND EventId IN ('1006','1007','1008','1009','1010','1011','1012','1015','1116','1117','1118','1119','5001','5004','5007','5010','5012')"
           },
           "drill": {
             "table": "{{evtx}}",
@@ -689,9 +689,22 @@
                 "op": "in",
                 "value": [
                   "1006",
+                  "1007",
+                  "1008",
+                  "1009",
+                  "1010",
+                  "1011",
+                  "1012",
                   "1015",
                   "1116",
-                  "1117"
+                  "1117",
+                  "1118",
+                  "1119",
+                  "5001",
+                  "5004",
+                  "5007",
+                  "5010",
+                  "5012"
                 ]
               }
             ]
