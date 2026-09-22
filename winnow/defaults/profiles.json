@@ -449,12 +449,17 @@
           "span": 1,
           "sub": "distinct hosts in 4624s",
           "query": {
-            "sql": "SELECT COUNT(DISTINCT RemoteHost) FROM {{evtx}} WHERE EventId='4624' AND RemoteHost NOT IN ('-','','- (-)')"
+            "sql": "SELECT COUNT(DISTINCT RemoteHost) FROM {{evtx}} WHERE Channel='Security' AND EventId='4624' AND RemoteHost NOT IN ('-','','- (-)')"
           },
           "drill": {
             "table": "{{evtx}}",
             "column": "RemoteHost",
             "where": [
+              {
+                "column": "Channel",
+                "op": "equals",
+                "value": "Security"
+              },
               {
                 "column": "EventId",
                 "op": "equals",
@@ -485,11 +490,16 @@
           "span": 1,
           "tone": "warn",
           "query": {
-            "sql": "SELECT COUNT(*) FROM {{evtx}} WHERE EventId='4625'"
+            "sql": "SELECT COUNT(*) FROM {{evtx}} WHERE Channel='Security' AND EventId='4625'"
           },
           "drill": {
             "table": "{{evtx}}",
             "where": [
+              {
+                "column": "Channel",
+                "op": "equals",
+                "value": "Security"
+              },
               {
                 "column": "EventId",
                 "op": "equals",
@@ -533,11 +543,16 @@
           "span": 1,
           "tone": "warn",
           "query": {
-            "sql": "SELECT COUNT(*) FROM {{evtx}} WHERE EventId='4648'"
+            "sql": "SELECT COUNT(*) FROM {{evtx}} WHERE Channel='Security' AND EventId='4648'"
           },
           "drill": {
             "table": "{{evtx}}",
             "where": [
+              {
+                "column": "Channel",
+                "op": "equals",
+                "value": "Security"
+              },
               {
                 "column": "EventId",
                 "op": "equals",
@@ -587,12 +602,17 @@
           "render": "bar",
           "span": 2,
           "query": {
-            "sql": "SELECT RemoteHost, COUNT(*) c FROM {{evtx}} WHERE EventId='4624' AND RemoteHost NOT IN ('-','','- (-)') GROUP BY RemoteHost ORDER BY c DESC LIMIT 8"
+            "sql": "SELECT RemoteHost, COUNT(*) c FROM {{evtx}} WHERE Channel='Security' AND EventId='4624' AND RemoteHost NOT IN ('-','','- (-)') GROUP BY RemoteHost ORDER BY c DESC LIMIT 8"
           },
           "drill": {
             "table": "{{evtx}}",
             "column": "RemoteHost",
             "where": [
+              {
+                "column": "Channel",
+                "op": "equals",
+                "value": "Security"
+              },
               {
                 "column": "EventId",
                 "op": "equals",
@@ -622,12 +642,17 @@
           "render": "list",
           "span": 2,
           "query": {
-            "sql": "SELECT UserName, COUNT(*) c FROM {{evtx}} WHERE EventId='4624' AND UserName <> '' GROUP BY UserName ORDER BY c ASC LIMIT 10"
+            "sql": "SELECT UserName, COUNT(*) c FROM {{evtx}} WHERE Channel='Security' AND EventId='4624' AND UserName <> '' GROUP BY UserName ORDER BY c ASC LIMIT 10"
           },
           "drill": {
             "table": "{{evtx}}",
             "column": "UserName",
             "where": [
+              {
+                "column": "Channel",
+                "op": "equals",
+                "value": "Security"
+              },
               {
                 "column": "EventId",
                 "op": "equals",
@@ -722,11 +747,16 @@
           "tone": "warn",
           "sub": "log tampering",
           "query": {
-            "sql": "SELECT COUNT(*) FROM {{evtx}} WHERE EventId='1102'"
+            "sql": "SELECT COUNT(*) FROM {{evtx}} WHERE Channel='Security' AND EventId='1102'"
           },
           "drill": {
             "table": "{{evtx}}",
             "where": [
+              {
+                "column": "Channel",
+                "op": "equals",
+                "value": "Security"
+              },
               {
                 "column": "EventId",
                 "op": "equals",
@@ -742,11 +772,16 @@
           "span": 1,
           "tone": "warn",
           "query": {
-            "sql": "SELECT COUNT(*) FROM {{evtx}} WHERE EventId='4719'"
+            "sql": "SELECT COUNT(*) FROM {{evtx}} WHERE Channel='Security' AND EventId='4719'"
           },
           "drill": {
             "table": "{{evtx}}",
             "where": [
+              {
+                "column": "Channel",
+                "op": "equals",
+                "value": "Security"
+              },
               {
                 "column": "EventId",
                 "op": "equals",
