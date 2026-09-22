@@ -128,6 +128,15 @@ export const KEYMAP_VERSION_KEY = 'winnow.keymap.v';
 
 export const KEYMAP_VERSION = 5;
 
+/* The four spec strings one Ctrl/⌘+F press can produce. keySpecFromEvent
+   spells the plain chord 'Ctrl+f'; ⌘ makes it 'Meta+f', and Shift — or Caps
+   Lock, which is the one that bites — makes e.key 'F'. It is the same chord
+   under the analyst's fingers in all four cases, so the dispatcher matches
+   the set rather than the one spelling the keymap stores, the way the copy
+   handler matches 'c' or 'C'. Declared up here because the v5 migration
+   below has to know the whole set too. */
+const SEARCH_CHORD_SPECS = ['Ctrl+f', 'Ctrl+F', 'Meta+f', 'Meta+F'];
+
 export const KEYMAP_MIGRATIONS = [
   // v1 (2026-08): the column chooser grew into the table menu, and `f`
   // moved from "focus the first filter box" to "filter by this value"
@@ -179,10 +188,19 @@ export const KEYMAP_MIGRATIONS = [
   // where '/' is still the whole binding — an analyst who moved search
   // somewhere else keeps what they chose, and loses nothing, since the
   // pre-gate only claims the chord while focusSearch still holds it.
+  // The second condition is the one this chord needs and the others
+  // didn't: Ctrl+F matched nothing in Winnow until now, so Settings
+  // accepted it for any action, and handing focusSearch the chord would
+  // put the pre-gate in front of a binding someone chose — shadowed with
+  // the chip still sitting in Settings. Where that has happened the
+  // migration does nothing and their binding keeps working, since the
+  // gate is off while focusSearch does not hold the chord.
   (map) => {
     const wasDefault = (action, keys) =>
       JSON.stringify((map[action] || []).slice().sort()) === JSON.stringify(keys.slice().sort());
-    if (wasDefault('focusSearch', ['/'])) map.focusSearch = ['/', 'Ctrl+f'];
+    const chordTaken = Object.entries(map).some(([action, keys]) => action !== 'focusSearch'
+      && Array.isArray(keys) && keys.some((k) => SEARCH_CHORD_SPECS.includes(k)));
+    if (!chordTaken && wasDefault('focusSearch', ['/'])) map.focusSearch = ['/', 'Ctrl+f'];
   },
 ];
 
@@ -268,14 +286,6 @@ export function matchAction(e) {
   return null;
 }
 
-/* The four spec strings one Ctrl/⌘+F press can produce. keySpecFromEvent
-   spells the plain chord 'Ctrl+f'; ⌘ makes it 'Meta+f', and Shift — or Caps
-   Lock, which is the one that bites — makes e.key 'F'. Same chord under the
-   analyst's fingers in all four cases, which is why the dispatcher matches
-   on the set rather than on the one spelling the keymap stores, exactly as
-   the hardcoded copy handler matches 'c' or 'C'. */
-const SEARCH_CHORD_SPECS = ['Ctrl+f', 'Ctrl+F', 'Meta+f', 'Meta+F'];
-
 /* Whether the search box still owns the chord. It is dispatched by hand,
    above the typing guard where matchAction never looks — but not
    unconditionally: take the binding off focusSearch in Settings and the
@@ -298,9 +308,11 @@ export function findKeyConflict(key, currentAction) {
   if (/^(Ctrl|Meta)\+z$/.test(key)) return 'the tag-undo shortcut';
   if (/^Alt\+[0-9]$/.test(key)) return 'tab switching (Alt+1–0)';
   // The search chord is dispatched before matchAction and in every
-  // spelling of itself, so binding one of the other three to another
-  // action would silently do nothing. ('Ctrl+f' itself is reported by the
-  // loop below, off focusSearch's own entry — this covers the rest.)
+  // spelling of itself, so binding any of the four to another action
+  // would silently do nothing — including the two the keymap has no way
+  // to store on focusSearch ('Meta+f' and 'Meta+F'). Answered here rather
+  // than left to the loop below, which only knows the one spelling
+  // focusSearch actually holds.
   if (currentAction !== 'focusSearch' && SEARCH_CHORD_SPECS.includes(key) && searchChordBound()) {
     return ACTION_LABELS.focusSearch;
   }
@@ -447,6 +459,13 @@ document.addEventListener('keydown', (e) => {
      Below the $('app').hidden gate, though — the home screen has no
      search box, and it is small enough to be entirely in the DOM, which
      is the one place find-in-page tells the truth.
+
+     The match is the copy handler's shape — (ctrl || meta) on 'f' or 'F',
+     so ⌘ arrives here rather than as a second binding, and Caps Lock
+     (which makes e.key 'F') still opens the box — plus one term neither
+     the copy nor the undo handler has: `!e.altKey`. Ctrl+Alt is AltGr on
+     a European layout, and AltGr+F there is a character somebody is
+     trying to type, not a chord.
 
      A dialog keeps its own find. #modal and a spawned confirm overlay own
      the keyboard (the gate below says so for every other key, and Ctrl+C

@@ -4,7 +4,7 @@
 import { autofitMaxWidth, fillsGrid, renderHead } from './columns.js';
 import { $, AUTOFIT_MAX_W_DEFAULT, ROW_H, ROW_H_COMFORTABLE, ROW_H_COMPACT, api, debounce, el, post, setRowH, toast } from './core.js';
 import { labeledRow } from './derived.js';
-import { VALUE_FILTER_AUTO_MAX } from './filters.js';
+import { VALUE_FILTER_AUTO_MAX, syncSearchKeyCopy } from './filters.js';
 import { headH, rScroll, render, spacerPx, vScroll } from './grid.js';
 import { drawRail, rebuildGroupPrefix, renderGrouped } from './grouping.js';
 import { syncHistogramPanel } from './histogram.js';
@@ -803,15 +803,19 @@ export function openSettings() {
       + '"+ key" waits for a full press — hold modifiers for a combination (e.g. Ctrl+Shift+K), or Shift+letter for a capital.'));
     const list = el('div', 'settings-keys');
 
-    // Every change to a binding goes through here: the two toolbar
-    // tooltips that spell a key (⏱ Timeframe's toggle/open keys, the
-    // Histogram button's show/hide key) are built from S.keymap when
-    // their button syncs, so a rebinding has to rebuild them too or they
-    // name the old key until the next tab switch.
+    // Every change to a binding goes through here: the toolbar copy that
+    // spells a key (⏱ Timeframe's toggle/open keys, the Histogram
+    // button's show/hide key, the search button's tooltip and the search
+    // box's placeholder) is built from S.keymap when its control syncs,
+    // so a rebinding has to rebuild it too or it names the old key until
+    // the next tab switch. The search pair matters most: the chord there
+    // is only dispatched while focusSearch holds it, so copy left behind
+    // would be advertising a key the browser has taken back.
     function keymapChanged() {
       saveKeymap();
       updateTimeRangeButton();
       syncHistogramPanel();
+      syncSearchKeyCopy();
       renderList();
     }
 

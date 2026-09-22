@@ -9,8 +9,8 @@
      fire during load, so these are order-independent; they're grouped only
      because that's easier to read than interleaving them below.
    - the startup sequence, which is not. loadKeymap() must precede
-     updateTimeRangeButton() and syncHistogramPanel() (they read S.keymap
-     for their tooltips);
+     updateTimeRangeButton(), syncHistogramPanel() and syncSearchKeyCopy()
+     (they read S.keymap for their tooltips and placeholders);
      loadPageTabPrefs() must precede renderPageTabs(); loadDetailPrefs()
      must precede applyDetailPrefs(). Keep them in this order.
 
@@ -64,7 +64,7 @@ import * as home from './home.js';
 import * as errlog from './errlog.js';
 import { toast } from './core.js';
 import { applyDetailPrefs, loadDetailPrefs, wireDetail } from './detail.js';
-import { wireFilters } from './filters.js';
+import { syncSearchKeyCopy, wireFilters } from './filters.js';
 import { wireGrid } from './grid.js';
 import { wireGrouping } from './grouping.js';
 import { syncHistogramPanel, wireHistogram } from './histogram.js';
@@ -135,6 +135,7 @@ S.keymap = loadKeymap();
 
 updateTimeRangeButton();
 syncHistogramPanel();
+syncSearchKeyCopy();
 
 initAppearance();
 
