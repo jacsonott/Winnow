@@ -91,11 +91,26 @@ def test_the_manager_shows_the_whole_profile_not_one_truncated_row(page):
         "(n) => document.querySelectorAll('.pm-widget').length === n",
         arg=len(kape["dashboard"]), timeout=15_000)
     assert page.locator(".pm-w-title").all_inner_texts() == [w["title"] for w in kape["dashboard"]]
-    # the render kind of each card, and its span when it is not 1
-    kinds = page.locator(".pm-w-kind").all_inner_texts()
-    assert kinds[0] == kape["dashboard"][0]["render"]
-    wide = next(i for i, w in enumerate(kape["dashboard"]) if (w.get("span") or 1) > 1)
-    assert kinds[wide] == f"{kape['dashboard'][wide]['render']} · span {kape['dashboard'][wide]['span']}"
+    # The render kind of each card, and its span when it is not 1 — every
+    # card against its own definition, rather than the first card and the
+    # first wide one. Which card is wide is the board's business and it has
+    # changed once already; what this test is about is that the kind and the
+    # span shown are the ones the profile declares.
+    def kind_label(w):
+        # The widget editor's vocabulary, deliberately spelled out here
+        # rather than imported: a card quietly losing its span, or a
+        # non-SQL source going unsaid, is what this is watching for.
+        bits = []
+        if w.get("source") and w["source"] != "sql":
+            bits.append(w["source"])
+        bits.append(w.get("render") or "stat")
+        span = w.get("span") or 1
+        if span > 1:
+            bits.append(f"span {span}")
+        return " · ".join(bits)
+    assert page.locator(".pm-w-kind").all_inner_texts() == [kind_label(w) for w in kape["dashboard"]]
+    assert any((w.get("span") or 1) > 1 for w in kape["dashboard"]), \
+        "the shipped board has a wide card; this test needs one to prove the span is shown"
     # and whether each one re-runs on every open or paints its last result
     live = [w["title"] for w in kape["dashboard"] if w.get("live")]
     assert live, "the shipped board marks some widgets live; this test needs one"
@@ -111,43 +126,56 @@ def test_the_manager_shows_the_whole_profile_not_one_truncated_row(page):
     page.keyboard.press("Escape")
 
 
-def test_apply_and_copy_are_on_screen_without_scrolling_the_shipped_profile(page):
+def test_apply_and_copy_stay_on_screen_when_the_profile_overflows(page, api):
     """The detail pane scrolls; the head and the foot must not scroll with
-    it. The shipped KAPE profile is 26 widget rows plus a watchlist and
-    variables, so a footer pinned only by `margin-top: auto` sits below the
-    fold and the analyst has to scroll past every card to reach the button
-    the manager exists for. Playwright auto-scrolls before a click, so this
-    has to be asserted as geometry, not by clicking."""
-    _open_manager(page)
-    page.locator(".pm-item", has_text="KAPE triage").click()
-    page.wait_for_function(
-        "() => document.querySelectorAll('.pm-widget').length > 20", timeout=15_000)
-    geom = page.evaluate("""() => {
-      const pane = document.querySelector('.pm-detail');
-      pane.scrollTop = 0;
-      const p = pane.getBoundingClientRect();
-      const foot = document.querySelector('.pm-foot').getBoundingClientRect();
-      const head = document.querySelector('.pm-head').getBoundingClientRect();
-      return {overflows: pane.scrollHeight - pane.clientHeight,
-              paneTop: p.top, paneBottom: p.bottom,
-              footTop: foot.top, footBottom: foot.bottom,
-              headTop: head.top, headBottom: head.bottom};
-    }""")
-    assert geom["overflows"] > 100, \
-        "the shipped profile has to overflow the pane or this proves nothing"
-    assert geom["footBottom"] <= geom["paneBottom"] + 1 and geom["footTop"] >= geom["paneTop"], \
-        "“Apply to this case…” is outside the visible pane at the top of the scroll"
-    # and the head is still there once the analyst HAS scrolled
-    geom = page.evaluate("""() => {
-      const pane = document.querySelector('.pm-detail');
-      pane.scrollTop = pane.scrollHeight;
-      const p = pane.getBoundingClientRect();
-      const head = document.querySelector('.pm-head').getBoundingClientRect();
-      return {paneTop: p.top, paneBottom: p.bottom, headTop: head.top, headBottom: head.bottom};
-    }""")
-    assert geom["headTop"] >= geom["paneTop"] - 1 and geom["headBottom"] <= geom["paneBottom"], \
-        "“Copy to edit” scrolled away with the widget list"
-    page.keyboard.press("Escape")
+    it. A profile with more cards than the pane is tall leaves a footer
+    pinned only by `margin-top: auto` below the fold, and the analyst has to
+    scroll past every card to reach the button the manager exists for.
+    Playwright auto-scrolls before a click, so this has to be asserted as
+    geometry, not by clicking.
+
+    The overflow is seeded here rather than borrowed from the shipped KAPE
+    profile. How many cards that board carries is the board's business, it
+    has already changed once, and a layout claim that quietly stops being
+    tested when a board gets denser is worse than no claim."""
+    cards = 40
+    try:
+        _seed(api, dashboard=[{"title": f"Overflow card {i}", "source": "sql",
+                               "render": "stat", "query": {"sql": "SELECT 1"}}
+                              for i in range(cards)])
+        _open_manager(page)
+        page.locator(".pm-item", has_text=PROF).click()
+        page.wait_for_function(
+            "(n) => document.querySelectorAll('.pm-widget').length === n",
+            arg=cards, timeout=15_000)
+        geom = page.evaluate("""() => {
+          const pane = document.querySelector('.pm-detail');
+          pane.scrollTop = 0;
+          const p = pane.getBoundingClientRect();
+          const foot = document.querySelector('.pm-foot').getBoundingClientRect();
+          const head = document.querySelector('.pm-head').getBoundingClientRect();
+          return {overflows: pane.scrollHeight - pane.clientHeight,
+                  paneTop: p.top, paneBottom: p.bottom,
+                  footTop: foot.top, footBottom: foot.bottom,
+                  headTop: head.top, headBottom: head.bottom};
+        }""")
+        assert geom["overflows"] > 100, \
+            "the seeded profile has to overflow the pane or this proves nothing"
+        assert geom["footBottom"] <= geom["paneBottom"] + 1 and geom["footTop"] >= geom["paneTop"], \
+            "“Apply to this case…” is outside the visible pane at the top of the scroll"
+        # and the head is still there once the analyst HAS scrolled
+        geom = page.evaluate("""() => {
+          const pane = document.querySelector('.pm-detail');
+          pane.scrollTop = pane.scrollHeight;
+          const p = pane.getBoundingClientRect();
+          const head = document.querySelector('.pm-head').getBoundingClientRect();
+          return {paneTop: p.top, paneBottom: p.bottom, headTop: head.top, headBottom: head.bottom};
+        }""")
+        assert geom["headTop"] >= geom["paneTop"] - 1 and geom["headBottom"] <= geom["paneBottom"], \
+            "the head scrolled away with the widget list"
+    finally:
+        page.keyboard.press("Escape")
+        _clean(api)
 
 
 def test_a_shipped_profile_is_read_only_and_copies_instead(page):
