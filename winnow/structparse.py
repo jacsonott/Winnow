@@ -589,6 +589,12 @@ _REGEX_PARAM_GROUP = {
     "help": "0 = automatic (group 1 when the pattern has one, else the whole match). "
             "Set 2, 3, … to keep a different group.",
 }
+_REGEX_PARAM_GROUP_NAME = {
+    "name": "group_name", "label": "Named group", "type": "text", "required": False,
+    "help": "The name from a (?P<name>…) group, when the pattern names its parts. "
+            "Wins over the numbered group above — a definition that says which "
+            "name it keeps survives the pattern being edited around it.",
+}
 
 # Analyst-authored patterns run against their own local data, same trust
 # model as the SQL pane — but a runaway pattern shouldn't be able to be
@@ -614,6 +620,17 @@ def _extract_regex(value, params: dict, state: dict) -> str | None:
     m = _compiled_regex(params, state).search(s)
     if m is None:
         return None
+    # A named group is addressed by name, not by the number it happens to
+    # have: an IIS or syslog pattern gets edited — a group added in the
+    # middle, an alternation widened — and every numbered definition after
+    # the edit would quietly start keeping a different field. The name
+    # survives that; the number does not.
+    name = (params.get("group_name") or "").strip()
+    if name:
+        try:
+            return m.group(name)  # None when the group didn't participate -> NULL
+        except (IndexError, re.error):
+            return None
     g = int(params.get("group") or 0)
     if g == 0:
         g = 1 if m.re.groups >= 1 else 0
@@ -631,17 +648,38 @@ def _validate_regex_params(params: dict) -> None:
         rx = re.compile(pattern)
     except re.error as e:
         raise ValueError(f"Invalid regex: {e}")
+    name = (params.get("group_name") or "").strip()
+    if name and name not in rx.groupindex:
+        named = ", ".join(sorted(rx.groupindex)) or "none"
+        raise ValueError(f"The pattern has no group called {name!r} — it names: {named}")
     g = int(params.get("group") or 0)
     if g and g > rx.groups:
         raise ValueError(
             f"The pattern has {rx.groups} capture group{'s' if rx.groups != 1 else ''} — group {g} doesn't exist")
 
 
+def regex_group_names(pattern: str) -> list[str]:
+    """The (?P<name>…) groups a pattern declares, in the order they open.
+
+    What "one column per named group" is built from. `groupindex` maps
+    name -> number, and the numbers are assigned left to right, so sorting
+    by number puts the columns in the order the analyst wrote them rather
+    than in alphabetical order — for a path/method/status pattern that is
+    the difference between reading the definition and decoding it."""
+    if len(pattern or "") > _MAX_REGEX_LEN:
+        raise ValueError(f"Regex too long ({len(pattern)} > {_MAX_REGEX_LEN} characters)")
+    try:
+        rx = re.compile(pattern or "")
+    except re.error as e:
+        raise ValueError(f"Invalid regex: {e}")
+    return [name for name, _ in sorted(rx.groupindex.items(), key=lambda kv: kv[1])]
+
+
 timeparse.register_op({
     "id": "regex_extract",
     "label": "Regex capture",
     "description": "Extract part of this column's value with a regular expression — the host out of a URL, an ID out of a message, anything a capture group can name.",
-    "params": [_REGEX_PARAM_PATTERN, _REGEX_PARAM_GROUP],
+    "params": [_REGEX_PARAM_PATTERN, _REGEX_PARAM_GROUP, _REGEX_PARAM_GROUP_NAME],
     "parse": _extract_regex,
     "validate": _validate_regex_params,
     "value_type": "text",

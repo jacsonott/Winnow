@@ -4163,6 +4163,27 @@ def api_derived_preview(body: DerivedProbe):
         raise HTTPException(404, str(e))
 
 
+class RegexGroupsProbe(BaseModel):
+    source_id: int
+    column: str
+    pattern: str
+
+
+@app.post("/api/derived/regex_groups")
+def api_derived_regex_groups(body: RegexGroupsProbe):
+    """The (?P<name>…) groups a pattern declares, with sample values each
+    would pull out of this column — what the derive modal's "a column per
+    named group" offer is built from. A pattern that will not compile is a
+    400 with the compiler's own message, same as every other params error;
+    a column that is not there is a 404, same as the preview above."""
+    try:
+        return store().preview_regex_groups(body.source_id, body.column, body.pattern)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+
+
 @app.get("/api/derived/{def_id}/unparsed_filter")
 def api_derived_unparsed_filter(def_id: int):
     """The advanced-filter fragment for "show me the rows that didn't
