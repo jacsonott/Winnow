@@ -6,7 +6,7 @@ import { $, api, dragHas, el, post, setBusy, toast } from './core.js';
 import { pad2 } from './tsformat.js';
 import { loadPlugins, openImportModal, queueFiles } from './importer.js';
 import { inFlightWork, startJobsPoll } from './jobs.js';
-import { resetPluginTabMounts } from './plugins.js';
+import { dropPendingTabState, resetPluginTabMounts } from './plugins.js';
 import { resetDerivedSuggestions } from './derived.js';
 import { hideDetailPane } from './detail.js';
 import { resetJobState } from './jobs.js';
@@ -116,6 +116,10 @@ export async function openCase(path, opts = {}) {
   const note = $('noteInput');
   const boundRid = note.dataset.rid;
   note.dataset.rid = '';
+  // A plugin tab's debounced state save is the same hazard with the same
+  // fix: whatever it was about to write describes THIS case, and the POST
+  // below hands the server another one. Dropped before the swap, not after.
+  dropPendingTabState();
   let res;
   try {
     res = await post('/api/case/open', { path, force: !!opts.force });

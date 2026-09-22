@@ -27,6 +27,13 @@ Then pick the **Pivot** page tab.
 - **Copy** (TSV — pastes straight into a spreadsheet) and **CSV** download.
 - Sort the rows by any value column: click its header, again to reverse,
   a third time for key order.
+- **The pivots come back when the case is reopened.** Their DEFINITIONS
+  (table, field areas, filters, subtotal switches, which pivot was on top)
+  are kept in the case file through `winnow.tabState`; the cross-tab itself
+  is re-queried against the case as it is then. A line at the top says they
+  were restored, when they were saved, and offers **Start fresh** — and a
+  pivot whose table or columns are gone restores without them and names
+  what it dropped.
 
 ## Three things it does deliberately
 
