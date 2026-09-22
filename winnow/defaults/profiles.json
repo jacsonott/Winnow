@@ -211,7 +211,7 @@
           "source": "cells",
           "render": "signals",
           "span": 1,
-          "sub": "are we blind? — service and policy keys, then what was tampered with",
+          "sub": "service and policy keys, and what was tampered with",
           "cells": [
             {
               "label": "Sysmon service",
