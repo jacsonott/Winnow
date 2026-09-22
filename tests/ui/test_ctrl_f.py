@@ -267,9 +267,13 @@ def test_the_migration_stands_down_when_the_chord_is_already_spent(browser, serv
         pg.locator("#body").focus()
         pg.keyboard.press("Control+f")
 
-        # Their action, not the toolbar box.
+        # Their action, not the toolbar box. Asserted on the pane's own
+        # controls rather than its title: the sweep dialog has been renamed
+        # once already (it scopes now, so it is not always "all tables"),
+        # and this test is about which action the chord reached.
         pg.wait_for_selector("#modal:not([hidden])", timeout=5_000)
-        assert "search all tables" in pg.locator("#modal").inner_text().lower()
+        assert pg.locator("#modalBody .search-mode-toggle").count() == 1, \
+            pg.locator("#modal").inner_text()
         assert pg.locator("#searchWrap").is_hidden()
         pg.keyboard.press("Escape")
         pg.wait_for_selector("#modal[hidden]", state="attached", timeout=5_000)
