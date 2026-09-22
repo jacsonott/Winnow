@@ -9914,24 +9914,76 @@ class Store:
         wb.save(path)
         return {"sheets": sheets, "rows": total_rows}
 
-    def search_all_sources(self, query: str = "", terms: list[dict] | None = None) -> list[dict]:
+    def resolve_search_all_scope(self, source_ids: list[int] | None) -> dict:
+        """The sweep's scope, turned into real source ids it can actually
+        scan: `{"source_ids": [...] | None, "merges": [...]}`.
+
+        None in, None out — the whole case, which is what the sweep has
+        always done. Otherwise every id is resolved, in the order asked,
+        deduped, and **a merge is expanded to its member_source_ids**: a
+        merge has no `src_N` of its own (CLAUDE.md invariant #9's
+        exceptions), so "search this table" on one can only mean searching
+        the tables its rows actually live in. The expansion is reported in
+        `merges` — `{id, name, member_source_ids}` per merge asked for — so
+        the caller can say so rather than quietly answering a different
+        question than the one asked.
+
+        An id naming nothing raises KeyError (the routes turn that into a
+        400): a typo'd id that silently scanned nothing would come back as
+        "no matches", which is the wrong answer rather than an error. An
+        empty list is a scope of no tables, and scans nothing.
+
+        Resolution happens once, at the point the scope is accepted — the
+        sweep itself never re-resolves. A table dropped between the scope
+        being chosen and the sweep reaching it simply isn't in the
+        `list_sources()` snapshot _iter_search_all_sources filters, so it
+        costs that table its scan rather than ending the run, the way the
+        unscoped sweep has always absorbed a source removed mid-sweep."""
+        if source_ids is None:
+            return {"source_ids": None, "merges": []}
+        out: list[int] = []
+        merges: list[dict] = []
+        for sid in source_ids:
+            src = self._source_lite(sid)          # KeyError: no such source/merge
+            members = list(src["member_source_ids"]) if src.get("is_merge") else [sid]
+            if src.get("is_merge"):
+                merges.append({"id": sid, "name": src["name"], "member_source_ids": members})
+            for m in members:
+                if m not in out:
+                    out.append(m)
+        return {"source_ids": out, "merges": merges}
+
+    def search_all_sources(self, query: str = "", terms: list[dict] | None = None,
+                           source_ids: list[int] | None = None) -> list[dict]:
         """Every source's match count, sorted heaviest-first — the whole
         sweep, run to completion. See _iter_search_all_sources for the
         actual scan and its lock discipline; this is the collect-it-all
         wrapper, used by the synchronous endpoint and the tests.
 
+        `source_ids` scopes it (resolve_search_all_scope); None is every
+        real source in the case. It is resolved HERE, before the scan, so
+        a caller naming a table this case doesn't have gets the KeyError
+        its route turns into a 400 rather than an empty answer that reads
+        like "no matches".
+
         start_search_all_job is the same sweep run on a background thread
         with incremental results, which is what the UI uses."""
-        out = [hit for _, _, hit in self._iter_search_all_sources(query, terms) if hit]
+        scope = self.resolve_search_all_scope(source_ids)["source_ids"]
+        out = [hit for _, _, hit in self._iter_search_all_sources(query, terms, scope) if hit]
         out.sort(key=lambda d: -d["match_count"])
         return out
 
     def _iter_search_all_sources(
-        self, query: str = "", terms: list[dict] | None = None
+        self, query: str = "", terms: list[dict] | None = None,
+        source_ids: list[int] | None = None,
     ) -> Iterator[tuple[int, int, dict | None]]:
         """Per-source match counts for a search across every real source in
         the case (merges excluded — their rows already belong to a real
-        source), no filter/sort/view materialisation involved.
+        source), or across the subset `source_ids` names, no filter/sort/
+        view materialisation involved. `source_ids` is REAL source ids,
+        already resolved: both entry points come through
+        resolve_search_all_scope, which is where a merge becomes its
+        members and an unknown id becomes a KeyError.
 
         Yields `(scanned, total, hit_or_None)` after each source so a caller
         can report progress and surface partial results while the sweep is
@@ -9979,6 +10031,15 @@ class Store:
         # itself); the per-source work below re-acquires it one count at a
         # time. A source removed mid-sweep just yields a SQL error we skip.
         sources = [s for s in self.list_sources() if not s.get("error")]
+        # Scope filtered straight onto that snapshot, the shape
+        # _iter_watchlist_scan uses: an id whose table has been dropped
+        # since the scope was chosen is not in the snapshot, so it costs
+        # that table its scan and nothing else. `total` therefore counts
+        # the tables this run will really scan — it is the progress
+        # denominator the modal shows.
+        if source_ids is not None:
+            wanted = set(source_ids)
+            sources = [s for s in sources if s["id"] in wanted]
         total = len(sources)
         scanned = 0
         for src in sources:
@@ -9993,8 +10054,10 @@ class Store:
             n = 0
             per_term: list[dict] = []
             if inner is not None:
-                # One _reader() checkout per source's count — the sweep
-                # never touches self.lock at all now, so even its worst
+                # One _reader() checkout per source's count — this loop
+                # never touches self.lock at all (a scoped run pays one
+                # locked resolve before it starts, not one per source), so
+                # even its worst
                 # case (N full LIKE scans on an unindexed 42 GB merge)
                 # can't stall a single paging/tagging/view-build request.
                 # Checked out per count rather than once for the sweep so
@@ -10114,10 +10177,18 @@ class Store:
         out.sort(key=lambda d: -d["match_count"])
         return out
 
-    def start_search_all_job(self, query: str = "", terms: list[dict] | None = None) -> dict:
+    def start_search_all_job(self, query: str = "", terms: list[dict] | None = None,
+                             source_ids: list[int] | None = None) -> dict:
         """Runs a search_all sweep on a background daemon thread and returns
         its job record immediately, so the HTTP request that started it
         doesn't sit open for the length of the sweep.
+
+        `source_ids` scopes the sweep (None = every real table). It is
+        resolved BEFORE the thread starts, so an unknown id is a KeyError
+        the caller's request carries back rather than an error buried in a
+        job record nobody is polling yet; the resolved scope — including
+        any merge expanded to its members — rides along in the record, so a
+        poller can say which tables the results in front of it came from.
 
         The sweep was already careful not to hold self.lock across the whole
         loop, so other requests were never actually blocked at the *server* —
@@ -10135,6 +10206,7 @@ class Store:
         Same fire-and-forget daemon-thread pattern as _ensure_fts_building.
         Cancellation is cooperative and only checked between sources, so a
         cancel during one huge table's count still waits out that count."""
+        scope = self.resolve_search_all_scope(source_ids)
         with self._search_job_lock:
             if self._search_job is not None:
                 self._search_job["cancelled"] = True
@@ -10143,6 +10215,9 @@ class Store:
                 "job_id": self._search_job_seq,
                 "query": query,
                 "terms": terms or [],
+                "scope": {"requested": list(source_ids) if source_ids is not None else None,
+                          "source_ids": scope["source_ids"],
+                          "merges": scope["merges"]},
                 "scanned": 0,
                 "total": 0,
                 "hits": [],
@@ -10160,7 +10235,8 @@ class Store:
 
     def _search_all_worker(self, job: dict) -> None:
         try:
-            for scanned, total, hit in self._iter_search_all_sources(job["query"], job["terms"]):
+            for scanned, total, hit in self._iter_search_all_sources(
+                    job["query"], job["terms"], job["scope"]["source_ids"]):
                 with self._search_job_lock:
                     if job["cancelled"]:
                         break
@@ -10187,6 +10263,10 @@ class Store:
                 return None
             return {
                 "job_id": job["job_id"],
+                # The scope the results in this snapshot came from, not
+                # whatever the modal has since been switched to — same rule
+                # the frontend's st.terms follows.
+                "scope": job["scope"],
                 "scanned": job["scanned"],
                 "total": job["total"],
                 "hits": sorted(job["hits"], key=lambda d: -d["match_count"]),
