@@ -2657,6 +2657,13 @@ def api_plugin_bundles_plan(bundle_id: int):
         "turn_off": sorted(on_now - wanted),
         "stay_off": len(known - wanted - on_now),
         "missing": sorted(wanted - known),   # named by the profile, not installed here
+        # How many explicit case overrides the write lands. Applying does
+        # not only move the plugins that differ: it writes an override for
+        # EVERY installed plugin, which is what makes the case's set the
+        # profile's regardless of what the machine's defaults later become.
+        # So the sheet has something to show — and something to leave
+        # tickable — on a case that already matches the profile exactly.
+        "pins": len(known),
     }
 
     def _board(name, widgets):
@@ -2688,11 +2695,21 @@ def api_plugin_bundles_plan(bundle_id: int):
     variables = []
     for d in bundle.get("variables") or []:
         vname = str(d.get("name") or "").strip()
-        if not vname:
+        # Exactly what the apply will accept. Store.seed_variables skips a
+        # name outside VARIABLE_NAME_RE, and a profile that arrived as a
+        # file has had no name checked anywhere (the builder's guard is
+        # client-side), so listing one here would promise a variable that
+        # is never created and never asked for.
+        if not Store.VARIABLE_NAME_RE.match(vname):
             continue
+        # A declared DEFAULT is not a value this case holds, but apply
+        # creates the row with it, so a required variable carrying one is
+        # never prompted for. The sheet needs both facts to say which of
+        # the two happens rather than promising a prompt that never comes.
         variables.append({"name": vname, "label": d.get("label") or "",
                           "required": bool(d.get("required")),
-                          "set": bool(values.get(vname))})
+                          "set": bool(values.get(vname)),
+                          "default": str(d.get("default") or "")})
 
     return {"name": bundle["name"], "shipped": bool(bundle.get("shipped")),
             "plugins": plugins, "boards": boards,

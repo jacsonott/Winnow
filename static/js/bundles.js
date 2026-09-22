@@ -502,8 +502,18 @@ export function openProfileApplySheet(bd, { returnTo } = {}) {
       if (p.already_on.length) tail.push(`${p.already_on.join(', ')} already on`);
       tail.push(p.stay_off === 1 ? '1 other plugin stays off' : `${p.stay_off} other plugins stay off`);
       if (p.missing.length) tail.push(`${p.missing.join(', ')} not installed here`);
+      if (p.pins) {
+        tail.push(`all ${p.pins} pinned for this case, whatever the machine defaults become`);
+      }
       d.append(el('span', null, tail.join(' · ') + '.'));
-    }, { enabled: !!(p.turn_on.length || p.turn_off.length) });
+      /* Ticked even when nothing moves. Applying writes an explicit
+         override for every installed plugin, and that write is the point:
+         it is what stops a later machine-wide toggle taking a plugin out
+         of this case. A part that unticked itself on a matching case
+         would quietly make the sheet's apply mean something weaker than
+         the one the new-case dialog sends. Only a machine with no
+         plugins at all has nothing here to write. */
+    }, { enabled: !!p.pins });
 
     part('boards', 'Boards', (d) => {
       if (!plan.boards.length) {
@@ -556,10 +566,16 @@ export function openProfileApplySheet(bd, { returnTo } = {}) {
       plan.variables.forEach((v, i) => {
         if (i) d.append(el('span', null, ', '));
         d.append(el('span', null, v.label || v.name));
-        if (v.required && !v.set) d.append(el('span', 'ap-off', ' (required, not set)'));
+        /* A required variable with a declared default is NOT asked for:
+           the apply creates the row carrying the default, so it is set
+           by the time anything could prompt. Saying "not set" about it
+           and then never asking is the one disagreement the sheet
+           cannot afford. */
+        if (v.required && !v.set && !v.default) d.append(el('span', 'ap-off', ' (required, not set)'));
+        else if (v.required && !v.set) d.append(el('span', null, ` (required, defaults to “${v.default}”)`));
         else if (v.required) d.append(el('span', null, ' (required)'));
       });
-      const ask = plan.variables.filter((v) => v.required && !v.set).length;
+      const ask = plan.variables.filter((v) => v.required && !v.set && !v.default).length;
       d.append(el('span', null, ask
         ? ' — you will be asked for these after applying.'
         : ' — definitions only; values you have already set are kept.'));

@@ -12,6 +12,8 @@ beforehand are the ones the apply then produces.
 
 from __future__ import annotations
 
+import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -101,11 +103,70 @@ def test_a_file_that_is_not_a_profile_is_refused_by_name(client):
         (b'{"format": "winnow-profile/1"}', "no profile in it"),
         (b'{"format": "winnow-profile/1", "profile": {"name": "  "}}', "no name"),
         (b"not json at all", "Not a valid profile file"),
+        # A KNOWN key holding the wrong kind of value. `save` is
+        # permissive on purpose, so `"plugins": "lateral_movement"` would
+        # store `sorted({str(p) for p in plugins})` — one plugin per
+        # LETTER — and a string `dashboard` would reach the manager as a
+        # board whose widgets cannot be iterated. Half a profile that
+        # looks whole, which is the failure the key check is named for.
+        (b'{"format": "winnow-profile/1", "profile": {"name": "X", "plugins": "lateral_movement"}}',
+         "“plugins” in that profile file is a string, not a list"),
+        (b'{"format": "winnow-profile/1", "profile": {"name": "X", "dashboard": {"a": 1}}}',
+         "“dashboard” in that profile file is an object, not a list"),
+        (b'{"format": "winnow-profile/1", "profile": {"name": "X", "watchlist": ["rclone"]}}',
+         "“watchlist” in that profile file holds a string"),
+        (b'{"format": "winnow-profile/1", "profile": {"name": "X", "from_version": true}}',
+         "“from_version” in that profile file is a true/false value, not a number"),
     ]:
         r = client.post("/api/plugin_bundles/import",
                         files={"file": ("p.json", body, "application/json")})
         assert r.status_code == 400, body
         assert expect in r.json()["detail"], body
+        assert not any(b["name"] == "X" for b in client.get("/api/plugin_bundles").json()), body
+
+
+def test_a_name_that_fills_the_cap_still_finds_a_free_one(client):
+    """A profile name may be exactly 100 characters, and the suffix the
+    import adds to a taken name was appended and then truncated back to
+    100 — straight back to the name it collided with, so every candidate
+    was taken and the search never ended. The route is a plain `def`, so
+    that pinned a threadpool worker at 100% for the life of the process
+    and a second attempt took another one.
+
+    Asserted with a watchdog because the symptom is "never returns"."""
+    long_name = "A" * 100
+    assert client.post("/api/plugin_bundles",
+                       json={"name": long_name, "plugins": []}).status_code == 200
+    file = json.dumps({"format": "winnow-profile/1",
+                       "profile": {"name": long_name}}).encode()
+
+    out = {}
+
+    def go():
+        r = client.post("/api/plugin_bundles/import",
+                        files={"file": ("p.json", file, "application/json")})
+        out["status"], out["body"] = r.status_code, r.json()
+
+    t = threading.Thread(target=go, daemon=True)
+    t.start()
+    t.join(30)
+    assert not t.is_alive(), "the import never returned — the search for a free name cannot end"
+    assert out["status"] == 200, out
+    assert out["body"]["name"] != long_name and len(out["body"]["name"]) <= 100
+    # and a second one lands beside both rather than on either
+    names = {b["name"] for b in client.get("/api/plugin_bundles").json()}
+    r = client.post("/api/plugin_bundles/import", files={"file": ("p.json", file, "application/json")})
+    assert r.status_code == 200 and r.json()["name"] not in names
+
+
+def test_a_name_with_room_to_spare_is_imported_unchanged(client):
+    """The trimming is for the collision only — an ordinary import keeps
+    the name it arrived with, character for character."""
+    r = client.post("/api/plugin_bundles/import", files={"file": (
+        "p.json", json.dumps({"format": "winnow-profile/1",
+                              "profile": {"name": "B" * 100}}).encode(), "application/json")})
+    assert r.status_code == 200, r.text
+    assert r.json()["name"] == "B" * 100
 
 
 def test_a_shipped_profile_exports_as_an_editable_copy(client):
@@ -215,7 +276,10 @@ def test_the_plan_counts_what_apply_will_change(client, store, write_csv, regist
     assert plan["watchlist"]["existing"] == ["psexec"]
     assert plan["watchlist"]["scan_tables"] == 1
     assert plan["variables"] == [{"name": "engagement", "label": "Engagement",
-                                 "required": True, "set": False}]
+                                 "required": True, "set": False, "default": ""}]
+    # Every installed plugin gets an explicit override, not just the ones
+    # that move — the number the sheet keeps its Plugins part tickable on.
+    assert plan["plugins"]["pins"] == len(installed)
 
     client.post(f"/api/plugin_bundles/{rec['id']}/apply")
 
@@ -256,6 +320,36 @@ def test_the_plan_needs_a_case(client, monkeypatch):
     rec = _profile(client)
     monkeypatch.setattr(server, "STORE", None)
     assert client.get(f"/api/plugin_bundles/{rec['id']}/plan").status_code == 400
+
+
+def test_a_required_variable_with_a_default_is_not_promised_a_prompt(client, store, registry):
+    """The sheet prints "you will be asked for these after applying" from
+    the plan's `set`. Apply seeds the row WITH the declared default, so a
+    required variable that has one is never asked for — the sheet has to
+    say which of the two happens."""
+    rec = _profile(client, variables=[{"name": "engagement", "label": "Engagement",
+                                       "required": True, "default": "Acme IR"}])
+    plan = client.get(f"/api/plugin_bundles/{rec['id']}/plan").json()
+    assert plan["variables"] == [{"name": "engagement", "label": "Engagement",
+                                  "required": True, "set": False, "default": "Acme IR"}]
+
+    applied = client.post(f"/api/plugin_bundles/{rec['id']}/apply").json()
+    assert applied["variables_missing"] == [], "nothing prompts, so the sheet must not promise one"
+    assert [v["value"] for v in store.list_variables() if v["name"] == "engagement"] == ["Acme IR"]
+
+
+def test_a_variable_the_apply_would_skip_is_not_in_the_plan(client, store, registry):
+    """Store.seed_variables skips a name outside VARIABLE_NAME_RE, and a
+    profile that arrived as a file has had its names checked nowhere (the
+    builder's guard is client-side). Listing one would promise a variable
+    that is never created and never asked for."""
+    rec = _profile(client, variables=[{"name": "2 bad", "required": True},
+                                      {"name": "good_one", "required": True}])
+    plan = client.get(f"/api/plugin_bundles/{rec['id']}/plan").json()
+    assert [v["name"] for v in plan["variables"]] == ["good_one"]
+
+    client.post(f"/api/plugin_bundles/{rec['id']}/apply")
+    assert [v["name"] for v in store.list_variables()] == ["good_one"]
 
 
 # ------------------------------------------------------------- apply parts

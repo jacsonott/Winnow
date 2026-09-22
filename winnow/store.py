@@ -8728,11 +8728,13 @@ class Store:
     def set_dashboard_widgets(self, dashboard_id: int, widgets: list) -> list:
         """Edited by hand, which also clears `origin`.
 
-        `origin` means "these widgets are exactly what the plugin wrote" —
-        that is the whole basis for re-adding the board refreshing it
+        `origin` means "these widgets are exactly what whoever stamped it
+        wrote" — a plugin's add (`plugin:<fs_name>:<id>`) or a profile's
+        apply (`profile:<name>`); see upsert_dashboard_by_name. That is
+        the whole basis for re-adding or re-applying a board refreshing it
         without asking. The moment the analyst changes a card, there IS
-        work of theirs to lose, so the board stops being the plugin's copy
-        and the next add goes back to asking."""
+        work of theirs to lose, so the board stops being anyone else's
+        copy and both of those go back to asking."""
         if not isinstance(widgets, list):
             raise ValueError("A dashboard is a list of widgets")
         widgets = self._mint_widget_ids(widgets)
@@ -8818,11 +8820,14 @@ class Store:
         duplicates).
 
         `origin` says whose widgets these now are, and is written every
-        time — including as NULL. Whoever last wrote the board owns it: the
-        plugin add stamps itself so re-adding refreshes silently, and a
-        profile apply (which writes ITS widgets, not the plugin's) clears
-        the stamp so the plugin has to ask before overwriting them. One
-        rule, and it errs toward asking."""
+        time — including as NULL. Whoever last wrote the board owns it: a
+        plugin add stamps `plugin:<fs_name>:<id>`, a profile apply stamps
+        `profile:<profile name>`, and a hand edit clears it to NULL
+        (set_dashboard_widgets). A caller re-writing its OWN stamp is
+        refreshing its own copy and says nothing; any other stamp, or
+        none, means there is someone else's work here and the caller asks
+        first. One rule, read from both ends, and it errs toward
+        asking."""
         widgets = self._mint_widget_ids(widgets)
         with self.lock, self.db:
             row = self.db.execute(

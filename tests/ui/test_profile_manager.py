@@ -111,6 +111,45 @@ def test_the_manager_shows_the_whole_profile_not_one_truncated_row(page):
     page.keyboard.press("Escape")
 
 
+def test_apply_and_copy_are_on_screen_without_scrolling_the_shipped_profile(page):
+    """The detail pane scrolls; the head and the foot must not scroll with
+    it. The shipped KAPE profile is 26 widget rows plus a watchlist and
+    variables, so a footer pinned only by `margin-top: auto` sits below the
+    fold and the analyst has to scroll past every card to reach the button
+    the manager exists for. Playwright auto-scrolls before a click, so this
+    has to be asserted as geometry, not by clicking."""
+    _open_manager(page)
+    page.locator(".pm-item", has_text="KAPE triage").click()
+    page.wait_for_function(
+        "() => document.querySelectorAll('.pm-widget').length > 20", timeout=15_000)
+    geom = page.evaluate("""() => {
+      const pane = document.querySelector('.pm-detail');
+      pane.scrollTop = 0;
+      const p = pane.getBoundingClientRect();
+      const foot = document.querySelector('.pm-foot').getBoundingClientRect();
+      const head = document.querySelector('.pm-head').getBoundingClientRect();
+      return {overflows: pane.scrollHeight - pane.clientHeight,
+              paneTop: p.top, paneBottom: p.bottom,
+              footTop: foot.top, footBottom: foot.bottom,
+              headTop: head.top, headBottom: head.bottom};
+    }""")
+    assert geom["overflows"] > 100, \
+        "the shipped profile has to overflow the pane or this proves nothing"
+    assert geom["footBottom"] <= geom["paneBottom"] + 1 and geom["footTop"] >= geom["paneTop"], \
+        "“Apply to this case…” is outside the visible pane at the top of the scroll"
+    # and the head is still there once the analyst HAS scrolled
+    geom = page.evaluate("""() => {
+      const pane = document.querySelector('.pm-detail');
+      pane.scrollTop = pane.scrollHeight;
+      const p = pane.getBoundingClientRect();
+      const head = document.querySelector('.pm-head').getBoundingClientRect();
+      return {paneTop: p.top, paneBottom: p.bottom, headTop: head.top, headBottom: head.bottom};
+    }""")
+    assert geom["headTop"] >= geom["paneTop"] - 1 and geom["headBottom"] <= geom["paneBottom"], \
+        "“Copy to edit” scrolled away with the widget list"
+    page.keyboard.press("Escape")
+
+
 def test_a_shipped_profile_is_read_only_and_copies_instead(page):
     _open_manager(page)
     page.locator(".pm-item", has_text="KAPE triage").click()
@@ -131,7 +170,9 @@ def test_the_sheet_names_every_part_with_numbers_from_this_case(page, api):
     which go off, what the board replaces, which indicators are new, which
     variables will be asked for."""
     try:
-        _seed(api)
+        _seed(api, variables=[{"name": "ui_engagement", "label": "UI engagement", "required": True},
+                              {"name": "ui_client", "label": "UI client", "required": True,
+                               "default": "Acme IR"}])
         on_now = sorted(p["fs_name"] for p in api("/api/plugins")["plugins"] if p["enabled"])
         _open_manager(page)
         page.locator(".pm-item", has_text=PROF).click()
@@ -159,6 +200,10 @@ def test_the_sheet_names_every_part_with_numbers_from_this_case(page, api):
 
         variables = page.locator('.ap-part[data-part="variables"]').inner_text()
         assert "UI engagement" in variables and "required, not set" in variables
+        # One of the two declares a DEFAULT, and apply creates its row
+        # carrying it — so it is never among the ones anything asks for.
+        assert "UI client (required, defaults to \u201cAcme IR\u201d)" in variables
+        assert "you will be asked for these after applying" in variables
 
         # Nothing has happened yet — that is the sentence at the bottom.
         assert "Nothing is applied until you press Apply." in page.locator(".ap-note").inner_text()
@@ -169,6 +214,37 @@ def test_the_sheet_names_every_part_with_numbers_from_this_case(page, api):
         page.keyboard.press("Escape")
         _clean(api)
         _clean_case(api)
+
+
+def test_a_profile_that_moves_no_plugin_still_offers_to_pin_the_set(page, api):
+    """Applying writes an explicit override for EVERY installed plugin, so
+    the case's plugin set stops depending on the machine's defaults. The
+    sheet used to untick and disable the Plugins part whenever the case
+    already matched the profile — so Apply wrote no override at all, and
+    the analyst who later switched a plugin off machine-wide silently lost
+    it from this case. Nothing to change is not nothing to do."""
+    try:
+        installed = api("/api/plugins")["plugins"]
+        assert installed, "this test needs at least one installed plugin"
+        on_now = sorted(p["fs_name"] for p in installed if p["enabled"])
+        _seed(api, plugins=on_now, dashboard=[], dashboards=[], watchlist=[], variables=[])
+        _open_manager(page)
+        page.locator(".pm-item", has_text=PROF).click()
+        page.locator(".pm-foot .btn", has_text="Apply to this case").click()
+        page.wait_for_selector('.ap-part[data-part="plugins"]', timeout=15_000)
+
+        row = page.locator('.ap-part[data-part="plugins"]')
+        text = row.inner_text()
+        assert "Every plugin is already where this profile wants it" in text
+        assert f"all {len(installed)} pinned for this case" in text
+        box = row.locator("input")
+        assert box.is_checked() and box.is_enabled(), \
+            "the part writes the overrides that pin this case; it cannot untick itself"
+        page.locator(".row-actions .btn", has_text="Cancel").click()
+        page.wait_for_selector(".pm-item", timeout=15_000)
+    finally:
+        page.keyboard.press("Escape")
+        _clean(api)
 
 
 def test_unticking_a_part_leaves_that_part_of_the_case_alone(page, api):

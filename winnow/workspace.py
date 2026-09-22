@@ -926,6 +926,26 @@ class PluginBundles:
     IMPORTABLE = ("name", "description", "plugins", "watchlist", "dashboard",
                   "dashboards", "variables", "from_profile", "from_version")
 
+    # And what each of those keys has to BE, with what its list holds.
+    # The unknown-key refusal above only covers names nobody here knows;
+    # a KNOWN key carrying the wrong kind of value is the same failure
+    # wearing a familiar name, and it gets further. `save` stores
+    # `sorted({str(p) for p in plugins})`, so a hand-edited
+    # `"plugins": "lateral_movement"` imports as one plugin per LETTER,
+    # and a `dashboard` that is not a list reaches the manager as a board
+    # whose widgets cannot be iterated — half a profile that looks whole,
+    # again. None passes everywhere: an exported profile writes the keys
+    # it has no value for as null.
+    IMPORT_SHAPE = {"name": (str, None), "description": (str, None),
+                    "from_profile": (str, None), "from_version": (int, None),
+                    "plugins": (list, str), "watchlist": (list, dict),
+                    "dashboard": (list, dict), "dashboards": (list, dict),
+                    "variables": (list, dict)}
+
+    # What to call those types in a message an analyst reads.
+    TYPE_WORDS = {str: "string", int: "number", list: "list", dict: "object",
+                  bool: "true/false value", float: "number"}
+
     @staticmethod
     def _shipped() -> list[dict]:
         """Shipped default profiles (defaults/profiles.json), given negative
@@ -1070,6 +1090,41 @@ class PluginBundles:
             prof["from_version"] = b.get("version", 1)
         return {"format": self.EXPORT_FORMAT, "profile": prof}
 
+    @classmethod
+    def _check_shape(cls, prof: dict) -> None:
+        """Every key in that file is the shape this version can apply.
+
+        Refusing an unknown KEY and then accepting a known one holding
+        anything at all would be a strange place to stop: `save` is
+        permissive on purpose (it is fed by the builder, which validates
+        on the way in), so a file is the one door where the value types
+        have never been checked. The messages name the key and both
+        types, because the analyst who hand-edits a profile file is the
+        person who has to fix it."""
+        def word(v):
+            name = cls.TYPE_WORDS.get(type(v), type(v).__name__)
+            return f"{'an' if name[0] in 'aeiou' else 'a'} {name}"
+
+        def wanted(t):
+            name = cls.TYPE_WORDS[t]
+            return f"{'an' if name[0] in 'aeiou' else 'a'} {name}"
+
+        for key, (want, member) in cls.IMPORT_SHAPE.items():
+            val = prof.get(key)
+            if val is None:
+                continue
+            # bool is an int to isinstance, and `"from_version": true` is
+            # not a version.
+            if not isinstance(val, want) or (want is int and isinstance(val, bool)):
+                raise ValueError(f"“{key}” in that profile file is {word(val)}, "
+                                 f"not {wanted(want)}")
+            if member is None:
+                continue
+            for item in val:
+                if not isinstance(item, member) or (member is str and isinstance(item, bool)):
+                    raise ValueError(f"“{key}” in that profile file holds {word(item)} "
+                                     f"where it needs {wanted(member)}")
+
     def import_one(self, data: dict) -> dict:
         """Read one exported profile back, under a name that is free.
 
@@ -1089,14 +1144,29 @@ class PluginBundles:
         if unknown:
             raise ValueError("This profile carries something this version does not understand: "
                              + ", ".join(unknown))
+        self._check_shape(prof)
         name = str(prof.get("name") or "").strip()
         if not name:
             raise ValueError("That profile has no name")
         taken = {b["name"].lower() for b in self.list()}
+        # A name that fills `save`'s 100-character cap has no room left
+        # for a suffix: `(name + " (imported 2)")[:100]` truncates
+        # straight back to the name it collided with, so every candidate
+        # is taken and the search never ends (the route is a plain `def`,
+        # so that spins a threadpool worker for the life of the process).
+        # Trim the BASE far enough for the longest suffix instead, and
+        # only when there is a collision at all, so an ordinary import
+        # keeps the name it arrived with. Bounded too, because a loop
+        # whose termination depends on string arithmetic should not be
+        # the only thing standing between a file and a hung worker.
+        base = name[:100 - len(" (imported 99)")]
         candidate, n = name, 1
         while candidate.lower() in taken:
             n += 1
-            candidate = (f"{name} (imported)" if n == 2 else f"{name} (imported {n})")[:100]
+            if n > 99:
+                raise ValueError(f"Too many profiles are already named “{name}” "
+                                 "— rename or delete one before importing another")
+            candidate = f"{base} (imported)" if n == 2 else f"{base} (imported {n})"
         version = prof.get("from_version")
         return self.save(candidate, prof.get("plugins") or [],
                          dashboard=prof.get("dashboard") or [],

@@ -2474,7 +2474,14 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 .pm-list-acts .btn { text-align: left; }
 .pm-mini { font-size: 10px; padding: 2px 6px; }
 .pm-detail { display: flex; flex-direction: column; min-width: 0; overflow: auto; }
-.pm-head { display: flex; align-items: center; gap: 9px; margin-bottom: 4px; }
+/* Head and foot stay put while the widget list scrolls under them. The
+   shipped KAPE profile is 26 widget rows plus a watchlist and variables,
+   so in a 62vh pane both "Apply to this case…" and "Copy to edit" are
+   below the fold — the analyst opens the manager on the most-used profile
+   and has to scroll past every card to find the button the manager exists
+   for. Same fold that pushed Apply off the row this replaced. */
+.pm-head { display: flex; align-items: center; gap: 9px; padding-bottom: 6px;
+  position: sticky; top: 0; z-index: 2; background: var(--panel); }
 .pm-head h3 { margin: 0; font-size: 15px; color: var(--text); font-weight: 600; }
 .pm-head-acts { margin-left: auto; display: flex; gap: 4px; }
 .pm-desc { font-size: 11px; color: var(--dim); margin: 0 0 12px; line-height: 1.6; }
@@ -2493,7 +2500,8 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 .pm-w-kind { color: var(--dim); font-family: var(--mono); font-size: 10px; }
 .pm-w-run { color: var(--dim); font-family: var(--mono); font-size: 10px; min-width: 72px; text-align: right; }
 .pm-w-run.live { color: var(--accent); }
-.pm-foot { display: flex; gap: 8px; align-items: center; margin-top: auto; padding-top: 10px; }
+.pm-foot { display: flex; gap: 8px; align-items: center; margin-top: auto; padding: 10px 0 2px;
+  position: sticky; bottom: 0; z-index: 2; background: var(--panel); border-top: 1px solid var(--line); }
 .pm-foot-note, .pm-foot-when { font-size: 11px; color: var(--dim); }
 .pm-foot-when { margin-left: auto; font-family: var(--mono); }
 .pm-diff { margin: 8px 0; }
