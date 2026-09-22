@@ -2771,7 +2771,10 @@ def api_plugin_bundles_apply(bundle_id: int, body: BundleApplyBody | None = None
             STORE.upsert_dashboard_by_name(bundle["name"], bundle["dashboard"], origin=origin)
             dashboard_applied = True
         # Extra named boards a profile carries land under their own names,
-        # same upsert-by-name rule and the same stamp.
+        # same upsert-by-name rule and the same stamp. No SHIPPED profile
+        # has one — the KAPE host overview, which is what this was written
+        # for, is part of the triage board now — but Save-as-profile writes
+        # whatever boards it was given.
         for board in bundle.get("dashboards") or []:
             bname = str(board.get("name") or "").strip()
             if bname and board.get("widgets"):
@@ -3776,6 +3779,11 @@ class DashboardReorder(BaseModel):
 class WidgetPreviewBody(BaseModel):
     source: str
     query: dict = {}
+    # A `signals` widget (source "cells") asks several questions at once —
+    # one per cell, each with its own drill. They ride in the body rather
+    # than in `query` because each cell has its own source, and the
+    # editor's Preview runs an unsaved draft that is not on any board yet.
+    cells: list | None = None
     # Which card on which board this run is for. Both present and the
     # result is cached under that widget, so the next open of the board
     # paints it instead of re-running the query. Absent — the editor
@@ -3962,7 +3970,7 @@ def api_dashboard_widget_preview(body: WidgetPreviewBody):
     st = store()
     t0 = time.time()
     try:
-        out = st.dashboard_widget_preview(body.source, body.query)
+        out = st.dashboard_widget_preview(body.source, body.query, cells=body.cells)
     except ValueError as e:
         raise HTTPException(400, str(e))
     elapsed = int((time.time() - t0) * 1000)

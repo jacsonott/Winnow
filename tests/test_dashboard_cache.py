@@ -517,10 +517,22 @@ def test_the_refresh_route_reruns_and_404s_on_a_board_that_is_gone(client, store
 # ------------------------------------------------------------ shipped board
 
 def test_the_shipped_kape_board_keeps_its_cheap_widgets_live(client):
-    """The two that count the analyst's OWN work — a number that is wrong
-    to show a minute old — and nothing that scans the log."""
+    """The card that counts the analyst's OWN work — numbers that are
+    wrong to show a minute old — and nothing that scans the log.
+
+    The two counts are cells of one card now rather than two cards, which
+    is what keeps them live at all: everything else on the board is a
+    scan, so a live flag on any of it would put the cost back that the
+    cache took away."""
     profiles = client.get("/api/plugin_bundles").json()
     kape = next(p for p in profiles if p["name"] == "KAPE triage")
-    live = [w["title"] for w in kape["dashboard"] if w.get("live")]
-    assert live == ["Watchlist hits", "Tagged findings"]
-    assert not any(w.get("live") for w in kape["dashboard"] if w.get("source") == "sql")
+    live = [w for w in kape["dashboard"] if w.get("live")]
+    assert [w["title"] for w in live] == ["Findings"]
+    assert [c["source"] for c in live[0]["cells"]] == ["watchlist", "tags"]
+    # Nothing that reads a log runs on every open — not as a widget, and
+    # not as a cell of one.
+    for w in kape["dashboard"]:
+        if not w.get("live"):
+            continue
+        for c in w.get("cells") or [w]:
+            assert (c.get("source") or "sql") != "sql", (w["title"], c.get("label"))

@@ -45,12 +45,27 @@ def _conds(node):
     return out
 
 
-def test_every_kape_sql_widget_has_a_drill_that_names_real_columns():
+def _questions():
+    """Everything on the board that asks a question of the data: a
+    widget's own query, and each cell of a `signals` widget. A cell is a
+    small widget — its own source, its own query, its own drill — so the
+    drill contract applies to it in exactly the same words."""
+    out = []
     for w in _kape()["dashboard"]:
-        if w["source"] != "sql":
+        if w.get("cells"):
+            out.extend((f"{w['title']} · {c['label']}", c) for c in w["cells"])
+        else:
+            out.append((w["title"], w))
+    return out
+
+
+def test_every_kape_sql_widget_has_a_drill_that_names_real_columns():
+    for title, w in _questions():
+        if (w.get("source") or "sql") != "sql":
             continue
         drill = w.get("drill")
-        assert drill, w["title"]
+        assert drill, title
+        w = dict(w, title=title)
         cols = _columns_for(drill["table"])
         for cond in _conds(drill):
             assert cond["column"] in cols, (w["title"], cond)
@@ -98,6 +113,9 @@ REG_ROWS = [
     _reg(KeyPath="Microsoft\\Windows NT\\CurrentVersion\\Winlogon", ValueName="ProductName", ValueData="decoy", Category="OS"),
     _reg(KeyPath="ControlSet001\\Control\\ComputerName\\ComputerName", ValueName="ComputerName", ValueData="WKSTN-014", Category="System"),
     _reg(KeyPath="ControlSet001\\Control\\ProductOptions", ValueName="ProductType", ValueData="WinNT", Category="System"),
+    # A second ProductType with no value: the card does not print it, so
+    # the drill must not open it either.
+    _reg(KeyPath="ControlSet001\\Control\\ProductOptions", ValueName="ProductType", ValueData="", Category="System"),
     _reg(KeyPath="ControlSet001\\Control\\ProductOptions", ValueName="ProductSuite", ValueData="Terminal Server", Category="System"),
     _reg(KeyPath="ControlSet001\\Services\\Tcpip\\Parameters", ValueName="Hostname", ValueData="wkstn-014", Category="Network"),
     _reg(KeyPath="ControlSet001\\Services\\Tcpip\\Parameters", ValueName="Domain", ValueData="corp.example.com", Category="Network"),
@@ -156,28 +174,35 @@ def _drill_rows(store, sid, drill, value=None):
 
 
 def _preview(store, w):
-    return store.dashboard_widget_preview(w["source"], w["query"])["rows"]
+    return store.dashboard_widget_preview(w.get("source") or "sql", w.get("query") or {},
+                                          cells=w.get("cells"))["rows"]
 
 
 def test_every_counting_drill_selects_exactly_the_rows_its_sql_counted(host):
-    """A stat that says 3 opens 3 rows; a distinct count opens rows with
+    """A number that says 3 opens 3 rows; a distinct count opens rows with
     exactly that many distinct values. Anything looser or tighter is a
-    number the click contradicts."""
+    number the click contradicts.
+
+    The floor went UP with the consolidation, which is the point of the
+    `signals` render kind: eleven single-number cards became cells of two
+    cards, and every one of them kept the drill it had. Folding them into
+    a kv card would have left one OR-of-everything here and a floor of
+    two."""
     store, ids = host
     checked = 0
-    for w in _kape()["dashboard"]:
-        if w["source"] != "sql" or w["render"] != "stat":
-            continue
-        sql = w["query"]["sql"].replace("\n", " ")
+    for title, w in _questions():
+        sql = (w.get("query") or {}).get("sql", "").replace("\n", " ")
+        if not sql.startswith("SELECT COUNT(") or "> 0" in sql:
+            continue                     # not a row count: a yes/no chip, a list, a chart
         drill = w["drill"]
         rows = _drill_rows(store, ids[drill["table"]], drill)
         (n,) = _preview(store, w)[0]
         if "COUNT(DISTINCT" in sql:
-            assert len({r[drill["column"]] for r in rows}) == n, (w["title"], n, len(rows))
+            assert len({r[drill["column"]] for r in rows}) == n, (title, n, len(rows))
         else:
-            assert len(rows) == n, (w["title"], n, len(rows))
+            assert len(rows) == n, (title, n, len(rows))
         checked += 1
-    assert checked >= 9, checked
+    assert checked >= 12, checked
 
 
 def test_top_n_drills_open_exactly_the_rows_behind_each_bar(host):
@@ -190,31 +215,66 @@ def test_top_n_drills_open_exactly_the_rows_behind_each_bar(host):
             assert len(rows) == count, (title, label, count, len(rows))
 
 
-def test_host_fact_drills_open_the_rows_the_cards_read(host):
-    """The kv and chips cards on the registry: the drill lands on the rows
-    the card was computed from, and on nothing else (the Winlogon decoy,
-    the 0.0.0.0 interface, Sysmon's Parameters subkey, Category '-')."""
+def test_the_host_cards_drill_opens_the_rows_the_card_read(host):
+    """One card now carries five facts, so it carries one drill — an OR of
+    the five trees the five cards had, which has to open THEIR union and
+    nothing else: not the Winlogon decoy, not the 0.0.0.0 interface, not
+    Sysmon's Parameters subkey, not the uncategorised value."""
     store, ids = host
     reg = ids["{{registry}}"]
     by_title = {w["title"]: w for w in _kape()["dashboard"]}
-    def opened(title):
-        return sorted((r["KeyPath"], r["ValueName"]) for r in _drill_rows(store, reg, by_title[title]["drill"]))
-    assert opened("OS version") == [("Microsoft\\Windows NT\\CurrentVersion", "DisplayVersion"),
-                                    ("Microsoft\\Windows NT\\CurrentVersion", "ProductName")]
-    assert opened("Hostname") == [("ControlSet001\\Control\\ComputerName\\ComputerName", "ComputerName"),
-                                  ("ControlSet001\\Services\\Tcpip\\Parameters", "Hostname")]
-    assert opened("Domain") == [("ControlSet001\\Services\\Tcpip\\Parameters", "Domain"),
-                                ("ControlSet001\\Services\\Tcpip\\Parameters", "NV Domain")]
-    assert opened("IP addresses") == [("ControlSet001\\Services\\Tcpip\\Parameters\\Interfaces\\{9ec42dd6}", "DhcpDefaultGateway"),
-                                      ("ControlSet001\\Services\\Tcpip\\Parameters\\Interfaces\\{9ec42dd6}", "DhcpIPAddress")]
-    assert opened("System function") == [("ControlSet001\\Control\\ProductOptions", "ProductType")]
-    assert opened("Sysmon enabled") == [("ControlSet001\\Services\\Sysmon64", "ImagePath"),
+    opened = sorted((r["KeyPath"], r["ValueName"])
+                    for r in _drill_rows(store, reg, by_title["Host"]["drill"]))
+    assert opened == [
+        ("ControlSet001\\Control\\ComputerName\\ComputerName", "ComputerName"),
+        ("ControlSet001\\Control\\ProductOptions", "ProductType"),
+        ("ControlSet001\\Services\\Tcpip\\Parameters", "Domain"),
+        ("ControlSet001\\Services\\Tcpip\\Parameters", "Hostname"),
+        ("ControlSet001\\Services\\Tcpip\\Parameters", "NV Domain"),
+        ("ControlSet001\\Services\\Tcpip\\Parameters\\Interfaces\\{9ec42dd6}", "DhcpDefaultGateway"),
+        ("ControlSet001\\Services\\Tcpip\\Parameters\\Interfaces\\{9ec42dd6}", "DhcpIPAddress"),
+        ("Microsoft\\Windows NT\\CurrentVersion", "DisplayVersion"),
+        ("Microsoft\\Windows NT\\CurrentVersion", "ProductName"),
+    ]
+    # Exactly the rows the card printed, row for row.
+    printed = [r[0] for r in _preview(store, by_title["Host"])]
+    assert len(printed) == len(opened)
+
+
+def test_each_posture_chip_opens_only_the_key_it_read(host):
+    """The chips GAINED precision in the merge: two cards carried one
+    OR-tree each covering all their chips, so clicking either opened every
+    key on it. As cells they carry one drill apiece."""
+    store, ids = host
+    reg = ids["{{registry}}"]
+    cells = {c["label"]: c for c in
+             next(w for w in _kape()["dashboard"] if w["title"] == "Logging posture")["cells"]}
+
+    def opened(label):
+        return sorted((r["KeyPath"], r["ValueName"]) for r in _drill_rows(store, reg, cells[label]["drill"]))
+
+    # The service chip is true when either Sysmon binary is registered, and
+    # opens both — the SQL behind it says the same (`\\Services\\Sysmon%`).
+    assert opened("Sysmon service") == [("ControlSet001\\Services\\Sysmon64", "ImagePath"),
                                         ("ControlSet001\\Services\\SysmonDrv", "ImagePath")]
-    assert opened("PowerShell logging enabled") == [("Policies\\Microsoft\\Windows\\PowerShell\\ModuleLogging", "EnableModuleLogging"),
-                                                    ("Policies\\Microsoft\\Windows\\PowerShell\\ScriptBlockLogging", "EnableScriptBlockLogging")]
-    # Defender's kv card lists alert events only; its drill opens the same set.
+    assert opened("Sysmon driver") == [("ControlSet001\\Services\\SysmonDrv", "ImagePath")]
+    assert opened("Script block") == [("Policies\\Microsoft\\Windows\\PowerShell\\ScriptBlockLogging",
+                                       "EnableScriptBlockLogging")]
+    assert opened("Module") == [("Policies\\Microsoft\\Windows\\PowerShell\\ModuleLogging",
+                                 "EnableModuleLogging")]
+    assert opened("Transcription") == []          # unset counts as off, and opens nothing
+
+
+def test_the_defender_signal_and_the_defender_list_open_the_same_rows(host):
+    """One population, two cards — checked here as the rows each opens
+    rather than as the ids each names."""
+    store, ids = host
     ev = ids["{{evtx}}"]
-    assert sorted(r["EventId"] for r in _drill_rows(store, ev, by_title["Most recent Defender alerts"]["drill"])) == ["1116", "1117", "5001"]
+    by_title = {w["title"]: w for w in _kape()["dashboard"]}
+    signal = next(c for c in by_title["Triage signals"]["cells"] if c["label"] == "Defender alerts")
+    listed = by_title["Most recent Defender alerts"]
+    both = [sorted(r["EventId"] for r in _drill_rows(store, ev, w["drill"])) for w in (signal, listed)]
+    assert both[0] == both[1] == ["1116", "1117", "5001"]
 
 
 # ---------------------------------------------------------- resolve
