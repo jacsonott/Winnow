@@ -7994,6 +7994,25 @@ class Store:
                     self._bump_state_generation()
         return len(rids), tagged
 
+    def watchlist_scan_sources(self) -> list[dict]:
+        """The tables a scan would actually read — every real, finished,
+        error-free source.
+
+        One predicate, named, because two callers now depend on the same
+        answer: the scan itself, and the profile-apply sheet, which tells
+        an analyst how many tables seeding a watchlist is about to scan
+        before they agree to it. A count that disagreed with the scan
+        would be worse than no count.
+
+        Merges are absent by construction (CLAUDE.md invariant #9 lists
+        this exception): a merge has no src_N of its own, its rows belong
+        to its members and are scanned there, so counting it would
+        promise the analyst a table that is really two of the ones
+        already in the list. A source still filling (`columns` is `'[]'`)
+        is absent for the reason _iter_watchlist_scan gives below."""
+        return [s for s in self.list_sources()
+                if not s.get("is_merge") and not s.get("error") and s.get("columns")]
+
     def _iter_watchlist_scan(
         self, source_ids: list[int] | None = None, watchlist_ids: list[int] | None = None,
         stop: Callable[[], bool] | None = None,
@@ -8030,8 +8049,7 @@ class Store:
         copies of the parent's, which the same run did scan — and giving
         the copy a scan of its own is a change of its own: a subset table
         has never been scanned on creation, overlapping scan or not."""
-        sources = [s for s in self.list_sources()
-                   if not s.get("is_merge") and not s.get("error") and s.get("columns")]
+        sources = self.watchlist_scan_sources()
         if source_ids is not None:
             wanted = set(source_ids)
             sources = [s for s in sources if s["id"] in wanted]
@@ -8802,11 +8820,13 @@ class Store:
     def set_dashboard_widgets(self, dashboard_id: int, widgets: list) -> list:
         """Edited by hand, which also clears `origin`.
 
-        `origin` means "these widgets are exactly what the plugin wrote" —
-        that is the whole basis for re-adding the board refreshing it
+        `origin` means "these widgets are exactly what whoever stamped it
+        wrote" — a plugin's add (`plugin:<fs_name>:<id>`) or a profile's
+        apply (`profile:<name>`); see upsert_dashboard_by_name. That is
+        the whole basis for re-adding or re-applying a board refreshing it
         without asking. The moment the analyst changes a card, there IS
-        work of theirs to lose, so the board stops being the plugin's copy
-        and the next add goes back to asking."""
+        work of theirs to lose, so the board stops being anyone else's
+        copy and both of those go back to asking."""
         if not isinstance(widgets, list):
             raise ValueError("A dashboard is a list of widgets")
         widgets = self._mint_widget_ids(widgets)
@@ -8892,11 +8912,14 @@ class Store:
         duplicates).
 
         `origin` says whose widgets these now are, and is written every
-        time — including as NULL. Whoever last wrote the board owns it: the
-        plugin add stamps itself so re-adding refreshes silently, and a
-        profile apply (which writes ITS widgets, not the plugin's) clears
-        the stamp so the plugin has to ask before overwriting them. One
-        rule, and it errs toward asking."""
+        time — including as NULL. Whoever last wrote the board owns it: a
+        plugin add stamps `plugin:<fs_name>:<id>`, a profile apply stamps
+        `profile:<profile name>`, and a hand edit clears it to NULL
+        (set_dashboard_widgets). A caller re-writing its OWN stamp is
+        refreshing its own copy and says nothing; any other stamp, or
+        none, means there is someone else's work here and the caller asks
+        first. One rule, read from both ends, and it errs toward
+        asking."""
         widgets = self._mint_widget_ids(widgets)
         with self.lock, self.db:
             row = self.db.execute(

@@ -14,6 +14,7 @@ NAME = "UI Builder Profile"
 def _open_builder(page):
     page.keyboard.press("M")
     page.wait_for_selector("#modal:not([hidden])")
+    page.wait_for_selector(".pm-item", timeout=15_000)   # the manager's list loads async
     page.locator("#modalBody .btn", has_text="New profile").click()
     _wait_for_builder(page)
 
@@ -72,10 +73,11 @@ def test_build_a_profile_with_plugins_dashboards_and_variables(page, api):
                                        "description": "for report titles", "default": "",
                                        "required": True}]
 
-        # the menu reopens showing what it carries
-        page.wait_for_selector(f"#modalBody .session-row:has-text('{NAME}')")
-        assert "1 variable (1 required)" in page.locator(
-            "#modalBody .session-row", has_text=NAME).inner_text()
+        # the manager reopens with the new profile selected, showing what
+        # it carries rather than one ellipsised line of it
+        page.wait_for_selector(f"#modalBody .pm-item:has-text('{NAME}')")
+        assert page.locator(".pm-detail h3").inner_text() == NAME
+        assert "1 · 1 required" in page.locator('.pm-sec[data-sec="variables"]').inner_text()
     finally:
         page.keyboard.press("Escape")
         _cleanup(api)
@@ -102,8 +104,9 @@ def test_editing_an_existing_profile_reopens_it_filled_in(page, api):
         "variables": [{"name": "engagement", "label": "Engagement", "required": True}]})
     try:
         page.keyboard.press("M")
-        page.wait_for_selector(f".session-row:has-text('{NAME}')")
-        page.locator(".session-row", has_text=NAME).locator(".btn", has_text="✎").click()
+        page.wait_for_selector(f".pm-item:has-text('{NAME}')")
+        page.locator(".pm-item", has_text=NAME).click()
+        page.locator(".pm-head-acts .btn", has_text="Edit…").click()
         _wait_for_builder(page)
         assert page.locator("#modalTitle").inner_text().lower().startswith("edit profile")
         assert page.locator("#modalBody .pb-head input").first.input_value() == NAME
@@ -123,14 +126,28 @@ def test_editing_an_existing_profile_reopens_it_filled_in(page, api):
 def test_a_shipped_profile_opens_as_a_copy(page, api):
     try:
         page.keyboard.press("M")
-        page.wait_for_selector(".session-row:has-text('KAPE triage')")
-        page.locator(".session-row", has_text="KAPE triage").locator(".btn", has_text="Copy").click()
+        page.wait_for_selector(".pm-item:has-text('KAPE triage')")
+        page.locator(".pm-item", has_text="KAPE triage").click()
+        page.locator(".pm-head-acts .btn", has_text="Copy to edit").click()
         _wait_for_builder(page)
         assert page.locator("#modalTitle").inner_text().lower().startswith("new profile from")
         assert page.locator("#modalBody .pb-head input").first.input_value() == "KAPE triage (copy)"
         # the shipped profile's own board comes along, pre-checked
         page.wait_for_selector("#modalBody .pb-row:has-text('the profile\u2019s own board')")
         assert page.locator("#modalBody .pb-row", has_text="KAPE triage").count() == 1
+
+        # Saving it records the lineage and carries the parts the builder
+        # has no editor for: a copy that lost the shipped watchlist looked
+        # like a bug from every angle except the builder's.
+        page.locator("#modalBody .pb-head input").first.fill("UI Builder Copy")
+        page.locator("#modalBody .btn", has_text="Create profile").click()
+        page.wait_for_selector("#toast:not([hidden])")
+        shipped = next(b for b in api("/api/plugin_bundles") if b["name"] == "KAPE triage")
+        saved = next(b for b in api("/api/plugin_bundles") if b["name"] == "UI Builder Copy")
+        assert saved["from_profile"] == "KAPE triage"
+        assert saved["from_version"] == shipped["version"]
+        assert saved["update_available"] is None, "a copy of today's profile has nothing to take"
+        assert [i["value"] for i in saved["watchlist"]] == [i["value"] for i in shipped["watchlist"]]
     finally:
         page.keyboard.press("Escape")
         _cleanup(api)

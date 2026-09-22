@@ -144,6 +144,22 @@ see [docs/notes/README.md](README.md) for the whole set.
   /api/watchlist` answers 400 for an exact duplicate value; the two
   import routes return `added_ids` so the client scans for the new
   entries only; `GET /api/watchlist/hits` answers `{sources, hits}`.
+- **The profile routes** (`/api/plugin_bundles/*`) are all plain `def`:
+  every one of them touches `WS.plugin_bundles` (a JSON file under a
+  process-wide lock) or the Store, so none belongs on the event loop.
+  Two shapes worth knowing. `POST .../{id}/apply` takes an OPTIONAL body
+  (`BundleApplyBody | None = None`) because the request that has always
+  existed sends none — the new-case dialog's Case type select, tests,
+  scripts — and that has to keep meaning "all four parts"; a part name
+  outside `APPLY_PARTS` is a 400 rather than a silently ignored word.
+  `GET .../{id}/plan` writes nothing at all: it is the apply sheet's
+  numbers, counted against the open case, and a sheet whose numbers came
+  from a route that could mutate would be a strange thing to put in front
+  of a confirmation. Both 400 without a case, like every other per-case
+  route. Import is `UploadFile`/multipart like the saved-filters import
+  beside it; export sets `Content-Disposition` with the profile name
+  slugged through a `[^A-Za-z0-9._-]` filter, since profile names are free
+  text.
 - `run_sql` (the SQL pane) allows arbitrary SELECT/EXPLAIN on purpose, but
   blacklists `ATTACH`/`DETACH`/`PRAGMA`/`VACUUM` as defense-in-depth — none of
   those serve a read-only ad-hoc query pane. CSV export runs every cell through

@@ -126,8 +126,14 @@ def test_applying_a_profile_prompts_for_required_variables_it_seeds(page, api):
     try:
         _clear_variables(page, api)
         page.keyboard.press("M")
-        page.wait_for_selector(".session-row:has-text('UI Vars Apply')")
-        page.locator(".session-row", has_text="UI Vars Apply").locator(".btn", has_text="Apply to this case").click()
+        page.wait_for_selector(".pm-item:has-text('UI Vars Apply')")
+        page.locator(".pm-item", has_text="UI Vars Apply").click()
+        # Apply goes through the sheet now — the variables part is the only
+        # one this profile has, and it says so before anything happens.
+        page.locator(".pm-foot .btn", has_text="Apply to this case").click()
+        page.wait_for_selector('.ap-part[data-part="variables"]', timeout=15_000)
+        assert "Engagement" in page.locator('.ap-part[data-part="variables"]').inner_text()
+        page.locator(".row-actions .btn", has_text="Apply").click()
         page.wait_for_selector("#modal:not([hidden]) .case-var-prompt")
         assert "needs a few values" in page.locator("#modalTitle").inner_text().lower()
         page.locator("#modalBody .btn", has_text="Save").click()       # empty → refused
