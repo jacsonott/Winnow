@@ -1428,8 +1428,10 @@ the expensive card you actually wanted.
 for it where a stale number would be *wrong* rather than merely old and
 the query is cheap: a tag count, a watchlist count, a row count on a small
 table. Not a `GROUP BY` over the whole log — that is the card the cache
-exists for, and the analyst can ↻ it. The shipped KAPE profile marks two
-of its twenty-six widgets live, which is about the right ratio.
+exists for, and the analyst can ↻ it. The shipped KAPE profile marks one
+of its ten cards live — the two-cell Findings card, which reads the
+watchlist and the tag table and nothing else. Everything else on that
+board scans a log, so one is the honest number, not a stingy one.
 
 An imported table or a tag write does not silently replace a cached
 number; it marks it stale, and the card and the board bar say so. Numbers

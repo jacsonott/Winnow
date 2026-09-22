@@ -26,9 +26,10 @@ from winnow import defaults
 EVTX_COLS = dict(defaults.headers()["nicknames"])["Event logs (EvtxECmd)"]
 
 # Events the Security channel is the only honest source for. 4624/4625/
-# 4648 are logons, 1102 is "the log was cleared", 4719 is "auditing was
-# changed" — the two an intruder produces on the way out.
-SECURITY_IDS = {"4624", "4625", "4648", "1102", "4719"}
+# 4648 are logons, 4688 is a process create, 1102 is "the log was
+# cleared" and 4719 is "auditing was changed" — the two an intruder
+# produces on the way out.
+SECURITY_IDS = {"4624", "4625", "4648", "4688", "1102", "4719"}
 
 CHANNEL_COND = {"column": "Channel", "op": "equals", "value": "Security"}
 
@@ -81,7 +82,7 @@ def test_every_security_event_count_names_the_channel():
         assert re.search(r"Channel\s*=\s*'Security'", sql), label
         assert CHANNEL_COND in _conds(drill), (label, drill)
         checked += 1
-    assert checked >= 5, checked
+    assert checked >= 6, checked
 
 
 # ------------------------------------------------------- against rows
@@ -101,11 +102,13 @@ ROWS = [
     _ev(TimeCreated="2026-03-14 08:02:00", EventId="4648", Channel="Security", UserName="admin"),
     _ev(TimeCreated="2026-03-14 08:03:00", EventId="1102", Channel="Security", UserName="admin"),
     _ev(TimeCreated="2026-03-14 08:04:00", EventId="4719", Channel="Security", UserName="admin"),
+    _ev(TimeCreated="2026-03-14 08:05:00", EventId="4688", Channel="Security", UserName="admin"),
     _ev(TimeCreated="2026-03-14 09:00:00", EventId="4624", Channel="Microsoft-Windows-Bits-Client/Operational", UserName="decoy", RemoteHost="10.9.9.9"),
     _ev(TimeCreated="2026-03-14 09:01:00", EventId="4625", Channel="Microsoft-Windows-Bits-Client/Operational", UserName="decoy"),
     _ev(TimeCreated="2026-03-14 09:02:00", EventId="4648", Channel="Application", UserName="decoy"),
     _ev(TimeCreated="2026-03-14 09:03:00", EventId="1102", Channel="Microsoft-Windows-DNS-Client/Operational", UserName="decoy"),
     _ev(TimeCreated="2026-03-14 09:04:00", EventId="4719", Channel="System", UserName="decoy"),
+    _ev(TimeCreated="2026-03-14 09:05:00", EventId="4688", Channel="Microsoft-Windows-Sysmon/Operational", UserName="decoy"),
 ]
 
 
@@ -140,7 +143,7 @@ def test_the_decoy_channel_rows_are_counted_by_nothing(logs):
         assert all(r["Channel"] == "Security" for r in rows), (label, rows)
         assert "decoy" not in {r["UserName"] for r in rows}, label
         checked += 1
-    assert checked >= 5, checked
+    assert checked >= 6, checked
 
 
 def test_the_logon_histogram_and_the_logon_counts_agree(logs):

@@ -2019,22 +2019,25 @@ def test_kape_profile_ships_and_applies(client, store, write_csv, example_regist
     assert "KAPE triage" in boards
     widgets = client.get(f"/api/dashboards/{boards['KAPE triage']['id']}").json()["widgets"]
     assert len(widgets) == len(next(p for p in defaults.profiles() if p["name"] == "KAPE triage")["dashboard"])
-    # a {{evtx}}-placeholder SQL widget resolves and returns data
-    peers = next(w for w in widgets if w["title"] == "Remote logon peers")
-    pv = client.post("/api/dashboard/widget/preview", json={"source": "sql", "query": peers["query"]})
-    assert pv.status_code == 200 and pv.json()["rows"][0][0] == 2   # WKS07, WKS01
+    # The {{evtx}} placeholder resolves for a whole card of cells in ONE
+    # request — the numbers that used to be ten separate widgets.
+    signals = next(w for w in widgets if w["title"] == "Triage signals")
+    sv = client.post("/api/dashboard/widget/preview",
+                     json={"source": "cells", "query": {}, "cells": signals["cells"]})
+    assert sv.status_code == 200
+    by = dict(sv.json()["rows"])
+    assert by["Remote logon peers"] == 2          # WKS07, WKS01
+    assert by["Distinct accounts"] >= 1
 
-    # a host-facts widget (also {{evtx}}) resolves — distinct accounts here
-    accts = next(w for w in widgets if w["title"] == "Distinct accounts")
-    av = client.post("/api/dashboard/widget/preview", json={"source": "sql", "query": accts["query"]})
-    assert av.status_code == 200 and av.json()["rows"][0][0] >= 1
-
-    # the registry-persistence widget resolves its {{registry}} placeholder to
-    # a friendly empty state (this case has EVTX only, no RECmd batch), not a
-    # SQL error — the whole point of shipping widgets a case may not fill
-    reg = next(w for w in widgets if w["title"] == "Run / service registry entries")
-    rv = client.post("/api/dashboard/widget/preview", json={"source": "sql", "query": reg["query"]})
-    assert rv.status_code == 400 and "table" in rv.json()["detail"].lower()
+    # And the registry cell riding in that same card resolves its
+    # {{registry}} placeholder to a friendly message in its own place —
+    # this case has EVTX only, no RECmd batch — while the nine evtx cells
+    # beside it still answer. That is the whole point of shipping a board
+    # a case may only half fill.
+    errs = dict(zip([r[0] for r in sv.json()["rows"]], sv.json()["cell_errors"]))
+    assert by["Run / service entries"] is None
+    assert "table" in errs["Run / service entries"].lower()
+    assert errs["Remote logon peers"] is None
 
     # a placeholder with no matching table gives a friendly 400, not a SQL error
     miss = client.post("/api/dashboard/widget/preview",

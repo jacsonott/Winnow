@@ -2447,13 +2447,17 @@ html.remote .row.selected:hover { background: var(--row-selected); }
    its own drill. Eleven single-number cards fit in one of these, which is
    what the KAPE board's fourth row is. `auto-fill` rather than a fixed
    column count so the same card reads at span 1 and span 4. */
-.dash-signals { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 10px 14px; }
+.dash-signals { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 10px 14px; }
 .dash-signal { border-left: 2px solid var(--line-2); padding-left: 9px; min-width: 0; }
 .dash-signal.warn { border-left-color: var(--danger); }
 .dash-signal .n { font-size: 21px; color: var(--accent); line-height: 1.15; }
 .dash-signal.warn .n { color: var(--danger); }
+/* Wraps rather than ellipsing: the part of a signal's label that runs
+   off the end is the part that says which events it counted
+   ("Audit policy changed (4719)"), and a card of "Audit policy chan…"
+   is a card of numbers nobody can reconcile. */
 .dash-signal .l { font-size: 10px; color: var(--dim); letter-spacing: .04em;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  line-height: 1.3; overflow-wrap: anywhere; }
 .dash-signal.drillable { cursor: pointer; }
 .dash-signal.drillable:hover .n { text-decoration: underline;
   text-decoration-color: var(--accent-dim); text-underline-offset: 4px; }
