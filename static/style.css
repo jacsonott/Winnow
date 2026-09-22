@@ -1342,21 +1342,54 @@ textarea:focus { border-color: var(--accent); outline: none; }
 }
 .sidebar-newfolder:hover { color: var(--text); border-color: var(--accent); }
 .sidebar-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 4px; display: flex; flex-direction: column; gap: 1px; }
-.sidebar-row { display: flex; align-items: stretch; gap: 1px; border-radius: var(--radius-sm); padding-left: calc(var(--depth, 0) * 12px); }
+
+/* Indent guides. A row at depth N is pushed right N × --tree-indent and
+   carries one vertical rule per level it sits inside, so the tree reads
+   as a tree instead of as rows that happen to start further along — at
+   two levels deep, 12px of whitespace and a 10px grey chevron was the
+   only thing saying a table was inside anything at all.
+
+   Painted as a background rather than as N nested elements: the rows are
+   a flat list (renderSidebar appends folder headers and table rows to one
+   container, which is what lets a filter force-expand without rebuilding
+   the nesting), so there is nothing to hang a real left border on.
+   `background-size` clips the repeat to exactly the indent, so a rule is
+   never drawn past where the row's own content starts. Anything that
+   highlights one of these rows sets background-COLOR only — the shorthand
+   would drop the guides. */
+.sidebar-list { --tree-indent: 14px; }
+.sidebar-row, .sidebar-folder {
+  padding-left: calc(var(--depth, 0) * var(--tree-indent));
+  background-image: repeating-linear-gradient(
+    to right, var(--line-2) 0 1px, transparent 1px var(--tree-indent));
+  background-size: calc(var(--depth, 0) * var(--tree-indent)) 100%;
+  background-position: 5px 0;
+  background-repeat: no-repeat;
+}
+.sidebar-row { display: flex; align-items: stretch; gap: 1px; border-radius: var(--radius-sm); }
 
 /* Folder header rows in the table tree — depth indent via --depth (set per
    row in renderSidebar), a disclosure twisty, and a drop-into highlight
    when a table is dragged over. */
-.sidebar-folder { display: flex; align-items: stretch; gap: 1px; border-radius: var(--radius-sm); padding-left: calc(var(--depth, 0) * 12px); }
-.sidebar-folder:hover { background: var(--panel-2); }
+.sidebar-folder { display: flex; align-items: stretch; gap: 1px; border-radius: var(--radius-sm); }
+.sidebar-folder:hover { background-color: var(--panel-2); }
+/* The disclosure reads as a control: full-strength text rather than
+   --dim, big enough to aim at, and it answers the hover. At 10px and
+   --dim it was the faintest thing in the panel and the one thing an
+   analyst has to hit to get anywhere in the tree. */
 .sidebar-folder .folder-twisty {
-  flex: 0 0 auto; width: 16px; background: none; border: 0; color: var(--dim);
-  cursor: pointer; font: inherit; font-size: 10px; padding: 0;
+  flex: 0 0 auto; width: 18px; background: none; border: 0; color: var(--text);
+  cursor: pointer; font: inherit; font-size: 12px; line-height: 1; padding: 0;
+  border-radius: var(--radius-sm);
 }
+.sidebar-folder .folder-twisty:hover { color: var(--accent); background-color: var(--ink); }
 .sidebar-folder .folder-name { flex: 1 1 auto; min-width: 0; font-weight: 600; }
+/* background-COLOR, not the shorthand: a folder row's indent guides are
+   a background-image, and the shorthand would drop them exactly while
+   the row is being dragged onto. */
 .sidebar-folder.drop-into, .sidebar-rootzone.drop-into,
 .sidebar-open-header.drop-into, .sidebar-openrow.drop-into, .sidebar-pages-header.drop-into {
-  background: var(--ink); box-shadow: inset 0 0 0 1px var(--accent); color: var(--accent);
+  background-color: var(--ink); box-shadow: inset 0 0 0 1px var(--accent); color: var(--accent);
 }
 .sidebar-rootzone {
   margin: 4px 2px 2px; padding: 6px 8px; text-align: center; font-size: 11px;
@@ -1364,8 +1397,8 @@ textarea:focus { border-color: var(--accent); outline: none; }
 }
 /* The Open section header doubles as a drop target for opening a table,
    and carries a "close all" affordance once more than one tab is open. */
-.sidebar-open-header { display: flex; align-items: center; }
-.sidebar-open-label { flex: 1 1 auto; }
+.sidebar-open-header, .sidebar-all-header { display: flex; align-items: center; }
+.sidebar-open-label, .sidebar-all-label { flex: 1 1 auto; }
 .sidebar-closeall {
   flex: 0 0 auto; background: none; border: 0; color: var(--dim); cursor: pointer;
   font: inherit; font-size: 10px; text-transform: none; letter-spacing: 0; padding: 0 2px;
@@ -1379,7 +1412,7 @@ textarea:focus { border-color: var(--accent); outline: none; }
   border-radius: var(--radius-sm); margin: 8px 2px 2px; padding: 5px 8px;
 }
 #sidebarList .menu-header:first-child { margin-top: 2px; }
-.sidebar-row.active { background: var(--ink); box-shadow: inset 2px 0 0 var(--accent); }
+.sidebar-row.active { background-color: var(--ink); box-shadow: inset 2px 0 0 var(--accent); }
 .sidebar-row.active .menu-item { color: var(--accent); }
 .sidebar-row .menu-item { flex: 1 1 auto; min-width: 0; }
 /* A row count sitting as its own flex sibling, not floated inside the

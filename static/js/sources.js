@@ -169,6 +169,40 @@ export async function closeAllTabs() {
   } catch (e) { toast('Could not close tabs: ' + e.message, 6000); }
 }
 
+/* Above this many tabs at once, "open all" asks first: a directory
+   import can put 30+ tables in a case, and a tab strip that long is a
+   thing to choose, not to discover. */
+export const OPEN_ALL_CONFIRM_AT = 12;
+
+/* The tables "open all" would open: everything in the case that isn't
+   already open and isn't broken. Merges included — a merge is a table in
+   this tree like any other. */
+export function tablesToOpen() {
+  return S.sources.filter((s) => !s.is_open && !s.error);
+}
+
+/* The tables "open all with tags" would open. Merges excluded, the same
+   rule the Tables manager's "Open all tagged" has always applied: a
+   merge's tagged_row_count is its members' summed, so opening it as well
+   shows the same tagged rows twice, under two tabs. */
+export function taggedTablesToOpen() {
+  return S.sources.filter((s) => !s.is_open && !s.error && !s.is_merge && s.tagged_row_count > 0);
+}
+
+/* Opens these tables' tabs in one round trip and refreshes the strip,
+   landing on the first of them. Shared by the sidebar's two buttons and
+   the Tables manager, so "which tables" is decided once per button and
+   "how they are opened" exactly once. */
+export async function openTables(srcs, { navigate = true } = {}) {
+  if (!srcs.length) return 0;
+  let opened;
+  try {
+    ({ opened } = await post('/api/tabs/open', { source_ids: srcs.map((s) => s.id) }));
+  } catch (e) { toast('Could not open those tables: ' + e.message, 6000); return 0; }
+  await loadSources(navigate ? srcs[0].id : undefined, { navigate });
+  return opened;
+}
+
 /* Moves an open tab earlier/later in S.tabOrder — the same state
    wireDragReorder's drop handler mutates, just via the Open section's ▲/▼
    instead of a drag. No-ops at either end rather than wrapping. */
@@ -1052,7 +1086,7 @@ export function renderSidebar() {
   if (!tables.length && !S.folders.length) {
     list.append(el('div', 'note-status', q ? 'No matching tables.' : 'No tables in this case yet.'));
   } else {
-    if (S.sources.length) list.append(el('div', 'menu-header', 'All tables'));
+    if (S.sources.length) list.append(allTablesHeader());
     renderInto('root', 0);
     if (S.folders.length) list.append(rootDropZone());  // drag a table back out of a folder
   }
@@ -1074,6 +1108,43 @@ export function renderSidebar() {
   // having tables: a fresh case with a profile applied already has boards,
   // and an empty one still needs the "New dashboard" row to be reachable.
   renderDashboardsInto(list);
+}
+
+/* The "All tables" header, with the two bulk opens on it. They sit here
+   rather than beside "close all" on the Open header because that is what
+   they act on: everything in the tree below, open or not. Close all stays
+   with the tabs it closes. Each hides itself when it would do nothing —
+   a case with every table already open has no "open all" to offer. */
+function allTablesHeader() {
+  // Its own class, not the Open header's: that one is a drop target (drop
+  // a table on it to open it) and is how the Open section is identified.
+  const h = el('div', 'menu-header sidebar-all-header');
+  h.append(el('span', 'sidebar-all-label', 'All tables'));
+  const closed = tablesToOpen();
+  const tagged = taggedTablesToOpen();
+  if (tagged.length && tagged.length < closed.length) {
+    const t = el('button', 'sidebar-closeall', 'tagged');
+    t.title = `Open the ${tagged.length} closed table${tagged.length === 1 ? '' : 's'} that ${tagged.length === 1 ? 'has' : 'have'} tagged rows`;
+    t.onclick = async (e) => {
+      e.stopPropagation();
+      const n = await openTables(tagged);
+      toast(`Opened ${n} table${n === 1 ? '' : 's'} with tagged rows`);
+    };
+    h.append(t);
+  }
+  if (closed.length) {
+    const a = el('button', 'sidebar-closeall', 'open all');
+    a.title = `Open all ${closed.length} closed table${closed.length === 1 ? '' : 's'} as tabs`;
+    a.onclick = async (e) => {
+      e.stopPropagation();
+      if (closed.length > OPEN_ALL_CONFIRM_AT
+          && !(await confirmDialog(`Open ${closed.length} tables as tabs?`, { okLabel: 'Open all' }))) return;
+      const n = await openTables(closed);
+      toast(`Opened ${n} table${n === 1 ? '' : 's'}`);
+    };
+    h.append(a);
+  }
+  return h;
 }
 
 /* A folder in the tree: disclosure + name + recursive table count, the

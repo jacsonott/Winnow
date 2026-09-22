@@ -10,6 +10,17 @@ see [docs/notes/README.md](README.md) for the whole set.
 
 ---
 
+- **The sidebar tree's indent guides are a background-image, so a
+  highlight must set background-COLOR.** Rows in the tree are a flat list
+  — `renderSidebar` appends folder headers and table rows to one
+  container, which is what lets a filter force-expand without rebuilding
+  the nesting — so there is no nested element to hang a left border on.
+  Each row paints one vertical rule per level it sits inside, clipped to
+  its own indent by `background-size`. `background: var(--ink)` on
+  `.drop-into` or `.active` drops the guides exactly when the row is
+  being dragged onto or is the current one; `background-color` doesn't.
+  `tests/ui/test_sidebar_tree.py` pins it.
+
 - **A background refresh must not navigate.** `loadSources()` re-opens
   the current source as a side effect of picking a tab, and `openSource()`
   switches to the grid and resets that source's filters and search. That
