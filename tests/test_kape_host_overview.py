@@ -214,22 +214,42 @@ def test_the_posture_card_reads_both_tables_at_once(host):
 
 def test_coverage_is_the_security_log_plus_the_window_any_channel_covers(host):
     kv = _kv(host, "Coverage")
-    assert kv["Oldest event"] == "2024-01-05 13:22:01"    # the System-channel 2023 event does not count
-    assert kv["Newest event"] == "2024-01-15 01:00:00"
-    assert kv["Span (days)"] == 9.5
-    assert kv["Events"] == 2
+    assert kv["Security: oldest"] == "2024-01-05 13:22:01"   # the System-channel 2023 event does not count
+    assert kv["Security: newest"] == "2024-01-15 01:00:00"
+    assert kv["Security: span (days)"] == 9.5
+    assert kv["Security: events"] == 2
     # The activity window the second card used to hold: every channel.
-    assert kv["Any channel"] == "2023-12-31 23:59:59 → 2024-01-15 01:00:00"
+    assert kv["All channels: window"] == "2023-12-31 23:59:59 → 2024-01-15 01:00:00"
+
+
+def test_every_coverage_row_says_which_population_it_counted(host):
+    """Merging "Security log coverage" into "Coverage" put four
+    Security-only rows next to an all-channel one and dropped the only
+    word that said which was which: "Oldest event" read 2024-01-05 on a
+    case whose oldest event is 2023-12-31, and nothing on the card could
+    reconcile the two numbers. Each row carries its own scope now.
+
+    The fixture keeps the two populations genuinely different — a
+    System-channel event older than every Security one — so a row that
+    lost its scope again would be labelled wrongly, not just vaguely."""
+    rows = _rows(host, "Coverage")
+    scoped = [k for k, _ in rows if k.startswith("Security: ")]
+    everything = [k for k, _ in rows if k.startswith("All channels: ")]
+    assert len(scoped) == 4 and len(everything) == 1
+    assert len(rows) == len(scoped) + len(everything)
+    kv = dict(rows)
+    assert kv[everything[0]].startswith("2023-12-31")        # the System-channel event
+    assert kv["Security: oldest"].startswith("2024-01-05")   # and not in the Security rows
 
 
 def test_coverage_says_when_there_is_no_security_log(store, write_csv):
     store.ingest_csv(write_csv([EVTX_COLS, _ev(TimeCreated="2024-01-01 00:00:00", EventId="1", Channel="System")], "e.csv"),
                      name="e", build_fts=False)
     kv = _kv(store, "Coverage")
-    assert kv["Oldest event"] == "(no Security channel events)" and kv["Events"] == 0
+    assert kv["Security: oldest"] == "(no Security channel events)" and kv["Security: events"] == 0
     # One day: the second timestamp drops its date, or the row is wider
     # than the card and wraps mid-arrow.
-    assert kv["Any channel"] == "2024-01-01 00:00:00 → 00:00:00"
+    assert kv["All channels: window"] == "2024-01-01 00:00:00 → 00:00:00"
 
 
 def test_defender_alerts_newest_first_with_description_fallback(host):
