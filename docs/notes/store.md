@@ -305,6 +305,27 @@ see [docs/notes/README.md](README.md) for the whole set.
   opening any other modal supersedes it). Switching builder mode no longer
   auto-runs a search — with a real job that would abandon a sweep in
   progress just because you glanced at the other tab.
+- **The sweep can be scoped to chosen tables** (`source_ids` through
+  `SearchAllReq` → `start_search_all_job` → `_iter_search_all_sources`,
+  filtered onto the `list_sources()` snapshot the way
+  `_iter_watchlist_scan` filters its own). `None` is every real table,
+  which is all the sweep could ever do before. `resolve_search_all_scope`
+  turns a scope into ids the sweep can actually scan: deduped, in the
+  order asked, and **a merge expanded to its `member_source_ids`** — a
+  merge has no `src_N`, so "search this table" on one can only mean the
+  tables its rows live in (invariant #9). The expansion rides back in the
+  job record's `scope`, so the pane can say which tables the numbers in
+  front of it came from rather than quietly answering about different
+  ones. An id naming nothing is a **KeyError → 400** on the way in (a
+  typo'd scope that scanned nothing would come back as "no matches",
+  which is a wrong answer rather than an error) and is **skipped** on the
+  way through the sweep, which re-resolves a scope chosen minutes
+  earlier and should lose one dropped table rather than the whole run.
+  The **1,000-row count cap is unchanged at every scope**: scoping to one
+  table doesn't make that table smaller, and an exact count on an
+  unindexed one is the full scan the cap exists to prevent — the pane
+  names the cap and points at "Open ↦", where the grid's own `N of M` is
+  exact.
 - **The watchlist scan runs on the reader pool, one locked write per
   (indicator, source), as a background job** (`scan_source`/`scan_all`
   synchronous for profile apply and tests, `start_watchlist_scan_job` /

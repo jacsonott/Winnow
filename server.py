@@ -4442,6 +4442,10 @@ def api_export_all_xlsx(filename: str = "all-tables.xlsx"):
 class SearchAllReq(BaseModel):
     query: str = ""
     terms: list[dict] = []  # advanced mode: [{term, connector: "AND"|"OR", exclude: bool}]
+    # None = every real table in the case, which is what the sweep has
+    # always done. A list scopes it; a merge id in that list expands to the
+    # merge's members (Store.resolve_search_all_scope).
+    source_ids: list[int] | None = None
 
 
 @app.post("/api/search_all")
@@ -4449,12 +4453,21 @@ def api_search_all(body: SearchAllReq):
     """Synchronous whole-sweep search. Kept for scripted/one-shot use; the
     UI goes through the job routes below so it can show partial results and
     let the analyst close the modal mid-sweep."""
-    return store().search_all_sources(body.query, body.terms)
+    try:
+        return store().search_all_sources(body.query, body.terms, body.source_ids)
+    except KeyError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.post("/api/search_all/start")
 def api_search_all_start(body: SearchAllReq):
-    return store().start_search_all_job(body.query, body.terms)
+    """400 (not a job that quietly scans nothing) when the scope names a
+    source this case doesn't have — an empty result set reads as "no
+    matches", which would be an answer rather than the error it is."""
+    try:
+        return store().start_search_all_job(body.query, body.terms, body.source_ids)
+    except KeyError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.get("/api/search_all/job")

@@ -447,7 +447,15 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
    and tagged through their members and its hits pane lists real
    tables only — and the client's cache invalidation after a scan
    matches the open merge through its `member_source_ids`, since the
-   job names the member.
+   job names the member. The **search-all sweep** has never scanned a
+   merge for the same reason (`_iter_search_all_sources` walks
+   `list_sources`, which is real sources only), so **scoping that sweep
+   to a merged table expands it to the members**
+   (`resolve_search_all_scope`) rather than refusing: "search this
+   table" on a merge can only mean the tables its rows live in, the
+   hits come back keyed by member so "Open ↦" has a real table to
+   filter, and the expansion is reported in the job's `scope` so the
+   pane says which tables answered.
  **Saving a
    view as a table** (`save_view_as_source`) works on a merge — the copy
    resolves each row through its own member and `subset_rids` records
