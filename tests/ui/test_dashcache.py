@@ -13,6 +13,14 @@ widgets of one board are all issued inside a single `render()` task, in
 card order, and Playwright delivers them to the handler in that order. So
 putting the live widget LAST makes "its request arrived and no other did"
 a fact rather than a timeout.
+
+Two of these are about what the board does when things go wrong rather
+than about what it saves. A board LEFT OPEN while the case changes under
+it has to say so without being reopened — the analyst watching an import
+land is the one most likely to be reading it. And a ↻ Refresh that
+reaches nothing has to leave the numbers where they are: the payloads are
+still in the cache, so blanking the cards loses nothing real and makes a
+server that blinked look like a cache that was lost.
 """
 
 from __future__ import annotations
@@ -226,6 +234,64 @@ def test_a_tag_write_makes_the_board_say_so_rather_than_hiding_it(page):
         if tagged:
             page.evaluate("""() => fetch('/api/row_tags/undo', { method: 'POST',
               headers: { 'X-Timeline-Lite-Client': '1' } }).then(r => r.json())""")
+        _drop_board(page, did)
+
+
+def test_a_board_left_open_is_told_when_the_case_changes_under_it(page, api):
+    """Staleness used to be worked out only when a board LOADED. An analyst
+    who opens the board to watch a long import land is the person most
+    likely to be reading it while the case moves — and the board went on
+    saying "As of 09:12" in green until they navigated away and back."""
+    did = _make_board(page, "Open board", [_widget("Alpha", "SELECT 42 AS n")])
+    ind = None
+    try:
+        _open(page, did)
+        page.wait_for_function(
+            "() => document.querySelectorAll('#dashGrid .dash-stat').length === 1", timeout=15_000)
+        page.wait_for_selector("#dashBar .dash-stamp", timeout=15_000)
+        assert page.locator("#dashBar .dash-stamp.stale").count() == 0
+
+        # An indicator and the scan that writes its hits — the same call
+        # jobs.js makes when an import finishes, fired while the board is
+        # the tab on screen. Nothing navigates.
+        ind = api("/api/watchlist", "POST", {"value": "H2"})
+        page.evaluate("() => __winnow.scanWatchlistForSources([__winnow.S.sourceId])")
+
+        page.wait_for_selector("#dashBar .dash-stamp.stale", timeout=20_000)
+        assert "the case has changed since" in page.locator("#dashBar .dash-stamp").inner_text()
+        assert page.locator("#dashGrid .dash-card .dash-mark.stale").count() == 1
+        # Dated, not hidden: the number it worked out is still on the card.
+        assert page.locator("#dashGrid .dash-stat").inner_text() == "42"
+    finally:
+        if ind and ind.get("id"):
+            api(f"/api/watchlist/{ind['id']}", "DELETE")
+        _drop_board(page, did)
+
+
+def test_a_refresh_that_reaches_nothing_leaves_the_numbers_up(page):
+    """↻ Refresh all against a server that is restarting used to blank
+    every card on the board — 26 identical grey error lines over payloads
+    that were still in the cache, so a reopen brought them back and the
+    failure read as a lost cache."""
+    did = _make_board(page, "Offline refresh", [
+        _widget("Alpha", "SELECT 42 AS n"),
+        _widget("Beta", "SELECT 7 AS n"),
+    ])
+    try:
+        _open(page, did)
+        page.wait_for_function(
+            "() => document.querySelectorAll('#dashGrid .dash-stat').length === 2", timeout=15_000)
+        page.route(PREVIEW, lambda route: route.abort())
+        page.locator("#dashBar .dash-refresh").click()
+        page.wait_for_function(
+            "() => document.querySelectorAll('#dashGrid .dash-mark.failed').length === 2",
+            timeout=15_000)
+        assert page.locator("#dashGrid .dash-stat").all_text_contents() == ["42", "7"]
+        # Said once for the board, not once per card.
+        assert "could not be re-run" in page.locator("#toast").inner_text()
+        assert page.locator("#dashGrid .note-status").count() == 0
+    finally:
+        page.unroute(PREVIEW)
         _drop_board(page, did)
 
 

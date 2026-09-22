@@ -2380,6 +2380,10 @@ html.remote .row.selected:hover { background: var(--row-selected); }
   background: var(--accent); display: inline-block; flex: 0 0 auto; }
 .dash-mark { margin: 0 4px 8px; font: 9px var(--mono); color: var(--dim); flex: 0 0 auto; }
 .dash-mark.stale { color: var(--danger); }
+/* The last re-run of this card did not come back. The number it is
+   showing is the previous one, and the mark carries a "!" as well as the
+   colour so it is not just another shade of red. */
+.dash-mark.failed { color: var(--danger); }
 .dash-mark.dash-live-dot { margin-bottom: 12px; }
 .dash-live-row { align-items: flex-start; gap: 9px; margin-top: 12px;
   padding: 9px 10px; background: var(--ink); border-radius: var(--radius-sm); }

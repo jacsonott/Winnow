@@ -7162,25 +7162,38 @@ class Store:
 
     def upsert_tag(self, tag_id: int | None, name: str, color: str, hotkey: str | None) -> dict:
         with self.lock, self.db:
+            # A tags widget lists one row PER TAG DEFINITION, labelled with
+            # its name, so a new tag or a rename changes its answer without
+            # touching row_tags. A recolour or a rehotkey does not, and a
+            # board that reddened every time somebody adjusted the palette
+            # would be crying wolf.
             if tag_id:
+                was = self.db.execute("SELECT name FROM tag_defs WHERE id=?", (tag_id,)).fetchone()
                 self.db.execute(
                     "UPDATE tag_defs SET name=?, color=?, hotkey=? WHERE id=?",
                     (name, color, hotkey, tag_id),
                 )
+                if was is None or was["name"] != name:
+                    self._bump_state_generation()
             else:
                 cur = self.db.execute(
                     "INSERT INTO tag_defs(name, color, hotkey) VALUES (?,?,?)",
                     (name, color, hotkey),
                 )
                 tag_id = cur.lastrowid
+                self._bump_state_generation()
             row = self.db.execute("SELECT * FROM tag_defs WHERE id=?", (tag_id,)).fetchone()
         return dict(row)
 
     def delete_tag(self, tag_id: int) -> None:
+        """Drops every assignment of the tag with it — a direct row_tags
+        write rather than a recorded delta (there is nothing to undo once
+        the tag itself is gone), so it bumps the state generation itself."""
         with self.lock, self.db:
             self._drop_undo_for_tag(tag_id)
             self.db.execute("DELETE FROM row_tags WHERE tag_id=?", (tag_id,))
             self.db.execute("DELETE FROM tag_defs WHERE id=?", (tag_id,))
+            self._bump_state_generation()
 
     # ------------------------------------------------------------------ undo
 
@@ -7193,12 +7206,21 @@ class Store:
     UNDO_LIMIT = 25
     UNDO_ROW_BUDGET = 5_000_000
 
-    # Bumped by every row_tags write, so a dashboard can tell that its
-    # cached "Tagged findings: 0" was counted before the analyst spent the
-    # morning tagging. A counter rather than a COUNT(*): row_tags is
-    # WITHOUT ROWID and can hold millions of rows, so counting it on every
-    # board open would cost more than the widget it is guarding.
-    TAG_GENERATION_KEY = "tag_generation"
+    # Bumped by every write that changes what an analyst has CONCLUDED —
+    # a tag on a row, a tag definition, a watchlist indicator or its hits —
+    # so a dashboard can tell that its cached "Tagged findings: 0" was
+    # counted before the analyst spent the morning tagging. The evidence
+    # half of that question (rows imported, tables added or dropped) is
+    # read off the `sources` table instead; the two together are
+    # data_generation, which says why.
+    #
+    # A counter rather than a COUNT(*): row_tags and watchlist_hits are
+    # both WITHOUT ROWID and can hold millions of rows, so counting them on
+    # every board open would cost more than the widget being guarded. The
+    # price of a counter is that every writer has to remember to bump it,
+    # which is why the bump sits inside each write's own transaction and
+    # why _bump_state_generation lists who calls it.
+    STATE_GENERATION_KEY = "state_generation"
 
     def _apply_tag_change(self, *, tag_id: int, on: bool, source_id: int, scope: str,
                           target_sql: str | None = None, target_params: Sequence = (),
@@ -7287,9 +7309,12 @@ class Store:
         undo is the same operation with `on` flipped, not a second
         implementation of it.
 
-        Because it is the one place row_tags changes, it is also where the
-        tag generation is bumped (see TAG_GENERATION_KEY): a cached tag
-        count goes stale on an undo exactly as it does on the write."""
+        The state generation is bumped here (see STATE_GENERATION_KEY) so
+        that a cached tag count goes stale on an undo exactly as it does on
+        the write. This is the DELTA path, not the only path: the writes
+        that replace tag state wholesale rather than by a recorded delta
+        (delete_tag, import_session, start_new_session) bypass it by
+        design and bump for themselves."""
         if on:
             cur = self.db.execute(
                 f"INSERT OR IGNORE INTO row_tags(source_id, rid, tag_id) "
@@ -7303,16 +7328,29 @@ class Store:
                 (tag_id,),
             )
         if cur.rowcount > 0:
-            self._bump_tag_generation()
+            self._bump_state_generation()
 
-    def _bump_tag_generation(self) -> None:
-        """Caller holds self.lock and is inside a self.db transaction — the
+    def _bump_state_generation(self) -> None:
+        """Record that this case's conclusions have moved on, for
+        data_generation and the dashboard cache that reads it.
+
+        Caller holds self.lock and is inside a self.db transaction — the
         bump commits with the rows it describes, so a reader never sees a
-        generation that promises a write that rolled back."""
+        generation that promises a write that rolled back.
+
+        Called by every writer of the tables data_generation cannot afford
+        to count: _write_tag_delta (so every tag apply and its undo),
+        delete_tag and upsert_tag, import_session and start_new_session
+        (which replace tag state wholesale, outside the delta path),
+        add_indicator and delete_indicator, and _scan_unit when a scan
+        actually changes an indicator's hits. Adding a writer of row_tags,
+        tag_defs, watchlist or watchlist_hits means adding a bump; a board
+        that shows a number from one of them is otherwise told it is
+        current when it is not."""
         self.db.execute(
             "INSERT INTO case_settings(key, value) VALUES (?, '1') "
             "ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)",
-            (self.TAG_GENERATION_KEY,))
+            (self.STATE_GENERATION_KEY,))
 
     def _trim_undo(self) -> None:
         """Evict from the oldest end until both limits hold. Caller must
@@ -7726,6 +7764,10 @@ class Store:
                 "INSERT INTO watchlist(value, kind, note, auto_tag_id, created_at)"
                 " VALUES (?,?,?,?,?)",
                 (value, kind or "other", note, auto_tag_id, time.strftime("%Y-%m-%dT%H:%M:%S")))
+            # A watchlist widget lists one row per indicator, so the board's
+            # answer changed the moment this one was added — before any
+            # scan gives it hits.
+            self._bump_state_generation()
         return self._indicator(cur.lastrowid)
 
     _INDICATOR_SQL = (
@@ -7758,6 +7800,7 @@ class Store:
         with self.lock, self.db:
             self.db.execute("DELETE FROM watchlist WHERE id=?", (wid,))
             self.db.execute("DELETE FROM watchlist_hits WHERE watchlist_id=?", (wid,))
+            self._bump_state_generation()
 
     def _watchlist_match_sql(self, src: dict, cols: list[str], value: str) -> tuple[str, tuple]:
         """The rid SELECT for one indicator against one source: the two
@@ -7841,6 +7884,13 @@ class Store:
                 row = self.db.execute("SELECT value, auto_tag_id FROM watchlist WHERE id=?", (wid,)).fetchone()
                 if row is None or row["value"] != value:
                     return None
+                # What this unit is replacing, for the state generation
+                # below. A range scan of this indicator's own hits in this
+                # one source — the leading columns of the hits PK — not a
+                # count of the table.
+                before = self.db.execute(
+                    "SELECT COUNT(*) FROM watchlist_hits WHERE watchlist_id=? AND source_id=?",
+                    (wid, source_id)).fetchone()[0]
                 self.db.execute("DELETE FROM watchlist_hits WHERE watchlist_id=? AND source_id=?",
                                 (wid, source_id))
                 tagged = False
@@ -7852,6 +7902,16 @@ class Store:
                         self._apply_tag_change(tag_id=int(row["auto_tag_id"]), on=True, source_id=source_id,
                                                scope="rows", pairs=[(source_id, rid) for rid in rids])
                         tagged = True
+                # A watchlist widget's number is the sum of the hit counts,
+                # so a scan that finds different hits moves it with nothing
+                # in `sources` changing. Bumped on a CHANGE rather than on
+                # every unit: re-scanning an unchanged table finds the same
+                # rids, and marking every board stale for that would teach
+                # the analyst to ignore the mark. (Same count, different
+                # rows means the table itself changed, and row_count has
+                # already said so.)
+                if before != len(rids):
+                    self._bump_state_generation()
         return len(rids), tagged
 
     def _iter_watchlist_scan(
@@ -8762,21 +8822,32 @@ class Store:
         """A cheap marker for "something a widget could have counted has
         changed". Not a checksum of the evidence — how many sources there
         are, how many rows they hold between them, the highest source id,
-        and a counter every row_tags write bumps.
+        and STATE_GENERATION_KEY, the counter the tag and watchlist writes
+        bump.
 
-        That is enough to notice the three things that move a dashboard's
-        numbers under it: an import finishing (row_count climbs), a table
-        arriving or being dropped, and the analyst tagging rows. It is
-        deliberately derived from the `sources` table rather than bumped by
-        each ingest path, because a derived marker cannot be forgotten by
-        the next import path somebody writes. Its job is to let a stale
-        number be SHOWN AND LABELLED, not to be cryptographically exact."""
+        Between them those cover what moves a dashboard's numbers under it:
+        an import finishing (row_count climbs), a table arriving or being
+        dropped, the analyst tagging rows or clearing them for a second
+        pass, a tag renamed or deleted, and an indicator or its hits
+        changing. The evidence half is deliberately DERIVED from the
+        `sources` table rather than bumped by each ingest path, because a
+        derived marker cannot be forgotten by the next import path somebody
+        writes; the conclusions half has to be a counter because its tables
+        are too big to count on every board open, and it is bumped inside
+        each write's own transaction (_bump_state_generation).
+
+        What it is not: exact. A widget reading something else about the
+        case — case notes, a saved view, a derived column's values — can
+        still go quietly out of date, and a marker that moved for those
+        would mark every board stale every time anyone did anything. Its
+        job is to let a stale number be SHOWN AND LABELLED, not to be
+        cryptographically complete."""
         with self._reader() as db:
             n, rows, top = db.execute(
                 "SELECT COUNT(*), COALESCE(SUM(row_count), 0), COALESCE(MAX(id), 0) FROM sources"
             ).fetchone()
             tag = db.execute(
-                "SELECT value FROM case_settings WHERE key=?", (self.TAG_GENERATION_KEY,)).fetchone()
+                "SELECT value FROM case_settings WHERE key=?", (self.STATE_GENERATION_KEY,)).fetchone()
         return f"{n}.{rows}.{top}.{tag['value'] if tag else '0'}"
 
     def _prune_widget_cache(self, dashboard_id: int, widgets: list) -> None:
@@ -8845,6 +8916,12 @@ class Store:
         w = next((x for x in widgets if isinstance(x, dict) and x.get("id") == widget_id), None)
         if w is None:
             return None
+        # default=str for the same reason _widget_fingerprint uses it: a
+        # hand-written widget can SELECT a BLOB (unhex, randomblob, CAST),
+        # and json.dumps raises TypeError on the bytes rather than
+        # returning them. The run already succeeded and the analyst already
+        # has the number; refusing to FILE it would be answering a
+        # successful query with a 500.
         rec = {"fingerprint": self._widget_fingerprint(w), "generation": self.data_generation(),
                "ran_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "elapsed_ms": int(elapsed_ms or 0)}
         with self.lock, self.db:
@@ -8856,7 +8933,7 @@ class Store:
                 " fingerprint=excluded.fingerprint, generation=excluded.generation,"
                 " payload=excluded.payload, ran_at=excluded.ran_at, elapsed_ms=excluded.elapsed_ms",
                 (dashboard_id, widget_id, rec["fingerprint"], rec["generation"],
-                 json.dumps(payload), rec["ran_at"], rec["elapsed_ms"]))
+                 json.dumps(payload, default=str), rec["ran_at"], rec["elapsed_ms"]))
         return {"ran_at": rec["ran_at"], "elapsed_ms": rec["elapsed_ms"], "stale": False}
 
     def refresh_dashboard(self, dashboard_id: int, widget_id: str | None = None) -> dict:
@@ -8882,12 +8959,17 @@ class Store:
             t0 = time.time()
             try:
                 payload = self.dashboard_widget_preview(w.get("source") or "sql", w.get("query") or {})
-            except (ValueError, KeyError, sqlite3.Error) as e:
+                ms = int((time.time() - t0) * 1000)
+                # Encoded inside the same try, and with default=str: one
+                # widget nobody can serialise must cost its own cache row,
+                # not the whole board's — the widgets that ran before it
+                # would otherwise have their results discarded with it.
+                blob = json.dumps(payload, default=str)
+            except (ValueError, KeyError, TypeError, sqlite3.Error) as e:
                 results[w.get("id")] = {"error": str(e)}
                 continue
-            ms = int((time.time() - t0) * 1000)
             writes.append((dashboard_id, w["id"], self._widget_fingerprint(w), gen,
-                           json.dumps(payload), ran_at, ms))
+                           blob, ran_at, ms))
             results[w["id"]] = {"payload": payload, "ran_at": ran_at, "elapsed_ms": ms, "stale": False}
         if writes:
             with self.lock, self.db:
@@ -9177,6 +9259,11 @@ class Store:
                 "ON CONFLICT(source_id, rid) DO UPDATE SET note=excluded.note",
                 [(source_id, r["rid"], r["note"]) for r in session.get("row_notes", [])],
             )
+            # Tags arrived wholesale rather than through the delta path, so
+            # the bump it would have done is owed here: a dashboard cached
+            # against the pre-load state is now counting somebody else's
+            # pass over this evidence.
+            self._bump_state_generation()
         # Tag state was just replaced wholesale, not by a recorded delta, so
         # every existing undo entry now describes a world that is gone —
         # replaying one would strip tags off rows the loaded session owns.
@@ -9573,13 +9660,17 @@ class Store:
         undo journal is bounded by UNDO_ROW_BUDGET and a case with a million
         tagged rows would blow straight through it. Saving first is the
         undo, and it is a better one — a named session you can diff against
-        rather than a single step you can lose."""
+        rather than a single step you can lose. Bypassing the delta path
+        means bypassing its state-generation bump too, so this does it
+        itself — a dashboard whose tag counts were worked out during the
+        last pass is wrong about this one, not merely old."""
         saved = self.save_session(save_as) if save_as else None
         with self.lock, self.db:
             tags = self.db.execute("SELECT COUNT(*) FROM row_tags").fetchone()[0]
             notes = self.db.execute("SELECT COUNT(*) FROM row_notes").fetchone()[0]
             self.db.execute("DELETE FROM row_tags")
             self.db.execute("DELETE FROM row_notes")
+            self._bump_state_generation()
         # The undo entries reference rows that no longer carry those tags;
         # replaying one would reinsert assignments this deliberately cleared.
         self._discard_undo()

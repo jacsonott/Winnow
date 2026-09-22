@@ -3750,10 +3750,14 @@ def api_dashboard_widget_preview(body: WidgetPreviewBody):
         # Caching is best-effort on purpose: the analyst asked for a
         # number, and they have it. A board that has been deleted or a
         # widget that has moved on since the request went out is a reason
-        # not to store the result, not a reason to fail the request.
+        # not to store the result, not a reason to fail the request — and
+        # so is anything else, which is why this catches Exception rather
+        # than a list. A narrower list said "best-effort" and meant "unless
+        # I forgot one": a widget whose result would not encode turned a
+        # 200 into a 500 on the way to the filing cabinet.
         try:
             stamp = st.cache_widget_result(body.dashboard_id, body.widget_id, out, elapsed)
-        except (KeyError, ValueError, sqlite3.Error):
+        except Exception:
             stamp = None
         if stamp:
             out["ran_at"] = stamp["ran_at"]

@@ -46,6 +46,26 @@ let boardGen = 0;
    hand the refresh back its enabled label halfway through the run. */
 let refreshing = 0;
 
+/* Widget ids whose last re-run did not come back, while a cached result
+   was already painted on the card. The number stays — it is still the
+   last true answer this widget gave — but its age mark says the re-run
+   failed, or a server that blinked during ↻ Refresh would be indis-
+   tinguishable from a board that is up to date. Cleared by the next
+   successful run and by opening any board (two boards can hold the same
+   widget id: an id is derived from the widget's index and question). */
+const failedRuns = new Set();
+
+/* One bar repaint per frame. renderBar() tears the whole bar down
+   (replaceChildren) and every widget that lands moves the "as of", so a
+   cold open of a 26-widget board rebuilt it 27 times — and a mousedown on
+   "＋ Add widget" that lands before a rebuild with its mouseup after it
+   produces no click at all. Same coalesce as the jobs panel's. */
+let barRaf = 0;
+function scheduleBar() {
+  if (barRaf) return;
+  barRaf = requestAnimationFrame(() => { barRaf = 0; renderBar(); });
+}
+
 /* The dashboard being dragged from the sidebar, for the Pages header's
    drop target (sources.js) — a tiny shared holder rather than a
    dataTransfer read, which isn't available during dragover. */
@@ -80,11 +100,13 @@ async function loadWidgets(id) {
     const d = await api(`/api/dashboards/${id}`);
     widgets = d.widgets || [];
     cache = d.cache || {};
+    failedRuns.clear();
     loadError = null;
   }
   catch (e) {
     widgets = [];
     cache = {};
+    failedRuns.clear();
     loadError = e;
     // 404 means this board is not in this case (deleted elsewhere, or an
     // id left over from another case). Re-read the list so the sidebar
@@ -706,7 +728,11 @@ export function clockOf(ranAt) {
    and a bar quoting the freshest card would be reassuring about exactly
    the wrong thing. */
 function boardStamp() {
-  const hits = widgets.map((w) => w.id && cache[w.id]).filter(Boolean);
+  // Only results that can say WHEN. A cache entry with no readable
+  // ran_at has no age to compare or to print, and one of those landing
+  // as the oldest rendered the bar as "As of  · " — two empty spans.
+  const hits = widgets.map((w) => w.id && cache[w.id])
+    .filter((h) => h && ranAtAge(h.ran_at) != null);
   if (!hits.length) return null;
   let oldest = hits[0];
   let stale = false;
@@ -730,20 +756,57 @@ function paintAges() {
 
 function fillMark(mark, w) {
   const hit = w.id ? cache[w.id] : null;
+  const bad = !!(w.id && failedRuns.has(w.id));
   mark.className = 'dash-mark';
-  if (w.live) {
+  // A live widget that just failed to run is showing its PREVIOUS answer,
+  // so it says how old that is rather than wearing the "runs every time"
+  // dot, which would be a promise it did not keep.
+  if (w.live && !bad) {
     mark.classList.add('dash-live-dot');
     mark.textContent = '';
     mark.title = 'Runs every time this dashboard opens';
     return;
   }
-  mark.textContent = hit ? shortAge(hit.ran_at) : '';
+  mark.textContent = hit ? (bad ? '!' : '') + shortAge(hit.ran_at) : '';
   if (!hit) { mark.title = ''; return; }
   mark.classList.add('dash-age');
   if (hit.stale) mark.classList.add('stale');
+  if (bad) mark.classList.add('failed');
   mark.title = `Last run ${clockOf(hit.ran_at)} · ${longAge(hit.ran_at)}`
     + (hit.stale ? ' — the case has changed since. ↻ Refresh re-runs it.' : '')
+    + (bad ? ' — the last attempt to re-run it did not come back, so this is still the older result.' : '')
     + ` · took ${runtimeLabel(hit.elapsed_ms)}`;
+}
+
+/* Something that could have moved these numbers just finished — an
+   import landing, a watchlist scan tagging rows. Staleness is only
+   computed when a board is LOADED, so a board left open through a
+   twenty-minute import went on saying "As of 09:12" in green over numbers
+   the import had already invalidated, and only owned up when the analyst
+   navigated away and back. Called from the jobs poll and the watchlist
+   scan, which are where the app learns those finished.
+
+   It ASKS rather than assumes: the flags come from the same
+   Store.data_generation comparison the next open would make, so the board
+   never reddens over a re-scan that found exactly what it found last time
+   and then quietly greens again on the next open. Only the flag is taken
+   from the answer — the payloads on screen are left alone, and a result
+   that landed while this was in flight (a newer ran_at) is not touched. */
+export async function markDashboardStale() {
+  if (S.activeTab !== 'dashboard' || S.dashboardId == null) return;
+  const id = S.dashboardId;
+  const gen = boardGen;
+  let fresh;
+  try { fresh = await api(`/api/dashboards/${id}`); } catch { return; }
+  if (gen !== boardGen || S.dashboardId !== id) return;
+  let moved = false;
+  for (const [wid, hit] of Object.entries(fresh.cache || {})) {
+    const mine = cache[wid];
+    if (mine && hit.stale && !mine.stale && mine.ran_at === hit.ran_at) { mine.stale = true; moved = true; }
+  }
+  if (!moved) return;
+  renderBar();
+  paintAges();
 }
 
 function renderBar() {
@@ -808,8 +871,16 @@ export async function refreshBoard() {
   });
   refreshing += 1;
   renderBar();
-  try { await Promise.all(jobs); }
-  finally {
+  try {
+    const bad = (await Promise.all(jobs)).filter((r) => r && r.error).length;
+    // One toast for the board, not one per card: the cards keep their
+    // numbers (see runWidget), so without this a refresh that reached
+    // nothing would look exactly like one that changed nothing.
+    if (bad) {
+      toast(`${bad} of ${jobs.length} widget${bad === 1 ? '' : 's'} could not be re-run — `
+        + 'those cards still show their previous results', 6000);
+    }
+  } finally {
     refreshing -= 1;
     renderBar();
   }
@@ -948,18 +1019,37 @@ async function runWidget(w, body, opts = {}) {
   const req = { source: w.source, query: w.query || {} };
   if (opts.boardId != null && w.id) { req.dashboard_id = opts.boardId; req.widget_id = w.id; }
   if (!opts.quiet) body.replaceChildren(el('div', 'note-status', 'Loading…'));
+  const mine = () => gen === boardGen && S.dashboardId === opts.boardId;
   let data;
   try { data = await post('/api/dashboard/widget/preview', req); }
-  catch (e) { body.replaceChildren(el('div', 'note-status', e.message)); return; }
+  catch (e) {
+    // `quiet` means a good number is already on this card. Replacing 26 of
+    // them with 26 identical grey error lines because the server blinked
+    // throws away the only thing the cache was for — and throws away
+    // nothing real, since the payloads are still here and a reopen brings
+    // them back, which makes a transient failure read as a lost cache.
+    if (opts.quiet && w.id && cache[w.id]) {
+      failedRuns.add(w.id);
+      if (mine()) paintAges();
+      return { error: e };
+    }
+    body.replaceChildren(el('div', 'note-status', e.message));
+    return { error: e };
+  }
+  if (req.dashboard_id != null && w.id) failedRuns.delete(w.id);
   // The board may have been closed or swapped while this was in flight;
-  // filing the answer would file it against another board's widget.
-  if (req.dashboard_id != null && gen === boardGen && S.dashboardId === opts.boardId) {
-    cache[w.id] = { payload: data, ran_at: data.ran_at || null,
+  // filing the answer would file it against another board's widget. No
+  // ran_at means the server did not file it either (the widget left the
+  // board while this was out), so neither does this — caching it here
+  // would paint an age-less card the bar cannot date.
+  if (req.dashboard_id != null && data.ran_at && mine()) {
+    cache[w.id] = { payload: data, ran_at: data.ran_at,
       elapsed_ms: data.elapsed_ms || 0, stale: false };
-    renderBar();
+    scheduleBar();
     paintAges();
   }
   paintWidget(w, body, data);
+  return {};
 }
 
 export function paintWidget(w, body, data) {

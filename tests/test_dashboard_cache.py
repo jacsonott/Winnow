@@ -17,6 +17,13 @@ when it is served with a warning:
 Widget identity is the thing everything else hangs off, so it is pinned
 first: widgets were a JSON list identified by position, and a drag-reorder
 rewrote the list.
+
+"Served stale" has a test per writer rather than one for the mechanism.
+Half of data_generation is derived from the `sources` table and cannot be
+forgotten; the other half is a counter every tag and watchlist write has
+to remember to bump, and each of the writers that bypasses the tag delta
+path — a tag deleted, a session restored, the case cleared for a second
+pass — was its own way of being told a number was current when it was not.
 """
 
 from __future__ import annotations
@@ -265,6 +272,131 @@ def test_re_tagging_rows_that_already_carry_the_tag_changes_nothing(case):
     assert store.get_dashboard_cache(did)[wid]["stale"] is False
 
 
+def test_clearing_the_case_for_a_second_pass_marks_the_board_stale(case):
+    """start_new_session deletes every row_tags row by hand — invariant #7's
+    documented exception, so it never reaches the tag delta path. A tag
+    widget cached before it says "3 tagged" over a case with none."""
+    store, sid = case
+    tag = store.list_tags()[0]["id"]
+    store.set_tags(sid, [1, 2, 3], tag, True)
+    did = _board(store, sid)
+    store.refresh_dashboard(did)
+    tagged = store.get_dashboard(did)[2]["id"]
+    assert store.get_dashboard_cache(did)[tagged]["payload"]["total"] == 3
+    store.start_new_session()
+    hit = store.get_dashboard_cache(did)[tagged]
+    assert hit["stale"] is True
+    assert hit["payload"]["total"] == 3, "the number it counted is still shown, dated"
+
+
+def test_deleting_a_tag_marks_the_board_stale(case):
+    """It drops every assignment of that tag with it, straight out of
+    row_tags."""
+    store, sid = case
+    tag = store.list_tags()[0]["id"]
+    store.set_tags(sid, [1, 2], tag, True)
+    did = _board(store, sid)
+    store.refresh_dashboard(did)
+    tagged = store.get_dashboard(did)[2]["id"]
+    store.delete_tag(tag)
+    assert store.get_dashboard_cache(did)[tagged]["stale"] is True
+
+
+def test_naming_a_new_tag_marks_the_board_stale(case):
+    """A tags widget lists one row per DEFINITION, so its answer changes
+    before a single row carries the tag."""
+    store, sid = case
+    did = _board(store, sid)
+    store.refresh_dashboard(did)
+    tagged = store.get_dashboard(did)[2]["id"]
+    store.upsert_tag(None, "Lateral movement", "#8844cc", None)
+    assert store.get_dashboard_cache(did)[tagged]["stale"] is True
+
+
+def test_recolouring_a_tag_leaves_the_board_alone(case):
+    """The counter follows what the write changed. A tags widget is names
+    and counts; the palette is neither."""
+    store, sid = case
+    tag = store.list_tags()[0]
+    did = _board(store, sid)
+    store.refresh_dashboard(did)
+    tagged = store.get_dashboard(did)[2]["id"]
+    store.upsert_tag(tag["id"], tag["name"], "#123456", tag.get("hotkey"))
+    assert store.get_dashboard_cache(did)[tagged]["stale"] is False
+
+
+def test_restoring_a_saved_session_marks_the_board_stale(case):
+    """Loading a session INSERTs row_tags wholesale — the tags of another
+    pass over the same evidence, arriving without a delta behind them."""
+    store, sid = case
+    tag = store.list_tags()[0]["id"]
+    store.set_tags(sid, [1, 2, 3], tag, True)
+    store.save_session("pass1")
+    store.start_new_session()
+    did = _board(store, sid)
+    store.refresh_dashboard(did)
+    tagged = store.get_dashboard(did)[2]["id"]
+    assert store.get_dashboard_cache(did)[tagged]["payload"]["total"] == 0
+    store.load_session("pass1")
+    assert store.get_dashboard_cache(did)[tagged]["stale"] is True
+
+
+def test_a_watchlist_scan_that_finds_hits_marks_the_board_stale(case):
+    """A watchlist widget's number is the sum of the hit counts, and a scan
+    moves it with nothing in `sources` changing."""
+    store, sid = case
+    did = store.create_dashboard("IOCs", [
+        {"title": "Watchlist hits", "source": "watchlist", "render": "stat"}])["id"]
+    store.add_indicator("WKS07")
+    store.refresh_dashboard(did)
+    wid = store.get_dashboard(did)[0]["id"]
+    assert store.get_dashboard_cache(did)[wid]["payload"]["total"] == 0
+    store.scan_all()
+    assert store.get_dashboard_cache(did)[wid]["stale"] is True
+
+
+def test_re_scanning_an_unchanged_case_leaves_the_board_alone(case):
+    """The counter follows what the hits DID, not that a scan ran: a board
+    that reddened every time the watchlist re-scanned — which happens after
+    every import — would teach the analyst to ignore the mark."""
+    store, sid = case
+    did = store.create_dashboard("IOCs", [
+        {"title": "Watchlist hits", "source": "watchlist", "render": "stat"}])["id"]
+    store.add_indicator("WKS07")
+    store.scan_all()
+    store.refresh_dashboard(did)
+    wid = store.get_dashboard(did)[0]["id"]
+    store.scan_all()
+    assert store.get_dashboard_cache(did)[wid]["stale"] is False
+
+
+def test_dropping_an_indicator_marks_the_board_stale(case):
+    store, sid = case
+    did = store.create_dashboard("IOCs", [
+        {"title": "Watchlist hits", "source": "watchlist", "render": "stat"}])["id"]
+    ind = store.add_indicator("WKS07")
+    store.scan_all()
+    store.refresh_dashboard(did)
+    wid = store.get_dashboard(did)[0]["id"]
+    store.delete_indicator(ind["id"])
+    assert store.get_dashboard_cache(did)[wid]["stale"] is True
+
+
+def test_a_widget_returning_a_blob_is_cached_rather_than_failing(case):
+    """A widget can ask for bytes — `unhex`, `randomblob`, a CAST — and
+    json.dumps refuses them. Refusing to FILE a result is not a reason to
+    fail a query that already answered, so the encode is lenient and the
+    run is stored like any other."""
+    store, sid = case
+    did = store.create_dashboard("Blobs", [
+        _widget("Bytes", "SELECT CAST('abc' AS BLOB) AS b"),
+        _widget("Rows", f"SELECT COUNT(*) FROM src_{sid}")])["id"]
+    out = store.refresh_dashboard(did)
+    assert not any("error" in r for r in out["results"].values())
+    hits = store.get_dashboard_cache(did)
+    assert len(hits) == 2, "one unencodable widget must not take the board's cache with it"
+
+
 def test_a_merge_widget_goes_stale_when_a_member_grows(store, write_csv):
     """Merge parity for the cache. Dashboards do not offer merges in the
     editor (CLAUDE.md invariant #9's exception list), but hand-written SQL
@@ -335,6 +467,27 @@ def test_a_preview_with_no_board_caches_nothing(client, store, write_csv):
     client.post("/api/dashboard/widget/preview",
                 json={"source": "sql", "query": {"sql": f"SELECT COUNT(*) FROM src_{sid}"}})
     assert client.get(f"/api/dashboards/{did}").json()["cache"] == {}
+
+
+def test_a_preview_the_cache_cannot_file_still_answers(client, store, write_csv, monkeypatch):
+    """Filing the result is best-effort, and best-effort has to mean any
+    failure, not a list of the ones that were thought of: the analyst
+    asked for a number and the query produced one, so nothing that happens
+    on the way to the filing cabinet may turn that 200 into a 500."""
+    sid = store.ingest_csv(write_csv(ROWS, "e.csv"), name="e", build_fts=False)["id"]
+    did = _board(store, sid)
+    wid = store.get_dashboard(did)[0]["id"]
+
+    def boom(*a, **k):
+        raise TypeError("Object of type bytes is not JSON serializable")
+
+    monkeypatch.setattr(type(store), "cache_widget_result", boom)
+    r = client.post("/api/dashboard/widget/preview", json={
+        "source": "sql", "query": {"sql": f"SELECT COUNT(*) FROM src_{sid}"},
+        "dashboard_id": did, "widget_id": wid})
+    assert r.status_code == 200
+    assert r.json()["rows"] == [[3]]
+    assert "ran_at" not in r.json(), "nothing was filed, so nothing is stamped"
 
 
 def test_saving_widgets_hands_back_the_ids_the_store_minted(client, store, write_csv):

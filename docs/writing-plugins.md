@@ -1370,6 +1370,7 @@ api.register_dashboard(
 | `query.sql` | required for `source: "sql"`; runs on the read-only pane connection, so a board is data, not code |
 | `span` | `1` or `2` — how wide the card sits |
 | `live` | `true` — re-run this widget every time the board opens, instead of showing its last result |
+| `id` | assigned by Winnow when the board lands in a case — don't set it, but preserve it if you read a board and write it back |
 | `drill` | makes the card clickable; see below |
 
 **A board is not re-run from scratch every time it is opened.** Each
@@ -1390,6 +1391,15 @@ of its twenty-six widgets live, which is about the right ratio.
 An imported table or a tag write does not silently replace a cached
 number; it marks it stale, and the card and the board bar say so. Numbers
 an analyst is going to draw conclusions from are dated, always.
+
+The cached result is filed under the widget's `id`, which Winnow assigns
+when the board is written into a case. The list you register here is left
+unstamped, so there is nothing to set — but a board you READ back
+(`req.store.get_dashboard()`, `GET /api/dashboards/{id}`) carries one per
+widget, and a plugin that edits a board and writes it back with
+`req.store.set_dashboard_widgets()` has to carry the `id` through. Drop it
+and every card on that board is a new widget: the cached results are
+pruned and the whole board re-runs on its next open.
 
 **Write the SQL against a placeholder, not a table id**, which is
 different in every case: `{{evtx}}`-style shorthands and
