@@ -124,7 +124,10 @@ def test_shift_hotkey_while_grouped_repaints_the_open_group(page):
     try:
         page.keyboard.press(f"Shift+{hotkey}")
         page.wait_for_selector(".confirm-overlay")
-        page.locator(".confirm-card .btn", has_text="OK").click()
+        # By role, not by label: the whole-view confirm names the direction
+        # it is about to go in ("Tag them" / "Remove the tag"), which is the
+        # point of it. The affirmative button is the non-ghost one.
+        page.locator(".confirm-card .confirm-actions .btn:not(.ghost)").click()
         # Server truth first: the write landed (the count came back with it).
         page.wait_for_function("([id, n]) => (__winnow.S.tagCountsAll[id] || 0) > n", arg=[tag_id, before])
         tagged = True

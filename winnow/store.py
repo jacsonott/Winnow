@@ -7651,6 +7651,29 @@ class Store:
             ).fetchall()
         return {"counts": {str(r["tag_id"]): r["n"] for r in rows}}
 
+    def tag_coverage_in_view(self, view_id: str, tag_id: int) -> dict:
+        """How much of a view one tag already covers: {rows, tagged}.
+
+        What the whole-view tag hotkey asks before it acts. "Tag everything
+        in this view" only makes sense as a one-way action while something
+        in the view is untagged; once the lot carries the tag, pressing the
+        same keys again can only sensibly mean take it off. Answering that
+        needs the count and the view's size together, and the caller needs
+        both numbers anyway — a confirm that says "remove it from 1,204
+        rows" is a different sentence from "tag 1,204 rows", and the
+        analyst is entitled to read which one they are agreeing to before
+        anything is written.
+
+        Deliberately the same aggregate the ribbon already runs after every
+        build (tag_counts_in_view), so this adds a shape of query, not a
+        cost."""
+        handle = self._views.get(view_id)
+        if not handle:
+            raise KeyError("View expired — rebuild it")
+        counts = self.tag_counts_in_view(view_id)["counts"]
+        return {"rows": int(handle["row_count"]),
+                "tagged": int(counts.get(str(int(tag_id)), 0))}
+
     def set_note(self, source_id: int, rid: int, note: str) -> None:
         with self.lock, self.db:
             if note.strip():
