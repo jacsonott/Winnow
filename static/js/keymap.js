@@ -1,7 +1,7 @@
 /* Keybindings: the default map, its migrations, and the action handlers.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { autofitAllColumnWidths, resetAllColumnWidths, saveDefaultLayout, visibleCols } from './columns.js';
+import { autofitAllColumnWidths, openColumnFilter, resetAllColumnWidths, saveDefaultLayout, visibleCols } from './columns.js';
 import { openFilterBuilder } from './filterbuilder.js';
 import { $, ROW_H } from './core.js';
 import { currentModalAction, repaintOpenMenus, closeMenu, closeModal } from './ui.js';
@@ -86,7 +86,7 @@ export const ACTION_LABELS = {
   moveDown: 'Move down', moveUp: 'Move up',
   pageDown: 'Page down', pageUp: 'Page up',
   jumpFirst: 'Jump to first row', jumpLast: 'Jump to last row',
-  focusSearch: 'Focus search box', focusFilter: 'Focus first column filter',
+  focusSearch: 'Focus search box', focusFilter: 'Filter the column under the cursor',
   focusNote: 'Focus note field', openSettings: 'Open settings (keyboard shortcuts, filter syntax)',
   resetColumnWidths: 'Reset all column widths to default',
   autofitColumnWidths: 'Autofit all column widths to content',
@@ -339,7 +339,18 @@ export const ACTION_HANDLERS = {
   jumpFirst: () => moveCursor(0, false),
   jumpLast: () => moveCursor(Math.max(0, gridRowCount() - 1), false),
   focusSearch: () => expandSearch(),
-  focusFilter: () => { const i = document.querySelector('.fcell input'); if (i) { i.focus(); i.select(); } },
+  // "Let me type a filter" — which under the filter bar means revealing a
+  // box before there is one to focus. It goes through openColumnFilter, the
+  // one place that knows how to reveal, scroll to and focus a column's box,
+  // so the key means the same thing on both surfaces. It aims at the column
+  // the cell cursor is in rather than the first on screen: pressing it with
+  // a cell selected in the seventh column and landing in the first one's
+  // box is how it used to behave and it was never what anyone wanted.
+  focusFilter: () => {
+    const cols = visibleCols();
+    const name = cols[(S.cellRange && S.cellRange.c0) || 0] || cols[0];
+    if (name) openColumnFilter(name);
+  },
   focusNote: () => { if (!$('detail').hidden) $('noteInput').focus(); },
   openSettings: () => openSettings(),
   resetColumnWidths: () => resetAllColumnWidths(),

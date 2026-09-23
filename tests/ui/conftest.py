@@ -169,11 +169,16 @@ def clean_plugin_tab_state(server_post):
 # individual #tabSql/#tabTimeline nodes it hides. The shared context
 # models an analyst who expanded the strip; the default itself is
 # covered by tests/ui/test_pages_dropdown.py, which turns it back on.
+# `filterUi: 'row'` is the same bargain: the filter bar is the default
+# now, and most tests predate it and type into `.fcell input[data-col=…]`,
+# which under the bar exists only for a column whose box was opened. The
+# shared context models an analyst who kept the classic row; the default
+# is covered by tests/ui/test_filter_bar.py, which turns it back on.
 # A test that builds its own context to seed something more takes the
 # `first_run_init` fixture and appends to this, so the seed stays one.
 FIRST_RUN_INIT = ("localStorage.setItem('winnow.remotePrompt', 'seen');"
                   "localStorage.setItem('winnow.appearance',"
-                  " JSON.stringify({ splash: false, pagesMenu: false }));"
+                  " JSON.stringify({ splash: false, pagesMenu: false, filterUi: 'row' }));"
                   # The sidebar defaults CLOSED now; most tests predate
                   # that and address rows in it, so the shared context
                   # models an analyst who chose to keep it open.

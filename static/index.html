@@ -140,6 +140,16 @@ try {
 
 <div class="main-area" id="mainArea" data-dock="bottom">
   <div class="main-content">
+    <!-- The filter bar: the filters actually set, as chips, plus the way to
+         add one. Deliberately OUTSIDE #gridHead, which is inside the grid's
+         scroll container and is width: max-content — anything in there either
+         scrolls horizontally out of reach with the columns or needs a width
+         equal to the scrollport, which no CSS length can express from in
+         there. Here it is simply as wide as the grid, wraps when it has to,
+         and stays put while the columns scroll under it. renderFilterBar owns
+         its `hidden`: it is gone under the classic filter row, with no table
+         open, and behind every page tab (syncTabChrome). -->
+    <div class="filter-bar" id="filterBar" hidden></div>
     <main class="grid" id="grid">
       <div class="grid-body" id="body" tabindex="0" role="grid" aria-label="Rows">
         <!-- Inside the scroll container on purpose: position:sticky keeps
@@ -148,6 +158,11 @@ try {
              lag the rows the way the old JS translateX-on-scroll did. -->
         <div class="grid-head" id="gridHead">
           <div class="head-row" id="headRow"></div>
+          <!-- The per-column boxes. Every column gets one under the classic
+               setting (Settings → Appearance); under the filter bar only the
+               columns whose box has been opened (S.filterOpen) get an input,
+               the rest get an empty cell so the open one stays under its own
+               header, and the whole row is hidden while none is open. -->
           <div class="filter-row" id="filterRow"></div>
         </div>
         <div class="spacer-y" id="spacerY"></div>
