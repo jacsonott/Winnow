@@ -2351,8 +2351,13 @@ class Store:
 
     # How often a build waiting for the writer lock re-asks the holder to
     # stand aside. Only paid while actually waiting, and only by a build
-    # for the table in front of the analyst.
-    YIELD_ASK_EVERY_S = 0.05
+    # for the table in front of the analyst. Short, because it is also the
+    # granularity of the wait itself: the loop cannot notice the lock has
+    # freed until its next attempt, and a build that answers inline has
+    # VIEW_JOB_INLINE_WAIT_MS (250) to do everything in. An attempt is a
+    # lock try and a dict lookup, so 100 a second while waiting is not a
+    # cost worth trading latency for.
+    YIELD_ASK_EVERY_S = 0.01
     # How long a restarted build will stand back for a waiting one before
     # going anyway. Generous: the thing it is waiting for is a build that
     # has already interrupted it and is about to take the lock.
