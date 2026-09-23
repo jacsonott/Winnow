@@ -292,19 +292,38 @@ try {
            the outermost sibling. The divider has its OWN id: syncPluginPanels
            hides #notesPanelResize by id and must never touch this one. -->
       <div class="notes-split" id="notesSplit" data-mode="split">
+      <!-- The placeholder is one sentence of prose and one of syntax, NOT a
+           sample note. It used to be a worked example — a heading, bullets,
+           timestamped lines — and on an empty case that read as a narrative
+           someone had written beside a preview pane that had failed to render
+           it. Dimming alone doesn't fix that: it's the SHAPE that reads as
+           content. Keep it prose, and keep the lines short enough not to wrap
+           into a block. .notes-editor::placeholder does the quietening. -->
       <textarea class="notes-editor" id="notesEditor" spellcheck="true"
-        placeholder="The story of this investigation — Markdown. Saved in the case file and travels with it.
+        placeholder="Write the story of this investigation here. It saves into the case file and travels with it.
 
-# Timeline
-- 2026-03-15 14:03 — spray from WKS07
-- 2026-03-15 14:18 — first success onto FILESRV01 as svc_backup
-
-## Leads
-- rclone.exe under \ProgramData"></textarea>
+Markdown: # headings, - bullets, **bold**, `code`, tables. Link ▾ points at a table, query or dashboard."></textarea>
       <div class="notes-divider" id="notesDivider" role="separator" aria-orientation="vertical"
            title="Drag to resize · double-click to reset"></div>
       <div class="notes-preview" id="notesPreview"><div class="notes-preview-body" id="notesPreviewBody"></div></div>
       </div>
+      <!-- The OTHER thing called notes: the ones attached to evidence rows,
+           written in the detail pane and until now visible only there. An
+           analyst writing up findings had to remember which rows they had
+           annotated. Kept below the split rather than inside the preview
+           pane, because the preview is the narrative rendered and these are
+           not part of it; each entry opens its row. Collapsible, with the
+           state in winnow.notes beside the divider position. -->
+      <section class="notes-rows" id="notesRows">
+        <div class="notes-rows-head">
+          <button class="btn ghost notes-rows-toggle" id="btnNotesRows" aria-expanded="true"
+                  aria-controls="notesRowsBody" title="Notes written on rows, in the detail pane">
+            <span class="notes-rows-caret" aria-hidden="true">▾</span>
+            <span id="notesRowsCount">Row notes</span>
+          </button>
+        </div>
+        <div class="notes-rows-body" id="notesRowsBody"></div>
+      </section>
     </div>
       <div class="page-panel-resize" id="notesPanelResize" title="Drag to resize the panel" hidden></div>
       <aside id="notesPluginPanels" class="page-panels" hidden></aside>

@@ -8214,6 +8214,43 @@ class Store:
                     "DELETE FROM row_notes WHERE source_id=? AND rid=?", (source_id, rid)
                 )
 
+    def list_row_notes(self, limit: int = 500) -> dict:
+        """Every row note in the case, with the table each one sits on — what
+        the Notes page lists under the case narrative, so the rows an analyst
+        annotated during triage are findable from the page they write the
+        report on rather than only from the detail pane of the row itself.
+
+        Joined to `sources` rather than read bare, because the label is the
+        whole point of the listing ("Security.csv · Line 412"), and the join
+        also drops notes whose table is gone — `drop_source` deletes them, so
+        one surviving here would be a bug, but listing an unnameable row would
+        be worse than omitting it.
+
+        Merge parity (invariant #9) needs nothing here: a note taken on a row
+        of a merged table is written against the member it came from, exactly
+        like a tag, so it is already listed under that member's name and its
+        (source_id, rid) opens the real table. The watchlist hits pane resolves
+        the same way.
+
+        `total` is the count before `limit`, so a case with more notes than the
+        page shows can say so instead of quietly truncating. Ordered by table
+        then line, which is the order the tables are listed in and the order
+        the rows are read in."""
+        limit = max(0, int(limit))
+        with self._reader() as ro:
+            total = ro.execute(
+                "SELECT COUNT(*) FROM row_notes n JOIN sources s ON s.id = n.source_id"
+            ).fetchone()[0]
+            rows = ro.execute(
+                "SELECT n.source_id, n.rid, n.note, s.name, s.nickname "
+                "FROM row_notes n JOIN sources s ON s.id = n.source_id "
+                "ORDER BY n.source_id, n.rid LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return {"total": int(total),
+                "notes": [{"source_id": r["source_id"], "rid": r["rid"], "note": r["note"],
+                           "source_name": r["nickname"] or r["name"]} for r in rows]}
+
     # ------------------------------------------------------------ layout/views
 
     def save_layout(self, source_id: int, payload: dict) -> None:
