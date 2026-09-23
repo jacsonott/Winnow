@@ -2568,13 +2568,57 @@ html.remote .row.selected:hover { background: var(--row-selected); }
   font-family: var(--mono); font-size: 11px; padding: 1px 5px; border-radius: 8px; }
 .wl-count.hot { color: var(--bg); background: var(--accent); font-weight: 600; }
 .wl-count.scanning { color: var(--dim); letter-spacing: .1em; }
+/* The count cell when the answer is a state, not a number. "0" said both
+   "read every table, it isn't here" and "nothing has looked yet"; those
+   are words now, and words need the room a 2.2em pill doesn't have.
+   "clean" is the only one of the three that is a finding — the sentence an
+   analyst can put in a report — so it is the one in the full text colour;
+   the other two are the dim of something still owed. No new colour token:
+   a green here would be the only green in the app.
+   This is a variant of .wl-count, not a sibling of it: the cell is the
+   same slot whichever answer it holds, so it keeps that class (and the
+   type and padding that come with it) and only undoes the geometry a
+   number wanted. */
+.wl-count.wl-state { min-width: 0; text-align: left; white-space: nowrap; }
+.wl-count.wl-state.clean { color: var(--text); }
+.wl-count.wl-state.unscanned { font-style: italic; }
+/* The overlap marker, under the value like the note: another indicator is
+   reporting these same rows. A button because it opens the merge dialog,
+   styled flat so the row still reads as one line of text. */
+.wl-dup { align-self: flex-start; max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; background: none; border: none; padding: 0; cursor: pointer;
+  font: inherit; font-size: 11px; color: var(--accent); text-align: left; }
+.wl-dup:hover { text-decoration: underline; }
+.wl-dup-row .count { color: var(--dim); font-size: 11px; }
 .wl-del { flex: 0 0 auto; background: none; border: none; color: var(--line-2);
   cursor: pointer; font-size: 12px; visibility: hidden; }
 .wl-row:hover .wl-del { visibility: visible; }
 .wl-del:hover { color: var(--danger); }
 .wl-hits { overflow: auto; }
 .wl-hits-head { color: var(--dim); text-transform: uppercase; letter-spacing: .07em;
-  font-size: 10px; padding: 10px 14px 6px; }
+  font-size: 10px; padding: 10px 14px 6px; display: flex; align-items: baseline; gap: 10px; }
+.wl-hits-sub { text-transform: none; letter-spacing: 0; font-size: 11px; }
+.wl-hits-back { background: none; border: none; padding: 0; cursor: pointer; font: inherit;
+  font-size: 10px; letter-spacing: .07em; color: var(--accent); }
+.wl-hits-back:hover { text-decoration: underline; }
+/* One flagged ROW per line — the indicators that matched it, what the row
+   is, and when. The three columns are fixed-ish so the timestamps line up
+   down the right edge and the eye can run the column; the middle one is
+   the only one allowed to grow, and is cut with an ellipsis. */
+.wl-latest { display: flex; align-items: baseline; gap: 12px; padding: 5px 14px;
+  border-bottom: 1px solid var(--line); cursor: pointer; }
+.wl-latest:hover { background: var(--panel-2); }
+.wl-latest-who { flex: 0 0 auto; max-width: 30%; display: flex; gap: 6px; min-width: 0; }
+.wl-latest-ioc { background: none; border: none; padding: 0; cursor: pointer; font: inherit;
+  font-family: var(--mono); font-size: 12px; color: var(--accent); min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wl-latest-ioc:hover { text-decoration: underline; }
+.wl-latest-sep { flex: 0 0 auto; color: var(--dim); }
+.wl-latest-what { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; color: var(--dim); font-family: var(--mono); font-size: 12px; }
+.wl-latest-table { color: var(--text); }
+.wl-latest-when { flex: 0 0 auto; color: var(--dim); font-family: var(--mono); font-size: 11px; }
+.wl-latest-more { padding: 8px 14px; }
 .wl-hit { padding: 5px 14px; cursor: pointer; border-bottom: 1px solid var(--line); }
 .wl-hit:hover { background: var(--panel-2); }
 /* One group per table the indicator hit: a header styled like a grouped

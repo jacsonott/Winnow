@@ -3714,6 +3714,46 @@ def api_watchlist_hits(watchlist_id: int):
     return store().indicator_hits(watchlist_id)
 
 
+@app.get("/api/watchlist/overview")
+def api_watchlist_overview():
+    """What the tab opens on: every indicator (with how much of the case it
+    has actually been scanned against), the table count that fraction is
+    out of, and the overlap picture — which indicators flag identical or
+    contained row sets, and how many DISTINCT rows the per-indicator counts
+    add up to. `/api/watchlist` still answers the plain list; this is the
+    one the page reads, because a summary built from counts alone
+    double-counts a row two indicators both match."""
+    return store().watchlist_overview()
+
+
+@app.get("/api/watchlist/latest")
+def api_watchlist_latest(limit: int | None = None):
+    """The newest flagged rows across every indicator, one entry per row
+    with the indicators that matched it. Uses the analyst's timeline
+    templates for "when" and "what the row is" (the same resolution
+    /api/timeline does), so the pane speaks the artefact's vocabulary
+    rather than column indexes."""
+    return store().latest_hits(_resolve_timeline_configs(), limit)
+
+
+class WatchlistMergeBody(BaseModel):
+    keep_id: int
+    drop_id: int
+
+
+@app.post("/api/watchlist/merge")
+def api_watchlist_merge(body: WatchlistMergeBody):
+    """Fold a redundant indicator into the one that already covers its
+    rows. 400 when it does not cover them all — the message names how many
+    would be lost."""
+    try:
+        return store().merge_indicators(body.keep_id, body.drop_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 @app.get("/api/watchlist/cases")
 def api_watchlist_cases():
     """Recent cases that have indicators to offer — the picker behind the

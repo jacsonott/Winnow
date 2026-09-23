@@ -10,8 +10,10 @@ scan runs behind it as a job whose result fills the count in.
 Timing is shaped with page.route, not sleeps: the scan's start request
 is held (never answered) while the row is asserted, then released; the
 second test aborts it outright to pin that a scan that cannot start
-leaves the row with its real count rather than a marker that never
-resolves (the trap the search-all badge documents). The third holds the
+leaves the row saying what is actually true of it — nothing has read it
+yet — rather than a marker that never resolves (the trap the search-all
+badge documents) and rather than the "0" that used to stand in for it,
+which reads as "looked, and it is not in this case". The third holds the
 job polls instead, so the first Add's scan is still being followed when
 the second Add starts its own: the row the newer scan displaces settles
 at once, and nothing is left in the running state.
@@ -40,10 +42,17 @@ def _clear_watchlist(page):
 
 
 def _row_state(value):
-    """The count cell's text for the row whose value is `value`, or null."""
+    """The count cell's text for the row whose value is `value`, or null.
+
+    The cell is read through `.wl-count` whatever it holds — a number, the
+    "…" marker, or one of the scanned/not-scanned words — because that
+    class is the slot. Optional chaining, not a bare `.textContent`: these
+    predicates run inside wait_for_function, where a missing cell must be
+    a false poll and not an exception that ends the wait.
+    """
     return f"""() => {{ const r = [...document.querySelectorAll('.wl-row')]
         .find(x => x.querySelector('.wl-val')?.textContent === {value!r});
-      return r ? r.querySelector('.wl-count').textContent : null; }}"""
+      return r ? r.querySelector('.wl-count')?.textContent ?? null : null; }}"""
 
 
 def test_the_row_appears_before_the_scan_has_even_started(page):
@@ -76,7 +85,12 @@ def test_the_row_appears_before_the_scan_has_even_started(page):
         _clear_watchlist(page)
 
 
-def test_a_scan_that_cannot_start_leaves_a_real_count_not_a_marker(page):
+def test_a_scan_that_cannot_start_leaves_a_settled_state_not_a_marker(page):
+    """No scan ran, so the row settles on "not scanned" — the honest
+    answer, and the one that is not a marker waiting on a job that will
+    never land. It is deliberately not "0": that would claim the tables
+    had been read for this indicator and it was absent, which is the
+    sentence an analyst quotes into a report."""
     _clear_watchlist(page)
     page.locator("#tabWatchlist").click()
     page.wait_for_selector("#watchlistview:not([hidden])")
@@ -85,9 +99,9 @@ def test_a_scan_that_cannot_start_leaves_a_real_count_not_a_marker(page):
         page.locator("#wlValue").fill("H3")
         page.locator("#wlAdd").click()
         page.wait_for_function(f"() => ({_row_state('H3')})() !== null")
-        # No scan ran, so the honest count is 0 — and it is a count, not "…".
-        page.wait_for_function(f"() => ({_row_state('H3')})() === '0'")
+        page.wait_for_function(f"() => ({_row_state('H3')})() === 'not scanned'")
         assert page.locator(".wl-count.scanning").count() == 0
+        assert page.locator(".wl-row .wl-count.unscanned").count() == 1
         assert page.locator("#wlStatus").inner_text() == ""
         page.wait_for_selector("#toast:not([hidden])")
         assert "scan" in page.locator("#toast").inner_text().lower()

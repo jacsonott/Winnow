@@ -469,6 +469,51 @@ see [docs/notes/README.md](README.md) for the whole set.
   `tests/test_watchlist_scan.py` pins the lock discipline structurally
   (every match statement on a reader checked out with the lock unheld,
   none on the writer), `tests/test_watchlist_grouped_hits.py` the shape.
+- **What a watchlist count cannot say on its own** —
+  `watchlist_overview` is the one read behind the tab, and it answers
+  three things a list of per-indicator counts cannot.
+  **How much of the case an indicator has actually been scanned
+  against**: `watchlist_scans` records one row per (indicator, table)
+  unit a scan completed, written in the SAME transaction as that unit's
+  hits (`_scan_unit`), so `scanned_sources` against `scan_targets`
+  (`watchlist_scan_sources`, so merges and still-filling imports are out
+  of both halves of the fraction) tells "read every table, it is not in
+  this case" from "nothing has looked yet" — a bare `0` meant both, and
+  only the first is a sentence an analyst can put in a report. Both
+  `delete_indicator` and `drop_source` delete the records, for the id-reuse
+  reason the hits already had on both sides.
+  **Which indicators are flagging the same rows**:
+  `watchlist_overlaps` reports only COMPLETE overlap (identical sets, or
+  one contained in the other — `mimikatz` and `mimikatz.exe` matching the
+  same 2,323 rows), both directions of every pair, plus `distinct_rows`,
+  which is the honest count behind a `total_hits` that adds the same row
+  up once per indicator matching it. A partial overlap is ordinary and
+  says nothing worth acting on; an indicator with NO hits is never
+  reported, because the empty set is a subset of everything and saying so
+  would call an unscanned entry redundant against the whole list. It is
+  linear, not pairwise: the supersets of an indicator are the
+  intersection, over its own rows, of the indicators on each row, so one
+  pass over `watchlist_hits` answers for all of them — the self-join it
+  replaces needs a sort on `(source_id, rid)` per side, and
+  `ix_watchlist_hits_row` is the index that makes "which indicators are
+  on this row" and "which rows of this table are flagged" cheap at all.
+  Above `WATCHLIST_OVERLAP_MAX_HITS` the pass is skipped and
+  `overlap_checked` says so — "not checked" must not render as "no
+  duplicates".
+  **What it has found lately**: `latest_hits` is the newest flagged rows
+  across every indicator, one entry per ROW with the indicators that
+  matched it (so a duplicated pair fills the pane once), capped per source
+  BEFORE the union as well as after it so the ordering sort is over
+  (sources x limit) rows. It takes `build_timeline`'s per-source config,
+  resolved by server.py against the analyst's timeline templates, so the
+  pane and the Timeline describe a row the same way; a source with no
+  datetime column sorts last rather than vanishing. Merges are absent for
+  invariant #9's reason — their rows are members' rows, flagged there.
+  `merge_indicators` folds a redundant entry into the one that covers it:
+  the only thing removal can lose is its auto-tag, which moves across when
+  the keeper has none, and the subset check is against the hits on disk,
+  not against an overlap report that may be a scan out of date.
+  `tests/test_watchlist_findings.py`.
 - **A view build yields the writer lock to the table the analyst just
   switched to.** `build_view` holds `self.lock` for the whole
   `INSERT..SELECT`, which is right for materialising a million rows and

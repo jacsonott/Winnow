@@ -349,6 +349,23 @@ CREATE TABLE IF NOT EXISTS watchlist_hits (
     rid          INTEGER NOT NULL,
     PRIMARY KEY (watchlist_id, source_id, rid)
 ) WITHOUT ROWID;
+-- The PK leads with watchlist_id, which answers "this indicator's hits"
+-- and nothing else. "Which rows in this table were flagged" and "which
+-- indicators are on this row" are the two questions the latest-hits pane
+-- and the overlap check ask, and both scanned the whole table to answer.
+CREATE INDEX IF NOT EXISTS ix_watchlist_hits_row ON watchlist_hits(source_id, rid);
+-- What a scan has actually looked at: one row per (indicator, table) unit
+-- that completed, whether or not it matched. Without it a bare 0 means
+-- both "scanned, found nothing" and "never scanned", which is the
+-- difference between being able to write "not present" in a report and
+-- not. Written in the same transaction as the unit's hits (_scan_unit),
+-- so the record and the rows it describes can never disagree.
+CREATE TABLE IF NOT EXISTS watchlist_scans (
+    watchlist_id INTEGER NOT NULL,
+    source_id    INTEGER NOT NULL,
+    scanned_at   TEXT,
+    PRIMARY KEY (watchlist_id, source_id)
+) WITHOUT ROWID;
 
 -- The case's dashboard: one JSON document (a list of widget definitions).
 -- In the case .db so a dashboard travels with the case it summarises; a
@@ -4644,9 +4661,11 @@ class Store:
             self.db.execute(f"DROP TABLE IF EXISTS {q(src['table_name'])}")
             self.db.execute(f"DROP TABLE IF EXISTS {q('fts_' + str(source_id))}")
             self.db.execute(f"DROP VIEW IF EXISTS {q(src['table_name'] + '_doc')}")
-            # watchlist_hits too: the id is reused by the next import (below),
-            # and a hit left keyed by it would sit under that file's name.
-            for t in ("row_tags", "row_notes", "watchlist_hits"):
+            # The watchlist's two per-table sidecars too: the id is reused by
+            # the next import (below), so a hit left keyed by it would sit
+            # under that file's name, and a scan record left behind would
+            # claim a table nothing has ever read was scanned clean.
+            for t in ("row_tags", "row_notes", "watchlist_hits", "watchlist_scans"):
                 self.db.execute(f"DELETE FROM {t} WHERE source_id=?", (source_id,))
             self.db.execute("DELETE FROM layouts WHERE source_id=?", (source_id,))
             self.db.execute("DELETE FROM saved_views WHERE source_id=?", (source_id,))
@@ -8385,6 +8404,10 @@ class Store:
         with self.lock, self.db:
             self.db.execute("DELETE FROM watchlist WHERE id=?", (wid,))
             self.db.execute("DELETE FROM watchlist_hits WHERE watchlist_id=?", (wid,))
+            # The scan record goes with it: watchlist.id is not
+            # AUTOINCREMENT, so a row left behind would tell the next
+            # indicator to take this id that it had already been scanned.
+            self.db.execute("DELETE FROM watchlist_scans WHERE watchlist_id=?", (wid,))
             self._bump_state_generation()
 
     def _watchlist_match_sql(self, src: dict, cols: list[str], value: str) -> tuple[str, tuple]:
@@ -8478,6 +8501,15 @@ class Store:
                     (wid, source_id)).fetchone()[0]
                 self.db.execute("DELETE FROM watchlist_hits WHERE watchlist_id=? AND source_id=?",
                                 (wid, source_id))
+                # This unit looked at this table, and that is a different
+                # fact from how many rows it matched. It lands in the same
+                # transaction as the hits so "scanned" can never outlive
+                # the rows it is a claim about (a record written after the
+                # commit would survive a crash the hits did not).
+                self.db.execute(
+                    "INSERT INTO watchlist_scans(watchlist_id, source_id, scanned_at) VALUES (?,?,?)"
+                    " ON CONFLICT(watchlist_id, source_id) DO UPDATE SET scanned_at=excluded.scanned_at",
+                    (wid, source_id, time.strftime("%Y-%m-%dT%H:%M:%S")))
                 tagged = False
                 if rids:
                     self.db.executemany(
@@ -8843,6 +8875,285 @@ class Store:
                          "source_name": names.get(r["source_id"], f"source {r['source_id']}"),
                          **context.get(key, {"column": None, "value": None, "preview": ""})})
         return {"sources": sources, "hits": hits}
+
+    # ------------------------------------- what the counts cannot say alone
+
+    #: Hits above which the overlap pass is skipped rather than run. It is
+    #: two linear scans of watchlist_hits plus a dict keyed by every
+    #: distinct flagged row, which is milliseconds and a few MB at the
+    #: sizes a watchlist reaches in practice (a 9k-hit case scans in ~10 ms)
+    #: and neither at a million. Skipping says so — `overlap_checked` False
+    #: — rather than reporting "no duplicates", which would be a claim the
+    #: pass never made.
+    WATCHLIST_OVERLAP_MAX_HITS = 250_000
+
+    def watchlist_overlaps(self) -> dict:
+        """Which indicators are flagging the same rows as each other, and
+        how many rows the case is actually holding.
+
+        Two indicators can cover identical row sets — `mimikatz` and
+        `mimikatz.exe` match the same 2,323 rows — and nothing in a list of
+        per-indicator counts says so: the summary adds them and reports
+        twice the findings the case has. Returns
+
+            {total_hits, distinct_rows, overlap_checked, relations}
+
+        where `total_hits` is the sum of the per-indicator counts (what the
+        list adds up to), `distinct_rows` the number of distinct
+        `(source_id, rid)` rows behind them — the honest count of findings —
+        and `relations` one entry per ordered pair that overlaps
+        completely: `{id, other_id, relation, shared}` with `relation` in
+        `same` (identical row sets), `subset` (every row of `id` is also
+        `other_id`'s) or `superset` (the other way). Both directions of
+        every pair are emitted, so a renderer can look an indicator up
+        rather than search.
+
+        Complete overlap only, deliberately. A partial one — two indicators
+        sharing some rows — is ordinary and says nothing worth acting on;
+        an identical or contained set is the case where one of the two
+        entries is buying the analyst nothing, which is the thing worth a
+        line on the row and a way to merge them.
+
+        An indicator with no hits never appears here. `{}` is a subset of
+        everything, so an unscanned entry would be reported as redundant
+        against every other one — a claim about rows nobody has looked at.
+
+        Linear, not pairwise: the candidate supersets of an indicator are
+        the intersection, over its own rows, of the sets of indicators on
+        each row, so one pass over `watchlist_hits` answers for every
+        indicator at once. The pairwise self-join it replaces is
+        O(hits x indicators-per-row) rows out of SQLite and needs a sort on
+        (source_id, rid) per side.
+
+        A pure read on the reader pool (invariant #4) — the watchlist tab
+        opens while imports run."""
+        with self._reader() as ro:
+            total = ro.execute("SELECT COUNT(*) FROM watchlist_hits").fetchone()[0]
+            if total > self.WATCHLIST_OVERLAP_MAX_HITS:
+                return {"total_hits": total, "distinct_rows": None,
+                        "overlap_checked": False, "relations": []}
+            on_row: dict[tuple[int, int], list[int]] = {}
+            counts: dict[int, int] = {}
+            for r in ro.execute("SELECT watchlist_id, source_id, rid FROM watchlist_hits"):
+                wid = r["watchlist_id"]
+                on_row.setdefault((r["source_id"], r["rid"]), []).append(wid)
+                counts[wid] = counts.get(wid, 0) + 1
+
+            relations: list[dict] = []
+
+            def flush(wid: int | None, cand: set[int] | None) -> None:
+                # `cand` is every indicator that appeared on EVERY one of
+                # wid's rows — i.e. every superset of wid, itself included.
+                if wid is None or not cand:
+                    return
+                for other in sorted(cand):
+                    if other == wid:
+                        continue
+                    if counts[other] == counts[wid]:
+                        # Identical sets. The other one's own pass emits
+                        # the mirror entry, so only this direction here.
+                        relations.append({"id": wid, "other_id": other,
+                                          "relation": "same", "shared": counts[wid]})
+                    else:
+                        # wid is strictly inside other, which other's own
+                        # pass can never discover (other is not a subset of
+                        # wid), so both directions are written here.
+                        relations.append({"id": wid, "other_id": other,
+                                          "relation": "subset", "shared": counts[wid]})
+                        relations.append({"id": other, "other_id": wid,
+                                          "relation": "superset", "shared": counts[wid]})
+
+            current: int | None = None
+            cand: set[int] | None = None
+            for r in ro.execute(
+                    "SELECT watchlist_id, source_id, rid FROM watchlist_hits ORDER BY watchlist_id"):
+                wid = r["watchlist_id"]
+                if wid != current:
+                    flush(current, cand)
+                    current, cand = wid, set(on_row[(r["source_id"], r["rid"])])
+                elif cand:
+                    # Already empty stays empty; the rest of this
+                    # indicator's rows cannot put a candidate back.
+                    cand.intersection_update(on_row[(r["source_id"], r["rid"])])
+            flush(current, cand)
+        return {"total_hits": total, "distinct_rows": len(on_row),
+                "overlap_checked": True, "relations": relations}
+
+    def watchlist_overview(self) -> dict:
+        """Everything the watchlist tab needs to describe its own state:
+        the indicators, how much of the case each has actually been scanned
+        against, and the overlap picture above.
+
+        Each indicator carries `scanned_sources` — how many of the tables a
+        scan would read (`watchlist_scan_sources`, so merges and
+        still-filling imports are excluded from both halves of the
+        fraction) have a completed unit on record for it. With
+        `scan_targets` beside it that is the difference between "scanned,
+        found nothing" and "never scanned", which a `0` cannot express and
+        an analyst needs before writing "not present" in a report. A scan
+        record naming a table that is no longer scannable is not counted:
+        the fraction has to be readable against today's case."""
+        targets = {s["id"] for s in self.watchlist_scan_sources()}
+        scanned: dict[int, int] = {}
+        with self._reader() as ro:
+            for r in ro.execute("SELECT watchlist_id, source_id FROM watchlist_scans"):
+                if r["source_id"] in targets:
+                    scanned[r["watchlist_id"]] = scanned.get(r["watchlist_id"], 0) + 1
+        indicators = self.list_indicators()
+        for ind in indicators:
+            ind["scanned_sources"] = scanned.get(ind["id"], 0)
+        return {"indicators": indicators, "scan_targets": len(targets),
+                **self.watchlist_overlaps()}
+
+    #: Rows the latest-hits pane opens on. Enough to fill the pane and see
+    #: what the case is about; the per-indicator pane is where paging
+    #: through one indicator's hits happens.
+    LATEST_HITS = 60
+
+    def latest_hits(self, configs: dict[int, dict] | None = None,
+                    limit: int | None = None) -> dict:
+        """The most recent flagged rows across every indicator, newest
+        first — what the watchlist has found, before anything is selected.
+
+        One row per flagged ROW, not per hit: `watchlist_ids` lists every
+        indicator that matched it, so two indicators covering the same rows
+        read as one finding here rather than filling the pane twice.
+
+        `configs` is the same per-source timeline configuration
+        `build_timeline` takes, resolved by server.py against the analyst's
+        timeline templates, so "when" and "what the row is" are the columns
+        they already chose for this kind of artefact; a source without one
+        falls back to its first datetime column and every column, exactly
+        as the timeline does. A source with no datetime column at all sorts
+        last (SQL NULLs are smallest, so DESC puts them there) rather than
+        being dropped — its rows are findings too, they just cannot be
+        placed in time.
+
+        Capped per source before the union as well as after it, so the sort
+        that orders the pane is over (sources x limit) rows rather than
+        every hit in the case.
+
+        Merges are absent for the reason invariant #9 gives: a merge has no
+        `src_N`, its rows are its members' and were scanned and flagged
+        there, so they appear here under the member that holds them.
+
+        A pure read on the reader pool (invariant #4)."""
+        limit = self.LATEST_HITS if limit is None else max(1, int(limit))
+        configs = configs or {}
+        with self._reader() as ro:
+            flagged = {r["source_id"] for r in ro.execute(
+                "SELECT DISTINCT source_id FROM watchlist_hits")}
+        if not flagged:
+            return {"rows": [], "limit": limit}
+
+        branches: list[str] = []
+        params: list[Any] = []
+        for src in self.list_sources():
+            sid = src["id"]
+            if sid not in flagged or src.get("is_merge") or not src.get("table_name") or not src.get("columns"):
+                continue
+            col_names = {c["name"] for c in src["columns"]}
+            dt_cols = [c["name"] for c in src["columns"] if c["type"] == "datetime"]
+            cfg = configs.get(sid, {})
+            ts_col = cfg.get("timestamp_column")
+            if ts_col not in col_names:
+                ts_col = dt_cols[0] if dt_cols else None
+            # A derived column is already canonical, so it is used as-is —
+            # the same split build_timeline makes, for the same reason.
+            ts_expr = "NULL"
+            if ts_col:
+                ref = self._col_ref(src, ts_col, "s")
+                ts_expr = ref if self._is_derived(src, ts_col) else f"TS_NORMALIZE({ref})"
+            body_cols = [c for c in (cfg.get("body_columns") or []) if c in col_names]
+            if not body_cols:
+                # Every column EXCEPT the one already shown as "when" —
+                # unlike the timeline, whose body is the only text on the
+                # line, this pane has a timestamp column of its own, and
+                # repeating it ate the width the rest of the row needed.
+                # A template that names its body columns explicitly is
+                # taken at its word, timestamp included.
+                body_cols = [c["name"] for c in src["columns"] if c["name"] != ts_col]
+            body_expr = " || ' | ' || ".join(
+                f"COALESCE({self._col_ref(src, c, 's')}, '')" for c in body_cols) or "''"
+            branches.append(
+                "SELECT * FROM ("
+                f"SELECT ? AS source_name, {int(sid)} AS source_id, s.rid AS rid, "
+                f"{ts_expr} AS ts, ({body_expr}) AS body, "
+                f"(SELECT GROUP_CONCAT(watchlist_id) FROM watchlist_hits "
+                f" WHERE source_id={int(sid)} AND rid=s.rid) AS wids "
+                f"FROM {self._from_clause(src, 's')} "
+                f"WHERE s.rid IN (SELECT rid FROM watchlist_hits WHERE source_id={int(sid)}) "
+                # Ordinals, not the `ts` alias: a source is free to have a
+                # column of its own called ts, and the ORDER BY has to mean
+                # the expression above it either way.
+                "ORDER BY 4 DESC, 3 DESC LIMIT ?)")
+            params.append(src["name"])
+            params.append(limit)
+        if not branches:
+            return {"rows": [], "limit": limit}
+        sql = " UNION ALL ".join(branches) + " ORDER BY 4 DESC, 2, 3 DESC LIMIT ?"
+        params.append(limit)
+        with self._reader() as ro:
+            rows = ro.execute(sql, params).fetchall()
+        return {"rows": [{
+            "source_id": r["source_id"],
+            "source_name": r["source_name"],
+            "rid": r["rid"],
+            "ts": r["ts"],
+            "body": (r["body"] or "")[:self.WATCHLIST_PREVIEW_CHARS],
+            "watchlist_ids": [int(x) for x in (r["wids"] or "").split(",") if x],
+        } for r in rows], "limit": limit}
+
+    def merge_indicators(self, keep_id: int, drop_id: int) -> dict:
+        """Fold one indicator into another that already covers every row it
+        found, and delete it.
+
+        There is nothing else to merge: two indicators are a value, a note
+        and an auto-tag, and the rows are already the keeper's. So the only
+        thing that can be lost by removing the redundant entry is its
+        auto-tag, and that moves across when the keeper has none — the rows
+        it named are tagged already, and the next scan re-tags the same rows
+        through the keeper rather than quietly stopping.
+
+        Refuses unless every one of the dropped indicator's hits is also
+        the keeper's, and says how many rows would have gone with it. The
+        check is against the hits on disk, not against a cached overlap
+        report: the report can be a scan old by the time the analyst acts
+        on it, and dropping rows nothing else matches is exactly the
+        silent-loss failure this codebase refuses elsewhere."""
+        keep_id, drop_id = int(keep_id), int(drop_id)
+        if keep_id == drop_id:
+            raise ValueError("An indicator cannot be merged into itself")
+        with self.lock, self.db:
+            keep = self.db.execute("SELECT id, value, auto_tag_id FROM watchlist WHERE id=?",
+                                   (keep_id,)).fetchone()
+            drop = self.db.execute("SELECT id, value, auto_tag_id FROM watchlist WHERE id=?",
+                                   (drop_id,)).fetchone()
+            if keep is None or drop is None:
+                raise KeyError("No such indicator")
+            only_drop = self.db.execute(
+                "SELECT COUNT(*) FROM watchlist_hits d WHERE d.watchlist_id=?"
+                " AND NOT EXISTS (SELECT 1 FROM watchlist_hits k WHERE k.watchlist_id=?"
+                "                 AND k.source_id=d.source_id AND k.rid=d.rid)",
+                (drop_id, keep_id)).fetchone()[0]
+            if only_drop:
+                raise ValueError(
+                    f"“{keep['value']}” does not cover {only_drop:,} row"
+                    f"{'' if only_drop == 1 else 's'} “{drop['value']}” found — "
+                    "removing it would lose them")
+            moved = drop["auto_tag_id"] is not None and keep["auto_tag_id"] is None
+            if moved:
+                self.db.execute("UPDATE watchlist SET auto_tag_id=? WHERE id=?",
+                                (drop["auto_tag_id"], keep_id))
+            self.db.execute("DELETE FROM watchlist WHERE id=?", (drop_id,))
+            self.db.execute("DELETE FROM watchlist_hits WHERE watchlist_id=?", (drop_id,))
+            self.db.execute("DELETE FROM watchlist_scans WHERE watchlist_id=?", (drop_id,))
+            self._bump_state_generation()
+        # Outside the write transaction: _indicator reads through the pool,
+        # and a reader inside an open writer transaction sees the old row
+        # (invariant #4).
+        return {"kept": self._indicator(keep_id), "dropped": drop_id,
+                "dropped_value": drop["value"], "auto_tag_moved": moved}
 
     # --------------------------------------------------------- entity pivot
 

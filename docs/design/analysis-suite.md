@@ -66,17 +66,35 @@ can be **saved to workspace** and re-applied to any case (a standing IOC
 set), the same save/apply pattern bundles use.
 
 **Tab UI.** Left: indicator list with hit counts + color swatch — a new
-entry appears at once with "…" until its scan lands. Right: hits for
-the selected indicator **grouped by table** (a collapsible header per
-table with its exact count; up to 200 rows per table, then "…and N
-more — open the table"), each hit showing the matched column and the
-row as one line, clickable to open that table at the row. Top: import /
-from a case / export / scan-all / "auto-tag hits as…".
+entry appears at once with "…" until its scan lands, a zero says which
+kind of zero it is (`clean` / `not scanned` / `N/M tables`), and an entry
+whose rows another entry also covers carries an overlap marker that opens
+the merge dialog. Right, with nothing selected: the **latest flagged rows
+across every indicator**, newest first, one line per row naming the
+indicators on it, the table, the row and when. With an indicator selected:
+its hits **grouped by table** (a collapsible header per table with its
+exact count; up to 200 rows per table, then "…and N more — open the
+table"), each hit showing the matched column and the row as one line,
+clickable to open that table at the row. Top: import / from a case /
+export / scan-all / "auto-tag hits as…", and a summary that counts
+distinct flagged ROWS when two indicators cover the same ones.
 
-**Routes.** `GET/POST/DELETE /api/watchlist`, `POST /api/watchlist/scan`
+**Findings, not counts.** Three questions the per-indicator counts cannot
+answer, all in `Store.watchlist_overview` / `latest_hits`: a `0` is
+disambiguated by `watchlist_scans`, one row per (indicator, table) unit a
+scan completed; indicators whose hit sets are identical or contained are
+reported by `watchlist_overlaps`, with `distinct_rows` as the honest total
+behind a sum that counts a shared row once per indicator; and
+`merge_indicators` folds a redundant entry into the one that covers it,
+carrying its auto-tag and refusing any direction that would lose rows.
+See docs/notes/store.md.
+
+**Routes.** `GET/POST/DELETE /api/watchlist`, `GET
+/api/watchlist/overview` (the tab's own read), `POST /api/watchlist/scan`
 (synchronous), `POST /api/watchlist/scan/start` + `GET
 /api/watchlist/scan/job` + `POST /api/watchlist/scan/cancel` (the job),
-`GET /api/watchlist/hits?watchlist_id=…` (`{sources, hits}`), `POST
+`GET /api/watchlist/hits?watchlist_id=…` (`{sources, hits}`), `GET
+/api/watchlist/latest`, `POST /api/watchlist/merge`, `POST
 /api/watchlist/import`, `POST /api/watchlist/import_case`.
 
 ---
