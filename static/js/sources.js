@@ -1550,6 +1550,14 @@ export function clearViewNarrowing() {
   // A pivoted session comparison is a filter plus marks, and the marks go
   // with the filter — same reasoning as clearAllFilters below.
   S.diffMarks = null;
+  // The chrome that reads these, all of it. renderHead is the one that is
+  // easy to forget and the one that shows: the header boxes are painted
+  // from S.filters, so without it the grid lands on the unfiltered count
+  // with the old filter still typed into the column it was cleared from —
+  // which is the same lie as landing on the wrong count, just told by a
+  // different part of the screen.
+  renderHead();
+  renderTagRibbon();
   updateTimeRangeButton();
   updateFiltersButton();
   return cleared;

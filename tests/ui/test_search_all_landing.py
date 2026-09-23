@@ -111,6 +111,16 @@ def test_opening_a_hit_lands_on_the_count_that_was_clicked(page):
           terms: __winnow.S.searchTerms.map((t) => t.term),
         })""")
         assert state == {"filters": {}, "tree": 0, "tags": 0, "timeframe": False, "terms": [TERM]}
+        # The header boxes are painted from S.filters, so clearing the
+        # state without repainting them leaves the old filter typed into
+        # the column it was cleared from, over the unfiltered count — the
+        # same lie as landing on the wrong number, told by a different
+        # part of the screen. (Found in a screenshot, not by this test.)
+        boxes = page.evaluate(
+            "() => [...document.querySelectorAll('#filterRow input[data-col]')]"
+            ".map((i) => [i.dataset.col, i.value])")
+        assert boxes, "no header filter boxes were found — this assertion proves nothing"
+        assert [b for b in boxes if b[1]] == [], f"a header filter box still reads {boxes}"
         # ...and the empty state that the old first build painted is gone.
         assert page.locator("#noRows").is_hidden()
     finally:
