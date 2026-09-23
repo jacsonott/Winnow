@@ -297,16 +297,35 @@ export function insertAtCursor(text) {
 
 /* -------------------------------------------------------- row notes */
 
+/* The strip reduced to a single line of its own, with the count taken off
+   the heading. Every state that is NOT a list of this case's row notes
+   goes through here — none written, not fetched yet, and a fetch that
+   failed — because each of them has the same requirement: no (source_id,
+   rid) button left in the DOM that belongs to something other than what
+   the heading claims. */
+function rowNotesLine(text) {
+  const count = $('notesRowsCount');
+  const body = $('notesRowsBody');
+  if (!count || !body) return;
+  count.textContent = 'Row notes';
+  body.replaceChildren(el('div', 'notes-rows-empty', text));
+}
+
 /* The case's row notes, listed under the narrative. Fetched per visit
    rather than cached: they are written on the grid, one row at a time,
    between visits to this page, and a stale count here would be worse than
-   no count. Failure is silent on purpose — the narrative is what the page
-   is for, and an unreachable listing must not take the editor down with
-   it; the strip keeps whatever it last showed. */
+   no count. A failure says so in the strip and goes no further — the
+   narrative is what the page is for, and an unreachable listing must not
+   take the editor down with it. It deliberately does NOT leave the
+   previous list standing: the entries are (source_id, rid) pairs, and
+   after a case switch a pair that no longer describes anything here still
+   resolves to a real row of a real table, so a list nobody can tell is
+   current is the dangerous outcome, not the useless one. */
 export async function loadRowNotes() {
   if (!$('notesRows')) return null;
   let data = null;
-  try { data = await api('/api/row_notes'); } catch { return null; }
+  try { data = await api('/api/row_notes'); }
+  catch (e) { rowNotesLine('Could not load the row notes: ' + e.message); return null; }
   renderRowNotes(data);
   return data;
 }
@@ -318,15 +337,14 @@ export async function loadRowNotes() {
 export function renderRowNotes(data) {
   const notes = (data && data.notes) || [];
   const total = data && Number.isFinite(data.total) ? data.total : notes.length;
-  $('notesRowsCount').textContent = total ? `Row notes (${total})` : 'Row notes';
-  const body = $('notesRowsBody');
   if (!notes.length) {
     // Says where they come from: an analyst who has never opened the detail
     // pane's note box has no way to know this section is waiting for it.
-    body.replaceChildren(el('div', 'notes-rows-empty',
-                            'None yet — a note written on a row, in the detail pane, is listed here.'));
+    rowNotesLine('None yet — a note written on a row, in the detail pane, is listed here.');
     return;
   }
+  $('notesRowsCount').textContent = `Row notes (${total})`;
+  const body = $('notesRowsBody');
   const frag = document.createDocumentFragment();
   for (const n of notes) {
     const where = `${n.source_name} · Line ${n.rid}`;
@@ -435,6 +453,15 @@ export function resetNotes() {
   // it cannot repaint A's narrative here either.
   const body = $('notesPreviewBody');
   if (body) body.innerHTML = '';
+  // The row-note strip belongs to the previous case too, and it fails worse
+  // than the narrative did: its entries are (source_id, rid) pairs, and
+  // source ids restart at 1 in a new case, so a button left behind doesn't
+  // error — it opens a real row of a real table and presents it as one the
+  // analyst annotated. Clearing it has to happen at the switch, not at the
+  // refetch: showNotesTab reveals the page before loadRowNotes answers, and
+  // if that fetch fails there is no refetch to correct it. This is the row
+  // notes' version of blanking the detail pane's note binding in openCase.
+  rowNotesLine('Loading…');
 }
 
 /* The body loads lazily with the page. Anything that writes the editor

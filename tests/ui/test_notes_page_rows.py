@@ -163,3 +163,62 @@ def test_closing_the_strip_holds_across_visits(page, no_row_notes):
         page.wait_for_selector("#notesRowsBody .notes-rows-empty")
     finally:
         _leave_clean(page)
+
+
+def test_a_case_switch_empties_the_row_note_strip(page, server_post, no_row_notes):
+    """The entries are (source_id, rid) pairs, and both restart at 1 in a new
+    case: a button left over from the previous one opens a real row of a real
+    table and presents it as a row somebody annotated. Nothing errors, which
+    is what makes it worth a test.
+
+    Driven through resetNotes() rather than through a second case, because
+    the UI suite shares one server and one case file (tests/ui/conftest.py) —
+    opening another would pull the case out from under every later module.
+    resetNotes is the seam the switch goes through: openCase calls it, for
+    this reason, beside the clearing of every other per-case id it holds."""
+    server_post("/api/note", {"source_id": 1, "rid": 11, "note": "case A row"})
+    _open_notes(page)
+    try:
+        page.wait_for_selector("#notesRowsBody .notes-row")
+        page.evaluate("() => __winnow.resetNotes()")
+        # No button survives: not hidden, not disabled — gone from the DOM,
+        # so a click during the window before the next fetch lands has
+        # nothing to hit.
+        assert page.locator("#notesRowsBody .notes-row").count() == 0
+        # And the count goes with them. "Row notes (1)" over an empty strip
+        # is the same claim about the wrong case, made in the heading.
+        assert page.locator("#notesRowsCount").text_content() == "Row notes"
+
+        # Re-opening the page refetches, so the strip is only empty for as
+        # long as the answer takes.
+        page.evaluate("() => __winnow.showGridTab()")
+        page.wait_for_selector("#notesview", state="hidden")
+        _open_notes(page)
+        page.wait_for_selector("#notesRowsBody .notes-row")
+        assert page.locator("#notesRowsCount").text_content() == "Row notes (1)"
+    finally:
+        _leave_clean(page)
+
+
+def test_a_fetch_that_fails_says_so_rather_than_leaving_the_list_up(page, server_post, no_row_notes):
+    """The failure path is the one that makes a stale list permanent: there
+    is no second refetch to correct it, so a list left standing after an
+    unanswered request is a list nobody can tell is current."""
+    server_post("/api/note", {"source_id": 1, "rid": 5, "note": "before the outage"})
+    _open_notes(page)
+    try:
+        page.wait_for_selector("#notesRowsBody .notes-row")
+        page.route("**/api/row_notes", lambda route: route.abort())
+        page.evaluate("() => __winnow.loadRowNotes()")
+        line = page.locator("#notesRowsBody .notes-rows-empty")
+        line.wait_for(state="visible", timeout=4000)
+        assert "Could not load the row notes" in line.inner_text()
+        assert page.locator("#notesRowsBody .notes-row").count() == 0
+        # The narrative is the page's job and must survive the listing's
+        # failure — the editor is still editable and still saving.
+        page.locator("#notesEditor").fill("still writing")
+        page.wait_for_function(
+            "() => document.getElementById('notesSaved').textContent === 'Saved'", timeout=6000)
+        page.unroute("**/api/row_notes")
+    finally:
+        _leave_clean(page)
