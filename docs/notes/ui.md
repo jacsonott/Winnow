@@ -10,6 +10,19 @@ see [docs/notes/README.md](README.md) for the whole set.
 
 ---
 
+- **Shift+<tag key> asks before it decides.** The whole-view tag
+  hotkey reads `/api/tag_view_coverage` first: anything in the view still
+  untagged means tag the lot, everything already tagged means take it
+  off. The direction is settled by the WHOLE view, never by a sample row
+  — the unshifted key is the one that toggles from the row under the
+  cursor, and mixing the two rules would make a keystroke's meaning
+  depend on where the cursor happened to be. The coverage is asked fresh
+  rather than read from `S.tagCounts`, which is refreshed
+  fire-and-forget and is a ribbon's number, not a number to write from.
+  The confirm names the direction in its own button ("Tag them" /
+  "Remove the tag"), so a test that clicks it should find it by role
+  (`.confirm-actions .btn:not(.ghost)`), not by the label.
+
 - **A background refresh must not navigate.** `loadSources()` re-opens
   the current source as a side effect of picking a tab, and `openSource()`
   switches to the grid and resets that source's filters and search. That

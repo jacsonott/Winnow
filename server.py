@@ -3480,6 +3480,18 @@ def api_tag_counts(view_id: str):
         raise HTTPException(409, str(e))
 
 
+@app.get("/api/tag_view_coverage")
+def api_tag_view_coverage(view_id: str, tag_id: int):
+    """How many rows this view has and how many of them already carry one
+    tag — what the whole-view tag hotkey asks before it decides whether it
+    is tagging or untagging, and what its confirm quotes. Same 409 on an
+    expired view as every other view-keyed read."""
+    try:
+        return store().tag_coverage_in_view(view_id, tag_id)
+    except KeyError as e:
+        raise HTTPException(409, str(e))
+
+
 @app.post("/api/tags")
 def api_tag_upsert(body: TagDef):
     return store().upsert_tag(body.id, body.name, body.color, body.hotkey)
