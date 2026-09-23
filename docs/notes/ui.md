@@ -407,6 +407,57 @@ see [docs/notes/README.md](README.md) for the whole set.
   dragged id isn't in the target surface's own id list, which is what
   stops a SQL sub-tab dropped on the source strip from being spliced into
   `S.tabOrder`.
+- **The SQL pane opens in the analyst's vocabulary, not the schema's.**
+  Three things in `static/js/sql.js` exist only for that, and all three
+  are easy to undo by accident:
+  - `starterSql()` puts `-- Security.csv (src_1)` on the first line. The
+    seeded query used to be a bare `SELECT * FROM src_1 LIMIT 50;`, and
+    `src_1` is a name that appears nowhere else in the product — the tab
+    strip, the sidebar, the Tables manager and the dashboards all say
+    `Security.csv`. A leading comment is the one place to say which file
+    that is that survives the query being edited into something real;
+    `run_sql` and `sql_to_table` both tolerate it (the latter wraps the
+    query in `SELECT COUNT(*) FROM (...)`, which is why the comment ends
+    in a newline rather than being appended). **Everything in
+    `sqlassist.js` that reads a query with a regex reads
+    `sqlStructural()` first** — comments and string literals blanked,
+    lengths preserved, double-quoted names left alone because `FROM
+    "src_2"` is a real reference. The comment says `src_1`, so a query
+    edited to read another table with that line kept — the flow the
+    comment exists for — scanned as two tables, and `sqlRowRef` answered
+    nothing: the result silently lost its live Tags column, row
+    selection, the tag hotkeys, Ctrl+C on a selection and
+    double-click-into-the-table, while the autocomplete offered both
+    tables' columns. It is the same pass `run_sql` makes server-side
+    (`_strip_sql_comments` + `_blank_string_literals`) before its own
+    scan.
+  - `sqlStarters()` builds two or three clickable queries **from this
+    case's own sources**, never from a canned example — one that names a
+    table the analyst doesn't have errors on the first click. Each is
+    offered only when it would return rows (`tagged_row_count`, a second
+    real table), and each is shaped for a measured reason: the tagged-rows
+    query drives off `row_tags` by `rid` rather than `WHERE Tags IS NOT
+    NULL` (which can use no index — 32ms scanning 200k rows to find five,
+    against 0.4ms for the subquery form), the per-table counts read the
+    `src_N` views rather than `main.src_N` because SQLite flattens the
+    view and never evaluates the Tags/Note correlated subselects for a
+    `COUNT`, and a merge gets `(source_id, rid) IN (…)` because its rids
+    are only unique per member (invariant #9). Table labels go in as
+    string literals through `sqlLiteral`, so `O'Brien.csv` is not a syntax
+    error.
+  - `openStarter()` fills the current tab only when its text is blank or
+    is itself a starter, and opens a **named sub-tab** otherwise. The
+    editor autosaves into the case file, so clobbering a half-written
+    query is a real deletion — but always opening a tab would leave an
+    abandoned "Query 1" behind in every case.
+  The header above the editor is a sentence in mixed case with the
+  identifiers in `<code>`; `.sql-head` overrides the `text-transform:
+  uppercase` it shares with `.detail-head`, which is a label ("ROW
+  DETAIL") and stays shouted. Blueprint re-uppercases its headers and
+  paints them on a solid accent bar, so it needs its own override *and* a
+  `code` colour — the global `code` rule is accent-on-panel, which on that
+  bar is the bar's own colour. `tests/ui/test_sql_pane_welcome.py` pins
+  all of it.
 - **The 2026-08 navigation batch** — five smaller features, and the traps
   each one carries:
   - **"Open filter in SQL pane"** (`Store.spec_sql`, `POST /api/view/sql`,

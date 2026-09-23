@@ -49,6 +49,15 @@ import { dropPendingSelection, pendingViewStatsText, rebuildView, syncNoRows, wr
    falls through to name for them. */
 export function sourceLabel(s) { return (s && (s.nickname || s.name)) || ''; }
 
+/* The name the SQL pane's connection knows a source by — the same question
+   as sourceLabel, asked of SQLite instead of a person. A merge has no
+   src_N of its own (invariant #9), only the merge_<id> TEMP VIEW
+   Store._pane_connection creates for it, and negative ids are how a merge
+   is spelled everywhere else in the client. Three places were computing
+   this inline; a fourth disagreeing about merges would emit `src_-3`,
+   which is a syntax error rather than a wrong answer. */
+export function paneTable(s) { return s.is_merge || s.id < 0 ? `merge_${-s.id}` : `src_${s.id}`; }
+
 /* The glyph that prefixes a source's label wherever it is listed (tab
    strip, sidebar, Tables manager): ⛓ for a merge, ⊂ for a subset table
    saved out of another table's view or selection (sources.origin —

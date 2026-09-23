@@ -3,16 +3,16 @@
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { recordTabVisit } from './tabhistory.js';
 import { renderFilterBar } from './columns.js';
-import { $, api, debounce, el, post, toast } from './core.js';
+import { $, MOD_ENTER, api, debounce, el, post, toast } from './core.js';
 import { hideDetailPane } from './detail.js';
 import { render, renderTagToolbar } from './grid.js';
 import { drawRail, regroupIfGroupedByTag } from './grouping.js';
-import { hidePluginViews, sqlResultNodes, syncPluginPanels } from './plugins.js';
+import { hidePluginViews, runSql, sqlResultNodes, syncPluginPanels } from './plugins.js';
 import { syncHistogramPanel } from './histogram.js';
-import { setActiveSqlResult } from './sqlassist.js';
+import { quoteIdent, setActiveSqlResult } from './sqlassist.js';
 import { checkPresets } from './savedfilters.js';
 import { syncDiffBanner } from './session.js';
-import { syncTabSelection, wireDragReorder } from './sources.js';
+import { paneTable, sourceLabel, syncTabSelection, wireDragReorder } from './sources.js';
 import { S } from './state.js';
 import { buildTimeline } from './timeline.js';
 import { confirmDialog, promptDialog } from './ui.js';
@@ -51,13 +51,153 @@ export function showSqlTab() {
 
 export const SQL_AUTOSAVE_MS = 700;
 
+/* A SQLite string literal, for the table names the starters below embed as
+   data rather than as identifiers. A file called `O'Brien.csv` is not
+   hypothetical on a real case. */
+const sqlLiteral = (v) => `'${String(v).replace(/'/g, "''")}'`;
+
+/* "SELECT * FROM src_1" with the first line saying which file that is.
+   `src_1` is a name the analyst has never seen anywhere else — the tab
+   strip, the sidebar and the dashboards all call this table Security.csv —
+   so the query has to answer "which table is this?" before it answers
+   anything else, and a comment is the one place to say it that survives
+   being edited into a real query. */
+function browseSql(s) {
+  const table = paneTable(s);
+  return `-- ${sourceLabel(s)} (${table})\nSELECT * FROM ${table} LIMIT 50;`;
+}
+
 export function starterSql() {
-  // Merges (negative source_id) aren't a real src_N table — there's nothing
-  // to `SELECT * FROM src_${S.sourceId}` for one. Prefill against its first
-  // member instead of emitting invalid SQL like `src_-3`.
   if (!S.sourceId) return '';
-  if (S.sourceId < 0) return `SELECT * FROM merge_${-S.sourceId} LIMIT 50;`;
-  return `SELECT * FROM src_${S.sourceId} LIMIT 50;`;
+  const s = S.sources.find((x) => x.id === S.sourceId);
+  if (s) return browseSql(s);
+  // The source list hasn't landed — no caller does this today, but emitting
+  // a bare statement is better than naming the table wrongly. Merges
+  // (negative source_id) aren't a real src_N table: there's nothing to
+  // `SELECT * FROM src_${S.sourceId}` for one, and `src_-3` is a syntax
+  // error rather than a wrong answer.
+  const table = S.sourceId < 0 ? `merge_${-S.sourceId}` : `src_${S.sourceId}`;
+  return `SELECT * FROM ${table} LIMIT 50;`;
+}
+
+/* Two or three queries worth clicking, built from the tables THIS case
+   actually holds. Hardcoded examples were rejected outright: a starter
+   naming a table the analyst doesn't have teaches nothing and errors on
+   click, which is a worse first impression than the blank pane this
+   replaces.
+
+   Each one is offered only when it would return something — a "rows you
+   tagged" starter on an untagged case is a scan that ends in "0 rows" —
+   and each is written the way it is for a measured reason:
+     - the tagged-rows query drives off `row_tags` via the `rid IN (...)`
+       subquery rather than `WHERE Tags IS NOT NULL`, which cannot use an
+       index and scanned 200k rows in 32ms to find five (the subquery form
+       is 0.4ms on the same data, SEARCH by INTEGER PRIMARY KEY);
+     - the per-table counts read the `src_N` views, not `main.src_N`,
+       because SQLite flattens the view and never evaluates the Tags/Note
+       correlated subselects for a COUNT (measured: 1.4ms over 200k rows,
+       against 1.0ms for the raw table) — so the pane's own vocabulary
+       costs nothing here;
+     - a merge carries `source_id` and its rids are only unique per
+       member, so its tagged-rows form is the row-value `(source_id, rid)
+       IN (...)`. Invariant #9: the merge path ships with the feature. */
+export function sqlStarters() {
+  const usable = S.sources.filter((s) => !s.error);
+  if (!usable.length) return [];
+  const here = usable.find((s) => s.id === S.sourceId) || usable[0];
+  const table = paneTable(here);
+  const label = sourceLabel(here);
+  // `name` is what the query becomes if it opens in a tab of its own:
+  // short, because it has to fit the sub-tab strip beside the others.
+  const out = [{ label: `First 50 rows of ${label}`, name: label, sql: browseSql(here) }];
+
+  if (here.tagged_row_count > 0) {
+    const key = here.is_merge || here.id < 0
+      ? '(source_id, rid) IN (SELECT source_id, rid FROM row_tags)'
+      : `rid IN (SELECT rid FROM row_tags WHERE source_id = ${here.id})`;
+    out.push({
+      label: `Rows you tagged in ${label}`,
+      name: 'Tagged rows',
+      sql: `-- Tagged rows in ${label} — the Tags column is the pane's, not the file's.\n`
+        + `SELECT * FROM ${table} WHERE ${key} LIMIT 50;`,
+    });
+  }
+
+  // Merges are left out of the inventory on purpose: every merge row is
+  // also a member row, so counting both reports the case as larger than
+  // it is (the same reason _sources_for_header_set skips them).
+  const real = usable.filter((s) => !s.is_merge && s.id > 0);
+  if (real.length > 1) {
+    out.push({
+      label: 'Rows per table',
+      name: 'Rows per table',
+      sql: '-- How many rows each table in this case holds.\n'
+        + real.map((s, i) => `SELECT ${sqlLiteral(sourceLabel(s))}${i ? '' : ' AS "Table"'}, `
+            + `COUNT(*)${i ? '' : ' AS "Rows"'} FROM ${paneTable(s)}`).join('\nUNION ALL ')
+        + '\nORDER BY "Rows" DESC;',
+    });
+  }
+
+  // Timestamps are the one column shape where a value count is never the
+  // interesting question, so the pick skips them; whichever column it
+  // lands on is named in the label, so the analyst can see it was a guess
+  // and change it.
+  const col = (here.columns || []).find((c) => c.type !== 'datetime');
+  if (col) {
+    out.push({
+      label: `Most common ${col.name} in ${label}`,
+      name: `Top ${col.name}`,
+      sql: `-- Value counts for one column of ${label}.\n`
+        + `SELECT ${quoteIdent(col.name)} AS "Value", COUNT(*) AS "Rows"\n`
+        + `FROM ${table} GROUP BY 1 ORDER BY 2 DESC LIMIT 20;`,
+    });
+  }
+  return out.slice(0, 3);
+}
+
+/* The results area before anything has run in this query tab. It used to
+   be blank — about four fifths of the pane saying nothing at all, with no
+   sign that Ctrl+Enter is what runs a query (the Run button says so, but
+   only in a tooltip). */
+export function sqlEmptyState() {
+  const wrap = el('div', 'sql-empty');
+  wrap.append(el('p', 'empty-title', 'Nothing run yet'));
+  wrap.append(el('p', null,
+    `${MOD_ENTER} runs the query. Results become a table you can sort, tag and export.`));
+  const starters = sqlStarters();
+  if (!starters.length) return wrap;
+  const row = el('div', 'sql-starters');
+  for (const st of starters) {
+    const b = el('button', 'btn ghost sql-starter', st.label);
+    b.title = st.sql; // the query itself, so a click is never a surprise
+    b.onclick = () => openStarter(st);
+    row.append(b);
+  }
+  wrap.append(row);
+  return wrap;
+}
+
+/* Clicking a starter must not cost the analyst a draft. The editor holds
+   one tab's text and autosaves it into the case file, so overwriting a
+   half-written query is a real deletion — but demanding a new tab for the
+   very first click, when the editor holds nothing but the seeded starter,
+   would leave an abandoned "Query 1" behind in every case. So: fill this
+   tab when its text is blank or is itself a starter, and open a named tab
+   otherwise. */
+export async function openStarter(st) {
+  const cur = $('sqlText').value.trim();
+  const disposable = !cur || sqlStarters().some((x) => x.sql.trim() === cur);
+  if (!disposable) {
+    await newSqlTab(st.name, st.sql);
+  } else {
+    $('sqlText').value = st.sql;
+    // Through the editor's own input handler, so the tab record, the
+    // autosave and the box's auto-grow all see it the way they would a
+    // keystroke.
+    $('sqlText').dispatchEvent(new Event('input', { bubbles: true }));
+    await flushSqlTabSave();
+  }
+  await runSql();
 }
 
 export async function loadSqlTabs() {
@@ -95,7 +235,7 @@ export function applySqlTabToEditor() {
   const out = $('sqlResult');
   const cached = tab ? S.sqlResults.get(tab.id) : null;
   setActiveSqlResult(cached && !cached.error ? cached : null);
-  if (!cached) out.replaceChildren();
+  if (!cached) out.replaceChildren(sqlEmptyState());
   else if (cached.error) out.replaceChildren(el('div', 'sql-error', cached.error));
   else out.replaceChildren(...sqlResultNodes(cached));
 }
