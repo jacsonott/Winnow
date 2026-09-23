@@ -13,58 +13,6 @@ see [docs/notes/README.md](README.md) for the whole set.
 
 ---
 
-- **`expand_group`'s virtual fast path only applies to an unfiltered
-  parent.** `_virtual_group_where` reads straight off the member table with
-  nothing but `column = value` (+ the nested path) — it has no view to join
-  and so no way to express the parent's filters, search or timeframe. The
-  gate is `_grouping_covers_whole_source`; anything else materialises, same
-  as a merge or an over-threshold group already did. The bug this closed
-  was quiet in exactly the way that costs you: the *counts* come from the
-  other side (`group_summary` and `expand_group`'s own `total` both join the
-  view and stayed correct), so the grid asked for `row_count` rows and got
-  the first `row_count` of a longer, unfiltered list — and tag/export on the
-  group read the same way, which made it an over-tagging bug and not just a
-  display one.
-- **Grouping by tag** is a pseudo-column, `TAG_GROUP_COLUMN` (`"__tag__"`),
-  carried through every grouping path as an ordinary column name so nothing
-  between the frontend and `group_summary` needs a second notion of what a level
-  is. It's in `RESERVED_COLUMN_NAMES`, so a CSV with a literal `__tag__`
-  header gets renamed at ingest and the sentinel can never be ambiguous.
-  Three things about it are decisions:
-  - **One group per tag, not one per tag-set.** A row with two tags is
-    counted under both, so the counts can sum to more than the view holds.
-    That's the only reading that answers "how much of this have I marked,
-    and as what"; a partition into `"Lateral movement, Persistence"`
-    combinations is combinatorial and useless.
-  - **A group's value is a tag *id*, not its name.** `tag_defs` has no
-    unique constraint on `name`, so grouping by name would silently merge
-    two tags an analyst deliberately kept apart. `groupValueLabel()` in
-    the frontend renders the name from `S.tags`; the untagged group's value is
-    `NULL`.
-  - **The join order is pinned, and that's load-bearing.** `v.view_N` is
-    indexed on `pos` and nothing else, so reaching a view row by `rid` is a
-    full scan of it — and given a `WHERE vv.source_id = ?` to work with,
-    SQLite drives from `row_tags`' covering index and re-scans the entire
-    view once per tagged row (measured: 150k x 300k row visits, minutes,
-    where the right plan is 200ms). `_tag_group_branches` therefore uses
-    `CROSS JOIN` (which SQLite documents as suppressing reordering), drops
-    the per-member `source_id` restriction when there's no nested path, and
-    reaches the source table only through a self-contained `EXISTS`. The
-    whole-table case never touches the source at all — per-tag counts are
-    `row_tags`' own aggregate and the untagged remainder is arithmetic on
-    the member's `row_count`. `test_grouping.py` pins both with EXPLAIN.
-- **The histogram's tag split is one row, one segment.** `stack=tags`
-  attributes each row to the FIRST tag it carries in ribbon order — the
-  lowest tag id, since the ribbon renders tag_defs in id order — with
-  untagged rows as the base. So a stacked bar is exactly as tall as the
-  plain one and the two charts can be read against each other. Counting a
-  two-tag row under both segments is what grouping by tag does
-  deliberately (`_tag_group_branches`), and it is the wrong trade here:
-  bars taller than the rows they describe, for a per-tag total the ribbon
-  already carries exactly. The lookup is a correlated `MIN` over
-  row_tags' primary key, skipped entirely for a member with no tags at
-  all — the same short-circuit `tag_counts_in_view` makes.
-
 - The **unified Timeline tab** (`build_timeline`/`fetch_timeline_rows` in
   store.py, a pinned tab like SQL) unions every *tagged* row across every
   real source in the case — open or closed, since it's "every finding in
@@ -177,6 +125,58 @@ see [docs/notes/README.md](README.md) for the whole set.
   the caller string-prepend it — `s.DAY_BUCKET(...)` isn't valid SQL the
   way `s."col"` is, so a caller that goes back to prepending `s.` onto the
   result will get a syntax error the moment it hits a datetime column.
+- **`expand_group`'s virtual fast path only applies to an unfiltered
+  parent.** `_virtual_group_where` reads straight off the member table with
+  nothing but `column = value` (+ the nested path) — it has no view to join
+  and so no way to express the parent's filters, search or timeframe. The
+  gate is `_grouping_covers_whole_source`; anything else materialises, same
+  as a merge or an over-threshold group already did. The bug this closed
+  was quiet in exactly the way that costs you: the *counts* come from the
+  other side (`group_summary` and `expand_group`'s own `total` both join the
+  view and stayed correct), so the grid asked for `row_count` rows and got
+  the first `row_count` of a longer, unfiltered list — and tag/export on the
+  group read the same way, which made it an over-tagging bug and not just a
+  display one.
+- **Grouping by tag** is a pseudo-column, `TAG_GROUP_COLUMN` (`"__tag__"`),
+  carried through every grouping path as an ordinary column name so nothing
+  between the frontend and `group_summary` needs a second notion of what a level
+  is. It's in `RESERVED_COLUMN_NAMES`, so a CSV with a literal `__tag__`
+  header gets renamed at ingest and the sentinel can never be ambiguous.
+  Three things about it are decisions:
+  - **One group per tag, not one per tag-set.** A row with two tags is
+    counted under both, so the counts can sum to more than the view holds.
+    That's the only reading that answers "how much of this have I marked,
+    and as what"; a partition into `"Lateral movement, Persistence"`
+    combinations is combinatorial and useless.
+  - **A group's value is a tag *id*, not its name.** `tag_defs` has no
+    unique constraint on `name`, so grouping by name would silently merge
+    two tags an analyst deliberately kept apart. `groupValueLabel()` in
+    the frontend renders the name from `S.tags`; the untagged group's value is
+    `NULL`.
+  - **The join order is pinned, and that's load-bearing.** `v.view_N` is
+    indexed on `pos` and nothing else, so reaching a view row by `rid` is a
+    full scan of it — and given a `WHERE vv.source_id = ?` to work with,
+    SQLite drives from `row_tags`' covering index and re-scans the entire
+    view once per tagged row (measured: 150k x 300k row visits, minutes,
+    where the right plan is 200ms). `_tag_group_branches` therefore uses
+    `CROSS JOIN` (which SQLite documents as suppressing reordering), drops
+    the per-member `source_id` restriction when there's no nested path, and
+    reaches the source table only through a self-contained `EXISTS`. The
+    whole-table case never touches the source at all — per-tag counts are
+    `row_tags`' own aggregate and the untagged remainder is arithmetic on
+    the member's `row_count`. `test_grouping.py` pins both with EXPLAIN.
+- **The histogram's tag split is one row, one segment.** `stack=tags`
+  attributes each row to the FIRST tag it carries in ribbon order — the
+  lowest tag id, since the ribbon renders tag_defs in id order — with
+  untagged rows as the base. So a stacked bar is exactly as tall as the
+  plain one and the two charts can be read against each other. Counting a
+  two-tag row under both segments is what grouping by tag does
+  deliberately (`_tag_group_branches`), and it is the wrong trade here:
+  bars taller than the rows they describe, for a per-tag total the ribbon
+  already carries exactly. The lookup is a correlated `MIN` over
+  row_tags' primary key, skipped entirely for a member with no tags at
+  all — the same short-circuit `tag_counts_in_view` makes.
+
 - **`tag_counts_in_view`** is what the tag ribbon shows once a filter or
   search is on: the same shape `tag_counts` returns, counted over one view.
   Scope is the view exactly as built, tag filter included — a ribbon that
