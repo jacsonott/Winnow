@@ -348,12 +348,20 @@ export function onMenuKeydown(e) {
   const active = document.activeElement;
   const inSub = openSubs.find((s) => s.el.contains(active));
   if (!inSub && !openMenuEl.contains(active)) {
-    if (isTextField(active) || (e.key !== 'ArrowDown' && e.key !== 'ArrowUp')) return;
+    if (isTextField(active)) return;
     const items = focusableIn(openMenuEl);
     if (!items.length) return;
     e.preventDefault();
     e.stopPropagation();
-    items[e.key === 'ArrowDown' ? 0 : items.length - 1].focus();
+    // Down/Up step into the menu. Left/Right have nothing to act on with
+    // no item focused yet — but they are swallowed all the same, because
+    // an open menu owns the arrow keys: left and right used to be bound
+    // to nothing, so letting them fall through cost nothing, and now they
+    // move the grid's cell cursor. A menu the analyst opened, answering by
+    // scrolling the table underneath it, is not an answer.
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      items[e.key === 'ArrowDown' ? 0 : items.length - 1].focus();
+    }
     return;
   }
   const focusable = focusableIn(inSub ? inSub.el : openMenuEl);

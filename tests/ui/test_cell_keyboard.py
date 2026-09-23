@@ -379,3 +379,41 @@ def test_arrows_step_over_group_headings(page):
     finally:
         page.evaluate("() => { __winnow.dropGrouping(); return __winnow.rebuildView({ keepScroll: false }); }")
         page.wait_for_function("() => (__winnow.S.groupByCols || []).length === 0")
+
+
+# ------------------------------------------------- not under a menu
+
+def test_an_open_menu_keeps_the_arrows(page):
+    """The menu's own key handler captures Down/Up to walk its items but
+    deliberately let Left/Right through — which cost nothing while left
+    and right were bound to nothing, and moves the cell cursor now. A menu
+    the analyst opened, answering by scrolling the table underneath it, is
+    not an answer."""
+    cols = _cols(page)
+    _click_cell(page, 1, cols[1])
+    before = _focus(page)
+    page.locator("#body .row").nth(1).locator(".cell").nth(1).click(button="right")
+    page.locator(".menu").wait_for(state="visible")
+    try:
+        # One direction at a time: Right-then-Left is a net zero and would
+        # pass whether or not the menu swallowed either of them.
+        page.keyboard.press("ArrowRight")
+        assert _focus(page) == before, "the menu let ArrowRight reach the grid"
+        page.keyboard.press("ArrowLeft")
+        assert _focus(page) == before, "the menu let ArrowLeft reach the grid"
+    finally:
+        page.keyboard.press("Escape")
+        page.wait_for_selector(".menu", state="detached")
+
+
+def test_the_mac_chord_reaches_the_same_jump(page):
+    """⌘+Arrow is bound beside Ctrl+Arrow: on macOS the Ctrl form belongs
+    to Mission Control and never reaches the page."""
+    cols = _cols(page)
+    total = page.evaluate("() => __winnow.S.view.row_count")
+    _click_cell(page, 2, cols[0])
+    page.keyboard.press("Meta+ArrowDown")
+    assert _focus(page) == {"pos": total - 1, "col": 0}
+    page.keyboard.press("Meta+Shift+ArrowUp")
+    r = _range(page)
+    assert (r["r0"], r["r1"]) == (0, total - 1), "⌘+Shift extends, like Ctrl+Shift"

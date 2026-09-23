@@ -44,10 +44,15 @@ export const DEFAULT_KEYMAP = {
   // Shift from a chord that did not match and tries again, so it lands
   // here and the handler reads e.shiftKey — the same route Shift+ArrowDown
   // takes to moveDown.
-  jumpEdgeUp: ['Ctrl+ArrowUp'],
-  jumpEdgeDown: ['Ctrl+ArrowDown'],
-  jumpEdgeLeft: ['Ctrl+ArrowLeft'],
-  jumpEdgeRight: ['Ctrl+ArrowRight'],
+  // ⌘ alongside Ctrl, the way focusSearch carries Ctrl+F: on macOS
+  // Ctrl+Arrow belongs to Mission Control and never reaches the page,
+  // and ⌘+Arrow is what Excel uses there anyway. Harmless elsewhere —
+  // Windows takes Meta+Arrow for window snapping before the browser sees
+  // it, and on Linux it is free.
+  jumpEdgeUp: ['Ctrl+ArrowUp', 'Meta+ArrowUp'],
+  jumpEdgeDown: ['Ctrl+ArrowDown', 'Meta+ArrowDown'],
+  jumpEdgeLeft: ['Ctrl+ArrowLeft', 'Meta+ArrowLeft'],
+  jumpEdgeRight: ['Ctrl+ArrowRight', 'Meta+ArrowRight'],
   pageDown: ['PageDown'],
   pageUp: ['PageUp'],
   jumpFirst: ['g'],
