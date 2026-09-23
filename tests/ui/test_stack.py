@@ -3,9 +3,14 @@ chart module, click-to-filter. Reached from the column header menu."""
 
 from __future__ import annotations
 
+import json
+import re
+
 import pytest
 
 pytestmark = pytest.mark.ui
+
+SUMMARY = re.compile(r".*/api/group_summary.*")
 
 
 def test_stack_lists_values_rarest_first_and_filters(page):
@@ -62,13 +67,23 @@ def test_a_stack_of_a_few_values_is_a_box_a_few_bars_tall(page):
 
 def test_a_stack_of_many_values_still_stops_at_the_cap(page):
     """The other half of the same rule: sizing to content must not let a
-    long tail push the modal off the screen. Timestamp is unique per row in
-    the fixture, so this is the capped-and-scrolling case."""
-    _open_stack(page, "Timestamp")
+    long tail push the modal off the screen.
+
+    The counts are stubbed because the shared fixture has no long tail to
+    stack — every column in it holds a handful of distinct values, and the
+    datetime one buckets to its single day. What decides the box's height
+    is the number of bars and nothing else, so the one request that says
+    how many there are is the honest place to put 200 of them."""
+    groups = [{"value": f"v{i:03d}", "count": 1} for i in range(200)]
+    page.route(SUMMARY, lambda route: route.fulfill(
+        status=200, content_type="application/json",
+        body=json.dumps({"groups": groups})))
     try:
+        _open_stack(page, "Host")
         m = page.evaluate(BOX)
         assert abs(m["box"] - m["cap"]) <= 2, m
         assert m["canvas"] > m["box"], m        # so the rest is reachable by scrolling
     finally:
         page.keyboard.press("Escape")
         page.wait_for_selector("#modal[hidden]", state="attached")
+        page.unroute(SUMMARY)
