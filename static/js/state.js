@@ -103,6 +103,7 @@ export const S = {
   timeline: {
     view: null, pages: new Map(), pending: new Set(), reqId: 0,
     tagFilter: null, // tag ids currently checked; null = not yet initialized (defaults to "every known tag" on first load)
+    raw: new Set(),  // "<source_id>:<rid>" for rows showing the raw source row instead of their summary — see fillTimelineBody
   },
   savedFilterCursor: -1,   // index into filtersForCurrentSource(), for [ and ] cycling
   cases: [],               // home screen's case registry, from workspace/cases.json
