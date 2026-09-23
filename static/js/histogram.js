@@ -34,6 +34,10 @@ export const HISTOGRAM_PREFS_KEY = 'winnow.histogram';
 const LEGACY_PANELS_KEY = 'winnow.panels';
 const LEGACY_PANEL_ID = 'table-histogram.histogram';
 const REFRESH_MS = 150;
+/* How many times the strip re-asks about a view that is still the grid's
+   and still answers 409. Small: the grid's own paging hits the same
+   expired view and rebuilds, which brings a view change with it. */
+const RETRY_MAX = 3;
 const HEIGHT = 96;
 
 let data = null;        // last /api/histogram response
@@ -43,6 +47,8 @@ let timer = null;
 let inflight = 0;
 let seq = 0;            // request counter: only the newest answer lands
 let problem = null;     // a 400's message, shown in place of the chart
+let drawnFor = null;    // the view id the chart on screen describes
+let retries = 0;        // consecutive re-asks after an answer we could not use
 let shown = false;      // what syncHistogramPanel last applied (its onShow edge)
 let ui = null;          // {colSel, info, canvas, hint, empty} once wired
 
@@ -362,7 +368,7 @@ function clearTimeRange() {
 async function load() {
   if (!ui) return;
   const v = S.view;
-  if (!S.sourceId || !v || !pickColumn()) { data = null; problem = null; draw(); return; }
+  if (!S.sourceId || !v || !pickColumn()) { data = null; problem = null; drawnFor = null; draw(); return; }
   const mine = ++seq;
   inflight++;
   draw();
@@ -385,13 +391,24 @@ async function load() {
   } catch (e) { err = e; }
   inflight = Math.max(0, inflight - 1);
   if (mine !== seq) return;   // a newer request is out; its answer paints
-  if (!err) { data = next; problem = null; }
-  // A 409 is the view going mid-rebuild: the rebuild's own view change
-  // refetches, so what is drawn stays. Anything else — a 400 for a
+  if (!err) { data = next; problem = null; drawnFor = v.view_id; }
+  // A 409 is the view going mid-rebuild. Anything else — a 400 for a
   // column the table no longer has, or one that is not a datetime — is
   // worth a line of text, and waiting would fix nothing.
-  else if (err.status !== 409) { data = null; problem = err.message; }
+  else if (err.status !== 409) { data = null; problem = err.message; drawnFor = v.view_id; }
   draw();
+  // An answer describes the view it was asked about. If the chart on
+  // screen is not about the view the grid has now, ask again rather than
+  // waiting for a view change: the rebuild that evicted the old view
+  // fired its own change before this request came back, so no further one
+  // is coming. That is how one lost answer during a burst of filter
+  // changes left the strip describing the PREVIOUS filter — the reported
+  // "the histogram stops updating" — until something else happened to
+  // rebuild the view. Bounded: a view that is current and keeps 409ing is
+  // re-asked a few times and then left alone, rather than polled forever.
+  if (!shown || !S.view || S.view.view_id === drawnFor) return;
+  if (S.view.view_id !== v.view_id) { retries = 0; schedule(); }
+  else if (retries < RETRY_MAX) { retries += 1; schedule(); }
 }
 function schedule() { clearTimeout(timer); timer = setTimeout(load, REFRESH_MS); }
 
@@ -405,7 +422,7 @@ export function wireHistogram() {
   // and syncHistogramPanel's show edge fetches then. Keying on the pref
   // alone ran the aggregate twice for a view rebuilt behind the SQL tab —
   // once for a canvas nobody could see, again on the way back.
-  document.addEventListener('winnow:viewchange', () => { if (shown) schedule(); });
+  document.addEventListener('winnow:viewchange', () => { if (shown) { retries = 0; schedule(); } });
   // Tokens are read at draw time, so a skin/accent change is one redraw.
   document.addEventListener('winnow:appearance', () => { if (shown) draw(); });
   window.addEventListener('resize', () => { if (shown) draw(); });

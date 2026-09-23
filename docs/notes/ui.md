@@ -85,6 +85,17 @@ see [docs/notes/README.md](README.md) for the whole set.
   `parseTimestamp`) is what both the column values and the start/end
   bounds get compared through — a bare text/numeric comparison on the raw
   stored value sorts the US `M/D/YYYY` shape wrong.
+- **The histogram strip re-asks; it does not wait to be told.**
+  `/api/histogram` names a view id, and a view is evicted the moment the
+  next rebuild lands — which is what a burst of filter changes is. The
+  409 that comes back was swallowed on the reasoning that "the rebuild's
+  own view change refetches", and it does not: that change fired before
+  the 409 came back. One lost answer and the chart went on describing the
+  previous filter until something else rebuilt the view. It now compares
+  the view the answer was about with the view the grid has and asks again
+  when they differ, bounded so that a view that is current and keeps
+  failing is re-asked a few times rather than polled.
+
 - **The histogram strip** (`static/js/histogram.js`, `GET /api/histogram`
   over `Store.time_histogram`, toggled by `#btnHistogram` or `h`) was the
   `table_histogram` example plugin until 2026-09 and is built in now;
@@ -156,6 +167,17 @@ see [docs/notes/README.md](README.md) for the whole set.
   cache is still alive under the grouping and would otherwise paint the
   pre-tag rows back on Ungroup (grid.md, "Grouped mode's rows are ordinary
   rows").
+- **The sidebar tree's indent guides are a background-image, so a
+  highlight must set background-COLOR.** Rows in the tree are a flat list
+  — `renderSidebar` appends folder headers and table rows to one
+  container, which is what lets a filter force-expand without rebuilding
+  the nesting — so there is no nested element to hang a left border on.
+  Each row paints one vertical rule per level it sits inside, clipped to
+  its own indent by `background-size`. `background: var(--ink)` on
+  `.drop-into` or `.active` drops the guides exactly when the row is
+  being dragged onto or is the current one; `background-color` doesn't.
+  `tests/ui/test_sidebar_tree.py` pins it.
+
 - **The sidebar** (`renderSidebar`, replacing the old `openTabJumpMenu`
   dropdown) is a *persistent* list of every table, open or closed — the
   horizontal tab strip (`.tabs`/`renderTabs`) is untouched and still the
