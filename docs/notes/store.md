@@ -13,6 +13,18 @@ see [docs/notes/README.md](README.md) for the whole set.
 
 ---
 
+- **`expand_group`'s virtual fast path only applies to an unfiltered
+  parent.** `_virtual_group_where` reads straight off the member table with
+  nothing but `column = value` (+ the nested path) — it has no view to join
+  and so no way to express the parent's filters, search or timeframe. The
+  gate is `_grouping_covers_whole_source`; anything else materialises, same
+  as a merge or an over-threshold group already did. The bug this closed
+  was quiet in exactly the way that costs you: the *counts* come from the
+  other side (`group_summary` and `expand_group`'s own `total` both join the
+  view and stayed correct), so the grid asked for `row_count` rows and got
+  the first `row_count` of a longer, unfiltered list — and tag/export on the
+  group read the same way, which made it an over-tagging bug and not just a
+  display one.
 - **The tag filter is a UNION, compiled part by part.** `spec.tags` may
   hold tag ids, `__any__`, `__none__`, or a mix; each part compiles on
   its own and the parts are OR'd. It used to compare the whole list
@@ -136,18 +148,6 @@ see [docs/notes/README.md](README.md) for the whole set.
   the caller string-prepend it — `s.DAY_BUCKET(...)` isn't valid SQL the
   way `s."col"` is, so a caller that goes back to prepending `s.` onto the
   result will get a syntax error the moment it hits a datetime column.
-- **`expand_group`'s virtual fast path only applies to an unfiltered
-  parent.** `_virtual_group_where` reads straight off the member table with
-  nothing but `column = value` (+ the nested path) — it has no view to join
-  and so no way to express the parent's filters, search or timeframe. The
-  gate is `_grouping_covers_whole_source`; anything else materialises, same
-  as a merge or an over-threshold group already did. The bug this closed
-  was quiet in exactly the way that costs you: the *counts* come from the
-  other side (`group_summary` and `expand_group`'s own `total` both join the
-  view and stayed correct), so the grid asked for `row_count` rows and got
-  the first `row_count` of a longer, unfiltered list — and tag/export on the
-  group read the same way, which made it an over-tagging bug and not just a
-  display one.
 - **Grouping by tag** is a pseudo-column, `TAG_GROUP_COLUMN` (`"__tag__"`),
   carried through every grouping path as an ordinary column name so nothing
   between the frontend and `group_summary` needs a second notion of what a level
