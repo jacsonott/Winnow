@@ -3007,6 +3007,23 @@ def api_set_tab_open(source_id: int, body: TabOpenReq):
     return {"ok": True}
 
 
+class TabsOpenReq(BaseModel):
+    source_ids: list[int]
+
+
+@app.post("/api/tabs/open")
+def api_open_tabs(body: TabsOpenReq):
+    """Open tabs for several tables at once — the sidebar's "open all" and
+    "open all with tags", and the Tables manager's "Open all tagged",
+    which used to be a POST per table. Answers with how many tabs it
+    actually opened (ones already open don't count); an id that names no
+    table is a 400, not a tab for nothing."""
+    try:
+        return {"opened": store().open_tabs(body.source_ids)}
+    except KeyError as e:
+        raise HTTPException(400, str(e).strip("'"))
+
+
 @app.post("/api/tabs/close_all")
 def api_close_all_tabs():
     """Close every open tab at once (the tables stay in the case)."""
@@ -3464,6 +3481,18 @@ def api_tag_counts(view_id: str):
     view-keyed read."""
     try:
         return store().tag_counts_in_view(view_id)
+    except KeyError as e:
+        raise HTTPException(409, str(e))
+
+
+@app.get("/api/tag_view_coverage")
+def api_tag_view_coverage(view_id: str, tag_id: int):
+    """How many rows this view has and how many of them already carry one
+    tag — what the whole-view tag hotkey asks before it decides whether it
+    is tagging or untagging, and what its confirm quotes. Same 409 on an
+    expired view as every other view-keyed read."""
+    try:
+        return store().tag_coverage_in_view(view_id, tag_id)
     except KeyError as e:
         raise HTTPException(409, str(e))
 

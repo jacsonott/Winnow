@@ -437,8 +437,9 @@ document.addEventListener('keydown', (e) => {
      that's waiting on an answer isn't what anyone means. Ahead of
      matchAction and the tag hotkeys below because neither of those looks
      at modifiers — '0' is bound to resetColumnWidths and 1–9 are tag
-     hotkeys, and Alt+digit is meant for neither. (Shift+digit was the obvious row and is taken: it applies a
-     tag to the whole view.) */
+     hotkeys, and Alt+digit is meant for neither. (Shift+digit was the obvious row and is taken: it
+     tags the whole view, or untags it when the whole view already
+     carries that tag.) */
   if (e.altKey && !e.ctrlKey && !e.metaKey && /^[0-9]$/.test(digit)) {
     if (!$('modal').hidden || document.querySelector('.confirm-overlay')) return;
     e.preventDefault();

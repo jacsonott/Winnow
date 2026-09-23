@@ -353,7 +353,10 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
    paths (`fetch_rows` in all its kinds, `tag_positions`, `find_position`,
    `column_values`, `column_max_lengths`, `group_summary`'s aggregate,
    `fetch_timeline_rows`, the CSV/XLSX export streams, the search-all
-   counts) run on pooled read-only connections that never take `self.lock`
+   counts, and everything a table switch asks for — `list_sources`,
+   `get_source`, `_source_lite`, `_resolve_members`, `get_layout`,
+   `list_tags`, `tag_counts`, `list_derived_columns`, the folder tree)
+   run on pooled read-only connections that never take `self.lock`
    at all — WAL (already on for the case file, set on the views db at
    attach) is what makes that safe, and it's what keeps paging at ~1ms
    while a multi-second `build_view` or ingest holds the writer lock

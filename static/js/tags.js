@@ -78,7 +78,9 @@ export function renderTagRibbon() {
     const scope = n === all
       ? `${all.toLocaleString()} tagged`
       : `${n.toLocaleString()} tagged in this view · ${all.toLocaleString()} in the table`;
-    chip.title = `${scope}. Click to filter to ${t.name}. Press ${t.hotkey || '—'} to tag the selection.`;
+    chip.title = `${scope}. Click to filter to ${t.name}. Press ${t.hotkey || '—'} to tag the selection`
+      + (t.hotkey ? `, Shift+${t.hotkey} for every row in this view — or to take it off them, once they all have it` : '')
+      + '.';
     chip.onclick = () => {
       S.tagFilter = S.tagFilter.includes(t.id) ? [] : [t.id];
       renderTagRibbon();
@@ -305,10 +307,36 @@ export async function undoLastTagChange() {
 
 export async function applyTagToView(tag) {
   if (!S.view || !S.view.row_count) return;
-  if (!(await confirmDialog(`Tag all ${S.view.row_count.toLocaleString()} rows in this view as "${tag.name}"?`))) return;
+  // Which way this goes is asked before it is confirmed, because the two
+  // directions are different sentences to agree to. The rule: anything in
+  // the view still untagged means tag the lot; only when every row already
+  // carries the tag does the same keystroke mean take it off. So a repeat
+  // press is an undo of the press before it, and no press ever partially
+  // untags — the direction is decided by the whole view, never by one row
+  // (which is what the per-row hotkey does, on purpose).
+  //
+  // Asked fresh rather than read from S.tagCounts: those are refreshed
+  // fire-and-forget after every build and every tag write, which is right
+  // for a ribbon and not good enough to decide a write on.
+  let cov;
+  try {
+    cov = await api(`/api/tag_view_coverage?view_id=${encodeURIComponent(S.view.view_id)}&tag_id=${tag.id}`);
+  } catch (e) {
+    toast('Could not check what is tagged: ' + e.message, 5000);
+    return;
+  }
+  const rows = cov.rows;
+  if (!rows) return;
+  const on = cov.tagged < rows;
+  const ok = await confirmDialog(on
+    ? `Tag all ${rows.toLocaleString()} rows in this view as "${tag.name}"?`
+      + (cov.tagged ? ` ${cov.tagged.toLocaleString()} already ${cov.tagged === 1 ? 'is' : 'are'}.` : '')
+    : `Every row in this view is tagged "${tag.name}". Remove it from all ${rows.toLocaleString()}?`,
+  { okLabel: on ? 'Tag them' : 'Remove the tag' });
+  if (!ok) return;
   setBusy(true);
   let res;
-  try { res = await post('/api/row_tags/view', { view_id: S.view.view_id, tag_id: tag.id, on: true }); }
+  try { res = await post('/api/row_tags/view', { view_id: S.view.view_id, tag_id: tag.id, on }); }
   finally { setBusy(false); }
   S.tagCountsAll = res.counts || {};  // whole-table; refreshTagCounts re-reads the view-scoped half
   refreshTagCounts();
@@ -318,5 +346,12 @@ export async function applyTagToView(tag) {
   drawRail();
   regroupIfGroupedByTag();
   await refreshUndoState();
-  toast(`Tagged ${res.affected.toLocaleString()} rows · ${tag.name}`);
+  // `changed` on the way out, `affected` on the way in: removing a tag
+  // from a view where every row had it changes all of them, and saying
+  // "removed from 1,204 rows" when 1,204 is also the count is the honest
+  // number either way. Tagging keeps `affected` (rows targeted), which is
+  // what it has always reported.
+  toast(on
+    ? `Tagged ${res.affected.toLocaleString()} rows · ${tag.name}`
+    : `Removed "${tag.name}" from ${res.changed.toLocaleString()} rows`);
 }

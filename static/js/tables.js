@@ -5,7 +5,7 @@ import { openTableMenu } from './timeframe.js';
 import { $, api, el, post, setBusy, toast } from './core.js';
 import { writeClipboardText } from './grouping.js';
 import { sqlSchemaForLLM } from './plugins.js';
-import { dropViewStateFor, editSourceNickname, loadSources, sourceGlyph, sourceLabel, sourceTitle, subsetParentLabel } from './sources.js';
+import { dropViewStateFor, editSourceNickname, loadSources, openTables, sourceGlyph, sourceLabel, sourceTitle, subsetParentLabel, taggedTablesToOpen } from './sources.js';
 import { S } from './state.js';
 import { markModalAction, confirmDialog, modal } from './ui.js';
 import { cancelPendingView } from './view.js';
@@ -105,13 +105,17 @@ export function openTablesManager() {
     const acts = el('div', 'row-actions');
     const openAllTagged = el('button', 'btn ghost', 'Open all tagged');
     openAllTagged.onclick = async () => {
-      const targets = S.sources.filter((s) => !s.is_merge && !s.error && !s.is_open && s.tagged_row_count > 0);
+      // Which tables count as tagged is decided in one place now
+      // (sources.js), shared with the sidebar's button — and opened in
+      // one round trip rather than one per table, which on a directory
+      // import was thirty trips each taking the writer lock in turn.
+      // navigate:false — this modal is the analyst's place right now;
+      // it reopens below rather than being replaced by a grid.
+      const targets = taggedTablesToOpen();
       if (!targets.length) { toast('No closed tables have tagged rows'); return; }
       setBusy(true);
-      try {
-        for (const s of targets) await post(`/api/source/${s.id}/open`, { open: true });
-      } finally { setBusy(false); }
-      await loadSources();
+      try { await openTables(targets, { navigate: false }); }
+      finally { setBusy(false); }
       openTablesManager();
     };
     const copySchema = el('button', 'btn ghost', 'Copy table definitions');

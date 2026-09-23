@@ -427,6 +427,37 @@ see [docs/notes/README.md](README.md) for the whole set.
   `tests/test_watchlist_scan.py` pins the lock discipline structurally
   (every match statement on a reader checked out with the lock unheld,
   none on the writer), `tests/test_watchlist_grouped_hits.py` the shape.
+- **A view build yields the writer lock to the table the analyst just
+  switched to.** `build_view` holds `self.lock` for the whole
+  `INSERT..SELECT`, which is right for materialising a million rows and
+  wrong for the tab you click while a four-minute search runs: that
+  table's own build queued behind the search. A build for a DIFFERENT
+  source now asks the holder to stand aside (`_yield_the_writer`), the
+  interrupted build rolls back whole — a held build evicts nothing, so
+  nothing on screen depended on it — and its worker starts it again
+  (`_build_for_job`). Four things keep that from turning into a
+  merry-go-round, and none is optional: the ask is only ever across
+  tables (two builds for the same table are the ordinary supersede); a
+  RESTART never asks, so two builds cannot take the lock off each other
+  forever; a restart stands back while a foreground build is queued,
+  or the two race for the lock the moment it frees and the restart can
+  win; and `VIEW_BUILD_YIELD_MAX` caps how many times one job can be
+  asked, so flicking between tabs cannot starve a search. `OpPreempted`
+  subclasses `OpCancelled` so every existing handler unwinds one
+  correctly without being taught about it.
+
+- **The table-switch reads are on the pool, and they have to stay
+  there.** `list_sources`, `list_merges`, `list_folders`, `get_source`,
+  `_source_lite`, `_resolve_members`, `get_layout`, `list_tags`,
+  `tag_counts`, `list_derived_columns` and the rest of what opening a
+  table asks for used to read on the writer connection under
+  `self.lock`. Clicking another tab during a long build therefore blocked
+  on the FIRST await, before a view was even asked for — the analyst's
+  "it locks you on that table". Anything new on that path belongs on
+  `_reader()` too; `tests/test_search_does_not_pin_the_table.py` holds the
+  writer lock for the whole of a switch and asserts it completes, which
+  deadlocks rather than merely being slow if one moves back.
+
 - **Long view work is cancellable via a client-generated `op_token`**
   (`Store.cancel_op` / `_interruptible`, `POST /api/cancel_op`;
   `build_view`, `build_timeline`, `group_summary`). cancel_op marks the
