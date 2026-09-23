@@ -440,7 +440,14 @@ function valueOf(id) { const i = indicatorById(id); return i ? i.value : `indica
 /* What an indicator's count cell says, which is not always a number. A
    bare "0" meant both "every table was read and it is not in this case"
    and "nothing has looked yet" — the first is a sentence an analyst can
-   put in a report, the second is not, and they were spelled the same. */
+   put in a report, the second is not, and they were spelled the same.
+
+   Every answer keeps the `wl-count` class, whatever it says: that class
+   is the row's count SLOT, the one thing the stylesheet and the UI tests
+   reach for to find the cell, and a row that happened to be unscanned
+   dropping out of `.wl-count` altogether turned "read the cell" into
+   "read the cell if it is a number". `wl-state` is the variant on top of
+   it, for when the answer is words. */
 function countCell(ind) {
   if (scanning.has(ind.id)) {
     const c = el('span', 'wl-count scanning', '…');
@@ -456,16 +463,16 @@ function countCell(ind) {
     return c;
   }
   if (!done) {
-    const c = el('span', 'wl-state unscanned', 'not scanned');
+    const c = el('span', 'wl-count wl-state unscanned', 'not scanned');
     c.title = 'No scan has read this indicator against any table yet — this is not "not present".';
     return c;
   }
   if (done >= targets) {
-    const c = el('span', 'wl-state clean', 'clean');
+    const c = el('span', 'wl-count wl-state clean', 'clean');
     c.title = `${covered} — no row anywhere in the case matched it.`;
     return c;
   }
-  const c = el('span', 'wl-state partial', `${done}/${targets} tables`);
+  const c = el('span', 'wl-count wl-state partial', `${done}/${targets} tables`);
   c.title = `${covered} — no hits in those. The rest have not been read for it.`;
   return c;
 }

@@ -2419,11 +2419,14 @@ html.remote .row.selected:hover { background: var(--row-selected); }
    "clean" is the only one of the three that is a finding — the sentence an
    analyst can put in a report — so it is the one in the full text colour;
    the other two are the dim of something still owed. No new colour token:
-   a green here would be the only green in the app. */
-.wl-state { flex: 0 0 auto; white-space: nowrap; font-size: 11px; color: var(--dim);
-  font-family: var(--mono); padding: 1px 5px; }
-.wl-state.clean { color: var(--text); }
-.wl-state.unscanned { font-style: italic; }
+   a green here would be the only green in the app.
+   This is a variant of .wl-count, not a sibling of it: the cell is the
+   same slot whichever answer it holds, so it keeps that class (and the
+   type and padding that come with it) and only undoes the geometry a
+   number wanted. */
+.wl-count.wl-state { min-width: 0; text-align: left; white-space: nowrap; }
+.wl-count.wl-state.clean { color: var(--text); }
+.wl-count.wl-state.unscanned { font-style: italic; }
 /* The overlap marker, under the value like the note: another indicator is
    reporting these same rows. A button because it opens the merge dialog,
    styled flat so the row still reads as one line of text. */
