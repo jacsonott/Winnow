@@ -4,7 +4,7 @@
 import { draggedCol, renderHead, saveLayout, visibleCols } from './columns.js';
 import { $, OVERSCAN, PAGE, ROW_H, api, el, post, setBusy, toast } from './core.js';
 import { displayValue, ellipsize, filterByValue } from './filters.js';
-import { buildDataRow, ensurePage, headH, moveCursor, render, renderTagToolbar, rowAt, rowPaintContext, rowsPaintY, schedulePrefetch, setCellRange, spacerPx, syncRowsTop, syncRowsWidth, vScroll } from './grid.js';
+import { buildDataRow, ensurePage, headH, moveCursor, render, renderTagToolbar, rowAt, rowPaintContext, rowsPaintY, schedulePrefetch, setCellRange, spacerPx, syncRowsTop, syncRowsWidth, titleClippedCells, vScroll } from './grid.js';
 import { armOpCancel, opToken } from './jobs.js';
 import { openRowContextMenu } from './rowmenu.js';
 import { S, cellInRange, cellRangeRows, selClear, selCount, selHas, selPositions, selRemap, selSetRange, selSnapshot } from './state.js';
@@ -232,6 +232,10 @@ export function renderGrouped() {
   rowsEl.replaceChildren(frag);
   schedulePrefetch();
   renderTagToolbar();
+  // Grouped rows are ordinary rows painted by the same buildDataRow, so
+  // they clip the same way and get the same tooltip — last, after the DOM
+  // this measures has settled (see titleClippedCells).
+  titleClippedCells();
 }
 
 export function makeGroupNode(gr, level, path) {

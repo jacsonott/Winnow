@@ -238,3 +238,53 @@ see [docs/notes/README.md](README.md) for the whole set.
   and with nothing picked a multi-row cell range is the scope of a tag
   key and the row menu alike (`rowMenuTargets`), and the toolbar says so.
   One anchor (`S.anchor`) serves the gutter, the cells and the keyboard.
+- **A cell says what it says only when it was cut** (`titleClippedCells`,
+  the last thing every paint pass does). A `LEVEL` column rendering
+  `Informati…` carried an empty `title`, so the value was reachable by
+  widening the column or opening the row and nowhere else — while tabs,
+  sidebar rows and column headers have always carried one. The check is
+  `scrollWidth > clientWidth + 1` per painted cell, which forces one
+  layout: it therefore runs *after* `replaceChildren` (a node still in a
+  DocumentFragment has no geometry — scrollWidth is 0) and *last* in the
+  pass, because the loop only reads geometry and writes `title`, which
+  cannot dirty layout, so the frame pays for the reflow it was going to do
+  anyway. The 1px of slack is what keeps an autofit column — sized to
+  exactly its content, then rounded — from titling every one of its cells
+  with the text already on screen. Deliberately not set unconditionally:
+  the grid's rule is that only the visible window is in the DOM
+  (invariant #6), and a title on every cell of every row is a lot of
+  string for the majority that fit.
+- **The row says how it opens, in the gutter's middle slot.** A single
+  click selects a *cell*; the detail pane opens on double-click or the
+  detail hotkey, and that was written down in one source comment and
+  nowhere else. `buildDataRow` paints a `.row-open` on every landed row
+  (not on a `pending` one — there is nothing to open yet), CSS keeps it
+  `visibility: hidden` until `.row:hover`, and the gutter's mousedown
+  takes it *before* the pick, then `moveCursor` + `showDetail` — the
+  cursor has to follow, since the pane, its note box and "Copy row" all
+  read the cursor row. It shares the middle slot with the tag stripes
+  rather than adding a fourth track, because the three-slot template is
+  what keeps the checkbox and the row number aligned down the page; it
+  carries the gutter's own `background: inherit` so a long stripe run
+  passes behind it. Like every other child of the gutter it names its row
+  as well as its column (`grid-area: 1 / 2`) — grid auto-placement is
+  sparse, so a child whose definite column sits left of the cursor opens a
+  new implicit row instead of backing up, and naming column 2 alone made
+  the gutter two rows tall: the checkbox and the digits off centre on
+  every landed row, and the glyph itself overhanging the row below, where
+  the click selected that row rather than opening this one. Remote session mode hides it: appearing on hover is a
+  repaint to encode on every mousemove, which is the whole point of that
+  mode (double-click, the hotkey and the hint still work). The hint —
+  one line beside the row count — is `detail.js`'s
+  `syncRowOpenHint`/`noteRowOpened`, keyed on `winnow.rowOpenSeen` in
+  localStorage and marked from `showDetail`, so it answers "has a row ever
+  been opened", not "was this affordance clicked".
+- **The stats line describes the rows, not the machinery.** `statsLine`
+  has one writer, `writeStatsLine`, and `openSource`'s cached path goes
+  through it too. That path used to end the sentence with `· cached`,
+  which put "the materialised view was still alive server-side" into the
+  one sentence that says what is on screen — and only on the reopen path,
+  so the same 6,000 rows described themselves two ways depending on
+  history the analyst had no reason to track. The fact is kept in the
+  line's `title`, and the build time it shows there is the time that build
+  really took.

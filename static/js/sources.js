@@ -6,7 +6,7 @@ import { recordTabVisit } from './tabhistory.js';
 import { renderHead, saveLayout } from './columns.js';
 import { $, ROW_H, api, el, post, toast } from './core.js';
 import { derivedOps } from './derived.js';
-import { hideDetailPane } from './detail.js';
+import { hideDetailPane, syncRowOpenHint } from './detail.js';
 import { currentSpec, renderAdvancedChips, setSearchMode, updateSearchHint } from './filters.js';
 import { clearPageCache, headH, rScroll, render, rowAt, spacerPx } from './grid.js';
 import { closeAllGroupViews, drawRail, dropGrouping, regroupAll, renderGroupStrip, setGrouping } from './grouping.js';
@@ -29,7 +29,7 @@ import { loadTags, refreshTagCounts, renderTagRibbon } from './tags.js';
 import { openTableMenu, updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
 import { baseColumns } from './tsformat.js';
 import { confirmDialog, dropdownMenu, modal, promptDialog } from './ui.js';
-import { dropPendingSelection, pendingViewStatsText, rebuildView, syncNoRows } from './view.js';
+import { dropPendingSelection, pendingViewStatsText, rebuildView, syncNoRows, writeStatsLine } from './view.js';
 
 /* --------------------------------------------------------------- sources */
 
@@ -706,6 +706,9 @@ export async function loadSources(select, { navigate = true, openOpts = undefine
     $('empty').hidden = false;
     $('noRows').hidden = true;
     $('viewStats').textContent = '';
+    // The stats line is gone, so the hint that sits beside it goes too —
+    // there is no row on screen to open.
+    syncRowOpenHint();
     // A fresh load with no tables (a quick-look just created, an empty
     // case) never reaches renderHead, so the strip stayed an 18px dashed
     // stub until a table opened.
@@ -925,9 +928,12 @@ export async function openSource(id, { skipBuild = false } = {}) {
     // went through installView, so nothing else puts the empty state back
     // after the blanket hide above.
     syncNoRows();
+    // Through the same writer as a freshly built view, so reopening a
+    // table doesn't re-describe it: the line is about the rows, and the
+    // fact that nothing had to be rebuilt to show them rides in its
+    // tooltip (see writeStatsLine).
     if (pendingIsSpec) $('viewStats').textContent = pendingViewStatsText(pending);
-    else $('viewStats').innerHTML =
-      `<b>${cached.row_count.toLocaleString()}</b> of ${src.row_count.toLocaleString()} rows · cached`;
+    else writeStatsLine(S.view, { cached: true });
     $('body').scrollTop = stash ? stash.scroll : 0;
     render();
     drawRail();

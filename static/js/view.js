@@ -3,6 +3,7 @@
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { renderHead } from './columns.js';
 import { $, OVERSCAN, PAGE, ROW_H, api, debounce, post, setBusy, toast, toastAction } from './core.js';
+import { syncRowOpenHint } from './detail.js';
 import { currentSpec, renderAdvancedChips, updateSearchHint } from './filters.js';
 import { clearPageCache, headH, rScroll, render, rowAt, spacerPx, vScroll } from './grid.js';
 import { drawRail, regroupAll } from './grouping.js';
@@ -169,10 +170,32 @@ function stopIndicator(seq, restore) {
    the honest denominator (it held every row it found). A throw instead
    would take the rest of installView with it, leaving the grid half
    swapped. */
-function statsLine(v) {
+export function statsLine(v) {
   const src = S.sources.find((s) => s.id === S.sourceId);
   const total = src ? src.row_count : v.row_count;
   return `<b>${v.row_count.toLocaleString()}</b> of ${total.toLocaleString()} rows · ${v.elapsed_ms} ms`;
+}
+
+/* The one writer of the landed-view stats line, so the sentence reads the
+   same however the view got here.
+
+   It used to not: a table reopened on the spec it was left with skipped
+   the rebuild and wrote its own line, ending `· cached`. That put an
+   implementation detail — which materialized view the server still had —
+   into the single sentence that tells the analyst what is on screen, and
+   only on the reopen path, so the same 6,000 rows described themselves
+   two different ways depending on history the analyst had no reason to
+   track. The fact itself is kept, in the tooltip, where something you go
+   looking for belongs; the row counts and the build time (the cached
+   path's is the time that build actually took, which is what the line
+   said when it was built) are the same either way. */
+export function writeStatsLine(v, { cached = false } = {}) {
+  const box = $('viewStats');
+  box.innerHTML = statsLine(v);
+  box.title = cached
+    ? 'Reused the view built the last time this table was open — nothing was rebuilt.'
+    : '';
+  syncRowOpenHint();
 }
 
 /* The row the analyst is at, as an identity that survives a rebuild
@@ -355,7 +378,7 @@ function restoreStats(rec) {
   syncNoRows();
   if (S.sourceId !== rec.sourceId) return;
   if (rec.before && S.view && S.view.view_id === rec.viewId) $('viewStats').innerHTML = rec.before;
-  else if (S.view && S.view.source_id === S.sourceId) $('viewStats').innerHTML = statsLine(S.view);
+  else if (S.view && S.view.source_id === S.sourceId) writeStatsLine(S.view);
 }
 
 function rowsLabel(n) { return `${n.toLocaleString()} row${n === 1 ? '' : 's'}`; }
@@ -798,7 +821,7 @@ export async function installView(v, { seq, forSourceId, cacheKey, seeded = [], 
   // the table out of S.sources while a build for it can still be in
   // flight, and this landing runs against the list as it is now.
   const src = S.sources.find((s) => s.id === S.sourceId);
-  $('viewStats').innerHTML = statsLine(v);
+  writeStatsLine(v);
   // Picks are positions, and positions mean different rows now — but the
   // ROWS the analyst picked are the same rows. Carry them over by id
   // (keys captured before the rebuild, positions looked up after) so a

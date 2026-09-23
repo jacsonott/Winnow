@@ -1084,3 +1084,22 @@ see [docs/notes/README.md](README.md) for the whole set.
   its-own-tags line is deliberate: an analyst may expect the parent's
   tags to have come along, or the subset's to appear on the parent, and
   the tooltip is where both expectations get corrected.
+
+- **The detail pane's field list is a two-column read, and reads like
+  one.** The names are painted as the column writes them; the uppercasing
+  they used to get from CSS cost a beat per field in a list of forty (the
+  word shapes go with it) and hid that `TimeCreated` and `CommandLine` are
+  the same strings the header row shows. What separates the name from its
+  value now is the typeface — the UI face against the value's `--mono` —
+  which is the difference the eye was using anyway. Each `<dd>` also
+  carries its own copy button (`copyFieldButton`, revealed on `dd:hover`,
+  `float`ed so the value wraps around it and reserved in the layout at all
+  times so the hover costs no reflow); "Copy row" was the only copy the
+  pane offered, so lifting one SID out of forty fields meant selecting it
+  by hand across a wrapped pretty-printed block. It copies the **raw**
+  cell, like "Copy row" and unlike the pane's rendering of it, and finds
+  that cell through `#detailFields`'s `dataset.pos` rather than a value
+  stashed on the button — a multi-KB payload duplicated into an attribute
+  would put the row in the DOM twice. The button is not a tab stop: forty
+  of them between the pane's own buttons and the note box would bury the
+  keyboard path that exists.
