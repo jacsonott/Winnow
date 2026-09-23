@@ -315,14 +315,28 @@ def test_a_bar_that_fills_in_drills_on_the_row_that_was_clicked(page):
         _wait_folded(page, 1)
         _fill(page)
         canvas = page.locator("#dashGrid canvas.drillable").first
-        bb = canvas.bounding_box()
-        # The last pixel of the THIRD row's band, at the right-hand end of
-        # the card: at the fallback size that point is outside every box
-        # (nothing happens at all), and at the fallback height it belongs
-        # to the fourth row.
-        row_h = max(16, min(30, bb["height"] / 8))
-        canvas.click(position={"x": bb["width"] - 8, "y": row_h * 3 - 1})
+        # The chart's own hit map, not arithmetic over the canvas height:
+        # the bands have padding between them, so a row height derived
+        # from height/rows lands in a gap. The point taken is the middle
+        # of the third bar at the right-hand end of the card — at the
+        # 300x150 fallback that x is past the end of every box, which is
+        # the failure this test is here for.
+        page.wait_for_function(
+            "() => { const c = document.querySelector('#dashGrid canvas.drillable');"
+            " return c && c.bars && c.bars.length >= 3; }", timeout=15_000)
+        spot = page.evaluate(
+            "() => { const c = document.querySelector('#dashGrid canvas.drillable');"
+            " const b = c.bars[2];"
+            " return { x: Math.round(c.clientWidth - 8), y: Math.round(b.y + b.h / 2),"
+            "          label: b.row.label }; }")
+        assert spot["label"] == "H2", spot
+        canvas.click(position={"x": spot["x"], "y": spot["y"]})
         page.wait_for_selector("#dashboardview", state="hidden", timeout=15_000)
+        # The filter is applied after the table has opened, so the grid
+        # settling is what says the drill finished — reading the tree the
+        # moment the board goes away catches drillInto mid-await.
+        page.wait_for_function(
+            "() => __winnow.S.view && __winnow.S.view.row_count === 40", timeout=15_000)
         assert page.evaluate("() => __winnow.S.filterTree")["children"] == [
             {"type": "cond", "column": "Host", "op": "equals", "value": "H2"}]
     finally:

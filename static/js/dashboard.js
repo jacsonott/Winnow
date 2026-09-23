@@ -1309,6 +1309,14 @@ export function paintWidget(w, body, data) {
         boxes = drawBars(canvas, {
           rows: rows.map((r) => ({ label: String(r[0]), value: num(r[r.length - 1]) })),
           label: 'label', value: 'value' }).boxes;
+        // The hit map, hung on the element it belongs to. The click
+        // handler below closes over `boxes`, so where a bar actually is
+        // is otherwise knowable only by redrawing the chart — which is
+        // what a test that reverse-engineers the row height from the
+        // canvas height ends up doing, and why one of them clicked into
+        // the gap between two bars. Same idea as histogram.js's
+        // histogramData(): a read-only window onto what was drawn.
+        canvas.bars = boxes;
       });
       if (w.drill && w.drill.column) {
         canvas.classList.add('drillable');
