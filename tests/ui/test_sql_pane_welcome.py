@@ -183,3 +183,60 @@ def test_a_merge_gets_starters_it_can_actually_run(page):
     # Nothing to count per table when the only source is a merge: counting
     # a merge alongside its members would report the case as larger.
     assert "Rows per table" not in [s["label"] for s in starters]
+
+
+def test_a_left_behind_table_comment_is_not_a_second_table(page, server_post, api, tmp_path):
+    """The comment on line one is there to survive the query being edited
+    into something real — which means the everyday state of the editor is
+    a comment naming one table above a FROM naming another. Scanned for
+    `src_N` with the comment still in it, that query looked like it read
+    two tables, so the result resolved to no row at all: no live Tags
+    column, no row selection, no tag hotkeys, no Ctrl+C on a selection and
+    no double-click into the table, with nothing on screen saying why. The
+    autocomplete widened the same way, offering the commented table's
+    columns beside the real one's.
+    """
+    csv = tmp_path / "gadgets.csv"
+    csv.write_text("When,Gadget\n2026-04-01 00:00:00,widget\n2026-04-01 00:00:01,sprocket\n")
+    before = page.evaluate("() => __winnow.S.sources.length")
+    server_post("/api/ingest/jobs/path", {"path": str(csv)})
+    page.wait_for_function(
+        "(n) => { __winnow.loadSources(); return __winnow.S.sources.length >= n + 1; }",
+        arg=before, timeout=15_000)
+    sid = page.evaluate("() => (__winnow.S.sources.find((s) => s.name === 'gadgets.csv') || {}).id")
+    try:
+        _open_sql(page)
+        ta = page.locator("#sqlText")
+        # Exactly what the analyst is left with after editing the seeded
+        # query's FROM clause and keeping the line that named the file.
+        ta.fill(f"-- ui.csv (src_1)\nSELECT rid, Gadget FROM src_{sid} LIMIT 5;")
+        page.click("#btnRunSql")
+        page.wait_for_function(
+            "() => [...document.querySelectorAll('#sqlResult th')]"
+            ".some((h) => h.textContent === 'Gadget')")
+
+        heads = page.locator("#sqlResult th")
+        assert [heads.nth(i).inner_text() for i in range(heads.count())] == ["rid", "Gadget", "Tags"]
+        assert "tags joined via rid" in page.locator("#sqlResult").inner_text()
+        # And the rows are rows again: clicking one selects it, which is
+        # what the tag hotkeys and Ctrl+C act on.
+        page.locator("#sqlResult tr").nth(1).click()
+        assert page.locator("#sqlResult .sql-row-sel").count() == 1
+
+        # The columns offered are the queried table's, not the comment's.
+        ta.click()
+        ta.fill(f"-- ui.csv (src_1)\nSELECT rid, Gadget FROM src_{sid} WHERE ")
+        ta.type("Ga")
+        page.wait_for_selector(".sql-ac")
+        assert "Gadget" in page.locator(".sql-ac .menu-item").first.inner_text()
+
+        ta.fill(f"-- ui.csv (src_1)\nSELECT rid, Gadget FROM src_{sid} WHERE ")
+        ta.type("Ex")  # ExtremelyLongColumnHeaderName belongs to ui.csv alone
+        items = page.locator(".sql-ac .menu-item")
+        labels = [items.nth(i).inner_text() for i in range(items.count())]
+        assert not any("ExtremelyLong" in t for t in labels), labels
+        page.keyboard.press("Escape")
+    finally:
+        page.evaluate("() => __winnow.showGridTab()")
+        api(f"/api/source/{sid}", "DELETE")
+        page.evaluate("() => __winnow.loadSources()")

@@ -397,7 +397,19 @@ see [docs/notes/README.md](README.md) for the whole set.
     that is that survives the query being edited into something real;
     `run_sql` and `sql_to_table` both tolerate it (the latter wraps the
     query in `SELECT COUNT(*) FROM (...)`, which is why the comment ends
-    in a newline rather than being appended).
+    in a newline rather than being appended). **Everything in
+    `sqlassist.js` that reads a query with a regex reads
+    `sqlStructural()` first** — comments and string literals blanked,
+    lengths preserved, double-quoted names left alone because `FROM
+    "src_2"` is a real reference. The comment says `src_1`, so a query
+    edited to read another table with that line kept — the flow the
+    comment exists for — scanned as two tables, and `sqlRowRef` answered
+    nothing: the result silently lost its live Tags column, row
+    selection, the tag hotkeys, Ctrl+C on a selection and
+    double-click-into-the-table, while the autocomplete offered both
+    tables' columns. It is the same pass `run_sql` makes server-side
+    (`_strip_sql_comments` + `_blank_string_literals`) before its own
+    scan.
   - `sqlStarters()` builds two or three clickable queries **from this
     case's own sources**, never from a canned example — one that names a
     table the analyst doesn't have errors on the first click. Each is

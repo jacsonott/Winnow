@@ -29,8 +29,64 @@ export const quoteIdent = (name) => (/^[A-Za-z_]\w*$/.test(name) ? name : '"' + 
 
 /* ------------------------------------------------------------ suggestions */
 
-function referencedSourceIds(text) {
-  return [...new Set([...text.matchAll(/\bsrc_(\d+)\b/g)].map((m) => Number(m[1])))];
+/* The structural text of a query: comments and string literals blanked,
+   lengths preserved, so an offset into it is still an offset into the
+   query. Everything here that reads a query with a regex reads this and
+   not the raw text.
+
+   It matters because the seeded query now carries a
+   `-- Security.csv (src_1)` comment naming its table (sql.js says why),
+   and the analyst editing the FROM clause into another table and leaving
+   that line behind is the flow the comment exists for. Counted as a
+   reference, the comment made the result look like it read two tables:
+   sqlRowRef gave up, and with it went the live Tags column, row
+   selection, the tag hotkeys, Ctrl+C on a selection and
+   double-click-to-open — silently, with nothing saying why. Literals go
+   the same way: the "Rows per table" starter embeds file names as data,
+   and a case holding `src_2.csv` must not read as a reference to src_2.
+
+   Double-quoted spans are walked but copied through: `FROM "src_2"` is a
+   real table reference, so blanking it would lose the row ref exactly the
+   way the comment did. Same shape and the same reasons as store.py's
+   `_strip_sql_comments` + `_blank_string_literals`, which the server runs
+   before its own scan of a query. */
+function sqlStructural(text) {
+  let out = '';
+  let i = 0;
+  const n = text.length;
+  while (i < n) {
+    const two = text.slice(i, i + 2);
+    if (two === '--' || two === '/*') {
+      const end = two === '--' ? text.indexOf('\n', i) : text.indexOf('*/', i + 2);
+      const stop = end < 0 ? n : (two === '--' ? end : end + 2);
+      out += ' '.repeat(stop - i);
+      i = stop;
+    } else if (text[i] === "'" || text[i] === '"') {
+      const q = text[i];
+      let j = i + 1;
+      while (j < n) {
+        if (text[j] !== q) { j += 1; continue; }
+        if (text[j + 1] === q) { j += 2; continue; } // '' is an escaped quote
+        j += 1;
+        break;
+      }
+      out += q === '"' ? text.slice(i, j) : ' '.repeat(j - i);
+      i = j;
+    } else {
+      out += text[i];
+      i += 1;
+    }
+  }
+  return out;
+}
+
+/* Which tables a query reads, by source id — merges negative, the way
+   S.sources numbers them. */
+function referencedTableIds(text) {
+  const structural = sqlStructural(text);
+  const ids = [...structural.matchAll(/\bsrc_(\d+)\b/g)].map((m) => Number(m[1]));
+  const mids = [...structural.matchAll(/\bmerge_(\d+)\b/g)].map((m) => -Number(m[1]));
+  return { ids: [...new Set(ids)], mids: [...new Set(mids)] };
 }
 
 export function sqlSuggestions(text, word) {
@@ -52,10 +108,9 @@ export function sqlSuggestions(text, word) {
   }
   // Columns from the tables the query mentions; before any table is typed,
   // fall back to the table open in the grid.
-  const ids = [...referencedSourceIds(text),
-               ...[...text.matchAll(/\bmerge_(\d+)\b/g)].map((m) => -Number(m[1]))];
-  const colSources = ids.length
-    ? S.sources.filter((s) => ids.includes(s.id))
+  const { ids, mids } = referencedTableIds(text);
+  const colSources = ids.length || mids.length
+    ? S.sources.filter((s) => ids.includes(s.id) || mids.includes(s.id))
     : S.sources.filter((s) => s.id === S.sourceId);
   for (const s of colSources) {
     for (const c of s.columns || []) {
@@ -246,8 +301,7 @@ export function sqlRowRef(r, sql) {
   if (ridIdx === -1 || !r.rows.length) return null;
   const sidIdx = lower.indexOf('source_id');
   if (sidIdx !== -1) return { ridIdx, sidIdx, sid: null };
-  const ids = referencedSourceIds(sql);
-  const mids = [...sql.matchAll(/\bmerge_(\d+)\b/g)];
+  const { ids, mids } = referencedTableIds(sql);
   if (ids.length === 1 && !mids.length) return { ridIdx, sidIdx: -1, sid: ids[0] };
   return null;
 }
