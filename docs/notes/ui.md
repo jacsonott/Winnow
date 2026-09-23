@@ -1,9 +1,9 @@
 # UI surfaces: menus, filters, settings, tabs, keybindings
 
 Everything in `static/js/` and `static/style.css` that isn't the grid
-itself: the right-click menus, the filter row and its value picker, saved
-filters, the timeframe filter, tab strips and the sidebar, Settings, and
-the keymap.
+itself: the right-click menus, the filter bar (and the classic filter row
+behind a setting) with its value picker, saved filters, the timeframe
+filter, tab strips and the sidebar, Settings, and the keymap.
 
 Part of the working notes split out of [CLAUDE.md](../../CLAUDE.md) —
 see [docs/notes/README.md](README.md) for the whole set.
@@ -586,6 +586,57 @@ see [docs/notes/README.md](README.md) for the whole set.
   copied the polluted defaults back and looked like it did nothing.
   `defaultKeymap()` (a per-action `[...keys]`) is what `loadKeymap` and
   the reset button both go through now.
+- **The filter bar replaced the always-on filter row, and the row is a
+  setting rather than a casualty.** Measured on a seven-table review case:
+  **27 filter boxes on screen, 0 in use** — the emptiest strip in the
+  viewport was also the second heaviest thing in it after the data. The
+  default now is `#filterBar` (`renderFilterBar` in columns.js): one line
+  naming only the filters that exist, as chips carrying column + value and
+  a ✕, plus "+ filter a column…". A column's box appears under its header
+  when the header's `⌕` (`.hcell-filter`), a chip, or that picker asks for
+  it, and folds away again on Enter or Escape. `S.appearance.filterUi`
+  picks the surface and `FILTER_UI_DEFAULT` (settings.js) is the single
+  value that flips which one a fresh install gets; Settings → Appearance's
+  "Always-on filter row" is the analyst's own switch, because typing
+  straight into a column box without looking is the Timeline Explorer
+  reflex and the analysts who have it are not wrong. Five things are
+  decisions:
+  - **The bar lives OUTSIDE `#gridHead`, above `.grid-body`.** Everything
+    inside the head is in the grid's horizontal scroller and sized
+    `width: max-content`, so a strip in there either scrolls its chips out
+    of reach with the columns or needs a width equal to the scrollport —
+    which no CSS length can express from inside a `max-content` box. Out
+    here it is simply as wide as the grid and wraps. The price is that its
+    `hidden` has to be driven: `renderFilterBar` owns all three reasons
+    (classic row on, no table open, a page tab up) and `syncTabChrome`
+    calls it for the same reason it hides the toolbar.
+  - **The row survives under the bar, mostly as empty cells.** A revealed
+    box still has to sit under its own header, so every column keeps an
+    `.fcell` at its own `flex-basis` and only the open ones get an input;
+    the whole row is `hidden` while none is open. Rendering just the one
+    open cell would put it under the gutter.
+  - **The `⌕` is in flow, not on `:hover`.** Hiding it until hover would
+    reflow the header row as the pointer crossed it — the mistake
+    `.fcell-pick` refuses to make. It costs ~13px of every header, which is
+    the charge that got the column-options `▾` removed (see the menus entry
+    above); the trade is different here, since that was a rarely-opened
+    menu and this replaces a whole row of boxes with a row of nothing. A
+    modified click falls through to the header, so Alt-click still pins and
+    Shift-click still adds a sort when the glyph is what got hit.
+  - **An open box is not also a chip.** The box IS that filter while it is
+    being edited; two copies of one filter a keystroke apart is the
+    confusion the bar exists to remove. Which is also why Enter closes the
+    box under the bar and does not under the classic row.
+  - **`setColumnFilter` repaints the bar and nothing else.** It
+    deliberately avoids `renderHead` (that would drop the cell selection
+    its callers — the row menu, `f`, the picker's single-value case — are
+    still acting on), and under the bar the chip is the only place those
+    writes show at all. `S.filterOpen` is transient per table: pruned to
+    the visible columns on every `renderHead`, emptied by `openSource`,
+    `clearViewNarrowing` and `landOnFilters`. `columnFilterChips` covers
+    both spellings a column can be filtered by — the header box's text and
+    the value picker's node in the guided tree — because a bar that showed
+    only one would leave the other invisible.
 - **`.fcell` needs its `min-width: 0`, and it's not tidying.** Giving the
   filter cell `display: flex` (to seat the value picker's ▾ next to the
   input) also made its own automatic minimum size content-based — and a
