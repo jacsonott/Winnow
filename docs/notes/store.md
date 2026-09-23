@@ -13,6 +13,118 @@ see [docs/notes/README.md](README.md) for the whole set.
 
 ---
 
+- The **unified Timeline tab** (`build_timeline`/`fetch_timeline_rows` in
+  store.py, a pinned tab like SQL) unions every *tagged* row across every
+  real source in the case — open or closed, since it's "every finding in
+  the case," not "every finding in an open tab" — into one chronological
+  list: timestamp (via `TS_NORMALIZE`, same function the timeframe filter
+  uses, so tables with different timestamp formats still sort correctly
+  against each other), a "source type" label, and a body joined from a
+  configurable subset of that source's columns with `" | "`. Per-source
+  config (which column is the timestamp, which columns make the body, what
+  to call the type) lives in `workspace.timeline_templates` — keyed by
+  header set like `ColumnLayouts`/`HeaderNicknames`, cross-case on purpose
+  (the "database of headers" that maps a header shape to a source type).
+  store.py can't resolve these itself (can't import workspace.py — see
+  `pop_legacy_presets`), so server.py's `_resolve_timeline_configs` does
+  the header-set matching and hands `build_timeline` a plain `{source_id:
+  {...}}` dict; a source with no matching template still works, falling
+  back to its first datetime column, every column, and its own file name.
+  Same materialize-into-`v.`-then-page-by-pos pattern as `build_view`
+  (invariant #2) — only one timeline view is ever alive at a time, rebuilt
+  (and the old one evicted) on every tag-filter change.
+- The substring-search index (`fts_<id>`) is FTS5 `tokenize='trigram'` over a
+  **single `doc` column** — every column concatenated via the `src_<id>_doc`
+  view (same `_blob_expr` the LIKE fallback scans, so indexed and fallback
+  results are identical by construction) — with `detail=none, columnsize=0`,
+  and it is queried with a bare `doc LIKE ?`, **never MATCH**. Each piece of
+  that shape is measured, not stylistic (332K-row/285MB EvtxECmd source):
+  `detail=none` drops per-occurrence position lists nothing here uses,
+  cutting the index 892MB→143MB (–84%; case files were ~4.2x their source
+  CSVs, now ~1.6x) at the cost of verifying candidates against the real
+  text — so query time scales with *result count*: unchanged for the
+  rare-IOC case, ~0.8s worst-case for a term matching ~all rows. Under
+  `detail=none` a multi-trigram MATCH is a *phrase* query and errors
+  outright ("phrase queries are not supported"); SQLite ≥3.45's trigram
+  LIKE pushdown is the query form instead. Three traps around that
+  pushdown, all verified: it's per-column — a table-level `fts LIKE ?`
+  runs against the hidden table-name column (NULL outside MATCH) and
+  silently returns **0 rows** (why the index is one `doc` column); it only
+  fires for a *bare* `LIKE ?` — adding `ESCAPE` reverts to a full scan —
+  so the pushdown pattern is deliberately unescaped and
+  `_fts_like_pattern()` refuses any term containing `%`/`_` (would match
+  as wildcards = silently-wrong superset), routing it to the escaped
+  blob-LIKE fallback (backslash needs no escape in bare LIKE — Windows
+  paths search fine); and pre-3.45 SQLite has no pushdown at all, so
+  `_ensure_fts_building` no-ops there (LIKE still returns correct rows by
+  scanning — an index would be pure wasted disk). A term under
+  `TRIGRAM_MIN_LEN` (3 chars) or a source whose index isn't built yet
+  falls back the same way, in `_compile_where`/`_advanced_fts_clause`/
+  `search_all_sources`. Building isn't free — `build_fts` is
+  `_ensure_fts_building`'d on a background daemon thread (batched the same
+  BATCH-sized-chunk way `ingest_csv` commits, so it never holds
+  `self.lock` for the whole build) rather than inline, both right after
+  ingest and lazily on a source's first Contains/Advanced search — so
+  browsing and searching both work immediately via the LIKE fallback, and
+  get fast once the build catches up. A case file from an earlier build
+  may have `has_fts=1` pointing at a stale-shape table — the original
+  word-tokenized one, or the first-generation trigram (multi-column,
+  `detail=full`; the doc-LIKE query form would be a SQL error against it);
+  `Store.__init__` detects both from `sqlite_master`'s own CREATE VIRTUAL
+  TABLE text (`'detail=none'` only appears in current-shape DDL), resets
+  `has_fts=0` for the lazy re-upgrade, and drops the stale tables on a
+  background janitor thread (`wait_for_fts_maintenance` in tests) — freed
+  pages go to the freelist for reuse; the file only shrinks under a VACUUM
+  nothing runs automatically.
+- A per-column filter with a **sargable op** (`equals`/`in` — see `SARGABLE_OPS`)
+  lazily gets a plain B-tree index on that `(source_id, column)`, same
+  fire-and-forget background pattern as FTS (`_ensure_column_index_building`
+  parallels `_ensure_fts_building`; the query being compiled still runs the
+  current scan, the *next* application of that filter gets the indexed
+  path). Only `equals`/`in` trigger it — `contains`/`starts` are LIKE
+  patterns a plain index can't accelerate (trigram FTS is the answer for
+  substring search instead), and numeric `>`/`<` go through `_numeric_expr`,
+  a functional expression a plain index on the raw column wouldn't match.
+  `_compile_where` is also where `hide_empty_rows` lands (every column
+  NULL or '' → dropped): a predicate emitted from inside it makes `where`
+  non-empty, which is what keeps an otherwise unfiltered view off the
+  `root_virtual` carve-out — appended to the SQL text after that gate it
+  would silently take the virtual path with every position wrong.
+  This matters a lot more for a **merge**: `build_view` compiles the filter
+  once per member and `UNION ALL`s the results (see `_resolve_members`), so
+  an unindexed sargable filter is a full scan repeated across every member,
+  serially, on the one shared connection. Measured on an 11-member/42 GB
+  merged case where the working set exceeds available RAM: an `EventId`-
+  equals filter went from 6–8s *every* application (never stays cached —
+  each scan touches more distinct pages than fit in the OS/SQLite cache) to
+  ~50ms once indexed. Index name is `idx_<table>_<md5(column)[:12]>` — hashed
+  rather than the raw column name, since a column name is arbitrary CSV-
+  header text and this sidesteps identifier-safety entirely rather than
+  leaning on `q()` for a human-readable name nobody needs to read.
+- Column types are **inferred from a 500-row sample and stored as metadata only**;
+  every value is stored TEXT. Don't "fix" this by typing the columns — mixed-type
+  forensic CSVs then silently coerce, and evidence fidelity matters more than
+  sort elegance. Numeric sorts/filters go through `_numeric_expr()`, not a bare
+  `CAST(... AS REAL)` — SQLite's own CAST silently turns non-numeric text into
+  `0.0`, which is indistinguishable from a genuine zero. `_numeric_expr` gates
+  the cast behind the same regex the ingest-time sampler uses, so a value that
+  doesn't actually look numeric (a stray "N/A", a blank from a ragged row) comes
+  out `NULL` instead — it sorts to one edge and drops out of `>`/`<` filters
+  instead of quietly blending in as real data. Any new numeric comparison/sort
+  should go through this helper, not a raw CAST.
+- Grouping (`group_summary`) buckets a `datetime` column by calendar day via
+  a registered SQL function, `DAY_BUCKET(x)` (Python `_day_bucket`, same
+  ISO/US shapes `DATE_RE` and `tsformat.js`'s `parseTimestamp` already recognize) —
+  otherwise grouping by a full timestamp puts nearly every row in its own
+  group of one. Everywhere a group's *value* gets compared back against raw
+  rows (`expand_group`, `_virtual_group_where`, and therefore tag/export on
+  a group) has to wrap the column in the same `DAY_BUCKET(...)` — that's
+  `_eq_condition`'s `is_datetime` flag, threaded through `_path_where` too
+  for nested-grouping's outer levels. `_eq_condition`/`_path_where` build
+  the alias (`s.`) *inside* the returned fragment now rather than letting
+  the caller string-prepend it — `s.DAY_BUCKET(...)` isn't valid SQL the
+  way `s."col"` is, so a caller that goes back to prepending `s.` onto the
+  result will get a syntax error the moment it hits a datetime column.
 - **`expand_group`'s virtual fast path only applies to an unfiltered
   parent.** `_virtual_group_where` reads straight off the member table with
   nothing but `column = value` (+ the nested path) — it has no view to join
