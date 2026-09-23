@@ -10,6 +10,17 @@ see [docs/notes/README.md](README.md) for the whole set.
 
 ---
 
+- **The histogram strip re-asks; it does not wait to be told.**
+  `/api/histogram` names a view id, and a view is evicted the moment the
+  next rebuild lands — which is what a burst of filter changes is. The
+  409 that comes back was swallowed on the reasoning that "the rebuild's
+  own view change refetches", and it does not: that change fired before
+  the 409 came back. One lost answer and the chart went on describing the
+  previous filter until something else rebuilt the view. It now compares
+  the view the answer was about with the view the grid has and asks again
+  when they differ, bounded so that a view that is current and keeps
+  failing is re-asked a few times rather than polled.
+
 - **A background refresh must not navigate.** `loadSources()` re-opens
   the current source as a side effect of picking a tab, and `openSource()`
   switches to the grid and resets that source's filters and search. That
