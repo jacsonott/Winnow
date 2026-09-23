@@ -198,11 +198,16 @@ def test_a_left_behind_table_comment_is_not_a_second_table(page, server_post, ap
     """
     csv = tmp_path / "gadgets.csv"
     csv.write_text("When,Gadget\n2026-04-01 00:00:00,widget\n2026-04-01 00:00:01,sprocket\n")
-    before = page.evaluate("() => __winnow.S.sources.length")
     server_post("/api/ingest/jobs/path", {"path": str(csv)})
+    # Poll the server, then load once. A no-argument loadSources()
+    # navigates — it opens whichever table it settles on and switches to
+    # the grid — so calling it from the poll left several in flight, and
+    # one of them landed after the SQL page had been opened and pulled the
+    # app back to the grid under it.
     page.wait_for_function(
-        "(n) => { __winnow.loadSources(); return __winnow.S.sources.length >= n + 1; }",
-        arg=before, timeout=15_000)
+        "() => fetch('/api/sources').then((r) => r.json())"
+        ".then((s) => s.some((x) => x.name === 'gadgets.csv'))", timeout=15_000)
+    page.evaluate("() => __winnow.loadSources()")
     sid = page.evaluate("() => (__winnow.S.sources.find((s) => s.name === 'gadgets.csv') || {}).id")
     try:
         _open_sql(page)
@@ -228,7 +233,13 @@ def test_a_left_behind_table_comment_is_not_a_second_table(page, server_post, ap
         ta.fill(f"-- ui.csv (src_1)\nSELECT rid, Gadget FROM src_{sid} WHERE ")
         ta.type("Ga")
         page.wait_for_selector(".sql-ac")
-        assert "Gadget" in page.locator(".sql-ac .menu-item").first.inner_text()
+        # Offered, not necessarily on top: the file is called gadgets.csv,
+        # so the TABLE matches "Ga" as well, and which of the two a ranking
+        # puts first is not what this test is about. Each item renders its
+        # label on one line and its kind on the next.
+        items = page.locator(".sql-ac .menu-item")
+        labels = [items.nth(i).inner_text() for i in range(items.count())]
+        assert any(t.splitlines()[0] == "Gadget" for t in labels), labels
 
         ta.fill(f"-- ui.csv (src_1)\nSELECT rid, Gadget FROM src_{sid} WHERE ")
         ta.type("Ex")  # ExtremelyLongColumnHeaderName belongs to ui.csv alone
