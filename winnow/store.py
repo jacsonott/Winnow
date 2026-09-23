@@ -5409,6 +5409,48 @@ class Store:
         failures = sum(1 for v in samples if op["parse"](v, params, state) is None)
         return {"preview": preview, "sampled": len(samples), "failures": failures}
 
+    def preview_regex_groups(self, source_id: int, column: str, pattern: str,
+                             limit: int = 3) -> dict:
+        """The named groups a pattern declares, each with a few of the
+        values it would pull out of this column.
+
+        One pattern over one column is usually N columns of intent — an
+        IIS line is a method, a path, a status and a time — and deriving
+        them one at a time meant writing the same regex four times, each
+        with a different group number, and four full scans of the table.
+        This is what the "a column per named group" offer is built from:
+        the names in the order they open, the sample values under each, and
+        how much of the sample the pattern matched at all, so the analyst
+        can see the pattern is right before committing to a backfill.
+
+        Sampling is the same `_sample_column` every other preview uses (so
+        a merge previews against its first member, as they all do), and the
+        work is pure Python over those values — no new query shape."""
+        names = structparse.regex_group_names(pattern)
+        if source_id < 0:
+            source_id = self._resolve_members(source_id)[0]["source_id"]
+        src = self._source_lite(source_id)
+        if self._find_column(src, column) is None:
+            raise KeyError(column)
+        samples = self._sample_column(src, column)
+        rx = re.compile(pattern)
+        matched = 0
+        found: dict[str, list[str]] = {n: [] for n in names}
+        for value in samples:
+            m = rx.search(str(value))
+            if m is None:
+                continue
+            matched += 1
+            for n in names:
+                got = m.group(n)
+                if got is not None and len(found[n]) < limit:
+                    found[n].append(got)
+        return {
+            "groups": [{"name": n, "samples": found[n]} for n in names],
+            "sampled": len(samples),
+            "matched": matched,
+        }
+
     # ------------------------------------------------------------ case settings
 
     def get_case_settings(self) -> dict:

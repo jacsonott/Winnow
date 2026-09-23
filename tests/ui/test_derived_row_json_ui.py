@@ -14,9 +14,9 @@ pytestmark = pytest.mark.ui
 def test_row_as_json_prefills_every_column_and_lands_in_the_grid(page):
     page.evaluate("() => __winnow.openDerivedColumnModal('Host')")
     page.wait_for_selector("#modal:not([hidden])")
-    page.locator("#modalBody select").nth(0).select_option(label="Combine columns")
+    page.locator("#modalBody select[data-role=type]").select_option(label="Combine columns")
     page.wait_for_timeout(150)
-    page.locator("#modalBody select").nth(2).select_option(label="Row as JSON")
+    page.locator("#modalBody select[data-role=op]").select_option(label="Row as JSON")
     page.wait_for_timeout(200)
     assert page.locator(".derived-name").input_value() == "Row as JSON"
     chips = [c.replace("✕", "").strip() for c in page.locator(".derived-columns .fb-groupby-chip").all_inner_texts()]

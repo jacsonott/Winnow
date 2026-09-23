@@ -529,7 +529,7 @@ export async function openDerivedColumnModal(prefill, editing) {
               if (other.type === 'lookup_column') delete state.params[other.name];
             }
             buildParams();
-            refreshPreview();
+            refreshBoth();
           });
         } else if (spec.type === 'lookup_column') {
           // A column OF THE CHOSEN LOOKUP TABLE, not of the open one.
@@ -556,7 +556,7 @@ export async function openDerivedColumnModal(prefill, editing) {
           const existingBool = state.params[spec.name];
           input.checked = existingBool === true || existingBool === 'true' || (existingBool == null && spec.default === true);
           state.params[spec.name] = input.checked;
-          input.onchange = () => { state.params[spec.name] = input.checked; refreshPreview(); };
+          input.onchange = () => { state.params[spec.name] = input.checked; refreshBoth(); };
           row.classList.add('derived-param-bool');
           row.append(input);
           if (spec.help) row.append(el('span', 'fb-help derived-param-help', spec.help));
@@ -585,7 +585,7 @@ export async function openDerivedColumnModal(prefill, editing) {
               const rm = el('button', 'fb-groupby-rm', '✕');
               rm.type = 'button';
               rm.title = `Stop reading ${name}`;
-              rm.onclick = () => { chosen.splice(i, 1); paint(); refreshPreview(); };
+              rm.onclick = () => { chosen.splice(i, 1); paint(); refreshBoth(); };
               chip.append(rm);
               input.append(chip);
             });
@@ -595,7 +595,7 @@ export async function openDerivedColumnModal(prefill, editing) {
               if (c.name === state.column || c.name === state.name || chosen.includes(c.name)) continue;
               add.append(new Option(c.name, c.name));
             }
-            add.onchange = () => { if (add.value) { chosen.push(add.value); paint(); refreshPreview(); } };
+            add.onchange = () => { if (add.value) { chosen.push(add.value); paint(); refreshBoth(); } };
             input.append(add);
           };
           paint();
@@ -614,12 +614,109 @@ export async function openDerivedColumnModal(prefill, editing) {
         else if (spec.type === 'int' && spec.name === 'base_year') input.value = new Date().getFullYear();
         else if (spec.type === 'lookup_source' && input.options.length) input.value = input.options[0].value;
         state.params[spec.name] = input.value;
-        input.oninput = () => { state.params[spec.name] = input.value; refreshPreview(); };
-        input.onchange = () => { state.params[spec.name] = input.value; refreshPreview(); };
+        input.oninput = () => { state.params[spec.name] = input.value; refreshBoth(); };
+        input.onchange = () => { state.params[spec.name] = input.value; refreshBoth(); };
         row.append(input);
         if (spec.help) row.append(el('span', 'fb-help derived-param-help', spec.help));
         paramBox.append(row);
       }
+    }
+
+    /* ------------------------------------------- regex named groups
+
+       One pattern over one column is usually several columns of intent —
+       an IIS line is a method, a path, a status and a time. Deriving them
+       one at a time meant writing the same regex once per field, each
+       with a different group number, and a full scan of the table for
+       each. When the pattern names its groups, they are offered as a
+       batch: one scan, N columns, all-or-nothing (the same
+       /api/derived/batch the JSON flatten picker uses).
+
+       Each column is an ordinary regex_extract definition carrying
+       `group_name`, not a slice of some new multi-output op — so it
+       re-derives, exports and lives in a session exactly like a
+       hand-made one, and a name survives the pattern being edited
+       around it in a way a group number does not. */
+    const groupsBox = el('div', 'derived-groups');
+    const groupsNote = el('div', 'fb-help bad');
+    let nameRow = null;       // the single-column name row, hidden while a batch is ticked
+    let groups = [];          // [{name, samples, use, colName}]
+    let groupsSeq = 0;
+
+    function groupsWanted() {
+      return groups.filter((g) => g.use);
+    }
+    function takenNames() {
+      return new Set(S.columns.map((c) => c.name.toLowerCase()));
+    }
+    function groupsProblem() {
+      const wanted = groupsWanted();
+      const taken = takenNames();
+      const seen = new Set();
+      for (const g of wanted) {
+        const n = (g.colName || '').trim();
+        if (!n) return 'Every column needs a name.';
+        if (taken.has(n.toLowerCase())) return `This table already has a column called “${n}”.`;
+        if (seen.has(n.toLowerCase())) return `Two of these are both called “${n}”.`;
+        seen.add(n.toLowerCase());
+      }
+      return null;
+    }
+
+    function renderGroups(note) {
+      groupsBox.replaceChildren();
+      if (note) groupsBox.append(el('div', 'fb-help', note));
+      if (!groups.length) { syncGo(); return; }
+      const n = groups.length;
+      groupsBox.append(el('div', 'derived-groups-title',
+        `This pattern names ${n} group${n === 1 ? '' : 's'} — make a column for each?`));
+      for (const g of groups) {
+        const row = el('div', 'derived-group-row');
+        const cb = el('input');
+        cb.type = 'checkbox';
+        cb.checked = g.use;
+        cb.onchange = () => { g.use = cb.checked; syncGo(); };
+        const name = el('input', 'derived-group-name');
+        name.value = g.colName;
+        name.oninput = () => { g.colName = name.value; syncGo(); };
+        const lab = el('label', 'derived-group-pick');
+        lab.append(cb, el('span', 'derived-group-key', g.name));
+        row.append(lab, name);
+        row.append(el('span', 'derived-group-samples',
+          g.samples.length ? g.samples.join(' · ') : '(nothing matched)'));
+        groupsBox.append(row);
+      }
+      syncGo();
+    }
+
+    async function refreshGroups() {
+      const seq = ++groupsSeq;
+      if (opSelect.value !== 'regex_extract' || !(state.params.pattern || '').trim()) {
+        groups = [];
+        renderGroups(null);
+        return;
+      }
+      let res;
+      try {
+        res = await post('/api/derived/regex_groups', {
+          source_id: S.sourceId, column: state.column, pattern: state.params.pattern,
+        });
+      } catch {
+        if (seq !== groupsSeq) return;
+        groups = [];
+        renderGroups(null);   // the preview below already says what is wrong with the pattern
+        return;
+      }
+      if (seq !== groupsSeq) return;
+      const before = new Map(groups.map((g) => [g.name, g]));
+      groups = res.groups.map((g) => {
+        const had = before.get(g.name);
+        return { name: g.name, samples: g.samples, use: had ? had.use : true,
+                 colName: had ? had.colName : g.name };
+      });
+      renderGroups(groups.length && res.matched === 0
+        ? 'The pattern matched none of the sampled values — the columns would all be empty.'
+        : null);
     }
 
     let previewSeq = 0;
@@ -654,6 +751,11 @@ export async function openDerivedColumnModal(prefill, editing) {
           : `All ${res.sampled.toLocaleString()} sampled values parse.`));
     }
 
+    /* The preview and the named-group offer answer the same edits — the
+       pattern, the column, the operation — so they refresh together. The
+       group probe no-ops unless the operation is the regex one. */
+    function refreshBoth() { refreshPreview(); refreshGroups(); }
+
     async function pickColumn(name) {
       state.column = name;
       if (!editing) {
@@ -683,7 +785,7 @@ export async function openDerivedColumnModal(prefill, editing) {
         suggestNote.textContent = editing ? '' : "No format detected — pick one below to see what it produces.";
       }
       buildParams();
-      refreshPreview();
+      refreshBoth();
     }
 
     colSelect.onchange = () => pickColumn(colSelect.value);
@@ -694,28 +796,43 @@ export async function openDerivedColumnModal(prefill, editing) {
       // current until the analyst has typed a name of their own.
       if (!editing && !nameTouched) { nameInput.value = defaultName(); state.name = nameInput.value; }
       buildParams();
-      refreshPreview();
+      refreshBoth();
     }
     opSelect.onchange = onOpChanged;
     // Switching type repopulates the op list, then behaves like an op change.
     typeSelect.onchange = () => { fillOpSelect(typeSelect.value); onOpChanged(); };
     nameInput.oninput = () => { nameTouched = true; state.name = nameInput.value; };
 
-    // Type before the column: "what am I making" is the question the
-    // analyst arrives with, and it decides what the column list means
-    // (a timestamp to parse, a document to extract from, the first of
-    // several to combine). The format suggestion still runs off the
-    // column pick and moves Type on its own when it finds something.
+    // What am I making, how, and from what. Type first because it is the
+    // question the analyst arrives with and it decides what the operation
+    // list holds; the operation next because it decides what the column
+    // list *means* (a timestamp to parse, a document to extract from, the
+    // first of several to combine); the column last, right above the
+    // parameters that read it and the preview of what it produces.
+    //
+    // The format suggestion still runs off the column pick, so it can
+    // move the two above it — shown rather than applied once the analyst
+    // has chosen an operation of their own (see pickColumn).
+    //
+    // The three carry data-role because tests used to address them by
+    // position, which is the wrong handle for a row that can be reordered
+    // — this reorder is what proved it.
+    typeSelect.dataset.role = 'type';
+    opSelect.dataset.role = 'op';
+    colSelect.dataset.role = 'column';
     body.append(labeledRow('Type', typeSelect));
+    body.append(labeledRow('Operation', opSelect));
     body.append(labeledRow('Parse column', colSelect));
     body.append(suggestNote);
-    body.append(labeledRow('Operation', opSelect));
     body.append(paramBox);
     if (!editing) {
       nameInput.value = defaultName();
       state.name = nameInput.value;
-      body.append(labeledRow('New column name', nameInput));
+      nameRow = labeledRow('New column name', nameInput);
+      body.append(nameRow);
     }
+    body.append(groupsBox);
+    body.append(groupsNote);
     body.append(el('div', 'derived-preview-title', 'Preview'));
     body.append(previewBox);
 
@@ -728,20 +845,55 @@ export async function openDerivedColumnModal(prefill, editing) {
       opSelect.disabled = true;
       api(`/api/derived?source_id=${S.sourceId}`).then((defs) => {
         const d = defs.find((x) => x.id === editing.derived_id);
-        if (d) { state.params = Object.assign({}, d.params); buildParams(); refreshPreview(); }
+        if (d) { state.params = Object.assign({}, d.params); buildParams(); refreshBoth(); }
       }).catch(() => {});
       buildParams();
-      refreshPreview();
+      refreshBoth();
     } else {
       pickColumn(state.column);
     }
 
     const actions = el('div', 'row-actions');
     const go = el('button', 'btn', editing ? 'Re-derive' : 'Add column');
+    /* The one place the button's label, its enabled state and the single
+       name field agree about what is being made: one column, or the
+       ticked named groups. Declared after `go` and called from the group
+       handlers above — the modal builder runs top to bottom, so nothing
+       calls it before it exists. */
+    function syncGo() {
+      const wanted = editing ? [] : groupsWanted();
+      const problem = wanted.length ? groupsProblem() : null;
+      go.textContent = editing ? 'Re-derive'
+        : (wanted.length ? `Add ${wanted.length} column${wanted.length === 1 ? '' : 's'}` : 'Add column');
+      go.disabled = !!problem;
+      go.title = problem || '';
+      // One column's name is beside the point when several are being made.
+      if (nameRow) nameRow.hidden = !editing && wanted.length > 0;
+      groupsNote.textContent = problem || '';
+    }
     go.onclick = async () => {
       go.disabled = true;
       try {
         let res;
+        const batch = editing ? [] : groupsWanted();
+        if (batch.length) {
+          // One scan, N columns, all-or-nothing — a name collision in the
+          // fourth spec fails before the first column exists, rather than
+          // leaving three behind to clean up (add_derived_columns).
+          await post('/api/derived/batch', {
+            source_id: S.sourceId,
+            columns: batch.map((g) => ({
+              name: g.colName.trim(), input_column: state.column, op_id: 'regex_extract',
+              params: { pattern: state.params.pattern, group_name: g.name },
+            })),
+          });
+          $('modal').hidden = true;
+          await loadSources();
+          await openSource(S.sourceId);
+          startJobsPoll();
+          toast(`Adding ${batch.length} column${batch.length === 1 ? '' : 's'}…`);
+          return;
+        }
         if (editing) {
           res = await post(`/api/derived/${editing.derived_id}/rederive`, { params: state.params });
         } else {

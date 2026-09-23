@@ -8,6 +8,20 @@ see [docs/notes/README.md](README.md) for the whole set.
 
 ---
 
+- **A regex derive addresses its group by NAME where the pattern names
+  one.** `regex_extract` takes `group_name` alongside the numbered
+  `group`, and the name wins. This is not a nicety: a pattern gets edited
+  — a group added in the middle, an alternation widened — and every
+  numbered definition after the edit quietly starts keeping a different
+  field, with no error and no sign on screen. The name does not move.
+  `(?P<name>…)` is Python's spelling, not JavaScript's, so the names are
+  discovered server-side (`/api/derived/regex_groups`) rather than parsed
+  out of the pattern in the browser, and the same route samples the
+  column so each offered column shows what it would actually pull. The
+  columns are created through the existing batch route — one scan, N
+  columns, all-or-nothing — which is the same machinery the JSON flatten
+  picker uses.
+
 - **Derived columns** (`timeparse.py`, `derived_columns`/`drv_<id>` tables,
   `/api/derived/*`, the column header's right-click menu's "Add datetime column from
   this…") let an analyst add a *computed* datetime column from one that's
