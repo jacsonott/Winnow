@@ -164,11 +164,12 @@ def clean_plugin_tab_state(server_post):
 # for several seconds, which every click in every test would otherwise
 # wait out. test_first_run_prompt.py and test_splash.py build their own
 # contexts without this.
-# `pagesMenu: false` for the same reason as the sidebar below: the Pages
-# dropdown is the default now, and most tests predate it and click the
-# individual #tabSql/#tabTimeline nodes it hides. The shared context
-# models an analyst who expanded the strip; the default itself is
-# covered by tests/ui/test_pages_dropdown.py, which turns it back on.
+# `pagesMenu: false` is also the default now (it was on for a while, and
+# most tests here predate that and click the individual #tabSql/#tabTimeline
+# nodes it hides). Stated explicitly rather than left to the default: these
+# tests want the expanded strip whatever the default becomes next. The
+# dropdown itself is covered by tests/ui/test_pages_dropdown.py, which
+# turns it on for its own module.
 # A test that builds its own context to seed something more takes the
 # `first_run_init` fixture and appends to this, so the seed stays one.
 FIRST_RUN_INIT = ("localStorage.setItem('winnow.remotePrompt', 'seen');"

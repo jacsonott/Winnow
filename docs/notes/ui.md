@@ -287,6 +287,27 @@ see [docs/notes/README.md](README.md) for the whole set.
     (`dataset.dragWired`): the two reused ones would otherwise accumulate
     a listener set per render, and one drop would then apply the same
     reorder once per set.
+  - **The pages are compact, and each badge sits on the page it counts.**
+    A walk with eight tables open found the table strip overflowing
+    (1,212px of tabs in 1,171px) and the page strip collapsed to one 83px
+    button reading "SQL" with a "99+" badge on it — where the 99+ counted
+    *watchlist* hits. Two things follow from that. The page tabs render in
+    the SQL sub-tab register (`.page-tabs .tab-sql`: mono, 11px, tight
+    padding, no rules between them), which took the four of them from
+    300px to 238px and handed the difference to the tables; a glyph per
+    page was tried and dropped, since a glyph plus its gap costs more than
+    the padding saves. And `pagesMenu` ("Pages as a dropdown") is OFF by
+    default now — four labelled pages that are always there beat one
+    button that is not, and the preference stays for a case carrying
+    enough plugin or pinned-dashboard tabs that the strip really is the
+    problem it was added for. **In the collapsed mode the badge does not
+    follow the button**, which is labelled with whichever page is up and
+    therefore owns none of these numbers: `paintWatchlistBadge` gives it
+    an ownerless dot (the sentence goes in the button's own `title`, since
+    a dot has nothing to announce) and the count itself rides the Watchlist
+    row inside the menu, via `menuItemNode`'s `badge` slot. The strip is
+    still what scrolls when a case has too many tables for it — this buys
+    room, it does not remove the limit. tests/ui/test_page_tabs_badges.py.
   - Order and divider position persist in `localStorage`
     (`winnow.pagetabs`), unlike `S.tabOrder`, which is in-memory and
     resets per case. "SQL" means the same thing in every case, and a

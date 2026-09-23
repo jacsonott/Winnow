@@ -1,10 +1,12 @@
-"""The Pages dropdown, on by default and sized to the page it names.
+"""The Pages dropdown, sized to the page it names.
 
-The page strip and the table strip share one bar. With a few plugin tabs
-on, the strip wins width the tables needed, which is why the dropdown
-exists — so it is what a fresh install gets. Collapsed, the strip IS one
-button whose label is the page that is up, so it has to size to that
-label rather than to a width dragged for the expanded strip.
+The page strip and the table strip share one bar, which is why the
+dropdown exists: a case with several plugin or pinned-dashboard tabs wins
+width the tables needed. It is no longer the default — the compact strip
+is (see test_page_tabs_badges.py) — but it stays a choice, so this file
+turns it on for itself. Collapsed, the strip IS one button whose label is
+the page that is up, so it has to size to that label rather than to a
+width dragged for the expanded strip.
 """
 
 from __future__ import annotations
@@ -24,8 +26,8 @@ def _width(page):
 
 @pytest.fixture(autouse=True)
 def dropdown_on(page):
-    """The shared context expands the strip (see tests/ui/conftest.py), so
-    this file turns the real default back on for itself."""
+    """The strip is expanded by default now, so this file turns the
+    preference on for itself and puts it back afterwards."""
     page.evaluate("""() => { __winnow.S.appearance.pagesMenu = true;
       __winnow.S.pageTabPrefs.width = null;
       __winnow.renderPageTabs(); __winnow.applyPageTabsSize(); }""")
@@ -35,9 +37,12 @@ def dropdown_on(page):
       __winnow.renderPageTabs(); __winnow.applyPageTabsSize(); }""")
 
 
-def test_a_fresh_install_gets_the_dropdown(page):
-    assert page.evaluate("() => __winnow.defaultAppearance().pagesMenu") is True
-    assert _pages_btn(page).count() == 1
+def test_a_fresh_install_gets_the_strip_not_the_dropdown(page):
+    """Flipped deliberately: four labelled pages that are always there beat
+    one button that is not, now that the strip is compact enough to afford
+    them. The preference itself still collapses the strip."""
+    assert page.evaluate("() => __winnow.defaultAppearance().pagesMenu") is False
+    assert _pages_btn(page).count() == 1   # this file's fixture turned it on
 
 
 def test_the_button_names_the_page_that_is_up(page):

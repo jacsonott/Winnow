@@ -57,11 +57,16 @@ export function defaultAppearance() {
     // this therefore reads as on, which is what a new feature should do for
     // someone who has never seen the switch.
     splash: true,
-    // Same rule. The strip competes with the table tabs for one bar, and
-    // loses badly once a few plugin tabs are on — the dropdown hands that
-    // width back and is the better default for everyone who has not
-    // deliberately chosen otherwise.
-    pagesMenu: true,
+    // OFF by default: the strip is compact enough now (mono, 11px, no
+    // rules between the pages — see .page-tabs .tab-sql) that it costs the
+    // table tabs about 60px, and four labelled pages that are always there
+    // beat one button that is not. Collapsed, that button is labelled with
+    // whichever page is up, which is what let the Watchlist's hit count
+    // end up reading as SQL's. The preference stays, for a case carrying
+    // enough plugin tabs that the strip really is the problem it was
+    // added for — there it collapses, and the count moves into the menu
+    // with the page that owns it.
+    pagesMenu: false,
     // Off unless turned on: a finished import updates the tab strip and
     // leaves the analyst where they are (see jobs.js). On, the first table
     // of an import batch to finish opens; the rest land quietly.
@@ -763,9 +768,10 @@ export function openSettings() {
     paintSplashNote();
     secLook.append(splashNote);
 
-    /* Pages as one dropdown: with several plugin tabs the page strip
-       competes with the table tabs for the bar — collapsing it to a single
-       Pages ▾ button (like Filters ▾) hands that width back. */
+    /* Pages as one dropdown: the compact strip is the default, but a case
+       with several plugin or pinned-dashboard tabs still competes with the
+       table tabs for one bar — collapsing it to a single Pages ▾ button
+       (like Filters ▾) hands that width back. */
     const pagesLabel = el('label', 'check-row');
     const pagesCb = el('input');
     pagesCb.type = 'checkbox';
@@ -779,7 +785,8 @@ export function openSettings() {
     pagesLabel.append(pagesCb, el('span', null, 'Pages as a dropdown'));
     secLook.append(pagesLabel);
     secLook.append(el('p', 'fb-help',
-      'Collapse SQL, Timeline, Notes, Watchlist and plugin tabs into one Pages \u25be button, the way Filters \u25be works.'));
+      'Collapse SQL, Timeline, Notes, Watchlist and plugin tabs into one Pages \u25be button, the way Filters \u25be works. '
+      + 'Buys the table tabs the strip\u2019s width; the pages themselves, and their counts, then live in that button\u2019s menu.'));
 
     /* Imports: how a finished import behaves. A machine preference like
        the look (per browser, mirrored to the machine), not case data. */
