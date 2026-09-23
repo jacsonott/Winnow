@@ -20,10 +20,12 @@ import { modal } from './ui.js';
    side does the real work (build_timeline unions each source's tagged
    rows, using workspace.timeline_templates — see loadTimelineTemplates
    below and openTimelineSourceConfig — to pick that source's timestamp
-   column, body columns, and a human "source type" label); this is just
-   the tab UI plus a small virtualized list, same translateY-window
-   technique as the main grid's render(), simplified since a row here is
-   always exactly three fixed fields (ts/type/body), never per-column. */
+   column, body columns, and a human "source type" label, and
+   defaults/headers.json to summarise the row for its artefact shape);
+   this is just the tab UI plus a small virtualized list, same
+   translateY-window technique as the main grid's render(), simplified
+   since a row here is always exactly three fixed fields (ts/type/body),
+   never per-column. */
 
 export async function loadTimelineTemplates() {
   try { S.timelineTemplates = await api('/api/timeline_templates'); } catch { S.timelineTemplates = []; }
@@ -59,6 +61,10 @@ export async function buildTimeline() {
   if (S.timeline.tagFilter === null) S.timeline.tagFilter = S.tags.map((t) => t.id);
   S.timeline.pages.clear();
   S.timeline.pending.clear();
+  // Which rows are showing their raw text is per-build state: the rows a
+  // rebuild brings back are a different set, and a Set that outlived every
+  // build would grow for the life of the tab.
+  S.timeline.raw.clear();
   const reqId = ++S.timeline.reqId;
   if (!S.timeline.tagFilter.length) {
     // Every tag unchecked -> nothing can match; skip the round trip and
@@ -147,13 +153,49 @@ export function renderTimelineRows() {
       badge.title = r.source_name;
       typeCell.append(badge);
     }
-    const bodyCell = el('div', 'tl-col-body', r ? r.body : '');
-    if (r) bodyCell.title = r.body;
+    const bodyCell = el('div', 'tl-col-body');
+    if (r) fillTimelineBody(bodyCell, r);
     row.append(tsCell, typeCell, bodyCell);
     if (r) row.onclick = () => jumpToTimelineRow(r.source_id, r.rid);
     frag.append(row);
   }
   rowsEl.replaceChildren(frag);
+}
+
+/* The Body cell. The server sends both halves of the row (see
+   build_timeline): `lead`/`detail` are the summary for this artefact
+   shape — "Special privileges assigned  svc_backup · WKSTN-4471 · id
+   4672" — and `body` is the whole source row pipe-joined, which is all
+   there is for a CSV no shipped shape describes.
+
+   The raw row is never more than a gesture away: it's the cell's title
+   on every row, "raw" swaps the cell's text for it, and clicking the row
+   still opens that row in its own table. What "raw" deliberately does
+   NOT do is expand the row — every row in this list is exactly ROW_H
+   tall and the virtualized window's arithmetic (first, visible,
+   translateY) is built on that, so a row that grew would paint over its
+   neighbour and put every row below it at the wrong offset. */
+export function fillTimelineBody(cell, r) {
+  cell.title = r.body;
+  const summarised = !!(r.lead || r.detail);
+  const key = `${r.source_id}:${r.rid}`;
+  const showRaw = !summarised || S.timeline.raw.has(key);
+  if (showRaw) {
+    cell.append(el('span', 'tl-raw', r.body));
+  } else {
+    if (r.lead) cell.append(el('span', 'tl-lead', r.lead));
+    if (r.detail) cell.append(el('span', 'tl-detail', r.detail));
+  }
+  if (!summarised) return; // nothing to swap to — the body already IS the raw row
+  const btn = el('button', 'tl-raw-toggle', showRaw ? 'summary' : 'raw');
+  btn.title = showRaw ? 'Show the summary' : 'Show the raw row';
+  btn.setAttribute('aria-pressed', String(showRaw));
+  btn.onclick = (e) => {
+    e.stopPropagation(); // clicking the row itself jumps to it in its table
+    if (showRaw) S.timeline.raw.delete(key); else S.timeline.raw.add(key);
+    renderTimelineRows();
+  };
+  cell.append(btn);
 }
 
 export async function jumpToTimelineRow(sourceId, rid) {
@@ -178,7 +220,9 @@ export function openTimelineSourceConfig() {
     b.append(el('p', null,
       'Per header set, reused across cases: which column is the timestamp, which columns (in the order '
       + 'checked) make up the body, and what to call this source type. A table with no matching config '
-      + 'here falls back to its first datetime column, every column, and its own file name.'));
+      + 'here falls back to its first datetime column and its own file name, and its body reads as the '
+      + 'summary Winnow ships for that artefact shape — or, for a shape it does not know, every column '
+      + 'joined. Checking body columns here replaces that summary with exactly what you check.'));
 
     const list = el('div', 'session-list');
     b.append(list);

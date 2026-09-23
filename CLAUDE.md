@@ -193,10 +193,12 @@ plasoread.py       Plaso storage (.plaso) reading for import — both on-disk
                     ops can lift fields out of. Stdlib only.
 defaults/          The defaults Winnow ships, as JSON rather than Python:
                     headers.json names the header sets common tools emit
-                    (EvtxECmd, MFTECmd, Amcache, ...); filters.json is a
-                    working analyst's Timeline Explorer triage set as filter
-                    trees. Both are seeded once into workspace/ by
-                    ensure_seeded, where they become ordinary records —
+                    (EvtxECmd, MFTECmd, Amcache, ...) and, per set, how to
+                    say one of its rows in a line (the `summary` block the
+                    Timeline reads — see docs/notes/store.md);
+                    filters.json is a working analyst's Timeline Explorer
+                    triage set as filter trees. Both are seeded once into
+                    workspace/ by ensure_seeded, where they become ordinary records —
                     analyst renames and deletes always win. A filter names
                     its header set and __init__.py resolves it, so the two
                     cannot describe different columns; an unresolvable name

@@ -29,10 +29,41 @@ see [docs/notes/README.md](README.md) for the whole set.
   `pop_legacy_presets`), so server.py's `_resolve_timeline_configs` does
   the header-set matching and hands `build_timeline` a plain `{source_id:
   {...}}` dict; a source with no matching template still works, falling
-  back to its first datetime column, every column, and its own file name.
+  back to its first datetime column, its own file name, and the summary
+  for its artefact shape (next entry) or every column joined.
   Same materialize-into-`v.`-then-page-by-pos pattern as `build_view`
   (invariant #2) — only one timeline view is ever alive at a time, rebuilt
   (and the old one evicted) on every tag-filter change.
+- **A Timeline row leads with what happened, not with the source row.**
+  Beside `body` (still the pipe-joined columns, unchanged) each row
+  carries `summary_lead`/`summary_detail` — "Special privileges assigned"
+  plus "svc_backup · WKSTN-4471 · id 4672" — built in the same INSERT by
+  the `TL_LEAD`/`TL_DETAILS` SQL functions from the artefact shape's
+  `summary` block in `defaults/headers.json`. Things worth knowing before
+  touching it:
+  - The shape is matched by `_timeline_summary_template` the way every
+    other header-set binding here is (`_sources_for_header_set`): the
+    source's **own imported columns** must CONTAIN the set's, so a derived
+    column the analyst added can't cost a table its summary, and the most
+    specific match wins.
+  - **The timestamp column is removed from the summary at build time**
+    (`_timeline_summary_exprs`), against the column the Timeline is
+    actually reading — a template can't know about an override or a
+    derived timestamp. Repeating the column immediately to the left is
+    what made the old body unreadable; don't reintroduce it by hardcoding
+    a template's ts column instead.
+  - **A shape with no template renders exactly the old join**, as does a
+    source whose body columns the analyst picked by hand in Configure
+    sources — an explicit choice outranks a shipped default.
+  - `TL_LEAD`/`TL_DETAILS` are registered on the **writer only**, unlike
+    `DAY_BUCKET`/`TS_NORMALIZE`: they only ever appear in the timeline
+    INSERT, never in a stored view's WHERE that a reader re-runs.
+  - Both halves are squashed to one line and capped (`TL_LEAD_MAX`,
+    `TL_DETAIL_MAX`). A Timeline row is exactly one `--row-h` tall, and a
+    Payload with newlines in it or a 4KB command line would otherwise own
+    the whole cell. The raw row stays reachable: it's the cell's `title`
+    and the per-row "raw" toggle (`fillTimelineBody` in timeline.js), and
+    clicking the row still opens it in its own table.
 - The substring-search index (`fts_<id>`) is FTS5 `tokenize='trigram'` over a
   **single `doc` column** — every column concatenated via the `src_<id>_doc`
   view (same `_blob_expr` the LIKE fallback scans, so indexed and fallback

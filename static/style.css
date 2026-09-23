@@ -1244,6 +1244,23 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .timeline-row .tl-col-body {
   font-family: var(--mono); font-size: 12px; white-space: nowrap; text-overflow: ellipsis; gap: 6px;
 }
+/* The summary's two halves (fillTimelineBody): what happened, then who and
+   where. Each clips itself — text-overflow on the flex container above
+   only ever applied to the bare text node the cell used to hold. */
+.timeline-row .tl-col-body > span { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.timeline-row .tl-lead { flex: 0 1 auto; color: var(--text); }
+/* Shrinks ~20x faster than the lead, so a narrow Timeline eats into the
+   identifying fields rather than truncating the event itself. The extra
+   margin is on top of the cell's 6px gap: at this size one gap reads as a
+   word space and runs the lead into the first detail. */
+.timeline-row .tl-detail { flex: 0 20 auto; color: var(--dim); margin-left: 6px; }
+.timeline-row .tl-raw { flex: 0 1 auto; }
+.timeline-row .tl-raw-toggle {
+  flex: 0 0 auto; font: inherit; font-size: 10px; line-height: 1.6;
+  background: var(--panel-2); color: var(--dim); border: 1px solid var(--line-2);
+  border-radius: var(--radius-sm); padding: 0 5px; cursor: pointer;
+}
+.timeline-row .tl-raw-toggle:hover { color: var(--text); border-color: var(--accent); }
 .timeline-row .tl-tag-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
 .timeline-empty { padding: 40px 20px; text-align: center; color: var(--dim); font-size: 13px; }
 

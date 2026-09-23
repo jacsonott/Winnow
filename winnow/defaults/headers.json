@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "nicknames": [
     {
       "name": "Event logs (EvtxECmd)",
@@ -31,7 +31,22 @@
         "Keywords",
         "ExtraDataOffset",
         "Payload"
-      ]
+      ],
+      "summary": {
+        "lead": [
+          "MapDescription",
+          "Provider"
+        ],
+        "details": [
+          "UserName",
+          "RemoteHost",
+          "Computer",
+          "EventId"
+        ],
+        "labels": {
+          "EventId": "id"
+        }
+      }
     },
     {
       "name": "Amcache — file entries",
@@ -57,7 +72,24 @@
         "Usn",
         "Language",
         "Description"
-      ]
+      ],
+      "summary": {
+        "lead": [
+          "FullPath",
+          "Name"
+        ],
+        "details": [
+          "ProductName",
+          "Version",
+          "Size",
+          "SHA1"
+        ],
+        "labels": {
+          "Version": "version",
+          "Size": "size",
+          "SHA1": "sha1"
+        }
+      }
     },
     {
       "name": "Amcache — device containers",
@@ -79,7 +111,19 @@
         "ModelNumber",
         "PrimaryCategory",
         "State"
-      ]
+      ],
+      "summary": {
+        "lead": [
+          "FriendlyName",
+          "ModelName",
+          "KeyName"
+        ],
+        "details": [
+          "Manufacturer",
+          "ModelNumber",
+          "PrimaryCategory"
+        ]
+      }
     },
     {
       "name": "Amcache — device PnPs",
@@ -109,7 +153,21 @@
         "Provider",
         "Service",
         "Stackid"
-      ]
+      ],
+      "summary": {
+        "lead": [
+          "BusReportedDescription",
+          "Description",
+          "Model",
+          "KeyName"
+        ],
+        "details": [
+          "Manufacturer",
+          "Class",
+          "DriverName",
+          "HWID"
+        ]
+      }
     },
     {
       "name": "Amcache — driver binaries",
@@ -134,7 +192,22 @@
         "ProductVersion",
         "Service",
         "WdfVersion"
-      ]
+      ],
+      "summary": {
+        "lead": [
+          "DriverName",
+          "KeyName"
+        ],
+        "details": [
+          "DriverCompany",
+          "Product",
+          "DriverVersion",
+          "Service"
+        ],
+        "labels": {
+          "DriverVersion": "version"
+        }
+      }
     },
     {
       "name": "Amcache — driver packages",
@@ -151,7 +224,22 @@
         "SubmissionId",
         "SYSFILE",
         "Version"
-      ]
+      ],
+      "summary": {
+        "lead": [
+          "Directory",
+          "KeyName"
+        ],
+        "details": [
+          "Provider",
+          "Class",
+          "Version",
+          "Inf"
+        ],
+        "labels": {
+          "Version": "version"
+        }
+      }
     },
     {
       "name": "Amcache — program entries",
@@ -182,7 +270,23 @@
         "StoreAppType",
         "UninstallString",
         "Manufacturer"
-      ]
+      ],
+      "summary": {
+        "lead": [
+          "Name",
+          "ProgramId"
+        ],
+        "details": [
+          "Publisher",
+          "Version",
+          "RootDirPath",
+          "Source"
+        ],
+        "labels": {
+          "Version": "version",
+          "Source": "source"
+        }
+      }
     },
     {
       "name": "Amcache — shortcuts",
@@ -190,7 +294,16 @@
         "KeyName",
         "LnkName",
         "KeyLastWriteTimestamp"
-      ]
+      ],
+      "summary": {
+        "lead": [
+          "LnkName",
+          "KeyName"
+        ],
+        "details": [
+          "KeyName"
+        ]
+      }
     },
     {
       "name": "Shimcache (AppCompatCache)",
@@ -202,7 +315,19 @@
         "Executed",
         "Duplicate",
         "SourceFile"
-      ]
+      ],
+      "summary": {
+        "lead": [
+          "Path"
+        ],
+        "details": [
+          "Executed",
+          "SourceFile"
+        ],
+        "labels": {
+          "Executed": "executed"
+        }
+      }
     },
     {
       "name": "Prefetch (PECmd)",
@@ -234,14 +359,35 @@
         "Directories",
         "FilesLoaded",
         "ParsingError"
-      ]
+      ],
+      "summary": {
+        "lead": [
+          "ExecutableName",
+          "SourceFilename"
+        ],
+        "details": [
+          "RunCount",
+          "Size",
+          "Volume0Name"
+        ],
+        "labels": {
+          "RunCount": "runs",
+          "Size": "size"
+        }
+      }
     },
     {
       "name": "Prefetch timeline (PECmd)",
       "columns": [
         "RunTime",
         "ExecutableName"
-      ]
+      ],
+      "summary": {
+        "lead": [
+          "ExecutableName"
+        ],
+        "details": []
+      }
     },
     {
       "name": "Recycle Bin (RBCmd)",
@@ -251,7 +397,20 @@
         "FileName",
         "FileSize",
         "DeletedOn"
-      ]
+      ],
+      "summary": {
+        "lead": [
+          "FileName"
+        ],
+        "details": [
+          "FileSize",
+          "FileType",
+          "SourceName"
+        ],
+        "labels": {
+          "FileSize": "size"
+        }
+      }
     },
     {
       "name": "Windows Timeline — activity (WxTCmd)",
@@ -278,7 +437,22 @@
         "PlatformDeviceId",
         "DevicePlatform",
         "TimeZone"
-      ]
+      ],
+      "summary": {
+        "lead": [
+          "DisplayText",
+          "Executable"
+        ],
+        "details": [
+          "Executable",
+          "ActivityType",
+          "Duration",
+          "DevicePlatform"
+        ],
+        "labels": {
+          "Duration": "duration"
+        }
+      }
     },
     {
       "name": "Windows Timeline — operations (WxTCmd)",
@@ -306,7 +480,20 @@
         "PlatformDeviceId",
         "DevicePlatform",
         "TimeZone"
-      ]
+      ],
+      "summary": {
+        "lead": [
+          "DisplayText",
+          "Description",
+          "Executable"
+        ],
+        "details": [
+          "Executable",
+          "ActivityType",
+          "OperationType",
+          "DevicePlatform"
+        ]
+      }
     },
     {
       "name": "Windows Timeline — package IDs (WxTCmd)",
@@ -316,7 +503,16 @@
         "Name",
         "AdditionalInformation",
         "Expires"
-      ]
+      ],
+      "summary": {
+        "lead": [
+          "Name"
+        ],
+        "details": [
+          "Platform",
+          "AdditionalInformation"
+        ]
+      }
     },
     {
       "name": "Jump lists — automatic (JLECmd)",
@@ -364,7 +560,22 @@
         "ExtraBlocksPresent",
         "Arguments",
         "Notes"
-      ]
+      ],
+      "summary": {
+        "lead": [
+          "Path",
+          "AppIdDescription"
+        ],
+        "details": [
+          "AppIdDescription",
+          "Hostname",
+          "InteractionCount",
+          "Arguments"
+        ],
+        "labels": {
+          "InteractionCount": "interactions"
+        }
+      }
     },
     {
       "name": "Jump lists — custom (JLECmd)",
@@ -397,7 +608,20 @@
         "TrackerCreatedOn",
         "ExtraBlocksPresent",
         "Arguments"
-      ]
+      ],
+      "summary": {
+        "lead": [
+          "EntryName",
+          "LocalPath",
+          "TargetIDAbsolutePath"
+        ],
+        "details": [
+          "AppIdDescription",
+          "LocalPath",
+          "Arguments",
+          "MachineID"
+        ]
+      }
     },
     {
       "name": "LNK files (LECmd)",
@@ -429,7 +653,24 @@
         "MACVendor",
         "TrackerCreatedOn",
         "ExtraBlocksPresent"
-      ]
+      ],
+      "summary": {
+        "lead": [
+          "LocalPath",
+          "NetworkPath",
+          "TargetIDAbsolutePath",
+          "SourceFile"
+        ],
+        "details": [
+          "Arguments",
+          "WorkingDirectory",
+          "MachineID",
+          "FileSize"
+        ],
+        "labels": {
+          "FileSize": "size"
+        }
+      }
     },
     {
       "name": "Shellbags (SBECmd)",
@@ -453,7 +694,22 @@
         "LastInteracted",
         "HasExplored",
         "Miscellaneous"
-      ]
+      ],
+      "summary": {
+        "lead": [
+          "AbsolutePath",
+          "Value",
+          "BagPath"
+        ],
+        "details": [
+          "ShellType",
+          "BagPath",
+          "Slot"
+        ],
+        "labels": {
+          "Slot": "slot"
+        }
+      }
     },
     {
       "name": "NTFS $Boot (MFTECmd)",
@@ -475,7 +731,22 @@
         "VolumeSerialNumber32Reverse",
         "SectorSignature",
         "SourceFile"
-      ]
+      ],
+      "summary": {
+        "lead": [
+          "SourceFile"
+        ],
+        "details": [
+          "VolumeSerialNumber",
+          "ClusterSize",
+          "TotalSectors"
+        ],
+        "labels": {
+          "VolumeSerialNumber": "serial",
+          "ClusterSize": "cluster",
+          "TotalSectors": "sectors"
+        }
+      }
     },
     {
       "name": "NTFS $MFT (MFTECmd)",
@@ -513,7 +784,21 @@
         "ObjectIdFileDroid",
         "LoggedUtilStream",
         "ZoneIdContents"
-      ]
+      ],
+      "summary": {
+        "lead": [
+          "FileName"
+        ],
+        "details": [
+          "ParentPath",
+          "FileSize",
+          "EntryNumber"
+        ],
+        "labels": {
+          "FileSize": "size",
+          "EntryNumber": "entry"
+        }
+      }
     },
     {
       "name": "USN journal $J (MFTECmd)",
@@ -531,7 +816,20 @@
         "FileAttributes",
         "OffsetToData",
         "SourceFile"
-      ]
+      ],
+      "summary": {
+        "lead": [
+          "UpdateReasons"
+        ],
+        "details": [
+          "Name",
+          "ParentPath",
+          "EntryNumber"
+        ],
+        "labels": {
+          "EntryNumber": "entry"
+        }
+      }
     },
     {
       "name": "NTFS $SDS (MFTECmd)",
@@ -548,7 +846,22 @@
         "UniqueDaclAceTypes",
         "FileOffset",
         "SourceFile"
-      ]
+      ],
+      "summary": {
+        "lead": [
+          "OwnerSid"
+        ],
+        "details": [
+          "GroupSid",
+          "Id",
+          "Control"
+        ],
+        "labels": {
+          "GroupSid": "group",
+          "Id": "id",
+          "Control": "control"
+        }
+      }
     },
     {
       "name": "Registry (RECmd batch)",
@@ -568,7 +881,19 @@
         "Deleted",
         "LastWriteTimestamp",
         "PluginDetailFile"
-      ]
+      ],
+      "summary": {
+        "lead": [
+          "Description",
+          "ValueName",
+          "KeyPath"
+        ],
+        "details": [
+          "KeyPath",
+          "ValueName",
+          "ValueData"
+        ]
+      }
     },
     {
       "name": "SRUM — app resource use (SrumECmd)",
@@ -598,7 +923,17 @@
         "ForegroundNumberOfFlushes",
         "ForegroundNumReadOperations",
         "ForegroundNumWriteOperations"
-      ]
+      ],
+      "summary": {
+        "lead": [
+          "ExeInfo"
+        ],
+        "details": [
+          "UserName",
+          "ExeInfoDescription",
+          "Sid"
+        ]
+      }
     },
     {
       "name": "SRUM — network usage (SrumECmd)",
@@ -620,7 +955,22 @@
         "L2ProfileFlags",
         "L2ProfileId",
         "ProfileName"
-      ]
+      ],
+      "summary": {
+        "lead": [
+          "ExeInfo"
+        ],
+        "details": [
+          "UserName",
+          "ProfileName",
+          "BytesSent",
+          "BytesReceived"
+        ],
+        "labels": {
+          "BytesSent": "sent",
+          "BytesReceived": "received"
+        }
+      }
     },
     {
       "name": "ESXi / Linux host logs",
@@ -634,7 +984,21 @@
         "User",
         "SourceIP",
         "Message"
-      ]
+      ],
+      "summary": {
+        "lead": [
+          "Message"
+        ],
+        "details": [
+          "Component",
+          "User",
+          "SourceIP",
+          "Log"
+        ],
+        "labels": {
+          "SourceIP": "from"
+        }
+      }
     }
   ]
 }
