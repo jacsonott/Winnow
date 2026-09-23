@@ -103,7 +103,9 @@ def test_clicking_it_opens_that_row(page):
     row.hover()
     row.locator(".row-open").click()
     page.wait_for_selector("#detail:not([hidden])")
-    assert page.locator("#detailTitle").inner_text() == f"Line {rid}"
+    # The title is uppercased by CSS and inner_text reports what is
+    # rendered, so compare in one case — the claim is which row opened.
+    assert page.locator("#detailTitle").inner_text().lower() == f"line {rid}".lower()
     # The pane, its note box and "Copy row" all read the cursor row, so
     # opening a row has to move the cursor onto it.
     assert page.evaluate("() => __winnow.S.cursor") == 2
