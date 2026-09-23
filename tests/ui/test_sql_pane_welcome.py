@@ -186,6 +186,26 @@ def test_a_merge_gets_starters_it_can_actually_run(page):
     assert "Rows per table" not in [s["label"] for s in starters]
 
 
+def _ac_labels(page):
+    """Every autocomplete item's LABEL, read in ONE call. An empty list is
+    a real answer — it means nothing matched, which is what the second
+    probe below is asking about, so this never waits for an item.
+
+    One call because `count()` and then `nth(i)` is two round trips over a
+    list the editor rebuilds on each keystroke: on a loaded runner an item
+    counted in the first call is gone by the second, and nth(i) then waits
+    its full timeout for a node that no longer exists. That is what failed
+    on CI.
+
+    The first span is the label and the second is the kind (sqlassist.js
+    builds them that way), so the label span is addressed directly —
+    textContent over the whole item runs the two together with no
+    separator to split on.
+    """
+    return [t.strip() for t in
+            page.locator(".sql-ac .menu-item span:first-child").all_text_contents()]
+
+
 def test_a_left_behind_table_comment_is_not_a_second_table(page, server_post, api, tmp_path):
     """The comment on line one is there to survive the query being edited
     into something real — which means the everyday state of the editor is
@@ -239,19 +259,25 @@ def test_a_left_behind_table_comment_is_not_a_second_table(page, server_post, ap
         ta.click()
         ta.fill(f"-- ui.csv (src_1)\nSELECT rid, Gadget FROM src_{sid} WHERE ")
         ta.type("Ga")
-        page.wait_for_selector(".sql-ac")
+        page.wait_for_selector(".sql-ac .menu-item")
         # Offered, not necessarily on top: the file is called gadgets.csv,
         # so the TABLE matches "Ga" as well, and which of the two a ranking
         # puts first is not what this test is about. Each item renders its
         # label on one line and its kind on the next.
-        items = page.locator(".sql-ac .menu-item")
-        labels = [items.nth(i).inner_text() for i in range(items.count())]
-        assert any(t.splitlines()[0] == "Gadget" for t in labels), labels
+        labels = _ac_labels(page)
+        assert "Gadget" in labels, labels
 
         ta.fill(f"-- ui.csv (src_1)\nSELECT rid, Gadget FROM src_{sid} WHERE ")
         ta.type("Ex")  # ExtremelyLongColumnHeaderName belongs to ui.csv alone
-        items = page.locator(".sql-ac .menu-item")
-        labels = [items.nth(i).inner_text() for i in range(items.count())]
+        # Wait for the editor to have answered THIS word rather than
+        # reading the previous one's list: "Ex" matches nothing in the
+        # queried table, so what says the rebuild happened is Gadget
+        # leaving. Reading straight after typing asserts against whatever
+        # "Ga" left on screen, which would pass no matter what.
+        page.wait_for_function(
+            "() => { const n = [...document.querySelectorAll('.sql-ac .menu-item')];"
+            " return !n.length || !n.some((x) => x.textContent.includes('Gadget')); }")
+        labels = _ac_labels(page)
         assert not any("ExtremelyLong" in t for t in labels), labels
         page.keyboard.press("Escape")
     finally:
