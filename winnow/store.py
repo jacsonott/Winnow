@@ -866,6 +866,18 @@ class OpCancelled(Exception):
     not an error, not the analyst's fault, keep what you had."""
 
 
+class OpPreempted(OpCancelled):
+    """A view build was interrupted to let the table the analyst just
+    switched to have the writer lock — see Store._yield_the_writer.
+
+    A SUBCLASS of OpCancelled on purpose: every path that already knows
+    how to unwind a cancelled build (roll back, keep the previous view,
+    report 499) does the right thing with one of these untouched. Only
+    the view-job worker looks for the distinction, and only so it can
+    start the build again instead of telling the analyst their search was
+    cancelled — which nobody asked for."""
+
+
 def _union_scope(a: list[int] | None, b: list[int] | None) -> list[int] | None:
     """The scope covering both of two scan-job scopes, None meaning every
     table (or every indicator) — see Store.start_watchlist_scan_job."""
@@ -1545,6 +1557,15 @@ class Store:
         self._op_lock = threading.Lock()
         self._op_conns: dict[str, sqlite3.Connection] = {}
         self._op_cancelled: set[str] = set()
+        # Preemption (see _yield_the_writer): which build currently holds
+        # the writer lock, which tokens were interrupted to make way for
+        # another table rather than cancelled outright, and how many times
+        # each job has been asked to stand aside. Same lock, because these
+        # are read and written in the same steps as the two above.
+        self._build_running: dict | None = None
+        self._op_preempted: set[str] = set()
+        self._build_yields: dict[str, int] = {}
+        self._build_waiting = 0   # builds for the open table queued on the writer
         self._downgrade_legacy_fts()
 
     def _downgrade_legacy_fts(self) -> None:
@@ -1808,9 +1829,9 @@ class Store:
             return []  # a merge has no table of its own; its members carry the indexes
         src = self.get_source(source_id)
         table = src["table_name"]
-        with self.lock:
+        with self._reader() as ro:
             existing = {
-                r[0] for r in self.db.execute(
+                r[0] for r in ro.execute(
                     "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name=?", (table,)
                 )
             }
@@ -2038,7 +2059,6 @@ class Store:
                 conn.close()
 
     def close(self) -> None:
-        self._drain_idle_readers(permanent=True)
         # Stop any running ingest job, and any view-as-table copy, before
         # the connection goes away — a worker mid-batch would otherwise die
         # on a closed database, and a copy would strand a half-filled
@@ -2092,6 +2112,14 @@ class Store:
                 t.join(15)
         for c in copies:
             c["done"].wait(15)
+        # Immediately before the writer closes, and not before the cleanup
+        # above: an idle reader still holding the case file open at that
+        # moment stops SQLite checkpointing the -wal on the writer's close,
+        # and save_as then renames the .db and deletes the -wal beside it —
+        # the committed rows go with it. (Drained *here* rather than at the
+        # top of close for the other half of the same problem: stopping the
+        # jobs above means reading, and those reads are on the pool now.)
+        self._drain_idle_readers(permanent=True)
         with self.lock:
             self.db.close()
         # Release the flock (see __init__) before unlinking, so that if the
@@ -2167,6 +2195,16 @@ class Store:
         the store closing, and a connection whose last statement died is
         cheaper to replace than to prove clean. The pool refills lazily."""
         with self._reader_lock:
+            # A store whose case has been closed under a request in flight
+            # (a case switch, with two browsers on one server) must fail
+            # the way the writer does: server.py maps ProgrammingError
+            # "closed database" to a clean 409. Opening a fresh reader
+            # would instead fail on the deleted views file with an
+            # OperationalError — a 500 and a traceback for a situation
+            # that is neither. Checked inside the lock, so close() cannot
+            # land between the check and the pop.
+            if self._readers_closed:
+                raise sqlite3.ProgrammingError("Cannot operate on a closed database.")
             conn = self._reader_pool.pop() if self._reader_pool else None
         if conn is None:
             conn = self._open_reader()
@@ -2252,12 +2290,135 @@ class Store:
         except sqlite3.OperationalError as e:
             with self._op_lock:
                 was_cancelled = token in self._op_cancelled
-            if was_cancelled and "interrupt" in str(e).lower():
-                raise OpCancelled("Cancelled") from e
+                was_preempted = token in self._op_preempted
+                self._op_preempted.discard(token)
+            if "interrupt" in str(e).lower():
+                # A genuine cancel outranks a preemption that happened to
+                # land in the same window: the analyst asked for one and
+                # not the other, and OpPreempted would restart the build
+                # they just stopped.
+                if was_cancelled:
+                    raise OpCancelled("Cancelled") from e
+                if was_preempted:
+                    raise OpPreempted("Yielded to another table") from e
             raise
         finally:
             with self._op_lock:
                 self._op_conns.pop(token, None)
+                self._op_preempted.discard(token)
+
+    # A view build yields the writer lock to a build for a DIFFERENT table
+    # at most this many times. Past it, the search finishes: the point is
+    # that switching tables works while a long search runs, not that a
+    # search can be starved forever by someone flicking between tabs.
+    VIEW_BUILD_YIELD_MAX = 3
+
+    def _yield_the_writer(self, source_id: int, token: str | None) -> None:
+        """Interrupt the build holding the writer lock, if it is for
+        another table, so this one can have it.
+
+        build_view holds self.lock for the whole INSERT..SELECT, which is
+        the right shape for a 1.2M-row materialise and the wrong one for
+        an analyst who started a four-minute search and then clicked
+        another tab: that table's own build queued behind the search and
+        the grid sat on "Filtering…" for the rest of it. Reads stopped
+        being the problem when they moved to the pool (invariant #4);
+        this is the other half.
+
+        The interrupted build rolls back — a held build evicts nothing, so
+        there was never anything on screen depending on it — and its
+        worker starts it again once the lock is free (_view_job_worker).
+        Nothing is lost but the time already spent scanning, which is the
+        trade: the table in front of the analyst wins.
+
+        Only across tables. Two builds for the same table are the ordinary
+        supersede, which cancel-on-rebuild already handles and which must
+        stay a cancel: the newer spec replaces the older one rather than
+        queueing behind it."""
+        with self._op_lock:
+            cur = self._build_running
+            if cur is None or cur["source_id"] == source_id or cur["token"] == token:
+                return
+            if cur["token"] in self._op_preempted:
+                return   # already asked, and unwinding — asking again is not another yield
+            if self._build_yields.get(cur["token"], 0) >= self.VIEW_BUILD_YIELD_MAX:
+                return
+            self._build_yields[cur["token"]] = self._build_yields.get(cur["token"], 0) + 1
+            self._op_preempted.add(cur["token"])
+            conn = self._op_conns.get(cur["token"])
+            if conn is not None:
+                conn.interrupt()
+
+    # How often a build waiting for the writer lock re-asks the holder to
+    # stand aside. Only paid while actually waiting, and only by a build
+    # for the table in front of the analyst. Short, because it is also the
+    # granularity of the wait itself: the loop cannot notice the lock has
+    # freed until its next attempt, and a build that answers inline has
+    # VIEW_JOB_INLINE_WAIT_MS (250) to do everything in. An attempt is a
+    # lock try and a dict lookup, so 100 a second while waiting is not a
+    # cost worth trading latency for.
+    YIELD_ASK_EVERY_S = 0.01
+    # How long a restarted build will stand back for a waiting one before
+    # going anyway. Generous: the thing it is waiting for is a build that
+    # has already interrupted it and is about to take the lock.
+    YIELD_STANDBACK_MAX_S = 10.0
+
+    @contextlib.contextmanager
+    def _writer_for_build(self, source_id: int, token: str | None, yield_others: bool):
+        """The writer lock for a view build, asking whoever holds it to
+        stand aside when it is building another table.
+
+        Asked in a LOOP rather than once before blocking. The build to
+        stand aside for may have taken the lock a moment ago and not yet
+        registered — start a long search and switch tabs immediately and
+        that is exactly the ordering — and a single ask would miss it and
+        then wait out the whole search, which is the thing this exists to
+        stop. Asking again is free: _yield_the_writer ignores a holder it
+        has already asked, so the poll costs a lock and a dict lookup and
+        cannot spend the yield budget."""
+        if not yield_others:
+            # A restart waits for the build that took the lock off it to
+            # have the lock — otherwise the two race for it the moment it
+            # is free, the restart can win, and the table in front of the
+            # analyst is asked to stand aside a second time for a search
+            # nobody is watching. Bounded: a waiter that never arrives (it
+            # failed, or its request was dropped) must not park this
+            # thread for the life of the process.
+            deadline = time.time() + self.YIELD_STANDBACK_MAX_S
+            while self._build_waiting and time.time() < deadline:
+                time.sleep(self.YIELD_ASK_EVERY_S)
+            with self.lock:
+                yield
+            return
+        with self._op_lock:
+            self._build_waiting += 1
+        try:
+            while True:
+                self._yield_the_writer(source_id, token)
+                if self.lock.acquire(timeout=self.YIELD_ASK_EVERY_S):
+                    break
+        finally:
+            with self._op_lock:
+                self._build_waiting -= 1
+        try:
+            yield
+        finally:
+            self.lock.release()
+
+    @contextlib.contextmanager
+    def _running_build(self, source_id: int, token: str | None):
+        """Registers this build as the one holding the writer lock, for
+        _yield_the_writer to find. Entered inside the lock and left before
+        it is released, the same discipline _interruptible documents."""
+        rec = {"source_id": source_id, "token": token}
+        with self._op_lock:
+            self._build_running = rec
+        try:
+            yield
+        finally:
+            with self._op_lock:
+                if self._build_running is rec:
+                    self._build_running = None
 
     @contextlib.contextmanager
     def _ingest_synchronous_off(self):
@@ -3884,8 +4045,8 @@ class Store:
     # merge folds like any other table.
 
     def list_folders(self) -> list[dict]:
-        with self.lock:
-            rows = self.db.execute(
+        with self._reader() as ro:
+            rows = ro.execute(
                 "SELECT id, name, parent_id, pos FROM source_folders "
                 "ORDER BY (parent_id IS NULL) DESC, parent_id, pos, id"
             ).fetchall()
@@ -3894,8 +4055,8 @@ class Store:
     def _source_folder(self, source_id: int) -> tuple[int | None, int]:
         """(folder_id, pos) for one signed source id — (None, 0) if it sits
         at the root (no map row)."""
-        with self.lock:
-            r = self.db.execute(
+        with self._reader() as ro:
+            r = ro.execute(
                 "SELECT folder_id, pos FROM source_folder_map WHERE source_id=?",
                 (source_id,)).fetchone()
         return (r["folder_id"], r["pos"]) if r else (None, 0)
@@ -4051,15 +4212,15 @@ class Store:
         N+1 against row_tags/row_notes/open_tabs on every case with several
         tables open, which is exactly the "8+ tables" case this exists to
         support."""
-        with self.lock:
-            rows = self.db.execute("SELECT * FROM sources ORDER BY id").fetchall()
-            open_ids = {r[0] for r in self.db.execute("SELECT source_id FROM open_tabs")}
-            tagged = dict(self.db.execute("SELECT source_id, COUNT(DISTINCT rid) FROM row_tags GROUP BY source_id"))
-            notes = dict(self.db.execute("SELECT source_id, COUNT(*) FROM row_notes GROUP BY source_id"))
-            derived = self.db.execute(
+        with self._reader() as ro:
+            rows = ro.execute("SELECT * FROM sources ORDER BY id").fetchall()
+            open_ids = {r[0] for r in ro.execute("SELECT source_id FROM open_tabs")}
+            tagged = dict(ro.execute("SELECT source_id, COUNT(DISTINCT rid) FROM row_tags GROUP BY source_id"))
+            notes = dict(ro.execute("SELECT source_id, COUNT(*) FROM row_notes GROUP BY source_id"))
+            derived = ro.execute(
                 "SELECT * FROM derived_columns ORDER BY source_id, id"
             ).fetchall()
-            folder = {r[0]: (r[1], r[2]) for r in self.db.execute(
+            folder = {r[0]: (r[1], r[2]) for r in ro.execute(
                 "SELECT source_id, folder_id, pos FROM source_folder_map")}
         by_src: dict[int, list] = {}
         for r in derived:
@@ -4083,8 +4244,8 @@ class Store:
         tagged_row_count/note_count for merges — row_tags/row_notes are
         never keyed by a negative id, so callers building a merge's dict
         must sum its members' counts instead (see _merge_source_dict)."""
-        with self.lock:
-            is_open = self.db.execute("SELECT 1 FROM open_tabs WHERE source_id=?", (source_id,)).fetchone() is not None
+        with self._reader() as ro:
+            is_open = ro.execute("SELECT 1 FROM open_tabs WHERE source_id=?", (source_id,)).fetchone() is not None
         return {"is_open": is_open}
 
     def set_tab_open(self, source_id: int, open_: bool) -> None:
@@ -4163,13 +4324,13 @@ class Store:
         collide."""
         if source_id < 0:
             return self._merge_source_dict(-source_id)
-        with self.lock:
-            row = self.db.execute("SELECT * FROM sources WHERE id=?", (source_id,)).fetchone()
+        with self._reader() as ro:
+            row = ro.execute("SELECT * FROM sources WHERE id=?", (source_id,)).fetchone()
             if not row:
                 raise KeyError(f"No source {source_id}")
-            tagged = self.db.execute("SELECT COUNT(DISTINCT rid) FROM row_tags WHERE source_id=?", (source_id,)).fetchone()[0]
-            note_count = self.db.execute("SELECT COUNT(*) FROM row_notes WHERE source_id=?", (source_id,)).fetchone()[0]
-            derived = self.db.execute(
+            tagged = ro.execute("SELECT COUNT(DISTINCT rid) FROM row_tags WHERE source_id=?", (source_id,)).fetchone()[0]
+            note_count = ro.execute("SELECT COUNT(*) FROM row_notes WHERE source_id=?", (source_id,)).fetchone()[0]
+            derived = ro.execute(
                 "SELECT * FROM derived_columns WHERE source_id=? ORDER BY id", (source_id,)
             ).fetchall()
         d = self._src_dict(row)
@@ -4231,8 +4392,8 @@ class Store:
         every scroll. Anything user-facing that actually shows those
         counts keeps using get_source; everything that only needs
         table_name/columns/row_count/has_fts to run a query uses this."""
-        with self.lock:
-            return self._source_lite_on(self.db, source_id)
+        with self._reader() as ro:
+            return self._source_lite_on(ro, source_id)
 
     def _source_lite_on(self, conn: sqlite3.Connection, source_id: int) -> dict:
         """The query logic behind _source_lite, parameterised on the
@@ -4283,8 +4444,8 @@ class Store:
         return d
 
     def _merge_row(self, merge_id: int) -> sqlite3.Row:
-        with self.lock:
-            row = self.db.execute("SELECT * FROM merges WHERE id=?", (merge_id,)).fetchone()
+        with self._reader() as ro:
+            row = ro.execute("SELECT * FROM merges WHERE id=?", (merge_id,)).fetchone()
         if not row:
             raise KeyError(f"No merge {merge_id}")
         return row
@@ -4330,8 +4491,8 @@ class Store:
         every member's table without needing per-member name translation —
         the locked-in 'exact column match' rule already guarantees members
         share the same names modulo case."""
-        with self.lock:
-            return self._resolve_members_on(self.db, source_id)
+        with self._reader() as ro:
+            return self._resolve_members_on(ro, source_id)
 
     def _resolve_members_on(self, conn: sqlite3.Connection, source_id: int) -> list[dict]:
         """_resolve_members parameterised on the connection, same split as
@@ -4381,8 +4542,8 @@ class Store:
         return self.get_source(-merge_id)
 
     def list_merges(self) -> list[dict]:
-        with self.lock:
-            rows = self.db.execute("SELECT * FROM merges ORDER BY id").fetchall()
+        with self._reader() as ro:
+            rows = ro.execute("SELECT * FROM merges ORDER BY id").fetchall()
         out = []
         for r in rows:
             try:
@@ -4540,15 +4701,15 @@ class Store:
             exposed = {c["name"].lower() for c in src["columns"] if c.get("derived")}
             first = self._resolve_members(source_id)[0]["source_id"]
             return [d for d in self.list_derived_columns(first) if d["name"].lower() in exposed]
-        with self.lock:
-            rows = self.db.execute(
+        with self._reader() as ro:
+            rows = ro.execute(
                 "SELECT * FROM derived_columns WHERE source_id=? ORDER BY id", (source_id,)
             ).fetchall()
         return [self._derived_dict(r) for r in rows]
 
     def get_derived_column(self, def_id: int) -> dict:
-        with self.lock:
-            row = self.db.execute("SELECT * FROM derived_columns WHERE id=?", (def_id,)).fetchone()
+        with self._reader() as ro:
+            row = ro.execute("SELECT * FROM derived_columns WHERE id=?", (def_id,)).fetchone()
         if not row:
             raise KeyError(f"No derived column {def_id}")
         return self._derived_dict(row)
@@ -5251,8 +5412,8 @@ class Store:
     # ------------------------------------------------------------ case settings
 
     def get_case_settings(self) -> dict:
-        with self.lock:
-            return {r["key"]: r["value"] for r in self.db.execute("SELECT key, value FROM case_settings")}
+        with self._reader() as ro:
+            return {r["key"]: r["value"] for r in ro.execute("SELECT key, value FROM case_settings")}
 
     def set_case_setting(self, key: str, value: str | None) -> None:
         with self.lock, self.db:
@@ -5267,7 +5428,8 @@ class Store:
 
     # ------------------------------------------------------------------- views
 
-    def build_view(self, source_id: int, spec: dict, *, hold: bool = False) -> dict:
+    def build_view(self, source_id: int, spec: dict, *, hold: bool = False,
+                   yield_others: bool = False) -> dict:
         """Materialise (pos, source_id, rid) for a filter+sort spec. Returns
         view handle. source_id is a constant column here (every row comes
         from the same source) — kept as a real column rather than a
@@ -5358,7 +5520,13 @@ class Store:
                 + f" {order}"
             )
         t0 = time.time()
-        with self.lock, self._interruptible(spec.get("op_token"), self.db), self.db:
+        # `yield_others`: this build is for the table the analyst is
+        # looking at now, so a build for a DIFFERENT table holding the
+        # writer lock stands aside for it — asked while waiting for the
+        # lock, not once before blocking on it (_writer_for_build).
+        with self._writer_for_build(source_id, spec.get("op_token"), yield_others), \
+                self._running_build(source_id, spec.get("op_token")), \
+                self._interruptible(spec.get("op_token"), self.db), self.db:
             # pos declared INTEGER PRIMARY KEY makes it *be* the rowid, so
             # this alone gives the same unique/indexed-by-pos lookup the old
             # CTAS + separate CREATE UNIQUE INDEX did, for one less full
@@ -7211,8 +7379,8 @@ class Store:
         return {"start": lo, "end": hi}
 
     def list_tags(self) -> list[dict]:
-        with self.lock:
-            return [dict(r) for r in self.db.execute("SELECT * FROM tag_defs ORDER BY id")]
+        with self._reader() as ro:
+            return [dict(r) for r in ro.execute("SELECT * FROM tag_defs ORDER BY id")]
 
     def upsert_tag(self, tag_id: int | None, name: str, color: str, hotkey: str | None) -> dict:
         with self.lock, self.db:
@@ -7606,21 +7774,27 @@ class Store:
 
     def tag_counts(self, source_id: int) -> dict:
         member_ids = [m["source_id"] for m in self._resolve_members(source_id)]
-        with self.lock:
-            return self._tag_counts_for_ids(member_ids)
+        with self._reader() as ro:
+            return self._tag_counts_for_ids(member_ids, ro)
 
-    def _tag_counts_for_ids(self, member_ids: Sequence[int]) -> dict:
+    def _tag_counts_for_ids(self, member_ids: Sequence[int],
+                            conn: sqlite3.Connection | None = None) -> dict:
         """Counts over an explicit member list. Split out of tag_counts
         because undo has to recount from inside its own open transaction
         (self.lock is not re-entrant) and over the exact member set the
         original change reported against — a merged view's ribbon counts
         every member, not just the one the changed rows happened to
-        belong to."""
+        belong to.
+
+        `conn` is which connection asks. tag_counts hands it a pooled
+        reader — it is a top-level read and has no business on the writer
+        (invariant #4) — while undo, which is mid-transaction and has to
+        see its own uncommitted delete, keeps the default of self.db."""
         ids = [int(i) for i in member_ids]
         if not ids:
             return {"counts": {}}
         ph = ",".join("?" * len(ids))
-        rows = self.db.execute(
+        rows = (conn or self.db).execute(
             f"SELECT tag_id, count(*) n FROM row_tags WHERE source_id IN ({ph}) GROUP BY 1", ids,
         ).fetchall()
         return {"counts": {str(r["tag_id"]): r["n"] for r in rows}}
@@ -7724,8 +7898,8 @@ class Store:
             )
 
     def get_layout(self, source_id: int) -> dict | None:
-        with self.lock:
-            row = self.db.execute(
+        with self._reader() as ro:
+            row = ro.execute(
                 "SELECT payload FROM layouts WHERE source_id=?", (source_id,)
             ).fetchone()
         return json.loads(row["payload"]) if row else None
@@ -7739,8 +7913,8 @@ class Store:
         return {"id": cur.lastrowid, "name": name, "payload": payload}
 
     def list_saved_views(self, source_id: int) -> list[dict]:
-        with self.lock:
-            rows = self.db.execute(
+        with self._reader() as ro:
+            rows = ro.execute(
                 "SELECT * FROM saved_views WHERE source_id=? ORDER BY id DESC", (source_id,)
             ).fetchall()
         return [{"id": r["id"], "name": r["name"], "payload": json.loads(r["payload"])} for r in rows]
@@ -7752,8 +7926,8 @@ class Store:
     # ------------------------------------------------------- sql pane sub-tabs
 
     def list_sql_tabs(self) -> list[dict]:
-        with self.lock:
-            rows = self.db.execute(
+        with self._reader() as ro:
+            rows = ro.execute(
                 "SELECT id, name, sql, pos FROM sql_tabs ORDER BY pos, id"
             ).fetchall()
         return [dict(r) for r in rows]
@@ -7815,8 +7989,8 @@ class Store:
         truncated copy) reads as nothing saved rather than raising: every
         caller's fallback is "start fresh", which is the right answer to a
         payload nobody can read anyway."""
-        with self.lock:
-            row = self.db.execute(
+        with self._reader() as ro:
+            row = ro.execute(
                 "SELECT payload, saved_at FROM plugin_ui_state WHERE mount_key=?",
                 (mount_key,),
             ).fetchone()
@@ -7862,8 +8036,8 @@ class Store:
 
     def get_case_notes(self) -> dict:
         """The case narrative Markdown. One row, read whole."""
-        with self.lock:
-            row = self.db.execute("SELECT body, updated_at FROM case_notes WHERE id=1").fetchone()
+        with self._reader() as ro:
+            row = ro.execute("SELECT body, updated_at FROM case_notes WHERE id=1").fetchone()
         return {"body": row["body"] if row else "", "updated_at": row["updated_at"] if row else None}
 
     def set_case_notes(self, body: str) -> dict:
@@ -8551,8 +8725,8 @@ class Store:
     VARIABLE_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
 
     def list_variables(self) -> list[dict]:
-        with self.lock:
-            rows = self.db.execute(
+        with self._reader() as ro:
+            rows = ro.execute(
                 "SELECT name, value, description, required FROM case_variables ORDER BY required DESC, name").fetchall()
         return [{"name": r["name"], "value": r["value"], "description": r["description"] or "",
                  "required": bool(r["required"])} for r in rows]
@@ -10967,11 +11141,10 @@ class Store:
     def _view_job_worker(self, job: dict) -> None:
         t0 = time.time()
         try:
-            # close() sets this before it cancels and joins; a worker that
-            # was queued behind that must not touch the connection at all.
-            if self._view_jobs.closing:
-                raise OpCancelled("Cancelled")
-            view = self.build_view(job["source_id"], job["spec"], hold=True)
+            try:
+                view = self._build_for_job(job)
+            finally:
+                self._forget_build_yields(job["token"])
         except OpCancelled:
             self._view_jobs.finish(job, "cancelled", elapsed_ms=int((time.time() - t0) * 1000))
         except (ValueError, KeyError) as e:
@@ -10991,6 +11164,47 @@ class Store:
             if self._view_jobs.finish(job, "done", view=view,
                                       elapsed_ms=int((time.time() - t0) * 1000)) == "cancelled":
                 self._drop_pending_view(view["view_id"])
+
+    def _build_for_job(self, job: dict) -> dict:
+        """The job's build, started again if it was asked to stand aside.
+
+        The first attempt is the one that may take the lock off a build
+        for another table (_yield_the_writer) — the analyst is looking at
+        this table, so it goes first. A RESTART never does: it has already
+        had its turn, and two builds that each take the lock off the other
+        would run forever without finishing either. So a retry simply
+        queues, which is what makes this terminate.
+
+        Bounded the other way too, by VIEW_BUILD_YIELD_MAX in the yielding
+        half: a search on one table cannot be restarted forever by someone
+        flicking between tabs. Past the cap it keeps the lock and
+        finishes."""
+        attempt = 0
+        while True:
+            # close() sets this before it cancels and joins; a worker that
+            # was queued behind that must not touch the connection at all.
+            if self._view_jobs.closing:
+                raise OpCancelled("Cancelled")
+            try:
+                return self.build_view(job["source_id"], job["spec"], hold=True,
+                                       yield_others=attempt == 0)
+            except OpPreempted:
+                # Not the analyst's cancel: the build rolled back whole and
+                # nothing on screen depended on it (a held build evicts
+                # nothing), so the honest thing is to run it again rather
+                # than report a cancellation nobody asked for.
+                attempt += 1
+                if attempt > self.VIEW_BUILD_YIELD_MAX:
+                    raise OpCancelled("Cancelled") from None
+
+    def _forget_build_yields(self, token: str | None) -> None:
+        """One entry per view job, dropped when the job settles — the
+        registry keeps one live job per source, but tokens are minted per
+        build and this dict would otherwise be a slow leak."""
+        if not token:
+            return
+        with self._op_lock:
+            self._build_yields.pop(token, None)
 
     def _view_job_snapshot(self, job: dict) -> dict:
         with self._view_jobs.lock:
