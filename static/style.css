@@ -961,8 +961,9 @@ section.page-with-panels { flex-direction: row; }
 
 /* ------------------------------------------------------------ filter bar */
 
-/* What replaced the always-on filter row: one thin strip naming only the
-   filters that are actually set. It sits OUTSIDE the grid's scroll
+/* The other filter surface, the one Settings → Appearance turns on in
+   place of the always-on row: one thin strip naming only the filters that
+   are actually set. It sits OUTSIDE the grid's scroll
    container (see index.html) so the chips never scroll away with the
    columns, and wraps rather than overflowing — a case with eight filters on
    is rare, and a second line of chips is better than a chip nobody can
