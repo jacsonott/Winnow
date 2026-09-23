@@ -514,8 +514,9 @@ export function openNewCaseModal(state = {}) {
     pathRow.append(pathInput, browseBtn);
     b.append(el('label', null, 'Case file path'), pathRow);
 
-    // Case type: a plugin bundle applied right after the case opens, so
-    // a Triage case starts with the triage plugins on — no settings trip.
+    // The profile, applied right after the case opens, so a Triage case
+    // starts with the triage plugins on — no settings trip. (The record is
+    // a plugin_bundles row; only the word the analyst reads is "profile".)
     const typeSel = el('select');
     typeSel.style.cssText = 'flex:1;background:var(--ink);color:var(--text);border:1px solid var(--line-2);padding:6px 8px;font:inherit';
     const noneOpt = el('option', null, 'None — machine defaults');
@@ -562,7 +563,7 @@ export function openNewCaseModal(state = {}) {
     typeSel.onchange = renderProfileVars;
     const typeRow = el('div', 'row-actions');
     typeRow.append(typeSel);
-    b.append(el('label', null, 'Case type'), typeRow, varsBox);
+    b.append(el('label', null, 'Profile'), typeRow, varsBox);
 
 
     const actions = el('div', 'row-actions');
@@ -596,7 +597,7 @@ export function openNewCaseModal(state = {}) {
           }
           await applyBundle({ id: Number(typeSel.value) });
         } catch (e) {
-          toast('Case created, but the case-type bundle failed to apply: ' + e.message, 6000);
+          toast('Case created, but the profile failed to apply: ' + e.message, 6000);
         }
       }
     };
@@ -805,7 +806,7 @@ export function renderCaseRow(c) {
     ? `${c.path} — file not found`
     : c.error
       ? `${c.path} — ${c.error}`
-      : `${c.path} · ${(c.source_count || 0).toLocaleString()} source${c.source_count === 1 ? '' : 's'} `
+      : `${c.path} · ${(c.source_count || 0).toLocaleString()} table${c.source_count === 1 ? '' : 's'} `
         + `· ${(c.row_count || 0).toLocaleString()} rows` + (c.last_opened ? ` · opened ${c.last_opened}` : '');
   main.append(el('div', 'home-case-meta', stats));
   if (c.notes) main.append(el('div', 'home-case-notes', c.notes));

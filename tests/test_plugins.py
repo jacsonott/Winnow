@@ -1331,9 +1331,9 @@ def test_pivot_detail_on_a_blank_cell_means_blank_not_empty_string(pivot_client)
 # `source_id` is filled in from the fixture unless the case is about it
 # being wrong, which is what the third element says.
 @pytest.mark.parametrize("body, fragment, own_source_id", [
-    ({"values": [{"agg": "count"}], "group_sets": [[]], "source_id": -1}, "no source", True),  # merges work now (invariant #9); -1 simply doesn't exist here
+    ({"values": [{"agg": "count"}], "group_sets": [[]], "source_id": -1}, "no table", True),  # merges work now (invariant #9); -1 simply doesn't exist here
     ({"values": [{"agg": "count"}], "group_sets": [[]]}, "source_id", True),
-    ({"values": [{"agg": "count"}], "group_sets": [[]], "source_id": 999}, "No source", True),
+    ({"values": [{"agg": "count"}], "group_sets": [[]], "source_id": 999}, "No table", True),
     ({"values": [{"agg": "count"}], "group_sets": [["Nope"]]}, "No column", False),
     ({"values": [{"agg": "nope", "column": "Host"}], "group_sets": [[]]}, "Unknown aggregation", False),
     ({"values": [{"agg": "sum"}], "group_sets": [[]]}, "needs a column", False),

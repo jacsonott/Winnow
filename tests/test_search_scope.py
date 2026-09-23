@@ -144,7 +144,7 @@ def test_the_route_carries_the_scope_and_rejects_an_unknown_table(client, store,
 
     bad = client.post("/api/search_all/start", json={"query": "svchost", "source_ids": [b + 999]})
     assert bad.status_code == 400
-    assert bad.json()["detail"] == f"No source {b + 999}"     # not the repr KeyError carries
+    assert bad.json()["detail"] == f"No table {b + 999}"      # not the repr KeyError carries
     assert client.post("/api/search_all", json={"query": "x", "source_ids": [b + 999]}).status_code == 400
 
 

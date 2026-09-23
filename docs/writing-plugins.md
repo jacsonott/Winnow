@@ -1110,7 +1110,7 @@ def report_handler(req):
 - Tabs and toolbar panels get the same through `winnow.state.variables`
   and `winnow.setVariable(name, value)`.
 
-A **profile** (case type) can declare the variables its plugins expect,
+A **profile** can declare the variables its plugins expect,
 so the analyst is asked once, at case creation, rather than discovering
 a missing setting mid-investigation:
 

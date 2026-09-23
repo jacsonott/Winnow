@@ -202,6 +202,27 @@ see [docs/notes/README.md](README.md) for the whole set.
   until the spacer passed the browser's ceiling, at which point that track's
   intrinsic size resolved to 0 and collapsed `.main-area`/`#grid`/`#body` to
   zero height. Correct row count, sticky header painted, not one data row.
+- **The tag rail sits inside `#body`'s scrollbars, not over them**
+  (`placeRail`/`drawRail` in grouping.js, `.rail` in style.css). It is
+  absolutely positioned over the grid, and for as long as it spanned the
+  whole of it at `right: 0` it had to declare `pointer-events: none` —
+  14px of overlay across the vertical scrollbar swallows every grab of
+  the thumb (the trap `.notes-divider` documents from the other side).
+  The cost of that was silence: an element the pointer never reaches
+  cannot show a `title` either, so the rail was the one surface in the
+  app where a tag appeared as a colour with no name anywhere near it.
+  Every draw now sets `right`/`top`/`bottom` from `#body`'s own box
+  (`offsetWidth - clientWidth` is the scrollbar, `headH()` the sticky
+  header), which both frees the scrollbar and makes the strip span
+  exactly the rows on screen — so the hover readout can name the tag
+  *and* the row a mark stands for. Two consequences to keep: the marks
+  are remembered keyed by the canvas row they landed on (`railMarks`),
+  because hit-testing a 2px dash needs the arithmetic the paint used and
+  a readout on every mousemove must not walk a list that is as long as
+  the tagged rows are numerous, and the wheel is
+  forwarded to `#body` by hand, since the rail is a sibling of the
+  scroller rather than a child of it and a wheel over it would otherwise
+  scroll nothing at all.
 - **The row gutter and its header share one three-slot CSS grid**
   (`.gutter` / `.gutter-head` / `.gutter-filter`: checkbox | tag stripes +
   note mark | row number). The gutter used to be `justify-content:

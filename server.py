@@ -2424,7 +2424,7 @@ def _resolve_row_action_rows(pairs: list[tuple[int, int]]) -> list[dict]:
         try:
             src = st.get_source(sid)
         except KeyError:
-            raise HTTPException(400, f"No source {sid}")
+            raise HTTPException(400, f"No table {sid}")
         cols = [c["name"] for c in src["columns"] if not c.get("derived")]
         sel = ", ".join(q(c) for c in cols)
         marks = ",".join(str(int(r)) for r in rids)
@@ -2725,7 +2725,7 @@ class BundleApplyBody(BaseModel):
     """Which parts of the profile to apply, from APPLY_PARTS.
 
     None means all four — what apply meant before the sheet existed, and
-    what the new-case dialog's Case type select and any script calling
+    what the new-case dialog's Profile select and any script calling
     this route still send."""
     parts: list[str] | None = None
 
