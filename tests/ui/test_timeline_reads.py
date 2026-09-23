@@ -67,11 +67,34 @@ def tagged_evtx(page, tmp_path):
       }""", sid)
 
 
+# The fixture row's timestamp, which is what addresses its row below. No
+# other UI fixture uses this date (the shared case's ui.csv is all
+# 2026-03-14), so it names exactly one row in the Timeline.
+TS = "2026-03-03 00:00:00"
+
+
 def _summary_row(page):
+    """The fixture's row, addressed by its Timestamp cell.
+
+    Deliberately not `has=.tl-lead`: "raw" removes `.tl-lead` from the row,
+    and that is the click these tests are about. A Playwright locator is a
+    query, not a handle — it re-runs on every use — so a lead-shaped filter
+    would resolve to nothing on the line after the toggle and fail the
+    assertion it exists to prove. Nor an element handle: the toggle calls
+    renderTimelineRows(), which replaceChildren()s the whole window, so the
+    row node itself is a different one afterwards. The Timestamp cell is
+    the one part of the row neither the toggle nor the re-render changes.
+    """
     page.locator("#tabTimeline").click()
     page.wait_for_selector("#timelineview:not([hidden])")
-    page.wait_for_selector(".timeline-row .tl-lead", timeout=10_000)
-    return page.locator(".timeline-row", has=page.locator(".tl-lead")).first
+    row = page.locator(".timeline-row", has=page.locator(".tl-col-ts", has_text=TS))
+    # Waiting on this row's own lead, not on any `.tl-lead` in the list:
+    # the timeline is still building when the tab opens, and a wait that
+    # any summarised row could satisfy would hand back a row that is not
+    # the fixture's.
+    row.locator(".tl-lead").wait_for(timeout=10_000)
+    assert row.count() == 1, f"expected one timeline row at {TS}, got {row.count()}"
+    return row
 
 
 def test_the_row_leads_with_what_happened_not_the_raw_columns(page, tagged_evtx):
@@ -93,6 +116,7 @@ def test_the_row_leads_with_what_happened_not_the_raw_columns(page, tagged_evtx)
 
 def test_raw_swaps_the_row_in_place_and_back(page, tagged_evtx):
     row = _summary_row(page)
+    assert row.locator(".tl-lead").count() == 1
     height = row.bounding_box()["height"]
 
     row.locator(".tl-raw-toggle").click()
