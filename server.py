@@ -3290,7 +3290,8 @@ def api_group_summary(view_id: str, column: str, order: str = "count", direction
 
 
 @app.get("/api/histogram")
-def api_histogram(view_id: str, column: str, max_buckets: int = 160, op_token: str | None = None):
+def api_histogram(view_id: str, column: str, max_buckets: int = 160, op_token: str | None = None,
+                  stack: str | None = None):
     """Time buckets of a datetime column over the CURRENT view — what the
     histogram strip between the toolbar and the grid draws
     (static/js/histogram.js). A side-effect-free view-summary read like
@@ -3306,8 +3307,12 @@ def api_histogram(view_id: str, column: str, max_buckets: int = 160, op_token: s
     split api_case_copy_sources makes); folding the second into the 409 would
     leave the strip waiting for a view change that fixes nothing."""
     try:
+        # `stack=tags` adds a per-bucket split by tag beside the plain
+        # counts; anything else is ignored rather than refused, so an old
+        # client and a new server agree on the chart they already share.
         return JSONResponse(store().time_histogram(
-            view_id, column, max_buckets=max(20, min(max_buckets, 400)), op_token=op_token))
+            view_id, column, max_buckets=max(20, min(max_buckets, 400)), op_token=op_token,
+            stack="tags" if stack == "tags" else None))
     except ValueError as e:
         raise HTTPException(400, str(e))
     except KeyError as e:

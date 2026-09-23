@@ -77,6 +77,19 @@ export function migrateHistogramPrefs() {
 
 export function histogramOpen() { return !!prefs().open; }
 
+/* Colour the bars by tag, per browser like the open flag and the chosen
+   column. Off by default: the plain chart answers "when did this view
+   happen", and the stacked one answers a question you only have once you
+   have started tagging. */
+export function histogramStacked() { return !!prefs().stack; }
+
+export function toggleHistogramStack(on = !histogramStacked()) {
+  savePrefs({ stack: !!on });
+  data = null;          // the split is asked for at fetch time, not derived
+  schedule();
+  draw();
+}
+
 export function toggleHistogram(on = !histogramOpen()) {
   savePrefs({ open: !!on });
   // Host first: the strip is measured on show, and a hidden host gives
@@ -109,6 +122,13 @@ export function syncHistogramPanel() {
 
 export function refreshHistogram() { return load(); }
 
+/* What the strip last drew, and the layers it derived from it. Read-only
+   windows onto module state — the chart lives on a canvas, so this is the
+   only way anything outside (a UI test, an eventual export-the-chart) can
+   see what is actually on screen. */
+export function histogramData() { return data; }
+export function histogramLayers() { return stackLayers(); }
+
 /* ------------------------------------------------------------- chrome */
 
 function buildChrome(container) {
@@ -118,10 +138,15 @@ function buildChrome(container) {
   colSel.title = 'Which datetime column to chart';
   colSel.onchange = () => { column = colSel.value || null; savePrefs({ column }); schedule(); };
   const info = el('span', 'th-info', '');
+  const legend = el('span', 'th-legend');
+  const stackBtn = el('button', 'btn ghost th-stack', 'Tags');
+  stackBtn.title = 'Colour the bars by tag — each row under the first tag it carries, '
+    + 'untagged underneath, so the bars stay as tall as the rows they count';
+  stackBtn.onclick = () => toggleHistogramStack();
   const clearBtn = el('button', 'btn ghost', 'Clear timeframe');
   clearBtn.title = 'Remove the timeframe filter this strip set (the ⏱ filter in the toolbar)';
   clearBtn.onclick = () => clearTimeRange();
-  bar.append(title, colSel, info, clearBtn);
+  bar.append(title, colSel, info, legend, stackBtn, clearBtn);
 
   const canvas = el('canvas', 'th-canvas');
   canvas.style.height = `${HEIGHT}px`;
@@ -133,7 +158,7 @@ function buildChrome(container) {
   const empty = el('div', 'note-status th-empty');
   empty.hidden = true;
   container.append(bar, canvas, hint, empty);
-  ui = { colSel, info, canvas, hint, empty };
+  ui = { colSel, info, legend, stackBtn, canvas, hint, empty };
 
   /* ------------------------------------------------------------ brush */
   canvas.addEventListener('mousedown', (e) => {
@@ -151,7 +176,13 @@ function buildChrome(container) {
       const w = canvas.clientWidth || 1;
       const tt = tOf(x, w);
       const b = data.buckets.find((bb) => tt >= bb[0] && tt < bb[0] + data.bucket_seconds);
-      canvas.title = b ? `${iso(b[0])} — ${b[1].toLocaleString()} rows` : iso(tt);
+      const stack = stackLayers();
+      const seg = stack && b && stack.rows.find((r) => r[0] === b[0]);
+      canvas.title = b
+        ? `${iso(b[0])} — ${b[1].toLocaleString()} rows`
+          + (seg ? '\n' + seg[1].map((n, i) => (n ? `${stack.labels[i]}: ${n.toLocaleString()}` : ''))
+                            .filter(Boolean).join('\n') : '')
+        : iso(tt);
     }
   });
   canvas.addEventListener('mouseup', endBrush);
@@ -181,6 +212,7 @@ const tokens = () => {
     accent: cs.getPropertyValue('--accent').trim() || '#d9a441',
     dim: cs.getPropertyValue('--dim').trim() || '#888',
     line: cs.getPropertyValue('--line').trim() || '#333',
+    line2: cs.getPropertyValue('--line-2').trim() || '#444',
     sel: cs.getPropertyValue('--sel').trim() || 'rgba(255,255,255,.1)',
     text: cs.getPropertyValue('--text').trim() || '#ddd',
     mono: cs.getPropertyValue('--mono').trim() || 'monospace',
@@ -227,6 +259,62 @@ function span() {
 const xOf = (t, w) => { const s = span(); return ((t - s.t0) / (s.t1 - s.t0)) * w; };
 const tOf = (x, w) => { const s = span(); return s.t0 + (x / w) * (s.t1 - s.t0); };
 
+/* The stacked layers to paint, or null when the chart is a plain one.
+   Layer 0 is the untagged remainder; the rest follow the server's tag
+   order, which is tag id order, which is ribbon order — the same order
+   the row attribution used, so a segment's colour and the tag it counts
+   can't drift apart.
+
+   A tag deleted since the answer came back has no colour to draw in and
+   is folded into the untagged base rather than dropped: the rows are
+   still in the view, and a bar that shrank would be a lie about them. */
+function stackLayers() {
+  if (!histogramStacked() || !data || !data.stack) return null;
+  const cs = tokens();
+  // --line-2 rather than --line for the untagged base: the bar's full
+  // height is the point of stacking this way (it is the same height the
+  // plain chart draws), and a base the eye cannot separate from the panel
+  // throws that away. Quiet enough that the tagged segments still lead,
+  // which they should — untagged is usually most of the view.
+  const colours = [cs.line2];
+  const labels = ['Untagged'];
+  const fold = [];
+  data.stack.tags.forEach((id, i) => {
+    const tag = S.tags.find((x) => x.id === id);
+    if (!tag) { fold.push(i + 1); return; }
+    colours.push(tag.color);
+    labels.push(tag.name);
+  });
+  const rows = data.stack.buckets.map(([b, counts]) => {
+    const kept = [counts[0], ...counts.slice(1).filter((_, i) => !fold.includes(i + 1))];
+    for (const i of fold) kept[0] += counts[i];
+    return [b, kept];
+  });
+  return { colours, labels, rows };
+}
+
+/* A swatch and a name per layer, beside the count line. Only what is
+   actually in the chart: a case with twelve tags and two of them in this
+   view lists two. */
+function drawLegend() {
+  const { legend, stackBtn } = ui;
+  stackBtn.setAttribute('aria-pressed', String(histogramStacked()));
+  legend.replaceChildren();
+  const stack = stackLayers();
+  if (!stack) return;
+  const present = stack.rows.length
+    ? stack.labels.map((_, i) => stack.rows.some(([, c]) => c[i] > 0))
+    : stack.labels.map(() => false);
+  stack.labels.forEach((name, i) => {
+    if (!present[i]) return;
+    const chip = el('span', 'th-legend-item');
+    const sw = el('span', 'swatch');
+    sw.style.background = stack.colours[i];
+    chip.append(sw, el('span', null, name));
+    legend.append(chip);
+  });
+}
+
 /* --------------------------------------------------------------- draw */
 
 function draw() {
@@ -266,11 +354,35 @@ function draw() {
   const max = Math.max(...data.buckets.map((b) => b[1]));
   const s = span();
   const bw = Math.max(1, (data.bucket_seconds / (s.t1 - s.t0)) * w - 1);
-  ctx.fillStyle = t.accent;
-  for (const [b, n] of data.buckets) {
-    const x = xOf(b, w);
-    const h = Math.max(1, (n / max) * plotH);
-    ctx.fillRect(x, bottom - h, bw, h);
+  const stack = stackLayers();
+  if (stack) {
+    // Bottom-up, untagged first: each row is in exactly one segment (the
+    // server puts it under the first tag it carries), so the bar is the
+    // same height it would be plain and the two charts can be read
+    // against each other.
+    for (const [b, counts] of stack.rows) {
+      const x = xOf(b, w);
+      const total = counts.reduce((a, c) => a + c, 0);
+      if (!total) continue;
+      const full = Math.max(1, (total / max) * plotH);
+      let y = bottom;
+      counts.forEach((n, i) => {
+        if (!n) return;
+        // Proportional to this bar's own height, so rounding cannot make
+        // the segments add up to more or less than the bar.
+        const h = (n / total) * full;
+        ctx.fillStyle = stack.colours[i];
+        ctx.fillRect(x, y - h, bw, h);
+        y -= h;
+      });
+    }
+  } else {
+    ctx.fillStyle = t.accent;
+    for (const [b, n] of data.buckets) {
+      const x = xOf(b, w);
+      const h = Math.max(1, (n / max) * plotH);
+      ctx.fillRect(x, bottom - h, bw, h);
+    }
   }
   // baseline + axis labels (start / end, and a middle tick)
   ctx.strokeStyle = t.line;
@@ -302,6 +414,7 @@ function draw() {
     const lw = ctx.measureText(label).width;
     ctx.fillText(label, Math.max(2, Math.min(w - lw - 2, (x0 + x1) / 2 - lw / 2)), top + 10);
   }
+  drawLegend();
   const tr = S.timeRange;
   info.textContent = `${data.total.toLocaleString()} rows · ${humanBucket(data.bucket_seconds)} buckets · max ${max.toLocaleString()}`
     + (tr && tr.enabled && (tr.start || tr.end) ? ' · timeframe on' : '');
@@ -387,7 +500,8 @@ async function load() {
   let next = null, err = null;
   try {
     next = await api(`/api/histogram?view_id=${encodeURIComponent(v.view_id)}`
-      + `&column=${encodeURIComponent(column)}&max_buckets=${maxBuckets}`);
+      + `&column=${encodeURIComponent(column)}&max_buckets=${maxBuckets}`
+      + (histogramStacked() ? '&stack=tags' : ''));
   } catch (e) { err = e; }
   inflight = Math.max(0, inflight - 1);
   if (mine !== seq) return;   // a newer request is out; its answer paints

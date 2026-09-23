@@ -13,6 +13,18 @@ see [docs/notes/README.md](README.md) for the whole set.
 
 ---
 
+- **The histogram's tag split is one row, one segment.** `stack=tags`
+  attributes each row to the FIRST tag it carries in ribbon order — the
+  lowest tag id, since the ribbon renders tag_defs in id order — with
+  untagged rows as the base. So a stacked bar is exactly as tall as the
+  plain one and the two charts can be read against each other. Counting a
+  two-tag row under both segments is what grouping by tag does
+  deliberately (`_tag_group_branches`), and it is the wrong trade here:
+  bars taller than the rows they describe, for a per-tag total the ribbon
+  already carries exactly. The lookup is a correlated `MIN` over
+  row_tags' primary key, skipped entirely for a member with no tags at
+  all — the same short-circuit `tag_counts_in_view` makes.
+
 - The **unified Timeline tab** (`build_timeline`/`fetch_timeline_rows` in
   store.py, a pinned tab like SQL) unions every *tagged* row across every
   real source in the case — open or closed, since it's "every finding in
