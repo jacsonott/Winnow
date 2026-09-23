@@ -165,6 +165,18 @@ see [docs/notes/README.md](README.md) for the whole set.
     whole-table case never touches the source at all — per-tag counts are
     `row_tags`' own aggregate and the untagged remainder is arithmetic on
     the member's `row_count`. `test_grouping.py` pins both with EXPLAIN.
+- **The histogram's tag split is one row, one segment.** `stack=tags`
+  attributes each row to the FIRST tag it carries in ribbon order — the
+  lowest tag id, since the ribbon renders tag_defs in id order — with
+  untagged rows as the base. So a stacked bar is exactly as tall as the
+  plain one and the two charts can be read against each other. Counting a
+  two-tag row under both segments is what grouping by tag does
+  deliberately (`_tag_group_branches`), and it is the wrong trade here:
+  bars taller than the rows they describe, for a per-tag total the ribbon
+  already carries exactly. The lookup is a correlated `MIN` over
+  row_tags' primary key, skipped entirely for a member with no tags at
+  all — the same short-circuit `tag_counts_in_view` makes.
+
 - **`tag_counts_in_view`** is what the tag ribbon shows once a filter or
   search is on: the same shape `tag_counts` returns, counted over one view.
   Scope is the view exactly as built, tag filter included — a ribbon that

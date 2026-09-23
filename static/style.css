@@ -617,6 +617,18 @@ section.page-with-panels { flex-direction: row; }
 .histogram-head .th-title { letter-spacing: .08em; text-transform: uppercase; font-size: 10px; }
 .histogram-head select { font-size: 11px; padding: 1px 4px; max-width: 220px; }
 .histogram-head .th-info { margin-left: auto; font-family: var(--mono); }
+/* The tag legend: only the layers actually in the chart, each with the
+   tag's own colour — the same swatch the ribbon uses, so the two read as
+   one palette. Wraps to nothing when the chart is not stacked. */
+.th-legend { display: flex; align-items: center; gap: 10px; min-width: 0; overflow: hidden; }
+.th-legend-item {
+  display: flex; align-items: center; gap: 4px; flex: 0 0 auto;
+  font-size: 11px; color: var(--dim); white-space: nowrap;
+}
+/* `.swatch` is sized per host (the ribbon, the group header, the timeline
+   filter each say so); this is the histogram's. */
+.th-legend-item .swatch { width: 8px; height: 8px; border-radius: 1px; flex: 0 0 auto; }
+.th-stack[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
 .histogram-head .btn { font-size: 11px; padding: 1px 7px; }
 .th-canvas { display: block; width: 100%; cursor: crosshair; user-select: none; }
 .th-hint { padding: 0 10px 4px; font-size: 10px; }
