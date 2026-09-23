@@ -14,15 +14,27 @@ artefact nobody collected, which importing a file fixes, versus a table
 that is in the case whose query matched nothing, which is a finding — and
 that a zero is left alone, because 0 is an answer.
 
+And that a card stops being folded in the right order. A folded card is
+display:none, so it has no size, and a bar or histogram measures its
+canvas one frame after it is appended — unfold on the strip's frame
+instead of before the paint and the card that finally got its rows comes
+back carrying a chart drawn at 300×150 and stretched, whose hit boxes are
+in that same phantom space. Only a browser can tell either half of that.
+
 The shared fixture table is 200 rows over four EventIds, 50 each, with no
 row anywhere carrying EventId 9999.
 """
 
 from __future__ import annotations
 
+import json
+import re
+
 import pytest
 
 pytestmark = pytest.mark.ui
+
+PREVIEW = re.compile(r".*/api/dashboard/widget/preview$")
 
 H = "{ 'Content-Type': 'application/json', 'X-Timeline-Lite-Client': '1' }"
 
@@ -217,4 +229,106 @@ def test_a_board_with_nothing_empty_has_no_strip(page):
         assert not page.locator("#dashGrid .dash-empties").is_visible()
         assert _cards(page).nth(0).is_visible()
     finally:
+        _drop(page, did)
+
+
+# ------------------------------------------- the card that stops being empty
+
+class _Filled:
+    """The two answers one widget gives across an import: nothing, then
+    rows. Stubbed rather than driven by a real import, because what is
+    being measured is the pixel geometry of the card the second answer
+    lands on, and that needs a row count and a card width the test knows.
+    """
+
+    def __init__(self, page, rows):
+        self.rows = rows
+        self.n = 0
+        page.route(PREVIEW, self._on)
+
+    def _on(self, route):
+        self.n += 1
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"columns": ["Host", "n"],
+                                       "rows": [] if self.n == 1 else self.rows,
+                                       "elapsed_ms": 1}))
+
+
+def _bar_board(page, name):
+    """One folded-then-filled card, wide enough that a chart drawn at
+    fit()'s 300×150 fallback cannot pass for one drawn at the card's own
+    size."""
+    src = _src(page)
+    return _board(page, name, [{
+        "title": "Registry entries by category", "source": "sql", "render": "bar", "span": 2,
+        "query": {"sql": f"SELECT Host, COUNT(*) AS n FROM src_{src} GROUP BY Host"},
+        "drill": {"table": f"src_{src}", "column": "Host"}}])
+
+
+def _fill(page):
+    """↻ Refresh all, the way an analyst reaches for it after importing
+    the artefact a folded card was waiting on. It runs quiet — no
+    render() — which is the whole reason the unfold has to be its own
+    step."""
+    page.evaluate("() => __winnow.refreshBoard()")
+    page.wait_for_function(
+        "() => document.querySelectorAll('#dashGrid .dash-empties-row').length === 0",
+        timeout=15_000)
+    page.wait_for_selector("#dashGrid canvas", timeout=15_000)
+    page.wait_for_timeout(300)   # the bars draw on the next frame
+
+
+def test_a_card_that_fills_in_draws_its_chart_at_the_cards_own_size(page):
+    """A folded card is display:none, so a canvas measured while it is
+    still folded has no size at all: fit() falls back to 300×150 and the
+    board then stretches that bitmap across a card twice as wide. The
+    fold has to be lifted before the paint, not a frame after it."""
+    _Filled(page, [[f"H{i}", 8 - i] for i in range(8)])
+    did = _bar_board(page, "Filled bar")
+    try:
+        _show(page, did)
+        _wait_folded(page, 1)
+        _fill(page)
+        box = page.evaluate("""() => {
+          const c = document.querySelector('#dashGrid canvas');
+          const dpr = Math.min(window.devicePixelRatio || 1, 2);
+          return { w: c.clientWidth, h: c.clientHeight,
+                   bw: Math.round(c.width / dpr), bh: Math.round(c.height / dpr) };
+        }""")
+        assert box["w"] > 340 and abs(box["h"] - 150) > 4, box   # not 300×150 by accident
+        assert (box["bw"], box["bh"]) == (box["w"], box["h"]), box
+    finally:
+        _drop(page, did)
+
+
+def test_a_bar_that_fills_in_drills_on_the_row_that_was_clicked(page):
+    """The expensive half of the same bug, and the silent one. drawBars
+    hands back hit boxes in the coordinate space it drew in, and pickBar
+    tests them against the click's real offsets — so a chart sized 300×150
+    inside a ~600×160 card swallows every click past its left half, and
+    the ones that do land are a row out, because the row height is the
+    canvas height divided by the row count."""
+    _Filled(page, [[f"H{i}", 8 - i] for i in range(8)])
+    did = _bar_board(page, "Filled bar drill")
+    try:
+        _show(page, did)
+        _wait_folded(page, 1)
+        _fill(page)
+        canvas = page.locator("#dashGrid canvas.drillable").first
+        bb = canvas.bounding_box()
+        # The last pixel of the THIRD row's band, at the right-hand end of
+        # the card: at the fallback size that point is outside every box
+        # (nothing happens at all), and at the fallback height it belongs
+        # to the fourth row.
+        row_h = max(16, min(30, bb["height"] / 8))
+        canvas.click(position={"x": bb["width"] - 8, "y": row_h * 3 - 1})
+        page.wait_for_selector("#dashboardview", state="hidden", timeout=15_000)
+        assert page.evaluate("() => __winnow.S.filterTree")["children"] == [
+            {"type": "cond", "column": "Host", "op": "equals", "value": "H2"}]
+    finally:
+        page.evaluate("""async () => {
+          __winnow.S.filterTree = { type: 'group', op: 'AND', children: [] };
+          __winnow.updateFiltersButton();
+          await __winnow.rebuildView({ keepScroll: false, keepRow: false });
+        }""")
         _drop(page, did)

@@ -1029,10 +1029,15 @@ export function emptyReason(w, state) {
    on open, a run landing, the editor's Run now — so a card can never be
    folded away on the strength of a stale answer.
 
-   It also writes the reason into the card's own body, which matters for
-   the one moment the card is visible: "Show them" puts it back on the
-   board, and the shipped queries no longer UNION in a sentence of their
-   own (that sentence is what held the full-width card this replaces). */
+   It runs BEFORE the paint and returns the empty state, so the caller
+   paints only what it returns null for. Both halves of that matter. A
+   card that resolved to nothing has its body written here (the reason),
+   which is what the card shows the moment "Show them" puts it back on
+   the board — the shipped queries no longer UNION a sentence of their
+   own in, and that sentence is what held the full-width card this
+   replaces. And a card that resolved to SOMETHING has to be back on the
+   layout before paintWidget runs, or its chart measures a hidden
+   element; see the unhide below. */
 function noteEmpty(w, cardEl, data, err) {
   // Cards on the BOARD only. The editor's Preview runs an unsaved draft
   // through this same runWidget, into a `.dash-card.dash-preview` inside
@@ -1049,8 +1054,27 @@ function noteEmpty(w, cardEl, data, err) {
       body.style.height = '';
       body.replaceChildren(el('div', 'dash-empty-note', emptyReason(w, state)));
     }
-  } else empties.delete(cardEl);
+  } else {
+    empties.delete(cardEl);
+    // Unhidden HERE, synchronously, rather than on the strip's own frame.
+    // A folded card is display:none, and a bar or histogram measures its
+    // canvas inside a requestAnimationFrame — the one paintWidget
+    // registers runs a frame before scheduleEmpties() would unhide the
+    // card, so a card that gains rows (the RECmd batch finally imported,
+    // then ↻ Refresh all, which runs quiet and never calls render())
+    // would be drawn while it is still hidden: clientWidth/clientHeight
+    // are 0, fit() falls back to 300×150, and that bitmap is then
+    // stretched across a span-2 card. The blur is the cheap half. The
+    // boxes drawBars hands back are in that phantom space too, and
+    // pickBar tests them against a real e.offsetX/offsetY, so a click
+    // past ~300px drills nothing at all and one near a row edge opens
+    // the neighbouring host's rows (rowH is h/n, and h was wrong).
+    // Nothing repaints a card on resize, so it stays wrong until the
+    // next full render().
+    cardEl.classList.remove('is-empty');
+  }
   scheduleEmpties();
+  return state;
 }
 
 /* The strip: one line per card that resolved to nothing, in BOARD order
@@ -1176,7 +1200,10 @@ function card(w, i) {
   // card, and an analyst reopening a case in the morning paid for all of
   // them before a single number appeared.
   const hit = w.id ? cache[w.id] : null;
-  if (hit) { paintWidget(w, body, hit.payload); noteEmpty(w, c, hit.payload, null); }
+  // noteEmpty first, and no paint when it says there is nothing to paint:
+  // it owns the body in that case, and its answer decides whether this
+  // card is on the layout at all. Same order everywhere a card is painted.
+  if (hit && !noteEmpty(w, c, hit.payload, null)) paintWidget(w, body, hit.payload);
   if (!hit || w.live) runWidget(w, body, { boardId: S.dashboardId, quiet: !!hit });
   return c;
 }
@@ -1226,8 +1253,10 @@ async function runWidget(w, body, opts = {}) {
     scheduleBar();
     paintAges();
   }
-  paintWidget(w, body, data);
-  noteEmpty(w, body.closest('.dash-card'), data, null);
+  // Ask noteEmpty first: it decides whether this card is on the layout at
+  // all, and it owns the body when the answer was nothing, so there is
+  // nothing left for paintWidget to do in that case.
+  if (!noteEmpty(w, body.closest('.dash-card'), data, null)) paintWidget(w, body, data);
   return {};
 }
 
@@ -1685,10 +1714,14 @@ function openWidgetEditor(existing, prefill = null) {
           const cards = [...$('dashGrid').querySelectorAll('.dash-card:not(.dash-add)')];
           const onBoard = cards[widgets.indexOf(existing)];
           if (onBoard) {
-            paintWidget(existing, onBoard.querySelector('.dash-widget-body'), res.payload);
             // An edit that gave the card rows takes it back out of the
-            // strip, and one that took them away puts it in.
-            noteEmpty(existing, onBoard, res.payload, null);
+            // strip, and one that took them away puts it in — asked
+            // before the paint, as on the board, so that a card coming
+            // back out of the strip is on the layout by the time its
+            // chart measures itself (see noteEmpty).
+            if (!noteEmpty(existing, onBoard, res.payload, null)) {
+              paintWidget(existing, onBoard.querySelector('.dash-widget-body'), res.payload);
+            }
           }
           renderBar();
           paintAges();
