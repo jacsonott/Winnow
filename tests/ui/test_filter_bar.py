@@ -242,7 +242,10 @@ def test_the_value_picker_still_opens_from_a_revealed_box(page):
     request now — so the path to it has to survive the reveal."""
     _open_box(page, "Host")
     page.locator('.fcell-pick[data-col="Host"]').click()
-    page.wait_for_selector(".value-picker")
+    # The rows, not the panel: the values are fetched after it opens, so
+    # counting on the panel alone counts zero whenever the box loses that
+    # race — which on a loaded machine it does.
+    page.wait_for_selector(".value-picker .vp-row")
     assert page.locator(".value-picker .vp-row").count() >= 5
 
 
@@ -251,7 +254,7 @@ def test_the_value_picker_writes_a_chip(page):
     show up in the bar like a typed one."""
     _open_box(page, "Host")
     page.locator('.fcell-pick[data-col="Host"]').click()
-    page.wait_for_selector(".value-picker")
+    page.wait_for_selector(".value-picker .vp-row")
     page.locator(".value-picker .vp-actions .btn", has_text="None").click()
     page.locator('.value-picker .vp-row:has-text("H1") input').first.check()
     page.locator(".value-picker .vp-actions .btn:not(.ghost)").click()
