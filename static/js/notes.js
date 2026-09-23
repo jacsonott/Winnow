@@ -1,11 +1,17 @@
 /* Case notes — a free-form Markdown scratchpad for the investigation's
-   narrative, distinct from per-row notes. Stored in the case file
-   (Store.case_notes), so the story travels with the .db to whoever
-   receives it. Its own page tab; the editor and a live preview side by
-   side, split by a draggable divider (Edit / Preview collapse the other
-   pane; only the divider position is remembered, per browser, under
+   narrative. Stored in the case file (Store.case_notes), so the story
+   travels with the .db to whoever receives it. Its own page tab; the
+   editor and a live preview side by side, split by a draggable divider
+   (Edit / Preview collapse the other pane; the divider position and
+   whether the row-note list is open are remembered, per browser, under
    winnow.notes); a tiny dependency-free Markdown renderer (airgap rule);
-   debounced autosave. See docs/design/analysis-suite.md. */
+   debounced autosave. See docs/design/analysis-suite.md.
+
+   It also lists the OTHER notes — the ones written on evidence rows, in
+   the detail pane (Store.row_notes). Two things were called notes and
+   only one of them was on the page called Notes, so an analyst writing up
+   findings had to remember which rows they had annotated. They are a jump
+   list here, not an editor: each entry opens its row where it lives. */
 
 import { $, api, debounce, el, post, toast } from './core.js';
 import { showDashboard } from './dashboard.js';
@@ -13,6 +19,7 @@ import { recordTabVisit } from './tabhistory.js';
 import { loadSqlTabs, showMainView, showSqlTab, syncTabChrome } from './sql.js';
 import { openSource, sourceLabel, syncTabSelection } from './sources.js';
 import { S } from './state.js';
+import { jumpToTimelineRow } from './timeline.js';
 import { dropdownMenu } from './ui.js';
 
 let loaded = false;   // whether this case's notes have been fetched into the editor
@@ -110,7 +117,10 @@ export function loadNotesPrefs() {
   let stored = {};
   try { stored = JSON.parse(localStorage.getItem(NOTES_KEY) || '{}') || {}; } catch { /* defaults below */ }
   const split = Number(stored.split);
-  return { split: split >= NOTES_SPLIT_MIN && split <= NOTES_SPLIT_MAX ? split : NOTES_SPLIT_DEFAULT };
+  return { split: split >= NOTES_SPLIT_MIN && split <= NOTES_SPLIT_MAX ? split : NOTES_SPLIT_DEFAULT,
+           // Open unless the analyst closed it: the list exists to be seen
+           // by someone who doesn't know their row notes are reachable here.
+           rows: stored.rows !== false };
 }
 
 export function saveNotesPrefs(patch) {
@@ -179,7 +189,16 @@ export function renderPreview() {
   if (!split || !view || view.hidden || split.dataset.mode === 'edit') return false;
   const pane = $('notesPreview');
   const top = pane.scrollTop;
-  $('notesPreviewBody').innerHTML = renderMarkdown($('notesEditor').value);
+  const body = $('notesPreviewBody');
+  const text = $('notesEditor').value;
+  // An empty case used to put a blank pane beside the editor's placeholder,
+  // which read as a note someone had written and a preview that had failed
+  // to render it. Saying so costs one line and removes the ambiguity — and
+  // it is a DOM node, not markdown fed through the renderer, so nothing an
+  // analyst could type reproduces it.
+  if (text.trim()) body.innerHTML = renderMarkdown(text);
+  else body.replaceChildren(el('p', 'notes-preview-empty',
+                               'Nothing written yet — what you type on the left appears here.'));
   pane.scrollTop = top;
   previewStale = false;
   return true;
@@ -276,6 +295,76 @@ export function insertAtCursor(text) {
   ed.dispatchEvent(new Event('input'));   // autosave sees it like typing
 }
 
+/* -------------------------------------------------------- row notes */
+
+/* The case's row notes, listed under the narrative. Fetched per visit
+   rather than cached: they are written on the grid, one row at a time,
+   between visits to this page, and a stale count here would be worse than
+   no count. Failure is silent on purpose — the narrative is what the page
+   is for, and an unreachable listing must not take the editor down with
+   it; the strip keeps whatever it last showed. */
+export async function loadRowNotes() {
+  if (!$('notesRows')) return null;
+  let data = null;
+  try { data = await api('/api/row_notes'); } catch { return null; }
+  renderRowNotes(data);
+  return data;
+}
+
+/* One button per note: table, line, and the note on one line. Built as DOM
+   nodes with textContent, never innerHTML — a row note is analyst-typed
+   text sitting next to forensic data, and the preview pane above is the
+   only place in this app that renders markup at all. */
+export function renderRowNotes(data) {
+  const notes = (data && data.notes) || [];
+  const total = data && Number.isFinite(data.total) ? data.total : notes.length;
+  $('notesRowsCount').textContent = total ? `Row notes (${total})` : 'Row notes';
+  const body = $('notesRowsBody');
+  if (!notes.length) {
+    // Says where they come from: an analyst who has never opened the detail
+    // pane's note box has no way to know this section is waiting for it.
+    body.replaceChildren(el('div', 'notes-rows-empty',
+                            'None yet — a note written on a row, in the detail pane, is listed here.'));
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  for (const n of notes) {
+    const where = `${n.source_name} · Line ${n.rid}`;
+    const b = el('button', 'notes-row');
+    b.type = 'button';
+    b.dataset.sourceId = n.source_id;
+    b.dataset.rid = n.rid;
+    b.title = `${where}\n\n${n.note}`;
+    b.append(el('span', 'notes-row-where', where),
+             // Collapsed to one line for the list; the tooltip above and the
+             // detail pane on the other side of the click have all of it.
+             el('span', 'notes-row-note', n.note.replace(/\s+/g, ' ').trim()));
+    frag.append(b);
+  }
+  // A case can carry more row notes than a jump list is any use as. Say
+  // which part of them this is rather than ending on an arbitrary line.
+  if (notes.length < total) {
+    frag.append(el('div', 'notes-rows-empty', `Showing the first ${notes.length} of ${total}.`));
+  }
+  body.replaceChildren(frag);
+}
+
+/* Show or hide the strip. Applies only — the click handler in wireNotes is
+   what writes the preference, exactly as the divider's drag does and
+   applyNotesSplit doesn't: a visit to the page must not record a choice
+   nobody made (tests/ui/test_notes_split.py pins that a page opened and
+   left alone writes no winnow.notes at all).
+
+   Unlike the Edit/Split/Preview mode, this one IS remembered across visits:
+   closing the strip is a standing "row notes aren't what I'm here for", and
+   the heading it collapses to still says what is behind it. */
+export function setRowNotesOpen(open) {
+  const section = $('notesRows');
+  if (!section) return;
+  section.dataset.collapsed = open ? '0' : '1';
+  $('btnNotesRows').setAttribute('aria-expanded', String(!!open));
+}
+
 export function wireNotes() {
   $('tabNotes').onclick = showNotesTab;
   // One listener for every write path (typing, Link ▾, a plugin's
@@ -308,6 +397,20 @@ export function wireNotes() {
       if (!$('notesview').hidden) applyNotesSplit(loadNotesPrefs().split);
     }).observe($('notesSplit'));
   }
+  $('btnNotesRows').onclick = () => {
+    const open = $('notesRows').dataset.collapsed === '1';
+    setRowNotesOpen(open);
+    saveNotesPrefs({ rows: open });
+  };
+  // Delegated for the same reason as the preview's links: the list is
+  // replaced wholesale on every visit. jumpToTimelineRow is the same
+  // open-source-then-recenter the watchlist hits use, so a row note and a
+  // watchlist hit land the analyst in exactly the same place.
+  $('notesRowsBody').addEventListener('click', (e) => {
+    const b = e.target.closest('.notes-row');
+    if (!b) return;
+    jumpToTimelineRow(Number(b.dataset.sourceId), Number(b.dataset.rid));
+  });
   // Delegated — the preview re-renders wholesale (innerHTML) on every
   // edit, so a handler bound to a link would be gone after the next keystroke.
   $('notesPreview').addEventListener('click', (e) => {
@@ -366,7 +469,12 @@ export async function showNotesTab() {
   // then jump. The mode is always Split (not remembered, see NOTES_KEY);
   // the ratio is whatever the last drag left.
   setNotesMode('split');
-  applyNotesSplit(loadNotesPrefs().split);
+  const prefs = loadNotesPrefs();
+  applyNotesSplit(prefs.split);
+  setRowNotesOpen(prefs.rows);
+  // Not awaited: the row notes are a second question, and the narrative
+  // (and the cursor in it) must not wait on the answer to it.
+  loadRowNotes();
   await ensureNotesLoaded();
   if (previewStale) renderPreview();
   // Focusing a display:none textarea is a silent no-op, but say so.

@@ -4271,6 +4271,14 @@ def api_note(body: NoteWrite):
     return {"ok": True}
 
 
+# Read-only, and deliberately whole-case rather than per source: the Notes
+# page lists the rows annotated anywhere in the case, which is the one
+# question the detail pane can't answer.
+@app.get("/api/row_notes")
+def api_row_notes(limit: int = 500):
+    return store().list_row_notes(limit)
+
+
 @app.post("/api/layout")
 def api_layout_save(body: LayoutWrite):
     store().save_layout(body.source_id, body.payload)
