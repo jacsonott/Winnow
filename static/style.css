@@ -1416,6 +1416,15 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .menu-item-action:disabled { color: var(--text-faint); cursor: default; background: none; }
 .menu-item-flex { display: flex; align-items: center; gap: 6px; }
 .menu-item-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* An item with a `desc` puts both lines in this one flex child, so the
+   ✓/swatch on its left and the hint on its right stay centred on the
+   pair rather than on the label alone. The label keeps its own class, so
+   a test (or a pin) that addresses .menu-item-text still finds it. */
+.menu-item-lines { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+/* Dimmer and smaller than the label but NOT --text-faint: this line is
+   the difference between three verbs that otherwise read alike, so it has
+   to survive a glance. */
+.menu-item-desc { color: var(--dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Fixed width so labels line up whether or not their row is ticked. */
 .menu-check { flex: 0 0 10px; color: var(--accent); font-size: 11px; }
 .menu-swatch { flex: 0 0 auto; width: 9px; height: 9px; border-radius: 2px; }

@@ -14,7 +14,7 @@ def test_right_click_opens_the_menu_with_its_sections(page, row_menu, flyout):
     text = menu.inner_text()
     # One stable entry from each registered section at the top level: the
     # Tag and Copy submenus and the clicked column's filters.
-    assert "Tag this row" in text and "Copy" in text and "Filter to" in text
+    assert "Tag this row" in text and "Copy" in text and "Narrow to this value" in text
     # The tag list (default tags are seeded into every new case) is a click away.
     flyout("Tag this row")
     sub = page.locator(".menu-sub").inner_text()

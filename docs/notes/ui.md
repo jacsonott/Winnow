@@ -522,6 +522,23 @@ see [docs/notes/README.md](README.md) for the whole set.
   is deliberately the same sample-one-row rule `resolveTagDirection`
   already uses for the number hotkeys, so the menu can't promise a
   different outcome than pressing `2` would.
+- **The clicked cell's filter block names the value once, in its heading**
+  (`rowMenuCellItems`). It used to spell it into all three verbs —
+  "Filter to <value>", "Filter to <value> only", "Exclude <value>" — so a
+  40-character provider name appeared three times and the whole difference
+  between the first two was the word "only", sitting at the end of the
+  longer label where a long value had already been ellipsized away. The
+  heading is `Column = value`, `literal: true` so it is mono and *not*
+  uppercased (half of it is a value, and an uppercased hash or path is a
+  different string to the eye), with the value budgeted against the column
+  name's length to keep it on one line and the untruncated text on the
+  heading's `title`. The three verbs — Narrow / Reset / Exclude — each
+  carry a `desc`, the dim second line `menuItemNode` renders under a
+  label, saying what that verb does to the filters already on. That field
+  is for exactly this shape of problem: sibling verbs whose consequence,
+  not whose name, is what an analyst is choosing between. "Filter by
+  values…" below them deliberately stays one line — it is not a verb on
+  this value.
 - **The header value picker** (`openValuePicker`, the `▾` in each filter
   cell) is an *author* for the filter the header box already understands —
   it writes `=v` or `a|b|c` into `S.filters` and nothing downstream knows

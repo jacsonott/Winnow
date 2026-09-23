@@ -199,22 +199,69 @@ export function rowMenuTagItems(ctx) {
   return items;
 }
 
+/* The clicked cell's filters: the value named ONCE, in the heading, and
+   three verbs under it whose second line says what each does to the
+   filters already on.
+
+   These read "Filter to <value>", "Filter to <value> only" and "Exclude
+   <value>" until 2026-09. Three siblings repeating a 40-character
+   provider name, with the entire difference between the first two
+   carried by the word "only" at the end of the longer one — which is
+   past where the eye stops on a menu, and past where the label gets
+   ellipsized on a long value. Naming the value in the heading is also
+   what lets the verbs say something: the words the labels no longer
+   spend on the value now go on the consequence, which is the thing an
+   analyst three filters deep actually has to choose between.
+
+   The verbs are deliberately not "…" / "… only": a pair that differs by
+   one word is the bug, so "Narrow" and "Reset" carry the difference in
+   the first word of each, and the second lines spell it out. Behaviour
+   is untouched — the same three filterByValue calls, same options. */
 export function rowMenuCellItems(ctx) {
   if (!ctx.colName) return [];
-  const shown = ellipsize(displayValue(ctx.value));
+  const value = displayValue(ctx.value);
+  // The heading has to stay one line — it is what the menu sizes itself
+  // to, and a wrapped one breaks mid-value. A long column name is half
+  // the budget, so spend what it leaves rather than ellipsizing at the
+  // fixed width that only ever fitted short column names.
+  const shown = ellipsize(value, Math.max(16, 52 - ctx.colName.length));
+  // Literal, not the usual uppercased label: half of this heading is a
+  // value, and a value is case-sensitive — an uppercased hash or path is
+  // a different string to the eye. `=` rather than "is" because that is
+  // what the header filter box will hold once one of these is clicked.
+  const heading = { header: `${ctx.colName} = ${shown}`, literal: true };
+  // Only when there is more to see than the heading shows, and capped:
+  // a cell can hold a whole JSON document, and a tooltip of one is no
+  // more readable than the clipped heading.
+  if (shown !== value) heading.title = `${ctx.colName} = ${ellipsize(value, 400)}`;
   return [
-    { header: ctx.colName },
-    { label: `Filter to ${shown}`, onclick: () => filterByValue(ctx.colName, ctx.value) },
+    heading,
     {
-      label: `Filter to ${shown} only`,
+      label: 'Narrow to this value',
+      desc: 'adds to the filters already on',
+      title: `Filters ${ctx.colName} to this value — every other filter, the search and the timeframe stay as they are`,
+      onclick: () => filterByValue(ctx.colName, ctx.value),
+    },
+    {
+      label: 'Reset to this value',
+      desc: 'clears the other filters first',
       title: 'Drops every other filter and the search — the timeframe filter stays',
       onclick: () => filterByValue(ctx.colName, ctx.value, { only: true }),
     },
-    { label: `Exclude ${shown}`, onclick: () => filterByValue(ctx.colName, ctx.value, { exclude: true }) },
+    {
+      label: 'Exclude this value',
+      desc: 'hides it, leaving the other filters on',
+      title: `Filters ${ctx.colName} to everything except this value`,
+      onclick: () => filterByValue(ctx.colName, ctx.value, { exclude: true }),
+    },
     {
       // The way in when the column's own picker button is switched off for
       // size (see valueFilterEnabled) — an explicit click is consent to pay
       // for the scan, which the always-visible button isn't.
+      // No second line: one plain row under the three two-line verbs is
+      // what separates "act on this value" from "go pick some values",
+      // and it would have nothing true to say about the filters already
+      // on — the picker's own buttons decide that later.
       label: 'Filter by values…',
       onclick: () => openValuePickerForColumn(ctx.colName),
     },

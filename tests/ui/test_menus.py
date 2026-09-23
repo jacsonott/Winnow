@@ -20,7 +20,7 @@ def test_row_right_click_menu_has_tags_and_cell_actions(page, row_menu, flyout):
     items = page.locator(".menu:not(.menu-sub) .menu-item").all_inner_texts()
     joined = " | ".join(i.replace("\n", " ") for i in items)
     # The clicked column's filters are broken out at the top level …
-    assert "Filter to" in joined and "Exclude" in joined
+    assert "Narrow to this value" in joined and "Exclude this value" in joined
     # … everything else folds into a submenu so the list stays short.
     assert "Tag this row" in joined and "Copy" in joined
     assert "Edit tags…" not in joined and "Copy cell" not in joined
@@ -58,7 +58,9 @@ def test_row_menu_filters_by_the_clicked_cell(page):
     value = page.locator(".row").first.locator(".cell").nth(host_index).inner_text()
     page.locator(".row").first.locator(".cell").nth(host_index).click(button="right")
     page.wait_for_selector(".menu")
-    page.click(f".menu .menu-item:has-text('Filter to {value}')")
+    # The value itself lives in the heading now, not in the verb's label.
+    assert f"Host = {value}" in page.locator(".menu:not(.menu-sub) .menu-header").last.inner_text()
+    page.click(".menu:not(.menu-sub) .menu-item:has-text('Narrow to this value')")
     page.wait_for_timeout(800)
     assert page.locator('.fcell input[data-col="Host"]').input_value() == f"={value}"
     assert page.evaluate("() => __winnow.S.view.row_count") < 200
