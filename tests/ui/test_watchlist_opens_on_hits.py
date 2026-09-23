@@ -64,6 +64,14 @@ def _row(page, value):
         has=page.locator(".wl-val", has_text=re.compile(rf"^{re.escape(value)}$")))
 
 
+def _head(page):
+    """The heading is uppercased by CSS and inner_text reports what is
+    rendered, so compare in one case — the claim is which indicator the
+    pane narrowed to, not how the heading is styled. The back button
+    shares the element, hence the last line."""
+    return page.locator(".wl-hits-head").inner_text().strip().splitlines()[-1].lower()
+
+
 def test_the_pane_opens_on_the_latest_hits_not_an_instruction(page, watchlist):
     _open(page)
     page.wait_for_selector(".wl-latest")
@@ -85,10 +93,13 @@ def test_the_pane_opens_on_the_latest_hits_not_an_instruction(page, watchlist):
 def test_picking_an_indicator_narrows_and_there_is_a_way_back(page, watchlist):
     _open(page)
     page.wait_for_selector(".wl-latest")
-    _row(page, DUPE_A).click()
+    # The value, not the middle of the row: the overlap chip sits there and
+    # is its own control (it opens the merge dialog), so a click aimed at
+    # the row's centre lands on the chip.
+    _row(page, DUPE_A).locator(".wl-val").click()
     page.wait_for_selector(".wl-hit-group")
     assert page.locator(".wl-latest").count() == 0
-    assert f'Hits for "{DUPE_A}"' in page.locator(".wl-hits-head").inner_text()
+    assert _head(page) == f'hits for "{DUPE_A}"'
     page.locator(".wl-hits-back").click()
     page.wait_for_selector(".wl-latest")
     assert page.locator(".wl-hit-group").count() == 0
@@ -102,7 +113,7 @@ def test_an_indicator_name_in_a_hit_line_narrows_to_it(page, watchlist):
     page.locator(".wl-latest").first.locator(
         ".wl-latest-ioc", has_text=re.compile(rf"^{re.escape(DUPE_B)}$")).click()
     page.wait_for_selector(".wl-hit-group")
-    assert f'Hits for "{DUPE_B}"' in page.locator(".wl-hits-head").inner_text()
+    assert _head(page) == f'hits for "{DUPE_B}"'
 
 
 def test_zero_says_which_kind_of_zero_it_is(page, watchlist):
