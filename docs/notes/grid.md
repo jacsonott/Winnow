@@ -12,6 +12,18 @@ see [docs/notes/README.md](README.md) for the whole set.
 
 ---
 
+- **The "no rows match" overlay is derived, never assigned.** `#noRows`
+  used to be written in one place (`installView`) and cleared in another
+  (`openSource`), which meant it outlived the view it was an answer
+  about: it sat on screen for the whole of the next build, telling the
+  analyst there was nothing to find while the search that would find it
+  was still running. Search-all's "Open ↦" hit it every time, because
+  that path built twice. `view.syncNoRows()` is the one writer now — no
+  overlay while this table has a build in flight or a search running in
+  the background (the stats line carries that state, in words), otherwise
+  whatever the live view's count makes true. Call it rather than touching
+  `hidden`, and call it after the state it reads has settled.
+
 - **Pinned columns are `position: sticky`, not a second pane.** A column
   the analyst pinned (Alt-click its header, or the columns panel) keeps its
   place in the flex row and gets `left: <gutter + widths of the pinned
