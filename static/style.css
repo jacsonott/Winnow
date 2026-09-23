@@ -731,6 +731,14 @@ section.page-with-panels { flex-direction: row; }
 .spacer { flex: 1; }
 .stats { font-family: var(--mono); font-size: 11px; color: var(--dim); white-space: nowrap; }
 .stats b { color: var(--accent); font-weight: 600; }
+/* The one-time "double-click a row to open it" beside the count. Same
+   --dim as the line it follows, in the UI face rather than the count's
+   mono, so it reads as an aside beside a measurement rather than as part
+   of it — and --text-faint, the obvious "quieter still", is placeholder
+   grey: against --ink it is barely there, which is the wrong kind of
+   quiet for something meant to be read once. It leaves the document
+   entirely once a row has been opened. */
+.stats-hint { font-size: 11px; color: var(--dim); white-space: nowrap; margin-left: 10px; }
 
 .group-strip {
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0;
@@ -1003,6 +1011,24 @@ section.page-with-panels { flex-direction: row; }
   cursor: pointer; padding-left: 6px; border-radius: var(--radius-sm);
   user-select: none;
 }
+/* "Open this row", on the row the pointer is over (grid.js paints one per
+   landed row). Placed into the gutter's MIDDLE slot — grid-column: 2,
+   flush right, against the row number — rather than as a fourth column:
+   the three-slot template is the contract that keeps the checkbox and the
+   digits aligned down the page, and adding a track would move both on
+   every row. It therefore shares that slot with the tag stripes, which is
+   why it carries the gutter's own resolved background (the same `inherit`
+   idiom .gutter itself uses): a long stripe run passes behind the glyph
+   instead of through it. Hidden rather than absent so the hover costs no
+   layout. */
+.gutter .row-open {
+  grid-column: 2; justify-self: end;
+  color: var(--accent); font-size: 11px; line-height: 1;
+  padding: 1px 3px; border-radius: var(--radius-sm);
+  background: inherit; visibility: hidden; cursor: pointer;
+}
+.row:hover .row-open { visibility: visible; }
+
 /* The whole gutter is the row handle (grid.js): a hover lights all of
    it, not the digits, so it reads as one target; a selected row's gutter
    simply wears the row's own background. */
@@ -1083,12 +1109,31 @@ code { font-family: var(--mono); color: var(--accent); background: var(--panel);
 .main-area[data-dock="right"] .detail-resize { width: 6px; margin: 0 -3px; cursor: col-resize; }
 .detail-resize:hover, .detail-resize.dragging { background: var(--accent-dim); }
 .detail-body dl { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 2px 14px; align-content: start; }
+/* Field names as the column writes them: no uppercasing, no tracking.
+   Forty rows of UPPERCASE in a two-column list is slower to scan than
+   mixed case (the word shapes are gone), and it hid that TimeCreated and
+   CommandLine are the same strings the header row shows. The column stays
+   distinct from its value without the shouting — this is the UI face
+   against the value's mono, which is the difference the eye actually
+   uses. */
 .detail-body dt {
-  font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .05em;
+  font-size: 12px; color: var(--text);
   white-space: nowrap; padding-top: 2px;
 }
 .detail-body dd { margin: 0; font-family: var(--mono); font-size: 12px; word-break: break-all; }
 .detail-body dd:empty::after { content: "—"; color: var(--text-faint); }
+/* One field's copy button. Floated rather than absolutely positioned so
+   the value wraps around it instead of running underneath, and reserved
+   in the layout at all times (visibility, not display) — appearing on
+   hover must not reflow a forty-field list under the pointer. */
+.dfield-copy {
+  float: right; margin: 0 0 2px 8px; padding: 0 4px;
+  background: none; border: var(--border-w) solid var(--line-2); border-radius: var(--radius-sm);
+  color: var(--dim); font-size: 11px; line-height: 16px; cursor: pointer;
+  visibility: hidden;
+}
+.detail-body dd:hover .dfield-copy { visibility: visible; }
+.dfield-copy:hover { color: var(--accent); border-color: var(--accent-dim); }
 
 .detail-pretty { margin: 0; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-word; }
 .jtok-key { color: var(--accent); }
@@ -2184,6 +2229,10 @@ html[data-style="studio"] #search:focus, html[data-style="studio"] textarea:focu
    row state's own motionless background (a computed no-op — no pixels
    change, so nothing crosses the wire). The scrolling half is in grid.js. */
 html.remote * { transition: none !important; animation: none !important; }
+/* Same reasoning for the row's open affordance: appearing on hover is a
+   change to encode on every mousemove down the grid. Remote analysts keep
+   double-click, the detail key and the hint beside the row count. */
+html.remote .row:hover .row-open { visibility: hidden; }
 html.remote .row:hover { background: var(--ink); }
 html.remote .row:hover:nth-child(even) { background: var(--row-even); }
 html.remote .row.cursor:hover { background: var(--sel); }

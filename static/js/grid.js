@@ -360,6 +360,37 @@ export function render() {
   for (let pos = first; pos < last; pos++) frag.append(buildDataRow(pos, rowAt(pos), ctx));
   rowsEl.replaceChildren(frag);
   renderTagToolbar();
+  titleClippedCells();
+}
+
+/* A cell the column cut short says what it says, on hover — and only one
+   that was actually cut.
+
+   `LEVEL` painting `Informati…` with an empty title was the measured case:
+   the full value was reachable by widening the column or opening the row,
+   and nowhere else, while every other truncating surface in the app (tabs,
+   sidebar rows, column headers) has always carried a title.
+
+   Two things here are deliberate. It runs AFTER the rows are in the
+   document, because scrollWidth on a node still in a DocumentFragment is
+   0 — there is no way to ask "did this clip" before layout. And it titles
+   only the cells that clipped, rather than every cell unconditionally:
+   most values fit, and a title attribute on every cell of every painted
+   row is DOM string the grid does not need (invariant #6 is about what
+   the grid keeps in the document). The loop reads and never writes
+   geometry, so the first scrollWidth forces the one layout the frame was
+   going to do anyway and the rest come out of it — setting `title` cannot
+   dirty layout, so this must stay the last thing a paint does.
+
+   The 1px of slack is not superstition: scrollWidth and clientWidth are
+   rounded integers over fractional text and box widths, so an
+   exactly-fitting cell (an autofit column, most obviously) reports one
+   pixel of overflow it does not visibly have, and every cell in the
+   column would get a tooltip repeating what is already on screen. */
+export function titleClippedCells() {
+  for (const c of $('rows').querySelectorAll('.cell')) {
+    if (c.scrollWidth > c.clientWidth + 1) c.title = c.textContent;
+  }
 }
 
 /* Everything a paint pass hoists out of its row loop — built once per
@@ -455,6 +486,22 @@ export function buildDataRow(pos, r, ctx) {
     }
   }
   g.append(cb, mid, el('span', 'rid', r ? String(r.rid) : '·'));
+  // How you open a row, said on the row. The gesture (double-click, or the
+  // detail hotkey) is unchanged — this is a place to point at for an
+  // analyst who single-clicked, got a highlighted cell, and had nothing on
+  // screen telling them the whole row was one more click away. Only on a
+  // row that has landed: there is nothing to show for a page still in
+  // flight. It sits in the gutter's middle slot (see style.css) rather
+  // than as a fourth column, so the three-slot contract the checkbox and
+  // the rid line up against is untouched. aria-hidden because the
+  // keyboard already has the hotkey, and one of these per painted row
+  // would otherwise be read out as a screenful of identical controls.
+  if (r) {
+    const open = el('span', 'row-open', '⤢');
+    open.title = 'Open this row (double-click, or the detail key)';
+    open.setAttribute('aria-hidden', 'true');
+    g.append(open);
+  }
   row.append(g);
 
   cols.forEach((name, ci) => {
@@ -806,6 +853,21 @@ $('body').addEventListener('mousedown', (e) => {
   if (e.button !== 0) return;
   const pos = gutterRowAt(e.target);
   if (pos < 0) return;
+  // The row's own "open me" affordance is the one thing in the gutter that
+  // isn't picking, so it has to be taken before the toggle below. On
+  // mousedown like the rest of this handler, and for the same reason: the
+  // render these two calls do replaces the pressed node before the button
+  // comes back up, and a 'click' listener on a detached target never
+  // fires. The cursor moves with it because the pane, its note box and
+  // Copy row all read the cursor row — opening one row while another is
+  // current is how "Copy row" would copy a row nobody was looking at.
+  if (e.target.closest('.row-open')) {
+    e.preventDefault();
+    moveCursor(pos, false);
+    showDetail(pos);
+    $('body').focus();   // as every other gutter gesture does: the arrow keys keep working
+    return;
+  }
   e.preventDefault();   // no native text-drag off the digits, no native checkbox toggle
   selSnapshot();
   endKeyboardRun();

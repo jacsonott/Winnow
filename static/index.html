@@ -103,6 +103,10 @@ try {
   <div id="tagRibbon" class="tag-ribbon" aria-label="Tags"></div>
   <div class="spacer"></div>
   <div id="viewStats" class="stats"></div>
+  <!-- The grid's one gesture nothing on screen says: a single click selects a cell, and the
+       whole row opens on double-click (or the detail key). Shown beside the count until the
+       analyst has opened a row, then gone for good — detail.js owns both halves. -->
+  <span id="rowOpenHint" class="stats-hint" hidden>double-click a row to open it</span>
   <!-- Plugin toolbar-panel toggles (PluginAPI.register_toolbar_panel) land here, left of the built-in
        histogram toggle and the timeframe. The span is wiped and refilled on every plugin reload
        (renderPluginPanelButtons), which is why #btnHistogram sits after it rather than inside it. -->

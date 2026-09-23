@@ -300,6 +300,62 @@ export function renderDetailContent(v) {
   return document.createTextNode(v);
 }
 
+/* --------------------------------------- saying that a row can be opened
+
+   The grid's one undiscoverable gesture. A single click selects a cell;
+   the pane opens on double-click or the detail hotkey, and until now the
+   only place either was written down was a comment in this file. So the
+   hovered row carries an affordance (grid.js paints it, style.css hides
+   it until hover), and one quiet line sits beside the row count until the
+   analyst has opened a row — after which it never appears again, because
+   a hint that outlives its lesson is just chrome.
+
+   Local to the browser profile like the keymap and the detail dock: it is
+   a fact about a person, not about the case, and it must not travel in a
+   session export. Storage that throws (private mode, a full quota) counts
+   as "already seen" rather than "show it forever" — the analyst it would
+   nag every boot is the one we can never stop nagging. */
+const ROW_OPEN_SEEN = 'winnow.rowOpenSeen';
+
+function rowOpenSeen() {
+  try { return localStorage.getItem(ROW_OPEN_SEEN) === 'seen'; } catch { return true; }
+}
+
+/* Every path that opens a row goes through showDetail, so marking it
+   there is what makes the hint answer "has this been done", not "was this
+   particular affordance clicked". */
+export function noteRowOpened() {
+  if (rowOpenSeen()) return;
+  try { localStorage.setItem(ROW_OPEN_SEEN, 'seen'); } catch { /* nothing to remember it with */ }
+  syncRowOpenHint();
+}
+
+/* Called wherever the stats line it sits next to is written (view.js's
+   writeStatsLine) and wherever that line is cleared — with no table open
+   there is no row to open, and the hint would be advice about an empty
+   grid. */
+export function syncRowOpenHint() {
+  $('rowOpenHint').hidden = rowOpenSeen() || !S.view || S.sourceId == null;
+}
+
+/* One field's "copy this value", revealed on hover (style.css). "Copy
+   row" was the only copy the pane offered, so lifting a single SID or
+   command line out of forty fields meant selecting it by hand across a
+   wrapped, pretty-printed block — or copying the row and deleting the
+   rest. The button carries no value of its own: the text lives in the
+   row object already, and duplicating a multi-KB payload into a dataset
+   attribute for every field would put the whole row in the DOM twice. */
+export function copyFieldButton(column) {
+  const b = el('button', 'dfield-copy', '⧉');
+  b.type = 'button';
+  b.title = `Copy ${column}`;
+  // Not a tab stop: a wide table puts forty of these between the pane's
+  // buttons and the note box, and tabbing to the note is the keyboard
+  // path that actually exists here.
+  b.tabIndex = -1;
+  return b;
+}
+
 /* The detail pane only force-opens on double-click (activateRow's plain
    single-click path deliberately never calls showDetail) or the toggleDetail
    hotkey. Once it's open, though, cursor movement — click, arrow keys,
@@ -316,11 +372,25 @@ export function showDetail(pos) {
   d.hidden = false;
   $('detailResize').hidden = false;
   $('detailTitle').textContent = `Line ${r.rid}`;
+  // Opening a row is the gesture the grid had no way of announcing, so
+  // the announcement stops the moment it has been used — from anywhere:
+  // the gutter affordance, a double-click, or the hotkey.
+  noteRowOpened();
   const dl = $('detailFields');
+  // The row this pane was painted for. The pane only ever shows the
+  // cursor row (maybeShowDetail keeps it there), but a field's Copy must
+  // act on the row in front of the analyst rather than re-derive one from
+  // state that something else may have moved since.
+  dl.dataset.pos = pos;
   dl.replaceChildren();
   S.columns.forEach((c, i) => {
     const v = r.cells[i];
     if (v == null || v === '') return;
+    // The column's name as the column writes it. It used to be
+    // uppercased in CSS, which costs a beat per field in a two-column
+    // list of forty of them, and made names that are already mixed case
+    // in the evidence (TimeCreated, CommandLine) unrecognisable as the
+    // same strings the header row shows.
     const dt = el('dt', null, c.name);
     dt.dataset.col = c.name;
     dl.append(dt);
@@ -330,7 +400,7 @@ export function showDetail(pos) {
     // <dd> is the only thing that still knows once you're deep inside a
     // pretty-printed document.
     dd.dataset.col = c.name;
-    dd.append(renderDetailContent(displayCell(c.name, v)));
+    dd.append(copyFieldButton(c.name), renderDetailContent(displayCell(c.name, v)));
     dl.append(dd);
   });
   const note = $('noteInput');
@@ -590,6 +660,24 @@ $('detailResize').addEventListener('mousedown', (e) => {
 });
 
 $('btnCloseDetail').onclick = () => hideDetailPane();
+
+/* A field's Copy puts the DISPLAYED value on the clipboard — the same
+   rule the grid's row and cell copies follow, so a datetime column's
+   chosen format applies to a copy exactly as it does on screen rather
+   than reverting to the stored text. What it does NOT carry across is
+   this pane's pretty-printing: a JSON column copies as the document the
+   row holds, not as the indented rendering of it, which is the same value
+   the field menu's "Copy value" hands over. Delegated, since showDetail
+   rebuilds the whole field list on every cursor move. */
+$('detailFields').addEventListener('click', (e) => {
+  const btn = e.target.closest('.dfield-copy');
+  if (!btn) return;
+  const column = btn.closest('dd').dataset.col;
+  const r = rowAt(Number($('detailFields').dataset.pos));
+  const i = S.columns.findIndex((c) => c.name === column);
+  if (!r || i < 0) return;
+  writeClipboardText(Promise.resolve(String(displayCell(column, r.cells[i]))), `Copied ${column}`);
+});
 
 $('btnCopyRow').onclick = () => {
   const r = rowAt(S.cursor);
