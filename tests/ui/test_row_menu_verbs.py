@@ -113,8 +113,18 @@ def test_reset_clears_the_other_filters_first(page):
 def test_exclude_hides_the_value_and_leaves_the_others_on(page):
     _filter_eventid(page)
     value = _open_on_host(page)
+    before = page.evaluate("() => [__winnow.S.view.view_id, __winnow.S.view.row_count]")
     page.click(".menu:not(.menu-sub) .menu-item:has-text('Exclude this value')")
-    page.wait_for_function("(v) => __winnow.S.filters.Host === '!=' + v", value)
+    # filterByValue writes S.filters in the click handler's own task and only
+    # then awaits the rebuild, so S.filters.Host flips to '!=…' before the
+    # POST /api/view has even been sent — waiting on it alone would let the
+    # read below hit the OLD rows, which stay in #body until the new view
+    # lands, and compare the clicked value against itself. Wait for the view
+    # that replaced them: a new view_id, and fewer rows than were there.
+    page.wait_for_function(
+        "([id, n]) => __winnow.S.view && __winnow.S.view.view_id !== id"
+        " && __winnow.S.view.row_count < n", before)
+    assert page.evaluate("(v) => __winnow.S.filters.Host === '!=' + v", value)
     assert page.locator('.fcell input[data-col="EventId"]').input_value() == "=4624"
     # Not just the filter string — the grid no longer shows that value.
     i = page.evaluate("() => __winnow.visibleCols().indexOf('Host')")
