@@ -266,7 +266,13 @@ see [docs/notes/README.md](README.md) for the whole set.
   rather than adding a fourth track, because the three-slot template is
   what keeps the checkbox and the row number aligned down the page; it
   carries the gutter's own `background: inherit` so a long stripe run
-  passes behind it. Remote session mode hides it: appearing on hover is a
+  passes behind it. Like every other child of the gutter it names its row
+  as well as its column (`grid-area: 1 / 2`) — grid auto-placement is
+  sparse, so a child whose definite column sits left of the cursor opens a
+  new implicit row instead of backing up, and naming column 2 alone made
+  the gutter two rows tall: the checkbox and the digits off centre on
+  every landed row, and the glyph itself overhanging the row below, where
+  the click selected that row rather than opening this one. Remote session mode hides it: appearing on hover is a
   repaint to encode on every mousemove, which is the whole point of that
   mode (double-click, the hotkey and the hint still work). The hint —
   one line beside the row count — is `detail.js`'s

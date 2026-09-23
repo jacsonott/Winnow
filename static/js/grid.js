@@ -493,9 +493,12 @@ export function buildDataRow(pos, r, ctx) {
   // row that has landed: there is nothing to show for a page still in
   // flight. It sits in the gutter's middle slot (see style.css) rather
   // than as a fourth column, so the three-slot contract the checkbox and
-  // the rid line up against is untouched. aria-hidden because the
-  // keyboard already has the hotkey, and one of these per painted row
-  // would otherwise be read out as a screenful of identical controls.
+  // the rid line up against is untouched — the slot is named there, row
+  // and column both, so appending it after the rid here does not decide
+  // where it lands (it once did, and it landed a row down). aria-hidden
+  // because the keyboard already has the hotkey, and one of these per
+  // painted row would otherwise be read out as a screenful of identical
+  // controls.
   if (r) {
     const open = el('span', 'row-open', '⤢');
     open.title = 'Open this row (double-click, or the detail key)';

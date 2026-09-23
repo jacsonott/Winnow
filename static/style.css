@@ -966,7 +966,20 @@ section.page-with-panels { flex-direction: row; }
    These three selectors must keep the same grid-template-columns, gap and
    horizontal padding. That's the whole contract — break it and the header
    checkbox stops sitting above the row checkboxes, which is exactly the
-   misalignment this replaced. */
+   misalignment this replaced.
+
+   Every child of a data row's gutter names its own row and column below
+   (`grid-area: 1 / n`), because the row gutter has FOUR children for three
+   slots: the opener shares slot 2 with the tag stripes. Auto-placement is
+   sparse — an item whose definite column sits to the left of the cursor
+   starts a new implicit ROW rather than backing up — so leaving any of
+   them to flow made the gutter two rows tall the moment the opener was
+   appended after the rid: 14px + 13px inside a 23px box, the checkbox and
+   the digits shoved off centre on every landed row (visibility: hidden
+   still takes layout, so hovering had nothing to do with it), and the
+   glyph itself hanging over the row below, where a click selected the
+   wrong row. Placing all four explicitly takes DOM order out of the
+   layout entirely. */
 .gutter, .gutter-head, .gutter-filter {
   display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center; gap: 6px; padding: 0 8px;
@@ -990,12 +1003,12 @@ section.page-with-panels { flex-direction: row; }
   justify-self: end; font-size: 11px; letter-spacing: .06em; text-transform: uppercase;
 }
 
-.gutter-mid { display: flex; align-items: center; gap: 2px; overflow: hidden; min-width: 0; }
+.gutter-mid { grid-area: 1 / 2; display: flex; align-items: center; gap: 2px; overflow: hidden; min-width: 0; }
 .gutter .stripe { width: 4px; height: 12px; border-radius: 1px; flex: 0 0 auto; }
 .gutter .has-note { color: var(--accent); }
-/* Explicit grid-column: 3 rather than relying on sibling order — a row
-   still painting in (no cells resolved yet) has an empty middle slot, and a
-   rid placed by flow would land in column 1 and stop lining up with its
+/* Explicit slot 3 rather than relying on sibling order — a row still
+   painting in (no cells resolved yet) has an empty middle slot, and a rid
+   placed by flow would land in column 1 and stop lining up with its
    neighbours. tabular-nums so rids of differing digit counts right-align
    cleanly. */
 /* Clickable, and it has to look it: the number selects its row the way
@@ -1004,7 +1017,7 @@ section.page-with-panels { flex-direction: row; }
    is padded out to the gutter's right edge so the target is the column,
    not the digits. */
 .gutter .rid {
-  grid-column: 3; justify-self: end; font-variant-numeric: tabular-nums;
+  grid-area: 1 / 3; justify-self: end; font-variant-numeric: tabular-nums;
   /* Left only: the digits stay flush right, where the "Line" header above
      them is measured against (docs/notes/grid.md's three-slot contract).
      The padding just widens the target leftwards into empty gutter. */
@@ -1012,17 +1025,19 @@ section.page-with-panels { flex-direction: row; }
   user-select: none;
 }
 /* "Open this row", on the row the pointer is over (grid.js paints one per
-   landed row). Placed into the gutter's MIDDLE slot — grid-column: 2,
+   landed row). Placed into the gutter's MIDDLE slot — row 1, column 2,
    flush right, against the row number — rather than as a fourth column:
    the three-slot template is the contract that keeps the checkbox and the
    digits aligned down the page, and adding a track would move both on
    every row. It therefore shares that slot with the tag stripes, which is
    why it carries the gutter's own resolved background (the same `inherit`
    idiom .gutter itself uses): a long stripe run passes behind the glyph
-   instead of through it. Hidden rather than absent so the hover costs no
-   layout. */
+   instead of through it. The row half of `grid-area` is not decoration:
+   naming column 2 alone is what put the glyph in an implicit second row
+   under the gutter (see the contract note above). Hidden rather than
+   absent so the hover costs no layout. */
 .gutter .row-open {
-  grid-column: 2; justify-self: end;
+  grid-area: 1 / 2; justify-self: end;
   color: var(--accent); font-size: 11px; line-height: 1;
   padding: 1px 3px; border-radius: var(--radius-sm);
   background: inherit; visibility: hidden; cursor: pointer;
@@ -1041,7 +1056,7 @@ section.page-with-panels { flex-direction: row; }
   width: 12px; height: 12px; accent-color: var(--accent);
   flex: 0 0 auto; margin: 0; cursor: pointer;
 }
-.gutter input.rowcheck { opacity: .85; width: 14px; height: 14px; transition: opacity var(--transition-fast) var(--ease); }
+.gutter input.rowcheck { grid-area: 1 / 1; opacity: .85; width: 14px; height: 14px; transition: opacity var(--transition-fast) var(--ease); }
 .row:hover .rowcheck, .row.selected .rowcheck, .rowcheck:checked, .rowcheck:focus-visible { opacity: 1; }
 .hcell input.select-all-rows:disabled { cursor: default; opacity: .35; }
 

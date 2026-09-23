@@ -119,6 +119,45 @@ def test_the_gestures_it_advertises_still_work_unchanged(page):
     page.wait_for_selector("#detail:not([hidden])")
 
 
+def test_the_opener_stays_inside_the_row_it_opens(page):
+    """It shares the gutter's middle slot with the tag stripes, and grid
+    auto-placement is sparse: an item that names column 2 after one that
+    names column 3 starts a new implicit ROW rather than backing up. Naming
+    the column without the row put the glyph in a second 13px row of a 23px
+    gutter, half of it hanging over the row below — where the pointer had
+    already left this row, the glyph had gone invisible again, and the click
+    landed on the next row's gutter and selected it."""
+    row = page.locator("#body .row").nth(2)
+    tracks = row.locator(".gutter").evaluate("(g) => getComputedStyle(g).gridTemplateRows").split()
+    assert len(tracks) == 1, f"the gutter grew a second row: {tracks}"
+
+    row.hover()
+    rb = row.bounding_box()
+    ob = row.locator(".row-open").bounding_box()
+    assert ob["y"] >= rb["y"] - 1 and ob["y"] + ob["height"] <= rb["y"] + rb["height"] + 1, (rb, ob)
+    # Slot 2, flush against the digits — not over them.
+    assert ob["x"] + ob["width"] <= row.locator(".rid").bounding_box()["x"] + 1, ob
+    # And the whole glyph is the target: what is under its middle is itself,
+    # not the gutter of the row underneath.
+    assert row.locator(".row-open").evaluate(
+        """(o) => { const r = o.getBoundingClientRect();
+             return document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2) === o; }""")
+
+
+def test_the_opener_does_not_move_the_checkbox_or_the_digits(page):
+    """`visibility: hidden` still takes layout, so a mislaid opener shifted
+    the other two slots on every landed row whether it was hovered or not —
+    and the header gutter, which has no opener, stopped lining up with them.
+    That alignment is the whole reason the gutter is a grid (style.css)."""
+    head_cb = page.locator("#selectAllRows").bounding_box()
+    row = page.locator("#body .row").nth(2)
+    rb = row.bounding_box()
+    cb = row.locator(".rowcheck").bounding_box()
+    assert abs(cb["x"] - head_cb["x"]) < 1.5, (head_cb, cb)
+    for name, box in (("checkbox", cb), ("rid", row.locator(".rid").bounding_box())):
+        assert abs((box["y"] + box["height"] / 2) - (rb["y"] + rb["height"] / 2)) < 1.5, (name, rb, box)
+
+
 def test_a_row_still_paging_in_has_nothing_to_open(page):
     assert page.evaluate(
         """() => {
