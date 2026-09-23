@@ -522,6 +522,10 @@ export function menuItemNode(item, ctx = null, depth = 0) {
     b.append(el('span', 'menu-item-text', item.label));
   }
   if (item.note) b.append(el('span', 'menu-item-note', item.note));
+  // The same count pill the tab strip paints (.tab-badge), for a menu that
+  // stands in for a strip — the collapsed Pages ▾ list, where the badge has
+  // to travel with the row it belongs to rather than sit on the button.
+  if (item.badge) b.append(el('span', 'tab-badge', item.badge));
   if (item.hint) b.append(el('span', 'menu-item-hint', item.hint));
   if (item.submenu) {
     b.classList.add('menu-item-sub');

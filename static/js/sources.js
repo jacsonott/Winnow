@@ -19,7 +19,7 @@ import { syncSearchExpansion } from './search.js';
 import { openSessionManager } from './session.js';
 import { showGridTab, showSqlTab, showTimelineTab } from './sql.js';
 import { showNotesTab } from './notes.js';
-import { paintWatchlistBadge, refreshWatchlistBadge, showWatchlistTab } from './watchlist.js';
+import { paintWatchlistBadge, refreshWatchlistBadge, showWatchlistTab, watchlistBadge } from './watchlist.js';
 import { dashDrag, loadDashboards, renderDashboardsInto, showDashboard } from './dashboard.js';
 import { openCaseSettings } from './settings.js';
 import { openLog } from './errlog.js';
@@ -550,12 +550,23 @@ export function renderPageTabs() {
     const current = open.find((t) => t.key === S.activeTab);
     const btn = el('button', 'tab tab-sql pages-menu-btn');
     btn.id = 'pagesMenuBtn';
-    btn.append(el('span', null, current ? current.label : 'Pages'), el('span', 'caret', '\u25be'));
-    btn.title = 'Pages — SQL, Timeline, Notes, Watchlist and plugin tabs';
+    btn.append(el('span', 'pages-menu-label', current ? current.label : 'Pages'), el('span', 'caret', '\u25be'));
+    // Kept aside because paintWatchlistBadge appends "— N new hits" to it
+    // and would otherwise append to its own last answer on every repaint.
+    btn.dataset.baseTitle = 'Pages — SQL, Timeline, Notes, Watchlist and plugin tabs';
+    btn.title = btn.dataset.baseTitle;
     btn.setAttribute('aria-haspopup', 'true');
-    btn.onclick = () => dropdownMenu(btn, open.map((t) => ({
-      label: t.label, checked: t.key === S.activeTab, onclick: t.show,
-    })));
+    // Built per click, not per render, so the counts are the ones the
+    // analyst is looking at rather than the ones the strip last painted.
+    // A page's badge goes on that page's ROW — the button itself is
+    // labelled with whichever page is up and owns none of these numbers.
+    btn.onclick = () => dropdownMenu(btn, open.map((t) => {
+      const badge = t.key === 'watchlist' ? watchlistBadge() : null;
+      return {
+        label: t.label, checked: t.key === S.activeTab, onclick: t.show,
+        badge: badge ? badge.text : null, title: badge ? badge.title : t.title,
+      };
+    }));
     nodes.push(btn);
   }
   strip.replaceChildren(...nodes);
@@ -583,7 +594,9 @@ export function syncTabSelection() {
     // The collapsed button stands in for whichever page is up.
     const cur = pageTabsSorted().find((t) => t.key === S.activeTab);
     pm.setAttribute('aria-selected', String(!!cur));
-    pm.firstChild.textContent = cur ? cur.label : 'Pages';
+    // By class, not firstChild: the new-hit dot is a sibling that comes
+    // and goes, and writing the label into it would blank the marker.
+    pm.querySelector('.pages-menu-label').textContent = cur ? cur.label : 'Pages';
     // The button just changed width with its label; the strip is sized to
     // its content, so it has to be told to re-fit.
     applyPageTabsSize();
@@ -1405,9 +1418,10 @@ export function pageSidebarRow(t, index, total) {
   // Showing a closed page reopens it — the sidebar is the reopen path,
   // same as a closed table's row under All tables.
   label.onclick = () => { reopenPageTab(t.key); t.show(); };
-  if (t.key === 'watchlist' && S.watchlistNewHits) {
-    const pill = el('span', 'tab-badge', S.watchlistNewHits > 99 ? '99+' : String(S.watchlistNewHits));
-    pill.title = `${S.watchlistNewHits.toLocaleString()} new watchlist hits`;
+  const badge = t.key === 'watchlist' ? watchlistBadge() : null;
+  if (badge) {
+    const pill = el('span', 'tab-badge', badge.text);
+    pill.title = badge.title;
     label.append(pill);
   }
   row.append(label);

@@ -359,8 +359,9 @@ function announceHits(notice, found) {
   });
 }
 
-/* The tab's new-hit dot: total hits vs the count last seen (case_settings,
-   so it travels with the case). Showing the tab is what marks them seen. */
+/* The tab's new-hit count: total hits vs the count last seen
+   (case_settings, so it travels with the case). Showing the tab is what
+   marks them seen. */
 export async function refreshWatchlistBadge() {
   let b;
   try { b = await api('/api/watchlist/badge'); } catch { return; }
@@ -368,24 +369,60 @@ export async function refreshWatchlistBadge() {
   paintWatchlistBadge();
 }
 
-/* The new-hit indicator: a count pill on the Watchlist tab (and on the
-   collapsed Pages ▾ button when the strip is a dropdown), plus the
-   sidebar's Pages row — one number, painted wherever the tab is
-   represented, so it can't be missed whichever way the pages are shown. */
-export function paintWatchlistBadge() {
+/* The count as it gets painted, or null when there is nothing new. One
+   place because the same pill is drawn in three: the Watchlist tab, the
+   sidebar's Pages row, and the Watchlist item inside the collapsed
+   strip's dropdown. Three copies of ">99 reads as 99+" would drift. */
+export function watchlistBadge() {
   const n = S.watchlistNewHits || 0;
-  const paint = (host) => {
-    if (!host) return;
-    let pill = host.querySelector(':scope > .tab-badge');
-    if (!n) { if (pill) pill.remove(); return; }
-    if (!pill) { pill = el('span', 'tab-badge'); host.append(pill); }
-    pill.textContent = n > 99 ? '99+' : String(n);
-    pill.title = `${n.toLocaleString()} new watchlist hit${n === 1 ? '' : 's'} since you last looked`;
+  if (!n) return null;
+  return {
+    text: n > 99 ? '99+' : String(n),
+    title: `${n.toLocaleString()} new watchlist hit${n === 1 ? '' : 's'} since you last looked`,
   };
-  paint($('tabWatchlist'));
+}
+
+/* The new-hit indicator: a count pill on the Watchlist tab and on the
+   sidebar's Pages row — one number, painted wherever the tab itself is
+   represented, so it can't be missed whichever way the pages are shown.
+
+   The collapsed Pages ▾ button gets a dot instead, and that difference is
+   the whole point: that button is labelled with whichever page is up, so a
+   COUNT sitting on it reads as that page's number. A walk with eight
+   tables open found it reading "SQL 99+" where the 99+ counted watchlist
+   hits — a number against the wrong name is worse than no number. The
+   count rides the Watchlist row inside the menu (renderPageTabs), next to
+   the name that owns it; out here the dot says only "something in Pages
+   has news", which is true of whatever the button happens to be naming. */
+export function paintWatchlistBadge() {
+  const badge = watchlistBadge();
+  const tab = $('tabWatchlist');
+  if (tab) {
+    let pill = tab.querySelector(':scope > .tab-badge');
+    if (!badge) pill?.remove();
+    else {
+      if (!pill) { pill = el('span', 'tab-badge'); tab.append(pill); }
+      pill.textContent = badge.text;
+      pill.title = badge.title;
+    }
+    tab.classList.toggle('has-new-hits', !!badge);
+  }
   const pm = $('pagesMenuBtn');
-  if (pm) paint(pm);
-  $('tabWatchlist')?.classList.toggle('has-new-hits', n > 0);
+  if (pm) {
+    let dot = pm.querySelector(':scope > .pages-news-dot');
+    if (!badge) dot?.remove();
+    else if (!dot) {
+      // Before the caret, after the label: syncTabSelection rewrites the
+      // label in place and the caret has to stay last. Purely decorative —
+      // the sentence a screen reader gets is the button's own title, set
+      // below, because a bare dot has nothing to announce.
+      dot = el('span', 'pages-news-dot');
+      dot.setAttribute('aria-hidden', 'true');
+      pm.insertBefore(dot, pm.lastChild);
+    }
+    const base = pm.dataset.baseTitle || pm.title;
+    pm.title = badge ? `${base} — ${badge.title}` : base;
+  }
   renderSidebar();
 }
 
