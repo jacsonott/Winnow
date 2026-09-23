@@ -803,15 +803,27 @@ export async function openDerivedColumnModal(prefill, editing) {
     typeSelect.onchange = () => { fillOpSelect(typeSelect.value); onOpChanged(); };
     nameInput.oninput = () => { nameTouched = true; state.name = nameInput.value; };
 
-    // Type before the column: "what am I making" is the question the
-    // analyst arrives with, and it decides what the column list means
-    // (a timestamp to parse, a document to extract from, the first of
-    // several to combine). The format suggestion still runs off the
-    // column pick and moves Type on its own when it finds something.
+    // What am I making, how, and from what. Type first because it is the
+    // question the analyst arrives with and it decides what the operation
+    // list holds; the operation next because it decides what the column
+    // list *means* (a timestamp to parse, a document to extract from, the
+    // first of several to combine); the column last, right above the
+    // parameters that read it and the preview of what it produces.
+    //
+    // The format suggestion still runs off the column pick, so it can
+    // move the two above it — shown rather than applied once the analyst
+    // has chosen an operation of their own (see pickColumn).
+    //
+    // The three carry data-role because tests used to address them by
+    // position, which is the wrong handle for a row that can be reordered
+    // — this reorder is what proved it.
+    typeSelect.dataset.role = 'type';
+    opSelect.dataset.role = 'op';
+    colSelect.dataset.role = 'column';
     body.append(labeledRow('Type', typeSelect));
+    body.append(labeledRow('Operation', opSelect));
     body.append(labeledRow('Parse column', colSelect));
     body.append(suggestNote);
-    body.append(labeledRow('Operation', opSelect));
     body.append(paramBox);
     if (!editing) {
       nameInput.value = defaultName();

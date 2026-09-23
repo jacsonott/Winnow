@@ -13,10 +13,10 @@ pytestmark = pytest.mark.ui
 def test_combine_type_offers_coalesce_and_the_chips_build_the_param(page):
     page.evaluate("() => __winnow.openDerivedColumnModal('Host')")
     page.wait_for_selector("#modal:not([hidden])")
-    page.locator("#modalBody select").nth(0).select_option(label="Combine columns")   # type
+    page.locator("#modalBody select[data-role=type]").select_option(label="Combine columns")   # type
     page.wait_for_timeout(150)
     ops = page.evaluate(
-        "() => [...document.querySelectorAll('#modalBody select')[2].options].map((o) => o.textContent)")
+        "() => [...document.querySelector('#modalBody select[data-role=op]').options].map((o) => o.textContent)")
     assert ops == ["First non-empty value", "Row as JSON"], ops
     assert page.locator(".derived-name").input_value() == "Host (combined)"
     # The chips widget, not a select: order is the meaning.
@@ -39,11 +39,11 @@ def test_combine_type_offers_coalesce_and_the_chips_build_the_param(page):
     page.locator(".derived-columns .fb-groupby-chip").first.click(position={"x": 8, "y": 6})
     assert page.locator(".derived-columns .fb-groupby-chip").count() == 2
     # Changing the Parse column keeps the chosen Type and its chips.
-    page.locator("#modalBody select").nth(1).select_option("Timestamp")
+    page.locator("#modalBody select[data-role=column]").select_option("Timestamp")
     page.wait_for_timeout(400)
-    assert page.locator("#modalBody select").nth(0).input_value() == "Combine columns"
+    assert page.locator("#modalBody select[data-role=type]").input_value() == "Combine columns"
     assert page.locator(".derived-columns .fb-groupby-chip").count() == 2
-    page.locator("#modalBody select").nth(1).select_option("Host")
+    page.locator("#modalBody select[data-role=column]").select_option("Host")
     page.wait_for_timeout(300)
     # Removing the first chip keeps the second in place.
     page.locator(".derived-columns .fb-groupby-rm").first.click()
