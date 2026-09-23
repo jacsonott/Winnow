@@ -599,6 +599,69 @@ def _ts_normalize(raw: Any) -> str | None:
     return None
 
 
+# The Timeline's summary line (see build_timeline). Both caps are about a
+# single row of a fixed-height list: a lead long enough to fill the cell on
+# its own pushes every detail off the right edge, where the analyst cannot
+# see it and CSS cannot tell them it is there. The raw row stays one hover
+# (or one click on "raw") away, so truncating here hides nothing.
+TL_LEAD_MAX = 100
+TL_DETAIL_MAX = 120
+TL_DETAIL_SEP = " \u00b7 "
+
+
+def _tl_squash(raw: Any) -> str:
+    """One line of text out of whatever a cell holds. Forensic CSVs carry
+    embedded newlines and runs of padding constantly (EvtxECmd's Payload,
+    an ESXi log Message), and a raw newline in a row of a fixed-height
+    virtualized list renders as a gap the row has no height for."""
+    if raw is None:
+        return ""
+    return " ".join(str(raw).split())
+
+
+def _tl_cap(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "\u2026"
+
+
+def _tl_lead(*values: Any) -> str:
+    """Registered as the SQL function TL_LEAD(v1, v2, ...) — the first of
+    the summary template's lead columns that this row actually filled in.
+
+    Not COALESCE: the columns that say what happened are text columns that
+    are *present and empty* far more often than they are NULL (EvtxECmd
+    writes an empty MapDescription for every event it has no map for), and
+    COALESCE would hand back that empty string and stop."""
+    for v in values:
+        s = _tl_squash(v)
+        if s:
+            return _tl_cap(s, TL_LEAD_MAX)
+    return ""
+
+
+def _tl_details(lead: Any, *pairs: Any) -> str:
+    """Registered as the SQL function TL_DETAILS(lead, label1, value1, ...)
+    — the summary's trailing fields, blanks dropped, joined with a middle
+    dot.
+
+    Takes the lead value so it can drop a detail that merely repeats it:
+    lead columns fall back (TL_LEAD above), so on a row where the first
+    candidate was empty the lead IS one of the detail columns, and
+    "KeyName  KeyName" is not a summary. Repeats among the details
+    themselves go the same way — a jump list whose Path and LocalPath
+    agree should say it once."""
+    seen = {_tl_squash(lead)}
+    out = []
+    for i in range(0, len(pairs) - 1, 2):
+        label, value = pairs[i], pairs[i + 1]
+        s = _tl_squash(value)
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        s = _tl_cap(s, TL_DETAIL_MAX)
+        out.append(f"{label} {s}" if label else s)
+    return TL_DETAIL_SEP.join(out)
+
+
 # Microseconds between 1601-01-01 (the Windows/WebKit epoch) and 1970-01-01
 # (the Unix epoch) — Chromium stores every *_time/*_utc column (History's
 # urls.last_visit_time, visits.visit_time, Cookies' creation_utc/expires_utc,
@@ -1351,6 +1414,14 @@ class Store:
         self.db.create_function("REGEXP", 2, _regexp, deterministic=True)
         self.db.create_function("DAY_BUCKET", 1, _day_bucket, deterministic=True)
         self.db.create_function("TS_NORMALIZE", 1, _ts_normalize, deterministic=True)
+        # Timeline summaries only — variadic, and only ever appearing in the
+        # INSERT that materialises a timeline view, which runs here on the
+        # writer. Deliberately NOT registered on the _reader() pool the way
+        # DAY_BUCKET/TS_NORMALIZE are: those turn up inside a stored view's
+        # WHERE that a reader later re-runs, while a summary is plain text
+        # the build already wrote into v.<view>.
+        self.db.create_function("TL_LEAD", -1, _tl_lead, deterministic=True)
+        self.db.create_function("TL_DETAILS", -1, _tl_details, deterministic=True)
         self._tune(self.db)
         # Materialised views live in their own on-disk database, named and
         # WAL-journalled (not the anonymous `ATTACH DATABASE ''` this used
@@ -5725,6 +5796,75 @@ class Store:
 
     # -------------------------------------------------------------- timeline
 
+    def _timeline_summary_template(self, src: dict) -> dict | None:
+        """The shipped summary template (defaults/headers.json) for this
+        source's artefact shape, or None for a CSV no shipped shape
+        describes.
+
+        Matched the way every other header-set binding in here is matched
+        (_sources_for_header_set): a source qualifies when it CONTAINS the
+        set's columns, case-insensitively, against its own imported
+        columns only — a derived column the analyst added must not stop
+        an EvtxECmd export from being recognised as one. The most specific
+        match wins when several sets fit, so a shape that is another one
+        plus a few columns is summarised as itself rather than as whichever
+        smaller set happened to be listed first."""
+        from . import defaults
+
+        head = defaults.headers()
+        have = {c["name"].strip().lower() for c in self._base_cols(src)}
+        best: tuple[int, dict] | None = None
+        for name, cols in head["nicknames"]:
+            spec = head["summaries"].get(name)
+            if not spec or not all(c.strip().lower() in have for c in cols):
+                continue
+            if best is None or len(cols) > best[0]:
+                best = (len(cols), spec)
+        return best[1] if best else None
+
+    def _timeline_summary_exprs(self, src: dict, ts_col: str | None) -> tuple[str, str, list] | None:
+        """(lead SQL, details SQL, params) for this source's summary, or
+        None when nothing shipped describes it — in which case the row
+        keeps today's pipe-joined body and nothing regresses.
+
+        `ts_col` is dropped from both halves wherever it appears: the
+        timestamp is already the column beside the body, and a summary
+        that opens by repeating it is exactly the row the Timeline had
+        before. That is enforced here, against the timestamp this source
+        is ACTUALLY being read with — which can be a derived column or an
+        analyst's override, neither of which the shipped template can
+        know about."""
+        spec = self._timeline_summary_template(src)
+        if not spec:
+            return None
+        have = {c["name"].strip().lower(): c["name"] for c in self._base_cols(src)}
+        skip = (ts_col or "").strip().lower()
+
+        def resolve(name: str) -> str | None:
+            key = name.strip().lower()
+            return None if key == skip else have.get(key)
+
+        lead_cols = [c for c in (resolve(n) for n in spec["lead"]) if c]
+        details = [(label, col) for label, col in
+                   ((label, resolve(name)) for name, label in spec["details"]) if col]
+        if not lead_cols and not details:
+            return None
+        lead_sql = ("TL_LEAD(" + ", ".join(self._col_ref(src, c, "s") for c in lead_cols) + ")"
+                    if lead_cols else "''")
+        params: list[Any] = []
+        if not details:
+            return lead_sql, "''", params
+        # The lead expression is evaluated a second time inside TL_DETAILS
+        # (it carries no parameters, so repeating its text is safe) because
+        # dropping a detail that repeats the lead needs the lead's VALUE,
+        # which is only known per row.
+        args = [lead_sql]
+        for label, col in details:
+            args.append("?")
+            params.append(label)
+            args.append(self._col_ref(src, col, "s"))
+        return lead_sql, f"TL_DETAILS({', '.join(args)})", params
+
     def build_timeline(self, configs: dict[int, dict] | None = None, tag_ids: list[int] | None = None,
                        op_token: str | None = None) -> dict:
         """Materialises one row per *tagged* row across every real source in
@@ -5739,6 +5879,17 @@ class Store:
         `configs`, or with an override that doesn't actually apply to it
         (a timestamp_column that isn't one of its own columns), falls back
         to its first datetime column, every column, and its own name.
+
+        Each row also carries a **summary** — a lead ("Special privileges
+        assigned") and a few identifying details ("svc_backup · WKSTN-4471
+        · id 4672") — built here, beside the body, from the artefact
+        shape's template in defaults/headers.json. Built here rather than
+        client-side for the reason the body is: the client is a virtualized
+        list that already has the row, and re-deriving a summary there
+        would mean shipping it the source columns it deliberately never
+        fetches. A shape nothing describes, or a source whose body columns
+        the analyst chose by hand, gets an empty summary and reads exactly
+        as it did before.
 
         `tag_ids` narrows to rows carrying at least one of those tags;
         None/empty means every tagged row regardless of which tag(s).
@@ -5777,21 +5928,33 @@ class Store:
                 ref = self._col_ref(src, ts_col, "s")
                 ts_expr = ref if self._is_derived(src, ts_col) else f"TS_NORMALIZE({ref})"
 
-            body_cols = [c for c in (cfg.get("body_columns") or []) if c in col_names]
-            if not body_cols:
-                body_cols = [c["name"] for c in src["columns"]]
+            chosen_body = [c for c in (cfg.get("body_columns") or []) if c in col_names]
+            body_cols = chosen_body or [c["name"] for c in src["columns"]]
             body_expr = " || ' | ' || ".join(
                 f"COALESCE({self._col_ref(src, c, 's')}, '')" for c in body_cols
             )
 
+            # An analyst who picked body columns in Configure sources said
+            # what they want this source to read as, so the shipped summary
+            # stays out of it; otherwise the artefact shape gets its
+            # summary, and a shape nothing describes keeps the join.
+            summary = None if chosen_body else self._timeline_summary_exprs(src, ts_col)
+            lead_expr, detail_expr, summary_params = summary or ("''", "''", [])
+
             type_label = cfg.get("type_label") or src["name"]
             branches.append(
                 f"SELECT {int(source_id)} AS source_id, s.rid AS rid, {ts_expr} AS ts, ({body_expr}) AS body, "
+                f"{lead_expr} AS summary_lead, {detail_expr} AS summary_detail, "
                 f"? AS type_label, ? AS source_name, "
                 f"(SELECT GROUP_CONCAT(tag_id) FROM row_tags WHERE source_id={int(source_id)} AND rid=s.rid) AS tag_ids "
                 f"FROM {self._from_clause(src, 's')} "
                 f"WHERE s.rid IN (SELECT rid FROM row_tags WHERE source_id={int(source_id)}{tag_clause})"
             )
+            # Parameter order follows the order the placeholders appear in
+            # the SELECT above, since SQLite binds by ordinal across the
+            # whole UNION: the summary's detail labels, then the two label
+            # columns, then this branch's tag ids.
+            params.extend(summary_params)
             params.append(type_label)
             params.append(src["name"])
             if tag_ids:
@@ -5801,7 +5964,8 @@ class Store:
         with self.lock, self._interruptible(op_token, self.db), self.db:
             self.db.execute(
                 f"CREATE TABLE v.{q(vid)} (pos INTEGER PRIMARY KEY, source_id INTEGER, rid INTEGER, "
-                f"ts TEXT, body TEXT, type_label TEXT, source_name TEXT, tag_ids TEXT)"
+                f"ts TEXT, body TEXT, summary_lead TEXT, summary_detail TEXT, "
+                f"type_label TEXT, source_name TEXT, tag_ids TEXT)"
             )
             n = 0
             if branches:
@@ -5810,8 +5974,10 @@ class Store:
                 # in sorted order ((source_id, rid) makes the order fully
                 # determined), rowcount replaces a count(*) re-scan.
                 n = self.db.execute(
-                    f"INSERT INTO v.{q(vid)}(source_id, rid, ts, body, type_label, source_name, tag_ids) "
-                    f"SELECT source_id, rid, ts, body, type_label, source_name, tag_ids FROM ({union_sql}) "
+                    f"INSERT INTO v.{q(vid)}(source_id, rid, ts, body, summary_lead, summary_detail, "
+                    f"type_label, source_name, tag_ids) "
+                    f"SELECT source_id, rid, ts, body, summary_lead, summary_detail, "
+                    f"type_label, source_name, tag_ids FROM ({union_sql}) "
                     f"ORDER BY (ts IS NULL) ASC, ts ASC, source_id, rid",
                     params,
                 ).rowcount
@@ -5830,10 +5996,16 @@ class Store:
             raise KeyError("View expired — rebuild it")
         with self._reader() as ro, self._dropped_view_is_expired():
             rows = ro.execute(
-                f"SELECT pos, source_id, rid, ts, body, type_label, source_name, tag_ids "
+                f"SELECT pos, source_id, rid, ts, body, summary_lead, summary_detail, "
+                f"type_label, source_name, tag_ids "
                 f"FROM v.{q(view_id)} WHERE pos >= ? AND pos < ? ORDER BY pos",
                 (start + 1, start + 1 + count),
             ).fetchall()
+        # `body` stays the raw row it has always been and `lead`/`detail`
+        # ride along beside it, rather than the summary replacing the body:
+        # the row has to be able to show both (the client's "raw" toggle),
+        # and a client that re-fetches after a rebuild must not depend on
+        # which shape the row happened to get.
         out = [
             {
                 "pos": r["pos"] - 1,
@@ -5841,6 +6013,8 @@ class Store:
                 "rid": r["rid"],
                 "ts": r["ts"],
                 "body": r["body"],
+                "lead": r["summary_lead"] or "",
+                "detail": r["summary_detail"] or "",
                 "type_label": r["type_label"],
                 "source_name": r["source_name"],
                 "tags": [int(x) for x in r["tag_ids"].split(",")] if r["tag_ids"] else [],

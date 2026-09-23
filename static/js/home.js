@@ -167,7 +167,8 @@ export async function openCase(path, opts = {}) {
   // Same reasoning for the timeline: its view_id belongs to the Store
   // instance that just closed, and its tag-id checkboxes belong to the
   // previous case's tag_defs — neither means anything here.
-  S.timeline = { view: null, pages: new Map(), pending: new Set(), reqId: S.timeline.reqId + 1, tagFilter: null };
+  S.timeline = { view: null, pages: new Map(), pending: new Set(), reqId: S.timeline.reqId + 1,
+                 tagFilter: null, raw: new Set() };
   // sql_tabs is a per-case table, so the previous case's tabs (and the
   // in-memory results keyed by their ids) don't describe this one. Left
   // empty rather than reloaded here — showSqlTab loads lazily.
