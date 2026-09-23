@@ -489,7 +489,10 @@ function commitPin(id, on) {
    (renders a ✓ column — pass false for "checkable but off", omit entirely
    for a plain item), `swatch` (a color chip, for tags), `hint` (right-aligned
    keycap text, e.g. a hotkey), `note` (right-aligned dim text that is NOT a
-   key — a plugin's name), `keepOpen` (repaint the menu in place instead of
+   key — a plugin's name), `desc` (a dim SECOND line under the label, for a
+   verb whose consequence won't fit in its name — see rowMenuCellItems,
+   where it carries what each filter verb does to the filters already on),
+   `keepOpen` (repaint the menu in place instead of
    closing it, so toggling three tags is three clicks), `submenu` (an array,
    or a function for one that repaints — opens a flyout beside the item on
    hover or click; `key` names it when two siblings share a label), and
@@ -507,7 +510,17 @@ export function menuItemNode(item, ctx = null, depth = 0) {
     sw.style.background = item.swatch;
     b.append(sw);
   }
-  b.append(el('span', 'menu-item-text', item.label));
+  if (item.desc) {
+    // The two lines share one flex child so the ✓/swatch column on the
+    // left and the hint on the right still line up against the label,
+    // not against the middle of a two-line block.
+    const lines = el('span', 'menu-item-lines');
+    lines.append(el('span', 'menu-item-text', item.label));
+    lines.append(el('span', 'menu-item-desc', item.desc));
+    b.append(lines);
+  } else {
+    b.append(el('span', 'menu-item-text', item.label));
+  }
   if (item.note) b.append(el('span', 'menu-item-note', item.note));
   if (item.hint) b.append(el('span', 'menu-item-hint', item.hint));
   if (item.submenu) {
@@ -620,7 +633,11 @@ export function fillMenuNode(menu, items, ctx = null, depth = 0) {
     if (!item) continue;
     if (item === '-') { menu.append(el('div', 'menu-sep')); continue; }
     if (item.header) {
-      menu.append(el('div', 'menu-header' + (item.literal ? ' menu-header-literal' : ''), item.header));
+      const h = el('div', 'menu-header' + (item.literal ? ' menu-header-literal' : ''), item.header);
+      // A header that names a value has had it ellipsized to fit; the
+      // full text is worth having on hover, the way a clipped cell's is.
+      if (item.title) h.title = item.title;
+      menu.append(h);
       continue;
     }
     const node = menuItemNode(item, ctx, depth);

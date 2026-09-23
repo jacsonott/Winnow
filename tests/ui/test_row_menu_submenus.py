@@ -62,7 +62,7 @@ def test_top_level_is_short_and_keeps_the_filters_broken_out(page, row_menu):
     assert any(l.startswith("Copy") for l in subs)
     assert any(l.startswith("Save as table") for l in subs)
     # the filters are plain items at the top, not folded
-    assert any(l.startswith("Filter to") for l in labels) and any(l.startswith("Exclude") for l in labels)
+    assert any(l.startswith("Narrow to this value") for l in labels) and any(l.startswith("Exclude this value") for l in labels)
     # Eight at most, the folds included. Undo is counted apart: it is only
     # there while a tag write is on the stack, which depends on what ran
     # before this module, and the budget should not depend on that.
@@ -97,7 +97,7 @@ def test_the_tag_entry_advertises_the_hotkeys_the_tags_carry(page, row_menu):
 def test_hovering_a_sibling_closes_the_flyout(page, row_menu, flyout):
     row_menu(row=1, cell=1)
     flyout("Copy")
-    page.locator(".menu:not(.menu-sub) .menu-item", has_text="Filter to").first.hover()
+    page.locator(".menu:not(.menu-sub) .menu-item", has_text="Narrow to this value").first.hover()
     page.wait_for_selector(".menu-sub", state="detached")
     page.keyboard.press("Escape")
 
