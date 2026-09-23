@@ -29,6 +29,7 @@ export const S = {
   valueFilterMode: 'auto', // 'auto' (on under VALUE_FILTER_AUTO_MAX rows) | 'on' | 'off' — this table's value-picker default, per-column overrides live in S.layout
   hideEmptyRows: false, // the table menu's "Hide empty rows" — a per-table view preference, saved in the layout like valueFilterMode
   filters: {},          // name -> raw filter text
+  filterOpen: [],       // column names whose filter box is revealed under the filter bar — transient, per table, never persisted
   sort: [],             // [{column, dir}]
   search: '',
   searchMode: 'contains', // 'contains' | 'regex' | 'advanced'

@@ -896,6 +896,19 @@ section.page-with-panels { flex-direction: row; }
   font-family: var(--mono); font-size: 11px; opacity: .85;
 }
 .hcell-derived.pending { opacity: .5; font-style: italic; }
+/* The one-click way into a column's filter box, under the filter bar. In
+   flow at all times — hiding it until :hover would reflow the header row
+   as the pointer crossed it, the same thing .fcell-pick refuses to do — so
+   it is quiet rather than absent, and speaks up for a column that is
+   actually filtered. */
+.hcell-filter {
+  flex: 0 0 auto; background: none; border: 0; cursor: pointer;
+  color: var(--dim); font: inherit; font-size: 11px; padding: 0 2px;
+  border-radius: var(--radius-sm); opacity: .5;
+}
+.hcell:hover .hcell-filter { opacity: 1; }
+.hcell-filter:hover { color: var(--accent); background: var(--panel-2); }
+.hcell-filter.open, .hcell-filter.active { color: var(--accent); opacity: 1; }
 .hcell.dragging { opacity: .4; }
 .hcell.drop-before { box-shadow: inset 2px 0 0 var(--accent); }
 .hcell.drop-after { box-shadow: inset -2px 0 0 var(--accent); }
@@ -930,6 +943,58 @@ section.page-with-panels { flex-direction: row; }
 .fcell input:hover { border-color: var(--line); }
 .fcell input:focus { border-color: var(--accent); background: var(--panel-3); outline: none; }
 .fcell input.active { border-color: var(--accent-dim); color: var(--accent); }
+
+/* ------------------------------------------------------------ filter bar */
+
+/* What replaced the always-on filter row: one thin strip naming only the
+   filters that are actually set. It sits OUTSIDE the grid's scroll
+   container (see index.html) so the chips never scroll away with the
+   columns, and wraps rather than overflowing — a case with eight filters on
+   is rare, and a second line of chips is better than a chip nobody can
+   reach. */
+.filter-bar {
+  flex: 0 0 auto; display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  padding: 3px 8px; min-height: 26px;
+  background: var(--panel); border-bottom: 1px solid var(--line-2);
+}
+.filter-bar-label {
+  flex: 0 0 auto; font-size: 10px; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--dim); cursor: help;
+}
+.filter-bar-none { color: var(--dim); font-size: 11px; font-style: italic; }
+/* A chip is two buttons in one border: the label (edit it under its column)
+   and the ✕ (take it off). Split because those are the two things anyone
+   wants from a filter they can see, and a chip that only removed would make
+   changing a value a delete-and-retype. */
+.filter-chip {
+  display: inline-flex; align-items: center; flex: 0 0 auto; max-width: 100%;
+  border: var(--border-w) solid var(--line-2); border-radius: var(--radius-sm);
+  background: var(--panel-2);
+}
+.filter-chip-label {
+  display: inline-flex; align-items: baseline; gap: 6px; min-width: 0;
+  background: none; border: 0; color: var(--dim); font: inherit; font-size: 11px;
+  padding: 2px 3px 2px 8px; cursor: pointer;
+}
+.filter-chip-label:hover { color: var(--text); }
+.filter-chip-col { flex: 0 0 auto; white-space: nowrap; }
+.filter-chip-val {
+  min-width: 0; max-width: 34ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--mono); font-size: 11px; color: var(--accent);
+}
+.filter-chip-rm {
+  flex: 0 0 auto; background: none; border: 0; cursor: pointer;
+  color: var(--dim); font: inherit; font-size: 10px; padding: 3px 7px 3px 4px;
+  border-radius: var(--radius-sm);
+}
+.filter-chip-rm:hover { color: var(--danger); background: var(--panel-3); }
+.filter-add { font-size: 11px; padding: 2px 8px; }
+/* Rides .menu's positioning and shadow like the value picker does, and
+   borrows its search box and list; only the width is its own. */
+.filter-col-picker { width: 260px; max-width: 92vw; padding: 8px; gap: 6px; }
+.filter-col-picker .vp-list { max-height: 44vh; }
+.filter-col-picker .menu-item { font-family: var(--mono); font-size: 12px; padding: 4px 8px; }
+.filter-col-picker .menu-item.filtered { color: var(--accent); }
 
 /* overscroll-behavior-x: none (not just contain) — contain only stops
    scroll from chaining to an ancestor at the boundary, it doesn't stop the
