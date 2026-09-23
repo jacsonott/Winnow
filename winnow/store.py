@@ -6090,7 +6090,7 @@ class Store:
                          12 * 3600, 86400, 7 * 86400, 30 * 86400, 365 * 86400)
 
     def time_histogram(self, view_id: str, column: str, max_buckets: int = 160,
-                       op_token: str | None = None) -> dict:
+                       op_token: str | None = None, stack: str | None = None) -> dict:
         """Time buckets over the rows of the CURRENT view — filtered, searched,
         timeframe'd, exactly what the grid shows — for a datetime column.
         Two aggregate passes on the reader pool (invariant #4), shaped like
@@ -6148,9 +6148,60 @@ class Store:
                 f"SELECT b, COUNT(*) AS n FROM ({count_union}) WHERE b IS NOT NULL GROUP BY b ORDER BY b"
             ).fetchall()
         iso = lambda t: time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(int(t)))
-        return {"column": column, "bucket_seconds": bucket,
-                "start": iso(lo), "end": iso(hi), "total": int(n),
-                "buckets": [[int(r[0]), int(r[1])] for r in rows]}
+        out = {"column": column, "bucket_seconds": bucket,
+               "start": iso(lo), "end": iso(hi), "total": int(n),
+               "buckets": [[int(r[0]), int(r[1])] for r in rows]}
+        if stack == "tags":
+            out["stack"] = self._histogram_tag_stack(branch, members, bucket, op_token)
+        return out
+
+    def _histogram_tag_stack(self, branch, members: list[dict], bucket: int,
+                             op_token: str | None) -> dict:
+        """The same buckets split by tag, as {tags: [id…], buckets: [[epoch,
+        [untagged, n_first_tag, …]], …]}.
+
+        **One row, one segment.** Each row counts under the FIRST tag it
+        carries in ribbon order — which is the lowest tag id, since the
+        ribbon renders tag_defs in id order — and untagged rows make the
+        base segment. So a stacked bar is exactly as tall as the plain one
+        and the stacked chart and the flat chart are the same chart, read
+        two ways. Counting a two-tag row under both segments (which is what
+        grouping by tag does, deliberately — see _tag_group_branches) would
+        make bars taller than the rows they describe, and a height that
+        stops meaning "rows" is not worth the extra truth about one tag's
+        total: the ribbon already carries those numbers exactly.
+
+        The per-row lookup is a correlated MIN over row_tags' primary key
+        (source_id, rid, tag_id) — a prefix probe per row, not a join the
+        planner can turn inside out. Skipped entirely for a member with no
+        tags at all, the same short-circuit tag_counts_in_view makes,
+        because that is the common case and it costs nothing to notice.
+        """
+        with self._reader() as ro, self._dropped_view_is_expired(), self._interruptible(op_token, ro):
+            tagged = {m["source_id"] for m in members
+                      if ro.execute("SELECT 1 FROM row_tags WHERE source_id=? LIMIT 1",
+                                    (m["source_id"],)).fetchone()}
+            parts = []
+            for m in members:
+                if m["source_id"] in tagged:
+                    tag = ("(SELECT MIN(rt.tag_id) FROM row_tags rt "
+                           f"WHERE rt.source_id = {int(m['source_id'])} AND rt.rid = s.rid)")
+                else:
+                    tag = "NULL"
+                parts.append(branch(m, f"(EPOCH / {bucket}) * {bucket} AS b, {tag} AS tag"))
+            union = " UNION ALL ".join(parts)
+            rows = ro.execute(
+                f"SELECT b, tag, COUNT(*) AS n FROM ({union}) WHERE b IS NOT NULL "
+                "GROUP BY b, tag ORDER BY b"
+            ).fetchall()
+        ids = sorted({int(r[1]) for r in rows if r[1] is not None})
+        slot = {tid: i + 1 for i, tid in enumerate(ids)}
+        by_bucket: dict[int, list[int]] = {}
+        for b, tag, cnt in rows:
+            counts = by_bucket.setdefault(int(b), [0] * (len(ids) + 1))
+            counts[0 if tag is None else slot[int(tag)]] += int(cnt)
+        return {"tags": ids,
+                "buckets": [[b, by_bucket[b]] for b in sorted(by_bucket)]}
 
     def _tag_group_branches(self, view_id: str, src: dict, members: list[dict], direct: bool,
                             member_rows: dict[int, int], path_for) -> tuple[list[str], list]:
