@@ -5,7 +5,7 @@ import { applyPin, colWidth, pinnedOffsets, visibleCols } from './columns.js';
 import { $, GUTTER_W, MAX_SPACER_PX, OVERSCAN, PAGE, ROW_H, api, el } from './core.js';
 import { maybeShowDetail, showDetail } from './detail.js';
 import { ensureGroupPage, findGroupAt, groupCoordAt, groupDataRowAt, isLeafLevel, renderGrouped, toggleGroup } from './grouping.js';
-import { S, cellInRange, cellRangeRows, endKeyboardRun, gridRowCount, selAdd, selClear, selCount, selHas, selRangeApply, selRanges, selRemove, selReplace, selSnapshot, selToggle, selUndoAvailable, selUndoLast, startKeyboardRun } from './state.js';
+import { S, cellInRange, cellRangeRowCount, cellRangeRows, clearCellSelection, endKeyboardRun, gridRowCount, selAdd, selClear, selCount, selHas, selRangeApply, selRanges, selRemove, selReplace, selSnapshot, selToggle, selUndoAvailable, selUndoLast, startKeyboardRun } from './state.js';
 import { applyTag } from './tags.js';
 import { displayCell } from './tsformat.js';
 import { rebuildInFlight, rebuildView } from './view.js';
@@ -513,6 +513,9 @@ export function buildDataRow(pos, r, ctx) {
     applyPin(c, name, pins);
     c.dataset.col = ci;
     if (cellInRange(pos, ci)) c.classList.add('cell-selected');
+    // The ring is where the next arrow steps from — without it a
+    // keyboard analyst cannot tell which corner of a rectangle is live.
+    if (S.cellFocus && S.cellFocus.pos === pos && S.cellFocus.col === ci) c.classList.add('cell-active');
     const val = r ? r.cells[idx[name]] : '';
     if (val != null && val !== '') {
       // Keep the raw value (with highlight) when it's what matched the
@@ -537,7 +540,7 @@ export function renderTagToolbar() {
   // kept: coming back to the grid brings the bar back with it.
   // A cell range spanning several rows is what a tag key would hit when
   // nothing is picked (applyTag) — say so, rather than tagging silently.
-  const rangeRows = !count ? cellRangeRows().length : 0;   // headings excluded — the same rows a tag key hits
+  const rangeRows = !count ? cellRangeRowCount() : 0;   // headings excluded — the same rows a tag key hits
   if ((!count && rangeRows < 2) || S.activeTab !== 'grid') { bar.hidden = true; return; }
   bar.hidden = false;
   const ranges = count && !S.selectAll ? selRanges() : 0;
@@ -573,7 +576,7 @@ export function renderTagToolbar() {
     bar.append(undo);
   }
   const clear = el('button', 'btn ghost', count ? 'Clear selection' : 'Clear');
-  clear.onclick = () => { selSnapshot(); selClear(); S.cellRange = null; S.cellAnchor = null; S.selHidden = 0; render(); };
+  clear.onclick = () => { selSnapshot(); selClear(); clearCellSelection(); S.selHidden = 0; render(); };
   bar.append(clear);
 }
 
@@ -717,6 +720,121 @@ export function setCellRange(a, b) {
    pane wouldn't. Doing both updates in the same synchronous handler avoids
    depending on that later event entirely. */
 
+
+/* ----------------------------------------- keyboard cell movement */
+
+/* Excel's model in the terms this grid already had: S.cellFocus is the
+   active cell, S.cellAnchor is the corner a Shift run extends FROM, and
+   S.cellRange is the rectangle between them. A plain move drags both
+   corners along together, so the rectangle collapses to the one cell the
+   analyst is standing on; Shift moves only the focus, so the rectangle
+   grows from wherever the anchor was left — by an earlier arrow or by a
+   mouse drag, since the pointer paths below set the same two fields.
+
+   A keypress can therefore create a cell range where the mouse used to be
+   the only thing that could. That is why handleCopyShortcut lets picked
+   rows beat a ONE-cell range (grouping.js): a single cell is where you
+   are, a rectangle is what you chose. */
+
+/* The next position up or down that can hold a cell. A group heading owns
+   a position but has no cells — grouping.js paints one spanning element —
+   so an active cell parked on one would be invisible, and every consumer
+   that asks which rows a range means skips it anyway (cellRangeRows).
+   Arrows step over headings rather than landing on them. */
+function nextCellRow(from, step) {
+  const total = gridRowCount();
+  let p = from + step;
+  while (p >= 0 && p < total && S.groupByCols.length && !groupCoordAt(p)) p += step;
+  return p >= 0 && p < total ? p : null;
+}
+
+/* The first or last position that can hold a cell — Ctrl+Up / Ctrl+Down.
+   Walks inward past trailing headings for the same reason. */
+function edgeCellRow(step) {
+  const total = gridRowCount();
+  if (!total) return null;
+  let p = step > 0 ? total - 1 : 0;
+  while (p >= 0 && p < total && S.groupByCols.length && !groupCoordAt(p)) p -= step;
+  return p >= 0 && p < total ? p : null;
+}
+
+/* Bring a column into view horizontally — the counterpart of
+   scrollIntoView(pos) above, and deliberately NOT the DOM's own
+   scrollIntoView: the gutter and every pinned column are position:sticky
+   over the left edge of the scroller, so a cell scrolled flush to
+   scrollLeft parks UNDERNEATH them and the analyst watches the highlight
+   disappear. The sticky block's width is the real left edge, and it is
+   the same sum pinnedOffsets() already computes for the paint. */
+export function scrollColIntoView(ci) {
+  const body = $('body');
+  const cols = visibleCols();
+  const name = cols[ci];
+  if (!name || !body) return;
+  const pins = pinnedOffsets();
+  if (pins[name] !== undefined) return;   // a pinned column is never off screen
+  let left = GUTTER_W;
+  for (let i = 0; i < ci; i++) left += colWidth(cols[i]);
+  let stuck = GUTTER_W;
+  for (const n of cols) if (pins[n] !== undefined) stuck += colWidth(n);
+  const w = colWidth(name);
+  if (left < body.scrollLeft + stuck) body.scrollLeft = left - stuck;
+  else if (left + w > body.scrollLeft + body.clientWidth) body.scrollLeft = left + w - body.clientWidth;
+}
+
+/* One step of the cell cursor. dr/dc are -1, 0 or 1; `edge` turns the
+   step into a jump to the far end (Ctrl); `extend` keeps the anchor where
+   it is so the rectangle grows (Shift). Every keyboard movement action
+   goes through here, so the active cell and the row cursor can never
+   drift apart. */
+export function moveCell({ dr = 0, dc = 0, extend = false, edge = false, rows = 1 } = {}) {
+  const total = gridRowCount();
+  const cols = visibleCols();
+  if (!S.view || !total || !cols.length) return;
+  const lastCol = cols.length - 1;
+  /* Cold start: the arrows have to work on a grid nobody has clicked in.
+     The row cursor is wherever the analyst was last put — a search hit, a
+     row opened from the watchlist — so the first press continues from
+     there instead of teleporting to the top of the table. */
+  if (!S.cellFocus) {
+    const onHeading = S.groupByCols.length && !groupCoordAt(S.cursor);
+    const pos = S.cursor >= 0 && !onHeading ? S.cursor : edgeCellRow(-1);
+    if (pos == null) return;
+    S.cellFocus = { pos, col: 0, name: cols[0] };
+    S.cellAnchor = { pos, col: 0 };
+  }
+  let { pos, col } = S.cellFocus;
+  if (dr) {
+    if (edge) {
+      const to = edgeCellRow(dr);
+      if (to != null) pos = to;
+    } else {
+      // PageUp/PageDown ask for a stride; a heading inside it is stepped
+      // over one row at a time, so a page never lands on one.
+      for (let i = 0; i < rows; i++) {
+        const to = nextCellRow(pos, dr);
+        if (to == null) break;
+        pos = to;
+      }
+    }
+  }
+  if (dc) col = edge ? (dc > 0 ? lastCol : 0) : Math.max(0, Math.min(lastCol, col + dc));
+  S.cellFocus = { pos, col, name: cols[col] };
+  if (!extend) S.cellAnchor = { pos, col };
+  setCellRange(S.cellAnchor, S.cellFocus);
+  /* The row cursor follows the active cell: the detail pane, the note
+     box, the tag keys and the row menu all read S.cursor, and a cell
+     highlight on one row while those act on another is the bug this
+     feature would otherwise ship. S.anchor follows too, so a later
+     shift-click in the gutter extends from where the keyboard left off,
+     exactly as it did when the arrows drove the row cursor directly. */
+  S.cursor = pos;
+  if (!extend) { S.anchor = pos; endKeyboardRun(); }
+  scrollIntoView(pos);
+  scrollColIntoView(col);
+  render();
+  maybeShowDetail(pos);
+}
+
 export let cellDragging = false;
 
 export let cellDragRaf = null;
@@ -738,8 +856,7 @@ export function selectCellRangeRows() {
   endKeyboardRun();
   selRangeApply(S.cellRange.r0, S.cellRange.r1, true);
   S.anchor = S.cellRange.r0;
-  S.cellRange = null;
-  S.cellAnchor = null;
+  clearCellSelection();
   render();
   return true;
 }
@@ -887,8 +1004,7 @@ $('body').addEventListener('mousedown', (e) => {
   }
   // Picking rows is a fresh "what to copy" choice, so a stale cell
   // rectangle must not win over it.
-  S.cellRange = null;
-  S.cellAnchor = null;
+  clearCellSelection();
   S.cursor = pos;
   render();
   maybeShowDetail(pos);
@@ -939,11 +1055,13 @@ $('body').addEventListener('mousedown', (e) => {
     // also picks rows (that ambiguity was what made Ctrl+C and a tag key
     // disagree). The toolbar says how many rows the range spans, and
     // Shift+Space turns it into row picks.
-    setCellRange(S.cellAnchor, { pos, col });
+    S.cellFocus = { pos, col, name: visibleCols()[col] };
+    setCellRange(S.cellAnchor, S.cellFocus);
     S.cursor = pos;
     render();
   } else {
     S.cellAnchor = { pos, col };
+    S.cellFocus = { pos, col, name: visibleCols()[col] };
     setCellRange(S.cellAnchor, S.cellAnchor); // commit immediately so a plain click alone selects that one cell
     cellDragging = true;
     activateRow(pos, e); // renders once, atomically, with the cell range above
@@ -958,7 +1076,8 @@ $('body').addEventListener('mousemove', (e) => {
   if (!cell) return;
   const pos = Number(cell.closest('.row').dataset.pos);
   const col = Number(cell.dataset.col);
-  setCellRange(S.cellAnchor, { pos, col });
+  S.cellFocus = { pos, col, name: visibleCols()[col] };
+  setCellRange(S.cellAnchor, S.cellFocus);
   if (cellDragRaf) return;
   cellDragRaf = requestAnimationFrame(() => { render(); cellDragRaf = null; });
 });

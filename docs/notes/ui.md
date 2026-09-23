@@ -1027,7 +1027,24 @@ see [docs/notes/README.md](README.md) for the whole set.
   capital-letter binding), and for non-printable keys an unprefixed
   binding still matches the shifted press (matchAction's fallback) — this
   is what keeps Shift+ArrowDown reaching moveDown, whose handler reads
-  e.shiftKey to extend the selection. The settings capture handler ignores
+  e.shiftKey to extend the selection. The same fallback is why
+  **Ctrl+Shift+Arrow needs no binding of its own**: it is spelled
+  `Ctrl+Shift+ArrowDown`, matches nothing, gets Shift stripped, and lands
+  on `jumpEdgeDown`'s `Ctrl+ArrowDown` — whose handler reads e.shiftKey
+  and extends to the edge instead of jumping to it. Note the asymmetry
+  that makes this work at all: Shift falls back, every other modifier
+  does not, so `Ctrl+ArrowDown` itself has to be a binding spelled out in
+  full or it reaches no handler and the browser scrolls the page.
+- **Excel's arrow keys are four NEW action names, not new chords on the
+  old ones.** `moveLeft`/`moveRight`/`jumpEdge{Up,Down,Left,Right}` were
+  added rather than extending `moveDown`/`moveUp`'s arrays, because
+  `loadKeymap` lets a stored array replace a default one wholesale: adding
+  a chord to an action an analyst has already used reaches nobody without
+  a migration, while an action name their stored keymap has never seen
+  takes its default for free. Same reasoning the v2 entry records for
+  `openFilterBuilder`/`openValuePicker`. `moveDown`/`moveUp` did change
+  *behaviour* — they move the cell cursor now — but their bindings are
+  untouched, so no migration was needed for that either. The settings capture handler ignores
   modifier-only keydowns and keeps listening (it used to commit on the
   first keydown, so pressing Ctrl for Ctrl+K bound "Control" and combos
   were impossible). findKeyConflict also refuses the hardcoded

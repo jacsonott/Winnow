@@ -23,7 +23,7 @@ import { paintWatchlistBadge, refreshWatchlistBadge, showWatchlistTab, watchlist
 import { dashDrag, loadDashboards, renderDashboardsInto, showDashboard } from './dashboard.js';
 import { openCaseSettings } from './settings.js';
 import { openLog } from './errlog.js';
-import { S, selClear, selCount, selFirst, specKey } from './state.js';
+import { S, clearCellSelection, selClear, selCount, selFirst, specKey } from './state.js';
 import { compactCaseFile, openTablesManager } from './tables.js';
 import { loadTags, refreshTagCounts, renderTagRibbon } from './tags.js';
 import { openTableMenu, updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
@@ -943,8 +943,7 @@ export async function openSource(id, { skipBuild = false } = {}) {
     selClear();
     S.selHidden = 0;
     S.anchor = -1;
-    S.cellRange = null;
-    S.cellAnchor = null;
+    clearCellSelection();
     $('spacerY').style.height = spacerPx(cached.row_count) + 'px';
     // The cached view is a real answer, empty or not — this path never
     // went through installView, so nothing else puts the empty state back

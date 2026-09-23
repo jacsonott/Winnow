@@ -8,7 +8,7 @@ import { currentModalAction, repaintOpenMenus, closeMenu, closeModal } from './u
 import { toggleDetailPane } from './detail.js';
 import { toggleHistogram } from './histogram.js';
 import { filterBySelectedCell, openValuePickerForColumn, selectedCellTarget } from './filters.js';
-import { headH, moveCursor, render, selectCellRangeRows, toggleCursorRow } from './grid.js';
+import { headH, moveCell, render, selectCellRangeRows, toggleCursorRow } from './grid.js';
 import { dropGrouping, handleCopyShortcut, toggleGrouping } from './grouping.js';
 import { openPluginBundlesModal } from './bundles.js';
 import { cycleSavedFilter, openFilterSqlTab } from './savedfilters.js';
@@ -17,7 +17,7 @@ import { applySqlTabToEditor, showGridTab } from './sql.js';
 import { sqlClearSelection, sqlCopySelection, sqlSelectionCount, sqlTagHotkey } from './sqlassist.js';
 import { openSettings } from './settings.js';
 import { activateTabSlot, clearAllFilters, setSidebarVisible } from './sources.js';
-import { S, gridRowCount, selClear, selCount, selSetAll, selSnapshot } from './state.js';
+import { S, clearCellSelection, selClear, selCount, selSetAll, selSnapshot } from './state.js';
 import { openTablesManager } from './tables.js';
 import { applyTag, applyTagToView, undoLastTagChange } from './tags.js';
 import { doJumpTs, openJumpTsModal, openTableMenu, openTimeRangeModal, toggleTimeRange } from './timeframe.js';
@@ -32,6 +32,22 @@ import { doJumpTs, openJumpTsModal, openTableMenu, openTimeRangeModal, toggleTim
 export const DEFAULT_KEYMAP = {
   moveDown: ['ArrowDown', 'j'],
   moveUp: ['ArrowUp', 'k'],
+  // Left/right and the Ctrl jumps are NEW action names on purpose, not
+  // extra keys on the two above. loadKeymap lets a stored array replace a
+  // default one wholesale, so adding a chord to an action an analyst has
+  // already used reaches nobody without a migration — while an action
+  // name their keymap has never seen takes its default for free. Same
+  // reasoning the v2 entry records for openFilterBuilder/openValuePicker.
+  moveLeft: ['ArrowLeft'],
+  moveRight: ['ArrowRight'],
+  // Ctrl+Shift+Arrow needs no binding of its own: matchAction strips
+  // Shift from a chord that did not match and tries again, so it lands
+  // here and the handler reads e.shiftKey — the same route Shift+ArrowDown
+  // takes to moveDown.
+  jumpEdgeUp: ['Ctrl+ArrowUp'],
+  jumpEdgeDown: ['Ctrl+ArrowDown'],
+  jumpEdgeLeft: ['Ctrl+ArrowLeft'],
+  jumpEdgeRight: ['Ctrl+ArrowRight'],
   pageDown: ['PageDown'],
   pageUp: ['PageUp'],
   jumpFirst: ['g'],
@@ -83,7 +99,11 @@ export const DEFAULT_KEYMAP = {
 };
 
 export const ACTION_LABELS = {
-  moveDown: 'Move down', moveUp: 'Move up',
+  moveDown: 'Move the cell cursor down', moveUp: 'Move the cell cursor up',
+  moveLeft: 'Move the cell cursor left', moveRight: 'Move the cell cursor right',
+  jumpEdgeUp: 'Jump to the first row, keeping the column',
+  jumpEdgeDown: 'Jump to the last row, keeping the column',
+  jumpEdgeLeft: 'Jump to the first column', jumpEdgeRight: 'Jump to the last column',
   pageDown: 'Page down', pageUp: 'Page up',
   jumpFirst: 'Jump to first row', jumpLast: 'Jump to last row',
   focusSearch: 'Focus search box', focusFilter: 'Filter the column under the cursor',
@@ -332,12 +352,23 @@ export function findKeyConflict(key, currentAction) {
 export const TAB_AGNOSTIC_ACTIONS = new Set(['openSettings', 'openTables', 'openSearchAll', 'openPluginBundles', 'toggleSidebar']);
 
 export const ACTION_HANDLERS = {
-  moveDown: (e, pageRows) => moveCursor(S.cursor + 1, e.shiftKey),
-  moveUp: (e, pageRows) => moveCursor(S.cursor - 1, e.shiftKey),
-  pageDown: (e, pageRows) => moveCursor(S.cursor + pageRows, e.shiftKey),
-  pageUp: (e, pageRows) => moveCursor(S.cursor - pageRows, e.shiftKey),
-  jumpFirst: () => moveCursor(0, false),
-  jumpLast: () => moveCursor(Math.max(0, gridRowCount() - 1), false),
+  /* Every movement goes through moveCell, so the active cell and the row
+     cursor can never drift apart. Shift extends the rectangle from the
+     anchor (what a mouse drag does); Ctrl jumps to the far end. Shift and
+     Ctrl together do both, which is how Ctrl+Shift+Arrow gets to be "grab
+     everything from here to the edge" without a binding of its own. */
+  moveDown: (e) => moveCell({ dr: 1, extend: e.shiftKey }),
+  moveUp: (e) => moveCell({ dr: -1, extend: e.shiftKey }),
+  moveLeft: (e) => moveCell({ dc: -1, extend: e.shiftKey }),
+  moveRight: (e) => moveCell({ dc: 1, extend: e.shiftKey }),
+  jumpEdgeUp: (e) => moveCell({ dr: -1, edge: true, extend: e.shiftKey }),
+  jumpEdgeDown: (e) => moveCell({ dr: 1, edge: true, extend: e.shiftKey }),
+  jumpEdgeLeft: (e) => moveCell({ dc: -1, edge: true, extend: e.shiftKey }),
+  jumpEdgeRight: (e) => moveCell({ dc: 1, edge: true, extend: e.shiftKey }),
+  pageDown: (e, pageRows) => moveCell({ dr: 1, rows: pageRows, extend: e.shiftKey }),
+  pageUp: (e, pageRows) => moveCell({ dr: -1, rows: pageRows, extend: e.shiftKey }),
+  jumpFirst: (e) => moveCell({ dr: -1, edge: true, extend: e.shiftKey }),
+  jumpLast: (e) => moveCell({ dr: 1, edge: true, extend: e.shiftKey }),
   focusSearch: () => expandSearch(),
   // "Let me type a filter" — which under the filter bar means revealing a
   // box before there is one to focus. It goes through openColumnFilter, the
@@ -359,8 +390,7 @@ export const ACTION_HANDLERS = {
     if (S.groupByCols.length || !S.view || !S.view.row_count) return;
     selSnapshot();
     selSetAll();
-    S.cellRange = null; // same mutual exclusion the header checkbox applies
-    S.cellAnchor = null;
+    clearCellSelection();
     render();
   },
   cyclePrevFilter: () => cycleSavedFilter(-1),
@@ -416,7 +446,7 @@ document.addEventListener('keydown', (e) => {
     // Escape lets go of everything picked — rows and the cell range — and
     // the chip's Undo brings it back if it was a slip.
     if (selCount() || S.cellRange) selSnapshot();
-    selClear(); S.cellRange = null; S.cellAnchor = null; S.selHidden = 0; render(); return;
+    selClear(); clearCellSelection(); S.selHidden = 0; render(); return;
   }
   // Space toggles the cursor row; Shift+Space turns a cell range into row
   // picks. Not in the rebindable map: a bare space is what the map can't

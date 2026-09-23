@@ -7,7 +7,7 @@ import { displayValue, ellipsize, filterByValue } from './filters.js';
 import { buildDataRow, ensurePage, headH, moveCursor, render, renderTagToolbar, rowAt, rowPaintContext, rowsPaintY, schedulePrefetch, setCellRange, spacerPx, syncRowsTop, syncRowsWidth, titleClippedCells, vScroll } from './grid.js';
 import { armOpCancel, opToken } from './jobs.js';
 import { openRowContextMenu } from './rowmenu.js';
-import { S, cellInRange, cellRangeRows, selClear, selCount, selHas, selPositions, selRemap, selSetRange, selSnapshot } from './state.js';
+import { S, cellInRange, cellRangeIsSingle, cellRangeRows, clearCellSelection, selClear, selCount, selHas, selPositions, selRemap, selSetRange, selSnapshot } from './state.js';
 import { BULK_TAG_CONFIRM_AT, clearRowCaches, refreshTagCounts, refreshUndoState, renderTagRibbon } from './tags.js';
 import { confirmDialog, contextMenu, dropdownMenu } from './ui.js';
 import { displayCell } from './tsformat.js';
@@ -278,8 +278,7 @@ export function clearGroupSelectionState() {
   S.selHidden = 0;
   S.cursor = -1;
   S.anchor = -1;
-  S.cellRange = null;
-  S.cellAnchor = null;
+  clearCellSelection();
 }
 
 /* Expanding or collapsing a group renumbers every flattened position below
@@ -310,7 +309,7 @@ export function shiftGroupPositions(headerPos, oldTotal) {
   // A cell range spanning the toggled group can't survive it intact —
   // its rows are no longer contiguous — so it goes rather than silently
   // covering different rows than it did a moment ago.
-  if (S.cellRange && (S.cellRange.r1 > headerPos)) { S.cellRange = null; S.cellAnchor = null; }
+  if (S.cellRange && (S.cellRange.r1 > headerPos)) clearCellSelection();
 }
 
 /* The (headerPos, oldTotal) pair shiftGroupPositions needs, read at the
@@ -1029,13 +1028,24 @@ export async function copyRowsAsText(positions, withHeaders) {
   await writeClipboardText(textPromise, `Copied ${positions.length.toLocaleString()} row${positions.length > 1 ? 's' : ''}${withHeaders ? ' with headers' : ''}`);
 }
 
-/* Ctrl+C prefers an explicit dragged/shift-clicked cell range; otherwise
-   falls back to whatever rows are actually selected — checked rows first,
-   then just the cursor row — so "select a row, then copy" (via checkbox or
-   a plain click) copies the whole row rather than nothing or a stray cell. */
+/* Ctrl+C prefers an explicit cell RECTANGLE — dragged, shift-clicked or
+   Shift+Arrowed; otherwise falls back to whatever rows are actually
+   selected — checked rows first, then just the cursor row — so "select a
+   row, then copy" (via checkbox or a plain click) copies the whole row
+   rather than nothing or a stray cell.
+
+   "Explicit" is the whole rule, and it is why a ONE-cell range loses to
+   picked rows. Before the arrow keys moved the cell cursor, a cell range
+   could only come from a mouse gesture, so its mere existence WAS the
+   analyst's intent and `if (S.cellRange)` said so correctly. Now every
+   arrow press leaves a one-cell range behind, and without this an analyst
+   who picked forty rows in the gutter and then pressed Down to read the
+   next one would find Ctrl+C had quietly become "copy one cell". A
+   rectangle still wins, because dragging one out is still a choice. */
 export async function handleCopyShortcut(withHeaders) {
-  if (S.cellRange) { await copySelectedCells(withHeaders); return; }
-  const count = selCount();
+  const picked = selCount();
+  if (S.cellRange && !(cellRangeIsSingle() && picked)) { await copySelectedCells(withHeaders); return; }
+  const count = picked;
   // Checked before materializing: selPositions() on a select-all would
   // allocate an array of every position in the view just to have it
   // rejected by copyRowsAsText's own ceiling on the next line.

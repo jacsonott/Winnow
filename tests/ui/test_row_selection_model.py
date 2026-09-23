@@ -1,7 +1,12 @@
 """The row-selection model: the whole gutter is the handle, ranges add
 rather than replace, a drag selects the span it covers however fast it
 moves, picks survive cell clicks, arrow keys, a sort and a filter, and the
-toolbar chip reports and undoes."""
+toolbar chip reports and undoes.
+
+Arrow keys drive the CELL cursor (see test_cell_keyboard.py); what this
+file cares about is that they leave the row picks alone, and that the
+gesture which does turn a cell rectangle into picks — Shift+Space — adds
+to them rather than replacing them."""
 import pytest
 
 pytestmark = pytest.mark.ui
@@ -81,13 +86,30 @@ def test_space_and_shift_space(page):
     assert _picked(page) == [6, 7, 8] and page.evaluate("() => __winnow.S.cellRange") is None
 
 
-def test_shift_arrows_extend_over_earlier_picks_without_eating_them(page):
+def test_shift_arrows_build_a_range_that_picks_without_eating_earlier_picks(page):
+    """Shift+Arrow grows the CELL rectangle now, not the row picks — the
+    Excel gesture won the chord. The claim this test was written for
+    survives the change and is what is asserted: the rows an analyst adds
+    by extending never swallow the ones they picked earlier.
+
+    The extra keystroke is Shift+Space, which turns the rectangle into
+    picks. That is the documented replacement for the old chord, so it is
+    the one under test here."""
     _gutter(page, 1).click()
     page.locator("#body .row").nth(5).locator(".cell").nth(1).click()
+    assert _picked(page) == [1]                                           # a cell click picks no rows
     page.keyboard.press("Shift+ArrowDown"); page.keyboard.press("Shift+ArrowDown"); page.keyboard.press("Shift+ArrowDown")
-    assert _picked(page) == [1, 5, 6, 7, 8]
-    page.keyboard.press("Shift+ArrowUp")
-    assert _picked(page) == [1, 5, 6, 7]                                  # the run shrinks; row 1 stays
+
+    # The rectangle grew and the picks did not move.
+    assert page.evaluate("() => __winnow.S.cellRange.r0") == 5
+    assert page.evaluate("() => __winnow.S.cellRange.r1") == 8
+    assert _picked(page) == [1]
+
+    page.keyboard.press("Shift+ArrowUp")                                  # the rectangle shrinks
+    assert page.evaluate("() => __winnow.S.cellRange.r1") == 7
+
+    page.keyboard.press("Shift+ ")                                        # …and becomes picks, adding
+    assert _picked(page) == [1, 5, 6, 7]                                  # row 1 stays
 
 
 def test_picks_survive_a_sort_and_a_filter_and_the_chip_counts_the_hidden(page):

@@ -277,6 +277,50 @@ see [docs/notes/README.md](README.md) for the whole set.
   and with nothing picked a multi-row cell range is the scope of a tag
   key and the row menu alike (`rowMenuTargets`), and the toolbar says so.
   One anchor (`S.anchor`) serves the gutter, the cells and the keyboard.
+- **The cell cursor is three fields, and they go together.** `S.cellAnchor`
+  is the corner a Shift run extends FROM, `S.cellFocus` is the active cell
+  (the moving corner, the one wearing the `.cell-active` ring), and
+  `S.cellRange` is the normalised rectangle between them. Eleven places
+  drop a cell selection — a rebuild, a table switch, Escape, Ctrl+A, the
+  gutter, the select-all box, a group toggle, `renderHead` — so they all
+  go through `clearCellSelection()` rather than nulling fields by hand;
+  before that they were eleven chances to clear two of the three and leave
+  a rectangle with no corners.
+- **`S.cellFocus` carries its column's NAME as well as its index**, and
+  that is the whole reason an active cell survives a repaint. `col` is an
+  index into `visibleCols()`, a list that hiding, reordering or pinning a
+  column rewrites — so `renderHead` drops the rectangle (its far corner
+  may be in a column that just left) and puts the active cell back by
+  name, or not at all. Restoring by index instead moved the ring onto
+  whichever column slid into that slot, which is worse than losing it:
+  `renderHead` also runs on every filter keystroke and every sort, so this
+  is the difference between a cursor and a cursor-shaped flicker.
+- **A one-cell range loses Ctrl+C to picked rows** (`handleCopyShortcut`).
+  The rule was always "an explicit rectangle wins", and before the arrow
+  keys moved the cell cursor, `if (S.cellRange)` said exactly that — only
+  a mouse gesture could make a range, so its existence WAS the intent.
+  Now every arrow press leaves a one-cell range behind, and without the
+  extra clause an analyst who picked forty rows in the gutter and pressed
+  Down to read the next one would find Ctrl+C had quietly become "copy one
+  cell". A rectangle still wins, because dragging or Shift+Arrowing one out
+  is still a choice.
+- **Arrow keys step over group headings.** A heading owns a position but
+  has no cells (one spanning element), so an active cell on one is a ring
+  on nothing, and `cellRangeRows` skips headings anyway — a range that
+  started on one would report rows it did not cover. `nextCellRow` and
+  `edgeCellRow` walk past them, which also means Ctrl+Down in grouped mode
+  lands on the last ROW rather than the last heading.
+- **Horizontal scroll-into-view is arithmetic, not `Element.scrollIntoView`**
+  (`scrollColIntoView`). The gutter and every pinned column are
+  `position: sticky` over the left edge of the scroller, so a cell scrolled
+  flush to `scrollLeft` parks *underneath* them and the ring vanishes. The
+  real left edge is `GUTTER_W` plus the widths of the pinned columns —
+  the same sum `pinnedOffsets()` already computes for the paint.
+- **`cellRangeRowCount()` exists because the toolbar asks every paint.**
+  Ctrl+Shift+Down makes the answer "the whole view", and materialising
+  200,000 positions per scroll frame just to read `.length` off them is
+  the difference between a smooth grid and a janky one. Ungrouped it is
+  arithmetic; grouped it still has to walk, since headings do not count.
 - **A cell says what it says only when it was cut** (`titleClippedCells`,
   the last thing every paint pass does). A `LEVEL` column rendering
   `Informati…` carried an empty `title`, so the value was reachable by

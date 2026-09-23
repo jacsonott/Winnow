@@ -4,9 +4,9 @@
 import { $, AUTOFIT_MAX_W_DEFAULT, GUTTER_W, api, debounce, el, post, toast } from './core.js';
 import { columnMenuItems, opLabel } from './derived.js';
 import { columnFilterChips, openValuePicker, pickerTreeNode, removeColumnFilter, valueFilterEnabled } from './filters.js';
-import { render } from './grid.js';
+import { render, setCellRange } from './grid.js';
 import { renderGroupStrip } from './grouping.js';
-import { S, selClear, selSetAll, selSnapshot } from './state.js';
+import { S, clearCellSelection, gridRowCount, selClear, selSetAll, selSnapshot } from './state.js';
 import { baseColumns, columnMeta } from './tsformat.js';
 import { anchoredPanel, contextMenu } from './ui.js';
 import { rebuildSoon, rebuildView } from './view.js';
@@ -326,8 +326,14 @@ export function openFilterColumnPicker(anchorEl) {
 }
 
 export function renderHead() {
-  S.cellRange = null; // column order/visibility/width changes invalidate cell-range column indices
-  S.cellAnchor = null;
+  /* The RECTANGLE goes: c0/c1 are indices into visibleCols(), and this
+     runs precisely when that list changes — a hide, a reorder, a pin, a
+     resize. The ACTIVE CELL is carried across by column NAME instead,
+     because this also runs on a filter edit and a sort, and a keyboard
+     cursor that vanished every time the analyst typed in a filter box
+     would not be a cursor. If its column is gone, so is it. */
+  const keep = S.cellFocus ? { pos: S.cellFocus.pos, name: S.cellFocus.name } : null;
+  clearCellSelection();
   renderGroupStrip();
   const head = $('headRow');
   const filt = $('filterRow');
@@ -350,8 +356,7 @@ export function renderHead() {
     if (S.groupByCols.length || !S.view) { selectAllCb.checked = false; return; }
     selSnapshot();
     selectAllCb.checked ? selSetAll() : selClear();
-    S.cellRange = null;
-    S.cellAnchor = null;
+    clearCellSelection();
     render();
   };
   // The Line label is the way BACK from any sort: original file order,
@@ -542,6 +547,20 @@ export function renderHead() {
   // table — which is the thing the bar exists to stop drawing.
   filt.hidden = !classicFilterRow() && !S.filterOpen.length;
   renderFilterBar();
+
+  // The active cell, put back on the column it was on if that column
+  // survived this repaint. The rectangle is NOT restored: its far corner
+  // may have been in a column that just went away, and a rectangle with
+  // one real corner is worse than none.
+  if (keep) {
+    const ci = visibleCols().indexOf(keep.name);
+    const pos = Math.min(keep.pos, Math.max(0, gridRowCount() - 1));
+    if (ci >= 0 && S.view && gridRowCount()) {
+      S.cellFocus = { pos, col: ci, name: keep.name };
+      S.cellAnchor = { pos, col: ci };
+      setCellRange(S.cellAnchor, S.cellFocus);
+    }
+  }
 }
 
 export function startResize(e, name) {

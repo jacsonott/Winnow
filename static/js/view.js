@@ -10,7 +10,7 @@ import { drawRail, regroupAll } from './grouping.js';
 import { armOpCancel, createNotice, followFtsBuild, opCancelCurrent, opToken } from './jobs.js';
 import { syncSearchExpansion } from './search.js';
 import { openSource } from './sources.js';
-import { S, gridRowCount, selAdd, selClear, selCount, selFirst, selPositions, specKey } from './state.js';
+import { S, clearCellSelection, gridRowCount, selAdd, selClear, selCount, selFirst, selPositions, specKey } from './state.js';
 import { refreshTagCounts, renderTagRibbon } from './tags.js';
 import { updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
 
@@ -840,8 +840,7 @@ export async function installView(v, { seq, forSourceId, cacheKey, seeded = [], 
     } catch { /* a lost selection is not worth a failed rebuild */ }
   }
   S.anchor = -1;
-  S.cellRange = null;
-  S.cellAnchor = null;
+  clearCellSelection();
   // The cursor is the one piece of place state the remap above doesn't
   // carry. Left as a number it names whatever row now holds that position
   // — off-screen after a chip toggle widened the view, and with the detail
