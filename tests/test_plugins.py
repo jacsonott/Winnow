@@ -944,7 +944,9 @@ def test_lateral_movement_validation(lateral_client):
     assert r.status_code == 400 and "Nope" in r.json()["detail"]
     r = client.post("/api/plugin/lateral_movement/edges", json={
         "selections": [_sel(-1)]})
-    assert r.status_code == 400 and "no source" in r.json()["detail"].lower()
+    # "table", not "source": the message reaches the analyst through the
+    # plugin's error toast, so it uses the word the rest of the UI uses.
+    assert r.status_code == 400 and "no table" in r.json()["detail"].lower()
     r = client.post("/api/plugin/lateral_movement/edges", json={
         "selections": [_sel(source_id, dst_col="SourceHost")]})
     assert r.status_code == 400
