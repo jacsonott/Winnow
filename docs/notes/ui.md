@@ -599,7 +599,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   value that flips which one a fresh install gets; Settings → Appearance's
   "Always-on filter row" is the analyst's own switch, because typing
   straight into a column box without looking is the Timeline Explorer
-  reflex and the analysts who have it are not wrong. Five things are
+  reflex and the analysts who have it are not wrong. Six things are
   decisions:
   - **The bar lives OUTSIDE `#gridHead`, above `.grid-body`.** Everything
     inside the head is in the grid's horizontal scroller and sized
@@ -637,6 +637,18 @@ see [docs/notes/README.md](README.md) for the whole set.
     both spellings a column can be filtered by — the header box's text and
     the value picker's node in the guided tree — because a bar that showed
     only one would leave the other invisible.
+  - **Revealing or folding a box changes the head's HEIGHT, so it has to
+    repaint the rows as well: `renderHeadResized()`, not `renderHead()`.**
+    `#rows` is positioned at `headH()` and that top is written in one place
+    only, `syncRowsTop()` inside a paint, so a head that grew by the filter
+    row while the rows stood still draws the first row of data underneath
+    the sticky header, leaves a blank strip at the bottom, and hands the
+    gutter drag and the autoscroll (`rowAtClientY`, which subtracts
+    `headH()`) a row that isn't the one under the pointer. Nothing repairs
+    it by itself — a column already in view scrolls nowhere, so no scroll
+    event fires, and folding a box away rebuilds nothing at all. Three
+    paths resize the head this way: the `⌕`/chip/picker reveal, the fold,
+    and the Appearance switch between the two surfaces.
 - **`.fcell` needs its `min-width: 0`, and it's not tidying.** Giving the
   filter cell `display: flex` (to seat the value picker's ▾ next to the
   input) also made its own automatic minimum size content-based — and a

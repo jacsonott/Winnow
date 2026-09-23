@@ -2,7 +2,7 @@
 picker behind each ▾, and filtering by a cell's value.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { renderFilterBar, renderHead, saveLayout, visibleCols } from './columns.js';
+import { renderFilterBar, renderHead, renderHeadResized, saveLayout, visibleCols } from './columns.js';
 import { $, api, debounce, el, toast } from './core.js';
 import { rowAt } from './grid.js';
 import { collapseSearchIfEmpty, syncSearchExpansion } from './search.js';
@@ -105,13 +105,20 @@ export function columnFilterChips() {
 
 /* Taking one filter off, from the chip's ✕. Both spellings go, because
    the chip names the column rather than the mechanism and removing "the
-   filter on Provider" has to mean all of it. */
+   filter on Provider" has to mean all of it.
+
+   Through renderHeadResized rather than renderHead because the line that
+   drops the column from S.filterOpen can shrink the head. Nothing reaches
+   here with that column's box open today — a chip and a revealed box are
+   never drawn for the same column — so the pairing costs one repaint and
+   buys not having to remember that, since the cost of forgetting is rows
+   painted under the sticky header until something else repaints them. */
 export async function removeColumnFilter(column) {
   delete S.filters[column];
   setPickerTreeNode(column, null);
   S.filterOpen = S.filterOpen.filter((n) => n !== column);
   updateFiltersButton();
-  renderHead();
+  renderHeadResized();
   await rebuildView();
 }
 

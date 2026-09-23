@@ -1,7 +1,7 @@
 /* The Settings modal — appearance, keyboard shortcuts, timestamps, tags.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { autofitMaxWidth, fillsGrid, renderHead } from './columns.js';
+import { autofitMaxWidth, fillsGrid, renderHead, renderHeadResized } from './columns.js';
 import { $, AUTOFIT_MAX_W_DEFAULT, ROW_H, ROW_H_COMFORTABLE, ROW_H_COMPACT, api, debounce, el, post, setRowH, toast } from './core.js';
 import { labeledRow } from './derived.js';
 import { VALUE_FILTER_AUTO_MAX, syncSearchKeyCopy } from './filters.js';
@@ -801,7 +801,9 @@ export function openSettings() {
        use — and the bar shows the same filters in a fraction of the ink.
        On, every column gets its box back and the bar goes away entirely,
        which is the surface an analyst coming from Timeline Explorer types
-       into without looking. renderHead() repaints both from one call. */
+       into without looking. One repaint covers both surfaces — through
+       renderHeadResized, because swapping them changes the head's height
+       by the whole filter row and the rows have to be moved to match. */
     const frLabel = el('label', 'check-row');
     const frCb = el('input');
     frCb.type = 'checkbox';
@@ -809,7 +811,7 @@ export function openSettings() {
     frCb.onchange = () => {
       S.appearance.filterUi = frCb.checked ? 'row' : 'bar';
       saveAppearance();
-      renderHead();
+      renderHeadResized();
     };
     frLabel.append(frCb, el('span', null, 'Always-on filter row'));
     secLook.append(frLabel);

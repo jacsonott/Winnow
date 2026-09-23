@@ -166,6 +166,26 @@ export const classicFilterRow = () => S.appearance.filterUi === 'row';
    column's is; under the bar only the ones the analyst opened. */
 export const filterBoxOpen = (name) => classicFilterRow() || S.filterOpen.includes(name);
 
+/* renderHead() for the paths that change the head's HEIGHT rather than only
+   what is drawn in it — revealing or folding a box, and the Appearance
+   switch between the two surfaces, all add or remove the whole filter row.
+
+   #rows is positioned absolutely at headH(), and that top is written in one
+   place only: syncRowsTop(), inside a paint. Repaint the head without
+   repainting the rows and the two disagree by the row's ~29px — the first
+   data row is drawn underneath the sticky header, a blank strip is left at
+   the bottom, and rowAtClientY (which subtracts headH()) hands the gutter
+   drag and the autoscroll a row that isn't the one under the pointer.
+   Nothing repairs it by itself: a column already in view scrolls nowhere,
+   so no scroll event fires, and folding a box away rebuilds nothing at all.
+   Every other caller that resizes the head — a width drag, a pin, hiding a
+   column — has always paired the two; this is that pair, named, so the
+   filter surface cannot drift back out of it. */
+export function renderHeadResized() {
+  renderHead();
+  render();
+}
+
 /* Reveal a column's box under its header and put the cursor in it. The
    header ⌕, a chip's label and the column picker all come through here, so
    the three cannot disagree about what "open" means or forget the scroll.
@@ -183,7 +203,7 @@ export function openColumnFilter(name, { focus = true } = {}) {
   }
   if (!classicFilterRow() && !S.filterOpen.includes(name)) {
     S.filterOpen = [...S.filterOpen, name];
-    renderHead();
+    renderHeadResized();
   }
   if (!focus) return;
   const inp = document.querySelector(`.fcell input[data-col="${CSS.escape(name)}"]`);
@@ -202,7 +222,7 @@ export function openColumnFilter(name, { focus = true } = {}) {
 export function closeColumnFilter(name) {
   if (!S.filterOpen.includes(name)) return;
   S.filterOpen = S.filterOpen.filter((n) => n !== name);
-  renderHead();
+  renderHeadResized();
 }
 
 export function toggleColumnFilter(name) {
@@ -465,7 +485,7 @@ export function renderHead() {
     // not open still needs one, at its own width, or the open box stops
     // sitting under the header it belongs to.
     const f = el('div', 'fcell');
-  applyPin(f, name, pins);
+    applyPin(f, name, pins);
     f.style.flexBasis = w + 'px';
     if (!filterBoxOpen(name)) { filt.append(f); continue; }
     const inp = el('input');

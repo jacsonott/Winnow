@@ -32,7 +32,7 @@ def bar_on(page):
     is nothing to undo."""
     page.evaluate("""() => { __winnow.S.appearance.filterUi = 'bar';
       __winnow.S.filters = {}; __winnow.S.filterOpen = [];
-      __winnow.renderHead(); }""")
+      __winnow.renderHeadResized(); }""")
 
 
 def _cols(page) -> int:
@@ -56,6 +56,54 @@ def _filter(page, col: str, text: str):
     box.fill(text)
     box.press("Enter")
     page.wait_for_selector(f'.filter-chip[data-col="{col}"]')
+
+
+def _head_geometry(page) -> dict:
+    """Where the head ends and the rows begin, in one measurement.
+
+    `#gridHead` is in flow at the top of the scroll content and `#rows` is
+    absolutely positioned at its height — a value written in exactly one
+    place, syncRowsTop(), which only a paint calls. `gap` is the pixels
+    between the bottom of the header and the top of the first painted row:
+    negative means the first data row is being drawn underneath the sticky
+    header, positive means a blank strip. Both are what a head repainted
+    without its rows looks like.
+    """
+    return page.evaluate("""() => {
+      const body = document.getElementById('body');
+      const head = document.getElementById('gridHead');
+      const rows = document.getElementById('rows');
+      const first = rows.querySelector('.row');
+      return {
+        scrollTop: body.scrollTop,
+        headH: head.offsetHeight,
+        rowsTop: parseFloat(rows.style.top || '0'),
+        gap: first.getBoundingClientRect().top - head.getBoundingClientRect().bottom,
+      };
+    }""")
+
+
+def _assert_rows_sit_under_the_head(page, where: str):
+    geo = _head_geometry(page)
+    assert geo["scrollTop"] < 1, geo           # the measurement assumes the top of the view
+    assert abs(geo["rowsTop"] - geo["headH"]) < 1, f"{where}: {geo}"
+    assert abs(geo["gap"]) < 2, f"{where}: {geo}"
+
+
+def _classic_row_from_settings(page):
+    """Tick Settings -> Appearance -> Always-on filter row, the way an
+    analyst would. Returns the checkbox, for the tests that assert on it."""
+    page.evaluate("() => __winnow.openSettings()")
+    page.wait_for_selector("#modal:not([hidden])")
+    sec = page.locator("#modalBody .settings-section").filter(
+        has=page.locator(".settings-section-title", has_text=re.compile(r"^Appearance$")))
+    sec.locator(".settings-section-head").click()   # sections start collapsed
+    cb = sec.locator("label.check-row", has_text="Always-on filter row").locator("input")
+    cb.wait_for(state="visible")
+    assert not cb.is_checked()
+    cb.check()
+    page.wait_for_function("() => __winnow.S.appearance.filterUi === 'row'")
+    return cb
 
 
 def test_a_fresh_install_gets_the_bar(page):
@@ -132,6 +180,56 @@ def test_an_opened_box_sits_under_its_own_column(page):
     assert abs(geo["hw"] - geo["fw"]) < 2, geo
 
 
+def test_revealing_a_box_moves_the_rows_down_with_the_head(page):
+    """The head grows by the whole filter row when a box is revealed. If
+    that repaint doesn't take the rows with it, the first row of data is
+    painted underneath the sticky header — and nothing repairs it on its
+    own, because a column already in view scrolls nowhere and no scroll
+    event fires."""
+    _assert_rows_sit_under_the_head(page, "before any box is open")
+    closed = _head_geometry(page)["headH"]
+    _open_box(page, "Host")
+    opened = _head_geometry(page)["headH"]
+    assert opened > closed + 8, (closed, opened)   # the row really is the height that changed
+    _assert_rows_sit_under_the_head(page, "with a box revealed")
+
+
+def test_folding_a_box_away_pulls_the_rows_back_up(page):
+    """Closing is the worse half: no filter changed, so nothing rebuilds
+    afterwards and a gap left here would stay on screen until the analyst
+    typed or scrolled."""
+    _open_box(page, "Host")
+    page.locator('.hcell[data-col="Host"] .hcell-filter').click()
+    page.wait_for_selector('.fcell input[data-col="Host"]', state="detached")
+    _assert_rows_sit_under_the_head(page, "after the box was folded away")
+
+
+def test_the_gutter_drag_lands_on_the_row_it_points_at_with_a_box_open(page):
+    """The drag reads its row from geometry — the pointer's y, less the
+    head's height — rather than from the element under the pointer. A head
+    that grew without the rows moving therefore selects rows an analyst can
+    see they are not pointing at, which is the same misalignment measured
+    from the other side."""
+    _open_box(page, "Host")
+    rows = page.locator("#rows .row")
+    start = rows.nth(2).locator(".gutter").bounding_box()
+    end = rows.nth(7).locator(".gutter").bounding_box()
+    page.mouse.move(start["x"] + start["width"] / 2, start["y"] + start["height"] / 2)
+    page.mouse.down()
+    page.mouse.move(end["x"] + end["width"] / 2, end["y"] + end["height"] / 2, steps=5)
+    page.mouse.up()
+    picked = page.evaluate("() => [...Array(10).keys()].map((p) => __winnow.selHas(p))")
+    assert picked == [False] * 2 + [True] * 6 + [False] * 2, picked
+
+
+def test_switching_surfaces_moves_the_rows_with_the_head(page):
+    """Settings -> Appearance swaps a bar for a whole row of boxes, which is
+    the largest head-height change there is."""
+    _classic_row_from_settings(page)
+    page.evaluate("() => __winnow.closeModal()")
+    _assert_rows_sit_under_the_head(page, "after the classic row came back")
+
+
 def test_escape_puts_the_box_away_again(page):
     _open_box(page, "Host")
     page.locator('.fcell input[data-col="Host"]').press("Escape")
@@ -185,16 +283,7 @@ def test_the_filter_keybinding_reveals_a_box(page):
 def test_the_setting_restores_the_classic_row(page):
     """The decision this shipped with: the bar is the default and the row
     is one checkbox away, for the analysts who type into it by reflex."""
-    page.evaluate("() => __winnow.openSettings()")
-    page.wait_for_selector("#modal:not([hidden])")
-    sec = page.locator("#modalBody .settings-section").filter(
-        has=page.locator(".settings-section-title", has_text=re.compile(r"^Appearance$")))
-    sec.locator(".settings-section-head").click()   # sections start collapsed
-    cb = sec.locator("label.check-row", has_text="Always-on filter row").locator("input")
-    cb.wait_for(state="visible")
-    assert not cb.is_checked()
-    cb.check()
-    page.wait_for_function("() => __winnow.S.appearance.filterUi === 'row'")
+    _classic_row_from_settings(page)
     page.evaluate("() => __winnow.closeModal()")
 
     # Every column has its box back, the bar is gone, and the choice is
@@ -212,6 +301,6 @@ def test_the_classic_row_keeps_filters_the_bar_set(page):
     _filter(page, "EventId", "=4624")
     page.wait_for_function("(n) => __winnow.S.view.row_count < n", arg=everything)
     narrowed = _rows(page)
-    page.evaluate("() => { __winnow.S.appearance.filterUi = 'row'; __winnow.renderHead(); }")
+    page.evaluate("() => { __winnow.S.appearance.filterUi = 'row'; __winnow.renderHeadResized(); }")
     assert page.locator('.fcell input[data-col="EventId"]').input_value() == "=4624"
     assert _rows(page) == narrowed
