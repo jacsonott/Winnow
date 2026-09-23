@@ -16,6 +16,11 @@ fact the batch does not carry is simply not listed. Four of the five
 cards it replaced rendered "(not in this RECmd output)" on a batch that
 lacked them, so the top of the board was four empty cards where one Host
 card belongs.
+
+A batch carrying none of them at all answers with NO ROWS rather than a
+sentinel line — the board reads an empty answer and collapses the card
+into its empty-cards strip (static/js/dashboard.js), which is where the
+reason and the fix belong.
 """
 
 from __future__ import annotations
@@ -142,19 +147,25 @@ def test_a_fact_the_batch_lacks_is_absent_rather_than_an_empty_card(store, write
     assert _rows(store, "Host") == [("ProductName", "Windows 10 Pro")]
 
 
-def test_a_batch_with_no_host_facts_at_all_says_so_once(store, write_csv):
+def test_a_batch_with_no_host_facts_at_all_answers_with_no_rows(store, write_csv):
+    """No sentinel row. The card used to UNION in a literal "(no host facts
+    in this RECmd output)" so it would not render as a blank box, and that
+    line then held a full-width card on the first screen of the board. The
+    query now says what it found — nothing — and the board collapses the
+    card into its empty-cards strip, which is the only place that can say
+    WHY it is empty and offer to fix it."""
     store.ingest_csv(write_csv([REG_COLS, _row(KeyPath="x", ValueName="y", ValueData="z")], "none.csv"),
                      name="none", build_fts=False)
-    assert _rows(store, "Host") == [("Host", "(no host facts in this RECmd output)")]
+    assert _rows(store, "Host") == []
 
 
 def test_a_fact_whose_only_row_is_empty_is_not_a_fact(store, write_csv):
     """The guard each of the five cards carried, and the one the merge has
     to keep: a ValueName RECmd wrote with no ValueData is a row, not a host
-    fact. Without it the card reads its own fallback out of existence —
-    every key path below matches, so the "(no host facts…)" line is
-    suppressed and what lands on screen is a full-looking Host card whose
-    values are blank."""
+    fact. Without it every key path below matches and what lands on screen
+    is a full-looking Host card whose values are all blank — which is
+    worse than an empty one, because the empty one folds into the board's
+    strip and says the batch carried no host facts."""
     rows = [
         _row(HiveType="SYSTEM", KeyPath="ControlSet001\\Control\\ComputerName\\ComputerName",
              ValueName="ComputerName", ValueData=""),
@@ -168,7 +179,7 @@ def test_a_fact_whose_only_row_is_empty_is_not_a_fact(store, write_csv):
              ValueName="ProductType", ValueData=""),
     ]
     store.ingest_csv(write_csv([REG_COLS] + rows, "blank.csv"), name="blank", build_fts=False)
-    assert _rows(store, "Host") == [("Host", "(no host facts in this RECmd output)")]
+    assert _rows(store, "Host") == []
 
 
 def test_an_empty_domain_is_the_one_empty_value_that_is_an_answer(store, write_csv):

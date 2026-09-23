@@ -860,6 +860,32 @@ class UnknownFilterColumn(ValueError):
             "Edit the filter, or apply it to a table that has that column.")
 
 
+class MissingTable(ValueError):
+    """A dashboard widget names a table this case does not have — a
+    `{{evtx}}`-style placeholder that binds to nothing, or a `src_N` that
+    has been deleted since the widget was written.
+
+    A ValueError subclass so every existing `except ValueError` around the
+    widget paths (the preview route, the resolve route, `_cells_preview`)
+    keeps behaving exactly as it did. What the subclass adds is the table's
+    NAME as a separate field, because the client has to tell two empty
+    cards apart and cannot do it by reading the sentence: a card whose
+    query ran and matched nothing is a finding ("no Defender alerts in
+    these logs"), and a card whose artefact was never collected is a gap
+    in the collection that importing one file would fill. Sniffing the
+    message text for "no ... table in this case yet" would have worked
+    until the day somebody reworded it.
+    """
+
+    def __init__(self, table: str | None, message: str | None = None):
+        # None when the reference named no artefact anyone could import —
+        # a src_N that has been deleted. Importing another file would
+        # create a new table with a new id, not bring that one back, so
+        # the client offers editing the widget rather than an import.
+        self.table = table
+        super().__init__(message or f"No \u201c{table}\u201d table in this case yet")
+
+
 class OpCancelled(Exception):
     """A registered cancellable operation (view/timeline build, group
     summary) was interrupted via cancel_op. server.py maps it to HTTP 499 —
@@ -9542,7 +9568,7 @@ class Store:
                 hs = _hs_of(key[len("all:"):].strip())
                 srcs = self._sources_for_header_set(hs)
                 if not srcs:
-                    raise ValueError(f"No \u201c{hs}\u201d table in this case yet")
+                    raise MissingTable(hs)
                 from . import defaults
                 want = dict(defaults.headers()["nicknames"]).get(hs) or []
                 cols = ", ".join(q(c) for c in want)
@@ -9552,7 +9578,7 @@ class Store:
             hs = _hs_of(key)
             src = self._source_for_header_set(hs)
             if not src:
-                raise ValueError(f"No \u201c{hs}\u201d table in this case yet")
+                raise MissingTable(hs)
             return q(src["table_name"])
 
         return re.sub(r"\{\{([^}]+)\}\}", repl, sql)
@@ -9570,7 +9596,7 @@ class Store:
             else self._TABLE_SHORTHANDS.get(inner.lower(), inner)
         srcs = self._sources_for_header_set(hs)
         if not srcs:
-            raise ValueError(f"No \u201c{hs}\u201d table in this case yet")
+            raise MissingTable(hs)
         return [int(s["id"]) for s in srcs]
 
     def resolve_table_source(self, table: str) -> int:
@@ -9587,7 +9613,7 @@ class Store:
             sid = int(m.group(1))
             if any(s["id"] == sid for s in self.list_sources()):
                 return sid
-            raise ValueError("That table is no longer in this case")
+            raise MissingTable(None, "That table is no longer in this case")
         m = re.fullmatch(r"\{\{([^}]+)\}\}", key)
         if not m:
             raise ValueError(f"Not a table reference: {table!r}")
@@ -9600,7 +9626,7 @@ class Store:
             hs = self._TABLE_SHORTHANDS.get(inner.lower(), inner)
         src = self._source_for_header_set(hs)
         if not src:
-            raise ValueError(f"No \u201c{hs}\u201d table in this case yet")
+            raise MissingTable(hs)
         return int(src["id"])
 
     def dashboard_widget_preview(self, source: str, query: dict, limit: int = 200,

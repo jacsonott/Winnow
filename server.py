@@ -43,7 +43,7 @@ from winnow import userenv
 from winnow import version
 from winnow import archive
 from winnow import workspace as WS
-from winnow.store import (CASE_SUFFIX, DEFAULT_IMPORT_EXTENSIONS, PLASO_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, OpCancelled, Store,
+from winnow.store import (CASE_SUFFIX, DEFAULT_IMPORT_EXTENSIONS, PLASO_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, MissingTable, OpCancelled, Store,
                    describe_case_lock, probe_case_lock, q, sweep_orphan_views)
 
 HERE = paths.INSTALL_ROOT  # static/, plugins/, examples/plugins/ all hang off the install root
@@ -4005,6 +4005,13 @@ def api_dashboard_widget_preview(body: WidgetPreviewBody):
     t0 = time.time()
     try:
         out = st.dashboard_widget_preview(body.source, body.query, cells=body.cells)
+    except MissingTable as e:
+        # Structured, not just a sentence: the board folds a card whose
+        # artefact is not in the case into its empty-cards strip and offers
+        # to import one, and it cannot tell that apart from "the query ran
+        # and matched nothing" by reading the message. `message` is the
+        # same string every existing catch prints (core.js unwraps it).
+        raise HTTPException(400, {"message": str(e), "missing_table": e.table})
     except ValueError as e:
         raise HTTPException(400, str(e))
     elapsed = int((time.time() - t0) * 1000)

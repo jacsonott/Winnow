@@ -261,10 +261,16 @@ def test_defender_alerts_newest_first_with_description_fallback(host):
     assert dict(_rows(host, "Triage signals"))["Defender alerts"] == 3
 
 
-def test_defender_alerts_say_when_there_are_none(store, write_csv):
+def test_defender_alerts_answer_with_no_rows_when_there_are_none(store, write_csv):
+    """The card used to UNION in a literal "(no Defender alert events in
+    the logs)" so it would not render as a blank box — and that one line
+    then held a full-width card on the first screen. Logs with no Defender
+    events answer with nothing now, and the board folds the card into its
+    empty-cards strip, which says whether the artefact is missing or the
+    query simply matched nothing."""
     store.ingest_csv(write_csv([EVTX_COLS, _ev(TimeCreated="2024-01-01 00:00:00", EventId="4624", Channel="Security")], "e.csv"),
                      name="e", build_fts=False)
-    assert _rows(store, "Most recent Defender alerts") == [["—", "(no Defender alert events in the logs)"]]
+    assert _rows(store, "Most recent Defender alerts") == []
 
 
 def test_the_signals_card_answers_every_cell_in_one_go(host):
