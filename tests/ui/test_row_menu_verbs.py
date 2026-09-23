@@ -95,7 +95,7 @@ def test_narrow_keeps_the_filters_already_on(page):
     _filter_eventid(page)
     value = _open_on_host(page)
     page.click(".menu:not(.menu-sub) .menu-item:has-text('Narrow to this value')")
-    page.wait_for_function("(v) => __winnow.S.filters.Host === '=' + v", value)
+    page.wait_for_function("(v) => __winnow.S.filters.Host === '=' + v", arg=value)
     assert page.locator('.fcell input[data-col="EventId"]').input_value() == "=4624"
     assert page.locator('.fcell input[data-col="Host"]').input_value() == f"={value}"
 
@@ -104,7 +104,7 @@ def test_reset_clears_the_other_filters_first(page):
     _filter_eventid(page)
     value = _open_on_host(page)
     page.click(".menu:not(.menu-sub) .menu-item:has-text('Reset to this value')")
-    page.wait_for_function("(v) => __winnow.S.filters.Host === '=' + v", value)
+    page.wait_for_function("(v) => __winnow.S.filters.Host === '=' + v", arg=value)
     page.wait_for_function("() => !__winnow.S.filters.EventId")
     assert page.locator('.fcell input[data-col="EventId"]').input_value() == ""
     assert page.locator('.fcell input[data-col="Host"]').input_value() == f"={value}"
@@ -123,7 +123,7 @@ def test_exclude_hides_the_value_and_leaves_the_others_on(page):
     # that replaced them: a new view_id, and fewer rows than were there.
     page.wait_for_function(
         "([id, n]) => __winnow.S.view && __winnow.S.view.view_id !== id"
-        " && __winnow.S.view.row_count < n", before)
+        " && __winnow.S.view.row_count < n", arg=before)
     assert page.evaluate("(v) => __winnow.S.filters.Host === '!=' + v", value)
     assert page.locator('.fcell input[data-col="EventId"]').input_value() == "=4624"
     # Not just the filter string — the grid no longer shows that value.
