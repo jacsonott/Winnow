@@ -1,7 +1,7 @@
 /* The Settings modal — appearance, keyboard shortcuts, timestamps, tags.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { autofitMaxWidth, fillsGrid, renderHead } from './columns.js';
+import { autofitMaxWidth, fillsGrid, renderHead, renderHeadResized } from './columns.js';
 import { $, AUTOFIT_MAX_W_DEFAULT, ROW_H, ROW_H_COMFORTABLE, ROW_H_COMPACT, api, debounce, el, post, setRowH, toast } from './core.js';
 import { labeledRow } from './derived.js';
 import { VALUE_FILTER_AUTO_MAX, syncSearchKeyCopy } from './filters.js';
@@ -46,6 +46,18 @@ export const STYLES = {
 
 export const ACCENT_PRESETS = ['#d2a04a', '#39e881', '#ff6a1a', '#7c6cf6', '#4a90d9', '#d9534f'];
 
+/* Which of the two filter surfaces a fresh install gets: 'bar' (the filter
+   bar — only the filters actually set, as chips) or 'row' (a box under every
+   column, always). THIS is the line to change to flip the default; nothing
+   else reads a hardcoded side of it.
+
+   'bar' because the row was measured empty: a seven-table case put 27 boxes
+   on screen with 0 in use, and they are the heaviest thing in the viewport
+   after the data. 'row' stays a setting rather than a removal because typing
+   straight into a column box is the Timeline Explorer reflex, and analysts
+   who have it are not wrong. */
+export const FILTER_UI_DEFAULT = 'bar';
+
 export function defaultAppearance() {
   return {
     // Harvest is the default look. An install that already has a saved
@@ -66,6 +78,9 @@ export function defaultAppearance() {
     // leaves the analyst where they are (see jobs.js). On, the first table
     // of an import batch to finish opens; the rest land quietly.
     openNewTables: false,
+    // 'bar' | 'row' — see FILTER_UI_DEFAULT. An install that predates this
+    // has no key and therefore gets the default, like every other switch here.
+    filterUi: FILTER_UI_DEFAULT,
   };
 }
 
@@ -780,6 +795,30 @@ export function openSettings() {
     secLook.append(pagesLabel);
     secLook.append(el('p', 'fb-help',
       'Collapse SQL, Timeline, Notes, Watchlist and plugin tabs into one Pages \u25be button, the way Filters \u25be works.'));
+
+    /* The classic always-on filter row. Off by default (see
+       FILTER_UI_DEFAULT): the row was measured empty — 27 boxes, none in
+       use — and the bar shows the same filters in a fraction of the ink.
+       On, every column gets its box back and the bar goes away entirely,
+       which is the surface an analyst coming from Timeline Explorer types
+       into without looking. One repaint covers both surfaces — through
+       renderHeadResized, because swapping them changes the head's height
+       by the whole filter row and the rows have to be moved to match. */
+    const frLabel = el('label', 'check-row');
+    const frCb = el('input');
+    frCb.type = 'checkbox';
+    frCb.checked = S.appearance.filterUi === 'row';
+    frCb.onchange = () => {
+      S.appearance.filterUi = frCb.checked ? 'row' : 'bar';
+      saveAppearance();
+      renderHeadResized();
+    };
+    frLabel.append(frCb, el('span', null, 'Always-on filter row'));
+    secLook.append(frLabel);
+    secLook.append(el('p', 'fb-help',
+      'Off: a filter bar above the grid shows only the filters you have set, as chips you can remove, '
+      + 'and the \u2315 on a column header opens that column\u2019s box where it belongs. '
+      + 'On: every column carries a filter box at all times, the way Timeline Explorer does it.'));
 
     /* Imports: how a finished import behaves. A machine preference like
        the look (per browser, mirrored to the machine), not case data. */

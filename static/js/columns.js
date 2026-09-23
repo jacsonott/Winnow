@@ -3,12 +3,12 @@
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { $, AUTOFIT_MAX_W_DEFAULT, GUTTER_W, api, debounce, el, post, toast } from './core.js';
 import { columnMenuItems, opLabel } from './derived.js';
-import { openValuePicker, pickerTreeNode, valueFilterEnabled } from './filters.js';
+import { columnFilterChips, openValuePicker, pickerTreeNode, removeColumnFilter, valueFilterEnabled } from './filters.js';
 import { render } from './grid.js';
 import { renderGroupStrip } from './grouping.js';
 import { S, selClear, selSetAll, selSnapshot } from './state.js';
 import { baseColumns, columnMeta } from './tsformat.js';
-import { contextMenu } from './ui.js';
+import { anchoredPanel, contextMenu } from './ui.js';
 import { rebuildSoon, rebuildView } from './view.js';
 
 /* ---------------------------------------------------------------- header */
@@ -144,6 +144,187 @@ export function wireColumnDrag(h, name) {
   });
 }
 
+/* ------------------------------------------------------- filter surface */
+
+/* Two surfaces, one setting. The default is the filter BAR: a strip above
+   the grid carrying only the filters actually set, as chips, plus the way
+   to add one — and a column's box appears under its header only when the
+   header's ⌕ (or a chip, or "+ filter a column…") asks for it. The classic
+   always-on filter ROW — a box under every column, forever — is what
+   Settings → Appearance restores.
+
+   The row was measured on a real seven-table case: 27 boxes on screen, 0
+   in use, and they are the heaviest thing in the viewport after the data.
+   It is a setting rather than a removal because typing straight into a
+   column box without looking is the Timeline Explorer reflex, and the
+   analysts who have it are not wrong. The default lives in one place
+   (FILTER_UI_DEFAULT in settings.js), not in a comparison spelled out
+   here — flipping it must be one edit. */
+export const classicFilterRow = () => S.appearance.filterUi === 'row';
+
+/* Whether this column's box is on screen. Under the classic row every
+   column's is; under the bar only the ones the analyst opened. */
+export const filterBoxOpen = (name) => classicFilterRow() || S.filterOpen.includes(name);
+
+/* renderHead() for the paths that change the head's HEIGHT rather than only
+   what is drawn in it — revealing or folding a box, and the Appearance
+   switch between the two surfaces, all add or remove the whole filter row.
+
+   #rows is positioned absolutely at headH(), and that top is written in one
+   place only: syncRowsTop(), inside a paint. Repaint the head without
+   repainting the rows and the two disagree by the row's ~29px — the first
+   data row is drawn underneath the sticky header, a blank strip is left at
+   the bottom, and rowAtClientY (which subtracts headH()) hands the gutter
+   drag and the autoscroll a row that isn't the one under the pointer.
+   Nothing repairs it by itself: a column already in view scrolls nowhere,
+   so no scroll event fires, and folding a box away rebuilds nothing at all.
+   Every other caller that resizes the head — a width drag, a pin, hiding a
+   column — has always paired the two; this is that pair, named, so the
+   filter surface cannot drift back out of it. */
+export function renderHeadResized() {
+  renderHead();
+  render();
+}
+
+/* Reveal a column's box under its header and put the cursor in it. The
+   header ⌕, a chip's label and the column picker all come through here, so
+   the three cannot disagree about what "open" means or forget the scroll.
+
+   Under the classic row there is nothing to reveal — the box is already
+   there — so this is only the focus half. */
+export function openColumnFilter(name, { focus = true } = {}) {
+  // A hidden or grouped-away column has no header to reveal a box under.
+  // Its filter is still real and its chip's ✕ still takes it off — this is
+  // only the edit-in-place half, and saying why beats a click that does
+  // nothing.
+  if (!visibleCols().includes(name)) {
+    toast(`"${name}" is not on screen — show it from the Columns panel to edit its filter here`);
+    return;
+  }
+  if (!classicFilterRow() && !S.filterOpen.includes(name)) {
+    S.filterOpen = [...S.filterOpen, name];
+    renderHeadResized();
+  }
+  if (!focus) return;
+  const inp = document.querySelector(`.fcell input[data-col="${CSS.escape(name)}"]`);
+  if (!inp) return;
+  // A column off the right edge has a box nobody can see, and focusing it
+  // would scroll the grid there with no warning. Bring it in deliberately,
+  // by the nearest amount, so the columns either side stay in frame.
+  inp.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  inp.focus();
+  inp.select();
+}
+
+/* Put a revealed box away again. Not a filter change: an open box with
+   text in it folds back into its chip, which is where a set filter lives
+   when it is not being edited. */
+export function closeColumnFilter(name) {
+  if (!S.filterOpen.includes(name)) return;
+  S.filterOpen = S.filterOpen.filter((n) => n !== name);
+  renderHeadResized();
+}
+
+export function toggleColumnFilter(name) {
+  if (S.filterOpen.includes(name)) closeColumnFilter(name); else openColumnFilter(name);
+}
+
+/* The bar, painted on its own. Separate from renderHead because
+   setColumnFilter (the row menu's Filter to…, the `f` keybind, the value
+   picker's single-value case) deliberately avoids a full head render —
+   that would drop the cell selection the caller is still acting on — and
+   the chip is the only place those writes show up once the boxes are gone.
+
+   Owns its own `hidden`, all three reasons for it: the classic row is on,
+   no table is open, or a page tab is up (syncTabChrome calls this for the
+   same reason it hides the toolbar — the bar describes the grid). */
+export function renderFilterBar() {
+  const bar = $('filterBar');
+  if (!bar) return;
+  bar.replaceChildren();
+  bar.hidden = classicFilterRow() || !S.sourceId || S.activeTab !== 'grid';
+  if (bar.hidden) return;
+
+  const label = el('span', 'filter-bar-label', 'Filters');
+  // The scope, said once here rather than guessed at: the guided tree, the
+  // tag filter and the timeframe narrow the table too and have their own
+  // controls, so "Filters — none" must not read as "nothing is hidden".
+  label.title = 'The per-column filters on this table. The filter builder, tags and the timeframe have their own controls in the toolbar.';
+  bar.append(label);
+
+  // A column being edited in place is not also a chip: the box IS that
+  // filter while it is open, and two copies of one filter a keystroke
+  // apart is exactly the confusion the bar exists to remove.
+  const chips = columnFilterChips().filter((c) => !S.filterOpen.includes(c.column));
+  for (const c of chips) bar.append(filterChip(c));
+  if (!chips.length && !S.filterOpen.length) bar.append(el('span', 'filter-bar-none', 'none'));
+
+  const add = el('button', 'btn ghost filter-add', '+ filter a column…');
+  add.id = 'filterAdd';
+  add.title = 'Open a column’s filter box — including one scrolled off the right edge';
+  add.onclick = (e) => { e.stopPropagation(); openFilterColumnPicker(add); };
+  bar.append(add);
+}
+
+/* One chip: the column, what it is filtered to, and the way off. The label
+   is a button rather than text because "click the filter to change it" is
+   the gesture people try first, and it lands on the same reveal the header
+   ⌕ does. */
+function filterChip(c) {
+  const chip = el('span', 'filter-chip');
+  chip.dataset.col = c.column;
+  const label = el('button', 'filter-chip-label');
+  label.append(el('span', 'filter-chip-col', c.column), el('span', 'filter-chip-val', c.text));
+  label.title = `${c.column}: ${c.full}\n\nClick to edit this filter under its column`;
+  label.onclick = () => openColumnFilter(c.column);
+  const rm = el('button', 'filter-chip-rm', '✕');
+  rm.title = `Remove the filter on ${c.column}`;
+  rm.setAttribute('aria-label', `Remove the filter on ${c.column}`);
+  rm.onclick = () => removeColumnFilter(c.column);
+  chip.append(label, rm);
+  return chip;
+}
+
+/* "+ filter a column…": the way to filter a column a long way off the right
+   edge, and the answer to "where did the boxes go" for anyone meeting the
+   bar for the first time. Searchable because a KAPE EVTX table carries
+   thirty-odd columns and reading the list is slower than typing three
+   letters. Visible columns only — the others have no header to open a box
+   under (see openColumnFilter). */
+export function openFilterColumnPicker(anchorEl) {
+  const cols = visibleCols();
+  return anchoredPanel(anchorEl, 'filter-col-picker', (p, close) => {
+    const search = el('input', 'vp-search');
+    search.type = 'search';
+    search.placeholder = 'Find a column…';
+    const list = el('div', 'vp-list');
+    const paint = () => {
+      const q = search.value.trim().toLowerCase();
+      list.replaceChildren();
+      const hits = cols.filter((n) => !q || n.toLowerCase().includes(q));
+      for (const n of hits) {
+        const b = el('button', 'menu-item', n);
+        if (S.filters[n]) b.classList.add('filtered');
+        b.onclick = () => { close(); openColumnFilter(n); };
+        list.append(b);
+      }
+      if (!hits.length) list.append(el('div', 'vp-note', 'No column matches that.'));
+    };
+    search.oninput = paint;
+    // Enter takes the first hit: typing three letters and pressing Enter is
+    // the whole gesture for someone who knows which column they want.
+    search.onkeydown = (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      const first = list.querySelector('.menu-item');
+      if (first) first.click();
+    };
+    p.append(search, list);
+    paint();
+    setTimeout(() => search.focus(), 0);
+  });
+}
+
 export function renderHead() {
   S.cellRange = null; // column order/visibility/width changes invalidate cell-range column indices
   S.cellAnchor = null;
@@ -191,6 +372,13 @@ export function renderHead() {
   gh.append(selectAllCb, el('span', 'gutter-mid'), lineLabel);
   head.append(gh);
 
+  // A box can only be open on a column that is still on screen: hiding a
+  // column from the columns panel, grouping by it, or removing a derived
+  // column would otherwise leave a name in S.filterOpen that nothing ever
+  // renders and nothing ever drops.
+  const shown = visibleCols();
+  S.filterOpen = S.filterOpen.filter((n) => shown.includes(n));
+
   const gf = el('div', 'fcell gutter-filter');
   gf.style.flexBasis = GUTTER_W + 'px';
   filt.append(gf);
@@ -220,6 +408,37 @@ export function renderHead() {
         + (dstatus === 'partial' ? ' (incomplete — re-derive to finish)' : '');
       if (dstatus !== 'ready') mark.classList.add('pending');
       h.append(mark);
+    }
+    if (!classicFilterRow()) {
+      // The one-click way in, in the place the box it opens will appear.
+      // Laid out at all times rather than appearing on hover, for the same
+      // reason .fcell-pick is: a header row that reflows as the pointer
+      // crosses it is worse than a quiet glyph. It does cost ~13px of every
+      // header — the charge that got the column-options ▾ removed — and the
+      // trade is different here: that one was a rarely-used menu, this one
+      // replaces a whole row of boxes with a row of nothing, and filtering
+      // a column is the everyday verb it pays for.
+      const fo = el('button', 'hcell-filter', '⌕');
+      fo.dataset.col = name;
+      fo.tabIndex = -1;
+      const open = S.filterOpen.includes(name);
+      const filtered = !!(S.filters[name] || pickerTreeNode(name));
+      if (open) fo.classList.add('open');
+      if (filtered) fo.classList.add('active');
+      fo.setAttribute('aria-pressed', String(open));
+      fo.title = filtered
+        ? `${name} is filtered — click to edit the filter here`
+        : `Filter ${name}`;
+      fo.onclick = (ev) => {
+        // A modified click belongs to the header, not to this button:
+        // Alt-click pins and Shift-click adds a sort, and landing one of
+        // those on the glyph of a narrow column must not mean something
+        // else. Falling through (no stopPropagation) is what delivers it.
+        if (ev.altKey || ev.shiftKey || ev.ctrlKey || ev.metaKey) return;
+        ev.stopPropagation();
+        toggleColumnFilter(name);
+      };
+      h.append(fo);
     }
     if (colMetaEntry) {
       // Column options (display format, "Derive a column from this…",
@@ -262,9 +481,13 @@ export function renderHead() {
     h.append(grip);
     head.append(h);
 
+    // Under the bar the row is mostly empty cells: a column whose box is
+    // not open still needs one, at its own width, or the open box stops
+    // sitting under the header it belongs to.
     const f = el('div', 'fcell');
-  applyPin(f, name, pins);
+    applyPin(f, name, pins);
     f.style.flexBasis = w + 'px';
+    if (!filterBoxOpen(name)) { filt.append(f); continue; }
     const inp = el('input');
     inp.value = S.filters[name] || '';
     inp.placeholder = 'filter';
@@ -276,8 +499,22 @@ export function renderHead() {
       rebuildSoon();
     };
     inp.onkeydown = (e) => {
-      if (e.key === 'Escape') { inp.value = ''; S.filters[name] = ''; inp.classList.remove('active'); rebuildView(); }
-      if (e.key === 'Enter') { e.preventDefault(); rebuildView(); $('body').focus(); }
+      // Escape clears; Enter commits. Under the bar both also put the box
+      // away — it was revealed for one edit, and a box left open with its
+      // filter in it is the row this replaced, rebuilt one column at a
+      // time. What the filter says then is the chip's job. Under the
+      // classic row there is nothing to put away.
+      if (e.key === 'Escape') {
+        inp.value = ''; S.filters[name] = ''; inp.classList.remove('active');
+        closeColumnFilter(name);
+        rebuildView();
+      }
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        closeColumnFilter(name);
+        rebuildView();
+        $('body').focus();
+      }
     };
     f.append(inp);
     if (valueFilterEnabled(name)) {
@@ -300,6 +537,11 @@ export function renderHead() {
     }
     filt.append(f);
   }
+
+  // Nothing open means the row is a line of empty cells across the whole
+  // table — which is the thing the bar exists to stop drawing.
+  filt.hidden = !classicFilterRow() && !S.filterOpen.length;
+  renderFilterBar();
 }
 
 export function startResize(e, name) {

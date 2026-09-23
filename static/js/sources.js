@@ -786,6 +786,8 @@ export async function openSource(id, { skipBuild = false } = {}) {
      used to do it). */
   clearPageCache();
   S.filters = {};
+  // Revealed filter boxes name columns of the table being left.
+  S.filterOpen = [];
   S.search = '';
   S.searchMode = 'contains';
   S.searchTerms = [];
@@ -1624,6 +1626,7 @@ export function clearViewNarrowing() {
   if (S.tagFilter.length) cleared.push('the tag filter');
   if (S.timeRange && S.timeRange.enabled && (S.timeRange.start || S.timeRange.end)) cleared.push('the timeframe');
   S.filters = {};
+  S.filterOpen = [];
   S.filterTree = { type: 'group', op: 'AND', children: [] };
   S.tagFilter = [];
   S.timeRange = { enabled: false, column: null, start: '', end: '' };
@@ -1679,6 +1682,9 @@ async function landOnFilters(filters, tree, { clearTimeframe = false } = {}) {
     await dropGrouping();
   }
   S.filters = filters;
+  // Whatever survives is stated by the bar's chips; a box left revealed
+  // over a filter this just replaced is the empty row all over again.
+  S.filterOpen = [];
   S.search = ''; S.tagFilter = []; S.searchTerms = []; S.advCollapsed = null;
   S.filterTree = tree;
   // A pivot from a COUNT has to show the rows behind that count. The

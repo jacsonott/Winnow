@@ -2,7 +2,7 @@
 picker behind each ▾, and filtering by a cell's value.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { renderHead, saveLayout, visibleCols } from './columns.js';
+import { renderFilterBar, renderHead, renderHeadResized, saveLayout, visibleCols } from './columns.js';
 import { $, api, debounce, el, toast } from './core.js';
 import { rowAt } from './grid.js';
 import { collapseSearchIfEmpty, syncSearchExpansion } from './search.js';
@@ -41,6 +41,85 @@ export function parseFilter(raw) {
   }
   if (s.includes('|')) return { op: 'in', value: s.split('|').map((x) => x.trim()).filter(Boolean) };
   return { op: 'contains', value: s };
+}
+
+/* How one column's filter reads on a chip in the filter bar. Short enough
+   for a strip, and honest about which of the box's operators is in play —
+   a chip that showed the bare text would make `!powershell` and
+   `powershell` look like the same filter, which is the opposite of what a
+   summary is for. `contains` is the one op with no marker, because it is
+   what typing a word into the box means and a `~` on nine chips out of ten
+   is noise. */
+export function describeFilter(raw) {
+  const p = parseFilter(raw);
+  if (!p) return '';
+  const v = (n = 30) => ellipsize(String(p.value), n);
+  switch (p.op) {
+    case 'contains': return v();
+    case 'not_contains': return 'not ' + v(26);
+    case 'equals': return '= ' + v(28);
+    case 'not_equals': return '\u2260 ' + v(28);
+    case 'starts': return 'starts ' + v(24);
+    case 'regex': return '/' + v(26) + '/';
+    case 'empty': return 'is empty';
+    case 'not_empty': return 'is not empty';
+    case 'in': return ellipsize(p.value.join(' | '), 34);
+    default: return p.op + ' ' + v(26); // the numeric comparisons: > >= < <=
+  }
+}
+
+/* Every per-column filter currently narrowing the table, in display order,
+   as {column, text, full} — what the filter bar draws chips from.
+
+   Two kinds, because a column can be filtered two ways and a bar that
+   showed only one would leave the other invisible: the header box's own
+   text, and the value picker's node in the guided filter tree (the
+   selections the box can't spell — see setPickerTreeNode). The tree's OTHER
+   conditions are the filter builder's and stay under Filters ▾, which is
+   where they can be edited.
+
+   Hidden and grouped-away columns are included deliberately: a filter on a
+   column you cannot see is exactly the one worth naming. */
+export function columnFilterChips() {
+  const seen = new Set();
+  const names = [...S.order, ...S.columns.map((c) => c.name)].filter((n) => {
+    if (seen.has(n)) return false;
+    seen.add(n);
+    return true;
+  });
+  const out = [];
+  for (const column of names) {
+    const raw = S.filters[column];
+    if (raw && parseFilter(raw)) {
+      out.push({ column, text: describeFilter(raw), full: raw });
+      continue;
+    }
+    const node = pickerTreeNode(column);
+    if (node) {
+      const values = valuesFromPickerNode(node).map(displayValue);
+      out.push({ column, text: ellipsize(values.join(' | '), 34), full: values.join(' | ') });
+    }
+  }
+  return out;
+}
+
+/* Taking one filter off, from the chip's ✕. Both spellings go, because
+   the chip names the column rather than the mechanism and removing "the
+   filter on Provider" has to mean all of it.
+
+   Through renderHeadResized rather than renderHead because the line that
+   drops the column from S.filterOpen can shrink the head. Nothing reaches
+   here with that column's box open today — a chip and a revealed box are
+   never drawn for the same column — so the pairing costs one repaint and
+   buys not having to remember that, since the cost of forgetting is rows
+   painted under the sticky header until something else repaints them. */
+export async function removeColumnFilter(column) {
+  delete S.filters[column];
+  setPickerTreeNode(column, null);
+  S.filterOpen = S.filterOpen.filter((n) => n !== column);
+  updateFiltersButton();
+  renderHeadResized();
+  await rebuildView();
 }
 
 export function currentSpec() {
@@ -446,11 +525,17 @@ export function valueExcludeText(v) {
 
 /* Writes a raw filter string into a column's header box and the state
    behind it, keeping the visible input in step without a full renderHead()
-   (which would drop the cell selection the caller may still be acting on). */
+   (which would drop the cell selection the caller may still be acting on).
+
+   The bar IS repainted, on its own: under it most columns have no box, so
+   the chip is the only place the filter this just wrote shows up, and one
+   that appeared a rebuild later would be a filter bar that lies about what
+   is narrowing the table. renderFilterBar touches nothing but the strip. */
 export function setColumnFilter(name, raw) {
   if (raw) S.filters[name] = raw; else delete S.filters[name];
   const inp = document.querySelector(`.fcell input[data-col="${CSS.escape(name)}"]`);
   if (inp) { inp.value = raw || ''; inp.classList.toggle('active', !!raw); }
+  renderFilterBar();
 }
 
 export const displayValue = (v) => (v == null || v === '' ? '(empty)' : String(v));

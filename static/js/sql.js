@@ -2,6 +2,7 @@
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { recordTabVisit } from './tabhistory.js';
+import { renderFilterBar } from './columns.js';
 import { $, MOD_ENTER, api, debounce, el, post, toast } from './core.js';
 import { hideDetailPane } from './detail.js';
 import { render, renderTagToolbar } from './grid.js';
@@ -395,6 +396,7 @@ export function syncTabChrome() {
   syncPluginPanels();   // plugin toolbar panels live and die with the toolbar
   syncHistogramPanel(); // as does the built-in histogram strip beside them
   syncDiffBanner();     // as does a session comparison's banner
+  renderFilterBar();    // and the filter bar, which describes the grid's rows
   renderTagToolbar();   // and the "N selected" tagging bar
 }
 
