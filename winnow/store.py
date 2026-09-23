@@ -4094,6 +4094,32 @@ class Store:
             else:
                 self.db.execute("DELETE FROM open_tabs WHERE source_id=?", (source_id,))
 
+    def open_tabs(self, source_ids: Sequence[int]) -> int:
+        """Open a tab for each of these sources (or merges, by negative id)
+        in one transaction, and say how many were not already open.
+
+        The bulk counterpart of close_all_tabs, and for the same reason:
+        the sidebar's "open all" on a directory import of thirty files was
+        thirty round trips, each taking the writer lock in turn, with the
+        source list refetched at the end anyway. Which tables belong in the
+        list is the caller's decision — "every table" and "every table with
+        tagged rows" differ over merges, whose tags live on their members
+        — so this validates the ids and opens exactly them."""
+        ids = [int(i) for i in source_ids]
+        if not ids:
+            return 0
+        with self.lock, self.db:
+            known = {r[0] for r in self.db.execute("SELECT id FROM sources")}
+            known |= {-r[0] for r in self.db.execute("SELECT id FROM merges")}
+            missing = [i for i in ids if i not in known]
+            if missing:
+                raise KeyError(f"No such table: {missing[0]}")
+            before = self.db.execute("SELECT COUNT(*) FROM open_tabs").fetchone()[0]
+            self.db.executemany("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)",
+                                [(i,) for i in ids])
+            after = self.db.execute("SELECT COUNT(*) FROM open_tabs").fetchone()[0]
+        return after - before
+
     def close_all_tabs(self) -> None:
         """Close every open tab in one shot — the tables stay in the case
         (and the folder tree); only their open flag clears. Cheaper and
