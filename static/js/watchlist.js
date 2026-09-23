@@ -3,7 +3,12 @@
    and are re-scanned on every import (the jobs.js source-done hook calls
    scanWatchlistForSources). Its own page tab: add/import indicators, see
    per-indicator hit counts, and drill into where each landed — the hits
-   pane groups them by table. The scan is a background job (runScan):
+   pane groups them by table. It OPENS on the latest flagged rows across
+   every indicator (renderLatestHits), because a case with thousands of
+   findings should not spend half the page telling you to click something;
+   counts say whether a zero was scanned or never looked at, and an
+   indicator whose rows are another's is marked and mergeable (see
+   Store.watchlist_overview). The scan is a background job (runScan):
    started, polled at 400 ms, shown as a jobs-panel row; a newer scan
    takes over a running one's remaining work (the server folds the
    scopes), so a new entry is in the list the moment the server has it,
@@ -29,7 +34,20 @@ const KIND_LABEL = { hash: 'HASH', ip: 'IP', domain: 'DOMAIN',
                      filename: 'FILE', other: 'IOC' };
 export const WATCHLIST_POLL_MS = 400;
 let indicators = [];
+/* The rest of what /api/watchlist/overview answers: how many tables a scan
+   covers (`scan_targets`, the denominator of every entry's
+   scanned-so-far fraction), the honest row count behind the per-indicator
+   totals, and which indicators flag each other's rows. Kept beside
+   `indicators` rather than folded onto each entry because two of the three
+   are facts about the LIST, not about any one row. */
+let overview = { scan_targets: 0, total_hits: 0, distinct_rows: null,
+                 overlap_checked: false, relations: [] };
 let selected = null;
+/* Bumped by every renderHits() call. Both panes fetch, and the fetch that
+   comes back second would otherwise paint over the pane the analyst is
+   actually looking at — selecting an indicator while the latest-hits list
+   is still in flight was exactly that. */
+let paintToken = 0;
 /* Indicators whose first scan has not landed yet — rendered as "…" in
    the count cell. Keyed by id in module state rather than flagged on the
    row object: any load() (the import hook's, a delete's) replaces
@@ -387,13 +405,140 @@ function fillAutoTag() {
 }
 
 async function load() {
-  try { indicators = await api('/api/watchlist'); } catch { indicators = []; }
+  try {
+    const res = await api('/api/watchlist/overview');
+    indicators = res.indicators || [];
+    overview = res;
+  } catch { indicators = []; overview = { scan_targets: 0, total_hits: 0, distinct_rows: null,
+                                          overlap_checked: false, relations: [] }; }
+  if (selected != null && !indicators.some((i) => i.id === selected)) selected = null;
   renderList();
-  if (selected != null && !indicators.some((i) => i.id === selected)) { selected = null; renderHits(); }
+  // The hits pane is repainted on every load, not only when the selection
+  // died under it: a scan that just landed changed what "latest" means and
+  // what the selected indicator's hits are, and leaving the pane on the
+  // pre-scan answer is the stale half-screen this page already had.
+  renderHits();
   // Any load while the tab is showing means the analyst is looking at the
   // current counts — keep the seen high-water in step or the next badge
   // poll would light the dot for hits already on screen.
   if (S.activeTab === 'watchlist') markHitsSeen();
+}
+
+/* Every relation the overlap pass found for one indicator, most
+   consequential first: an identical set makes this entry redundant, being
+   contained in another makes it redundant, containing another makes the
+   OTHER one redundant. */
+function relationsFor(id) {
+  const order = { same: 0, subset: 1, superset: 2 };
+  return (overview.relations || []).filter((r) => r.id === id)
+    .sort((a, b) => order[a.relation] - order[b.relation]);
+}
+
+function indicatorById(id) { return indicators.find((i) => i.id === id); }
+function valueOf(id) { const i = indicatorById(id); return i ? i.value : `indicator ${id}`; }
+
+/* What an indicator's count cell says, which is not always a number. A
+   bare "0" meant both "every table was read and it is not in this case"
+   and "nothing has looked yet" — the first is a sentence an analyst can
+   put in a report, the second is not, and they were spelled the same. */
+function countCell(ind) {
+  if (scanning.has(ind.id)) {
+    const c = el('span', 'wl-count scanning', '…');
+    c.title = 'Scanning the tables for it…';
+    return c;
+  }
+  const done = ind.scanned_sources || 0;
+  const targets = overview.scan_targets || 0;
+  const covered = targets ? `scanned ${done.toLocaleString()} of ${targets.toLocaleString()} table${targets === 1 ? '' : 's'}` : 'no tables to scan';
+  if (ind.hit_count) {
+    const c = el('span', 'wl-count hot', ind.hit_count.toLocaleString());
+    c.title = `${hitsLabel(ind.hit_count)} · ${covered}`;
+    return c;
+  }
+  if (!done) {
+    const c = el('span', 'wl-state unscanned', 'not scanned');
+    c.title = 'No scan has read this indicator against any table yet — this is not "not present".';
+    return c;
+  }
+  if (done >= targets) {
+    const c = el('span', 'wl-state clean', 'clean');
+    c.title = `${covered} — no row anywhere in the case matched it.`;
+    return c;
+  }
+  const c = el('span', 'wl-state partial', `${done}/${targets} tables`);
+  c.title = `${covered} — no hits in those. The rest have not been read for it.`;
+  return c;
+}
+
+/* The row's overlap chip: this indicator's hits are another's hits, so one
+   of the two is buying the analyst nothing. Clicking opens the merge
+   dialog rather than acting, because which of the two names belongs in the
+   report is the analyst's call, not ours. */
+function overlapChip(ind) {
+  const rels = relationsFor(ind.id);
+  if (!rels.length) return null;
+  const r = rels[0];
+  let text;
+  if (rels.length > 1) text = `⧉ overlaps ${rels.length} other indicators`;
+  else if (r.relation === 'same') text = `⧉ same rows as ${valueOf(r.other_id)}`;
+  else if (r.relation === 'subset') text = `⧉ all its rows are also ${valueOf(r.other_id)}’s`;
+  else text = `⧉ covers every row of ${valueOf(r.other_id)}`;
+  const chip = el('button', 'wl-dup', text);
+  chip.title = 'These indicators report the same rows — the summary counts them once. Merge or remove one.';
+  chip.onclick = (e) => { e.stopPropagation(); openOverlapDialog(ind); };
+  return chip;
+}
+
+/* Merge two indicators that cover the same rows. The server refuses to
+   drop one that found rows the keeper did not, so the pair on screen being
+   a scan out of date is a message, not lost findings. */
+async function mergeIndicators(keepId, dropId) {
+  let r;
+  try { r = await post('/api/watchlist/merge', { keep_id: keepId, drop_id: dropId }); }
+  catch (e) { toast(e.message, 6000); return; }
+  document.getElementById('modal').hidden = true;
+  scanning.delete(dropId);
+  if (selected === dropId) selected = keepId;
+  toast(`Merged into “${r.kept.value}”`
+    + (r.auto_tag_moved ? ' · its auto-tag came across' : ''));
+  await load();
+  await refreshWatchlistBadge();
+}
+
+function openOverlapDialog(ind) {
+  modal('Overlapping indicators', (b) => {
+    b.append(el('p', 'fb-help',
+      'Two indicators that flag the same rows are one finding, not two. '
+      + 'Keep the name you want in the report; the other is removed, and its '
+      + 'auto-tag moves across if the one you keep has none.'));
+    const list = el('div', 'session-list');
+    b.append(list);
+    for (const r of relationsFor(ind.id)) {
+      const other = indicatorById(r.other_id);
+      const row = el('div', 'row-actions session-row wl-dup-row');
+      const what = el('span', 'session-name');
+      what.append(el('span', 'wl-val', ind.value));
+      const rel = r.relation === 'same' ? ' and ' : r.relation === 'subset' ? ' — every row of it is also in ' : ' — it covers every row of ';
+      what.append(document.createTextNode(rel));
+      what.append(el('span', 'wl-val', other ? other.value : `indicator ${r.other_id}`));
+      what.append(el('span', 'count', ` ${r.shared.toLocaleString()} shared row${r.shared === 1 ? '' : 's'}`));
+      row.append(what);
+      // Only the merges that lose nothing are offered: dropping the
+      // indicator whose rows are a strict subset is safe, dropping the
+      // wider one would take rows with it and the server says no.
+      if (r.relation === 'same' || r.relation === 'superset') {
+        const keepThis = el('button', 'btn ghost', `Keep “${ind.value}”`);
+        keepThis.onclick = () => mergeIndicators(ind.id, r.other_id);
+        row.append(keepThis);
+      }
+      if (r.relation === 'same' || r.relation === 'subset') {
+        const keepOther = el('button', 'btn ghost', `Keep “${other ? other.value : r.other_id}”`);
+        keepOther.onclick = () => mergeIndicators(r.other_id, ind.id);
+        row.append(keepOther);
+      }
+      list.append(row);
+    }
+  });
 }
 
 /* Entries the server just accepted go straight into the list, marked
@@ -406,18 +551,39 @@ function addIndicators(added) {
   renderList();
 }
 
+/* The summary line. Its old form added the per-indicator counts up and
+   called the total "hits", which is a count of findings only while no two
+   indicators match the same row — and two of them matching the same rows
+   is the normal case (`mimikatz` and `mimikatz.exe` are one finding
+   reported twice). When the overlap pass found fewer distinct rows than
+   hits, the ROW count leads and the hit total is named for what it is. */
+function paintSummary() {
+  const sum = $('wlSummary');
+  if (!sum) return;
+  sum.title = '';
+  if (!indicators.length) { sum.textContent = ''; return; }
+  const withHits = indicators.filter((i) => i.hit_count).length;
+  const totalHits = overview.total_hits != null
+    ? overview.total_hits : indicators.reduce((n, i) => n + (i.hit_count || 0), 0);
+  const rows = overview.overlap_checked ? overview.distinct_rows : null;
+  let text = `${indicators.length} indicator${indicators.length === 1 ? '' : 's'}`;
+  if (!withHits) { sum.textContent = text + ' · no hits yet'; return; }
+  text += ` · ${withHits} with hits`;
+  if (rows != null && rows < totalHits) {
+    text += ` · ${rows.toLocaleString()} row${rows === 1 ? '' : 's'} flagged`
+      + ` · ${totalHits.toLocaleString()} hits counted across indicators`;
+    sum.title = 'Some rows matched more than one indicator, so the hit total counts them '
+      + 'more than once. The row count is how many findings the case actually holds.';
+  } else {
+    text += ` · ${hitsLabel(totalHits)}`;
+  }
+  sum.textContent = text;
+}
+
 function renderList() {
   const list = $('wlList');
   list.replaceChildren();
-  const withHits = indicators.filter((i) => i.hit_count).length;
-  const totalHits = indicators.reduce((n, i) => n + (i.hit_count || 0), 0);
-  const sum = $('wlSummary');
-  if (sum) {
-    sum.textContent = indicators.length
-      ? `${indicators.length} indicator${indicators.length === 1 ? '' : 's'}`
-        + (withHits ? ` · ${withHits} with hits · ${totalHits.toLocaleString()} hit${totalHits === 1 ? '' : 's'}` : ' · no hits yet')
-      : '';
-  }
+  paintSummary();
   if (!indicators.length) {
     list.append(el('div', 'note-status', 'No indicators yet — add one above or import a list. '
       + 'New imports are scanned automatically.'));
@@ -435,10 +601,9 @@ function renderList() {
       note.title = ind.note;
       mainCol.append(note);
     }
-    const pending = scanning.has(ind.id);
-    const cnt = el('span', 'wl-count' + (pending ? ' scanning' : ind.hit_count ? ' hot' : ''),
-      pending ? '…' : String(ind.hit_count));
-    cnt.title = pending ? 'Scanning the tables for it…' : `${ind.hit_count} hit${ind.hit_count === 1 ? '' : 's'}`;
+    const dup = overlapChip(ind);
+    if (dup) mainCol.append(dup);
+    const cnt = countCell(ind);
     const del = el('button', 'wl-del', '✕');
     del.title = 'Remove this indicator';
     del.onclick = async (e) => {
@@ -449,7 +614,11 @@ function renderList() {
       load();
     };
     row.append(kind, mainCol, cnt, del);
-    row.onclick = () => { selected = ind.id; renderList(); renderHits(); };
+    // Clicking the selected row again goes back to the whole case, which
+    // is the only way back to the latest-hits pane once one is picked.
+    row.onclick = () => { selected = selected === ind.id ? null : ind.id; renderList(); renderHits(); };
+    row.title = ind.id === selected ? 'Show the latest hits from every indicator again'
+      : 'Show only this indicator’s hits';
     list.append(row);
   }
 }
@@ -476,6 +645,82 @@ function hitRow(h) {
   return r;
 }
 
+/* The pane the tab opens on: the newest flagged rows across every
+   indicator, one line per ROW rather than per hit, each naming the
+   indicators that matched it, the table, what the row is and when.
+
+   It replaced "Select an indicator to see its hits", which spent half the
+   page on an instruction while the case held thousands of findings — and
+   which made "which of these fired most recently" a question you could
+   only answer by clicking every entry in turn. Selecting an indicator
+   still narrows to that one (the grouped-by-table pane below).
+
+   The row summary and the timestamp are the columns the analyst's own
+   timeline template names for that artefact, resolved server-side, so this
+   pane and the Timeline describe a row the same way. */
+async function renderLatestHits(box, token) {
+  const head = el('div', 'wl-hits-head');
+  head.append(el('span', null, 'Latest hits'));
+  const sub = el('span', 'wl-hits-sub');
+  head.append(sub);
+  box.append(head);
+  if (!indicators.length) {
+    box.append(el('div', 'note-status', 'No indicators yet — add one on the left, import a list, '
+      + 'or copy the set from another case.'));
+    return;
+  }
+  let res;
+  try { res = await api('/api/watchlist/latest'); }
+  catch (e) { if (paintToken === token) box.append(el('div', 'note-status', e.message)); return; }
+  if (paintToken !== token) return;
+  if (!res.rows.length) {
+    const anyScanned = indicators.some((i) => (i.scanned_sources || 0) > 0);
+    box.append(el('div', 'note-status', anyScanned
+      ? 'Nothing in this case matches any indicator on the list.'
+      : 'Nothing scanned yet — "Scan all" reads every table for every indicator.'));
+    return;
+  }
+  const withHits = indicators.filter((i) => i.hit_count).length;
+  const rows = overview.overlap_checked && overview.distinct_rows != null
+    ? overview.distinct_rows : null;
+  sub.textContent = (rows != null
+    ? `${rows.toLocaleString()} row${rows === 1 ? '' : 's'} flagged by ${withHits} indicator${withHits === 1 ? '' : 's'}`
+    : `${withHits} indicator${withHits === 1 ? '' : 's'} with hits`) + ' · newest first';
+  for (const h of res.rows) {
+    const row = el('div', 'wl-latest');
+    const who = el('span', 'wl-latest-who');
+    for (const wid of h.watchlist_ids) {
+      // The indicator's own name, and a way to narrow to it — the
+      // question "what else did this one hit" is one click from here
+      // rather than a hunt down the list on the left. Separated by a
+      // middot: two indicator names side by side in the same colour read
+      // as one long value, which is exactly the confusion this pane
+      // exists to clear up.
+      if (who.childNodes.length) who.append(el('span', 'wl-latest-sep', '·'));
+      const ioc = el('button', 'wl-latest-ioc', valueOf(wid));
+      ioc.title = 'Show only this indicator’s hits';
+      ioc.onclick = (e) => { e.stopPropagation(); selected = wid; renderList(); renderHits(); };
+      who.append(ioc);
+    }
+    const what = el('span', 'wl-latest-what');
+    const src = S.sources.find((s) => s.id === h.source_id);
+    what.append(el('span', 'wl-latest-table', (src && sourceLabel(src)) || h.source_name));
+    what.append(document.createTextNode(' · ' + h.body));
+    what.title = h.body;
+    const when = el('span', 'wl-latest-when', h.ts || '—');
+    if (!h.ts) when.title = 'This table has no datetime column, so the row cannot be placed in time.';
+    row.append(who, what, when);
+    row.title = 'Open this table at the row';
+    row.onclick = () => jumpToTimelineRow(h.source_id, h.rid);
+    box.append(row);
+  }
+  if (rows != null && rows > res.rows.length) {
+    box.append(el('div', 'note-status wl-latest-more',
+      `Showing the newest ${res.rows.length.toLocaleString()} of ${rows.toLocaleString()} flagged rows — `
+      + 'pick an indicator to page through its own.'));
+  }
+}
+
 /* The hits pane: one collapsible group per table the indicator hit,
    headed by the table's name (the analyst's nickname, as the sidebar
    shows it) and its exact count — the server counts per table and caps
@@ -486,14 +731,20 @@ function hitRow(h) {
 async function renderHits() {
   const box = $('wlHits');
   box.replaceChildren();
-  if (selected == null) { box.append(el('div', 'note-status', 'Select an indicator to see its hits.')); return; }
+  const token = ++paintToken;
+  if (selected == null) { await renderLatestHits(box, token); return; }
   const want = selected;
   const ind = indicators.find((i) => i.id === selected);
-  box.append(el('div', 'wl-hits-head', `Hits for "${ind ? ind.value : ''}"`));
+  const head = el('div', 'wl-hits-head');
+  const back = el('button', 'wl-hits-back', '← all indicators');
+  back.title = 'Back to the latest hits across every indicator';
+  back.onclick = () => { selected = null; renderList(); renderHits(); };
+  head.append(back, el('span', null, `Hits for "${ind ? ind.value : ''}"`));
+  box.append(head);
   let res;
   try { res = await api(`/api/watchlist/hits?watchlist_id=${selected}`); }
-  catch (e) { if (selected === want) box.append(el('div', 'note-status', e.message)); return; }
-  if (selected !== want) return;   // another row was picked while this loaded
+  catch (e) { if (paintToken === token) box.append(el('div', 'note-status', e.message)); return; }
+  if (paintToken !== token || selected !== want) return;   // another row was picked while this loaded
   if (!res.hits.length) { box.append(el('div', 'note-status', 'No hits — scan tables, or this indicator matched nothing.')); return; }
   const bySource = new Map();
   for (const h of res.hits) {
@@ -643,6 +894,8 @@ export function wireWatchlist() {
 export function resetWatchlist() {
   selected = null;
   indicators = [];
+  overview = { scan_targets: 0, total_hits: 0, distinct_rows: null,
+               overlap_checked: false, relations: [] };
   scanning.clear();
   collapsed.clear();
   stopScanPoll();

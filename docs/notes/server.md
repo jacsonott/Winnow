@@ -143,7 +143,16 @@ see [docs/notes/README.md](README.md) for the whole set.
   scans inline while it seeds a watchlist, and tests use it. `POST
   /api/watchlist` answers 400 for an exact duplicate value; the two
   import routes return `added_ids` so the client scans for the new
-  entries only; `GET /api/watchlist/hits` answers `{sources, hits}`.
+  entries only; `GET /api/watchlist/hits` answers `{sources, hits}`. `GET
+  /api/watchlist/overview` is what the tab loads — the indicators plus
+  `scanned_sources`/`scan_targets` and the overlap picture (see
+  [store.md](store.md)); `/api/watchlist` still answers the plain list,
+  because the badge poll and the import hook only need that. `GET
+  /api/watchlist/latest?limit=` resolves the timeline templates the same
+  way `/api/timeline` does before calling the store, which is why it lives
+  on a route rather than in `Store.latest_hits`. `POST
+  /api/watchlist/merge` is 400 when the keeper does not cover every row the
+  dropped indicator found, and the message says how many would go.
 - **The profile routes** (`/api/plugin_bundles/*`) are all plain `def`:
   every one of them touches `WS.plugin_bundles` (a JSON file under a
   process-wide lock) or the Store, so none belongs on the event loop.
