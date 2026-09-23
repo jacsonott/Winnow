@@ -1,4 +1,5 @@
-"""The tag rail says which tag a mark belongs to.
+"""The tag rail says which tag a mark belongs to — without covering the
+grid to do it.
 
 The rail was the one surface in the app where a tag appeared as a colour
 and nothing else: 14px of dashes down the right edge, no name anywhere
@@ -7,10 +8,14 @@ scrollbar, so it carried `pointer-events: none` to keep a grab of the
 thumb from landing on 14px of canvas, and an element the pointer never
 reaches shows no `title`.
 
-So these three go together, and all three are the fix: the strip is
-parked inside the scrollbar, the mark under the pointer names its tag,
-and the wheel is forwarded by hand because the rail is a sibling of the
-scroller rather than a child of it.
+What bought the title back is the gutter: #body gives up a rail's width
+and the strip stands in it, so it overlays neither the thumb nor the
+rows. Sliding the strip inward instead, by measuring #body's scrollbar on
+every draw, is the version that has to keep failing here — it puts the
+canvas on top of the rightmost column of cells, and it goes stale the
+moment something repaints without redrawing the rail (expanding a group
+is one). So the geometry tests are as much a part of the readout as the
+hover is: the tooltip is only safe while nothing is under the strip.
 
 The case file is shared by the whole UI session, so the test that tags a
 row untags it again.
@@ -31,10 +36,22 @@ TAG = "__winnow.S.tags[0]"
 POS = 100
 
 GEOMETRY = """() => {
-  const b = document.getElementById('body'), r = document.getElementById('rail');
-  const bb = b.getBoundingClientRect(), rb = r.getBoundingClientRect();
-  return { scrollbar: b.offsetWidth - b.clientWidth, head: __winnow.headH(),
-           bodyRight: bb.right, bodyTop: bb.top, railRight: rb.right, railTop: rb.top };
+  const g = document.getElementById('grid'), b = document.getElementById('body'),
+        r = document.getElementById('rail');
+  const gb = g.getBoundingClientRect(), bb = b.getBoundingClientRect(),
+        rb = r.getBoundingClientRect();
+  // What the browser hands the pointer just inside the scroller's right
+  // edge — the pixels the rail used to sit on. `null` when nothing is
+  // there, the id/class when it is something other than the grid.
+  const at = document.elementFromPoint(bb.right - 2, bb.top + bb.height / 2);
+  return { gridTop: gb.top, gridBottom: gb.bottom, gridRight: gb.right,
+           bodyTop: bb.top, bodyRight: bb.right,
+           railLeft: rb.left, railRight: rb.right, railTop: rb.top,
+           railBottom: rb.bottom, railWidth: rb.width,
+           bitmap: [r.width, r.height], box: [r.clientWidth, r.clientHeight],
+           inlineStyle: r.getAttribute('style') || '',
+           overflowing: b.scrollHeight > b.clientHeight,
+           atBodyEdge: at ? (b.contains(at) ? 'grid' : (at.id || at.className)) : null };
 }"""
 
 # A y on the canvas with nothing painted within 8px of it — read out of the
@@ -57,18 +74,63 @@ EMPTY_Y = """() => {
 }"""
 
 
-def test_the_rail_stops_where_the_scrollbar_starts(page):
-    """Asserted against the measurement rather than a constant: headless
-    Chromium's scrollbars are overlays and take no width, so the number
-    here is 0 in CI and ~11px in the Edge/Chromium app window an analyst
-    runs — what has to hold on both is that the rail gives up exactly what
-    the scrollbar takes."""
+def _assert_clear_of_the_grid(g):
+    """The one thing that must hold however the grid is scrolled, grouped
+    or sized: the strip begins where the scroller ends. Everything the
+    rail is allowed to do with the pointer rests on this."""
+    assert g["railLeft"] >= g["bodyRight"] - 0.5, g
+    assert abs(g["railRight"] - g["gridRight"]) <= 0.5, g
+    # Given room rather than squeezed into the margin of error: a rail
+    # sitting flush at zero width would satisfy the line above.
+    assert g["railWidth"] >= 13.5, g
+    # And the last pixels of the scroller still answer as the scroller.
+    # This is the symptom the covered-up version had: a mousedown there
+    # found no .cell, so it selected nothing, and a right-click got
+    # Chromium's own menu instead of the row menu.
+    assert g["atBodyEdge"] == "grid", g
+
+
+def test_the_rail_stands_beside_the_grid_not_on_it(page):
     page.evaluate("() => __winnow.drawRail()")
     g = page.evaluate(GEOMETRY)
-    assert abs(g["railRight"] - (g["bodyRight"] - g["scrollbar"])) <= 0.5, g
-    # And below the sticky header, so the strip spans the rows and a mark
-    # sits beside the row it stands for.
-    assert g["railTop"] >= g["bodyTop"] + g["head"] - 0.5, g
+    _assert_clear_of_the_grid(g)
+    # Placed by the stylesheet alone — top to bottom of .grid, beside the
+    # scroll track it maps, with no per-draw JS writing top/right/bottom.
+    # An inline style here means the measuring version is back.
+    assert g["inlineStyle"] == "", g
+    # Top to bottom of .grid. Worth stating as the whole height and not
+    # "tall enough": with `top: 0; bottom: 0` and no `height`, a canvas —
+    # a replaced element — takes its intrinsic height from the attribute
+    # and drops `bottom` on the floor, which leaves the strip 150px long
+    # and every mark crammed into the top sixth of the grid.
+    assert abs(g["railTop"] - g["gridTop"]) <= 0.5, g
+    assert abs(g["railBottom"] - g["gridBottom"]) <= 0.5, g
+    # And the bitmap is the box, so a mark is one device pixel per CSS
+    # pixel and the hover's arithmetic is the paint's.
+    assert g["bitmap"] == g["box"], g
+
+
+def test_the_rail_stays_clear_when_a_group_expands(page):
+    """The path that broke the measured version. Grouped by a column with
+    four values the grid does not overflow, so a draw taken then reads a
+    scrollbar of zero; expanding a group calls render() and nothing else,
+    which brings the scrollbar in without redrawing the rail. A strip
+    placed from a stale measurement is over the thumb from here on."""
+    page.evaluate("() => __winnow.addGroupLevel('EventId')")
+    page.wait_for_function("() => __winnow.S.groups.length > 0")
+    try:
+        page.evaluate("() => __winnow.drawRail()")
+        # Four collapsed headers don't fill the viewport — this is the draw
+        # that would have measured a scrollbar of zero and kept it.
+        assert not page.evaluate(GEOMETRY)["overflowing"], "grouped view already overflows"
+        page.evaluate("async () => { if (!__winnow.S.groups[0].expanded)"
+                      " await __winnow.toggleGroup(0); }")
+        page.wait_for_function("() => __winnow.S.groups[0].expanded")
+        page.wait_for_function("() => { const b = document.getElementById('body');"
+                               " return b.scrollHeight > b.clientHeight; }")
+        _assert_clear_of_the_grid(page.evaluate(GEOMETRY))
+    finally:
+        page.evaluate("() => __winnow.dropGrouping()")
 
 
 def test_a_mark_names_its_tag_under_the_pointer(page):
@@ -99,6 +161,34 @@ def test_a_mark_names_its_tag_under_the_pointer(page):
         page.mouse.move(box["x"] + box["width"] / 2, box["y"] + empty)
         assert "Tagged rows in this view" in page.locator("#rail").get_attribute("title")
     finally:
+        page.evaluate(f"() => __winnow.tagRowsAtPositions({TAG}, [{POS}], false)")
+
+
+def test_the_readout_follows_the_strip_after_a_resize_with_no_redraw(page):
+    """Dragging the detail pane's divider resizes the grid and calls
+    nothing (detail.js) — so the rail's box changes while its bitmap does
+    not, and the browser stretches the painted marks to fit. The resize is
+    done here by hand for the same reason: what has to be true is that a
+    hover reads the strip as it is on screen now, not as it was painted.
+    Without the scale the readout names whatever row is that many *canvas*
+    rows down, which after a halving is the wrong half of the view."""
+    name = page.evaluate(f"() => {TAG}.name")
+    page.evaluate(f"() => __winnow.tagRowsAtPositions({TAG}, [{POS}], true)")
+    try:
+        page.evaluate("() => __winnow.drawRail()")
+        total = page.evaluate("() => __winnow.S.view.row_count")
+        page.evaluate("""() => {
+          const cv = document.getElementById('rail');
+          cv.style.bottom = 'auto';
+          cv.style.height = (cv.getBoundingClientRect().height / 2) + 'px';
+        }""")
+        box = page.locator("#rail").bounding_box()
+        page.mouse.move(box["x"] + box["width"] / 2,
+                        box["y"] + box["height"] * (POS / total))
+        assert name in page.locator("#rail").get_attribute("title")
+    finally:
+        page.evaluate("() => { const cv = document.getElementById('rail');"
+                      " cv.style.bottom = ''; cv.style.height = ''; }")
         page.evaluate(f"() => __winnow.tagRowsAtPositions({TAG}, [{POS}], false)")
 
 

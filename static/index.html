@@ -153,8 +153,13 @@ try {
         <div class="spacer-y" id="spacerY"></div>
         <div class="rows" id="rows"></div>
       </div>
-      <!-- The tag rail. Its title is replaced per mark on hover (railTitleAt in
-           static/js/grouping.js); this is what it says between them. -->
+      <!-- The tag rail. It sits in the strip .grid-body's margin-right keeps
+           clear for it, never over the grid or its scrollbar — that is what
+           lets it take pointer events, and the title is why it wants them:
+           it is replaced per mark on hover (railTitleAt in
+           static/js/grouping.js), and this is what it says between them.
+           `width` is the pre-paint bitmap only; drawRail sizes it from the
+           box so --rail-w stays the one place the strip's width is set. -->
       <canvas class="rail" id="rail" width="14"
               title="Tagged rows in this view — hover a mark for its tag"></canvas>
       <div class="empty" id="empty">

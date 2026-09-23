@@ -669,24 +669,6 @@ const RAIL_TITLE = 'Tagged rows in this view — hover a mark for its tag';
 // one exactly.
 const RAIL_HIT = 3;
 
-/* Park the strip just inside #body's scrollbars and below its sticky
-   header, so the span it covers is exactly the rows on screen.
-
-   It used to lie across the whole grid at right:0 and had to declare
-   `pointer-events: none`, because 14px of overlay across the vertical
-   scrollbar turns every grab of the thumb into a grab of nothing — the
-   same trap .notes-divider documents from the other side. That is also
-   what left the rail mute: an element the pointer never reaches can't
-   show a `title` either. Moving it out of the scrollbar's way is what
-   makes taking the pointer events back safe, so do not put it back at
-   right:0 without giving the tooltip up as well. */
-function placeRail(cv) {
-  const body = $('body');
-  cv.style.right = (body.offsetWidth - body.clientWidth) + 'px';
-  cv.style.top = headH() + 'px';
-  cv.style.bottom = (body.offsetHeight - body.clientHeight) + 'px';
-}
-
 /* What the mark under the pointer is called. A pixel several tags landed
    on names all of them rather than picking whichever happened to be drawn
    last, and the span it covers is stated as rows because at any real row
@@ -712,7 +694,16 @@ function railTitleAt(y) {
 export async function drawRail() {
   const cv = $('rail');
   const ctx = cv.getContext('2d');
-  placeRail(cv);
+  /* The bitmap follows the box, so --rail-w in style.css is the only place
+     the strip's width is decided and a mark stays one device pixel per CSS
+     pixel. Nothing else about the placement is set from here: the rail
+     lives in the gutter .grid-body's margin-right reserves for it, which
+     is why it can take pointer events at all. Setting `right` per draw
+     from #body's measured scrollbar was tried and is the wrong shape —
+     it put the strip on the rows rather than beside them, and it went
+     stale on every repaint that changes #body's overflow without
+     redrawing the rail (toggleGroup calls render() and nothing else). */
+  cv.width = cv.clientWidth;
   cv.height = cv.clientHeight;
   ctx.clearRect(0, 0, cv.width, cv.height);
   railMarks = new Map();
@@ -1079,7 +1070,16 @@ $('groupStrip').addEventListener('drop', (e) => {
    tooltip is up takes the tooltip away. */
 $('rail').addEventListener('mousemove', (e) => {
   const cv = $('rail');
-  const t = railTitleAt(e.clientY - cv.getBoundingClientRect().top);
+  const r = cv.getBoundingClientRect();
+  if (!r.height) return;
+  /* Scaled into canvas rows rather than used as CSS pixels: the two are
+     the same only until the box changes height without a redraw, and one
+     path does that — dragging the detail pane's divider resizes the grid
+     and calls nothing (detail.js). The bitmap then stretches to the new
+     box, so the marks the analyst can see have moved; multiplying by the
+     same factor is what keeps the readout naming the mark under the
+     pointer instead of the row it used to stand for. */
+  const t = railTitleAt((e.clientY - r.top) * (cv.height / r.height));
   if (cv.title !== t) cv.title = t;
 });
 

@@ -202,27 +202,45 @@ see [docs/notes/README.md](README.md) for the whole set.
   until the spacer passed the browser's ceiling, at which point that track's
   intrinsic size resolved to 0 and collapsed `.main-area`/`#grid`/`#body` to
   zero height. Correct row count, sticky header painted, not one data row.
-- **The tag rail sits inside `#body`'s scrollbars, not over them**
-  (`placeRail`/`drawRail` in grouping.js, `.rail` in style.css). It is
-  absolutely positioned over the grid, and for as long as it spanned the
-  whole of it at `right: 0` it had to declare `pointer-events: none` —
-  14px of overlay across the vertical scrollbar swallows every grab of
-  the thumb (the trap `.notes-divider` documents from the other side).
-  The cost of that was silence: an element the pointer never reaches
-  cannot show a `title` either, so the rail was the one surface in the
-  app where a tag appeared as a colour with no name anywhere near it.
-  Every draw now sets `right`/`top`/`bottom` from `#body`'s own box
-  (`offsetWidth - clientWidth` is the scrollbar, `headH()` the sticky
-  header), which both frees the scrollbar and makes the strip span
-  exactly the rows on screen — so the hover readout can name the tag
-  *and* the row a mark stands for. Two consequences to keep: the marks
-  are remembered keyed by the canvas row they landed on (`railMarks`),
-  because hit-testing a 2px dash needs the arithmetic the paint used and
-  a readout on every mousemove must not walk a list that is as long as
-  the tagged rows are numerous, and the wheel is
-  forwarded to `#body` by hand, since the rail is a sibling of the
-  scroller rather than a child of it and a wheel over it would otherwise
-  scroll nothing at all.
+- **The tag rail has its own gutter; it overlays nothing** (`.rail` and
+  `.grid-body`'s `margin-right: var(--rail-w)` in style.css, `drawRail`
+  in grouping.js). It is absolutely positioned against `.grid`, and for
+  as long as it spanned the whole of it at `right: 0` it had to declare
+  `pointer-events: none` — 14px of overlay across the vertical scrollbar
+  swallows every grab of the thumb (the trap `.notes-divider` documents
+  from the other side). The cost of that was silence: an element the
+  pointer never reaches cannot show a `title` either, so the rail was
+  the one surface in the app where a tag appeared as a colour with no
+  name anywhere near it. **Giving up the overlay, not moving it, is what
+  bought the tooltip back.** The scroller now ends a rail-width short of
+  the grid and the strip stands in what it gave up, so it covers neither
+  the thumb nor the right-hand column of cells, and a hover can name the
+  tag a mark belongs to and the rows it stands for.
+
+  Measuring instead was tried and is worth not repeating: setting
+  `right` per draw from `#body`'s own box (`offsetWidth - clientWidth`)
+  moves the strip a scrollbar's width *inward*, onto `.rows` — which is
+  `min-width: 100%` of the padding box and therefore reaches
+  `clientWidth` — so the rightmost 14px of every row went opaque and
+  inert, no `.cell` under a mousedown, the browser's own menu on a
+  right-click, and a cell-range drag stalling the moment the pointer
+  crossed the strip (the drag listener is on `#body`, and the rail is a
+  sibling of it). It also went stale: the scrollbar comes and goes on
+  paths that repaint without redrawing the rail — `toggleGroup` calls
+  `render()` and nothing else — so the first group expand put it back
+  over the thumb. A reserved gutter needs no measurement and has no
+  such path.
+
+  Three consequences to keep: the marks are remembered keyed by the
+  canvas row they landed on (`railMarks`), because hit-testing a 2px
+  dash needs the arithmetic the paint used and a readout on every
+  mousemove must not walk a list that is as long as the tagged rows are
+  numerous; the hover's y is scaled by `cv.height / rect.height` before
+  that lookup, since dragging the detail pane's divider resizes the
+  strip without redrawing it and the bitmap stretches to fit; and the
+  wheel is forwarded to `#body` by hand, since the rail is a sibling of
+  the scroller rather than a child of it and a wheel over it would
+  otherwise scroll nothing at all.
 - **The row gutter and its header share one three-slot CSS grid**
   (`.gutter` / `.gutter-head` / `.gutter-filter`: checkbox | tag stripes +
   note mark | row number). The gutter used to be `justify-content:
