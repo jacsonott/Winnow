@@ -26,13 +26,13 @@ export function openMergeBuilder() {
   }
   const eligible = [...groups.values()].filter((g) => g.length >= 2);
 
-  modal('Merge sources', (b) => {
+  modal('Merge tables', (b) => {
     if (!eligible.length) {
-      b.append(el('p', null, 'No two open sources currently share the same columns. Import matching files first.'));
+      b.append(el('p', null, 'No two open tables currently share the same columns. Import matching files first.'));
       return;
     }
     b.append(el('p', null,
-      'Sources are grouped by matching columns (case-insensitive). Pick 2 or more from the same group — '
+      'Tables are grouped by matching columns (case-insensitive). Pick 2 or more from the same group — '
       + 'merged rows keep tagging/notes tied to their original file, nothing is copied.'));
     const selected = new Set();
     eligible.forEach((group, gi) => {
@@ -96,7 +96,7 @@ export function openMergeBuilder() {
       create.disabled = clash;
     };
     create.onclick = async () => {
-      if (selected.size < 2) { toast('Select at least 2 sources from the same group'); return; }
+      if (selected.size < 2) { toast('Select at least 2 tables from the same group'); return; }
       const name = nameInput.value.trim() || defaultName;
       try {
         const rec = await post('/api/merges', { name, source_ids: [...selected] });

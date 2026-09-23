@@ -11,6 +11,12 @@ import { filterByValue } from './filters.js';
 import { S } from './state.js';
 import { modal } from './ui.js';
 
+/* How much height one bar gets. drawBars shares the canvas out between the
+   rows and clamps a row to 16–30px, so a canvas of rows×22 lands inside the
+   clamp and every bar is exactly this tall — which is what lets the box
+   below be as tall as its content and no taller. */
+const BAR_PX = 22;
+
 export function openStack(column) {
   if (!S.view || !S.view.view_id) { toast('Open a table first'); return; }
   const state = { order: 'count', direction: 'asc', rows: [], boxes: [], limit: 60 };
@@ -37,14 +43,22 @@ export function openStack(column) {
       + 'single logon from an odd host. Click a bar to filter the grid to it.'));
 
     const wrap = el('div');
-    wrap.style.cssText = 'position:relative;height:min(60vh,520px);overflow:auto;border:1px solid var(--line-2)';
+    // Sized to its bars, not to the screen. This was a flat
+    // height:min(60vh,520px), so the common case — a column that stacks to
+    // nine distinct values — opened a modal four fifths empty with the nine
+    // bars crammed into the top corner. max-height, rather than measuring
+    // the bars and setting a height, leaves the canvas as the only thing
+    // that decides how tall the content is (its own floor of 120px is the
+    // box's minimum too), so the ResizeObserver below has nothing to fight.
+    wrap.style.cssText = 'position:relative;max-height:min(60vh,520px);'
+      + 'overflow:auto;border:1px solid var(--line-2)';
     const canvas = el('canvas');
     canvas.style.cssText = 'width:100%;display:block';
     wrap.append(canvas);
     b.append(wrap);
 
     function paint() {
-      canvas.style.height = Math.max(120, state.rows.length * 22) + 'px';
+      canvas.style.height = Math.max(120, state.rows.length * BAR_PX) + 'px';
       const r = drawBars(canvas, { rows: state.rows, label: 'value', value: 'count', horizontal: true });
       state.boxes = r.boxes;
     }

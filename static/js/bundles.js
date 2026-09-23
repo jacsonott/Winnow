@@ -1,7 +1,7 @@
 /* Profiles — "how I analyze this kind of case": the plugins a case of this
    kind needs, the boards it opens with, a starter watchlist, and the
-   variables the case must carry. Managed from the M menu here, and offered
-   as "Case type" when creating a case (home.js).
+   variables the case must carry. Managed from the M menu here, and picked
+   by name from the new-case dialog's Profile select (home.js).
 
    Two things this module is deliberate about, both because applying a
    profile CHANGES THE OPEN CASE and used to say nothing first:
@@ -30,7 +30,7 @@ export async function listBundles() {
 
 /* Apply a profile to the open case. `parts` is the subset of
    plugins/boards/watchlist/variables the analyst agreed to — omitted
-   means all four, which is what the new-case dialog's Case type select
+   means all four, which is what the new-case dialog's Profile select
    sends and what apply meant before the sheet existed. */
 export async function applyBundle(bundle, parts = null) {
   const res = await post(`/api/plugin_bundles/${bundle.id}/apply`, parts ? { parts } : {});

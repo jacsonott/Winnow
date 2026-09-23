@@ -24,6 +24,13 @@
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, monospace;
   --ui: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --row-h: 24px;
+  /* The tag rail's width, and the gutter .grid-body gives up for it. The
+     two have to agree or the strip either overlaps the grid or leaves a
+     gap beside it, so they read it from here rather than each carrying a
+     14. The canvas's own `width` attribute is the bitmap, not the box:
+     drawRail sets it from clientWidth, which is this less the left
+     border, so the marks paint one device pixel per CSS pixel. */
+  --rail-w: 14px;
 }
 
 * { box-sizing: border-box; }
@@ -849,8 +856,8 @@ section.page-with-panels { flex-direction: row; }
    min-width: 100% so its background still reaches the right edge when
    the columns are narrower than the viewport. */
 /* z-index 3: above the rows' sticky gutters (2) it scrolls over, below
-   the .rail overlay (4). The .gutter-head/.gutter-filter z-index 3 inside
-   is scoped to the stacking context this z-index creates. */
+   the .rail (4) beside it. The .gutter-head/.gutter-filter z-index 3
+   inside is scoped to the stacking context this z-index creates. */
 .grid-head {
   background: var(--panel); border-bottom: 1px solid var(--line-2);
   position: sticky; top: 0; z-index: 3;
@@ -1009,7 +1016,18 @@ section.page-with-panels { flex-direction: row; }
    browser's own elastic bounce past the boundary on the element itself,
    which looks broken on a data grid. Y-axis keeps the original contain
    (that one's about not chaining vertical scroll to the page). */
-.grid-body { position: relative; overflow: auto; outline: none; overscroll-behavior-x: none; overscroll-behavior-y: contain; }
+/* margin-right is the rail's gutter, and it is load-bearing rather than
+   spacing: the rail is absolutely positioned against .grid, so without a
+   reserved strip it lands *on* this scroller. Over the vertical scrollbar
+   that swallows every grab of the thumb; a hair further in it covers the
+   right-hand 14px of every row, where a mousedown then finds no .cell and
+   a right-click gets Chromium's menu instead of the row menu. Give the
+   strip its own column and neither can happen — see .rail below. */
+.grid-body {
+  position: relative; overflow: auto; outline: none;
+  overscroll-behavior-x: none; overscroll-behavior-y: contain;
+  margin-right: var(--rail-w);
+}
 .spacer-y { width: 1px; }
 /* The row-width contract: render() sets an explicit pixel `width` on this
    box — gutter + the sum of the visible columns' widths, floored at the
@@ -1169,10 +1187,32 @@ section.page-with-panels { flex-direction: row; }
 .cell { user-select: none; }
 .cell-selected { background: var(--cell-selected-bg); box-shadow: inset 0 0 0 1px var(--sel-line); }
 
+/* The tag rail: a map of the whole view, in the strip .grid-body's
+   margin-right keeps clear for it. It overlaps nothing, which is what
+   lets it take pointer events, and it needs those for the tooltip that
+   names the tag under the cursor (railTitleAt in static/js/grouping.js).
+
+   Placed entirely here, with no JS setting top/right/bottom per draw.
+   That was tried: measuring #body's scrollbar on every draw put the
+   strip a scrollbar's width inside the grid — onto the rows, not beside
+   them — and left it wherever the last draw had put it when the
+   scrollbar came and went on a path that repaints without redrawing the
+   rail (expanding a group is one). A reserved gutter needs no
+   measurement and cannot go stale.
+
+   The background is opaque on purpose now that nothing is under it: it
+   reads as a second track beside the scrollbar rather than as a film
+   over the grid.
+
+   `height: 100%`, not `top: 0; bottom: 0` — a canvas is a replaced
+   element, so with `height: auto` the browser takes its intrinsic height
+   from the `height` attribute and ignores `bottom` outright. The pair
+   silently left the strip 150px tall (the canvas default), and drawRail
+   copying clientHeight back into the attribute is what kept it there. */
 .rail {
-  position: absolute; top: 0; right: 0; width: 14px; height: 100%;
-  background: rgba(0,0,0,.25); border-left: 1px solid var(--line);
-  pointer-events: none; z-index: 4;
+  position: absolute; top: 0; right: 0; width: var(--rail-w); height: 100%;
+  background: var(--panel); border-left: 1px solid var(--line);
+  z-index: 4;
 }
 
 .empty {

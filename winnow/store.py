@@ -4428,7 +4428,7 @@ class Store:
             with self.lock, self.db:
                 cur = self.db.execute("UPDATE sources SET nickname=? WHERE id=?", (nickname, source_id))
                 if cur.rowcount == 0:
-                    raise KeyError(f"No source {source_id}")
+                    raise KeyError(f"No table {source_id}")
         return self.get_source(source_id)
 
     def get_source(self, source_id: int) -> dict:
@@ -4441,7 +4441,7 @@ class Store:
         with self._reader() as ro:
             row = ro.execute("SELECT * FROM sources WHERE id=?", (source_id,)).fetchone()
             if not row:
-                raise KeyError(f"No source {source_id}")
+                raise KeyError(f"No table {source_id}")
             tagged = ro.execute("SELECT COUNT(DISTINCT rid) FROM row_tags WHERE source_id=?", (source_id,)).fetchone()[0]
             note_count = ro.execute("SELECT COUNT(*) FROM row_notes WHERE source_id=?", (source_id,)).fetchone()[0]
             derived = ro.execute(
@@ -4548,7 +4548,7 @@ class Store:
             }
         row = conn.execute("SELECT * FROM sources WHERE id=?", (source_id,)).fetchone()
         if not row:
-            raise KeyError(f"No source {source_id}")
+            raise KeyError(f"No table {source_id}")
         d = self._src_dict(row)
         for dr in conn.execute(
             "SELECT * FROM derived_columns WHERE source_id=? ORDER BY id", (source_id,)
@@ -4639,13 +4639,13 @@ class Store:
         if self._merge_name_taken(name):
             raise ValueError(f'A merge named "{name}" already exists')
         if len(source_ids) < 2:
-            raise ValueError("A merge needs at least 2 sources")
+            raise ValueError("A merge needs at least 2 tables")
         sources = [self.get_source(sid) for sid in source_ids]
         # Base columns only: adding a derived column to one member must not
         # change whether two files of the same format can merge.
         sigs = {column_signature([c["name"] for c in s["columns"] if not c.get("derived")]) for s in sources}
         if len(sigs) > 1:
-            raise ValueError("Selected sources don't have matching columns")
+            raise ValueError("Selected tables don't have matching columns")
         with self.lock, self.db:
             cur = self.db.execute(
                 "INSERT INTO merges(name, source_ids, created_at) VALUES (?,?,?)",
@@ -5274,7 +5274,7 @@ class Store:
         defs = [self.get_derived_column(d) for d in def_ids]
         source_id = defs[0]["source_id"]
         if any(d["source_id"] != source_id for d in defs):
-            raise ValueError("All columns in one backfill must belong to the same source")
+            raise ValueError("All columns in one backfill must belong to the same table")
         src = self._source_lite(source_id)
         drv = self._derived_table(source_id)
         frm = self._from_clause(src)
@@ -10512,7 +10512,7 @@ class Store:
             for sid in source_ids:
                 row = self.db.execute("SELECT * FROM sources WHERE id=?", (sid,)).fetchone()
                 if not row:
-                    raise KeyError(f"No source {sid}")
+                    raise KeyError(f"No table {sid}")
                 src_rows[sid] = dict(row)
             tag_defs = [dict(r) for r in self.db.execute("SELECT * FROM tag_defs ORDER BY id")]
 

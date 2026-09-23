@@ -1838,7 +1838,7 @@ $('btnTabJump').onclick = () => setSidebarVisible($('sidebar').hidden);
    several here rather than the thing itself. */
 $('btnCase').onclick = () => dropdownMenu($('btnCase'), [
   { label: 'Import…', onclick: openImportModal },
-  { label: 'Merge sources…', onclick: openMergeBuilder },
+  { label: 'Merge tables…', onclick: openMergeBuilder },
   { label: 'Tables…', onclick: openTablesManager },
   '-',
   { label: 'Export…', onclick: openExportModal },

@@ -175,7 +175,7 @@ export function openTablesManager() {
         const del = el('button', 'btn ghost', 'Remove…');
         del.onclick = async () => {
           const warn = s.is_merge
-            ? `Delete merge "${sourceLabel(s)}"? The underlying sources are untouched.`
+            ? `Delete merge "${sourceLabel(s)}"? The tables under it are untouched.`
             : `Remove ${sourceLabel(s)} from this case? Tags and notes for it are deleted too.`;
           if (!(await confirmDialog(warn, { danger: true, okLabel: 'Remove' }))) return;
           // A search running in the background for it, or landed and

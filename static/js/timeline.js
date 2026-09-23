@@ -216,13 +216,13 @@ export let timelineScrollRaf = null;
    real source gets a row here, whether or not it has tagged rows yet —
    configuring ahead of tagging is the normal workflow, not an edge case. */
 export function openTimelineSourceConfig() {
-  modal('Configure timeline sources', (b) => {
+  modal('Configure timeline tables', (b) => {
     b.append(el('p', null,
       'Per header set, reused across cases: which column is the timestamp, which columns (in the order '
-      + 'checked) make up the body, and what to call this source type. A table with no matching config '
-      + 'here falls back to its first datetime column and its own file name, and its body reads as the '
-      + 'summary Winnow ships for that artefact shape — or, for a shape it does not know, every column '
-      + 'joined. Checking body columns here replaces that summary with exactly what you check.'));
+      + 'checked) make up the body, and what this kind of table is called on the timeline. A table with no '
+      + 'matching config here falls back to its first datetime column and its own file name, and its body '
+      + 'reads as the summary Winnow ships for that artefact shape — or, for a shape it does not know, '
+      + 'every column joined. Checking body columns here replaces that summary with exactly what you check.'));
 
     const list = el('div', 'session-list');
     b.append(list);
@@ -244,7 +244,7 @@ export function openTimelineSourceConfig() {
       row.append(nameSpan);
 
       const typeInput = fieldInput(existing ? existing.type_label : '');
-      typeInput.placeholder = `Source type (defaults to "${src.name}")`;
+      typeInput.placeholder = `Type (defaults to "${src.name}")`;
       row.append(typeInput);
 
       const tsSel = el('select');

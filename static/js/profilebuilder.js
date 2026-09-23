@@ -258,8 +258,8 @@ export function openProfileBuilder(existing = null, { onSaved } = {}) {
           from_version: copying ? (existing.version || 1) : ((existing && existing.from_version) || null),
         };
         const rec = await post('/api/plugin_bundles', body);
-        toast(`Profile “${rec.name}” saved — apply it from the profile manager, or pick it as the `
-          + 'case type when creating a case', 7000);
+        toast(`Profile “${rec.name}” saved — apply it from the profile manager, or pick it `
+          + 'when creating a case', 7000);
         document.getElementById('modal').hidden = true;
         if (onSaved) onSaved(rec);
       } catch (e) {

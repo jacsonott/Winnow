@@ -382,7 +382,7 @@ def test_applying_one_part_leaves_the_others_exactly_alone(client, store, write_
 
 
 def test_an_apply_with_no_body_is_still_the_whole_profile(client, store, write_csv, registry):
-    """The new-case dialog's Case type select and every script predate the
+    """The new-case dialog's Profile select and every script predate the
     sheet and send nothing; they must keep meaning "all of it"."""
     store.ingest_csv(write_csv([["a"], ["1"]], "e.csv"), name="e", build_fts=False)
     rec = _profile(client)

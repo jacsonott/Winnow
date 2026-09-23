@@ -1581,7 +1581,7 @@ function openWidgetEditor(existing, prefill = null) {
       + 'and sits under Advanced if you want to change it. A widget built this way opens the rows behind it when clicked.'));
     b.append(form);
     const top = el('div', 'dash-form-row');
-    mk('Title', title, top); mk('Data source', source, top);
+    mk('Title', title, top); mk('Data from', source, top);
     form.append(top);
     const sqlWrap = el('div');
     const pick = el('div', 'dash-form-row');

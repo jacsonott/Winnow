@@ -654,20 +654,79 @@ export function renderGroupStrip() {
   strip.append(dropAll);
 }
 
+/* What the rail is currently showing, keyed by the canvas row each mark
+   landed on: the tags on that pixel and the span of view positions it
+   stands for. The rail was the one surface in the app where a tag
+   appeared as a colour and nothing else; this is what lets a hover name
+   it (railTitleAt below).
+
+   Keyed by y rather than kept as the flat list of pairs because a view
+   can hold hundreds of thousands of tagged rows and the readout runs on
+   every mousemove — by y it is seven lookups whatever the count, and the
+   map is bounded by the height of the strip. */
+let railMarks = new Map();
+
+const RAIL_TITLE = 'Tagged rows in this view — hover a mark for its tag';
+
+// A mark is a 2px dash on a strip 14px wide; the readout answers for a
+// few pixels either side of the pointer rather than making it land on
+// one exactly.
+const RAIL_HIT = 3;
+
+/* What the mark under the pointer is called. A pixel several tags landed
+   on names all of them rather than picking whichever happened to be drawn
+   last, and the span it covers is stated as rows because at any real row
+   count one pixel of rail is many rows of view. */
+function railTitleAt(y) {
+  if (!S.view) return RAIL_TITLE;
+  const hit = [];
+  for (let d = -RAIL_HIT; d <= RAIL_HIT; d++) {
+    const m = railMarks.get(Math.round(y) + d);
+    if (m) hit.push(m);
+  }
+  if (!hit.length) return RAIL_TITLE;
+  const names = new Map(S.tags.map((t) => [t.id, t.name]));
+  const tags = [...new Set(hit.flatMap((m) => [...m.tids]).map((id) => names.get(id)).filter(Boolean))];
+  if (!tags.length) return RAIL_TITLE;   // every tag on this pixel has since been deleted
+  const lo = Math.min(...hit.map((m) => m.lo)) + 1;
+  const hi = Math.max(...hit.map((m) => m.hi)) + 1;
+  const where = lo === hi ? `row ${lo.toLocaleString()}`
+    : `rows ${lo.toLocaleString()}–${hi.toLocaleString()}`;
+  return `${tags.join(', ')} · ${where} of ${S.view.row_count.toLocaleString()}`;
+}
+
 export async function drawRail() {
   const cv = $('rail');
   const ctx = cv.getContext('2d');
+  /* The bitmap follows the box, so --rail-w in style.css is the only place
+     the strip's width is decided and a mark stays one device pixel per CSS
+     pixel. Nothing else about the placement is set from here: the rail
+     lives in the gutter .grid-body's margin-right reserves for it, which
+     is why it can take pointer events at all. Setting `right` per draw
+     from #body's measured scrollbar was tried and is the wrong shape —
+     it put the strip on the rows rather than beside them, and it went
+     stale on every repaint that changes #body's overflow without
+     redrawing the rail (toggleGroup calls render() and nothing else). */
+  cv.width = cv.clientWidth;
   cv.height = cv.clientHeight;
   ctx.clearRect(0, 0, cv.width, cv.height);
+  railMarks = new Map();
   if (!S.view || !S.view.row_count) return;
   let pts = [];
   try { pts = await api(`/api/tag_positions?view_id=${S.view.view_id}`); } catch { return; }
   const color = Object.fromEntries(S.tags.map((t) => [t.id, t.color]));
+  const marks = new Map();
   for (const [pos, tid] of pts) {
     const y = Math.round((pos / S.view.row_count) * cv.height);
     ctx.fillStyle = color[tid] || '#888';
     ctx.fillRect(1, y, cv.width - 2, 2);
+    let m = marks.get(y);
+    if (!m) marks.set(y, (m = { tids: new Set(), lo: pos, hi: pos }));
+    m.tids.add(tid);
+    if (pos < m.lo) m.lo = pos;
+    if (pos > m.hi) m.hi = pos;
   }
+  railMarks = marks;
 }
 
 /* ------------------------------------------------- group header actions */
@@ -1006,6 +1065,45 @@ $('groupStrip').addEventListener('drop', (e) => {
   $('groupStrip').classList.remove('drag-over');
   if (draggedCol && !S.groupByCols.includes(draggedCol)) addGroupLevel(draggedCol);
 });
+
+/* The rail's readout. A `title` rather than a floating element: it is the
+   idiom every other hover hint here uses, it needs no z-order argument
+   with the menus and modals that open over the grid, and a mark is a 2px
+   dash — anything positioned against one would spend its life chasing it.
+   Assigned only when the text changes, because setting `title` while its
+   tooltip is up takes the tooltip away. */
+$('rail').addEventListener('mousemove', (e) => {
+  const cv = $('rail');
+  const r = cv.getBoundingClientRect();
+  if (!r.height) return;
+  /* Scaled into canvas rows rather than used as CSS pixels: the two are
+     the same only until the box changes height without a redraw, and one
+     path does that — dragging the detail pane's divider resizes the grid
+     and calls nothing (detail.js). The bitmap then stretches to the new
+     box, so the marks the analyst can see have moved; multiplying by the
+     same factor is what keeps the readout naming the mark under the
+     pointer instead of the row it used to stand for. */
+  const t = railTitleAt((e.clientY - r.top) * (cv.height / r.height));
+  if (cv.title !== t) cv.title = t;
+});
+
+/* The rail is a sibling of #body, not a child, so a wheel over it scrolls
+   nothing at all on its own — at the right edge of the grid that reads as
+   the grid having frozen under the pointer. deltaMode is honoured for the
+   same reason #body's own handler honours it: Firefox reports lines where
+   Chromium reports pixels, and three pixels per notch is the same dead
+   grid by another route. Ctrl is left alone, so browser zoom still works
+   over the strip. Remote-session quantization stays where it is (grid.js):
+   it exists to cut repaints during sustained scrolling of the rows, which
+   is not what a wheel on a 14px strip is. */
+$('rail').addEventListener('wheel', (e) => {
+  if (e.ctrlKey) return;
+  const body = $('body');
+  const unit = e.deltaMode === 1 ? ROW_H : e.deltaMode === 2 ? body.clientHeight : 1;
+  body.scrollTop += e.deltaY * unit;
+  body.scrollLeft += e.deltaX * unit;
+  e.preventDefault();
+}, { passive: false });
 
 $('body').addEventListener('contextmenu', (e) => {
   const groupHeader = e.target.closest('.group-header-row');

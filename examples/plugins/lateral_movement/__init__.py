@@ -233,7 +233,7 @@ def edges(req):
         try:
             src = req.store.get_source(int(sel.get("source_id")))
         except (TypeError, ValueError, KeyError):
-            raise ValueError(f"No source {sel.get('source_id')!r}")
+            raise ValueError(f"No table {sel.get('source_id')!r}")
         names = {c["name"] for c in src["columns"]}
         sc_name, dc_name = sel.get("src_col"), sel.get("dst_col")
         label = sel.get("label_col") or None

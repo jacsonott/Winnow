@@ -111,7 +111,7 @@ def _source(req, body):
     try:
         return req.store.get_source(source_id)
     except KeyError:
-        raise ValueError(f"No source {source_id}")
+        raise ValueError(f"No table {source_id}")
 
 
 def _check_columns(src, columns):

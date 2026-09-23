@@ -460,7 +460,7 @@ export function openImportModal() {
 export function openSqliteTablePicker(src, hooks = {}) {
   openUnitPicker(src, hooks, {
     title: 'Pick SQLite tables',
-    intro: 'Choose which tables to import from this file — each becomes its own source.',
+    intro: 'Choose which tables to import from this file — each becomes its own table in the case.',
     empty: 'No tables in this file.',
     confirm: 'Use selected tables',
     checkFirst: 'Check at least one table to import',
@@ -479,7 +479,7 @@ export function openSqliteTablePicker(src, hooks = {}) {
 export function openXlsxSheetPicker(src, hooks = {}) {
   openUnitPicker(src, hooks, {
     title: 'Pick Excel sheets',
-    intro: 'Choose which sheets to import from this workbook — each becomes its own source. '
+    intro: 'Choose which sheets to import from this workbook — each becomes its own table in the case. '
       + 'Date-formatted cells are converted to readable timestamps on import.',
     empty: 'No data sheets in this workbook.',
     confirm: 'Use selected sheets',

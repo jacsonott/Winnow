@@ -1028,9 +1028,9 @@ class PluginBundles:
         sends only a description cannot silently drop a profile's board."""
         name = (name or "").strip()
         if not name:
-            raise ValueError("Name the bundle")
+            raise ValueError("Name the profile")
         if len(name) > 100:
-            raise ValueError("Bundle name is too long")
+            raise ValueError("Profile name is too long")
         plugins = sorted({str(p) for p in (plugins or [])})
         with _LOCK:
             data = _read(self.FILE, {"bundles": []})

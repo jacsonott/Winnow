@@ -158,7 +158,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   process-wide lock) or the Store, so none belongs on the event loop.
   Two shapes worth knowing. `POST .../{id}/apply` takes an OPTIONAL body
   (`BundleApplyBody | None = None`) because the request that has always
-  existed sends none — the new-case dialog's Case type select, tests,
+  existed sends none — the new-case dialog's Profile select, tests,
   scripts — and that has to keep meaning "all four parts"; a part name
   outside `APPLY_PARTS` is a 400 rather than a silently ignored word.
   `GET .../{id}/plan` writes nothing at all: it is the apply sheet's

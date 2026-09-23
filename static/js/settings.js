@@ -1047,7 +1047,7 @@ export function openSettings() {
 
     const secFilters = settingsSection(b, 'Saved filters');
     secFilters.append(el('p', null,
-      `Cycle through filters saved for the current source's columns with `
+      `Cycle through filters saved for the current table's columns with `
       + `${S.keymap.cyclePrevFilter[0] || '['} / ${S.keymap.cycleNextFilter[0] || ']'}. `
       + `Browse, apply, rename, reorder and delete them — and nickname their header sets — from `
       + `Filters ▾ → Saved filters (also reachable from the Filter builder). Save one from the `

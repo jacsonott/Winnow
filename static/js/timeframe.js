@@ -580,7 +580,7 @@ export function openSavedFiltersModal({ returnTo = null } = {}) {
     b.append(acts);
 
     b.append(el('p', null,
-      `Cycle filters that match the open source's columns with `
+      `Cycle filters that match the open table's columns with `
       + `${S.keymap.cyclePrevFilter[0] || '['} / ${S.keymap.cycleNextFilter[0] || ']'} — cycling past either `
       + `end drops the filters entirely rather than wrapping. ▲/▼ (or drag) set the cycle order within a `
       + `header set. "Edit" applies a filter to the open table and reopens it in the Filter builder, where `
@@ -796,7 +796,7 @@ export function buildTableStripPanel(container) {
   const src = S.sources.find((s) => s.id === S.sourceId);
   const strip = el('div', 'table-menu-strip');
   const tables = el('button', 'btn ghost', 'Tables manager…');
-  tables.title = 'Every table in the case — indexes, row counts, dropping a source';
+  tables.title = 'Every table in the case — indexes, row counts, dropping a table';
   tables.onclick = () => openTablesManager();
   const reset = el('button', 'btn ghost', 'Reset view');
   reset.title = 'Back to the just-opened state: clear filters, search, tag filter and grouping, and restore the default sort. Column layout and the timeframe filter stay.';
