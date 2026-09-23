@@ -1072,6 +1072,14 @@ code { font-family: var(--mono); color: var(--accent); background: var(--panel);
   padding: 5px 10px; border-bottom: 1px solid var(--line);
   font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim);
 }
+/* The detail pane's header is a label ("ROW DETAIL") and stays uppercase.
+   The SQL pane's is a sentence explaining src_N, merge_N and main.src_N,
+   and uppercase + .1em tracking turned it into two lines of shouting that
+   also flattened those three names into ordinary words. Mixed case, normal
+   tracking, identifiers in `code` — which is the global rule at the top of
+   this file, so it themes with the accent like every other inline name. */
+.sql-head { text-transform: none; letter-spacing: normal; }
+.sql-head code { padding: 0 4px; }
 .sql-head > span { flex: 1 1 auto; min-width: 0; }
 .sql-head > div { flex: 0 0 auto; display: flex; gap: 6px; margin-left: 10px; }
 .detail-actions { display: flex; gap: 6px; }
@@ -1199,6 +1207,24 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .sql-result tr.sql-row-sel td { background: var(--row-selected); }
 .sql-result tr td { cursor: default; }
 .sql-error { color: var(--danger); font-family: var(--mono); font-size: 12px; padding: 6px 0; }
+
+/* The results area with nothing run in it yet. Deliberately NOT `.empty`,
+   which is `position: absolute; inset: 0` over the grid's positioned
+   viewport — dropped in here it would cover the result pane instead of
+   scrolling out of it, and .sql-result has no positioning of its own to
+   anchor to. `align-content: start` rather than centring: the editor above
+   is resizable, and a vertically centred block would drift every time the
+   analyst dragged it. */
+.sql-empty {
+  display: grid; align-content: start; justify-items: center; gap: 6px;
+  text-align: center; color: var(--dim); padding: 56px 20px 20px;
+}
+.sql-empty p { margin: 0; max-width: 60ch; }
+.sql-starters { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 12px; }
+/* Mono, because every one of these is a query — the label is a sentence
+   about SQL, and the button it sits in is the same .btn ghost the pane's
+   own toolbar uses. */
+.sql-starter { font-family: var(--mono); font-size: 11px; border-radius: 999px; }
 
 /* --------------------------------------------------------- unified timeline */
 
@@ -2146,6 +2172,17 @@ html[data-style="blueprint"] .row.selected { box-shadow: inset 5px 0 0 0 var(--a
 html[data-style="blueprint"] .detail-head, html[data-style="blueprint"] .sql-head, html[data-style="blueprint"] .modal-head {
   background: var(--accent); color: var(--accent-fg); text-transform: uppercase; font-weight: 700;
 }
+/* Blueprint sets its headers as solid accent bars, which is right for the
+   two that are labels — but the SQL pane's is a sentence with `code` in
+   it, and on an accent bar the global code rule (accent on panel) paints
+   the identifiers in the bar's own colour. Outline them in the bar's text
+   colour instead, and leave the sentence in mixed case. */
+html[data-style="blueprint"] .sql-head { text-transform: none; }
+html[data-style="blueprint"] .sql-head code {
+  color: var(--accent-fg); background: transparent;
+  border: var(--border-w) solid var(--accent-fg); padding: 0 3px;
+}
+
 /* The buttons and the tab's row count inherit the dim grey from their own
    rules, which on the solid accent measured 1.08:1 — Close was invisible. */
 html[data-style="blueprint"] .modal-head .btn, html[data-style="blueprint"] .detail-head .btn, html[data-style="blueprint"] .sql-head .btn {

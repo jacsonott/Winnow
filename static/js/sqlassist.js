@@ -8,7 +8,7 @@
 import { toast, $, el, post } from './core.js';
 import { regroupIfGroupedByTag, writeClipboardText } from './grouping.js';
 import { sqlSchemaForLLM } from './plugins.js';
-import { sourceLabel } from './sources.js';
+import { paneTable, sourceLabel } from './sources.js';
 import { activeSqlTab } from './sql.js';
 import { S } from './state.js';
 import { clearRowCaches } from './tags.js';
@@ -25,7 +25,7 @@ const SQL_KEYWORDS = [
   'row_tags', 'row_notes', 'tag_defs',
 ];
 
-const quoteIdent = (name) => (/^[A-Za-z_]\w*$/.test(name) ? name : '"' + name.replace(/"/g, '""') + '"');
+export const quoteIdent = (name) => (/^[A-Za-z_]\w*$/.test(name) ? name : '"' + name.replace(/"/g, '""') + '"');
 
 /* ------------------------------------------------------------ suggestions */
 
@@ -44,7 +44,7 @@ export function sqlSuggestions(text, word) {
   };
   for (const s of S.sources) {
     if (s.error) continue;
-    const table = s.is_merge || s.id < 0 ? `merge_${-s.id}` : `src_${s.id}`;
+    const table = paneTable(s);
     const name = sourceLabel(s);
     if (name.toLowerCase().startsWith(w) || table.startsWith(w)) {
       push(`${name} — ${table}`, table, 'table');
@@ -217,7 +217,7 @@ export function wireSqlAssist() {
     const items = [{ header: 'Click to insert at the cursor' }];
     for (const s of S.sources) {
       if (s.error) continue;
-      const table = s.is_merge || s.id < 0 ? `merge_${-s.id}` : `src_${s.id}`;
+      const table = paneTable(s);
       items.push({
         label: `${sourceLabel(s)} — ${table} (${(s.row_count || 0).toLocaleString()} rows)`,
         onclick: () => {

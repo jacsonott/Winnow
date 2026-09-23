@@ -173,7 +173,11 @@ try {
       <div class="page-main">
       <nav id="sqlTabs" class="sql-tabs" aria-label="SQL queries"></nav>
       <div class="sql-head">
-        <span>Read-only query against the case file — src_N and merge_N include your derived columns plus Tags and Note; main.src_N is the raw import</span>
+        <!-- A sentence, not a label: mixed case with the identifiers in
+             <code> so the three names an analyst has to tell apart look
+             like names. Uppercased and letter-spaced, this wrapped to two
+             lines of shouting (see .sql-head in style.css). -->
+        <span>Read-only, against this case file. <code>src_N</code> and <code>merge_N</code> carry your derived columns, Tags and Note — <code>main.src_N</code> is the raw import.</span>
         <div>
           <button class="btn ghost" id="btnSqlSchema" title="Copy every table's definition (names, columns, types) to the clipboard — paste it into notes or an LLM">Copy schema</button>
           <button class="btn ghost" id="btnSqlTables" title="Every table's src_N name — click one to insert it at the cursor">Tables ▾</button>
