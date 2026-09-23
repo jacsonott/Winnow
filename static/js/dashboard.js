@@ -12,6 +12,7 @@ import { renderHead } from './columns.js';
 import { $, api, el, post, toast } from './core.js';
 import { WIDGET_TEMPLATES, bucketRange, columnsForTable, recipeSql, tableOf, templateById, widgetFrom } from './dashwidgets.js';
 import { currentSpec, renderAdvancedChips, updateSearchHint } from './filters.js';
+import { openImportModal } from './importer.js';
 import { syncSearchExpansion } from './search.js';
 import { recordTabVisit } from './tabhistory.js';
 import { openSource, renderPageTabs, renderSidebar, sourceLabel, syncTabSelection } from './sources.js';
@@ -54,6 +55,37 @@ let refreshing = 0;
    successful run and by opening any board (two boards can hold the same
    widget id: an id is derived from the widget's index and question). */
 const failedRuns = new Set();
+
+/* Cards that resolved to nothing, keyed by the card ELEMENT they were
+   painted into — not by widget id (a widget has none until the store
+   mints one) and not by index (the answers arrive out of order, so there
+   is no one moment to build this at). render() builds new elements, so
+   clearing there empties this by construction.
+
+   Why the board keeps this at all: on a real collection two cards on the
+   shipped KAPE board read "(no host facts in this RECmd output)" and
+   "(no Defender alert events in the logs)" and each took a full-width
+   card on the first screen. Nothing was wrong — those artefacts were not
+   in the collection — but the board spent its best space saying so and
+   never said what would change it. */
+const empties = new Map();
+
+/* Whether the folded cards are ALSO shown in place. Off, which is the
+   whole point, and deliberately not a stored preference: it is a look at
+   what is behind one line, not a setting, and a board that remembered it
+   would quietly be the old board again on the next case. Reset on every
+   board load for the same reason. */
+let showEmpties = false;
+
+/* One strip repaint per frame. Every widget that lands may add or remove
+   a line, so a ten-widget board would otherwise rebuild the strip ten
+   times in one open — and rebuilding it under a mousedown loses the
+   click, exactly as renderBar() did before scheduleBar(). */
+let emptiesRaf = 0;
+function scheduleEmpties() {
+  if (emptiesRaf) return;
+  emptiesRaf = requestAnimationFrame(() => { emptiesRaf = 0; renderEmpties(); });
+}
 
 /* One bar repaint per frame. renderBar() tears the whole bar down
    (replaceChildren) and every widget that lands moves the "as of", so a
@@ -107,12 +139,14 @@ async function loadWidgets(id) {
     widgets = d.widgets || [];
     cache = d.cache || {};
     failedRuns.clear();
+    showEmpties = false;
     loadError = null;
   }
   catch (e) {
     widgets = [];
     cache = {};
     failedRuns.clear();
+    showEmpties = false;
     loadError = e;
     // 404 means this board is not in this case (deleted elsewhere, or an
     // id left over from another case). Re-read the list so the sidebar
@@ -896,6 +930,8 @@ function render() {
   renderBar();
   const grid = $('dashGrid');
   grid.replaceChildren();
+  // Every card element this Map keyed has just been thrown away.
+  empties.clear();
   if (!widgets.length && loadError) {
     // Say the widgets could not be FETCHED. Offering "＋ Add widget" here
     // invites someone to rebuild a board that is still perfectly fine.
@@ -928,10 +964,165 @@ function render() {
       + 'profile is exactly that.'));
     grid.append(e);
   }
+  // First child, spanning the grid: the empty cards fold UP, to one line
+  // each, rather than down into a footnote nobody scrolls to. Hidden
+  // until something lands in it, which on most boards is never.
+  const strip = el('div', 'dash-empties');
+  strip.hidden = true;
+  grid.append(strip);
   widgets.forEach((w, i) => grid.append(card(w, i)));
   const add = el('div', 'dash-card dash-add', '＋ Add widget');
   add.onclick = () => openWidgetEditor(null);
   grid.append(add);
+  renderEmpties();
+}
+
+
+/* ------------------------------------------------- cards that said nothing */
+
+/* Why this card has nothing to show, or null when it has something.
+
+   TWO causes, which paint identically on a blank card and are not the
+   same answer. Either the artefact is not in this case — import a RECmd
+   batch and the card fills in, so it is a gap in the collection — or the
+   table IS here and the query matched nothing, which is a finding ("no
+   Defender alerts in these logs") and has nothing to import. The strip
+   says which, because an analyst about to write "not present" in a
+   report needs to know whether anything looked.
+
+   A `stat` is never empty: 0 is an answer, and folding "0 failed logons"
+   away would hide the reassuring half of a triage board. Neither is a
+   `signals` card that answered any of its cells — a cell that could not
+   answer already reports in its own place (paintSignals), beside the
+   neighbours that did, and folding the card would take those with it. */
+export function emptyStateOf(w, data, err) {
+  // Only a missing table folds. A SQL error or a server that blinked is
+  // something to fix, not an absence, and it keeps saying so on the card.
+  if (err) {
+    const d = err.detail;
+    return d && typeof d === 'object' && 'missing_table' in d
+      ? { missing: true, table: d.missing_table || null } : null;
+  }
+  if (!data || w.render === 'stat') return null;
+  return (data.rows || []).length ? null : { missing: false, table: null };
+}
+
+/* The one line. Written for somebody deciding whether the absence is
+   theirs to fix, so it says what is missing rather than that something
+   is — and it names what the widget actually asked, since "the query
+   matched nothing" is a sentence about a table and three of the four
+   sources are not tables. */
+export function emptyReason(w, state) {
+  if (state.missing) {
+    return state.table
+      ? `no “${state.table}” table in this case yet`
+      : 'the table this card read is no longer in this case';
+  }
+  if (w.source === 'watchlist') return 'nothing on this case’s watchlist yet';
+  if (w.source === 'tags') return 'no tags defined in this case yet';
+  if (w.source === 'cells') return 'this card has no signals on it';
+  return 'the table is in the case; the query matched nothing';
+}
+
+/* One card just answered, or failed: file it in the strip, or take it
+   out. Called from every place a card body is painted — the cache paint
+   on open, a run landing, the editor's Run now — so a card can never be
+   folded away on the strength of a stale answer.
+
+   It runs BEFORE the paint and returns the empty state, so the caller
+   paints only what it returns null for. Both halves of that matter. A
+   card that resolved to nothing has its body written here (the reason),
+   which is what the card shows the moment "Show them" puts it back on
+   the board — the shipped queries no longer UNION a sentence of their
+   own in, and that sentence is what held the full-width card this
+   replaces. And a card that resolved to SOMETHING has to be back on the
+   layout before paintWidget runs, or its chart measures a hidden
+   element; see the unhide below. */
+function noteEmpty(w, cardEl, data, err) {
+  // Cards on the BOARD only. The editor's Preview runs an unsaved draft
+  // through this same runWidget, into a `.dash-card.dash-preview` inside
+  // the modal — which wants its own error text, not a line in a strip it
+  // is not on. Tested by the class rather than by the parent node: the
+  // cached paint happens while the card is still being built, before
+  // render() has appended it to the grid.
+  if (!cardEl || cardEl.classList.contains('dash-preview')) return;
+  const state = emptyStateOf(w, data, err);
+  if (state) {
+    empties.set(cardEl, { w, state });
+    const body = cardEl.querySelector('.dash-widget-body');
+    if (body) {
+      body.style.height = '';
+      body.replaceChildren(el('div', 'dash-empty-note', emptyReason(w, state)));
+    }
+  } else {
+    empties.delete(cardEl);
+    // Unhidden HERE, synchronously, rather than on the strip's own frame.
+    // A folded card is display:none, and a bar or histogram measures its
+    // canvas inside a requestAnimationFrame — the one paintWidget
+    // registers runs a frame before scheduleEmpties() would unhide the
+    // card, so a card that gains rows (the RECmd batch finally imported,
+    // then ↻ Refresh all, which runs quiet and never calls render())
+    // would be drawn while it is still hidden: clientWidth/clientHeight
+    // are 0, fit() falls back to 300×150, and that bitmap is then
+    // stretched across a span-2 card. The blur is the cheap half. The
+    // boxes drawBars hands back are in that phantom space too, and
+    // pickBar tests them against a real e.offsetX/offsetY, so a click
+    // past ~300px drills nothing at all and one near a row edge opens
+    // the neighbouring host's rows (rowH is h/n, and h was wrong).
+    // Nothing repaints a card on resize, so it stays wrong until the
+    // next full render().
+    cardEl.classList.remove('is-empty');
+  }
+  scheduleEmpties();
+  return state;
+}
+
+/* The strip: one line per card that resolved to nothing, in BOARD order
+   (read off the grid, since the answers arrive in whatever order the
+   queries finish), plus the toggle that puts the cards back. Rebuilt
+   whole — it is a handful of rows, and rebuilding is what keeps it in
+   order as answers land. */
+function renderEmpties() {
+  const grid = $('dashGrid');
+  const strip = grid.querySelector('.dash-empties');
+  if (!strip) return;
+  const cards = [...grid.querySelectorAll('.dash-card:not(.dash-add)')];
+  const folded = cards.filter((c) => empties.has(c));
+  // Hidden, never removed: paintAges(), refreshBoard() and the editor's
+  // Run now all reach a card by its INDEX among the cards on the grid.
+  cards.forEach((c) => c.classList.toggle('is-empty', !showEmpties && empties.has(c)));
+  strip.replaceChildren();
+  strip.hidden = !folded.length;
+  if (!folded.length) return;
+  const head = el('div', 'dash-empties-head');
+  head.append(el('span', 'n', `${folded.length} empty card${folded.length === 1 ? '' : 's'}`));
+  const toggle = el('button', 'dash-empties-act', showEmpties ? 'Fold them back' : 'Show them');
+  toggle.title = showEmpties
+    ? 'Collapse these back to one line each'
+    : 'Put these cards back on the board, so they can be edited or removed';
+  toggle.onclick = () => { showEmpties = !showEmpties; renderEmpties(); };
+  head.append(toggle);
+  strip.append(head);
+  for (const cardEl of folded) {
+    const { w, state } = empties.get(cardEl);
+    const row = el('div', 'dash-empties-row');
+    row.append(el('span', 't', w.title || '(untitled)'),
+      el('span', 'r', emptyReason(w, state)));
+    // The fix, where there is one. A deleted src_N has no artefact to
+    // import — a new file would be a new table with a new id — so that
+    // case gets the pencil and nothing else.
+    if (state.missing && state.table) {
+      const imp = el('button', 'dash-empties-act', 'Import one ▸');
+      imp.title = `Import a “${state.table}” file into this case`;
+      imp.onclick = () => openImportModal();
+      row.append(imp);
+    }
+    const edit = el('button', 'dash-empties-act dash-empties-edit', '✎');
+    edit.title = 'Edit widget';
+    edit.onclick = () => openWidgetEditor(w);
+    row.append(edit);
+    strip.append(row);
+  }
 }
 
 let dragIdx = null;
@@ -1009,7 +1200,10 @@ function card(w, i) {
   // card, and an analyst reopening a case in the morning paid for all of
   // them before a single number appeared.
   const hit = w.id ? cache[w.id] : null;
-  if (hit) paintWidget(w, body, hit.payload);
+  // noteEmpty first, and no paint when it says there is nothing to paint:
+  // it owns the body in that case, and its answer decides whether this
+  // card is on the layout at all. Same order everywhere a card is painted.
+  if (hit && !noteEmpty(w, c, hit.payload, null)) paintWidget(w, body, hit.payload);
   if (!hit || w.live) runWidget(w, body, { boardId: S.dashboardId, quiet: !!hit });
   return c;
 }
@@ -1041,6 +1235,10 @@ async function runWidget(w, body, opts = {}) {
       return { error: e };
     }
     body.replaceChildren(el('div', 'note-status', e.message));
+    // A missing table is an absence, not a breakage — noteEmpty folds the
+    // card into the strip and replaces the sentence above with one that
+    // says what to import.
+    noteEmpty(w, body.closest('.dash-card'), null, e);
     return { error: e };
   }
   if (req.dashboard_id != null && w.id) failedRuns.delete(w.id);
@@ -1055,7 +1253,10 @@ async function runWidget(w, body, opts = {}) {
     scheduleBar();
     paintAges();
   }
-  paintWidget(w, body, data);
+  // Ask noteEmpty first: it decides whether this card is on the layout at
+  // all, and it owns the body when the answer was nothing, so there is
+  // nothing left for paintWidget to do in that case.
+  if (!noteEmpty(w, body.closest('.dash-card'), data, null)) paintWidget(w, body, data);
   return {};
 }
 
@@ -1108,6 +1309,14 @@ export function paintWidget(w, body, data) {
         boxes = drawBars(canvas, {
           rows: rows.map((r) => ({ label: String(r[0]), value: num(r[r.length - 1]) })),
           label: 'label', value: 'value' }).boxes;
+        // The hit map, hung on the element it belongs to. The click
+        // handler below closes over `boxes`, so where a bar actually is
+        // is otherwise knowable only by redrawing the chart — which is
+        // what a test that reverse-engineers the row height from the
+        // canvas height ends up doing, and why one of them clicked into
+        // the gap between two bars. Same idea as histogram.js's
+        // histogramData(): a read-only window onto what was drawn.
+        canvas.bars = boxes;
       });
       if (w.drill && w.drill.column) {
         canvas.classList.add('drillable');
@@ -1512,7 +1721,16 @@ function openWidgetEditor(existing, prefill = null) {
           paintWidget(existing, previewBody, res.payload);
           const cards = [...$('dashGrid').querySelectorAll('.dash-card:not(.dash-add)')];
           const onBoard = cards[widgets.indexOf(existing)];
-          if (onBoard) paintWidget(existing, onBoard.querySelector('.dash-widget-body'), res.payload);
+          if (onBoard) {
+            // An edit that gave the card rows takes it back out of the
+            // strip, and one that took them away puts it in — asked
+            // before the paint, as on the board, so that a card coming
+            // back out of the strip is on the layout by the time its
+            // chart measures itself (see noteEmpty).
+            if (!noteEmpty(existing, onBoard, res.payload, null)) {
+              paintWidget(existing, onBoard.querySelector('.dash-widget-body'), res.payload);
+            }
+          }
           renderBar();
           paintAges();
         } catch (e) { toast('Could not run this widget: ' + e.message, 6000); }

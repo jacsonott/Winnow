@@ -2039,10 +2039,15 @@ def test_kape_profile_ships_and_applies(client, store, write_csv, example_regist
     assert "table" in errs["Run / service entries"].lower()
     assert errs["Remote logon peers"] is None
 
-    # a placeholder with no matching table gives a friendly 400, not a SQL error
+    # a placeholder with no matching table gives a friendly 400, not a SQL
+    # error — and names the table separately from the sentence, which is
+    # how the board tells "not collected" from "matched nothing"
     miss = client.post("/api/dashboard/widget/preview",
                        json={"source": "sql", "query": {"sql": "SELECT * FROM {{mft}}"}})
-    assert miss.status_code == 400 and "table" in miss.json()["detail"].lower()
+    assert miss.status_code == 400
+    detail = miss.json()["detail"]
+    assert "table" in detail["message"].lower()
+    assert detail["missing_table"] == "NTFS $MFT (MFTECmd)"
 
 
 def test_claude_transcript_lives_in_the_case_and_renders_without_the_service(claude_client, monkeypatch, store):
