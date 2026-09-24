@@ -164,16 +164,19 @@ def clean_plugin_tab_state(server_post):
 # for several seconds, which every click in every test would otherwise
 # wait out. test_first_run_prompt.py and test_splash.py build their own
 # contexts without this.
-# Two defaults are stated here rather than left to the default, because
-# both changed under tests that predate them and both are covered by a
-# module of their own that turns the new default back on.
-# `pagesMenu: false`: the Pages dropdown is the default now, and most
-# tests here click the individual #tabSql/#tabTimeline nodes it hides —
-# see tests/ui/test_pages_dropdown.py.
-# `filterUi: 'row'`: the filter bar is the default now, and most tests
-# type into `.fcell input[data-col=…]`, which under the bar exists only
-# for a column whose box has been opened — see tests/ui/test_filter_bar.py.
-# The shared context models an analyst who kept the older shape of both.
+# Two appearance keys are pinned here rather than left to whatever ships,
+# so that a default moving cannot quietly change what the modules below
+# are pointing at. Each has a module of its own that turns the other
+# surface on for itself.
+# `pagesMenu: false`: most tests here click the individual
+# #tabSql/#tabTimeline nodes, which the Pages dropdown hides — see
+# tests/ui/test_pages_dropdown.py.
+# `filterUi: 'row'`: most tests type into `.fcell input[data-col=…]`,
+# which exists for every column only under the classic filter row; under
+# the bar it exists for a column whose box has been opened — see
+# tests/ui/test_filter_bar.py.
+# Both happen to match what ships today. They are stated anyway, because
+# each of them has moved once already and it was these modules that broke.
 # A test that builds its own context to seed something more takes the
 # `first_run_init` fixture and appends to this, so the seed stays one.
 FIRST_RUN_INIT = ("localStorage.setItem('winnow.remotePrompt', 'seen');"

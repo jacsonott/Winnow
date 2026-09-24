@@ -146,20 +146,22 @@ export function wireColumnDrag(h, name) {
 
 /* ------------------------------------------------------- filter surface */
 
-/* Two surfaces, one setting. The default is the filter BAR: a strip above
-   the grid carrying only the filters actually set, as chips, plus the way
-   to add one — and a column's box appears under its header only when the
-   header's ⌕ (or a chip, or "+ filter a column…") asks for it. The classic
-   always-on filter ROW — a box under every column, forever — is what
-   Settings → Appearance restores.
-
-   The row was measured on a real seven-table case: 27 boxes on screen, 0
-   in use, and they are the heaviest thing in the viewport after the data.
-   It is a setting rather than a removal because typing straight into a
+/* Two surfaces, one setting. The classic always-on filter ROW — a box
+   under every column, forever — is what ships: typing straight into a
    column box without looking is the Timeline Explorer reflex, and the
-   analysts who have it are not wrong. The default lives in one place
-   (FILTER_UI_DEFAULT in settings.js), not in a comparison spelled out
-   here — flipping it must be one edit. */
+   analysts who have it are not wrong. Settings → Appearance switches to
+   the filter BAR: a strip above the grid carrying only the filters
+   actually set, as chips, plus the way to add one — and there a column's
+   box appears under its header only when the header's ⌕ (or a chip, or
+   "+ filter a column…") asks for it.
+
+   The bar exists because the row was measured on a real seven-table case:
+   27 boxes on screen, 0 in use, and they are the heaviest thing in the
+   viewport after the data. Which of the two a fresh install gets lives in
+   one place (FILTER_UI_DEFAULT in settings.js), not in a comparison
+   spelled out here — flipping it must be one edit, and the sentence above
+   naming the shipped side is the only thing in this file that has to
+   follow it. */
 export const classicFilterRow = () => S.appearance.filterUi === 'row';
 
 /* Whether this column's box is on screen. Under the classic row every

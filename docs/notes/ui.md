@@ -675,20 +675,25 @@ see [docs/notes/README.md](README.md) for the whole set.
   copied the polluted defaults back and looked like it did nothing.
   `defaultKeymap()` (a per-action `[...keys]`) is what `loadKeymap` and
   the reset button both go through now.
-- **The filter bar replaced the always-on filter row, and the row is a
-  setting rather than a casualty.** Measured on a seven-table review case:
-  **27 filter boxes on screen, 0 in use** — the emptiest strip in the
-  viewport was also the second heaviest thing in it after the data. The
-  default now is `#filterBar` (`renderFilterBar` in columns.js): one line
-  naming only the filters that exist, as chips carrying column + value and
-  a ✕, plus "+ filter a column…". A column's box appears under its header
-  when the header's `⌕` (`.hcell-filter`), a chip, or that picker asks for
-  it, and folds away again on Enter or Escape. `S.appearance.filterUi`
-  picks the surface and `FILTER_UI_DEFAULT` (settings.js) is the single
-  value that flips which one a fresh install gets; Settings → Appearance's
-  "Always-on filter row" is the analyst's own switch, because typing
-  straight into a column box without looking is the Timeline Explorer
-  reflex and the analysts who have it are not wrong. Six things are
+- **There are two filter surfaces, and the always-on row is the one that
+  ships.** The filter bar was built because the row was measured on a
+  seven-table review case: **27 filter boxes on screen, 0 in use** — the
+  emptiest strip in the viewport was also the second heaviest thing in it
+  after the data. `#filterBar` (`renderFilterBar` in columns.js) is one
+  line naming only the filters that exist, as chips carrying column +
+  value and a ✕, plus "+ filter a column…"; there a column's box appears
+  under its header when the header's `⌕` (`.hcell-filter`), a chip, or
+  that picker asks for it, and folds away again on Enter or Escape. It is
+  the opt-in rather than the default because typing straight into a column
+  box without looking is the Timeline Explorer reflex and the analysts who
+  have it are not wrong — so a fresh install gets the row and Settings →
+  Appearance's "Always-on filter row" is the switch between them.
+  `S.appearance.filterUi` picks the surface at runtime and
+  `FILTER_UI_DEFAULT` (settings.js) is the single value deciding which one
+  a fresh install gets; nothing else compares against a side, so a future
+  flip is that constant plus the sentences that name a side out loud (this
+  one, the header in columns.js, the block above the checkbox in
+  settings.js, and the `.filter-bar` comment in style.css). Six things are
   decisions:
   - **The bar lives OUTSIDE `#gridHead`, above `.grid-body`.** Everything
     inside the head is in the grid's horizontal scroller and sized

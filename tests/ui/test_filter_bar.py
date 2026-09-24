@@ -1,18 +1,20 @@
-"""The filter bar, and the classic filter row behind a setting.
+"""The filter bar — the surface Settings -> Appearance turns on in place
+of the always-on filter row.
 
-What it replaced was measured, not guessed at: on a seven-table case the
-grid carried a filter box under every one of 27 columns and none of them
-had anything typed in it, which made the emptiest strip on screen the
-second heaviest thing in the viewport after the data itself.
+The bar was measured into existence, not guessed at: on a seven-table
+case the grid carried a filter box under every one of 27 columns and none
+of them had anything typed in it, which made the emptiest strip on screen
+the second heaviest thing in the viewport after the data itself. The bar
+names only the filters that exist, as chips, and a column's box is
+revealed under its header when the header's opener asks for it.
 
-So the default is now a bar that names only the filters that exist, as
-chips, and a column's box is revealed under its header when the header's
-opener asks for it. The always-on row is a setting rather than a
-casualty: typing straight into a column box without looking is the
-Timeline Explorer reflex, and plenty of analysts have it.
-
-These tests run against the real default, which the shared browser
-context deliberately turns off for every other module (see conftest.py).
+The row is what ships, because typing straight into a column box without
+looking is the Timeline Explorer reflex and plenty of analysts have it.
+So this module runs against the NON-default surface and turns it on for
+itself, the shape tests/ui/test_pages_dropdown.py already has for the
+pages dropdown. The one test that asserts what a first run actually
+renders builds its own browser context, because that question cannot be
+asked from inside a module that has already answered it.
 """
 
 from __future__ import annotations
@@ -26,10 +28,11 @@ pytestmark = pytest.mark.ui
 
 @pytest.fixture(autouse=True)
 def bar_on(page):
-    """The shared context keeps the classic row so the older modules can
-    keep typing into `.fcell input`; this file puts the shipped default
-    back for itself. The context is thrown away after each test, so there
-    is nothing to undo."""
+    """The bar is the opt-in surface, so this file turns it on for
+    itself. The shared context ships the classic row (conftest.py), which
+    is also what a fresh install gets, so without this nothing here would
+    exercise the bar at all. The context is thrown away after each test,
+    so there is nothing to undo."""
     page.evaluate("""() => { __winnow.S.appearance.filterUi = 'bar';
       __winnow.S.filters = {}; __winnow.S.filterOpen = [];
       __winnow.renderHeadResized(); }""")
@@ -90,9 +93,11 @@ def _assert_rows_sit_under_the_head(page, where: str):
     assert abs(geo["gap"]) < 2, f"{where}: {geo}"
 
 
-def _classic_row_from_settings(page):
-    """Tick Settings -> Appearance -> Always-on filter row, the way an
-    analyst would. Returns the checkbox, for the tests that assert on it."""
+def _appearance_checkbox(page):
+    """Open Settings -> Appearance and hand back the "Always-on filter
+    row" checkbox, the way an analyst reaches it. Which way it needs
+    moving depends on the surface the test starts from, so that is the
+    caller's business."""
     page.evaluate("() => __winnow.openSettings()")
     page.wait_for_selector("#modal:not([hidden])")
     sec = page.locator("#modalBody .settings-section").filter(
@@ -100,15 +105,51 @@ def _classic_row_from_settings(page):
     sec.locator(".settings-section-head").click()   # sections start collapsed
     cb = sec.locator("label.check-row", has_text="Always-on filter row").locator("input")
     cb.wait_for(state="visible")
+    return cb
+
+
+def _classic_row_from_settings(page):
+    """Tick the box, from the bar this module's fixture turns on."""
+    cb = _appearance_checkbox(page)
     assert not cb.is_checked()
     cb.check()
     page.wait_for_function("() => __winnow.S.appearance.filterUi === 'row'")
     return cb
 
 
-def test_a_fresh_install_gets_the_bar(page):
-    assert page.evaluate("() => __winnow.defaultAppearance().filterUi") == "bar"
-    assert page.evaluate("() => __winnow.FILTER_UI_DEFAULT") == "bar"
+def test_a_fresh_install_gets_the_row(page):
+    assert page.evaluate("() => __winnow.defaultAppearance().filterUi") == "row"
+    assert page.evaluate("() => __winnow.FILTER_UI_DEFAULT") == "row"
+
+
+def test_a_browser_that_has_never_seen_winnow_renders_the_row(browser, server):
+    """The constant above is half the claim; what an analyst meets on a
+    first run is a rendered grid, and only a browser can say what that
+    looks like.
+
+    Its own context, because neither of the two that this suite offers can
+    answer the question: the shared one pins `filterUi` explicitly
+    (conftest.py) and would pass this even if the default moved, and this
+    module's own fixture turns the bar on before every test. Seeds nothing
+    but the splash and the remote prompt, both of which would otherwise
+    cover the grid."""
+    ctx = browser.new_context(viewport={"width": 1500, "height": 900})
+    ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen');"
+                        "localStorage.setItem('winnow.appearance',"
+                        " JSON.stringify({ splash: false }))")
+    pg = ctx.new_page()
+    try:
+        pg.goto(server, wait_until="networkidle")
+        pg.wait_for_selector(".row")
+        cols = pg.evaluate("() => __winnow.visibleCols().length")
+        assert cols > 3
+        # A box under every column, no bar, and no opener on the headers —
+        # the opener belongs to the surface that hides the boxes.
+        assert pg.locator("#filterRow .fcell input").count() == cols
+        assert pg.locator("#filterBar").is_hidden()
+        assert pg.locator(".hcell-filter").count() == 0
+    finally:
+        ctx.close()
 
 
 def test_the_grid_carries_no_empty_filter_boxes(page):
@@ -283,9 +324,39 @@ def test_the_filter_keybinding_reveals_a_box(page):
         col) is True
 
 
+def test_the_bar_is_one_checkbox_away_from_the_row_that_ships(page):
+    """The decision this shipped with, travelled in the direction an
+    analyst travels it: the row is what a fresh install gets, and the bar
+    is one checkbox away for the analysts who would rather see only the
+    filters they set.
+
+    Starts from the row rather than from this module's fixture, so the
+    journey under test is the real one.
+    """
+    page.evaluate("""() => { __winnow.S.appearance.filterUi = 'row';
+      __winnow.renderHeadResized(); }""")
+    assert page.locator("#filterRow .fcell input").count() == _cols(page)
+
+    cb = _appearance_checkbox(page)
+    assert cb.is_checked(), "the shipped surface is the ticked state of this box"
+    cb.uncheck()
+    page.wait_for_function("() => __winnow.S.appearance.filterUi === 'bar'")
+    page.evaluate("() => __winnow.closeModal()")
+
+    # The boxes are gone, the bar is up, every header carries its opener,
+    # and the choice is remembered for the next time this browser opens
+    # Winnow.
+    assert page.locator("#filterRow .fcell input").count() == 0
+    assert page.locator("#filterBar").is_visible()
+    assert page.locator(".hcell-filter").count() == _cols(page)
+    assert page.evaluate(
+        "() => JSON.parse(localStorage.getItem('winnow.appearance')).filterUi") == "bar"
+
+
 def test_the_setting_restores_the_classic_row(page):
-    """The decision this shipped with: the bar is the default and the row
-    is one checkbox away, for the analysts who type into it by reflex."""
+    """And back again, from the bar this module's fixture turns on — the
+    switch has to work in both directions, since either one can be the
+    surface an analyst is leaving."""
     _classic_row_from_settings(page)
     page.evaluate("() => __winnow.closeModal()")
 

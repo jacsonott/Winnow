@@ -46,17 +46,19 @@ export const STYLES = {
 
 export const ACCENT_PRESETS = ['#d2a04a', '#39e881', '#ff6a1a', '#7c6cf6', '#4a90d9', '#d9534f'];
 
-/* Which of the two filter surfaces a fresh install gets: 'bar' (the filter
-   bar — only the filters actually set, as chips) or 'row' (a box under every
-   column, always). THIS is the line to change to flip the default; nothing
+/* Which of the two filter surfaces a fresh install gets: 'row' (a box under
+   every column, always) or 'bar' (the filter bar — only the filters actually
+   set, as chips). THIS is the line to change to flip the default; nothing
    else reads a hardcoded side of it.
 
-   'bar' because the row was measured empty: a seven-table case put 27 boxes
-   on screen with 0 in use, and they are the heaviest thing in the viewport
-   after the data. 'row' stays a setting rather than a removal because typing
-   straight into a column box is the Timeline Explorer reflex, and analysts
-   who have it are not wrong. */
-export const FILTER_UI_DEFAULT = 'bar';
+   'row' because a default is a bet on what the hands already know, and
+   typing straight into the box under a column header is the Timeline
+   Explorer reflex. The bar stays a setting rather than a removal because
+   the row was measured empty on a real seven-table case — 27 boxes on
+   screen with 0 in use, the heaviest thing in the viewport after the data
+   — and that case is the one the bar reclaims. Neither surface is a
+   casualty; which one ships is this line and nothing else. */
+export const FILTER_UI_DEFAULT = 'row';
 
 export function defaultAppearance() {
   return {
@@ -803,14 +805,15 @@ export function openSettings() {
       'Collapse SQL, Timeline, Notes, Watchlist and plugin tabs into one Pages \u25be button, the way Filters \u25be works. '
       + 'Buys the table tabs the strip\u2019s width; the pages themselves, and their counts, then live in that button\u2019s menu.'));
 
-    /* The classic always-on filter row. Off by default (see
-       FILTER_UI_DEFAULT): the row was measured empty — 27 boxes, none in
-       use — and the bar shows the same filters in a fraction of the ink.
-       On, every column gets its box back and the bar goes away entirely,
-       which is the surface an analyst coming from Timeline Explorer types
-       into without looking. One repaint covers both surfaces — through
-       renderHeadResized, because swapping them changes the head's height
-       by the whole filter row and the rows have to be moved to match. */
+    /* The classic always-on filter row — a box under every column header.
+       Which side a fresh install starts on is FILTER_UI_DEFAULT's alone;
+       this checkbox only reports that value and writes it, so nothing
+       here needs editing when the default moves. Off, the filter bar
+       takes over: the filters actually set, as chips, and the ⌕ on a
+       header for a one-column box. One repaint covers both surfaces —
+       through renderHeadResized, because swapping them changes the head's
+       height by the whole filter row and the rows have to be moved to
+       match. */
     const frLabel = el('label', 'check-row');
     const frCb = el('input');
     frCb.type = 'checkbox';
@@ -823,9 +826,9 @@ export function openSettings() {
     frLabel.append(frCb, el('span', null, 'Always-on filter row'));
     secLook.append(frLabel);
     secLook.append(el('p', 'fb-help',
-      'Off: a filter bar above the grid shows only the filters you have set, as chips you can remove, '
-      + 'and the \u2315 on a column header opens that column\u2019s box where it belongs. '
-      + 'On: every column carries a filter box at all times, the way Timeline Explorer does it.'));
+      'On: every column carries a filter box at all times, the way Timeline Explorer does it. '
+      + 'Off: a filter bar above the grid shows only the filters you have set, as chips you can '
+      + 'remove, and the \u2315 on a column header opens that column\u2019s box where it belongs.'));
 
     /* Imports: how a finished import behaves. A machine preference like
        the look (per browser, mirrored to the machine), not case data. */
