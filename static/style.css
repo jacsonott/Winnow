@@ -1188,6 +1188,19 @@ section.page-with-panels { flex-direction: row; }
 .cell { user-select: none; }
 .cell-selected { background: var(--cell-selected-bg); box-shadow: inset 0 0 0 1px var(--sel-line); }
 
+/* The ACTIVE cell: the one the next arrow key steps from, and the corner
+   a Shift+Arrow rectangle grows out of. Drawn in the accent rather than
+   --sel-line so it reads as one cell against a rectangle of selected
+   ones — the whole point is telling the analyst WHERE in the selection
+   they are, which a uniform highlight cannot say. Two pixels, because one
+   is what an ordinary selected cell already wears. */
+.cell-active { box-shadow: inset 0 0 0 2px var(--accent); }
+/* A pinned cell paints its own background to cover the columns sliding
+   under it, and that rule is more specific than .cell-active — so the
+   ring needs a pinned variant or the active cell goes invisible the
+   moment an analyst arrows into a pinned column. */
+.cell.pinned.cell-active { box-shadow: inset 0 0 0 2px var(--accent); }
+
 /* The tag rail: a map of the whole view, in the strip .grid-body's
    margin-right keeps clear for it. It overlaps nothing, which is what
    lets it take pointer events, and it needs those for the tooltip that

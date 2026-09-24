@@ -939,7 +939,12 @@ export function openSettings() {
 
     const fixedKeys = el('div', 'kv');
     fixedKeys.style.marginTop = '10px';
-    fixedKeys.append(el('kbd', null, 'Shift + move keys'), el('span', null, 'Extend the selection'));
+    fixedKeys.append(el('kbd', null, 'Shift + arrow'),
+      el('span', null, 'Grow the cell selection, the way dragging does'));
+    fixedKeys.append(el('kbd', null, 'Ctrl/\u2318 + Shift + arrow'),
+      el('span', null, 'Grow it all the way to the first/last row or column'));
+    fixedKeys.append(el('kbd', null, 'Shift + Space'),
+      el('span', null, 'Turn the cell selection into picked rows, for tagging'));
     fixedKeys.append(el('kbd', null, '1 – 9'), el('span', null, 'Toggle the tag with that hotkey on the selection'));
     fixedKeys.append(el('kbd', null, 'Shift + 1 – 9'), el('span', null, 'Apply that tag to every row in the current view'));
     fixedKeys.append(el('kbd', null, 'Alt + 1 – 0'), el('span', null, 'Switch tabs — 1 is the table you were last in, 2 – 0 the page tabs in strip order'));

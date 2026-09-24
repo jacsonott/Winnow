@@ -277,6 +277,59 @@ see [docs/notes/README.md](README.md) for the whole set.
   and with nothing picked a multi-row cell range is the scope of a tag
   key and the row menu alike (`rowMenuTargets`), and the toolbar says so.
   One anchor (`S.anchor`) serves the gutter, the cells and the keyboard.
+- **The cell cursor is three fields, and they go together.** `S.cellAnchor`
+  is the corner a Shift run extends FROM, `S.cellFocus` is the active cell
+  (the moving corner, the one wearing the `.cell-active` ring), and
+  `S.cellRange` is the normalised rectangle between them. Eleven places
+  drop a cell selection — a rebuild, a table switch, Escape, Ctrl+A, the
+  gutter, the select-all box, a group toggle, `renderHead` — so they all
+  go through `clearCellSelection()` rather than nulling fields by hand;
+  before that they were eleven chances to clear two of the three and leave
+  a rectangle with no corners.
+- **`S.cellFocus` carries its column's NAME as well as its index**, and
+  that is the whole reason an active cell survives a repaint. `col` is an
+  index into `visibleCols()`, a list that hiding, reordering or pinning a
+  column rewrites — so `renderHead` drops the rectangle (its far corner
+  may be in a column that just left) and puts the active cell back by
+  name, or not at all. Restoring by index instead moved the ring onto
+  whichever column slid into that slot, which is worse than losing it.
+  This covers repaints only — a resize, a pin, a reorder, a hide,
+  revealing a filter box. A filter edit or a sort REBUILDS, and
+  `rebuildView` drops the cell selection outright: after a re-sort "row 4"
+  is a different row, so a cursor left on it would point at evidence the
+  analyst never chose. Row picks survive a rebuild because `selRemap`
+  re-finds them by rid; a cell cursor has no such identity.
+- **`S.cellRangeExplicit` is the word "explicit" from the copy rule,
+  written down.** `handleCopyShortcut` always preferred *an explicit
+  rectangle* to picked rows, and before the arrow keys moved the cell
+  cursor `if (S.cellRange)` said exactly that — only a mouse gesture could
+  make a range, so its existence WAS the intent. A plain arrow now leaves
+  a one-cell range wherever the cursor stops, so the flag distinguishes
+  asking from standing: a click, a drag, a right-click and a Shift+Arrow
+  set it; a plain arrow and a jump through `moveCursor` clear it. Without
+  it, an analyst who picked forty rows in the gutter and pressed Down to
+  read the next one found Ctrl+C had become "copy one cell". Inferring it
+  from SIZE instead (a one-cell range is never explicit) was the first
+  attempt and it was wrong in the other direction: clicking a single cell
+  to copy it is a real gesture, and it stopped working whenever rows
+  happened to be picked.
+- **Arrow keys step over group headings.** A heading owns a position but
+  has no cells (one spanning element), so an active cell on one is a ring
+  on nothing, and `cellRangeRows` skips headings anyway — a range that
+  started on one would report rows it did not cover. `nextCellRow` and
+  `edgeCellRow` walk past them, which also means Ctrl+Down in grouped mode
+  lands on the last ROW rather than the last heading.
+- **Horizontal scroll-into-view is arithmetic, not `Element.scrollIntoView`**
+  (`scrollColIntoView`). The gutter and every pinned column are
+  `position: sticky` over the left edge of the scroller, so a cell scrolled
+  flush to `scrollLeft` parks *underneath* them and the ring vanishes. The
+  real left edge is `GUTTER_W` plus the widths of the pinned columns —
+  the same sum `pinnedOffsets()` already computes for the paint.
+- **`cellRangeRowCount()` exists because the toolbar asks every paint.**
+  Ctrl+Shift+Down makes the answer "the whole view", and materialising
+  200,000 positions per scroll frame just to read `.length` off them is
+  the difference between a smooth grid and a janky one. Ungrouped it is
+  arithmetic; grouped it still has to walk, since headings do not count.
 - **A cell says what it says only when it was cut** (`titleClippedCells`,
   the last thing every paint pass does). A `LEVEL` column rendering
   `Informati…` carried an empty `title`, so the value was reachable by

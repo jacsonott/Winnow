@@ -61,8 +61,18 @@ export const S = {
   rowsByPos: new Map(),
   reqId: 0,
   viewCache: new Map(), // source_id -> { key, view_id, row_count, elapsed_ms }
-  cellAnchor: null,      // {pos, col} — drag start, col is an index into visibleCols()
+  cellAnchor: null,      // {pos, col} — the FIXED corner: drag start, or the cell a
+                         //   Shift+Arrow run extends from. col indexes visibleCols()
+  cellFocus: null,       // {pos, col, name} — the ACTIVE cell: the moving corner, where
+                         //   the next arrow steps from, and the one drawn with a ring.
+                         //   `name` is the column, carried because `col` is an index into
+                         //   a list that hiding or reordering a column rewrites — see
+                         //   renderHead, which puts the cell back by name or not at all
   cellRange: null,       // {r0, c0, r1, c1} normalized — separate from row S.selection
+  cellRangeExplicit: false, // did the analyst ASK for this rectangle (a click, a drag,
+                         //   a Shift+Arrow) or is it just where the cell cursor is
+                         //   standing after a plain arrow? Only copy cares — see
+                         //   handleCopyShortcut
   importQueue: [],       // [{file, kind: 'csv'|'json', configured, ...kind-specific settings}] — Import modal's file queue
   groupByCols: [],         // ordered column names — [] for normal flat mode, nested grouping otherwise
   groupSort: 'count',      // 'count' | 'value' — how each level's groups are ordered
@@ -167,29 +177,16 @@ export const selRemove = (pos) => { S.selectAll ? S.selection.add(pos) : S.selec
 export const selToggle = (pos) => { selHas(pos) ? selRemove(pos) : selAdd(pos); };
 
 /* Replace the selection wholesale. The one door for it, so the version
-   bump and the end of any keyboard run happen every time. */
+   bump happens every time. */
 export function selReplace(selectAll, selection) {
   S.selectAll = selectAll;
   S.selection = selection;
   S.selVersion++;
-  kbBase = null;
 }
 
 export function selClear() { selReplace(false, new Set()); }
 
 export function selSetAll() { selReplace(true, new Set()); }
-
-/* The keyboard's Shift+Arrow run: what was picked BEFORE the run started,
-   kept so the run can shrink back without eating earlier picks. Lives here
-   so every sanctioned replacement of the selection (clear, select-all, an
-   undo, a rebuild's remap, a table switch) ends the run — a stale base
-   used to survive all of those and restore rows nobody had picked. */
-let kbBase = null;
-export function startKeyboardRun() {
-  if (!kbBase) { selSnapshot(); kbBase = { selectAll: S.selectAll, selection: new Set(S.selection) }; }
-  return kbBase;
-}
-export function endKeyboardRun() { kbBase = null; }
 
 /* Every selection GESTURE snapshots first, so the chip's Undo (and a
    stray Escape) can be taken back. Bounded; the newest wins. Stamped with
@@ -235,6 +232,31 @@ export function cellRangeRows() {
     out.push(p);
   }
   return out;
+}
+
+/* How MANY rows the range spans, without building the list. The toolbar
+   asks this on every paint, and Ctrl+Shift+Down makes the answer the
+   whole view — materialising 200,000 positions per scroll frame to read
+   `.length` off them is the difference between a smooth grid and a
+   janky one. Ungrouped, the count is arithmetic; grouped, the headings
+   have to be walked, and grouped views are bounded by what is expanded. */
+export function cellRangeRowCount() {
+  if (!S.cellRange) return 0;
+  if (!S.groupByCols.length) return S.cellRange.r1 - S.cellRange.r0 + 1;
+  return cellRangeRows().length;
+}
+
+/* The three cell fields go together, always: a rectangle with no corners
+   is unpaintable and an active cell with no rectangle is a highlight
+   nothing can copy. Eleven places drop the cell selection — a rebuild, a
+   table switch, Escape, Ctrl+A, the gutter, the select-all box, a group
+   toggle, renderHead — and before this was one call they were eleven
+   chances to clear two of the three. */
+export function clearCellSelection() {
+  S.cellRange = null;
+  S.cellAnchor = null;
+  S.cellFocus = null;
+  S.cellRangeExplicit = false;
 }
 
 /* Contiguous runs among the picked rows — the chip's "N ranges". Memoised

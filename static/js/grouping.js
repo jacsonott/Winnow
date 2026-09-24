@@ -7,7 +7,7 @@ import { displayValue, ellipsize, filterByValue } from './filters.js';
 import { buildDataRow, ensurePage, headH, moveCursor, render, renderTagToolbar, rowAt, rowPaintContext, rowsPaintY, schedulePrefetch, setCellRange, spacerPx, syncRowsTop, syncRowsWidth, titleClippedCells, vScroll } from './grid.js';
 import { armOpCancel, opToken } from './jobs.js';
 import { openRowContextMenu } from './rowmenu.js';
-import { S, cellInRange, cellRangeRows, selClear, selCount, selHas, selPositions, selRemap, selSetRange, selSnapshot } from './state.js';
+import { S, cellInRange, cellRangeRows, clearCellSelection, selClear, selCount, selHas, selPositions, selRemap, selSetRange, selSnapshot } from './state.js';
 import { BULK_TAG_CONFIRM_AT, clearRowCaches, refreshTagCounts, refreshUndoState, renderTagRibbon } from './tags.js';
 import { confirmDialog, contextMenu, dropdownMenu } from './ui.js';
 import { displayCell } from './tsformat.js';
@@ -278,8 +278,7 @@ export function clearGroupSelectionState() {
   S.selHidden = 0;
   S.cursor = -1;
   S.anchor = -1;
-  S.cellRange = null;
-  S.cellAnchor = null;
+  clearCellSelection();
 }
 
 /* Expanding or collapsing a group renumbers every flattened position below
@@ -310,7 +309,7 @@ export function shiftGroupPositions(headerPos, oldTotal) {
   // A cell range spanning the toggled group can't survive it intact —
   // its rows are no longer contiguous — so it goes rather than silently
   // covering different rows than it did a moment ago.
-  if (S.cellRange && (S.cellRange.r1 > headerPos)) { S.cellRange = null; S.cellAnchor = null; }
+  if (S.cellRange && (S.cellRange.r1 > headerPos)) clearCellSelection();
 }
 
 /* The (headerPos, oldTotal) pair shiftGroupPositions needs, read at the
@@ -1029,13 +1028,26 @@ export async function copyRowsAsText(positions, withHeaders) {
   await writeClipboardText(textPromise, `Copied ${positions.length.toLocaleString()} row${positions.length > 1 ? 's' : ''}${withHeaders ? ' with headers' : ''}`);
 }
 
-/* Ctrl+C prefers an explicit dragged/shift-clicked cell range; otherwise
-   falls back to whatever rows are actually selected — checked rows first,
-   then just the cursor row — so "select a row, then copy" (via checkbox or
-   a plain click) copies the whole row rather than nothing or a stray cell. */
+/* Ctrl+C prefers an explicit cell RECTANGLE — dragged, shift-clicked or
+   Shift+Arrowed; otherwise falls back to whatever rows are actually
+   selected — checked rows first, then just the cursor row — so "select a
+   row, then copy" (via checkbox or a plain click) copies the whole row
+   rather than nothing or a stray cell.
+
+   "Explicit" is the whole rule, and S.cellRangeExplicit is it written
+   down. Before the arrow keys moved the cell cursor, a cell range could
+   only come from a mouse gesture, so its mere existence WAS the analyst's
+   intent and `if (S.cellRange)` said so correctly. Now a plain arrow
+   leaves a one-cell range behind wherever the cursor stops, so without
+   this an analyst who picked forty rows in the gutter and then pressed
+   Down to read the next one would find Ctrl+C had quietly become "copy
+   one cell". A click, a drag and a Shift+Arrow all still win, including
+   on a single cell — clicking one cell to copy it is a real gesture and
+   asking for it is what makes it explicit, not how big it is. */
 export async function handleCopyShortcut(withHeaders) {
-  if (S.cellRange) { await copySelectedCells(withHeaders); return; }
-  const count = selCount();
+  const picked = selCount();
+  if (S.cellRange && (S.cellRangeExplicit || !picked)) { await copySelectedCells(withHeaders); return; }
+  const count = picked;
   // Checked before materializing: selPositions() on a select-all would
   // allocate an array of every position in the view just to have it
   // rejected by copyRowsAsText's own ceiling on the next line.
@@ -1131,9 +1143,11 @@ $('body').addEventListener('contextmenu', (e) => {
     // right-click INSIDE an existing range keeps the range: the menu's
     // scope is the rows it spans (rowMenuTargets), same as a tag key's.
     S.cellAnchor = { pos, col: colIndex };
+    S.cellFocus = { pos, col: colIndex, name: colName };
     setCellRange(S.cellAnchor, S.cellAnchor);
+    S.cellRangeExplicit = true;   // a right-click on a cell is asking for that cell
   }
-  if (!inSelection) moveCursor(pos, false); // renders
+  if (!inSelection) moveCursor(pos); // renders
   else render();
   const r = rowAt(pos);
   const value = r && colName ? r.cells[S.columns.findIndex((c) => c.name === colName)] : null;

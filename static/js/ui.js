@@ -334,8 +334,12 @@ const isTextField = (n) => !!n && (/^(INPUT|TEXTAREA|SELECT)$/.test(n.tagName) |
    it. The arrows walk the menu the focus is in; Right opens a flyout and
    Left closes it, the way native menus do. From outside the menu (focus
    on the body, or on the button that opened it) Down and Up step in at
-   the first or last item and nothing else is claimed: a caret in a text
-   field keeps its arrows, and a menu only owns keys for a focus it owns. */
+   the first or last item, and Left/Right are swallowed without doing
+   anything — not because the menu has a use for them, but because the
+   grid does: they move the cell cursor now, and a menu the analyst opened
+   answering an arrow key by scrolling the table underneath itself is not
+   an answer. A caret in a text field still keeps its arrows, which is the
+   one case where the focus genuinely is not the menu's. */
 export function onMenuKeydown(e) {
   if (!openMenuEl) return;
   if (e.key === 'Escape') {
@@ -348,12 +352,20 @@ export function onMenuKeydown(e) {
   const active = document.activeElement;
   const inSub = openSubs.find((s) => s.el.contains(active));
   if (!inSub && !openMenuEl.contains(active)) {
-    if (isTextField(active) || (e.key !== 'ArrowDown' && e.key !== 'ArrowUp')) return;
+    if (isTextField(active)) return;
     const items = focusableIn(openMenuEl);
     if (!items.length) return;
     e.preventDefault();
     e.stopPropagation();
-    items[e.key === 'ArrowDown' ? 0 : items.length - 1].focus();
+    // Down/Up step into the menu. Left/Right have nothing to act on with
+    // no item focused yet — but they are swallowed all the same, because
+    // an open menu owns the arrow keys: left and right used to be bound
+    // to nothing, so letting them fall through cost nothing, and now they
+    // move the grid's cell cursor. A menu the analyst opened, answering by
+    // scrolling the table underneath it, is not an answer.
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      items[e.key === 'ArrowDown' ? 0 : items.length - 1].focus();
+    }
     return;
   }
   const focusable = focusableIn(inSub ? inSub.el : openMenuEl);
