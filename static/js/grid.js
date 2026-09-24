@@ -5,7 +5,7 @@ import { applyPin, colWidth, pinnedOffsets, visibleCols } from './columns.js';
 import { $, GUTTER_W, MAX_SPACER_PX, OVERSCAN, PAGE, ROW_H, api, el } from './core.js';
 import { maybeShowDetail, showDetail } from './detail.js';
 import { ensureGroupPage, findGroupAt, groupCoordAt, groupDataRowAt, isLeafLevel, renderGrouped, toggleGroup } from './grouping.js';
-import { S, cellInRange, cellRangeRowCount, cellRangeRows, clearCellSelection, gridRowCount, selAdd, selClear, selCount, selHas, selRangeApply, selRanges, selRemove, selReplace, selSnapshot, selToggle, selUndoAvailable, selUndoLast } from './state.js';
+import { S, cellInRange, cellRangeAllSelected, cellRangeRowCount, cellRangeRows, clearCellSelection, gridRowCount, selAdd, selClear, selCount, selHas, selRangeApply, selRanges, selRemove, selReplace, selSnapshot, selToggle, selUndoAvailable, selUndoLast } from './state.js';
 import { applyTag } from './tags.js';
 import { displayCell } from './tsformat.js';
 import { rebuildInFlight, rebuildView } from './view.js';
@@ -870,8 +870,47 @@ export let cellDragging = false;
 
 export let cellDragRaf = null;
 
-/* Space: toggle the cursor row. Shift+Space: the rows a cell range spans
-   become picks (and the range is done with). Called from keymap.js. */
+/* What the two Space keys mean, across the three functions below.
+   Both keys fall through to toggleCursorRow when there is no
+   rectangle to speak of, which is every press before the analyst
+   has touched a cell, and every press after the gutter (which
+   clears the cell selection) has had one.
+
+   Space is a toggle, and what it toggles is whatever the cell selection
+   says you are pointing at: a rectangle spanning several rows is ONE
+   block of rows, not the single row the active cell happens to sit on.
+   All-or-nothing across that block, the way a header checkbox behaves —
+   anything short of every row picked means the press picks the rest, and
+   only a fully picked block is let go. Flipping each row on its own is
+   the obvious alternative and is wrong: on a half-picked range it merely
+   swaps which half is picked, and a second press swaps it back, so the
+   block can never be made whole.
+
+   The rectangle SURVIVES the press, which is what gives a second press
+   something to act on — Shift+Space clears it instead, and if Space did
+   too there would be no block left to let go of. Letting it go is not an
+   undo, though: a row picked BEFORE the rectangle was drawn goes with
+   the block if the rectangle covers it, because all-or-nothing means the
+   block and not "the rows this press added". The toolbar's Undo, which
+   the selSnapshot below feeds, is the thing that restores the state
+   before a press.
+
+   Shift+Space is the other half: it only ever adds, and it spends the
+   rectangle doing it — the gesture for gathering several rectangles into
+   one set of picks, where a toggle would undo the last one gathered. */
+export function toggleCellRangeRows() {
+  if (cellRangeRowCount() < 2) return false;   // one row IS the cursor row; leave it to the plain path
+  selSnapshot();
+  /* S.anchor is deliberately left alone. It is the corner a later
+     Shift+click in the gutter extends FROM, and on a rectangle that is
+     already the row the run started on — the Shift+Arrow origin, or a
+     drag's mousedown. Moving it to r0 (what selectCellRangeRows does,
+     which loses the direction of an upward run) or to the cursor would
+     spend that on a gesture that chose no new origin. */
+  selRangeApply(S.cellRange.r0, S.cellRange.r1, !cellRangeAllSelected());
+  render();
+  return true;
+}
 export function toggleCursorRow() {
   if (!S.view || S.cursor < 0) return;
   if (S.groupByCols.length && !groupCoordAt(S.cursor)) return;

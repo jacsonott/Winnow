@@ -8,7 +8,7 @@ import { currentModalAction, repaintOpenMenus, closeMenu, closeModal } from './u
 import { toggleDetailPane } from './detail.js';
 import { toggleHistogram } from './histogram.js';
 import { filterBySelectedCell, openValuePickerForColumn, selectedCellTarget } from './filters.js';
-import { headH, moveCell, render, selectCellRangeRows, toggleCursorRow } from './grid.js';
+import { headH, moveCell, render, selectCellRangeRows, toggleCellRangeRows, toggleCursorRow } from './grid.js';
 import { dropGrouping, handleCopyShortcut, toggleGrouping } from './grouping.js';
 import { openPluginBundlesModal } from './bundles.js';
 import { cycleSavedFilter, openFilterSqlTab } from './savedfilters.js';
@@ -459,15 +459,26 @@ document.addEventListener('keydown', (e) => {
     if (selCount() || S.cellRange) selSnapshot();
     selClear(); clearCellSelection(); S.selHidden = 0; render(); return;
   }
-  // Space toggles the cursor row; Shift+Space turns a cell range into row
-  // picks. Not in the rebindable map: a bare space is what the map can't
-  // spell, and the grid is the only place it means anything.
+  // Space toggles the rows the cell selection covers: every row of a
+  // multi-row rectangle, or the cursor row when there is no rectangle to
+  // speak of. Shift+Space picks those rows without toggling and spends
+  // the rectangle. Neither is in the rebindable map: a bare space is what
+  // the map can't spell, and the grid is the only place it means anything.
   // Only when the grid itself has focus: a focused button, menu item or a
   // confirm dialog's OK gets its native Space, not a row toggle.
   const gridFocused = e.target === document.body || e.target === $('body') || $('body').contains(e.target);
   if (e.key === ' ' && S.activeTab === 'grid' && !typing && gridFocused && $('modal').hidden && !document.querySelector('.confirm-overlay')) {
     e.preventDefault();
-    if (e.shiftKey) { if (!selectCellRangeRows()) toggleCursorRow(); } else toggleCursorRow();
+    /* Auto-repeat is never what a toggle means. Hold the key and the OS
+       sends a press every ~30ms, flipping the same rows on and off until
+       it comes up and leaving the result to whichever repeat landed
+       last. That was merely pointless while Space was one row; it is
+       worth refusing now that Space can mean a rectangle reaching to the
+       end of the view, where every repeat walks every position in it.
+       preventDefault stays above this, or a held Space scrolls the page. */
+    if (e.repeat) return;
+    if (e.shiftKey) { if (!selectCellRangeRows()) toggleCursorRow(); }
+    else if (!toggleCellRangeRows()) toggleCursorRow();
     return;
   }
   /* Everything below acts on the case UI — the grid's cursor, its tabs, its

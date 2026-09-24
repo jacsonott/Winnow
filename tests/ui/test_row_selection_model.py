@@ -4,9 +4,11 @@ moves, picks survive cell clicks, arrow keys, a sort and a filter, and the
 toolbar chip reports and undoes.
 
 Arrow keys drive the CELL cursor (see test_cell_keyboard.py); what this
-file cares about is that they leave the row picks alone, and that the
-gesture which does turn a cell rectangle into picks — Shift+Space — adds
-to them rather than replacing them."""
+file cares about is that they leave the row picks alone, and that
+Shift+Space — the gesture that turns a cell rectangle into picks without
+toggling — adds to them rather than replacing them. Space turns a
+rectangle into picks too, as a toggle and all-or-nothing; that rule and
+its edges live in test_space_over_a_cell_range.py."""
 import pytest
 
 pytestmark = pytest.mark.ui
@@ -73,6 +75,9 @@ def test_picks_survive_cell_clicks_and_arrows_and_escape_lets_go(page):
 
 
 def test_space_and_shift_space(page):
+    """One cell clicked is a one-row rectangle, which is the cursor row,
+    so Space means here what it has always meant. The multi-row case is
+    test_space_over_a_cell_range.py."""
     page.locator("#body .row").nth(4).locator(".cell").nth(1).click()
     page.keyboard.press(" ")
     assert _picked(page) == [4]
@@ -92,9 +97,10 @@ def test_shift_arrows_build_a_range_that_picks_without_eating_earlier_picks(page
     survives the change and is what is asserted: the rows an analyst adds
     by extending never swallow the ones they picked earlier.
 
-    The extra keystroke is Shift+Space, which turns the rectangle into
-    picks. That is the documented replacement for the old chord, so it is
-    the one under test here."""
+    The extra keystroke is Space (a toggle over the whole rectangle) or
+    Shift+Space (which only adds, and is what this test presses, since
+    "never swallows earlier picks" is the claim). Either is the
+    documented replacement for the old chord."""
     _gutter(page, 1).click()
     page.locator("#body .row").nth(5).locator(".cell").nth(1).click()
     assert _picked(page) == [1]                                           # a cell click picks no rows

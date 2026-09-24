@@ -246,6 +246,32 @@ export function cellRangeRowCount() {
   return cellRangeRows().length;
 }
 
+/* Does every real row the range spans already carry a pick? Space over a
+   multi-row rectangle needs ONE answer for the whole block — take the
+   lot, or let the lot go — rather than flipping each row on its own,
+   which on a half-picked range only swaps which half is picked.
+
+   Asking is cheaper than answering: the first unpicked row settles it,
+   so the ordinary case (a fresh rectangle over rows nobody has picked)
+   stops at r0. Only an already-picked range walks to the end, and this
+   runs on a keypress, never on a paint — which is why it may loop where
+   cellRangeRowCount above may not.
+
+   `any` is the all-headings guard: a range holding no real rows is not
+   "all picked", it is nothing to pick, and the caller has to tell those
+   apart. selHas rather than S.selection.has, so an inverted select-all
+   selection answers for the rows it MEANS, not the rows it stores. */
+export function cellRangeAllSelected() {
+  if (!S.cellRange) return false;
+  let any = false;
+  for (let p = S.cellRange.r0; p <= S.cellRange.r1; p++) {
+    if (S.groupByCols.length && !groupCoordAt(p)) continue;
+    if (!selHas(p)) return false;
+    any = true;
+  }
+  return any;
+}
+
 /* The three cell fields go together, always: a rectangle with no corners
    is unpaintable and an active cell with no rectangle is a highlight
    nothing can copy. Eleven places drop the cell selection — a rebuild, a

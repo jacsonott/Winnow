@@ -848,7 +848,7 @@ export function openSettings() {
       + 'On: the first table of a batch to finish opens; the rest of that batch land without moving you again.'));
 
     const secKeys = settingsSection(b, 'Keyboard shortcuts');
-    secKeys.append(el('p', null, 'Tag hotkeys (1–9) are set per-tag in Edit tags. Escape always clears the selection or closes a panel. Space toggles the cursor row; Shift+Space picks every row a cell range spans. '
+    secKeys.append(el('p', null, 'Tag hotkeys (1–9) are set per-tag in Edit tags. Escape always clears the selection or closes a panel. Space toggles the rows the cell selection covers: every row of a multi-row selection, all together, or the cursor row when there is no multi-row selection. Shift+Space picks those rows without toggling. '
       + '"+ key" waits for a full press — hold modifiers for a combination (e.g. Ctrl+Shift+K), or Shift+letter for a capital.'));
     const list = el('div', 'settings-keys');
 
@@ -943,6 +943,8 @@ export function openSettings() {
       el('span', null, 'Grow the cell selection, the way dragging does'));
     fixedKeys.append(el('kbd', null, 'Ctrl/\u2318 + Shift + arrow'),
       el('span', null, 'Grow it all the way to the first/last row or column'));
+    fixedKeys.append(el('kbd', null, 'Space'),
+      el('span', null, 'Pick every row the cell selection covers \u2014 or let them all go, if they are already picked'));
     fixedKeys.append(el('kbd', null, 'Shift + Space'),
       el('span', null, 'Turn the cell selection into picked rows, for tagging'));
     fixedKeys.append(el('kbd', null, '1 – 9'), el('span', null, 'Toggle the tag with that hotkey on the selection'));
