@@ -2352,7 +2352,12 @@ textarea:focus { border-color: var(--accent); outline: none; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
-.derived-preview-title { font-size: 12px; color: var(--text-dim); margin-top: 12px; }
+/* The scope buttons sit on this line, so it becomes a row. */
+.derived-preview-title {
+  font-size: 12px; color: var(--text-dim); margin-top: 12px;
+  display: flex; align-items: center; gap: 10px;
+}
+.derived-scope { margin-left: auto; }
 .derived-preview {
   border: 1px solid var(--line); border-radius: var(--radius-sm);
   padding: 8px 10px; margin-top: 4px; max-height: 240px; overflow: auto;

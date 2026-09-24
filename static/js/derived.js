@@ -439,6 +439,20 @@ export async function openDerivedColumnModal(prefill, editing) {
     name: editing ? editing.name : '',
   };
 
+  /* Which rows the preview samples. The head of the file is the one
+     region a triage filter exists to escape, so a preview taken from it
+     can report that every sampled value parses while every row on screen
+     fails — which is the whole complaint this control answers.
+
+     Defaults to the view when the analyst has narrowed one, because then
+     they have already said which rows they mean; to the whole table
+     otherwise, where the two are the same thing anyway. Same two words
+     and the same segmented control as the value picker's scope, which is
+     the same question asked about a different thing. */
+  const narrowed = () => !!(S.view && S.view.row_count != null && S.view.row_count
+    !== (S.sources.find((x) => x.id === S.sourceId) || {}).row_count);
+  state.scope = narrowed() ? 'view' : 'table';
+
   modal(editing ? `Re-derive "${editing.name}"` : 'Add derived column', (body) => {
     const previewBox = el('div', 'derived-preview');
     const paramBox = el('div', 'derived-params');
@@ -719,19 +733,45 @@ export async function openDerivedColumnModal(prefill, editing) {
         : null);
     }
 
+    /* Declared before refreshPreview so its 409 fallback can call it —
+       the two are one control: the buttons say what the sample is, and
+       the fallback changes what the sample is. */
+    function syncScope() {
+      for (const b of body.querySelectorAll('.derived-scope .btn')) {
+        b.setAttribute('aria-pressed', String(b.dataset.scope === state.scope));
+      }
+    }
+
     let previewSeq = 0;
     async function refreshPreview() {
       const seq = ++previewSeq;
       previewBox.replaceChildren(el('div', 'fb-help', 'Checking…'));
       let res;
+      const ask = (scope) => post('/api/derived/preview', {
+        source_id: S.sourceId, column: state.column, op_id: opSelect.value, params: state.params,
+        view_id: scope === 'view' && S.view ? S.view.view_id : undefined,
+      });
       try {
-        res = await post('/api/derived/preview', {
-          source_id: S.sourceId, column: state.column, op_id: opSelect.value, params: state.params,
-        });
+        res = await ask(state.scope);
       } catch (e) {
-        if (seq !== previewSeq) return;
-        previewBox.replaceChildren(el('div', 'fb-help bad', e.message));
-        return;
+        // A 409 is the view going out from under the modal mid-rebuild.
+        // Fall back to the table rather than showing an error for a
+        // question the analyst can still have answered — the value
+        // picker does the same, and says so.
+        if (e.status === 409 && state.scope === 'view') {
+          state.scope = 'table';
+          syncScope();
+          toast('That view was rebuilt — previewing against the whole table');
+          try { res = await ask('table'); } catch (e2) {
+            if (seq !== previewSeq) return;
+            previewBox.replaceChildren(el('div', 'fb-help bad', e2.message));
+            return;
+          }
+        } else {
+          if (seq !== previewSeq) return;
+          previewBox.replaceChildren(el('div', 'fb-help bad', e.message));
+          return;
+        }
       }
       if (seq !== previewSeq) return; // a later keystroke already superseded this
       previewBox.replaceChildren();
@@ -745,10 +785,14 @@ export async function openDerivedColumnModal(prefill, editing) {
         table.append(r);
       }
       previewBox.append(table);
+      // The verdict names the sample it is a verdict about. "All 200
+      // sampled values parse" is a very different claim depending on
+      // which 200, and it used to be silent about that.
+      const where = state.scope === 'view' ? 'in this view' : 'in the whole table';
       previewBox.append(el('div', 'fb-help derived-verdict' + (res.failures ? ' bad' : ''),
         res.failures
-          ? `${res.failures.toLocaleString()} of ${res.sampled.toLocaleString()} sampled values can't be parsed this way.`
-          : `All ${res.sampled.toLocaleString()} sampled values parse.`));
+          ? `${res.failures.toLocaleString()} of ${res.sampled.toLocaleString()} sampled values ${where} can't be parsed this way.`
+          : `All ${res.sampled.toLocaleString()} sampled values ${where} parse.`));
     }
 
     /* The preview and the named-group offer answer the same edits — the
@@ -833,8 +877,26 @@ export async function openDerivedColumnModal(prefill, editing) {
     }
     body.append(groupsBox);
     body.append(groupsNote);
-    body.append(el('div', 'derived-preview-title', 'Preview'));
+    /* The preview's own scope control, beside the word Preview, because
+       what it changes is which rows the answer below is about. Same
+       shape and the same two labels as the value picker's (filters.js),
+       so an analyst who has met one has met both. */
+    const previewHead = el('div', 'derived-preview-title', 'Preview');
+    const scopeSeg = el('div', 'vp-seg derived-scope');
+    for (const [key, label, title] of [
+      ['view', 'This view', 'Sample the rows the current filters leave — what you are actually looking at'],
+      ['table', 'Whole table', 'Sample from the top of the table, ignoring the current filters'],
+    ]) {
+      const b = el('button', 'btn ghost', label);
+      b.dataset.scope = key;
+      b.title = title;
+      b.onclick = () => { if (state.scope !== key) { state.scope = key; syncScope(); refreshPreview(); } };
+      scopeSeg.append(b);
+    }
+    previewHead.append(scopeSeg);
+    body.append(previewHead);
     body.append(previewBox);
+    syncScope();
 
     if (editing) {
       state.opId = editing.derived_op;

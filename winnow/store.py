@@ -5463,13 +5463,80 @@ class Store:
     DETECT_SAMPLE = 200
 
     def _sample_column(self, src: dict, column: str, limit: int | None = None) -> list:
+        """The first N non-empty values of a column, in FILE order.
+
+        `ORDER BY rid` is load-bearing, not tidiness. Without it this is a
+        bare SCAN and the first N rows arrive in file order by accident —
+        until a background column index exists on that column
+        (`_ensure_column_index_building` builds one the moment an
+        equals/in filter touches it), at which point the planner switches
+        to a covering-index range scan and returns the N lexicographically
+        SMALLEST values instead. The sample an analyst previewed a derived
+        column against would then differ between one open of a case and
+        the next, with nothing on screen to explain why. `rid` is the
+        INTEGER PRIMARY KEY, so ordering by it costs no temp b-tree —
+        the same fact invariant #2's carve-out rests on.
+        """
         with self._reader() as ro:
             return [r[0] for r in ro.execute(
                 f"SELECT {self._col_ref(src, column)} FROM {self._from_clause(src)} "
                 f"WHERE {self._col_ref(src, column)} IS NOT NULL "
-                f"AND {self._col_ref(src, column)} <> '' LIMIT ?",
+                f"AND {self._col_ref(src, column)} <> '' ORDER BY rid LIMIT ?",
                 (limit or self.DETECT_SAMPLE,),
             )]
+
+    def _sample_column_in_view(self, view_id: str, column: str,
+                               limit: int | None = None) -> tuple[dict, list]:
+        """The same sample, taken from the rows the VIEW holds.
+
+        The head of a file is exactly the region a triage filter exists to
+        escape, so a preview sampled from it can report that every value
+        parses while the rows the analyst is actually looking at do not.
+        Scoping the sample to the view is the analyst saying which rows
+        they mean.
+
+        Shape copied from time_histogram's `branch()`: an unfiltered,
+        unsorted view (`root_virtual`) has no `v.view_N` table at all and
+        reads its member tables directly; a materialised one joins the
+        view table per member. A merge unions its members, which also
+        fixes the preview's old habit of only ever looking at member 0 —
+        a merged view's rows carry their own source_id.
+
+        Returns (src, values) because every caller needs the source dict
+        the view is over anyway, and resolving it twice would mean two
+        reader round trips for one question.
+        """
+        handle = self._views.get(view_id)
+        if not handle:
+            raise KeyError("View expired — rebuild it")
+        with self._reader() as ro:
+            src = self._source_lite_on(ro, handle["source_id"])
+            members = self._resolve_members_on(ro, handle["source_id"])
+        if self._find_column(src, column) is None:
+            raise KeyError(column)
+        if handle.get("kind") == "root_virtual":
+            # No filter and no sort: the view IS the source, and the
+            # cheaper head-of-file path says the same thing.
+            return src, self._sample_column(src, column, limit)
+
+        direct = self._grouping_covers_whole_source(handle, src)
+
+        def branch(m: dict) -> str:
+            ref = self._col_ref(src, column, "s", None if direct else "d")
+            if direct:
+                scope = f"FROM {self._member_from(src, m, 's')}"
+            else:
+                scope = (f"FROM v.{q(view_id)} vv "
+                         f"JOIN {q(m['table_name'])} s ON s.rid = vv.rid "
+                         f"AND vv.source_id = {int(m['source_id'])}"
+                         f"{self._member_derived_join(src, m, 's')}")
+            return (f"SELECT {ref} AS v {scope} "
+                    f"WHERE {ref} IS NOT NULL AND {ref} <> ''")
+
+        union = " UNION ALL ".join(branch(m) for m in members)
+        with self._reader() as ro, self._dropped_view_is_expired():
+            return src, [r[0] for r in ro.execute(
+                f"SELECT v FROM ({union}) LIMIT ?", (limit or self.DETECT_SAMPLE,))]
 
     def detect_timestamp_format(self, source_id: int, column: str) -> list[dict]:
         """Which operations can read this column, best first. Same
@@ -5527,14 +5594,26 @@ class Store:
         return [{"input": v, "output": op["parse"](v, params, state)} for v in values]
 
     def preview_derived(self, source_id: int, column: str, op_id: str,
-                        params: dict | None = None, limit: int = 10) -> dict:
+                        params: dict | None = None, limit: int = 10,
+                        view_id: str | None = None) -> dict:
         """A handful of real input→output pairs plus how many of the
         sampled values this operation can't read, so the analyst sees what
-        they're about to create before committing to a full backfill."""
+        they're about to create before committing to a full backfill.
+
+        `view_id` scopes the sample to the rows the analyst is looking at.
+        Without it the sample is the head of the file, which is the one
+        region a triage filter exists to escape — so a preview could
+        report that all 200 sampled values parse while every row on screen
+        failed. It also gets a merge right: a view over one unions its
+        members, where the source-scoped path only ever read member 0.
+        """
         op = timeparse.OPERATIONS.get(op_id)
         if op is None:
             raise ValueError(f"Unknown operation: {op_id}")
         params = timeparse.validate_params(op_id, params)
+        if view_id and not op["multi_input"]:
+            src, samples = self._sample_column_in_view(view_id, column)
+            return self._derived_preview_from(samples, op_id, params, limit)
         if source_id < 0:
             # Preview against the first member — representative, and the
             # only side with a real table to sample.
@@ -5562,7 +5641,13 @@ class Store:
             failures = sum(1 for r, p in zip(rows, preview)
                            if p["output"] is None and any(v is not None and str(v).strip() for v in r))
             return {"preview": preview, "sampled": len(preview), "failures": failures}
-        samples = self._sample_column(src, column)
+        return self._derived_preview_from(self._sample_column(src, column), op_id, params, limit)
+
+    def _derived_preview_from(self, samples: list, op_id: str, params: dict, limit: int) -> dict:
+        """Pairs, count and failure tally for an already-taken sample —
+        shared so the view-scoped and source-scoped paths cannot drift into
+        reporting the same numbers two different ways."""
+        op = timeparse.OPERATIONS[op_id]
         preview = self._preview_rows(samples[:limit], op_id, params)
         state: dict = {}
         if op.get("prepare"):
