@@ -462,6 +462,13 @@ export function buildDataRow(pos, r, ctx) {
   // number keep the same x-position on every row regardless of whether
   // that row happens to be tagged or annotated.
   const g = el('div', 'gutter');
+  // The line number says whether this row is IN the cell rectangle. It is
+  // the one column that never could: the range is painted per .cell and
+  // the gutter is not one, so with a rectangle two columns wide an
+  // analyst reading down the line numbers had nothing to read. Rows only
+  // — a rectangle spans whole rows vertically, so a per-column answer
+  // here would be a lie.
+  if (S.cellRange && pos >= S.cellRange.r0 && pos <= S.cellRange.r1) g.classList.add('gutter-in-range');
   g.style.flexBasis = GUTTER_W + 'px';
   const cb = el('input');
   cb.type = 'checkbox';

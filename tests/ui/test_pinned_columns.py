@@ -166,3 +166,90 @@ def test_the_columns_panel_pins_too(page):
         page.keyboard.press("Escape")
     finally:
         _unpin_all(page)
+
+
+# ------------------------------------------- the selection on a pinned cell
+
+def _bg(page, sel):
+    return page.locator(sel).first.evaluate("(n) => getComputedStyle(n).backgroundColor")
+
+
+def _shadow(page, sel):
+    return page.locator(sel).first.evaluate("(n) => getComputedStyle(n).boxShadow")
+
+
+def _select_cells(page, r0, r1, c0, c1):
+    page.evaluate("""([r0, r1, c0, c1]) => {
+      __winnow.S.cellAnchor = { pos: r0, col: c0 };
+      __winnow.S.cellFocus = { pos: r1, col: c1, name: __winnow.visibleCols()[c1] };
+      __winnow.setCellRange(__winnow.S.cellAnchor, __winnow.S.cellFocus);
+      __winnow.render();
+    }""", [r0, r1, c0, c1])
+    page.wait_for_timeout(150)
+
+
+def test_a_selected_pinned_cell_looks_selected_on_every_row(page):
+    """A pinned cell paints an opaque background to cover the columns
+    sliding under it, and the zebra stripe rule for it is MORE specific
+    than the selection was — so the selection showed on odd rows and the
+    stripe on even ones, which is what "the highlight is only on some of
+    them" looks like from the outside.
+
+    Asserted as computed colour against a cell that is plainly selected in
+    the same row, because the class was always applied — it was the
+    cascade that dropped it, and a class assertion passed throughout."""
+    _unpin_all(page)
+    try:
+        page.locator('.hcell[data-col="Timestamp"]').click(modifiers=["Alt"])
+        page.wait_for_selector('.hcell.pinned[data-col="Timestamp"]')
+        first = page.evaluate("() => __winnow.visibleCols().indexOf('Timestamp')")
+        _select_cells(page, 2, 5, first, first + 2)
+
+        want = _bg(page, "#body .row .cell.cell-selected:not(.pinned)")
+        got = page.evaluate("""() => [...document.querySelectorAll('#body .row')]
+          .filter((r) => { const p = Number(r.dataset.pos); return p >= 2 && p <= 5; })
+          .map((r) => { const c = r.querySelector('.cell.pinned.cell-selected');
+                        return c ? getComputedStyle(c).backgroundColor : null; })""")
+        assert len(got) >= 3, got
+        assert all(g == want for g in got), (want, got)
+    finally:
+        _unpin_all(page)
+
+
+def test_a_selected_pinned_cell_keeps_the_ring_and_its_divider(page):
+    """box-shadow replaces rather than merges, and `.cell.pinned`'s divider
+    outranked `.cell-selected`'s ring — so a pinned cell never showed the
+    outline the rest of the selection wore. Both have to be there: the
+    divider is what separates a pinned column from the ones scrolling
+    under it."""
+    _unpin_all(page)
+    try:
+        page.locator('.hcell[data-col="Timestamp"]').click(modifiers=["Alt"])
+        page.wait_for_selector('.hcell.pinned[data-col="Timestamp"]')
+        first = page.evaluate("() => __winnow.visibleCols().indexOf('Timestamp')")
+        _select_cells(page, 2, 4, first, first + 1)
+
+        ring = page.evaluate(
+            "() => getComputedStyle(document.documentElement).getPropertyValue('--sel-line').trim()")
+        shadow = _shadow(page, "#body .row .cell.pinned.cell-selected")
+        assert "inset" in shadow
+        assert shadow.count("inset") == 2, f"ring and divider, got: {shadow}"
+    finally:
+        _unpin_all(page)
+
+
+def test_the_line_number_says_which_rows_the_rectangle_covers(page):
+    """The gutter is not a cell, so it was the one column a cell range
+    could never mark — and reading down the line numbers told an analyst
+    nothing about what they had selected."""
+    _unpin_all(page)
+    try:
+        _select_cells(page, 3, 6, 0, 1)
+        marked = page.evaluate("""() => [...document.querySelectorAll('#body .row')]
+          .map((r) => [Number(r.dataset.pos),
+                       r.querySelector('.gutter').classList.contains('gutter-in-range')])
+          .filter(([p]) => p >= 1 && p <= 8)""")
+        for pos, inRange in marked:
+            assert inRange == (3 <= pos <= 6), (pos, inRange, marked)
+    finally:
+        page.evaluate("() => { __winnow.clearCellSelection(); __winnow.render(); }")
