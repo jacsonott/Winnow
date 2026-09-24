@@ -902,7 +902,31 @@ section.page-with-panels { flex-direction: row; }
 .row.diff-ab .cell.pinned { background: linear-gradient(90deg, var(--diff-a-bg), var(--diff-b-bg)); }
 .row:hover .cell.pinned { background: var(--row-hover); }
 .row.selected .cell.pinned { background: var(--row-selected); }
-.cell.pinned.cell-selected { background: var(--cell-selected-bg); }
+/* A pinned cell paints its own opaque background to cover the columns
+   sliding under it, and the zebra/hover/row-state rules above are all
+   MORE specific than a bare `.cell.pinned.cell-selected` — so a selected
+   pinned cell showed the stripe instead of the selection on every other
+   row, which is what "the highlight is only on some of them" looks like
+   from the outside. The ring went missing on every row for the same
+   reason one level down: `.cell.pinned`'s divider shadow outranks
+   `.cell-selected`'s ring, and a box-shadow does not merge — it replaces.
+   Both are restored by matching the row (which buys the specificity) and
+   by listing the divider alongside the ring rather than instead of it. */
+.row .cell.pinned.cell-selected {
+  background: var(--cell-selected-bg);
+  box-shadow: inset 0 0 0 1px var(--sel-line), inset -1px 0 0 var(--line);
+}
+/* Declared after, at equal specificity, so the active cell's heavier ring
+   still wins on the one cell that carries both classes. */
+.row .cell.pinned.cell-active {
+  box-shadow: inset 0 0 0 2px var(--accent), inset -1px 0 0 var(--line);
+}
+/* The line number carries the rectangle's vertical extent. Not the cell
+   fill — the gutter is not in the selection, it reports on it — so a
+   dimmer wash, and the row-state rules above it still win on a row that
+   is also picked or hovered. .gutter sets `background: inherit` to stay
+   opaque while it sticks, so this has to name a colour of its own. */
+.row .gutter.gutter-in-range { background: var(--sel); }
 /* Marks an analyst-added derived column, so it's never mistaken for a
    field that came out of the evidence file. Dimmed-but-italic while the
    backfill is still running (or left partial by a cancel). */
@@ -1195,11 +1219,6 @@ section.page-with-panels { flex-direction: row; }
    they are, which a uniform highlight cannot say. Two pixels, because one
    is what an ordinary selected cell already wears. */
 .cell-active { box-shadow: inset 0 0 0 2px var(--accent); }
-/* A pinned cell paints its own background to cover the columns sliding
-   under it, and that rule is more specific than .cell-active — so the
-   ring needs a pinned variant or the active cell goes invisible the
-   moment an analyst arrows into a pinned column. */
-.cell.pinned.cell-active { box-shadow: inset 0 0 0 2px var(--accent); }
 
 /* The tag rail: a map of the whole view, in the strip .grid-body's
    margin-right keeps clear for it. It overlaps nothing, which is what
