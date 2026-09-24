@@ -62,21 +62,29 @@ def test_the_file_picker_filters_and_sorts(page, tmp_path):
     assert page.locator("#modalBody .browse-row .browse-mtime").first.inner_text().startswith("20")
 
     # A sort change re-asks the server (the cap is cut in that order), so
-    # each one is waited for by its first row.
-    def first_is(name):
+    # each one waits for the WHOLE order to land — never for the first row
+    # alone. a_small.csv leads under name-ascending and under
+    # size-ascending both, so "the first row is a_small" was already true
+    # of the list being replaced, and that wait returned without waiting.
+    # It cost a full-suite run on a 2-CPU box, where the server was slow
+    # enough for the assertion under it to read the previous listing, and
+    # the module failed for a reason that had nothing to do with sorting.
+    # The filter below needs no wait for the mirror-image reason: it is
+    # `paint()` over the listing already in hand, not another `load()`.
+    def order_is(*expected):
         page.wait_for_function(
-            "(n) => { const r = document.querySelector('#modalBody .browse-row .session-name'); return r && r.textContent === n; }",
-            arg=name, timeout=10_000)
+            "(want) => [...document.querySelectorAll('#modalBody .browse-row .session-name')]"
+            ".map((n) => n.textContent).join() === want",
+            arg=",".join(expected), timeout=10_000)
+
     page.locator("#modalBody .browse-sort").select_option("size")
-    first_is("a_small.csv")
+    order_is("a_small.csv", "c_old.txt", "b_big.csv")
     assert names() == ["a_small.csv", "c_old.txt", "b_big.csv"]
     page.locator("#modalBody .browse-sort-dir").click()
-    first_is("b_big.csv")
+    order_is("b_big.csv", "c_old.txt", "a_small.csv")
     assert names() == ["b_big.csv", "c_old.txt", "a_small.csv"]
     page.locator("#modalBody .browse-sort").select_option("mtime")
-    page.wait_for_function(
-        "() => [...document.querySelectorAll('#modalBody .browse-row .session-name')].map((n) => n.textContent).join() === 'a_small.csv,b_big.csv,c_old.txt'",
-        timeout=10_000)
+    order_is("a_small.csv", "b_big.csv", "c_old.txt")
     assert names() == ["a_small.csv", "b_big.csv", "c_old.txt"], "newest first, descending"
 
     # A selection survives re-sorting and filtering.
