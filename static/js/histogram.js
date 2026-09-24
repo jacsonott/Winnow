@@ -49,6 +49,13 @@ let seq = 0;            // request counter: only the newest answer lands
 let problem = null;     // a 400's message, shown in place of the chart
 let drawnFor = null;    // the view id the chart on screen describes
 let retries = 0;        // consecutive re-asks after an answer we could not use
+/* Set when the re-ask budget runs out with the chart still describing a
+   view the grid has moved on from. Keeping the old chart up is right —
+   an empty strip mid-filter is worse than a slightly old one — but it
+   has to stop claiming to be current, which is the half of "the
+   histogram isn't updating" that is really "the histogram didn't say it
+   had given up". */
+let stale = false;
 let shown = false;      // what syncHistogramPanel last applied (its onShow edge)
 let ui = null;          // {colSel, info, canvas, hint, empty} once wired
 
@@ -320,6 +327,16 @@ function drawLegend() {
 function draw() {
   if (!ui) return;
   const { canvas, info } = ui;
+  /* The one place the strip says it is working. Every other cue lives in
+     the `!data` branch below, so a chart that was already up repainted
+     the PREVIOUS answer byte-for-byte while a new one was in flight and
+     looked exactly like a chart that had stopped updating — which is
+     what most of "the histogram isn't updating" turns out to be. An
+     attribute on the chrome rather than pixels on the canvas: a canvas
+     does not inherit CSS (see the module header), so anything drawn into
+     it would need a redraw on a timer to animate. */
+  const panel = $('histogramPanel');
+  if (panel) panel.toggleAttribute('aria-busy', inflight > 0);
   if (!S.sourceId) {
     showEmpty('Open a table to chart when its rows happened.');
     info.textContent = '';
@@ -336,7 +353,9 @@ function draw() {
     return;
   }
   if (!data || !data.total) {
-    showEmpty(inflight ? 'Loading…' : 'No rows with a parsable timestamp in this view.');
+    showEmpty(inflight ? 'Loading…'
+      : stale ? 'Could not read the histogram for this view — change a filter to try again.'
+      : 'No rows with a parsable timestamp in this view.');
     info.textContent = data ? '0 rows' : '';
     return;
   }
@@ -417,7 +436,11 @@ function draw() {
   drawLegend();
   const tr = S.timeRange;
   info.textContent = `${data.total.toLocaleString()} rows · ${humanBucket(data.bucket_seconds)} buckets · max ${max.toLocaleString()}`
-    + (tr && tr.enabled && (tr.start || tr.end) ? ' · timeframe on' : '');
+    + (tr && tr.enabled && (tr.start || tr.end) ? ' · timeframe on' : '')
+    // Said plainly rather than left for the analyst to notice: a chart
+    // describing a filter that is no longer on is worse than no chart,
+    // because it is quietly wrong instead of obviously absent.
+    + (stale ? ' · showing the previous filter' : '');
 }
 
 /* Snapping. Ranges should read as clean clock times, which is why the
@@ -505,7 +528,7 @@ async function load() {
   } catch (e) { err = e; }
   inflight = Math.max(0, inflight - 1);
   if (mine !== seq) return;   // a newer request is out; its answer paints
-  if (!err) { data = next; problem = null; drawnFor = v.view_id; }
+  if (!err) { data = next; problem = null; drawnFor = v.view_id; stale = false; }
   // A 409 is the view going mid-rebuild. Anything else — a 400 for a
   // column the table no longer has, or one that is not a datetime — is
   // worth a line of text, and waiting would fix nothing.
@@ -523,6 +546,10 @@ async function load() {
   if (!shown || !S.view || S.view.view_id === drawnFor) return;
   if (S.view.view_id !== v.view_id) { retries = 0; schedule(); }
   else if (retries < RETRY_MAX) { retries += 1; schedule(); }
+  // Out of re-asks with the chart still about an older view. Stop, and
+  // say so — silence here is indistinguishable from a strip that simply
+  // never updates.
+  else { stale = true; draw(); }
 }
 function schedule() { clearTimeout(timer); timer = setTimeout(load, REFRESH_MS); }
 
@@ -536,7 +563,7 @@ export function wireHistogram() {
   // and syncHistogramPanel's show edge fetches then. Keying on the pref
   // alone ran the aggregate twice for a view rebuilt behind the SQL tab —
   // once for a canvas nobody could see, again on the way back.
-  document.addEventListener('winnow:viewchange', () => { if (shown) { retries = 0; schedule(); } });
+  document.addEventListener('winnow:viewchange', () => { if (shown) { retries = 0; stale = false; schedule(); } });
   // Tokens are read at draw time, so a skin/accent change is one redraw.
   document.addEventListener('winnow:appearance', () => { if (shown) draw(); });
   window.addEventListener('resize', () => { if (shown) draw(); });

@@ -634,6 +634,14 @@ section.page-with-panels { flex-direction: row; }
 .histogram-head .th-title { letter-spacing: .08em; text-transform: uppercase; font-size: 10px; }
 .histogram-head select { font-size: 11px; padding: 1px 4px; max-width: 220px; }
 .histogram-head .th-info { margin-left: auto; font-family: var(--mono); }
+/* While a fetch is out and a chart is already up, the strip has nothing
+   else to say it is working: the canvas keeps painting the last answer,
+   and that is deliberate — an empty strip mid-filter is worse than a
+   slightly old one. So the count line breathes instead. Chrome, not
+   canvas pixels: a canvas does not inherit CSS, and animating inside it
+   would need a redraw on a timer. */
+.histogram-panel[aria-busy="true"] .th-info { animation: th-busy 1s var(--ease) infinite; }
+@keyframes th-busy { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
 /* The tag legend: only the layers actually in the chart, each with the
    tag's own colour — the same swatch the ribbon uses, so the two read as
    one palette. Wraps to nothing when the chart is not stacked. */

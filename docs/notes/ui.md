@@ -96,6 +96,23 @@ see [docs/notes/README.md](README.md) for the whole set.
   when they differ, bounded so that a view that is current and keeps
   failing is re-asked a few times rather than polled.
 
+- **And it says both that it is working and that it stopped.** The
+  re-asking above fixed the staleness; what stayed broken was that none
+  of it was visible. `draw()` mentioned loading only in its
+  nothing-to-draw branch, so the first chart said "Loading…" and every
+  one after it repainted the previous answer byte-for-byte while a new
+  request was out — and a chart one filter behind looks exactly like a
+  chart that has stopped, which is how one gets reported as the other.
+  `aria-busy` on the panel drives a breathe on the count line while a
+  fetch is out; deliberately on the CHROME, because a canvas does not
+  inherit CSS and anything drawn into it would need a redraw on a timer
+  to animate. The kill switches at the end of style.css (reduced motion,
+  remote session) already cover it. When the bounded re-asks run out the
+  strip keeps the old chart — an empty strip mid-filter is worse than a
+  slightly old one — and appends "showing the previous filter" to the
+  count line, because a chart that is quietly wrong is worse than one
+  that is obviously absent.
+
 - **The histogram strip** (`static/js/histogram.js`, `GET /api/histogram`
   over `Store.time_histogram`, toggled by `#btnHistogram` or `h`) was the
   `table_histogram` example plugin until 2026-09 and is built in now;
