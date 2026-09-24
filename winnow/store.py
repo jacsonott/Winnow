@@ -4681,7 +4681,52 @@ class Store:
             for t in ("open_tabs", "layouts", "saved_views"):
                 self.db.execute(f"DELETE FROM {t} WHERE source_id=?", (-merge_id,))
 
+    def merges_using(self, source_id: int) -> list[dict]:
+        """The merges this table is a member of, as {id, name}.
+
+        `merges.source_ids` is a JSON array of real source ids, so it is a
+        holder of source ids exactly like row_tags or layouts — but unlike
+        those, drop_source does not clean it, and deliberately: a member
+        that disappears surfaces as a KeyError when the merge is opened
+        rather than as a merge that silently changed shape
+        (_merge_source_dict). That is the right call for a merge whose
+        member went missing; it is the wrong thing to let an analyst DO by
+        accident, which is why the drop is refused instead.
+        """
+        if source_id < 0:
+            return []
+        out = []
+        with self._reader() as ro:
+            for r in ro.execute("SELECT id, name, source_ids FROM merges ORDER BY id"):
+                try:
+                    ids = json.loads(r["source_ids"] or "[]")
+                except (TypeError, ValueError):
+                    continue
+                if source_id in ids:
+                    out.append({"id": r["id"], "name": r["name"]})
+        return out
+
     def drop_source(self, source_id: int) -> None:
+        """Delete a table and every sidecar keyed by its id.
+
+        Refuses a table that a merge is built on. Source ids are REUSED by
+        the next import (see the id reset below), so dropping a member
+        does not merely break that merge — it arms it: the next file
+        imported takes the freed id and silently becomes part of a merge
+        nobody added it to. Deleting the merge first is one click, and it
+        is the only order in which neither outcome is possible.
+
+        The internal callers are all ingest cancels dropping a partial
+        import created seconds earlier, which cannot be a member of
+        anything; if one ever is, refusing is still the right answer.
+        """
+        used_by = self.merges_using(source_id)
+        if used_by:
+            names = ", ".join(f'"{m["name"]}"' for m in used_by)
+            raise ValueError(
+                f"This table is merged into {names}. Delete "
+                + ("that merge" if len(used_by) == 1 else "those merges")
+                + " first — a merge is only a view over its tables, so deleting it keeps them.")
         src = self.get_source(source_id)
         with self.lock, self.db:
             self.db.execute(f"DROP TABLE IF EXISTS {q(src['table_name'])}")
