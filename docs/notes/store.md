@@ -34,6 +34,24 @@ see [docs/notes/README.md](README.md) for the whole set.
   Same materialize-into-`v.`-then-page-by-pos pattern as `build_view`
   (invariant #2) — only one timeline view is ever alive at a time, rebuilt
   (and the old one evicted) on every tag-filter change.
+- **A table a merge is built on cannot be dropped** (`drop_source`, via
+  `merges_using`). `merges.source_ids` is a JSON array of real source
+  ids — a holder of source ids exactly like `row_tags` or `layouts` —
+  and it is the one `drop_source` does NOT clean, deliberately: a member
+  that vanishes surfaces as a `KeyError` when the merge is opened
+  (`_merge_source_dict`) rather than as a merge that silently changed
+  shape. That is the right way to report a missing member and the wrong
+  thing to let anyone do by accident, because **source ids are reused by
+  the next import**. Dropping a member does not merely break the merge,
+  it arms it: the next file imported takes the freed id and becomes part
+  of a merge nobody added it to, and nothing anywhere would say so.
+  So the drop raises `ValueError` naming the merges, `DELETE
+  /api/source/{id}` maps that to **409** (well-formed, and it will
+  succeed once the merge is gone), and deleting the merge first is one
+  click that leaves every table intact. The internal callers are all
+  ingest cancels dropping a partial import created seconds earlier,
+  which cannot be a member of anything.
+
 - **A Timeline row leads with what happened, not with the source row.**
   Beside `body` (still the pipe-joined columns, unchanged) each row
   carries `summary_lead`/`summary_detail` — "Special privileges assigned"

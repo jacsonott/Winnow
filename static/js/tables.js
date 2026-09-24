@@ -7,7 +7,7 @@ import { writeClipboardText } from './grouping.js';
 import { sqlSchemaForLLM } from './plugins.js';
 import { dropViewStateFor, editSourceNickname, loadSources, openTables, sourceGlyph, sourceLabel, sourceTitle, subsetParentLabel, taggedTablesToOpen } from './sources.js';
 import { S } from './state.js';
-import { markModalAction, confirmDialog, modal } from './ui.js';
+import { alertDialog, confirmDialog, markModalAction, modal } from './ui.js';
 import { cancelPendingView } from './view.js';
 
 /* Every source/merge in the case, open or not — the counterpart to the tab
@@ -174,6 +174,23 @@ export function openTablesManager() {
         };
         const del = el('button', 'btn ghost', 'Remove…');
         del.onclick = async () => {
+          /* A table a merge is built on is refused, not warned about. Its
+             id is REUSED by the next import, so dropping it does not just
+             break the merge — the next file imported takes the freed id
+             and silently joins a merge nobody added it to. The server
+             refuses this too (409); asking here as well is so the analyst
+             gets the reason and the merge's name without a round trip,
+             and so the button never looks like it did nothing. */
+          const usedBy = s.is_merge ? []
+            : (S.sources || []).filter((m) => m.is_merge && (m.member_source_ids || []).includes(s.id));
+          if (usedBy.length) {
+            const names = usedBy.map((m) => `"${sourceLabel(m)}"`).join(', ');
+            await alertDialog(
+              `${sourceLabel(s)} is merged into ${names}. Delete `
+              + (usedBy.length === 1 ? 'that merge' : 'those merges')
+              + ' first — a merge is only a view over its tables, so deleting it keeps them.');
+            return;
+          }
           const warn = s.is_merge
             ? `Delete merge "${sourceLabel(s)}"? The tables under it are untouched.`
             : `Remove ${sourceLabel(s)} from this case? Tags and notes for it are deleted too.`;

@@ -2989,7 +2989,12 @@ async def api_ingest_plugin_upload(
 
 @app.delete("/api/source/{source_id}")
 def api_drop_source(source_id: int):
-    store().drop_source(source_id)
+    try:
+        store().drop_source(source_id)
+    except ValueError as e:
+        # 409, not 400: the request is well-formed and will succeed once
+        # the merge above it is gone. The message names which one.
+        raise HTTPException(409, str(e))
     return {"ok": True}
 
 
