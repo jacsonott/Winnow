@@ -353,6 +353,35 @@ html[data-style="studio"][data-theme="light"] {
 }
 .job-action:hover { background: var(--accent); }
 
+/* The panel's Clear all header. Sticky at the top of the scroller, and
+   opaque, because the panel itself has no background — a transparent
+   header would have the finished rows sliding under the button. Shaped
+   like a .job-row so it reads as the top of the stack rather than as
+   floating chrome. */
+.jobs-clear {
+  position: sticky; top: 0; z-index: 1;
+  display: flex; justify-content: space-between; align-items: center;
+  background: var(--panel-2); border: var(--border-w) solid var(--line-2);
+  border-radius: var(--radius-sm); padding: 5px 5px 5px 10px;
+  box-shadow: var(--shadow-tag);
+}
+/* The .job-phase badge's treatment, because it is the same kind of thing:
+   a small dim label saying what the row beside it is. */
+.jobs-clear-count {
+  color: var(--dim); font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
+}
+/* The .job-action look — a plugin notice's buttons already use it inside
+   this panel, so the one control in the panel's chrome reads as a button
+   rather than as another dim label. A ghost treatment was tried first and
+   was the problem: beside ten rows of dim text it disappeared into them. */
+.jobs-clear-btn {
+  background: var(--accent-dim); color: var(--text);
+  border: var(--border-w) solid var(--accent);
+  border-radius: var(--radius-sm); padding: 3px 9px; font: inherit; font-size: 11px;
+  cursor: pointer;
+}
+.jobs-clear-btn:hover { background: var(--accent); }
+
 #app {
   height: 100%;
   display: grid;

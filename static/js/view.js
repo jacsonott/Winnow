@@ -415,6 +415,13 @@ function detachBuild(rec) {
     // once it has landed — never a plain dismiss, which would leave the
     // search polling with nothing on screen to apply or drop it from.
     onDismiss: () => cancelPendingView(rec.sourceId),
+    // ...and the panel's Clear all is not that ✕. A landed search holds a
+    // built view server-side until Apply or Discard, so this is the one
+    // notice in the app that a bulk clear must not answer for. Declared
+    // rather than inferred from the Apply/Discard buttons, because other
+    // notices carry buttons that are shortcuts rather than questions —
+    // see clearFinishedNotices in jobs.js.
+    holdsResult: true,
   });
   S.pendingViews.set(rec.sourceId, rec);
   syncNoRows();   // the search is still running; the old view's empty state is not its answer
@@ -483,7 +490,20 @@ async function followPendingView(rec) {
 function settlePending(rec, status, detail) {
   S.pendingViews.delete(rec.sourceId);
   rec.status = status;
-  if (status === 'error') rec.notice.fail({ detail: detail || 'the search failed' });
+  /* actions: [] because applyNoticeOpts leaves what it is not given, and
+     what this notice was given at create time was a Cancel. That button
+     does NOT go inert when the record leaves S.pendingViews, which is
+     what makes leaving it a bug rather than untidiness: its onClick is
+     cancelPendingView(rec.sourceId), keyed by TABLE and not by record
+     (unlike watchlist.js's cancelScan, which checks `scanJob !== rec`),
+     so clicking Cancel on a row whose search failed ten minutes ago
+     cancels whatever search that table has in flight now. The cancelled
+     branch below already cleared its actions; now both settle paths do.
+
+     The underlying sharp edge — cancelPendingView taking a table rather
+     than a record — is still there for any future caller. No live one is
+     left holding a stale sourceId. */
+  if (status === 'error') rec.notice.fail({ detail: detail || 'the search failed', actions: [] });
   else rec.notice.done({ detail: detail || 'cancelled', sticky: false, actions: [] });
   restoreStats(rec);
 }
