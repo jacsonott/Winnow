@@ -135,6 +135,13 @@ def test_open_all_opens_the_tables_that_were_closed(page, api):
         page.wait_for_function(
             "() => __winnow.S.sources.every((s) => s.is_open || s.error)", timeout=15_000)
         # …and it takes itself away once there is nothing left to open.
+        # Waited for, not read once: the tables open one request at a time
+        # and the sidebar repaints on its own schedule, so the state above
+        # goes true a repaint BEFORE the button leaves the DOM. Reading the
+        # count at that instant caught the old sidebar about a third of the
+        # time — on CI, where it reads as this PR's fault rather than a
+        # race that was always here.
+        header.locator("button", has_text="open all").wait_for(state="detached", timeout=15_000)
         assert header.locator("button", has_text="open all").count() == 0
     finally:
         page.evaluate("(ids) => __winnow.openTables(__winnow.S.sources.filter((s) => ids.includes(s.id)))",
