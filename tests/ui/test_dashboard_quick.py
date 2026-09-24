@@ -441,18 +441,29 @@ def test_a_missing_pick_leaves_no_query_behind(page):
     did = _new_board(page, "Stale")
     try:
         _show(page, did)
+        # A portable table whose header set has no columns to offer.
+        #
+        # Stubbed at the ROUTE, not just in S.headerSets, because
+        # ensureHeaderSets() assigns whatever the fetch returns
+        # unconditionally — so a state stub written after any fetch was
+        # already in flight gets overwritten when that answer lands, and
+        # the regenerate() hanging off it puts real SQL back in the box.
+        # Locally the fetch always landed first and the stub survived; on
+        # a loaded runner it did not, which cost two unrelated PRs a red
+        # check. Stubbing the response makes the answer the same whoever
+        # wins, and the state stub below means the editor need not ask.
+        page.route("**/api/header_sets", lambda route: route.fulfill(
+            status=200, content_type="application/json",
+            body='{"shorthands": {}, "sets": []}'))
+        page.evaluate("() => { __winnow.S.headerSets = { shorthands: {}, sets: [] }; }")
         page.locator("#dashBar button", has_text="Add widget").click()
         page.wait_for_selector("#modal:not([hidden]) .dash-template")
         page.locator("#modal .dash-template").select_option("count")
         assert "COUNT(*)" in page.locator("#modal .dash-sql").input_value()
-        # a portable table whose header set has no columns to offer
-        page.evaluate("() => { __winnow.S.headerSets = { shorthands: {}, sets: [] }; }")
         page.locator("#modal .dash-table").select_option("{{evtx}}")
         page.locator("#modal .dash-template").select_option("top")
-        # regenerate() awaits ensureHeaderSets(), so the box settles a tick
-        # after the change — and the previous selection's regenerate can
-        # still be in flight. Asserting straight away read whichever won,
-        # which passed locally and failed on a slower runner.
+        # regenerate() awaits ensureHeaderSets(), so the box still settles
+        # a tick after the change — that part was always real.
         page.wait_for_function(
             "() => document.querySelector('#modal .dash-sql').value === ''")
         page.locator("#modal .confirm-input").first.fill("Nothing")
@@ -462,6 +473,7 @@ def test_a_missing_pick_leaves_no_query_behind(page):
         assert _widgets(page, did) == []
         page.keyboard.press("Escape")
     finally:
+        page.unroute("**/api/header_sets")
         page.evaluate("() => { __winnow.S.headerSets = null; }")
         _delete_board(page, did)
 
