@@ -273,7 +273,12 @@ see [docs/notes/README.md](README.md) for the whole set.
   first so the toolbar's Undo can take it back. Shift+click on a *cell*
   is the cell rectangle and nothing else — it used to also pick rows,
   which is why Ctrl+C and a tag key disagreed about "the selection";
-  `Shift+Space` turns a range into picks, `Space` toggles the cursor row,
+  `Space` toggles the rows the cell selection covers — all of a multi-row
+  rectangle at once, all-or-nothing, leaving the rectangle up so a second
+  press lets the whole block go (the block, not just the rows that press
+  added — a pick the rectangle covers goes with it, and the toolbar's Undo
+  is what brings it back) — while `Shift+Space` only adds and spends the
+  rectangle doing it,
   and with nothing picked a multi-row cell range is the scope of a tag
   key and the row menu alike (`rowMenuTargets`), and the toolbar says so.
   One anchor (`S.anchor`) serves the gutter, the cells and the keyboard.
