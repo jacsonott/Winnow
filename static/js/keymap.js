@@ -106,8 +106,7 @@ export const DEFAULT_KEYMAP = {
 export const ACTION_LABELS = {
   moveDown: 'Move the cell cursor down', moveUp: 'Move the cell cursor up',
   moveLeft: 'Move the cell cursor left', moveRight: 'Move the cell cursor right',
-  jumpEdgeUp: 'Jump to the first row, keeping the column',
-  jumpEdgeDown: 'Jump to the last row, keeping the column',
+  jumpEdgeUp: 'Jump to the first row', jumpEdgeDown: 'Jump to the last row',
   jumpEdgeLeft: 'Jump to the first column', jumpEdgeRight: 'Jump to the last column',
   pageDown: 'Page down', pageUp: 'Page up',
   jumpFirst: 'Jump to first row', jumpLast: 'Jump to last row',
@@ -372,8 +371,15 @@ export const ACTION_HANDLERS = {
   jumpEdgeRight: (e) => moveCell({ dc: 1, edge: true, extend: e.shiftKey }),
   pageDown: (e, pageRows) => moveCell({ dr: 1, rows: pageRows, extend: e.shiftKey }),
   pageUp: (e, pageRows) => moveCell({ dr: -1, rows: pageRows, extend: e.shiftKey }),
-  jumpFirst: (e) => moveCell({ dr: -1, edge: true, extend: e.shiftKey }),
-  jumpLast: (e) => moveCell({ dr: 1, edge: true, extend: e.shiftKey }),
+  /* No e.shiftKey here, unlike every handler above: these two are bound
+     to PRINTABLE keys, and keySpecFromEvent never prefixes Shift for one
+     — 'G' IS Shift+g. Reading e.shiftKey therefore made jumpLast extend
+     ALWAYS and never jump, selecting from the cursor to the last row of
+     the view; a tag hotkey pressed after it would have hit every row in
+     between. Ctrl+Shift+ArrowDown is the extending form, and it can read
+     the modifier because its binding is a non-printable key. */
+  jumpFirst: () => moveCell({ dr: -1, edge: true }),
+  jumpLast: () => moveCell({ dr: 1, edge: true }),
   focusSearch: () => expandSearch(),
   // "Let me type a filter" — which under the filter bar means revealing a
   // box before there is one to focus. It goes through openColumnFilter, the

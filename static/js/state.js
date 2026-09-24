@@ -69,6 +69,10 @@ export const S = {
                          //   a list that hiding or reordering a column rewrites — see
                          //   renderHead, which puts the cell back by name or not at all
   cellRange: null,       // {r0, c0, r1, c1} normalized — separate from row S.selection
+  cellRangeExplicit: false, // did the analyst ASK for this rectangle (a click, a drag,
+                         //   a Shift+Arrow) or is it just where the cell cursor is
+                         //   standing after a plain arrow? Only copy cares — see
+                         //   handleCopyShortcut
   importQueue: [],       // [{file, kind: 'csv'|'json', configured, ...kind-specific settings}] — Import modal's file queue
   groupByCols: [],         // ordered column names — [] for normal flat mode, nested grouping otherwise
   groupSort: 'count',      // 'count' | 'value' — how each level's groups are ordered
@@ -173,29 +177,16 @@ export const selRemove = (pos) => { S.selectAll ? S.selection.add(pos) : S.selec
 export const selToggle = (pos) => { selHas(pos) ? selRemove(pos) : selAdd(pos); };
 
 /* Replace the selection wholesale. The one door for it, so the version
-   bump and the end of any keyboard run happen every time. */
+   bump happens every time. */
 export function selReplace(selectAll, selection) {
   S.selectAll = selectAll;
   S.selection = selection;
   S.selVersion++;
-  kbBase = null;
 }
 
 export function selClear() { selReplace(false, new Set()); }
 
 export function selSetAll() { selReplace(true, new Set()); }
-
-/* The keyboard's Shift+Arrow run: what was picked BEFORE the run started,
-   kept so the run can shrink back without eating earlier picks. Lives here
-   so every sanctioned replacement of the selection (clear, select-all, an
-   undo, a rebuild's remap, a table switch) ends the run — a stale base
-   used to survive all of those and restore rows nobody had picked. */
-let kbBase = null;
-export function startKeyboardRun() {
-  if (!kbBase) { selSnapshot(); kbBase = { selectAll: S.selectAll, selection: new Set(S.selection) }; }
-  return kbBase;
-}
-export function endKeyboardRun() { kbBase = null; }
 
 /* Every selection GESTURE snapshots first, so the chip's Undo (and a
    stray Escape) can be taken back. Bounded; the newest wins. Stamped with
@@ -255,13 +246,6 @@ export function cellRangeRowCount() {
   return cellRangeRows().length;
 }
 
-/* A range of exactly one cell is where the analyst IS, not something they
-   chose — see handleCopyShortcut, which lets picked rows win over it. */
-export function cellRangeIsSingle() {
-  const r = S.cellRange;
-  return !!r && r.r0 === r.r1 && r.c0 === r.c1;
-}
-
 /* The three cell fields go together, always: a rectangle with no corners
    is unpaintable and an active cell with no rectangle is a highlight
    nothing can copy. Eleven places drop the cell selection — a rebuild, a
@@ -272,6 +256,7 @@ export function clearCellSelection() {
   S.cellRange = null;
   S.cellAnchor = null;
   S.cellFocus = null;
+  S.cellRangeExplicit = false;
 }
 
 /* Contiguous runs among the picked rows — the chip's "N ranges". Memoised

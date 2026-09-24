@@ -328,10 +328,16 @@ export function openFilterColumnPicker(anchorEl) {
 export function renderHead() {
   /* The RECTANGLE goes: c0/c1 are indices into visibleCols(), and this
      runs precisely when that list changes — a hide, a reorder, a pin, a
-     resize. The ACTIVE CELL is carried across by column NAME instead,
-     because this also runs on a filter edit and a sort, and a keyboard
-     cursor that vanished every time the analyst typed in a filter box
-     would not be a cursor. If its column is gone, so is it. */
+     resize, revealing a filter box. The ACTIVE CELL is carried across by
+     column NAME instead, so those repaints do not cost the analyst their
+     place. If its column is gone, so is it.
+
+     The boundary worth knowing: this rescues repaints only. A filter edit
+     or a sort REBUILDS, and rebuildView clears the cell selection
+     outright — correctly, because after a re-sort "row 4" is a different
+     row and a cursor left sitting on it would be pointing at evidence the
+     analyst never chose. Row picks survive a rebuild because they are
+     remapped by rid; a cell cursor has no such identity. */
   const keep = S.cellFocus ? { pos: S.cellFocus.pos, name: S.cellFocus.name } : null;
   clearCellSelection();
   renderGroupStrip();

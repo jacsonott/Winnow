@@ -1096,7 +1096,7 @@ export function sqlResultNodes(r) {
             await openSource(sid);
             try {
               const res = await api(`/api/row_position?view_id=${S.view.view_id}&source_id=${sid}&rid=${rid}`);
-              if (res.pos != null) moveCursor(res.pos, false);
+              if (res.pos != null) moveCursor(res.pos);
             } catch { /* the row may be filtered out of the default view */ }
           };
         }

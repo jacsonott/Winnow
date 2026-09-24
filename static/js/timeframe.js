@@ -93,7 +93,7 @@ export async function doJumpTs() {
     ? S.jumpTs.column : null;
   try {
     const res = await post('/api/view/find_ts', { view_id: S.view.view_id, value: S.jumpTs.value, column: col });
-    moveCursor(res.pos, false);
+    moveCursor(res.pos);
     toast(`Jumped to ${res.ts} (row ${(res.pos + 1).toLocaleString()})`);
   } catch (e) {
     toast((e.status === 404 ? e.message : 'Could not jump: ' + e.message), 4000);

@@ -298,18 +298,39 @@ def test_a_rectangle_still_wins_the_copy(page):
 
 # ------------------------------------------------------- staying alive
 
-def test_the_active_cell_survives_a_filter_edit(page):
+def test_the_active_cell_survives_a_column_resize(page):
     """renderHead() drops the rectangle because column indices stop
-    meaning anything, and it runs on every filter keystroke. The cell is
-    carried across by column name."""
+    meaning anything against a list it is about to rewrite. The active
+    cell is carried across by column NAME, so the repaints that do not
+    rebuild — a resize, a pin, a reorder, revealing a filter box — do not
+    cost the analyst their place."""
     cols = _cols(page)
     name = "Host" if "Host" in cols else cols[1]
     ci = cols.index(name)
     _click_cell(page, 4, name)
-    page.evaluate("() => __winnow.renderHead()")
+    page.evaluate("""(n) => {
+      __winnow.S.layout[n] = { ...(__winnow.S.layout[n] || {}), w: 220 };
+      __winnow.renderHead(); __winnow.render();
+    }""", cols[0])
     page.wait_for_timeout(150)
     assert _focus(page) == {"pos": 4, "col": ci}
     assert page.locator("#body .cell-active").count() == 1
+
+
+def test_a_rebuild_takes_the_cell_cursor_with_it(page):
+    """The other side of that boundary, and it is deliberate: after a sort
+    or a filter, "row 4" is a different row, so a cursor left sitting on
+    it would point at evidence the analyst never chose. Row picks survive
+    a rebuild because they are re-found by rid; a cell cursor has no such
+    identity."""
+    cols = _cols(page)
+    name = "Host" if "Host" in cols else cols[1]
+    _click_cell(page, 4, name)
+    assert _focus(page) is not None
+    page.locator(f'.fcell input[data-col="{name}"]').fill("=H0")
+    page.wait_for_function("() => __winnow.S.view && __winnow.S.view.row_count < 200", timeout=15_000)
+    assert _focus(page) is None
+    assert page.locator("#body .cell-active").count() == 0
 
 
 def test_a_hidden_column_takes_the_active_cell_with_it(page):
@@ -358,10 +379,20 @@ def test_arrows_step_over_group_headings(page):
     try:
         # Open the first group so there are data rows to walk between the
         # headings; a collapsed board is all headings and nothing else.
-        page.wait_for_function("() => __winnow.S.groups.length > 0", timeout=10_000)
+        page.wait_for_function("() => __winnow.S.groups.length > 1", timeout=10_000)
         headings = page.evaluate("() => __winnow.S.groups.length")
-        page.evaluate("() => __winnow.toggleGroup(0)")
+        # TWO groups, so there is a heading BETWEEN two data rows. With only
+        # one open, everything below its last row is heading all the way to
+        # the end and the arrow correctly refuses to move — which exercises
+        # the clamp, not the skip this test is about.
+        page.evaluate("async () => { await __winnow.toggleGroup(0); }")
         page.wait_for_function("(n) => __winnow.gridRowCount() > n", arg=headings, timeout=10_000)
+        opened = page.evaluate("() => __winnow.gridRowCount()")
+        page.evaluate("""async () => {
+          const gi = __winnow.S.groups.findIndex((g, i) => i > 0);
+          await __winnow.toggleGroup(gi);
+        }""")
+        page.wait_for_function("(n) => __winnow.gridRowCount() > n", arg=opened, timeout=10_000)
 
         # Position 0 is the first group's heading. Starting the cursor
         # there is the case that matters: the first arrow has to find a row.
@@ -373,6 +404,25 @@ def test_arrows_step_over_group_headings(page):
             pos = _focus(page)["pos"]
             assert page.evaluate("(p) => !!__winnow.groupCoordAt(p)", pos), pos
             page.keyboard.press("ArrowDown")
+
+        # The step that matters: from the LAST row of the expanded group,
+        # where the next position is the following group's heading. Walking
+        # inside one group never exercises the skip at all — the positions
+        # there are contiguous rows.
+        last_row = page.evaluate("""() => {
+          const n = __winnow.gridRowCount();
+          for (let p = 0; p < n - 1; p++) {
+            if (__winnow.groupCoordAt(p) && !__winnow.groupCoordAt(p + 1)) return p;
+          }
+          return null;
+        }""")
+        assert last_row is not None, "expected a heading somewhere below the expanded group"
+        page.evaluate("(p) => { __winnow.clearCellSelection(); __winnow.S.cursor = p; }", last_row)
+        page.keyboard.press("ArrowDown")
+        landed = _focus(page)["pos"]
+        assert landed > last_row + 1, (last_row, landed)          # it stepped OVER something
+        assert page.evaluate("(p) => !!__winnow.groupCoordAt(p)", landed)
+
         # And the far edge is a row too, not the last heading.
         page.keyboard.press("Control+ArrowDown")
         assert page.evaluate("(p) => !!__winnow.groupCoordAt(p)", _focus(page)["pos"])
@@ -417,3 +467,76 @@ def test_the_mac_chord_reaches_the_same_jump(page):
     page.keyboard.press("Meta+Shift+ArrowUp")
     r = _range(page)
     assert (r["r0"], r["r1"]) == (0, total - 1), "⌘+Shift extends, like Ctrl+Shift"
+
+
+# ------------------------------------------- regressions found in review
+
+def test_the_letter_jumps_jump_rather_than_extend(page):
+    """`G` IS Shift+g — keySpecFromEvent never prefixes Shift on a
+    printable key. A handler that reads e.shiftKey on a letter binding
+    therefore always extends and never jumps, which turned "go to the last
+    row" into "select every row from here to the end" — and the tag hotkey
+    pressed next would have hit all of them."""
+    total = page.evaluate("() => __winnow.S.view.row_count")
+    cols = _cols(page)
+    _click_cell(page, 3, cols[0])
+    # "Shift+G", which is what a real Shift+g delivers: e.key 'G' AND
+    # shiftKey true. The other two spellings each miss half of it —
+    # press("G") sends the character with no modifier (and went green
+    # against this bug), press("Shift+g") sends 'g' with the modifier and
+    # lands on jumpFirst instead.
+    page.keyboard.press("Shift+G")
+    r = _range(page)
+    assert _focus(page)["pos"] == total - 1
+    assert (r["r0"], r["r1"]) == (total - 1, total - 1), "G selected a span, it should jump"
+    assert page.locator("#tagToolbar").is_hidden()
+
+    page.keyboard.press("g")
+    r = _range(page)
+    assert _focus(page)["pos"] == 0
+    assert (r["r0"], r["r1"]) == (0, 0)
+
+
+def test_a_jump_that_is_not_an_arrow_takes_the_cell_cursor_with_it(page):
+    """Everything that moves the row cursor without an arrow key — the
+    row-open chevron, jump-to-timestamp, a watchlist hit, a right-click on
+    a far row — used to leave the active cell where it was. The next
+    ArrowDown then read that stale cell and teleported the viewport back
+    to it, taking the detail pane and the tag keys along."""
+    cols = _cols(page)
+    _click_cell(page, 3, cols[1])
+    page.evaluate("() => __winnow.moveCursor(120, false)")
+    page.wait_for_timeout(200)
+    assert _focus(page)["pos"] == 120, "the cell cursor stayed behind"
+    page.keyboard.press("ArrowDown")
+    assert _focus(page)["pos"] == 121
+    assert page.evaluate("() => __winnow.S.cursor") == 121
+
+
+def test_a_right_click_puts_the_cell_cursor_where_the_menu_is(page):
+    cols = _cols(page)
+    _click_cell(page, 2, cols[0])
+    page.locator("#body .row").nth(6).locator(".cell").nth(1).click(button="right")
+    page.locator(".menu").wait_for(state="visible")
+    try:
+        assert _focus(page) == {"pos": 6, "col": 1}
+    finally:
+        page.keyboard.press("Escape")
+        page.wait_for_selector(".menu", state="detached")
+
+
+def test_clicking_one_cell_still_beats_rows_picked_earlier(page):
+    """The copy rule is about being ASKED for, not about size. Clicking a
+    single cell to copy it is a real gesture, and inferring intent from
+    the rectangle's size instead broke it whenever rows happened to be
+    picked."""
+    cols = _cols(page)
+    page.locator("#body .row").nth(1).locator(".gutter").click()
+    page.locator("#body .row").nth(2).locator(".gutter").click()
+    assert page.evaluate("() => __winnow.selCount()") == 2
+    _click_cell(page, 5, cols[1])
+    page.keyboard.press("Control+c")
+    page.wait_for_timeout(400)
+    clip = page.evaluate("() => navigator.clipboard.readText()")
+    assert len(clip.strip().splitlines()) == 1, clip
+    assert "\t" not in clip, clip

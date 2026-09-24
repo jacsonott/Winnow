@@ -292,18 +292,27 @@ see [docs/notes/README.md](README.md) for the whole set.
   column rewrites — so `renderHead` drops the rectangle (its far corner
   may be in a column that just left) and puts the active cell back by
   name, or not at all. Restoring by index instead moved the ring onto
-  whichever column slid into that slot, which is worse than losing it:
-  `renderHead` also runs on every filter keystroke and every sort, so this
-  is the difference between a cursor and a cursor-shaped flicker.
-- **A one-cell range loses Ctrl+C to picked rows** (`handleCopyShortcut`).
-  The rule was always "an explicit rectangle wins", and before the arrow
-  keys moved the cell cursor, `if (S.cellRange)` said exactly that — only
-  a mouse gesture could make a range, so its existence WAS the intent.
-  Now every arrow press leaves a one-cell range behind, and without the
-  extra clause an analyst who picked forty rows in the gutter and pressed
-  Down to read the next one would find Ctrl+C had quietly become "copy one
-  cell". A rectangle still wins, because dragging or Shift+Arrowing one out
-  is still a choice.
+  whichever column slid into that slot, which is worse than losing it.
+  This covers repaints only — a resize, a pin, a reorder, a hide,
+  revealing a filter box. A filter edit or a sort REBUILDS, and
+  `rebuildView` drops the cell selection outright: after a re-sort "row 4"
+  is a different row, so a cursor left on it would point at evidence the
+  analyst never chose. Row picks survive a rebuild because `selRemap`
+  re-finds them by rid; a cell cursor has no such identity.
+- **`S.cellRangeExplicit` is the word "explicit" from the copy rule,
+  written down.** `handleCopyShortcut` always preferred *an explicit
+  rectangle* to picked rows, and before the arrow keys moved the cell
+  cursor `if (S.cellRange)` said exactly that — only a mouse gesture could
+  make a range, so its existence WAS the intent. A plain arrow now leaves
+  a one-cell range wherever the cursor stops, so the flag distinguishes
+  asking from standing: a click, a drag, a right-click and a Shift+Arrow
+  set it; a plain arrow and a jump through `moveCursor` clear it. Without
+  it, an analyst who picked forty rows in the gutter and pressed Down to
+  read the next one found Ctrl+C had become "copy one cell". Inferring it
+  from SIZE instead (a one-cell range is never explicit) was the first
+  attempt and it was wrong in the other direction: clicking a single cell
+  to copy it is a real gesture, and it stopped working whenever rows
+  happened to be picked.
 - **Arrow keys step over group headings.** A heading owns a position but
   has no cells (one spanning element), so an active cell on one is a ring
   on nothing, and `cellRangeRows` skips headings anyway — a range that

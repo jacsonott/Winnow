@@ -7,7 +7,7 @@ import { displayValue, ellipsize, filterByValue } from './filters.js';
 import { buildDataRow, ensurePage, headH, moveCursor, render, renderTagToolbar, rowAt, rowPaintContext, rowsPaintY, schedulePrefetch, setCellRange, spacerPx, syncRowsTop, syncRowsWidth, titleClippedCells, vScroll } from './grid.js';
 import { armOpCancel, opToken } from './jobs.js';
 import { openRowContextMenu } from './rowmenu.js';
-import { S, cellInRange, cellRangeIsSingle, cellRangeRows, clearCellSelection, selClear, selCount, selHas, selPositions, selRemap, selSetRange, selSnapshot } from './state.js';
+import { S, cellInRange, cellRangeRows, clearCellSelection, selClear, selCount, selHas, selPositions, selRemap, selSetRange, selSnapshot } from './state.js';
 import { BULK_TAG_CONFIRM_AT, clearRowCaches, refreshTagCounts, refreshUndoState, renderTagRibbon } from './tags.js';
 import { confirmDialog, contextMenu, dropdownMenu } from './ui.js';
 import { displayCell } from './tsformat.js';
@@ -1034,17 +1034,19 @@ export async function copyRowsAsText(positions, withHeaders) {
    row, then copy" (via checkbox or a plain click) copies the whole row
    rather than nothing or a stray cell.
 
-   "Explicit" is the whole rule, and it is why a ONE-cell range loses to
-   picked rows. Before the arrow keys moved the cell cursor, a cell range
-   could only come from a mouse gesture, so its mere existence WAS the
-   analyst's intent and `if (S.cellRange)` said so correctly. Now every
-   arrow press leaves a one-cell range behind, and without this an analyst
-   who picked forty rows in the gutter and then pressed Down to read the
-   next one would find Ctrl+C had quietly become "copy one cell". A
-   rectangle still wins, because dragging one out is still a choice. */
+   "Explicit" is the whole rule, and S.cellRangeExplicit is it written
+   down. Before the arrow keys moved the cell cursor, a cell range could
+   only come from a mouse gesture, so its mere existence WAS the analyst's
+   intent and `if (S.cellRange)` said so correctly. Now a plain arrow
+   leaves a one-cell range behind wherever the cursor stops, so without
+   this an analyst who picked forty rows in the gutter and then pressed
+   Down to read the next one would find Ctrl+C had quietly become "copy
+   one cell". A click, a drag and a Shift+Arrow all still win, including
+   on a single cell — clicking one cell to copy it is a real gesture and
+   asking for it is what makes it explicit, not how big it is. */
 export async function handleCopyShortcut(withHeaders) {
   const picked = selCount();
-  if (S.cellRange && !(cellRangeIsSingle() && picked)) { await copySelectedCells(withHeaders); return; }
+  if (S.cellRange && (S.cellRangeExplicit || !picked)) { await copySelectedCells(withHeaders); return; }
   const count = picked;
   // Checked before materializing: selPositions() on a select-all would
   // allocate an array of every position in the view just to have it
@@ -1141,9 +1143,11 @@ $('body').addEventListener('contextmenu', (e) => {
     // right-click INSIDE an existing range keeps the range: the menu's
     // scope is the rows it spans (rowMenuTargets), same as a tag key's.
     S.cellAnchor = { pos, col: colIndex };
+    S.cellFocus = { pos, col: colIndex, name: colName };
     setCellRange(S.cellAnchor, S.cellAnchor);
+    S.cellRangeExplicit = true;   // a right-click on a cell is asking for that cell
   }
-  if (!inSelection) moveCursor(pos, false); // renders
+  if (!inSelection) moveCursor(pos); // renders
   else render();
   const r = rowAt(pos);
   const value = r && colName ? r.cells[S.columns.findIndex((c) => c.name === colName)] : null;

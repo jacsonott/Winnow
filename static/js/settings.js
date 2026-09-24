@@ -936,9 +936,9 @@ export function openSettings() {
 
     const fixedKeys = el('div', 'kv');
     fixedKeys.style.marginTop = '10px';
-    fixedKeys.append(el('kbd', null, 'Shift + move keys'),
+    fixedKeys.append(el('kbd', null, 'Shift + arrow'),
       el('span', null, 'Grow the cell selection, the way dragging does'));
-    fixedKeys.append(el('kbd', null, 'Ctrl + Shift + arrow'),
+    fixedKeys.append(el('kbd', null, 'Ctrl/\u2318 + Shift + arrow'),
       el('span', null, 'Grow it all the way to the first/last row or column'));
     fixedKeys.append(el('kbd', null, 'Shift + Space'),
       el('span', null, 'Turn the cell selection into picked rows, for tagging'));

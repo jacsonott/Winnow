@@ -334,8 +334,12 @@ const isTextField = (n) => !!n && (/^(INPUT|TEXTAREA|SELECT)$/.test(n.tagName) |
    it. The arrows walk the menu the focus is in; Right opens a flyout and
    Left closes it, the way native menus do. From outside the menu (focus
    on the body, or on the button that opened it) Down and Up step in at
-   the first or last item and nothing else is claimed: a caret in a text
-   field keeps its arrows, and a menu only owns keys for a focus it owns. */
+   the first or last item, and Left/Right are swallowed without doing
+   anything — not because the menu has a use for them, but because the
+   grid does: they move the cell cursor now, and a menu the analyst opened
+   answering an arrow key by scrolling the table underneath itself is not
+   an answer. A caret in a text field still keeps its arrows, which is the
+   one case where the focus genuinely is not the menu's. */
 export function onMenuKeydown(e) {
   if (!openMenuEl) return;
   if (e.key === 'Escape') {

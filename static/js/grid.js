@@ -5,7 +5,7 @@ import { applyPin, colWidth, pinnedOffsets, visibleCols } from './columns.js';
 import { $, GUTTER_W, MAX_SPACER_PX, OVERSCAN, PAGE, ROW_H, api, el } from './core.js';
 import { maybeShowDetail, showDetail } from './detail.js';
 import { ensureGroupPage, findGroupAt, groupCoordAt, groupDataRowAt, isLeafLevel, renderGrouped, toggleGroup } from './grouping.js';
-import { S, cellInRange, cellRangeRowCount, cellRangeRows, clearCellSelection, endKeyboardRun, gridRowCount, selAdd, selClear, selCount, selHas, selRangeApply, selRanges, selRemove, selReplace, selSnapshot, selToggle, selUndoAvailable, selUndoLast, startKeyboardRun } from './state.js';
+import { S, cellInRange, cellRangeRowCount, cellRangeRows, clearCellSelection, gridRowCount, selAdd, selClear, selCount, selHas, selRangeApply, selRanges, selRemove, selReplace, selSnapshot, selToggle, selUndoAvailable, selUndoLast } from './state.js';
 import { applyTag } from './tags.js';
 import { displayCell } from './tsformat.js';
 import { rebuildInFlight, rebuildView } from './view.js';
@@ -594,29 +594,43 @@ export function highlight(node, text, needle) {
 
 /* ------------------------------------------------------------- movement */
 
-/* Shift+Arrow extends a run from the anchor; what was picked BEFORE the
-   run started is kept underneath it (state.js keyboardRunBase), so the
-   run can shrink back without eating earlier picks and the picks survive
-   the arrow keys. */
-export function moveCursor(to, extend) {
+/* Moves the ROW cursor. The arrow keys no longer come through here —
+   they drive the cell cursor (moveCell), and Shift+Arrow grows the cell
+   rectangle rather than a run of row picks. What still calls this is
+   every jump that is not an arrow: a cell click, the row-open chevron,
+   jump-to-timestamp, opening a watchlist hit, the right-click path.
+
+   It took an `extend` flag while the arrow keys drove it, for the
+   Shift+Arrow run that grew the row picks. Nothing produces that gesture
+   any more — every remaining caller passes a plain move — so the flag and
+   its run machinery are gone from here rather than left as a branch the
+   next reader would assume something reaches. The gutter's shift-click
+   calls selRangeApply directly and is untouched. */
+export function moveCursor(to) {
   const total = gridRowCount();
   if (!S.view || !total) return;
   to = Math.max(0, Math.min(total - 1, to));
-  if (extend) {
-    // A cleared anchor (a rebuild, a table switch) is a new run.
-    if (S.anchor < 0) { endKeyboardRun(); S.anchor = S.cursor < 0 ? to : S.cursor; }
-    const base = startKeyboardRun();
-    S.selectAll = base.selectAll;
-    S.selection = new Set(base.selection);
-    S.selVersion++;
-    selRangeApply(S.anchor, to, true);
-  } else {
-    // A plain move keeps the picks: moving the cursor is looking, not
-    // choosing. The picks go with Escape, the chip, or a new pick.
-    S.anchor = to;
-    endKeyboardRun();
-  }
+  // Moving the cursor is looking, not choosing: the picks stay. They go
+  // with Escape, the chip, or a new pick.
+  S.anchor = to;
   S.cursor = to;
+  /* Carry the cell cursor to the row the row cursor just moved to. Every
+     jump that is not an arrow key comes through here — the row-open
+     chevron, jump-to-timestamp, opening a watchlist hit, the right-click
+     path — and each of them used to leave S.cellFocus on whatever row was
+     last arrowed to. The next ArrowDown then read that stale focus and
+     teleported the viewport back to it, taking the detail pane and the
+     tag keys along; with Shift held it selected everything in between.
+     The column is kept and the rectangle collapses, which is what a plain
+     move means everywhere else in this feature. Deliberately NOT a
+     clearCellSelection(): the cell click path sets the selection and THEN
+     calls this, so clearing would wipe the click's own work. */
+  if (S.cellFocus && S.cellFocus.pos !== to) {
+    S.cellFocus = { ...S.cellFocus, pos: to };
+    S.cellAnchor = { pos: to, col: S.cellFocus.col };
+    setCellRange(S.cellAnchor, S.cellFocus);
+    S.cellRangeExplicit = false;   // the jump moved the cursor, it did not choose a cell
+  }
   scrollIntoView(to);
   render();
   maybeShowDetail(to);
@@ -680,10 +694,9 @@ export function activateRow(pos, e) {
     // still means rows on the cell surface. Shift means the cell range.
     selSnapshot();
     selToggle(pos);
-    endKeyboardRun();
     S.anchor = pos;
     S.cursor = pos; render(); maybeShowDetail(pos);
-  } else moveCursor(pos, false);
+  } else moveCursor(pos);
 
   if (isDoubleActivate) showDetail(pos);
 }
@@ -705,7 +718,7 @@ export function setCellRange(a, b) {
    pick "what to copy," and they should stay mutually exclusive rather than
    one silently shadowing the other: clicking a cell commits a (possibly
    1-cell) range immediately AND clears row selection (via activateRow's
-   plain-click -> moveCursor(pos, false) path, which already clears
+   plain-click -> moveCursor(pos) path, which already clears
    S.selection); checking a checkbox clears any active cell range instead.
    Whichever the user touched most recently is what Ctrl+C acts on.
 
@@ -821,6 +834,10 @@ export function moveCell({ dr = 0, dc = 0, extend = false, edge = false, rows = 
   S.cellFocus = { pos, col, name: cols[col] };
   if (!extend) S.cellAnchor = { pos, col };
   setCellRange(S.cellAnchor, S.cellFocus);
+  // Shift asked for a rectangle; a plain arrow only moved the cursor and
+  // left a one-cell range where it stopped. Copy is the one consumer that
+  // needs to tell those apart — see handleCopyShortcut.
+  S.cellRangeExplicit = extend;
   /* The row cursor follows the active cell: the detail pane, the note
      box, the tag keys and the row menu all read S.cursor, and a cell
      highlight on one row while those act on another is the bug this
@@ -828,7 +845,7 @@ export function moveCell({ dr = 0, dc = 0, extend = false, edge = false, rows = 
      shift-click in the gutter extends from where the keyboard left off,
      exactly as it did when the arrows drove the row cursor directly. */
   S.cursor = pos;
-  if (!extend) { S.anchor = pos; endKeyboardRun(); }
+  if (!extend) S.anchor = pos;
   scrollIntoView(pos);
   scrollColIntoView(col);
   render();
@@ -845,7 +862,6 @@ export function toggleCursorRow() {
   if (!S.view || S.cursor < 0) return;
   if (S.groupByCols.length && !groupCoordAt(S.cursor)) return;
   selSnapshot();
-  endKeyboardRun();
   selToggle(S.cursor);
   S.anchor = S.cursor;
   render();
@@ -853,7 +869,6 @@ export function toggleCursorRow() {
 export function selectCellRangeRows() {
   if (!S.cellRange) return false;
   selSnapshot();
-  endKeyboardRun();
   selRangeApply(S.cellRange.r0, S.cellRange.r1, true);
   S.anchor = S.cellRange.r0;
   clearCellSelection();
@@ -983,14 +998,13 @@ $('body').addEventListener('mousedown', (e) => {
   // current is how "Copy row" would copy a row nobody was looking at.
   if (e.target.closest('.row-open')) {
     e.preventDefault();
-    moveCursor(pos, false);
+    moveCursor(pos);
     showDetail(pos);
     $('body').focus();   // as every other gutter gesture does: the arrow keys keep working
     return;
   }
   e.preventDefault();   // no native text-drag off the digits, no native checkbox toggle
   selSnapshot();
-  endKeyboardRun();
   if (e.shiftKey && S.anchor >= 0) {
     selRangeApply(S.anchor, pos, !(e.ctrlKey || e.metaKey));
   } else {
@@ -1057,12 +1071,14 @@ $('body').addEventListener('mousedown', (e) => {
     // Shift+Space turns it into row picks.
     S.cellFocus = { pos, col, name: visibleCols()[col] };
     setCellRange(S.cellAnchor, S.cellFocus);
+    S.cellRangeExplicit = true;
     S.cursor = pos;
     render();
   } else {
     S.cellAnchor = { pos, col };
     S.cellFocus = { pos, col, name: visibleCols()[col] };
     setCellRange(S.cellAnchor, S.cellAnchor); // commit immediately so a plain click alone selects that one cell
+    S.cellRangeExplicit = true;               // clicking a cell IS asking for it
     cellDragging = true;
     activateRow(pos, e); // renders once, atomically, with the cell range above
   }
@@ -1078,6 +1094,7 @@ $('body').addEventListener('mousemove', (e) => {
   const col = Number(cell.dataset.col);
   S.cellFocus = { pos, col, name: visibleCols()[col] };
   setCellRange(S.cellAnchor, S.cellFocus);
+  S.cellRangeExplicit = true;
   if (cellDragRaf) return;
   cellDragRaf = requestAnimationFrame(() => { render(); cellDragRaf = null; });
 });
