@@ -358,6 +358,13 @@ export function renderJobsPanel() {
   if (!panel) return;
   panel.replaceChildren();
   let count = 0;
+  /* The Clear all header goes first so it is the top of the scroller and
+     can stick there — twenty finished rows overflow the panel's 50vh, and
+     a button that scrolled away with them would be exactly as much work
+     as the ✕s it replaces. It is never the only thing in the panel:
+     anything it can clear is a row below it, so `count` still decides
+     whether the panel shows at all. */
+  if (clearableCount()) panel.append(clearAllRow());
   for (const [, u] of activeUploads) {
     panel.append(jobPanelRow({
       label: u.name, phase: 'uploading',
@@ -525,10 +532,20 @@ function renderJobsPanelSoon() {
   noticeRaf = requestAnimationFrame(() => { noticeRaf = 0; renderJobsPanel(); });
 }
 
-export function createNotice(owner, opts = {}, { onDismiss = null } = {}) {
+export function createNotice(owner, opts = {}, { onDismiss = null, holdsResult = false } = {}) {
   const id = ++noticeSeq;
   const n = { id, owner, status: 'running', title: '', detail: '', phase: null, progress: undefined, actions: [], sticky: false, timer: null,
-              onDismiss: typeof onDismiss === 'function' ? onDismiss : null };
+              onDismiss: typeof onDismiss === 'function' ? onDismiss : null,
+              /* `holdsResult`: this row is not reporting, it is ASKING —
+                 something is held for it somewhere and the row is the only
+                 way to say yes or no. Clear all leaves those alone; see
+                 clearFinishedNotices. Today the detached search is the only
+                 one (view.js), holding a built view server-side until Apply
+                 or Discard. In the third argument beside onDismiss, not in
+                 opts, because that argument is the app's own — a plugin's
+                 notify() passes opts through and nothing else, and a plugin
+                 has no server-side result to hold. */
+              holdsResult: !!holdsResult };
   applyNoticeOpts(n, opts);
   if (!n.title) n.title = String(owner).replace(/^[a-z]+:/, '');
   pluginNotices.set(id, n);
@@ -559,6 +576,129 @@ export function createNotice(owner, opts = {}, { onDismiss = null } = {}) {
     close() { closeNotice(id); },
   };
   return handle;
+}
+
+/* ------------------------------------------------------ clearing the panel */
+
+/* Importing a folder queues one job per file, and every one of them leaves
+   a finished row behind. The server keeps the last INGEST_JOB_KEEP (20)
+   finished jobs, so the pile tops out at twenty rows rather than one per
+   file — but twenty ✕ clicks after every folder is still twenty, and the
+   errors are the ones that stay: a done row auto-dismisses after 8s and a
+   failed one never does, so a folder holding a dozen files Winnow cannot
+   read leaves a dozen rows waiting to be clicked away one at a time.
+
+   It clears the rows the panel is only TELLING you about: finished
+   imports, whether they landed, failed or were cancelled, and finished
+   plugin notices. Two kinds are left alone.
+
+   Anything still running or queued, because clearing notifications is not
+   cancelling work. Those rows wear a ✕ that means Cancel — jobPanelRow
+   gives onCancel and onDismiss the same glyph — and a Clear all that
+   quietly killed a half-finished folder import would be a far worse bug
+   than the one it fixes.
+
+   And any FINISHED row that says it is holding something — `holdsResult`
+   on createNotice. A search that ran in the background holds its rows
+   server-side until Apply or Discard (view.js followPendingView), and
+   "clear my notifications" is not an answer to that question, which is
+   the same reason that row's own ✕ is a Discard rather than a plain
+   dismiss. An error row is never asking, so it goes.
+
+   `holdsResult` is a declaration and not an inference, because the
+   obvious inference is wrong. "Finished and still carrying buttons" was
+   tried first and it kept the wrong rows: the watchlist's hits alert
+   (watchlist.js announceHits) is `done` + `sticky` + an Open watchlist
+   button, and the bundled Claude plugin ends the same way — both are
+   shortcuts to a tab, not questions, and neither holds anything. Worse,
+   a folder import is what PRODUCES the watchlist alert (every landed
+   import runs scanWatchlistForSources) and sticky-with-buttons also
+   skips the linger timer, so the one row the feature exists to sweep up
+   was the one row it refused to clear, while telling the analyst it was
+   waiting for an answer. */
+export function awaitingAnswer() {
+  return [...pluginNotices.values()].filter((n) => n.status === 'done' && n.holdsResult);
+}
+
+/* Declarations, not const arrows: renderJobsPanel calls clearableCount
+   and lives 200 lines above this, and a const would leave these in the
+   temporal dead zone for anything that painted the panel before the
+   module finished evaluating. Nothing does today — every top-level side
+   effect is main.js's, per CLAUDE.md — and this way nothing can. */
+function clearableJob(j) {
+  return !dismissedJobs.has(j.job_id) && j.status !== 'running' && j.status !== 'queued';
+}
+
+function clearableNotice(n) {
+  return n.status !== 'running' && !(n.status === 'done' && n.holdsResult);
+}
+
+export function clearableCount() {
+  return ingestJobs.filter(clearableJob).length
+    + [...pluginNotices.values()].filter(clearableNotice).length;
+}
+
+export function clearFinishedNotices() {
+  let cleared = 0;
+  for (const j of ingestJobs) if (clearableJob(j)) { dismissedJobs.add(j.job_id); cleared++; }
+  for (const [id, n] of [...pluginNotices]) {
+    if (!clearableNotice(n)) continue;
+    /* Deleted rather than closed, for two reasons.
+
+       The repaint: once at the end instead of once per row, the same
+       reason closeNoticesOwnedBy does it by hand.
+
+       And onDismiss deliberately does NOT run. It means "the ✕ must act
+       on this rather than merely hide it", which is only ever true of a
+       row standing for something live — and those are exactly the rows
+       kept above this line, for being `running` or `holdsResult`. What
+       reaches here stands for nothing, so there is nothing to act on, and
+       firing the handler anyway reaches PAST the row: the detached
+       search's onDismiss is cancelPendingView(rec.sourceId), keyed by
+       TABLE and not by record, so running it for a search that failed ten
+       minutes ago cancels whatever search that table has in flight now.
+       Clearing a stale receipt is not consent to kill live work. */
+    clearNoticeTimer(n);
+    pluginNotices.delete(id);
+    cleared++;
+  }
+  if (cleared) renderJobsPanel();
+  return cleared;
+}
+
+/* The panel's own header. Built only when there is something for it to
+   clear: a panel showing one running import has nothing for this button
+   to do, and a control that is usually a no-op is one people learn to
+   ignore.
+
+   The count is the CLEARABLE count, not the row count — the running
+   import and the queued summary above it are not what the button acts
+   on, and a header reading "11 finished" over a panel that only loses
+   eight rows would be the button explaining itself wrongly.
+
+   It does change as jobs land, inside #jobsPanel's aria-live region.
+   That is not a new cost: renderJobsPanel replaceChildren()s the whole
+   panel on every 900ms poll while a batch runs, so the region already
+   re-announces everything it holds. Worth knowing before anything here
+   is made quieter — the fix is at the panel level, not this line. */
+function clearAllRow() {
+  const row = el('div', 'jobs-clear');
+  row.append(el('span', 'jobs-clear-count', `${clearableCount()} finished`));
+  const btn = el('button', 'jobs-clear-btn', 'Clear all');
+  btn.title = 'Dismiss the finished rows. Anything still running, and anything waiting on an answer, stays.';
+  btn.onclick = () => {
+    clearFinishedNotices();
+    // Said only when something was left behind, since the panel emptying
+    // reports the ordinary case by itself. A row that survived a button
+    // labelled "Clear all" needs explaining; one that vanished does not.
+    const waiting = awaitingAnswer().length;
+    if (waiting) {
+      toast(`Kept ${waiting} notification${waiting === 1 ? '' : 's'} `
+        + `${waiting === 1 ? 'that is' : 'that are'} waiting for an answer`, 4000);
+    }
+  };
+  row.append(btn);
+  return row;
 }
 
 /* ----------------------------------------------------- cancellable ops */

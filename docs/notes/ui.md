@@ -906,6 +906,71 @@ see [docs/notes/README.md](README.md) for the whole set.
   — the index-build test plays the server for `/api/sources` (route +
   reload) rather than writing `fts_building` into client state, so it
   proves the refresh is issued, not just that the hint renders.
+- **The jobs panel has a Clear all, and what it will not clear is the
+  point of it.** A folder import queues one job per file and every one of
+  them leaves a finished row behind. The server keeps the last
+  `INGEST_JOB_KEEP` (20) finished jobs, so the pile tops out at twenty
+  rather than one per file — but twenty ✕ clicks per folder is still
+  twenty, and the failures are what stay: a done row auto-dismisses after
+  8 s and an errored one never has. The header button
+  (`clearFinishedNotices`, jobs.js) dismisses every finished import —
+  landed, failed or cancelled — and every finished plugin notice, and
+  leaves two kinds standing. **Anything running or queued**, because
+  clearing notifications is not cancelling work: those rows wear a ✕ that
+  means Cancel (`jobPanelRow` gives `onCancel` and `onDismiss` the same
+  glyph), and a Clear all that quietly killed a half-finished folder
+  import would be a worse bug than the one it fixes. **Any finished row
+  that declares `holdsResult`** — the third argument to `createNotice`,
+  beside `onDismiss`, so it is the app's own and not part of the plugin
+  contract. A background search that has landed holds a built view
+  server-side until Apply or Discard, which is also why that row's own ✕
+  is a Discard and not a plain dismiss. A row kept for that reason is
+  announced ("Kept 1 notification that is waiting for an answer"), since
+  a survivor of a button labelled Clear all needs explaining and a row
+  that vanished does not.
+
+  **`holdsResult` is declared, not inferred, and the obvious inference is
+  wrong.** "Finished and still carrying buttons" was the first rule and
+  it kept exactly the wrong rows: `announceHits` (watchlist.js) settles
+  its scan row as `done` + `sticky` + an "Open watchlist" button, and the
+  bundled claude_assistant ends the same way — both shortcuts to a tab,
+  neither holding anything. `settle` skips the linger timer for
+  sticky-with-actions, so nothing else took those rows away either. And
+  a folder import is what *produces* the watchlist alert (every landed
+  import runs `scanWatchlistForSources`), so the one row the feature
+  exists to sweep up was the one row it refused, while telling the
+  analyst it was waiting for an answer.
+
+  **Clearing does not run `onDismiss`.** That handler means "the ✕ must
+  act on this rather than merely hide it", which is only true of a row
+  standing for something live — and those are the rows Clear all keeps.
+  What it does clear stands for nothing, so there is nothing to act on,
+  and firing the handler reaches *past* the row: the detached search's is
+  `cancelPendingView(rec.sourceId)`, keyed by TABLE rather than by record
+  (unlike `cancelScan`, which checks `scanJob !== rec`), so running it for
+  a search that failed ten minutes ago cancels whatever that table has in
+  flight now. Clearing a stale receipt is not consent to kill live work.
+  The same sharp edge is why `settlePending`'s `fail` now passes
+  `actions: []`: `applyNoticeOpts` leaves what it is not given, so a
+  failed search kept the Cancel it was created with, and that button did
+  **not** go inert — clicking it cancelled the table's *current* search.
+  Both settle paths clear their actions now; `cancelPendingView` taking a
+  table rather than a record is still there for any future caller. The
+  header is
+  `position: sticky` inside the panel's scroller: twenty rows overflow its
+  50vh `max-height`, and a button that scrolled away with them would be
+  exactly as much work as the ✕s it replaces. It carries the **clearable**
+  count ("8 finished"), not the row count — the running import and the
+  queued summary above it are not what the button acts on, and a header
+  reading "11 finished" over a panel that loses eight rows explains itself
+  wrongly. The button wears `.job-action`'s treatment rather than a ghost
+  one: beside ten rows of dim text a dim button disappears into them, and
+  a control nobody finds does not answer a complaint about tedium. The
+  count changes as jobs land inside `#jobsPanel`'s `aria-live` region,
+  which is not a new cost — `renderJobsPanel` `replaceChildren()`s the
+  whole panel on every 900 ms poll while a batch runs, so that region
+  already re-announces everything it holds; the fix, if one is wanted, is
+  at the panel level.
 - **A search-box build goes to the background after `SEARCH_DETACH_MS`
   (5 s) and its result waits for Apply.** The box's debounce, Enter,
   Escape, the mode switch and the advanced chips pass `detachAfterMs` to
