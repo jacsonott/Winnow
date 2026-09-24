@@ -975,6 +975,22 @@ export async function writeClipboardText(textPromise, successMsg) {
   }
 }
 
+/* What a cell rectangle copied, in its own units. It used to report the
+   ROWS it spanned — so one cell read "Copied 1 row", which is the
+   complaint, and a 4x3 block read "Copied 4 rows", which claims every
+   column came across when three did. The row count alone cannot say
+   either thing correctly, because the rectangle has a width.
+
+   One cell is "1 cell"; a rectangle says its shape, because "12 cells"
+   leaves an analyst pasting into a spreadsheet with no idea what shape
+   to expect. */
+export function cellCount(rows, cols) {
+  if (rows === 1 && cols === 1) return '1 cell';
+  const r = `${rows.toLocaleString()} row${rows > 1 ? 's' : ''}`;
+  const c = `${cols.toLocaleString()} column${cols > 1 ? 's' : ''}`;
+  return `${r} \u00d7 ${c}`;
+}
+
 export async function copySelectedCells(withHeaders) {
   if (!S.cellRange) return;
   const { c0, c1 } = S.cellRange;
@@ -982,7 +998,7 @@ export async function copySelectedCells(withHeaders) {
   const rowCount = spanned.length;
   if (rowCount > 20000) { toast('Selection too large to copy (max 20,000 rows)', 4000); return; }
   const cols = visibleCols().slice(c0, c1 + 1);
-  if (positionsNeedLoading(spanned)) toast(`Copying ${rowCount.toLocaleString()} row${rowCount > 1 ? 's' : ''}…`, 8000);
+  if (positionsNeedLoading(spanned)) toast(`Copying ${cellCount(rowCount, cols.length)}…`, 8000);
   const textPromise = (async () => {
     await loadRowsForPositions(spanned); // no-op fast path once everything's already cached
     const colIdx = Object.fromEntries(S.columns.map((c, i) => [c.name, i]));
@@ -1001,7 +1017,7 @@ export async function copySelectedCells(withHeaders) {
     }
     return lines.join('\n');
   })();
-  await writeClipboardText(textPromise, `Copied ${rowCount.toLocaleString()} row${rowCount > 1 ? 's' : ''}${withHeaders ? ' with headers' : ''}`);
+  await writeClipboardText(textPromise, `Copied ${cellCount(rowCount, cols.length)}${withHeaders ? ' with headers' : ''}`);
 }
 
 export async function copyRowsAsText(positions, withHeaders) {
