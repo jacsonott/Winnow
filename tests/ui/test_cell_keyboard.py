@@ -209,6 +209,8 @@ def test_moving_down_past_the_window_scrolls_and_the_cell_is_still_drawn(page):
 
 
 def test_moving_right_brings_the_column_into_view(page):
+    """In memory only, like the pinned test below — nothing here is
+    saved, so the widened columns die with this browser context."""
     page.evaluate("""() => {
       for (const c of __winnow.S.columns) {
         __winnow.S.layout[c.name] = { ...(__winnow.S.layout[c.name] || {}), hidden: false, w: 600 };
@@ -228,7 +230,14 @@ def test_moving_right_brings_the_column_into_view(page):
 def test_the_active_cell_does_not_park_under_a_pinned_column(page):
     """A pinned column is position:sticky over the left edge of the
     scroller. Scrolling a cell flush to scrollLeft puts it underneath one,
-    where the ring is invisible and the analyst has lost their place."""
+    where the ring is invisible and the analyst has lost their place.
+
+    Everything here is in memory and NOTHING is saved: the UI suite shares
+    one case file, and a layout persisted from this test reaches every
+    module that runs after it. Widening every column to 600px and
+    un-hiding the ones other modules hid is exactly the kind of change
+    that makes an unrelated row-menu test fail three files later."""
+    before = page.evaluate("() => JSON.stringify(__winnow.S.layout)")
     page.evaluate("""() => {
       for (const c of __winnow.S.columns) {
         __winnow.S.layout[c.name] = { ...(__winnow.S.layout[c.name] || {}), hidden: false, w: 600 };
@@ -251,14 +260,13 @@ def test_the_active_cell_does_not_park_under_a_pinned_column(page):
         pinned = page.locator(f'#body .row .cell.pinned').first.bounding_box()
         assert ring["x"] >= pinned["x"] + pinned["width"] - 1, (ring, pinned)
     finally:
-        page.evaluate("""() => {
-          for (const k of Object.keys(__winnow.S.layout)) {
-            if (__winnow.S.layout[k].pinned) __winnow.S.layout[k].pinned = false;
-          }
-          __winnow.renderHead(); __winnow.render(); __winnow.saveLayout();
+        # Put the layout back exactly as it was found, in memory only —
+        # saveLayout() here is what pushed w:600 onto the shared case.
+        page.evaluate("""(json) => {
+          __winnow.S.layout = JSON.parse(json);
+          __winnow.renderHead(); __winnow.render();
           document.getElementById('body').scrollLeft = 0;
-        }""")
-        page.wait_for_timeout(600)
+        }""", before)
 
 
 # ------------------------------------------- what the selection means
@@ -540,3 +548,24 @@ def test_clicking_one_cell_still_beats_rows_picked_earlier(page):
     clip = page.evaluate("() => navigator.clipboard.readText()")
     assert len(clip.strip().splitlines()) == 1, clip
     assert "\t" not in clip, clip
+
+
+def test_a_right_click_inside_a_rectangle_keeps_it(page):
+    """The row menu's scope IS the rectangle when no rows are picked
+    (rowMenuTargets), so collapsing it on the way to opening the menu
+    silently shrinks "these four rows" to "this one cell" — which
+    re-enables plugin actions that were disabled for exceeding their row
+    limit. Landing inside the current rectangle leaves it alone."""
+    cols = _cols(page)
+    _click_cell(page, 2, cols[1])
+    ci = cols.index(cols[1])
+    page.locator("#body .row").nth(6).locator(".cell").nth(ci).click(modifiers=["Shift"])
+    assert (_range(page)["r0"], _range(page)["r1"]) == (2, 6)
+    page.locator("#body .row").nth(4).locator(".cell").nth(ci).click(button="right")
+    page.locator(".menu").wait_for(state="visible")
+    try:
+        r = _range(page)
+        assert (r["r0"], r["r1"]) == (2, 6), "the right-click collapsed the selection it was opened on"
+    finally:
+        page.keyboard.press("Escape")
+        page.wait_for_selector(".menu", state="detached")

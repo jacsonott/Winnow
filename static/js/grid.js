@@ -624,8 +624,15 @@ export function moveCursor(to) {
      The column is kept and the rectangle collapses, which is what a plain
      move means everywhere else in this feature. Deliberately NOT a
      clearCellSelection(): the cell click path sets the selection and THEN
-     calls this, so clearing would wipe the click's own work. */
-  if (S.cellFocus && S.cellFocus.pos !== to) {
+     calls this, so clearing would wipe the click's own work.
+
+     A cursor landing INSIDE the current rectangle leaves it alone. That
+     is the right-click-within-a-selection case, where the menu's scope IS
+     the rectangle (rowMenuTargets) — collapsing it there silently shrank
+     "these four rows" to "this one cell" and re-enabled plugin actions
+     that had been disabled for exceeding their row limit. */
+  const insideRange = S.cellRange && to >= S.cellRange.r0 && to <= S.cellRange.r1;
+  if (S.cellFocus && S.cellFocus.pos !== to && !insideRange) {
     S.cellFocus = { ...S.cellFocus, pos: to };
     S.cellAnchor = { pos: to, col: S.cellFocus.col };
     setCellRange(S.cellAnchor, S.cellFocus);
