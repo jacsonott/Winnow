@@ -8,6 +8,32 @@ see [docs/notes/README.md](README.md) for the whole set.
 
 ---
 
+- **The preview samples the rows the analyst is looking at, if they say
+  so** (`preview_derived(..., view_id=)` → `_sample_column_in_view`).
+  It used to take the first 200 non-empty values straight off the source
+  table, which is the one region a triage filter exists to escape: the
+  modal could report "All 200 sampled values parse" about rows that had
+  been filtered away, and the analyst found out after a backfill over
+  millions of rows. The scope control is the value picker's, verbatim
+  ("This view" / "Whole table"), because it is the same question asked
+  about a different thing; it defaults to the view when one is narrowed,
+  and the verdict names which sample it is about. An expired view is a
+  **409** the client retries against the table with a toast — a 404 would
+  read as "no such column". A view over a MERGE unions its members, so
+  the scoped path also fixes the source-scoped one's habit of previewing
+  member 0 only.
+- **`_sample_column` orders by `rid`, and that is not tidiness.** Without
+  it the statement is a bare `SCAN` and the head of the file is the head
+  by accident — until a background column index exists on that column
+  (`_ensure_column_index_building` builds one the moment an equals filter
+  touches it), at which point the planner switches to a covering-index
+  range scan and returns the lexicographically SMALLEST values instead.
+  The sample an analyst previewed against would then change between one
+  open of a case and the next with nothing to explain it. Verified at
+  3,000 rows: the plan goes `SCAN` → `SEARCH … USING COVERING INDEX` and
+  the values change with it; at 40 rows the planner keeps the scan, which
+  is why a small test of this proves nothing.
+
 - **A regex derive addresses its group by NAME where the pattern names
   one.** `regex_extract` takes `group_name` alongside the numbered
   `group`, and the name wins. This is not a nicety: a pattern gets edited

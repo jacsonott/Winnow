@@ -4126,6 +4126,10 @@ class DerivedProbe(BaseModel):
     column: str
     op_id: str | None = None
     params: dict = {}
+    # Optional: sample the rows this view holds rather than the head of
+    # the file. Absent means the whole table, which is what every caller
+    # got before the preview could be scoped.
+    view_id: str | None = None
 
 
 class RederiveWrite(BaseModel):
@@ -4237,11 +4241,15 @@ def api_derived_preview(body: DerivedProbe):
     if not body.op_id:
         raise HTTPException(400, "op_id is required")
     try:
-        return store().preview_derived(body.source_id, body.column, body.op_id, body.params)
+        return store().preview_derived(body.source_id, body.column, body.op_id, body.params,
+                                       view_id=body.view_id)
     except ValueError as e:
         raise HTTPException(400, str(e))
     except KeyError as e:
-        raise HTTPException(404, str(e))
+        # An expired view is a 409 the client retries against the table,
+        # the same split api_histogram makes — a 404 would read as "no
+        # such column" and send the analyst looking for the wrong thing.
+        raise HTTPException(409 if "expired" in str(e) else 404, str(e))
 
 
 class RegexGroupsProbe(BaseModel):
