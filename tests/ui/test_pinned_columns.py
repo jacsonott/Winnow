@@ -178,6 +178,25 @@ def _shadow(page, sel):
     return page.locator(sel).first.evaluate("(n) => getComputedStyle(n).boxShadow")
 
 
+def _colour(page, prop):
+    """A theme colour in the spelling a computed box-shadow uses.
+
+    getPropertyValue hands back whatever the stylesheet wrote — `#3d6180`
+    — while getComputedStyle().boxShadow is always resolved to rgb(), so
+    looking for the raw value inside a shadow could never match and the
+    check would pass by never failing. Painting the variable onto a
+    throwaway element makes the browser do the conversion, and then the
+    two strings are comparable."""
+    return page.evaluate("""(prop) => {
+      const probe = document.createElement('span');
+      probe.style.color = `var(${prop})`;
+      document.body.appendChild(probe);
+      const c = getComputedStyle(probe).color;
+      probe.remove();
+      return c;
+    }""", prop)
+
+
 def _select_cells(page, r0, r1, c0, c1):
     page.evaluate("""([r0, r1, c0, c1]) => {
       __winnow.S.cellAnchor = { pos: r0, col: c0 };
@@ -229,11 +248,21 @@ def test_a_selected_pinned_cell_keeps_the_ring_and_its_divider(page):
         first = page.evaluate("() => __winnow.visibleCols().indexOf('Timestamp')")
         _select_cells(page, 2, 4, first, first + 1)
 
-        ring = page.evaluate(
-            "() => getComputedStyle(document.documentElement).getPropertyValue('--sel-line').trim()")
+        ring, divider = _colour(page, "--sel-line"), _colour(page, "--line")
+        # Everything below is "the ring is the SELECTION colour, not the
+        # ordinary grid line", which says nothing on a theme that makes
+        # those two the same. None shipped today does; if one ever does,
+        # this says so instead of going quietly vacuous.
+        assert ring != divider, (ring, divider)
+
         shadow = _shadow(page, "#body .row .cell.pinned.cell-selected")
-        assert "inset" in shadow
         assert shadow.count("inset") == 2, f"ring and divider, got: {shadow}"
+        # Counting the shadows is not enough on its own: two insets is also
+        # what you get when the ring is drawn in --line, which is the exact
+        # regression this test exists for — the divider winning and the
+        # selection outline disappearing into it. Name both colours.
+        assert ring in shadow, f"the selection ring is missing from: {shadow}"
+        assert divider in shadow, f"the pinned divider is missing from: {shadow}"
     finally:
         _unpin_all(page)
 
