@@ -7,11 +7,13 @@ backend endpoints — without touching Winnow's source. Drop it in
 
 This guide is the long form, and it stands alone — every hook, data
 shape and example you need to write a plugin is in this file, and every
-code sample in it was extracted verbatim and run before shipping. The
-enforcing contract lives in [`plugin_api.py`](../winnow/plugin_api.py)'s module
-docstring, and three fuller plugins live in
-[`examples/plugins/`](../examples/plugins/), but neither is required
-reading. Start with the Quickstart.
+code sample in it is written to be pasted out and run as it stands —
+kept true by hand, since `tests/test_plugin_docs_current.py` guards the
+hook names, the contents anchors and the §-references but never opens a
+code block. The enforcing contract lives in
+[`plugin_api.py`](../winnow/plugin_api.py)'s module docstring, and seven
+fuller plugins live in [`examples/plugins/`](../examples/plugins/), but
+neither is required reading. Start with the Quickstart.
 
 **Contents**
 
@@ -118,8 +120,10 @@ def register(api):
     )
 ```
 
-Restart the server (or just open **Settings → Plugins** — installs and
-toggles reload without a restart). You now have a `hosts file` format:
+Restart the server, or make the registry reload without one: open or
+switch a case, or flip any plugin's scope in **Settings → Plugins**
+(installs and toggles reload; opening the panel by itself only re-reads
+the set that is already loaded). You now have a `hosts file` format:
 drag a `hosts` file onto the window, or use Settings → Plugins → the
 format's own **Import files…** picker. Rows land in a normal `src_N`
 table, so tagging, filtering, search, sessions and the SQL pane all work
@@ -138,7 +142,7 @@ A plugin is **either** a single `.py` file **or** a folder with an
 
 ```
 plugins/
-  hostsfile.py              ← single-file plugin (ingest formats only)
+  hostsfile.py              ← single-file plugin (everything but tabs and panels)
   my_plugin/                ← folder plugin (everything)
     __init__.py             ← must define register(api)
     parser.py               ← helper modules; import with `from . import parser`
@@ -664,7 +668,8 @@ api.register_toolbar_panel(
 )
 ```
 
-A toggle button appears in the table toolbar beside the search icon.
+A toggle button appears in the table toolbar after the row count, left
+of the built-in **Histogram** and **⏱ Timeframe** buttons.
 While it's on (the state persists per browser) and a table is showing,
 your module's UI occupies a strip **between the toolbar and the grid**;
 it hides with the toolbar on page tabs. Folder plugins only.
@@ -679,8 +684,8 @@ evidence.
 
 ### Following the grid
 
-The `winnow` context is a tab's (see above) with three additions that
-exist for exactly this hook:
+The `winnow` context here is the same object a tab gets — one builder
+makes both — but four of its members are the ones a panel lives on:
 
 ```js
 export default function mount(container, winnow) {
@@ -1044,7 +1049,7 @@ digits or `_` is refused.
 that is the guarantee. It is not isolation: a plugin is arbitrary Python
 holding `req.store`, so SQL naming another plugin's table runs, exactly as
 anything else it chooses to do to the case file would ([Security
-model](#12-security-model)).
+model](#13-security-model)).
 
 **The evidence is the one exception.** `t.execute` refuses to write to
 `src_<id>`, `drv_<id>`, `row_tags`, `row_notes`, `sources` or `tag_defs`
@@ -1152,7 +1157,9 @@ assert rows[0]["FullPath"] == ".\\Users\\bob\\secret.txt"
 **Test through the registry** to cover `register()` itself:
 
 ```python
-from plugin_api import PluginRegistry
+from pathlib import Path
+
+from winnow.plugin_api import PluginRegistry
 
 reg = PluginRegistry()
 reg.load([Path("examples/plugins")])
@@ -1204,9 +1211,19 @@ SDK with `monkeypatch.setitem(sys.modules, "anthropic", fake_module)` so
 a network-dependent plugin is still testable offline, and build binary
 fixtures in the test file rather than committing evidence.
 
-For a tab's JS there's no browser test runner, but you can at least
-syntax-check it the way the repo checks its own frontend modules — see the Testing
-section of [`CLAUDE.md`](../CLAUDE.md).
+A tab's JS can be driven in a real browser. `tests/ui/` runs pytest
+against a live uvicorn and a real Chromium under Playwright, and the
+bundled examples are tested exactly that way: `test_lateral_movement.py`
+turns the plugin on through `/api/plugins/toggle`, calls
+`__winnow.loadPlugins()`, opens the tab and drives the graph that
+`lateral_movement/ui/tab.js` draws, and the pivot and first_last tabs get
+the same treatment. Copy one of those modules — mark it `pytest.mark.ui`,
+enable your plugin, reload the plugin set, then talk to your own DOM. The
+suite skips itself where playwright or a browser is missing, so a machine
+with neither still runs everything else. Separately, the esprima
+parse-and-scope check in `tests/test_static_syntax.py` covers `static/js/`
+rather than plugin JS, but it's a cheap technique to point at your own
+`ui/*.js` — see the Testing section of [`CLAUDE.md`](../CLAUDE.md).
 
 ---
 
@@ -1216,9 +1233,12 @@ section of [`CLAUDE.md`](../CLAUDE.md).
 file for a single-file plugin, or the folder that directly contains
 `__init__.py` for a folder plugin (the dialog states the rule and checks
 your pick before any bytes move). It copies into `plugins/` and loads
-immediately, no restart. Copying in by hand works identically; the panel
-picks it up next time it opens. The bundled examples in
-`examples/plugins/` never need installing — they're always listed, with
+immediately, no restart. Copying in by hand works too, but nothing
+notices the new file until the registry next reloads: a server restart,
+opening or switching a case, changing any plugin's scope, applying a
+profile, or installing through the dialog. Opening the panel is not
+enough on its own — it re-reads the set already loaded. The bundled
+examples in `examples/plugins/` never need installing — they're always listed, with
 a scope dropdown like any other plugin, just defaulting to off.
 
 **Scopes:** each plugin is on/off *for all cases* (machine default,
@@ -1311,7 +1331,7 @@ def lookup_handler(req):
   limit on what Settings → Environment and `/api/env` can touch, and a
   convention that keeps a well-behaved plugin on the names the analyst
   manages — it is not a sandbox. A plugin is ordinary Python and can
-  read `os.environ` directly, which is why section 12 says what it says.
+  read `os.environ` directly, which is why §13 says what it says.
 - **Saving one:** `req.set_env("WINNOW_VT_API_KEY", token)` persists it the
   same way Settings → Environment does — immediately, and across restarts —
   so a plugin that obtained a key itself (an OAuth exchange, a field in its
@@ -1622,20 +1642,21 @@ can drive a plugin parser from `curl` without touching the UI.
 Everything an author needs is here: the contract for every hook,
 the data shapes you'll consume, complete runnable examples of an ingest
 format and a tab, and a standalone test recipe. It deliberately does not
-assume you can read Winnow's source — every example in it was extracted
-verbatim from this document and run against a live server before it
-shipped.
+assume you can read Winnow's source — every example in it is written to
+be pasted straight out of this document and run against a live server,
+with no step that says "and now read the code".
 
-Rough context cost (character estimate, not a tokenizer run):
+Rough context cost (characters counted and divided by four, not a
+tokenizer run):
 
 | What you paste | Size | Use it when |
 | --- | ---: | --- |
-| **This guide alone** | **~8k tokens** | Anything described here — which is every hook |
-| \+ `plugin_api.py` | ~14k tokens | You want the enforcing code beside the prose (validation rules, exact error text) |
-| \+ one `examples/plugins/*` | ~12–23k tokens | You're building something close to that example and want a full working precedent |
-| The whole codebase | ~190k tokens | You're changing Winnow itself, not writing a plugin |
+| **This guide alone** | **~20k tokens** | Anything described here — which is every hook |
+| \+ `plugin_api.py` | ~34k tokens | You want the enforcing code beside the prose (validation rules, exact error text) |
+| \+ one `examples/plugins/*` | ~22–54k tokens | You're building something close to that example and want a full working precedent |
+| The whole codebase | ~830k tokens | You're changing Winnow itself, not writing a plugin |
 
-So the guide is roughly **1/24th** the cost of loading the tool, and the
+So the guide is roughly **1/40th** the cost of loading the tool, and the
 step up to guide + contract is still under a tenth.
 
 ### A prompt that works
@@ -1665,8 +1686,8 @@ step up to guide + contract is still under a tenth.
 Three things this guide can't do for you:
 
 - **New hook types.** If you need an extension point that doesn't exist
-  (a new export format, a right-click action), no amount of guide helps
-  — that's a change to `plugin_api.py`, i.e. a Winnow PR.
+  (a new export format, say), no amount of guide helps — that's a
+  change to `plugin_api.py`, i.e. a Winnow PR.
 - **Matching internal behavior exactly.** If your parser has to reproduce
   a Winnow-specific detail not spelled out here (say, precisely how the
   timeframe filter normalizes an odd timestamp shape), read the source

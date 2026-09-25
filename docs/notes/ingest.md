@@ -135,12 +135,20 @@ see [docs/notes/README.md](README.md) for the whole set.
   first). `.txt` keeps the delimited path on purpose (KAPE emits
   delimited `.txt`); the CSV preview's **Lines** option forces any file
   into raw text, and that choice rides on the queue item as `kind`.
-  The only refusal left is `looks_binary` (a NUL in the first 8 KB; a
-  UTF-16 BOM is exempt) — the browser cannot check bytes, so a dropped
-  binary becomes a job error, not a silent skip. Folder import stays
-  extension-gated: the `*` chip ("other text files", off by default)
-  admits everything non-binary as kind `text`, with binaries excluded
-  under their own reason; profiles carry `*` in their extension list.
+  The only refusal left is the binary check, and it stands on both sides.
+  A file the browser hands over is probed before anything is uploaded —
+  `looksBinaryFile` in importer.js, the same rule as `looks_binary`: a NUL
+  in the first 8 KB, a UTF-16 BOM exempt — and one that trips it is dropped
+  from the queue under a "Skipped N binary files (not text)" toast, so an
+  .exe or an .evtx picked or dropped by mistake is never copied up at all.
+  A path item has no bytes to probe — the server has them, the browser
+  doesn't — so there, and for a binary that routes to some kind other than
+  `text` (one named `.csv`, or one a plugin format claims), `looks_binary`
+  at ingest makes it a job error instead, not a silent skip. Folder
+  import stays extension-gated: the `*` chip ("other text files", off by
+  default) admits everything non-binary as kind `text`, with binaries
+  excluded under their own reason; profiles carry `*` in their extension
+  list.
 - **Include patterns narrow; they never widen.** The folder scan's
   extension gate runs first, and a file it drops is gone before
   `include_patterns` are consulted — so `*.log` in the include box cannot
@@ -220,13 +228,16 @@ see [docs/notes/README.md](README.md) for the whole set.
   `onchange`); a queued SQLite item still has to go through "Pick
   tables…" (`openSqliteTablePicker`) before it can import — which
   table(s) to pull out is a real choice, so it can't just auto-import the
-  way CSV/JSON does. The one genuinely new piece is recognizing what was
-  dropped at all: a raw OS drop has no equivalent of a `<input accept>`
-  filtering what's offered, so `handleDroppedFiles` filters by extension
-  itself, against `RECOGNIZED_IMPORT_EXTENSIONS`/
-  `SQLITE_IMPORT_EXTENSIONS` — the same lists the import modal's own
-  `accept` attribute is built from, so there's one true list per format
-  instead of three hand-typed copies. Every listener in `wireFileDrop`
+  way CSV/JSON does. There is nothing for the drop itself to
+  recognize: `handleDroppedFiles` puts every dropped file through `queueFiles`
+  and opens the modal, and what each one *is* gets decided later, per queue
+  item, by `importKindFor` — sqlite, xlsx, plaso, archive, json, csv, and raw
+  `text` for any name no built-in or plugin format claims. The extension lists
+  (`RECOGNIZED_IMPORT_EXTENSIONS`/`SQLITE_IMPORT_EXTENSIONS`/`XLSX_`/
+  `PLASO_`/`ARCHIVE_`) drive that routing and the directory-import chips,
+  but nothing gates a drop; the import modal's own picker carries no
+  `accept` either, deliberately, so the picker isn't the one entry point
+  where a `.log.1` can't be chosen. Every listener in `wireFileDrop`
   gates on `e.dataTransfer.types.includes('Files')` — an OS file drag
   carries a `'Files'` type; every *internal* drag (`wireDragReorder`,
   column-header reorder, the group-by pill drag) only ever carries
@@ -310,11 +321,16 @@ see [docs/notes/README.md](README.md) for the whole set.
   it.** A stray `"` folds every following line into one field until the
   next quote (or the 128KB field-limit error). The rows vanish from the
   grid, `ragged_rows` reads 0, and nothing errored. `suspect_quote_rows`
-  counts rows where a single field holds ≥10 embedded newlines — the
-  swallow's signature — and the jobs toast / CLI print a check-your-file
-  warning. Legitimate multi-line payloads (EVTX XML) sit under the
-  threshold. It's a heuristic on purpose: csv's parse is *correct* for
-  properly-quoted multi-line fields, so this can only ever be a warning.
+  counts rows that consumed ≥10 PHYSICAL file lines — `reader.line_num`
+  minus the previous row's, one int compare per row, because a per-cell
+  newline scan here benchmarked ingest 11% slower — which is the swallow's
+  signature, and the jobs toast / CLI print a check-your-file warning. The
+  count is per ROW across all of its fields rather than per field, so two
+  fields holding five newlines each trip it and a legitimately quoted
+  record spanning ten lines is counted too. Ordinary multi-line payloads
+  (EVTX XML) sit under the threshold. It's a heuristic on purpose: csv's
+  parse is *correct* for properly-quoted multi-line fields, so this can
+  only ever be a warning.
 
 - **One broken JSONL line costs one line, not the file.** ingest_json's
   two-pass shape used to make any malformed line an all-or-nothing

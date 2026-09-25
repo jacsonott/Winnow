@@ -5,12 +5,16 @@ folder with an `__init__.py` per plugin. Nothing in this folder is ever
 committed except this README.
 
 Manage plugins from **Settings → Plugins** (the `?` panel in the app):
-every plugin in this folder is listed there with a checkbox to toggle it
-on or off (a disabled plugin's code is never imported), and the two
-install buttons copy a `.py` file or a plugin folder picked from anywhere
-on disk into here. Toggles and installs take effect immediately — no
-server restart. Copying a plugin into this folder by hand still works
-exactly the same; the panel picks it up on next open.
+every plugin in this folder is listed there with a scope dropdown — on or
+off for every case on this machine, plus, when a case is open on screen,
+on or off for that case alone (the per-case override is stored in the case
+file, so it travels with the case). A disabled plugin's code is never
+imported. **Install a plugin…** opens a dialog that explains which of the
+two shapes you have — a single `.py` file, or a folder with an
+`__init__.py` — and offers a picker for each, copying what you pick from
+anywhere on disk into here. Scope changes and installs take effect
+immediately — no server restart. Copying a plugin into this folder by
+hand still works exactly the same; the panel picks it up on next open.
 
 Seven ready-made examples ship in [`examples/plugins/`](../examples/plugins/):
 `mft_usn` (raw NTFS `$MFT`/`$J` parsing — an ingest-format plugin),
