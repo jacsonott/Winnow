@@ -43,7 +43,7 @@ from winnow import userenv
 from winnow import version
 from winnow import archive
 from winnow import workspace as WS
-from winnow.store import (CASE_SUFFIX, DEFAULT_IMPORT_EXTENSIONS, PLASO_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, MissingTable, OpCancelled, Store,
+from winnow.store import (CASE_SUFFIX, DEFAULT_IMPORT_EXTENSIONS, PLASO_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, MissingTable, OpCancelled, Store, ViewExpired,
                    describe_case_lock, probe_case_lock, q, sweep_orphan_views)
 
 HERE = paths.INSTALL_ROOT  # static/, plugins/, examples/plugins/ all hang off the install root
@@ -3324,10 +3324,13 @@ def api_histogram(view_id: str, column: str, max_buckets: int = 160, op_token: s
     the 409 every view read returns — a rebuild is under way and its own
     view change refetches. A column the table does not have (a derived
     column just removed, say) or one that is not a datetime is a 400 the
-    strip shows as text. Store.time_histogram raises KeyError for both an
-    expired view and an unknown column, so the message decides (the same
-    split api_case_copy_sources makes); folding the second into the 409 would
-    leave the strip waiting for a view change that fixes nothing."""
+    strip shows as text. Both arrive as a KeyError, and they are told
+    apart by TYPE: time_histogram raises ViewExpired for the handle and a
+    plain KeyError carrying the column NAME for the column. Not by looking
+    for "expired" in the message, which is what this route used to do —
+    column names are user data (invariant #5), so a table with a column
+    called `expired_at` got the 409 and the strip sat waiting for a view
+    change that would fix nothing."""
     try:
         # `stack=tags` adds a per-bucket split by tag beside the plain
         # counts; anything else is ignored rather than refused, so an old
@@ -3337,9 +3340,9 @@ def api_histogram(view_id: str, column: str, max_buckets: int = 160, op_token: s
             stack="tags" if stack == "tags" else None))
     except ValueError as e:
         raise HTTPException(400, str(e))
-    except KeyError as e:
-        if "expired" in str(e):
-            raise HTTPException(409, str(e))
+    except ViewExpired as e:
+        raise HTTPException(409, str(e))
+    except KeyError:
         raise HTTPException(400, f"No column named {column!r} on this table")
 
 
@@ -4250,11 +4253,17 @@ def api_derived_preview(body: DerivedProbe):
                                        view_id=body.view_id)
     except ValueError as e:
         raise HTTPException(400, str(e))
+    except ViewExpired as e:
+        # An expired view is a 409 the client retries against the table; a
+        # 404 would read as "no such column" and send the analyst looking
+        # for the wrong thing. The split is on the exception TYPE, not on
+        # the message: the other KeyError this call raises carries a column
+        # NAME, which is user data (invariant #5), so a table with a column
+        # called `expired_at` used to answer "that view was rebuilt" to a
+        # request whose real problem was the column.
+        raise HTTPException(409, str(e))
     except KeyError as e:
-        # An expired view is a 409 the client retries against the table,
-        # the same split api_histogram makes — a 404 would read as "no
-        # such column" and send the analyst looking for the wrong thing.
-        raise HTTPException(409 if "expired" in str(e) else 404, str(e))
+        raise HTTPException(404, str(e))
 
 
 class RegexGroupsProbe(BaseModel):

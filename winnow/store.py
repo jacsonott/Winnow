@@ -966,6 +966,24 @@ class MissingTable(ValueError):
         super().__init__(message or f"No \u201c{table}\u201d table in this case yet")
 
 
+class ViewExpired(KeyError):
+    """The view a request named is no longer there — evicted by a newer
+    build, or its table dropped under an in-flight read.
+
+    A KeyError subclass so every `except KeyError` around a view read
+    keeps behaving exactly as it did; what the subclass adds is a way to
+    tell this apart from the OTHER KeyError those same methods raise, a
+    missing column, whose payload is the column NAME. Column names are
+    user data (invariant #5), and splitting the two by looking for
+    "expired" in the message — which is what every view route did before
+    this type existed — meant a table carrying a column called
+    `expired_at` got a 409 "that view was rebuilt" and a client that
+    dutifully retried a request whose real problem was the column.
+    The type carries the distinction instead, where no import can spell
+    it wrong.
+    """
+
+
 class OpCancelled(Exception):
     """A registered cancellable operation (view/timeline build, group
     summary) was interrupted via cancel_op. server.py maps it to HTTP 499 —
@@ -2339,7 +2357,7 @@ class Store:
     @contextlib.contextmanager
     def _dropped_view_is_expired() -> Iterator[None]:
         """Maps "no such table" during an unlocked view read to the same
-        KeyError contract a missing handle raises, so server.py's existing
+        ViewExpired a missing handle raises, so server.py's existing
         KeyError → 409 mapping turns it into the "view expired" the
         frontend already rebuilds on. This race is new with _reader():
         under the old single-connection design the lock serialized a page
@@ -2351,7 +2369,7 @@ class Store:
             yield
         except sqlite3.OperationalError as e:
             if "no such table" in str(e).lower():
-                raise KeyError("View expired — rebuild it") from None
+                raise ViewExpired("View expired — rebuild it") from None
             raise
 
     # ------------------------------------------------------------------ ingest
@@ -5486,7 +5504,7 @@ class Store:
             )]
 
     def _sample_column_in_view(self, view_id: str, column: str,
-                               limit: int | None = None) -> tuple[dict, list]:
+                               limit: int | None = None) -> list:
         """The same sample, taken from the rows the VIEW holds.
 
         The head of a file is exactly the region a triage filter exists to
@@ -5498,17 +5516,35 @@ class Store:
         Shape copied from time_histogram's `branch()`: an unfiltered,
         unsorted view (`root_virtual`) has no `v.view_N` table at all and
         reads its member tables directly; a materialised one joins the
-        view table per member. A merge unions its members, which also
-        fixes the preview's old habit of only ever looking at member 0 —
-        a merged view's rows carry their own source_id.
+        view table per member. A merge reads every member, because a
+        merged view's rows carry their own source_id.
 
-        Returns (src, values) because every caller needs the source dict
-        the view is over anyway, and resolving it twice would mean two
-        reader round trips for one question.
+        Each member is sliced FIRST and the slices are combined after,
+        rather than capping one big union: UNION ALL is evaluated in
+        order, so a LIMIT outside it drains member 0 before it ever looks
+        at member 1, and a merge whose members are each bigger than
+        DETECT_SAMPLE would be sampled entirely from its first table —
+        the head-of-file bias this method exists to remove, arrived at by
+        a different road. Every member gets an equal share of the budget
+        instead. A member with fewer rows than its share spends less and
+        the total lands under `limit`, which is the trade worth making:
+        the verdict is a proportion, and a merge's members are different
+        tools' output, so reading none of one is the failure that matters.
+
+        `ORDER BY` inside each slice is load-bearing for the same reason
+        it is in _sample_column, not tidiness. Unordered, the direct
+        branch is a bare SCAN whose first N rows are in file order only by
+        accident — until a background column index exists on that column,
+        at which point the planner switches to a covering-index range scan
+        and the sample silently becomes the N lexicographically smallest
+        values instead. Both keys are free: the view table's `pos` and a
+        source table's `rid` are each an INTEGER PRIMARY KEY, so neither
+        ordering costs a temp b-tree, and each slice can stop as soon as
+        it has its share.
         """
         handle = self._views.get(view_id)
         if not handle:
-            raise KeyError("View expired — rebuild it")
+            raise ViewExpired("View expired — rebuild it")
         with self._reader() as ro:
             src = self._source_lite_on(ro, handle["source_id"])
             members = self._resolve_members_on(ro, handle["source_id"])
@@ -5517,26 +5553,44 @@ class Store:
         if handle.get("kind") == "root_virtual":
             # No filter and no sort: the view IS the source, and the
             # cheaper head-of-file path says the same thing.
-            return src, self._sample_column(src, column, limit)
+            return self._sample_column(src, column, limit)
 
         direct = self._grouping_covers_whole_source(handle, src)
+        want = limit or self.DETECT_SAMPLE
+        # An even split of the budget, ceil so a remainder does not starve
+        # the last member. Deliberately even and NOT weighted by member
+        # size: the failure this exists to stop is a member going unread,
+        # and the weights that would make the proportion exact are
+        # per-member counts WITHIN the view, which is a COUNT per member
+        # for an answer the analyst reads as "does any of this fail".
+        # The cost is that the reported proportion is a per-member average
+        # rather than a whole-view rate — ten bad rows beside five
+        # thousand good ones read as 10 of 110, not 10 of 5010. It errs
+        # toward caution, which is the right direction for a pre-flight
+        # check, but it is not the view's true rate. See
+        # docs/notes/derived.md.
+        per = max(1, -(-want // len(members)))
 
         def branch(m: dict) -> str:
             ref = self._col_ref(src, column, "s", None if direct else "d")
             if direct:
                 scope = f"FROM {self._member_from(src, m, 's')}"
+                order = "s.rid"
             else:
                 scope = (f"FROM v.{q(view_id)} vv "
                          f"JOIN {q(m['table_name'])} s ON s.rid = vv.rid "
                          f"AND vv.source_id = {int(m['source_id'])}"
                          f"{self._member_derived_join(src, m, 's')}")
-            return (f"SELECT {ref} AS v {scope} "
-                    f"WHERE {ref} IS NOT NULL AND {ref} <> ''")
+                # The view's own order, which is what the analyst is
+                # looking at, and free: pos is the view table's rowid.
+                order = "vv.pos"
+            return (f"SELECT v FROM (SELECT {ref} AS v {scope} "
+                    f"WHERE {ref} IS NOT NULL AND {ref} <> '' "
+                    f"ORDER BY {order} LIMIT {int(per)})")
 
         union = " UNION ALL ".join(branch(m) for m in members)
         with self._reader() as ro, self._dropped_view_is_expired():
-            return src, [r[0] for r in ro.execute(
-                f"SELECT v FROM ({union}) LIMIT ?", (limit or self.DETECT_SAMPLE,))]
+            return [r[0] for r in ro.execute(f"SELECT v FROM ({union}) LIMIT ?", (want,))]
 
     def detect_timestamp_format(self, source_id: int, column: str) -> list[dict]:
         """Which operations can read this column, best first. Same
@@ -5604,16 +5658,34 @@ class Store:
         Without it the sample is the head of the file, which is the one
         region a triage filter exists to escape — so a preview could
         report that all 200 sampled values parse while every row on screen
-        failed. It also gets a merge right: a view over one unions its
-        members, where the source-scoped path only ever read member 0.
+        failed. It also gets a merge right: a view over one reads every
+        member, where the source-scoped path only ever read member 0.
+
+        The returned `scope` says which sample was actually taken, "view"
+        or "table", and is not simply an echo of the argument: a
+        multi-input operation cannot be scoped yet (see below) and answers
+        "table" even when a view_id was passed. The client renders the
+        verdict's "in this view" / "in the whole table" from this field
+        rather than from the button it pressed, so the sentence can never
+        claim a narrowing the numbers underneath it do not have.
         """
         op = timeparse.OPERATIONS.get(op_id)
         if op is None:
             raise ValueError(f"Unknown operation: {op_id}")
         params = timeparse.validate_params(op_id, params)
         if view_id and not op["multi_input"]:
-            src, samples = self._sample_column_in_view(view_id, column)
-            return self._derived_preview_from(samples, op_id, params, limit)
+            samples = self._sample_column_in_view(view_id, column)
+            return self._derived_preview_from(samples, op_id, params, limit, scope="view")
+        # A multi-input operation reads several columns of the SAME row, so
+        # the one-column sample above cannot serve it: scoping it needs a
+        # row-wise read of the view, a second query shape built for the one
+        # operation family that has this problem. Between the two honest
+        # options — build that read, or admit the scope was not applied —
+        # this takes the second, because the harm is not that the numbers
+        # come off the table's head, it is a verdict labelled "in this
+        # view" over rows the analyst filtered away, and a field in the
+        # payload closes that while a new read path is a feature. So the
+        # answer here is the table's, and it says "table".
         if source_id < 0:
             # Preview against the first member — representative, and the
             # only side with a real table to sample.
@@ -5640,20 +5712,26 @@ class Store:
             # backfill, so the modal's verdict and the column's count agree.
             failures = sum(1 for r, p in zip(rows, preview)
                            if p["output"] is None and any(v is not None and str(v).strip() for v in r))
-            return {"preview": preview, "sampled": len(preview), "failures": failures}
-        return self._derived_preview_from(self._sample_column(src, column), op_id, params, limit)
+            return {"preview": preview, "sampled": len(preview), "failures": failures,
+                    "scope": "table"}
+        return self._derived_preview_from(self._sample_column(src, column), op_id, params, limit,
+                                          scope="table")
 
-    def _derived_preview_from(self, samples: list, op_id: str, params: dict, limit: int) -> dict:
+    def _derived_preview_from(self, samples: list, op_id: str, params: dict, limit: int,
+                              scope: str) -> dict:
         """Pairs, count and failure tally for an already-taken sample —
         shared so the view-scoped and source-scoped paths cannot drift into
-        reporting the same numbers two different ways."""
+        reporting the same numbers two different ways. `scope` travels with
+        them for the same reason: the caller that took the sample is the
+        only one that knows which rows it came from, and the verdict the
+        client writes is a claim about exactly that."""
         op = timeparse.OPERATIONS[op_id]
         preview = self._preview_rows(samples[:limit], op_id, params)
         state: dict = {}
         if op.get("prepare"):
             op["prepare"](self, params, state)
         failures = sum(1 for v in samples if op["parse"](v, params, state) is None)
-        return {"preview": preview, "sampled": len(samples), "failures": failures}
+        return {"preview": preview, "sampled": len(samples), "failures": failures, "scope": scope}
 
     def preview_regex_groups(self, source_id: int, column: str, pattern: str,
                              limit: int = 3) -> dict:
@@ -5890,7 +5968,7 @@ class Store:
         with self.lock, self.db:
             handle = self._views.get(view_id)
             if handle is None or handle.get("kind") not in ("root", "root_virtual"):
-                raise KeyError("View expired — rebuild it")
+                raise ViewExpired("View expired — rebuild it")
             handle["pending"] = False
             self._evict_root_views(handle["source_id"], keep=view_id)
         return handle
@@ -6168,7 +6246,7 @@ class Store:
     def fetch_timeline_rows(self, view_id: str, start: int, count: int) -> dict:
         handle = self._views.get(view_id)
         if not handle or handle.get("kind") != "timeline":
-            raise KeyError("View expired — rebuild it")
+            raise ViewExpired("View expired — rebuild it")
         with self._reader() as ro, self._dropped_view_is_expired():
             rows = ro.execute(
                 f"SELECT pos, source_id, rid, ts, body, summary_lead, summary_detail, "
@@ -6368,7 +6446,7 @@ class Store:
         it's the one that hurts."""
         handle = self._views.get(view_id)
         if not handle:
-            raise KeyError("View expired — rebuild it")
+            raise ViewExpired("View expired — rebuild it")
         by_tag = column == TAG_GROUP_COLUMN
         with self._reader() as ro:
             src = self._source_lite_on(ro, handle["source_id"])
@@ -6497,7 +6575,7 @@ class Store:
         rather than piling into bucket zero."""
         handle = self._views.get(view_id)
         if not handle:
-            raise KeyError("View expired — rebuild it")
+            raise ViewExpired("View expired — rebuild it")
         with self._reader() as ro:
             src = self._source_lite_on(ro, handle["source_id"])
             members = self._resolve_members_on(ro, handle["source_id"])
@@ -6707,7 +6785,7 @@ class Store:
         rid (root_virtual's outer order is rid order by construction)."""
         root = self._views.get(view_id)
         if not root:
-            raise KeyError("View expired — rebuild it")
+            raise ViewExpired("View expired — rebuild it")
         src = self._source_lite(root["source_id"])
         colnames = {c["name"]: c["type"] for c in src["columns"]}
         by_tag = column == TAG_GROUP_COLUMN
@@ -7325,7 +7403,7 @@ class Store:
         and resolved per member. Either way this stays O(window)."""
         handle = self._views.get(view_id)
         if not handle:
-            raise KeyError("View expired — rebuild it")
+            raise ViewExpired("View expired — rebuild it")
         if handle.get("kind") == "group_virtual":
             return self._fetch_virtual_group_rows(handle, start, count)
         if handle.get("kind") == "root_virtual":
@@ -7500,7 +7578,7 @@ class Store:
         """Positions of tagged rows inside a view, for the scrollbar rail."""
         handle = self._views.get(view_id)
         if not handle:
-            raise KeyError("View expired — rebuild it")
+            raise ViewExpired("View expired — rebuild it")
         if handle.get("kind") == "group_virtual":
             return []  # no pos-ordered backing table for a small ungathered group — documented limitation
         with self._reader() as ro, self._dropped_view_is_expired():
@@ -7571,7 +7649,7 @@ class Store:
         rebuilt out from under it, e.g. clearing filters."""
         handle = self._views.get(view_id)
         if not handle:
-            raise KeyError("View expired — rebuild it")
+            raise ViewExpired("View expired — rebuild it")
         if handle.get("kind") == "group_virtual":
             return None  # no pos-ordered backing table for a small ungathered group
         with self._reader() as ro, self._dropped_view_is_expired():
@@ -7589,7 +7667,7 @@ class Store:
         view doesn't have are skipped; capped like the remap itself."""
         handle = self._views.get(view_id)
         if not handle:
-            raise KeyError("View expired — rebuild it")
+            raise ViewExpired("View expired — rebuild it")
         if handle.get("kind") == "group_virtual":
             return []
         wanted = sorted({int(p) for p in positions})[:self.SELECTION_REMAP_MAX]
@@ -7618,7 +7696,7 @@ class Store:
         filter took out from under a selection. See view_keys."""
         handle = self._views.get(view_id)
         if not handle:
-            raise KeyError("View expired — rebuild it")
+            raise ViewExpired("View expired — rebuild it")
         pairs: list[tuple[int, int]] = []
         for k in list(keys)[:self.SELECTION_REMAP_MAX]:
             try:
@@ -7654,7 +7732,7 @@ class Store:
         win. Returns None when no row has a usable timestamp."""
         handle = self._views.get(view_id)
         if not handle:
-            raise KeyError("View expired — rebuild it")
+            raise ViewExpired("View expired — rebuild it")
         norm = _ts_normalize(value)
         if norm is None:
             raise ValueError("Not a recognized timestamp — try YYYY-MM-DD HH:MM:SS")
@@ -8145,7 +8223,7 @@ class Store:
         second count, since they came out of this same view."""
         handle = self._views.get(view_id)
         if not handle:
-            raise KeyError("View expired — rebuild it")
+            raise ViewExpired("View expired — rebuild it")
         if handle.get("kind") == "group_virtual":
             return self._tag_virtual_group(handle, tag_id, on, exclude)
         if handle.get("kind") == "root_virtual":
@@ -8277,7 +8355,7 @@ class Store:
         plain per-source counts with no join at all."""
         handle = self._views.get(view_id)
         if not handle:
-            raise KeyError("View expired — rebuild it")
+            raise ViewExpired("View expired — rebuild it")
         if handle.get("kind") == "root_virtual":
             return self.tag_counts(handle["source_id"])
         with self._reader() as ro, self._dropped_view_is_expired():
@@ -8326,7 +8404,7 @@ class Store:
         cost."""
         handle = self._views.get(view_id)
         if not handle:
-            raise KeyError("View expired — rebuild it")
+            raise ViewExpired("View expired — rebuild it")
         counts = self.tag_counts_in_view(view_id)["counts"]
         return {"rows": int(handle["row_count"]),
                 "tagged": int(counts.get(str(int(tag_id)), 0))}
@@ -11090,7 +11168,7 @@ class Store:
         try/except to turn it into a 409."""
         handle = self._views.get(view_id)
         if not handle:
-            raise KeyError("View expired — rebuild it")
+            raise ViewExpired("View expired — rebuild it")
         # Covers all three export shapes at once, and eagerly: the body
         # below is a generator, so an error raised inside it would surface
         # from StreamingResponse rather than from the route's try/except.
@@ -12314,7 +12392,7 @@ class Store:
             raise ValueError("Name the new table")
         handle = self._views.get(view_id)
         if not handle:
-            raise KeyError("View expired — rebuild it")
+            raise ViewExpired("View expired — rebuild it")
         parent_id = handle["source_id"]
         parent = self._source_lite(parent_id)
         self._require_columns(parent)

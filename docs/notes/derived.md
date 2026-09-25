@@ -19,9 +19,43 @@ see [docs/notes/README.md](README.md) for the whole set.
   about a different thing; it defaults to the view when one is narrowed,
   and the verdict names which sample it is about. An expired view is a
   **409** the client retries against the table with a toast — a 404 would
-  read as "no such column". A view over a MERGE unions its members, so
-  the scoped path also fixes the source-scoped one's habit of previewing
-  member 0 only.
+  read as "no such column" — and that split is made on the exception
+  TYPE (`ViewExpired`, a `KeyError` subclass), never on the message.
+  Looking for "expired" in the text is what both this route and
+  `/api/histogram` used to do, and the unknown-column `KeyError` carries
+  the column NAME: a table with a column called `expired_at` answered
+  "that view was rebuilt" to a question about a column, and the client
+  retried a request whose real problem was never going to change
+  (invariant #5 — column names are user data).
+- **An outer `LIMIT` on a `UNION ALL` reads member 0 and stops.** The
+  merge claim above was false for a year of row counts: `SELECT v FROM
+  (a UNION ALL b) LIMIT 200` drains `a` before it touches `b`, so any
+  merge whose first member held 200+ non-empty values was previewed
+  against that member alone — exactly the habit the scoped path was
+  written to fix. It passed review because the test used ten rows a
+  member. The slice now happens INSIDE each arm (`per = ceil(want /
+  members)`), so every member is read. Two consequences worth knowing:
+  the total can land under `limit` when a member is short, and the
+  reported figure is a per-member average rather than the view's true
+  rate — ten bad rows beside five thousand good ones read as "10 of
+  110", not "10 of 5010". That errs toward caution, which is the right
+  direction for a pre-flight check. Making it exact needs a per-member
+  `COUNT` *within the view*, which is a query per member for a number
+  the analyst reads as "does any of this fail".
+- **Each arm carries its own `ORDER BY` for the same reason
+  `_sample_column` does** — `s.rid` on the direct branch, `vv.pos` on
+  the view-join branch (the view's own order, and free: `pos` is the
+  view table's rowid). Without it the scoped sample silently changed the
+  moment a background column index appeared, while the source-scoped
+  sibling stayed put.
+- **The payload says which scope it actually used.** A multi-input
+  operation reads several columns of one row, which the one-column
+  sample cannot express, so it is previewed against the table even when
+  a `view_id` is passed. `preview_derived` returns `scope: "view"|
+  "table"` on every path and the modal writes its verdict from that
+  field rather than from the pressed button — otherwise a whole-table
+  answer was labelled with the view's name, which is the precise claim
+  this feature exists to stop.
 - **`_sample_column` orders by `rid`, and that is not tidiness.** Without
   it the statement is a bare `SCAN` and the head of the file is the head
   by accident — until a background column index exists on that column
