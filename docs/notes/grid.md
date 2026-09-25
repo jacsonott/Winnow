@@ -58,8 +58,13 @@ see [docs/notes/README.md](README.md) for the whole set.
 - **Row selection (`static/js/state.js`) is a flag plus a Set, never a list of every
   selected position** — `S.selectAll` off means `S.selection` holds the
   selected view *positions*; on means it holds the *exclusions* (everything
-  else in the view is selected). Nothing outside the `sel*` helper block at
-  the `sel*` block in state.js touches either field directly. Positions, not rids — but a rebuild no longer simply drops them:
+  else in the view is selected). Nothing outside the `sel*` helper block in
+  state.js touches either field directly, with one deliberate exception:
+  the gutter drag re-applies its span from the state captured before the
+  press, so `applyGutterSpan` restores `S.selectAll`/`S.selection` from
+  that base by hand and bumps `S.selVersion` itself — the bookkeeping
+  `selReplace` exists to own, and what keeps the `selRanges` memo honest.
+  Positions, not rids — but a rebuild no longer simply drops them:
   `rebuildView` asks `/api/view/keys` for the picked rows' ids while the
   old view is still there, builds, then `/api/view/positions` maps them
   into the new one and counts the ones it no longer shows
@@ -147,7 +152,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   rows with quiet blanks in it is worse than a copy that fails. Both copy
   paths now cap at 20,000 rows and refuse a hole rather than papering over
   one.
-- The page cache is capped at `MAX_CACHED_PAGES` (~100 pages / 50k rows),
+- The page cache is capped at `MAX_CACHED_PAGES` (10 pages / 50k rows),
   evicted furthest-from-viewport first by `trimPageCache`. Deep-scrolling a
   1.2M-row × 27-column view used to accumulate the whole table in the JS
   heap — the DOM has always held only the visible window (invariant #6),
@@ -195,13 +200,20 @@ see [docs/notes/README.md](README.md) for the whole set.
   2.46M rows get ~6.5px of spacer per row instead of 24, so a wheel notch
   travels ~3.7x further; every row stays addressable (that needs 1px/row,
   which the cap doesn't reach until ~16M rows) and keyboard nav moves by row.
-  Related, and the reason this was found at all: `#app`'s four grid children
-  each pin their own `grid-row`. `#presetBanner` is `hidden` by default and a
-  `display:none` item isn't placed in the grid at all, so under
-  auto-placement `.main-area` slid into the 3rd (`auto`) track — harmless
+  Related, and the reason this was found at all: `#app`'s in-flow grid
+  children each pin their own `grid-row` — `.temp-banner` 1, `.bar` 2,
+  `.toolbar` 3, `.plugin-panels` 4, `.diff-banner` 5, `.main-area` 6, with
+  `#sidebar` spanning `3 / -1` — rather than leaving any of them to
+  auto-placement. A `hidden` sibling like `#tempBanner` or `#diffBanner` is
+  `display:none`, and a `display:none` item isn't placed in the grid at all,
+  so under auto-placement `.main-area` slid up a track — harmless
   until the spacer passed the browser's ceiling, at which point that track's
   intrinsic size resolved to 0 and collapsed `.main-area`/`#grid`/`#body` to
   zero height. Correct row count, sticky header painted, not one data row.
+  The sibling that sprang it was the suggestion banner, an element the app
+  no longer has (the suggestion is a state of the Filters button instead);
+  the explicit pins stay so the next hidden sibling can't set the same trap
+  again.
 - **The tag rail has its own gutter; it overlays nothing** (`.rail` and
   `.grid-body`'s `margin-right: var(--rail-w)` in style.css, `drawRail`
   in grouping.js). It is absolutely positioned against `.grid`, and for

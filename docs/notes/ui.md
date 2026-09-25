@@ -120,9 +120,15 @@ see [docs/notes/README.md](README.md) for the whole set.
   it. **A 409 from the route means mid-rebuild, not an error**: the strip
   fetches 150 ms after `winnow:viewchange`, and a second rebuild in that
   window evicts the view it asked about — so on a 409 it keeps what is
-  drawn and lets that rebuild's own view change refetch. Only an
-  'expired' KeyError is a 409; an unknown column (a derived column just
-  removed) or a non-datetime one is a 400 the strip shows as text in
+  drawn rather than blanking the chart, then compares the view the answer
+  was about with the view the grid has and asks again when they differ —
+  the evicting rebuild fired its own view change before the 409 came back,
+  so nothing further is coming (the entry above has that forensics). A view
+  that is still the grid's and still answering 409 is re-asked `RETRY_MAX`
+  (3) times, after which the strip marks itself stale and appends "showing
+  the previous filter" to the count line. Only an 'expired' KeyError is a
+  409; an unknown column (a derived column just removed) or a
+  non-datetime one is a 400 the strip shows as text in
   `.th-empty`, because waiting for a view change would never fix it. It
   listens only while it is on screen: open but hidden behind a page tab,
   a view change is left for the show edge in `syncHistogramPanel` to
@@ -151,13 +157,18 @@ see [docs/notes/README.md](README.md) for the whole set.
 - There's no separate "preset" concept anymore — a preset is just a saved
   filter (`workspace.SavedFilters`, cross-case) whose `col_names` happens to
   match (exactly, or "similar" per the same Jaccard/subset heuristic the old
-  case-scoped `filter_presets` table used) the table just opened. The banner
-  (`checkPresets`/`matchingSavedFilters` in `static/js/savedfilters.js`) computes this entirely
-  client-side against the already-loaded `S.savedFilters` — no request. A
-  case file saved before this change may still have rows in the old
-  `filter_presets` SQLite table; `Store.pop_legacy_presets()` reads and
-  clears it once on open, and server.py folds whatever it finds into
-  `WS.filters`. Nothing writes to `filter_presets` anymore — it stays in the
+  case-scoped `filter_presets` table used) the table just opened. The match
+  (`checkPresets`/`matchingSavedFilters` in `static/js/savedfilters.js`) is
+  computed entirely client-side against the already-loaded `S.savedFilters` —
+  no request — and it surfaces as a state of the Filters button rather than a
+  row of chrome of its own: an accent ring on the button
+  (`updateFiltersButton` in `static/js/timeframe.js`), and the matches
+  themselves listed in its dropdown under a "For this table" header, below a
+  separator and the fixed entries. A case file saved before this change may
+  still have rows in the old `filter_presets` SQLite table;
+  `Store.pop_legacy_presets()` reads and clears it once on open, and server.py
+  folds whatever it finds into `WS.filters`. Nothing writes to
+  `filter_presets` anymore — it stays in the
   schema purely as a one-way migration source for old case files.
 - A header-set **nickname** (`workspace.HeaderNicknames`, `header_nicknames.json`)
   is a separate tiny store from `SavedFilters`, not a field on it — several
@@ -205,13 +216,15 @@ see [docs/notes/README.md](README.md) for the whole set.
   directory import can open 30+ tabs in one pass (every ingest auto-opens
   its tab), and a dropdown you reopen per click doesn't scale to that.
   `#app`'s CSS grid grew a column rather than a wrapper div — `#sidebar` is
-  `grid-column: 1; grid-row: 1 / -1`, the four rows that used to be `#app`'s
-  only direct children (`.bar`/`.toolbar`/`#presetBanner`/`.main-area`) all
-  moved to `grid-column: 2` — so hiding it (`[hidden]`) collapses that
-  column to zero width for free, nothing else occupies it. `renderSidebar`
-  is called from inside `renderTabs()` itself (both of `renderTabs`'s
-  callers — `loadSources` and the tab strip's own drag-drop handler —
-  mean `S.sources`/`S.tabOrder` just changed), not from a
+  `grid-column: 1; grid-row: 3 / -1` (it slides in UNDER the tab bar, so
+  toggling it never reflows the top chrome). The chrome it tucks beneath —
+  `.temp-banner` and `.bar` — spans `grid-column: 1 / -1` for that reason,
+  while everything the sidebar sits beside (`.toolbar`, `.plugin-panels`,
+  `.diff-banner`, `.main-area`) is `grid-column: 2` — so hiding it
+  (`[hidden]`) collapses that column to zero width for free, nothing else
+  occupies it. `renderSidebar` is called from inside `renderTabs()` itself
+  (both of `renderTabs`'s callers — `loadSources` and the tab strip's own
+  drag-drop handler — mean `S.sources`/`S.tabOrder` just changed), not from a
   parallel set of call sites that could drift out of sync. The table list
   has two parts. An **Open** section at the top is the working set — the
   tables with a tab open, in `S.tabOrder`, reorderable by ▲/▼ or drag
@@ -262,10 +275,10 @@ see [docs/notes/README.md](README.md) for the whole set.
   being made. The only thing the `editing` argument adds is an `Update
   "<name>"` button; everything else, including "Save as new…", is the
   normal builder. That button deliberately sends **only `payload`** —
-  never `col_names`. A filter's header set is its identity for `[` / `]`
-  cycle order and the suggested-filter banner (see the saved-filters
-  entries above), so re-binding it to whatever table happened to be open
-  during an edit would silently move it out of the group it was saved
+  never `col_names`. A filter's header set is its identity for `[` / `]` cycle
+  order and the suggested-filter state of the Filters button (see the
+  saved-filters entries above), so re-binding it to whatever table happened to
+  be open during an edit would silently move it out of the group it was saved
   for; "Save as new…" is the rebind path. `workspace.SavedFilters.update`
   replaced the old name-only `rename` with the same
   None-means-leave-alone partial-update convention `CaseRegistry.update`
@@ -604,8 +617,8 @@ see [docs/notes/README.md](README.md) for the whole set.
   (`clearRowCaches`, both the flat and the grouped one) underneath it. Scope follows the selection: right-clicking *inside* one
   acts on the whole selection (tagging 200 checked rows shouldn't collapse
   to the row under the pointer), right-clicking outside it moves the
-  cursor there first. Works in grouped mode too now (see "Grouped mode's
-  rows are ordinary rows" below); a right-click on a *group header* opens a
+  cursor there first. Works in grouped mode too now (grid.md, "Grouped
+  mode's rows are ordinary rows"); a right-click on a *group header* opens a
   different menu instead — `groupMenuItems`. A tag's ✓
   reads the clicked row even when the target is a whole selection, which
   is deliberately the same sample-one-row rule `resolveTagDirection`

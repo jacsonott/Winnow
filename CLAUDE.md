@@ -134,10 +134,11 @@ winnow/            Everything the app is made of. The modules below all
                     live here.
 store.py           All SQLite: ingest, view materialisation, tags, sessions, export.
 timeparse.py       Timestamp-parsing operations for derived datetime columns —
-                    and, since structparse.py registers into it, the registry
-                    of derived-column operations generally. `family` splits
-                    them ("datetime" vs "extract") so each picker offers only
-                    the ops that answer its question. Stdlib only, imports
+                    and, since structparse.py, combine.py and enrich.py all
+                    register into it, the registry of derived-column
+                    operations generally. `family` splits them ("datetime",
+                    "extract", "combine", "lookup") so each picker offers
+                    only the ops that answer its question. Stdlib only, imports
                     nothing from the app.
 structparse.py     JSON/XML field-extraction operations, registered into
                     timeparse.OPERATIONS via register_op (its documented
@@ -210,12 +211,14 @@ workspace.py       Cross-case JSON state (case registry, saved filters, default
                     tag template) — human-readable files in workspace/, outside
                     any single case.db so they survive switching cases.
 plugin_api.py      Plugin host: discovery/loading from plugins/, PluginAPI
-                    (register_ingest_format / register_tab / register_api),
-                    the registry server.py's /api/plugins, /plugin_assets/*
-                    and /api/plugin/* routes read. The authoring contract
-                    lives in its module docstring; docs/writing-plugins.md
-                    is the long-form guide built on top of it (keep the two
-                    in sync when the contract changes).
+                    (the register_* extension-point hooks — ingest formats,
+                    tabs, routes, row actions, toolbar and page panels,
+                    dashboards), the registry server.py's /api/plugins,
+                    /plugin_assets/* and /api/plugin/* routes read. The
+                    authoring contract lives in its module docstring;
+                    docs/writing-plugins.md is the long-form guide built on
+                    top of it (keep the two in sync when the contract
+                    changes).
 docs/              Long-form documentation. writing-plugins.md — the plugin
                     developer guide. notes/ — the per-subsystem working
                     notes ("things that bite"), one file per part of the
@@ -224,23 +227,44 @@ plugins/           Analyst-installed plugins (gitignored except its README).
                     Managed from Settings → Plugins: per-plugin on/off
                     toggles and a copy-from-disk installer, no restart —
                     dropping a folder/.py here by hand works too.
-examples/plugins/  Committed example plugins, one per extension point — treat
-                    them as the reference for writing new ones. Always in
+examples/plugins/  Committed example plugins covering every extension point
+                    but one — treat them as the reference for writing new
+                    ones. register_row_action is the gap: its contract
+                    lives in docs/writing-plugins.md and in
+                    tests/test_plugin_row_actions.py until an example earns
+                    its place here. Always in
                     PLUGIN_DIRS (after plugins/, whose same-named entries
                     shadow them), so they're listed in Settings → Plugins
                     with no install step — default OFF via PluginPrefs'
                     enabled_bundled list, the inverse of the installed
                     dir's presence-means-on rule. mft_usn: raw
                     NTFS $MFT/$J parsing (ingest formats, stdlib-only).
+                    esxi_logs: an ESXi support bundle or UAC Linux
+                    collection read into one shared column schema
+                    (register_ingest_format), plus the reference
+                    register_dashboard board, offered on its own under
+                    Dashboards ▸ Library. The shipped "ESXi / UAC triage"
+                    profile is a separate thing in defaults/profiles.json:
+                    it carries its own wider board and turns this plugin on.
                     lateral_movement: a pinned graph tab (register_tab +
                     register_api + a canvas ES module, offline).
+                    first_last: a tab that writes a TABLE back
+                    (register_tab + register_api) — the bounds of each
+                    group of events go through ingest_rows, so the result
+                    tags and exports like any other source.
+                    pivot: a cross-tab over an ingested table
+                    (register_tab + register_api), rows/columns/values
+                    dragged into place.
                     top_values: a toolbar panel that follows the grid
                     (register_toolbar_panel, no routes — the built-in
                     histogram strip in static/js/histogram.js is the
                     same shape, and was this hook's example before it
                     was built in).
-                    claude_assistant: a Claude chat tab (external service from
-                    a plugin route; needs network + `pip install anthropic` —
+                    claude_assistant: a Claude chat tab, and the SQL
+                    Copilot page panel that writes and runs queries in the
+                    SQL pane's own column (register_tab + register_api +
+                    register_page_panel; external service from a plugin
+                    route; needs network + `pip install anthropic` —
                     deliberately NOT airgap-compatible, which is why it's a
                     plugin). Install via Settings → Plugins or cp -r into
                     plugins/.
@@ -255,7 +279,8 @@ static/icons/      The brand mark (three thinning bars — grain kept, chaff
                     winnow/assoc.py). Ships in the release archive (static/
                     is not export-ignored); PNG/ICO are marked binary.
 static/js/         The frontend, one ES module per subsystem (main.js is the
-                    entry; core.js is the only module nothing imports *into*).
+                    entry; core.js and charts.js are the leaves — nothing from
+                    the app is imported *into* either).
                     No build step — `<script type="module">` is native, and
                     the plugin host already dynamic-import()s plugin modules.
                     Modules hold declarations only; every top-level side
@@ -294,9 +319,11 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
 ## Invariants — don't break these
 
 1. **Source tables are never mutated.** Each import is `src_<id>` with an
-   explicit `rid INTEGER PRIMARY KEY`. Tags, notes, layouts and saved views live
-   in sidecar tables keyed by `(source_id, rid)`. The CSV on disk is never
-   written to. This is what makes a session portable and re-import non-destructive.
+   explicit `rid INTEGER PRIMARY KEY`. Tags and notes live in sidecar tables
+   keyed by `(source_id, rid)`; layouts and saved views are sidecars too, keyed
+   per source rather than per row — a layout is one row per source, a saved view
+   one row per saved spec. The CSV on disk is never written to. This is what
+   makes a session portable and re-import non-destructive.
 
 2. **Never page with `LIMIT/OFFSET` over a filtered sort.** Filter/sort changes
    materialise once into a temp-attached `v.view_N(pos, rid)` table; the grid
@@ -530,8 +557,16 @@ A new trap goes in the file for its subsystem, not back here — see
    the first step: a second view already lives beside the live one until
    it is adopted or discarded. Filter tabs need that plus a way to keep
    several adopted at once.
-3. **Merged multi-source timeline** — one view across several `src_` tables with
-   a normalised timestamp column. The big one for real triage.
+3. **A timeline that isn't only tagged rows.** The merged view itself is
+   built: `Store.build_timeline` UNION ALLs a branch per source into one
+   `v.view_N`, normalising each source's timestamp so tables in different
+   formats interleave. What it unions is every *tagged* row, which is the
+   right default — a case-wide view of "everything I've flagged as a
+   finding" rather than of whichever table happens to be open — but it is
+   not the only shape an analyst wants: reconstructing the hour around a
+   finding means seeing the rows nobody has tagged yet. The extension is a
+   timeline scoped by time window or by source instead of by `row_tags`,
+   without materialising every row in the case to get there.
 4. **Saved views UI.** Endpoints (`/api/saved_views`) exist and work; nothing in
    the frontend calls them yet. (Related but not it: "Save as table" —
    `Store.save_view_as_source` — records the spec that produced a subset

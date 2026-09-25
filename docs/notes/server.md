@@ -309,10 +309,13 @@ see [docs/notes/README.md](README.md) for the whole set.
   unchanged, because `is_winnow_case_file` and the open path sniff
   CONTENT (SQLite header + the sources/tag_defs/row_tags tables), never
   the extension — only NEW cases take the new suffix, nothing is
-  migrated. In the association catalogue `.db-winnow` is the one builtin
-  type that is `default_ok`: nothing else owns it, so making Winnow its
-  default can't steal a file from Excel or a DB browser the way claiming
-  `.db`/`.xlsx` would. The brand icon rides the same association —
+  migrated. In the association catalogue `.db-winnow` is
+  `default_ok`, alongside the formats nothing else contests — `.csv`,
+  `.tsv`, `.jsonl`, `.ndjson`. What is particular about it is the
+  ownership: nothing on the system claims `.db-winnow` at all, so Winnow
+  can take its double-click without taking it from anybody, the way
+  claiming `.db`/`.xlsx` would. Those, with `.txt`/`.json`/`.sqlite*`/
+  `.xlsm`, stay handler-only. The brand icon rides the same association —
   DefaultIcon on the Windows ProgId, the `.desktop` Icon= and a
   hicolor `application-x-winnow-case` mimetype icon on Linux. **An icon
   replaced in place does not show up on its own**: Explorer caches

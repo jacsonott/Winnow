@@ -156,7 +156,13 @@ destination, reusing the lateral-movement src/dst notion). The question
 analysts ask constantly ("what do we know about WKS07?") that today means
 filtering each table by hand.
 
-**Where it's reachable — three ways in:**
+**Where it's reachable — three ways in, none of them built.** The backend
+is the half that shipped: `Store.entity_pivot` and `POST
+/api/entity/pivot` exist and are tested, and nothing in the front end
+calls them. There is no pivot item in rowmenu.js, no pivot action on a
+watchlist indicator, and no entity-pivot page tab — the page-tab list
+holds SQL, Timeline, Notes, Watchlist, plugin tabs and pinned dashboards,
+and nothing else. What follows is the front end as intended:
 1. **Right-click any cell → "Pivot on 'WKS07'"** (rowmenu.js gains one
    item next to filter-by-value). Primary path — always one cell from a
    full-case view of that value.
@@ -169,13 +175,21 @@ Opens as a page tab (like SQL/Timeline). See the mockup: left rail =
 chronological evidence table; double-click a row opens that source
 filtered to it.
 
-**Backend.** `POST /api/entity/pivot {value, columns?}` that, per source,
-runs a counted scan across its text columns (or a chosen set), returns
-`{source_id, count, sample_rows, time_bounds}`, plus a merged timeline
-built the same way the super-timeline would — so entity pivot and the
+**Backend.** `POST /api/entity/pivot {value, limit}` (`EntityPivotBody`,
+`limit` defaulting to 60) that, per source, runs a counted scan across all
+of that table's base columns — the same all-columns blob match search-all
+uses — and returns `{value, sources, rows, buckets}`: one entry per
+matching source as `{source_id, source_name, count, columns, time_col}`, a
+merged, time-ordered `rows` sample capped at `limit`, and per-day
+`buckets` for the histogram. Merges and errored sources are skipped (a
+merge's rows are its members'). The timeline is built the same way the
+super-timeline would be, reusing `TS_NORMALIZE` — so entity pivot and the
 super-timeline share their normalization code. Column resolution ("which
-columns hold hosts") reuses header-set knowledge (RemoteHost/Computer/
-Workstation for EvtxECmd, etc.).
+columns hold hosts") deliberately needs no header-set knowledge: rather
+than knowing that RemoteHost/Computer/Workstation hold hosts for EvtxECmd,
+the scan reports which columns actually held the value — a general
+stand-in for "seen as source / destination" that needs no per-tool
+hardcoding.
 
 **Why high-value + low-risk.** Mostly assembly of parts that exist (search
 counting, chart module, `openFiltered`, header sets), and it's the
@@ -223,8 +237,19 @@ property, like bundles). The *data* is queried live from the open case. A
 profile exports to JSON and imports on another box — the portability the
 watchlist and sessions have.
 
-**Routes.** `GET/POST /api/dashboard` (the open case's active layout),
-profiles extend `/api/plugin_bundles` with `dashboard`/`watchlist` fields,
+**Routes.** `GET/POST /api/dashboards` — list the case's boards, create
+one; a case holds several named boards rather than a single active layout.
+`GET/POST /api/dashboards/{dashboard_id}` reads one and updates its name,
+widgets or pinned flag, `DELETE /api/dashboards/{dashboard_id}` removes
+it, `POST /api/dashboards/reorder` takes the sidebar's order and
+`POST /api/dashboards/{dashboard_id}/refresh` re-runs every widget on a
+board. `POST /api/dashboard/resolve` answers where a widget's placeholder
+table lands in *this* case — the source id a drilldown opens, or a query
+with its placeholders substituted for handing to the SQL pane. The
+machine-wide library is `GET/POST /api/dashboard_library`,
+`GET/DELETE /api/dashboard_library/{board_id}` and
+`POST /api/dashboard_library/{board_id}/add`. Profiles extend
+`/api/plugin_bundles` with `dashboard`/`watchlist` fields, and
 `POST /api/dashboard/widget/preview` runs a widget's query → render-ready
 data.
 

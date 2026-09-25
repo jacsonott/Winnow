@@ -33,7 +33,7 @@ split, found by loading the app:
    time, so the import cycles between modules (there are many, and that's
    fine) can't produce a temporal-dead-zone error.
 2. **`core.js` imports nothing.** It holds `$`, `el`, the constants, `api`/
-   `post`, the toast/busy chrome and `debounce`. Three modules initialise a
+   `post`, the toast/busy chrome and `debounce`. Seven modules initialise a
    top-level `const x = debounce(...)`, which *does* run at evaluation time —
    so `debounce` has to be reachable before any other module's body runs, and
    the only way to guarantee that is for its module to be a leaf. When
