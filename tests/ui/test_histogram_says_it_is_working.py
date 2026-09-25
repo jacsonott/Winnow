@@ -34,11 +34,31 @@ def strip_open(page):
     page.wait_for_function("() => !!document.querySelector('#histogramPanel .th-info')", timeout=10_000)
     yield
     page.unroute(HIST)
-    page.evaluate("() => { __winnow.clearAllFilters(); __winnow.toggleHistogram(false); }")
+    # Two statements in one arrow body would drop clearAllFilters' promise
+    # on the floor: page.evaluate awaits what the function RETURNS, and a
+    # braced body returning nothing hands back undefined immediately. The
+    # view rebuild it kicks off would then still be in flight when the
+    # next module starts using the shared case.
+    page.evaluate("() => __winnow.clearAllFilters()")
+    page.wait_for_function("() => __winnow.busyCount === 0", timeout=15_000)
+    page.evaluate("() => __winnow.toggleHistogram(false)")
+
+
+# What an analyst can actually see, asked of the browser rather than of
+# the markup: the count line breathing. Every assertion here goes through
+# this rather than through hasAttribute, because the cue shipped once with
+# the attribute present and the animation not running — toggleAttribute
+# writes the empty string, and `[aria-busy="true"]` does not match it. A
+# test that only asked whether the attribute existed stayed green through
+# the whole of that.
+BUSY_JS = """() => getComputedStyle(
+  document.querySelector('#histogramPanel .th-info')).animationName !== 'none'"""
+IDLE_JS = """() => getComputedStyle(
+  document.querySelector('#histogramPanel .th-info')).animationName === 'none'"""
 
 
 def _busy(page):
-    return page.evaluate("() => document.getElementById('histogramPanel').hasAttribute('aria-busy')")
+    return page.evaluate(BUSY_JS)
 
 
 def _info(page):
@@ -56,8 +76,11 @@ def test_the_strip_says_it_is_working_while_a_chart_is_already_up(page):
     held = []
     page.route(HIST, lambda route: held.append(route))          # answer nothing yet
     page.evaluate("() => { __winnow.S.filters = { EventId: '=4624' }; return __winnow.rebuildView({ keepScroll: false }); }")
-    page.wait_for_function("() => document.getElementById('histogramPanel').hasAttribute('aria-busy')",
-                           timeout=15_000)
+    page.wait_for_function(BUSY_JS, timeout=15_000)
+    # The value has to be the literal "true", not merely present: that is
+    # what the stylesheet selects on, and ARIA gives aria-busy no boolean
+    # shorthand.
+    assert page.locator("#histogramPanel").get_attribute("aria-busy") == "true"
     # The old chart is still up — deliberately, an empty strip mid-filter
     # is worse than a slightly old one — which is exactly why the cue has
     # to live somewhere other than the canvas.
@@ -66,21 +89,37 @@ def test_the_strip_says_it_is_working_while_a_chart_is_already_up(page):
     for r in held:
         r.continue_()
     page.unroute(HIST)
-    page.wait_for_function("() => !document.getElementById('histogramPanel').hasAttribute('aria-busy')",
-                           timeout=15_000)
+    page.wait_for_function(IDLE_JS, timeout=15_000)
+    assert page.locator("#histogramPanel").get_attribute("aria-busy") is None
 
 
 def test_the_busy_cue_is_on_the_chrome_not_the_canvas(page):
     """A canvas does not inherit CSS, so anything expressed in drawn
-    pixels would need a redraw on a timer. The count line carries it."""
-    style = page.evaluate("""() => {
-      const el = document.querySelector('#histogramPanel .th-info');
-      document.getElementById('histogramPanel').setAttribute('aria-busy', 'true');
-      const a = getComputedStyle(el).animationName;
-      document.getElementById('histogramPanel').removeAttribute('aria-busy');
-      return { busy: a, idle: getComputedStyle(el).animationName };
-    }""")
-    assert style["busy"] != "none" and style["idle"] == "none", style
+    pixels would need a redraw on a timer. The count line carries it.
+
+    Driven by a request the strip is really waiting on. Writing the
+    attribute from the test instead would only prove the stylesheet has a
+    rule, which it always did — the half that was broken was the markup
+    the strip writes, and no hand-set attribute can catch that."""
+    page.wait_for_function("() => /rows/.test(document.querySelector('#histogramPanel .th-info').textContent)",
+                           timeout=15_000)
+    assert _busy(page) is False, "idle strip should not be animating"
+
+    held = []
+    page.route(HIST, lambda route: held.append(route))          # answer nothing yet
+    page.evaluate("() => { __winnow.S.filters = { EventId: '=4624' }; return __winnow.rebuildView({ keepScroll: false }); }")
+    page.wait_for_function(BUSY_JS, timeout=15_000)
+    where = page.evaluate("""() => ({
+      info: getComputedStyle(document.querySelector('#histogramPanel .th-info')).animationName,
+      canvas: getComputedStyle(document.querySelector('#histogramPanel canvas')).animationName,
+    })""")
+    assert where["info"] != "none", where
+    assert where["canvas"] == "none", where
+
+    for r in held:
+        r.continue_()
+    page.unroute(HIST)
+    page.wait_for_function(IDLE_JS, timeout=15_000)
 
 
 def test_a_strip_that_gave_up_stops_claiming_to_be_current(page):
