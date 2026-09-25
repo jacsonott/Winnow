@@ -336,7 +336,15 @@ function draw() {
      does not inherit CSS (see the module header), so anything drawn into
      it would need a redraw on a timer to animate. */
   const panel = $('histogramPanel');
-  if (panel) panel.toggleAttribute('aria-busy', inflight > 0);
+  /* Written out longhand rather than with toggleAttribute, which sets the
+     EMPTY string: the stylesheet asks for [aria-busy="true"] — as every
+     other busy cue in the app does, and as ARIA requires, the attribute
+     having no boolean form — so `aria-busy=""` left the cue switched on
+     in the markup and invisible on screen. */
+  if (panel) {
+    if (inflight > 0) panel.setAttribute('aria-busy', 'true');
+    else panel.removeAttribute('aria-busy');
+  }
   if (!S.sourceId) {
     showEmpty('Open a table to chart when its rows happened.');
     info.textContent = '';
