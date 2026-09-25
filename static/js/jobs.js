@@ -379,10 +379,16 @@ export function renderJobsPanel() {
   // the in-progress files aren't buried below a long waiting list, and keep
   // finished/errored rows (they auto-dismiss). Running first, then the
   // queued summary, then the completed — so what's happening stays on top.
+  //
+  // The finished list is `clearableJob` itself, not a second copy of its
+  // rule. The header above counts the rows Clear all will take; these are
+  // those rows. Two spellings of one rule drift, and the drift is silent —
+  // the count would describe a different set than the button removes, which
+  // is the exact miscount clearAllRow says the clearable count exists to
+  // avoid.
   const active = ingestJobs.filter((j) => !dismissedJobs.has(j.job_id) && j.status === 'running');
   const queued = ingestJobs.filter((j) => !dismissedJobs.has(j.job_id) && j.status === 'queued');
-  const finished = ingestJobs.filter((j) => !dismissedJobs.has(j.job_id)
-    && j.status !== 'running' && j.status !== 'queued');
+  const finished = ingestJobs.filter(clearableJob);
   for (const j of active) {
     const label = j.tables_total > 1
       ? `${j.name} — ${Math.min(j.tables_done + 1, j.tables_total)}/${j.tables_total}${j.current_table ? `: ${j.current_table}` : ''}`
@@ -620,11 +626,12 @@ export function awaitingAnswer() {
   return [...pluginNotices.values()].filter((n) => n.status === 'done' && n.holdsResult);
 }
 
-/* Declarations, not const arrows: renderJobsPanel calls clearableCount
-   and lives 200 lines above this, and a const would leave these in the
-   temporal dead zone for anything that painted the panel before the
-   module finished evaluating. Nothing does today — every top-level side
-   effect is main.js's, per CLAUDE.md — and this way nothing can. */
+/* Declarations, not const arrows: renderJobsPanel calls both
+   clearableCount and clearableJob from 200 lines above this, and a const
+   would leave these in the temporal dead zone for anything that painted
+   the panel before the module finished evaluating. Nothing does today —
+   every top-level side effect is main.js's, per CLAUDE.md — and this way
+   nothing can. */
 function clearableJob(j) {
   return !dismissedJobs.has(j.job_id) && j.status !== 'running' && j.status !== 'queued';
 }
