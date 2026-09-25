@@ -754,6 +754,14 @@ export async function openDerivedColumnModal(prefill, editing) {
       try {
         res = await ask(state.scope);
       } catch (e) {
+        /* Before anything else: a superseded request may not touch the
+           modal at all. The fallback below repaints the scope buttons and
+           raises a toast, and doing that on behalf of a request nobody is
+           waiting on leaves the pressed button, the verdict sentence and
+           the rows under it describing three different samples. The other
+           branches each guarded for themselves; this one has to guard
+           first, because its first act is already a visible one. */
+        if (seq !== previewSeq) return;
         // A 409 is the view going out from under the modal mid-rebuild.
         // Fall back to the table rather than showing an error for a
         // question the analyst can still have answered — the value
@@ -763,12 +771,11 @@ export async function openDerivedColumnModal(prefill, editing) {
           syncScope();
           toast('That view was rebuilt — previewing against the whole table');
           try { res = await ask('table'); } catch (e2) {
-            if (seq !== previewSeq) return;
+            if (seq !== previewSeq) return;   // the retry itself can be overtaken
             previewBox.replaceChildren(el('div', 'fb-help bad', e2.message));
             return;
           }
         } else {
-          if (seq !== previewSeq) return;
           previewBox.replaceChildren(el('div', 'fb-help bad', e.message));
           return;
         }
@@ -785,14 +792,24 @@ export async function openDerivedColumnModal(prefill, editing) {
         table.append(r);
       }
       previewBox.append(table);
-      // The verdict names the sample it is a verdict about. "All 200
-      // sampled values parse" is a very different claim depending on
-      // which 200, and it used to be silent about that.
-      const where = state.scope === 'view' ? 'in this view' : 'in the whole table';
+      /* The verdict names the sample it is a verdict about. "All 200
+         sampled values parse" is a very different claim depending on
+         which 200, and it used to be silent about that. The name comes
+         from the answer's own `scope`, never from the button that was
+         pressed: an operation that reads several columns of a row at once
+         is not scoped server-side, so asking for the view still gets the
+         table — and the sentence has to say the table. */
+      const where = res.scope === 'view' ? 'in this view' : 'in the whole table';
       previewBox.append(el('div', 'fb-help derived-verdict' + (res.failures ? ' bad' : ''),
         res.failures
           ? `${res.failures.toLocaleString()} of ${res.sampled.toLocaleString()} sampled values ${where} can't be parsed this way.`
           : `All ${res.sampled.toLocaleString()} sampled values ${where} parse.`));
+      if (state.scope === 'view' && res.scope !== 'view') {
+        // Otherwise the pressed button and the verdict disagree with
+        // nothing on screen to explain which one to believe.
+        previewBox.append(el('div', 'fb-help derived-scope-note',
+          'This operation reads more than one column of each row, which the preview can only sample from the whole table.'));
+      }
     }
 
     /* The preview and the named-group offer answer the same edits — the
