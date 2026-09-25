@@ -43,13 +43,35 @@ COUNT = f"{PANEL} .jobs-clear-count"
 
 @pytest.fixture(autouse=True)
 def quiet_panel(page):
-    """The shared server has import rows of its own in a full run, and a
-    poll would replace anything this test wrote. Empty the list, stop the
-    poll, and put both back afterwards."""
+    """A panel holding nothing but what the test puts in it.
+
+    The server is shared across the whole UI run, so by the time this
+    module gets a page the job list can already carry finished imports
+    other modules made. Empty it and close any plugin notices, then put
+    both back, so each test reasons about its own rows only.
+
+    `dismissedJobs` is saved and restored rather than cleared, which is
+    the point of the pairing: booting the page dismisses every job that
+    finished before it loaded (the `history` branch in pollJobs), and
+    that is the whole reason those older imports are not already on
+    screen. Clearing the set un-dismisses them, so the real pile paints
+    itself back over the grid — a 300px panel across the rows — the
+    moment anything repaints the panel.
+
+    What this does NOT do is stop the poll, despite where the rows come
+    from, because nothing here can: `jobsPollTimer` lives in jobs.js and
+    the namespace object these tests reach through exposes getters only.
+    It is survivable because pollJobs re-arms itself only while something
+    is uploading, importing, or being watched for an index build, and
+    this fixture leaves none of those behind. Were one to land anyway it
+    would take the rows below with it — it assigns `ingestJobs = d.jobs`
+    wholesale, a rebind, so an in-place push is simply dropped rather
+    than merged.
+    """
     page.evaluate("""() => {
       window.__realJobs = __winnow.ingestJobs.slice();
+      window.__realDismissed = [...__winnow.dismissedJobs];
       __winnow.ingestJobs.length = 0;
-      __winnow.dismissedJobs.clear();
       for (const id of [...__winnow.pluginNotices.keys()]) __winnow.closeNotice(id);
       __winnow.renderJobsPanel();
     }""")
@@ -58,8 +80,10 @@ def quiet_panel(page):
       for (const id of [...__winnow.pluginNotices.keys()]) __winnow.closeNotice(id);
       __winnow.ingestJobs.length = 0;
       __winnow.ingestJobs.push(...(window.__realJobs || []));
-      delete window.__realJobs;
       __winnow.dismissedJobs.clear();
+      for (const id of (window.__realDismissed || [])) __winnow.dismissedJobs.add(id);
+      delete window.__realJobs;
+      delete window.__realDismissed;
       __winnow.renderJobsPanel();
     }""")
 
