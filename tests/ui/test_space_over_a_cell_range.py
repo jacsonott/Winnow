@@ -56,13 +56,20 @@ def clean(page):
     }""")
     yield
     page.keyboard.press("Escape")
+    # `await`, not a bare call: clearAllFilters is async — it refetches the
+    # view and repaints — and page.evaluate only waits for the promise the
+    # arrow RETURNS. Calling it and falling off the end of the block hands
+    # Playwright an already-resolved undefined, so the fixture returns
+    # while the rebuild is still in flight and it lands somewhere in the
+    # next module's first test. The UI suite shares one case file, so that
+    # is a filter clearing itself under a test that never set one.
     page.evaluate("""async () => {
       __winnow.selClear();
       __winnow.clearCellSelection();
       __winnow.S.selUndo.length = 0;
       document.getElementById('body').scrollTop = 0;
       document.getElementById('body').scrollLeft = 0;
-      __winnow.clearAllFilters();
+      await __winnow.clearAllFilters();
     }""")
 
 

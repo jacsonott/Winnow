@@ -52,7 +52,9 @@ def merged(page, server, server_post, tmp_path):
     page.evaluate("""async (mid) => {
       await __winnow.api('/api/merges/' + mid, { method: 'DELETE' });
     }""", -merge["id"])
-    sid = [i for i in ids if i != page.evaluate("() => __winnow.S.sources[0].id")]
+    # By NAME, not by id: loadSources() above has already reordered the
+    # list, so working out "the one that isn't the fixture table" from a
+    # position in S.sources costs a round trip to reach the wrong answer.
     page.evaluate("""async (name) => {
       const s = __winnow.S.sources.find((x) => x.name === name);
       if (s) await __winnow.api('/api/source/' + s.id, { method: 'DELETE' });

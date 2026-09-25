@@ -44,11 +44,16 @@ def clean(page):
     }""")
     yield
     page.keyboard.press("Escape")
+    # `await`, not a bare call: clearAllFilters is async, and page.evaluate
+    # waits only for the promise this arrow RETURNS. Without the await the
+    # block finishes immediately and the fixture returns while the refetch
+    # and repaint are still running, so they land inside whichever test
+    # runs next against the case file this suite shares.
     page.evaluate("""async () => {
       __winnow.selClear();
       __winnow.clearCellSelection();
       document.getElementById('body').scrollLeft = 0;
-      __winnow.clearAllFilters();
+      await __winnow.clearAllFilters();
     }""")
 
 
