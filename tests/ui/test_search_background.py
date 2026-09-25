@@ -14,6 +14,11 @@ rebound to 0 (setSearchDetachMs), and /api/view/start's answer is the
 real job masked as still running, with the polls held until the test
 lets them through. The adopt that Apply does is real.
 
+Everything a row hands to a button or to its ✕ is scoped to the record
+that row stands for: an error row waits on screen indefinitely, and the
+click that finally tidies it away must not reach the search the table has
+in flight by then.
+
 Two rules around the pending search are pinned here too. Any other
 rebuild of its table — a header-box filter here — calls it off FIRST:
 that build lands as a normal build, which evicts the held view, and
@@ -74,8 +79,10 @@ class _Background:
 
     def finish_as(self, status, error=None):
         """The polls answer `status` from now on — the server's word that
-        the job ended without a view (cancelled, superseded, an error)."""
-        self.final = {"status": status, "error": error}
+        the job ended without a view (cancelled, superseded, an error).
+        `None` puts them back to "running", for a test that ends one
+        search this way and then runs another."""
+        self.final = {"status": status, "error": error} if status else None
 
     def close(self):
         self.released = True
@@ -350,6 +357,53 @@ def test_a_search_cancelled_server_side_ends_as_a_finished_row_not_an_error(page
         assert page.locator(f"{ROWS} .job-action").count() == 0
         assert page.evaluate("() => __winnow.S.pendingViews.size") == 0
         page.wait_for_function("() => document.getElementById('viewStats').textContent.startsWith('200 of 200 rows')")
+    finally:
+        bg.close()
+        _reset(page)
+
+
+def test_a_settled_rows_x_cannot_cancel_a_newer_search(page):
+    """The ✕ on a search's row is that search's Cancel — and an error row
+    never goes away on its own, so it is still sitting in the panel when
+    the analyst starts the next search on the same table and then tidies
+    the old row away. The handler is a closure over a record that ended
+    long ago; scoped to the table alone it would land on the search that
+    table is running NOW, killing live work as the price of housekeeping.
+
+    The failure is made without a clock: the first search's polls are
+    answered `error`, then put back to `running` for the second."""
+    bg = _Background(page)
+    cancels = _cancels(page)
+    _arm(page)
+    page.click("#btnSearchToggle")
+    try:
+        page.locator("#search").fill("4624")
+        page.wait_for_selector(ROWS)
+        bg.finish_as("error", "the search failed")
+        page.wait_for_selector(f"{ROWS} .job-phase.error")
+        assert page.evaluate("() => __winnow.S.pendingViews.size") == 0
+        # A second search on the same table, with the dead row left standing.
+        bg.finish_as(None)
+        page.locator("#search").fill("4625")
+        page.wait_for_function("() => document.querySelectorAll('#jobsPanel .job-notice').length === 2")
+        page.wait_for_function("() => __winnow.S.pendingViews.size === 1")
+        assert len(bg.jobs) == 2
+        live = bg.jobs[1]["job_id"]
+        # Tidying the failed row away leaves exactly one row — the live
+        # search's. Unscoped, the ✕ took both, and the second job with them.
+        page.locator(f"{ROWS}:has(.job-phase.error) .job-x").click()
+        page.wait_for_function("() => document.querySelectorAll('#jobsPanel .job-notice').length === 1")
+        assert 'Searching "4625"' in _notice_text(page)
+        assert page.evaluate("() => __winnow.S.pendingViews.size") == 1
+        assert page.evaluate("(id) => [...__winnow.S.pendingViews.values()][0].jobId === id", live)
+        assert cancels == [], f"the stale ✕ cancelled a job: {cancels}"
+        # And the live search still lands and applies, which a cancelled
+        # job could not.
+        bg.release()
+        page.wait_for_selector(f"{ROWS} .job-action:has-text('Apply')")
+        page.locator(f"{ROWS} .job-action", has_text="Apply").click()
+        page.wait_for_function("() => __winnow.S.view && __winnow.S.view.row_count === 50 && __winnow.busyCount === 0")
+        assert page.evaluate("() => __winnow.S.pendingViews.size") == 0
     finally:
         bg.close()
         _reset(page)

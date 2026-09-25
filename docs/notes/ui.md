@@ -962,18 +962,27 @@ see [docs/notes/README.md](README.md) for the whole set.
   act on this rather than merely hide it", which is only true of a row
   standing for something live — and those are the rows Clear all keeps.
   What it does clear stands for nothing, so there is nothing to act on,
-  and firing the handler reaches *past* the row: the detached search's is
-  `cancelPendingView(rec.sourceId)`, keyed by TABLE rather than by record
-  (unlike `cancelScan`, which checks `scanJob !== rec`), so running it for
-  a search that failed ten minutes ago cancels whatever that table has in
-  flight now. Clearing a stale receipt is not consent to kill live work.
-  The same sharp edge is why `settlePending`'s `fail` now passes
-  `actions: []`: `applyNoticeOpts` leaves what it is not given, so a
-  failed search kept the Cancel it was created with, and that button did
-  **not** go inert — clicking it cancelled the table's *current* search.
-  Both settle paths clear their actions now; `cancelPendingView` taking a
-  table rather than a record is still there for any future caller. The
-  header is
+  and firing the handler would aim *past* the row: the detached search's
+  calls off that table's background search, and a receipt for a search
+  that failed ten minutes ago is no instruction about the one running now.
+  Clearing a stale receipt is not consent to kill live work.
+
+  **That reach is now closed at the source, because the row's own ✕ had
+  it too — and that ✕ is the one an analyst actually clicks.** An error
+  row waits on screen indefinitely, so tidying one away after starting a
+  fresh search on the same table cancelled the fresh search.
+  `cancelPendingView(sourceId, only)` takes the record as well and does
+  nothing unless it is still the table's pending one, which is the guard
+  `cancelScan` has always had (`scanJob !== rec`) — made once in the
+  function rather than in each handler, so no closure written later can
+  reach past the search it was created for. The table-only form stays
+  right where the caller means "whatever this table has pending, call it
+  off": `runBuild` before a rebuild, and Remove in the tables manager.
+  `settlePending` clears the row's actions on both settle paths for a
+  separate reason — `applyNoticeOpts` leaves what it is not given, so a
+  failed search would keep the Cancel it was created with, and a receipt
+  offering a button about work that has already ended misleads even when
+  the button is inert. The header is
   `position: sticky` inside the panel's scroller: twenty rows overflow its
   50vh `max-height`, and a button that scrolled away with them would be
   exactly as much work as the ✕s it replaces. It carries the **clearable**
