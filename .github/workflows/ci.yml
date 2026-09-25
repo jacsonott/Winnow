@@ -1,4 +1,4 @@
-# Every PR into main runs the suite. Before this existed, the only thing
+# Every PR into develop or main runs the suite. Before this existed, the only thing
 # standing between a broken merge and main was somebody remembering to run
 # pytest — which, on a repo where changes arrive as whole features, is a lot
 # to leave to memory.

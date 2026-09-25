@@ -1136,13 +1136,27 @@ def test_claude_ask_request_shape(claude_client, monkeypatch):
     assert record["betas"] == ["server-side-fallback-2026-07-01"]
     assert record["fallbacks"] == "default"
     assert "thinking" not in record  # omitted on purpose — adaptive by default on this model
-    # Schema rides in system with the cache breakpoint on it.
+    # Schema rides in system with a cache breakpoint on it.
     assert record["system"][1]["text"].endswith("CREATE TABLE src_1 (...);")
     assert record["system"][1]["cache_control"] == {"type": "ephemeral"}
     # The stored turns replay in order; the new question is the last one.
     assert [m["role"] for m in record["messages"]] == ["user", "assistant", "user"]
     assert record["messages"][0]["content"] == "hi"
     assert record["messages"][-1]["content"] == "Which src_ table has the 4624s?"
+    # The transcript gets its own breakpoint, on the last turn that came out
+    # of the case's table — otherwise every replayed turn is reprocessed at
+    # full price behind the cached schema. It must land there and not on the
+    # question we appended, which is the one turn unique to this request:
+    # an entry written on the tail is bytes no later request sends again.
+    # (In the Copilot the tail is further from the stored text still — it
+    # carries the editor's SQL folded in. This request is the chat tab, so
+    # the two happen to match, which is why the assertion above reads the
+    # plain question back.)
+    assert record["messages"][-2]["content"] == [
+        {"type": "text", "text": "SELECT 1;", "cache_control": {"type": "ephemeral"}}
+    ]
+    assert "cache_control" not in str(record["messages"][-1]["content"])
+    assert "cache_control" not in record  # no top-level automatic caching
 
 
 def test_claude_copilot_mode_has_its_own_prompt_transcript_and_context(claude_client, monkeypatch):

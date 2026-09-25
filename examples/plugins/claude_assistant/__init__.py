@@ -52,21 +52,41 @@ timestamps are strings. Keep answers focused and practical; when you \
 reference an artifact or event ID, say why it matters for the investigation."""
 
 # The Copilot beside the SQL pane: same model, same schema, a narrower job.
-# Its answers are inserted and run by buttons, so the shape matters — one
-# fenced sql block the UI can lift out, and words kept to a minimum.
+# Its answers are inserted and run by buttons, so the *block* is a real
+# contract — exactly one fenced sql block the UI can lift out, and no block
+# at all when there is no query to give. The prose around it is not a
+# contract: ui/copilot.js renders it as plain divs and truncates nothing,
+# so the prompt asks for what the analyst needs to read rather than for a
+# sentence count. The count this used to carry bought neatness at the price
+# of the caveats that decide whether a result can be trusted — that a
+# timestamp comparison is text-wise, say, and comes apart across exports
+# that format their dates differently.
+#
+# The schema the UI sends is source tables only (static/js/plugins.js drops
+# anything with is_merge, and the Copilot has no toggle to turn that off),
+# but a merge is still queryable: the pane's connection carries a merge_<id>
+# TEMP VIEW, and a selected merge puts `SELECT * FROM merge_N` in the editor
+# text that rides along as context. So the prompt has to scope the schema
+# claim rather than list merges as part of it — otherwise a literal reader
+# "fixes" a perfectly good merge_3 query because merge_3 is not in the dump.
 COPILOT_PROMPT = """You are the SQL copilot inside Winnow's SQL pane, helping a DFIR \
-analyst query a case. The case is SQLite; the tables are the src_N and \
-merge_N in the provided schema. Every column is stored as TEXT whatever \
-the schema comments say — CAST explicitly for numeric comparisons, and \
-timestamps are ISO-like strings compared as text.
+analyst query a case. The case is SQLite; the provided schema lists the \
+case's src_N tables. A merged table is queryable as merge_N as well, even \
+though the schema does not list its columns — if the analyst is working \
+against one, write the query against merge_N rather than steering back to \
+the sources. Every column is stored as TEXT whatever the schema comments \
+say — CAST explicitly for numeric comparisons, and timestamps are \
+ISO-like strings compared as text.
 
 Answer with exactly one fenced ```sql block holding a single read-only \
-SELECT, then at most two short sentences saying what it shows. Add \
-LIMIT 200 unless the analyst asks for everything or an aggregate. If the \
-analyst's message is about the query currently in the editor ("make this \
-faster", "add the host", "why no rows?"), answer about that query and \
-return the revised one. If a question cannot be answered with a query, \
-say so in one sentence and give no code block."""
+SELECT, then tell the analyst what the result shows and anything that \
+would make them read it wrong — a comparison that is text-wise, a column \
+that is not filled in on every export, a filter narrower than it looks. \
+Add LIMIT 200 unless the analyst asks for everything or an aggregate. If \
+the analyst's message is about the query currently in the editor ("make \
+this faster", "add the host", "why no rows?"), answer about that query \
+and return the revised one. If a question cannot be answered with a \
+query, say so and why, and give no code block."""
 
 MODES = ("chat", "sql")   # the tab's conversation and the Copilot's — separate tables
 
@@ -161,7 +181,7 @@ def ask(req):
             "The claude-assistant plugin needs the official SDK on the server: pip install -U anthropic"
         )
 
-    # System prompt is [stable text, schema] with the cache breakpoint on
+    # System prompt is [stable text, schema] with a cache breakpoint on
     # the schema block: the whole prefix is cached between questions and
     # only invalidates when the case's tables actually change.
     system = [{"type": "text", "text": COPILOT_PROMPT if mode == "sql" else SYSTEM_PROMPT}]
@@ -178,6 +198,40 @@ def ask(req):
         role, content = turn.get("role"), turn.get("content")
         if role in ("user", "assistant") and isinstance(content, str) and content.strip():
             messages.append({"role": role, "content": content})
+    # The second cache breakpoint, on the last turn we replayed. The whole
+    # transcript ahead of it is byte-identical from one question to the
+    # next, and claude-opus-5 caches any prefix from 512 tokens up, so a
+    # conversation of any substance is past break-even within a few
+    # questions. Before this marker existed the schema was cached and up to
+    # MAX_HISTORY turns of transcript behind it were re-read at full price
+    # on every single question.
+    #
+    # It goes on the last *stored* turn and not on the one appended below.
+    # In the Copilot the two are different text — what we send is the
+    # question with the editor's SQL folded in, what the transcript keeps
+    # is the question alone — so a marker there would write an entry keyed
+    # on bytes no later request ever sends again. In the chat tab they
+    # happen to be the same string, but the marker still belongs here: the
+    # tail is the one turn that is unique to this request either way, and
+    # a breakpoint is only worth its write premium on bytes that come back.
+    # Top-level automatic caching is wrong for exactly that reason — it
+    # places its breakpoint on the tail.
+    #
+    # The limitation worth stating plainly: once a conversation runs past
+    # MAX_HISTORY turns the slice above starts moving, and it moves a PAIR
+    # at a time — a successful ask stores the question and the answer
+    # together — so the replayed prefix changes from its first byte and
+    # this marker stops reading. The schema breakpoint in `system` is
+    # unaffected (system renders before messages), so what is lost is the
+    # transcript half, not the whole cache. Fixing it properly means a
+    # window that advances in chunks big enough to leave a stable prefix
+    # behind, rather than one that moves every request.
+    if messages:
+        tail = messages[-1]
+        tail["content"] = [{"type": "text",
+                            "text": tail["content"],
+                            "cache_control": {"type": "ephemeral"}}]
+
     # The Copilot sees what is in the editor — "make this faster" needs
     # "this". It rides in the turn, not the transcript: the stored question
     # stays the analyst's words, and the next turn carries the editor's

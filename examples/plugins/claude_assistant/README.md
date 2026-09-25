@@ -39,9 +39,14 @@ than a Winnow feature. Airgapped machines never load a line of it.
   recommended substitute model in the same call instead of dead-ending
   the analyst. Remove the `fallbacks`/`betas` lines in `__init__.py` if
   you'd rather see raw refusals.
-- The schema block carries a prompt-cache breakpoint, so repeated
-  questions against the same case re-read the cached schema (~10× cheaper)
-  instead of re-paying for it.
+- The schema block carries a prompt-cache breakpoint, and so does the
+  last replayed transcript turn, so repeated questions against the same
+  case re-read both the schema and the conversation behind it (~10×
+  cheaper) instead of re-paying for them. The transcript half stops
+  paying off once a conversation runs past `MAX_HISTORY` turns: the
+  window then moves a question-and-answer pair per request, which changes
+  the prefix and ends the reads. The schema half keeps reading either
+  way — `system` renders before `messages`.
 - A refusal that survives the fallback chain surfaces as an inline error
   in the chat, with the category when the API provides one.
 
@@ -50,9 +55,10 @@ than a Winnow feature. Airgapped machines never load a line of it.
 The SQL page's toolbar gains a **Copilot** toggle (`register_page_panel`,
 page `"sql"`). On, a resizable column beside the editor holds a second
 chat: the same model and schema, told to answer with one fenced SQL
-block and a sentence or two, and every question carries the editor's
-current text — so "why does this return nothing?" or "add the host
-column" are about the query on screen. Under each SQL block:
+block plus whatever the analyst needs in order to read the result
+correctly, and every question carries the editor's current text — so
+"why does this return nothing?" or "add the host column" are about the
+query on screen. Under each SQL block:
 
 - **Insert** — `winnow.sqlPage.setText(sql)`: the active query tab's text
   is replaced (autosaved like typing; use a new query tab first if you

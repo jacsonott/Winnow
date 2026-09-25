@@ -532,14 +532,12 @@ A new trap goes in the file for its subsystem, not back here — see
    several adopted at once.
 3. **Merged multi-source timeline** — one view across several `src_` tables with
    a normalised timestamp column. The big one for real triage.
-4. **Drag-to-reorder columns.** `S.order` is already persisted in the layout;
-   only the drag handler is missing.
-5. **Saved views UI.** Endpoints (`/api/saved_views`) exist and work; nothing in
+4. **Saved views UI.** Endpoints (`/api/saved_views`) exist and work; nothing in
    the frontend calls them yet. (Related but not it: "Save as table" —
    `Store.save_view_as_source` — records the spec that produced a subset
    in `sources.origin_meta`, the first place a view spec is persisted per
    result; a saved *view* would replay one, a subset copies its rows.)
-6. `.tle_sess` import, so existing Timeline Explorer sessions carry over.
+5. `.tle_sess` import, so existing Timeline Explorer sessions carry over.
 
 ## Plugin-facing changes ship with their docs
 
@@ -556,10 +554,10 @@ a hook without docs fails CI rather than shipping as folklore. Bump
 ## Testing
 
 `tests/` is a `pytest` suite in three layers, and **CI
-(`.github/workflows/ci.yml`) runs all of it on every PR into main** — the
-whole suite used to depend on somebody remembering to run it before merging,
-which on a repo where changes arrive as whole features is a lot to leave to
-memory.
+(`.github/workflows/ci.yml`) runs all of it on every PR into develop or
+main** — the whole suite used to depend on somebody remembering to run it
+before merging, which on a repo where changes arrive as whole features is a
+lot to leave to memory.
 
 - **Backend** (`tests/test_*.py`) — `store.py`, `server.py`, `workspace.py`.
   The bulk of it; see the coverage notes below.

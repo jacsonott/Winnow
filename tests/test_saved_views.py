@@ -1,5 +1,5 @@
 """Saved views: the store CRUD and its three routes. This is currently a
-backend-only feature (CLAUDE.md backlog #5 — the UI doesn't call it yet),
+backend-only feature (CLAUDE.md backlog #4 — the UI doesn't call it yet),
 which is exactly why it needs pinning: nothing exercises it day-to-day,
 so a regression would sit invisible until the UI finally lands on top of
 a broken foundation."""
