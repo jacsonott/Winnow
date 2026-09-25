@@ -653,11 +653,15 @@ export function clearFinishedNotices() {
        row standing for something live — and those are exactly the rows
        kept above this line, for being `running` or `holdsResult`. What
        reaches here stands for nothing, so there is nothing to act on, and
-       firing the handler anyway reaches PAST the row: the detached
-       search's onDismiss is cancelPendingView(rec.sourceId), keyed by
-       TABLE and not by record, so running it for a search that failed ten
-       minutes ago cancels whatever search that table has in flight now.
-       Clearing a stale receipt is not consent to kill live work. */
+       firing the handler anyway would aim PAST the row: the detached
+       search's onDismiss calls off that table's background search, so
+       running it for a search that failed ten minutes ago is a click
+       about work that table finished with long ago. view.js scopes that
+       call to its own record now, so it would no-op rather than kill the
+       table's live search — this rule does not lean on that, since a
+       handler belonging to a row that stands for nothing has nothing to
+       do in the first place. Clearing a stale receipt is not consent to
+       kill live work. */
     clearNoticeTimer(n);
     pluginNotices.delete(id);
     cleared++;

@@ -230,9 +230,11 @@ def test_a_finished_notice_without_buttons_goes(page):
     # The row goes, its onDismiss does NOT run. That handler means "the ✕
     # must act on this rather than merely hide it", which is only true of
     # a row standing for something live — and those are the rows Clear all
-    # keeps. Firing it here reaches past the row: the detached search's is
-    # cancelPendingView(sourceId), keyed by table, so running it for a
-    # search that failed long ago cancels that table's current one.
+    # keeps. Firing it here would aim past the row: the detached search's
+    # calls off that table's background search, and a receipt for a search
+    # that failed long ago is no instruction about the one running now.
+    # (view.js scopes that call to its own record, so it would no-op; the
+    # rule stands on its own, for handlers nobody has written yet.)
     assert page.evaluate("() => window.__dismissed") is False
 
 

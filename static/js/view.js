@@ -409,12 +409,15 @@ function detachBuild(rec) {
     detail: 'running in the background',
     progress: null,
     sticky: true,
-    actions: [{ label: 'Cancel', onClick: () => cancelPendingView(rec.sourceId) }],
+    actions: [{ label: 'Cancel', onClick: () => cancelPendingView(rec.sourceId, rec) }],
   }, {
     // The row's ✕ is this search's Cancel while it runs and its Discard
     // once it has landed — never a plain dismiss, which would leave the
     // search polling with nothing on screen to apply or drop it from.
-    onDismiss: () => cancelPendingView(rec.sourceId),
+    // The record goes with the call, so once this search has settled the
+    // ✕ falls back to a plain dismiss instead of reaching the next search
+    // on the same table — see cancelPendingView.
+    onDismiss: () => cancelPendingView(rec.sourceId, rec),
     // ...and the panel's Clear all is not that ✕. A landed search holds a
     // built view server-side until Apply or Discard, so this is the one
     // notice in the app that a bulk clear must not answer for. Declared
@@ -470,7 +473,7 @@ async function followPendingView(rec) {
       sticky: true,
       actions: [
         { label: 'Apply', onClick: () => applyPendingView(rec.sourceId) },
-        { label: 'Discard', onClick: () => cancelPendingView(rec.sourceId) },
+        { label: 'Discard', onClick: () => cancelPendingView(rec.sourceId, rec) },
       ],
     });
     toastAction(`Search finished — ${rows}`, 'Apply', () => applyPendingView(rec.sourceId));
@@ -490,19 +493,19 @@ async function followPendingView(rec) {
 function settlePending(rec, status, detail) {
   S.pendingViews.delete(rec.sourceId);
   rec.status = status;
-  /* actions: [] because applyNoticeOpts leaves what it is not given, and
-     what this notice was given at create time was a Cancel. That button
-     does NOT go inert when the record leaves S.pendingViews, which is
-     what makes leaving it a bug rather than untidiness: its onClick is
-     cancelPendingView(rec.sourceId), keyed by TABLE and not by record
-     (unlike watchlist.js's cancelScan, which checks `scanJob !== rec`),
-     so clicking Cancel on a row whose search failed ten minutes ago
-     cancels whatever search that table has in flight now. The cancelled
-     branch below already cleared its actions; now both settle paths do.
+  /* actions: [] on both settle paths. A settled row is a receipt, and a
+     receipt carrying a button labelled Cancel invites a click that can
+     only be about a search that has already ended — applyNoticeOpts
+     leaves what it is not given, so the Cancel this notice was created
+     with would otherwise sit there through fail() and done().
 
-     The underlying sharp edge — cancelPendingView taking a table rather
-     than a record — is still there for any future caller. No live one is
-     left holding a stale sourceId. */
+     What that click can no longer do is reach a LATER search: the
+     record is passed to cancelPendingView below, which acts only while
+     it is still the table's pending one. That guard is what makes the
+     row's ✕ safe too — its onDismiss is the same call, it stays wired
+     after the record settles, and an error row waits on screen for the
+     ✕ indefinitely, so an analyst tidying the panel minutes later must
+     not be able to kill the search that table is running now. */
   if (status === 'error') rec.notice.fail({ detail: detail || 'the search failed', actions: [] });
   else rec.notice.done({ detail: detail || 'cancelled', sticky: false, actions: [] });
   restoreStats(rec);
@@ -512,10 +515,23 @@ function settlePending(rec, status, detail) {
    notice's Cancel), or discards the result of one that finished (its
    Discard). The server cancels the build, or drops the held view — the
    rows on screen were never touched either way. Returns whether there
-   was one. */
-export function cancelPendingView(sourceId = S.sourceId) {
+   was one.
+
+   `only` scopes the call to one record, the way watchlist.js's
+   cancelScan does with `scanJob !== rec`. Everything a notice hands to
+   a button or to the ✕ is a closure that outlives the search it stands
+   for: a row can settle, or simply linger, and still be clicked long
+   after the analyst has started a fresh search on the same table. Keyed
+   by table alone, that click would land on whatever is pending NOW.
+   Passing the record makes the stale closure a no-op instead — and
+   scoping it here rather than clearing each handler as it goes stale
+   closes the hole for every caller, including ones written later. The
+   table-only form is still the right call for "whatever this table has
+   pending, call it off": runBuild before a rebuild, and Remove in the
+   tables manager. */
+export function cancelPendingView(sourceId = S.sourceId, only = null) {
   const rec = S.pendingViews.get(sourceId);
-  if (!rec) return false;
+  if (!rec || (only && rec !== only)) return false;
   S.pendingViews.delete(sourceId);
   rec.notice.close();
   post(`/api/view/job/cancel?job_id=${rec.jobId}`, {}).catch(() => {});
@@ -541,7 +557,7 @@ export async function applyPendingView(sourceId = S.sourceId) {
     // source list is refetched): nothing to open, and the held view is
     // dropped rather than left on the server for nobody.
     toast('That table is gone — the search result was discarded', 4000);
-    cancelPendingView(sourceId);
+    cancelPendingView(sourceId, rec);
     return;
   }
   S.pendingViews.delete(sourceId);
