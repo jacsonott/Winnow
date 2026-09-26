@@ -1,4 +1,4 @@
-"""The M menu: the profile manager — save, list, apply, delete.
+"""The profiles manager (Settings → Profiles, or `p`) — save, list, apply, delete.
 
 The list these drove used to be one row per profile with the buttons on
 the end of it; they drive the two-pane manager now (tests/ui/
