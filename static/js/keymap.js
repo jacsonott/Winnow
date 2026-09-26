@@ -100,7 +100,11 @@ export const DEFAULT_KEYMAP = {
   openFilterSql: ['Q'],
   openJumpTs: ['J', 'a'],
   repeatJumpTs: ['.'],
-  openPluginBundles: ['M'],
+  // Lowercase, and the letter the word starts with. M was chosen when
+  // these were "plugin bundles"; nothing about the surface says M now,
+  // and the profiles manager is a place analysts go often enough for the
+  // key to be worth a home key rather than a shifted one.
+  openPluginBundles: ['p'],
 };
 
 export const ACTION_LABELS = {
@@ -150,7 +154,7 @@ export const ACTION_LABELS = {
    over it on every load. */
 export const KEYMAP_VERSION_KEY = 'winnow.keymap.v';
 
-export const KEYMAP_VERSION = 5;
+export const KEYMAP_VERSION = 6;
 
 /* The four spec strings one Ctrl/⌘+F press can produce. keySpecFromEvent
    spells the plain chord 'Ctrl+f'; ⌘ makes it 'Meta+f', and Shift — or Caps
@@ -225,6 +229,28 @@ export const KEYMAP_MIGRATIONS = [
     const chordTaken = Object.entries(map).some(([action, keys]) => action !== 'focusSearch'
       && Array.isArray(keys) && keys.some((k) => SEARCH_CHORD_SPECS.includes(k)));
     if (!chordTaken && wasDefault('focusSearch', ['/'])) map.focusSearch = ['/', 'Ctrl+f'];
+  },
+  // v6 (2026-09): the profiles manager moves M → p. A REPLACEMENT, not an
+  // alias, so unlike the additive migrations above it has to be sure it
+  // is not stepping on something: `p` was unbound by default, which means
+  // Settings would have accepted it for any action, and handing it to
+  // this one would shadow a binding somebody chose.
+  //
+  // The `else` is not belt-and-braces. A migration edits the STORED map,
+  // and loadKeymap then merges it over the defaults — so declining to
+  // move an action the stored map has no entry for leaves the new
+  // default (`p`) to arrive anyway, beside the `p` the analyst bound to
+  // something else. Writing M back makes the refusal stick. A stored map
+  // always carries every action after one real run (loadKeymap persists
+  // the whole thing), so this only reaches a hand-edited or very old
+  // one — which is exactly the shape that would otherwise collide.
+  (map) => {
+    const wasDefault = (action, keys) =>
+      JSON.stringify((map[action] || []).slice().sort()) === JSON.stringify(keys.slice().sort());
+    const taken = Object.entries(map).some(([action, keys]) => action !== 'openPluginBundles'
+      && Array.isArray(keys) && keys.includes('p'));
+    if (!taken && wasDefault('openPluginBundles', ['M'])) map.openPluginBundles = ['p'];
+    else if (taken && !map.openPluginBundles) map.openPluginBundles = ['M'];
   },
 ];
 

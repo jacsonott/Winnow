@@ -136,9 +136,28 @@ function pill(text, title) {
    every widget with its render kind and whether it re-runs on every open,
    the watchlist, the variables. The list it replaced showed one truncated
    row per profile, which pushed its own Apply button off the end. */
+/* `returnTo`: where the × (and Escape) should land, following the same
+   one-shot-listener idiom saved filters uses (timeframe.js). Settings
+   opens this in the same shared modal, so without it closing the manager
+   drops the analyst on the grid — one level up, not back where they came
+   from. Guarded by the title, because a profile applied from here hides
+   the modal without the event and the builder opened from here replaces
+   the title; neither should bounce to Settings. */
 export function openPluginBundlesModal(opts = {}) {
+  const { returnTo = null } = opts;
   markModalAction('openPluginBundles');
+  if (returnTo) {
+    const back = () => {
+      document.removeEventListener('winnow:modalclose', back);
+      if ($('modalTitle').textContent === 'Profiles' && $('modalBody').dataset.pmReturn === '1') returnTo();
+    };
+    document.addEventListener('winnow:modalclose', back);
+  }
   modal('Profiles', async (b) => {
+    // Marks THIS opening as the one with a way back, so a listener left
+    // armed by a close that bypassed the event cannot fire for a later
+    // Profiles opened from the keyboard.
+    b.dataset.pmReturn = returnTo ? '1' : '';
     b.append(el('p', 'fb-help',
       'A profile is a kind of case: the plugins it needs, the boards it opens with, a starter '
       + 'watchlist and the values the case must carry. Applying one changes THIS case, and says '
@@ -169,7 +188,7 @@ export function openPluginBundlesModal(opts = {}) {
     let selected = (bundles.find((x) => x.name.toLowerCase() === want) || bundles[0] || {}).id;
 
     function reopen(select) {
-      openPluginBundlesModal({ select: select != null ? select : selectedName() });
+      openPluginBundlesModal({ select: select != null ? select : selectedName(), returnTo });
     }
 
     function selectedName() {
@@ -357,6 +376,11 @@ export function openPluginBundlesModal(opts = {}) {
         : 'Open a case to apply a profile'));
       if (appliedAt[bd.name]) {
         foot.append(el('span', 'pm-foot-when', `Applied ${appliedAt[bd.name].replace('T', ' ')}`));
+      }
+      if (returnTo) {
+        const back = el('button', 'btn ghost pm-mini', '‹ Settings');
+        back.onclick = () => returnTo();
+        foot.append(back);
       }
       detailPane.append(foot);
     }

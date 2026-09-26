@@ -125,7 +125,7 @@ def test_applying_a_profile_prompts_for_required_variables_it_seeds(page, api):
         "variables": [{"name": "engagement", "label": "Engagement", "required": True}]})
     try:
         _clear_variables(page, api)
-        page.keyboard.press("M")
+        page.keyboard.press("p")
         page.wait_for_selector(".pm-item:has-text('UI Vars Apply')")
         page.locator(".pm-item", has_text="UI Vars Apply").click()
         # Apply goes through the sheet now — the variables part is the only

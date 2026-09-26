@@ -27,7 +27,7 @@ IOCS = ["ui-manager-ioc-a", "ui-manager-ioc-b"]
 
 
 def _open_manager(page):
-    page.keyboard.press("M")
+    page.keyboard.press("p")
     page.wait_for_selector("#modal:not([hidden])")
     page.wait_for_selector(".pm-item", timeout=15_000)
 

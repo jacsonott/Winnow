@@ -1113,6 +1113,18 @@ see [docs/notes/README.md](README.md) for the whole set.
   already holds one of the four chord spellings, because Ctrl+F matched
   nothing before that release, Settings therefore accepted it for
   anything, and the pre-gate below would shadow such a binding.
+
+  v6 moves the profiles manager `M` → `p`, and is the first **replacement**
+  rather than an addition — which needs one more thing than v5's guard.
+  Declining to move is not enough on its own: a migration edits the
+  *stored* map, `loadKeymap` then merges it over the defaults, so an
+  action the stored map has no entry for takes the new default anyway —
+  `p` would arrive beside the `p` the analyst had bound to something
+  else. When the key is taken the migration writes `M` back explicitly, so
+  the refusal survives the merge. (A stored map carries every action after
+  one real run, so this only reaches a hand-edited or very old one — which
+  is exactly the shape that would otherwise collide.)
+
   **A change to `DEFAULT_KEYMAP` with no migration entry reaches nobody
   who has run Winnow before**: `loadKeymap` persists the whole expanded
   default map on a profile's very first load, so by the second run the
