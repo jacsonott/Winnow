@@ -179,37 +179,45 @@ def test_a_pinned_action_runs_and_hides_while_its_plugin_is_off(page, row_menu, 
 
 
 def test_toggling_a_plugin_off_takes_its_row_actions_with_it(page, api):
-    """The plugins panel copies row_actions from the toggle response, so a
-    pinned action cannot outlive its plugin within a session (a stale list
-    would show the pin and 404 on click)."""
+    """applyPluginListing copies row_actions out of the toggle response, so
+    a pinned action cannot outlive its plugin within a session (a stale
+    list would show the pin and 404 on click)."""
     plugins = api("/api/plugins")["plugins"]
     p = next((p for p in plugins if p.get("bundled") and p.get("case_override") is None), None)
     if p is None:
         pytest.skip("no bundled plugin to toggle")
-    flip, restore = ("off_all", "on_all") if p.get("machine_enabled") else ("on_all", "off_all")
+    flip, restore = ("Off", "On") if p.get("machine_enabled") else ("On", "Off")
     # A stand-in the server never listed: the toggle's refresh must drop it.
     page.evaluate("() => __winnow.S.pluginRowActions.push({ id: 'ghost', local_id: 'ghost', plugin: 'ghost', "
                   "plugin_fs: 'ghost', label: 'Ghost action', description: '', max_rows: 5 })")
-    page.keyboard.press("?")
-    page.wait_for_selector("#modal:not([hidden])")
-    page.click(".settings-section-head:has-text('Plugins')")
-    # The panel lists plugins after its own fetch, one scope select per
-    # entry of S.plugins in order; a plugin's display name changes once it
-    # loads, so it is found by position, keyed on fs_name.
-    find = ("(fs) => { const i = __winnow.S.plugins.findIndex((q) => q.fs_name === fs);"
-            " const sels = [...document.querySelectorAll('#modalBody select')]"
-            ".filter((s) => s.nextElementSibling && s.nextElementSibling.classList.contains('session-name'));"
-            " const sel = sels[i]; return sel && !sel.disabled ? sel : null; }")
-    set_scope = "([fs, value]) => { const sel = (%s)(fs); sel.value = value; sel.dispatchEvent(new Event('change')); }" % find
-    page.wait_for_function("(fs) => !!(%s)(fs)" % find, arg=p["fs_name"], timeout=10_000)
+    # The manager renders one .pm-item per S.plugins entry, in order, so
+    # the plugin is found by position keyed on fs_name — its display name
+    # is the wrong key (two plugins may share one; only the folder is
+    # unique) and, before this pane existed, changed once it loaded.
+    pick = ("(fs) => { const i = __winnow.S.plugins.findIndex((q) => q.fs_name === fs);"
+            " const items = [...document.querySelectorAll('#modalBody .pm-item')];"
+            " return items[i] || null; }")
+    # "Everywhere" is the machine-wide default — the row that is there
+    # whether or not a case is on screen.
+    everywhere = ("(label) => { const row = [...document.querySelectorAll('#modalBody .pl-scope-row')]"
+                  ".find((r) => r.querySelector('.pl-scope-label').textContent === 'Everywhere');"
+                  " return row ? [...row.querySelectorAll('button')].find((b) => b.textContent === label) : null; }")
+    set_scope = ("([fs, label]) => { (%s)(fs).click(); (%s)(label).click(); }" % (pick, everywhere))
+
+    def open_on(fs):
+        page.evaluate("() => __winnow.openPluginManager()")
+        page.wait_for_selector("#modal:not([hidden])")
+        page.wait_for_function("(fs) => !!(%s)(fs)" % pick, arg=fs, timeout=10_000)
+
+    open_on(p["fs_name"])
     page.evaluate(set_scope, [p["fs_name"], flip])
     try:
         page.wait_for_function("() => !__winnow.S.pluginRowActions.some((a) => a.id === 'ghost')", timeout=10_000)
     finally:
-        page.wait_for_function("(fs) => !!(%s)(fs)" % find, arg=p["fs_name"], timeout=10_000)
+        open_on(p["fs_name"])
         page.evaluate(set_scope, [p["fs_name"], restore])
         page.wait_for_function("([fs, on]) => (__winnow.S.plugins.find((q) => q.fs_name === fs) || {}).machine_enabled === on",
-                               arg=[p["fs_name"], restore == "on_all"], timeout=10_000)
+                               arg=[p["fs_name"], restore == "On"], timeout=10_000)
         page.keyboard.press("Escape")
 
 
