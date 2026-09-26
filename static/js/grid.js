@@ -3,6 +3,7 @@
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { applyPin, colWidth, pinnedOffsets, visibleCols } from './columns.js';
 import { $, GUTTER_W, MAX_SPACER_PX, OVERSCAN, PAGE, ROW_H, api, el } from './core.js';
+import { syncHistogramMarker } from './histogram.js';
 import { maybeShowDetail, showDetail } from './detail.js';
 import { ensureGroupPage, findGroupAt, groupCoordAt, groupDataRowAt, isLeafLevel, renderGrouped, toggleGroup } from './grouping.js';
 import { S, cellInRange, cellRangeAllSelected, cellRangeRowCount, cellRangeRows, clearCellSelection, gridRowCount, selAdd, selClear, selCount, selHas, selRangeApply, selRanges, selRemove, selReplace, selSnapshot, selToggle, selUndoAvailable, selUndoLast } from './state.js';
@@ -331,7 +332,10 @@ export function syncRowsWidth(widths, cols) {
 export function render() {
   if (!S.view) return;
   syncSelectAllCheckbox();
-  if (S.groupByCols.length) { renderGrouped(); return; }
+  // Grouped mode has no honest viewport span (group headers interleave
+  // with rows, and a collapsed group's rows are not loaded at all), so
+  // this is the call that CLEARS the marker as well as the one that moves it.
+  if (S.groupByCols.length) { renderGrouped(); syncHistogramMarker(); return; }
   syncRowsTop();
   const body = $('body');
   const rowsEl = $('rows');
@@ -361,6 +365,7 @@ export function render() {
   rowsEl.replaceChildren(frag);
   renderTagToolbar();
   titleClippedCells();
+  syncHistogramMarker();
 }
 
 /* A cell the column cut short says what it says, on hover — and only one

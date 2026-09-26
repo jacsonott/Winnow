@@ -22,10 +22,12 @@
    nothing to dispose. It shares #pluginPanels with plugin toolbar
    panels; plugins.js syncPluginPanels() is the one writer of that host's
    `hidden` and asks histogramOpen() so the host shows for either kind. */
-import { $, api, el } from './core.js';
+import { $, ROW_H, api, el } from './core.js';
+import { headH, rowAt, vScroll } from './grid.js';
 import { syncPluginPanels } from './plugins.js';
 import { S } from './state.js';
 import { datetimeColumns, updateTimeRangeButton } from './timeframe.js';
+import { parseTimestamp } from './tsformat.js';
 import { rebuildView } from './view.js';
 
 /* Per browser, like the appearance and keymap prefs: {open, column}. */
@@ -57,6 +59,8 @@ let retries = 0;        // consecutive re-asks after an answer we could not use
    had given up". */
 let stale = false;
 let shown = false;      // what syncHistogramPanel last applied (its onShow edge)
+let markKey = null;     // the viewport marker's last window, so a repaint that
+                        // would not move it costs nothing
 let ui = null;          // {colSel, info, canvas, hint, empty} once wired
 
 function prefs() {
@@ -135,6 +139,10 @@ export function refreshHistogram() { return load(); }
    see what is actually on screen. */
 export function histogramData() { return data; }
 export function histogramLayers() { return stackLayers(); }
+/* And the viewport marker's own numbers, for the same reason: it is drawn
+   on the canvas, so this is the only way to check that the epochs it
+   places are the ones the bars were bucketed on. */
+export function histogramViewport() { return viewportMarks(); }
 
 /* ------------------------------------------------------------- chrome */
 
@@ -322,9 +330,158 @@ function drawLegend() {
   });
 }
 
+/* ------------------------------------------- the viewport marker */
+
+/* Where the rows the analyst is actually looking at sit on the timeline.
+
+   The strip has always charted the whole view; scrolling the grid moved
+   through it with nothing on the chart to say so, which is the one
+   question a time chart above a time-ordered table is asked most —
+   "where am I?". This is the answer, drawn as a bracket over the span
+   the on-screen rows cover, with a tick per row.
+
+   Read from the rows already in the client (invariant #6 keeps only the
+   visible window in the DOM, and S.rowsByPos holds the pages behind it),
+   so scrolling costs no request. Timestamps are parsed here rather than
+   asked for: SQLite's strftime('%s') reads the normalised string as UTC
+   (Store.time_histogram), so Date.UTC over parseTimestamp's fields is
+   the same epoch the bars were bucketed on.
+
+   Ticks rather than a bare band because a band alone would lie by
+   omission. Sorted by the charted column the rows are contiguous and the
+   ticks pack into a solid block — the SIEM-style "you are here". Sorted
+   by anything else they scatter across the whole chart, and the same
+   drawing says THAT instead of implying a window that isn't one. */
+/* Two minimums, because the marker has to stay findable across four
+   orders of magnitude of zoom. A time-sorted grid showing forty rows of a
+   four-thousand-row day is forty seconds out of eleven hours — a third of
+   a pixel — so the band gets a floor, and the handle above it a larger
+   one, since a 2px band on its own is a smudge you have to already know
+   to look for. */
+const MARK_MIN_PX = 2;
+const HANDLE_MIN_PX = 11;
+const HANDLE_H = 4;
+
+function viewportWindow() {
+  // Grouped mode has group headers interleaved with rows and collapsed
+  // groups that are not loaded at all; there is no honest "these rows".
+  if (!S.view || S.groupByCols.length || S.activeTab !== 'grid') return null;
+  const body = $('body');
+  const total = S.view.row_count;
+  if (!body || !total) return null;
+  const head = headH();
+  const virt = vScroll(body, total, head);
+  const first = Math.max(0, Math.floor(virt / ROW_H));
+  // The rows area, not the scroller: #gridHead is sticky INSIDE #body, so
+  // its height is not row space.
+  const tall = Math.max(1, Math.ceil(Math.max(0, body.clientHeight - head) / ROW_H));
+  const last = Math.min(total, first + tall);
+  return last > first ? { first, last } : null;
+}
+
+/* The epochs of the rows in that window, plus how many could not be read.
+   A page still in flight has no row yet (rowAt is null) and a value the
+   client's parser does not know is skipped — both are "not counted"
+   rather than "at zero", the same rule the server's own bucketing uses. */
+function viewportMarks() {
+  const win = viewportWindow();
+  if (!win || !column || !data || !data.total) return null;
+  const ci = S.columns.findIndex((c) => c.name === column);
+  if (ci < 0) return null;
+  const times = [];
+  let unread = 0;
+  for (let pos = win.first; pos < win.last; pos++) {
+    const r = rowAt(pos);
+    if (!r) { unread++; continue; }
+    const t = parseTimestamp(r.cells[ci]);
+    if (!t) { unread++; continue; }
+    times.push(Date.UTC(t.y, t.mo - 1, t.d, t.h, t.mi, t.s) / 1000);
+  }
+  if (!times.length) return null;
+  return {
+    t0: Math.min(...times), t1: Math.max(...times), times, unread,
+    rows: win.last - win.first, first: win.first, last: win.last,
+  };
+}
+
+/* Cheap identity for "has the marker moved?" — the window, the view it is
+   a window into, and how much of it has actually arrived. That last part
+   is why this is called from the grid's render() rather than from a
+   scroll listener: scroll past a page boundary and the rows are not there
+   yet, so the marker would be drawn from the handful that are and then
+   never corrected, because the thing that fixes it is a page landing, not
+   another scroll event. render() runs for both. */
+function markIdentity() {
+  const win = viewportWindow();
+  if (!win) return null;
+  let loaded = 0;
+  for (let pos = win.first; pos < win.last; pos++) if (rowAt(pos)) loaded++;
+  return `${S.view && S.view.id}:${win.first}:${win.last}:${loaded}:${column}`;
+}
+
+/* Called by grid.render() after every paint — scroll, page arrival,
+   filter change, grouping on or off. Repaints the canvas only when the
+   marker would actually land somewhere new, and leaves the legend (DOM,
+   and unchanged by scrolling) alone. */
+export function syncHistogramMarker() {
+  if (!shown || !data) return;
+  const key = markIdentity();
+  if (key === markKey) return;
+  markKey = key;
+  draw({ legend: false });
+}
+
+function drawViewportMarker(ctx, w, t, top, plotH) {
+  const m = viewportMarks();
+  if (!m) return null;
+  const s = span();
+  // A row can sit outside the charted span: the histogram answers for the
+  // view it was built for, and the grid may already be showing a rebuilt
+  // one. Clamp rather than draw off-canvas — the marker is a position
+  // cue, and one drawn past the axis is worse than one pinned at it.
+  const clamp = (x) => Math.max(0, Math.min(w, x));
+  const x0 = clamp(xOf(Math.max(m.t0, s.t0), w));
+  const x1 = clamp(xOf(Math.min(m.t1, s.t1), w));
+  const left = Math.min(x0, x1);
+  const width = Math.max(MARK_MIN_PX, Math.abs(x1 - x0));
+
+  ctx.save();
+  // The tint is faint on purpose: it sits OVER the bars it is locating,
+  // and the brush already taught this chart that covering the data you
+  // are pointing at is the wrong trade.
+  ctx.globalAlpha = 0.14;
+  ctx.fillStyle = t.accent;
+  ctx.fillRect(left, top, width, plotH);
+  // One tick per on-screen row. Sub-pixel rows land on the same column
+  // and simply darken it, which is the right behaviour: a dense block is
+  // exactly what "these forty rows are all in this minute" looks like,
+  // and a scattered spray is what a view sorted by something other than
+  // time actually is.
+  ctx.globalAlpha = 0.45;
+  for (const time of m.times) {
+    if (time < s.t0 || time > s.t1) continue;
+    ctx.fillRect(Math.round(clamp(xOf(time, w))), top, 1, plotH);
+  }
+  ctx.restore();
+  // The edges, full height and fully opaque. At a wide span they bracket
+  // the tint; at a narrow one they land on each other and read as the
+  // single line the situation actually calls for.
+  ctx.fillStyle = t.accent;
+  ctx.fillRect(Math.round(left), top, MARK_MIN_PX, plotH);
+  ctx.fillRect(Math.round(left + width) - MARK_MIN_PX, top, MARK_MIN_PX, plotH);
+  // And the handle, in the margin above the plot so it covers no bar —
+  // the one part with a minimum wide enough to catch the eye on its own,
+  // centred on the span rather than left-aligned to it so it stays over
+  // what it points at.
+  const hw = Math.max(HANDLE_MIN_PX, width);
+  const hx = Math.max(0, Math.min(w - hw, left + width / 2 - hw / 2));
+  ctx.fillRect(hx, top - HANDLE_H - 1, hw, HANDLE_H);
+  return m;
+}
+
 /* --------------------------------------------------------------- draw */
 
-function draw() {
+function draw({ legend = true } = {}) {
   if (!ui) return;
   const { canvas, info } = ui;
   /* The one place the strip says it is working. Every other cue lives in
@@ -420,6 +577,7 @@ function draw() {
   ctx.fillText(endLabel, w - ctx.measureText(endLabel).width - 4, HEIGHT - 4);
   const mid = iso((s.t0 + s.t1) / 2);
   ctx.fillText(mid, w / 2 - ctx.measureText(mid).width / 2, HEIGHT - 4);
+  const mark = drawViewportMarker(ctx, w, t, top, plotH);
   // brush overlay
   if (brush) {
     const x0 = Math.min(brush.x0, brush.x1), x1 = Math.max(brush.x0, brush.x1);
@@ -441,9 +599,10 @@ function draw() {
     const lw = ctx.measureText(label).width;
     ctx.fillText(label, Math.max(2, Math.min(w - lw - 2, (x0 + x1) / 2 - lw / 2)), top + 10);
   }
-  drawLegend();
+  if (legend) drawLegend();
   const tr = S.timeRange;
   info.textContent = `${data.total.toLocaleString()} rows · ${humanBucket(data.bucket_seconds)} buckets · max ${max.toLocaleString()}`
+    + (mark ? ` · on screen ${iso(mark.t0)}${mark.t1 > mark.t0 ? ` → ${iso(mark.t1)}` : ''}` : '')
     + (tr && tr.enabled && (tr.start || tr.end) ? ' · timeframe on' : '')
     // Said plainly rather than left for the analyst to notice: a chart
     // describing a filter that is no longer on is worse than no chart,

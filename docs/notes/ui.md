@@ -154,6 +154,39 @@ see [docs/notes/README.md](README.md) for the whole set.
   and every case switch). Prefs are `winnow.histogram` `{open, column}`
   per browser; the plugin's `winnow.panels['table-histogram.histogram']`
   is migrated to `open` once and deleted.
+- **The viewport marker says where the grid is on the chart** — a bracket
+  over the span the on-screen rows cover, a tick per row, and the span in
+  the count line. Four things it has to get right.
+
+  **It agrees with the server about what a timestamp is.** The bars are
+  bucketed on SQLite's `strftime('%s')`, which reads the normalised string
+  as UTC (`Store.time_histogram`), so the marker parses with `Date.UTC`
+  over `parseTimestamp`'s fields. Parse it as LOCAL time and every marker
+  shifts by the machine's offset — a cue that is confidently wrong, which
+  is worse than none. A UTC dev box cannot catch that, so the test that
+  pins it runs the page in `America/New_York`
+  (`tests/ui/test_histogram_viewport.py`).
+
+  **It is driven from `grid.render()`, not from a scroll listener.** Scroll
+  past a page boundary and the rows are not in `S.rowsByPos` yet, so a
+  marker drawn from the handful that are would never be corrected — the
+  thing that fixes it is a page landing, not another scroll event, and
+  `render()` runs for both. `markIdentity` therefore counts how much of
+  the window has arrived, not just which positions it spans, and
+  `syncHistogramMarker` repaints the canvas without the legend (which is
+  DOM, and unchanged by scrolling).
+
+  **A row that is not there yet is not at zero.** A page in flight, or a
+  value the client's parser does not know, is counted as `unread` and left
+  out of the span — counting it as epoch 0 would drag the band to 1970.
+
+  **Ticks, not just a band.** Sorted by the charted column the rows are
+  contiguous and the ticks pack into the solid block that reads as "you
+  are here". Sorted by anything else they scatter, and the same drawing
+  says THAT rather than implying a window that is not one. Grouped mode
+  has no marker at all: group headers interleave with rows and a collapsed
+  group's rows are not loaded, so there is no honest "these rows are on
+  screen".
 - There's no separate "preset" concept anymore — a preset is just a saved
   filter (`workspace.SavedFilters`, cross-case) whose `col_names` happens to
   match (exactly, or "similar" per the same Jaccard/subset heuristic the old
