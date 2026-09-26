@@ -161,7 +161,7 @@ is the better off switch since it keeps the plugin visible.
 PLUGIN = {                      # optional — all three keys optional
     "name": "my-plugin",        # display name; defaults to the file/folder name
     "version": "1.0.0",
-    "description": "One line, shown in Settings → Plugins.",
+    "description": "One line, shown in the plugins manager.",
 }
 
 WINNOW_API_VERSION = 1          # optional; refuse to load on an older Winnow
@@ -173,6 +173,30 @@ def register(api):              # REQUIRED
 `register(api)` is called once at load. Raise anything inside it and the
 plugin is recorded as failed (with your exception's message) and skipped
 — it never takes the server or other plugins down.
+
+**Write the description. It is read even when your plugin is off.** A
+disabled plugin is never imported, so for a long time the manager had
+nothing to show for one but its folder name, and an analyst had to switch
+a plugin on to find out what it was. Winnow now reads `PLUGIN` and
+`WINNOW_API_VERSION` straight out of your **source** — `ast.literal_eval`
+on the module-level assignment, no import, not a line of your code run —
+so the name, version and description are what the manager shows *before*
+anyone decides to run you. That makes the description the single most
+load-bearing string in your plugin: it is the case for switching it on.
+
+Two consequences worth knowing:
+
+- Both must be **literals assigned at module level**. `PLUGIN = {...}`
+  with a plain dict is read; `PLUGIN = build_meta()`, a name, or an
+  f-string is not, and your plugin falls back to its folder name until it
+  is enabled. Same for `WINNOW_API_VERSION = 11` versus a computed value.
+- The manager also lists what your plugin *would* add, from the
+  `api.register_*(…)` calls its entry file names — kinds only ("import
+  formats", "a pinned tab"), never counts, since a call inside a loop or
+  in a helper module makes a source-read count wrong. Once the plugin is
+  running the manager uses the real registry instead. A `register_*` call
+  reached only through a helper module will not show up in the
+  not-yet-enabled list; that costs you nothing but a line in the preview.
 
 ### Two names, and which one to use where
 
@@ -248,7 +272,8 @@ imports to pick them up.
 
 **Built-in extensions always win.** If you register `.csv`, files still
 route to Winnow's CSV parser by default — your format stays reachable
-through its own picker in Settings → Plugins, but it won't hijack
+through its own picker in the plugins manager (beside the format, under
+"What it adds"), but it won't hijack
 existing behavior. Everything else goes to your format *before* the
 raw-text catch-all: a name nothing claims imports as plain text, one
 line per row, so a plugin that registers `hostd*` gets `hostd.log` and
@@ -326,7 +351,7 @@ api.register_tab(
 ```
 
 Folder plugins only, and `entry` must exist **at registration time** — a
-typo is a visible load error in Settings → Plugins, not a 404 the first
+typo is a visible load error in the plugins manager, not a 404 the first
 time someone clicks the tab.
 
 ### The module contract

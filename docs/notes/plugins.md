@@ -104,6 +104,17 @@ see [docs/notes/README.md](README.md) for the whole set.
   default, keyed by filesystem name because that's the only identity that
   exists without importing (a disabled plugin is discovered for the
   listing but its code never runs — the point of the off switch).
+  That last clause is also why a plugin's own metadata has to be readable
+  *without* a load: `static_meta` parses `PLUGIN`, `WINNOW_API_VERSION`
+  and the `register_*` names out of the entry file with `ast.parse` +
+  `ast.literal_eval`, executing nothing, so the manager can show a
+  switched-off plugin's name, version and description — the three things
+  the decision to enable it is actually made on. It is also the fallback
+  when a load FAILS: an import that dies on its first line used to leave
+  the record holding a folder name and a traceback, at the moment being
+  identifiable matters most. `declares` is kinds, never counts — three
+  `register_ingest_format` calls across `mft_usn`'s folder register two
+  formats, because one is in a helper the entry file never reaches.
   `POST /api/plugins/install` copies an uploaded .py or folder (from the
   panel's webkitdirectory picker) into `PLUGIN_DIRS[0]`, rejecting
   absolute/`..` paths so an upload can't write outside the plugins dir; a

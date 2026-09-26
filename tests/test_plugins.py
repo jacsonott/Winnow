@@ -1571,6 +1571,62 @@ def test_case_scope_overrides_travel_with_the_case(scoped_client, store):
     assert "plugin_overrides" not in store.get_case_settings()
 
 
+def test_follow_case_drops_the_override_without_touching_the_default(scoped_client, store):
+    """Going back to "this case follows the machine" was, until follow_case,
+    only reachable by re-picking an everywhere scope — which clears the
+    override as a side effect. That is fine when the machine setting you
+    want is the one already set, and a silent rewrite of every OTHER
+    case's behaviour when it isn't. Removing one case's override must not
+    be able to do that."""
+    import json as _json
+
+    # Machine default is on; this case says off.
+    scoped_client.post("/api/plugins/toggle", json={"fs_name": "demo", "scope": "off_case"})
+    states, _ = _states(scoped_client)
+    assert states["demo"]["case_override"] is False and states["demo"]["machine_enabled"] is True
+
+    r = scoped_client.post("/api/plugins/toggle", json={"fs_name": "demo", "scope": "follow_case"})
+    assert r.status_code == 200
+    states, _ = _states(scoped_client)
+    assert states["demo"]["case_override"] is None      # the override is gone
+    assert states["demo"]["machine_enabled"] is True    # ...and the default is untouched
+    assert states["demo"]["enabled"] is True            # so the case follows it again
+    # No empty dict left behind in the case file either.
+    assert "plugin_overrides" not in store.get_case_settings()
+
+
+def test_follow_case_leaves_other_plugins_overrides_alone(scoped_client, store):
+    import json as _json
+
+    scoped_client.post("/api/plugins/toggle", json={"fs_name": "demo", "scope": "off_case"})
+    scoped_client.post("/api/plugins/toggle", json={"fs_name": "shipped", "scope": "on_case"})
+    scoped_client.post("/api/plugins/toggle", json={"fs_name": "demo", "scope": "follow_case"})
+    assert _json.loads(store.get_case_settings()["plugin_overrides"]) == {"shipped": True}
+
+
+def test_follow_case_on_a_plugin_with_no_override_is_a_no_op(scoped_client, store):
+    r = scoped_client.post("/api/plugins/toggle", json={"fs_name": "demo", "scope": "follow_case"})
+    assert r.status_code == 200
+    states, _ = _states(scoped_client)
+    assert states["demo"]["case_override"] is None
+    assert "plugin_overrides" not in store.get_case_settings()
+
+
+def test_follow_case_requires_an_open_case(scoped_client, monkeypatch):
+    import server
+
+    monkeypatch.setattr(server, "STORE", None)
+    server._reload_plugins()
+    r = scoped_client.post("/api/plugins/toggle", json={"fs_name": "demo", "scope": "follow_case"})
+    assert r.status_code == 400
+
+
+def test_unknown_scope_is_refused(scoped_client):
+    r = scoped_client.post("/api/plugins/toggle", json={"fs_name": "demo", "scope": "follow_all"})
+    assert r.status_code == 400
+    assert "follow_all" in r.json()["detail"]
+
+
 def test_case_scope_requires_an_open_case(scoped_client, monkeypatch):
     import server
 
