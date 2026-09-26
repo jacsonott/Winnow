@@ -30,7 +30,8 @@ export async function loadPlugins() {
     S.pluginPagePanels = r.page_panels || [];
     S.pluginDirs = r.dirs || [];
     S.pluginsCaseOpen = !!r.case_open;
-  } catch { S.plugins = []; S.pluginFormats = []; S.pluginTabs = []; S.pluginRowActions = []; S.pluginDashboards = []; S.pluginPanels = []; S.pluginPagePanels = []; S.pluginDirs = []; S.pluginsCaseOpen = false; }
+    S.pluginApiVersion = r.api_version ?? null;
+  } catch { S.plugins = []; S.pluginFormats = []; S.pluginTabs = []; S.pluginRowActions = []; S.pluginDashboards = []; S.pluginPanels = []; S.pluginPagePanels = []; S.pluginDirs = []; S.pluginsCaseOpen = false; S.pluginApiVersion = null; }
   renderPluginTabs();
   renderPluginPanelButtons();
 }

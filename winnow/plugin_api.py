@@ -46,6 +46,13 @@ A plugin module provides:
     PLUGIN = {"name": "...", "version": "...", "description": "..."}   # optional
     WINNOW_API_VERSION = 1                                             # optional
 
+Both are read from the SOURCE as well as from the loaded module — see
+static_meta. A plugin that is switched off is never imported, so without
+that the manager could show nothing about one but its folder name, and
+the only way to learn what a plugin did was to run it. Which means: they
+must be module-level literal assignments to be read before a load, and
+the description is what an analyst decides on.
+
     def register(api):                                                 # required
         api.register_ingest_format(
             id="mft",                        # unique within this plugin
@@ -184,6 +191,7 @@ analyst controls and never fetches code; the analyst placing a file there
 
 from __future__ import annotations
 
+import ast
 import fnmatch
 import importlib.util
 import os
@@ -849,6 +857,106 @@ class PluginAPI:
                 raise ValueError(f"Widget {title!r}: cell {c['label']!r} is a sql cell with no query.sql")
 
 
+# A folder plugin's README, if it ships one. Name only — the manager
+# offers to reveal the file rather than rendering it, because a plugin's
+# README is arbitrary Markdown from the same untrusted-ish source as its
+# code and the app has no renderer that would be safe to point at it.
+_README_NAMES = ("README.md", "README.rst", "README.txt", "README")
+
+
+def _readme_of(root: Path) -> str | None:
+    if not root.is_dir():
+        return None
+    for name in _README_NAMES:
+        if (root / name).is_file():
+            return name
+    return None
+
+
+# ---------------------------------------------------------- static metadata
+
+# What a plugin's source says about itself, read WITHOUT importing it.
+#
+# A disabled plugin is never imported — that is the whole point of the off
+# switch on something that runs with the app's privileges — so until this
+# existed the listing had nothing to show for one but its folder name.
+# Seven bundled examples all carrying a name, a version and a sentence of
+# description rendered as seven rows reading `mft_usn`, `first_last`,
+# `top_values`…, and the only way to find out what one did was to turn it
+# on: exactly backwards, since the description is what the decision needs.
+#
+# `ast.parse` + `ast.literal_eval` never executes a line of the file. A
+# literal_eval on a hand-written dict is the same trust boundary as reading
+# JSON; it is not `eval`, and it cannot call anything.
+_DECL_PREFIX = "register_"
+
+
+def _literal_assignment(tree: ast.Module, want: str):
+    """The value of a module-level `want = <literal>`, or None.
+
+    Last assignment wins, matching what the interpreter would end up with.
+    A non-literal value (a name, an f-string, a call) is skipped rather
+    than guessed at — the point of reading statically is to be certain."""
+    found = None
+    for node in tree.body:
+        targets = (node.targets if isinstance(node, ast.Assign)
+                   else [node.target] if isinstance(node, ast.AnnAssign) and node.value
+                   else [])
+        if not any(isinstance(t, ast.Name) and t.id == want for t in targets):
+            continue
+        try:
+            found = ast.literal_eval(node.value)
+        except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+            continue
+    return found
+
+
+def static_meta(entry: Path) -> dict:
+    """`PLUGIN`, `WINNOW_API_VERSION` and the `register_*` kinds a plugin's
+    source names, read from the file rather than from a live module.
+
+    `declares` is what the SOURCE calls, not what a load would produce:
+    a kind appears if `api.register_<kind>(…)` is written anywhere in the
+    file, so it is a list of what the plugin can add, never a count of
+    what it did add. A loaded plugin has a real registry behind it and the
+    caller should use that instead — this is the answer for the one that
+    was deliberately not run.
+
+    Every failure is the same answer: empty. A plugin whose source does
+    not parse is a plugin that would not import either, and the listing's
+    job here is to describe, not to diagnose (a failed *load* still
+    reports its error the usual way)."""
+    out = {"name": None, "version": None, "description": "",
+           "api_wants": None, "declares": []}
+    try:
+        tree = ast.parse(entry.read_text(encoding="utf-8", errors="replace"), str(entry))
+    except (OSError, SyntaxError, ValueError):
+        return out
+    meta = _literal_assignment(tree, "PLUGIN")
+    if isinstance(meta, dict):
+        if meta.get("name"):
+            out["name"] = str(meta["name"])
+        if meta.get("version"):
+            out["version"] = str(meta["version"])
+        if meta.get("description"):
+            out["description"] = str(meta["description"])
+    wants = _literal_assignment(tree, "WINNOW_API_VERSION")
+    if isinstance(wants, int) and not isinstance(wants, bool):
+        out["api_wants"] = wants
+    kinds = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        # `api.register_tab(…)` — the documented form. A bare
+        # `register_tab(…)` is not one of ours (the name only exists as a
+        # method on the PluginAPI the register() function is handed).
+        if isinstance(fn, ast.Attribute) and fn.attr.startswith(_DECL_PREFIX):
+            kinds.add(fn.attr[len(_DECL_PREFIX):])
+    out["declares"] = sorted(k for k in kinds if k)
+    return out
+
+
 class PluginRegistry:
     """Discovers, imports and indexes plugins. One module-level instance
     lives in server.py; tests build their own against tmp dirs.
@@ -933,11 +1041,18 @@ class PluginRegistry:
                     continue
                 seen.add(fs_name)
                 if not enabled_for(fs_name, str(d)):
+                    # Never imported — so everything below it knows about
+                    # itself comes from reading the file. See static_meta.
+                    meta = static_meta(entry)
                     self.plugins.append({
-                        "name": fs_name, "fs_name": fs_name, "path": str(candidate),
-                        "version": None, "description": "", "error": None,
+                        "name": meta["name"] or fs_name, "fs_name": fs_name,
+                        "path": str(candidate),
+                        "version": meta["version"], "description": meta["description"],
+                        "error": None,
                         "enabled": False, "gen": 0, "formats": [], "tabs": [],
                         "bundled": is_bundled,
+                        "entry": entry.name, "readme": _readme_of(candidate),
+                        "api_wants": meta["api_wants"], "declares": meta["declares"],
                     })
                 else:
                     self._load_one(fs_name, entry, candidate, bundled=is_bundled)
@@ -951,6 +1066,12 @@ class PluginRegistry:
         record = {
             "name": default_name, "fs_name": default_name, "path": str(root),
             "version": None, "description": "", "error": None,
+            # Set from the module below once it imports. Pre-seeded so a
+            # plugin that fails to load still describes itself in the
+            # listing instead of going blank at the moment it most needs
+            # to be identifiable.
+            "entry": entry.name, "readme": _readme_of(root),
+            "api_wants": None, "declares": [],
             # gen = this load's sequence number — the frontend cache-busts
             # a tab entry's import() URL with it, so a toggle-off/on (or
             # any registry reload) picks up changed JS instead of the
@@ -976,6 +1097,8 @@ class PluginRegistry:
             record["description"] = str(meta.get("description") or "")
 
             wants = getattr(module, "WINNOW_API_VERSION", None)
+            if wants is not None:
+                record["api_wants"] = int(wants)
             if wants is not None and int(wants) > PLUGIN_API_VERSION:
                 raise RuntimeError(
                     f"needs Winnow plugin API v{wants}, this build provides v{PLUGIN_API_VERSION} — update Winnow"
@@ -994,6 +1117,19 @@ class PluginRegistry:
             # one-liner in the record for the UI.
             traceback.print_exc()
             record["error"] = f"{type(e).__name__}: {e}"
+            # An import that died partway leaves the record holding
+            # whatever ran before the exception — for a plugin that blew
+            # up on its first line, that is the folder name and nothing
+            # else. Reading the file gives the failed plugin back its
+            # name and description, which is when they are most wanted.
+            meta = static_meta(entry)
+            record["name"] = record["name"] or meta["name"] or default_name
+            if record["name"] == default_name and meta["name"]:
+                record["name"] = meta["name"]
+            record["version"] = record["version"] or meta["version"]
+            record["description"] = record["description"] or meta["description"]
+            record["api_wants"] = record["api_wants"] or meta["api_wants"]
+            record["declares"] = meta["declares"]
 
     def _add_format(self, fmt: IngestFormat) -> None:
         if fmt.id in self._formats:

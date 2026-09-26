@@ -1,13 +1,15 @@
 """Per-case plugin scopes need a case on screen.
 
-Settings → Plugins offers four scopes per plugin: on/off for every case on
-this machine, and on/off for this case only. The last two were gated on
-`case_open`, which asks whether the SERVER still holds a Store — and going
-back to the home screen only hides `#app` (`showHome`), so it stays true.
+The plugins manager offers scope as two controls: a machine-wide default
+("Everywhere"), and — when a case is on screen — an override for that case
+that can Follow the default, or override it on or off.
 
-Opening Settings from the home screen therefore offered "this case only"
-for a case nothing on that screen names, and choosing it wrote a
-`plugin_overrides` entry into whichever case happened to still be open.
+The per-case half was once gated on `case_open`, which asks whether the
+SERVER still holds a Store — and going back to the home screen only hides
+`#app` (`showHome`), so it stays true. Opening the manager from the home
+screen therefore offered "this case only" for a case nothing on that
+screen names, and choosing it wrote a `plugin_overrides` entry into
+whichever case happened to still be open.
 """
 
 from __future__ import annotations
@@ -27,23 +29,20 @@ def _post(server, route, body):
     return json.loads(urllib.request.urlopen(req, timeout=10).read())
 
 
-def _open_plugins_panel(page):
-    # Called directly rather than via the ? hotkey: this file opens Settings
-    # from the home screen too, where the grid does not have focus.
-    page.evaluate("() => __winnow.openSettings()")
+def _open_manager(page):
+    # Called directly rather than through Settings: this file opens the
+    # manager from the home screen too, where the grid has no focus.
+    page.evaluate("() => __winnow.openPluginManager()")
     page.wait_for_selector("#modal:not([hidden])")
-    page.click(".settings-section-head:has-text('Plugins')")
-    # attached, not visible: Settings' other sections are collapsed and
-    # their selects resolve first.
-    page.wait_for_selector("#modalBody .settings-section-body:not([hidden]) select", state="attached")
+    page.wait_for_selector("#modalBody .pl-scope-row", state="attached")
 
 
-def _scopes(page):
-    return page.evaluate("""() => {
-      const s = [...document.querySelectorAll('#modalBody select')]
-        .find((x) => x.nextElementSibling && x.nextElementSibling.classList.contains('session-name'));
-      return s ? [...s.options].map((o) => ({ value: o.value, label: o.textContent, disabled: o.disabled })) : null;
-    }""")
+def _scope_rows(page):
+    return page.evaluate("""() => [...document.querySelectorAll('#modalBody .pl-scope-row')].map((r) => ({
+      label: r.querySelector('.pl-scope-label').textContent,
+      buttons: [...r.querySelectorAll('button')].map((b) => ({
+        label: b.textContent, on: b.getAttribute('aria-pressed') === 'true', disabled: b.disabled })),
+    }))""")
 
 
 @pytest.fixture(autouse=True)
@@ -53,45 +52,43 @@ def _back_to_the_case(page):
     page.evaluate("() => { document.getElementById('home').hidden = true; document.getElementById('app').hidden = false; }")
 
 
-def test_a_case_on_screen_offers_all_four(page):
-    _open_plugins_panel(page)
-    opts = _scopes(page)
-    assert opts is not None
-    assert [o["value"] for o in opts] == ["on_all", "off_all", "on_case", "off_case"]
+def test_a_case_on_screen_offers_both_halves(page):
+    _open_manager(page)
+    rows = _scope_rows(page)
+    assert [r["label"] for r in rows][:1] == ["Everywhere"]
+    assert len(rows) == 2, rows
+    assert [b["label"] for b in rows[0]["buttons"]] == ["Off", "On"]
+    assert [b["label"] for b in rows[1]["buttons"]] == ["Follow", "On", "Off"]
 
 
-def test_the_case_scopes_name_the_case(page):
-    """"this case only" beside nothing that says which case is the
-    complaint; the brand button already answers it, so they use that."""
+def test_the_case_scope_names_the_case(page):
+    """A per-case control beside nothing that says which case is the
+    complaint; the brand button already answers it, so it uses that."""
     label = page.evaluate("() => document.getElementById('brandLabel').textContent.trim()")
-    _open_plugins_panel(page)
-    per_case = [o["label"] for o in _scopes(page) if o["value"].endswith("_case")]
-    assert per_case and all(label in o for o in per_case), (label, per_case)
+    _open_manager(page)
+    rows = _scope_rows(page)
+    assert label in rows[1]["label"], (label, rows[1]["label"])
 
 
-def test_the_home_screen_offers_only_the_machine_wide_scopes(page):
+def test_the_home_screen_offers_only_the_machine_wide_scope(page):
     """The server still holds the case — that is the point. What changed is
     that nothing on screen names it."""
     page.evaluate("() => __winnow.showHome()")
     # Both halves, and settled: boot() reveals #app after its own fetch, so
     # asserting on #home alone can read a moment before that lands and the
-    # panel then builds with a case on screen after all.
+    # manager then builds with a case on screen after all.
     page.wait_for_function(
         "() => document.getElementById('app').hidden && !document.getElementById('home').hidden")
     assert page.evaluate("() => __winnow.S.pluginsCaseOpen") is True, "the Store is still open, as it was"
-    _open_plugins_panel(page)
+    _open_manager(page)
     assert page.evaluate("() => document.getElementById('app').hidden") is True
-    opts = _scopes(page)
-    # Nothing CHOOSABLE beyond the two machine-wide scopes. A plugin the
-    # still-open case has overridden also carries one disabled option
-    # stating that, which is the point of it — see the test below.
-    assert [o["value"] for o in opts if not o["disabled"]] == ["on_all", "off_all"], opts
-    assert all(o["disabled"] for o in opts if o["value"].endswith("_case")), opts
+    rows = _scope_rows(page)
+    assert [r["label"] for r in rows] == ["Everywhere"], rows
 
 
 def test_a_case_override_is_still_told_the_truth_from_home(page, server):
-    """A plugin a case has turned off must not read as "On — all cases"
-    just because its scopes are not on offer."""
+    """A plugin a case has turned on must not read as plain machine state
+    just because its per-case control is not on offer."""
     plugins = json.loads(urllib.request.urlopen(urllib.request.Request(
         server.rstrip("/") + "/api/plugins",
         headers={"X-Timeline-Lite-Client": "1"})).read())["plugins"]
@@ -104,16 +101,13 @@ def test_a_case_override_is_still_told_the_truth_from_home(page, server):
         page.evaluate("() => __winnow.showHome()")
         page.wait_for_function(
             "() => document.getElementById('app').hidden && !document.getElementById('home').hidden")
-        _open_plugins_panel(page)
-        opts = _scopes(page)
-        chosen = page.evaluate("""() => {
-          const s = [...document.querySelectorAll('#modalBody select')]
-            .find((x) => x.nextElementSibling && x.nextElementSibling.classList.contains('session-name'));
-          return s ? s.options[s.selectedIndex].textContent : null; }""")
-        assert "set by the open case" in chosen, (chosen, opts)
-        assert any(o["disabled"] for o in opts), opts
+        # plugins[0] is also the manager's default selection, so the
+        # detail pane is already showing the overridden plugin.
+        _open_manager(page)
+        note = page.evaluate("() => (document.querySelector('#modalBody .pl-scope-note') || {}).textContent || ''")
+        assert "open but not on screen" in note, note
+        assert _scope_rows(page)[0]["label"] == "Everywhere"
     finally:
         page.keyboard.press("Escape")
         _post(server, "/api/plugins/toggle", {"fs_name": fs, "scope": "off_all"})
         page.evaluate("() => __winnow.loadPlugins()")
-

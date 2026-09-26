@@ -696,7 +696,8 @@ see [docs/notes/README.md](README.md) for the whole set.
   close the others. A section's own code is unchanged apart from what it
   appends into — which is also what keeps a section that fills itself
   later (`buildPluginsPanel`'s async listing) landing inside its own
-  section rather than at the end of the modal.
+  section rather than at the end of the modal. That section is now one
+  line and a button — see the plugins manager below.
 - **`S.keymap` must hold its own key arrays, not `DEFAULT_KEYMAP`'s.**
   The settings UI's "+ key"/"✕" handlers splice and push those arrays in
   place, so the old shallow `{...DEFAULT_KEYMAP}` handed them the
@@ -1323,3 +1324,55 @@ see [docs/notes/README.md](README.md) for the whole set.
   would put the row in the DOM twice. The button is not a tab stop: forty
   of them between the pane's own buttons and the note box would bury the
   keyboard path that exists.
+
+- **A plugin describes itself without being imported, and the plugins
+  manager is what that buys.** The Settings → Plugins panel used to show a
+  switched-off plugin as its folder name, an "example" badge and the word
+  "off" — seven rows reading `mft_usn`, `first_last`, `top_values`… with a
+  four-option `<select>` as the widest thing on each, the state printed
+  twice (the select said "Off — …" and a right-hand column said "off"),
+  and the same badge repeated seven times. All seven bundled examples
+  ship a name, a version and a sentence of description; none of it was
+  reachable, because a disabled plugin is never imported (that is the
+  entire value of an off switch on something that runs with the app's
+  privileges) and the record's metadata only existed *after* an import.
+  The only way to learn what a plugin did was to run it, which is
+  backwards for the decision about whether to run it.
+
+  `plugin_api.static_meta` reads `PLUGIN`, `WINNOW_API_VERSION` and the
+  `register_*` calls out of the **source**: `ast.parse` plus
+  `ast.literal_eval` on the module-level assignment, so not one line of
+  the file executes. A `literal_eval` over a hand-written dict is the
+  same trust boundary as reading JSON — it is not `eval`, and it cannot
+  call anything. Every failure mode (unparseable source, `PLUGIN` bound
+  to something that isn't a dict, a value that isn't a literal) answers
+  empty rather than raising: a plugin whose source won't parse is one
+  that wouldn't import either, and the listing's job is to describe, not
+  to diagnose. A plugin that *fails to load* still reports its error the
+  usual way — and now keeps its name while doing it, which is the moment
+  it is most wanted.
+
+  Two things the pane is careful to keep apart. For a **running** plugin,
+  "What it adds" is the registry's own answer, attributed by `plugin_fs`
+  (two plugins may call themselves the same thing; only the folder name
+  is unique). For one that is **not running** it is `declares` — kinds,
+  never counts, and labelled "from its source". The count is the part
+  that cannot be trusted: `examples/plugins/mft_usn` contains three
+  `register_ingest_format` calls across its folder and registers two,
+  because the third is in a helper module the entry file never reaches.
+  A kind survives that; a number doesn't.
+
+- **Plugin scope is two controls, not one dropdown.** The model is a
+  machine-wide default plus an optional per-case override living in the
+  case file. One `<select>` mixing them could spell every state except
+  the useful one — *drop my override and follow the machine again* —
+  because the only route back was re-picking an "everywhere" scope, which
+  clears the override as a side effect. That is fine when the machine
+  setting you want is the one already set, and a silent rewrite of every
+  other case's behaviour when it isn't. Hence the `follow_case` scope and
+  the Follow button, and a foot line that states the state in a sentence
+  rather than leaving two controls to be read together. The per-case row
+  is still gated on a case being **on screen**, not on the server holding
+  a Store: `#home` and `#app` are siblings and `showHome()` only hides
+  `#app`, so `case_open` stays true after it (`tests/ui/
+  test_plugin_scope_needs_a_case.py`).

@@ -2468,7 +2468,7 @@ async def api_plugin_row_action(fs_name: str, action_id: str, body: RowActionBod
 class PluginToggle(BaseModel):
     fs_name: str   # the plugins/ entry's file/folder name — the identity that exists without importing
     enabled: bool | None = None          # legacy body: on/off everywhere
-    scope: str | None = None             # on_all | off_all | on_case | off_case
+    scope: str | None = None             # on_all | off_all | on_case | off_case | follow_case
 
 
 @app.post("/api/plugins/toggle")
@@ -2490,7 +2490,7 @@ def api_plugins_toggle(body: PluginToggle):
         if body.enabled is None:
             raise HTTPException(400, "Send scope (on_all/off_all/on_case/off_case) or the legacy enabled flag")
         scope = "on_all" if body.enabled else "off_all"
-    if scope not in ("on_all", "off_all", "on_case", "off_case"):
+    if scope not in ("on_all", "off_all", "on_case", "off_case", "follow_case"):
         raise HTTPException(400, f"Unknown scope {scope!r}")
     default_on = not rec.get("bundled")
     if scope in ("on_all", "off_all"):
@@ -2507,8 +2507,18 @@ def api_plugins_toggle(body: PluginToggle):
         if STORE is None or STORE.closed:
             raise HTTPException(400, "Open a case first — per-case scopes live in the case file")
         overrides = _case_plugin_overrides()
-        overrides[body.fs_name] = scope == "on_case"
-        STORE.set_case_setting("plugin_overrides", json.dumps(overrides))
+        if scope == "follow_case":
+            # Drop this case's override and go back to following the
+            # machine setting, whatever it is. The only other way to
+            # reach that state was to re-pick an "everywhere" scope,
+            # which clears the override as a side effect — fine when the
+            # machine setting you want is the one already set, and a
+            # silent rewrite of every other case's behaviour when it
+            # isn't. Removing an override should not be able to do that.
+            overrides.pop(body.fs_name, None)
+        else:
+            overrides[body.fs_name] = scope == "on_case"
+        STORE.set_case_setting("plugin_overrides", json.dumps(overrides) if overrides else None)
     _reload_plugins()
     return api_plugins()
 
