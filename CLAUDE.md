@@ -224,9 +224,15 @@ docs/              Long-form documentation. writing-plugins.md — the plugin
                     notes ("things that bite"), one file per part of the
                     app; read the one covering what you're about to touch.
 plugins/           Analyst-installed plugins (gitignored except its README).
-                    Managed from Settings → Plugins: per-plugin on/off
-                    toggles and a copy-from-disk installer, no restart —
-                    dropping a folder/.py here by hand works too.
+                    Managed from Settings → Plugins → Manage plugins…,
+                    a two-pane manager (static/js/pluginmanager.js):
+                    per-plugin scope (machine default + per-case override
+                    that can Follow it), what each one adds, where it came
+                    from, and a copy-from-disk installer — no restart.
+                    A switched-off plugin still names and describes itself:
+                    plugin_api.static_meta reads PLUGIN out of the SOURCE
+                    rather than from an import that never happens.
+                    Dropping a folder/.py here by hand works too.
 examples/plugins/  Committed example plugins covering every extension point
                     but one — treat them as the reference for writing new
                     ones. register_row_action is the gap: its contract

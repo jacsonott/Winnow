@@ -145,8 +145,10 @@ it lands.
 
 ![The pivot plugin: a cross-tab of hosts against event descriptions](docs/screenshots/pivot.png)
 
-**Settings → Plugins** turns them on and off per machine or per case, with
-no restart. Seven examples ship switched off: **pivot** (Excel's
+**Settings → Plugins** opens a manager that turns them on and off per
+machine or per case, with no restart — and says what each one adds, and
+what it can reach, before you switch it on (a plugin that is off is never
+imported, so its description is read from its source, not by running it). Seven examples ship switched off: **pivot** (Excel's
 PivotTable over any table), **first_last** (collapse events into per-group
 session bookends), **mft_usn** (raw NTFS `$MFT`/`$J` in pure Python, no
 EZTools), **lateral_movement** (logon pairs as an offline graph),

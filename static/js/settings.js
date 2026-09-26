@@ -10,7 +10,7 @@ import { drawRail, rebuildGroupPrefix, renderGrouped } from './grouping.js';
 import { syncHistogramPanel } from './histogram.js';
 import { shutdownWinnow } from './home.js';
 import { ACTION_LABELS, defaultKeymap, findKeyConflict, keySpecFromEvent, saveKeymap } from './keymap.js';
-import { buildPluginsPanel } from './plugins.js';
+import { buildPluginsPanel } from './pluginmanager.js';
 import { buildAssocPanel } from './assoc.js';
 import { buildEnvPanel } from './userenv.js';
 import { loadCaseVariables, loadSavedFilters } from './savedfilters.js';

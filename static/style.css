@@ -3097,6 +3097,59 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 .pm-diff-label { color: var(--dim); text-transform: uppercase; letter-spacing: .08em; font-size: 10px; }
 .pm-diff-vals { display: flex; flex-direction: column; gap: 2px; min-width: 0; word-break: break-word; }
 .pm-add { color: var(--good, var(--accent)); }
+
+/* The plugins manager (pluginmanager.js). Built on the profile manager's
+   .pm-* shell above — these are only what a plugin has that a profile
+   doesn't: two scope controls instead of one Apply, provenance as a
+   definition list, and a "what it adds" row that can carry a file picker. */
+/* A plugin's name and its folder path are both longer than a profile's
+   name, so this manager's list pane is wider than the profile one's. */
+.pm.pm-plugins { grid-template-columns: 260px minmax(0, 1fr); }
+.pl-dirs { margin-top: 12px; padding-top: 8px; border-top: 1px solid var(--line); }
+.pl-dirs-head { font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim); margin-bottom: 4px; }
+.pl-dir { font: 10px var(--mono); color: var(--dim); word-break: break-all; line-height: 1.5; }
+
+.pl-fs { font: 10px var(--mono); color: var(--dim); }
+.pl-tag-bad { color: var(--danger); border-color: var(--danger); }
+.pl-bad { color: var(--danger); }
+
+.pl-scopes { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.pl-scope-row { display: flex; align-items: center; gap: 7px; }
+.pl-scope-label { font: 10px var(--mono); color: var(--dim); white-space: nowrap; }
+.pl-scope { display: flex; border: 1px solid var(--line-2); border-radius: var(--radius-sm); overflow: hidden; }
+.pl-scope button {
+  font: inherit; font-size: 11px; padding: 3px 10px; background: transparent; color: var(--dim);
+  border: 0; border-right: 1px solid var(--line-2); cursor: pointer; white-space: nowrap;
+}
+.pl-scope button:last-child { border-right: 0; }
+.pl-scope button:hover:not([aria-pressed="true"]):not(:disabled) { color: var(--text); background: var(--line); }
+.pl-scope button[aria-pressed="true"] { background: var(--accent-dim); border-color: var(--accent); color: var(--accent-fg); }
+.pl-scope button:disabled { opacity: .5; cursor: default; }
+.pl-scope-note { font-size: 10px; color: var(--dim); max-width: 280px; text-align: right; line-height: 1.5; }
+
+.pl-reg { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 4px 10px;
+  align-items: center; padding: 3px 0; }
+.pl-reg-main { min-width: 0; }
+.pl-reg-label { font-size: 11px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pl-reg-note { font: 10px var(--mono); color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pl-reg-kind { font: 10px var(--mono); color: var(--dim); min-width: 92px; text-align: right; }
+
+.pl-declared-lead, .pl-usedby-lead { font-size: 11px; color: var(--dim); }
+.pl-declared-lead { margin-bottom: 6px; }
+
+.pl-kv { display: grid; grid-template-columns: 116px minmax(0, 1fr); gap: 3px 12px; margin: 0; font-size: 11px; }
+.pl-kv dt { color: var(--dim); }
+.pl-kv dd { margin: 0; font: 11px var(--mono); color: var(--text); word-break: break-all; }
+
+.pl-error { border: 1px solid var(--danger); border-radius: var(--radius-sm); padding: 8px 10px;
+  margin-bottom: 8px; font-size: 11px; color: var(--text); line-height: 1.6; }
+.pl-error-head { color: var(--danger); text-transform: uppercase; letter-spacing: .08em; font-size: 10px; margin-bottom: 3px; }
+
+/* Settings keeps one line where the whole panel used to be. */
+.settings-line { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.settings-line-text { font: 11px var(--mono); color: var(--dim); }
+.settings-line-bad { color: var(--danger); }
+.settings-line .fb-help { flex-basis: 100%; margin: 4px 0 0; }
 .pm-rem { color: var(--danger); }
 
 /* The apply sheet. A profile apply rewrites every plugin override in the

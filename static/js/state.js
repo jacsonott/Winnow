@@ -104,7 +104,8 @@ export const S = {
   pluginPagePanels: [],   // register_page_panel — the SQL/Notes side-column panels, same shape plus `page`
   pluginDirs: [],        // where the server loads plugins from — shown in the Plugins modal so "drop it where?" has an answer
   lastBrowsePath: null,  // last dir the "Add from this machine…" picker was in — session-only convenience, not persisted
-  pluginsCaseOpen: false, // whether /api/plugins was answered with a case open — gates the per-case scope options in Settings → Plugins
+  pluginsCaseOpen: false, // whether /api/plugins was answered with a case open — gates the per-case scope options in the plugins manager
+  pluginApiVersion: null, // PLUGIN_API_VERSION this build provides — the manager shows it beside the version a plugin asks for
   sidebarFilter: '',      // substring filter typed into the sidebar's own search box
   dashboards: [],         // [{id, name, pos, widget_count}] named dashboards, from the case file (see dashboard.js)
   dashboardId: null,      // which named dashboard is currently showing

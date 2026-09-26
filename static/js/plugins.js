@@ -3,7 +3,6 @@
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { recordTabVisit } from './tabhistory.js';
 import { $, MOD_ENTER, api, el, post, setBusy, toast } from './core.js';
-import { loadPlugins, openImportModal, pluginFormatById, queueFilesForFormat } from './importer.js';
 import { clearAllFilters, loadSources, openSource, pageTabs, renderPageTabs, renderSidebar, reopenPageTab, syncTabSelection } from './sources.js';
 import { closeNoticesOwnedBy, createNotice } from './jobs.js';
 import { ensureNotesLoaded, insertAtCursor, showNotesTab } from './notes.js';
@@ -19,287 +18,134 @@ import { alertDialog, closeModal, confirmDialog, modal, promptDialog } from './u
 import { updateTimeRangeButton } from './timeframe.js';
 import { histogramOpen } from './histogram.js';
 
-/* Settings → Plugins: everything about drop-in extensions in one place —
-   every plugin found in the plugins directory (enabled, disabled, or
-   failed-to-load with why), a checkbox per plugin that takes effect
-   immediately (the server rescans and reloads its registry on every
-   toggle; a disabled plugin's code is never even imported), and an
-   installer that copies a picked .py file or plugin folder from anywhere
-   on disk into the plugins directory — the same consent model as copying
-   it in by hand, minus the hand. Appends into the Settings modal body and
-   re-renders itself in place, same inline pattern as buildColumnsPanel.
-   Each enabled format keeps its own no-accept-attribute file picker — the
-   one file-picking path that can reach a target the format matches by
-   bare-name pattern ("$MFT" has no extension for an accept to allow). */
-/* A per-case scope is only offerable when a case is on screen. #home and
-   #app are siblings and exactly one is visible (see CLAUDE.md), so that is
-   the question — S.pluginsCaseOpen alone answers "does the server hold a
-   Store", which stays true after showHome(). */
-const caseScopeAvailable = () => !!S.pluginsCaseOpen && !$('app').hidden;
+/* Installing a plugin: copying a picked .py file or plugin folder from
+   anywhere on disk into the plugins directory — the same consent model as
+   copying it in by hand, minus the hand. The listing these routes answer
+   with is applied by applyPluginListing, which every caller shares so a
+   toggle and an install can't drift on what they repaint.
 
-/* Which case "this case" is. The brand button is already the app's answer
-   to that, so it is the same string, and naming it means the option can
-   never be read as being about some other case. */
-function thisCase() {
-  const label = ($('brandLabel') && $('brandLabel').textContent || '').trim();
-  return label && label !== 'Winnow' ? `“${label}”` : 'this case';
+   The panel that used to live here is now two pieces: a summary line in
+   Settings (buildPluginsPanel, in pluginmanager.js) and the manager it
+   opens. */
+
+/* Applies a fresh /api/plugins response to app state and repaints
+   everything a plugin toggle or install can change. Exported because the
+   plugins manager (pluginmanager.js) POSTs the toggle and install routes,
+   both of which answer with this same listing shape. */
+export function applyPluginListing(r) {
+  S.plugins = r.plugins || [];
+  S.pluginFormats = r.formats || [];
+  S.pluginTabs = r.tabs || [];
+  S.pluginDirs = r.dirs || [];
+  S.pluginApiVersion = r.api_version ?? null;
+  // A toggle takes a plugin's row actions with it — and a pinned one
+  // out of the row menu, which promises to hide it while its plugin is off.
+  S.pluginRowActions = r.row_actions || [];
+  S.pluginDashboards = r.dashboards || [];
+  S.pluginPanels = r.panels || [];
+  S.pluginPagePanels = r.page_panels || [];
+  renderPluginTabs(); // a toggle/install can add or remove pinned tabs
+  renderPluginPanelButtons(); // …and toolbar / page panels
+  // …and can add or remove offered boards. Without this the Dashboards
+  // section keeps whatever it last drew: a board that is not offered
+  // yet, or a phantom row whose ＋ 404s because its plugin is off.
+  renderSidebar();
 }
 
-export function buildPluginsPanel(b) {
-  const box = el('div');
-  b.append(box);
-
-  function applyListing(r) {
-    S.plugins = r.plugins || [];
-    S.pluginFormats = r.formats || [];
-    S.pluginTabs = r.tabs || [];
-    S.pluginDirs = r.dirs || [];
-    // A toggle takes a plugin's row actions with it — and a pinned one
-    // out of the row menu, which promises to hide it while its plugin is off.
-    S.pluginRowActions = r.row_actions || [];
-    S.pluginDashboards = r.dashboards || [];
-    S.pluginPanels = r.panels || [];
-    S.pluginPagePanels = r.page_panels || [];
-    renderPluginTabs(); // a toggle/install can add or remove pinned tabs
-    renderPluginPanelButtons(); // …and toolbar / page panels
-    // …and can add or remove offered boards. Without this the Dashboards
-    // section keeps whatever it last drew: a board that is not offered
-    // yet, or a phantom row whose ＋ 404s because its plugin is off.
-    renderSidebar();
-  }
-
-  async function installFiles(fileList, relPaths) {
-    const files = [...fileList];
-    if (!files.length) return;
-    const fd = new FormData();
-    for (const f of files) fd.append('files', f);
-    fd.append('paths', JSON.stringify(relPaths));
-    let r;
+async function installFiles(fileList, relPaths, onDone) {
+  const files = [...fileList];
+  if (!files.length) return;
+  const fd = new FormData();
+  for (const f of files) fd.append('files', f);
+  fd.append('paths', JSON.stringify(relPaths));
+  let r;
+  try {
+    r = await api('/api/plugins/install', { method: 'POST', body: fd });
+  } catch (e) {
+    if (e.status !== 409) { toast('Install failed: ' + e.message, 6000); return; }
+    // Name taken — the server won't clobber without being told to.
+    if (!(await confirmDialog(`${e.message}. Replace it?`, { danger: true, okLabel: 'Replace' }))) return;
+    fd.append('overwrite', 'true');
     try {
       r = await api('/api/plugins/install', { method: 'POST', body: fd });
-    } catch (e) {
-      if (e.status !== 409) { toast('Install failed: ' + e.message, 6000); return; }
-      // Name taken — the server won't clobber without being told to.
-      if (!(await confirmDialog(`${e.message}. Replace it?`, { danger: true, okLabel: 'Replace' }))) return;
-      fd.append('overwrite', 'true');
-      try {
-        r = await api('/api/plugins/install', { method: 'POST', body: fd });
-      } catch (e2) { toast('Install failed: ' + e2.message, 6000); return; }
-    }
-    applyListing(r);
-    renderPanel();
-    if (r.error) toast(`Installed ${r.installed}, but it failed to load: ${r.error}`, 8000);
-    else toast(`Installed ${r.installed}`);
+    } catch (e2) { toast('Install failed: ' + e2.message, 6000); return; }
   }
+  applyPluginListing(r);
+  if (onDone) onDone(r.installed);
+  if (r.error) toast(`Installed ${r.installed}, but it failed to load: ${r.error}`, 8000);
+  else toast(`Installed ${r.installed}`);
+}
 
-  /* "File or folder?" was the question the two old side-by-side buttons
-     made the analyst answer blind — the browser can't offer one picker
-     that takes either, so the dialog states the rule the pickers can't:
-     which one you need is decided by how the plugin arrived on disk. If a
-     folder pick contains no __init__.py, or a file pick isn't a .py, that's
-     said here rather than left to a failed install. */
-  function openInstallDialog() {
-    modal('Install a plugin', (b) => {
-      b.append(el('p', null,
-        'A plugin is either a single Python file or a folder — which one is decided by '
-        + 'how it arrived, not by preference:'));
-      const kv = el('div', 'kv');
-      kv.append(el('kbd', null, 'One .py file'), el('span', null, 'Pick the file itself.'));
-      kv.append(el('kbd', null, 'A folder'), el('span', null,
-        'Pick the folder that directly contains __init__.py (plus any ui/, README, data it ships). '
-        + 'Everything inside is copied.'));
-      b.append(kv);
-      b.append(el('p', 'note-status',
-        'Either way it lands in the first plugins directory listed above, enabled immediately. '
-        + 'The bundled examples are already listed — no install needed, just switch them on.'));
+/* "File or folder?" was the question the two old side-by-side buttons
+   made the analyst answer blind — the browser can't offer one picker
+   that takes either, so the dialog states the rule the pickers can't:
+   which one you need is decided by how the plugin arrived on disk. If a
+   folder pick contains no __init__.py, or a file pick isn't a .py, that's
+   said here rather than left to a failed install.
 
-      const acts = el('div', 'row-actions');
-      const fileLabel = el('label', 'btn', 'Pick a .py file…');
-      const fileInput = el('input');
-      fileInput.type = 'file';
-      fileInput.accept = '.py';
-      fileInput.hidden = true;
-      fileInput.onchange = () => {
-        const files = [...fileInput.files];
-        fileInput.value = '';
-        if (!files.length) return;
-        if (!files[0].name.endsWith('.py')) { toast('That isn\'t a .py file — for a folder plugin, use the folder button', 5000); return; }
-        $('modal').hidden = true;
-        installFiles(files, files.map((f) => f.name));
-      };
-      fileLabel.append(fileInput);
-      const folderLabel = el('label', 'btn', 'Pick a plugin folder…');
-      const folderInput = el('input');
-      folderInput.type = 'file';
-      // Folder picker: every file inside arrives with its path relative to
-      // the picked folder (webkitRelativePath), which is exactly what the
-      // install route's `paths` field wants.
-      folderInput.webkitdirectory = true;
-      folderInput.hidden = true;
-      folderInput.onchange = () => {
-        const files = [...folderInput.files];
-        folderInput.value = '';
-        if (!files.length) return;
-        // The rule stated above, enforced before any bytes move: a plugin
-        // folder is one whose top level has __init__.py.
-        const hasInit = files.some((f) => {
-          const rel = f.webkitRelativePath || f.name;
-          const parts = rel.split('/');
-          return parts.length === 2 && parts[1] === '__init__.py';
-        });
-        if (!hasInit) {
-          toast('That folder has no __init__.py at its top level — pick the plugin folder itself, not its parent or a subfolder', 6500);
-          return;
-        }
-        $('modal').hidden = true;
-        installFiles(files, files.map((f) => f.webkitRelativePath || f.name));
-      };
-      folderLabel.append(folderInput);
-      acts.append(fileLabel, folderLabel);
-      b.append(acts);
-    });
-  }
-
-  function renderPanel() {
-    box.replaceChildren();
-    box.append(el('p', null,
-      'Drop-in extensions, Notepad++-style. Changes take effect immediately — no restart. '
-      + 'A plugin runs with the same privileges as Winnow itself, so only install plugins you trust. '
-      + 'The bundled examples ship with Winnow and start switched off.'));
-    for (const d of S.pluginDirs) {
-      const dir = el('div', 'note-status', d);
-      dir.style.cssText = 'font-family:var(--mono)';
-      box.append(dir);
-    }
-    for (const p of S.plugins) {
-      const row = el('div', 'row-actions session-row');
-      // Four scopes, not a checkbox: machine default ("everywhere") plus a
-      // per-case override that lives in the case file and travels with it.
-      // The select's value is the current state's provenance, so what it
-      // shows is why the plugin is on/off, not just whether.
-      //
-      // The two per-case scopes need a case ON SCREEN, not merely one the
-      // server still holds. Going back to the home screen only hides #app
-      // (showHome), so the Store stays open and case_open stays true — and
-      // Settings opened from there offered "this case only" for a case
-      // nothing on that screen names. Choosing it wrote a plugin_overrides
-      // entry into whichever case was still open, which the analyst then
-      // met the next time they opened it.
-      const scopeSel = el('select');
-      scopeSel.style.cssText = 'background:var(--ink);color:var(--text);border:1px solid var(--line-2);'
-        + 'padding:3px 6px;font:inherit;font-size:12px';
-      const OPTIONS = [
-        ['on_all', 'On — all cases'],
-        ['off_all', 'Off — all cases'],
-        ...(caseScopeAvailable() ? [
-          ['on_case', `On — ${thisCase()} only`],
-          ['off_case', `Off — ${thisCase()} only`],
-        ] : []),
-      ];
-      for (const [v, label] of OPTIONS) {
-        const o = el('option', null, label);
-        o.value = v;
-        scopeSel.append(o);
-      }
-      const want = p.case_override === true ? 'on_case'
-        : p.case_override === false ? 'off_case'
-        : p.machine_enabled ? 'on_all' : 'off_all';
-      // A case the server still holds can carry an override while its
-      // scopes are not on offer here. Say so in a disabled option rather
-      // than falling back to the first one — a select showing "On — all
-      // cases" for a plugin a case has turned off is a lie, and a
-      // one-click-away lie at that.
-      const strandedOverride = !caseScopeAvailable() && p.case_override != null;
-      if (strandedOverride) {
-        const o = el('option', null,
-          `${p.case_override ? 'On' : 'Off'} — set by the open case (open it to change)`);
-        o.value = want;
-        o.disabled = true;
-        scopeSel.append(o);
-      }
-      scopeSel.value = want;
-      scopeSel.title = strandedOverride
-        ? 'A case that is open but not on screen has overridden the everywhere setting — open that case to change it'
-        : p.case_override != null
-          ? 'This case overrides the everywhere setting; other cases follow it'
-          : 'Applies to every case on this machine';
-      scopeSel.onchange = async () => {
-        scopeSel.disabled = true;
-        try {
-          applyListing(await post('/api/plugins/toggle', { fs_name: p.fs_name, scope: scopeSel.value }));
-        } catch (e) {
-          toast('Could not change the plugin: ' + e.message, 5000);
-        }
-        renderPanel();
-      };
-      const parts = [];
-      if ((p.formats || []).length) parts.push(`${p.formats.length} format${p.formats.length === 1 ? '' : 's'}`);
-      if ((p.tabs || []).length) parts.push(`${p.tabs.length} tab${p.tabs.length === 1 ? '' : 's'}`);
-      const status = p.error ? 'failed to load'
-        : !p.enabled ? 'off'
-        : (parts.join(', ') || 'loaded');
-      const nameSpan = el('span', 'session-name', p.name + (p.version ? ` v${p.version}` : ''));
-      nameSpan.style.whiteSpace = 'nowrap';
-      row.append(scopeSel, nameSpan);
-      if (p.bundled) {
-        const badge = el('span', 'count', 'example — ships with Winnow');
-        // margin-right 0 beats .session-row .count's `auto`, which shared
-        // the slack between badge and status and left the statuses ragged.
-        badge.style.cssText = 'border:1px solid var(--line-2);border-radius:var(--radius-sm);padding:0 5px;white-space:nowrap;margin-right:0';
-        row.append(badge);
-      }
-      const statusSpan = el('span', 'count', status);
-      statusSpan.style.cssText = 'white-space:nowrap;margin-left:auto;margin-right:0';
-      row.append(statusSpan);
-      box.append(row);
-      if (p.error) {
-        const err = el('div', 'note-status', p.error);
-        err.style.cssText = 'color:var(--bad, #c0392b);margin:0 0 10px 24px';
-        box.append(err);
-        continue;
-      }
-      if (p.description) {
-        const desc = el('div', 'note-status', p.description);
-        desc.style.cssText = 'margin:0 0 6px 24px';
-        box.append(desc);
-      }
-      for (const fid of p.formats || []) {
-        const f = pluginFormatById(fid);
-        if (!f) continue;
-        const frow = el('div', 'row-actions session-row');
-        frow.style.marginLeft = '24px';
-        const matches = (f.extensions || []).concat(f.filename_patterns || []).join(', ');
-        frow.append(
-          el('span', 'session-name', f.label),
-          el('span', 'count', matches || 'no automatic matching'),
-        );
-        const pickLabel = el('label', 'btn ghost', 'Import files…');
-        const inp = el('input');
-        inp.type = 'file';
-        inp.multiple = true;
-        inp.hidden = true; // no accept attribute on purpose — see the panel comment
-        inp.onchange = () => {
-          if (!inp.files.length) return;
-          queueFilesForFormat(f, [...inp.files]);
-          openImportModal();
-        };
-        pickLabel.append(inp);
-        frow.append(pickLabel);
-        box.append(frow);
-      }
-    }
+   `onDone(installedName)` fires after a successful install, so whatever
+   opened this dialog can repaint. It replaces the modal it was opened
+   from, so the caller re-opens itself rather than being restored. */
+export function openInstallDialog(onDone) {
+  modal('Install a plugin', (b) => {
+    b.append(el('p', null,
+      'A plugin is either a single Python file or a folder — which one is decided by '
+      + 'how it arrived, not by preference:'));
+    const kv = el('div', 'kv');
+    kv.append(el('kbd', null, 'One .py file'), el('span', null, 'Pick the file itself.'));
+    kv.append(el('kbd', null, 'A folder'), el('span', null,
+      'Pick the folder that directly contains __init__.py (plus any ui/, README, data it ships). '
+      + 'Everything inside is copied.'));
+    b.append(kv);
+    b.append(el('p', 'note-status',
+      'Either way it lands in the first plugins directory listed in the manager, enabled '
+      + 'immediately. The bundled examples are already listed — no install needed, just switch '
+      + 'them on.'));
 
     const acts = el('div', 'row-actions');
-    const installBtn = el('button', 'btn ghost', 'Install a plugin…');
-    installBtn.onclick = openInstallDialog;
-    acts.append(installBtn);
-    box.append(acts);
-  }
-
-  renderPanel();
-  // Refresh from the server in the background — cheap, and catches a
-  // plugin someone dropped into the folder by hand since boot.
-  loadPlugins().then(renderPanel);
+    const fileLabel = el('label', 'btn', 'Pick a .py file…');
+    const fileInput = el('input');
+    fileInput.type = 'file';
+    fileInput.accept = '.py';
+    fileInput.hidden = true;
+    fileInput.onchange = () => {
+      const files = [...fileInput.files];
+      fileInput.value = '';
+      if (!files.length) return;
+      if (!files[0].name.endsWith('.py')) { toast('That isn\'t a .py file — for a folder plugin, use the folder button', 5000); return; }
+      $('modal').hidden = true;
+      installFiles(files, files.map((f) => f.name), onDone);
+    };
+    fileLabel.append(fileInput);
+    const folderLabel = el('label', 'btn', 'Pick a plugin folder…');
+    const folderInput = el('input');
+    // Folder picker: every file inside arrives with its path relative to
+    // the picked folder (webkitRelativePath), which is exactly what the
+    // install route's `paths` field wants.
+    folderInput.webkitdirectory = true;
+    folderInput.hidden = true;
+    folderInput.onchange = () => {
+      const files = [...folderInput.files];
+      folderInput.value = '';
+      if (!files.length) return;
+      // The rule stated above, enforced before any bytes move: a plugin
+      // folder is one whose top level has __init__.py.
+      const hasInit = files.some((f) => {
+        const rel = f.webkitRelativePath || f.name;
+        const parts = rel.split('/');
+        return parts.length === 2 && parts[1] === '__init__.py';
+      });
+      if (!hasInit) {
+        toast('That folder has no __init__.py at its top level — pick the plugin folder itself, not its parent or a subfolder', 6500);
+        return;
+      }
+      $('modal').hidden = true;
+      installFiles(files, files.map((f) => f.webkitRelativePath || f.name), onDone);
+    };
+    folderLabel.append(folderInput);
+    acts.append(fileLabel, folderLabel);
+    b.append(acts);
+  });
 }
 
 /* Real (non-merge) sources' schema, formatted as CREATE TABLE-ish SQL —
