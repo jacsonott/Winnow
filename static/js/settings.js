@@ -11,6 +11,7 @@ import { syncHistogramPanel } from './histogram.js';
 import { shutdownWinnow } from './home.js';
 import { ACTION_LABELS, defaultKeymap, findKeyConflict, keySpecFromEvent, saveKeymap } from './keymap.js';
 import { buildPluginsPanel } from './pluginmanager.js';
+import { listBundles, openPluginBundlesModal } from './bundles.js';
 import { buildAssocPanel } from './assoc.js';
 import { buildEnvPanel } from './userenv.js';
 import { loadCaseVariables, loadSavedFilters } from './savedfilters.js';
@@ -353,6 +354,50 @@ export function settingsSection(parent, title, { open = false } = {}) {
   wrap.append(head, body);
   parent.append(wrap);
   return body;
+}
+
+/* Settings → Profiles: a count and the way in. The manager was reachable
+   only by its hotkey, which is fine once you know it exists and no help
+   at all before then — and Settings is where someone looks for "what
+   else is there". One line and a button, the same shape the Plugins
+   section takes, because the two answer the same kind of question and a
+   second full panel in this modal is what the plugins one was moved out
+   to avoid. */
+export function buildProfilesPanel(b) {
+  const box = el('div', 'settings-line');
+  b.append(box);
+
+  // `null` until the listing lands: an unloaded panel that says
+  // "0 profiles" for a moment is a wrong answer, and there are always at
+  // least the shipped two.
+  function paint(list) {
+    box.replaceChildren();
+    const shipped = list ? list.filter((x) => x.shipped).length : 0;
+    const mine = list ? list.length - shipped : 0;
+    const line = el('span', 'settings-line-text', !list ? ''
+      : `${list.length} profile${list.length === 1 ? '' : 's'}`
+        + (list.length ? ` · ${shipped} shipped, ${mine} your own` : ''));
+    const open = el('button', 'btn', 'Open profiles…');
+    // Came from Settings, goes back to Settings: the modal is shared, so
+    // without this the × drops the analyst on the grid.
+    open.onclick = () => openPluginBundlesModal({ returnTo: openSettings });
+    box.append(line, open);
+    box.append(el('p', 'fb-help',
+      'A profile is a kind of case: the plugins it needs, the boards it opens with, a starter '
+      + 'watchlist and the values the case must carry. Applying one changes the open case, and '
+      + `says what it will change first. ${keyHint('openPluginBundles')}`));
+  }
+
+  paint(null);
+  listBundles().then(paint).catch(() => paint(null));
+}
+
+/* The key a rebindable action is on right now, as a sentence fragment —
+   read from S.keymap rather than written out, so a rebinding in the panel
+   above does not leave prose naming a key that no longer works. */
+function keyHint(action) {
+  const keys = (S.keymap && S.keymap[action]) || [];
+  return keys.length ? `Also on ${keys.join(' / ')}.` : '';
 }
 
 /* One skin as a card. Used twice: as the read-only "this is what you're
@@ -1089,6 +1134,9 @@ export function openSettings() {
 
     const secPlugins = settingsSection(b, 'Plugins');
     buildPluginsPanel(secPlugins);
+
+    const secProfiles = settingsSection(b, 'Profiles');
+    buildProfilesPanel(secProfiles);
 
     const secAssoc = settingsSection(b, 'File associations');
     buildAssocPanel(secAssoc);

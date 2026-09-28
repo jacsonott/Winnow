@@ -1,4 +1,4 @@
-"""The M menu: the profile manager — save, list, apply, delete.
+"""The profiles manager (Settings → Profiles, or `p`) — save, list, apply, delete.
 
 The list these drove used to be one row per profile with the buttons on
 the end of it; they drive the two-pane manager now (tests/ui/
@@ -13,11 +13,11 @@ import pytest
 pytestmark = pytest.mark.ui
 
 
-def test_m_opens_and_closes_the_profile_manager(page):
-    page.keyboard.press("M")
+def test_the_key_opens_and_closes_the_profile_manager(page):
+    page.keyboard.press("p")
     page.wait_for_selector("#modal:not([hidden])")
     assert page.locator("#modalTitle").inner_text().lower() == "profiles"
-    page.keyboard.press("M")  # the toggle contract from the same batch
+    page.keyboard.press("p")  # the toggle contract from the same batch
     page.wait_for_selector("#modal[hidden]", state="attached")
 
 
@@ -26,7 +26,7 @@ def test_save_list_and_delete_a_profile(page):
     rec = page.evaluate("""() => fetch('/api/plugin_bundles', { method: 'POST',
       headers: { 'X-Timeline-Lite-Client': '1', 'Content-Type': 'application/json' },
       body: JSON.stringify({ name: 'UI Triage', plugins: ['lateral_movement'] }) }).then((r) => r.json())""")
-    page.keyboard.press("M")
+    page.keyboard.press("p")
     page.wait_for_selector(".pm-item:has-text('UI Triage')")  # the list loads async
     page.locator(".pm-item", has_text="UI Triage").click()
     assert "lateral_movement" in page.locator('.pm-sec[data-sec="plugins"]').inner_text()
@@ -52,7 +52,7 @@ def test_shipped_kape_profile_is_readonly_and_applies(page):
     dashboard doesn't silently stale this test again)."""
     from winnow import defaults
     expected = len(next(pr for pr in defaults.profiles() if pr["name"] == "KAPE triage")["dashboard"])
-    page.keyboard.press("M")
+    page.keyboard.press("p")
     page.wait_for_selector(".pm-item:has-text('KAPE triage')")
     page.locator(".pm-item", has_text="KAPE triage").click()
     # read-only: a shipped badge, no delete control

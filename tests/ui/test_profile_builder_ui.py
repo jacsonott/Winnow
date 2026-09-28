@@ -12,7 +12,7 @@ NAME = "UI Builder Profile"
 
 
 def _open_builder(page):
-    page.keyboard.press("M")
+    page.keyboard.press("p")
     page.wait_for_selector("#modal:not([hidden])")
     page.wait_for_selector(".pm-item", timeout=15_000)   # the manager's list loads async
     page.locator("#modalBody .btn", has_text="New profile").click()
@@ -103,7 +103,7 @@ def test_editing_an_existing_profile_reopens_it_filled_in(page, api):
         "name": NAME, "plugins": [], "description": "before",
         "variables": [{"name": "engagement", "label": "Engagement", "required": True}]})
     try:
-        page.keyboard.press("M")
+        page.keyboard.press("p")
         page.wait_for_selector(f".pm-item:has-text('{NAME}')")
         page.locator(".pm-item", has_text=NAME).click()
         page.locator(".pm-head-acts .btn", has_text="Edit…").click()
@@ -125,7 +125,7 @@ def test_editing_an_existing_profile_reopens_it_filled_in(page, api):
 
 def test_a_shipped_profile_opens_as_a_copy(page, api):
     try:
-        page.keyboard.press("M")
+        page.keyboard.press("p")
         page.wait_for_selector(".pm-item:has-text('KAPE triage')")
         page.locator(".pm-item", has_text="KAPE triage").click()
         page.locator(".pm-head-acts .btn", has_text="Copy to edit").click()
