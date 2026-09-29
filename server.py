@@ -5134,8 +5134,47 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
+def _ensure_console_streams() -> None:
+    """Give sys.stdout/sys.stderr somewhere to go when the process has no
+    console.
+
+    Windows' pythonw.exe — which is what a file association registered in
+    background mode launches (assoc.launch_command) — starts a process
+    with no console at all, and CPython sets sys.stdout and sys.stderr to
+    None rather than to a stream that discards. `print()` tolerates that;
+    uvicorn does not. `uvicorn.run` configures logging before it binds,
+    and its default formatter asks `sys.stdout.isatty()`, so the server
+    died with an AttributeError on the line before it would have started
+    listening.
+
+    What the analyst saw was nothing: double-click a file, no window, no
+    error — the browser thread was waiting out its fifteen seconds on a
+    port that was never going to open, and there was no console for the
+    traceback to land in either. "Launching by association never opens
+    the browser" is that crash, seen from outside.
+
+    Rebinding both to os.devnull is deliberately the whole fix. The
+    alternative — handing uvicorn a log config that does not touch stdout
+    — would leave every other stdout consumer (this module's own prints,
+    any plugin's) one None-dereference away from the same silent death.
+    """
+    devnull = None
+    for name in ("stdout", "stderr"):
+        if getattr(sys, name, None) is not None:
+            continue
+        if devnull is None:
+            # Line-buffered text, like a console would be. Never closed:
+            # it has to outlive main() — uvicorn logs through it until the
+            # process exits, and the OS reclaims it then.
+            devnull = open(os.devnull, "w", buffering=1)  # noqa: SIM115
+        setattr(sys, name, devnull)
+
+
 def main() -> None:
     global STORE
+    # Before anything that might log or print: with no console there is
+    # no stdout, and the crash that causes is invisible by construction.
+    _ensure_console_streams()
     # Stored WINNOW_* variables (tokens plugins read) join the process
     # environment here, not at import — `import server` in a test must
     # never read the developer's real store. A real export wins.
