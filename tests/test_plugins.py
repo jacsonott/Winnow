@@ -388,6 +388,62 @@ def test_install_folder_with_junk_filtered(plugin_client, plug_dir):
     assert "folderplug.p" in {fm["id"] for fm in out["formats"]}
 
 
+def test_a_plugin_that_exits_at_import_is_a_load_error_not_an_exit(plug_dir):
+    """`sys.exit("needs Winnow 2.0")` is an ordinary way for a plugin to
+    bail on a version check, and SystemExit is not an Exception — so it
+    used to walk straight out of the registry. At startup that killed the
+    import of server.py itself: install such a plugin and Winnow would
+    not come back up until it was deleted by hand."""
+    _write_plugin(plug_dir, "bail",
+                  'import sys\nsys.exit("needs a newer Winnow")\n\ndef register(api):\n    pass\n')
+    reg = PluginRegistry()
+    reg.load([plug_dir])          # used to raise SystemExit
+    rec = next(p for p in reg.describe() if p["fs_name"] == "bail")
+    assert rec["error"] == "SystemExit: needs a newer Winnow"
+    assert rec["enabled"] is True and rec["formats"] == []
+
+
+def test_a_plugin_that_raises_keyboardinterrupt_is_caught_too(plug_dir):
+    _write_plugin(plug_dir, "ki", "raise KeyboardInterrupt()\n\ndef register(api):\n    pass\n")
+    reg = PluginRegistry()
+    reg.load([plug_dir])
+    rec = next(p for p in reg.describe() if p["fs_name"] == "ki")
+    assert rec["error"].startswith("KeyboardInterrupt")
+
+
+def test_one_plugin_exiting_does_not_take_the_others_with_it(plug_dir):
+    """The loop has to keep going. A single bad plugin taking out every
+    other plugin's tabs and formats is the failure this registry exists
+    to prevent, and BaseException was a hole straight through it."""
+    _write_plugin(plug_dir, "aaa_bail", 'import sys\nsys.exit(3)\n\ndef register(api):\n    pass\n')
+    _write_plugin(plug_dir, "demo", GOOD_PLUGIN)
+    reg = PluginRegistry()
+    reg.load([plug_dir])
+    by_fs = {p["fs_name"]: p for p in reg.describe()}
+    assert by_fs["aaa_bail"]["error"].startswith("SystemExit")
+    assert by_fs["demo"]["error"] is None
+    assert reg.get_format("demo.lines") is not None
+
+
+def test_installing_a_plugin_that_exits_answers_instead_of_hanging(plugin_client, plug_dir):
+    """The reported symptom. The install route reloads the registry in a
+    worker thread; a BaseException escaping that thread means the request
+    never returns and Winnow simply stops answering."""
+    init = b'import sys\nsys.exit("needs a newer Winnow")\n\ndef register(api):\n    pass\n'
+    r = plugin_client.post(
+        "/api/plugins/install",
+        files=[("files", ("__init__.py", init))],
+        data={"paths": json.dumps(["bailfolder/__init__.py"])},
+    )
+    assert r.status_code == 200, r.text
+    out = r.json()
+    # Installed — the files are on disk — and reported as failed to load,
+    # exactly like a plugin with a syntax error.
+    assert out["installed"] == "bailfolder"
+    assert out["error"] == "SystemExit: needs a newer Winnow"
+    assert (plug_dir / "bailfolder" / "__init__.py").is_file()
+
+
 def test_install_rejects_traversal_and_absolute_paths(plugin_client, plug_dir):
     r = plugin_client.post("/api/plugins/install",
                            files=[("files", ("evil.py", b"x = 1"))],

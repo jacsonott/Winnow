@@ -1112,7 +1112,29 @@ class PluginRegistry:
             register(PluginAPI(self, record["name"], record["fs_name"], root))
             record["formats"] = sorted(set(self._formats) - before_formats)
             record["tabs"] = sorted(set(self._tabs) - before_tabs)
-        except Exception as e:
+        except BaseException as e:  # noqa: BLE001 — see below
+            # BaseException, not Exception, and the difference is the whole
+            # point. Importing a plugin runs arbitrary module-level Python,
+            # and `sys.exit("needs Winnow 2.0")` is a completely ordinary
+            # way for a plugin to bail on a version check. SystemExit and
+            # KeyboardInterrupt are not Exception subclasses, so they used
+            # to walk straight out of here:
+            #
+            #   - out of an install (run_in_threadpool(_reload_plugins)),
+            #     where it escapes the worker thread and the request never
+            #     returns — Winnow simply stops answering;
+            #   - and out of the module-level _reload_plugins() in
+            #     server.py, where it kills the import and the server will
+            #     not start AT ALL until the plugin is deleted by hand.
+            #
+            # Install such a plugin and Winnow hangs, then refuses to come
+            # back up. A plugin that cannot load is a load error like any
+            # other, and that is what it is recorded as here.
+            #
+            # The cost is a real Ctrl+C landing inside a plugin's import
+            # being swallowed. That is one keystroke, on a server whose
+            # shutdown uvicorn owns — against a plugin being able to make
+            # the app unstartable, it is not a close call.
             # Full traceback to the console for the plugin author; a
             # one-liner in the record for the UI.
             traceback.print_exc()
