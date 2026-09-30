@@ -353,3 +353,32 @@ see [docs/notes/README.md](README.md) for the whole set.
   The routes interpolate the cause and add their own advice ("copy again
   when it finishes"). Adding a fifth kind means adding its wording here,
   not just another `or`.
+
+- **With no console, `sys.stdout` and `sys.stderr` are `None`, and uvicorn
+  dereferences them before it binds.** Windows' `pythonw.exe` is what a
+  file association launches once the background setting is on
+  (`assoc.launch_command`, and that setting is the **default** — a console
+  riding along with every double-clicked file is the wrong experience).
+  It starts a process with no console at all, and CPython sets both
+  streams to `None` rather than to something that discards. `print()`
+  tolerates that, which is why nothing here noticed for so long;
+  `uvicorn.run` does not. It calls `configure_logging()` from `Config`'s
+  constructor, and uvicorn's default formatter asks
+  `sys.stdout.isatty()` — so the server died with an `AttributeError` on
+  the line *before* it would have started listening.
+
+  The symptom was silence. `browser.open_when_ready` was already waiting
+  on a daemon thread for a port that would never open, and there was no
+  console for the traceback to land in either: double-click a file, and
+  nothing happens. It reached us as "launching by file association never
+  opens the browser", which is that crash seen from outside.
+
+  `main()` therefore calls `_ensure_console_streams()` before anything
+  that might log or print, binding whichever of the two is `None` to
+  `os.devnull`. Rebinding the streams rather than handing uvicorn a log
+  config that avoids stdout is deliberate: the config fix would leave
+  every other stdout consumer — this module's own prints, any plugin's —
+  one `None` dereference away from the same silent death.
+  `tests/test_no_console_launch.py` pins it, and carries a test that the
+  unfixed call really does raise, so a future uvicorn that stops asking
+  cannot quietly turn the rest of the file into a tautology.
