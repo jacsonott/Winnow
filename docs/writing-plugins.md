@@ -172,7 +172,13 @@ def register(api):              # REQUIRED
 
 `register(api)` is called once at load. Raise anything inside it and the
 plugin is recorded as failed (with your exception's message) and skipped
-— it never takes the server or other plugins down.
+— it never takes the server or other plugins down. The same is true of
+your module-level code, and of `SystemExit`: `sys.exit("needs Winnow
+2.0")` at import is recorded as a load error rather than exiting Winnow,
+so it is a safe way to refuse to run. It is not a *good* one — the
+analyst sees `SystemExit: needs Winnow 2.0` where they could have seen a
+sentence — so prefer `raise RuntimeError("…")`, or `WINNOW_API_VERSION`,
+which Winnow checks for you and reports in the plugins manager.
 
 **Write the description. It is read even when your plugin is off.** A
 disabled plugin is never imported, so for a long time the manager had

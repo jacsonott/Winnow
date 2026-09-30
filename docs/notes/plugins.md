@@ -321,3 +321,23 @@ see [docs/notes/README.md](README.md) for the whole set.
   and tested. Widget SQL should use `{{all:header_set:…}}` rather than a
   table id: ids differ per case, and a bundle arrives as many files.
 - **Bundles are profiles.** A plugin bundle (PluginBundles, workspace/plugin_bundles.json) carries, alongside its plugins, an optional `dashboard` (a list of widget definitions), extra named boards under `dashboards`, a starter `watchlist` and variable definitions. So a profile is 'how I analyze this kind of case' — one saveable, shareable JSON thing, and literally one file: `GET /api/plugin_bundles/{id}/export` writes a `winnow-profile/1` document and `POST /api/plugin_bundles/import` reads one back (a key this version does not understand is a 400 rather than a silent drop, and so is a known key holding the wrong kind of value — `"plugins": "lateral_movement"` would otherwise store one plugin per letter). **Applying is per part now** — `POST .../apply` takes `parts` from server.APPLY_PARTS (plugins/boards/watchlist/variables) and no body still means all four, which is what the new-case dialog and any script sends. The plugins part is still all-or-nothing WITHIN itself: every installed plugin gets an explicit case override, so anything not in the profile is turned off — and the sheet keeps that part ticked even on a case whose plugin set already matches, because the override write is what pins the case against a later machine-wide toggle, not a no-op (`plan.plugins.pins` is how many overrides it lands). Boards land by upsert-by-name stamped `origin='profile:<name>'`, which is how the apply sheet knows whether the board it is about to replace has been edited since — and which still is not a `plugin:<fs>:<id>` stamp, so a plugin offering a board of that name asks like any other collision. See docs/notes/ui.md's profile-manager entry and docs/design/analysis-suite.md.
+- **Importing a plugin catches `BaseException`, not `Exception`, and the
+  difference is not pedantry.** `PluginRegistry._load_one` runs arbitrary
+  module-level Python — that is what a plugin *is* — and
+  `sys.exit("needs Winnow 2.0")` is a completely ordinary way for one to
+  bail on a version check. `SystemExit` and `KeyboardInterrupt` are not
+  `Exception` subclasses, so they used to leave the registry entirely,
+  and the two places that call it both handle that badly. From the
+  install route (`run_in_threadpool(_reload_plugins)`) the exception
+  escapes a worker thread and **the request never returns** — Winnow
+  stops answering. From the module-level `_reload_plugins()` in
+  `server.py` it kills the import of `server.py` itself, so the server
+  **will not start at all** until the plugin is deleted by hand. Install
+  one plugin like that and Winnow hangs, then refuses to come back up;
+  reported as "importing a plugin folder crashes Winnow". A plugin that
+  cannot load is a load error like any other, and that is what it is
+  recorded as. The cost is a genuine Ctrl+C inside a plugin's import
+  being swallowed — one keystroke, on a server whose shutdown uvicorn
+  owns. `tests/test_plugins.py` pins all three: the registry records it,
+  one bad plugin does not take the others' formats with it, and the
+  install route answers instead of hanging.
