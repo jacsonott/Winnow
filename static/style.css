@@ -2853,6 +2853,16 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 .wl-hit-group-label { color: var(--text); font-weight: 600; min-width: 0; overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; }
 .wl-hit-group-count { color: var(--dim); font-size: 11px; margin-left: 8px; flex: 0 0 auto; }
+/* The import dialog's read-back of the file: a few of the values it is
+   about to add, so the count beside the file's name is a claim the
+   analyst can check rather than one they have to take. */
+.wl-import-preview { max-height: 170px; overflow: auto; margin-top: 8px;
+  border: 1px solid var(--line-2); border-radius: var(--radius-sm); padding: 6px 10px;
+  font-family: var(--mono); font-size: 12px; color: var(--text); }
+.wl-import-preview > div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wl-import-more { color: var(--dim); }
+.wl-import-field { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12px; }
+.wl-import-field > span:first-child { color: var(--dim); flex: 0 0 72px; }
 .wl-hit-more { cursor: pointer; }
 .wl-hit-more:hover { color: var(--text); }
 .wl-hit-top { display: flex; align-items: baseline; gap: 10px; min-width: 0; }

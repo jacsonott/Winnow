@@ -433,12 +433,20 @@ async function markHitsSeen() {
   try { await post('/api/watchlist/seen', { count: total }); } catch { /* best effort */ }
 }
 
-function fillAutoTag() {
-  const sel = $('wlAutoTag');
-  const keep = sel.value;
+/* The auto-tag picker's options. One function because the Add row's
+   select and the import dialog's own are the same list, down to the
+   "no auto-tag" entry having to be first in both — a tag added since the
+   last paint would otherwise be missing from whichever copy was built by
+   hand. */
+function fillAutoTagSelect(sel, keep) {
   sel.replaceChildren(new Option('no auto-tag', ''));
   for (const t of S.tags || []) sel.append(new Option(t.name, String(t.id)));
   if (keep) sel.value = keep;
+}
+
+function fillAutoTag() {
+  const sel = $('wlAutoTag');
+  fillAutoTagSelect(sel, sel.value);
 }
 
 async function load() {
@@ -877,6 +885,100 @@ function openFromCasePicker() {
   });
 }
 
+/* Importing a list asks about the list. The two selects it used to read
+   are the ADD row's, at the other end of the page and set for whatever
+   single indicator was typed last — so a file of two hundred hashes went
+   in as whatever kind that was, with an auto-tag nobody had chosen for
+   it, and nothing on screen said so before or after. Type and auto-tag
+   are decisions about the batch; the batch asks.
+
+   The file is read first and the dialog reports what it found, because
+   "47 indicators" next to the name of the file is the part an analyst can
+   actually check — a list pasted into the wrong file, or a CSV export
+   with a header row, is visible here and invisible from a file picker.
+
+   The line rules are the server's (`/api/watchlist/import`): blanks and
+   #-comments dropped, a per-line `value,kind` overriding the default
+   below. They are mirrored here only to count and preview, never to
+   decide — the import posts the text as read. */
+function openWatchlistImport(name, text) {
+  const lines = (text || '').split(/\r?\n/).map((l) => l.trim());
+  // A file's final newline is not a blank line anybody wrote: trailing
+  // empties come off before anything is counted, or every import reports
+  // one more skipped line than the file has in it.
+  while (lines.length && !lines[lines.length - 1]) lines.pop();
+  const skipped = lines.filter((l) => !l || l.startsWith('#')).length;
+  const entries = lines.filter((l) => l && !l.startsWith('#'))
+    .map((l) => l.split(',')[0].trim()).filter(Boolean);
+  modal('Import indicators', (b) => {
+    if (!entries.length) {
+      b.append(el('p', 'fb-help', `Nothing to import from ${name} — one indicator per line, `
+        + 'blank lines and lines starting with # ignored.'));
+      return;
+    }
+    b.append(el('p', 'fb-help',
+      'One indicator per line. A line of the form “value,kind” carries its own type and '
+      + 'ignores the one picked below. Values already on the watchlist are skipped.'));
+
+    const head = el('div', 'note-status',
+      `${entries.length.toLocaleString()} indicator${entries.length === 1 ? '' : 's'} from ${name}`
+      + (skipped ? ` · ${skipped} blank or comment line${skipped === 1 ? '' : 's'} ignored` : ''));
+    b.append(head);
+
+    const preview = el('div', 'wl-import-preview');
+    for (const v of entries.slice(0, 8)) preview.append(el('div', null, v));
+    if (entries.length > 8) {
+      preview.append(el('div', 'wl-import-more', `…and ${(entries.length - 8).toLocaleString()} more`));
+    }
+    b.append(preview);
+
+    const kindRow = el('div', 'wl-import-field');
+    kindRow.append(el('span', null, 'Type'));
+    const kind = el('select');
+    // Cloned from the Add row's select rather than re-listed: that one is
+    // the only place the type list is written down (index.html), and two
+    // copies would drift the first time a kind was added.
+    for (const o of $('wlKind').options) kind.append(new Option(o.textContent, o.value));
+    kind.value = $('wlKind').value;
+    kind.title = 'The type every line without its own gets — it sets the row’s colour';
+    kindRow.append(kind);
+    b.append(kindRow);
+
+    const tagRow = el('div', 'wl-import-field');
+    tagRow.append(el('span', null, 'Auto-tag'));
+    const tag = el('select');
+    fillAutoTagSelect(tag, '');
+    tag.title = 'Tag every row these indicators match, as the scan finds them';
+    tagRow.append(tag);
+    b.append(tagRow);
+    if (!(S.tags || []).length) {
+      tagRow.append(el('span', 'fb-help', 'This case has no tags yet.'));
+      tag.disabled = true;
+    }
+
+    const acts = el('div', 'row-actions');
+    const go = el('button', 'btn', `Import ${entries.length.toLocaleString()}`);
+    go.onclick = async () => {
+      go.disabled = true;
+      try {
+        const r = await post('/api/watchlist/import', { text, kind: kind.value,
+          auto_tag_id: tag.value ? Number(tag.value) : null });
+        document.getElementById('modal').hidden = true;
+        toast(`${r.added} indicator${r.added === 1 ? '' : 's'} imported`
+          + (entries.length - r.added > 0 ? ` · ${entries.length - r.added} already there` : ''));
+        importedIndicators(r);
+      } catch (e) {
+        toast(e.message, 6000);
+        go.disabled = false;
+      }
+    };
+    const cancel = el('button', 'btn ghost', 'Cancel');
+    cancel.onclick = () => { document.getElementById('modal').hidden = true; };
+    acts.append(go, cancel);
+    b.append(acts);
+  });
+}
+
 /* An import answered: the list is what the server returned, the new
    entries are marked, and the scan covers only those. */
 function importedIndicators(r) {
@@ -922,13 +1024,10 @@ export function wireWatchlist() {
     const f = $('wlImportFile').files[0];
     if (!f) return;
     const text = await f.text();
+    // Cleared before the dialog, not after: picking the same file twice in
+    // a row fires no change event while the old value is still on it.
     $('wlImportFile').value = '';
-    try {
-      const r = await post('/api/watchlist/import', { text, kind: $('wlKind').value,
-        auto_tag_id: $('wlAutoTag').value ? Number($('wlAutoTag').value) : null });
-      toast(`${r.added} indicator${r.added === 1 ? '' : 's'} imported`);
-      importedIndicators(r);
-    } catch (e) { toast(e.message, 6000); }
+    openWatchlistImport(f.name, text);
   };
 }
 
