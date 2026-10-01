@@ -1388,3 +1388,23 @@ see [docs/notes/README.md](README.md) for the whole set.
   a Store: `#home` and `#app` are siblings and `showHome()` only hides
   `#app`, so `case_open` stays true after it (`tests/ui/
   test_plugin_scope_needs_a_case.py`).
+
+- **A dialog Settings opens in its own modal owes the analyst a way
+  back.** `#modalBody` is a singleton, so Settings → Plugins → "Manage
+  plugins…" *replaces* Settings rather than stacking on it, and the ✕ hid
+  the whole thing — one level up, not where the analyst came from, for a
+  dialog reached through two clicks of another one. Three dialogs now take
+  the same `returnTo` hand-off (plugins manager, Profiles, Saved filters):
+  a one-shot `winnow:modalclose` listener armed per opening, guarded by
+  BOTH the title and a `pmReturn` flag on the body, plus a `‹ Settings`
+  button in the foot. Both guards are load-bearing. The title, because the
+  dialogs these open in turn (the installer, the import queue, a profile
+  applying) replace the title or hide the modal without the event, and
+  none of them should bounce to Settings when IT is closed; the flag,
+  because a listener left armed by one of those closes must not fire for a
+  later opening that came from somewhere else. The way back is handed
+  **in**, never imported: Settings owns its own opener, which is why
+  `buildPluginsPanel(b, { returnTo })` takes it as an argument rather than
+  importing `openSettings` back across the boundary it is called from.
+  `tests/ui/test_plugins_from_settings.py`,
+  `tests/ui/test_profiles_from_settings.py`.

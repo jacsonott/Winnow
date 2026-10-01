@@ -120,13 +120,33 @@ function summaryOf(p) {
   return 'adds ' + kinds.map((k) => kindWord(k, 2)).join(', ');
 }
 
+/* `returnTo`: where the × (and Escape) should land, the same
+   one-shot-listener idiom the profiles manager and saved filters use
+   (bundles.js, timeframe.js). Settings opens this in the same shared
+   modal, so without it closing the manager drops the analyst on the grid
+   — one level up, not back where they came from. Guarded by the title,
+   because the dialogs this one opens (the installer, the import queue)
+   replace it in that same modal and neither should bounce to Settings
+   when IT is closed. */
 export function openPluginManager(opts = {}) {
+  const { returnTo = null } = opts;
   markModalAction('openPluginManager');
+  if (returnTo) {
+    const back = () => {
+      document.removeEventListener('winnow:modalclose', back);
+      if ($('modalTitle').textContent === 'Plugins' && $('modalBody').dataset.pmReturn === '1') returnTo();
+    };
+    document.addEventListener('winnow:modalclose', back);
+  }
   // Not async: nothing here awaits. The listing is already in S (boot
   // loads it), so the panes paint at once and the two fetches below
   // repaint when they land — a plugins dialog that opened empty and
   // filled in a moment later would be the worse trade.
   modal('Plugins', (b) => {
+    // Marks THIS opening as the one with a way back, so a listener left
+    // armed by a close that bypassed the event cannot fire for a later
+    // Plugins opened from the keyboard.
+    b.dataset.pmReturn = returnTo ? '1' : '';
     b.append(el('p', 'pm-desc',
       'Drop-in Python extensions, read from the folders named under the list. A plugin runs with '
       + 'the same privileges as Winnow itself, so only install ones you trust — a plugin that is '
@@ -189,7 +209,9 @@ export function openPluginManager(opts = {}) {
       // panes this closure holds are detached by the time it finishes —
       // repainting them would paint into nothing. Reopen instead, on the
       // plugin that just arrived.
-      add.onclick = () => openInstallDialog((fs) => openPluginManager({ select: fs }));
+      // returnTo travels with it: the manager that comes back after an
+      // install is the same visit, so its × still owes the analyst Settings.
+      add.onclick = () => openInstallDialog((fs) => openPluginManager({ select: fs, returnTo }));
       acts.append(add);
       listPane.append(acts);
       // The directories, at the bottom of the pane the install button is
@@ -357,10 +379,26 @@ export function openPluginManager(opts = {}) {
       for (const b of using) body.append(el('span', 'pm-pill', b.name));
     }
 
+    /* The way back to Settings, when that is where this was opened from.
+       It lives in the detail pane's foot — including the foot of an EMPTY
+       pane: a dialog with nothing in it is the worst one to be stranded
+       in, and "no plugins at all" is reachable with the examples moved
+       out of PLUGIN_DIRS. */
+    function backToSettings() {
+      if (!returnTo) return null;
+      const back = el('button', 'btn ghost pm-mini', '‹ Settings');
+      back.onclick = () => returnTo();
+      return back;
+    }
+
     function renderDetail() {
       detailPane.replaceChildren();
       const p = current();
-      if (!p) return;
+      if (!p) {
+        const only = backToSettings();
+        if (only) { const bare = el('div', 'pm-foot'); bare.append(only); detailPane.append(bare); }
+        return;
+      }
       const head = el('div', 'pm-head');
       const h = el('h3', null, p.name || p.fs_name);
       head.append(h);
@@ -391,6 +429,8 @@ export function openPluginManager(opts = {}) {
 
       const foot = el('div', 'pm-foot');
       foot.append(el('span', 'pm-foot-note', effectiveSentence(p)));
+      const back = backToSettings();
+      if (back) foot.append(back);
       detailPane.append(foot);
     }
 
@@ -428,7 +468,7 @@ function effectiveSentence(p) {
    a plugin that was switched off showed nothing else at all. That is more
    structure than a settings section can hold, so it lives in its own
    two-pane manager (pluginmanager.js) and Settings keeps the summary. */
-export function buildPluginsPanel(b) {
+export function buildPluginsPanel(b, { returnTo = null } = {}) {
   const box = el('div', 'settings-line');
   b.append(box);
 
@@ -443,7 +483,12 @@ export function buildPluginsPanel(b) {
     const line = el('span', 'settings-line-text', summary);
     if (bad) line.append(el('span', 'settings-line-bad', ` · ${bad} failed to load`));
     const open = el('button', 'btn', 'Manage plugins…');
-    open.onclick = () => openPluginManager();
+    // Came from Settings, goes back to Settings — the modal is shared, so
+    // the manager's × would otherwise drop the analyst on the grid. The
+    // way back is handed IN rather than imported, the same shape the
+    // Profiles and Saved filters lines take: Settings owns its own opener,
+    // and this module stays off the other side of that boundary.
+    open.onclick = () => openPluginManager({ returnTo });
     box.append(line, open);
     box.append(el('p', 'fb-help',
       'Drop-in Python extensions — a plugin runs with the same privileges as Winnow itself. '
