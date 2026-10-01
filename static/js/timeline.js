@@ -6,7 +6,7 @@ import { rowsPaintY, spacerPx, vScroll } from './grid.js';
 import { fieldInput } from './home.js';
 import { armOpCancel, opToken } from './jobs.js';
 import { headerSig } from './savedfilters.js';
-import { openSource, recenterOnRow, sourceLabel, sourceTitle } from './sources.js';
+import { loadSources, openSource, recenterOnRow, sourceLabel, sourceTitle } from './sources.js';
 import { showGridTab } from './sql.js';
 import { S } from './state.js';
 import { modal } from './ui.js';
@@ -240,8 +240,28 @@ export function fillTimelineBody(cell, r) {
   cell.append(btn);
 }
 
+/* Open the row's own table at the row — from a timeline line, and from
+   every hit in the watchlist's two panes.
+
+   A CLOSED table needs marking open first. openSource() switches the grid
+   to it, but "open" is server-side state (sources.is_open) and nothing
+   here was writing it: the analyst landed in a table with no tab, absent
+   from the sidebar's Open section, and still listed under the closed ones
+   — nothing on screen to come back to, and nothing to close. The two
+   steps are the ones search-all's "Open ↦" already takes: POST the
+   source open, then reload the listing so the tab strip and sidebar are
+   built from the new answer. loadSources() opens the table itself (it is
+   in the open tabs by then), so this is not an extra switch. */
 export async function jumpToTimelineRow(sourceId, rid) {
-  await openSource(sourceId);
+  const src = S.sources.find((s) => s.id === sourceId);
+  if (src && !src.is_open) {
+    // A failure here is not a reason to refuse the navigation — the grid
+    // can still show the row, which is what was asked for.
+    try { await post(`/api/source/${sourceId}/open`, { open: true }); } catch { /* best effort */ }
+    await loadSources(sourceId);
+  } else {
+    await openSource(sourceId);
+  }
   showGridTab();
   await recenterOnRow({ source_id: sourceId, rid });
 }

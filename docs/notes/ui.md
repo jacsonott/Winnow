@@ -1257,6 +1257,21 @@ see [docs/notes/README.md](README.md) for the whole set.
 
 - **The search dialog carries a scope** (search.js, `openSearchAllModal`) — titled "Search tables" rather than "Search all tables", because a scope row above the term builder now decides how much of the case it covers: **Every table / This table / Choose…** (the value picker's `.vp-seg` idiom, `aria-pressed`), with the case's real tables as chips under it, open ones first and the tail folded behind "+ N more". The default is *This table* when one is open and *Every table* otherwise. Clicking a chip from either fixed scope means "start from what is in scope and take this one out", so it seeds a Choose… scope and toggles that chip; a pick the analyst empties by hand stays empty (Search refuses it with a toast) rather than quietly widening back to the whole case. A pick whose tables have *all* since left the case is a different thing and does widen back to every table — with the scope row saying so, because a three-table check silently becoming a whole-case sweep is minutes nobody asked for. **A pick is keyed by id *and* name** (`searchAllLivePickIds`): SQLite reuses a source id once the table holding it is dropped, so an id whose live table is now a different file is not one of the tables that was ticked — the rule `subsetParentLabel` follows, for the same reason. `S.searchAll.scope` is the pending choice, `S.searchAll.ranScope` is the scope **the results on screen came from** — the same rule `terms` follows, so re-scoping without re-running cannot re-label numbers nobody re-ran, and the badge and the finished toast read from it too. On the wire it is `source_ids` (null = every table); a merged table is sent AS the merge and the server expands it to its members (invariant #9), which the results pane reports. Three things that bite: the poller used to decide "is this pane on screen" by comparing `$('modalTitle').textContent` to the literal 'Search all tables', which a title that varies with scope silently breaks — it asks `currentModalAction() === 'openSearchAll'` now; one search job runs per case, so a scoped start stops a sweep that may be four minutes in, which is why Search is no longer disabled while one runs and `startSearchAll` asks first instead — and why an empty box while a sweep runs is refused with a toast rather than taking the "nothing to search for" path, which would drop the job id and the partial hits while the server kept scanning, Stop button and all (a poll that 404s because the start it raced superseded its job is ignored for the same reason: only the job still being followed ends the run); and the 1,000-row count cap is unchanged at every scope — scoping does not make a table smaller — so the pane names the cap and points at "Open ↦", where the grid's own count is exact.
 
+- **`jumpToTimelineRow` marks the table open, it does not just switch to
+  it.** The one navigation behind a Timeline row, a watchlist hit in
+  either pane, "…and N more — open the table", and a row-note entry on
+  the Notes page. `openSource()` switches the grid to a table without
+  touching `sources.is_open`, which is server-side state — so a jump into
+  a CLOSED table landed the analyst in a grid with no tab for it, no row
+  in the sidebar's Open section, and the table still listed under the
+  closed ones: nothing on screen to come back to, and nothing to close.
+  It now takes the two steps search-all's "Open ↦" takes — `POST
+  /api/source/<id>/open` then `loadSources(id)`, which opens the table
+  itself once it is in the open tabs, so this is not a second switch —
+  and keeps the plain `openSource` fast path for a table already open.
+  A failed POST still jumps: the grid can show the row, which is what was
+  asked for. `tests/ui/test_watchlist_opens_the_table.py`.
+
 - **The Timeline's tag filter is the grid's tag chips** (`.tag-chip`,
   renderTimelineTagFilter). It asks what the ribbon asks, from the same
   strip across the top, and was the one tag control in the app answering
