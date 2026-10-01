@@ -36,24 +36,51 @@ export function timelineTemplateFor(colNames) {
   return S.timelineTemplates.find((t) => headerSig(t.col_names) === sig) || null;
 }
 
+/* The tag filter, as the grid's own tag chips (.tag-chip, renderTagRibbon
+   in tags.js) rather than as a row of checkboxes. It asks the same
+   question the ribbon asks — which tags am I looking at — in the same
+   place on the screen, and it was the one tag control in the app that
+   answered it with a form instead: a checkbox and a bare swatch, with
+   none of the pressed-state, hover or per-skin treatment every other tag
+   control has.
+
+   Two things the ribbon's chips carry are deliberately NOT here. The
+   COUNT, because the ribbon's is scoped to the open table's view while
+   this list is case-wide — the open table's number under a case-wide chip
+   would be a wrong answer rather than a missing one. The HOTKEY, because
+   the digits tag the grid's selection and there is nothing to tag on this
+   tab, so printing the key would promise a keystroke that does nothing
+   here.
+
+   Pressed means "on the timeline", and every tag starts pressed: a
+   timeline is every tagged row until it is narrowed. */
 export function renderTimelineTagFilter() {
   const wrap = $('timelineTagFilter');
   wrap.replaceChildren();
   if (S.timeline.tagFilter === null) S.timeline.tagFilter = S.tags.map((t) => t.id);
   for (const t of S.tags) {
-    const lab = el('label');
-    const cb = el('input');
-    cb.type = 'checkbox';
-    cb.checked = S.timeline.tagFilter.includes(t.id);
-    cb.onchange = () => {
-      S.timeline.tagFilter = cb.checked
-        ? [...S.timeline.tagFilter, t.id]
-        : S.timeline.tagFilter.filter((id) => id !== t.id);
+    const on = S.timeline.tagFilter.includes(t.id);
+    const chip = el('button', 'tag-chip');
+    chip.setAttribute('aria-pressed', String(on));
+    // Inline, over the stylesheet's pressed colour, exactly as the ribbon
+    // does it — the border follows through currentColor.
+    chip.style.color = on ? t.color : '';
+    const sw = el('span', 'swatch');
+    sw.style.background = t.color;
+    chip.append(sw, el('span', null, t.name));
+    chip.title = on
+      ? `On the timeline. Click to take ${t.name} off it.`
+      : `Off the timeline. Click to put ${t.name} back on it.`;
+    chip.onclick = () => {
+      S.timeline.tagFilter = on
+        ? S.timeline.tagFilter.filter((id) => id !== t.id)
+        : [...S.timeline.tagFilter, t.id];
+      // Repainted here, not by the DOM: a chip's state is an attribute
+      // this function writes, where a checkbox kept its own.
+      renderTimelineTagFilter();
       buildTimeline();
     };
-    lab.append(cb, el('span', 'swatch'), document.createTextNode(t.name));
-    lab.children[1].style.background = t.color;
-    wrap.append(lab);
+    wrap.append(chip);
   }
 }
 
@@ -118,10 +145,25 @@ export function timelineRowAt(pos) {
   return page ? page[pos % PAGE] : undefined;
 }
 
+/* Why the timeline is empty, which is not always "nothing is tagged".
+   The chips make switching a tag off a single click, so the two narrowed
+   cases are now easy to reach — and "tag some rows in any table" over a
+   case full of findings sends the analyst looking for work they have
+   already done. Said in terms of the control above, since that is where
+   the answer is. */
+function emptyReason() {
+  const on = (S.timeline.tagFilter || []).length;
+  if (S.tags.length && !on) return 'Every tag is switched off — turn one back on above to see its rows.';
+  if (on && on < S.tags.length) return 'No rows carry the tags switched on above.';
+  return 'No tagged rows yet — tag some rows in any table, then come back here.';
+}
+
 export function renderTimelineRows() {
   const view = S.timeline.view;
   const total = view ? view.row_count : 0;
-  $('timelineEmpty').hidden = total > 0;
+  const empty = $('timelineEmpty');
+  empty.hidden = total > 0;
+  if (!total) empty.textContent = emptyReason();
   const body = $('timelineBody');
   const rowsEl = $('timelineRows');
   if (!total) { rowsEl.replaceChildren(); return; }
