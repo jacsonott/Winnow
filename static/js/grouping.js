@@ -476,12 +476,25 @@ export function groupValueLabel(column, value) {
    so dropGrouping() can restore the original layout exactly. The tag
    pseudo-column isn't in S.order to begin with, so that filter is a no-op
    for it and it stays out of the way. */
+/* Back to the left edge, because a grouped view is read from there. A
+   group header is an ordinary row with its label at the left (indented
+   per level — see .group-header-row), and nothing about it is sticky, so
+   grouping while scrolled right paints a screen of header rows whose
+   every label sits off past the edge. The column just grouped on has also
+   left the layout, which makes the horizontal position it was read at a
+   description of a column set that no longer exists. */
+function scrollGridLeft() {
+  const body = $('body');
+  if (body) body.scrollLeft = 0;
+}
+
 export function addGroupLevel(column) {
   if (S.groupByCols.includes(column)) return;
   if (!S.preGroupOrder) S.preGroupOrder = [...S.order];
   S.groupByCols.push(column);
   S.order = S.order.filter((n) => n !== column);
   renderHead();
+  scrollGridLeft();
   regroupAll();
 }
 
@@ -538,6 +551,11 @@ export async function toggleGrouping() {
   } else if (S.lastGroupBy && S.lastGroupBy.cols.some((c) => S.columns.some((x) => x.name === c))) {
     setGrouping(S.lastGroupBy.cols, S.lastGroupBy.sort, S.lastGroupBy.dir);
     renderHead();
+    // Restoring a grouping is grouping — same headers at the same left
+    // edge. (setGrouping itself must NOT do this: a table switch restores
+    // its stashed grouping through it, and that path is deliberately
+    // putting the analyst back where they were.)
+    scrollGridLeft();
     await regroupAll();
   } else {
     toast('No grouping to restore — drag a column header into the Group by strip');
