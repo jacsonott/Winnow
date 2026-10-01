@@ -487,6 +487,64 @@ see [docs/notes/README.md](README.md) for the whole set.
   `tests/test_watchlist_scan.py` pins the lock discipline structurally
   (every match statement on a reader checked out with the lock unheld,
   none on the writer), `tests/test_watchlist_grouped_hits.py` the shape.
+- **A sweep's answers are handed to the scan that follows it**
+  (`seed_watchlist_from_search_all`, `start_watchlist_scan_job`'s
+  `from_search_all`). Search-all's "Add to watchlist" started a full scan
+  of every table for terms the sweep had just answered for — twenty full
+  LIKE scans per indicator on a twenty-table case, to reach the numbers
+  already on screen. The two ask the same question: a per-term count goes
+  through `_search_all_count_sql`'s single-term path, and
+  `_watchlist_match_sql` compiles the same two shapes (indexed `doc LIKE`
+  when the source has a usable trigram index, the escaped blob LIKE
+  otherwise) without the cap. So a sweep that READ a table and found no
+  row holding a term has established the whole of what a scan of that
+  (indicator, table) pair would, and what the seeder writes is
+  byte-for-byte the write `_scan_unit` makes for a clean pair — the
+  pair's hits replaced by none plus a `watchlist_scans` upsert, in one
+  transaction, one source per transaction (invariant #4). Which is what
+  makes the handoff a shortcut rather than a second kind of answer:
+  `test_a_full_scan_afterwards_changes_nothing` reads every table
+  afterwards and asserts nothing moves.
+
+  The proof rides in the sweep's job record as `read` — one entry per
+  source, `{source_id, row_count, matched_terms}`, written by
+  `_iter_search_all_sources` and **only when the count returned**. A
+  count that raised is absorbed as `n = 0` for the progress report, which
+  is right there and would be a lie here: "clean" is a sentence an
+  analyst puts in a report, and a table nobody could read has not earned
+  it. `matched_terms` is `[]` when the union count was zero (no term
+  matched, so none of them did), the matching terms when there was a
+  per-term breakdown, and **None when the source matched without one** —
+  "something here matched, which of them is unknown", the one shape that
+  proves nothing per term. That last case is why a one-term sweep still
+  saves every clean table and never the matching one.
+
+  Five more refusals, each its own reason. A sweep that is not a plain OR
+  of positive terms (`_swept_or_terms` — under mixed AND/NOT the terms
+  constrain each other, so "no row matched the query" says nothing about
+  whether a row holds one of its terms). A sweep that errored, refused
+  whole: its per-source records are individually sound, but the exception
+  came from somewhere this does not model. A source whose `row_count` has
+  moved (unreachable through the app — source tables are never mutated
+  after ingest, invariant #1 — and guarded anyway for one integer
+  comparison). An indicator whose value is not one of the swept terms,
+  exact strings, so a box edited after the sweep gets a real scan. And
+  **any source not covered for EVERY indicator in the scan's scope**: one
+  unproven indicator sends the scan to every table regardless, and
+  trusting the sweep for the others would record a table as scanned for a
+  value nothing ever looked for there.
+
+  The saving is per TABLE, not per pair — a table where 49 of 50
+  indicators are clean is still read for all 50, because skipping pairs
+  inside a table the scan has to open anyway would mean teaching
+  `_iter_watchlist_scan` about exceptions for no I/O saved. The narrowing
+  is also the first thing a displaced scan undoes: the fold widens the new
+  job to whatever the scan it replaced still owed, and nothing promised
+  that one a sweep. The seeded records stay true either way — they are
+  facts about pairs, not about a job — so the worst case is a scan that
+  re-derives some of them. `seeded` in the job record is what the UI says
+  out loud. `tests/test_watchlist_from_search_all.py`.
+
 - **What a watchlist count cannot say on its own** —
   `watchlist_overview` is the one read behind the tab, and it answers
   three things a list of per-indicator counts cannot.

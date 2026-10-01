@@ -169,8 +169,16 @@ function foldScan(rec, job, keep) {
    — when it found something — the sticky "Watchlist: N hits" row with a
    way to the hits. Never rejects: callers fire it and move on. Returns
    the finished job, or null when it could not start or a later scan
-   folded it in. */
-export async function runScan({ sourceIds = null, watchlistIds = null, label = null } = {}) {
+   folded it in.
+
+   `fromSearchAll` is a search-all job id, and Search-all's "Add to
+   watchlist" is the one caller with one: the sweep just asked every table
+   the question this scan is about to, so the server records the pairs it
+   proved and leaves those tables out of the scan's scope
+   (Store.seed_watchlist_from_search_all). The job comes back with
+   `seeded`, which is what scanSummary names. */
+export async function runScan({ sourceIds = null, watchlistIds = null, label = null,
+                                fromSearchAll = null } = {}) {
   const turn = starting;
   let release;
   starting = new Promise((r) => { release = r; });
@@ -184,7 +192,8 @@ export async function runScan({ sourceIds = null, watchlistIds = null, label = n
     const prev = scanJob;
     if (prev) clearTimeout(prev.timer);
     try {
-      job = await post('/api/watchlist/scan/start', { source_ids: sourceIds, watchlist_ids: watchlistIds });
+      job = await post('/api/watchlist/scan/start', { source_ids: sourceIds, watchlist_ids: watchlistIds,
+                                                     from_search_all: fromSearchAll });
     } catch (e) {
       if (prev && scanJob === prev) pollScan(prev);
       // The entries this call marked have no scan coming: back to their
@@ -298,10 +307,8 @@ async function finishScan(rec, job) {
   // entry says nothing about another's, whose own scan is still to come.
   if (job.watchlist_ids == null) scanning.clear();
   else for (const id of job.watchlist_ids) scanning.delete(id);
-  const total = Object.values(job.matched || {}).reduce((a, b) => a + b, 0);
   const found = Object.entries(job.by_source || {}).filter(([, n]) => n > 0)
     .map(([sid, n]) => ({ sid: Number(sid), n }));
-  const secs = `${((job.elapsed_ms || 0) / 1000).toFixed(1)} s`;
   if (job.status === 'error') {
     rec.notice.fail({ detail: job.error || 'the scan failed', actions: [] });
   } else if (job.status !== 'done') {
@@ -309,7 +316,7 @@ async function finishScan(rec, job) {
   } else if (found.length && S.activeTab !== 'watchlist') {
     announceHits(rec.notice, found);
   } else {
-    rec.notice.done({ detail: `${hitsLabel(total)} · ${tablesLabel(job.scanned)} · ${secs}`, sticky: false, actions: [] });
+    rec.notice.done({ detail: scanSummary(job), sticky: false, actions: [] });
   }
   // Hits written and matches auto-tagged are both things a widget counts,
   // and a scan is usually running because an import just landed — which is
@@ -338,6 +345,19 @@ async function finishScan(rec, job) {
   if (S.activeTab === 'watchlist') await load();
   else { renderList(); await refreshWatchlistBadge(); }
   if (rec.done) rec.done(job);
+}
+
+/* The finished scan in one line. A scan handed a sweep's answers
+   (runScan's fromSearchAll) can be left with nothing to read at all, and
+   "0 hits · 0 tables" over a sweep that cleared eighteen of them reads as
+   a scan that never ran — the opposite of what it means. */
+function scanSummary(job) {
+  const total = Object.values(job.matched || {}).reduce((a, b) => a + b, 0);
+  const answered = (job.seeded && job.seeded.tables) || 0;
+  const swept = answered ? ` · ${tablesLabel(answered)} answered by the search` : '';
+  if (!job.total && answered) return `${hitsLabel(total)} · nothing left to read${swept}`;
+  const secs = `${((job.elapsed_ms || 0) / 1000).toFixed(1)} s`;
+  return `${hitsLabel(total)} · ${tablesLabel(job.scanned)} · ${secs}${swept}`;
 }
 
 /* The alert itself: the scan's own row in the jobs panel — the card an

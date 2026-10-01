@@ -8913,8 +8913,145 @@ class Store:
 
     WATCHLIST_SCAN_SLOT = "watchlist"   # one scan at a time for the whole case
 
+    _EMPTY_SEED = {"sources": [], "indicators": [], "pairs": 0}
+
+    def seed_watchlist_from_search_all(self, job_id: int,
+                                       watchlist_ids: list[int] | None = None) -> dict:
+        """What a Search-all sweep already proved, written as scan records
+        so the scan behind "Add to watchlist" does not read those tables a
+        second time.
+
+        The sweep and the scan ask a table the same question. A sweep
+        counts `(blob) LIKE '%term%'` — or the trigram index's `doc LIKE`
+        — per source and stops at a cap; a scan runs those same two shapes
+        uncapped and writes the rids (_watchlist_match_sql's docstring
+        names the shapes it shares with _search_all_count_sql, and
+        _search_all_term_counts reaches that function through its
+        single-term path, so a per-term count and a scan compile the same
+        WHERE). A sweep that READ a table and found no row holding a term
+        has therefore established the whole of what a scan of that
+        (indicator, table) pair would: nothing matches, and the pair has
+        been looked at. What this writes is the write _scan_unit makes for
+        a clean pair — the pair's hits replaced by none, a watchlist_scans
+        upsert in the same transaction — which is what makes this a
+        shortcut rather than a second kind of answer.
+
+        What it refuses to trust, each for its own reason:
+
+        - **A sweep that is not a plain OR of positive terms**
+          (_swept_or_terms). Under mixed AND/NOT the terms constrain each
+          other, so "no row matched the query" says nothing about whether
+          a row holds one of its terms.
+        - **A source the sweep did not read end to end.** `read` is only
+          recorded when the count returned (see _iter_search_all_sources):
+          a table dropped mid-sweep, an index swapped under it, or a
+          source still filling — whose empty column list will not compile
+          a blob expression — leaves no record, and absence is not proof.
+        - **A source whose row count has moved since.** Source tables are
+          never mutated after ingest (invariant #1), so this should be
+          unreachable. It is here because "clean" is a sentence an analyst
+          puts in a report, and the cost of being sure is one integer
+          comparison.
+        - **A source that matched with no per-term breakdown** — the sweep
+          knows something in it matched and not which term, which is the
+          one shape that proves nothing per term.
+        - **An indicator whose value is not one of the swept terms.** Exact
+          strings, both already stripped; an analyst who edited the box
+          after the sweep gets a real scan rather than a guess.
+        - **Any source not covered for EVERY named indicator.** A table
+          holding a hit for one of them is read in full regardless, and
+          that read rewrites every pair in it — so seeding there would be
+          work rather than work saved. Which is also where the saving
+          stops: it is per TABLE, not per pair. A table where 49 of 50
+          indicators are clean is still read for all 50, because skipping
+          pairs inside a table a scan is already reading would mean
+          teaching the scan loop about exceptions, for a table it has to
+          open anyway.
+
+        Returns `{"sources": [ids answered without a read], "indicators":
+        [ids covered], "pairs": n}`, counted from what was actually
+        written — `sources` is what start_watchlist_scan_job then takes
+        out of its own scope.
+        """
+        with self._search_job_lock:
+            job = self._search_job
+            # An errored sweep is refused whole. Its per-source records are
+            # individually sound (each one is a count that returned), but
+            # the exception came from somewhere this does not model, and
+            # the safe direction to be wrong in is "scan the table".
+            if job is None or job["job_id"] != job_id or job["error"]:
+                return dict(self._EMPTY_SEED)
+            swept = _swept_or_terms(job["query"], job["terms"])
+            # Copied under the lock: a sweep still running appends to this
+            # as it goes, and what it has read so far is proof already.
+            read = {sid: dict(r) for sid, r in job["read"].items()}
+        if not swept or not read:
+            return dict(self._EMPTY_SEED)
+        proven = set(swept)
+        indicators = self.list_indicators()
+        if watchlist_ids is not None:
+            wanted = set(watchlist_ids)
+            indicators = [i for i in indicators if i["id"] in wanted]
+        values = [(i["id"], (i["value"] or "").strip()) for i in indicators]
+        if not values or not all(v in proven for _wid, v in values):
+            return dict(self._EMPTY_SEED)
+
+        scannable = {s["id"]: s for s in self.watchlist_scan_sources()}
+        covered: list[int] = []
+        for sid, r in read.items():
+            src = scannable.get(sid)
+            # Not a table this scan would read at all (a merge, an errored
+            # or still-filling source) — there is no pair to record.
+            if src is None or src["row_count"] != r["row_count"]:
+                continue
+            matched = r["matched_terms"]
+            if matched is None or any(v in matched for _wid, v in values):
+                continue
+            covered.append(sid)
+        if not covered:
+            return dict(self._EMPTY_SEED)
+
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
+        done: list[int] = []
+        pairs = 0
+        emptied = 0
+        for sid in sorted(covered):
+            # One source is one unit of committed work, the rule every
+            # long-running writer here follows (invariant #4) — not the
+            # whole loop under one lock.
+            with self.lock, self.db:
+                if not self.db.execute("SELECT 1 FROM sources WHERE id=?", (sid,)).fetchone():
+                    continue           # dropped between the sweep and here
+                wrote = 0
+                for wid, value in values:
+                    # Re-read under the lock, for _scan_unit's reason:
+                    # watchlist.id is not AUTOINCREMENT, so an id deleted
+                    # and reused since the listing above would file this
+                    # value's answer under whatever value took the id.
+                    row = self.db.execute("SELECT value FROM watchlist WHERE id=?", (wid,)).fetchone()
+                    if row is None or row["value"] != value:
+                        continue
+                    cur = self.db.execute(
+                        "DELETE FROM watchlist_hits WHERE watchlist_id=? AND source_id=?", (wid, sid))
+                    emptied += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+                    self.db.execute(
+                        "INSERT INTO watchlist_scans(watchlist_id, source_id, scanned_at) VALUES (?,?,?)"
+                        " ON CONFLICT(watchlist_id, source_id) DO UPDATE SET scanned_at=excluded.scanned_at",
+                        (wid, sid, stamp))
+                    wrote += 1
+                if wrote:
+                    done.append(sid)
+                    pairs += wrote
+        if emptied:
+            # Hits went away, so a watchlist widget's number moved — the
+            # same condition _scan_unit bumps on, and for the same reason.
+            with self.lock, self.db:
+                self._bump_state_generation()
+        return {"sources": done, "indicators": [wid for wid, _v in values], "pairs": pairs}
+
     def start_watchlist_scan_job(self, source_ids: list[int] | None = None,
-                                 watchlist_ids: list[int] | None = None) -> dict:
+                                 watchlist_ids: list[int] | None = None,
+                                 from_search_all: int | None = None) -> dict:
         """Runs the scan on a daemon thread and answers at once with the
         job's snapshot — the Add button used to sit in one POST for the
         length of a scan of every table, with the new row invisible until
@@ -8924,11 +9061,38 @@ class Store:
         old id gets None → 404 → stops. The record carries
         progress (scanned/total), per-indicator and per-table match totals
         as they land, and which tables an auto-tag was written to — the
-        client invalidates its row caches for the open one."""
+        client invalidates its row caches for the open one.
+
+        `from_search_all` is a search-all job id, and the one thing an
+        "Add to watchlist" from a finished sweep has that nothing else
+        does: the sweep just asked every table the same question this scan
+        is about to. seed_watchlist_from_search_all writes the pairs it
+        proved clean and names the tables that answers whole, and those
+        come out of this job's scope — so adding fifty IOCs off a sweep of
+        twenty tables reads the two or three the sweep found something in,
+        not all twenty again. `seeded` rides in the record so the UI can
+        say how much did not have to be re-read.
+
+        The scope narrowing is the first thing a displaced scan undoes: the
+        fold below widens this job to cover whatever the scan it replaced
+        still owed, and that scan was not promised anything by a sweep. The
+        seeded records stay true either way — they are facts about pairs,
+        not about this job — so the worst case is a scan that re-derives
+        some of them."""
+        seeded = self.seed_watchlist_from_search_all(from_search_all, watchlist_ids) \
+            if from_search_all is not None else dict(self._EMPTY_SEED)
+        if seeded["pairs"]:
+            answered = set(seeded["sources"])
+            rest = [s["id"] for s in self.watchlist_scan_sources() if s["id"] not in answered]
+            if source_ids is not None:
+                wanted = set(source_ids)
+                rest = [sid for sid in rest if sid in wanted]
+            source_ids = rest
         job, old = self._scan_jobs.start(self.WATCHLIST_SCAN_SLOT, {
             "source_ids": None if source_ids is None else [int(s) for s in source_ids],
             "watchlist_ids": None if watchlist_ids is None else [int(w) for w in watchlist_ids],
             "scanned": 0, "total": 0, "matched": {}, "by_source": {}, "auto_tagged": [],
+            "seeded": {"tables": len(seeded["sources"]), "pairs": seeded["pairs"]},
             "elapsed_ms": None,
         })
         if old is not None and self._scan_jobs.request_discard(old):
@@ -8987,6 +9151,9 @@ class Store:
                 "scanned": job["scanned"], "total": job["total"],
                 "matched": dict(job["matched"]), "by_source": dict(job["by_source"]),
                 "auto_tagged": list(job["auto_tagged"]),
+                # Tables a Search-all sweep answered for this scan, so they
+                # were left out of its scope (see from_search_all above).
+                "seeded": dict(job.get("seeded") or {"tables": 0, "pairs": 0}),
                 "error": job["error"], "elapsed_ms": job["elapsed_ms"],
                 "source_ids": job["source_ids"], "watchlist_ids": job["watchlist_ids"],
             }
@@ -11638,14 +11805,14 @@ class Store:
         start_search_all_job is the same sweep run on a background thread
         with incremental results, which is what the UI uses."""
         scope = self.resolve_search_all_scope(source_ids)["source_ids"]
-        out = [hit for _, _, hit in self._iter_search_all_sources(query, terms, scope) if hit]
+        out = [hit for _, _, hit, _read in self._iter_search_all_sources(query, terms, scope) if hit]
         out.sort(key=lambda d: -d["match_count"])
         return out
 
     def _iter_search_all_sources(
         self, query: str = "", terms: list[dict] | None = None,
         source_ids: list[int] | None = None,
-    ) -> Iterator[tuple[int, int, dict | None]]:
+    ) -> Iterator[tuple[int, int, dict | None, dict | None]]:
         """Per-source match counts for a search across every real source in
         the case (merges excluded — their rows already belong to a real
         source), or across the subset `source_ids` names, no filter/sort/
@@ -11654,13 +11821,28 @@ class Store:
         resolve_search_all_scope, which is where a merge becomes its
         members and an unknown id becomes a KeyError.
 
-        Yields `(scanned, total, hit_or_None)` after each source so a caller
-        can report progress and surface partial results while the sweep is
-        still running (start_search_all_job) — a source with no matches
-        yields a None hit rather than being skipped silently, so `scanned`
-        always advances. Unsorted, in source order: sorting is the
-        collecting caller's job, since a running sweep has nothing stable
-        to sort yet.
+        Yields `(scanned, total, hit_or_None, read_or_None)` after each
+        source so a caller can report progress and surface partial results
+        while the sweep is still running (start_search_all_job) — a source
+        with no matches yields a None hit rather than being skipped
+        silently, so `scanned` always advances. Unsorted, in source order:
+        sorting is the collecting caller's job, since a running sweep has
+        nothing stable to sort yet.
+
+        `read` is the fourth element and a different kind of fact from the
+        hit: what this sweep PROVED about a source, for
+        seed_watchlist_from_search_all to hand to a watchlist scan instead
+        of making it read the table again (the two use the same predicate —
+        see _watchlist_match_sql). `{source_id, row_count, matched_terms}`,
+        and it is None unless the source was read end to end: a count that
+        raised mid-way is recorded as no match by the `except` below, which
+        is the right answer for a progress report and would be a lie here —
+        "clean" is a sentence an analyst puts in a report, and a table
+        nobody could read has not earned it. `matched_terms` is the terms
+        that did match, `[]` when the union count was zero (nothing matched,
+        so no term did), and None when the source matched without a
+        per-term breakdown — "something here matched, which of them is
+        unknown", the one shape that proves nothing per term.
 
         Same indexed-when-ready-else-LIKE reasoning as _compile_where's
         Contains/Advanced branches for both `query` and `terms` — including
@@ -11722,6 +11904,7 @@ class Store:
             inner, params = self._search_all_count_sql(src, table, cols, query, terms)
             n = 0
             per_term: list[dict] = []
+            read: dict | None = None
             if inner is not None:
                 # One _reader() checkout per source's count — this loop
                 # never touches self.lock at all (a scoped run pays one
@@ -11747,9 +11930,18 @@ class Store:
                         # source that already matched pays per term.
                         if n and breakdown:
                             per_term = self._search_all_term_counts(ro, src, table, cols, breakdown)
+                        # Last, and inside the try on purpose: `read` is the
+                        # claim that this source was read to the end, and a
+                        # breakdown that raised after the union count landed
+                        # must not leave one behind.
+                        read = {"source_id": source_id, "row_count": src["row_count"],
+                                "matched_terms": [] if not n
+                                                 else [t["term"] for t in per_term] if breakdown
+                                                 else None}
                 except sqlite3.Error:
                     n = 0  # source dropped (or its index swapped) mid-sweep
                     per_term = []
+                    read = None
             hit = None
             if n:
                 hit = {
@@ -11768,7 +11960,7 @@ class Store:
             scanned += 1
             # Every source yields, matches or not, so `scanned` tracks real
             # progress through the sweep rather than only counting hits.
-            yield scanned, total, hit
+            yield scanned, total, hit, read
             # No lock to starve anyone on anymore — this is now just a
             # scheduling courtesy so a long sweep's back-to-back scans
             # don't pin a core against interactive requests, and the gap
@@ -11890,6 +12082,13 @@ class Store:
                 "scanned": 0,
                 "total": 0,
                 "hits": [],
+                # What the sweep proved, per source it read end to end
+                # (_iter_search_all_sources' `read`), for
+                # seed_watchlist_from_search_all. Deliberately NOT in the
+                # snapshot get_search_all_job answers: the modal polls that
+                # every 400 ms and has no use for it, and the handoff reads
+                # the record here by job id.
+                "read": {},
                 "done": False,
                 "error": None,
                 "cancelled": False,
@@ -11904,7 +12103,7 @@ class Store:
 
     def _search_all_worker(self, job: dict) -> None:
         try:
-            for scanned, total, hit in self._iter_search_all_sources(
+            for scanned, total, hit, read in self._iter_search_all_sources(
                     job["query"], job["terms"], job["scope"]["source_ids"]):
                 with self._search_job_lock:
                     if job["cancelled"]:
@@ -11913,6 +12112,8 @@ class Store:
                     job["total"] = total
                     if hit:
                         job["hits"].append(hit)
+                    if read:
+                        job["read"][read["source_id"]] = read
         except Exception as e:  # noqa: BLE001 — surfaced to the UI as job.error
             with self._search_job_lock:
                 job["error"] = str(e)
@@ -12889,6 +13090,36 @@ def _or_of_positive_terms(terms: list[dict]) -> list[str] | None:
         if i and str(t.get("connector", "AND")).upper() != "OR":
             return None
     return strings
+
+
+def _swept_or_terms(query: str, terms: list[dict] | None) -> list[str] | None:
+    """The term strings a search-all sweep proves INDEPENDENTLY of each
+    other, or None when it proves nothing per term.
+
+    Wider than _or_of_positive_terms in two directions, both still a plain
+    OR. A single positive term: that function answers None because a
+    one-term breakdown is its own total, which is true of a breakdown and
+    beside the point here — "this source matched" and "this term matched
+    here" are the same fact when there is one term. And a bare `query`,
+    which is one positive term typed into the box instead of chipped.
+
+    Mixed AND/NOT is None, and has to be: under those the terms constrain
+    each other, so "no row matched the query" says nothing about whether
+    some row holds one of its terms. See
+    Store.seed_watchlist_from_search_all, the only caller.
+    """
+    if terms:
+        strings = [(t.get("term") or "").strip() for t in terms]
+        if not all(strings):
+            return None
+        for i, t in enumerate(terms):
+            if t.get("exclude"):
+                return None
+            if i and str(t.get("connector", "AND")).upper() != "OR":
+                return None
+        return strings
+    query = (query or "").strip()
+    return [query] if query else None
 
 
 def _advanced_like_clause(cols: list[str], terms: list[dict]) -> tuple[str, list]:
