@@ -58,9 +58,16 @@ def _clean(page):
     _clear(page)
 
 
-def _sweep_and_add(page, terms):
+def _sweep_and_add(page, terms, whole_case=True):
+    """Sweeps, then adds. `whole_case` picks the scope explicitly, because
+    the modal's own default is "This table" — and how many OTHER tables
+    the case holds is decided by whichever modules ran before this one in
+    the shared fixture case, so a test that assumed one would read as a
+    feature failure the first time somebody left a table behind."""
     page.locator("#btnSearchAll").click()
     page.wait_for_selector("#modal:not([hidden])")
+    if whole_case:
+        page.locator("#modal .vp-seg button", has_text="Every table").click()
     page.locator("#modal .search-all-paste").fill("\n".join(terms))
     page.locator("#modal button", has_text="Search").first.click()
     page.wait_for_function("() => __winnow.S.searchAll && !__winnow.S.searchAll.running && __winnow.S.searchAll.jobId != null",
@@ -78,22 +85,36 @@ def test_the_scan_is_handed_the_sweeps_job_id(page):
     assert len(scan["body"]["watchlist_ids"]) == 2
 
 
-def test_the_table_the_sweep_cleared_is_not_read_again(page):
+def test_the_tables_the_sweep_cleared_are_not_read_again(page):
+    """Every table swept, every table clean for both terms — so the scan is
+    left with a scope of no tables at all."""
     _sweep, scan = _sweep_and_add(page, ABSENT)
-    # One table in this case, swept clean for both terms — so the scan has
-    # nothing left to read at all.
-    assert scan["job"]["seeded"]["tables"] == 1
-    assert scan["job"]["seeded"]["pairs"] == 2
-    # A scope of no tables: everything the scan was for is already answered.
+    tables = scan["job"]["seeded"]["tables"]
+    assert tables >= 1
+    assert scan["job"]["seeded"]["pairs"] == tables * len(ABSENT)
     assert scan["job"]["source_ids"] == []
 
 
+def test_a_sweep_of_one_table_clears_only_that_one(page):
+    """The modal's default scope. The sweep proves what it read and no
+    more, so the table it covered comes out of the scan's scope and the
+    rest of the case stays in it."""
+    _sweep, scan = _sweep_and_add(page, ABSENT, whole_case=False)
+    assert scan["job"]["seeded"]["tables"] == 1
+    scope = scan["job"]["source_ids"]
+    assert scope is not None, "a scoped sweep should still narrow the scan"
+    assert page.evaluate("() => __winnow.S.sourceId") not in scope
+
+
 def test_a_table_the_sweep_found_something_in_is_still_read(page):
-    """The other half: a term that matches is not proof of anything, so
-    that table is read and the hits get written."""
+    """The other half: a term that matched a table proves nothing about
+    it, so that table stays in the scan's scope and its hits get written.
+    Only that table is asserted — whether the rest of the case was cleared
+    depends on what other modules have left in the shared case."""
+    open_id = page.evaluate("() => __winnow.S.sourceId")
     _sweep, scan = _sweep_and_add(page, ["powershell.exe", "QQZZALPHA"])
-    assert scan["job"]["seeded"] == {"tables": 0, "pairs": 0}
-    assert scan["job"]["source_ids"] is None       # nothing narrowed: the whole case
+    scope = scan["job"]["source_ids"]
+    assert scope is None or open_id in scope, f"{open_id} was dropped from {scope}"
     # Polled from Python: wait_for_function does not await a promise
     # predicate (tests/test_ui_test_hygiene.py).
     deadline = time.monotonic() + 30
