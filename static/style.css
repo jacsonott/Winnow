@@ -1497,11 +1497,12 @@ textarea:focus { border-color: var(--accent); outline: none; }
   border-bottom: 1px solid var(--line); background: var(--panel);
 }
 .timeline-head-label { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim); }
-.timeline-tagfilter { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-.timeline-tagfilter label {
-  display: inline-flex; align-items: center; gap: 5px; font-size: 12px; cursor: pointer; user-select: none;
-}
-.timeline-tagfilter .swatch { width: 8px; height: 8px; border-radius: 1px; flex: 0 0 auto; }
+/* .tag-ribbon's geometry, because these are the ribbon's chips: the
+   timeline's tag filter is .tag-chip buttons (renderTimelineTagFilter),
+   so the strip has to space them the way the ribbon does. Nothing else
+   is needed here — the chip carries its own padding, border, pressed
+   state and per-skin treatment. */
+.timeline-tagfilter { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; }
 .timeline-cols {
   display: flex; background: var(--panel); border-bottom: 1px solid var(--line-2);
   font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--dim);
