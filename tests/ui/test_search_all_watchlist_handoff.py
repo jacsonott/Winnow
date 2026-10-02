@@ -17,7 +17,9 @@ has not happened yet when the POST answers.
 
 from __future__ import annotations
 
+import json
 import time
+import urllib.request
 
 import pytest
 
@@ -28,34 +30,49 @@ pytestmark = pytest.mark.ui
 ABSENT = ["QQZZALPHA", "QQZZBETA"]
 
 
-def _clear(page):
-    page.evaluate("""async () => {
-      const h = { 'X-Timeline-Lite-Client': '1' };
-      for (const i of await fetch('/api/watchlist', { headers: h }).then((r) => r.json()))
-        await fetch('/api/watchlist/' + i.id, { method: 'DELETE', headers: h });
-    }""")
+def _get(server, route):
+    """Read over HTTP from Python, with a timeout. NOT through the page:
+    `page.evaluate` on a promise has no timeout of its own, so one fetch
+    that never settles hangs the whole job rather than failing a test."""
+    req = urllib.request.Request(server.rstrip("/") + route,
+                                 headers={"X-Timeline-Lite-Client": "1"})
+    return json.loads(urllib.request.urlopen(req, timeout=15).read())
+
+
+def _clear(server):
+    for i in _get(server, "/api/watchlist"):
+        urllib.request.urlopen(urllib.request.Request(
+            server.rstrip("/") + f"/api/watchlist/{i['id']}", method="DELETE",
+            headers={"X-Timeline-Lite-Client": "1"}), timeout=15).read()
 
 
 @pytest.fixture(autouse=True)
-def _clean(page):
-    _clear(page)
+def _clean(page, server):
+    _clear(server)
     # Records every scan start: the body sent and the job snapshot back.
     page.evaluate("""() => {
       window.__scans = [];
       const real = window.fetch;
-      window.fetch = async (url, opts) => {
-        const r = await real(url, opts);
+      // The app's own promise is handed straight back and the recording
+      // hangs off a DETACHED chain. Awaiting a clone inside the wrapper
+      // puts this test's bookkeeping on the app's critical path, and a
+      // body that never settles then wedges the caller rather than
+      // failing anything.
+      window.fetch = (url, opts) => {
+        const p = real(url, opts);
         if (String(url).includes('/api/watchlist/scan/start')) {
-          const copy = r.clone();
-          window.__scans.push({ body: JSON.parse((opts || {}).body || '{}'), job: await copy.json() });
+          p.then((r) => r.clone().json())
+            .then((job) => window.__scans.push(
+              { body: JSON.parse((opts || {}).body || '{}'), job }))
+            .catch(() => {});
         }
-        return r;
+        return p;
       };
     }""")
     yield
     page.keyboard.press("Escape")
     page.evaluate("() => { document.getElementById('modal').hidden = true; }")
-    _clear(page)
+    _clear(server)
 
 
 def _sweep_and_add(page, terms, whole_case=True):
@@ -106,7 +123,7 @@ def test_a_sweep_of_one_table_clears_only_that_one(page):
     assert page.evaluate("() => __winnow.S.sourceId") not in scope
 
 
-def test_a_table_the_sweep_found_something_in_is_still_read(page):
+def test_a_table_the_sweep_found_something_in_is_still_read(page, server):
     """The other half: a term that matched a table proves nothing about
     it, so that table stays in the scan's scope and its hits get written.
     Only that table is asserted — whether the rest of the case was cleared
@@ -117,11 +134,10 @@ def test_a_table_the_sweep_found_something_in_is_still_read(page):
     assert scope is None or open_id in scope, f"{open_id} was dropped from {scope}"
     # Polled from Python: wait_for_function does not await a promise
     # predicate (tests/test_ui_test_hygiene.py).
-    deadline = time.monotonic() + 30
+    deadline = time.monotonic() + 40
     while time.monotonic() < deadline:
-        got = page.evaluate("""() => fetch('/api/watchlist', { headers: { 'X-Timeline-Lite-Client': '1' } })
-          .then((r) => r.json())""")
-        if any(i["value"] == "powershell.exe" and i["hit_count"] > 0 for i in got):
+        if any(i["value"] == "powershell.exe" and i["hit_count"] > 0
+               for i in _get(server, "/api/watchlist")):
             break
         time.sleep(0.25)
     else:

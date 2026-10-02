@@ -15,7 +15,9 @@ share.
 
 from __future__ import annotations
 
+import json
 import time
+import urllib.request
 
 import pytest
 
@@ -24,21 +26,34 @@ pytestmark = pytest.mark.ui
 VALUES = [f"QQZZ{i:02d}" for i in range(1, 13)]
 
 
-def _clear(page):
-    page.evaluate("""async () => {
-      const h = { 'X-Timeline-Lite-Client': '1' };
-      for (const i of await fetch('/api/watchlist', { headers: h }).then((r) => r.json()))
-        await fetch('/api/watchlist/' + i.id, { method: 'DELETE', headers: h });
-    }""")
+def _get(server, route):
+    """Read over HTTP from Python, with a timeout. NOT through the page:
+    `page.evaluate` on a promise has no timeout of its own, so one fetch
+    that never settles hangs the whole job rather than failing a test —
+    which is how this module once burned a six-hour CI run."""
+    req = urllib.request.Request(server.rstrip("/") + route,
+                                 headers={"X-Timeline-Lite-Client": "1"})
+    return json.loads(urllib.request.urlopen(req, timeout=15).read())
+
+
+def _delete(server, route):
+    urllib.request.urlopen(urllib.request.Request(
+        server.rstrip("/") + route, method="DELETE",
+        headers={"X-Timeline-Lite-Client": "1"}), timeout=15).read()
+
+
+def _clear(server):
+    for i in _get(server, "/api/watchlist"):
+        _delete(server, f"/api/watchlist/{i['id']}")
 
 
 @pytest.fixture(autouse=True)
-def _clean(page):
-    _clear(page)
+def _clean(page, server):
+    _clear(server)
     yield
     page.keyboard.press("Escape")
     page.evaluate("() => { document.getElementById('modal').hidden = true; }")
-    _clear(page)
+    _clear(server)
 
 
 def _open_import(page, tmp_path, text, name="iocs.txt"):
@@ -76,19 +91,14 @@ def _import_with(page, kind=None, tag_label=None):
     page.wait_for_selector("#modal[hidden]", state="attached", timeout=10_000)
 
 
-def _read_watchlist(page):
-    return page.evaluate("""() => fetch('/api/watchlist', { headers: { 'X-Timeline-Lite-Client': '1' } })
-      .then((r) => r.json())""")
-
-
-def _indicators(page, want=1):
-    """Polled from Python: page.wait_for_function does not await a promise
-    predicate, so a `fetch(...).then(...)` handed to it passes the instant
-    it is called (tests/test_ui_test_hygiene.py). page.evaluate does
-    await."""
-    deadline = time.monotonic() + 15
+def _indicators(server, want=1):
+    """Polled from Python, which is also what makes the wait bounded —
+    `page.wait_for_function` does not await a promise predicate at all
+    (tests/test_ui_test_hygiene.py), and `page.evaluate` awaits one
+    forever."""
+    deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
-        got = _read_watchlist(page)
+        got = _get(server, "/api/watchlist")
         if len(got) >= want:
             return got
         time.sleep(0.2)
@@ -117,7 +127,7 @@ def test_it_offers_the_type_and_the_auto_tag(page, tmp_path):
     assert d["tags"][1:] == page.evaluate("() => __winnow.S.tags.map((t) => t.name)")
 
 
-def test_the_dialogs_choice_decides_not_the_add_rows(page, tmp_path):
+def test_the_dialogs_choice_decides_not_the_add_rows(page, server, tmp_path):
     """The whole point. The Add row is left on one kind and the dialog set
     to another; what lands is the dialog's."""
     page.locator("#tabWatchlist").click()
@@ -126,29 +136,29 @@ def test_the_dialogs_choice_decides_not_the_add_rows(page, tmp_path):
     _open_import(page, tmp_path, "\n".join(VALUES[:3]))
     _import_with(page, kind="ip", tag_label="Suspicious")
 
-    got = _indicators(page, want=3)
+    got = _indicators(server, want=3)
     assert {i["value"] for i in got} == set(VALUES[:3])
     assert {i["kind"] for i in got} == {"ip"}
     suspicious = page.evaluate("() => __winnow.S.tags.find((t) => t.name === 'Suspicious').id")
     assert {i["auto_tag_id"] for i in got} == {suspicious}
 
 
-def test_a_per_line_kind_still_wins(page, tmp_path):
+def test_a_per_line_kind_still_wins(page, server, tmp_path):
     """The server's own rule, which the dialog's help names rather than
     overriding: a `value,kind` line carries its own."""
     _open_import(page, tmp_path, f"{VALUES[0]}\n{VALUES[1]},domain\n")
     _import_with(page, kind="ip")
-    kinds = {i["value"]: i["kind"] for i in _indicators(page, want=2)}
+    kinds = {i["value"]: i["kind"] for i in _indicators(server, want=2)}
     assert kinds == {VALUES[0]: "ip", VALUES[1]: "domain"}
 
 
-def test_no_auto_tag_is_the_default(page, tmp_path):
+def test_no_auto_tag_is_the_default(page, server, tmp_path):
     _open_import(page, tmp_path, VALUES[0])
     _import_with(page)
-    assert [i["auto_tag_id"] for i in _indicators(page)] == [None]
+    assert [i["auto_tag_id"] for i in _indicators(server)] == [None]
 
 
-def test_a_file_with_nothing_in_it_says_so_and_imports_nothing(page, tmp_path):
+def test_a_file_with_nothing_in_it_says_so_and_imports_nothing(page, server, tmp_path):
     _open_import(page, tmp_path, "# only a comment\n\n\n")
     d = _dialog(page)
     assert d["button"] == "", "an empty import should offer no Import button"
@@ -156,4 +166,4 @@ def test_a_file_with_nothing_in_it_says_so_and_imports_nothing(page, tmp_path):
         "() => document.querySelector('#modalBody .fb-help').textContent")
     page.keyboard.press("Escape")
     page.wait_for_selector("#modal[hidden]", state="attached")
-    assert _read_watchlist(page) == []
+    assert _get(server, "/api/watchlist") == []
