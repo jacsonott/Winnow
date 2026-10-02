@@ -3697,6 +3697,11 @@ def api_watchlist_scan(source_id: int | None = None, watchlist_id: int | None = 
 class WatchlistScanStart(BaseModel):
     source_ids: list[int] | None = None     # None = every table
     watchlist_ids: list[int] | None = None  # None = every indicator
+    # A finished (or still running) search-all job whose answers this scan
+    # may reuse — see Store.seed_watchlist_from_search_all. An id naming no
+    # live job is not an error: the scan simply reads every table, which is
+    # what it did before there was a handoff at all.
+    from_search_all: int | None = None
 
 
 @app.post("/api/watchlist/scan/start")
@@ -3705,9 +3710,15 @@ def api_watchlist_scan_start(body: WatchlistScanStart | None = None):
     the job's snapshot (Store.start_watchlist_scan_job) — progress and
     per-indicator/per-table totals land in the record as each table
     finishes. One live scan per case; starting another stops the
-    running one. Poll /api/watchlist/scan/job."""
+    running one. Poll /api/watchlist/scan/job.
+
+    `from_search_all` hands the scan a search-all job id: the sweep asked
+    every table the same question, so the pairs it proved clean are
+    recorded and the tables it answered whole are left out of this scan's
+    scope. The job's `seeded` says how much."""
     body = body or WatchlistScanStart()
-    return store().start_watchlist_scan_job(body.source_ids, body.watchlist_ids)
+    return store().start_watchlist_scan_job(body.source_ids, body.watchlist_ids,
+                                            body.from_search_all)
 
 
 @app.get("/api/watchlist/scan/job")

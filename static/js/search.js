@@ -536,15 +536,24 @@ export function openSearchAllModal() {
     // The terms you're about to sweep for are usually exactly the IOCs
     // worth watching as new data lands — add them to the watchlist in one
     // click (it dedupes against what's already there, then scans for the
-    // new ones in the background — runScan's jobs-panel row stands for it).
+    // new ones in the background — runScan's jobs-panel row stands for
+    // it, and on a finished sweep that scan is only the tables this one
+    // found something in).
     const wlBtn = el('button', 'btn ghost', 'Add to watchlist');
-    wlBtn.title = 'Add these terms to the case watchlist and scan every table for them';
+    wlBtn.title = 'Add these terms to the case watchlist — the tables this sweep has already '
+      + 'answered for are not read again';
     wlBtn.onclick = async () => {
       const terms = searchAllTerms(st).filter((t) => !t.exclude).map((t) => t.term.trim()).filter(Boolean);
       if (!terms.length) { toast('Enter a term or two first'); return; }
       try {
         const r = await post('/api/watchlist/import', { text: terms.join('\n'), kind: 'other' });
-        if (r.added_ids && r.added_ids.length) runScan({ watchlistIds: r.added_ids });
+        // The sweep's own job id goes with the scan: it asked every table
+        // in its scope the question the scan is about to, so the tables it
+        // cleared are recorded rather than read again
+        // (Store.seed_watchlist_from_search_all). The server checks that
+        // the terms it swept are the values being added, so a box edited
+        // since the sweep ran simply gets the full scan.
+        if (r.added_ids && r.added_ids.length) runScan({ watchlistIds: r.added_ids, fromSearchAll: st.jobId });
         const dupes = terms.length - r.added;
         toast(r.added
           ? `${r.added} added to the watchlist${dupes > 0 ? ` · ${dupes} already there` : ''}`

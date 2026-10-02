@@ -169,8 +169,16 @@ function foldScan(rec, job, keep) {
    — when it found something — the sticky "Watchlist: N hits" row with a
    way to the hits. Never rejects: callers fire it and move on. Returns
    the finished job, or null when it could not start or a later scan
-   folded it in. */
-export async function runScan({ sourceIds = null, watchlistIds = null, label = null } = {}) {
+   folded it in.
+
+   `fromSearchAll` is a search-all job id, and Search-all's "Add to
+   watchlist" is the one caller with one: the sweep just asked every table
+   the question this scan is about to, so the server records the pairs it
+   proved and leaves those tables out of the scan's scope
+   (Store.seed_watchlist_from_search_all). The job comes back with
+   `seeded`, which is what scanSummary names. */
+export async function runScan({ sourceIds = null, watchlistIds = null, label = null,
+                                fromSearchAll = null } = {}) {
   const turn = starting;
   let release;
   starting = new Promise((r) => { release = r; });
@@ -184,7 +192,8 @@ export async function runScan({ sourceIds = null, watchlistIds = null, label = n
     const prev = scanJob;
     if (prev) clearTimeout(prev.timer);
     try {
-      job = await post('/api/watchlist/scan/start', { source_ids: sourceIds, watchlist_ids: watchlistIds });
+      job = await post('/api/watchlist/scan/start', { source_ids: sourceIds, watchlist_ids: watchlistIds,
+                                                     from_search_all: fromSearchAll });
     } catch (e) {
       if (prev && scanJob === prev) pollScan(prev);
       // The entries this call marked have no scan coming: back to their
@@ -298,10 +307,8 @@ async function finishScan(rec, job) {
   // entry says nothing about another's, whose own scan is still to come.
   if (job.watchlist_ids == null) scanning.clear();
   else for (const id of job.watchlist_ids) scanning.delete(id);
-  const total = Object.values(job.matched || {}).reduce((a, b) => a + b, 0);
   const found = Object.entries(job.by_source || {}).filter(([, n]) => n > 0)
     .map(([sid, n]) => ({ sid: Number(sid), n }));
-  const secs = `${((job.elapsed_ms || 0) / 1000).toFixed(1)} s`;
   if (job.status === 'error') {
     rec.notice.fail({ detail: job.error || 'the scan failed', actions: [] });
   } else if (job.status !== 'done') {
@@ -309,7 +316,7 @@ async function finishScan(rec, job) {
   } else if (found.length && S.activeTab !== 'watchlist') {
     announceHits(rec.notice, found);
   } else {
-    rec.notice.done({ detail: `${hitsLabel(total)} · ${tablesLabel(job.scanned)} · ${secs}`, sticky: false, actions: [] });
+    rec.notice.done({ detail: scanSummary(job), sticky: false, actions: [] });
   }
   // Hits written and matches auto-tagged are both things a widget counts,
   // and a scan is usually running because an import just landed — which is
@@ -338,6 +345,19 @@ async function finishScan(rec, job) {
   if (S.activeTab === 'watchlist') await load();
   else { renderList(); await refreshWatchlistBadge(); }
   if (rec.done) rec.done(job);
+}
+
+/* The finished scan in one line. A scan handed a sweep's answers
+   (runScan's fromSearchAll) can be left with nothing to read at all, and
+   "0 hits · 0 tables" over a sweep that cleared eighteen of them reads as
+   a scan that never ran — the opposite of what it means. */
+function scanSummary(job) {
+  const total = Object.values(job.matched || {}).reduce((a, b) => a + b, 0);
+  const answered = (job.seeded && job.seeded.tables) || 0;
+  const swept = answered ? ` · ${tablesLabel(answered)} answered by the search` : '';
+  if (!job.total && answered) return `${hitsLabel(total)} · nothing left to read${swept}`;
+  const secs = `${((job.elapsed_ms || 0) / 1000).toFixed(1)} s`;
+  return `${hitsLabel(total)} · ${tablesLabel(job.scanned)} · ${secs}${swept}`;
 }
 
 /* The alert itself: the scan's own row in the jobs panel — the card an
@@ -433,12 +453,20 @@ async function markHitsSeen() {
   try { await post('/api/watchlist/seen', { count: total }); } catch { /* best effort */ }
 }
 
-function fillAutoTag() {
-  const sel = $('wlAutoTag');
-  const keep = sel.value;
+/* The auto-tag picker's options. One function because the Add row's
+   select and the import dialog's own are the same list, down to the
+   "no auto-tag" entry having to be first in both — a tag added since the
+   last paint would otherwise be missing from whichever copy was built by
+   hand. */
+function fillAutoTagSelect(sel, keep) {
   sel.replaceChildren(new Option('no auto-tag', ''));
   for (const t of S.tags || []) sel.append(new Option(t.name, String(t.id)));
   if (keep) sel.value = keep;
+}
+
+function fillAutoTag() {
+  const sel = $('wlAutoTag');
+  fillAutoTagSelect(sel, sel.value);
 }
 
 async function load() {
@@ -877,6 +905,100 @@ function openFromCasePicker() {
   });
 }
 
+/* Importing a list asks about the list. The two selects it used to read
+   are the ADD row's, at the other end of the page and set for whatever
+   single indicator was typed last — so a file of two hundred hashes went
+   in as whatever kind that was, with an auto-tag nobody had chosen for
+   it, and nothing on screen said so before or after. Type and auto-tag
+   are decisions about the batch; the batch asks.
+
+   The file is read first and the dialog reports what it found, because
+   "47 indicators" next to the name of the file is the part an analyst can
+   actually check — a list pasted into the wrong file, or a CSV export
+   with a header row, is visible here and invisible from a file picker.
+
+   The line rules are the server's (`/api/watchlist/import`): blanks and
+   #-comments dropped, a per-line `value,kind` overriding the default
+   below. They are mirrored here only to count and preview, never to
+   decide — the import posts the text as read. */
+function openWatchlistImport(name, text) {
+  const lines = (text || '').split(/\r?\n/).map((l) => l.trim());
+  // A file's final newline is not a blank line anybody wrote: trailing
+  // empties come off before anything is counted, or every import reports
+  // one more skipped line than the file has in it.
+  while (lines.length && !lines[lines.length - 1]) lines.pop();
+  const skipped = lines.filter((l) => !l || l.startsWith('#')).length;
+  const entries = lines.filter((l) => l && !l.startsWith('#'))
+    .map((l) => l.split(',')[0].trim()).filter(Boolean);
+  modal('Import indicators', (b) => {
+    if (!entries.length) {
+      b.append(el('p', 'fb-help', `Nothing to import from ${name} — one indicator per line, `
+        + 'blank lines and lines starting with # ignored.'));
+      return;
+    }
+    b.append(el('p', 'fb-help',
+      'One indicator per line. A line of the form “value,kind” carries its own type and '
+      + 'ignores the one picked below. Values already on the watchlist are skipped.'));
+
+    const head = el('div', 'note-status',
+      `${entries.length.toLocaleString()} indicator${entries.length === 1 ? '' : 's'} from ${name}`
+      + (skipped ? ` · ${skipped} blank or comment line${skipped === 1 ? '' : 's'} ignored` : ''));
+    b.append(head);
+
+    const preview = el('div', 'wl-import-preview');
+    for (const v of entries.slice(0, 8)) preview.append(el('div', null, v));
+    if (entries.length > 8) {
+      preview.append(el('div', 'wl-import-more', `…and ${(entries.length - 8).toLocaleString()} more`));
+    }
+    b.append(preview);
+
+    const kindRow = el('div', 'wl-import-field');
+    kindRow.append(el('span', null, 'Type'));
+    const kind = el('select');
+    // Cloned from the Add row's select rather than re-listed: that one is
+    // the only place the type list is written down (index.html), and two
+    // copies would drift the first time a kind was added.
+    for (const o of $('wlKind').options) kind.append(new Option(o.textContent, o.value));
+    kind.value = $('wlKind').value;
+    kind.title = 'The type every line without its own gets — it sets the row’s colour';
+    kindRow.append(kind);
+    b.append(kindRow);
+
+    const tagRow = el('div', 'wl-import-field');
+    tagRow.append(el('span', null, 'Auto-tag'));
+    const tag = el('select');
+    fillAutoTagSelect(tag, '');
+    tag.title = 'Tag every row these indicators match, as the scan finds them';
+    tagRow.append(tag);
+    b.append(tagRow);
+    if (!(S.tags || []).length) {
+      tagRow.append(el('span', 'fb-help', 'This case has no tags yet.'));
+      tag.disabled = true;
+    }
+
+    const acts = el('div', 'row-actions');
+    const go = el('button', 'btn', `Import ${entries.length.toLocaleString()}`);
+    go.onclick = async () => {
+      go.disabled = true;
+      try {
+        const r = await post('/api/watchlist/import', { text, kind: kind.value,
+          auto_tag_id: tag.value ? Number(tag.value) : null });
+        document.getElementById('modal').hidden = true;
+        toast(`${r.added} indicator${r.added === 1 ? '' : 's'} imported`
+          + (entries.length - r.added > 0 ? ` · ${entries.length - r.added} already there` : ''));
+        importedIndicators(r);
+      } catch (e) {
+        toast(e.message, 6000);
+        go.disabled = false;
+      }
+    };
+    const cancel = el('button', 'btn ghost', 'Cancel');
+    cancel.onclick = () => { document.getElementById('modal').hidden = true; };
+    acts.append(go, cancel);
+    b.append(acts);
+  });
+}
+
 /* An import answered: the list is what the server returned, the new
    entries are marked, and the scan covers only those. */
 function importedIndicators(r) {
@@ -922,13 +1044,10 @@ export function wireWatchlist() {
     const f = $('wlImportFile').files[0];
     if (!f) return;
     const text = await f.text();
+    // Cleared before the dialog, not after: picking the same file twice in
+    // a row fires no change event while the old value is still on it.
     $('wlImportFile').value = '';
-    try {
-      const r = await post('/api/watchlist/import', { text, kind: $('wlKind').value,
-        auto_tag_id: $('wlAutoTag').value ? Number($('wlAutoTag').value) : null });
-      toast(`${r.added} indicator${r.added === 1 ? '' : 's'} imported`);
-      importedIndicators(r);
-    } catch (e) { toast(e.message, 6000); }
+    openWatchlistImport(f.name, text);
   };
 }
 

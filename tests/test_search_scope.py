@@ -120,7 +120,7 @@ def test_a_table_dropped_after_the_scope_was_chosen_costs_only_its_own_scan(stor
     it."""
     a, b = _two_tables(store, write_csv)
     store.drop_source(b)
-    hits = [h for _, _, h in store._iter_search_all_sources(query="svchost", source_ids=[a, b]) if h]
+    hits = [h for _, _, h, _r in store._iter_search_all_sources(query="svchost", source_ids=[a, b]) if h]
     assert [h["source_id"] for h in hits] == [a]
 
 
