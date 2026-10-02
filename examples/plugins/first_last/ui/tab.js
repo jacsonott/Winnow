@@ -740,6 +740,23 @@ export default function mount(container, winnow) {
     } else if (zone === 'groupBy' || zone === 'carry') {
       const list = state[zone];
       if (from !== zone && !list.includes(name)) list.push(name);
+      /* A column you grouped on is one you want to READ in the result.
+         Without this the output of "group by Host + User" is a timestamp
+         and a description, and which pair a row belongs to is recoverable
+         only from whatever the description template happens to name — so
+         the commonest grouping needed two more drags before it said
+         anything, and forgetting them produced a table that looked right
+         and could not be read.
+
+         One way only. Taking a column back out of the grouping leaves it
+         in the output: dropping a column the analyst can see is the worse
+         half of being wrong, and Include columns is theirs to prune and
+         reorder. The carve-out is a drag that came FROM carry, which is a
+         move gesture — bouncing the chip back where it started would read
+         as the drag having failed. */
+      if (zone === 'groupBy' && from !== 'carry' && !state.carry.includes(name)) {
+        state.carry.push(name);
+      }
     }
     state.selRows = new Set();
     renderControls();
