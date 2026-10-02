@@ -342,6 +342,21 @@ see [docs/notes/README.md](README.md) for the whole set.
   flush to `scrollLeft` parks *underneath* them and the ring vanishes. The
   real left edge is `GUTTER_W` plus the widths of the pinned columns —
   the same sum `pinnedOffsets()` already computes for the paint.
+- **Grouping a column scrolls the grid back to the left**
+  (`scrollGridLeft`, grouping.js). A group header is an ordinary `.row`
+  whose label sits at the row's left, indented per level, and none of it
+  is sticky — so grouping while scrolled right painted a screen of header
+  rows with every label off past the left edge: the view that was asked
+  for, with the part naming each group not on it. The column just grouped
+  on has also left `S.order`, which makes the horizontal position it was
+  read at a description of a column set that no longer exists. Both
+  entries into a grouping do it — `addGroupLevel` (the strip's drop
+  target, the column menu, Group by tag) and `toggleGrouping`'s restore
+  branch — and `setGrouping` deliberately does **not**: a table switch
+  restores its stashed grouping through there, and that path is putting
+  the analyst back where they were, horizontal position included.
+  `tests/ui/test_group_scrolls_left.py` asserts the symptom (the first
+  header's label inside the scroller's box), not the `scrollLeft` alone.
 - **`cellRangeRowCount()` exists because the toolbar asks every paint.**
   Ctrl+Shift+Down makes the answer "the whole view", and materialising
   200,000 positions per scroll frame just to read `.length` off them is

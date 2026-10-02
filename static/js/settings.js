@@ -1133,7 +1133,7 @@ export function openSettings() {
     secFilters.append(fActs);
 
     const secPlugins = settingsSection(b, 'Plugins');
-    buildPluginsPanel(secPlugins);
+    buildPluginsPanel(secPlugins, { returnTo: openSettings });
 
     const secProfiles = settingsSection(b, 'Profiles');
     buildProfilesPanel(secProfiles);
