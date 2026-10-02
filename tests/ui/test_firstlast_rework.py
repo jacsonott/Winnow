@@ -69,20 +69,26 @@ def test_drag_drop_builds_a_grouping_with_preview(fl_page):
     # datetime column, so the preview runs.
     pg.wait_for_selector("tbody tr", timeout=10_000)
     assert "5 groups" in pg.locator("text=5 groups").first.inner_text()
-    # Include a column by dragging it into carry.
+    # And the grouped column is in the output without a second drag — see
+    # tests/ui/test_firstlast_group_includes.py for that rule on its own.
+    pg.wait_for_function(
+        "() => [...document.querySelectorAll('thead th')].map(h => h.textContent).join('|') === 'Timestamp|Host|Description'",
+        timeout=10_000)
+    # Include a further column by dragging it into carry.
     pg.evaluate(DRAG, [_chip("EventId"), "[data-zone='carry']"])
     pg.wait_for_function(
-        "() => [...document.querySelectorAll('thead th')].map(h => h.textContent).join('|') === 'Timestamp|EventId|Description'",
+        "() => [...document.querySelectorAll('thead th')].map(h => h.textContent).join('|') === 'Timestamp|Host|EventId|Description'",
         timeout=10_000)
 
 
 def test_header_drag_reorders_included_columns(fl_page):
+    """Carries on from the test above, which leaves Host then EventId in
+    the output (Host from the grouping, EventId dragged)."""
     pg = fl_page
-    pg.evaluate(DRAG, [_chip("Host"), "[data-zone='carry']"])
     pg.wait_for_function(
-        "() => [...document.querySelectorAll('thead th')].map(h => h.textContent).join('|') === 'Timestamp|EventId|Host|Description'",
+        "() => [...document.querySelectorAll('thead th')].map(h => h.textContent).join('|') === 'Timestamp|Host|EventId|Description'",
         timeout=10_000)
-    # Drag the Host header onto the EventId header — Host moves first.
+    # Drag the EventId header onto the Host header — EventId moves first.
     pg.evaluate("""() => {
       const ths = [...document.querySelectorAll('thead th')];
       const dt = new DataTransfer();
@@ -93,7 +99,7 @@ def test_header_drag_reorders_included_columns(fl_page):
       src.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: dt }));
     }""")
     pg.wait_for_function(
-        "() => [...document.querySelectorAll('thead th')].map(h => h.textContent).join('|') === 'Timestamp|Host|EventId|Description'",
+        "() => [...document.querySelectorAll('thead th')].map(h => h.textContent).join('|') === 'Timestamp|EventId|Host|Description'",
         timeout=10_000)
 
 
