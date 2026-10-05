@@ -43,6 +43,9 @@ export const STYLES = {
   phosphor:  { label: 'Phosphor',  desc: 'Retro CRT terminal — glow, monospace chrome.', defaultAccent: '#39e881', preview: ['#060907', '#39e881'] },
   blueprint: { label: 'Blueprint', desc: 'Bold borders, hard offset shadows.', defaultAccent: '#ff6a1a', preview: ['#0c0d10', '#ff6a1a'] },
   studio:    { label: 'Studio',    desc: 'Rounded, soft shadows, calm motion.', defaultAccent: '#7c6cf6', preview: ['#111219', '#7c6cf6'] },
+  // Dark first in the preview swatch, because this one's dark half is the
+  // point of it — see the comment on the CSS block.
+  jenna:     { label: "Jenna's theme", desc: 'Timeline Explorer in its Office 2016 skin — flat, square, Segoe UI. Black by default.', defaultAccent: '#2b579a', preview: ['#1f1f1f', '#2b579a'] },
 };
 
 export const ACCENT_PRESETS = ['#d2a04a', '#39e881', '#ff6a1a', '#7c6cf6', '#4a90d9', '#d9534f'];
