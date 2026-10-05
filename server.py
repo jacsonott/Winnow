@@ -1948,8 +1948,13 @@ async def api_ingest_preview(
     try:
         if kind == "text":
             return await run_in_threadpool(store().preview_text_lines, text)
+        # The uploaded file's own name goes through: the delimiter is read
+        # from the extension first (Store._sniff), and a preview that
+        # sniffed without it would show a different table from the one the
+        # import then builds.
         return await run_in_threadpool(
-            store().preview_csv_text, text, delimiter=delimiter or None, has_header=has_header)
+            store().preview_csv_text, text, delimiter=delimiter or None,
+            has_header=has_header, name=file.filename)
     except Exception as e:
         raise HTTPException(400, str(e))
 
@@ -2165,7 +2170,7 @@ def api_ingest_preview_path(body: PreviewPath):
             if kind == "text":
                 return store().preview_text_lines(text)
             return store().preview_csv_text(text, delimiter=body.delimiter or None,
-                                            has_header=body.has_header)
+                                            has_header=body.has_header, name=body.path)
         if kind == "json":
             return store().preview_json_file(body.path, flatten_mode=body.flatten_mode,
                                              flatten_depth=body.flatten_depth)

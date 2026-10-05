@@ -81,6 +81,15 @@ SEARCH_ALL_TERM_BREAKDOWN_MAX = 250
 # inventing a separate notion of "supported" — one format list, two places
 # it has to be spelled out (a browser <input> can't read a Python constant).
 DEFAULT_IMPORT_EXTENSIONS = {".csv", ".tsv", ".txt", ".psv", ".json", ".jsonl", ".ndjson"}
+# The extensions that NAME their delimiter. A file called .tsv is a
+# tab-separated file — that is what the suffix means, and it is better
+# evidence than a content sniffer's tie-break, which is decided by
+# CPython's `preferred` list and puts the comma first. One comma on every
+# line (a column named "Last Modified (UTC, local)" is enough) makes the
+# comma exactly as consistent as the tab, and a .tsv then imports as CSV
+# with its header split down the middle.
+# .txt is deliberately absent: it names no delimiter, so it is sniffed.
+EXTENSION_DELIMITERS = {".tsv": "\t", ".tab": "\t", ".csv": ",", ".psv": "|"}
 # The SQLite set is separate because these files can't be bulk-imported
 # blind — which tables to pull out is a per-file choice (see
 # preview_sqlite_tables) — so directory import ignores them while the
@@ -2621,7 +2630,10 @@ class Store:
         head = fh.read(64 * 1024)
         fh.seek(0)
         if delimiter is None:
-            delimiter = self._sniff(head)
+            # `path`, not `name`: the display name is the caller's to
+            # override and may carry no extension at all, and the
+            # extension is the whole point here.
+            delimiter = self._sniff(head, path)
         reader = csv.reader(fh, delimiter=delimiter)
 
         try:
@@ -2911,12 +2923,17 @@ class Store:
         return total
 
     def preview_csv_text(
-        self, text: str, delimiter: str | None = None, has_header: bool = True, max_rows: int = 50
+        self, text: str, delimiter: str | None = None, has_header: bool = True,
+        max_rows: int = 50, name: str | None = None
     ) -> dict:
         """Read-only sample of a delimited file's first rows, for the import
-        preview UI. Never touches the database — no source row, no table."""
+        preview UI. Never touches the database — no source row, no table.
+
+        `name` is the file's name, and it has to be passed: the preview and
+        the ingest must reach the same delimiter or the analyst agrees to
+        one table and gets another."""
         if delimiter is None:
-            delimiter = self._sniff(text[:8192])
+            delimiter = self._sniff(text[:8192], name)
         reader = csv.reader(io.StringIO(text), delimiter=delimiter)
         try:
             first_row = next(reader)
@@ -4145,7 +4162,42 @@ class Store:
             self.db.execute("UPDATE sources SET has_fts=1 WHERE id=?", (source_id,))
 
     @staticmethod
-    def _sniff(head: str) -> str:
+    def _looks_delimited_by(head: str, ch: str, sample: int = 20) -> bool:
+        """Whether `ch` actually splits this text, so a file's extension is
+        only believed when the bytes agree with it.
+
+        Every sampled line has to contain it at least once — a character
+        the file does not split on at all is incidental, whatever the name
+        says — and most of them have to agree on how many. The 10% slack
+        is for ragged rows, which this app pads rather than refuses
+        (docs/notes/ingest.md), and for the occasional quoted field
+        carrying a literal delimiter."""
+        rows = [ln for ln in head.splitlines() if ln.strip()][:sample]
+        if not rows:
+            return False
+        counts = [ln.count(ch) for ln in rows]
+        if min(counts) < 1:
+            return False
+        modal = max(set(counts), key=counts.count)
+        return counts.count(modal) / len(counts) >= 0.9
+
+    @classmethod
+    def _sniff(cls, head: str, name: str | None = None) -> str:
+        """The delimiter, from the file's name first and its content second.
+
+        `name` is the file name when one is known (it is, on every path
+        that reaches here). An extension in EXTENSION_DELIMITERS names a
+        delimiter outright, and that beats sniffing the bytes — but only
+        when the bytes agree, so a mislabelled file still falls through to
+        the sniffer rather than being read down the wrong column.
+
+        Content-only sniffing stays underneath, unchanged, for .txt, for
+        extensionless dumps, and for the named file whose named delimiter
+        is not in it."""
+        ext = os.path.splitext(name or "")[1].lower()
+        named = EXTENSION_DELIMITERS.get(ext)
+        if named and cls._looks_delimited_by(head, named):
+            return named
         try:
             return csv.Sniffer().sniff(head[:8192], delimiters=",\t;|").delimiter
         except csv.Error:
