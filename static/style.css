@@ -1165,7 +1165,22 @@ section.page-with-panels { flex-direction: row; }
    to the sticky header's current height (see syncRowsTop in app.js) —
    the header is in-flow, so the first rows would otherwise start
    underneath it. */
-.rows { position: absolute; top: 0; left: 0; will-change: transform; min-width: 100%; }
+/* Deliberately NOT `will-change: transform`, which is the reflex for a
+   transform-scrolled virtual list and is wrong here. It promotes .rows to
+   its own compositing layer, and Chrome will not use subpixel (LCD) text
+   antialiasing inside one — every glyph in the grid falls back to
+   grayscale AA, which on light-on-dark reads as heavier and softer than
+   the rest of the app. Measured on this grid: 0% of antialiased edge
+   pixels carried subpixel colour with the hint, 70% without it, while the
+   chrome outside the layer was unaffected either way. An opaque
+   background on the layer does not buy it back; only not promoting does.
+
+   It costs nothing to drop: render() rewrites the rows' contents on every
+   scroll step anyway, so there is no move-the-layer-without-repainting
+   fast path for the promotion to unlock. A/B/A/B scroll measurement found
+   no regression (mean frame 38.6ms without vs 39.4ms with, identical p95
+   and max). Same reasoning applies to .timeline-rows. */
+.rows { position: absolute; top: 0; left: 0; min-width: 100%; }
 
 .row {
   display: flex; height: var(--row-h); align-items: stretch;
@@ -1575,7 +1590,8 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .tl-col-body { flex: 1 1 auto; }
 .timeline-body { position: relative; flex: 1 1 auto; min-height: 0; overflow: auto; outline: none; }
 .timeline-spacer-y { width: 1px; }
-.timeline-rows { position: absolute; top: 0; left: 0; right: 0; will-change: transform; }
+/* No will-change: transform here either -- see the note on .rows. */
+.timeline-rows { position: absolute; top: 0; left: 0; right: 0; }
 .timeline-row {
   display: flex; height: var(--row-h); align-items: stretch; cursor: pointer;
   border-bottom: 1px solid var(--border-hairline);
