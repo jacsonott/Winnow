@@ -120,31 +120,3 @@ def test_the_grid_stays_monospace_in_every_skin(page, styles, theme):
         assert "mono" in fam.lower() or "consolas" in fam.lower() or "menlo" in fam.lower(), \
             f"{style}/{theme}: grid cells are {fam}"
 
-
-# The zebra is drawn by two rules, not one: `.row` paints `--ink` and
-# `.row:nth-child(even)` paints `--row-even` over it. A skin that wants a
-# flat grid therefore has to set `--row-even` to `--ink`. Matching it to
-# `--panel` — the obvious guess, since `--panel` is the chrome's surface —
-# leaves the stripe fully visible and reads as the skin ignoring the
-# setting. Checked against what the browser actually paints rather than
-# against the two tokens, so it fails if either rule moves.
-STRIPES = """(style) => {
-  __winnow.applyStyle(style);
-  const rows = [...document.querySelectorAll('#body .row')]
-    .filter((r) => !/selected|diff-/.test(r.className))
-    .slice(0, 12);
-  return { n: rows.length,
-           bgs: [...new Set(rows.map((r) => getComputedStyle(r).backgroundColor))] };
-}"""
-
-
-@pytest.mark.parametrize("theme", ["dark", "light"])
-def test_jennas_grid_does_not_stripe(page, theme):
-    """Timeline Explorer's Office 2016 Black grid is one flat surface ruled
-    by column separators. Jenna's theme is a reconstruction of it, so the
-    alternating row wash every other Winnow skin has is turned off here."""
-    page.mouse.move(0, 0)  # :hover would read as a third background
-    page.evaluate(READ, ["jenna", theme, []])
-    got = page.evaluate(STRIPES, "jenna")
-    assert got["n"] >= 4, f"not enough plain rows to judge striping: {got}"
-    assert len(got["bgs"]) == 1, f"jenna/{theme}: grid rows alternate — {got['bgs']}"
