@@ -37,6 +37,23 @@ see [docs/notes/README.md](README.md) for the whole set.
   Any new background caller wants that option — `refreshSourcesQuietly()`
   in tables.js exists for the same reason on the polling path.
 
+- **Row striping is a preference, saved per skin** (`STYLES[].stripes` is
+  the default, `S.appearance.stripes` holds only the skins the analyst has
+  overridden; `stripesOn`/`setStripes`/`paintStripes` in settings.js). It
+  is per skin because the skins disagree about it by construction — Jenna's
+  theme reconstructs a grid with no zebra, the rest are drawn around having
+  one — so one global switch would be wrong for half the list the moment it
+  was set. Off is a single token: everything that paints the zebra reads
+  `--row-even` (the grid's rows, the pinned cells tracking them, the
+  Timeline's rows), so `html[data-stripes="off"]` collapses it onto `--ink`,
+  the base both surfaces paint. That rule carries three attributes
+  deliberately — the skin blocks set `--row-even` at
+  `[data-style][data-theme]`, and a bare `html[data-stripes="off"]` is the
+  weaker selector and loses to every one of them, invisibly, because a
+  custom property that loses a cascade looks exactly like one never set.
+  Pinned by `tests/ui/test_row_striping_setting.py`, which reads painted
+  backgrounds rather than the token for that reason.
+
 - **Theming rule for controls.** `<select>` has a global themed base rule in
   `static/style.css` (dark `--ink`/`--line-2`, accent focus), and each theme
   sets `color-scheme` on `<html>` so the parts CSS can't reach — the native

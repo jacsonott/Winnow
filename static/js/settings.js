@@ -38,14 +38,14 @@ export const APPEARANCE_KEY = 'winnow.appearance';
 export const STYLES = {
   // Harvest first because it is the default — the list is a menu, and the
   // one you are on should be the one you read first.
-  harvest:   { label: 'Harvest',   desc: 'Grain and chaff — wheat gold on deep green-black, parchment in light.', defaultAccent: '#cfa057', preview: ['#0f1211', '#cfa057'] },
-  panel:     { label: 'Panel',     desc: 'The older look — cooler greys, amber accent.', defaultAccent: '#d2a04a', preview: ['#13161a', '#d2a04a'] },
-  phosphor:  { label: 'Phosphor',  desc: 'Retro CRT terminal — glow, monospace chrome.', defaultAccent: '#39e881', preview: ['#060907', '#39e881'] },
-  blueprint: { label: 'Blueprint', desc: 'Bold borders, hard offset shadows.', defaultAccent: '#ff6a1a', preview: ['#0c0d10', '#ff6a1a'] },
-  studio:    { label: 'Studio',    desc: 'Rounded, soft shadows, calm motion.', defaultAccent: '#7c6cf6', preview: ['#111219', '#7c6cf6'] },
+  harvest:   { label: 'Harvest',   desc: 'Grain and chaff — wheat gold on deep green-black, parchment in light.', stripes: true, defaultAccent: '#cfa057', preview: ['#0f1211', '#cfa057'] },
+  panel:     { label: 'Panel',     desc: 'The older look — cooler greys, amber accent.', stripes: true, defaultAccent: '#d2a04a', preview: ['#13161a', '#d2a04a'] },
+  phosphor:  { label: 'Phosphor',  desc: 'Retro CRT terminal — glow, monospace chrome.', stripes: true, defaultAccent: '#39e881', preview: ['#060907', '#39e881'] },
+  blueprint: { label: 'Blueprint', desc: 'Bold borders, hard offset shadows.', stripes: true, defaultAccent: '#ff6a1a', preview: ['#0c0d10', '#ff6a1a'] },
+  studio:    { label: 'Studio',    desc: 'Rounded, soft shadows, calm motion.', stripes: true, defaultAccent: '#7c6cf6', preview: ['#111219', '#7c6cf6'] },
   // Dark first in the preview swatch, because this one's dark half is the
   // point of it — see the comment on the CSS block.
-  jenna:     { label: "Jenna's theme", desc: 'Timeline Explorer in its Office 2016 Black skin — flat, square, Segoe UI, amber on cool grey.', defaultAccent: '#d7a35e', preview: ['#1e1e1e', '#d7a35e'] },
+  jenna:     { label: "Jenna's theme", desc: 'Timeline Explorer in its Office 2016 Black skin — flat, square, Segoe UI, amber on cool grey.', stripes: false, defaultAccent: '#d7a35e', preview: ['#1e1e1e', '#d7a35e'] },
 };
 
 export const ACCENT_PRESETS = ['#d2a04a', '#39e881', '#ff6a1a', '#7c6cf6', '#4a90d9', '#d9534f'];
@@ -92,6 +92,11 @@ export function defaultAppearance() {
     // 'bar' | 'row' — see FILTER_UI_DEFAULT. An install that predates this
     // has no key and therefore gets the default, like every other switch here.
     filterUi: FILTER_UI_DEFAULT,
+    // Per-skin row-striping overrides, keyed by skin name — see stripesOn().
+    // Only the skins the analyst has actually set appear here; the rest read
+    // their own default out of STYLES, so the empty object every existing
+    // install effectively has changes nothing for anyone.
+    stripes: {},
   };
 }
 
@@ -140,6 +145,7 @@ export function syncAppearanceFromServer() {
   if (hasLocal) return;
   S.appearance = { ...S.appearance, ...remote };
   document.documentElement.setAttribute('data-style', S.appearance.style);
+  paintStripes();   // before paintTheme, whose announce carries the value
   paintTheme();
   paintAccent();
   paintDensity();
@@ -220,7 +226,8 @@ export function paintTheme() {
    winnow.onAppearanceChange. */
 function announceAppearance() {
   document.dispatchEvent(new CustomEvent('winnow:appearance', {
-    detail: { style: S.appearance.style, themeMode: S.appearance.themeMode, accent: S.appearance.accent },
+    detail: { style: S.appearance.style, themeMode: S.appearance.themeMode,
+              accent: S.appearance.accent, stripes: stripesOn() },
   }));
 }
 
@@ -252,6 +259,9 @@ export function paintAccent() {
 export function applyStyle(styleName) {
   S.appearance.style = styleName;
   document.documentElement.setAttribute('data-style', styleName);
+  // The skin changed, so the effective striping may have too: a different
+  // default, or an override this skin carries and the last one did not.
+  paintStripes();
   if (!S.appearance.accentCustomized) applyAccent(STYLES[styleName].defaultAccent, false);
   else announceAppearance();   // applyAccent announces on the other branch
   saveAppearance();
@@ -260,6 +270,39 @@ export function applyStyle(styleName) {
 export function applyThemeMode(mode) {
   S.appearance.themeMode = mode;
   paintTheme();
+  saveAppearance();
+}
+
+/* Striped rows, remembered PER SKIN.
+
+   Per skin rather than one switch for the whole app because the skins
+   disagree about it by construction: Jenna's theme reconstructs a grid
+   with no zebra at all, while the others are drawn around having one. A
+   single global value would be wrong for half the list the moment it was
+   set, and would have the analyst re-toggling it on every skin change.
+
+   S.appearance.stripes holds ONLY the skins that have been overridden.
+   Anything absent reads its default from STYLES, which is what lets a
+   skin's shipped default change later without quietly overwriting a
+   deliberate choice someone already made. */
+export function stripesOn(style = S.appearance.style) {
+  const set = S.appearance.stripes || {};
+  if (Object.prototype.hasOwnProperty.call(set, style)) return !!set[style];
+  const meta = STYLES[style];
+  // An unknown skin — a name saved by a newer build, read after a
+  // downgrade — gets the striping every skin but Jenna has, which is also
+  // what the grid did before any of this was a setting.
+  return meta ? !!meta.stripes : true;
+}
+
+export function paintStripes() {
+  document.documentElement.setAttribute('data-stripes', stripesOn() ? 'on' : 'off');
+}
+
+export function setStripes(on) {
+  S.appearance.stripes = { ...(S.appearance.stripes || {}), [S.appearance.style]: !!on };
+  paintStripes();
+  announceAppearance();
   saveAppearance();
 }
 
@@ -311,6 +354,7 @@ export function applyDensity(density) {
 export function initAppearance() {
   S.appearance = loadAppearance();
   document.documentElement.setAttribute('data-style', S.appearance.style);
+  paintStripes();   // before paintTheme, whose announce carries the value
   paintTheme();
   paintAccent();
   paintDensity();
@@ -647,6 +691,7 @@ export function openSettings() {
       // what they just picked.
       currentRow.replaceChildren(currentCard(), browse);
       syncAccentUi();
+      syncStripesUi();   // per skin — the box and its note are about the new one
     });
     currentRow.append(currentCard(), browse);
     secLook.append(currentRow);
@@ -709,6 +754,29 @@ export function openSettings() {
       densitySeg.append(btn);
     }
     secLook.append(densitySeg);
+
+    /* Striped rows. Saved per skin (see stripesOn), which the help text has
+       to say outright: an analyst who turns it off, changes skin and finds
+       it back on has every reason to read that as the setting not sticking
+       rather than as the skin having its own answer. Naming the skin the
+       box is currently about is the cheapest way to make that legible. */
+    const stripeLabel = el('label', 'check-row');
+    const stripeCb = el('input');
+    stripeCb.type = 'checkbox';
+    stripeCb.id = 'appearanceStripes';
+    stripeCb.onchange = () => { setStripes(stripeCb.checked); syncStripesUi(); };
+    stripeLabel.append(stripeCb, el('span', null, 'Striped rows'));
+    secLook.append(stripeLabel);
+    const stripeNote = el('p', 'fb-help');
+    secLook.append(stripeNote);
+    function syncStripesUi() {
+      stripeCb.checked = stripesOn();
+      const meta = STYLES[S.appearance.style];
+      stripeNote.textContent =
+        'Alternating row shading in the grid and the Timeline. Saved per skin, so each '
+        + `one keeps the answer that suits it — this is the setting for ${meta ? meta.label : S.appearance.style}.`;
+    }
+    syncStripesUi();
 
     secLook.append(el('div', 'settings-sub-label', 'Autofit column width limit'));
     secLook.append(el('p', 'fb-help',

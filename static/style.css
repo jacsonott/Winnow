@@ -179,11 +179,12 @@ html[data-style="jenna"][data-theme="dark"] {
   --line: #3f3f46; --line-2: #54545a; --text: #d4d4d4; --dim: #969696;
   --accent: #d7a35e; --accent-dim: #a87c42; --accent-fg: #1e1e1e;
   --sel: #3f3f46; --sel-line: #54545a;
-  /* --row-even equals --ink on purpose: the grid does not stripe. It has
-     to match --ink, not --panel — .row's base background is --ink (and so
-     is .timelineview's), so a --row-even set to the chrome's colour
-     stripes every other row instead of cancelling the zebra. */
-  --row-even: #1e1e1e; --row-hover: #37373c; --row-selected: #3f3f46; --cell-selected-bg: #4a4a52;
+  /* Jenna defaults to no stripes (STYLES.jenna.stripes) because the skin
+     it reconstructs has none. This is the colour the rows take if the
+     analyst turns striping on for it: a quiet step off --ink, not the
+     --panel-sized jump the other skins use, which on a flat square skin
+     reads as a rendering fault rather than a zebra. */
+  --row-even: #232326; --row-hover: #37373c; --row-selected: #3f3f46; --cell-selected-bg: #4a4a52;
   --border-hairline: #333337; --text-faint: #6d6d70;
   --danger: #e06c60; --danger-bg: #3a1f1d; --danger-border: #6b3330;
   --diff-a: #e06c60; --diff-a-bg: #3a2220; --diff-b: #86c386; --diff-b-bg: #223324;
@@ -202,8 +203,7 @@ html[data-style="jenna"][data-theme="light"] {
   --line: #e0e0e0; --line-2: #c4c4c4; --text: #1e1e1e; --dim: #6b6b6b;
   --accent: #b5802f; --accent-dim: #8a6124; --accent-fg: #ffffff;
   --sel: #ededf0; --sel-line: #c4c4c4;
-  /* Matches --ink, as the dark half does — see the note there. */
-  --row-even: #f1f1f1; --row-hover: #f2f2f4; --row-selected: #e4e4e6; --cell-selected-bg: #d8d8dc;
+  --row-even: #f8f8f8; --row-hover: #f2f2f4; --row-selected: #e4e4e6; --cell-selected-bg: #d8d8dc;
   --border-hairline: #ededed; --text-faint: #a6a6a6;
   --danger: #c0392b; --danger-bg: #fbe4e2; --danger-border: #e8b0aa;
   --diff-a: #c0392b; --diff-a-bg: #fbe0dd; --diff-b: #2f7d46; --diff-b-bg: #ddeede;
@@ -346,6 +346,26 @@ html[data-style="studio"][data-theme="light"] {
   --ease: cubic-bezier(.2,.8,.2,1); --transition-fast: 150ms;
   --shadow-tag: 0 16px 40px rgba(40,40,80,.12); --shadow-modal: 0 16px 40px rgba(40,40,80,.14);
 }
+
+
+/* ------------------------------------------------- striped rows (opt-in)
+
+   Whether the grid alternates row shading is a preference, not a property
+   of the skin: each skin declares a default (STYLES[].stripes in
+   settings.js) and the analyst can override it per skin.
+
+   Off is one token. Everything that paints the zebra reads --row-even --
+   the grid's rows, the pinned cells that track them, and the Timeline's
+   rows -- so collapsing it onto the row's own base colour turns all three
+   off at once. --ink is that base for both surfaces (.row paints it,
+   .timelineview paints it).
+
+   Written with three attributes rather than one so it outweighs the skin
+   blocks above, which set --row-even at [data-style][data-theme]. A bare
+   html[data-stripes="off"] is the weaker selector and would lose to every
+   one of them -- silently, since a custom property that loses a cascade
+   looks exactly like one that was never set. */
+html[data-stripes="off"][data-style][data-theme] { --row-even: var(--ink); }
 
 .busy-bar {
   position: fixed; top: 0; left: 0; right: 0; height: 2px; z-index: 9999;
