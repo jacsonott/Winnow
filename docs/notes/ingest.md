@@ -306,6 +306,34 @@ see [docs/notes/README.md](README.md) for the whole set.
   in the table list reads as a real empty import. Pinned by
   tests/test_ingest_broken.py.
 
+- **The file's extension names the delimiter, and it is read before the
+  content is sniffed** (`EXTENSION_DELIMITERS`, `Store._sniff`). `.tsv`,
+  `.tab`, `.csv` and `.psv` each say what they are; `.txt` and an
+  extensionless dump say nothing and are sniffed as before.
+
+  `csv.Sniffer` alone got real exports wrong. It scores each candidate by
+  how consistently it appears per line, and when two of them tie it breaks
+  the tie with **CPython's own `preferred` list, which starts with the
+  comma**. A single comma on every line is enough to tie — and a column
+  named `Last Modified (UTC, local)` puts one on the header as well as the
+  body, so a 3-column `.tsv` imported as 2 columns with the header split
+  down the middle of a column name. Analysts were setting Tab by hand in
+  the preview on every import.
+
+  The name is **evidence, not an instruction**: `_looks_delimited_by`
+  requires the named character on every sampled line with a consistent
+  count (90%, for the ragged rows this importer pads rather than refuses),
+  so a comma-separated file somebody saved as `.tsv` still falls through
+  to the sniffer instead of being read as one very wide column. An
+  explicit `delimiter=` from the preview still beats both.
+
+  **The name has to reach both ends.** `ingest_csv` passes `path` rather
+  than `name` — the display name is the caller's to override and often
+  carries no extension — and both preview routes pass theirs
+  (`file.filename`, `body.path`), because a preview that sniffed without
+  the name would show a table the import then would not build.
+  tests/test_tsv_delimiter.py.
+
 - **UTF-16 is a routine input, not an edge case.** Windows PowerShell
   5.1's `Out-File`/`>` write UTF-16LE by default. Decoded as
   utf-8-sig-with-replacement, the header becomes NUL-riddled garbage and
