@@ -307,8 +307,18 @@ static/js/splash.js The launch animation — winnowing, which is what the app
                     prefers-reduced-motion. tests/ui/conftest.py disables it
                     for the shared page fixture — a full-viewport overlay
                     would make every click in every other test wait it out.
-static/style.css   Token-driven theming: 5 styles (panel/phosphor/blueprint/
-                    studio/harvest) x dark/light, selected via data-style/data-theme.
+static/style.css   Token-driven theming: 6 styles (panel/phosphor/blueprint/
+                    studio/harvest/jenna) x dark/light, selected via data-style/data-theme.
+                    Jenna's theme is the odd one: its DARK half is the
+                    primary (Office 2016 Black, which is what was asked
+                    for) and the light half is the Colorful/White
+                    counterpart — every other skin reads the other way
+                    round. It is also the only skin that sets --ui to a
+                    named face (Segoe UI, already on every Windows box, so
+                    still no web font); --mono is untouched there, so the
+                    grid keeps the column alignment it is built on.
+                    tests/ui/test_skin_tokens.py holds every skin to the
+                    same token list in both themes.
                     Harvest's dark is the loading screen's own palette
                     verbatim — green-cast greys, not brown; a warm-grey
                     version read as muddy against the gold, because a warm

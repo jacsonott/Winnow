@@ -148,6 +148,68 @@ html[data-style="phosphor"][data-theme="light"] {
   --glow: none;
 }
 
+/* Jenna's theme — Timeline Explorer wearing its Office 2016 Black skin.
+
+   Read off a screenshot of the real thing rather than reconstructed, and
+   four of the guesses it replaced were wrong in ways worth recording,
+   because each is a thing "an Office dark theme" sounds like and is not:
+
+   - THERE IS NO BLUE. Not in the selection, not on the chrome. The first
+     attempt used Office's #2b579a ribbon blue throughout; no blue of any
+     size appears in the application.
+   - THE SELECTION IS GREY. A row reads as selected by going one step
+     lighter than its neighbours, nothing more.
+   - THE ROWS DO NOT ALTERNATE. No zebra striping; one surface, ruled by
+     thin column separators.
+   - THE GREYS ARE THE VISUAL-STUDIO FAMILY (#1e1e1e / #2d2d30 / #3f3f46),
+     cool and mid-dark, not the near-black an "Office Black" name suggests.
+
+   The one colour with any presence is the amber on the row markers and on
+   the filter editor's keywords, so that is the accent. The filter bar's
+   own vocabulary is carried into the SQL pane's tokens: keywords amber,
+   values green, strings the pale blue it gives field names. That mapping
+   is upside down from most editors and is what this application shows.
+
+   Office is flat, square and hairline-ruled, so radius 0 and 1px borders
+   do as much of the resemblance as the colours. Segoe UI leads --ui;
+   --mono is untouched, and the screenshot bears that out — the analyst is
+   running Timeline Explorer with a fixed-width grid font. */
+html[data-style="jenna"][data-theme="dark"] {
+  --ink: #1e1e1e; --panel: #2d2d30; --panel-2: #333337; --panel-3: #3f3f46;
+  --line: #3f3f46; --line-2: #54545a; --text: #d4d4d4; --dim: #969696;
+  --accent: #d7a35e; --accent-dim: #a87c42; --accent-fg: #1e1e1e;
+  --sel: #3f3f46; --sel-line: #54545a;
+  /* --row-even equals --panel on purpose: the grid does not stripe. */
+  --row-even: #2d2d30; --row-hover: #37373c; --row-selected: #3f3f46; --cell-selected-bg: #4a4a52;
+  --border-hairline: #333337; --text-faint: #6d6d70;
+  --danger: #e06c60; --danger-bg: #3a1f1d; --danger-border: #6b3330;
+  --diff-a: #e06c60; --diff-a-bg: #3a2220; --diff-b: #86c386; --diff-b-bg: #223324;
+  --str: #6fb4d9; --num: #86c386; --kw: #d7a35e;
+  --radius-sm: 0px; --radius-md: 0px; --border-w: 1px;
+  --ease: ease-out; --transition-fast: 100ms;
+  --shadow-tag: 0 2px 8px rgba(0,0,0,.5); --shadow-modal: 0 4px 16px rgba(0,0,0,.55);
+  --ui: "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
+}
+html[data-style="jenna"][data-theme="light"] {
+  /* The light counterpart, kept in the dark half's character rather than
+     copied from Office's Colorful: the same amber accent, and a selection
+     that is a quiet step of grey rather than the blue wash a light Office
+     skin would use. The two halves should read as one theme. */
+  --ink: #f1f1f1; --panel: #ffffff; --panel-2: #f3f3f3; --panel-3: #e6e6e6;
+  --line: #e0e0e0; --line-2: #c4c4c4; --text: #1e1e1e; --dim: #6b6b6b;
+  --accent: #b5802f; --accent-dim: #8a6124; --accent-fg: #ffffff;
+  --sel: #ededf0; --sel-line: #c4c4c4;
+  --row-even: #ffffff; --row-hover: #f2f2f4; --row-selected: #e4e4e6; --cell-selected-bg: #d8d8dc;
+  --border-hairline: #ededed; --text-faint: #a6a6a6;
+  --danger: #c0392b; --danger-bg: #fbe4e2; --danger-border: #e8b0aa;
+  --diff-a: #c0392b; --diff-a-bg: #fbe0dd; --diff-b: #2f7d46; --diff-b-bg: #ddeede;
+  --str: #2b6f94; --num: #2f7d46; --kw: #a06a1f;
+  --radius-sm: 0px; --radius-md: 0px; --border-w: 1px;
+  --ease: ease-out; --transition-fast: 100ms;
+  --shadow-tag: 0 2px 8px rgba(0,0,0,.14); --shadow-modal: 0 4px 16px rgba(0,0,0,.16);
+  --ui: "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
+}
+
 /* Blueprint Brutalist — thick borders, hard offset (never blurred)
    shadows that compress on :active, zero border-radius. */
 html[data-style="blueprint"][data-theme="dark"] {
@@ -2432,6 +2494,15 @@ html[data-style="phosphor"][data-theme="dark"] .tab[aria-selected="true"]::after
 }
 @keyframes phosphor-blink { 50% { opacity: .2; } }
 html[data-style="phosphor"] .row.selected { box-shadow: inset 3px 0 0 var(--accent); }
+
+/* Jenna's theme: Office marks the active tab with a filled block and a
+   hairline rule, never a glow or an offset shadow — the flatness is the
+   half of the resemblance that is not colour. */
+html[data-style="jenna"] .tab[aria-selected="true"] {
+  background: var(--accent); color: var(--accent-fg); border-color: var(--accent);
+}
+html[data-style="jenna"] .btn:hover { background: var(--panel-3); }
+html[data-style="jenna"] .row.selected { box-shadow: inset 2px 0 0 var(--accent); }
 html[data-style="phosphor"] .detail-head, html[data-style="phosphor"] .sql-head, html[data-style="phosphor"] .modal-head { color: var(--accent); text-shadow: var(--glow); }
 html[data-style="phosphor"][data-theme="dark"] body::after {
   content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 9998;
