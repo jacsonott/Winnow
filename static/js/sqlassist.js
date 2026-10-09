@@ -435,6 +435,46 @@ export async function sqlDownloadCsv(columns, rows) {
   sqlResultCsv(columns, rows, clean.toLowerCase().endsWith('.csv') ? clean : clean + '.csv');
 }
 
+/* "Excel…": the same rows the CSV button would write, as a .xlsx.
+
+   Built server-side. A worksheet is a zip of XML and openpyxl is already
+   a dependency for the tagged/all-tables exports, so the alternative was
+   hand-rolling a zip writer in the browser to avoid a round trip that
+   costs nothing on localhost. The rows go UP rather than the query: a
+   click-sort lives only here, and re-running server-side would quietly
+   hand back a differently ordered file. */
+export async function sqlDownloadXlsx(columns, rows) {
+  const tab = activeSqlTab();
+  const suggested = ((tab && tab.name) || 'query-results').trim();
+  const name = await promptDialog(
+    `Save ${rows.length.toLocaleString()} rows as Excel — file name:`,
+    suggested, { okLabel: 'Save' });
+  if (name == null) return;
+  const clean = (name.trim() || suggested).replace(/[\\/:*?"<>|]/g, '_');
+  const filename = clean.toLowerCase().endsWith('.xlsx') ? clean : clean + '.xlsx';
+  try {
+    const r = await fetch('/api/sql/export_xlsx', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Timeline-Lite-Client': '1' },
+      body: JSON.stringify({ columns, rows, filename, sheet: suggested }),
+    });
+    if (!r.ok) {
+      // The route answers 400 with a reason worth showing (too many rows
+      // for one worksheet); anything else is a status the analyst can quote.
+      let msg = `HTTP ${r.status}`;
+      try { msg = (await r.json()).detail || msg; } catch { /* not JSON */ }
+      throw new Error(msg);
+    }
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(await r.blob());
+    a.download = filename;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  } catch (e) {
+    toast('Could not export: ' + e.message, 6000);
+  }
+}
+
 /* The current result as a CSV download — rows in DISPLAYED order (the
    caller passes them, so a click-sorted view exports as seen). */
 export function sqlResultCsv(columns, rows, filename = 'query-results.csv') {

@@ -11681,9 +11681,9 @@ class Store:
                     continue
                 ws.append([
                     rid,
-                    "; ".join(tmap.get(rid, [])),
-                    _csv_safe(nmap.get(rid, "")),
-                    *[_csv_safe(v) for v in cellmap[rid]],
+                    _xlsx_safe("; ".join(tmap.get(rid, []))),
+                    _xlsx_safe(nmap.get(rid, "")),
+                    *[_xlsx_safe(v) for v in cellmap[rid]],
                 ])
 
         if not wb.sheetnames:
@@ -11788,9 +11788,9 @@ class Store:
                         rid = row[0]
                         ws.append([
                             rid,
-                            "; ".join(tmap.get(rid, [])),
-                            _csv_safe(nmap.get(rid, "")),
-                            *[_csv_safe(v) for v in row[1:]],
+                            _xlsx_safe("; ".join(tmap.get(rid, []))),
+                            _xlsx_safe(nmap.get(rid, "")),
+                            *[_xlsx_safe(v) for v in row[1:]],
                         ])
                         written += 1
                         total_rows += 1
@@ -12956,6 +12956,34 @@ def _csv_safe(v):
     return v
 
 
+# The C0 control characters XML 1.0 cannot encode. openpyxl refuses
+# them — and refuses the whole workbook, with an IllegalCharacterError
+# naming the value but not the row it came from. Tab, newline and
+# carriage return are legal XML and stay as they are.
+_XLSX_ILLEGAL = re.compile(r"[\000-\010\013\014\016-\037]")
+
+
+def _xlsx_safe(v):
+    """_csv_safe, plus the characters a worksheet cannot hold at all.
+
+    Winnow keeps control characters in cell VALUES on purpose — ingest
+    strips them from column names only, because a name has to be
+    quotable while "cells are data and stay as-is". That fidelity is
+    right for the case file and fatal for a worksheet: one BEL inside
+    one command line raised IllegalCharacterError and took the entire
+    export down, which an analyst reads as the feature being broken.
+
+    Escaped rather than dropped. These turn up in exactly the fields
+    worth reading closely — command lines, paths, payloads — and a
+    silently shortened string in an exported artifact is worse than a
+    visible \\x07: the escape says what was there and is reversible,
+    while a strip quietly rewrites evidence.
+    """
+    if isinstance(v, str) and _XLSX_ILLEGAL.search(v):
+        v = _XLSX_ILLEGAL.sub(lambda m: "\\x%02x" % ord(m.group()), v)
+    return _csv_safe(v)
+
+
 def _esc_like(s: str) -> str:
     return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
@@ -12967,6 +12995,31 @@ _XLSX_SHEET_INVALID = re.compile(r"[\\/?*\[\]:]")
 # Module-level so a test can shrink it to prove the continuation-sheet
 # path without writing a million rows; read at call time for that reason.
 XLSX_MAX_ROWS = 1_048_576
+
+
+def rows_to_xlsx(columns: list, rows: list, sheet_name: str = "Query") -> io.BytesIO:
+    """A result set as a one-sheet workbook, in memory.
+
+    A module function rather than a Store method because it touches no
+    database: the SQL pane has already run the query and holds the rows
+    the analyst is looking at, sorted the way they sorted them, so the
+    export is a pure formatting step over what is on screen. Keeping it
+    off Store is also what lets its tests run without a case file.
+    """
+    if len(rows) + 1 > XLSX_MAX_ROWS:
+        raise ValueError(
+            f"{len(rows):,} rows is more than one worksheet holds "
+            f"({XLSX_MAX_ROWS - 1:,}) — narrow the query or save it as a table instead")
+    wb = Workbook()
+    ws = wb.active
+    ws.title = _xlsx_sheet_name(sheet_name, set())
+    ws.append([_xlsx_safe(c) for c in columns])
+    for row in rows:
+        ws.append([_xlsx_safe(v) for v in row])
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
 
 
 def _xlsx_sheet_name(name: str, used: set[str]) -> str:

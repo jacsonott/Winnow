@@ -175,7 +175,21 @@ see [docs/notes/README.md](README.md) for the whole set.
   `_csv_safe()` (OWASP formula-injection prefixing for `=+-@`/tab/CR-leading
   values) since exports are explicitly meant to be opened in Excel and handed
   to other analysts; this only touches the exported copy, never the stored
-  case-file value.
+  case-file value. **Worksheet exports go through `_xlsx_safe()` instead**,
+  which is `_csv_safe` plus the C0 control characters XML 1.0 cannot hold:
+  ingest keeps those in cell values on purpose (names must be quotable,
+  cells are evidence), openpyxl refuses them, and it refuses the whole
+  workbook rather than the one cell — so one BEL in one command line used
+  to take down the entire tagged export. They are escaped to `\x07` rather
+  than dropped, because a silently shortened string in a hand-over artifact
+  is worse than a visible escape.
+- **`POST /api/sql/export_xlsx`** takes the result the pane is SHOWING
+  (columns + rows, up from the client) rather than the query, so the
+  workbook matches the screen including a click-sort — which lives only in
+  the browser — and including the preview cap, so the file cannot disagree
+  with the row count printed above it. `Save as table` remains the one
+  action that re-runs the query in full. Refuses a result taller than one
+  worksheet (`XLSX_MAX_ROWS`) with a 400 rather than writing a bad file.
 - **`POST /api/shutdown`** (the home screen's ⏻ button and Session → "Shut
   down Winnow…") stops the server from the UI — the server usually lives
   in a forgotten terminal, and closing the browser tab leaving it running

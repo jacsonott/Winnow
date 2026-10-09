@@ -44,7 +44,7 @@ from winnow import version
 from winnow import archive
 from winnow import workspace as WS
 from winnow.store import (CASE_SUFFIX, DEFAULT_IMPORT_EXTENSIONS, PLASO_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, MissingTable, OpCancelled, Store, ViewExpired,
-                   describe_case_lock, probe_case_lock, q, sweep_orphan_views)
+                   describe_case_lock, probe_case_lock, q, rows_to_xlsx, sweep_orphan_views)
 
 HERE = paths.INSTALL_ROOT  # static/, plugins/, examples/plugins/ all hang off the install root
 
@@ -4760,6 +4760,40 @@ def api_sql_to_table(body: SqlToTable):
     except sqlite3.Error as e:
         raise HTTPException(400, str(e))
     return res
+
+
+class SqlResultXlsx(BaseModel):
+    """The result the pane is SHOWING, not the query that made it.
+
+    The rows come up from the client rather than being re-queried here so
+    the workbook matches the screen exactly — including a click-sort,
+    which lives only in the browser, and including the preview cap, so
+    the file can never disagree with the row count printed above it. The
+    neighbouring CSV and Copy buttons already work this way; "the whole
+    query, however big" is what Save as table is for."""
+    columns: list[str]
+    rows: list[list]
+    filename: str = "query-results.xlsx"
+    sheet: str = "Query"
+
+
+@app.post("/api/sql/export_xlsx")
+def api_sql_export_xlsx(body: SqlResultXlsx):
+    t0 = time.time()
+    what = f"SQL result ({len(body.rows):,} rows, .xlsx)"
+    wlog.record("info", f"Export started: {what} \u2192 {body.filename}")
+    try:
+        buf = rows_to_xlsx(body.columns, body.rows, body.sheet)
+    except ValueError as e:
+        wlog.record("error", f"Export failed: {what} \u2014 {e}")
+        raise HTTPException(400, str(e))
+    wlog.record("info", f"Export finished: {what} \u2014 {buf.getbuffer().nbytes:,} bytes "
+                        f"in {time.time() - t0:.1f}s")
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{body.filename}"'},
+    )
 
 
 class SaveViewAsTable(BaseModel):
