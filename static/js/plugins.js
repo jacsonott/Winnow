@@ -10,7 +10,7 @@ import { showWatchlistTab } from './watchlist.js';
 import { setColumnFilter, valueFilterText } from './filters.js';
 import { rebuildView } from './view.js';
 import { activeSqlTab, flushSqlTabSave, hideMainViews, loadSqlTabs, newSqlTab, scheduleSqlTabSave, showGridTab, showSqlTab, showTimelineTab, syncTabChrome } from './sql.js';
-import { setActiveSqlResult, sqlCopyResult, sqlDownloadCsv, sqlRowKey, sqlSelectedRows, sqlTagsFor, tagChips, wireSqlAssist } from './sqlassist.js';
+import { setActiveSqlResult, sqlCopyResult, sqlDownloadCsv, sqlDownloadXlsx, sqlRowKey, sqlSelectedRows, sqlTagsFor, tagChips, wireSqlAssist } from './sqlassist.js';
 import { moveCursor } from './grid.js';
 import { loadCaseVariables } from './savedfilters.js';
 import { S } from './state.js';
@@ -967,10 +967,13 @@ export function sqlResultNodes(r) {
   const csvBtn = el('button', 'btn ghost', 'CSV…');
   csvBtn.title = 'Save this result as a CSV file, in the displayed order';
   csvBtn.onclick = () => sqlDownloadCsv(r.columns, sortedRows());
+  const xlsxBtn = el('button', 'btn ghost', 'Excel…');
+  xlsxBtn.title = 'Save this result as an .xlsx workbook, in the displayed order';
+  xlsxBtn.onclick = () => sqlDownloadXlsx(r.columns, sortedRows());
   const saveBtn = el('button', 'btn ghost', 'Save as table…');
   saveBtn.title = "Run the query in FULL (this preview may be truncated) and land the result as a new table in the case";
   saveBtn.onclick = () => saveResultAsTable();
-  acts.append(copyBtn, csvBtn, saveBtn);
+  acts.append(copyBtn, csvBtn, xlsxBtn, saveBtn);
   bar.append(acts);
   return [bar, t];
 }
