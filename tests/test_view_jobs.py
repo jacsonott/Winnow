@@ -135,7 +135,12 @@ def test_polling_a_superseded_job_is_404(client, slow_source):
     store, sid = slow_source
     first = client.post("/api/view/start?wait_ms=50", json=_slow_body(sid, "tok-a")).json()
     assert first["status"] == "running"
-    second = client.post("/api/view/start", json={"source_id": sid,
+    # The second build has to wait for the cancelled regex build to give
+    # the writer lock back first. The default inline wait (250 ms) is less
+    # than that takes on a loaded CI runner, so it came back "running" and
+    # failed intermittently; wait the maximum instead, since this test is
+    # about what superseding does to the first job, not about how fast.
+    second = client.post("/api/view/start?wait_ms=5000", json={"source_id": sid,
                                                   "filters": [{"column": "Name", "op": "contains", "value": "n2"}]}).json()
     assert second["status"] == "done"
     r = client.get(f"/api/view/job?job_id={first['job_id']}")
