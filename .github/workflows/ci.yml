@@ -3,15 +3,25 @@
 # pytest — which, on a repo where changes arrive as whole features, is a lot
 # to leave to memory.
 #
-# Renaming a job here is not cosmetic: the branch ruleset requires these
-# checks *by job name*, so a rename that isn't mirrored there leaves every PR
-# waiting forever on a check that never reports. Change both together.
+# Renaming a job here is not cosmetic: the branch ruleset requires checks
+# *by job name* — `backend + frontend parse` and `browser` — so a rename
+# that isn't mirrored there leaves every PR waiting forever on a check that
+# never reports. Change both together.
 #
-# Two jobs, because they fail for different reasons and cost different
-# amounts: `tests` is the fast one (backend + the static/js parse, ~30s, no
-# browser), `ui` drives a real Chromium and is where the layout/state
-# regressions get caught. Both are required; keep the UI suite deterministic
-# rather than letting it become the check people re-run until it's green.
+# Two suites, because they fail for different reasons and cost different
+# amounts: the backend + static/js parse needs no browser, `tests/ui` drives
+# a real Chromium and is where the layout/state regressions get caught.
+# Both are required; keep the UI suite deterministic rather than letting it
+# become the check people re-run until it's green.
+#
+# Each suite is split across parallel runners with `pytest --shard K/N`
+# (tests/sharding.py: whole files, dealt by test count). Almost all of the
+# UI suite's time is ~800 tests each opening a fresh page, so one runner
+# took ~18 minutes and N take about 1/N of that. The shard jobs are NOT
+# what the ruleset requires — their names carry K/N and change with N.
+# The required names belong to the two small roll-up jobs at the bottom,
+# which pass only when every shard of their suite passed. That is what
+# lets N change here without touching the ruleset.
 name: CI
 
 on:
@@ -31,8 +41,15 @@ concurrency:
 
 jobs:
   tests:
-    name: backend + frontend parse
+    name: backend ${{ matrix.shard }}/${{ strategy.job-total }}
     runs-on: ubuntu-latest
+    strategy:
+      # Let the other shards finish: a failure in one says nothing about
+      # the tests in another, and "Re-run failed jobs" then re-runs only
+      # the shard that failed.
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -44,11 +61,15 @@ jobs:
       # tests/ui is excluded here rather than left to skip on a missing
       # browser: a silent skip in the fast job is how a suite quietly stops
       # running at all.
-      - run: pytest -q --ignore=tests/ui
+      - run: pytest -q --ignore=tests/ui --shard ${{ matrix.shard }}/${{ strategy.job-total }}
 
   ui:
-    name: browser
+    name: browser ${{ matrix.shard }}/${{ strategy.job-total }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -59,8 +80,30 @@ jobs:
       - run: pip install -r requirements-dev.txt
       # --with-deps pulls the shared libraries Chromium needs on a bare
       # runner; without it the browser installs and then fails to launch.
-      - run: playwright install --with-deps chromium
+      # --only-shell: the suite runs headless, which launches the headless
+      # shell; the full Chrome build alongside it is ~190MB nobody uses.
+      - run: playwright install --with-deps --only-shell chromium
       # No artifact upload step: when a UI test fails it's almost always the
       # server behind it, and the conftest fixture already folds the server's
       # stdout into the failure report.
-      - run: pytest -q tests/ui
+      - run: pytest -q tests/ui --shard ${{ matrix.shard }}/${{ strategy.job-total }}
+
+  # The two checks the ruleset requires. `!cancelled()` rather than
+  # `always()` so a run superseded by a newer push stays cancelled, and NOT
+  # left at the default: a job skipped because a shard failed reports as
+  # skipped, and a skipped required check counts as passing.
+  backend-result:
+    name: backend + frontend parse
+    needs: tests
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.tests.result }}" = success
+
+  ui-result:
+    name: browser
+    needs: ui
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.ui.result }}" = success

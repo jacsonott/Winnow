@@ -632,6 +632,18 @@ lot to leave to memory.
   which is why the fast job `--ignore=tests/ui` explicitly and a second job
   installs the browser. Marker: `-m ui` / `-m "not ui"`.
 
+**CI runs each suite in shards.** `pytest --shard K/N` (tests/sharding.py)
+keeps whole files, dealt by test count, and ci.yml runs that as a matrix —
+six browser jobs, two backend. The checks the branch ruleset requires are
+the two roll-up jobs at the bottom of ci.yml, not the shards, so N can
+change without touching the ruleset. One consequence for `tests/ui`: each
+shard starts its own server, so any module can be the first thing a cold
+server sees. A test that only passes because an earlier module warmed
+something up (a plugin's routes, a cache) fails in whichever shard it
+leads. Wait for what you assert on (`wait_for_selector`,
+`wait_for_function`) rather than looking once with `is_visible()` right
+after waiting on something else — test_firstlast_state.py had exactly that.
+
 Run it with:
 
 ```
