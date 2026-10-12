@@ -120,3 +120,34 @@ def client(store, monkeypatch):
     opened = server.STORE
     if opened is not None and opened is not store:
         opened.close()
+
+
+# `--shard K/N` — how CI splits a suite across runners. See tests/sharding.py.
+def pytest_addoption(parser):
+    parser.addoption("--shard", metavar="K/N", default=None,
+                     help="run only the K-th of N slices of the collected tests, "
+                          "split by file (see tests/sharding.py)")
+
+
+# trylast: slice what -k/-m left behind, not what they are about to remove.
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(config, items):
+    spec = config.getoption("--shard")
+    if not spec:
+        return
+    import sharding
+
+    try:
+        k, n = sharding.parse(spec)
+    except ValueError as e:
+        raise pytest.UsageError(str(e)) from None
+    sizes: dict[str, int] = {}
+    for item in items:
+        path = item.nodeid.split("::", 1)[0]
+        sizes[path] = sizes.get(path, 0) + 1
+    owner = sharding.deal(sizes, n)
+    keep = [it for it in items if owner[it.nodeid.split("::", 1)[0]] == k - 1]
+    if len(keep) < len(items):
+        kept = set(map(id, keep))
+        config.hook.pytest_deselected(items=[it for it in items if id(it) not in kept])
+        items[:] = keep
