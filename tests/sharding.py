@@ -16,8 +16,12 @@ Files are dealt heaviest first, each to whichever slice is lightest so far
 (greedy longest-processing-time), weighed by test count. Counting tests
 rather than reading recorded durations is deliberate: a durations file goes
 stale with every test added, and the UI tests are close enough to one
-another in cost — nearly all of each one is opening the page — that the
-count lands within seconds of a split by measured time.
+another in cost — most of each one is opening the page — that the count
+does well enough. Measured on CI when this went in: six UI shards ran
+157-200s of pytest against an even split of 177s. The backend suite is
+lumpier (four tests in test_view_jobs.py are ~105s of its ~270s), so its
+two shards balance by luck more than design; if one runs long, that file
+is why.
 
 A file's slice depends only on what was collected, so every runner on a
 given commit agrees on the split without talking to the others, and a

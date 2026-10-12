@@ -61,7 +61,7 @@ jobs:
       # tests/ui is excluded here rather than left to skip on a missing
       # browser: a silent skip in the fast job is how a suite quietly stops
       # running at all.
-      - run: pytest -q --ignore=tests/ui --shard ${{ matrix.shard }}/${{ strategy.job-total }} --durations=30
+      - run: pytest -q --ignore=tests/ui --shard ${{ matrix.shard }}/${{ strategy.job-total }}
 
   ui:
     name: browser ${{ matrix.shard }}/${{ strategy.job-total }}
@@ -86,7 +86,7 @@ jobs:
       # No artifact upload step: when a UI test fails it's almost always the
       # server behind it, and the conftest fixture already folds the server's
       # stdout into the failure report.
-      - run: pytest -q tests/ui --shard ${{ matrix.shard }}/${{ strategy.job-total }} --durations=30
+      - run: pytest -q tests/ui --shard ${{ matrix.shard }}/${{ strategy.job-total }}
 
   # The two checks the ruleset requires. `!cancelled()` rather than
   # `always()` so a run superseded by a newer push stays cancelled, and NOT

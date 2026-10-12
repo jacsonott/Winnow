@@ -374,7 +374,12 @@ def test_a_read_that_failed_is_not_mistaken_for_nothing_saved(fl_page, server):
                              timeout=10_000)
         _open_tab(pg)
 
-        # It says so rather than looking like an ordinary empty tab.
+        # It says so rather than looking like an ordinary empty tab. Waited
+        # for, not looked at once: mount() draws the drop zones _open_tab
+        # waits on before it has awaited /meta and the failed read, and the
+        # banner only follows those. On a server whose first_last routes are
+        # still cold (this module first in its CI shard) the look came first.
+        pg.wait_for_selector(".pluginview .fl-state-unread", timeout=10_000)
         unread = pg.locator(".pluginview .fl-state-unread")
         assert unread.is_visible()
         assert "Could not read" in unread.inner_text()
