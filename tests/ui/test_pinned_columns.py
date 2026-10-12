@@ -18,10 +18,19 @@ def _widen(page):
     600px, not 300: the fixture has five columns and the viewport is 1500,
     so 300 leaves about 100px of scroll range and two different scroll
     targets both clamp to the same place — which silently made a
-    "did it move?" assertion compare a value with itself."""
+    "did it move?" assertion compare a value with itself.
+
+    What it changed is remembered for _unpin_all to put back: "without
+    saving" stops being true the moment anything saves the layout — a pin
+    does, and so does _unpin_all — and a shared case left with every
+    column 600px wide pushed test_space_over_a_cell_range's drag target
+    off the right edge of the viewport whenever the two shared a server."""
     page.evaluate("""() => {
+      window.__preWiden = {};
       for (const c of __winnow.S.columns) {
-        __winnow.S.layout[c.name] = { ...(__winnow.S.layout[c.name] || {}), hidden: false, w: 600 };
+        const was = __winnow.S.layout[c.name];
+        window.__preWiden[c.name] = was ? { has: true, w: was.w, hidden: was.hidden } : { has: false };
+        __winnow.S.layout[c.name] = { ...(was || {}), hidden: false, w: 600 };
       }
       __winnow.renderHead(); __winnow.render();
     }""")
@@ -32,8 +41,18 @@ def _unpin_all(page):
     """Clear pins AND persist the clearing. Pinning is a layout property
     saved server-side, and the UI suite shares one case file — an in-memory
     reset would be undone by the next test's page reloading the layout,
-    which is what made these pass alone and fail together."""
+    which is what made these pass alone and fail together. Puts back the
+    widths _widen changed before it saves, for the same reason."""
     page.evaluate("""() => {
+      for (const [name, was] of Object.entries(window.__preWiden || {})) {
+        const cur = __winnow.S.layout[name];
+        if (!cur) continue;
+        for (const key of ['w', 'hidden']) {
+          if (was.has && was[key] !== undefined) cur[key] = was[key];
+          else delete cur[key];
+        }
+      }
+      window.__preWiden = null;
       for (const k of Object.keys(__winnow.S.layout)) {
         if (__winnow.S.layout[k].pinned) __winnow.S.layout[k].pinned = false;
       }

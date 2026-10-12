@@ -128,11 +128,14 @@ def test_columns_keep_their_width_while_scrolling(page):
 
 def test_copy_takes_every_row(page):
     _run(page, _count(7_000))
+    # The clipboard outlives the browser context, so whatever an earlier
+    # test copied is still there: wait for it to CHANGE, not to be non-empty.
+    page.evaluate("() => navigator.clipboard.writeText('-')")
     page.locator(".sql-result-actions .btn", has_text="Copy").click()
-    text = ""
+    text = "-"
     for _ in range(50):   # polled with evaluate, which awaits — see test_ui_test_hygiene
         text = page.evaluate("() => navigator.clipboard.readText()")
-        if text:
+        if text != "-":
             break
         page.wait_for_timeout(100)
     lines = text.split("\n")
