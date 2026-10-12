@@ -317,6 +317,13 @@ static/style.css   Token-driven theming: 6 styles (panel/phosphor/blueprint/
                     named face (Segoe UI, already on every Windows box, so
                     still no web font); --mono is untouched there, so the
                     grid keeps the column alignment it is built on.
+                    Its grid is also drawn like the SQL pane's result
+                    table (ruled in --line, a closed box, a mixed-case
+                    mono header) — the only skin that restyles the grid
+                    rather than just recolouring it; the rules are scoped
+                    to html[data-style="jenna"] because .row/.cell/.hcell
+                    are shared, and tests/ui/test_jenna_grid.py holds
+                    both the look and the scoping.
                     tests/ui/test_skin_tokens.py holds every skin to the
                     same token list in both themes.
                     Harvest's dark is the loading screen's own palette

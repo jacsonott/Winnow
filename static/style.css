@@ -2543,6 +2543,38 @@ html[data-style="jenna"] .tab[aria-selected="true"] {
 }
 html[data-style="jenna"] .btn:hover { background: var(--panel-3); }
 html[data-style="jenna"] .row.selected { box-shadow: inset 2px 0 0 var(--accent); }
+/* Jenna's grid is drawn like the SQL pane's result table (.sql-result),
+   which is what it was asked to resemble. Three things make that table
+   read as ruled, and the rule colour is the weakest of them: on #1e1e1e
+   the --border-hairline the grid normally uses (#333337) all but
+   disappears, but swapping it for --line alone barely shows. It takes
+   the closed box (a left edge on the gutter, a top and bottom rule on the
+   header) and the header set the way the SQL table sets it: --panel-2,
+   mono, mixed case. Mixed-case mono also fits more of a column name in the
+   same width than letter-spaced uppercase, so fewer headers truncate.
+   Row height is deliberately not here: --row-h is written inline on
+   <html> by the density setting and ROW_H drives the virtual scroller's
+   arithmetic, so a skin cannot change it without desyncing the two. */
+html[data-style="jenna"] .row { border-bottom-color: var(--line); }
+html[data-style="jenna"] .cell { border-right-color: var(--line); }
+html[data-style="jenna"] .gutter,
+html[data-style="jenna"] .gutter-head,
+html[data-style="jenna"] .gutter-filter { border-left: 1px solid var(--line); }
+html[data-style="jenna"] .grid-head {
+  background: var(--panel-2);
+  border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
+}
+html[data-style="jenna"] .hcell {
+  text-transform: none; letter-spacing: 0;
+  font-family: var(--mono); font-size: 12px; padding: 3px 8px;
+}
+/* The sticky header pieces paint their own background so scrolled-under
+   cells never show through; they follow the header band to --panel-2. */
+html[data-style="jenna"] .gutter-head,
+html[data-style="jenna"] .gutter-head:hover,
+html[data-style="jenna"] .gutter-filter,
+html[data-style="jenna"] .fcell.pinned { background: var(--panel-2); }
+html[data-style="jenna"] .gutter-head .label { text-transform: none; letter-spacing: 0; font-family: var(--mono); font-size: 12px; }
 html[data-style="phosphor"] .detail-head, html[data-style="phosphor"] .sql-head, html[data-style="phosphor"] .modal-head { color: var(--accent); text-shadow: var(--glow); }
 html[data-style="phosphor"][data-theme="dark"] body::after {
   content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 9998;
