@@ -505,6 +505,38 @@ see [docs/notes/README.md](README.md) for the whole set.
   `code` colour — the global `code` rule is accent-on-panel, which on that
   bar is the bar's own colour. `tests/ui/test_sql_pane_welcome.py` pins
   all of it.
+- **The SQL result is uncapped and virtualized, with its actions pinned**
+  (`sqlResultNodes` in plugins.js). `/api/sql` used to stop at 5,000 rows,
+  and since Copy / CSV / Excel export the rows the pane HOLDS, every export
+  of a bigger answer was cut at 5,000 too, with only "· truncated" in the
+  status to say so. The route's `limit` now defaults to none (`run_sql`
+  keeps its 5000 default for Python callers, and `winnow.api.sql` still
+  sends one), and returns a `JSONResponse` directly — FastAPI's per-cell
+  `jsonable_encoder` walk was most of the time on a large result. A
+  result can now be millions of rows, so the table is built like the
+  grid: only the window in view plus `OVERSCAN` is in the DOM, between a
+  top and a bottom spacer row, through the grid's own
+  `spacerPx`/`vScroll`/`rowsPaintY` (which grew a `rowH` argument) so the
+  tail stays reachable past `MAX_SPACER_PX` — without that a 2M-row result
+  stops at row ~1.68M. Things that bite: **rows must be one height**
+  (`.sql-result td` has a px line-height, the tag chips fit inside it) or
+  the window drifts; **a zero-height spacer is left out**, so a short
+  result is the plain table the older UI tests address by `tr` index;
+  **column widths come from every row up front** (set as the header
+  cell's `width`, which auto layout treats as a minimum), or auto layout
+  sizes columns to whichever rows are painted and they jump as you
+  scroll; **a row click marks the selection in place** rather than
+  repainting, because a double-click's second click would otherwise
+  replace the row under the pointer and hand the `dblclick` to a detached
+  node that never bubbles to `tbody`'s handler. Sort and scroll position
+  live on the result (`r.pane`), since every return to the page rebuilds
+  the nodes (`showSqlTab` → `applySqlTabToEditor`). The result bar sits
+  OUTSIDE `.sql-result-scroll`, which is the whole of "pin the export
+  options": it used to scroll away with the rows. `sqlTagsFor` asks for a
+  table's rid RANGE past `TAGS_IN_MAX` rids rather than giving up, and
+  drops the range's rows the result doesn't hold. Excel spills a result
+  past one worksheet onto "Query (2)"… (`rows_to_xlsx`, write-only).
+  `tests/ui/test_sql_result_uncapped.py`.
 - **The 2026-08 navigation batch** — five smaller features, and the traps
   each one carries:
   - **"Open filter in SQL pane"** (`Store.spec_sql`, `POST /api/view/sql`,

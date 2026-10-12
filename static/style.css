@@ -1516,7 +1516,7 @@ textarea:focus { border-color: var(--accent); outline: none; }
    sentence; this makes it a row with the same button grouping as the
    toolbar above the editor. */
 .sql-result-bar {
-  display: flex; align-items: center; gap: 12px;
+  flex: 0 0 auto; display: flex; align-items: center; gap: 12px;
   padding: 4px 2px 6px; border-bottom: 1px solid var(--line);
   margin-bottom: 6px;
 }
@@ -1552,16 +1552,30 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .sql-tab.dragging { opacity: .4; }
 .sql-tab.drop-before { box-shadow: inset 2px 0 0 var(--accent); }
 .sql-tab.drop-after { box-shadow: inset -2px 0 0 var(--accent); }
-.sql-result { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 0 8px 8px; }
+/* A column: the result bar, then the table's own scroller under it. The
+   bar used to scroll away with the rows, so Copy / CSV / Excel / Save as
+   table were gone the moment the analyst scrolled into a result; it now
+   sits outside .sql-result-scroll and stays put both ways. .sql-result
+   keeps overflow:auto for what has no scroller of its own (the welcome
+   block, an error). overflow-anchor:none because the table is virtualized
+   (sqlResultNodes) — scroll anchoring would chase the spacer row as it
+   resizes and nudge scrollTop on every repaint. */
+.sql-result { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 0 8px 8px; display: flex; flex-direction: column; }
+.sql-result-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; overflow-anchor: none; }
 /* border-collapse:separate, not collapse: collapsed borders belong to the
    TABLE and stay put while a sticky th scrolls, which is exactly the
    "rows showing through the header" artifact — and the th needs a
    z-index so cell content can never paint over it. */
 .sql-result table { border-collapse: separate; border-spacing: 0; font-family: var(--mono); font-size: 12px; }
+/* A px line-height, so every row is exactly SQL_ROW_H (plugins.js):
+   15 + 2×2 padding + 1 border. The virtualized window counts rows by
+   height, and a row that grew would push everything under it off by that
+   much. */
 .sql-result th, .sql-result td {
   border-right: 1px solid var(--line); border-bottom: 1px solid var(--line);
-  padding: 2px 8px; text-align: left; white-space: nowrap;
+  padding: 2px 8px; text-align: left; white-space: nowrap; line-height: 15px;
 }
+.sql-result tr.sql-spacer td { padding: 0; border: 0; }
 .sql-result th { background: var(--panel-2); color: var(--dim); position: sticky; top: 0; z-index: 2; border-top: 1px solid var(--line); }
 .sql-result th:first-child, .sql-result td:first-child { border-left: 1px solid var(--line); }
 .sql-result tr.sql-row-sel td { background: var(--row-selected); }
@@ -2675,9 +2689,11 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 .sql-ac .menu-item { display: flex; justify-content: space-between; gap: 12px; font-family: var(--mono); font-size: 12px; }
 .sql-ac-active { background: var(--panel-2); box-shadow: inset 2px 0 0 var(--accent); }
 .sql-th-sort { cursor: pointer; user-select: none; }
-.sql-tag-cell { display: inline-flex; gap: 4px; }
+/* Sized to sit inside the result row's 15px line box (see .sql-result td)
+   rather than stretching the row it is in. */
+.sql-tag-cell { display: inline-flex; gap: 4px; vertical-align: top; }
 .sql-tag-chip {
-  font-size: 10px; padding: 1px 6px; border-radius: var(--radius-sm);
+  font-size: 10px; line-height: 13px; padding: 1px 6px; border-radius: var(--radius-sm);
   color: #fff; white-space: nowrap;
 }
 

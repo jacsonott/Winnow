@@ -12905,8 +12905,14 @@ class Store:
                                                for v in t[1:])
         return out
 
-    def run_sql(self, sql: str, limit: int = 5000) -> dict:
+    def run_sql(self, sql: str, limit: int | None = 5000) -> dict:
         """Read-only ad-hoc query against the case file.
+
+        `limit=None` returns every row — what the SQL pane asks for, since
+        its Copy/CSV/Excel exports are taken from the rows it holds and a
+        cap there silently cut every export short. Python callers (plugins,
+        dashboards) keep the 5000 default: they pass a limit sized to what
+        they draw.
 
         This intentionally allows arbitrary SELECT/EXPLAIN — that's the
         point of the pane — unlike validate_where_fragment's tight allowlist
@@ -12926,13 +12932,17 @@ class Store:
         ro = self._pane_connection()
         try:
             t0 = time.time()
-            cur = ro.execute(sql)
-            rows = cur.fetchmany(limit)
+            # Plain tuples, not the connection's sqlite3.Row: on an uncapped
+            # result the per-cell Row indexing was the slow part.
+            cur = ro.cursor()
+            cur.row_factory = None
+            cur.execute(sql)
+            rows = cur.fetchall() if limit is None else cur.fetchmany(limit)
             cols = [d[0] for d in cur.description] if cur.description else []
             return {
                 "columns": cols,
-                "rows": [[r[i] for i in range(len(cols))] for r in rows],
-                "truncated": len(rows) == limit,
+                "rows": [list(r) for r in rows],
+                "truncated": limit is not None and len(rows) == limit,
                 "elapsed_ms": int((time.time() - t0) * 1000),
             }
         finally:
@@ -13005,17 +13015,28 @@ def rows_to_xlsx(columns: list, rows: list, sheet_name: str = "Query") -> io.Byt
     the analyst is looking at, sorted the way they sorted them, so the
     export is a pure formatting step over what is on screen. Keeping it
     off Store is also what lets its tests run without a case file.
+
+    The pane no longer caps a result, so one can be past Excel's
+    per-sheet limit: it continues on "Query (2)", "Query (3)"…, header
+    re-emitted, the way export_all_xlsx does — every row lands rather
+    than the export being refused. Write-only for the same reason that
+    one is: a million rows as openpyxl cell objects is gigabytes.
     """
-    if len(rows) + 1 > XLSX_MAX_ROWS:
-        raise ValueError(
-            f"{len(rows):,} rows is more than one worksheet holds "
-            f"({XLSX_MAX_ROWS - 1:,}) — narrow the query or save it as a table instead")
-    wb = Workbook()
-    ws = wb.active
-    ws.title = _xlsx_sheet_name(sheet_name, set())
-    ws.append([_xlsx_safe(c) for c in columns])
-    for row in rows:
-        ws.append([_xlsx_safe(v) for v in row])
+    per = XLSX_MAX_ROWS - 1   # one row is the header
+    header = [_xlsx_safe(c) for c in columns]
+    used: set[str] = set()
+    first = _xlsx_sheet_name(sheet_name, used)
+    wb = Workbook(write_only=True)
+    for part, start in enumerate(range(0, max(len(rows), 1), per), 1):
+        if part == 1:
+            title = first
+        else:
+            suffix = f" ({part})"
+            title = _xlsx_sheet_name(first[: 31 - len(suffix)] + suffix, used)
+        ws = wb.create_sheet(title)
+        ws.append(header)
+        for row in rows[start:start + per]:
+            ws.append([_xlsx_safe(v) for v in row])
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)

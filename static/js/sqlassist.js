@@ -312,10 +312,19 @@ export function sqlRowKey(ref, row) {
   return Number.isInteger(sid) && Number.isInteger(rid) ? `${sid}:${rid}` : null;
 }
 
+/* Past this many rids from one table, sqlTagsFor asks for their range. */
+export const TAGS_IN_MAX = 5000;
+
 /* A Tags column for a resolvable result — fetched as a second ordinary
-   read-only query against row_tags, same trust and cap as the query it
-   decorates. Returns {ref, map, sel}: tag ids keyed by "sid:rid", plus
-   the (initially empty) selection the pane's click handlers maintain. */
+   read-only query against row_tags, same trust as the query it decorates.
+   Returns {ref, map, sel}: tag ids keyed by "sid:rid", plus the
+   (initially empty) selection the pane's click handlers maintain.
+
+   The result is no longer capped, so neither is this: a table's rids go
+   up as an IN list while that stays a sensible statement, and past
+   TAGS_IN_MAX as the rid range they span — that answer is bounded by how
+   many rows in the range are TAGGED, not by how many there are, and the
+   ones the result doesn't hold are dropped on the way in. */
 export async function sqlTagsFor(r, sql) {
   const ref = sqlRowRef(r, sql);
   if (!ref) return null;
@@ -327,10 +336,14 @@ export async function sqlTagsFor(r, sql) {
     if (!bySid.has(sid)) bySid.set(sid, new Set());
     bySid.get(sid).add(rid);
   }
-  const total = [...bySid.values()].reduce((n, x) => n + x.size, 0);
-  if (!total || total > 5000) return null;
+  if (!bySid.size) return null;
   const clause = [...bySid.entries()]
-    .map(([sid, rids]) => `(source_id=${sid} AND rid IN (${[...rids].join(',')}))`)
+    .map(([sid, rids]) => {
+      if (rids.size <= TAGS_IN_MAX) return `(source_id=${sid} AND rid IN (${[...rids].join(',')}))`;
+      let lo = Infinity, hi = -Infinity;
+      for (const x of rids) { if (x < lo) lo = x; if (x > hi) hi = x; }
+      return `(source_id=${sid} AND rid BETWEEN ${lo} AND ${hi})`;
+    })
     .join(' OR ');
   try {
     const res = await post('/api/sql', {
@@ -338,6 +351,7 @@ export async function sqlTagsFor(r, sql) {
     });
     const map = {};
     for (const [sid, rid, t] of res.rows) {
+      if (!bySid.get(sid)?.has(rid)) continue;
       map[`${sid}:${rid}`] = String(t == null ? '' : t).split(',').filter(Boolean).map(Number);
     }
     return { ref, map, sel: new Set() };
@@ -518,7 +532,10 @@ export async function sqlTagHotkey(tag, repaint) {
   // paths make.
   clearRowCaches();
   regroupIfGroupedByTag();
-  if (repaint) repaint();
+  // In place when the pane can: rebuilding the result from scratch would
+  // re-measure every column of a possibly huge result for one tag.
+  if (r.tags.repaint) r.tags.repaint();
+  else if (repaint) repaint();
 }
 
 export function tagChips(tagIds) {

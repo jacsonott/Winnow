@@ -822,7 +822,10 @@ const off2 = winnow.notesPage.onChange(({ text }) => …);
 what "put this query in the editor" means, and the tab autosaves it as
 if typed. Use `newTab` when the analyst's own query should survive.
 `run()` paints the result in the pane whether or not the page is
-showing; call `show()` first if they should see it. Both `onRun` and
+showing; call `show()` first if they should see it. The pane has no row
+cap, so `run()`/`result()` hold *every* row the query returned — count
+or slice them before shipping them anywhere (`winnow.api.sql` still
+takes a `limit`). Both `onRun` and
 `onChange` return an unsubscribe and are cut with your mount.
 
 The `claude_assistant/` example's **Copilot** is the worked example: a

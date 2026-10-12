@@ -603,7 +603,10 @@ class SavedViewWrite(BaseModel):
 
 class SqlQuery(BaseModel):
     sql: str
-    limit: int = 5000
+    # None = every row. The pane sends none: its exports are taken from the
+    # rows it holds, so a cap here cut every Copy/CSV/Excel short.
+    # winnow.api.sql (plugins) still sends its own.
+    limit: int | None = None
 
 
 class IngestPath(BaseModel):
@@ -4767,10 +4770,11 @@ class SqlResultXlsx(BaseModel):
 
     The rows come up from the client rather than being re-queried here so
     the workbook matches the screen exactly — including a click-sort,
-    which lives only in the browser, and including the preview cap, so
-    the file can never disagree with the row count printed above it. The
-    neighbouring CSV and Copy buttons already work this way; "the whole
-    query, however big" is what Save as table is for."""
+    which lives only in the browser — and can never disagree with the row
+    count printed above it. The neighbouring CSV and Copy buttons work the
+    same way. The pane holds every row of the result (no preview cap since
+    it was lifted), so this is every row too, spilling past one worksheet
+    onto "Query (2)"… as rows_to_xlsx describes."""
     columns: list[str]
     rows: list[list]
     filename: str = "query-results.xlsx"
@@ -4982,9 +4986,16 @@ def api_search_all_cancel(job_id: int | None = None):
 @app.post("/api/sql")
 def api_sql(body: SqlQuery):
     try:
-        return store().run_sql(body.sql, body.limit)
+        res = store().run_sql(body.sql, body.limit)
     except Exception as e:
         raise HTTPException(400, str(e))
+    # Straight to json.dumps, as api_rows does: with no row cap, FastAPI's
+    # per-cell jsonable_encoder walk is most of the response time. A result
+    # json.dumps can't take as-is (a BLOB) still goes the encoder's way.
+    try:
+        return JSONResponse(res)
+    except (TypeError, ValueError):
+        return res
 
 
 class SqlTabCreate(BaseModel):

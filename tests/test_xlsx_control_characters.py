@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import io
 
-import pytest
 from openpyxl import load_workbook
 
 from winnow.store import XLSX_MAX_ROWS, _xlsx_safe, rows_to_xlsx
@@ -84,13 +83,28 @@ def test_a_sheet_name_excel_would_refuse_is_cleaned():
     assert len(ws.title) <= 31
 
 
-def test_more_rows_than_a_worksheet_holds_is_refused_with_a_reason(monkeypatch):
-    """Refused up front rather than written as a corrupt file. Shrink the
-    cap rather than build a million rows."""
-    monkeypatch.setattr("winnow.store.XLSX_MAX_ROWS", 5)
-    with pytest.raises(ValueError, match="more than one worksheet holds"):
-        rows_to_xlsx(["a"], [[i] for i in range(5)])
+def test_more_rows_than_a_worksheet_holds_continue_on_the_next_sheet(monkeypatch):
+    """The SQL pane no longer caps a result, so a result past Excel's
+    per-sheet limit is reachable from the Excel button. Every row lands:
+    the overflow continues on "Name (2)", header repeated, in order.
+    Shrink the cap rather than build a million rows."""
+    monkeypatch.setattr("winnow.store.XLSX_MAX_ROWS", 5)   # 4 data rows per sheet
+    buf = rows_to_xlsx(["a"], [[i] for i in range(10)], "Logons")
+    wb = load_workbook(io.BytesIO(buf.read()))
+    assert wb.sheetnames == ["Logons", "Logons (2)", "Logons (3)"]
+    got = []
+    for ws in wb.worksheets:
+        values = [r[0] for r in ws.iter_rows(values_only=True)]
+        assert values[0] == "a", "each continuation repeats the header"
+        got += values[1:]
+    assert got == list(range(10)), "every row, once, in order"
     assert XLSX_MAX_ROWS == 1_048_576, "the real cap is Excel's, not the test's"
+
+
+def test_an_empty_result_is_still_a_workbook_with_its_header():
+    wb = load_workbook(io.BytesIO(rows_to_xlsx(["a", "b"], []).read()))
+    assert wb.sheetnames == ["Query"]
+    assert [c.value for c in wb.active[1]] == ["a", "b"]
 
 
 # --------------------------------------------- the exports that crashed
@@ -151,8 +165,10 @@ def test_the_route_escapes_rather_than_500s(client):
     assert "\\x07" in ws.cell(row=2, column=1).value
 
 
-def test_the_route_refuses_an_oversized_result(client, monkeypatch):
+def test_the_route_spills_an_oversized_result_onto_more_sheets(client, monkeypatch):
     monkeypatch.setattr("winnow.store.XLSX_MAX_ROWS", 3)
     r = client.post("/api/sql/export_xlsx", json={"columns": ["a"], "rows": [[1], [2], [3]]})
-    assert r.status_code == 400
-    assert "worksheet" in r.json()["detail"]
+    assert r.status_code == 200
+    wb = load_workbook(io.BytesIO(r.content))
+    assert wb.sheetnames == ["Query", "Query (2)"]
+    assert [c.value for c in wb["Query (2)"]["A"]] == ["a", 3]
