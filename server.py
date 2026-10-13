@@ -22,6 +22,7 @@ import socket
 import sqlite3
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -311,7 +312,20 @@ def _reload_plugins() -> None:
     via the enabled list). Cheap enough (a directory listing plus importing
     whatever's enabled) that toggles, installs and case switches just call
     it — no server restart involved. Case switches MUST call it: "a
-    disabled plugin's code never runs" is a per-case statement now."""
+    disabled plugin's code never runs" is a per-case statement now.
+
+    Serialised as a whole, not just the load inside it: the policy is
+    read from whatever case is open NOW, so a toggle's reload that read
+    case A, then lost the race to a case switch's reload that read case
+    B, would finish last and leave B running A's plugin set."""
+    with _PLUGIN_RELOAD_LOCK:
+        _reload_plugins_locked()
+
+
+_PLUGIN_RELOAD_LOCK = threading.Lock()
+
+
+def _reload_plugins_locked() -> None:
     overrides = _case_plugin_overrides()
 
     def enabled_for(fs_name: str, directory: str) -> bool:
