@@ -360,6 +360,30 @@ def test_expand_the_untagged_group(store, write_csv):
     assert [r["rid"] for r in store.fetch_rows(exp["view_id"], 0, 20)["rows"]] == [5, 6, 7, 8, 9, 10]
 
 
+def test_tagging_inside_the_untagged_group_does_not_skip_its_next_page(store, write_csv):
+    """The analyst's own loop: expand "untagged", tag what they're looking
+    at, scroll on. A small tag group used to page virtually, re-running
+    its row_tags predicate on every fetch against a row_count fixed at
+    expansion — so the row just tagged left the group, every later row
+    moved up one position, and the next page started one row too far on.
+    Rid 8 below was never shown at all. Same for a tag level in a nested
+    path."""
+    source_id, alpha, beta = _tagged_fixture(store, write_csv)
+    view = store.build_view(source_id, {"source_id": source_id, "filters": [], "sort": []})
+
+    untagged = store.expand_group(view["view_id"], TAG_GROUP_COLUMN, None)
+    assert [r["rid"] for r in store.fetch_rows(untagged["view_id"], 0, 3)["rows"]] == [5, 6, 7]
+    store.set_tags(source_id, [6], alpha["id"], True)
+    assert [r["rid"] for r in store.fetch_rows(untagged["view_id"], 3, 3)["rows"]] == [8, 9, 10]
+
+    # Untagged H1 is rids 8 and 10 now that 6 carries Alpha.
+    path = [{"column": TAG_GROUP_COLUMN, "value": None}]
+    nested = store.expand_group(view["view_id"], "Host", "H1", path=path)
+    assert [r["rid"] for r in store.fetch_rows(nested["view_id"], 0, 1)["rows"]] == [8]
+    store.set_tags(source_id, [8], beta["id"], True)
+    assert [r["rid"] for r in store.fetch_rows(nested["view_id"], 1, 1)["rows"]] == [10]
+
+
 def test_tag_a_tag_group_both_directions(store, write_csv):
     """Tagging/untagging a tag group reads row_tags in the subquery and
     writes row_tags in the same statement — the shape most likely to be

@@ -185,7 +185,13 @@ see [docs/notes/README.md](README.md) for the whole set.
   view and stayed correct), so the grid asked for `row_count` rows and got
   the first `row_count` of a longer, unfiltered list — and tag/export on the
   group read the same way, which made it an over-tagging bug and not just a
-  display one.
+  display one. **Nor to a group with a tag level anywhere in it** (the
+  group itself, or its nested path): the virtual predicate is re-run on
+  every page fetch while `row_count` is fixed at expansion, and tags —
+  unlike column values — change under the group, typically by the analyst
+  tagging the row they are looking at in "untagged". The membership then
+  shrinks under the next page's offset and a row is skipped without ever
+  being shown. Materialising snapshots it, as a tag *filter* already does.
 - **The tag filter is a UNION, compiled part by part.** `spec.tags` may
   hold tag ids, `__any__`, `__none__`, or a mix; each part compiles on
   its own and the parts are OR'd. It used to compare the whole list

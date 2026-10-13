@@ -7123,7 +7123,18 @@ class Store:
         # over-tagging bug too, not just a display one.
         covers_source = self._grouping_covers_whole_source(root, src)
         is_merge = bool(src.get("is_merge"))
-        if is_merge or not covers_source or total > self.GROUP_MATERIALIZE_THRESHOLD:
+        # A tag level is the other thing the fast path can't hold still.
+        # Its predicate is re-run against row_tags on every page fetch,
+        # while row_count was fixed here — so tagging a row inside the
+        # expanded "untagged" group shrank the membership under the next
+        # page's offset and the grid skipped a row it never showed. Column
+        # values are source data and never change (invariant #1); tags do,
+        # constantly, and in exactly this view. Materialising snapshots
+        # membership the way a tag *filter* already does.
+        by_tag_anywhere = by_tag or any(
+            isinstance(p, dict) and p.get("column") == TAG_GROUP_COLUMN for p in (path or []))
+        if (is_merge or not covers_source or by_tag_anywhere
+                or total > self.GROUP_MATERIALIZE_THRESHOLD):
             vid = self._next_view_id()
             branches = []
             params: list[Any] = []
