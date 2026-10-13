@@ -847,6 +847,11 @@ TAG_GROUP_COLUMN = "__tag__"
 LINE_SORT_COLUMN = "__line__"
 RESERVED_COLUMN_NAMES = {"rid", "rank", "rowid", TAG_GROUP_COLUMN, LINE_SORT_COLUMN}
 
+# A derived column on a merge is one definition per member; the merge
+# reports the least finished of them (_merge_columns). Anything unknown
+# outranks them all, so it is shown rather than hidden behind 'ready'.
+_DERIVED_STATUS_RANK = {"ready": 0, "partial": 1, "error": 2, "building": 3}
+
 # sources.origin values for tables that were not imported from a file.
 # NULL is an import; these two are derived from what is already in the case.
 SQL_ORIGIN = "sql"          # sql_to_table — origin_meta = {sql}
@@ -5679,10 +5684,29 @@ class Store:
                 "(names that differ only in a non-ASCII letter's case, such as Ö and ö, are two "
                 "different columns to it). Delete the merge; its tables are unaffected.")
         first = members[0]["columns"]
-        return ([c for c in first if not c.get("derived")]
-                + [c for c in first if c.get("derived")
-                   and all(any(mc.get("derived") and _ascii_fold(mc["name"]) == _ascii_fold(c["name"])
-                               for mc in m["columns"]) for m in members[1:])])
+        out = [c for c in first if not c.get("derived")]
+        for c in first:
+            if not c.get("derived"):
+                continue
+            twins = [next((mc for mc in m["columns"] if mc.get("derived")
+                           and _ascii_fold(mc["name"]) == _ascii_fold(c["name"])), None)
+                     for m in members[1:]]
+            if any(t is None for t in twins):
+                continue
+            # One column over every member, so it says what all of them
+            # hold: still building if any member is (a re-derive on the
+            # merge runs a job per member), and the failures summed — the
+            # "Show N unparsed rows" filter it offers matches rows in every
+            # member. The id stays the first member's; the remove and
+            # re-derive routes take the merge's id beside it and act on
+            # every member's definition (_derived_scope).
+            every = [c] + twins
+            failures = [x.get("parse_failures") for x in every]
+            out.append({**c,
+                        "derived_status": max((x.get("derived_status") for x in every),
+                                              key=lambda s: _DERIVED_STATUS_RANK.get(s, 4)),
+                        "parse_failures": None if None in failures else sum(failures)})
+        return out
 
     def _merge_row(self, merge_id: int) -> sqlite3.Row:
         with self._reader() as ro:
@@ -6319,21 +6343,72 @@ class Store:
                      before["parse_failures"], before["id"]),
                 )
 
-    def remove_derived_column(self, def_id: int) -> None:
+    def _derived_scope(self, def_id: int, source_id: int | None = None) -> list[dict]:
+        """The definitions one action on a derived column applies to.
+
+        On a table that is `def_id` alone. On a merge (`source_id`
+        negative) it is every member's definition of that column, matched
+        by name the way _merge_columns matches them: creating on a merge
+        made one definition per member, and the merge's column list
+        carries only the FIRST member's id, so remove, re-derive and a
+        changed field path sent with that id alone used to act on that
+        member and leave the others as they were (invariant #9). Members
+        that do not carry the column are left out, which is also how a
+        column the merge does not expose (it is missing on some member)
+        is removed from the ones it is on."""
         d = self.get_derived_column(def_id)
-        with self.lock:
-            others = self.db.execute(
-                "SELECT * FROM derived_columns WHERE source_id=? AND id<>?",
-                (d["source_id"], def_id),
-            ).fetchall()
-        for o in others:
-            o_params = json.loads(o["params"] or "{}")
-            reads = {c.lower() for c in timeparse.op_inputs(o["op_id"], o["input_column"], o_params)}
-            if d["name"].lower() in reads:
-                raise ValueError(f"{o['name']!r} is computed from this column — remove that one first")
+        if source_id is None or source_id == d["source_id"]:
+            return [d]
+        if source_id > 0:
+            raise KeyError(f"No derived column {def_id} on table {source_id}")
+        members = [m["source_id"] for m in self._resolve_members(source_id)]
+        if d["source_id"] not in members:
+            raise KeyError(f"Derived column {def_id} is not on a table of merge {-source_id}")
+        key = _ascii_fold(d["name"])
+        out = []
+        with self._reader() as ro:
+            for sid in members:
+                for r in ro.execute("SELECT * FROM derived_columns WHERE source_id=? ORDER BY id", (sid,)):
+                    if _ascii_fold(r["name"]) == key:
+                        out.append(self._derived_dict(r))
+                        break
+        return out
+
+    def _member_label(self, d: dict, scope: list[dict]) -> str:
+        """" on table 'x'" when an action spans several members, so a
+        refusal says which member it came from; nothing otherwise."""
+        if len(scope) < 2:
+            return ""
+        return f" on table {self._source_lite(d['source_id'])['name']!r}"
+
+    def remove_derived_column(self, def_id: int, source_id: int | None = None) -> None:
+        """Remove a derived column — from every member that carries it when
+        `source_id` is the merge it was removed from (_derived_scope).
+
+        All-or-nothing on a merge, as creating on one is: every member is
+        checked for a column computed from this one before any is
+        removed, so a dependant on the second member refuses the whole
+        removal instead of leaving the first without the column."""
+        scope = self._derived_scope(def_id, source_id)
+        for d in scope:
+            with self.lock:
+                others = self.db.execute(
+                    "SELECT * FROM derived_columns WHERE source_id=? AND id<>?",
+                    (d["source_id"], d["id"]),
+                ).fetchall()
+            for o in others:
+                o_params = json.loads(o["params"] or "{}")
+                reads = {c.lower() for c in timeparse.op_inputs(o["op_id"], o["input_column"], o_params)}
+                if d["name"].lower() in reads:
+                    raise ValueError(f"{o['name']!r}{self._member_label(d, scope)} is computed from "
+                                     f"this column — remove that one first")
+        for d in scope:
+            self._drop_derived_definition(d)
+
+    def _drop_derived_definition(self, d: dict) -> None:
         drv = self._derived_table(d["source_id"])
         with self.lock, self.db:
-            self.db.execute("DELETE FROM derived_columns WHERE id=?", (def_id,))
+            self.db.execute("DELETE FROM derived_columns WHERE id=?", (d["id"],))
             try:
                 self.db.execute(f"ALTER TABLE {q(drv)} DROP COLUMN {q(d['name'])}")
             except sqlite3.OperationalError:
@@ -6399,23 +6474,66 @@ class Store:
                     pass
                 continue
 
-    def rederive_column(self, def_id: int, params: dict | None = None) -> dict:
+    def rederive_column(self, def_id: int, params: dict | None = None,
+                        source_id: int | None = None) -> dict:
         """Recompute a derived column in place — the path for "I set the
         wrong syslog year" or "these were local time, not UTC".
 
         The new params are written before the job starts, so a job that is
         refused (OpCancelled, the case closing) restores the definition
         exactly as it was rather than leaving it 'building' under params
-        nothing computed."""
-        d = self.get_derived_column(def_id)
-        new_params = timeparse.validate_params(d["op_id"], params if params is not None else d["params"])
-        op = timeparse.OPERATIONS[d["op_id"]]
-        if op.get("check"):
-            # Same as add_derived_column: an op that references the case
-            # (lookup) is refused HERE, with nothing changed, when what it
-            # references has gone — not after the column was put in
-            # 'building' and the job got as far as loading it.
-            op["check"](self, new_params)
+        nothing computed.
+
+        On a merge (`source_id` negative) every member that carries the
+        column is re-derived with the same params (_derived_scope), one
+        job per member — the shape creating on a merge has, so each member
+        shows, and cancels, in the jobs panel on its own, and a cancelled
+        member keeps its values marked 'partial', which the merge's column
+        then reports (_merge_columns). All-or-nothing up to the jobs, as
+        create is: every member's definition is checked against the new
+        params before any is rewritten, so params one member cannot take
+        refuse the whole re-derive instead of leaving the merge's one
+        column computed two ways."""
+        scope = self._derived_scope(def_id, source_id)
+        if params is not None and len({d["op_id"] for d in scope}) > 1:
+            ways = ", ".join(
+                f"{self._source_lite(d['source_id'])['name']}: "
+                f"{timeparse.OPERATIONS.get(d['op_id'], {}).get('label', d['op_id'])}" for d in scope)
+            raise ValueError(f"{scope[0]['name']!r} is not computed the same way on every table in "
+                             f"this merge ({ways}) — re-derive it on each table on its own")
+        prepared = []
+        for d in scope:
+            new_params = timeparse.validate_params(d["op_id"], params if params is not None else d["params"])
+            op = timeparse.OPERATIONS[d["op_id"]]
+            if op.get("check"):
+                # Same as add_derived_column: an op that references the case
+                # (lookup) is refused HERE, with nothing changed, when what it
+                # references has gone — not after the column was put in
+                # 'building' and the job got as far as loading it.
+                op["check"](self, new_params)
+            prepared.append((d, new_params))
+        results = [self._rederive_one(d, new_params) for d, new_params in prepared]
+        if len(results) == 1:
+            return results[0]
+        cascades, seen = [], set()
+        for r in results:
+            for n in r["cascades_to"]:
+                if _ascii_fold(n) not in seen:
+                    seen.add(_ascii_fold(n))
+                    cascades.append(n)
+        return {"definition": results[0]["definition"],
+                "member_definitions": [r["definition"] for r in results],
+                "job_id": results[0]["job_id"],
+                "job_ids": [r["job_id"] for r in results],
+                "cascades_to": cascades}
+
+    def _rederive_one(self, d: dict, new_params: dict) -> dict:
+        """rederive_column for one definition whose params are already
+        validated. A refusal part-way through a merge (the case closing)
+        restores the member it was refused on; the members before it
+        have jobs running, which the close cancels like any other — so
+        they end 'partial', as a cancelled re-derive does."""
+        def_id = d["id"]
         with self.lock, self.db:
             self.db.execute(
                 "UPDATE derived_columns SET params=?, status='building', parse_failures=NULL WHERE id=?",

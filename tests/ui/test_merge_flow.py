@@ -37,10 +37,11 @@ def _wait_for_source(page, name, timeout=25.0):
 
 def test_merge_builder_creates_and_opens_a_merge(page, tmp_path):
     """Imports BOTH of its own sources rather than pairing one with the
-    shared fixture table. The builder groups by column set, so anything an
-    earlier test does to that table — adding a derived column is enough to
-    change its key — used to leave this test with no eligible pair and a
-    checkbox wait that timed out with nothing to say."""
+    shared fixture table. The builder groups by column set, and an earlier
+    test adding a derived column to that table was once enough to change
+    its key (it no longer is — test_derived_merge_ui.py), which left this
+    test with no eligible pair and a checkbox wait that timed out with
+    nothing to say."""
     names = ("merge_a.csv", "merge_b.csv")
     before = page.evaluate("() => __winnow.S.sources.length")
     for n in names:

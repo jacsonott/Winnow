@@ -14,9 +14,15 @@ import { modal, oneAtATime } from './ui.js';
 
 /* Folds A-Z only, as SQLite (and the server's column_signature) does:
    toLowerCase() would group "Größe" with "GRÖßE", which SQLite reads as
-   two different columns, and the server refuses that merge. */
+   two different columns, and the server refuses that merge.
+
+   The file's own columns only, as create_merge decides: a derived column
+   is the analyst's addition, not part of the format, and grouping by it
+   put a table that had one in a group of its own — "No two open tables
+   currently share the same columns" about a merge the server accepts. */
 export function columnGroupKey(columns) {
-  return columns.map((c) => c.name.trim().replace(/[A-Z]+/g, (m) => m.toLowerCase())).sort().join('|');
+  return columns.filter((c) => !c.derived)
+    .map((c) => c.name.trim().replace(/[A-Z]+/g, (m) => m.toLowerCase())).sort().join('|');
 }
 
 export function openMergeBuilder() {
@@ -44,7 +50,7 @@ export function openMergeBuilder() {
       // nicknamed) reads as its name — "Event logs (EvtxECmd)" — with the
       // raw column list demoted to the tooltip. An unknown set still shows
       // its columns: that IS its identity until someone names it.
-      const colNames = group[0].columns.map((c) => c.name);
+      const colNames = group[0].columns.filter((c) => !c.derived).map((c) => c.name);
       const nick = nicknameFor(colNames);
       const head = el('h4', null, `Group ${gi + 1} — ${nick || colNames.join(', ')}`);
       if (nick) head.title = colNames.join(', ');
