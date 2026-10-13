@@ -102,7 +102,7 @@ def main(argv: list[str] | None = None) -> int:
                 out = updater.download(tip["url"], dest)
                 print(f"Downloaded {out} ({out.stat().st_size / 1e6:.1f} MB).")
                 return 0
-            print("Downloading main…")
+            print(f"Downloading {tip['branch']}@{tip['short']}…")
             archive = updater.download(tip["url"], dest)
             plan = updater.plan_update(archive, HERE)
             print("This sync will:")
