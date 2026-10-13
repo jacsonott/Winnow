@@ -211,13 +211,33 @@ see [docs/notes/README.md](README.md) for the whole set.
   beside it; export sets `Content-Disposition` with the profile name
   slugged through a `[^A-Za-z0-9._-]` filter, since profile names are free
   text.
+- **Every download's `Content-Disposition` comes from `_attachment()`**,
+  never an f-string. Starlette encodes header values as Latin-1, so
+  `filename="{name}"` was a 500 — and no file — for one en dash or
+  Cyrillic letter, and the names that reach these headers are exactly the
+  text that carries them: a SQL tab's name, an evidence file's own name,
+  what the analyst typed in the save prompt. The helper writes the real
+  name as RFC 6266 `filename*=UTF-8''…` beside an ASCII `filename="…"`
+  fallback (non-ASCII, `"` and `\` replaced), and turns control
+  characters into `_` in both, since a CR/LF would end the header line.
+  `FileResponse` gets it through `headers=` rather than its own
+  `filename=`, so there is one rule.
 - `run_sql` (the SQL pane) allows arbitrary SELECT/EXPLAIN on purpose, but
   blacklists `ATTACH`/`DETACH`/`PRAGMA`/`VACUUM` as defense-in-depth — none of
   those serve a read-only ad-hoc query pane. CSV export runs every cell through
   `_csv_safe()` (OWASP formula-injection prefixing for `=+-@`/tab/CR-leading
   values) since exports are explicitly meant to be opened in Excel and handed
   to other analysts; this only touches the exported copy, never the stored
-  case-file value. **Worksheet exports go through `_xlsx_safe()` instead**,
+  case-file value. **The header row and the Tags column go through it too**
+  (`_export_header`): column names are header text out of the evidence
+  file and tag names arrive in adopted sessions, and openpyxl writes any
+  string opening with `=` as a formula — a column called `=HYPERLINK(...)`
+  was a live link in the hand-over workbook while every cell under it was
+  neutralised. The SQL pane's CSV is built in the browser
+  (`sqlResultCsv`) and applies the same two rules by hand — the prefix,
+  and quoting a bare CR the way Python's csv module does — so its CSV and
+  Excel buttons cannot disagree about one result. **Worksheet exports go
+  through `_xlsx_safe()` instead**,
   which is `_csv_safe` plus the C0 control characters XML 1.0 cannot hold:
   ingest keeps those in cell values on purpose (names must be quotable,
   cells are evidence), openpyxl refuses them, and it refuses the whole

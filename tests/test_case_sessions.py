@@ -417,6 +417,82 @@ def test_clearing_drops_undo_entries_that_would_resurrect_tags(store, write_csv)
     assert store.db.execute("SELECT COUNT(*) FROM row_tags").fetchone()[0] == 0
 
 
+def test_loading_with_replace_clears_tables_the_snapshot_never_saw(store, write_csv):
+    """The Load dialog says "This replaces the tags and notes currently in
+    the case". A table imported after the snapshot was taken is not in it,
+    and its second-pass tags and notes used to survive the load — the case
+    then held neither the session nor the live state, but a mix, and a diff
+    against the session afterwards reported it as clean."""
+    a = _case(store, write_csv, "a.csv")
+    ta = _tag(store, a, [1], "TA")
+    store.save_session("first pass")
+    store.start_new_session()
+
+    b = store.ingest_csv(write_csv([["u"], ["3"], ["4"]], "b.csv"), name="b.csv",
+                         build_fts=False)["id"]
+    store.set_tags(b, [1, 2], ta, True)
+    store.set_note(b, 1, "second-pass note")
+
+    store.load_session("first pass", merge=False)
+
+    rows = {(r["source_id"], r["rid"]) for r in store.db.execute(
+        "SELECT source_id, rid FROM row_tags")}
+    assert rows == {(a, 1)}
+    assert store.db.execute("SELECT COUNT(*) FROM row_notes").fetchone()[0] == 0
+    assert store.diff_sessions("first pass", store.LIVE_SESSION)["counts"] == {
+        "added": 0, "removed": 0, "changed": 0, "note_changes": 0}
+
+
+def test_merge_load_still_leaves_tables_the_snapshot_never_saw(store, write_csv):
+    """The other half: merge adds to the live state, so a table outside the
+    snapshot keeps what it has."""
+    a = _case(store, write_csv, "a.csv")
+    ta = _tag(store, a, [1], "TA")
+    store.save_session("first pass")
+    b = store.ingest_csv(write_csv([["u"], ["3"], ["4"]], "b.csv"), name="b.csv",
+                         build_fts=False)["id"]
+    store.set_tags(b, [2], ta, True)
+
+    store.load_session("first pass", merge=True)
+
+    rows = {(r["source_id"], r["rid"]) for r in store.db.execute(
+        "SELECT source_id, rid FROM row_tags")}
+    assert rows == {(a, 1), (b, 2)}
+
+
+def test_loading_a_session_again_does_not_duplicate_its_saved_views(store, write_csv):
+    """Every load used to append the session's saved views again, so one
+    view became two after a save/load cycle and 16 after four — loading a
+    snapshot has to be idempotent for the parts of it that are not tags."""
+    sid = _case(store, write_csv)
+    store.save_view(sid, "my filter", {"filters": [{"col": "User", "op": "equals", "value": "bob"}]})
+    store.save_view(sid, "same name, other spec", {"filters": []})
+    for _ in range(3):
+        store.save_session("pass")
+        store.load_session("pass", merge=False)
+        store.load_session("pass", merge=True)
+
+    views = store.list_saved_views(sid)
+    assert sorted(v["name"] for v in views) == ["my filter", "same name, other spec"]
+
+
+def test_a_received_view_with_a_name_already_taken_is_kept_beside_it(store, write_csv):
+    """Skipping only exact duplicates: a session view that shares a name
+    with a local one but describes a different filter is someone's work,
+    and is added rather than dropped or written over the local one."""
+    sid = _case(store, write_csv)
+    store.save_view(sid, "suspects", {"filters": [{"col": "User", "op": "equals", "value": "bob"}]})
+    data = store.export_case_session()
+    data["sources"][0]["saved_views"] = [
+        {"name": "suspects", "payload": {"filters": [{"col": "User", "op": "equals", "value": "eve"}]}}]
+
+    store.import_case_session(data, merge=True)
+    store.import_case_session(data, merge=True)
+
+    values = sorted(v["payload"]["filters"][0]["value"] for v in store.list_saved_views(sid))
+    assert values == ["bob", "eve"]
+
+
 # ------------------------------------------- tables that share one file hash
 #
 # The hash is the file's, so every table imported out of one SQLite
@@ -589,3 +665,22 @@ def test_two_identical_copies_against_one_entry_is_refused_not_guessed(store, wr
     assert (_tagged(store, sid), _tagged(store, dup)) == ([], [])
     assert res["sources_restored"] == 0
     assert res["warnings"] and "evidence.csv" in res["warnings"][0]
+
+
+def test_a_replace_that_cannot_tell_the_copies_apart_leaves_both_alone(store, write_csv):
+    """Replace clears the case, but not the tables a skipped source may be:
+    with two indistinguishable copies, either could hold the rows the
+    session meant, and wiping the tags both have would lose work without
+    putting the session's in their place."""
+    sid = _case(store, write_csv)
+    _tag(store, sid, [2], "TA")
+    store.save_session("one copy")
+    store.start_new_session()
+    dup = _case(store, write_csv)
+    _tag(store, sid, [1], "TB")
+    _tag(store, dup, [3], "TB")
+
+    res = store.load_session("one copy", merge=False)
+    assert (_tagged(store, sid), _tagged(store, dup)) == ([1], [3])
+    assert res["sources_restored"] == 0
+    assert any("as they were" in w for w in res["warnings"])

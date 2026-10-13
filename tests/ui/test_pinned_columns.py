@@ -18,8 +18,14 @@ def _widen(page):
     600px, not 300: the fixture has five columns and the viewport is 1500,
     so 300 leaves about 100px of scroll range and two different scroll
     targets both clamp to the same place — which silently made a
-    "did it move?" assertion compare a value with itself."""
+    "did it move?" assertion compare a value with itself.
+
+    "Without saving" only holds until something saves: an Alt-click pin
+    and _unpin_all both persist the WHOLE layout, widths included. So the
+    layout as found is kept on the page, and _unpin_all puts the widths
+    and hidden flags back before its save."""
     page.evaluate("""() => {
+      if (!window.__preWiden) window.__preWiden = JSON.stringify(__winnow.S.layout);
       for (const c of __winnow.S.columns) {
         __winnow.S.layout[c.name] = { ...(__winnow.S.layout[c.name] || {}), hidden: false, w: 600 };
       }
@@ -32,8 +38,21 @@ def _unpin_all(page):
     """Clear pins AND persist the clearing. Pinning is a layout property
     saved server-side, and the UI suite shares one case file — an in-memory
     reset would be undone by the next test's page reloading the layout,
-    which is what made these pass alone and fail together."""
+    which is what made these pass alone and fail together.
+
+    The same save would persist _widen's 600px columns onto the shared
+    case, so those go back first — they did, and the next module in the
+    shard dragged to a cell 1524px across a 1500px viewport."""
     page.evaluate("""() => {
+      if (window.__preWiden) {
+        const pre = JSON.parse(window.__preWiden);
+        for (const [k, v] of Object.entries(__winnow.S.layout)) {
+          const was = pre[k] || {};
+          if ('w' in was) v.w = was.w; else delete v.w;
+          if ('hidden' in was) v.hidden = was.hidden; else delete v.hidden;
+        }
+        window.__preWiden = null;
+      }
       for (const k of Object.keys(__winnow.S.layout)) {
         if (__winnow.S.layout[k].pinned) __winnow.S.layout[k].pinned = false;
       }

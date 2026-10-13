@@ -256,6 +256,68 @@ def test_copy_refuses_while_an_import_runs(store, write_csv, target, monkeypatch
     assert "importing" in r.json()["detail"].lower()
 
 
+def _lookup_case(store, write_csv):
+    owners = store.ingest_csv(write_csv([["Host", "Owner"], ["h1", "alice"]], "owners.csv"),
+                              name="owners.csv", build_fts=False)["id"]
+    ev = _fill(store, write_csv)
+    r = store.add_derived_column(ev, "Owner", "Host", "lookup",
+                                 {"other_source_id": owners, "match_column": "Host",
+                                  "value_column": "Owner"})
+    store.wait_for_ingest_job(r["job_id"], timeout=30)
+    return owners, ev
+
+
+def _rederive_owner(t, new_id):
+    d = next(d for d in t.list_derived_columns(new_id) if d["name"] == "Owner")
+    out = t.rederive_column(d["id"])
+    t.wait_for_ingest_job(out["job_id"], timeout=30)
+    return [r[0] for r in t.db.execute(f'SELECT "Owner" FROM drv_{new_id} ORDER BY rid')]
+
+
+def test_a_copied_lookup_follows_its_table_into_the_target(store, write_csv, target):
+    """The lookup definition copies with this case's source id in it. In
+    the target that id is whatever table took it there, so a re-derive
+    filled the column from an unrelated table. Copied together, the lookup
+    follows its table to its new id."""
+    target.ingest_csv(write_csv([["Host", "Owner"], ["h1", "mallory"]], "other.csv"),
+                      name="other.csv", build_fts=False)
+    target_path = target.path
+    target.close()
+    owners, ev = _lookup_case(store, write_csv)
+
+    res = store.copy_sources_to(target_path, [owners, ev])
+
+    new_ev = next(c["id"] for c in res["copied"] if c["name"] == "quick.csv")
+    t = Store(target_path)
+    try:
+        assert _rederive_owner(t, new_ev) == ["alice", None, None]
+    finally:
+        t.close()
+
+
+def test_a_copied_lookup_without_its_table_does_not_bind_to_another(store, write_csv, target):
+    """Its table stayed behind and the target has nothing with that
+    fingerprint: the values copied as they were, and a re-derive is refused
+    (asks for the table) instead of reading whichever table holds the id."""
+    target.ingest_csv(write_csv([["Host", "Owner"], ["h1", "mallory"]], "other.csv"),
+                      name="other.csv", build_fts=False)
+    target_path = target.path
+    target.close()
+    _owners, ev = _lookup_case(store, write_csv)
+
+    res = store.copy_sources_to(target_path, [ev])
+
+    new_ev = res["copied"][0]["id"]
+    t = Store(target_path)
+    try:
+        assert [r[0] for r in t.db.execute(f'SELECT "Owner" FROM drv_{new_ev} ORDER BY rid')] == [
+            "alice", None, None]
+        with pytest.raises(ValueError, match="table"):
+            _rederive_owner(t, new_ev)
+    finally:
+        t.close()
+
+
 def test_tag_names_pair_by_the_rule_session_load_uses(store, write_csv, target):
     """One rule for copy, load and diff (store.pair_tag_names): exact name
     first, a name differing only in case when that is unambiguous."""
