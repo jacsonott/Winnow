@@ -17,7 +17,8 @@ comes out, so these ops carry `derived_kind: "text"` and
 datetime column" picker, which is a different question the analyst is
 asking.
 
-Stdlib only, and imports nothing from the app except the registry itself.
+Stdlib only, and imports nothing from the app except the registry itself
+and rxguard, the catastrophic-backtracking check it shares with store.py.
 
 **Paths are the analyst's addressing scheme, so they have to survive being
 written down.** They go into a column definition, a session file and the
@@ -44,7 +45,7 @@ import re
 import xml.etree.ElementTree as ET
 from typing import Any, Iterator
 
-from . import timeparse
+from . import rxguard, timeparse
 
 # A cell big enough to be a denial-of-service against the backfill rather
 # than a log field. 8 MB is far past any real EventData blob and still
@@ -153,7 +154,12 @@ def parse_json_path(text: str) -> list:
             out.append(int(m.group("index")))
         else:
             key = m.group("dotkey") or m.group("barekey")
-            if key is None:
+            if key is not None:
+                key = key.strip()
+            else:
+                # A quoted key is taken exactly as written — the quotes are
+                # the escape hatch, and a key with edge whitespace (" id ",
+                # "name\t") is a real key format_json_path quotes for that.
                 raw = m.group("dq") if m.group("dq") is not None else m.group("sq")
                 # `\uXXXX` is how format_json_path spells a lone surrogate
                 # in a key (one with no UTF-8 form, so it can't be stored
@@ -162,7 +168,7 @@ def parse_json_path(text: str) -> list:
                 key = re.sub(r"\\(u[0-9a-fA-F]{4}|.)",
                              lambda e: chr(int(e.group(1)[1:], 16)) if len(e.group(1)) == 5
                              else e.group(1), raw)
-            out.append(key.strip())
+            out.append(key)
         pos = m.end()
     if not out:
         raise ValueError(f"Can't read the field path {text!r}")
@@ -180,7 +186,10 @@ def format_json_path(segments: list) -> str:
     for seg in segments:
         if isinstance(seg, int):
             out += f"[{seg}]"
-        elif re.fullmatch(r"[^.\[\]\"']+", str(seg)) and not _has_lone_surrogate(str(seg)):
+        elif re.fullmatch(r"[^.\[\]\"']+", str(seg)) and str(seg) == str(seg).strip() \
+                and not _has_lone_surrogate(str(seg)):
+            # Dot notation strips the key it reads, so a key with edge
+            # whitespace has to be quoted to survive the round trip.
             out += f".{seg}"
         else:
             quoted = str(seg).replace("\\", "\\\\").replace('"', '\\"')
@@ -278,36 +287,47 @@ def _extract_json(value: Any, params: dict, state: dict) -> str | None:
 
 # -------------------------------------------------------------- XML paths
 
-def _split_steps(s: str) -> list[str]:
-    """`a/b[@N='x/y']/c` -> ['a', "b[@N='x/y']", 'c'] — a plain split would
-    cut the predicate in half, and predicate values are analyst data
-    (file paths, URLs) that routinely contain slashes."""
-    out, buf, depth = [], [], 0
-    for ch in s:
+def _structural(s: str):
+    """(index, char, bracket depth) for every character of a path that is
+    syntax rather than a predicate's quoted value. Predicate values are
+    analyst data — file paths, URLs, "a]b", "c@d" — so a `/`, `]` or `@`
+    inside the quotes must not split, close or select anything. A doubled
+    quote ('') simply closes and reopens, so it needs no case of its own."""
+    depth, quote = 0, None
+    for i, ch in enumerate(s):
+        if quote:
+            if ch == quote:
+                quote = None
+            continue
+        if ch in "'\"" and depth:
+            quote = ch
+            continue
         if ch == "[":
             depth += 1
         elif ch == "]":
             depth = max(0, depth - 1)
-        if ch == "/" and depth == 0:
-            out.append("".join(buf))
-            buf = []
-        else:
-            buf.append(ch)
-    out.append("".join(buf))
+        yield i, ch, depth
+
+
+def _split_steps(s: str) -> list[str]:
+    """`a/b[@N='x/y']/c` -> ['a', "b[@N='x/y']", 'c'] — a plain split would
+    cut the predicate in half, and predicate values are analyst data
+    (file paths, URLs) that routinely contain slashes."""
+    cuts = [i for i, ch, depth in _structural(s) if ch == "/" and depth == 0]
+    out, start = [], 0
+    for i in cuts:
+        out.append(s[start:i])
+        start = i + 1
+    out.append(s[start:])
     return out
 
 
 def _trailing_at(s: str) -> int | None:
     """Index of the `@` that selects an attribute — the last one at bracket
     depth zero — or None if the path selects an element's text."""
-    depth = 0
     found = None
-    for i, ch in enumerate(s):
-        if ch == "[":
-            depth += 1
-        elif ch == "]":
-            depth = max(0, depth - 1)
-        elif ch == "@" and depth == 0:
+    for i, ch, depth in _structural(s):
+        if ch == "@" and depth == 0:
             found = i
     return found
 
@@ -316,7 +336,7 @@ _XML_STEP_RE = re.compile(
     r"""^(?P<tag>[^\[\]@/]+)
     (?:\[
         (?: (?P<index>\d+)
-          | @(?P<pattr>[\w:.-]+)\s*=\s*(?P<quote>['"])(?P<pval>[^'"]*)(?P=quote)
+          | @(?P<pattr>[\w:.-]+)\s*=\s*(?:'(?P<sq>(?:[^']|'')*)'|"(?P<dq>(?:[^"]|"")*)")
         )
     \])?$""",
     re.VERBOSE,
@@ -365,7 +385,9 @@ def parse_xml_path(text: str) -> tuple[list[tuple[str, Any]], str | None]:
         if not m:
             raise ValueError(f"Can't read the element path at {raw!r}")
         if m.group("pattr"):
-            sel: Any = (m.group("pattr"), m.group("pval"))
+            pval = (m.group("sq").replace("''", "'") if m.group("sq") is not None
+                    else m.group("dq").replace('""', '"'))
+            sel: Any = (m.group("pattr"), pval)
         else:
             sel = int(m.group("index") or 0)
         steps.append((m.group("tag").strip(), sel))
@@ -376,7 +398,19 @@ def parse_xml_path(text: str) -> tuple[list[tuple[str, Any]], str | None]:
 
 def _format_step(tag: str, sel: Any) -> str:
     if isinstance(sel, tuple):
-        return f"{tag}[@{sel[0]}='{sel[1]}']"
+        # Single quotes as XPath writes them, double when the value holds
+        # an apostrophe (Name="O'Brien"), and a doubled quote when it holds
+        # both — XPath 2.0's escape; parse_xml_path reads all three. A
+        # value spliced in bare broke the parse, and discovery then offered
+        # (pre-ticked, at 100%) a path that failed the whole flatten batch.
+        v = str(sel[1])
+        if "'" not in v:
+            lit = f"'{v}'"
+        elif '"' not in v:
+            lit = f'"{v}"'
+        else:
+            lit = "'" + v.replace("'", "''") + "'"
+        return f"{tag}[@{sel[0]}={lit}]"
     return tag if sel == 0 else f"{tag}[{sel}]"
 
 
@@ -689,14 +723,35 @@ def _extract_regex(value, params: dict, state: dict) -> str | None:
         return None
 
 
-def _validate_regex_params(params: dict) -> None:
-    pattern = params.get("pattern", "")
+def _compile_analyst_regex(pattern: str) -> "re.Pattern":
+    """The one gate a derive pattern passes before it runs on anything:
+    length, syntax, and rxguard's catastrophic-backtracking check — the
+    same one the regex filter and search meet. The check is what makes a
+    preview or a backfill safe to start: one `(\\w+\\s?)*` against one
+    30-character cell that almost matches runs for minutes inside a
+    single re.search, and nothing can interrupt it — the backfill polls
+    its cancel flag between batches, and the preview and the named-group
+    probe run inside the request."""
     if len(pattern) > _MAX_REGEX_LEN:
         raise ValueError(f"Regex too long ({len(pattern)} > {_MAX_REGEX_LEN} characters)")
     try:
         rx = re.compile(pattern)
     except re.error as e:
         raise ValueError(f"Invalid regex: {e}")
+    hazard = rxguard.regex_hazard(pattern)
+    if hazard:
+        raise ValueError(
+            f"This pattern has {hazard}, which can backtrack catastrophically: on one unlucky "
+            "value it runs for minutes with no way to stop it. End each part of the repetition "
+            r"at a character it cannot match — (\w+\s)* rather than (\w+\s?)*, (\w+\.)+ "
+            r"rather than (\w+\.?)+ — or use one class instead of the nesting, [\w\s]* for "
+            r"(\w+\s?)*.")
+    return rx
+
+
+def _validate_regex_params(params: dict) -> None:
+    pattern = params.get("pattern", "")
+    rx = _compile_analyst_regex(pattern)
     name = (params.get("group_name") or "").strip()
     if name and name not in rx.groupindex:
         named = ", ".join(sorted(rx.groupindex)) or "none"
@@ -715,12 +770,7 @@ def regex_group_names(pattern: str) -> list[str]:
     by number puts the columns in the order the analyst wrote them rather
     than in alphabetical order — for a path/method/status pattern that is
     the difference between reading the definition and decoding it."""
-    if len(pattern or "") > _MAX_REGEX_LEN:
-        raise ValueError(f"Regex too long ({len(pattern)} > {_MAX_REGEX_LEN} characters)")
-    try:
-        rx = re.compile(pattern or "")
-    except re.error as e:
-        raise ValueError(f"Invalid regex: {e}")
+    rx = _compile_analyst_regex(pattern or "")
     return [name for name, _ in sorted(rx.groupindex.items(), key=lambda kv: kv[1])]
 
 
@@ -851,9 +901,14 @@ def _suggest_name(path: str, kind: str) -> str:
         return out
     # `Data[@Name='TargetUserName']` names itself — that predicate value is
     # a better column name than anything its tag or position could give.
-    pred = re.search(r"\[@[\w:.-]+='([^']*)'\]$", s)
-    if pred and pred.group(1).strip():
-        return pred.group(1).strip()
+    # Read through parse_xml_path, so a value quoted "O'Brien" (or with a
+    # doubled quote) names its column the same way 'TargetUserName' does.
+    try:
+        steps, attr = parse_xml_path(s)
+    except ValueError:
+        steps, attr = [], None
+    if steps and attr is None and isinstance(steps[-1][1], tuple) and str(steps[-1][1][1]).strip():
+        return str(steps[-1][1][1]).strip()
     if "@" in s and not s.rstrip().endswith("]"):
         head, _, attr = s.rpartition("@")
         tail = head.rstrip("/").split("/")[-1] if head.strip("/") else ""

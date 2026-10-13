@@ -165,6 +165,23 @@ see [docs/notes/README.md](README.md) for the whole set.
   callers can tell the two apart. Nothing that a user can actually type
   reaches the 500 path: `validate_where_fragment` converts SQL errors to
   `ValueError`, and `_regexp` swallows `re.error`.
+- **A 500 means Winnow is broken; input it can't act on is a 4xx.** A
+  route fuzz found ~50 routes answering 500 for the request's own fault,
+  and the fixes follow three rules. An int past SQLite's 64-bit range
+  (any path/query/body id) is ONE handler, `int_out_of_range_handler`,
+  keyed on sqlite3's own OverflowError message rather than a bound on
+  every int parameter — any other OverflowError is still the bug it
+  would be. A structured parameter is checked at the door: a typed
+  pydantic shape where one fits (`tag_view`'s `exclude` pairs → 422),
+  an explicit check where it arrives as text (`group_summary`'s JSON
+  `path`) or as a file (`session_document_problem` /
+  `case_session_document_problem` in store.py, `_filters_file_problem`
+  here) — and a whole case session is checked before its FIRST table is
+  applied, so a bad tenth table can't leave nine written. A missing
+  table is a 404, a table still importing is the 400
+  `Store._require_columns` raises, and no open case is a 400 — nothing
+  is broken, there's just no case yet. `tests/test_api_routes.py`'s
+  last section pins each one through a client that doesn't re-raise.
 - **The background-search routes** — `POST /api/view/start`, `GET
   /api/view/job`, `POST /api/view/job/cancel`, `POST /api/view/adopt`
   (the search box's build, run as a job that builds a *held* view; see
@@ -253,7 +270,26 @@ see [docs/notes/README.md](README.md) for the whole set.
   workbook rather than the one cell — so one BEL in one command line used
   to take down the entire tagged export. They are escaped to `\x07` rather
   than dropped, because a silently shortened string in a hand-over artifact
-  is worse than a visible escape.
+  is worse than a visible escape. Length is the same rule: openpyxl cuts a
+  value at Excel's 32,767-character cell limit without saying so, so
+  `_xlsx_safe` cuts first and ends the cell with a marker naming the full
+  length. Sheet names (`_xlsx_sheet_name`) are XML text too — a control
+  character in a source name wrote a workbook nothing would reopen — and
+  the apostrophe rule is applied after the 31-character cut, not before.
+  A merged view's CSV carries a `Table` column after `Line` (the member's
+  nickname or name): `Line` is a rid within one member, so without it two
+  rows of a merge both read "Line 1" with nothing saying where either is.
+  A single table's export keeps the old header.
+- **`/api/sql` encodes three kinds of cell at the JSON boundary**
+  (`pane_cell_json`), not in `Store.run_sql`, whose raw values plugins
+  are owed: a non-UTF-8 BLOB becomes SQLite's `X'00FF'` (a UTF-8 one
+  its text, as before), a non-finite REAL `Inf`/`-Inf`/`NaN`, and an
+  integer past ±2^53 its decimal string. The first two were a 500 (JSON
+  has neither); the third arrived rounded, so grid, Copy, CSV and Excel
+  all disagreed with the case for a FILETIME-sized number. "Save as
+  table" stores the same spellings (`pane_cell_text`) — it stored
+  Python's `b'…'` repr — and re-runs the query that produced the result
+  on screen (`r.sql`, kept by `runSql`), not the editor's text by then.
 - **A pane query has to be stoppable, because some of what gets typed
   never ends** — a recursive CTE with no stop condition, a cross join of
   two 2M-row tables. One used to run at 100% CPU through everything: the
@@ -361,6 +397,12 @@ see [docs/notes/README.md](README.md) for the whole set.
   case holds except what it is BORN with (`open_tabs`, the seeded
   `tag_defs`) and incidental UI state. Add new case tables to that list
   when they can hold something an analyst would miss.
+  Two more guards, same bias: the sweep only considers files
+  `is_winnow_case_file` accepts (a History.db dropped in `quicklook/`
+  has none of the work tables either, which read as "empty" and got it
+  deleted), and a file it can't read is skipped rather than ending the
+  sweep — a corrupt one used to raise `sqlite3.DatabaseError` past the
+  per-file `except OSError` and strand every file listed after it.
 
 - **A dropped presence stream is not a closed window.** Idle shutdown
   used to fire `IDLE_EXIT_S` after the last stream ended, which is right

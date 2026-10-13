@@ -294,6 +294,20 @@ def test_column_max_lengths_and_values_cover_derived_columns(store, write_csv):
     assert "2023-11-14 22:13:20" in vals
 
 
+def test_column_max_lengths_follow_a_derived_column_added_after_the_first_ask(store, write_csv):
+    """The autofit widths are cached per source, and the cache was keyed on
+    the row count alone — which adding or removing a derived column
+    doesn't move. Asked once before the add, the answer never gained the
+    new column, so autofit had no width for it; asked after a removal, it
+    still named a column the table no longer has."""
+    sid = _ingest(store, write_csv, EPOCH_ROWS)
+    assert "Timestamp" not in store.column_max_lengths(sid)
+    def_id = _add(store, sid, "Timestamp", "Epoch", "unix_epoch")
+    assert store.column_max_lengths(sid)["Timestamp"] == len("2023-11-14 22:13:20")
+    store.remove_derived_column(def_id)
+    assert "Timestamp" not in store.column_max_lengths(sid)
+
+
 def test_dropping_the_source_cleans_up_the_sidecar(store, write_csv):
     sid = _ingest(store, write_csv, EPOCH_ROWS)
     _add(store, sid, "Timestamp", "Epoch", "unix_epoch")

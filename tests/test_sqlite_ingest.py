@@ -128,6 +128,125 @@ def test_ingest_sqlite_table_source_table_never_mutated(store, chromium_like_db)
     assert before == after
 
 
+def test_one_unreadable_virtual_table_does_not_hide_the_rest_of_the_file(store, tmp_path):
+    """Thunderbird's global-messages-db.sqlite carries an FTS table built
+    with its own tokenizer; a SQLite without that module raises "no such
+    module" for it — and the preview read every table in one go, so the
+    whole file was unimportable. The table is listed with why it can't be
+    read, and every other table previews and imports as usual."""
+    path = str(tmp_path / "global-messages-db.sqlite")
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE messages(id INTEGER PRIMARY KEY, subject TEXT)")
+    conn.execute("INSERT INTO messages VALUES (1, 'invoice')")
+    conn.commit()
+    conn.execute("PRAGMA writable_schema=ON")
+    conn.execute("INSERT INTO sqlite_master(type,name,tbl_name,rootpage,sql) VALUES "
+                 "('table','messagesText','messagesText',0,"
+                 "'CREATE VIRTUAL TABLE messagesText USING mozvtab(body)')")
+    conn.commit()
+    conn.close()
+
+    tables = {t["name"]: t for t in store.preview_sqlite_tables(path)["tables"]}
+    assert tables["messages"]["row_count"] == 1 and "error" not in tables["messages"]
+    assert tables["messagesText"]["row_count"] is None
+    assert "mozvtab" in tables["messagesText"]["error"]
+    rec = store.ingest_sqlite_table(path, "messages", build_fts=False)
+    assert rec["row_count"] == 1
+
+
+def test_generated_columns_are_imported_too(store, tmp_path):
+    """`PRAGMA table_info` omits generated columns, so the import read the
+    table without them — a computed column the application shows its own
+    users simply wasn't in the case, with nothing saying so."""
+    path = str(tmp_path / "app.db")
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE visits (id INTEGER PRIMARY KEY, host TEXT, path TEXT, "
+                 "url TEXT GENERATED ALWAYS AS ('https://' || host || path) VIRTUAL, "
+                 "host_upper TEXT GENERATED ALWAYS AS (upper(host)) STORED)")
+    conn.execute("INSERT INTO visits(host, path) VALUES ('example.test', '/a')")
+    conn.commit()
+    conn.close()
+
+    prev = {t["name"]: t for t in store.preview_sqlite_tables(path)["tables"]}
+    assert [c["name"] for c in prev["visits"]["columns"]] == ["id", "host", "path", "url", "host_upper"]
+    rec = store.ingest_sqlite_table(path, "visits", build_fts=False)
+    assert [c["name"] for c in rec["columns"]] == ["id", "host", "path", "url", "host_upper"]
+    with store._reader() as ro:
+        row = ro.execute(f'SELECT url, host_upper FROM "{rec["table_name"]}"').fetchone()
+    assert tuple(row) == ("https://example.test/a", "EXAMPLE.TEST")
+
+
+def test_an_fts_tables_hidden_columns_stay_out(store, tmp_path):
+    path = str(tmp_path / "fts.db")
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE VIRTUAL TABLE docs USING fts5(body)")
+    conn.execute("INSERT INTO docs(body) VALUES ('hello')")
+    conn.commit()
+    conn.close()
+    prev = {t["name"]: t for t in store.preview_sqlite_tables(path)["tables"]}
+    assert [c["name"] for c in prev["docs"]["columns"]] == ["body"]
+
+
+def _wal_evidence(tmp_path, with_wal: bool):
+    """A WAL-mode database as a forensic copy carries it: the main file
+    plus (optionally) its -wal holding rows not yet checkpointed, and no
+    -shm — that one is per-process scratch and copies don't take it."""
+    import shutil
+    live = tmp_path / "live"
+    live.mkdir()
+    db = live / "places.sqlite"
+    conn = sqlite3.connect(db)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA wal_autocheckpoint=0")
+    conn.execute("CREATE TABLE t(x)")
+    conn.commit()
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    conn.executemany("INSERT INTO t VALUES (?)", [(i,) for i in range(100)])
+    conn.commit()
+    if not with_wal:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    ev = tmp_path / "evidence"
+    ev.mkdir()
+    shutil.copy(db, ev / "places.sqlite")
+    if with_wal:
+        shutil.copy(str(db) + "-wal", ev / "places.sqlite-wal")
+    conn.close()
+    return ev, str(ev / "places.sqlite")
+
+
+@pytest.mark.parametrize("with_wal", [True, False])
+def test_reading_a_wal_database_leaves_nothing_beside_the_evidence(store, tmp_path, with_wal):
+    """A read-only open of a WAL-mode database still creates its -shm (and
+    -wal, when the copy came without one) beside the file — in the
+    analyst's evidence folder. Nothing may be written there; and the rows
+    that only exist in the -wal are evidence too, so they must still be
+    read."""
+    ev, path = _wal_evidence(tmp_path, with_wal)
+    before = sorted(p.name for p in ev.iterdir())
+    prev = store.preview_sqlite_tables(path)
+    assert prev["tables"][0]["row_count"] == 100
+    rec = store.ingest_sqlite_table(path, "t", build_fts=False)
+    assert rec["row_count"] == 100
+    assert sorted(p.name for p in ev.iterdir()) == before
+
+
+def test_an_uploaded_wal_database_leaves_nothing_in_the_temp_folder(client, tmp_path, monkeypatch):
+    """An upload is spooled to a tempfile and removed after — but the
+    -wal/-shm the read-only open created beside the spool were not, one
+    pair per preview and per import, for good."""
+    import tempfile
+    _ev, path = _wal_evidence(tmp_path, with_wal=False)
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(spool))
+    with open(path, "rb") as f:
+        raw = f.read()
+    assert raw[18:20] == b"\x02\x02"                 # the header says WAL
+    r = client.post("/api/ingest/sqlite/preview", files={"file": ("places.sqlite", raw)})
+    assert r.status_code == 200 and r.json()["tables"][0]["row_count"] == 100
+    assert sorted(p.name for p in spool.iterdir()) == []
+
+
 def _db_with_bad_text(path, n, bad_rowid):
     conn = sqlite3.connect(path)
     conn.execute("CREATE TABLE t (id INTEGER, title TEXT)")

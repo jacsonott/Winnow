@@ -539,7 +539,12 @@ function openUnitPicker(src, { initial, onConfirm, onCancel } = {}, cfg) {
         cb.onchange = () => { cb.checked ? included.add(t.name) : included.delete(t.name); };
         const lab = el('label');
         lab.style.cssText = 'display:flex;align-items:center;gap:8px;flex:1';
-        lab.append(cb, el('span', 'session-name', t.name), el('span', 'count', `${t.row_count.toLocaleString()} rows`));
+        // A table the server could not read (a virtual table whose module
+        // this SQLite lacks) is shown, with why, but can't be picked —
+        // the file's other tables still import.
+        if (t.error) cb.disabled = true;
+        lab.append(cb, el('span', 'session-name', t.name),
+          el('span', 'count', t.error ? `can't be read: ${t.error}` : `${t.row_count.toLocaleString()} rows`));
         head.append(lab);
         row.append(head);
         if (t.likely_timestamp_columns.length) {
@@ -594,7 +599,7 @@ function openUnitPicker(src, { initial, onConfirm, onCancel } = {}, cfg) {
         // Re-opening the picker restores the previous choices; a fresh file
         // defaults to converting every detected timestamp column.
         if (prior) {
-          if (prior.has(t.name)) included.add(t.name);
+          if (prior.has(t.name) && !t.error) included.add(t.name);
           selected.set(t.name, prior.get(t.name) || new Set(t.likely_timestamp_columns));
         } else {
           selected.set(t.name, new Set(t.likely_timestamp_columns));

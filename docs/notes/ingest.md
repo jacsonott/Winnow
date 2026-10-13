@@ -27,7 +27,24 @@ see [docs/notes/README.md](README.md) for the whole set.
   default factory raised "Could not decode to UTF-8" mid-read, and the
   batch it was in plus every row after it were gone. And a table that
   fails before its first batch commits is dropped rather than left with
-  0 rows, which is indistinguishable from a real empty import.
+  0 rows, which is indistinguishable from a real empty import. The
+  preview reads each table on its own: one this SQLite can't read (a
+  virtual table whose module it lacks — Thunderbird's message index)
+  comes back with an `error` and `row_count: null`, shown but not
+  pickable, instead of failing the preview of the whole file. Columns come from
+  `PRAGMA table_xinfo`, not `table_info` (`_sqlite_table_columns`):
+  `table_info` omits GENERATED columns, so those were silently missing
+  from every import; a virtual table's hidden columns stay out.
+  **`mode=ro` still writes beside a WAL database** — its `-shm`, and a
+  `-wal` when the copy came without one — which put files in the
+  analyst's evidence folder and littered the temp folder beside every
+  uploaded spool. `_open_evidence_sqlite` opens a WAL-mode file with no
+  `-wal` as `immutable=1`, appended to the `sqlite_ro_uri` URI below
+  (nothing to replay, and no live writer can be holding it), and one WITH
+  a `-wal` by copying the pair into a private temp directory first —
+  those un-checkpointed rows are evidence, so
+  `immutable` (which ignores the WAL) is not an option there. Plaso
+  storage still opens plain `mode=ro`; plaso writes its files closed.
 - **Every read-only open is a URI, and the URI comes from
   `paths.sqlite_ro_uri` — never `f"file:{path}?mode=ro"`.** `mode=ro`
   only exists in URI form, and in a URI `#` starts a fragment, `?` the
@@ -56,7 +73,10 @@ see [docs/notes/README.md](README.md) for the whole set.
   xlsxread.py owns is the typed-cell→TEXT conversion. Three traps worth
   knowing: date-styled cells convert to ISO text *unconditionally* (no
   per-column opt-in like SQLite's WebKit chips — a day-serial means
-  nothing in any downstream surface), the header is the first *non-empty*
+  nothing in any downstream surface) — except a serial past year 9999,
+  which keeps its number: openpyxl's parser would have replaced it with
+  the string "#VALUE!", so xlsxread takes the conversion over from it
+  (`_own_date_conversion`, reading cells rather than values_only), the header is the first *non-empty*
   row (hand-made workbooks put titles above it) with the table sized to
   max(header, declared width) so extra data lands in `col_N` instead of
   being cut, and a formula cell in a workbook that was never opened in
@@ -106,6 +126,13 @@ see [docs/notes/README.md](README.md) for the whole set.
   numbered per path so 200,000 repeats of one name stay linear) and is
   listed under `renamed`. The import toast names the first skipped and
   renamed member and the server log keeps them all.
+  Member names are made to fit the OS they land on
+  (`_member_name_for_os`): a no-op on POSIX, but on Windows a `:`
+  would write an alternate data stream of the file before it and
+  `?*<>|"` raise, so those, trailing dots/spaces and reserved device
+  names (`aux.log` included) are rewritten with `_` — two that come
+  out the same are kept apart by `free_path` like any other clash.
+  Tested with the Windows rules forced, since the suite runs on POSIX.
 - Plaso ingest (`ingest_plaso`, plasoread.py) reads a `.plaso` storage
   file — a SQLite db of serialized attribute containers — as ONE flat
   timeline table, no plaso install involved. Both on-disk generations are
@@ -120,7 +147,11 @@ see [docs/notes/README.md](README.md) for the whole set.
   the root_virtual fast path. Unlike SQLite files and workbooks there is
   no picker — one file is one table — so `.plaso` participates in
   directory import (kind "plaso") and drag-drop directly. A malformed
-  event_data row degrades to an error note in its Attributes cell; cancel
+  event_data row degrades to an error note in its Attributes cell, and so
+  does a malformed (or NULL) EVENT row — it lands as a row with the event
+  table's own timestamp and an `_winnow_error` note, so the table always
+  holds every event in the file (it used to be skipped uncounted, and a
+  NULL `_data` failed the whole import with a TypeError); cancel
   drops the partial source like every other ingest.
 - JSON/JSONL ingest (`ingest_json`/`preview_json_file`/`_flatten_json`) has
   no fixed header row the way CSV's first line is one, so it can't type
@@ -137,6 +168,15 @@ see [docs/notes/README.md](README.md) for the whole set.
   line (each pass); a single `.json` document has to be `json.load()`ed
   whole (no generic streaming parser in the standard library) — memory use
   scales with file size for that shape specifically.
+  **The column set is capped at `JSON_MAX_COLUMNS` (1,000).** SQLite
+  refuses a table past 2,000 columns, and ONE record with more keys than
+  that (attacker-chosen HTTP header names, an environment dump) failed
+  the whole import. Past the cap, the first 999 keys (first-seen order)
+  stay columns and every later key folds into one `Other fields (JSON)`
+  cell per record — a JSON object of just that record's overflow keys,
+  empty when it has none — so nothing is dropped and the structparse
+  ops lift any of them back out. `_json_column_plan` builds the same
+  plan for preview and ingest, so the preview shows the real table.
 - **A JSON cell holds what the file said, all of it.** Every evidence
   read goes through `_json_loads`/`_json_load`, never a bare
   `json.loads`, for two reasons. *Numbers* are parsed to `_JsonNumber`,
@@ -164,6 +204,10 @@ see [docs/notes/README.md](README.md) for the whole set.
   (header, or first data row when `has_header=False`) happens to be short,
   every other row gets trimmed to match it; there's no whole-file pre-scan to
   pick a "correct" width, so this count is the only signal something's off.
+  "First row" means first NON-BLANK row (`_first_nonblank_row`, ingest and
+  preview alike): a leading blank line used to be read as a header of zero
+  columns, and the import died on `CREATE TABLE ... (rid ..., )`. Blank
+  rows after it are still kept as padded rows.
 - **Directory import** (`Store.scan_import_directory`, `POST
   /api/ingest/dir/scan`, the "Import a folder…" modal) is a preview-then-
   commit design, not a bulk-ingest endpoint — the scan step never touches

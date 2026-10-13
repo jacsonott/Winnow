@@ -972,7 +972,7 @@ export function sqlResultNodes(r) {
   xlsxBtn.onclick = () => sqlDownloadXlsx(r.columns, sortedRows());
   const saveBtn = el('button', 'btn ghost', 'Save as table…');
   saveBtn.title = "Run the query in FULL (this preview may be truncated) and land the result as a new table in the case";
-  saveBtn.onclick = () => saveResultAsTable();
+  saveBtn.onclick = () => saveResultAsTable(r.sql);
   acts.append(copyBtn, csvBtn, xlsxBtn, saveBtn);
   bar.append(acts);
   return [bar, t];
@@ -981,9 +981,15 @@ export function sqlResultNodes(r) {
 /* "Save as table…": rerun the tab's query in FULL server-side (the pane
    preview is capped) and land it as an ordinary source. Over the soft cap
    the server answers needs_confirm and we ask "you're about to save X
-   rows" before resending with force. */
-export async function saveResultAsTable() {
-  const sql = $('sqlText').value;
+   rows" before resending with force.
+
+   `sql` is the query behind the result on screen, which runSql keeps on
+   the result. The editor's current text is only the fallback: an analyst
+   who runs a query and then edits it is looking at the old result, and
+   the button sits on that result — saving the edited text landed a table
+   that matched neither what they saw nor what they had checked. */
+export async function saveResultAsTable(sql) {
+  if (typeof sql !== 'string') sql = $('sqlText').value;
   if (!sql.trim()) { toast('Nothing to save — run a query first'); return; }
   const name = await promptDialog('New table name:');
   if (!name || !name.trim()) return;
@@ -1050,6 +1056,9 @@ export async function runSql() {
     const sql = $('sqlText').value;
     const r = await post('/api/sql', { sql, op_token: token }, { signal: run.controller.signal });
     if (!current()) return superseded;
+    // The query that produced this result, kept with it: "Save as table…"
+    // on the result re-runs THIS, not whatever the editor holds by then.
+    r.sql = sql;
     // Decorate with a Tags column when the result can carry one (single
     // src_N + a rid column) — cached WITH the result so tab switches
     // repaint it without refetching.

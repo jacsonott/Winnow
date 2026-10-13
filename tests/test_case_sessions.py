@@ -417,6 +417,55 @@ def test_clearing_drops_undo_entries_that_would_resurrect_tags(store, write_csv)
     assert store.db.execute("SELECT COUNT(*) FROM row_tags").fetchone()[0] == 0
 
 
+def test_a_tag_written_while_a_new_session_starts_is_saved_or_kept(store, write_csv, monkeypatch):
+    """Save-then-clear ran as two holds of the writer lock. A tag written
+    in between (a watchlist auto-tag, a second window) landed after the
+    snapshot and before the DELETE: in neither the saved session nor the
+    live state. Driven deterministically: the competing write runs the
+    moment the session write lets go of the lock, which is exactly that
+    gap when there is one."""
+    import threading
+
+    sid = _case(store, write_csv)
+    tag = _tag(store, sid, [1], "TA")
+    inner = store.lock
+    pending = []
+
+    class _RunOnRelease:
+        def acquire(self, *a, **k):
+            return inner.acquire(*a, **k)
+
+        def release(self):
+            inner.release()
+            if pending and not inner._is_owned():
+                t = threading.Thread(target=pending.pop())
+                t.start()
+                t.join()
+
+        def __enter__(self):
+            inner.acquire()
+            return self
+
+        def __exit__(self, *exc):
+            self.release()
+
+    store.lock = _RunOnRelease()
+    write = store._write_session
+
+    def writing(*a, **k):
+        pending.append(lambda: store.set_tags(sid, [3], tag, True))
+        return write(*a, **k)
+
+    monkeypatch.setattr(store, "_write_session", writing)
+    store.start_new_session(save_as="pass one")
+
+    saved = {(s["source"]["name"], t["rid"]) for s in store.get_session("pass one")["sources"]
+             for t in s.get("row_tags") or []}
+    live = {r[0] for r in store.db.execute("SELECT rid FROM row_tags WHERE source_id=?", (sid,))}
+    assert not pending                                   # the competing write did run
+    assert ("evidence.csv", 3) in saved or 3 in live     # and was not lost
+
+
 def test_loading_with_replace_clears_tables_the_snapshot_never_saw(store, write_csv):
     """The Load dialog says "This replaces the tags and notes currently in
     the case". A table imported after the snapshot was taken is not in it,

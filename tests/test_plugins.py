@@ -900,6 +900,23 @@ def example_registry() -> PluginRegistry:
     return reg
 
 
+def test_filetime_keeps_every_microsecond_and_never_rounds_up(tmp_path):
+    """filetime_to_iso divided ticks by 10 as a float. At 2024 magnitudes
+    that is past a float's exact range, and timedelta rounds the fraction
+    it is handed — so 01.9999999 printed as 02.000000, manufacturing the
+    zeroed subseconds a timestomping check looks for."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "mft_usn_common_under_test", EXAMPLES / "mft_usn" / "common.py")
+    common = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(common)
+    base = ft(datetime(2024, 1, 5, 13, 22, 1, 123456))
+    assert common.filetime_to_iso(base + 7) == "2024-01-05 13:22:01.123456"
+    almost = ft(datetime(2024, 1, 5, 13, 22, 1, 999999)) + 9
+    assert common.filetime_to_iso(almost) == "2024-01-05 13:22:01.999999"
+
+
 def test_example_plugin_loads_and_matches(example_registry):
     mft = example_registry.get_format("mft-usn.mft")
     usn = example_registry.get_format("mft-usn.usn")

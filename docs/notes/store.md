@@ -215,6 +215,23 @@ see [docs/notes/README.md](README.md) for the whole set.
   background janitor thread (`wait_for_fts_maintenance` in tests) — freed
   pages go to the freelist for reuse; the file only shrinks under a VACUUM
   nothing runs automatically.
+- **Contains folds case for A–Z only; Regex folds every script.** Every
+  contains path — the search box, the `contains`/`starts`/`not_contains`
+  filters, Advanced, search-all — ends in SQLite's built-in `LIKE`, which
+  is case-insensitive for ASCII only, while `_regexp` is Python
+  `re.IGNORECASE`. So "администратор" finds "Администратор" under Regex and
+  not under Contains (same for "élodie"/"ÉLODIE"). Known and left as is,
+  deliberately: the trigram index itself already folds Unicode — its
+  candidates include both — and it is the per-candidate recheck that is
+  the built-in LIKE. Measured (SQLite 3.45, 300k rows): an app-defined
+  `like()` keeps the trigram pushdown (`VIRTUAL TABLE INDEX 0:L0`, rare-term
+  time unchanged) but makes every fallback scan ~2.6x slower (65ms →
+  167ms) — the not-yet-indexed source, terms under 3 chars or holding
+  `%`/`_`, every column filter — and would change `LIKE` in the SQL pane
+  too. Narrowing Regex to ASCII (`re.ASCII`) instead would make the mode an
+  analyst reaches for when Contains misses find less. Both are a trade for
+  the maintainer to make against `bench/`'s `search/contains.*` pairs; until
+  then the mode buttons' tooltips say which folds what.
 - A per-column filter with a **sargable op** (`equals`/`in` — see `SARGABLE_OPS`)
   lazily gets a plain B-tree index on that `(source_id, column)`, same
   fire-and-forget background pattern as FTS (`_ensure_column_index_building`
@@ -274,7 +291,9 @@ see [docs/notes/README.md](README.md) for the whole set.
   interrupt `re.search` (it polls for signals, which only reach the main
   thread). Rejected alternatives: a timeout needs another regex engine (a
   dependency) or a process per match; truncating cells would turn a hit
-  past the cut into a silent miss. The check walks the parsed pattern
+  past the cut into a silent miss. The check (`winnow/rxguard.py`, its
+  own module so the regex_extract derived column meets the same one —
+  structparse cannot import store) walks the parsed pattern
   (`re._parser`, `sre_parse` on 3.10) for the two shapes that blow up.
   **A repeated group whose repetitions can match the same text more than
   one way** — open-ended over anything variable-length, or a count of two
@@ -365,7 +384,13 @@ see [docs/notes/README.md](README.md) for the whole set.
   view and stayed correct), so the grid asked for `row_count` rows and got
   the first `row_count` of a longer, unfiltered list — and tag/export on the
   group read the same way, which made it an over-tagging bug and not just a
-  display one.
+  display one. **Nor to a group with a tag level anywhere in it** (the
+  group itself, or its nested path): the virtual predicate is re-run on
+  every page fetch while `row_count` is fixed at expansion, and tags —
+  unlike column values — change under the group, typically by the analyst
+  tagging the row they are looking at in "untagged". The membership then
+  shrinks under the next page's offset and a row is skipped without ever
+  being shown. Materialising snapshots it, as a tag *filter* already does.
 - **The tag filter is a UNION, compiled part by part.** `spec.tags` may
   hold tag ids, `__any__`, `__none__`, or a mix; each part compiles on
   its own and the parts are OR'd. It used to compare the whole list
@@ -416,6 +441,16 @@ see [docs/notes/README.md](README.md) for the whole set.
   already carries exactly. The lookup is a correlated `MIN` over
   row_tags' primary key, skipped entirely for a member with no tags at
   all — the same short-circuit `tag_counts_in_view` makes.
+- **Histogram buckets are floored, and 1601 is a real minimum.** A bucket
+  is `[b, b + bucket_seconds)` — the strip finds a row's bar that way —
+  but SQLite's `/` truncates toward zero, so `(e / w) * w` put every
+  pre-1970 row one bar late. `time_histogram` shifts the epoch by whole
+  buckets past the span's minimum before dividing (non-negative dividends
+  floor and truncate alike, and `EPOCH`, a strftime over TS_NORMALIZE, is
+  still evaluated once per row). The `start`/`end` labels come from
+  SQLite's `datetime(…, 'unixepoch')` rather than `time.gmtime`, which
+  raises OSError on Windows for any negative epoch — FILETIME zero is
+  exactly that. `tests/test_histogram.py`.
 
 - **`tag_counts_in_view`** is what the tag ribbon shows once a filter or
   search is on: the same shape `tag_counts` returns, counted over one view.
@@ -992,6 +1027,25 @@ see [docs/notes/README.md](README.md) for the whole set.
   inline wait is clamped (`VIEW_JOB_INLINE_WAIT_MAX_MS`): over HTTP it
   parks a shared threadpool worker, and the client never sends a figure.
   `tests/test_view_hold.py` / `tests/test_view_jobs.py`.
+- **A view handle goes into `_views` before the writer lock is
+  released, never after.** Eviction (`_evict_root_views`,
+  `_evict_views_of` when a table or merge is dropped, and the cascade
+  over `parent_view_id` children) only sees what is registered, and it
+  runs under `self.lock`. A build that committed its table, let
+  the lock go and *then* registered left a gap a rebuild of the same
+  source could take: the rebuild's eviction ran first, missed the
+  not-yet-registered view, and the late registration installed it on
+  top — a held search that could then be adopted over the newer view, a
+  group whose parent had been dropped (and its `v.view_N` table with
+  nobody left to evict it). `build_view` and both `expand_group`
+  branches therefore register inside the lock they built under, and
+  `expand_group` re-checks that its parent is still registered there —
+  a `root_virtual` parent has no table whose absence would raise. The
+  same gap let a view outlive a `drop_source` that ran in it, paging a
+  table that was gone instead of answering 409.
+  `tests/test_view_races.py` opens the gap deterministically by running
+  the competing rebuild (or drop) at the moment the build's lock is
+  released.
 - **The 2026-08 hot-path perf pass** (validated with `python3 -m bench
   --vs-ref` at both the 200k and 1.2M tiers — 0 slower, footprint
   unchanged), the shapes and their reasons:

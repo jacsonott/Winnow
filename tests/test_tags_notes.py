@@ -42,6 +42,26 @@ def test_set_tags_pairs_mixed_sources(store, write_csv):
     assert store.set_tags_pairs([], tag["id"], True) == {"counts": {}}
 
 
+def test_set_tags_pairs_counts_the_whole_merge_it_was_made_in(store, client, write_csv):
+    """The client stores these counts as the merge's whole-table counts
+    (S.tagCountsAll). Counted over only the members the selection touched,
+    tagging one row of A in a merge whose B already held two showed the
+    ribbon a count of 1 where the merge held 3 — and undo recounted the
+    same partial set."""
+    a = store.ingest_csv(write_csv([["u"], ["1"], ["2"]], name="a.csv"), name="a.csv", build_fts=False)["id"]
+    b = store.ingest_csv(write_csv([["u"], ["3"], ["4"]], name="b.csv"), name="b.csv", build_fts=False)["id"]
+    tag = store.upsert_tag(None, "Malware", "#ff0000", None)["id"]
+    store.set_tags(b, [1, 2], tag, True)
+    mid = store.create_merge("M", [a, b])["id"]
+
+    out = store.set_tags_pairs([[a, 1]], tag, True, source_id=mid)
+    assert out["counts"][str(tag)] == 3 == store.tag_counts(mid)["counts"][str(tag)]
+    assert store.undo_last_tag_change()["counts"][str(tag)] == 2
+
+    r = client.post("/api/row_tags", json={"pairs": [[a, 2]], "source_id": mid, "tag_id": tag, "on": True})
+    assert r.status_code == 200 and r.json()["counts"][str(tag)] == 3
+
+
 def test_tag_view_tags_every_row_in_the_view(ingested):
     store, source_id = ingested
     tag = store.upsert_tag(None, "AllInView", "#123456", None)

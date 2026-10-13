@@ -30,6 +30,19 @@ def test_unix_epoch_auto_ranges_by_plausible_year():
     assert parse("unix_epoch", "1700000000000000000") == "2023-11-14 22:13:20.000000"
 
 
+def test_integer_epochs_convert_exactly():
+    """A float carries ~16 significant digits; a nanosecond epoch has 19
+    and a WebKit value 17. Dividing as floats put the result up to a
+    microsecond off either way, and a nanosecond value at the very end of
+    the window rounded into 2101 and was refused outright."""
+    assert parse("unix_epoch", "1700000000123456789") == "2023-11-14 22:13:20.123456"
+    assert parse("unix_epoch", "1700000000123456999", {"unit": "ns"}) == "2023-11-14 22:13:20.123456"
+    assert parse("unix_epoch", "4133980799999999999") == "2100-12-31 23:59:59.999999"
+    assert parse("webkit_epoch", "13348668000123457") == "2024-01-02 11:20:00.123457"
+    assert parse("unix_epoch", "1700000000.5") == "2023-11-14 22:13:20.500000"   # a fraction stays float
+    assert parse("unix_epoch", "9" * 40) is None                                # and so does anything absurd
+
+
 def test_unix_epoch_rejects_out_of_window_and_garbage():
     assert parse("unix_epoch", "620000000") is None  # 1989 — below the 1990 floor
     assert parse("unix_epoch", "-1700000000") is None
@@ -174,6 +187,18 @@ def test_mac_absolute_overlaps_unix_seconds():
     assert parse("unix_epoch", "700000000") == "1992-03-07 20:26:40"
 
 
+def test_mac_absolute_reads_dates_before_2001():
+    """Negative Cocoa time is before 2001 and inside the 1990 floor — a
+    1990s date in a plist or Photos store. It was refused outright. Zero
+    (the unset default) still is, and detection still scores negatives as
+    misses, so a column of -1 sentinels is not offered as Mac time."""
+    assert parse("mac_absolute", "-100000000") == "1997-10-31 14:13:20"
+    assert parse("mac_absolute", "-1.5") == "2000-12-31 23:59:58.500000"
+    assert parse("mac_absolute", "0") is None
+    assert parse("mac_absolute", "-400000000") is None          # 1988 — below the window
+    assert not [r for r in timeparse.detect(["-1", "-1", "-5"]) if r["op_id"] == "mac_absolute"]
+
+
 def test_excel_serial():
     assert parse("excel_serial", "45296") == "2024-01-05 00:00:00"
     assert parse("excel_serial", "45296.5") == "2024-01-05 12:00:00"
@@ -196,6 +221,18 @@ def test_apache_clf():
 def test_rfc2822():
     assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 -0700") == "2006-01-02 22:04:05"
     assert parse("rfc2822", "garbage") is None
+
+
+def test_rfc2822_obsolete_years_follow_the_rfc():
+    """RFC 5322 §4.3: a two-digit year is 19xx from 50 up and 20xx below;
+    three digits are 1900 + n. email.utils splits at 68 and keeps three
+    digits as written, so "55" read as 2055 — plausible, and wrong — and
+    "124" as year 124, refused."""
+    assert parse("rfc2822", "Wed, 02 Jan 124 15:04:05 GMT") == "2024-01-02 15:04:05"
+    assert parse("rfc2822", "Mon, 02 Jan 55 15:04:05 +0000") is None    # 1955, below the window
+    assert parse("rfc2822", "Mon, 02 Jan 95 15:04:05 +0000") == "1995-01-02 15:04:05"
+    assert parse("rfc2822", "Mon, 02 Jan 06 15:04:05 -0700") == "2006-01-02 22:04:05"
+    assert parse("rfc2822", "02 Jan 06 15:04 GMT") == "2006-01-02 15:04:00"
 
 
 def test_us_datetime_ampm_rules():
@@ -285,6 +322,26 @@ def test_every_output_matches_the_shapes_store_already_recognizes():
         assert _TS_ISO_RE.match(out), out
         assert _ts_normalize(out) == out[:19], out
         assert _day_bucket(out) == out[:10], out
+
+
+
+def test_a_year_below_1000_keeps_four_digits():
+    """strftime's %Y on glibc drops the zero padding below year 1000, so
+    a string op holding "0999-…" wrote "999-06-01 00:00:00": not a shape
+    the store recognises, and as text it sorted after every 2024 date."""
+    outs = [
+        parse("iso8601", "0999-06-01T00:00:00"),
+        parse("dd_mmm_yyyy", "05 Jan 0999 13:22:01"),
+        parse("apache_clf", "05/Jan/0999:13:22:01"),
+        parse("us_datetime", "1/5/0999 1:22 PM"),
+        parse("iso8601", "0001-01-01T00:00:00.5"),
+    ]
+    assert outs == ["0999-06-01 00:00:00", "0999-01-05 13:22:01", "0999-01-05 13:22:01",
+                    "0999-01-05 13:22:00", "0001-01-01 00:00:00.500000"]
+    for out in outs:
+        assert _TS_ISO_RE.match(out), out
+        assert _ts_normalize(out) == out[:19], out
+        assert out < "2024-01-01 00:00:00"
 
 
 # ------------------------------------------ month-name native recognition

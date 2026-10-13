@@ -81,6 +81,35 @@ see [docs/notes/README.md](README.md) for the whole set.
   columns are created through the existing batch route — one scan, N
   columns, all-or-nothing — which is the same machinery the JSON flatten
   picker uses.
+- **A regex that can backtrack for minutes is refused, not run.** Python's
+  `re` has no timeout, a backfill polls its cancel flag only between
+  batches, and the preview and `/api/derived/regex_groups` run inside the
+  request — so `(\w+\s?)*` against one 30-character cell that almost
+  matches held a worker (or the whole backfill) for minutes with nothing
+  able to stop it. `structparse._compile_analyst_regex` is the one gate
+  every derive pattern passes, and its check is `rxguard.regex_hazard`:
+  the same automaton the regex filter, search and SQL-pane REGEXP use
+  (docs/notes/store.md has how it decides). There used to be a second,
+  shape-only check here, because structparse cannot import store; two
+  checks drew the line in two places, so the guard moved to a module
+  both import. The dotted and CSV shapes people write all the time —
+  `(\.[a-z]+)*`, `([a-z0-9-]+\.)+`, `(?:[^,]*,)*`, `(\S+\s+){3}` — pass;
+  `(\w+\s?)*`, `(\w+\.\w+)+` and `(\d+\d*,)+` do not. Bounding the
+  outer repeat is NOT a way out: `(\w+\s?){0,50}` took a minute on 29
+  characters. Overlaps are judged case-insensitively, as REGEXP runs, so
+  for a derive pattern (case-sensitive unless it says `(?i)`) the check
+  can only be stricter than it needs to be, never looser.
+- **Every path the flatten picker offers has to survive `validate_params`
+  and extract the sample it was offered with.** Because the batch is
+  all-or-nothing, one offered path that fails to parse fails every column
+  the analyst ticked — and the picker pre-ticks anything at 100%. Two
+  shapes broke that: an EVTX `Data Name` holding an apostrophe was spliced
+  into `'…'` bare (now `"O'Brien"`, or `'it''s "x"'` when it holds both,
+  XPath 2.0's doubling — `parse_xml_path` reads all three, and its step
+  splitting skips `/ ] @` inside the quotes), and a JSON key with edge
+  whitespace went out in dot notation, which strips (now bracket-quoted,
+  and quoted keys are no longer stripped). `test_structparse.py` checks
+  the property itself on those shapes, not just the two fixes.
 
 - **Derived columns** (`timeparse.py`, `derived_columns`/`drv_<id>` tables,
   `/api/derived/*`, the column header's right-click menu's "Add datetime column from
@@ -207,7 +236,10 @@ see [docs/notes/README.md](README.md) for the whole set.
     also runs the op's `check` first, so a lookup whose table is gone is
     refused with nothing changed.
   - **Canonical output is `YYYY-MM-DD HH:MM:SS[.ffffff]`**, sub-second only
-    when the source has that resolution. That exact shape is why there are
+    when the source has that resolution — four-digit year always, which is
+    why `_fmt` writes the fields out itself and not with `strftime`: glibc's `%Y` writes
+    year 999 as `999`, a shape nothing recognises and that sorts after
+    2024 as text. That exact shape is why there are
     **no new regexes to hand-sync**: `_TS_ISO_RE`/`TS_NORMALIZE`/`DAY_BUCKET`
     and `tsformat.js`'s `parseTimestamp` already prefix-match it. Timezones:
     epoch-family values are UTC by definition, values carrying an explicit

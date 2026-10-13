@@ -38,6 +38,10 @@ Untrusted-input rules, all enforced here rather than assumed:
 - **Nothing is overwritten.** Two members with one name, or ``messages``
   beside ``messages.gz``, would otherwise leave whichever came last; the
   later one takes ``name (2).ext`` and is reported under ``renamed``.
+- **Names fit the OS they land on**: on Windows a ``:`` in a member name
+  would write an NTFS alternate data stream of the file before it, and
+  ``?*<>|"`` raise — so each path component is sanitised there
+  (``_member_name_for_os``).
 
 Stdlib only (zipfile/tarfile/gzip/shutil), per the airgap rule.
 """
@@ -201,6 +205,38 @@ class _Budget:
         return f"{root} ({n}){ext}"
 
 
+# Characters Windows refuses in a file name (and ':' which it doesn't
+# refuse but reads as "alternate data stream of the file before it"),
+# control characters included; and the device names that are reserved
+# with or without an extension (`aux.log` is the AUX device).
+_WINDOWS_BAD_CHARS = set('<>:"|?*') | {chr(i) for i in range(32)}
+_WINDOWS_RESERVED = ({"CON", "PRN", "AUX", "NUL"}
+                     | {f"COM{i}" for i in range(1, 10)} | {f"LPT{i}" for i in range(1, 10)})
+
+
+def _member_name_for_os(rel: str, windows: bool) -> str:
+    """`rel` (a member's normalised relative path, '/'-separated) made
+    writable as itself on this OS. A no-op on POSIX, where every one of
+    these is a legal name. On Windows, each component: bad characters
+    become '_'; a trailing dot or space (which Windows silently drops, so
+    `a.` and `a` would collide) becomes '_'; a reserved device name gets a
+    '_' prefix. Two names that come out the same are kept apart by
+    _Budget.free_path, like any other clash. Taking the parameter rather
+    than reading os.name is what lets the POSIX suite check the Windows
+    rules."""
+    if not windows:
+        return rel
+    out = []
+    for comp in rel.split("/"):
+        comp = "".join("_" if ch in _WINDOWS_BAD_CHARS else ch for ch in comp)
+        kept = comp.rstrip(". ")
+        comp = kept + "_" * (len(comp) - len(kept))
+        if comp.split(".")[0].upper() in _WINDOWS_RESERVED:
+            comp = "_" + comp
+        out.append(comp)
+    return "/".join(out)
+
+
 def _safe_target(dest: str, member_name: str, budget: _Budget) -> str | None:
     # Zips written by Windows tools sometimes carry backslash separators.
     name = member_name.replace("\\", "/").lstrip("/")
@@ -210,7 +246,7 @@ def _safe_target(dest: str, member_name: str, budget: _Budget) -> str | None:
     if norm.startswith("..") or os.path.isabs(norm) or (len(norm) > 1 and norm[1] == ":"):
         budget.skip(member_name, "path escapes the extraction directory")
         return None
-    return os.path.join(dest, norm)
+    return os.path.join(dest, _member_name_for_os(norm.replace(os.sep, "/"), windows=os.name == "nt"))
 
 
 def _copy_stream(src, dst_path: str, budget: _Budget, source: str) -> bool:
@@ -362,7 +398,14 @@ def expand_archive(path: str, dest_root: str | None = None) -> dict:
     if _kind(path) is None:
         raise ArchiveError(f"{os.path.basename(path)} is not a zip, tar or gzip archive")
 
-    dest = _fresh_dest(path, dest_root)
+    try:
+        dest = _fresh_dest(path, dest_root)
+    except OSError as e:
+        # A read-only mount, or "<name>-extracted" past the filesystem's
+        # name limit: nothing was written, and the route can say why
+        # (this ran outside every handler, so it was a 500).
+        raise ArchiveError(f"Could not create a folder to expand "
+                           f"{os.path.basename(path)} into: {e}") from e
     budget = _Budget(dest)
     budget.archives += 1
     try:

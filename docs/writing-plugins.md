@@ -421,7 +421,7 @@ Prefer it to reaching into the app's globals — this is what's supported.
 | `assets` | `/plugin_assets/<fs_name>` — prefix for your own files |
 | `api(path, opts)` | `fetch` wrapper: JSON in/out, throws with `err.status`, sets the CSRF header |
 | `post(path, body)` | JSON POST shorthand |
-| `sql(sql, limit)` | Read-only query against the case file |
+| `sql(sql, limit)` | Read-only query against the case file. Cells JSON can't carry exactly come back as text: a BLOB as its UTF-8 text or SQLite's `X'00FF'`, `Inf`/`-Inf`/`NaN`, and an integer past ±2^53 as its decimal digits (server-side, `req.store.run_sql` still returns the raw values) |
 | `schemaText()` | The case's schema as CREATE TABLE-ish SQL (LLM-ready) |
 | `toast(msg, ms)` | Transient status message — one slot, no button; see [Feedback](#feedback-toasts-notifications-and-dialogs) |
 | `notify(opts)` | A row in the bottom-right jobs panel, the card an import gets — progress, detail, buttons; returns a handle (`update` / `done` / `fail` / `close`) |

@@ -25,6 +25,7 @@ import hashlib
 import io
 import itertools
 import json
+import math
 import os
 import re
 import shutil
@@ -49,6 +50,7 @@ from . import combine  # noqa: F401 — registers the multi-column ops (coalesce
 from . import structparse  # noqa: F401 — registers the JSON/XML extraction ops into timeparse.OPERATIONS
 from . import timeparse
 from . import plasoread
+from . import rxguard
 from . import xlsxread
 from . import log as wlog
 from .paths import sqlite_ro_uri
@@ -613,592 +615,6 @@ def _regexp(pattern: str, value: Any) -> bool:
     return _compiled_regex(pattern).search(str(value)) is not None
 
 
-# Catastrophic backtracking, and why it is refused rather than bounded.
-# Cells are attacker-controlled evidence, and `re` backtracks: `(a+)+$`
-# against forty a's and a "!" is 2^40 steps. That runs inside the REGEXP
-# callback, which holds the GIL for the whole of one cell's match — every
-# thread in the server (paging, the event loop, the cancel request itself)
-# stops until it finishes, and nothing in Python can interrupt re.search
-# (it only polls for signals, and those reach the main thread alone). A
-# timeout needs another regex engine (a dependency) or another process per
-# match; truncating cells would make a hit past the cut a silent miss. So
-# the pattern is checked instead, and the two shapes that blow up are
-# refused with a reason. One: a repeated group whose repetitions can match
-# the same text more than one way — open-ended over anything variable, or
-# a count of two or more over something open-ended (`(a+){10}`). That is
-# decided exactly (_rx_splits: a Thompson automaton of the body, and a
-# search for two paths that leave one point of the loop and come back to
-# it over the same text), not by shape — the shape rules it replaced both
-# refused patterns analysts type (`(\S+\s+){3}`, the field-N-of-a-command-
-# line shape) and passed ones that blow up (`(,a+.\s+)+$`, where the `.`
-# can take the last `a` or the first space). What the automaton does not
-# model (backreferences, conditionals, possessive and atomic groups, very
-# large bodies) falls back to those shape rules, _rx_delimited and
-# _rx_ambiguous. Two, in that fallback only: an open-ended repeat of
-# alternatives that can START the same way (`(a|a)*b`) — a cruder test the
-# automaton makes exactly everywhere else, which is what lets a keyword
-# list like `((?:lsadump|logonpasswords)\s+)+` through while `(a|a)*b` and
-# `(a|aa)+` still fail it. Conservative on purpose: a refused
-# pattern can be rewritten (end each part of the repetition at something
-# it cannot match, a class instead of an alternation, or Contains), a hung
-# case cannot be cancelled. NOT covered: polynomial blow-ups from adjacent
-# repeats over the same characters (`.*a.*b` on a megabyte cell) — those
-# are slow, not exponential, and refusing `.*x.*y` would refuse ordinary
-# searches.
-try:   # Python 3.11+
-    from re import _constants as _sre_c, _parser as _sre_parse
-except ImportError:   # Python 3.10
-    import sre_constants as _sre_c  # type: ignore[no-redef]
-    import sre_parse as _sre_parse  # type: ignore[no-redef]
-
-_RX_REPEATS = (_sre_c.MAX_REPEAT, _sre_c.MIN_REPEAT)
-_RX_POSSESSIVE = getattr(_sre_c, "POSSESSIVE_REPEAT", None)
-_RX_ATOMIC = getattr(_sre_c, "ATOMIC_GROUP", None)
-
-
-def _rx_union(a: set | None, b: set | None) -> set | None:
-    return None if a is None or b is None else a | b
-
-
-def _rx_class(items) -> set | None:
-    """The characters a `[...]` (or `\\d`-style) item can match, both cases,
-    or None for "too many to say" — a category, a negation, a wide range."""
-    out: set = set()
-    for op, av in items:
-        if op == _sre_c.LITERAL:
-            out |= {chr(av), chr(av).lower(), chr(av).upper()}
-        elif op == _sre_c.RANGE and av[1] - av[0] < 256:
-            for o in range(av[0], av[1] + 1):
-                out |= {chr(o), chr(o).lower(), chr(o).upper()}
-        else:
-            return None
-    return out
-
-
-def _rx_first(items) -> tuple[set | None, bool]:
-    """(the characters a match of `items` can start with — None for could
-    be anything — and whether it can match the empty string). Errs towards
-    None, which only ever makes the overlap check more cautious."""
-    first: set | None = set()
-    for op, av in items:
-        if op == _sre_c.LITERAL:
-            return _rx_union(first, {chr(av), chr(av).lower(), chr(av).upper()}), False
-        if op == _sre_c.IN:
-            return _rx_union(first, _rx_class(av)), False
-        if op in (_sre_c.AT, _sre_c.ASSERT, _sre_c.ASSERT_NOT):
-            continue   # zero-width
-        if op == _sre_c.SUBPATTERN or (_RX_ATOMIC is not None and op == _RX_ATOMIC):
-            sub, nullable = _rx_first(av[-1] if op == _sre_c.SUBPATTERN else av)
-        elif op == _sre_c.BRANCH:
-            sub, nullable = set(), False
-            for alt in av[1]:
-                f, n = _rx_first(alt)
-                sub, nullable = _rx_union(sub, f), nullable or n
-        elif op in _RX_REPEATS or (_RX_POSSESSIVE is not None and op == _RX_POSSESSIVE):
-            sub, nullable = _rx_first(av[2])
-            nullable = nullable or av[0] == 0
-        else:
-            return None, False   # ANY, NOT_LITERAL, a backreference: anything
-        first = _rx_union(first, sub)
-        if first is None or not nullable:
-            return first, False
-    return first, True
-
-
-def _rx_alternatives_overlap(alts) -> bool:
-    firsts = [_rx_first(a) for a in alts]
-    for i, (fa, na) in enumerate(firsts):
-        for fb, nb in firsts[i + 1:]:
-            if na or nb or fa is None or fb is None or fa & fb:
-                return True
-    return False
-
-
-# A `[...]` item's category back as the escape that wrote it, so an atom
-# can be rebuilt as a one-character pattern and asked about directly.
-_RX_CATEGORIES = {
-    _sre_c.CATEGORY_DIGIT: r"\d", _sre_c.CATEGORY_NOT_DIGIT: r"\D",
-    _sre_c.CATEGORY_SPACE: r"\s", _sre_c.CATEGORY_NOT_SPACE: r"\S",
-    _sre_c.CATEGORY_WORD: r"\w", _sre_c.CATEGORY_NOT_WORD: r"\W",
-}
-
-
-@functools.lru_cache(maxsize=1)
-def _rx_bmp() -> str:
-    """Every BMP character but the surrogates — the practical alphabet of
-    a log, for asking whether two classes share a character."""
-    return "".join(chr(o) for o in range(0x10000) if not 0xD800 <= o <= 0xDFFF)
-
-
-class _RxChar:
-    """One single-character atom, rebuilt as a one-character pattern
-    (`cls`, matched case-insensitively as REGEXP runs it) — plus, when it
-    is a short list of characters (a literal, `[.,;]`), that list, so a
-    check against it needs no scan."""
-
-    def __init__(self, cls: str, explicit: frozenset | None = None):
-        self.rx = re.compile(cls, re.IGNORECASE)
-        self.explicit = explicit
-
-    def overlaps(self, other: "_RxChar") -> bool:
-        if self.explicit is not None:
-            return any(other.rx.fullmatch(ch) for ch in self.explicit)
-        if other.explicit is not None:
-            return any(self.rx.fullmatch(ch) for ch in other.explicit)
-        # Two classes (\w against \s, [^,] against \d): what one matches
-        # across the BMP, searched with the other.
-        return other.rx.search(_rx_members(self.rx.pattern)) is not None
-
-
-@functools.lru_cache(maxsize=512)
-def _rx_members(cls: str) -> str:
-    """Every BMP character the one-character pattern `cls` matches. The
-    scan is the few ms an overlap check costs, and a pattern asks about
-    the same few classes many times over, so it is done once per class."""
-    return "".join(re.compile(cls, re.IGNORECASE).findall(_rx_bmp()))
-
-
-_RX_ANYTHING = _RxChar(r"(?s:.)")
-
-
-def _rx_char(op, av) -> _RxChar | None:
-    """The _RxChar for a single-character atom, or None for anything that
-    is not one (a group, a repeat, a zero-width assertion)."""
-    if op == _sre_c.LITERAL:
-        c = chr(av)
-        return _RxChar(re.escape(c), frozenset({c, c.lower(), c.upper()}))
-    if op == _sre_c.NOT_LITERAL:
-        return _RxChar(f"[^\\U{av:08x}]")
-    if op == _sre_c.ANY:
-        return _RxChar(".")
-    if op != _sre_c.IN:
-        return None
-    negate = bool(av) and av[0][0] == _sre_c.NEGATE
-    parts = av[1:] if negate else av
-    body = []
-    for pop, pav in parts:
-        if pop == _sre_c.LITERAL:
-            body.append(f"\\U{pav:08x}")
-        elif pop == _sre_c.RANGE:
-            body.append(f"\\U{pav[0]:08x}-\\U{pav[1]:08x}")
-        elif pop == _sre_c.CATEGORY and pav in _RX_CATEGORIES:
-            body.append(_RX_CATEGORIES[pav])
-        else:
-            return _RX_ANYTHING
-    if not body:
-        return _RX_ANYTHING
-    explicit = None if negate else _rx_class(parts)
-    return _RxChar(("[^" if negate else "[") + "".join(body) + "]",
-                   frozenset(explicit) if explicit is not None else None)
-
-
-def _rx_variable_chars(items, variable: bool = False) -> tuple[list[_RxChar], bool]:
-    """(the atoms in `items` that can match a varying amount of text, and
-    whether there is any variable-length part at all). `variable` says
-    everything here is already inside one — a repeat whose count can vary,
-    or an ambiguous alternation. A possessive repeat or an atomic group
-    never gives back what it took, so nothing inside one counts."""
-    chars: list[_RxChar] = []
-    any_variable = variable
-    for op, av in items:
-        ch = _rx_char(op, av)
-        if ch is not None:
-            if variable:
-                chars.append(ch)
-            continue
-        if op in _RX_REPEATS:
-            sub, v = _rx_variable_chars(av[2], variable or av[0] != av[1])
-        elif op == _sre_c.SUBPATTERN:
-            sub, v = _rx_variable_chars(av[-1], variable)
-        elif op == _sre_c.BRANCH:
-            # Alternatives that each start differently are one choice the
-            # first character makes (`(foo|bar)+`, `(a|bc)+`): only what is
-            # variable inside them counts. Ones that can match the same
-            # text are a choice backtracking can revisit, so all of it does.
-            ambiguous = variable or _rx_alternatives_overlap(av[1])
-            sub, v = [], ambiguous
-            for alt in av[1]:
-                alt_chars, alt_v = _rx_variable_chars(alt, ambiguous)
-                chars += alt_chars
-                v = v or alt_v
-        elif op == _sre_c.GROUPREF_EXISTS:
-            sub, v = [], True
-            for alt in (av[1], av[2]):
-                if alt is not None:
-                    chars += _rx_variable_chars(alt, True)[0]
-        elif op == _sre_c.GROUPREF:
-            sub, v = [_RX_ANYTHING], True   # a backreference can be any text
-        else:
-            continue   # zero-width, possessive, atomic
-        chars += sub
-        any_variable = any_variable or v
-    return chars, any_variable
-
-
-def _rx_open_ended(items) -> bool:
-    """Whether `items` holds a quantifier with no upper bound that can
-    backtrack (so not a possessive one, nor one inside an atomic group)."""
-    for op, av in items:
-        if op in _RX_REPEATS and (av[1] == _sre_c.MAXREPEAT or _rx_open_ended(av[2])):
-            return True
-        if op == _sre_c.SUBPATTERN and _rx_open_ended(av[-1]):
-            return True
-        if op == _sre_c.BRANCH and any(_rx_open_ended(alt) for alt in av[1]):
-            return True
-    return False
-
-
-def _rx_sequence(items) -> list:
-    """`items` with plain groups opened up: the run of atoms one match of
-    them steps through, in order."""
-    out: list = []
-    for op, av in items:
-        if op == _sre_c.SUBPATTERN:
-            out += _rx_sequence(av[-1])
-        else:
-            out.append((op, av))
-    return out
-
-
-def _rx_delimited(body) -> bool:
-    """Whether every repetition of `body` ends (or starts) at a character
-    none of its variable-length parts can match: a mandatory single
-    character with all of the variable parts on ONE side of it — a `.`
-    after `\\w+`, a `,` after `[^,]*`, a `\\` before `[^\\\\]+`. Then the
-    repetitions cannot trade text, so a cell splits between them only one
-    way. Both sides fails: in `(\\w+\\.\\w+)+` the word characters
-    between two dots can go to either repetition, 2^n ways. An OPTIONAL
-    delimiter (`\\s?`) is itself a variable part and delimits nothing."""
-    seq = _rx_sequence(body)
-    variable_chars, _ = _rx_variable_chars(body)
-    varies = [_rx_variable_chars([item])[1] for item in seq]
-    for i, item in enumerate(seq):
-        d = _rx_fixed_char(item)
-        if d is None or any(d.overlaps(v) for v in variable_chars):
-            continue
-        if not any(varies[:i]) or not any(varies[i + 1:]):
-            return True
-    return False
-
-
-def _rx_fixed_char(item) -> _RxChar | None:
-    """The one character a fixed single-character atom matches (bare, or
-    `\\.{1}`), or None when `item` is not one."""
-    op, av = item
-    d = _rx_char(op, av)
-    if d is None and op in _RX_REPEATS and av[0] == av[1] >= 1 and len(av[2]) == 1:
-        d = _rx_char(*av[2][0])
-    return d
-
-
-def _rx_ambiguous(body) -> bool:
-    """Whether one repetition of `body` can match the same text more than
-    one way: two variable-length parts that can match the same character
-    with nothing fixed between them that the first cannot match
-    (`a?[ab]?`, `\\d+\\.?\\d*`, `\\w+x\\w+`). A delimiter does not
-    save that — two ways through each repetition is 2^n over n of them."""
-    seq = _rx_sequence(body)
-    parts = []   # (variable chars, or None for a fixed item; the item)
-    for item in seq:
-        op, av = item
-        if op == _sre_c.BRANCH and any(_rx_ambiguous(alt) for alt in av[1]):
-            return True
-        if op in _RX_REPEATS and len(_rx_sequence(av[2])) > 1 and _rx_ambiguous(av[2]):
-            return True
-        varies = _rx_variable_chars([item])[1]
-        parts.append((_rx_variable_chars([item], True)[0] if varies else None, item))
-    for i, (chars_i, _) in enumerate(parts):
-        if chars_i is None:
-            continue
-        for chars_j, item_j in parts[i + 1:]:
-            if chars_j is None:
-                sep = _rx_fixed_char(item_j)
-                if sep is not None and not any(sep.overlaps(c) for c in chars_i):
-                    break   # part i cannot run past this character
-                continue
-            if any(a.overlaps(b) for a in chars_i for b in chars_j):
-                return True
-    return False
-
-
-class _RxUnsupported(Exception):
-    """A repeat body _rx_splits cannot model; the structural rules above
-    (_rx_delimited, _rx_ambiguous) judge it instead."""
-
-
-# Counted repeats past this many copies are modelled as E+ (or E* when
-# the count can be 0): every count still has exactly one path, so any two
-# ways through the original are two ways through the model, and the
-# check only gets more cautious. Past _RX_MAX_ATOMS character atoms, or
-# _RX_MAX_PAIRS product states, the structural rules decide instead.
-_RX_FOLD = 8
-_RX_MAX_ATOMS = 160
-_RX_MAX_PAIRS = 20000
-
-
-class _RxNfa:
-    """A Thompson automaton for one repeat body: one state per point
-    between atoms, an epsilon edge per choice the backtracking engine can
-    make (which alternative, one more repetition or stop), a character
-    edge per atom. Paths through it are exactly the ways `re` can match,
-    which is what makes counting them the right question."""
-
-    def __init__(self):
-        self.eps: list[list[int]] = []
-        self.chars: list[list[tuple[_RxChar, int]]] = []
-        self.atoms = 0
-
-    def state(self) -> int:
-        self.eps.append([])
-        self.chars.append([])
-        return len(self.eps) - 1
-
-    def seq(self, items) -> tuple[int, int]:
-        start = cur = self.state()
-        for op, av in items:
-            a, b = self.item(op, av)
-            self.eps[cur].append(a)
-            cur = b
-        return start, cur
-
-    def item(self, op, av) -> tuple[int, int]:
-        ch = _rx_char(op, av)
-        if ch is not None:
-            self.atoms += 1
-            if self.atoms > _RX_MAX_ATOMS:
-                raise _RxUnsupported
-            s, t = self.state(), self.state()
-            self.chars[s].append((ch, t))
-            return s, t
-        if op == _sre_c.SUBPATTERN:
-            return self.seq(av[-1])
-        if op in (_sre_c.AT, _sre_c.ASSERT, _sre_c.ASSERT_NOT):
-            s = self.state()   # zero-width; a lookaround's own body is _rx_hazard's
-            return s, s
-        if op == _sre_c.BRANCH:
-            s, t = self.state(), self.state()
-            for alt in av[1]:
-                a, b = self.seq(alt)
-                self.eps[s].append(a)
-                self.eps[b].append(t)
-            return s, t
-        if op in _RX_REPEATS:
-            lo, hi, body = av
-            if lo > _RX_FOLD or (hi != _sre_c.MAXREPEAT and hi > _RX_FOLD):
-                lo, hi = min(lo, 1), _sre_c.MAXREPEAT
-            s = cur = self.state()
-            for _ in range(lo):
-                a, b = self.seq(body)
-                self.eps[cur].append(a)
-                cur = b
-            t = self.state()
-            if hi == _sre_c.MAXREPEAT:
-                loop = self.state()
-                a, b = self.seq(body)
-                self.eps[cur].append(loop)
-                self.eps[loop] += [a, t]   # once more, or stop
-                self.eps[b].append(loop)
-            else:
-                for _ in range(hi - lo):
-                    a, b = self.seq(body)
-                    self.eps[cur] += [a, t]
-                    cur = b
-                self.eps[cur].append(t)
-            return s, t
-        # A backreference, a conditional, a possessive repeat or an atomic
-        # group: not something this models.
-        raise _RxUnsupported
-
-
-def _rx_splits(body) -> bool:
-    """Whether a repeat of `body` can match some text more than one way
-    in a way that compounds — two different paths from one point of the
-    loop back to that same point over the same text. That is exponential
-    ambiguity: n trips round the loop are 2^n paths, and on a cell that
-    fails at the end `re` walks every one of them. Exact, rather than a
-    rule about shapes, which matters in both directions:
-
-    - `(\\S+\\s+){3}` and `^(\\S+\\s+)*\\S+$`, the "field N of a command
-      line" shapes, pass: \\S and \\s share no character, so every
-      boundary is where the text changes from one to the other.
-    - `(\\w+\\s?)+` fails: the optional space lets a word end anywhere.
-    - `(,a+.\\s+)+` and `(.\\s+[ab]+)+` fail, though the `,` pins each
-      repetition of the first and `\\s+` and `[ab]+` share no character
-      in the second: the `.` can take the last letter or the first space,
-      two ways per repetition.
-
-    The search runs over pairs of states, two paths in step reading the
-    same character: a strongly connected set of pairs holding one where
-    the paths agree, (p, p), and one where they do not means a second
-    way round. Raises _RxUnsupported for what the automaton cannot model,
-    and for a body big enough that the pairs would cost more than the
-    check is worth."""
-    nfa = _RxNfa()
-    entry, end = nfa.seq(body)
-    nfa.eps[end].append(entry)   # the loop: the next repetition
-    n = len(nfa.eps)
-
-    # Epsilon closure with path counts: from each state, the character
-    # edges reachable without reading anything, and by how many distinct
-    # routes (capped at 2 — one or several is all that matters). A cycle
-    # of epsilon edges is a repetition that can match nothing at all,
-    # round and round: refused outright.
-    order: list[int] = []
-    colour = [0] * n
-    for root in range(n):
-        if colour[root]:
-            continue
-        stack = [(root, iter(nfa.eps[root]))]
-        colour[root] = 1
-        while stack:
-            node, it = stack[-1]
-            nxt = next(it, None)
-            if nxt is None:
-                colour[node] = 2
-                order.append(node)
-                stack.pop()
-            elif colour[nxt] == 1:
-                return True
-            elif colour[nxt] == 0:
-                colour[nxt] = 1
-                stack.append((nxt, iter(nfa.eps[nxt])))
-    closure: list[dict] = [{} for _ in range(n)]
-    for node in order:   # successors first
-        c = closure[node]
-        for k, _edge in enumerate(nfa.chars[node]):
-            c[(node, k)] = 1
-        for nxt in nfa.eps[node]:
-            for key, m in closure[nxt].items():
-                c[key] = min(2, c.get(key, 0) + m)
-
-    seen_overlap: dict = {}
-
-    def overlap(a: _RxChar, b: _RxChar) -> bool:
-        key = (a.rx.pattern, b.rx.pattern)
-        if key not in seen_overlap:
-            seen_overlap[key] = a.overlaps(b)
-        return seen_overlap[key]
-
-    def step(x: int, y: int):
-        """((x', y'), divergent) for the pairs one character on."""
-        for e1, m1 in closure[x].items():
-            c1, d1 = nfa.chars[e1[0]][e1[1]]
-            for e2, m2 in closure[y].items():
-                c2, d2 = nfa.chars[e2[0]][e2[1]]
-                if overlap(c1, c2):
-                    yield (d1, d2), (x == y and e1 == e2 and m1 > 1)
-
-    # Tarjan's strongly connected components over the pairs reachable from
-    # (entry, entry), iteratively.
-    index: dict = {}
-    low: dict = {}
-    on_stack: set = set()
-    comp_stack: list = []
-    divergent: list = []
-    counter = 0
-    start = (entry, entry)
-    work = [(start, None)]
-    edges_of: dict = {}
-    while work:
-        node, parent = work[-1]
-        if node not in index:
-            index[node] = low[node] = counter
-            counter += 1
-            if counter > _RX_MAX_PAIRS:
-                raise _RxUnsupported
-            comp_stack.append(node)
-            on_stack.add(node)
-            edges_of[node] = iter(list(step(*node)))
-        advanced = False
-        for target, div in edges_of[node]:
-            if div:
-                divergent.append((node, target))
-            if target not in index:
-                work.append((target, node))
-                advanced = True
-                break
-            if target in on_stack:
-                low[node] = min(low[node], index[target])
-        if advanced:
-            continue
-        work.pop()
-        if parent is not None:
-            low[parent] = min(low[parent], low[node])
-        if low[node] == index[node]:
-            comp = set()
-            while True:
-                w = comp_stack.pop()
-                on_stack.discard(w)
-                comp.add(w)
-                if w == node:
-                    break
-            if any(a == b for a, b in comp):
-                if any(a != b for a, b in comp):
-                    return True
-                if any(u in comp and v in comp for u, v in divergent):
-                    return True
-    return False
-
-
-def _rx_hazard(items, open_outer: bool = False) -> str | None:
-    """Why this parsed pattern can backtrack catastrophically, or None.
-    `open_outer`: these items sit inside an open-ended repeat that can be
-    backtracked into and that _rx_splits could not model — the one place
-    the alternation rule below still has to stand in for it."""
-    unbounded = _sre_c.MAXREPEAT
-    for op, av in items:
-        found = None
-        if op in _RX_REPEATS:
-            lo, hi, body = av
-            exact = False
-            if hi > 1:
-                # A repeated group whose repetitions can split the same text
-                # more than one way. Open-ended, any variable-length part
-                # does it (`(a+)+`, `(a{1,2})+`); a bounded count of two or
-                # more needs an open-ended one (`(a+){10}`; `(\d{1,3}){3}`
-                # is a few dozen ways at most).
-                risky = _rx_variable_chars(body)[1] if hi == unbounded else _rx_open_ended(body)
-                try:
-                    if risky and _rx_splits(body):
-                        return "a repeated group that can split the same text more than one way"
-                    exact = risky
-                except _RxUnsupported:
-                    if risky and not _rx_delimited(body):
-                        return "a repeated group with nothing marking where one repetition ends"
-                    if risky and _rx_ambiguous(body):
-                        return "a repeated group whose parts can share out the same text more than one way"
-            # A body the automaton passed has had its alternations weighed
-            # exactly — (a|a)*b and (a|aa)+ fail it, a keyword list whose
-            # words share a first letter does not — so the shape rule below
-            # only applies under a repeat it could not model.
-            found = _rx_hazard(body, open_outer or (hi > 1 and hi == unbounded and not exact))
-        elif _RX_POSSESSIVE is not None and op == _RX_POSSESSIVE:
-            found = _rx_hazard(av[2])
-        elif _RX_ATOMIC is not None and op == _RX_ATOMIC:
-            found = _rx_hazard(av)
-        elif op == _sre_c.SUBPATTERN:
-            found = _rx_hazard(av[-1], open_outer)
-        elif op == _sre_c.BRANCH:
-            # Alternatives that can match the same text give every
-            # repetition two ways through — `(a|a)*b` is 2^n even though a
-            # delimiter would pin the repetitions down, so this one holds
-            # regardless of _rx_delimited. It judges by first characters,
-            # so it also refuses alternatives that only START alike
-            # (`lsadump|logonpasswords`); that is why it is the fallback's
-            # rule and not the automaton's.
-            if open_outer and _rx_alternatives_overlap(av[1]):
-                return "alternatives that can match the same text inside an open-ended repeat"
-            for alt in av[1]:
-                found = found or _rx_hazard(alt, open_outer)
-        elif op in (_sre_c.ASSERT, _sre_c.ASSERT_NOT):
-            found = _rx_hazard(av[1])
-        elif op == _sre_c.GROUPREF_EXISTS:
-            found = _rx_hazard(av[1], open_outer) or (av[2] is not None and _rx_hazard(av[2], open_outer)) or None
-        if found:
-            return found
-    return None
-
-
 def _check_regexp_literals(sql: str) -> None:
     """A REGEXP against a literal pattern — `"Cmd" REGEXP '…'` or
     regexp('…', "Cmd") — gets the check the regex filter and search get
@@ -1215,13 +631,14 @@ def _check_regexp_literals(sql: str) -> None:
 def _compiled_regex(pattern: str) -> re.Pattern:
     """`pattern` compiled the way REGEXP runs it (case-insensitive), or a
     ValueError saying why it will not be run: it does not compile, or it
-    has a shape that can backtrack catastrophically (see above). Cached —
+    has a shape that can backtrack catastrophically (rxguard, whose
+    comment says why that is refused rather than bounded). Cached —
     REGEXP asks once per row."""
     try:
         rx = re.compile(pattern, re.IGNORECASE)
     except re.error as e:
         raise ValueError(f"Not a valid regular expression ({e}): {pattern}") from None
-    hazard = _rx_hazard(_sre_parse.parse(pattern, re.IGNORECASE))
+    hazard = rxguard.regex_hazard(pattern)
     if hazard:
         raise ValueError(
             f"Not a usable regular expression: {pattern} has {hazard}, which can backtrack "
@@ -1423,7 +840,12 @@ TAG_GROUP_COLUMN = "__tag__"
 # and its rows were already committed \u2014 a CSV with a plausible header like
 # "Rank" (a real column name in e.g. some log formats) failed the *entire*
 # import with a confusing error, even though the data itself was fine.
-RESERVED_COLUMN_NAMES = {"rid", "rank", "rowid", TAG_GROUP_COLUMN}
+#
+# "__line__" is the sort key the grid sends for file order (the gutter
+# header's toggle) — a real header of that name was shadowed by it, so
+# sorting that column returned the rows in file order.
+LINE_SORT_COLUMN = "__line__"
+RESERVED_COLUMN_NAMES = {"rid", "rank", "rowid", TAG_GROUP_COLUMN, LINE_SORT_COLUMN}
 
 # sources.origin values for tables that were not imported from a file.
 # NULL is an import; these two are derived from what is already in the case.
@@ -1727,6 +1149,19 @@ def column_signature(cols: list[str]) -> str:
     return hashlib.sha256("\x1f".join(sorted(_ascii_fold(c.strip()) for c in cols)).encode()).hexdigest()
 
 
+def _first_nonblank_row(reader: Iterable[list[str]]) -> list[str]:
+    """The first row with anything in it — the header, or (without one)
+    the row that fixes the table's width. Leading blank rows are skipped:
+    a blank line read as the header gave a table of ZERO columns, and
+    `CREATE TABLE ... (rid INTEGER PRIMARY KEY, )` failed the import with
+    a raw syntax error. Same rule as the Excel import's header (the first
+    non-empty row). ValueError when there is no such row."""
+    for row in reader:
+        if any(c.strip() for c in row):
+            return row
+    raise ValueError("File is empty")
+
+
 def infer_type(values: Iterable[str]) -> str:
     vals = [v for v in values if v not in (None, "")]
     if not vals:
@@ -1736,6 +1171,72 @@ def infer_type(values: Iterable[str]) -> str:
     if sum(1 for v in vals if DATE_RE.match(v)) >= max(1, int(len(vals) * 0.8)):
         return "datetime"
     return "text"
+
+
+def _sqlite_header_is_wal(path: str) -> bool:
+    try:
+        with open(path, "rb") as f:
+            head = f.read(20)
+    except OSError:
+        return False
+    return len(head) == 20 and head.startswith(b"SQLite format 3\x00") and head[18] == 2
+
+
+def _open_evidence_sqlite(path: str) -> tuple[sqlite3.Connection, Callable[[], None]]:
+    """A read-only connection to an external SQLite file that writes
+    nothing beside it. Returns (connection, cleanup): close the
+    connection, then call cleanup.
+
+    `mode=ro` alone is not that for a WAL-mode database: opening one still
+    creates its `-shm` (and a `-wal` when there isn't one) next to the
+    file — in the analyst's evidence folder for a path import, and as
+    litter in the temp folder beside an upload's spool, which outlived the
+    spool. Two cases:
+    - no `-wal` beside it: there is nothing un-checkpointed to read, and
+      no connection can be writing it (a live WAL database always has its
+      -wal), so `immutable=1` reads the file as it is and creates nothing.
+    - a `-wal` beside it: rows that exist only there are evidence, and
+      reading them needs the -shm SQLite would create. So the pair is
+      copied into a private temp directory and THAT is opened; cleanup
+      removes the directory. The evidence folder is never written to,
+      read-only media included.
+    A rollback-journal database creates nothing under `mode=ro` and opens
+    as it always did. Every case builds its URI with sqlite_ro_uri, like
+    every other read-only open here, so a `#` or `%` in an evidence path
+    and a file on a share open the same way they do everywhere else."""
+    tmpdir = None
+    target, extra = path, ""
+    if _sqlite_header_is_wal(path):
+        if os.path.exists(path + "-wal"):
+            tmpdir = tempfile.mkdtemp(prefix="winnow-sqlite-")
+            target = os.path.join(tmpdir, "evidence.db")
+            shutil.copyfile(path, target)
+            shutil.copyfile(path + "-wal", target + "-wal")
+        else:
+            extra = "&immutable=1"
+
+    def cleanup() -> None:
+        if tmpdir:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    try:
+        conn = sqlite3.connect(sqlite_ro_uri(target) + extra, uri=True, check_same_thread=False)
+    except BaseException:
+        cleanup()
+        raise
+    return conn, cleanup
+
+
+def _sqlite_table_columns(conn: sqlite3.Connection, table: str) -> list:
+    """An external table's columns as `PRAGMA table_xinfo` sees them,
+    GENERATED columns included. `table_info` leaves those out, so an
+    import silently dropped every generated column (a computed `full_url`,
+    a decoded timestamp the application derives) — data the evidence
+    file shows its own users. Hidden columns of a virtual table (hidden
+    = 1, e.g. an FTS table's own name column) are not data and stay out;
+    2 and 3 are the virtual and stored generated kinds."""
+    return [c for c in conn.execute(f"PRAGMA table_xinfo({q(table)})").fetchall()
+            if c["hidden"] in (0, 2, 3)]
 
 
 class _JsonNumber(str):
@@ -1987,6 +1488,35 @@ def _flatten_json(obj: dict, max_depth: int | None, clashes: dict | None = None)
     if clashed and clashes is not None:
         clashes["count"] += 1
     return out
+
+
+# SQLite refuses a table past 2,000 columns, and one record with more keys
+# than that (attacker-chosen header names, an environment dump) used to
+# fail the WHOLE import with "too many columns". A JSON file keeps its
+# first JSON_MAX_COLUMNS - 1 keys (first-seen order) as columns and folds
+# every key past them into one JSON-object cell per record, so no value is
+# lost and the structparse ops can lift any of them out — the Plaso
+# import's `Attributes (JSON)` shape. 1,000, not 1,999: a derived-column
+# sidecar joins its own columns on, and a grid of a thousand columns is
+# already past what anyone reads.
+JSON_MAX_COLUMNS = 1000
+JSON_OVERFLOW_COLUMN = "Other fields (JSON)"
+
+
+def _json_column_plan(keys: list[str]) -> tuple[list[str], Callable[[dict], list[str]]]:
+    """(column names, row_of) for the flattened keys a JSON file holds,
+    where row_of(flat_record) is that record's cells in column order. One
+    plan for preview and ingest, so the two show the same table."""
+    if len(keys) <= JSON_MAX_COLUMNS:
+        return sanitize_columns(keys), lambda flat: [flat.get(k, "") for k in keys]
+    kept = keys[:JSON_MAX_COLUMNS - 1]
+    kept_set = set(kept)
+
+    def row_of(flat: dict) -> list[str]:
+        rest = {k: v for k, v in flat.items() if k not in kept_set}
+        return [flat.get(k, "") for k in kept] + [json.dumps(rest, ensure_ascii=False) if rest else ""]
+
+    return sanitize_columns(kept + [JSON_OVERFLOW_COLUMN]), row_of
 
 
 def _iter_json_records(path: str, bad: dict | None = None) -> Iterable[dict]:
@@ -2619,6 +2149,71 @@ def _current_user() -> str:
         return "unknown"
 
 
+def _is_int64(v: Any) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool) and -(1 << 63) <= v < (1 << 63)
+
+
+def _list_of_dicts_problem(doc: dict, key: str, fields: dict[str, Any]) -> str | None:
+    """`doc[key]`, when present, must be a list of objects whose `fields`
+    (name -> type check) hold the right kind of value."""
+    items = doc.get(key)
+    if items is None:
+        return None
+    if not isinstance(items, list):
+        return f"{key!r} should be a list"
+    for i, item in enumerate(items):
+        if not isinstance(item, dict):
+            return f"{key}[{i}] should be an object"
+        for name, ok in fields.items():
+            if not ok(item.get(name)):
+                return f"{key}[{i}].{name} is missing or the wrong type"
+    return None
+
+
+def session_document_problem(doc: Any) -> str | None:
+    """What is wrong with the SHAPE of one table's session (the
+    `winnow-session/1` export_session writes), or None if import_session
+    can read it. A session file is another analyst's — foreign input — and
+    a valid-JSON document of the wrong shape used to reach the importer
+    and die there as a 500 ("'list' object has no attribute 'get'"),
+    sometimes after writing part of itself. Checked before anything is
+    written instead; only the fields the importer reads, so a newer
+    exporter's extra keys still pass."""
+    if not isinstance(doc, dict):
+        return "a session should be a JSON object"
+    if doc.get("source") is not None and not isinstance(doc["source"], dict):
+        return "'source' should be an object"
+    if doc.get("layout") is not None and not isinstance(doc["layout"], dict):
+        return "'layout' should be an object"
+    is_str = lambda v: isinstance(v, str)  # noqa: E731
+    return (
+        _list_of_dicts_problem(doc, "tag_defs", {"id": _is_int64, "name": is_str})
+        or _list_of_dicts_problem(doc, "row_tags", {"rid": _is_int64, "tag_id": _is_int64})
+        or _list_of_dicts_problem(doc, "row_notes", {"rid": _is_int64, "note": is_str})
+        or _list_of_dicts_problem(doc, "saved_views", {"name": is_str})
+        # A derived column's own fields are checked as it is created — a
+        # bad one is a per-column warning there, never a failed import.
+        or _list_of_dicts_problem(doc, "derived_columns", {})
+    )
+
+
+def case_session_document_problem(doc: Any) -> str | None:
+    """The same check for a whole-case session (`winnow-case-session/1`):
+    every table's session in it, before the first one is applied."""
+    if not isinstance(doc, dict):
+        return "a case session should be a JSON object"
+    sources = doc.get("sources")
+    if sources is None:
+        return None
+    if not isinstance(sources, list):
+        return "'sources' should be a list"
+    for i, s in enumerate(sources):
+        problem = session_document_problem(s)
+        if problem:
+            return f"sources[{i}]: {problem}"
+    return None
+
+
 class Store:
     FTS_BUILD_CONCURRENCY = 2  # trigram builds are CPU/writer-bound; more just thrash
 
@@ -2782,7 +2377,7 @@ class Store:
         # changed. Scratch, not evidence — it lives in the views database
         # (invariant #3) and dies with the process, same as a view.
         self._undo: list[dict] = []
-        self._maxlen_cache: dict[int, tuple[int, dict[str, int]]] = {}
+        self._maxlen_cache: dict[int, tuple[tuple, dict[str, int]]] = {}
         self._fts_threads: dict[int, threading.Thread] = {}
         self._fts_failures: set[tuple[int, str]] = set()   # logged once each (_build_fts_worker)
         self._index_threads: dict[tuple[int, str], threading.Thread] = {}
@@ -3981,37 +3576,39 @@ class Store:
             delimiter = self._sniff(head, path)
         reader = csv.reader(fh, delimiter=delimiter)
 
+        # Everything up to the row loop's own try/finally closes the file
+        # on the way out too — a failure here used to leak the handle.
         try:
-            first_row = next(reader)
-        except StopIteration:
-            fh.close()
-            raise ValueError("File is empty")
-        if has_header:
-            cols = sanitize_columns(first_row)
-            ncols = len(cols)
-            leftover_row = None
-        else:
-            ncols = len(first_row)
-            cols = sanitize_columns([None] * ncols)
-            leftover_row = first_row  # not a header — it's the first data row
+            first_row = _first_nonblank_row(reader)
+            if has_header:
+                cols = sanitize_columns(first_row)
+                ncols = len(cols)
+                leftover_row = None
+            else:
+                ncols = len(first_row)
+                cols = sanitize_columns([None] * ncols)
+                leftover_row = first_row  # not a header — it's the first data row
 
-        with self.lock, self.db:
-            cur = self.db.execute(
-                "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at, ingest)"
-                " VALUES (?,?,?,?,?,?,?)",
-                (name, os.path.abspath(path), "", "[]", file_hash,
-                 time.strftime("%Y-%m-%dT%H:%M:%S"),
-                 # The delimiter actually used, not the None that asked for
-                 # a sniff: a re-import must split the same way.
-                 _ingest_record("csv", delimiter=delimiter, has_header=has_header,
-                                column_types=column_types)),
-            )
-            source_id = cur.lastrowid
-            self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
-            table = f"src_{source_id}"
-            coldefs = ", ".join(f"{q(c)} TEXT" for c in cols)
-            self.db.execute(f"CREATE TABLE {q(table)} (rid INTEGER PRIMARY KEY, {coldefs})")
-            self.db.execute("UPDATE sources SET table_name=? WHERE id=?", (table, source_id))
+            with self.lock, self.db:
+                cur = self.db.execute(
+                    "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at, ingest)"
+                    " VALUES (?,?,?,?,?,?,?)",
+                    (name, os.path.abspath(path), "", "[]", file_hash,
+                     time.strftime("%Y-%m-%dT%H:%M:%S"),
+                     # The delimiter actually used, not the None that asked for
+                     # a sniff: a re-import must split the same way.
+                     _ingest_record("csv", delimiter=delimiter, has_header=has_header,
+                                    column_types=column_types)),
+                )
+                source_id = cur.lastrowid
+                self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
+                table = f"src_{source_id}"
+                coldefs = ", ".join(f"{q(c)} TEXT" for c in cols)
+                self.db.execute(f"CREATE TABLE {q(table)} (rid INTEGER PRIMARY KEY, {coldefs})")
+                self.db.execute("UPDATE sources SET table_name=? WHERE id=?", (table, source_id))
+        except BaseException:
+            fh.close()
+            raise
 
         placeholders = ",".join("?" * ncols)
         insert = f"INSERT INTO {q(table)} ({','.join(q(c) for c in cols)}) VALUES ({placeholders})"
@@ -4315,10 +3912,7 @@ class Store:
         if delimiter is None:
             delimiter = self._sniff(text[:8192], name)
         reader = csv.reader(io.StringIO(text), delimiter=delimiter)
-        try:
-            first_row = next(reader)
-        except StopIteration:
-            raise ValueError("File is empty")
+        first_row = _first_nonblank_row(reader)
         if has_header:
             cols = sanitize_columns(first_row)
             ncols = len(cols)
@@ -4347,8 +3941,9 @@ class Store:
         (see _webkit_to_iso) so that option can default to checked without
         the analyst needing to already know which columns are epoch-encoded.
         Never writes to the case db — a completely separate connection to
-        a completely separate file."""
-        ro = sqlite3.connect(sqlite_ro_uri(path), uri=True, check_same_thread=False)
+        a completely separate file — nor beside that file
+        (_open_evidence_sqlite)."""
+        ro, cleanup = _open_evidence_sqlite(path)
         ro.row_factory = sqlite3.Row
         ro.text_factory = _lenient_text_factory()   # the timestamp sniff reads values too
         try:
@@ -4359,19 +3954,30 @@ class Store:
             ]
             tables = []
             for t in table_names:
-                cols = ro.execute(f"PRAGMA table_info({q(t)})").fetchall()
-                row_count = ro.execute(f"SELECT COUNT(*) FROM {q(t)}").fetchone()[0]
-                likely_ts = []
-                for c in cols:
-                    if not re.search(r"time|utc|date", c["name"], re.IGNORECASE):
-                        continue
-                    sample = [
-                        r[0] for r in ro.execute(
-                            f"SELECT {q(c['name'])} FROM {q(t)} WHERE {q(c['name'])} IS NOT NULL LIMIT 20"
-                        )
-                    ]
-                    if sample and sum(1 for v in sample if _webkit_to_iso(v)) >= max(1, int(len(sample) * 0.8)):
-                        likely_ts.append(c["name"])
+                try:
+                    cols = _sqlite_table_columns(ro, t)
+                    row_count = ro.execute(f"SELECT COUNT(*) FROM {q(t)}").fetchone()[0]
+                    likely_ts = []
+                    for c in cols:
+                        if not re.search(r"time|utc|date", c["name"], re.IGNORECASE):
+                            continue
+                        sample = [
+                            r[0] for r in ro.execute(
+                                f"SELECT {q(c['name'])} FROM {q(t)} WHERE {q(c['name'])} IS NOT NULL LIMIT 20"
+                            )
+                        ]
+                        if sample and sum(1 for v in sample if _webkit_to_iso(v)) >= max(1, int(len(sample) * 0.8)):
+                            likely_ts.append(c["name"])
+                except sqlite3.Error as e:
+                    # One table this SQLite build can't read — a virtual
+                    # table whose module it lacks (Thunderbird's message
+                    # index uses its own FTS tokenizer) — used to fail the
+                    # preview of the whole FILE, so not one of its tables
+                    # could be imported. It is listed, marked unreadable
+                    # (`error`, row_count None), and the rest are offered.
+                    tables.append({"name": t, "row_count": None, "columns": [],
+                                   "likely_timestamp_columns": [], "error": str(e)})
+                    continue
                 tables.append({
                     "name": t,
                     "row_count": row_count,
@@ -4381,6 +3987,7 @@ class Store:
             return {"tables": tables}
         finally:
             ro.close()
+            cleanup()
 
     def ingest_sqlite_table(
         self,
@@ -4408,12 +4015,12 @@ class Store:
         timestamp_columns = set(timestamp_columns or [])
         file_hash = self._quick_hash(path)
 
-        ro = sqlite3.connect(sqlite_ro_uri(path), uri=True, check_same_thread=False)
+        ro, cleanup = _open_evidence_sqlite(path)
         ro.row_factory = sqlite3.Row
         undecodable = [0]
         ro.text_factory = _lenient_text_factory(undecodable)
         try:
-            src_cols_info = ro.execute(f"PRAGMA table_info({q(table_name)})").fetchall()
+            src_cols_info = _sqlite_table_columns(ro, table_name)
             if not src_cols_info:
                 raise ValueError(f"No such table: {table_name}")
             src_colnames = [c["name"] for c in src_cols_info]
@@ -4481,6 +4088,7 @@ class Store:
                     error = e
         finally:
             ro.close()
+            cleanup()
 
         types = [infer_type([r[i] for r in sample]) for i in range(ncols)] if sample else ["text"] * ncols
         colmeta = [{"name": c, "type": t} for c, t in zip(cols, types)]
@@ -4761,9 +4369,8 @@ class Store:
                     f"File has no readable records — {bad_prev['count']} unreadable line(s), "
                     f"first at line {bad_prev['first_line']}: {bad_prev['first_error']}")
             raise ValueError("File has no records")
-        cols = sanitize_columns(seen_cols)
-        key_by_col = dict(zip(cols, seen_cols))
-        sample_rows = [[flat.get(key_by_col[c], "") for c in cols] for flat in sample_flat]
+        cols, row_of = _json_column_plan(seen_cols)
+        sample_rows = [row_of(flat) for flat in sample_flat]
         types = [infer_type([r[i] for r in sample_rows]) for i in range(len(cols))] if sample_rows else ["text"] * len(cols)
         return {"columns": cols, "sample_rows": sample_rows, "inferred_types": types,
                 "record_count": record_count, "bad_records": bad_prev["count"],
@@ -4820,9 +4427,8 @@ class Store:
                     f"first at line {bad_scan['first_line']}: {bad_scan['first_error']}")
             raise ValueError("File has no records")
 
-        cols = sanitize_columns(seen_cols)
+        cols, row_of = _json_column_plan(seen_cols)
         ncols = len(cols)
-        key_by_col = dict(zip(cols, seen_cols))
 
         with self.lock, self.db:
             cur = self.db.execute(
@@ -4856,8 +4462,7 @@ class Store:
         with self._ingest_synchronous_off():
             try:
                 for rec in _iter_json_records(path, bad=bad):
-                    flat = _flatten_json(rec, max_depth, clashes)
-                    row = [flat.get(key_by_col[c], "") for c in cols]
+                    row = row_of(_flatten_json(rec, max_depth, clashes))
                     batch.append(tuple(row))
                     if len(sample) < SAMPLE_ROWS:
                         sample.append(row)
@@ -6548,6 +6153,13 @@ class Store:
         checkboxes against, and a full scan of a 1.2M-row column to
         populate a picker would cost more than building the columns."""
         src = self._source_lite(source_id)
+        if src.get("is_merge"):
+            # A merge has no table of its own to sample (_sample_column
+            # read `"None"` and died on it). The header menu never offers
+            # Flatten on one; this is the same answer for every other way
+            # of asking, the detail pane's "Flatten this document" included.
+            raise ValueError("Flatten works on one table at a time — open a "
+                             "member table of this merge to flatten its documents")
         if not self._find_column(src, column):
             raise KeyError(f"No column called {column!r}")
         values = self._sample_column(src, column, limit=self.STRUCT_SAMPLE)
@@ -7301,6 +6913,11 @@ class Store:
         are skipped: those already sort and filter correctly, so converting
         them would just duplicate data."""
         src = self._source_lite(source_id)
+        if src.get("is_merge"):
+            # The hint follows an import, and a merge is never imported —
+            # its members already had their turn. It also has no table of
+            # its own to sample.
+            return []
         # Nothing to suggest for a column the analyst has already converted.
         converted = {d["input_column"].lower() for d in self.list_derived_columns(source_id)}
         out = []
@@ -7586,42 +7203,50 @@ class Store:
         # writer lock stands aside for it — asked while waiting for the
         # lock, not once before blocking on it (_writer_for_build).
         with self._writer_for_build(source_id, spec.get("op_token"), yield_others), \
-                self._running_build(source_id, spec.get("op_token")), \
-                self._interruptible(spec.get("op_token"), self.db), self.db:
-            # pos declared INTEGER PRIMARY KEY makes it *be* the rowid, so
-            # this alone gives the same unique/indexed-by-pos lookup the old
-            # CTAS + separate CREATE UNIQUE INDEX did, for one less full
-            # sort-and-write of every row (see CLAUDE.md's "Performance"
-            # section, change 3). pos is deliberately absent from the
-            # INSERT's column list: rowids are assigned 1..N in insertion
-            # order, and an INSERT..SELECT with ORDER BY inserts in sorted
-            # order — measured ~35% faster than numbering the same sort
-            # with ROW_NUMBER() OVER, for byte-identical view content.
-            # (The ORDER BY always ends in `rid ASC`, so the order — and
-            # therefore every pos — is fully determined, not sorter-
-            # dependent.) cursor.rowcount then gives the view's row count
-            # without re-scanning the table we just wrote.
-            self.db.execute(f"CREATE TABLE v.{q(vid)} (pos INTEGER PRIMARY KEY, source_id INTEGER, rid INTEGER)")
-            n = self.db.execute(sql, params).rowcount
-            # Evicted *after* the new view is built, not before (it used to
-            # be first): the whole block is one transaction, so a cancelled
-            # (interrupted) build rolls back to a world where the previous
-            # view still exists — the frontend keeps its rows instead of
-            # every open handle 409ing. The new view's handle isn't in
-            # self._views yet, so the eviction loop can't touch it. A held
-            # build evicts only an earlier pending view (see the docstring).
-            self._evict_root_views(source_id, pending_only=hold)
+                self._running_build(source_id, spec.get("op_token")):
+            with self._interruptible(spec.get("op_token"), self.db), self.db:
+                # pos declared INTEGER PRIMARY KEY makes it *be* the rowid, so
+                # this alone gives the same unique/indexed-by-pos lookup the old
+                # CTAS + separate CREATE UNIQUE INDEX did, for one less full
+                # sort-and-write of every row (see CLAUDE.md's "Performance"
+                # section, change 3). pos is deliberately absent from the
+                # INSERT's column list: rowids are assigned 1..N in insertion
+                # order, and an INSERT..SELECT with ORDER BY inserts in sorted
+                # order — measured ~35% faster than numbering the same sort
+                # with ROW_NUMBER() OVER, for byte-identical view content.
+                # (The ORDER BY always ends in `rid ASC`, so the order — and
+                # therefore every pos — is fully determined, not sorter-
+                # dependent.) cursor.rowcount then gives the view's row count
+                # without re-scanning the table we just wrote.
+                self.db.execute(f"CREATE TABLE v.{q(vid)} (pos INTEGER PRIMARY KEY, source_id INTEGER, rid INTEGER)")
+                n = self.db.execute(sql, params).rowcount
+                # Evicted *after* the new view is built, not before (it used to
+                # be first): the whole block is one transaction, so a cancelled
+                # (interrupted) build rolls back to a world where the previous
+                # view still exists — the frontend keeps its rows instead of
+                # every open handle 409ing. The new view's handle isn't in
+                # self._views yet, so the eviction loop can't touch it. A held
+                # build evicts only an earlier pending view (see the docstring).
+                self._evict_root_views(source_id, pending_only=hold)
 
-        handle = {
-            "view_id": vid,
-            "source_id": source_id,
-            "row_count": n,
-            "kind": "root",
-            "elapsed_ms": int((time.time() - t0) * 1000),
-        }
-        if hold:
-            handle["pending"] = True
-        self._views[vid] = handle
+            # Registered after the commit (a rolled-back build never gets a
+            # handle) but BEFORE the writer lock is released. Registering
+            # after it left a gap in which the next build for this source
+            # could take the lock, find no handle to evict, and register
+            # its own — leaving this one live beside it: two root views for
+            # one source, a table nothing would drop, and an older held
+            # view adopt_view would install over the newer build instead of
+            # answering 409.
+            handle = {
+                "view_id": vid,
+                "source_id": source_id,
+                "row_count": n,
+                "kind": "root",
+                "elapsed_ms": int((time.time() - t0) * 1000),
+            }
+            if hold:
+                handle["pending"] = True
+            self._views[vid] = handle
         return handle
 
     def _evict_root_views(self, source_id: int, *, keep: str | None = None,
@@ -8297,29 +7922,43 @@ class Store:
 
         span_union = " UNION ALL ".join(branch(m, "EPOCH AS e") for m in members)
         with self._reader() as ro, self._dropped_view_is_expired(), self._interruptible(op_token, ro):
-            lo, hi, n = ro.execute(
-                f"SELECT MIN(e), MAX(e), COUNT(*) FROM ({span_union}) WHERE e IS NOT NULL").fetchone()
+            # The labels come from SQLite too, not time.gmtime: on Windows
+            # that raises OSError for anything before 1970 (a 500 for a
+            # column holding FILETIME zero), and SQLite formats every year
+            # its own strftime('%s') could have produced.
+            lo, hi, n, lo_text, hi_text = ro.execute(
+                "SELECT MIN(e), MAX(e), COUNT(*), datetime(MIN(e), 'unixepoch'), "
+                f"datetime(MAX(e), 'unixepoch') FROM ({span_union}) WHERE e IS NOT NULL").fetchone()
         if not n:
             return {"column": column, "bucket_seconds": 0, "start": None, "end": None,
                     "total": 0, "buckets": []}
         span = max(0, int(hi) - int(lo))
         bucket = next((b for b in self.HISTOGRAM_BUCKETS if span / b <= max_buckets),
                       self.HISTOGRAM_BUCKETS[-1])
+        # A bucket starts at floor(e / bucket) * bucket, which is what the
+        # strip assumes when it finds a row's bar (b <= t < b + bucket).
+        # SQLite's integer division truncates toward zero instead, so a
+        # pre-1970 (negative) epoch landed in the bucket AFTER its own —
+        # and 1601, FILETIME zero, is a value real artefacts carry. Shifting
+        # by a whole number of buckets past the span's minimum makes every
+        # dividend non-negative, where the two agree, and keeps EPOCH (a
+        # strftime over TS_NORMALIZE) evaluated once per row.
+        shift = max(0, -(int(lo) // bucket)) * bucket
+        bucket_sql = f"((EPOCH + {shift}) / {bucket}) * {bucket} - {shift}"
         count_union = " UNION ALL ".join(
-            branch(m, f"(EPOCH / {bucket}) * {bucket} AS b, 1 AS one") for m in members)
+            branch(m, f"{bucket_sql} AS b, 1 AS one") for m in members)
         with self._reader() as ro, self._dropped_view_is_expired(), self._interruptible(op_token, ro):
             rows = ro.execute(
                 f"SELECT b, COUNT(*) AS n FROM ({count_union}) WHERE b IS NOT NULL GROUP BY b ORDER BY b"
             ).fetchall()
-        iso = lambda t: time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(int(t)))
         out = {"column": column, "bucket_seconds": bucket,
-               "start": iso(lo), "end": iso(hi), "total": int(n),
+               "start": lo_text, "end": hi_text, "total": int(n),
                "buckets": [[int(r[0]), int(r[1])] for r in rows]}
         if stack == "tags":
-            out["stack"] = self._histogram_tag_stack(branch, members, bucket, op_token)
+            out["stack"] = self._histogram_tag_stack(branch, members, bucket_sql, op_token)
         return out
 
-    def _histogram_tag_stack(self, branch, members: list[dict], bucket: int,
+    def _histogram_tag_stack(self, branch, members: list[dict], bucket_sql: str,
                              op_token: str | None) -> dict:
         """The same buckets split by tag, as {tags: [id…], buckets: [[epoch,
         [untagged, n_first_tag, …]], …]}.
@@ -8352,7 +7991,7 @@ class Store:
                            f"WHERE rt.source_id = {int(m['source_id'])} AND rt.rid = s.rid)")
                 else:
                     tag = "NULL"
-                parts.append(branch(m, f"(EPOCH / {bucket}) * {bucket} AS b, {tag} AS tag"))
+                parts.append(branch(m, f"{bucket_sql} AS b, {tag} AS tag"))
             union = " UNION ALL ".join(parts)
             rows = ro.execute(
                 f"SELECT b, tag, COUNT(*) AS n FROM ({union}) WHERE b IS NOT NULL "
@@ -8543,7 +8182,18 @@ class Store:
         # over-tagging bug too, not just a display one.
         covers_source = self._grouping_covers_whole_source(root, src)
         is_merge = bool(src.get("is_merge"))
-        if is_merge or not covers_source or total > self.GROUP_MATERIALIZE_THRESHOLD:
+        # A tag level is the other thing the fast path can't hold still.
+        # Its predicate is re-run against row_tags on every page fetch,
+        # while row_count was fixed here — so tagging a row inside the
+        # expanded "untagged" group shrank the membership under the next
+        # page's offset and the grid skipped a row it never showed. Column
+        # values are source data and never change (invariant #1); tags do,
+        # constantly, and in exactly this view. Materialising snapshots
+        # membership the way a tag *filter* already does.
+        by_tag_anywhere = by_tag or any(
+            isinstance(p, dict) and p.get("column") == TAG_GROUP_COLUMN for p in (path or []))
+        if (is_merge or not covers_source or by_tag_anywhere
+                or total > self.GROUP_MATERIALIZE_THRESHOLD):
             vid = self._next_view_id()
             branches = []
             params: list[Any] = []
@@ -8563,30 +8213,46 @@ class Store:
                     )
                     params.extend([m["source_id"], *where_params])
             union_sql = " UNION ALL ".join(branches)
-            with self.lock, self._dropped_view_is_expired(), self.db:
-                # Same ORDER BY-fed insert as build_view: pos auto-assigns
-                # 1..N in insertion (= sorted) order, rowcount replaces a
-                # count(*) re-scan. root_pos is unique across the union
-                # (vv.pos from one view, or s.rid from one member table),
-                # so the order is fully determined.
-                self.db.execute(f"CREATE TABLE v.{q(vid)} (pos INTEGER PRIMARY KEY, source_id INTEGER, rid INTEGER)")
-                n = self.db.execute(
-                    f"INSERT INTO v.{q(vid)}(source_id, rid) "
-                    f"SELECT source_id, rid FROM ({union_sql}) ORDER BY root_pos",
-                    params,
-                ).rowcount
-            self._views[vid] = {
-                "view_id": vid, "source_id": root["source_id"], "row_count": n,
-                "kind": "group", "parent_view_id": view_id,
-            }
+            with self.lock:
+                with self._dropped_view_is_expired(), self.db:
+                    # The parent can have been rebuilt away since its
+                    # handle was read; a root_virtual one has no table
+                    # whose absence would say so, so ask the registry.
+                    if view_id not in self._views:
+                        raise ViewExpired("View expired — rebuild it")
+                    # Same ORDER BY-fed insert as build_view: pos auto-assigns
+                    # 1..N in insertion (= sorted) order, rowcount replaces a
+                    # count(*) re-scan. root_pos is unique across the union
+                    # (vv.pos from one view, or s.rid from one member table),
+                    # so the order is fully determined.
+                    self.db.execute(f"CREATE TABLE v.{q(vid)} (pos INTEGER PRIMARY KEY, source_id INTEGER, rid INTEGER)")
+                    n = self.db.execute(
+                        f"INSERT INTO v.{q(vid)}(source_id, rid) "
+                        f"SELECT source_id, rid FROM ({union_sql}) ORDER BY root_pos",
+                        params,
+                    ).rowcount
+                # Registered before the lock goes, like build_view's handle:
+                # a rebuild of the parent that took the lock first would
+                # have cascaded over a child it couldn't see yet, leaving a
+                # group (and its table) under a parent that no longer exists.
+                self._views[vid] = {
+                    "view_id": vid, "source_id": root["source_id"], "row_count": n,
+                    "kind": "group", "parent_view_id": view_id,
+                }
             return {"view_id": vid, "row_count": n, "elapsed_ms": 0}
 
-        vid = self._next_view_id()
-        self._views[vid] = {
-            "view_id": vid, "source_id": root["source_id"], "row_count": total,
-            "kind": "group_virtual", "parent_view_id": view_id,
-            "column": column, "value": value, "members": members, "path": path,
-        }
+        # Same rule for the virtual group, which has no table but does have
+        # a parent: registered under the lock, and only while that parent
+        # is still the registered view it was counted against.
+        with self.lock:
+            if view_id not in self._views:
+                raise ViewExpired("View expired — rebuild it")
+            vid = self._next_view_id()
+            self._views[vid] = {
+                "view_id": vid, "source_id": root["source_id"], "row_count": total,
+                "kind": "group_virtual", "parent_view_id": view_id,
+                "column": column, "value": value, "members": members, "path": path,
+            }
         return {"view_id": vid, "row_count": total, "elapsed_ms": 0}
 
     def _virtual_group_where(self, handle: dict, conn: sqlite3.Connection | None = None) -> tuple[str, list]:
@@ -8859,6 +8525,11 @@ class Store:
 
         search_mode = spec.get("search_mode", "contains")
         search = (spec.get("search") or "").strip()
+        if search or (search_mode == "advanced" and spec.get("search_terms")):
+            # Every search mode reads all of the table's columns, and a
+            # table still importing has none yet: `_blob_expr([])` compiled
+            # `() LIKE ?`, a syntax error the route could only call a 500.
+            self._require_columns(src)
         if search_mode == "regex" and search:
             # Base columns only, matching build_fts's doc view exactly — the
             # indexed and fallback paths have to search the same text, and
@@ -9025,28 +8696,46 @@ class Store:
     @staticmethod
     def _inline_sql_params(sql: str, params: list) -> str:
         """Substitute ? placeholders with safely-quoted literals, producing
-        SQL fit to hand the analyst in the SQL pane. Skips any ? that sits
-        inside a string literal — a raw filter fragment the analyst typed
-        can legitimately contain one — by walking the text with the same
-        ''-doubling rule SQLite itself uses."""
+        SQL fit to hand the analyst in the SQL pane. Skips any ? that is not
+        a placeholder, by walking the text the way SQLite's tokenizer does:
+        inside a string literal (a raw filter fragment the analyst typed can
+        legitimately contain one), inside a quoted identifier ("In Use?" is
+        a header q() quotes — and also `x` and [x], which a typed fragment
+        may use), or inside a comment. Quotes escape by doubling, as in
+        SQLite; brackets don't escape at all."""
         out: list[str] = []
         it = iter(params)
-        in_str = False
+        closers = {"'": "'", '"': '"', "`": "`", "[": "]"}
+        n = len(sql)
         i = 0
-        while i < len(sql):
+        while i < n:
             ch = sql[i]
-            if in_str:
-                if ch == "'":
-                    if i + 1 < len(sql) and sql[i + 1] == "'":
-                        out.append("''")
-                        i += 2
-                        continue
-                    in_str = False
-                out.append(ch)
-            elif ch == "'":
-                in_str = True
-                out.append(ch)
-            elif ch == "?":
+            if ch in closers:
+                close = closers[ch]
+                j = i + 1
+                while j < n:
+                    if sql[j] == close:
+                        if close != "]" and j + 1 < n and sql[j + 1] == close:
+                            j += 2
+                            continue
+                        break
+                    j += 1
+                out.append(sql[i:j + 1])
+                i = j + 1
+                continue
+            if sql.startswith("--", i):
+                j = sql.find("\n", i)
+                j = n if j < 0 else j
+                out.append(sql[i:j])
+                i = j
+                continue
+            if sql.startswith("/*", i):
+                j = sql.find("*/", i + 2)
+                j = n if j < 0 else j + 2
+                out.append(sql[i:j])
+                i = j
+                continue
+            if ch == "?":
                 try:
                     v = next(it)
                 except StopIteration:
@@ -9581,15 +9270,22 @@ class Store:
         UI's autofit-column-width shortcut. One sequential scan per member
         table, every column computed in a single pass.
 
-        Cached per source, invalidated by row_count changing — a full scan
-        over every column of a 10M-row source isn't cheap, and autofit is a
-        button a user can click repeatedly (once per column double-click,
-        plus a "fit all" action) without the underlying data changing at
-        all between clicks."""
+        Cached per source — a full scan over every column of a 10M-row
+        source isn't cheap, and autofit is a button a user can click
+        repeatedly (once per column double-click, plus a "fit all" action)
+        without the underlying data changing at all between clicks. Keyed
+        on the row count AND the column list, derived columns' id and
+        status included: base columns never change after ingest
+        (invariant #1), but a derived column comes and goes, and fills in
+        behind a backfill, without the row count moving — keyed on rows
+        alone, the answer after one was added simply lacked it."""
         with self._reader() as ro, self._dropped_view_is_expired():
             src = self._source_lite_on(ro, source_id)
+            key = (src["row_count"],
+                   tuple((c["name"], c.get("derived_id"), c.get("derived_status"))
+                         for c in src["columns"]))
             cached = self._maxlen_cache.get(source_id)
-            if cached and cached[0] == src["row_count"]:
+            if cached and cached[0] == key:
                 return cached[1]
             self._require_columns(src)
             cols = [c["name"] for c in src["columns"]]
@@ -9602,7 +9298,7 @@ class Store:
                     if v and v > maxes[i]:
                         maxes[i] = v
         result = {c: maxes[i] for i, c in enumerate(cols)}
-        self._maxlen_cache[source_id] = (src["row_count"], result)
+        self._maxlen_cache[source_id] = (key, result)
         return result
 
     # -------------------------------------------------------------------- tags
@@ -9998,25 +9694,29 @@ class Store:
             )
         return self.tag_counts(source_id)
 
-    def set_tags_pairs(self, pairs: list[list[int]], tag_id: int, on: bool) -> dict:
+    def set_tags_pairs(self, pairs: list[list[int]], tag_id: int, on: bool,
+                       source_id: int | None = None) -> dict:
         """Same as set_tags, but for a merged view where selected rows can
         belong to different real source_ids — each pair is that row's own
-        (source_id, rid), never the merge's synthetic negative id."""
+        (source_id, rid), never the merge's synthetic negative id.
+
+        `source_id` is the merge the selection was made in, when there is
+        one, and it decides what the returned counts cover: the client
+        stores them as that merge's whole-table counts (S.tagCountsAll),
+        so they have to count EVERY member — counting only the members the
+        selection happened to touch made a ribbon of 3 read 1. The same
+        member list goes to undo, which recounts against it."""
         if not pairs:
             return {"counts": {}}
+        count_ids = sorted({int(sid) for sid, _ in pairs})
+        if source_id is not None and int(source_id) < 0:
+            count_ids = [m["source_id"] for m in self._resolve_members(int(source_id))]
         with self.lock, self.db:
             self._apply_tag_change(
                 tag_id=tag_id, on=on, source_id=int(pairs[0][0]), scope="rows",
-                pairs=pairs, count_ids=sorted({int(sid) for sid, _ in pairs}),
+                pairs=pairs, count_ids=count_ids,
             )
-        member_ids = sorted({sid for sid, _ in pairs})
-        ph = ",".join("?" * len(member_ids))
-        with self.lock:
-            rows = self.db.execute(
-                f"SELECT tag_id, count(*) n FROM row_tags WHERE source_id IN ({ph}) GROUP BY 1",
-                member_ids,
-            ).fetchall()
-        return {"counts": {str(r["tag_id"]): r["n"] for r in rows}}
+            return self._tag_counts_for_ids(count_ids)
 
     def tag_view(self, view_id: str, tag_id: int, on: bool, exclude: list[Iterable[int]] | None = None) -> dict:
         """Tag every row in a materialised view — the 'filter to it, then mark
@@ -12376,6 +12076,12 @@ class Store:
         its own source, query and drill, and this runs them all and
         answers with one label/value row per cell."""
         query = query or {}
+        if not isinstance(query, dict):
+            # A cell's query arrives unchecked inside `cells` (the route's
+            # model only types the top-level one), and `.get` on a string
+            # was a 500 — or, per cell, an AttributeError past the cell's
+            # own error catch.
+            raise ValueError("A widget's query must be an object")
         if source == "cells":
             return self._cells_preview(cells or [], limit)
         if source == "sql":
@@ -13310,16 +13016,23 @@ class Store:
         means bypassing its state-generation bump too, so this does it
         itself — a dashboard whose tag counts were worked out during the
         last pass is wrong about this one, not merely old."""
-        saved = self.save_session(save_as) if save_as else None
-        with self.lock, self.db:
-            tags = self.db.execute("SELECT COUNT(*) FROM row_tags").fetchone()[0]
-            notes = self.db.execute("SELECT COUNT(*) FROM row_notes").fetchone()[0]
-            self.db.execute("DELETE FROM row_tags")
-            self.db.execute("DELETE FROM row_notes")
-            self._bump_state_generation()
-        # The undo entries reference rows that no longer carry those tags;
-        # replaying one would reinsert assignments this deliberately cleared.
-        self._discard_undo()
+        # One hold of the (re-entrant) writer lock from the snapshot to the
+        # clear. Saved and cleared under separate holds, a tag written in
+        # between — a watchlist scan's auto-tag, a second window — landed
+        # after the snapshot and before the DELETE, and so was in neither:
+        # gone, with the session reading as complete. The same hold keeps
+        # the undo discard from taking an entry recorded after the clear.
+        with self.lock:
+            saved = self.save_session(save_as) if save_as else None
+            with self.db:
+                tags = self.db.execute("SELECT COUNT(*) FROM row_tags").fetchone()[0]
+                notes = self.db.execute("SELECT COUNT(*) FROM row_notes").fetchone()[0]
+                self.db.execute("DELETE FROM row_tags")
+                self.db.execute("DELETE FROM row_notes")
+                self._bump_state_generation()
+            # The undo entries reference rows that no longer carry those tags;
+            # replaying one would reinsert assignments this deliberately cleared.
+            self._discard_undo()
         return {"saved": saved, "tags_cleared": tags, "notes_cleared": notes}
 
     def _drop_undo_for_source(self, source_id: int) -> None:
@@ -13827,11 +13540,26 @@ class Store:
             src = self._source_lite_on(ro, handle["source_id"])
             cols = self._export_columns(ro, src)
             sel = ", ".join(q(c) for c in cols)
+            # A merge's rows come from several tables, and Line is the rid
+            # within ONE of them — so without saying which, two rows read
+            # "Line 1" and nothing in the file tells the reader where either
+            # is. A merge export carries the member's name (as the sidebar
+            # shows it) after Line; a single table's stays as it was.
+            member_names: dict[int, str] | None = None
+            if src.get("is_merge"):
+                ids = [int(i) for i in src["member_source_ids"]]
+                member_names = {
+                    r["id"]: r["nickname"] or r["name"] for r in ro.execute(
+                        f"SELECT id, name, nickname FROM sources WHERE id IN ({','.join('?' * len(ids))})",
+                        ids)}
 
             tagnames = {r["id"]: r["name"] for r in ro.execute("SELECT id, name FROM tag_defs")}
             buf = io.StringIO()
             w = csv.writer(buf, lineterminator="\n")
-            w.writerow(_export_header(cols, _csv_safe))
+            head = _export_header(cols, _csv_safe)
+            if member_names is not None:
+                head.insert(1, "Table")
+            w.writerow(head)
             yield buf.getvalue()
             buf.seek(0), buf.truncate(0)
 
@@ -13885,6 +13613,8 @@ class Store:
                         continue  # tagged_only filtered this row out
                     w.writerow([
                         r["rid"],
+                        *([_csv_safe(member_names.get(r["source_id"], f"table {r['source_id']}"))]
+                          if member_names is not None else []),
                         _csv_safe("; ".join(tmap.get(key, []))),
                         _csv_safe(nmap.get(key, "")),
                         *[_csv_safe(v) for v in cellmap[key]],
@@ -14876,7 +14606,7 @@ class Store:
                 chunk = cur.fetchmany(50_000)
                 if not chunk:
                     break
-                rows.extend([["" if v is None else str(v) for v in r] for r in chunk])
+                rows.extend([[pane_cell_text(v) for v in r] for r in chunk])
                 if not force and len(rows) > self.SQL_TO_TABLE_SOFT_CAP:
                     return {"needs_confirm": True, "rows": None}  # count unknowable cheaply
         # Provenance: the query that produced it, so the table reads as
@@ -15284,6 +15014,54 @@ class Store:
             }
 
 
+# The largest integer a JavaScript number holds exactly.
+_JS_MAX_SAFE_INT = 2 ** 53 - 1
+
+
+def _blob_text(b: bytes) -> str:
+    """A BLOB as the SQL pane shows it: its text when it is UTF-8 (what
+    CAST('abc' AS BLOB) holds, and what the grid already showed), else
+    SQLite's own literal for it, X'00FF' — what quote() prints."""
+    try:
+        return b.decode("utf-8")
+    except UnicodeDecodeError:
+        return "X'" + b.hex().upper() + "'"
+
+
+def _nonfinite_text(f: float) -> str:
+    """Inf/-Inf/NaN spelled the way SQLite's CAST(… AS TEXT) spells them."""
+    return "NaN" if f != f else ("Inf" if f > 0 else "-Inf")
+
+
+def pane_cell_json(v: Any) -> Any:
+    """One SQL pane cell as JSON can carry it to the browser without
+    changing what it says. A non-UTF-8 BLOB (SELECT x'00ff') and a
+    non-finite REAL (SELECT 1e999) both made /api/sql a 500 — JSON has no
+    bytes and no Infinity — and an integer past 2^53 arrived rounded, so
+    the grid, Copy, CSV and Excel all showed a different number from the
+    one in the case (a FILETIME or a 64-bit id is exactly that size).
+    Those three become text; everything else passes through as it was."""
+    if isinstance(v, bytes):
+        return _blob_text(v)
+    if isinstance(v, float) and not math.isfinite(v):
+        return _nonfinite_text(v)
+    if isinstance(v, int) and not isinstance(v, bool) and abs(v) > _JS_MAX_SAFE_INT:
+        return str(v)
+    return v
+
+
+def pane_cell_text(v: Any) -> str:
+    """The same cell as the TEXT "Save as table" stores — the same spelling
+    the pane showed, not Python's repr (a BLOB used to land as "b'abc'")."""
+    if v is None:
+        return ""
+    if isinstance(v, bytes):
+        return _blob_text(v)
+    if isinstance(v, float) and not math.isfinite(v):
+        return _nonfinite_text(v)
+    return str(v)
+
+
 _CSV_FORMULA_LEAD = ("=", "+", "-", "@", "\t", "\r")
 
 
@@ -15308,8 +15086,14 @@ def _csv_safe(v):
 _XLSX_ILLEGAL = re.compile(r"[\000-\010\013\014\016-\037]")
 
 
+# Excel's per-cell text limit. openpyxl enforces it by cutting the string
+# at 32,767 characters and saying nothing.
+XLSX_CELL_MAX = 32_767
+
+
 def _xlsx_safe(v):
-    """_csv_safe, plus the characters a worksheet cannot hold at all.
+    """_csv_safe, plus the characters a worksheet cannot hold at all, and
+    a visible mark on a value too long for one cell.
 
     Winnow keeps control characters in cell VALUES on purpose — ingest
     strips them from column names only, because a name has to be
@@ -15323,10 +15107,22 @@ def _xlsx_safe(v):
     silently shortened string in an exported artifact is worse than a
     visible \\x07: the escape says what was there and is reversible,
     while a strip quietly rewrites evidence.
+
+    Length is the same argument. Past XLSX_CELL_MAX openpyxl truncates
+    without a word, and an encoded PowerShell payload or a long script
+    block is exactly the value that runs past it — the reader of the
+    workbook then has a cut-off command line that looks complete. Cut
+    here instead, with a marker that says it was cut and how long the
+    value is; the case file still holds all of it.
     """
+    full = len(v) if isinstance(v, str) else 0
     if isinstance(v, str) and _XLSX_ILLEGAL.search(v):
         v = _XLSX_ILLEGAL.sub(lambda m: "\\x%02x" % ord(m.group()), v)
-    return _csv_safe(v)
+    v = _csv_safe(v)
+    if isinstance(v, str) and len(v) > XLSX_CELL_MAX:
+        mark = f" …[cut: the value is {full:,} characters, a cell holds {XLSX_CELL_MAX:,} — all of it is in the case]"
+        v = v[: XLSX_CELL_MAX - len(mark)] + mark
+    return v
 
 
 def _xlsx_write_sheets(wb, used_names: set[str], name: str, header: list,
@@ -15377,7 +15173,11 @@ def _esc_like(s: str) -> str:
     return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-_XLSX_SHEET_INVALID = re.compile(r"[\\/?*\[\]:]")
+# What a worksheet NAME cannot hold: Excel's own \ / ? * [ ] : plus every C0
+# control character and DEL — a name is XML text in workbook.xml, and
+# openpyxl writes a BEL there without complaint, producing a workbook
+# that neither Excel nor openpyxl will open again.
+_XLSX_SHEET_INVALID = re.compile(r"[\\/?*\[\]:\x00-\x1f\x7f]")
 
 
 # Excel's hard per-worksheet row limit (1,048,576 including the header).
@@ -15412,15 +15212,18 @@ def rows_to_xlsx(columns: list, rows: list, sheet_name: str = "Query") -> io.Byt
 
 
 def _xlsx_sheet_name(name: str, used: set[str]) -> str:
-    """Excel worksheet names: no \\/?*[]:, max 31 chars, can't be blank or
-    start/end with an apostrophe, and must be unique within the workbook.
+    """Excel worksheet names: no \\/?*[]: (nor control characters), max 31
+    chars, can't be blank or start/end with an apostrophe, can't be
+    "History" (Excel reserves it), and must be unique within the workbook.
     Dedup mirrors sanitize_columns' approach (store.py:137) — append a
-    numeric suffix, truncating the base to make room for it."""
+    numeric suffix, truncating the base to make room for it. The
+    apostrophe rule is applied AFTER the cut to 31: "AAAA…A's log" cut
+    there ends in the apostrophe the full name had in its middle."""
     clean = _XLSX_SHEET_INVALID.sub("_", (name or "Sheet").strip()).strip("'") or "Sheet"
-    clean = clean[:31]
+    clean = clean[:31].rstrip("'")
     base = clean
     n = 1
-    while clean.lower() in used:
+    while clean.lower() in used or clean.lower() == "history":
         suffix = f"_{n}"
         clean = base[: 31 - len(suffix)] + suffix
         n += 1
