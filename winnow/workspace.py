@@ -289,15 +289,29 @@ def _now() -> str:
 
 class CaseRegistry:
     """The home screen's list of known case.db files — name/group/notes are
-    display metadata only, never mutate the underlying case file."""
+    display metadata only, never mutate the underlying case file.
+
+    A case's id is never handed out twice. The file keeps `next_id` beside
+    the list, because max+1 gives a forgotten newest case's id to the next
+    one registered — and a home screen still listing the forgotten one then
+    acts on the newcomer: "Delete with file" from a stale window deleted a
+    different case's file. A registry from before this field has no record
+    of what it gave out, so it starts from max+1 of what is still listed;
+    every id after that is new."""
 
     FILE = "cases.json"
 
     def _load(self) -> list[dict]:
         return _read(self.FILE, {"cases": []})["cases"]
 
-    def _save(self, items: list[dict]) -> None:
-        _write(self.FILE, {"cases": items})
+    def _save(self, items: list[dict], next_id: int | None = None) -> None:
+        data = _read(self.FILE, {"cases": []})
+        floor = max(_next_id(items), int(data.get("next_id") or 0), next_id or 0)
+        _write(self.FILE, {"cases": items, "next_id": floor})
+
+    def _allocate_id(self, items: list[dict]) -> int:
+        data = _read(self.FILE, {"cases": []})
+        return max(_next_id(items), int(data.get("next_id") or 0))
 
     def list(self) -> list[dict]:
         with _LOCK:
@@ -321,7 +335,7 @@ class CaseRegistry:
             if existing:
                 return existing
             rec = {
-                "id": _next_id(items),
+                "id": self._allocate_id(items),
                 "path": os.path.abspath(path),
                 "name": name,
                 "group": group,
@@ -330,7 +344,7 @@ class CaseRegistry:
                 "last_opened": None,
             }
             items.append(rec)
-            self._save(items)
+            self._save(items, next_id=rec["id"] + 1)
             return rec
 
     def update(self, case_id: int, **fields) -> dict:

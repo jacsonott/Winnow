@@ -37,6 +37,21 @@ def test_case_registry_update_missing_raises():
         WS.cases.update(99999, notes="x")
 
 
+def test_case_registry_never_reuses_an_id(tmp_path):
+    """Ids were max+1, so forgetting the newest case gave its id to the
+    next one registered — and a home screen still listing the forgotten
+    case then acted on the newcomer ("Delete with file" deleted the wrong
+    case's file). An emptied registry keeps counting too."""
+    a = WS.cases.create(str(tmp_path / "a.db"), name="A")
+    b = WS.cases.create(str(tmp_path / "b.db"), name="B")
+    WS.cases.delete(b["id"])
+    c = WS.cases.create(str(tmp_path / "c.db"), name="C")
+    assert c["id"] not in (a["id"], b["id"])
+    for rec in (a, c):
+        WS.cases.delete(rec["id"])
+    assert WS.cases.create(str(tmp_path / "d.db"), name="D")["id"] > c["id"]
+
+
 def test_saved_filters_crud():
     rec = WS.filters.create("My Filter", ["EventId", "User"], {"search": "svchost"})
     assert rec["name"] == "My Filter"

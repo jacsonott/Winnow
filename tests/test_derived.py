@@ -370,8 +370,8 @@ def test_a_value_that_raises_is_one_failure_not_a_failed_column(store, write_csv
     d = store.get_derived_column(res["definition"]["id"])
     assert d["status"] == "ready"
     assert d["parse_failures"] == 1
-    # The half character is stored as U+FFFD rather than refusing the row.
-    assert [r["Out"] for r in _cells(store, sid)] == ["<a", "<b", "<c", None, "<d", "x\ufffd", "<e"]
+    # The half character is stored as its escape rather than refusing the row.
+    assert [r["Out"] for r in _cells(store, sid)] == ["<a", "<b", "<c", None, "<d", "x\\ud800", "<e"]
 
 
 def test_a_rederive_past_a_value_that_raises_is_all_new_values(store, write_csv, small_batches, raising_op):
@@ -382,7 +382,7 @@ def test_a_rederive_past_a_value_that_raises_is_all_new_values(store, write_csv,
 
     assert _job(store, res["job_id"])["status"] == "done"
     assert store.get_derived_column(def_id)["status"] == "ready"
-    assert [r["Out"] for r in _cells(store, sid)] == ["[a", "[b", "[c", None, "[d", "x\ufffd", "[e"]
+    assert [r["Out"] for r in _cells(store, sid)] == ["[a", "[b", "[c", None, "[d", "x\\ud800", "[e"]
 
 
 def test_the_reported_rederive_is_one_answer_not_two(store, write_csv, small_batches):
@@ -420,7 +420,7 @@ def test_a_flatten_with_half_a_character_builds_every_column(store, write_csv, s
     assert [d["status"] for d in store.list_derived_columns(sid)] == ["ready", "ready"]
     rows = _cells(store, sid)
     assert [r["User"] for r in rows] == ["alice", "bob", "carol"]
-    assert [r["Msg"] for r in rows] == ["hi", "cut \ufffd", "bye"]
+    assert [r["Msg"] for r in rows] == ["hi", "cut \\ud83d", "bye"]
 
 
 def _stop_after_first_batch():
@@ -503,19 +503,65 @@ def test_a_rederive_whose_job_fails_before_writing_puts_the_column_back(store, l
     assert [r["Host"] for r in _cells(store, ev)] == ["DC01", None]
 
 
-def test_a_create_whose_job_fails_before_writing_is_removed(store, write_csv, monkeypatch):
+@pytest.fixture
+def job_finishes_first(store, monkeypatch):
+    """The job a create starts runs to its end before start_ingest_job
+    returns — the order a fast failure takes on a busy machine, made
+    certain. A create that reads its definition back only AFTER starting
+    the job then finds it already removed."""
+    start = store.start_ingest_job
+
+    def start_and_finish(*args, **kwargs):
+        job = start(*args, **kwargs)
+        store.wait_for_ingest_job(job["job_id"], timeout=30)
+        return job
+
+    monkeypatch.setattr(store, "start_ingest_job", start_and_finish)
+
+
+def _too_big_lookup(store, write_csv, monkeypatch):
     from winnow import enrich
 
     hosts = store.ingest_csv(write_csv([["IP", "Host"], ["a", "1"], ["b", "2"]], "h.csv"),
                              name="h", build_fts=False)["id"]
     ev = store.ingest_csv(write_csv([["Src"], ["a"]], "e.csv"), name="e", build_fts=False)["id"]
     monkeypatch.setattr(enrich, "MAX_LOOKUP_ROWS", 1)
-    res = store.add_derived_column(ev, "Host", "Src", "lookup",
-                                   {"other_source_id": hosts, "match_column": "IP", "value_column": "Host"})
+    return ev, {"other_source_id": hosts, "match_column": "IP", "value_column": "Host"}
+
+
+def test_a_create_whose_job_fails_before_writing_is_removed(store, write_csv, monkeypatch):
+    ev, params = _too_big_lookup(store, write_csv, monkeypatch)
+    res = store.add_derived_column(ev, "Host", "Src", "lookup", params)
     store.wait_for_ingest_job(res["job_id"], timeout=30)
 
     job = _job(store, res["job_id"])
     assert job["status"] == "error" and "too big" in job["error"]
+    assert store.list_derived_columns(ev) == []
+
+
+def test_a_create_whose_job_fails_at_once_still_answers(store, write_csv, monkeypatch, job_finishes_first):
+    """The create returns what it made and the job that will report on it,
+    even when that job has already failed and removed the column. It used
+    to read the definition back after starting the job, and raised
+    KeyError for a column the failure had just taken away."""
+    ev, params = _too_big_lookup(store, write_csv, monkeypatch)
+    res = store.add_derived_column(ev, "Host", "Src", "lookup", params)
+
+    assert res["definition"]["name"] == "Host"
+    assert _job(store, res["job_id"])["status"] == "error"
+    assert store.list_derived_columns(ev) == []
+
+
+def test_a_batch_create_whose_job_fails_at_once_still_answers(store, write_csv, monkeypatch,
+                                                               job_finishes_first):
+    ev, params = _too_big_lookup(store, write_csv, monkeypatch)
+    res = store.add_derived_columns(ev, [
+        {"name": "Host", "input_column": "Src", "op_id": "lookup", "params": params},
+        {"name": "Host2", "input_column": "Src", "op_id": "lookup", "params": params},
+    ])
+
+    assert [d["name"] for d in res["definitions"]] == ["Host", "Host2"]
+    assert _job(store, res["job_id"])["status"] == "error"
     assert store.list_derived_columns(ev) == []
 
 

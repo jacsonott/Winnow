@@ -64,7 +64,8 @@ def closed_table_with_a_hit(page, server, tmp_path):
     yield sid
 
     _clear_indicators(server)
-    _req(server, f"/api/source/{sid}", method="DELETE")
+    if any(s["id"] == sid for s in _req(server, "/api/sources")):   # a test may have removed it
+        _req(server, f"/api/source/{sid}", method="DELETE")
     page.evaluate("() => __winnow.loadSources(undefined, { navigate: false })")
 
 
@@ -112,3 +113,35 @@ def test_an_already_open_table_still_jumps(page, closed_table_with_a_hit, server
     _click_the_hit(page)
     page.wait_for_function("(id) => __winnow.S.sourceId === id", arg=sid, timeout=10_000)
     assert page.locator(f'#sourceTabs .tab[data-id="{sid}"]').count() == 1
+
+
+def test_a_hit_whose_table_was_removed_says_so(page, closed_table_with_a_hit, server):
+    """The hit was listed while its table existed; the table went away
+    (another window, or a moment ago in this one) before the click. The
+    jump's requests for that table answered 500 "Internal error: 'No table
+    N'", and every caller is a bare click handler, so the rejection was an
+    uncaught page error with nothing on screen to say why nothing
+    happened. It should say the table is gone and land on one that isn't."""
+    sid = closed_table_with_a_hit
+    _req(server, f"/api/source/{sid}/open", method="POST", body={"open": True})
+    page.evaluate("() => __winnow.loadSources(undefined, { navigate: false })")
+    page.wait_for_function("(id) => __winnow.S.sources.find((s) => s.id === id).is_open === true",
+                           arg=sid, timeout=15_000)
+    errors: list[str] = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+
+    page.locator("#tabWatchlist").click()
+    page.wait_for_selector("#watchlistview:not([hidden])")
+    page.locator(".wl-row", has=page.locator(".wl-val", has_text="ZEBRACHECK")).click()
+    page.wait_for_selector(".wl-hit")
+    # Gone server-side; the client's lists still name it.
+    _req(server, f"/api/source/{sid}", method="DELETE")
+    page.locator(".wl-hit").first.click()
+
+    page.wait_for_function(
+        "() => !document.getElementById('toast').hidden"
+        " && document.getElementById('toast').textContent.includes('no longer in this case')",
+        timeout=10_000)
+    page.wait_for_function("(id) => !__winnow.S.sources.some((s) => s.id === id)"
+                           " && __winnow.S.sourceId !== id", arg=sid, timeout=10_000)
+    assert not errors, errors

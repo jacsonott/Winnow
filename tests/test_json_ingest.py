@@ -139,3 +139,31 @@ def test_pathologically_deep_json_ingests_instead_of_recursing_out(store, tmp_pa
     assert len(rec["columns"]) == 1
     name = rec["columns"][0]["name"]
     assert name.count(".") == 64    # capped unfold, remainder is one cell
+
+
+def test_a_lone_surrogate_escape_costs_nothing(store, tmp_path):
+    """"\\udc80" is legal JSON that decodes to a string SQLite can't hold
+    as UTF-8: the batch's insert raised "surrogates not allowed" and the
+    import stopped — in a key, before a single row. The escape is kept as
+    text, the way the file wrote it, so nothing is lost."""
+    from winnow.store import BATCH
+
+    path = tmp_path / "ev.jsonl"
+    with open(path, "w", encoding="utf-8") as f:
+        for i in range(1, BATCH + 11):
+            if i == BATCH + 5:
+                f.write('{"id": %d, "msg": "evil \\udc80 here", "nested": {"k": "\\ud800"}}\n' % i)
+            else:
+                f.write(json.dumps({"id": i, "msg": f"m{i}"}) + "\n")
+    rec = store.ingest_json(str(path), build_fts=False)
+    assert rec["row_count"] == BATCH + 10
+    v = store.build_view(rec["id"], {"source_id": rec["id"]})
+    cells = store.fetch_rows(v["view_id"], BATCH + 4, 1)["rows"][0]["cells"]
+    assert cells[1] == "evil \\udc80 here"
+    assert json.loads(cells[2]) == {"k": "\ud800"}       # still the JSON it was
+
+    keyed = tmp_path / "k.jsonl"
+    keyed.write_text('{"a": 1, "\\ud800x": 2}\n{"a": 3}\n', encoding="utf-8")
+    rec = store.ingest_json(str(keyed), build_fts=False)
+    assert rec["row_count"] == 2
+    assert [c["name"] for c in rec["columns"]] == ["a", "\\ud800x"]

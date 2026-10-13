@@ -7,7 +7,7 @@ import { $, MOD_ENTER, api, debounce, el, post, toast } from './core.js';
 import { hideDetailPane } from './detail.js';
 import { render, renderTagToolbar } from './grid.js';
 import { drawRail, regroupIfGroupedByTag } from './grouping.js';
-import { hidePluginViews, runSql, sqlResultNodes, syncPluginPanels } from './plugins.js';
+import { abandonSqlRuns, hidePluginViews, runSql, sqlResultNodes, syncPluginPanels } from './plugins.js';
 import { syncHistogramPanel } from './histogram.js';
 import { quoteIdent, setActiveSqlResult } from './sqlassist.js';
 import { checkPresets } from './savedfilters.js';
@@ -361,6 +361,7 @@ export async function closeSqlTab(t) {
   const idx = S.sqlTabs.findIndex((x) => x.id === t.id);
   S.sqlTabs = S.sqlTabs.filter((x) => x.id !== t.id);
   S.sqlResults.delete(t.id);
+  abandonSqlRuns(t.id);   // its answer has no tab to go to
   if (S.sqlTabId === t.id) {
     const next = S.sqlTabs[Math.min(idx, S.sqlTabs.length - 1)];
     S.sqlTabId = next ? next.id : null;

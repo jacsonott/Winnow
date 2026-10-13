@@ -15,12 +15,16 @@ import { S } from './state.js';
    value that doesn't match either shape is left exactly as it was. */
 export const TS_ISO_RE = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2})(?:[.,](\d{1,9}))?)?)?/;
 
-export const TS_US_RE = /^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:[ ,]+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM|am|pm)?)?/;
+/* The 12-hour marker is timeparse.MERIDIEM's: any of PM / pm / Pm / p.m. /
+   P.M., after optional fraction digits, not followed by a letter. The
+   old `\s*(AM|PM|am|pm)?` straight after the seconds missed it whenever a
+   fraction came between ("1:22:01.123 PM") and read the time as morning. */
+export const TS_US_RE = /^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:[ ,]+(\d{1,2}):(\d{2})(?::(\d{2})(?:[.,](\d+))?)?\s*(?:([AaPp])\.?[Mm]\.?(?![A-Za-z]))?)?/;
 
 /* Month-name family ("JUN 23 2026 00:11:00", "23 Jun 2026", "June 23,
    2026 5:11 PM") — the word is captured loose and validated against
    MONTH_NO below, mirroring store.py's third recognized shape. */
-export const TS_MONTH_RE = /^(?:([A-Za-z]{3,9}) +(\d{1,2})|(\d{1,2}) +([A-Za-z]{3,9})) *,? *(\d{4})(?:[ ,]+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM|am|pm)?)?/;
+export const TS_MONTH_RE = /^(?:([A-Za-z]{3,9}) +(\d{1,2})|(\d{1,2}) +([A-Za-z]{3,9})) *,? *(\d{4})(?:[ ,]+(\d{1,2}):(\d{2})(?::(\d{2})(?:[.,](\d+))?)?\s*(?:([AaPp])\.?[Mm]\.?(?![A-Za-z]))?)?/;
 
 const MONTH_NO = {
   jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
@@ -28,6 +32,14 @@ const MONTH_NO = {
   january: 1, february: 2, march: 3, april: 4, june: 6,
   july: 7, august: 8, september: 9, october: 10, november: 11, december: 12,
 };
+
+/* 12-hour to 24 from the marker's captured letter (timeparse.hour24). */
+function hour24(h, meridiem) {
+  const m = (meridiem || '').toLowerCase();
+  if (m === 'p' && h < 12) return h + 12;
+  if (m === 'a' && h === 12) return 0;
+  return h;
+}
 
 export function parseTimestamp(raw) {
   const s = String(raw).trim();
@@ -44,21 +56,15 @@ export function parseTimestamp(raw) {
   }
   m = TS_US_RE.exec(s);
   if (m) {
-    let h = +(m[4] || 0);
-    const ampm = (m[7] || '').toLowerCase();
-    if (ampm === 'pm' && h < 12) h += 12;
-    if (ampm === 'am' && h === 12) h = 0;
-    return { y: +m[3], mo: +m[1], d: +m[2], h, mi: +(m[5] || 0), s: +(m[6] || 0), frac: '' };
+    const h = hour24(+(m[4] || 0), m[8]);
+    return { y: +m[3], mo: +m[1], d: +m[2], h, mi: +(m[5] || 0), s: +(m[6] || 0), frac: m[7] || '' };
   }
   m = TS_MONTH_RE.exec(s);
   if (m) {
     const mo = MONTH_NO[(m[1] || m[4]).toLowerCase()];
     if (!mo) return null; // a weekday or plain word, not a month
-    let h = +(m[6] || 0);
-    const ampm = (m[9] || '').toLowerCase();
-    if (ampm === 'pm' && h < 12) h += 12;
-    if (ampm === 'am' && h === 12) h = 0;
-    return { y: +m[5], mo, d: +(m[2] || m[3]), h, mi: +(m[7] || 0), s: +(m[8] || 0), frac: '' };
+    const h = hour24(+(m[6] || 0), m[10]);
+    return { y: +m[5], mo, d: +(m[2] || m[3]), h, mi: +(m[7] || 0), s: +(m[8] || 0), frac: m[9] || '' };
   }
   return null;
 }
