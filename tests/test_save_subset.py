@@ -528,7 +528,9 @@ def test_sql_to_table_records_its_query_as_origin(store, write_csv):
     res = store.sql_to_table(f"SELECT Host FROM src_{sid} WHERE EventId = '4624'", "logon hosts")
     src = store.get_source(res["source"]["id"])
     assert src["origin"] == "sql" and src["origin_meta"] == {"sql": f"SELECT Host FROM src_{sid} WHERE EventId = '4624'"}
-    assert src["file_hash"] is None
+    # No file behind it, so an identity of its own rather than none: a NULL
+    # hash is what made a session skip it (test_case_sessions.py, made inside Winnow).
+    assert src["file_hash"].startswith("made:") and src["path"] is None
     imported = store.get_source(sid)
     assert imported["origin"] is None and imported["origin_meta"] is None
 

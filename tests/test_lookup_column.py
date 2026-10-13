@@ -202,6 +202,49 @@ def test_a_lookup_table_from_a_multi_table_file_is_matched_like_a_session_source
         b.close()
 
 
+def test_a_lookup_on_a_table_made_in_winnow_follows_that_table_not_its_name(tmp_path, write_csv):
+    """A SQL-saved lookup table had no hash, so the session bound it by
+    NAME — in another case, to whatever table someone had saved under that
+    name: mallory where the analyst's column said alice. It now carries an
+    identity of its own (made:…), found again in its own case and never in
+    a table another case made the same way."""
+    from winnow.store import DEFAULT_TAGS, Store
+    owners = write_csv([["Host", "Owner"], ["web01", "alice"]], "owners.csv")
+    events = write_csv([["Host", "Msg"], ["web01", "logon"]], "events.csv")
+
+    def case(fname, owner_expr):
+        s = Store(str(tmp_path / fname), default_tags=DEFAULT_TAGS)
+        o = s.ingest_csv(owners, name="owners.csv", build_fts=False)["id"]
+        lk = s.sql_to_table(f"SELECT Host, {owner_expr} AS Owner FROM src_{o}", "owner map")["source"]["id"]
+        ev = s.ingest_csv(events, name="events.csv", build_fts=False)["id"]
+        return s, lk, ev
+
+    a, lk_a, ev_a = case("a.db", "Owner")
+    try:
+        r = a.add_derived_column(ev_a, "Owner", "Host", "lookup",
+                                 {"other_source_id": lk_a, "match_column": "Host", "value_column": "Owner"})
+        a.wait_for_ingest_job(r["job_id"], timeout=30)
+        sess = a.export_session(ev_a)
+        # Its own case: the same table, found again by its identity.
+        a.remove_derived_column(a.list_derived_columns(ev_a)[0]["id"])
+        res = a.import_session(ev_a, sess)
+        for j in res["derived_job_ids"]:
+            a.wait_for_ingest_job(j, timeout=30)
+        assert res["warnings"] == []
+        assert int(a.list_derived_columns(ev_a)[0]["params"]["other_source_id"]) == lk_a
+    finally:
+        a.close()
+
+    b, _lk_b, ev_b = case("b.db", "'mallory'")
+    try:
+        res = b.import_session(ev_b, sess)
+        assert res["derived_columns_added"] == 0
+        assert any("owner map" in w and "different table" in w for w in res["warnings"]), res["warnings"]
+        assert b.list_derived_columns(ev_b) == []
+    finally:
+        b.close()
+
+
 def test_a_lookup_whose_table_is_not_in_the_case_is_not_recreated(tmp_path, write_csv):
     """No table with that fingerprint here: say so and leave the column out,
     rather than filling it from whichever table took the old id."""

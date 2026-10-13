@@ -733,3 +733,215 @@ def test_a_replace_that_cannot_tell_the_copies_apart_leaves_both_alone(store, wr
     assert (_tagged(store, sid), _tagged(store, dup)) == ([1], [3])
     assert res["sources_restored"] == 0
     assert any("as they were" in w for w in res["warnings"])
+
+
+# ------------------------------------------------- tables made inside Winnow
+#
+# A table saved from the SQL pane ("Save as table…") or written by a plugin
+# with no file behind it (first_last's output) had no file hash. Matching
+# requires one, so a load skipped those tables — and a replacing load
+# clears every table first, so even a session saved a second earlier lost
+# their tags and notes, with a warning that the table "isn't open". They
+# now carry an identity of their own (made:<random>): it matches the table
+# and its copies, and nothing another case made the same way.
+
+ZERO = {"added": 0, "removed": 0, "changed": 0, "note_changes": 0}
+
+
+def _sql_table(store, sid, name="hits"):
+    return store.sql_to_table(f"SELECT Host, User FROM src_{sid} ORDER BY rid", name)["source"]["id"]
+
+
+def _plugin_table(store, name="First/Last"):
+    # What a plugin tab writes back (first_last): computed rows, no file.
+    return store.ingest_rows(["Host", "First"], [["h1", "t1"], ["h2", "t2"], ["h3", "t3"]],
+                             name=name, build_fts=False)["id"]
+
+
+def _note(store, sid, rid):
+    row = store.db.execute("SELECT note FROM row_notes WHERE source_id=? AND rid=?", (sid, rid)).fetchone()
+    return row[0] if row else None
+
+
+def test_reloading_the_session_just_saved_keeps_a_sql_saved_tables_tags(store, write_csv):
+    """The report, as it happened: save, load straight back with replace,
+    and the SQL-saved table's tags were gone."""
+    sid = _case(store, write_csv)
+    hits = _sql_table(store, sid)
+    _tag(store, hits, [1, 4], "TA")
+    store.set_note(hits, 4, "pivot host")
+    store.save_session("now")
+
+    res = store.load_session("now", merge=False)
+    assert _tagged(store, hits) == [1, 4] and _note(store, hits, 4) == "pivot host"
+    assert res["warnings"] == [] and res["sources_restored"] == 2
+
+
+@pytest.mark.parametrize("merge", [False, True])
+def test_a_table_saved_from_the_sql_pane_gets_its_tags_back(store, write_csv, merge):
+    sid = _case(store, write_csv)
+    hits = _sql_table(store, sid)
+    _tag(store, sid, [1], "TA")
+    _tag(store, hits, [2, 3], "TA")
+    store.set_note(hits, 3, "lateral hop")
+    store.save_session("pass1")
+    store.start_new_session()
+
+    res = store.load_session("pass1", merge=merge)
+    assert (_tagged(store, sid), _tagged(store, hits)) == ([1], [2, 3])
+    assert _note(store, hits, 3) == "lateral hop"
+    assert res["warnings"] == [] and res["sources_restored"] == 2
+    assert store.diff_sessions("pass1", store.LIVE_SESSION)["counts"] == ZERO
+
+
+@pytest.mark.parametrize("merge", [False, True])
+def test_a_table_a_plugin_made_gets_its_tags_back(store, write_csv, merge):
+    fl = _plugin_table(store)
+    _tag(store, fl, [1, 3], "TA")
+    store.set_note(fl, 1, "first logon")
+    store.save_session("pass1")
+    store.start_new_session()
+
+    res = store.load_session("pass1", merge=merge)
+    assert _tagged(store, fl) == [1, 3] and _note(store, fl, 1) == "first logon"
+    assert res["warnings"] == []
+    # and a difference found by the diff opens on that table
+    _tag(store, fl, [2], "TA")
+    d = store.diff_sessions("pass1", store.LIVE_SESSION)
+    assert [(r["source_id"], r["rid"]) for r in d["added"]] == [(fl, 2)]
+
+
+def test_tags_put_on_a_made_table_through_a_merge_come_back(store, write_csv):
+    """A merge's tags live on its members, so a member made inside Winnow
+    is restored through its own identity like any other."""
+    sid = _case(store, write_csv)
+    hits = _sql_table(store, sid)                       # same columns: the two merge
+    mid = store.create_merge("both", [sid, hits])["id"]
+    v = store.build_view(mid, {"source_id": mid, "filters": [], "sort": [],
+                               "filter_tree": {"type": "cond", "column": "User", "op": "equals",
+                                               "value": "bob"}})
+    store.tag_view(v["view_id"], store.upsert_tag(None, "TA", "#ff0000", None)["id"], True)
+    assert (_tagged(store, sid), _tagged(store, hits)) == ([2], [2])
+    store.save_session("pass1")
+    store.start_new_session()
+
+    res = store.load_session("pass1", merge=False)
+    assert (_tagged(store, sid), _tagged(store, hits)) == ([2], [2])
+    assert res["warnings"] == []
+
+
+def test_a_table_made_the_same_way_in_another_case_is_not_this_one(store, write_csv, tmp_path):
+    """Two analysts run the same query over the same evidence: two tables
+    with the same name, columns and rows, and still two tables — nothing
+    says the rows came out in the same order, or that the query was the
+    same. A session from one never tags the other; a COPY of the table
+    (copy_sources_to keeps its identity) is the table, as a file's is."""
+    from winnow.store import Store
+
+    sid = _case(store, write_csv)
+    hits = _sql_table(store, sid)
+    _tag(store, hits, [1], "TA")
+    theirs = store.export_case_session()
+
+    other = Store(str(tmp_path / "reviewer.db"))
+    try:
+        ohits = _sql_table(other, _case(other, write_csv))
+        _tag(other, ohits, [4], "TB")
+        other.adopt_session("analyst", theirs)
+        res = other.load_session("analyst", merge=True)
+        assert _tagged(other, ohits) == [4]
+        said = [w for w in res["warnings"] if "hits" in w]
+        assert len(said) == 1 and "different table" in said[0] and "isn't open" not in said[0], said
+        d = other.diff_sessions("analyst", other.LIVE_SESSION)
+        assert [(r["source_id"], r["rid"]) for r in d["removed"]] == [(None, 1)], \
+            "the analyst's hits is not this case's to open"
+    finally:
+        other.close()
+
+    target = Store(str(tmp_path / "copy.db"))
+    tp = target.path
+    target.close()
+    store.copy_sources_to(tp, [sid, hits])
+    t = Store(tp)
+    try:
+        copy = next(s["id"] for s in t.list_sources() if s["name"] == "hits")
+        t.start_new_session()          # the copy brought its tags; the load has to put them back
+        t.adopt_session("analyst", theirs)
+        res = t.load_session("analyst", merge=False)
+        assert _tagged(t, copy) == [1] and res["warnings"] == []
+    finally:
+        t.close()
+
+
+def test_a_session_from_before_made_tables_had_an_identity_never_costs_their_tags(store, write_csv):
+    """A session saved before the fix recorded no hash for a made table,
+    and nothing it holds proves which table here it was — a same-named one
+    may have been made over again since. So its tags for it are not
+    applied, and a replace leaves what that table has alone instead of
+    clearing it for nothing; the rest of the session loads as usual."""
+    sid = _case(store, write_csv)
+    hits = _sql_table(store, sid)
+    fl = _plugin_table(store)
+    _tag(store, sid, [2], "TA")
+    _tag(store, hits, [1], "TA")
+    old = store.export_case_session()
+    for e in old["sources"]:
+        if e["source"]["name"] in ("hits", "First/Last"):
+            e["source"]["file_hash"] = None             # what it recorded before the fix
+    store._write_session("before", old, origin="saved")
+    store.start_new_session()
+    _tag(store, sid, [3], "TB")
+    _tag(store, hits, [4], "TB")
+    store.set_note(hits, 4, "second pass")
+    _tag(store, fl, [2], "TB")
+
+    res = store.load_session("before", merge=False)
+    assert _tagged(store, sid) == [2]                   # replaced, as the Load dialog says
+    assert (_tagged(store, hits), _tagged(store, fl)) == ([4], [2])
+    assert _note(store, hits, 4) == "second pass"
+    assert any("hits" in w and "same table" in w for w in res["warnings"]), res["warnings"]
+    assert any("'hits'" in w and "'First/Last'" in w and "as they were" in w for w in res["warnings"])
+    assert not any("isn't open" in w for w in res["warnings"])
+    # The diff agrees with the load: the old record does not open on this table.
+    d = store.diff_sessions("before", store.LIVE_SESSION)
+    assert [(r["source"], r["source_id"], r["rid"]) for r in d["removed"] if r["source"] == "hits"] \
+        == [("hits", None, 1)]
+
+
+def test_an_older_case_gives_its_made_tables_an_identity_on_open(tmp_path, write_csv):
+    """A case from before keeps NULL hashes for the tables it made. The
+    first open gives each its own identity — once, so a session saved
+    afterwards still matches on every later open — and leaves a file's
+    fingerprint alone."""
+    import sqlite3
+
+    from winnow.store import Store
+
+    path = str(tmp_path / "older.db")
+    s = Store(path)
+    sid = _case(s, write_csv)
+    hits, fl = _sql_table(s, sid), _plugin_table(s)
+    fingerprint = s.get_source(sid)["file_hash"]
+    s.close()
+    con = sqlite3.connect(path)
+    con.execute("UPDATE sources SET file_hash=NULL WHERE id IN (?,?)", (hits, fl))
+    con.commit()
+    con.close()
+
+    s = Store(path)
+    try:
+        h = {x["id"]: x["file_hash"] for x in s.list_sources()}
+        assert h[sid] == fingerprint
+        assert h[hits].startswith("made:") and h[fl].startswith("made:") and h[hits] != h[fl]
+        _tag(s, hits, [2], "TA")
+        s.save_session("after")
+    finally:
+        s.close()
+    s = Store(path)
+    try:
+        assert s.get_source(hits)["file_hash"] == h[hits]
+        s.start_new_session()
+        res = s.load_session("after", merge=False)
+        assert _tagged(s, hits) == [2] and res["warnings"] == []
+    finally:
+        s.close()

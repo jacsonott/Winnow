@@ -501,7 +501,41 @@ see [docs/notes/README.md](README.md) for the whole set.
   unambiguously the source's — keeps what it has, with a warning naming
   it. The session's tags for it were refused because they would land on
   other rows; clearing its own as well would lose the analyst's work
-  there for nothing.
+  there for nothing. The same goes for the tables an entry with no hash
+  could be (`_legacy_made_table_candidates`, next entry).
+- **A table made inside Winnow has an identity of its own: `file_hash =
+  'made:' + 32 random hex digits`** (`MADE_HASH_PREFIX`, set by
+  `ingest_rows` when there is no file to fingerprint — so `sql_to_table`
+  and every plugin's computed table; a subset has its `subset:` digest,
+  below). Matching requires a hash, and these tables had NULL: a load
+  skipped them, the replacing load's clear (above) took their tags and
+  notes anyway, and re-import "refused" them with a warning that the
+  table "isn't open" while it was — so loading a session saved a second
+  earlier lost every SQL-saved and first_last table's tags. **Random, not
+  derived from the rows**, on purpose: two analysts running the same query
+  over the same evidence get two tables with the same name, columns and
+  rows, and they are still two tables (the query may differ, the order
+  may differ), so a session from one case must never tag the other's — a
+  content hash would make exactly that match. A copy (`copy_sources_to`
+  carries `file_hash`) IS the table and matches, as a file's copy and a
+  subset's do. An older case gets one per NULL-hash table on its first
+  open (`Store.__init__`'s migration, `randomblob` per row) — once, so
+  sessions saved afterwards keep matching. A session saved BEFORE that
+  recorded no hash for such a table, and nothing in it says which table
+  here it was (a same-named one may have been dropped and made again
+  since; `imported_at` vs `exported_at` cannot rule that out, clocks
+  move between machines), so such an entry is **never matched** — not on
+  load, not by the diff's pivot (which uses the load rule, no
+  `hashless`), not by the lookup resolver — and a replace leaves the live
+  tables it could be alone (no file hash, same name, same base columns
+  and row count: a made table's never change) with a warning that says
+  so, rather than "isn't open". The diff still pairs two hashless
+  records with each other by name (`_diff_source_keys`, `hashless=True`)
+  — that compares two documents and pivots nowhere. `_is_file_hash` is
+  the one test for "a fingerprint of a file on disk" versus synthetic or
+  none; `_reimport_session_source` is only reached for the former, and
+  says "isn't in this case" (closed tables match too).
+  tests/test_case_sessions.py, the made-inside-Winnow section.
 - **A session source is matched to a table by hash AND by which table of
   that file it is** (`_match_session_sources`, used by load and diff
   alike). The hash is the FILE's: every table imported from one SQLite
@@ -1201,8 +1235,9 @@ see [docs/notes/README.md](README.md) for the whole set.
   subset gets a synthetic `file_hash = 'subset:' + sha256(parent hash |
   spec | created_at | id)`: `import_case_session` requires a hash to
   match a source and skips a hashless one, so without it a saved session
-  would never give a subset its tags back — the gap SQL-saved tables
-  still have. `diff_sessions` keys on the same hash through the same
+  would never give a subset its tags back (SQL-saved and plugin-made
+  tables had that gap until they got `made:` hashes — above, under
+  sessions). `diff_sessions` keys on the same hash through the same
   matcher (`_match_session_sources`, below); nothing treats `file_hash`
   as "a file on disk" (that is `path`, which stays NULL). Failure of any kind mid-copy
   — `op_token` cancel via `_interruptible` (registered per statement:

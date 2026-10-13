@@ -28,6 +28,7 @@ import json
 import math
 import os
 import re
+import secrets
 import shutil
 import socket
 import sqlite3
@@ -851,6 +852,31 @@ RESERVED_COLUMN_NAMES = {"rid", "rank", "rowid", TAG_GROUP_COLUMN, LINE_SORT_COL
 # NULL is an import; these two are derived from what is already in the case.
 SQL_ORIGIN = "sql"          # sql_to_table — origin_meta = {sql}
 SUBSET_ORIGIN = "subset"    # save_view_as_source — origin_meta names the parent and the selection
+
+# sources.file_hash for a table with no file behind it. The hash is what a
+# session matches a table by (_match_session_sources), so a table without
+# one was never given its tags back — and a replacing load cleared them. A
+# subset's is derived from its parent and spec (save_view_as_source);
+# anything else made in-process — a SQL-pane save, a plugin's ingest_rows
+# with no file — gets MADE_HASH_PREFIX and random digits, deliberately not
+# derived from what it holds: the same query over the same evidence in
+# another case makes a table with the same name, columns and rows, and it
+# is still not this table, so a session from there must not tag it. A copy
+# (copy_sources_to) keeps the hash, so a copy does match. The prefixes keep
+# a synthetic hash from ever reading as a _quick_hash of a file on disk.
+MADE_HASH_PREFIX = "made:"
+SUBSET_HASH_PREFIX = "subset:"
+
+
+def _made_table_hash() -> str:
+    return MADE_HASH_PREFIX + secrets.token_hex(16)
+
+
+def _is_file_hash(h) -> bool:
+    """True for a fingerprint of a file on disk; False for a table made
+    inside Winnow (a synthetic hash) and for no hash at all — a session
+    record from before made tables had one."""
+    return bool(h) and not str(h).startswith((MADE_HASH_PREFIX, SUBSET_HASH_PREFIX))
 
 # The one column a raw-text import has (ingest_text): every physical line
 # of the file, verbatim, one row each. Not "Line" — the grid's own row-
@@ -2332,6 +2358,17 @@ class Store:
             for col in ("origin", "origin_meta", "ingest"):
                 if col not in have:
                     self.db.execute(f"ALTER TABLE sources ADD COLUMN {col} TEXT")
+            # A table made inside Winnow before such tables were given an
+            # identity (MADE_HASH_PREFIX) has a NULL hash, which no session
+            # can match — so a replacing load cleared its tags and never
+            # put them back. Each gets one now, once. randomblob() runs per
+            # row, so no two share one, and nothing outside this case has
+            # it. A session saved before this has no hash for such a table
+            # and stays unmatched: import_case_session leaves the tables it
+            # could be as they are rather than guess.
+            self.db.execute(
+                "UPDATE sources SET file_hash = ? || lower(hex(randomblob(16))) "
+                "WHERE file_hash IS NULL OR file_hash = ''", (MADE_HASH_PREFIX,))
             # Same for dashboards.pinned (a board promoted into the page strip).
             if not any(r[1] == "pinned" for r in self.db.execute("PRAGMA table_info(dashboards)")):
                 self.db.execute("ALTER TABLE dashboards ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
@@ -4582,7 +4619,9 @@ class Store:
             raise ValueError("No columns")
         cols = sanitize_columns(list(columns))
         ncols = len(cols)
-        file_hash = self._quick_hash(path) if path and os.path.isfile(path) else None
+        # No file to fingerprint (a SQL-pane save, a plugin's computed
+        # table): an identity of its own, so a session can find it again.
+        file_hash = self._quick_hash(path) if path and os.path.isfile(path) else _made_table_hash()
 
         source_id, table = self._create_source_shell(
             name, cols, path=path, file_hash=file_hash, origin=origin, origin_meta=origin_meta,
@@ -12250,26 +12289,35 @@ class Store:
     def _resolve_session_lookup(self, d: dict) -> int:
         """The live source a session's lookup column should read, from the
         `lookup_table` identity _session_derived_def wrote, matched the way
-        session sources are (_match_session_sources: the file's hash, then
-        which table of that file). A table with no hash — a SQL-saved or
-        plugin-made lookup table, common here — pairs by name, as the diff
-        pairs one (`hashless`). Raises ValueError — a warning, the column
-        not recreated — when no table matches or several could. The
-        session's id is never used: binding by it filled a column from
-        whichever table happened to hold that number, with nothing to say
-        so."""
+        a load matches session sources (_match_session_sources: the hash,
+        then which table of that file). A SQL-saved or plugin-made lookup
+        table — common here — matches by its synthetic hash like any other
+        (MADE_HASH_PREFIX), so another case's table of the same name is not
+        it. One recorded with no hash at all (a session from before made
+        tables had one) used to pair by name; nothing shows that table is
+        this one, so it is a warning now, like a load. Raises ValueError — a
+        warning, the column not recreated — when no table matches or
+        several could. The session's id is never used: binding by it filled
+        a column from whichever table happened to hold that number, with
+        nothing to say so."""
         ident = d.get("lookup_table")
         if not isinstance(ident, dict):
             raise ValueError("the session does not say which table it looks values up in "
                              "(it was saved before that was recorded); recreate it from the column menu")
         name = ident.get("name")
+        h = ident.get("file_hash")
+        if not h:
+            raise ValueError(f"its lookup table {name!r} was made inside Winnow and the session was "
+                             "saved before such tables could be told apart, so which one it reads "
+                             "can't be confirmed; recreate it from the column menu")
         real = [s for s in self.list_sources() if s["id"] >= 0]
-        pairs = self._match_session_sources([ident], real, hashless=True)
+        pairs = self._match_session_sources([ident], real)
         if 0 in pairs:
             return real[pairs[0]]["id"]
-        h = ident.get("file_hash")
-        same = [s for s in real if (s.get("file_hash") == h if h
-                                    else not s.get("file_hash") and s["name"] == name)]
+        same = [s for s in real if s.get("file_hash") == h]
+        if not same and not _is_file_hash(h) and any(s["name"] == name for s in real):
+            raise ValueError(f"its lookup table {name!r} was made inside Winnow, and this case's "
+                             f"{name!r} is a different table made separately")
         if not same:
             raise ValueError(f"its lookup table {name!r} is not in this case")
         raise ValueError(f"{len(same)} tables here could be its lookup table {name!r} and none "
@@ -12306,7 +12354,9 @@ class Store:
     def _session_hash_warnings(src: dict, session: dict) -> list[str]:
         s_src = session.get("source", {})
         if s_src.get("file_hash") and s_src["file_hash"] != src["file_hash"]:
-            return ["Session was recorded against a different file. Row numbers may not line up."]
+            what = ("file" if _is_file_hash(s_src["file_hash"]) and _is_file_hash(src["file_hash"])
+                    else "table")
+            return [f"Session was recorded against a different {what}. Row numbers may not line up."]
         return []
 
     def _session_tag_idmap(self, session: dict) -> dict:
@@ -12432,7 +12482,20 @@ class Store:
         (_session_shape_mismatch). Anything else is skipped with a warning
         rather than tagged — the same file imported with other options has
         every rid on a different row, and nothing about the tags would
-        show it."""
+        show it.
+
+        A table made inside Winnow (a SQL-pane save, a plugin's computed
+        table, a subset) has a synthetic hash — MADE_HASH_PREFIX — and
+        matches by it like a file; only a copy of that table carries it, so
+        another case's table made the same way, with the same name and
+        rows, never takes these tags. With no table of that identity here
+        there is nothing to re-import either, and the warning says so
+        (_made_table_unmatched_warning). A session saved before made
+        tables had an identity records none for them: such an entry is
+        never matched (a same-named table here may have been made over
+        again since), and a replace leaves the tables it could be as they
+        are (_legacy_made_table_candidates) rather than clearing them for
+        nothing."""
         warnings: list[str] = []
         tags_applied = 0
         sources_restored = 0
@@ -12454,13 +12517,23 @@ class Store:
             source_id = live[pairs[i]]["id"] if i in pairs else None
             reimported = False
             if source_id is None and s_meta.get("file_hash") in live_hashes:
-                same_file = sum(1 for s in live if s.get("file_hash") == s_meta["file_hash"])
-                unplaced.update(s["id"] for s in live if s.get("file_hash") == s_meta["file_hash"])
+                same = [s["id"] for s in live if s.get("file_hash") == s_meta["file_hash"]]
+                unplaced.update(same)
+                what = (f"{len(same)} table(s) from the same file" if _is_file_hash(s_meta["file_hash"])
+                        else f"{len(same)} copies of this table")
                 warnings.append(
                     f"'{s_meta.get('name', 'unknown')}' was not restored: this case has "
-                    f"{same_file} table(s) from the same file and none of them is "
+                    f"{what} and none of them is "
                     "unambiguously this one (matched on name, columns and row count) "
                     "— skipped rather than guessed")
+                continue
+            if source_id is None and not _is_file_hash(s_meta.get("file_hash")):
+                # Made inside Winnow, and this case has no table with its
+                # identity — or a record from before made tables had one.
+                # There is no file to re-import it from either way.
+                could_be = self._legacy_made_table_candidates(s_meta, live)
+                unplaced.update(could_be)
+                warnings.append(self._made_table_unmatched_warning(s_meta, live, could_be))
                 continue
             if source_id is None:
                 source_id, why = self._reimport_session_source(s_meta)
@@ -12482,7 +12555,7 @@ class Store:
                 else:
                     unplaced.add(source_id)
                     warnings.append(
-                        f"'{label}' is open, but not as the session's copy was imported "
+                        f"'{label}' is in this case, but not as the session's copy was imported "
                         f"({mismatch}) — its tags and notes would land on other rows, so "
                         "they were not applied")
                 continue
@@ -12536,6 +12609,55 @@ class Store:
             "sources_reimported": sources_reimported,
         }
 
+    @classmethod
+    def _legacy_made_table_candidates(cls, s_meta: dict, live: list[dict]) -> list[int]:
+        """The live tables a session entry with NO hash could describe — a
+        table made inside Winnow, recorded before such tables were given an
+        identity. Nothing proves which (if any) it is, so none is tagged,
+        but a replace must not clear these either. A made table's name,
+        columns and rows never change (invariant #1; a rename is a
+        nickname), so the table it was is one with no file behind it that
+        still agrees on all three — whatever of them the entry recorded.
+        An entry that has a hash has an identity, and no candidates."""
+        if s_meta.get("file_hash"):
+            return []
+        name = s_meta.get("name") or ""
+        cols = [c.get("name") if isinstance(c, dict) else c for c in s_meta.get("columns") or []]
+        rows = s_meta.get("row_count")
+        out = []
+        for s in live:
+            if _is_file_hash(s.get("file_hash")) or s.get("name") != name:
+                continue
+            if rows is not None and s.get("row_count") != rows:
+                continue
+            if cols and [c["name"] for c in cls._base_cols(s)] != cols:
+                continue
+            out.append(s["id"])
+        return out
+
+    @staticmethod
+    def _made_table_unmatched_warning(s_meta: dict, live: list[dict], could_be: list[int]) -> str:
+        """What to tell the analyst about a made-inside-Winnow entry that
+        matched no table here. It used to fall through to re-import, which
+        said the table "isn't open" — while it was open, and its tags had
+        just been cleared."""
+        label = s_meta.get("name") or "unknown"
+        if not s_meta.get("file_hash"):
+            if could_be:
+                return (f"'{label}' was not restored: the session was saved before Winnow could tell "
+                        "apart tables made inside it (SQL pane saves, plugin output), so nothing "
+                        f"shows this case's '{label}' is the same table — its tags and notes were "
+                        "not applied")
+            return (f"'{label}' was not restored: it is a table made inside Winnow, saved before "
+                    "such tables could be told apart, and this case has no table it could be")
+        if any(s.get("name") == label for s in live):
+            return (f"'{label}' was not restored: it was made inside Winnow (not imported from a "
+                    f"file), and this case's '{label}' is a different table made separately — the "
+                    "session's tags and notes were not put on it")
+        return (f"'{label}' was not restored: it was made inside Winnow (not imported from a file), "
+                "so there is no file to re-import it from, and this case does not have it or a "
+                "copy of it")
+
     _SESSION_READERS = ("csv", "text", "json", "sqlite", "xlsx", "plaso")
 
     def _reimport_session_source(self, s_meta: dict) -> tuple[int | None, str | None]:
@@ -12559,27 +12681,29 @@ class Store:
         label = s_meta.get("name") or s_meta.get("path") or "unknown"
         path = s_meta.get("path")
         if not path:
-            return None, f"'{label}' isn't open and the session doesn't say which file it came from — skipped"
+            return None, f"'{label}' isn't in this case and the session doesn't say which file it came from — skipped"
         if _is_network_path(path) or not os.path.isabs(path):
-            return None, (f"'{label}' isn't open, and the session names {path} for it — not a local "
+            return None, (f"'{label}' isn't in this case, and the session names {path} for it — not a local "
                           "file path, so Winnow did not look at it. Open the file yourself, then load "
                           "the session again.")
         if not os.path.isfile(path):
-            return None, f"'{label}' isn't open and its original file wasn't found at {path} — skipped"
+            return None, f"'{label}' isn't in this case and its original file wasn't found at {path} — skipped"
         want = s_meta.get("file_hash")
         how = s_meta.get("ingest") or self._guess_session_reader(path)
         kind = how.get("kind") if isinstance(how, dict) else None
         if kind not in self._SESSION_READERS:
-            why = ("was produced by a plugin or saved from another table"
+            # "rows" with a file behind it is a plugin's importer: a table
+            # made with no file never gets here (import_case_session).
+            why = ("was read by a plugin's importer"
                    if kind == "rows" else "has no record of how it was read")
-            return None, (f"'{label}' isn't open, and it {why}, so Winnow can't re-import it from "
-                          f"{path}. Open it yourself, then load the session again.")
+            return None, (f"'{label}' isn't in this case, and it {why}, so Winnow can't re-import it "
+                          f"from {path}. Import it yourself, then load the session again.")
         try:
             have = self._quick_hash(path)
         except OSError as e:
             return None, f"Could not re-import '{label}': {e}"
         if not want or have != want:
-            return None, (f"'{label}' isn't open, and {path} is not the file the session was "
+            return None, (f"'{label}' isn't in this case, and {path} is not the file the session was "
                           "recorded against (it has changed, or it is a different file) — not "
                           "imported, its tags and notes not applied")
         name = s_meta.get("name")
@@ -13150,10 +13274,14 @@ class Store:
         reported by the caller, never placed. Never matched on ids: two
         cases number their sources independently (invariant #10).
 
-        A source with no hash (a SQL-saved or plugin-made table) has no
-        fingerprint at all; `hashless` lets it pair by tiers 1 and 2 —
-        name required — which is what the diff has always done. Session
-        load leaves it unmatched, as before."""
+        A table made inside Winnow has a synthetic hash (MADE_HASH_PREFIX,
+        SUBSET_HASH_PREFIX) and pairs by it exactly like a file. A record
+        with NO hash is one a session wrote before made tables had one:
+        `hashless` lets two such records pair by tiers 1 and 2 — name
+        required — which is what the diff does between two documents.
+        Never against a live table: load, the lookup resolver and the
+        diff's pivot leave it unmatched, since a same-named table here may
+        have been made over again since (import_case_session)."""
         ie = [cls._session_identity(m) for m in entries]
         ic = [cls._session_identity(m) for m in candidates]
         free_e = [i for i, x in enumerate(ie) if x[0] or hashless]
@@ -13266,12 +13394,13 @@ class Store:
         # lists below are capped, so a table past the cap still reports
         # how many rows differ even when not all of them can be opened.
         # Each key resolves to the live table its record matches — by the
-        # same rule a load uses, so a diff never pivots into evidence a
-        # load would not have put those tags on.
+        # same rule a load uses (no `hashless`: a record with no hash is
+        # never placed on a live table), so a diff never pivots into
+        # evidence a load would not have put those tags on.
         live = self.list_sources()
         live_id: dict = {}
         for metas, keys in ((rmeta, rkeys), (lmeta, lkeys)):   # left wins
-            for i, j in self._match_session_sources(metas, live, hashless=True).items():
+            for i, j in self._match_session_sources(metas, live).items():
                 live_id[keys[i]] = live[j]["id"]
         resolve = live_id.get
         per_source: dict = {}
@@ -14711,8 +14840,9 @@ class Store:
         file_hash gets a synthetic 'subset:<sha256>': a subset has no file
         on disk, and a NULL hash is exactly what makes import_case_session
         skip a source, so a saved session would never give a subset its
-        tags back (SQL-saved tables have that gap today). The prefix keeps
-        it from ever reading as a _quick_hash of something on disk."""
+        tags back (SQL-saved and plugin-made tables get 'made:<random>' in
+        ingest_rows for the same reason; see MADE_HASH_PREFIX). The prefix
+        keeps it from ever reading as a _quick_hash of something on disk."""
         name = (name or "").strip()
         if not name:
             raise ValueError("Name the new table")
@@ -14835,7 +14965,7 @@ class Store:
                 with self.lock, self.db:
                     self.db.execute(
                         "UPDATE sources SET columns=?, origin_meta=?, file_hash=? WHERE id=?",
-                        (json.dumps(colmeta), json.dumps(meta), "subset:" + digest, new_id))
+                        (json.dumps(colmeta), json.dumps(meta), SUBSET_HASH_PREFIX + digest, new_id))
                     if copy_tags:
                         self.db.execute(
                             "INSERT OR IGNORE INTO row_tags(source_id, rid, tag_id) "
