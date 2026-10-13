@@ -95,6 +95,15 @@ see [docs/notes/README.md](README.md) for the whole set.
   line (each pass); a single `.json` document has to be `json.load()`ed
   whole (no generic streaming parser in the standard library) — memory use
   scales with file size for that shape specifically.
+  **The column set is capped at `JSON_MAX_COLUMNS` (1,000).** SQLite
+  refuses a table past 2,000 columns, and ONE record with more keys than
+  that (attacker-chosen HTTP header names, an environment dump) failed
+  the whole import. Past the cap, the first 999 keys (first-seen order)
+  stay columns and every later key folds into one `Other fields (JSON)`
+  cell per record — a JSON object of just that record's overflow keys,
+  empty when it has none — so nothing is dropped and the structparse
+  ops lift any of them back out. `_json_column_plan` builds the same
+  plan for preview and ingest, so the preview shows the real table.
 - Ragged rows are padded/trimmed to the header width, never dropped, and
   counted — `ingest_csv`'s return dict has a `ragged_rows` count surfaced to
   the analyst (toast in the UI, printed in the CLI path). If that first row

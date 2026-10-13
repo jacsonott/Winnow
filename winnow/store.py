@@ -901,6 +901,35 @@ def _flatten_json(obj: dict, max_depth: int | None) -> dict[str, str]:
     return out
 
 
+# SQLite refuses a table past 2,000 columns, and one record with more keys
+# than that (attacker-chosen header names, an environment dump) used to
+# fail the WHOLE import with "too many columns". A JSON file keeps its
+# first JSON_MAX_COLUMNS - 1 keys (first-seen order) as columns and folds
+# every key past them into one JSON-object cell per record, so no value is
+# lost and the structparse ops can lift any of them out — the Plaso
+# import's `Attributes (JSON)` shape. 1,000, not 1,999: a derived-column
+# sidecar joins its own columns on, and a grid of a thousand columns is
+# already past what anyone reads.
+JSON_MAX_COLUMNS = 1000
+JSON_OVERFLOW_COLUMN = "Other fields (JSON)"
+
+
+def _json_column_plan(keys: list[str]) -> tuple[list[str], Callable[[dict], list[str]]]:
+    """(column names, row_of) for the flattened keys a JSON file holds,
+    where row_of(flat_record) is that record's cells in column order. One
+    plan for preview and ingest, so the two show the same table."""
+    if len(keys) <= JSON_MAX_COLUMNS:
+        return sanitize_columns(keys), lambda flat: [flat.get(k, "") for k in keys]
+    kept = keys[:JSON_MAX_COLUMNS - 1]
+    kept_set = set(kept)
+
+    def row_of(flat: dict) -> list[str]:
+        rest = {k: v for k, v in flat.items() if k not in kept_set}
+        return [flat.get(k, "") for k in kept] + [json.dumps(rest, ensure_ascii=False) if rest else ""]
+
+    return sanitize_columns(kept + [JSON_OVERFLOW_COLUMN]), row_of
+
+
 def _iter_json_records(path: str, bad: dict | None = None) -> Iterable[dict]:
     """Yields one dict per record. `.jsonl`/`.ndjson` (one JSON value per
     line — the genuinely streamable shape, never loaded fully into memory)
@@ -3446,9 +3475,8 @@ class Store:
                     f"File has no readable records — {bad_prev['count']} unreadable line(s), "
                     f"first at line {bad_prev['first_line']}: {bad_prev['first_error']}")
             raise ValueError("File has no records")
-        cols = sanitize_columns(seen_cols)
-        key_by_col = dict(zip(cols, seen_cols))
-        sample_rows = [[flat.get(key_by_col[c], "") for c in cols] for flat in sample_flat]
+        cols, row_of = _json_column_plan(seen_cols)
+        sample_rows = [row_of(flat) for flat in sample_flat]
         types = [infer_type([r[i] for r in sample_rows]) for i in range(len(cols))] if sample_rows else ["text"] * len(cols)
         return {"columns": cols, "sample_rows": sample_rows, "inferred_types": types,
                 "record_count": record_count, "bad_records": bad_prev["count"],
@@ -3502,9 +3530,8 @@ class Store:
                     f"first at line {bad_scan['first_line']}: {bad_scan['first_error']}")
             raise ValueError("File has no records")
 
-        cols = sanitize_columns(seen_cols)
+        cols, row_of = _json_column_plan(seen_cols)
         ncols = len(cols)
-        key_by_col = dict(zip(cols, seen_cols))
 
         with self.lock, self.db:
             cur = self.db.execute(
@@ -3534,8 +3561,7 @@ class Store:
         with self._ingest_synchronous_off():
             try:
                 for rec in _iter_json_records(path, bad=bad):
-                    flat = _flatten_json(rec, max_depth)
-                    row = [flat.get(key_by_col[c], "") for c in cols]
+                    row = row_of(_flatten_json(rec, max_depth))
                     batch.append(tuple(row))
                     if len(sample) < SAMPLE_ROWS:
                         sample.append(row)
