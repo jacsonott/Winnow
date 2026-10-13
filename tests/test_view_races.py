@@ -220,3 +220,22 @@ def test_a_virtual_group_is_not_registered_under_a_parent_already_gone(store, wr
     with pytest.raises(KeyError):
         store.expand_group(root["view_id"], "Host", "H0")
     assert not [h for h in store._views.values() if h.get("parent_view_id") == root["view_id"]]
+
+
+def test_a_view_built_as_its_table_is_dropped_goes_with_the_table(store, write_csv, monkeypatch):
+    """drop_source evicts every view of the table it drops — but only the
+    ones in `_views` when it looks. A build that registered its handle
+    after letting go of the lock could land after the drop: a live handle
+    on a table nobody has, whose `v.view_N` nothing would ever remove, and
+    whose next page read the dead table instead of answering the 409 the
+    window rebuilds on."""
+    sid = _case(store, write_csv, rows=8)
+    store.lock = _RunOnRelease(store.lock)
+    _arm_after_next_mint(store, monkeypatch, lambda: store.drop_source(sid))
+
+    v = store.build_view(sid, {"sort": [{"column": "When", "dir": "desc"}]})
+
+    assert v["view_id"] not in store._views
+    assert _v_tables(store) == set()
+    with pytest.raises(KeyError):
+        store.fetch_rows(v["view_id"], 0, 5)

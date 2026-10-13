@@ -857,9 +857,10 @@ see [docs/notes/README.md](README.md) for the whole set.
   parks a shared threadpool worker, and the client never sends a figure.
   `tests/test_view_hold.py` / `tests/test_view_jobs.py`.
 - **A view handle goes into `_views` before the writer lock is
-  released, never after.** Eviction (`_evict_root_views`, and the
-  cascade over `parent_view_id` children) only sees what is registered,
-  and it runs under `self.lock`. A build that committed its table, let
+  released, never after.** Eviction (`_evict_root_views`,
+  `_evict_views_of` when a table or merge is dropped, and the cascade
+  over `parent_view_id` children) only sees what is registered, and it
+  runs under `self.lock`. A build that committed its table, let
   the lock go and *then* registered left a gap a rebuild of the same
   source could take: the rebuild's eviction ran first, missed the
   not-yet-registered view, and the late registration installed it on
@@ -868,9 +869,12 @@ see [docs/notes/README.md](README.md) for the whole set.
   nobody left to evict it). `build_view` and both `expand_group`
   branches therefore register inside the lock they built under, and
   `expand_group` re-checks that its parent is still registered there —
-  a `root_virtual` parent has no table whose absence would raise.
+  a `root_virtual` parent has no table whose absence would raise. The
+  same gap let a view outlive a `drop_source` that ran in it, paging a
+  table that was gone instead of answering 409.
   `tests/test_view_races.py` opens the gap deterministically by running
-  the competing rebuild at the moment the build's lock is released.
+  the competing rebuild (or drop) at the moment the build's lock is
+  released.
 - **The 2026-08 hot-path perf pass** (validated with `python3 -m bench
   --vs-ref` at both the 200k and 1.2M tiers — 0 slower, footprint
   unchanged), the shapes and their reasons:
