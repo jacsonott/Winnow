@@ -12,8 +12,11 @@ import { modal } from './ui.js';
 
 /* ------------------------------------------------------------------ merge */
 
+/* Folds A-Z only, as SQLite (and the server's column_signature) does:
+   toLowerCase() would group "Größe" with "GRÖßE", which SQLite reads as
+   two different columns, and the server refuses that merge. */
 export function columnGroupKey(columns) {
-  return columns.map((c) => c.name.trim().toLowerCase()).sort().join('|');
+  return columns.map((c) => c.name.trim().replace(/[A-Z]+/g, (m) => m.toLowerCase())).sort().join('|');
 }
 
 export function openMergeBuilder() {

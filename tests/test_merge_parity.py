@@ -37,11 +37,13 @@ def test_raw_sql_fragment_reaches_a_merge_derived_column(store, write_csv):
 def test_merge_raw_sql_validates_and_rejects_like_a_table(store, write_csv):
     _, _, mid = _mk(store, write_csv)
     store.validate_where_fragment(mid, "\"Msg\" LIKE '%a%'")  # must not raise
-    # Bare unknown identifiers hit the allowlist, same as on a plain table.
-    # (A double-quoted unknown falls into SQLite's string-literal misfeature
-    # on plain tables too — parity means matching that, not out-stricting it.)
+    # Unknown identifiers hit the allowlist, same as on a plain table —
+    # quoted ones too, rather than falling into SQLite's string-literal
+    # fallback on both.
     with pytest.raises(ValueError, match="Unknown identifier"):
         store.validate_where_fragment(mid, "Nope = 1")
+    with pytest.raises(ValueError, match='"Nope"'):
+        store.validate_where_fragment(mid, "\"Nope\" = 1")
     with pytest.raises(ValueError):
         store.validate_where_fragment(mid, "1; DROP TABLE x")
 
@@ -75,6 +77,45 @@ def test_member_only_derived_stays_invisible_to_merge_raw_sql(store, write_csv):
     # member's private derived column is rejected up front.
     with pytest.raises(ValueError, match="Unknown identifier"):
         store.validate_where_fragment(mid, "OnlyA = 'a'")
+
+
+
+def test_members_differing_only_in_non_ascii_case_do_not_merge(store, write_csv):
+    """SQLite folds identifier case for ASCII only, so to it "Größe" and
+    "GRÖßE" are two columns. The merge rule folded with str.lower and let
+    them merge; every read then quoted the first member's name against the
+    second, which SQLite's double-quoted-string fallback turned into the
+    literal — the second member's rows showed the header names as data."""
+    a = store.ingest_csv(write_csv([["Größe", "Öffnen"], ["1", "x"]], "a.csv"), build_fts=False)["id"]
+    b = store.ingest_csv(write_csv([["GRÖßE", "öffnen"], ["2", "y"]], "b.csv"), build_fts=False)["id"]
+    with pytest.raises(ValueError, match="matching columns"):
+        store.create_merge("m", [a, b])
+    # ASCII case is one column to SQLite, so those still merge, and every
+    # member reads its own values.
+    c = store.ingest_csv(write_csv([["SIZE", "open"], ["3", "z"]], "c.csv"), build_fts=False)["id"]
+    d = store.ingest_csv(write_csv([["size", "OPEN"], ["4", "w"]], "d.csv"), build_fts=False)["id"]
+    mid = store.create_merge("ascii", [c, d])["id"]
+    v = store.build_view(mid, {"source_id": mid, "sort": []})
+    cells = [r["cells"] for r in store.fetch_rows(v["view_id"], 0, 10)["rows"]]
+    assert sorted(cells) == [["3", "z"], ["4", "w"]]
+    assert sorted(x["value"] for x in store.column_values(mid, "SIZE")) == ["3", "4"]
+
+
+def test_a_merge_saved_under_the_old_rule_is_refused_not_read_wrong(store, write_csv):
+    """A case file can already hold a merge the old rule allowed. Opening
+    it must say so, as a merge whose member went missing does, rather than
+    page header names as cell values."""
+    a = store.ingest_csv(write_csv([["Größe"], ["1"]], "a.csv"), build_fts=False)["id"]
+    b = store.ingest_csv(write_csv([["GRÖßE"], ["2"]], "b.csv"), build_fts=False)["id"]
+    with store.lock, store.db:
+        store.db.execute("INSERT INTO merges(name, source_ids, created_at) VALUES ('old', ?, '')",
+                         (f"[{a}, {b}]",))
+    mid = -store.db.execute("SELECT id FROM merges WHERE name='old'").fetchone()[0]
+    with pytest.raises(KeyError, match="matching columns"):
+        store.build_view(mid, {"source_id": mid, "sort": []})
+    [entry] = [m for m in store.list_merges() if m["id"] == mid]
+    assert "matching columns" in entry["error"]
+
 
 
 # ------------------------------------------------------ batch derived add

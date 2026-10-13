@@ -51,6 +51,29 @@ see [docs/notes/README.md](README.md) for the whole set.
   click that leaves every table intact. The internal callers are all
   ingest cancels dropping a partial import created seconds earlier,
   which cannot be a member of anything.
+- **A quoted name that is not a column is not an error to SQLite — it is
+  a string.** SQLite's double-quoted-string fallback reads `"Nope"` as
+  the text 'Nope' when no column has that name, so every place a wrong
+  name can reach SQL quietly returns wrong rows instead of failing. Two
+  such places were real: a raw filter fragment with a typo'd quoted
+  column (`"Event Id " <> '4624'`, one trailing space, matched every row
+  — the EXPLAIN dry-run accepts it), and a merge whose members' names
+  differ only in non-ASCII case. SQLite folds identifier case for **A–Z
+  only**; the merge rule folded with `str.lower`, so "Größe"/"GRÖßE"
+  merged, and the second member, read through the first one's names,
+  paged its own header names as cell values. Now: `validate_where_fragment`
+  checks every double-quoted name against the columns (folded the SQLite
+  way, `_ascii_fold`) and says a text value takes single quotes;
+  `column_signature` folds ASCII only; and `_merge_columns` re-checks a
+  merge's members on every open, so one the old rule let into a case file
+  is a `KeyError` like a dropped member (listed as broken, offered for
+  deletion) rather than read wrong. On Python 3.12+ the writer, the
+  reader pool and the fragment dry-run also switch the fallback off
+  (`_no_dq_strings`), so anything that slips past those checks fails
+  loudly — an extra layer only, since `Connection.setconfig` doesn't
+  exist on 3.10/3.11. The SQL pane keeps the fallback on purpose:
+  `WHERE Channel = "Security"` is an ordinary habit there, and the
+  analyst sees what came back.
 
 - **A Timeline row leads with what happened, not with the source row.**
   Beside `body` (still the pipe-joined columns, unchanged) each row

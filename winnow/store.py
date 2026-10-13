@@ -29,6 +29,7 @@ import re
 import shutil
 import socket
 import sqlite3
+import string
 import tempfile
 import threading
 import time
@@ -996,10 +997,42 @@ def sanitize_columns(raw: list[str]) -> list[str]:
     return out
 
 
+_ASCII_FOLD = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
+
+
+def _ascii_fold(name: str) -> str:
+    """Case-fold the way SQLite resolves identifiers: A-Z only. str.lower
+    folds far more ("Ö" -> "ö"), so two names it calls equal can be two
+    different columns to SQLite — and quoting one against a table that
+    only has the other is not an error but, through SQLite's
+    double-quoted-string fallback, the column's NAME as a string literal."""
+    return name.translate(_ASCII_FOLD)
+
+
+def _no_dq_strings(conn: sqlite3.Connection) -> sqlite3.Connection:
+    """Turn off SQLite's double-quoted-string fallback on a connection
+    that runs Winnow's own SQL, where it can only ever hide a bug: every
+    column name reaches SQL through q(), so a quoted name that isn't a
+    column is a wrong name, and with the fallback on it reads as the
+    name's text — header names paged as cell values, a filter comparing
+    against a constant — instead of failing. An extra layer, not the fix:
+    Connection.setconfig is Python 3.12+, so on 3.10/3.11 the checks that
+    keep a wrong name from getting this far (validate_where_fragment's
+    quoted-name check, _merge_columns) are what hold. The SQL pane keeps
+    the fallback — `WHERE Channel = "Security"` is an ordinary habit there,
+    and the analyst sees what came back."""
+    if hasattr(conn, "setconfig") and hasattr(sqlite3, "SQLITE_DBCONFIG_DQS_DML"):
+        conn.setconfig(sqlite3.SQLITE_DBCONFIG_DQS_DML, False)
+    return conn
+
+
 def column_signature(cols: list[str]) -> str:
     """Order/case-independent fingerprint of a column-name set — used to
-    check two sources have "the same" columns for merge eligibility."""
-    return hashlib.sha256("\x1f".join(sorted(c.strip().lower() for c in cols)).encode()).hexdigest()
+    check two sources have "the same" columns for merge eligibility. Case
+    folds as SQLite does (_ascii_fold), because the merge reads every
+    member through the first member's names: members whose names differ
+    only in non-ASCII case would read each other's header names as data."""
+    return hashlib.sha256("\x1f".join(sorted(_ascii_fold(c.strip()) for c in cols)).encode()).hexdigest()
 
 
 def infer_type(values: Iterable[str]) -> str:
@@ -1662,7 +1695,7 @@ class Store:
         self.path = path
         self._default_tags = default_tags or DEFAULT_TAGS
         self.lock = threading.RLock()
-        self.db = sqlite3.connect(path, check_same_thread=False)
+        self.db = _no_dq_strings(sqlite3.connect(path, check_same_thread=False))
         self.db.row_factory = sqlite3.Row
         self.db.create_function("REGEXP", 2, _regexp, deterministic=True)
         self.db.create_function("DAY_BUCKET", 1, _day_bucket, deterministic=True)
@@ -2479,7 +2512,8 @@ class Store:
         writer (a group_virtual WHERE can contain DAY_BUCKET(...); a raw
         filter fragment echoed into an export can contain REGEXP), so a
         query compiled against one connection never fails on the other."""
-        ro = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, check_same_thread=False)
+        ro = _no_dq_strings(sqlite3.connect(f"file:{self.path}?mode=ro", uri=True,
+                                            check_same_thread=False))
         ro.row_factory = sqlite3.Row
         ro.create_function("REGEXP", 2, _regexp, deterministic=True)
         ro.create_function("DAY_BUCKET", 1, _day_bucket, deterministic=True)
@@ -4783,16 +4817,7 @@ class Store:
                 "path": None,
                 "table_name": None,
                 "row_count": sum(m["row_count"] for m in members),
-                # canonical — lowest-id (first-created) member, plus every
-                # derived column present on ALL members under the same name
-                # (each member reads it from its own drv_ sidecar; a column
-                # missing on any member would need NULL-padding nothing
-                # here does, so it simply isn't exposed until it exists
-                # everywhere).
-                "columns": ([c for c in members[0]["columns"] if not c.get("derived")]
-                            + [c for c in members[0]["columns"] if c.get("derived")
-                               and all(any(mc.get("derived") and mc["name"].lower() == c["name"].lower()
-                                           for mc in m["columns"]) for m in members[1:])]),
+                "columns": self._merge_columns(row["name"], members),
                 "file_hash": None,
                 "imported_at": row["created_at"],
                 "has_fts": 1 if all(m["has_fts"] for m in members) else 0,
@@ -4809,6 +4834,33 @@ class Store:
             d["columns"].append(self._derived_col_entry(dr))
             d["has_derived"] = True
         return d
+
+    @staticmethod
+    def _merge_columns(name: str, members: list[dict]) -> list[dict]:
+        """A merge's columns: the lowest-id (first-created) member's, plus
+        every derived column present on ALL members under the same name
+        (each member reads it from its own drv_ sidecar; a column missing
+        on any member would need NULL-padding nothing here does, so it
+        simply isn't exposed until it exists everywhere).
+
+        Every member is read through these names, so "the same name" means
+        what SQLite means by it — ASCII case only (_ascii_fold). A merge
+        whose members no longer agree on that is a KeyError, the contract
+        a dropped member already has: the merge rule used to fold with
+        str.lower, so a case file can hold one whose second member would
+        page its own header names as cell values."""
+        base = {column_signature([c["name"] for c in m["columns"] if not c.get("derived")])
+                for m in members}
+        if len(base) > 1:
+            raise KeyError(
+                f'The tables in merge "{name}" do not have matching columns as SQLite reads them '
+                "(names that differ only in a non-ASCII letter's case, such as Ö and ö, are two "
+                "different columns to it). Delete the merge; its tables are unaffected.")
+        first = members[0]["columns"]
+        return ([c for c in first if not c.get("derived")]
+                + [c for c in first if c.get("derived")
+                   and all(any(mc.get("derived") and _ascii_fold(mc["name"]) == _ascii_fold(c["name"])
+                               for mc in m["columns"]) for m in members[1:])])
 
     def _merge_row(self, merge_id: int) -> sqlite3.Row:
         with self._reader() as ro:
@@ -4831,13 +4883,7 @@ class Store:
             "path": None,
             "table_name": None,
             "row_count": sum(m["row_count"] for m in members),
-            # canonical — lowest-id (first-created) member, plus the derived
-            # columns present on every member (same intersection rule as
-            # _source_lite_on, which documents why)
-            "columns": ([c for c in members[0]["columns"] if not c.get("derived")]
-                        + [c for c in members[0]["columns"] if c.get("derived")
-                           and all(any(mc.get("derived") and mc["name"].lower() == c["name"].lower()
-                                       for mc in m["columns"]) for m in members[1:])]),
+            "columns": self._merge_columns(row["name"], members),
             "file_hash": None,
             "imported_at": row["created_at"],
             "has_fts": 1 if all(m["has_fts"] for m in members) else 0,
@@ -4854,10 +4900,11 @@ class Store:
     def _resolve_members(self, source_id: int) -> list[dict]:
         """Real source -> single identity-mapped element. Merge -> one
         element per member. SQLite resolves quoted identifiers
-        case-insensitively, so canonical column names work directly against
-        every member's table without needing per-member name translation —
-        the locked-in 'exact column match' rule already guarantees members
-        share the same names modulo case."""
+        case-insensitively (A-Z only), so canonical column names work
+        directly against every member's table without needing per-member
+        name translation — the locked-in 'exact column match' rule
+        (column_signature, re-checked by _merge_columns) guarantees members
+        share the same names modulo ASCII case."""
         with self._reader() as ro:
             return self._resolve_members_on(ro, source_id)
 
@@ -7351,6 +7398,17 @@ class Store:
             if ident.upper() in self.ALLOWED_SQL_WORDS or ident in colnames or NUM_RE.match(ident):
                 continue
             raise ValueError(f"Unknown identifier: {ident}")
+        # A double-quoted name has to be a column too. SQLite reads one that
+        # isn't as a string literal (its double-quoted-string fallback), and
+        # EXPLAIN below accepts that happily: `"Event Id " <> '4624'` — one
+        # trailing space — matched every row, `"EventID" = '4624'` none,
+        # and neither said why. Case folds as SQLite folds it, ASCII only.
+        folded = {_ascii_fold(c) for c in colnames}
+        for name in _double_quoted_names(frag):
+            if _ascii_fold(name) not in folded:
+                raise ValueError(
+                    f'Unknown column "{name}". A double-quoted name must be one of this '
+                    "table's columns; a text value takes single quotes.")
         # EXPLAIN below never calls REGEXP, so it can't catch a bad pattern.
         _check_regexp_literals(frag)
 
@@ -7361,7 +7419,8 @@ class Store:
         froms = ([self._from_clause(self._source_lite(m["source_id"]))
                   for m in self._resolve_members(source_id)]
                  if source_id < 0 else [self._from_clause(src)])
-        ro = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, check_same_thread=False)
+        ro = _no_dq_strings(sqlite3.connect(f"file:{self.path}?mode=ro", uri=True,
+                                            check_same_thread=False))
         ro.row_factory = sqlite3.Row
         ro.create_function("REGEXP", 2, _regexp, deterministic=True)
         try:
@@ -13514,6 +13573,33 @@ def _strip_sql_comments(frag: str) -> str:
             out.append(frag[i])
             i += 1
     return "".join(out)
+
+
+def _double_quoted_names(frag: str) -> list[str]:
+    """The double-quoted spans in `frag`, unescaped ("" -> "), skipping
+    single-quoted literals (a '"' inside one is text, not a quote) — the
+    same walk _blank_string_literals does, keeping what it blanks."""
+    out: list[str] = []
+    i, n = 0, len(frag)
+    while i < n:
+        ch = frag[i]
+        if ch not in ("'", '"'):
+            i += 1
+            continue
+        j, buf = i + 1, []
+        while j < n:
+            if frag[j] == ch:
+                if j + 1 < n and frag[j + 1] == ch:
+                    buf.append(ch)
+                    j += 2
+                    continue
+                break
+            buf.append(frag[j])
+            j += 1
+        if ch == '"':
+            out.append("".join(buf))
+        i = j + 1
+    return out
 
 
 def _blank_string_literals(frag: str) -> str:
