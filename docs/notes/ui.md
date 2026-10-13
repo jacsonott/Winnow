@@ -468,6 +468,48 @@ see [docs/notes/README.md](README.md) for the whole set.
   dragged id isn't in the target surface's own id list, which is what
   stops a SQL sub-tab dropped on the source strip from being spliced into
   `S.tabOrder`.
+- **The SQL result table builds only what the pane shows**
+  (`sqlResultNodes` in plugins.js) — invariant #6 for the SQL pane, both
+  axes. It used to build the whole result as one `<table>` and rebuild all
+  of it on every row click: `SELECT *` on a 150-column table is 5,000 x 150
+  = 750,000 cells, measured at 45 s to appear and 42 s per click (20
+  columns: 3.5 s and 8 s), with the page frozen throughout. Now a paint is
+  the rows in view plus `SQL_OVERSCAN_ROWS` each way and the columns in
+  view plus `SQL_OVERSCAN_PX` each way; the pane's own scroll listener and
+  ResizeObserver (`wirePlugins`, one pair for the pane rather than one per
+  result) re-paint that window, and a click only moves `.sql-row-sel` on
+  the rows already built (event delegation on the table, not three
+  listeners per row). Things that bite:
+  - **A result that fits is painted exactly as before** — header, one
+    `<tr>` per row, one `<td>` per column — and the tests in
+    test_sql_*.py lean on that (`tr` nth(1) is the first row, `td` nth(i)
+    is column i). Only a result too big for the pane gets the stand-ins:
+    `tr.sql-pad` above and below, `td.sql-gap` at the head of a row for
+    the columns left of the window, and `tr.sql-sizer` last.
+  - **The sizer is why the columns don't jump.** A `<table>` sizes its
+    columns from whatever cells it holds, so a windowed one re-sized every
+    column to the rows that happened to be built, every scroll. The sizer
+    holds each column's longest value (by characters — the pane is
+    monospace, so that is the widest) and is `visibility: collapse`, the
+    one value that takes the row's height away while keeping its widths:
+    `hidden` leaves ~4 px of height, and removing it or `display: none`
+    takes the widths with it (measured). Tag chips count by their names;
+    the sizer is rebuilt when a tag hotkey changes them.
+  - **The first paint runs before the table is in the document**, inside
+    `sqlResultNodes`, because every caller does
+    `out.replaceChildren(...sqlResultNodes(r))` and the tests count rows the
+    moment `#sqlResult table` exists. It estimates from lower bounds
+    (`SQL_EST_CH_PX`, `SQL_EST_ROW_PX`) so it builds more than the pane
+    shows, never less, and a `requestAnimationFrame` re-windows with the
+    real geometry — the header cells' `offsetLeft`/`offsetWidth` for the
+    column edges, a built row's height for the pads.
+  - Copy, CSV…, Excel…, Save as table… and the tag hotkeys read the rows
+    (`displayedRows`, `r.tags.sel`), never the DOM, so a Shift range or a
+    copy reaches rows that were never built. Keep it that way.
+  `tests/ui/test_wide_tables.py` covers it: a bounded cell count, the row
+  under the middle of the pane holding the rid its position means at the
+  top, middle and bottom, column widths unchanged by scrolling, and a
+  click that leaves every built row in place.
 - **The SQL pane opens in the analyst's vocabulary, not the schema's.**
   Three things in `static/js/sql.js` exist only for that, and all three
   are easy to undo by accident:

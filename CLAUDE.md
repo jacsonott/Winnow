@@ -447,7 +447,10 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
 6. **Only the visible window is ever in the DOM.** `render()` in `static/js/grid.js` builds
    rows for the scroll window plus overscan and positions them with a single
    `translateY`. Don't introduce per-row listeners; the grid uses event
-   delegation on `#body`.
+   delegation on `#body`. Both axes: a row holds cells for the columns in
+   the horizontal window (plus pinned ones), not for every column
+   (`paintedColumns`), and the SQL pane's result table builds only its
+   on-screen rows and columns — see docs/notes/grid.md and ui.md.
 
 7. **A tag write records the rows it actually changed, and undo replays
    that.** Every apply/remove — the selection paths, `tag_view`, both

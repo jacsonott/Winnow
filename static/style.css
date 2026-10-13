@@ -1578,6 +1578,18 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .sql-result th:first-child, .sql-result td:first-child { border-left: 1px solid var(--line); }
 .sql-result tr.sql-row-sel td { background: var(--row-selected); }
 .sql-result tr td { cursor: default; }
+/* The stand-ins a large result is painted with (sqlResultNodes in
+   static/js/plugins.js): space for the rows above and below the painted
+   ones, space for the columns left of them, and a row of each column's
+   longest value that keeps the column widths from following whichever
+   rows happen to be built. The first two are off screen and carry no
+   border, so neither can draw a stray rule. The sizer is `visibility:
+   collapse`, the one value that does exactly its job: the row takes no
+   height and is not drawn, and the table still sizes its columns as if it
+   were there (`hidden` keeps a few pixels of height; removing it, or
+   display:none, takes its widths away too). */
+.sql-result tr.sql-pad td, .sql-result td.sql-gap { padding: 0; border: 0; }
+.sql-result tr.sql-sizer { visibility: collapse; }
 .sql-error { color: var(--danger); font-family: var(--mono); font-size: 12px; padding: 6px 0; }
 
 /* The results area with nothing run in it yet. Deliberately NOT `.empty`,
