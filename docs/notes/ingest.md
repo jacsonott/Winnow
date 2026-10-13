@@ -29,6 +29,15 @@ see [docs/notes/README.md](README.md) for the whole set.
   `PRAGMA table_xinfo`, not `table_info` (`_sqlite_table_columns`):
   `table_info` omits GENERATED columns, so those were silently missing
   from every import; a virtual table's hidden columns stay out.
+  **`mode=ro` still writes beside a WAL database** — its `-shm`, and a
+  `-wal` when the copy came without one — which put files in the
+  analyst's evidence folder and littered the temp folder beside every
+  uploaded spool. `_open_evidence_sqlite` opens a WAL-mode file with no
+  `-wal` as `immutable=1` (nothing to replay, and no live writer can be
+  holding it), and one WITH a `-wal` by copying the pair into a private
+  temp directory first — those un-checkpointed rows are evidence, so
+  `immutable` (which ignores the WAL) is not an option there. Plaso
+  storage still opens plain `mode=ro`; plaso writes its files closed.
 - Excel ingest (`ingest_xlsx_sheet`/`preview_xlsx_sheets`, xlsxread.py) is
   the sheet-shaped sibling of the SQLite path — one workbook, N picked
   sheets, one background job, the same `{tables: [{table, name?}]}` option

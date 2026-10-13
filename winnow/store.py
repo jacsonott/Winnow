@@ -24,6 +24,7 @@ import io
 import itertools
 import json
 import os
+import pathlib
 import re
 import shutil
 import socket
@@ -846,6 +847,60 @@ def infer_type(values: Iterable[str]) -> str:
     if sum(1 for v in vals if DATE_RE.match(v)) >= max(1, int(len(vals) * 0.8)):
         return "datetime"
     return "text"
+
+
+def _sqlite_header_is_wal(path: str) -> bool:
+    try:
+        with open(path, "rb") as f:
+            head = f.read(20)
+    except OSError:
+        return False
+    return len(head) == 20 and head.startswith(b"SQLite format 3\x00") and head[18] == 2
+
+
+def _open_evidence_sqlite(path: str) -> tuple[sqlite3.Connection, Callable[[], None]]:
+    """A read-only connection to an external SQLite file that writes
+    nothing beside it. Returns (connection, cleanup): close the
+    connection, then call cleanup.
+
+    `mode=ro` alone is not that for a WAL-mode database: opening one still
+    creates its `-shm` (and a `-wal` when there isn't one) next to the
+    file — in the analyst's evidence folder for a path import, and as
+    litter in the temp folder beside an upload's spool, which outlived the
+    spool. Two cases:
+    - no `-wal` beside it: there is nothing un-checkpointed to read, and
+      no connection can be writing it (a live WAL database always has its
+      -wal), so `immutable=1` reads the file as it is and creates nothing.
+    - a `-wal` beside it: rows that exist only there are evidence, and
+      reading them needs the -shm SQLite would create. So the pair is
+      copied into a private temp directory and THAT is opened; cleanup
+      removes the directory. The evidence folder is never written to,
+      read-only media included.
+    A rollback-journal database creates nothing under `mode=ro` and opens
+    as it always did. The path goes in as a proper file URI, so a `#` or
+    `?` in it can't be read as URI syntax."""
+    tmpdir = None
+    target, params = os.path.abspath(path), "mode=ro"
+    if _sqlite_header_is_wal(path):
+        if os.path.exists(path + "-wal"):
+            tmpdir = tempfile.mkdtemp(prefix="winnow-sqlite-")
+            target = os.path.join(tmpdir, "evidence.db")
+            shutil.copyfile(path, target)
+            shutil.copyfile(path + "-wal", target + "-wal")
+        else:
+            params += "&immutable=1"
+
+    def cleanup() -> None:
+        if tmpdir:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    try:
+        conn = sqlite3.connect(f"{pathlib.Path(target).as_uri()}?{params}", uri=True,
+                               check_same_thread=False)
+    except BaseException:
+        cleanup()
+        raise
+    return conn, cleanup
 
 
 def _sqlite_table_columns(conn: sqlite3.Connection, table: str) -> list:
@@ -3090,8 +3145,9 @@ class Store:
         (see _webkit_to_iso) so that option can default to checked without
         the analyst needing to already know which columns are epoch-encoded.
         Never writes to the case db — a completely separate connection to
-        a completely separate file."""
-        ro = sqlite3.connect(f"file:{path}?mode=ro", uri=True, check_same_thread=False)
+        a completely separate file — nor beside that file
+        (_open_evidence_sqlite)."""
+        ro, cleanup = _open_evidence_sqlite(path)
         ro.row_factory = sqlite3.Row
         try:
             table_names = [
@@ -3134,6 +3190,7 @@ class Store:
             return {"tables": tables}
         finally:
             ro.close()
+            cleanup()
 
     def ingest_sqlite_table(
         self,
@@ -3161,7 +3218,7 @@ class Store:
         timestamp_columns = set(timestamp_columns or [])
         file_hash = self._quick_hash(path)
 
-        ro = sqlite3.connect(f"file:{path}?mode=ro", uri=True, check_same_thread=False)
+        ro, cleanup = _open_evidence_sqlite(path)
         ro.row_factory = sqlite3.Row
         try:
             src_cols_info = _sqlite_table_columns(ro, table_name)
@@ -3231,6 +3288,7 @@ class Store:
                     error = e
         finally:
             ro.close()
+            cleanup()
 
         types = [infer_type([r[i] for r in sample]) for i in range(ncols)] if sample else ["text"] * ncols
         colmeta = [{"name": c, "type": t} for c, t in zip(cols, types)]
