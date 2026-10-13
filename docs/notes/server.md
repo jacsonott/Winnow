@@ -271,8 +271,22 @@ see [docs/notes/README.md](README.md) for the whole set.
   outlives the unload; skipped when `persisted` says the page is only
   going into the bfcache), and the short fuse applies only when that
   arrived. A stream that merely stopped gets `SUSPENDED_EXIT_S` instead.
-  `_presence_open()` clears the flag, so closing one of two windows
-  cannot put the survivor on the short fuse.
+  **The goodbye has to be the LAST window's.** This note used to say a new
+  stream clearing the flag was enough to keep closing one of two windows
+  from putting the survivor on the short fuse; it was not — nothing new
+  connects, the closed window's goodbye stood, and when the survivor later
+  went quiet the server exited two minutes on. Clearing the flag whenever
+  a stream ends with others still open covers a goodbye that arrives
+  before its stream's end, but the two arrive in either order (the close
+  is noticed on the loop the moment the socket drops; the goodbye is a
+  separate request), and a goodbye landing after its own stream has gone
+  looks just like the survivor's. So both carry a per-page-load id
+  (`?page=` from `connection.js`), and `_presence_close` decides at the
+  moment the count reaches zero, by whether the page that just went said
+  goodbye; `api_goodbye` is `async` so the presence record is only touched
+  from the event loop. A goodbye with no page id (an older client, the
+  integration tests' raw requests) keeps the old meaning.
+  `tests/test_idle_shutdown.py`.
 
 - **Tests that spawn a real `server.py` must isolate it by env, not
   fixture.** The autouse `isolate_workspace` monkeypatch can't reach a

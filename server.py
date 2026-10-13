@@ -98,11 +98,19 @@ class _Presence:
         self.streams = 0            # open /api/presence connections
         self.inflight = 0           # other HTTP requests mid-flight
         self.ever_connected = False
-        self.said_goodbye = False   # a page reported itself closing, so the
-                                    # stream ending means gone, not asleep
+        self.said_goodbye = False   # the LAST window reported itself closing,
+                                    # so its stream ending means gone, not asleep
         self.started = time.monotonic()
         self.last_zero = time.monotonic()
         self.enabled = True         # main() clears this for --no-idle-shutdown
+        # Per page (connection.js names each page load): open streams, the
+        # pages that said goodbye while their stream was still open, and
+        # the page whose stream took the count to zero. Only open pages are
+        # kept, so these are bounded by the windows actually there. See
+        # _presence_close for why a goodbye has to be matched to its page.
+        self.pages: dict[str, int] = {}
+        self.farewells: set[str] = set()
+        self.last_gone: str | None = None
 
 
 PRESENCE = _Presence()
@@ -853,45 +861,99 @@ class UpdateApply(BaseModel):
     confirm: bool = False
 
 
-def _presence_open() -> None:
+def _presence_open(page: str = "") -> None:
     """A window is here. Clearing said_goodbye matters when several are
     open: one closing must not put the survivors on the closed-window
     fuse."""
     PRESENCE.streams += 1
     PRESENCE.ever_connected = True
     PRESENCE.said_goodbye = False
+    if page:
+        PRESENCE.pages[page] = PRESENCE.pages.get(page, 0) + 1
 
 
-def _presence_close() -> None:
+def _presence_close(page: str = "") -> None:
+    """A stream ended. Whether that reads as a closed window (the short
+    fuse) or a suspended one (the long one) is decided HERE, at the moment
+    the count reaches zero, by whether the page that just went is one that
+    said goodbye.
+
+    It used to be one flag that only a NEW stream cleared, so with two
+    windows open, closing one left its goodbye standing; when the survivor
+    later went quiet — a suspended tab, a sleeping laptop — the server took
+    the two-minute fuse and exited under a window that was still there.
+    Clearing the flag whenever a stream ends with others still open fixes
+    the order in which the goodbye arrives first, but not the other one,
+    and the other one is likelier: this close runs on the event loop the
+    moment the socket drops, while the goodbye is a separate request. A
+    goodbye landing after its own stream has gone looks exactly like one
+    from the survivor — unless both name their page, which is what the
+    page id connection.js sends on each is for."""
     PRESENCE.streams -= 1
+    if page:
+        left = PRESENCE.pages.get(page, 0) - 1
+        if left > 0:
+            PRESENCE.pages[page] = left
+        else:
+            PRESENCE.pages.pop(page, None)
     if PRESENCE.streams == 0:
         PRESENCE.last_zero = time.monotonic()
+        if page:
+            PRESENCE.said_goodbye = page in PRESENCE.farewells
+            PRESENCE.last_gone = page
+    else:
+        # A window remains, so no goodbye heard so far was the last one's.
+        PRESENCE.said_goodbye = False
+    if page and page not in PRESENCE.pages:
+        PRESENCE.farewells.discard(page)
+
+
+def _presence_page(page: str) -> str:
+    # A label the client makes up per page load; only ever compared, so a
+    # long one is cut rather than refused.
+    return (page or "")[:64]
 
 
 @app.get("/api/presence")
-async def api_presence():
+async def api_presence(page: str = ""):
     """The connection every page holds open so the server knows a browser
     is attached. EventSource on the client, a comment-ping stream here —
     no data ever flows, the CONNECTION is the message. Disconnect is
-    noticed at the next ping (≤15s), which is well inside the idle grace."""
+    noticed at the next ping (≤15s), which is well inside the idle grace.
+    `page` names the page load, so its goodbye can be matched to it."""
+    page = _presence_page(page)
+
     async def stream():
-        _presence_open()
+        _presence_open(page)
         try:
             while True:
                 yield ": ping\n\n"
                 await asyncio.sleep(15)
         finally:
-            _presence_close()
+            _presence_close(page)
     return StreamingResponse(stream(), media_type="text/event-stream")
 
 
 @app.post("/api/goodbye")
-def api_goodbye():
+async def api_goodbye(page: str = ""):
     """A page reporting that it is closing (connection.js sends this on
     pagehide with keepalive, so it survives the unload). Without it the
     server cannot tell a closed window from a suspended one and has to
-    assume the analyst may come back — see SUSPENDED_EXIT_S."""
-    PRESENCE.said_goodbye = True
+    assume the analyst may come back — see SUSPENDED_EXIT_S.
+
+    `async` so it runs on the event loop with the stream hooks above: the
+    presence record is only ever touched from one thread. A goodbye whose
+    page is still streaming is remembered until that stream closes (which
+    decides); one whose page already went counts only if that page was the
+    last to go. One naming no page — a client that predates the page id —
+    is taken as the last window's, which is what this always assumed."""
+    page = _presence_page(page)
+    if not page:
+        PRESENCE.said_goodbye = True
+    elif page in PRESENCE.pages:
+        PRESENCE.farewells.add(page)
+    elif PRESENCE.streams == 0 and PRESENCE.last_gone == page:
+        PRESENCE.said_goodbye = True
     return {"ok": True}
 
 
