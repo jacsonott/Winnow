@@ -55,6 +55,26 @@ see [docs/notes/README.md](README.md) for the whole set.
   file-count and nesting-depth caps → `truncated: true` with a valid
   partial tree. Inner archives are deleted after expanding — the tree
   holds only real files; the original archive is never touched.
+  **Damage is per member, never the whole expansion.** What a damaged
+  archive raises — EOFError (a cut-off .tgz), zlib.error (a corrupt
+  inner .gz; it is not an OSError), BadZipFile/TarError, LZMAError,
+  NotImplementedError (Deflate64, which Windows Explorer writes for big
+  members) — is none of it an ArchiveError, so each used to escape as a
+  500 with half the tree on disk and every later member unextracted.
+  Now a member that cannot be read or written (name too long, a file
+  where a directory must go) is skipped with a reason and the rest go
+  on; a partial member is deleted (a truncated file would import as if
+  whole); a tar whose stream ends early keeps every member before the
+  cut; an inner archive that cannot even be opened stays in the tree
+  unexpanded and is not retried; only an archive that yields NOTHING is
+  an ArchiveError (400). Disk-full stops the expansion rather than
+  failing every later member. **And nothing is overwritten**: two
+  members with one name, or `messages` beside `messages.gz`, used to
+  leave whichever came last — the attacker-activity copy gone without a
+  trace. The later one takes `name (2).ext` (`_Budget.free_path`,
+  numbered per path so 200,000 repeats of one name stay linear) and is
+  listed under `renamed`. The import toast names the first skipped and
+  renamed member and the server log keeps them all.
 - Plaso ingest (`ingest_plaso`, plasoread.py) reads a `.plaso` storage
   file — a SQLite db of serialized attribute containers — as ONE flat
   timeline table, no plaso install involved. Both on-disk generations are

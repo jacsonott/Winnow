@@ -2118,9 +2118,20 @@ def api_ingest_archive_expand(body: ArchiveExpandBody):
     if not os.path.isfile(body.path):
         raise HTTPException(400, f"No file at {body.path}")
     try:
-        return archive.expand_archive(body.path)
+        return _log_archive_report(os.path.basename(body.path), archive.expand_archive(body.path))
     except archive.ArchiveError as e:
         raise HTTPException(400, str(e))
+
+
+def _log_archive_report(name: str, rep: dict) -> dict:
+    # The toast that shows these is gone in seconds; members that were
+    # skipped (damaged, unwritable, refused) or renamed (their name was
+    # taken) are a fact about the evidence, so the log keeps them.
+    for sk in rep.get("skipped", []):
+        wlog.record("warn", f"Archive {name}: skipped {sk['path']} — {sk['reason']}")
+    for rn in rep.get("renamed", []):
+        wlog.record("warn", f"Archive {name}: {rn['path']} extracted as {rn['as']} (that name was taken)")
+    return rep
 
 
 @app.post("/api/ingest/archive/upload")
@@ -2140,7 +2151,8 @@ async def api_ingest_archive_upload(file: UploadFile = File(...)):
         os.replace(tmp, named)
         tmp = named
         try:
-            return await run_in_threadpool(archive.expand_archive, tmp, dest_root=dest_root)
+            return _log_archive_report(os.path.basename(tmp), await run_in_threadpool(
+                archive.expand_archive, tmp, dest_root=dest_root))
         except archive.ArchiveError as e:
             raise HTTPException(400, str(e))
     finally:
