@@ -265,6 +265,12 @@ see [docs/notes/README.md](README.md) for the whole set.
   case holds except what it is BORN with (`open_tabs`, the seeded
   `tag_defs`) and incidental UI state. Add new case tables to that list
   when they can hold something an analyst would miss.
+  Two more guards, same bias: the sweep only considers files
+  `is_winnow_case_file` accepts (a History.db dropped in `quicklook/`
+  has none of the work tables either, which read as "empty" and got it
+  deleted), and a file it can't read is skipped rather than ending the
+  sweep — a corrupt one used to raise `sqlite3.DatabaseError` past the
+  per-file `except OSError` and strand every file listed after it.
 
 - **A dropped presence stream is not a closed window.** Idle shutdown
   used to fire `IDLE_EXIT_S` after the last stream ended, which is right

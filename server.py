@@ -818,6 +818,12 @@ def _sweep_quicklook(max_age_days: int = 7) -> int:
         try:
             if os.path.getmtime(path) > cutoff or probe_case_lock(path):
                 continue
+            # Only ever a CASE file. _case_holds_work reads "none of the
+            # work tables" as empty, which is also what a browser History
+            # database or any other SQLite file dropped here looks like —
+            # and the janitor has no business deleting those at all.
+            if not is_winnow_case_file(path):
+                continue
             conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
             try:
                 busy = _case_holds_work(conn)
@@ -831,7 +837,10 @@ def _sweep_quicklook(max_age_days: int = 7) -> int:
             with contextlib.suppress(OSError):
                 os.remove(path + ".winnow-lock")
             removed += 1
-        except OSError:
+        except (OSError, sqlite3.Error):
+            # One file the sweep can't read is not proven empty, so it is
+            # kept — and it is that file's problem, not the end of the
+            # sweep (a corrupt one used to stop it for every file after).
             continue
     return removed
 

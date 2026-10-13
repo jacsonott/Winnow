@@ -462,3 +462,55 @@ def test_a_plugin_format_file_ingests_via_the_plugin(client, tmp_path, monkeypat
     assert [col["name"] for col in src["columns"]] == ["EventId", "Msg"]
     assert src["row_count"] == 2
     server.STORE.close()
+
+
+def test_one_corrupt_file_does_not_stop_the_sweep(tmp_path, monkeypatch):
+    """Only OSError was caught per file, so a quick-look whose content is
+    not a database (sqlite3.DatabaseError) ended the whole sweep — every
+    abandoned file listed after it stayed forever. It is skipped, not
+    deleted (the janitor only eats what it can prove is empty), and the
+    rest are swept."""
+    import server
+    from winnow.store import Store
+
+    qdir = tmp_path / "cases" / server.QUICKLOOK_DIRNAME
+    qdir.mkdir(parents=True)
+    monkeypatch.setattr(server, "_cases_dir", lambda: str(tmp_path / "cases"))
+    old = __import__("time").time() - 30 * 86400
+    bad = qdir / "quicklook-a-corrupt.db-winnow"
+    bad.write_bytes(b"SQLite format 3\x00" + b"\xff" * 4000)   # the header, then garbage
+    empties = []
+    for i in range(3):
+        p = qdir / f"quicklook-z{i}.db-winnow"
+        Store(str(p)).close()
+        empties.append(p)
+    for p in [bad, *empties]:
+        os.utime(p, (old, old))
+
+    assert server._sweep_quicklook() == 3
+    assert not any(p.exists() for p in empties)
+    assert bad.exists(), "a file the sweep can't read is not proven empty"
+
+
+def test_the_sweep_never_deletes_a_sqlite_file_that_is_not_a_case(tmp_path, monkeypatch):
+    """_case_holds_work reads "none of the work tables" as empty, and a
+    browser History database has none of them — so any non-Winnow SQLite
+    file left in quicklook/ for a week was deleted. The sweep only deletes
+    case files."""
+    import sqlite3
+    import server
+
+    qdir = tmp_path / "cases" / server.QUICKLOOK_DIRNAME
+    qdir.mkdir(parents=True)
+    monkeypatch.setattr(server, "_cases_dir", lambda: str(tmp_path / "cases"))
+    evidence = qdir / "History.db"
+    conn = sqlite3.connect(str(evidence))
+    conn.execute("CREATE TABLE urls (id INTEGER PRIMARY KEY, url TEXT)")
+    conn.execute("INSERT INTO urls(url) VALUES ('https://example.test')")
+    conn.commit()
+    conn.close()
+    old = __import__("time").time() - 30 * 86400
+    os.utime(evidence, (old, old))
+
+    assert server._sweep_quicklook() == 0
+    assert evidence.exists()
