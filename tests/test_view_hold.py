@@ -22,9 +22,10 @@ import pytest
 
 from winnow.store import DEFAULT_TAGS, OpCancelled, Store
 
-# The reliably-slow build test_cancel_op.py uses: catastrophic
-# backtracking inside the REGEXP UDF, per row.
-SLOW_REGEX = "(a+)+$"
+# The reliably-slow build test_cancel_op.py uses: polynomial
+# backtracking inside the REGEXP UDF, per row (the exponential kind is
+# refused by the regex guard now — see there).
+SLOW_REGEX = "a*a*a*a*a*a*b"
 
 
 @pytest.fixture

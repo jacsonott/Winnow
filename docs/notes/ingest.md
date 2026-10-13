@@ -394,6 +394,14 @@ see [docs/notes/README.md](README.md) for the whole set.
   builds used to be invisible, and a server restart kills one silently
   (`_build_fts_worker` swallows everything; the next search retries).
   `boot()` restarts the poll so a reload mid-import picks the job back up.
+  **A failed poll changes nothing.** It used to empty the jobs list, so
+  nothing read as running and the poll's own reschedule stopped it for
+  good — one 500 mid-import and the finished table never reached the tab
+  strip until a reload. Now the panel keeps the last good answer and the
+  poll retries with back-off (900ms doubling to 15s, logged once per run
+  of failures); `startJobsPoll` cuts a back-off short, since whoever calls
+  it just started work. Only the case list (no `#app`) lets it lapse.
+  `tests/ui/test_jobs_panel.py`.
 
 - **Keep-what-committed is really keep-what-PARSED.** When a bad line
   hard-stops the csv reader mid-file, the rows sitting in the pending

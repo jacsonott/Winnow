@@ -51,6 +51,45 @@ see [docs/notes/README.md](README.md) for the whole set.
   click that leaves every table intact. The internal callers are all
   ingest cancels dropping a partial import created seconds earlier,
   which cannot be a member of anything.
+- **A quoted name that is not a column is not an error to SQLite — it is
+  a string.** SQLite's double-quoted-string fallback reads `"Nope"` as
+  the text 'Nope' when no column has that name, so every place a wrong
+  name can reach SQL quietly returns wrong rows instead of failing. Two
+  such places were real: a raw filter fragment with a typo'd quoted
+  column (`"Event Id " <> '4624'`, one trailing space, matched every row
+  — the EXPLAIN dry-run accepts it), and a merge whose members' names
+  differ only in non-ASCII case. SQLite folds identifier case for **A–Z
+  only**; the merge rule folded with `str.lower`, so "Größe"/"GRÖßE"
+  merged, and the second member, read through the first one's names,
+  paged its own header names as cell values. Now: `validate_where_fragment`
+  checks every double-quoted name against the columns (folded the SQLite
+  way, `_ascii_fold`) and says a text value takes single quotes;
+  `column_signature` folds ASCII only; and `_merge_columns` re-checks a
+  merge's members on every open, so one the old rule let into a case file
+  is a `KeyError` like a dropped member (listed as broken, offered for
+  deletion) rather than read wrong. On Python 3.12+ the writer, the
+  reader pool and the fragment dry-run also switch the fallback off
+  (`_no_dq_strings`), so anything that slips past those checks fails
+  loudly — an extra layer only, since `Connection.setconfig` doesn't
+  exist on 3.10/3.11. The SQL pane keeps the fallback on purpose:
+  `WHERE Channel = "Security"` is an ordinary habit there, and the
+  analyst sees what came back.
+- **A merge member may spell a column differently — compare names the
+  way SQLite does.** Members are read through the first member's names,
+  which works in SQL because SQLite folds ASCII case; Python code that
+  compares names with `==` doesn't fold, and silently skips a member
+  whose column is "TIME" under a merge's "Time". That skipped the member
+  in jump-to-timestamp and in the tag time bounds, and built each
+  member's auto index under the MERGE's spelling — the index name hashes
+  the column, and `list_column_indexes`/`drop_column_index` hash the
+  member's own names, so the Tables modal never saw it. Compare through
+  `_ascii_fold`, and name anything per-table after `_table_spelling`
+  (the table's own spelling). The hash itself stays case-sensitive:
+  folding it would rename every index already on disk. Related, in the
+  same UNION: a merge projects each row's member id beside the data
+  columns, and a file with its own `source_id` column made ORDER BY
+  "source_id" sort by member — `_member_id_alias` picks a name no data
+  column has.
 - **An id a case hands out is never handed out again.** `sources`,
   `tag_defs`, `merges` and `sql_tabs` are `AUTOINCREMENT`. As plain
   `INTEGER PRIMARY KEY`s they gave a deleted newest row's id to the next
@@ -201,6 +240,96 @@ see [docs/notes/README.md](README.md) for the whole set.
   rather than the raw column name, since a column name is arbitrary CSV-
   header text and this sidesteps identifier-safety entirely rather than
   leaning on `q()` for a human-readable name nobody needs to read.
+- **Nothing binds one parameter per row or per list item.** Stock SQLite
+  stops at 32,766 variables per statement (999 before 3.32), and the box
+  the suite usually runs on raises that to 250,000 — so a statement that
+  scales its `?` count with the data passes every test here and fails on
+  an analyst's machine (python.org's Windows Python is stock).
+  `tests/conftest.py`'s `stock_sqlite_limits` puts the stock ceiling back
+  on a store's every connection; use it when testing anything that takes
+  a list. Two that did: an `in` filter (`_compile_cond`) now binds its
+  whole list as one JSON parameter read through `json_each` — a merge
+  compiles the WHERE once per member, so 3,000 pasted hashes on an
+  11-member merge was 33,000 parameters — and still gets the column index
+  (`SEARCH … USING INDEX (x=?)` with a `LIST SUBQUERY`); and
+  `export_tagged_xlsx`, which put every tagged rid in one `IN (...)` and
+  now pages them by keyset, reading cells through a `rid IN (SELECT …
+  LIMIT n)` subquery and tags/notes by the page's rid range. Its sheets
+  continue past Excel's row cap through `_xlsx_write_sheets`, the
+  all-tables export's continuation rule.
+- **A regex is checked before it runs, and some are refused**
+  (`_compiled_regex`, called by the regex filter op, regex search mode,
+  any `REGEXP '…'` literal in a raw fragment or the SQL pane
+  (`_check_regexp_literals`), and `_regexp` itself as the backstop for a
+  pattern only known at run time). An invalid pattern is a ValueError →
+  400 naming it: `_regexp` used to swallow `re.error` per row, so `C:\Users`
+  typed in regex mode (`\U` is a bad escape in Python) answered "0 rows"
+  — a false negative, the worst answer an evidence tool can give.
+  A pattern that can **backtrack exponentially** is refused the same
+  way, because cells are attacker-controlled and there is no other
+  defence: the REGEXP callback holds the GIL for one cell's whole match,
+  so `(a+)+$` against forty a's froze every thread — paging, the event
+  loop, the cancel request itself — for hours (measured 1.6s at 24
+  characters, doubling per character), and nothing in Python can
+  interrupt `re.search` (it polls for signals, which only reach the main
+  thread). Rejected alternatives: a timeout needs another regex engine (a
+  dependency) or a process per match; truncating cells would turn a hit
+  past the cut into a silent miss. The check walks the parsed pattern
+  (`re._parser`, `sre_parse` on 3.10) for the two shapes that blow up.
+  **A repeated group whose repetitions can match the same text more than
+  one way** — open-ended over anything variable-length, or a count of two
+  or more over something open-ended (`(a+){10}`; bounded-in-bounded like
+  `(\d{1,3}){3}` is a few dozen ways at most) — is decided EXACTLY, not by
+  shape (`_rx_splits`): the body becomes a small Thompson automaton
+  (an epsilon edge for every choice `re` can backtrack into, a character
+  edge per atom, the loop closed back on itself), and a search over
+  pairs of states asks whether two different paths can leave one point
+  of the loop and come back to it over the same text. If they can, n
+  trips round are 2^n paths and a cell that fails at the end walks them
+  all; if not, every cell splits one way. Both directions mattered.
+  Two rounds of shape rules each refused patterns analysts type: the
+  first any open-ended quantifier in a repeated group (IPv4, domains),
+  the second anything without a fixed delimiter character, which still
+  refused `(\S+\s+){3}` and `^(\S+\s+)*\S+$` — "field N of a command
+  line" — though `\S` and `\s` share no character, so every boundary is
+  where the text changes from one to the other. And shape rules miss
+  shapes: `(,a+.\s+)+$` passed the delimiter rule (the `,` pins each
+  repetition) yet blows up, because the `.` can take the last `a` or the
+  first space — two ways per repetition, 1.8s at 22 of them and
+  doubling. Extending the rule to count `\s+` as a delimiter let
+  `(.\s+[ab]+)+$` through the same hole. Fuzzing random patterns against
+  hostile cells found both; the automaton refuses both with no list of
+  exceptions to keep. Counted repeats past 8 copies are modelled as `E+` (or `E*`): each count
+  still has its own path, so any two ways through the original are two
+  ways through the model and the answer only gets more cautious. A body
+  the automaton does not model — a backreference, a conditional, a
+  possessive repeat or atomic group (which never give back what they
+  took), or one past 160 atoms or 20,000 state pairs — falls back to the
+  shape rules (`_rx_delimited`: a character none of the variable parts
+  can match, with all of them on one side of it; `_rx_ambiguous`: no two
+  variable parts that can share out the same text). A repetition that
+  can match nothing at all (`(a*)*`) is an epsilon cycle and refused
+  outright. Class against class (`\w` vs `\s`) is decided by matching
+  one against the BMP and searching the result with the other, the scan
+  cached per class (`_rx_members`). Alternations are the automaton's
+  too: `(a|a)*b`, `(a|aa)+` and `(?:\d|\d\d)+!` fail it (two ways
+  through every repetition), while a repeated keyword list whose words
+  share a first letter (`((?:lsadump|logonpasswords|kerberos)\s+)+`) and
+  the CSV-field pattern (`(?:[^,"]*|"[^"]*")(?:,(?:[^,"]*|"[^"]*"))*`,
+  one alternative empty) pass, since neither can match a cell two ways.
+  The older **alternation rule** — refuse an open-ended repeat of
+  alternatives that can *start* alike — judges by first characters and
+  refused both of those; it now applies only under a repeat the
+  automaton could not model (`_rx_hazard`'s `open_outer`), where nothing
+  better is available. (`re` factors a prefix every alternative shares,
+  so `(word0|word1)+` was always `word(?:0|1)` and never refused.) It
+  stays conservative: a refused pattern can be rewritten (end each
+  repetition with a delimiter, a class instead of an alternation, or
+  Contains), a hung case cannot be cancelled. **Not covered**: polynomial
+  blow-ups from adjacent repeats over the same characters (`.*a.*b` on a
+  megabyte cell) — slow rather than exponential, and refusing `.*x.*y`
+  would refuse ordinary searches. That is also why the cancel tests' slow
+  build is now `a*a*a*a*a*a*b` (tens of ms a row) rather than `(a+)+$`.
 - Column types are **inferred from a 500-row sample and stored as metadata only**;
   every value is stored TEXT. Don't "fix" this by typing the columns — mixed-type
   forensic CSVs then silently coerce, and evidence fidelity matters more than
@@ -324,6 +453,20 @@ see [docs/notes/README.md](README.md) for the whole set.
   by `name.lower()` alone while copy and diff matched exactly, so reloading
   your own session moved rows between the two and the diff said nothing
   had changed.
+- **Loading a case session with replace (`merge=False`) clears every table's
+  tags and notes, not just the snapshot's** — what the Load dialog promises.
+  It used to clear per table inside `import_session`, so a table imported
+  after the snapshot was taken kept its second-pass tags and the case became
+  a mix nobody had saved (and a diff against the session called it clean).
+  The clear and every table's writes are one transaction
+  (`import_case_session`); the one-table `import_session` still replaces
+  only its own table, since that is all a one-table session describes.
+  One exception: an open table a skipped session source may be — a
+  shape mismatch, or a file with several tables none of which is
+  unambiguously the source's — keeps what it has, with a warning naming
+  it. The session's tags for it were refused because they would land on
+  other rows; clearing its own as well would lose the analyst's work
+  there for nothing.
 - **A session source is matched to a table by hash AND by which table of
   that file it is** (`_match_session_sources`, used by load and diff
   alike). The hash is the FILE's: every table imported from one SQLite
@@ -344,6 +487,11 @@ see [docs/notes/README.md](README.md) for the whole set.
   is unambiguous, so `shared_sources`/`only_*_sources` read as before).
   Nothing was added to the session document: old ones carry all four
   fields already. tests/test_case_sessions.py, the shared-hash section.
+  A lookup column's table is found the same way on load
+  (`_resolve_session_lookup`): the session records the lookup table's
+  hash, name, base columns and row count beside the definition, so one
+  table of a multi-table file is told from its siblings by the same
+  tiers rather than by name alone.
 - **A session re-imports a missing table the way it was imported, from
   the file it was recorded against, or not at all.** Its tags name rows
   by rid, so a re-import is only any use if it produces the same rows in
@@ -540,7 +688,15 @@ see [docs/notes/README.md](README.md) for the whole set.
   would have inherited the old value's hits — and re-reads the source
   the same way, since `drop_source` deletes a table's hits and its id
   is the next import's. The auto-tag goes through `_apply_tag_change`
-  in that same transaction, so hits and tags land together. A unit
+  in that same transaction, so hits and tags land together — with
+  `record=False`, so it is **not on the analyst's undo stack**: one entry
+  per auto-tagging unit meant a scan behind a 25-entry watchlist evicted
+  the analyst's whole history (`UNDO_LIMIT`), and Ctrl+Z then stripped
+  auto-tags off rows whose hits were still listed. An unrecorded write
+  also takes its rows out of any recorded entry that tagged them the same
+  way (`_claim_from_undo`), so undoing "tag rows 1-3" after a scan matched
+  2-4 leaves 2 and 3 tagged — the invariant #7 overlap rule with the scan
+  as the other writer. A unit
   absorbs exactly one error from its match, "no such table": the
   source's own table means it was dropped mid-scan (the unit is
   skipped, there is nothing to record it against); its trigram table
@@ -750,6 +906,19 @@ see [docs/notes/README.md](README.md) for the whole set.
   server.py maps `OpCancelled` → HTTP 499 in one exception handler; the frontend
   arms a cancel chip (`armOpCancel`) only after ~1.2s in flight, so fast
   rebuilds never flash it.
+  **SQL pane queries register too, and are also stopped wholesale**
+  (`_pane_query`, used by `run_sql` and `sql_to_table` — so dashboards
+  and plugin reads through `run_sql` get it as well). The token half is
+  the usual `_interruptible`; the other half is a set of running pane
+  connections that `stop_pane_queries()` interrupts all at once and that
+  refuses new queries afterwards, for close() and shutdown (see
+  docs/notes/server.md for why shutdown cannot leave it to close()).
+  close() interrupts them first thing and then **waits for them to close
+  before the writer does** — a pane connection holds the case file open,
+  which is exactly the reader-at-writer-close trap `_drain_idle_readers`
+  exists for. `sql_to_table`'s exact-count wrap swallows `sqlite3.Error`
+  to fall back to streaming; it must re-raise an interrupt, or a stopped
+  count falls through and starts the same runaway again uninterrupted.
   **The frontend also cancels on supersede** (view.js `rebuildView`,
   module-level `inflight`): a rebuild that starts while another is in
   flight POSTs `cancel_op` for that one's token *and* aborts its fetch

@@ -25,7 +25,7 @@ import { fmtBytes } from './tables.js';
 import { loadCaseTags } from './tags.js';
 import { updateTimeRangeButton } from './timeframe.js';
 import { loadTimelineTemplates } from './timeline.js';
-import { confirmDialog, modal, promptDialog } from './ui.js';
+import { confirmDialog, modal, oneAtATime, promptDialog } from './ui.js';
 
 /* -------------------------------------------------------------- home screen */
 
@@ -106,7 +106,21 @@ export function describeCaseHolder(holder) {
     + 'at all and the file can be corrupted.';
 }
 
-export async function openCase(path, opts = {}) {
+/* One case switch at a time from this page. A double-click on a case card
+   is two clicks, and each used to start its own open: two POSTs racing on
+   the server (which serialises them now — see _CASE_SWITCH in server.py),
+   then two state resets and two loadSources interleaving here. A second
+   call while one is in flight gets the first one's promise instead —
+   whichever case was asked for first is the one that opens. */
+let caseOpening = null;
+
+export function openCase(path, opts = {}) {
+  if (caseOpening) return caseOpening;
+  caseOpening = openCaseNow(path, opts).finally(() => { caseOpening = null; });
+  return caseOpening;
+}
+
+export async function openCaseNow(path, opts = {}) {
   // A note save still inside its 500 ms debounce fires after the server
   // has swapped stores, and /api/note writes into whichever store is
   // current — the previous case's {source_id, rid} landing on an unrelated
@@ -131,7 +145,9 @@ export async function openCase(path, opts = {}) {
         okLabel: 'Open anyway', cancelLabel: 'Don\u2019t open', danger: true,
       });
       if (!go) return;
-      return openCase(path, { force: true });
+      // Straight to the worker: this IS the in-flight open, still holding
+      // the guard above, so going through openCase would get itself back.
+      return openCaseNow(path, { force: true });
     }
     toast('Could not open case: ' + e.message, 6000);
     return;
@@ -574,7 +590,7 @@ export function openNewCaseModal(state = {}) {
 
     const actions = el('div', 'row-actions');
     const create = el('button', 'btn', 'Create case');
-    create.onclick = async () => {
+    create.onclick = oneAtATime(create, async () => {
       const name = nameInput.value.trim();
       if (!name) { toast('Name the case first'); return; }
       const path = pathInput.value.trim();
@@ -606,7 +622,7 @@ export function openNewCaseModal(state = {}) {
           toast('Case created, but the profile failed to apply: ' + e.message, 6000);
         }
       }
-    };
+    });
     const cancel = el('button', 'btn ghost', 'Cancel');
     cancel.onclick = () => { $('modal').hidden = true; };
     actions.append(create, cancel);
@@ -684,7 +700,7 @@ export function openExistingCasePrompt(state = {}) {
 
     const actions = el('div', 'row-actions');
     const openBtn = el('button', 'btn', 'Open');
-    openBtn.onclick = async () => {
+    openBtn.onclick = oneAtATime(openBtn, async () => {
       const trimmed = pathInput.value.trim();
       if (!trimmed) { toast('Enter or browse to a case file'); return; }
       const name = trimmed.split(/[\\/]/).pop().replace(/\.db-winnow$|\.db$/i, '');
@@ -696,7 +712,7 @@ export function openExistingCasePrompt(state = {}) {
       }
       $('modal').hidden = true;
       await openCase(trimmed);
-    };
+    });
     const cancel = el('button', 'btn ghost', 'Cancel');
     cancel.onclick = () => { $('modal').hidden = true; };
     actions.append(openBtn, cancel);
@@ -1008,7 +1024,7 @@ export function tempCopyModal({ thenDiscard = false } = {}) {
         row.append(el('span', 'session-name', c.name),
                    el('span', 'count', c.path));
         const go = el('button', 'btn ghost', 'Copy into this case');
-        go.onclick = async () => {
+        go.onclick = oneAtATime(go, async () => {
           const ids = S.sources.filter((s) => s.id > 0 && !s.error).map((s) => s.id);
           if (!ids.length) { toast('Nothing here to copy yet'); return; }
           setBusy(true);
@@ -1019,7 +1035,7 @@ export function tempCopyModal({ thenDiscard = false } = {}) {
           $('modal').hidden = true;
           toast(`Copied ${res.copied.length} table${res.copied.length === 1 ? '' : 's'} into "${c.name}"`, 8000);
           if (thenDiscard) await tempDiscard({ confirm: false });
-        };
+        });
         row.append(go);
         list.append(row);
       }

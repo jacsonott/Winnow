@@ -13,12 +13,15 @@ import pytest
 
 from winnow.store import OpCancelled
 
-# A catastrophic-backtracking regex against strings of a's: each row costs
-# real CPU inside the REGEXP UDF, so the build is reliably still running
-# when the cancel lands — and SQLite checks its interrupt flag between VM
-# ops, so the abort is prompt. 5k rows at ~ms each is minutes of runway;
-# the test only needs the first few hundred ms of it.
-SLOW_REGEX = "(a+)+$"
+# A backtracking-heavy regex against strings of a's: each row costs real
+# CPU inside the REGEXP UDF, so the build is reliably still running when
+# the cancel lands — and SQLite checks its interrupt flag between VM ops,
+# so the abort is prompt. Polynomial (six adjacent stars over the same
+# letter: tens of ms a row), not the exponential `(a+)+$` this used to be:
+# the regex guard refuses that shape outright now, because one crafted
+# cell held the GIL for hours (see store._compiled_regex). 5k rows is
+# minutes of runway; the test only needs the first few hundred ms of it.
+SLOW_REGEX = "a*a*a*a*a*a*b"
 
 
 @pytest.fixture

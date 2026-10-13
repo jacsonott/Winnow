@@ -476,11 +476,19 @@ export async function sqlDownloadXlsx(columns, rows) {
 }
 
 /* The current result as a CSV download — rows in DISPLAYED order (the
-   caller passes them, so a click-sorted view exports as seen). */
+   caller passes them, so a click-sorted view exports as seen).
+
+   The server's export rules, because this file leaves the building the
+   same way the server's CSV and this pane's own Excel button do:
+   store._csv_safe's formula guard (a STRING opening with = + - @ tab or
+   CR gets a leading apostrophe — column names included; a number stays a
+   number), and Python csv's quoting, which quotes a bare CR as well as
+   LF — left bare, a spreadsheet reads it as a row break. */
 export function sqlResultCsv(columns, rows, filename = 'query-results.csv') {
   const esc = (v) => {
-    const s2 = v == null ? '' : String(v);
-    return /[",\n]/.test(s2) ? '"' + s2.replace(/"/g, '""') + '"' : s2;
+    let s2 = v == null ? '' : String(v);
+    if (typeof v === 'string' && /^[=+\-@\t\r]/.test(s2)) s2 = "'" + s2;
+    return /[",\r\n]/.test(s2) ? '"' + s2.replace(/"/g, '""') + '"' : s2;
   };
   const text = [columns.map(esc).join(','), ...rows.map((row) => row.map(esc).join(','))].join('\n');
   const a = document.createElement('a');

@@ -3,6 +3,8 @@ identifier quoting, view expiry, and the guided filter tree."""
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 
@@ -432,6 +434,31 @@ def test_validate_where_fragment_rejects_select_and_unknown_identifier(ingested)
     with pytest.raises(ValueError):
         store.validate_where_fragment(source_id, "NotAColumn = '1'")
     store.validate_where_fragment(source_id, "EventId = '4624'")  # doesn't raise
+
+
+
+def test_a_raw_fragment_refuses_a_quoted_column_the_table_does_not_have(store, write_csv):
+    """SQLite's double-quoted-string fallback reads a quoted name that is
+    not a column as a string literal, so a typo'd column was accepted and
+    compared as text: `"Event Id " <> '4624'` (trailing space) matched
+    every row, `"EventID" = '4624'` matched none, and neither said why."""
+    sid = store.ingest_csv(write_csv([["Event ID", "User"], ["4624", "bob"], ["4625", "alice"],
+                                      ["1", "eve"]], "e.csv"), build_fts=False)["id"]
+
+    def rows(frag):
+        return store.build_view(sid, {"source_id": sid, "sort": [],
+                                      "filter_tree": {"type": "raw", "sql": frag}})["row_count"]
+
+    for frag, missing in (("\"Event Id \" <> '4624'", "Event Id "),
+                          ("\"EventID\" = '4624'", "EventID"),
+                          ("\"Event ID\" = \"4624\"", "4624")):
+        with pytest.raises(ValueError, match=re.escape(f'"{missing}"')):
+            rows(frag)
+    # What SQLite itself resolves still works: ASCII case, a doubled quote
+    # spelled out, and a double quote inside a single-quoted value.
+    assert rows("\"Event ID\" = '4624'") == 1
+    assert rows("\"event id\" = '4624'") == 1
+    assert rows("\"User\" <> 'say \"hi\"'") == 3
 
 
 # --------------------------------------------------------------- time_range
