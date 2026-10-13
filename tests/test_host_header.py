@@ -91,8 +91,15 @@ def test_deleting_a_case_file_requires_it_to_be_one(client, tmp_path):
     rec = client.post("/api/cases", json={"path": str(victim), "name": "not a case"})
     assert rec.status_code in (200, 400)
     if rec.status_code != 200:
-        pytest.skip("registration refuses this path outright, which is also fine")
-    cid = rec.json()["id"]
+        # Registration refuses it outright now (tests/test_not_a_case_file.py),
+        # but the registry can still hold such a path: one registered before
+        # that check, or a case file since replaced by something else. The
+        # delete has to hold on its own.
+        from winnow import workspace as WS
+        rec = WS.cases.create(str(victim), name="not a case")
+        cid = rec["id"]
+    else:
+        cid = rec.json()["id"]
     r = client.delete(f"/api/cases/{cid}?delete_file=true")
     assert r.status_code == 400 and "not a Winnow case file" in r.text
     assert victim.read_text() == "PRIVATE KEY"

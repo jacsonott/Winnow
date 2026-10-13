@@ -19,13 +19,19 @@ it. If this module ever moves out of the root, this is the only
 definition that changes — and tests/test_paths.py fails loudly if it
 moves without being updated.
 
-Imports nothing. Anything that needs a path can depend on this without
-worrying about what it drags in.
+Imports nothing from the app. Anything that needs a path can depend on
+this without worrying about what it drags in.
+
+It also owns the one other path decision that is silent and expensive
+when each caller makes it for itself: how to hand SQLite a path to open
+read-only (`sqlite_ro_uri`, below).
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from urllib.parse import quote
 
 # The directory holding server.py — resolved, so a symlinked install
 # compares equal to itself however it was reached.
@@ -35,3 +41,46 @@ from pathlib import Path
 # line in the codebase that knows the layout; test_paths.py fails loudly
 # if it ever stops matching where things actually are.
 INSTALL_ROOT = Path(__file__).resolve().parent.parent
+
+
+def sqlite_ro_uri(path: str | os.PathLike, _path=os.path) -> str:
+    """The `file:` URI that opens `path` read-only — for
+    `sqlite3.connect(..., uri=True)` and for an ATTACH on a connection
+    opened that way.
+
+    Every read-only open in Winnow goes through here because pasting the
+    path in between `file:` and `?mode=ro` is wrong in a way that never
+    shows on a developer's machine: in a URI `#` starts a fragment, `?` starts
+    the query and `%` starts an escape. A case kept under `Case #5/` was
+    opened as `Case ` — read-WRITE, because `?mode=ro` went with the cut-off
+    fragment — which created an empty file of that name and made every
+    read fail with "no such table: sources"; previewing `History#1.db`
+    created an empty `History` in the evidence folder and listed no
+    tables. So the path is percent-encoded here, and only the query is
+    literal.
+
+    Absolute first (a relative URI would resolve against whatever the cwd
+    is when SQLite opens it) — abspath, not resolve(): resolve() turns a
+    mapped network drive into a UNC path on Windows, which is a different
+    spelling of the file than the one the analyst gave and the one the
+    case lock is keyed on. Then always `file://` + an empty authority +
+    an absolute path, which is the one shape SQLite reads the same way on
+    every platform:
+
+        /home/a/Case #5/x.db     file:///home/a/Case%20%235/x.db?mode=ro
+        C:\\Cases\\x.db           file:///C:/Cases/x.db?mode=ro
+        \\\\server\\share\\x.db    file:////server/share/x.db?mode=ro
+
+    The UNC form is why this is not `Path.as_uri()`: that writes
+    `file://server/share/...`, and SQLite refuses any authority but
+    `localhost` ("invalid uri authority"), so a case on a share would stop
+    opening. Four slashes is the spelling SQLite documents for UNC.
+
+    `_path` is for tests only: ntpath on Linux, to pin the Windows shapes
+    on a machine that cannot open them."""
+    p = _path.abspath(os.fspath(path))
+    if _path.sep != "/":
+        p = p.replace(_path.sep, "/")
+    if not p.startswith("/"):          # a Windows drive path, "C:/..."
+        p = "/" + p
+    return "file://" + quote(p, safe="/:") + "?mode=ro"
