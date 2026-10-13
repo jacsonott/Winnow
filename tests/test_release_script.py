@@ -194,3 +194,121 @@ def test_it_leaves_you_on_the_branch_you_started_from(repo):
     assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD") == "develop"
     assert (repo / "scripts" / "release.py").is_file()
     assert (repo / "CLAUDE.md").is_file(), "develop keeps everything"
+
+
+def test_it_leaves_gitignored_per_machine_files_alone(repo):
+    """`--write` ran `rm -rf bench .claude` in the maintainer's own
+    checkout to keep them out of `git add -A`, and took everything
+    gitignored under them along: bench/baselines/ (a machine's recorded
+    perf numbers, which are per machine on purpose), bench/.cache/, and
+    .claude/settings.local.json. None of it is in any commit, so none of
+    it could be got back."""
+    (repo / ".claude").mkdir()
+    (repo / ".claude" / "launch.json").write_text("{}\n")
+    (repo / ".gitignore").write_text(
+        "bench/baselines/\nbench/.cache/\n.claude/settings.local.json\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "dev config")
+    _git(repo, "update-ref", "refs/remotes/origin/develop", "refs/heads/develop")
+    ignored = {
+        "bench/baselines/mybox.json": '{"machine": "analyst-box", "ms": 123}\n',
+        "bench/.cache/fixture_1m.csv": "a,b\n",
+        ".claude/settings.local.json": '{"permissions": {}}\n',
+    }
+    for rel, text in ignored.items():
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_text(text)
+    assert _git(repo, "status", "--porcelain") == ""     # ignored: preflight passes
+
+    res = _release(repo, "0.1.0", "--write", "--orphan")
+    assert res.returncode == 0, res.stderr
+
+    for rel, text in ignored.items():
+        assert (repo / rel).is_file(), f"{rel} was deleted by the release"
+        assert (repo / rel).read_text() == text
+    # ...and the tracked dev files are still there on develop too.
+    assert (repo / "bench" / "run.py").is_file() and (repo / ".claude" / "launch.json").is_file()
+    files = _tracked(repo, "main")
+    assert not [f for f in files if f.startswith(("bench/", ".claude/"))]
+    assert _git(repo, "status", "--porcelain") == ""
+
+
+def _load_release_module(repo):
+    """The script, imported from the throwaway repo's copy so its ROOT is
+    that repo — for failures a subprocess can't inject."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("release_under_test", repo / "scripts" / "release.py")
+    mod = importlib.util.module_from_spec(spec)
+    # No scripts/__pycache__/ in the repo: the script refuses a dirty tree.
+    before, sys.dont_write_bytecode = sys.dont_write_bytecode, True
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        sys.dont_write_bytecode = before
+    return mod
+
+
+@pytest.mark.parametrize("fails", ["commit", "commit-tree", "tag", "update-ref", "branch"])
+@pytest.mark.parametrize("orphan", [True, False])
+def test_any_failure_part_way_leaves_everything_where_it_was(repo, fails, orphan):
+    """Only GitError was handled, so anything else — `rm` missing from
+    PATH on a Windows shell without Git Bash, a full disk — escaped with
+    the maintainer left standing on main with a half-built tree staged.
+    Whatever fails, and wherever: the branch you were on, a clean tree,
+    no tag, and the release branch where it was."""
+    if not orphan:
+        assert _release(repo, "0.1.0", "--write", "--orphan").returncode == 0
+        (repo / "winnow" / "version.py").write_text('VERSION = "0.2.0"\n')
+        _git(repo, "commit", "-qam", "bump")
+        _git(repo, "update-ref", "refs/remotes/origin/develop", "refs/heads/develop")
+    version = "0.1.0" if orphan else "0.2.0"
+    tags_before = _git(repo, "tag", "-l")
+    main_before = _git(repo, "rev-parse", "main")
+    release = _load_release_module(repo)
+    real_git = release.git
+
+    def flaky_git(*args, **kw):
+        # The writes, not preflight's read-only `tag -l`.
+        if args and args[0] == fails and args[:2] != ("tag", "-l"):
+            raise OSError(f"simulated failure in git {fails}")
+        return real_git(*args, **kw)
+    release.git = flaky_git
+
+    args = [version, "--write"] + (["--orphan"] if orphan else [])
+    try:
+        rc = release.main(args)
+    except SystemExit as e:
+        rc = e.code
+    if rc == 0:
+        return      # this flow never runs that command — nothing to fail
+    assert rc == 2
+    assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD") == "develop"
+    assert _git(repo, "status", "--porcelain") == ""
+    assert _git(repo, "tag", "-l") == tags_before
+    assert _git(repo, "rev-parse", "main") == main_before
+    assert (repo / "scripts" / "release.py").is_file()
+
+
+def test_it_refuses_to_run_on_the_branch_it_would_replace(repo):
+    """The snapshot is built without a checkout, so the one branch it
+    can't safely move is the one your working tree is on."""
+    _git(repo, "checkout", "-q", "main")
+    res = _release(repo, "0.1.0", "--write", "--orphan")
+    assert res.returncode == 2 and "main" in res.stderr
+    assert _git(repo, "tag", "-l") == ""
+
+
+def test_a_release_with_no_local_main_builds_on_origins(repo):
+    """`git checkout main` used to create the local branch from
+    origin/main when there was none; the ref-only build does the same."""
+    assert _release(repo, "0.1.0", "--write", "--orphan").returncode == 0
+    first = _git(repo, "rev-parse", "main")
+    _git(repo, "update-ref", "refs/remotes/origin/main", first)
+    _git(repo, "branch", "-D", "main")
+    (repo / "winnow" / "version.py").write_text('VERSION = "0.2.0"\n')
+    _git(repo, "commit", "-qam", "bump")
+    _git(repo, "update-ref", "refs/remotes/origin/develop", "refs/heads/develop")
+
+    res = _release(repo, "0.2.0", "--write")
+    assert res.returncode == 0, res.stderr
+    assert _git(repo, "rev-parse", "main^") == first
