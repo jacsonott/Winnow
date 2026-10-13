@@ -686,7 +686,11 @@ see [docs/notes/README.md](README.md) for the whole set.
     scope that isn't visible is a lie. Building a *second* view with just
     this column's filter removed would be the truly Excel-exact answer and
     is not available: `Store._views` evicts any other view for the same
-    source (backlog item 2).
+    source (backlog item 2). Either list is capped at `VALUE_PICKER_LIMIT`
+    (1,000) most-common values, and the panel's Find filters only those
+    client-side (`pickerRows`) — neither route takes a search term — so
+    the capped-list warning sends the analyst to a text filter on the
+    column instead of promising Find reaches the rest.
   - **`bucket_datetime=False`.** `group_summary` day-buckets datetime
     columns, and a `2024-01-05` bucket matches no stored value, so an
     `=`/`in` filter built from one selects nothing. The flag turns the
