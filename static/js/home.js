@@ -979,7 +979,10 @@ export async function tempSaveAs() {
 export function tempCopyModal({ thenDiscard = false } = {}) {
   (async () => {
     let cases;
-    try { cases = (await api('/api/cases')).filter((c) => !c.missing); }
+    // The registry marks a case whose file is gone `exists: false` — there
+    // is no `missing` key, so filtering on one offered every case, and
+    // picking a vanished one only failed after the copy was asked for.
+    try { cases = (await api('/api/cases')).filter((c) => c.exists !== false); }
     catch (e) { toast(e.message, 5000); return; }
     if (!cases.length) { toast('No saved cases yet — use "Save as a case…" instead', 6000); return; }
     modal('Add these tables to a case', (b) => {

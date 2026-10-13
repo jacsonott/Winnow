@@ -142,6 +142,50 @@ def test_a_target_open_in_another_winnow_is_refused_by_name(store, write_csv, ta
     assert target.list_sources() == []
 
 
+def test_a_second_copy_into_the_same_case_is_not_called_another_winnow(store, write_csv, target, client, monkeypatch):
+    """A double-clicked "Copy into this case": the second request found the
+    target locked by the first copy's Store — in this very process — and
+    told the analyst the case was open in another Winnow, naming our own
+    pid. The first copy is held mid-write here, deterministically, while
+    the second is asked for."""
+    import threading
+
+    sid = _fill(store, write_csv)
+    target_path = target.path
+    target.close()
+
+    inside, release = threading.Event(), threading.Event()
+    real = Store._copy_sources_into
+
+    def held(self, t, source_ids):
+        inside.set()
+        assert release.wait(10)
+        return real(self, t, source_ids)
+
+    monkeypatch.setattr(Store, "_copy_sources_into", held)
+    first: dict = {}
+    th = threading.Thread(target=lambda: first.update(store.copy_sources_to(target_path, [sid])))
+    th.start()
+    try:
+        assert inside.wait(10)
+        r = client.post("/api/case/copy_sources", json={"target_path": target_path, "source_ids": [sid]})
+        assert r.status_code == 409
+        assert "another Winnow" not in r.json()["detail"]
+        assert "Already copying" in r.json()["detail"]
+    finally:
+        release.set()
+        th.join(10)
+
+    # The first copy landed, once; the target is free again afterwards.
+    assert len(first["copied"]) == 1
+    t = Store(target_path)
+    try:
+        assert len(t.list_sources()) == 1
+    finally:
+        t.close()
+    assert store.copy_sources_to(target_path, [sid])["copied"]
+
+
 def test_copying_into_yourself_is_refused(store, write_csv):
     sid = _fill(store, write_csv)
     with pytest.raises(ValueError, match="this case"):

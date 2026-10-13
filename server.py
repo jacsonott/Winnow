@@ -1186,7 +1186,9 @@ def api_case_copy_sources(body: CopySourcesBody):
     except KeyError as e:
         raise HTTPException(404, str(e))
     except ValueError as e:
-        code = 409 if "another Winnow" in str(e) else 400
+        # Both refusals that clear up on their own (the other Winnow closes
+        # it, the running copy lands) are 409s; the rest are the request.
+        code = 409 if ("another Winnow" in str(e) or "Already copying" in str(e)) else 400
         raise HTTPException(code, str(e))
 
 
