@@ -264,6 +264,14 @@ see [docs/notes/README.md](README.md) for the whole set.
   not be presented as one.
 - Session import remaps tag IDs **by name**, creating missing tags. Two analysts
   with their own "Lateral movement" tag merge rather than duplicate.
+- **Loading a case session with replace (`merge=False`) clears every table's
+  tags and notes, not just the snapshot's** — what the Load dialog promises.
+  It used to clear per table inside `import_session`, so a table imported
+  after the snapshot was taken kept its second-pass tags and the case became
+  a mix nobody had saved (and a diff against the session called it clean).
+  The clear and every table's writes are one transaction
+  (`import_case_session`); the one-table `import_session` still replaces
+  only its own table, since that is all a one-table session describes.
 - `search_all_sources` runs each source's count on a `_reader()`
   connection — the sweep never touches `self.lock` at all now (it used to
   take it per source's count, which still stalled a concurrent request for

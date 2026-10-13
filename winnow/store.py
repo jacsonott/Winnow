@@ -10733,39 +10733,18 @@ class Store:
         }
 
     def import_session(self, source_id: int, session: dict, merge: bool = True) -> dict:
+        """Apply a one-table session to `source_id`. merge=False replaces
+        that table's tags and notes — only that table's, since a one-table
+        session says nothing about the others."""
         src = self.get_source(source_id)
-        warnings = []
-        s_src = session.get("source", {})
-        if s_src.get("file_hash") and s_src["file_hash"] != src["file_hash"]:
-            warnings.append(
-                "Session was recorded against a different file. Row numbers may not line up."
-            )
-        # Map session tag ids onto local tag ids by name, creating what's missing.
-        local = {t["name"].lower(): t["id"] for t in self.list_tags()}
-        idmap = {}
-        for t in session.get("tag_defs", []):
-            key = t["name"].lower()
-            if key not in local:
-                new = self.upsert_tag(None, t["name"], t.get("color", "#888888"), t.get("hotkey"))
-                local[key] = new["id"]
-            idmap[t["id"]] = local[key]
+        warnings = self._session_hash_warnings(src, session)
+        idmap = self._session_tag_idmap(session)
 
         with self.lock, self.db:
             if not merge:
                 self.db.execute("DELETE FROM row_tags WHERE source_id=?", (source_id,))
                 self.db.execute("DELETE FROM row_notes WHERE source_id=?", (source_id,))
-            self.db.executemany(
-                "INSERT OR IGNORE INTO row_tags(source_id, rid, tag_id) VALUES (?,?,?)",
-                [
-                    (source_id, r["rid"], idmap.get(r["tag_id"], r["tag_id"]))
-                    for r in session.get("row_tags", [])
-                ],
-            )
-            self.db.executemany(
-                "INSERT INTO row_notes(source_id, rid, note) VALUES (?,?,?) "
-                "ON CONFLICT(source_id, rid) DO UPDATE SET note=excluded.note",
-                [(source_id, r["rid"], r["note"]) for r in session.get("row_notes", [])],
-            )
+            self._write_session_rows(source_id, session, idmap)
             # Tags arrived wholesale rather than through the delta path, so
             # the bump it would have done is owed here: a dashboard cached
             # against the pre-load state is now counting somebody else's
@@ -10775,6 +10754,52 @@ class Store:
         # every existing undo entry now describes a world that is gone —
         # replaying one would strip tags off rows the loaded session owns.
         self._discard_undo()
+        derived_added, job_ids = self._restore_session_reading(source_id, session, warnings)
+        return {"warnings": warnings, "tags_applied": len(session.get("row_tags", [])),
+                "derived_columns_added": derived_added,
+                "derived_job_ids": job_ids}
+
+    @staticmethod
+    def _session_hash_warnings(src: dict, session: dict) -> list[str]:
+        s_src = session.get("source", {})
+        if s_src.get("file_hash") and s_src["file_hash"] != src["file_hash"]:
+            return ["Session was recorded against a different file. Row numbers may not line up."]
+        return []
+
+    def _session_tag_idmap(self, session: dict) -> dict:
+        """{session tag id -> local tag id}, by name, creating what's missing."""
+        local = {t["name"].lower(): t["id"] for t in self.list_tags()}
+        idmap = {}
+        for t in session.get("tag_defs", []):
+            key = t["name"].lower()
+            if key not in local:
+                new = self.upsert_tag(None, t["name"], t.get("color", "#888888"), t.get("hotkey"))
+                local[key] = new["id"]
+            idmap[t["id"]] = local[key]
+        return idmap
+
+    def _write_session_rows(self, source_id: int, session: dict, idmap: dict) -> None:
+        """One table's tags and notes out of a session document. Caller
+        holds self.lock inside a self.db transaction, and owns the clearing
+        a replace needs — which tables that covers is the caller's to say."""
+        self.db.executemany(
+            "INSERT OR IGNORE INTO row_tags(source_id, rid, tag_id) VALUES (?,?,?)",
+            [
+                (source_id, r["rid"], idmap.get(r["tag_id"], r["tag_id"]))
+                for r in session.get("row_tags", [])
+            ],
+        )
+        self.db.executemany(
+            "INSERT INTO row_notes(source_id, rid, note) VALUES (?,?,?) "
+            "ON CONFLICT(source_id, rid) DO UPDATE SET note=excluded.note",
+            [(source_id, r["rid"], r["note"]) for r in session.get("row_notes", [])],
+        )
+
+    def _restore_session_reading(self, source_id: int, session: dict,
+                                 warnings: list[str]) -> tuple[int, list[str]]:
+        """The half of a session that is how the evidence is READ — layout,
+        saved views, derived columns — rather than what was concluded about
+        it. Returns (derived columns added, their backfill job ids)."""
         if session.get("layout"):
             self.save_layout(source_id, session["layout"])
         for sv in session.get("saved_views", []):
@@ -10808,9 +10833,7 @@ class Store:
         # as done while the columns are still empty; anything reading values
         # straight afterwards gets NULLs. Hand them back so the caller can
         # decide whether to wait.
-        return {"warnings": warnings, "tags_applied": len(session.get("row_tags", [])),
-                "derived_columns_added": derived_added,
-                "derived_job_ids": list(pending_jobs.values())}
+        return derived_added, list(pending_jobs.values())
 
     # ---------------------------------------------------------- case sessions
 
@@ -10834,6 +10857,7 @@ class Store:
         sources_restored = 0
         sources_reimported = 0
         by_hash = self._live_sources_by_hash()
+        resolved: list[tuple[int, dict]] = []
 
         for src_session in session.get("sources", []):
             s_meta = src_session.get("source", {})
@@ -10854,10 +10878,32 @@ class Store:
                         f"wasn't found at {path or 'an unknown path'} — skipped"
                     )
                     continue
-            res = self.import_session(source_id, src_session, merge=merge)
-            warnings.extend(res["warnings"])
-            tags_applied += res["tags_applied"]
-            sources_restored += 1
+            resolved.append((source_id, src_session))
+
+        # Replace means the CASE's tags and notes, every table of it — what
+        # the Load dialog says. Clearing only the tables the snapshot names
+        # left a table imported after it was taken holding its second-pass
+        # tags: the case was then neither the session nor the live state but
+        # a mix, and a diff against the session called it clean. The clear
+        # and every table's writes are one transaction, so a failure part
+        # way leaves the case as it was rather than half-replaced.
+        idmaps = []
+        for source_id, src_session in resolved:
+            warnings.extend(self._session_hash_warnings(self._source_lite(source_id), src_session))
+            idmaps.append(self._session_tag_idmap(src_session))
+        with self.lock, self.db:
+            if not merge:
+                self.db.execute("DELETE FROM row_tags")
+                self.db.execute("DELETE FROM row_notes")
+            for (source_id, src_session), idmap in zip(resolved, idmaps):
+                self._write_session_rows(source_id, src_session, idmap)
+                tags_applied += len(src_session.get("row_tags", []))
+                sources_restored += 1
+            # Wholesale, outside the delta path — see import_session.
+            self._bump_state_generation()
+        self._discard_undo()
+        for source_id, src_session in resolved:
+            self._restore_session_reading(source_id, src_session, warnings)
 
         return {
             "warnings": warnings,

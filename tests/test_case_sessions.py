@@ -362,3 +362,46 @@ def test_clearing_drops_undo_entries_that_would_resurrect_tags(store, write_csv)
     store.start_new_session(save_as="before")
     assert not store._undo
     assert store.db.execute("SELECT COUNT(*) FROM row_tags").fetchone()[0] == 0
+
+
+def test_loading_with_replace_clears_tables_the_snapshot_never_saw(store, write_csv):
+    """The Load dialog says "This replaces the tags and notes currently in
+    the case". A table imported after the snapshot was taken is not in it,
+    and its second-pass tags and notes used to survive the load — the case
+    then held neither the session nor the live state, but a mix, and a diff
+    against the session afterwards reported it as clean."""
+    a = _case(store, write_csv, "a.csv")
+    ta = _tag(store, a, [1], "TA")
+    store.save_session("first pass")
+    store.start_new_session()
+
+    b = store.ingest_csv(write_csv([["u"], ["3"], ["4"]], "b.csv"), name="b.csv",
+                         build_fts=False)["id"]
+    store.set_tags(b, [1, 2], ta, True)
+    store.set_note(b, 1, "second-pass note")
+
+    store.load_session("first pass", merge=False)
+
+    rows = {(r["source_id"], r["rid"]) for r in store.db.execute(
+        "SELECT source_id, rid FROM row_tags")}
+    assert rows == {(a, 1)}
+    assert store.db.execute("SELECT COUNT(*) FROM row_notes").fetchone()[0] == 0
+    assert store.diff_sessions("first pass", store.LIVE_SESSION)["counts"] == {
+        "added": 0, "removed": 0, "changed": 0, "note_changes": 0}
+
+
+def test_merge_load_still_leaves_tables_the_snapshot_never_saw(store, write_csv):
+    """The other half: merge adds to the live state, so a table outside the
+    snapshot keeps what it has."""
+    a = _case(store, write_csv, "a.csv")
+    ta = _tag(store, a, [1], "TA")
+    store.save_session("first pass")
+    b = store.ingest_csv(write_csv([["u"], ["3"], ["4"]], "b.csv"), name="b.csv",
+                         build_fts=False)["id"]
+    store.set_tags(b, [2], ta, True)
+
+    store.load_session("first pass", merge=True)
+
+    rows = {(r["source_id"], r["rid"]) for r in store.db.execute(
+        "SELECT source_id, rid FROM row_tags")}
+    assert rows == {(a, 1), (b, 2)}
