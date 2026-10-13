@@ -5088,6 +5088,10 @@ class Store:
                  time.strftime("%Y-%m-%dT%H:%M:%S")),
             )
             def_id = cur.lastrowid
+        # Read back BEFORE the job starts: a backfill that fails at once
+        # removes the column (_fail_derive_backfill), and on a busy machine
+        # it can do that before this thread gets to the return below.
+        definition = self.get_derived_column(def_id)
         try:
             job = self.start_ingest_job(
                 "derive", "", name=name,
@@ -5105,7 +5109,7 @@ class Store:
             # whole table, and nothing able to chain off it.
             self._rollback_derive_definitions([def_id])
             raise
-        return {"definition": self.get_derived_column(def_id), "job_id": job["job_id"]}
+        return {"definition": definition, "job_id": job["job_id"]}
 
     STRUCT_SAMPLE = 200
 
@@ -5233,6 +5237,8 @@ class Store:
                 def_ids.append(cur.lastrowid)
 
         label = prepared[0]["name"] if len(prepared) == 1 else f"{len(prepared)} columns"
+        # Before the job, for add_derived_column's reason.
+        definitions = [self.get_derived_column(d) for d in def_ids]
         try:
             job = self.start_ingest_job(
                 "derive", "", name=label,
@@ -5246,10 +5252,7 @@ class Store:
             # stuck 'building' — see add_derived_column.
             self._rollback_derive_definitions(def_ids)
             raise
-        return {
-            "definitions": [self.get_derived_column(d) for d in def_ids],
-            "job_id": job["job_id"],
-        }
+        return {"definitions": definitions, "job_id": job["job_id"]}
 
     def _rollback_derive_definitions(self, def_ids: list[int]) -> None:
         """Undo the definition rows a create has just committed, for a
