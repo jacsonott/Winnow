@@ -453,6 +453,15 @@ see [docs/notes/README.md](README.md) for the whole set.
   large, and are a snapshot of the data rather than the analysis.
   `runSql` captures `S.sqlTabId` up front and only paints if that tab is
   still showing, since you can switch tabs while a query is in flight.
+  **The tab id is not enough to say a result still belongs there**, so
+  each run also holds its claim in `sqlRuns` (plugins.js) and checks it
+  after every await: running again in the same tab, closing the tab
+  (`closeSqlTab`) and opening another case (`openCase`, whose tabs are
+  numbered from 1 again) all end the claim through `abandonSqlRuns`,
+  which also aborts the request. Without it a slow run painted over the
+  quicker re-run after it (and Copy/CSV/tagging took its rows), and a run
+  started in case A landed under case B's "Query 1", where tagging one of
+  its rows wrote a tag into case B.
   `wireDragReorder` grew optional `currentIds`/`onReorder` callbacks
   (defaulting to the source-tab behaviour) so the sub-tab strip reuses the
   one DnD implementation; its `drop` handler now *returns* when the

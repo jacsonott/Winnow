@@ -6,7 +6,7 @@ import { $, api, dragHas, el, post, setBusy, toast } from './core.js';
 import { pad2 } from './tsformat.js';
 import { loadPlugins, openImportModal, queueFiles } from './importer.js';
 import { inFlightWork, startJobsPoll } from './jobs.js';
-import { dropPendingTabState, resetPluginTabMounts } from './plugins.js';
+import { abandonSqlRuns, dropPendingTabState, resetPluginTabMounts } from './plugins.js';
 import { resetDerivedSuggestions } from './derived.js';
 import { hideDetailPane } from './detail.js';
 import { resetJobState } from './jobs.js';
@@ -176,6 +176,7 @@ export async function openCase(path, opts = {}) {
   S.sqlTabs = [];
   S.sqlTabId = null;
   S.sqlResults.clear();
+  abandonSqlRuns();   // ...nor does a query still running against the last one
   // A Search-all job belongs to the Store instance the server just closed;
   // its results reference source ids from the previous case.
   S.searchAll = null;

@@ -114,3 +114,45 @@ def test_opening_another_case_replaces_the_tag_list(own_page, own_server):
     options = page.evaluate("() => [...document.querySelectorAll('#wlAutoTag option')].map(o => o.textContent)")
     assert "OnlyInCaseA" not in options
     assert options[1:] == [name for _, name in server_tags]
+
+
+def test_a_query_still_running_does_not_land_in_the_next_case(own_page, own_server):
+    """A SQL run started in case A and answered after case B opened was
+    painted under B's "Query 1" — both cases number their tabs from 1 —
+    and tagging one of its rows wrote a tag into case B for a row of
+    case A's table."""
+    import json
+    import re
+
+    page = own_page
+    page.click("#tabSql")
+    page.wait_for_selector("#sqlview:not([hidden])")
+    page.wait_for_function("() => __winnow.S.sqlTabs.length > 0 && !document.getElementById('sqlText').disabled")
+    held = []
+    pattern = re.compile(r".*/api/sql$")
+    page.route(pattern, lambda route: held.append(route) if not held else route.continue_())
+    try:
+        page.locator("#sqlText").fill("SELECT 'from case A' AS stale_col")
+        page.click("#btnRunSql")
+        page.wait_for_function("() => document.getElementById('sqlResult').textContent.startsWith('Running')")
+        assert held, "the run was not intercepted"
+
+        case_b = str(own_server["dir"] / "caseB.db-winnow")
+        own_server["post"]("/api/cases", {"path": case_b, "name": "B", "group": "", "notes": ""})
+        page.evaluate("(p) => __winnow.openCase(p)", case_b)
+        page.wait_for_function("() => __winnow.S.sources.length === 0")
+        page.click("#tabSql")
+        page.wait_for_selector("#sqlview:not([hidden])")
+        page.wait_for_function("() => __winnow.S.sqlTabs.length > 0")
+
+        try:
+            held[0].fulfill(status=200, content_type="application/json", body=json.dumps(
+                {"columns": ["stale_col"], "rows": [["from case A"]], "elapsed_ms": 1, "truncated": False}))
+        except Exception:
+            pass   # the page already let go of it
+        page.wait_for_timeout(500)
+        assert "stale_col" not in page.locator("#sqlResult").inner_text()
+        assert page.evaluate("() => [...__winnow.S.sqlResults.keys()]") == []
+        assert page.evaluate("() => __winnow.busyCount") == 0
+    finally:
+        page.unroute(pattern)
