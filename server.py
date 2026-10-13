@@ -241,9 +241,10 @@ STORE: Store | None = None
 
 # ---------------------------------------------------------------- plugins
 
-# Loaded once at import (so `uvicorn server:app` gets them too, not just
-# `python server.py`) from plugins/ next to server.py plus an optional
-# WINNOW_PLUGINS_DIR env var; main() adds any --plugins-dir flags on top.
+# Loaded from plugins/ next to server.py plus an optional WINNOW_PLUGINS_DIR
+# env var (main() adds any --plugins-dir flags on top): at import for
+# `uvicorn server:app`, and by main() for `python server.py`, once it knows
+# which case it is opening — see the load at the bottom of this section.
 # A plugin that fails to load is recorded with its error and skipped — it
 # shows up in GET /api/plugins with the reason, and never takes the server
 # down. See plugin_api.py for the whole model (and its security note: a
@@ -335,7 +336,14 @@ def _reload_plugins() -> None:
             p["error"] = RETIRED_BUNDLED_EXAMPLES[p["fs_name"]]
 
 
-_reload_plugins()
+# Not under `python server.py`: main() loads them itself once the case
+# named by --case (or a double-clicked case file) is open. The effective set
+# is that case's call, and loading the machine set here first would import —
+# run — a plugin the case has switched off, which unloading it a moment later
+# cannot take back. `uvicorn server:app` opens no case at startup, so the
+# machine set is the right one there.
+if __name__ != "__main__":
+    _reload_plugins()
 
 # ---------------------------------------------------------------------- csrf
 
@@ -1086,6 +1094,13 @@ def api_case_open(body: CaseOpen):
             body.path, name=os.path.splitext(os.path.basename(body.path))[0]
         )
         WS.cases.touch_opened(rec["id"])
+        # The store swap is what this skips, not the plugin reload: the
+        # client tears its plugin tabs down on this request and refetches
+        # the list on the understanding that the server reloaded for the
+        # case it just opened (openCase in home.js). Skipping it here left
+        # a registry that disagreed with the case disagreeing however often
+        # the analyst re-opened it.
+        _reload_plugins()
         return {"sources": STORE.list_sources(), "name": rec["name"], "temp": _is_temp_case(STORE.path)}
     if not body.force:
         holder = probe_case_lock(body.path)
@@ -1521,6 +1536,11 @@ def api_case_discard():
             os.remove(path + suffix)
     with contextlib.suppress(Exception):
         instances.set_case(None)
+    # No case is open now, so the machine defaults decide again: a plugin
+    # switched on only for the quick look must not stay imported and routed
+    # on the home screen (the case switch in api_case_open, for the same
+    # reason).
+    _reload_plugins()
     return {"ok": True}
 
 
@@ -5247,6 +5267,27 @@ def _ensure_console_streams() -> None:
         setattr(sys, name, devnull)
 
 
+def _load_startup_plugins() -> None:
+    """main()'s one plugin load (the import-time load is skipped under
+    `python server.py`), and the console summary of what it loaded — after
+    the startup case is open, so the summary describes what this server
+    will actually run rather than the machine defaults."""
+    _reload_plugins()
+    for p in PLUGINS.describe():
+        if p["bundled"] and p["fs_name"] in RETIRED_BUNDLED_EXAMPLES:
+            # Stamped with its reason by _reload_plugins; not a failure.
+            print(f"Plugin retired: {p['name']} ({p['path']}): {p['error']}")
+        elif p["error"]:
+            record_log("error", f"Plugin FAILED: {p['name']} ({p['path']}): {p['error']}")
+        elif not p["enabled"]:
+            print(f"Plugin disabled: {p['name']} (toggle in Settings → Plugins)")
+        else:
+            # Formats *and* tabs — a tab-only plugin reporting "no formats"
+            # reads like a failed load when it's a perfectly good plugin.
+            what = ", ".join(p["formats"] + p["tabs"]) or "registered nothing"
+            print(f"Plugin loaded: {p['name']}" + (f" v{p['version']}" if p["version"] else "") + f" ({what})")
+
+
 def main() -> None:
     global STORE
     # Before anything that might log or print: with no console there is
@@ -5293,20 +5334,6 @@ def main() -> None:
     if args.plugins_dir:
         global PLUGIN_DIRS
         PLUGIN_DIRS = _plugin_dirs(args.plugins_dir)
-        _reload_plugins()
-    for p in PLUGINS.describe():
-        if p["bundled"] and p["fs_name"] in RETIRED_BUNDLED_EXAMPLES:
-            # Stamped with its reason by _reload_plugins; not a failure.
-            print(f"Plugin retired: {p['name']} ({p['path']}): {p['error']}")
-        elif p["error"]:
-            record_log("error", f"Plugin FAILED: {p['name']} ({p['path']}): {p['error']}")
-        elif not p["enabled"]:
-            print(f"Plugin disabled: {p['name']} (toggle in Settings → Plugins)")
-        else:
-            # Formats *and* tabs — a tab-only plugin reporting "no formats"
-            # reads like a failed load when it's a perfectly good plugin.
-            what = ", ".join(p["formats"] + p["tabs"]) or "registered nothing"
-            print(f"Plugin loaded: {p['name']}" + (f" v{p['version']}" if p["version"] else "") + f" ({what})")
 
     # The bound address is by definition one this server answers to, as is
     # anything the operator named explicitly.
@@ -5365,6 +5392,10 @@ def main() -> None:
             # saves them — an unregistered temp case is the whole point.
             WS.cases.create(case_path, name=os.path.splitext(os.path.basename(case_path))[0])
             WS.cases.touch_opened(WS.cases.find_by_path(case_path)["id"])
+        # After the open, so the case's own plugin settings apply from the
+        # first request; before the quick-look imports below, which route a
+        # file to a plugin's parser when one claims it.
+        _load_startup_plugins()
         for f in getattr(args, "assoc_ingest", []):
             try:
                 job = _assoc_ingest(f)
@@ -5384,6 +5415,7 @@ def main() -> None:
                       "check for a stray quote if the row count looks low")
         print(f"Winnow on {url}  (case: {os.path.abspath(case_path)})")
     else:
+        _load_startup_plugins()
         print(f"Winnow on {url}  (home screen — no case open)")
     if not args.no_browser:
         # Opened from a thread that waits for the port, rather than before
