@@ -1064,8 +1064,10 @@ export function openSettings() {
     fixedKeys.append(el('kbd', null, 'Shift + Space'),
       el('span', null, 'Turn the cell selection into picked rows, for tagging'));
     fixedKeys.append(el('kbd', null, '1 – 9'), el('span', null, 'Toggle the tag with that hotkey on the selection'));
-    fixedKeys.append(el('kbd', null, 'Shift + 1 – 9'), el('span', null, 'Apply that tag to every row in the current view'));
+    fixedKeys.append(el('kbd', null, 'Shift + 1 – 9'), el('span', null, 'Apply that tag to every row in the current view — or, when every row already has it, remove it from them all (asks first)'));
     fixedKeys.append(el('kbd', null, 'Alt + 1 – 0'), el('span', null, 'Switch tabs — 1 is the table you were last in, 2 – 0 the page tabs in strip order'));
+    fixedKeys.append(el('kbd', null, 'Ctrl/⌘ + C'), el('span', null, 'Copy the selected cells, or the picked rows (the cursor row if none are picked), as tab-separated text'));
+    fixedKeys.append(el('kbd', null, 'Ctrl/⌘ + Shift + C'), el('span', null, 'The same, with a header row'));
     fixedKeys.append(el('kbd', null, 'Ctrl/⌘ + Z'), el('span', null, 'Undo the last tag applied or removed (repeat to keep stepping back)'));
     fixedKeys.append(el('kbd', null, 'Esc'), el('span', null, 'Clear selection, or close a panel'));
     fixedKeys.append(el('kbd', null, 'Right-click a row'), el('span', null, 'Tag it, filter to or exclude that cell’s value, copy'));
@@ -1077,8 +1079,12 @@ export function openSettings() {
       ['svchost', 'contains'],
       ['!svchost', 'does not contain'],
       ['=4624', 'exact match'],
+      ['!=4624', 'anything but this exact value'],
       ['^C:\\Users', 'starts with'],
-      ['>1000', 'greater than (numeric columns)'],
+      ['>1000', 'greater than — as numbers on a numeric column, in text order on any other'],
+      ['<1000', 'less than'],
+      ['>=1000', 'greater than or equal to'],
+      ['<=1000', 'less than or equal to'],
       ['/regex/', 'regular expression'],
       ['""', 'empty'],
       ['*', 'not empty'],
@@ -1094,7 +1100,9 @@ export function openSettings() {
       + 'right-click menu can open it for any column.'));
     secSyntax.append(el('p', null,
       'Search box — Contains is always a true substring match; Regex is a full scan; Advanced supports '
-      + 'multiple AND / OR / NOT terms and uses the FTS5 index when one was built at import.'));
+      + 'multiple AND / OR / NOT terms. Contains and Advanced (and Search tables) use the substring index, '
+      + 'which builds in the background after import — until it is ready, or for a term under 3 characters '
+      + 'or holding % or _, they scan instead, with the same results.'));
     secSyntax.append(el('p', null,
       'The ⏱ Timeframe button pins a start/end range against one datetime column, or every datetime '
       + "column at once (catches a row via its Modified time even if its Created time was timestomped) — "
@@ -1132,8 +1140,9 @@ export function openSettings() {
 
     const secTags = settingsSection(b, 'Default tags for new cases');
     secTags.append(el('p', null,
-      "Seeds a brand-new case's tag set when you create one from the home screen. Doesn't change tags in "
-      + 'any case that already exists — use "Apply default template" in Edit tags for that.'));
+      "Seeds the tag set of every new case, however it's made — the home screen, a dropped or double-clicked "
+      + 'file, --case on the command line — and of a case left with no tags at all, the next time it opens. '
+      + "Doesn't change tags in a case that has any — use \"Apply default template\" in Edit tags for that."));
     const dtList = el('div', 'settings-keys');
     let defaultTags = [];
 
