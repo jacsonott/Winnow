@@ -797,7 +797,10 @@ see [docs/notes/README.md](README.md) for the whole set.
   The target opens as a full Store — which is what migrates an older
   case's schema before anything writes, and whose case lock is the
   exclusivity that makes the write correct; a target open in another
-  Winnow is refused with the holder named. Our own live file is ATTACHed
+  Winnow is refused with the holder named, and a target that is not a
+  case at all (`is_winnow_case_file`) is refused before the Store opens,
+  since that open is itself the write — META_SCHEMA plus WAL into a
+  browser history that was registered as a case by mistake. Our own live file is ATTACHed
   to the target's writer read-only-by-discipline (WAL makes the concurrent
   read safe). Rids copy byte-for-byte — they are what tags and notes point
   at — and tags map by NAME, the session-import rule, because two cases

@@ -1259,6 +1259,31 @@ CASE_LOCK_HEARTBEAT_SEC = 30
 CASE_LOCK_STALE_AFTER_SEC = 150
 
 
+def is_winnow_case_file(path: str) -> bool:
+    """Distinguish a Winnow case from a generic SQLite file — double-
+    clicking a case should OPEN it, not ingest it as data. Read-only,
+    tolerant of anything unreadable.
+
+    Also the gate in front of every Store opened on a path that already
+    exists (server.py's _open_store, case registration, copy_sources_to):
+    Store.__init__ runs META_SCHEMA against whatever it is handed and
+    switches the file to WAL, so opening evidence AS a case writes into
+    it. Lives here rather than in server.py for copy_sources_to's sake."""
+    try:
+        with open(path, "rb") as f:
+            if f.read(16) != b"SQLite format 3\x00":
+                return False
+        conn = sqlite3.connect(sqlite_ro_uri(path), uri=True)
+        try:
+            names = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+        finally:
+            conn.close()
+        return {"sources", "tag_defs", "row_tags"} <= names
+    except Exception:  # noqa: BLE001 — unreadable means "not a case"
+        return False
+
+
 def case_lock_path(case_path: str) -> str:
     return os.path.abspath(case_path) + CASE_LOCK_SUFFIX
 
@@ -10920,6 +10945,14 @@ class Store:
             raise ValueError("That is this case — pick a different one to copy into")
         if not os.path.isfile(target_path):
             raise ValueError(f"No case file at {target_path}")
+        # Before Store(target_path), which would write its schema into
+        # whatever is there: the case registry can hold a path that is
+        # not a case (registered before registration checked, or a case
+        # file since replaced), and the one the analyst picks here may be
+        # a browser history database they meant to IMPORT.
+        if not is_winnow_case_file(target_path):
+            raise ValueError(
+                f"{target_path} is not a Winnow case file — copying into it would write into it")
         for sid in source_ids:
             if sid < 0:
                 raise ValueError("Merges can't be copied — their member tables can be, individually")

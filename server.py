@@ -44,7 +44,7 @@ from winnow import version
 from winnow import archive
 from winnow import workspace as WS
 from winnow.store import (CASE_SUFFIX, DEFAULT_IMPORT_EXTENSIONS, PLASO_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, MissingTable, OpCancelled, Store, ViewExpired,
-                   describe_case_lock, probe_case_lock, q, rows_to_xlsx, sweep_orphan_views)
+                   describe_case_lock, is_winnow_case_file, probe_case_lock, q, rows_to_xlsx, sweep_orphan_views)
 
 HERE = paths.INSTALL_ROOT  # static/, plugins/, examples/plugins/ all hang off the install root
 
@@ -550,6 +550,12 @@ def _default_tags_tuples() -> list[tuple]:
 
 
 def _open_store(path: str) -> Store:
+    # Every Store this server opens comes through here, so this is the
+    # backstop for any door that forgets: an EXISTING file must already
+    # be a case (is_winnow_case_file says why). A path that does not
+    # exist yet is a new case, which is the only thing Store may create.
+    if os.path.exists(path) and not is_winnow_case_file(path):
+        raise ValueError(f"{path} is not a Winnow case file — opening it would write into it")
     return Store(path, default_tags=_default_tags_tuples())
 
 
@@ -722,25 +728,6 @@ def _new_temp_case_path() -> str:
         path = os.path.join(d, f"quicklook-{stamp}-{n}{CASE_SUFFIX}")
         n += 1
     return path
-
-
-def is_winnow_case_file(path: str) -> bool:
-    """Distinguish a Winnow case from a generic SQLite file — double-
-    clicking a case should OPEN it, not ingest it as data. Read-only,
-    tolerant of anything unreadable."""
-    try:
-        with open(path, "rb") as f:
-            if f.read(16) != b"SQLite format 3\x00":
-                return False
-        conn = sqlite3.connect(paths.sqlite_ro_uri(path), uri=True)
-        try:
-            names = {r[0] for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'")}
-        finally:
-            conn.close()
-        return {"sources", "tag_defs", "row_tags"} <= names
-    except Exception:  # noqa: BLE001 — unreadable means "not a case"
-        return False
 
 
 # Every table whose contents can only exist because someone did something.
@@ -1781,6 +1768,14 @@ def api_cases_list():
 
 @app.post("/api/cases")
 def api_cases_create(body: CaseCreate):
+    # Registering a path puts it in every case picker — the home screen,
+    # "Copy into this case", multi-case — and each of those opens it.
+    # An existing file has to be a case already; same check /api/case/open
+    # makes, for the same reason.
+    if os.path.exists(body.path) and not is_winnow_case_file(body.path):
+        raise HTTPException(
+            400, f"{body.path} is not a Winnow case file — to import it as evidence, "
+                 "open a case and import it there")
     if not os.path.isfile(body.path):
         parent = os.path.dirname(os.path.abspath(body.path))
         if parent:
@@ -5314,6 +5309,18 @@ def main() -> None:
     case_path = args.case or (f"case{CASE_SUFFIX}" if args.open_files else None)
     url = f"http://{args.host}:{args.port}"
     if case_path:
+        # Same rule as /api/case/open, said here rather than as
+        # _open_store's traceback: an existing file that is not a case is
+        # not created over — the schema would land in it.
+        if os.path.exists(case_path) and not is_winnow_case_file(case_path):
+            print(
+                f"ERROR: {os.path.abspath(case_path)} is not a Winnow case file — opening it "
+                "as one would write Winnow's tables into it.\n"
+                "  To import it as evidence, open a case and import it; "
+                "for a new case, give a path that does not exist yet.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         # Refuse rather than warn: this entrypoint is scriptable, a warning
         # scrolls past, and opening a case twice is the failure the lock
         # exists to catch. --force is the deliberate way through, and a

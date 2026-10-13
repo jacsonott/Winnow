@@ -323,7 +323,15 @@ see [docs/notes/README.md](README.md) for the whole set.
   unchanged, because `is_winnow_case_file` and the open path sniff
   CONTENT (SQLite header + the sources/tag_defs/row_tags tables), never
   the extension — only NEW cases take the new suffix, nothing is
-  migrated. In the association catalogue `.db-winnow` is
+  migrated. The same sniff is the gate on every door that names an
+  EXISTING path as a case — `/api/case/open`, `POST /api/cases`
+  registration, `/api/case/copy_sources`' target, `--case` on the
+  command line, and `_open_store` behind all of them — because opening a
+  Store is a write (META_SCHEMA, WAL): before the gate covered all four,
+  a Chrome `History` registered as a case and then picked in "Copy into
+  this case" gained Winnow's tables and changed hash. A path that does
+  not exist is a new case and is created as before
+  (tests/test_not_a_case_file.py). In the association catalogue `.db-winnow` is
   `default_ok`, alongside the formats nothing else contests — `.csv`,
   `.tsv`, `.jsonl`, `.ndjson`. What is particular about it is the
   ownership: nothing on the system claims `.db-winnow` at all, so Winnow
