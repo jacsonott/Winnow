@@ -10146,6 +10146,66 @@ class Store:
 
     # ------------------------------------------------------------ watchlist
 
+    #: The columns the Watchlist's Export… writes (watchlist.js), in order.
+    WATCHLIST_EXPORT_COLUMNS = ("value", "kind", "note", "hits")
+
+    @classmethod
+    def parse_indicator_list(cls, text: str, default_kind: str = "other") -> list[dict]:
+        """The indicators in a file given to the Watchlist's Import…, as
+        `{value, kind, note}` in file order, duplicates included (the
+        import dedupes against the list, and against itself).
+
+        A plain list is one indicator per line: blanks and #-comments
+        dropped, an optional `value,kind` carrying its own type.
+
+        The Watchlist's own Export… is not one: it is a CSV under a header
+        row, `value,kind,note,hits`. Read as a plain list, that header came
+        back as an indicator called "value", every kind as the rest of its
+        line ("filename,,3") and a quoted value split at its comma. So a
+        first line made of the export's column names, `value` first and at
+        least two of them, is read as that header and everything after it
+        as CSV — each row keeps its kind (an empty one takes
+        `default_kind`) and its note, and `hits` is left to the scan to
+        recount. Only that header switches: a plain list whose first
+        indicator is the word "value" is one cell, not a header, and stays
+        an indicator. static/js/watchlist.js mirrors this to count and
+        preview the file; it never decides."""
+        text = (text or "").lstrip("\ufeff")
+        lines = text.splitlines(keepends=True)
+        for i, raw in enumerate(lines):
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            try:
+                header = [c.strip().lower() for c in next(csv.reader([line]), [])]
+            except csv.Error:
+                header = []
+            if (len(header) >= 2 and header[0] == "value" and len(set(header)) == len(header)
+                    and set(header) <= set(cls.WATCHLIST_EXPORT_COLUMNS)):
+                out = []
+                try:
+                    for rec in csv.reader(io.StringIO("".join(lines[i + 1:]), newline="")):
+                        row = dict(zip(header, rec))
+                        value = (row.get("value") or "").strip()
+                        if value:
+                            out.append({"value": value,
+                                        "kind": (row.get("kind") or "").strip() or default_kind,
+                                        "note": row.get("note") or None})
+                except csv.Error as e:
+                    raise ValueError(f"Could not read the watchlist export: {e}") from None
+                return out
+            break
+        out = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            value, _, kind = line.partition(",")
+            value = value.strip()
+            if value:
+                out.append({"value": value, "kind": kind.strip() or default_kind, "note": None})
+        return out
+
     def add_indicator(self, value: str, kind: str = "other",
                       note: str | None = None, auto_tag_id: int | None = None) -> dict:
         value = (value or "").strip()

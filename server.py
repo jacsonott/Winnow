@@ -4090,20 +4090,22 @@ def api_watchlist_add(body: IndicatorBody):
 @app.post("/api/watchlist/import")
 def api_watchlist_import(body: WatchlistImportBody):
     """One indicator per line; blanks and #-comments dropped; optional
-    'value,kind' per line overrides the body default. Deduped against
+    'value,kind' per line overrides the body default. The Watchlist's own
+    Export… CSV is recognised by its header row and read back with each
+    row's kind and note (Store.parse_indicator_list). Deduped against
     what's already in the list."""
     have = {i["value"] for i in store().list_indicators()}
     added_ids: list[int] = []
-    for line in (body.text or "").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        value, _, kind = line.partition(",")
-        value = value.strip()
-        if not value or value in have:
+    try:
+        entries = Store.parse_indicator_list(body.text, body.kind)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    for ind in entries:
+        value = ind["value"]
+        if value in have:
             continue
         try:
-            added_ids.append(store().add_indicator(value, (kind.strip() or body.kind), None, body.auto_tag_id)["id"])
+            added_ids.append(store().add_indicator(value, ind["kind"], ind["note"], body.auto_tag_id)["id"])
         except ValueError as e:   # an auto-tag that isn't a tag here fails the first line, before any write
             raise HTTPException(400, str(e))
         have.add(value)

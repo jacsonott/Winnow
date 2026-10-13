@@ -1360,18 +1360,34 @@ see [docs/notes/README.md](README.md) for the whole set.
   dialog reports what it found (`N indicators from <file>`, the blank and
   #-comment lines it ignored, the first eight values) and then offers the
   Type and Auto-tag for the batch. The count is there to be checked: a
-  list pasted into the wrong file, or a CSV export that still has its
-  header row, is visible here and invisible from a file picker. The type
+  list pasted into the wrong file, or another tool's CSV that still has
+  its header row, is visible here and invisible from a file picker. The type
   select is CLONED from `#wlKind` rather than re-listed, so index.html
   stays the one place the kinds are written down, and the auto-tag
   select goes through the same `fillAutoTagSelect` the Add row's does. The
-  line rules stay the server's (`/api/watchlist/import`: blanks and
-  #-comments dropped, a per-line `value,kind` overriding the default) and
-  are mirrored here only to count and preview — the import posts the text
-  as read, never a client-parsed list. One count that is NOT the server's
-  rule: a file's final newline is not a blank line anybody wrote, so
-  trailing empties come off before anything is counted.
-  `tests/ui/test_watchlist_import_options.py`.
+  line rules stay the server's (`/api/watchlist/import`,
+  `Store.parse_indicator_list`: blanks and #-comments dropped, a per-line
+  `value,kind` overriding the default) and are mirrored here only to count
+  and preview — the import posts the text as read, never a client-parsed
+  list. One count that is NOT the server's rule: a file's final newline is
+  not a blank line anybody wrote, so trailing empties come off before
+  anything is counted. `tests/ui/test_watchlist_import_options.py`.
+- **The Watchlist's own Export… goes back in through Import…** Export
+  writes a CSV under a header row (`EXPORT_COLUMNS`: value, kind, note,
+  hits), and the import read it as a plain list: the header became an
+  indicator called `value`, each kind the rest of its line
+  (`filename,,3`), and a value or note holding a comma was cut at it. A
+  first non-comment line made of export column names — `value` first, at
+  least two, none twice — is now that header, and every row after it is
+  read as CSV (quoted commas and line breaks included), keeping its kind
+  (an empty one takes the dialog's Type) and note; `hits` is left to the
+  scan. Recognised on IMPORT rather than changing the export, so files
+  written before the fix import cleanly too. Only that header switches:
+  a plain list whose first indicator is the word `value` is one cell, not
+  a header. The dialog mirrors the rule (`exportHeader`, `csvRows`) to
+  count rows rather than lines and to say the types come from the file.
+  `tests/test_watchlist_export_import.py`,
+  `tests/ui/test_watchlist_export_roundtrip.py`.
 
 
 - **Entity pivot** — a plugin, not a module: `examples/plugins/pivot` (there is no `entity.js`). The store's `entity_pivot` reuses the blob search + TS_NORMALIZE.

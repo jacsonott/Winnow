@@ -76,6 +76,48 @@ function csvCell(v) {
   return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
+/* The columns Export… writes, in order — and the header Import…
+   recognises, which is what makes an export go back in: read as a plain
+   list, its header line became an indicator called "value". The server's
+   copy is Store.WATCHLIST_EXPORT_COLUMNS. */
+const EXPORT_COLUMNS = ['value', 'kind', 'note', 'hits'];
+
+/* CSV text -> rows of cells: quoted cells, doubled quotes and line breaks
+   inside quotes, as Python's csv module reads them. Only for counting and
+   previewing an export in the import dialog; the server parses the file
+   it is sent. A final line break ends the last row rather than starting
+   an empty one. */
+function csvRows(text) {
+  const rows = [];
+  let row = [];
+  let cell = '';
+  let quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quoted) {
+      if (ch !== '"') cell += ch;
+      else if (text[i + 1] === '"') { cell += '"'; i++; } else quoted = false;
+    } else if (ch === '"' && cell === '') quoted = true;
+    else if (ch === ',') { row.push(cell); cell = ''; }
+    else if (ch === '\r' || ch === '\n') {
+      if (ch === '\r' && text[i + 1] === '\n') i++;
+      row.push(cell); rows.push(row); row = []; cell = '';
+    } else cell += ch;
+  }
+  if (cell || row.length) { row.push(cell); rows.push(row); }
+  return rows;
+}
+
+/* The export's header row's column names, or null for any other line:
+   `value` first, at least two names, every one an export column, none
+   twice — the rule Store.parse_indicator_list applies. A plain list's
+   first indicator can be the word "value"; one cell is not a header. */
+function exportHeader(line) {
+  const cells = (csvRows(line)[0] || []).map((c) => c.trim().toLowerCase());
+  return cells.length >= 2 && cells[0] === 'value' && new Set(cells).size === cells.length
+    && cells.every((c) => EXPORT_COLUMNS.includes(c)) ? cells : null;
+}
+
 /* Client-side file download — no server round trip; the watchlist is
    already in memory. */
 function downloadText(text, filename, type) {
@@ -914,31 +956,53 @@ function openFromCasePicker() {
 
    The file is read first and the dialog reports what it found, because
    "47 indicators" next to the name of the file is the part an analyst can
-   actually check — a list pasted into the wrong file, or a CSV export
-   with a header row, is visible here and invisible from a file picker.
+   actually check — a list pasted into the wrong file, or another tool's
+   CSV with a header row, is visible here and invisible from a file picker.
 
-   The line rules are the server's (`/api/watchlist/import`): blanks and
-   #-comments dropped, a per-line `value,kind` overriding the default
-   below. They are mirrored here only to count and preview, never to
-   decide — the import posts the text as read. */
+   The line rules are the server's (`/api/watchlist/import`,
+   Store.parse_indicator_list): blanks and #-comments dropped, a per-line
+   `value,kind` overriding the default below — or, for a file Export…
+   wrote, its header row read as column names and every row after it as
+   CSV, keeping each row's type and note. They are mirrored here only to
+   count and preview, never to decide — the import posts the text as
+   read. */
 function openWatchlistImport(name, text) {
-  const lines = (text || '').split(/\r?\n/).map((l) => l.trim());
+  const raw = (text || '').split(/\r?\n/);
+  const lines = raw.map((l) => l.trim());
   // A file's final newline is not a blank line anybody wrote: trailing
   // empties come off before anything is counted, or every import reports
   // one more skipped line than the file has in it.
   while (lines.length && !lines[lines.length - 1]) lines.pop();
-  const skipped = lines.filter((l) => !l || l.startsWith('#')).length;
-  const entries = lines.filter((l) => l && !l.startsWith('#'))
-    .map((l) => l.split(',')[0].trim()).filter(Boolean);
+  const first = lines.findIndex((l) => l && !l.startsWith('#'));
+  const header = first < 0 ? null : exportHeader(lines[first]);
+  let skipped;
+  let entries;
+  if (header) {
+    // Everything before the header is blanks and comments, by how it was
+    // found; after it a row can span lines (a quoted note), so the rows
+    // are counted, not the lines.
+    const rows = csvRows(raw.slice(first + 1).join('\n'));
+    while (rows.length && rows[rows.length - 1].every((c) => !c.trim())) rows.pop();
+    const values = rows.map((r) => (r[0] || '').trim());
+    entries = values.filter(Boolean);
+    skipped = first + values.length - entries.length;
+  } else {
+    skipped = lines.filter((l) => !l || l.startsWith('#')).length;
+    entries = lines.filter((l) => l && !l.startsWith('#'))
+      .map((l) => l.split(',')[0].trim()).filter(Boolean);
+  }
   modal('Import indicators', (b) => {
     if (!entries.length) {
       b.append(el('p', 'fb-help', `Nothing to import from ${name} — one indicator per line, `
         + 'blank lines and lines starting with # ignored.'));
       return;
     }
-    b.append(el('p', 'fb-help',
-      'One indicator per line. A line of the form “value,kind” carries its own type and '
-      + 'ignores the one picked below. Values already on the watchlist are skipped.'));
+    b.append(el('p', 'fb-help', header
+      ? 'A watchlist export: its header row names the columns, and each indicator keeps the '
+        + 'type and note it was exported with — the type picked below only fills in a row '
+        + 'without one. Values already on the watchlist are skipped.'
+      : 'One indicator per line. A line of the form “value,kind” carries its own type and '
+        + 'ignores the one picked below. Values already on the watchlist are skipped.'));
 
     const head = el('div', 'note-status',
       `${entries.length.toLocaleString()} indicator${entries.length === 1 ? '' : 's'} from ${name}`
@@ -1033,9 +1097,8 @@ export function wireWatchlist() {
   $('wlScan').onclick = () => { runScan({}); };
   $('wlExport').onclick = () => {
     if (!indicators.length) { toast('No indicators to export'); return; }
-    const header = ['value', 'kind', 'note', 'hits'];
     const rows = indicators.map((i) => [i.value, i.kind, i.note || '', i.hit_count]);
-    const csv = [header, ...rows].map((r) => r.map(csvCell).join(',')).join('\r\n') + '\r\n';
+    const csv = [EXPORT_COLUMNS, ...rows].map((r) => r.map(csvCell).join(',')).join('\r\n') + '\r\n';
     downloadText(csv, 'watchlist.csv', 'text/csv');
   };
   $('wlImport').onclick = () => $('wlImportFile').click();
