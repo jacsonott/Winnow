@@ -415,6 +415,34 @@ def test_view_route_404_style_missing_source_is_still_a_400(client):
     assert r.status_code == 400
 
 
+def test_a_read_for_a_removed_table_is_a_404_not_a_500(client, ingested):
+    """A request still in flight for a table another window just removed:
+    the store says KeyError("No table N"), and the catch-all turned that
+    into a 500 "Internal error" — an error badge, and an uncaught rejection
+    in whichever click handler asked."""
+    r = client.get("/api/tags?source_id=9999")
+    assert r.status_code == 404
+    assert "no longer in this case" in r.json()["detail"]
+    assert client.get("/api/tags?source_id=-9999").status_code == 404   # a merge, same answer
+
+
+def test_any_other_key_error_is_still_a_500(client, ingested, monkeypatch):
+    import server
+    from fastapi.testclient import TestClient
+
+    store, source_id = ingested
+
+    def boom(*a, **kw):
+        raise KeyError("No table 1 because of a bug")   # close, but not the lookup's own words
+
+    monkeypatch.setattr(store, "tag_counts", boom)
+    lenient = TestClient(server.app, headers={"X-Timeline-Lite-Client": "1"},
+                         raise_server_exceptions=False)
+    assert lenient.get(f"/api/tags?source_id={source_id}").status_code == 500
+    monkeypatch.setattr(store, "tag_counts", lambda *a, **kw: (_ for _ in ()).throw(KeyError(3)))
+    assert lenient.get(f"/api/tags?source_id={source_id}").status_code == 500
+
+
 def test_column_index_routes_list_and_drop(client, ingested):
     store, source_id = ingested
     assert client.get(f"/api/column_indexes?source_id={source_id}").json() == []

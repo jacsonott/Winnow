@@ -483,6 +483,24 @@ async def record_gone_handler(request: Request, exc: RecordGone):
     return JSONResponse({"detail": str(exc)}, status_code=404)
 
 
+# The read side of the same race: a request still in flight for a table
+# another window (or this one, a moment earlier) just deleted. The Store's
+# lookups say so as KeyError("No table N") / ("No merge N"), and a route
+# that never expected its table to vanish mid-request let that out into
+# the catch-all — a 500 "Internal error" and an error badge for something
+# nobody did wrong. Only those two messages are matched: any other
+# KeyError is still a bug, and still a 500.
+_GONE_TABLE_RE = re.compile(r"No (?:table|merge) -?\d+")
+
+
+@app.exception_handler(KeyError)
+async def gone_table_handler(request: Request, exc: KeyError):
+    msg = exc.args[0] if exc.args and isinstance(exc.args[0], str) else ""
+    if _GONE_TABLE_RE.fullmatch(msg):
+        return JSONResponse({"detail": "That table is no longer in this case"}, status_code=404)
+    return await _unhandled_error_handler(request, exc)
+
+
 @app.exception_handler(OpCancelled)
 async def op_cancelled_handler(request: Request, exc: OpCancelled):
     # 499 ("client closed request"): not an error and not the analyst's
