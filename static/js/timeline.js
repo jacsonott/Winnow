@@ -251,19 +251,35 @@ export function fillTimelineBody(cell, r) {
    steps are the ones search-all's "Open ↦" already takes: POST the
    source open, then reload the listing so the tab strip and sidebar are
    built from the new answer. loadSources() opens the table itself (it is
-   in the open tabs by then), so this is not an extra switch. */
+   in the open tabs by then), so this is not an extra switch.
+
+   Every caller is a bare click handler, so a failure is caught here or
+   nowhere — and it can fail for a reason nobody did wrong: the hit was
+   listed before its table was removed (another window, or a moment ago
+   in this one). That answers 404; the listing is reloaded so the grid
+   lands on a table that exists rather than the half-opened ghost. */
 export async function jumpToTimelineRow(sourceId, rid) {
-  const src = S.sources.find((s) => s.id === sourceId);
-  if (src && !src.is_open) {
-    // A failure here is not a reason to refuse the navigation — the grid
-    // can still show the row, which is what was asked for.
-    try { await post(`/api/source/${sourceId}/open`, { open: true }); } catch { /* best effort */ }
-    await loadSources(sourceId);
-  } else {
-    await openSource(sourceId);
+  try {
+    const src = S.sources.find((s) => s.id === sourceId);
+    if (src && !src.is_open) {
+      // A failure here is not a reason to refuse the navigation — the grid
+      // can still show the row, which is what was asked for.
+      try { await post(`/api/source/${sourceId}/open`, { open: true }); } catch { /* best effort */ }
+      await loadSources(sourceId);
+    } else {
+      await openSource(sourceId);
+    }
+    showGridTab();
+    await recenterOnRow({ source_id: sourceId, rid });
+  } catch (e) {
+    if (e && e.aborted) return;
+    if (e && e.status === 404) {
+      toast('That row\'s table is no longer in this case', 6000);
+      await loadSources().catch(() => {});
+      return;
+    }
+    toast('Could not open that row: ' + ((e && e.message) || e), 6000);
   }
-  showGridTab();
-  await recenterOnRow({ source_id: sourceId, rid });
 }
 
 // Guarded like #body's own scroll handler below: scroll can fire several

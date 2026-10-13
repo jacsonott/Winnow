@@ -41,10 +41,10 @@ see [docs/notes/README.md](README.md) for the whole set.
   that vanishes surfaces as a `KeyError` when the merge is opened
   (`_merge_source_dict`) rather than as a merge that silently changed
   shape. That is the right way to report a missing member and the wrong
-  thing to let anyone do by accident, because **source ids are reused by
-  the next import**. Dropping a member does not merely break the merge,
-  it arms it: the next file imported takes the freed id and becomes part
-  of a merge nobody added it to, and nothing anywhere would say so.
+  thing to let anyone do by accident. (It was worse while source ids were
+  reused by the next import — dropping a member armed the merge, the next
+  file imported taking the freed id and joining a merge nobody added it
+  to. Ids are never reused now; next entry.)
   So the drop raises `ValueError` naming the merges, `DELETE
   /api/source/{id}` maps that to **409** (well-formed, and it will
   succeed once the merge is gone), and deleting the merge first is one
@@ -90,6 +90,39 @@ see [docs/notes/README.md](README.md) for the whole set.
   columns, and a file with its own `source_id` column made ORDER BY
   "source_id" sort by member — `_member_id_alias` picks a name no data
   column has.
+- **An id a case hands out is never handed out again.** `sources`,
+  `tag_defs`, `merges` and `sql_tabs` are `AUTOINCREMENT`. As plain
+  `INTEGER PRIMARY KEY`s they gave a deleted newest row's id to the next
+  insert, and every one of those ids outlives its row somewhere — a view
+  handle or tag list in another window, an undo entry, an indicator's
+  `auto_tag_id`, a widget's `src_N`, a SQL result keyed by tab id. Reuse
+  turned "gone" into "a different table": a stale window tagged the next
+  import, Ctrl+Z after dropping a merge member tagged a file nobody had
+  touched, a deleted auto-tag's matches came back as "Benign".
+  `CREATE TABLE IF NOT EXISTS` cannot change an existing table, so
+  `_migrate_ids_never_reused` rebuilds the four in an older case file on
+  open, once, in one transaction (copy out, recreate from META_SCHEMA's
+  definition, copy back BY COLUMN NAME with ids intact — after the
+  `ALTER`s in `__init__` every file has the canonical columns, and one the
+  canonical DDL doesn't know is carried across, not dropped). The counter is seeded
+  from `_ID_HIGH_WATER_SQL`, the highest id still MENTIONED anywhere
+  (orphaned `row_tags`, a leftover `drv_9`, `src_9` in a widget), not
+  `MAX(id)`, which would hand the deleted newest id straight back. The same
+  pass deletes what reuse had already left: tag assignments and notes for a
+  missing table or tag, and an `auto_tag_id` naming a deleted tag.
+  Not relying on ids alone, the writes check their targets too:
+  `_apply_tag_change` (every tag write) and `set_note` refuse a missing
+  tag, table or row with `RecordGone` **inside** the transaction, before
+  writing — they used to commit and then 500 on the way out — and
+  server.py maps it to **404** globally (not 409: no rebuild brings a
+  deleted tag back). `drop_source` and `delete_merge` evict the views
+  built over them (`_evict_views_of`), `delete_tag` clears any
+  `watchlist.auto_tag_id` naming it, `add_indicator` refuses an
+  `auto_tag_id` that is not a tag here, and `_drop_undo_for_source` drops
+  an entry by the ROWS it recorded, not the id it was filed under — a
+  merge's entry holds member rows. `tests/test_ids_never_reused.py` builds
+  the old file from the old DDL rather than through a Store, which would
+  migrate it before the test could look.
 
 - **A Timeline row leads with what happened, not with the source row.**
   Beside `body` (still the pipe-joined columns, unchanged) each row
@@ -121,6 +154,24 @@ see [docs/notes/README.md](README.md) for the whole set.
     the whole cell. The raw row stays reachable: it's the cell's `title`
     and the per-row "raw" toggle (`fillTimelineBody` in timeline.js), and
     clicking the row still opens it in its own table.
+- **A per-column chain of one operator is built by `_sql_chain`, never
+  `" OP ".join`.** The search blob (`COALESCE(a,'') || ' ' || …`) and
+  hide-empty-rows' OR of every column parse, written flat, into a
+  left-deep tree one level per operator, and SQLite refuses a statement
+  deeper than `SQLITE_MAX_EXPR_DEPTH` (1000). Flattened JSON gets a table
+  there easily: from ~500 columns every Contains/regex/Advanced search
+  was a 500, the trigram build failed in its thread with nothing said,
+  and the Search-all sweep — which recorded a count that raised as zero —
+  reported the table as "No matches." `_sql_chain` writes runs of up to
+  `_SQL_CHAIN_FLAT` as before (a narrow table's doc view keeps the exact
+  definition stored in its case file) and balanced parenthesised halves
+  beyond that; concatenation and OR are associative, so the value — the
+  `doc` text the index holds — is identical. Two things are kept from it
+  on purpose: the sweep now reports a table it could not count
+  (`{source_id, name, error}` — in `search_all_sources`' list, and in the
+  job's `failed`, apart from `hits` so that list still means "tables that
+  matched"), skipping only a table dropped mid-sweep; and
+  `_build_fts_worker` logs a build failure once per source and message.
 - The substring-search index (`fts_<id>`) is FTS5 `tokenize='trigram'` over a
   **single `doc` column** — every column concatenated via the `src_<id>_doc`
   view (same `_blob_expr` the LIKE fallback scans, so indexed and fallback
@@ -392,7 +443,16 @@ see [docs/notes/README.md](README.md) for the whole set.
   file for session matching; it is **not** an evidence integrity hash and must
   not be presented as one.
 - Session import remaps tag IDs **by name**, creating missing tags. Two analysts
-  with their own "Lateral movement" tag merge rather than duplicate.
+  with their own "Lateral movement" tag merge rather than duplicate. The
+  name rule is `pair_tag_names`, and session load, `copy_sources_to`
+  (`_map_tags_by_name`) and `diff_sessions` all use it: the exact name
+  first, then a name differing only in case **only when that is
+  unambiguous on both sides** (one local tag folds to it, no other
+  incoming tag does). `tag_defs.name` is not unique by case — "Malware" and
+  "malware" can be two tags kept apart on purpose — and load used to match
+  by `name.lower()` alone while copy and diff matched exactly, so reloading
+  your own session moved rows between the two and the diff said nothing
+  had changed.
 - **Loading a case session with replace (`merge=False`) clears every table's
   tags and notes, not just the snapshot's** — what the Load dialog promises.
   It used to clear per table inside `import_session`, so a table imported
@@ -401,6 +461,12 @@ see [docs/notes/README.md](README.md) for the whole set.
   The clear and every table's writes are one transaction
   (`import_case_session`); the one-table `import_session` still replaces
   only its own table, since that is all a one-table session describes.
+  One exception: an open table a skipped session source may be — a
+  shape mismatch, or a file with several tables none of which is
+  unambiguously the source's — keeps what it has, with a warning naming
+  it. The session's tags for it were refused because they would land on
+  other rows; clearing its own as well would lose the analyst's work
+  there for nothing.
 - **A session source is matched to a table by hash AND by which table of
   that file it is** (`_match_session_sources`, used by load and diff
   alike). The hash is the FILE's: every table imported from one SQLite
@@ -426,6 +492,35 @@ see [docs/notes/README.md](README.md) for the whole set.
   hash, name, base columns and row count beside the definition, so one
   table of a multi-table file is told from its siblings by the same
   tiers rather than by name alone.
+- **A session re-imports a missing table the way it was imported, from
+  the file it was recorded against, or not at all.** Its tags name rows
+  by rid, so a re-import is only any use if it produces the same rows in
+  the same order. Every reader records itself and the options that shape
+  its rows in `sources.ingest` (`_ingest_record`: the CSV delimiter
+  actually used and `has_header`, the SQLite table and its converted
+  timestamp columns, the sheet, the JSON flatten settings; `rows` for
+  `ingest_rows`, which nothing can re-run), and `export_session` carries
+  it. `import_case_session` used to re-parse every missing table as a
+  default CSV — a headerless CSV gained a header and every tag slid a
+  row, a JSONL file came back as one column, and `warnings` was empty.
+  Then, for every table a session is applied to — re-imported, or
+  matched by `_match_session_sources` above (which says which table,
+  not whether its rows are the session's: below "all four agree" the
+  match can be the same file read another way): the row count and
+  imported columns must be the session's
+  (`_session_shape_mismatch`), or nothing is applied — the same file
+  opened with a header the session's copy didn't have is the same hash
+  with every rid on another row. A session from before `ingest` existed
+  gets the extension's reader as a guess and that same check behind it;
+  a mis-guessed copy is dropped again. And the path is a claim from a
+  file somebody else may have written (`_reimport_session_source`): a
+  UNC/device path is refused on its shape before anything touches it
+  (on Windows, `isfile` alone would offer the host the analyst's
+  credentials), a relative one too, and the file is fingerprinted against
+  the session's `file_hash` *before* anything is ingested — a changed
+  file at the recorded path used to be imported and tagged with only a
+  toast. The single-table `import_session` keeps its warn-and-apply: an
+  analyst picked that table on purpose.
 - `search_all_sources` runs each source's count on a `_reader()`
   connection — the sweep never touches `self.lock` at all now (it used to
   take it per source's count, which still stalled a concurrent request for

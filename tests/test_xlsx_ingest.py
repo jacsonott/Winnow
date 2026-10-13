@@ -188,3 +188,37 @@ def test_http_routing(store, write_xlsx, monkeypatch):
     done = store.wait_for_ingest_job(res.json()["job_id"], timeout=30)
     assert done["status"] == "done"
     assert "uploaded" in [s["name"] for s in store.list_sources()]
+
+
+def _with_declared_dimension(path, ref, out):
+    """A copy of the workbook at `path` whose first sheet declares
+    <dimension ref=`ref`> — stale or defaulted, as several writers emit."""
+    import re
+    import zipfile
+
+    with zipfile.ZipFile(path) as zin, zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename == "xl/worksheets/sheet1.xml":
+                data = re.sub(rb'<dimension ref="[^"]*"', b'<dimension ref="' + ref.encode() + b'"', data)
+            zout.writestr(item, data)
+    return str(out)
+
+
+def test_a_stale_declared_dimension_does_not_cut_the_sheet(store, write_xlsx, tmp_path):
+    """openpyxl's read-only mode trusts the sheet's own <dimension> as the
+    edge of the data: a workbook declaring A1:B10 but holding 3 columns
+    and 101 rows imported 2 columns and 9 rows, ragged 0 — no sign that
+    anything was left behind."""
+    good = write_xlsx({"Data": [["Time", "User", "Action"]]
+                               + [[f"t{i}", f"u{i}", f"a{i}"] for i in range(1, 101)]})
+    stale = _with_declared_dimension(good, "A1:B10", tmp_path / "stale.xlsx")
+
+    sheets = store.preview_xlsx_sheets(stale)["tables"]
+    assert [c["name"] for c in sheets[0]["columns"]] == ["Time", "User", "Action"]
+
+    rec = store.ingest_xlsx_sheet(stale, "Data", build_fts=False)
+    assert rec["row_count"] == 100
+    assert [c["name"] for c in rec["columns"]] == ["Time", "User", "Action"]
+    v = store.build_view(rec["id"], {"source_id": rec["id"]})
+    assert store.fetch_rows(v["view_id"], 99, 1)["rows"][0]["cells"] == ["t100", "u100", "a100"]

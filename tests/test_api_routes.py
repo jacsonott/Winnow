@@ -415,6 +415,34 @@ def test_view_route_404_style_missing_source_is_still_a_400(client):
     assert r.status_code == 400
 
 
+def test_a_read_for_a_removed_table_is_a_404_not_a_500(client, ingested):
+    """A request still in flight for a table another window just removed:
+    the store says KeyError("No table N"), and the catch-all turned that
+    into a 500 "Internal error" — an error badge, and an uncaught rejection
+    in whichever click handler asked."""
+    r = client.get("/api/tags?source_id=9999")
+    assert r.status_code == 404
+    assert "no longer in this case" in r.json()["detail"]
+    assert client.get("/api/tags?source_id=-9999").status_code == 404   # a merge, same answer
+
+
+def test_any_other_key_error_is_still_a_500(client, ingested, monkeypatch):
+    import server
+    from fastapi.testclient import TestClient
+
+    store, source_id = ingested
+
+    def boom(*a, **kw):
+        raise KeyError("No table 1 because of a bug")   # close, but not the lookup's own words
+
+    monkeypatch.setattr(store, "tag_counts", boom)
+    lenient = TestClient(server.app, headers={"X-Timeline-Lite-Client": "1"},
+                         raise_server_exceptions=False)
+    assert lenient.get(f"/api/tags?source_id={source_id}").status_code == 500
+    monkeypatch.setattr(store, "tag_counts", lambda *a, **kw: (_ for _ in ()).throw(KeyError(3)))
+    assert lenient.get(f"/api/tags?source_id={source_id}").status_code == 500
+
+
 def test_column_index_routes_list_and_drop(client, ingested):
     store, source_id = ingested
     assert client.get(f"/api/column_indexes?source_id={source_id}").json() == []
@@ -940,3 +968,33 @@ def test_a_download_name_cannot_split_the_header(client, store, write_csv):
     header = r.headers["content-disposition"]
     assert "\r" not in header and "\n" not in header
     assert "set-cookie" not in r.headers
+
+
+def test_a_stale_delete_with_file_never_deletes_another_case(client, tmp_path):
+    """A home screen's list can be older than the registry: another window
+    forgot case B and registered a new one. With registry ids reused, the
+    new case took B's id, and the stale window's "Delete with file" on B
+    deleted the new case's file. The client now says which file it means,
+    and a mismatch touches nothing."""
+    from winnow.store import Store
+
+    paths = {}
+    for name in ("A", "B", "NewHost"):
+        paths[name] = str(tmp_path / f"{name}.db-winnow")
+    a = client.post("/api/cases", json={"path": paths["A"], "name": "A"}).json()
+    b = client.post("/api/cases", json={"path": paths["B"], "name": "B"}).json()
+    assert client.delete(f"/api/cases/{b['id']}").status_code == 200       # window 2 forgets B
+    new = client.post("/api/cases", json={"path": paths["NewHost"], "name": "NewHost"}).json()
+    Store(paths["NewHost"]).close()                                          # a real case file on disk
+    assert new["id"] != b["id"]
+
+    # Window 1, still listing B under its old id, asks to delete B's file.
+    r = client.delete(f"/api/cases/{b['id']}", params={"delete_file": "true", "path": paths["B"]})
+    assert r.status_code == 200
+    assert (tmp_path / "NewHost.db-winnow").exists()
+
+    # And when an id does name another case than the one meant, nothing happens.
+    r = client.delete(f"/api/cases/{new['id']}", params={"delete_file": "true", "path": paths["A"]})
+    assert r.status_code == 409
+    assert (tmp_path / "NewHost.db-winnow").exists()
+    assert {c["id"] for c in client.get("/api/cases").json()} >= {a["id"], new["id"]}

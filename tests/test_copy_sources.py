@@ -316,3 +316,27 @@ def test_a_copied_lookup_without_its_table_does_not_bind_to_another(store, write
             _rederive_owner(t, new_ev)
     finally:
         t.close()
+
+
+def test_tag_names_pair_by_the_rule_session_load_uses(store, write_csv, target):
+    """One rule for copy, load and diff (store.pair_tag_names): exact name
+    first, a name differing only in case when that is unambiguous."""
+    sid = _fill(store, write_csv)
+    _tag(store, sid, [1], "Malware")
+    _tag(store, sid, [2], "Lateral")
+    target.upsert_tag(None, "MALWARE", "#000000", None)
+    target.upsert_tag(None, "lateral", "#000000", None)
+    target.upsert_tag(None, "LATERAL", "#000000", None)
+    target_path = target.path
+    target.close()
+    new = store.copy_sources_to(target_path, [sid])["copied"][0]["id"]
+    t = Store(target_path)
+    try:
+        names = {x["id"]: x["name"] for x in t.list_tags()}
+        got = sorted((r, names[tid]) for r, tid in t.db.execute(
+            "SELECT rid, tag_id FROM row_tags WHERE source_id=?", (new,)))
+    finally:
+        t.close()
+    # "Malware" is the target's one MALWARE; "Lateral" matches two target
+    # tags ignoring case, so it is its own tag rather than a guess.
+    assert got == [(1, "MALWARE"), (2, "Lateral")]

@@ -612,3 +612,22 @@ def test_two_identical_copies_against_one_entry_is_refused_not_guessed(store, wr
     assert (_tagged(store, sid), _tagged(store, dup)) == ([], [])
     assert res["sources_restored"] == 0
     assert res["warnings"] and "evidence.csv" in res["warnings"][0]
+
+
+def test_a_replace_that_cannot_tell_the_copies_apart_leaves_both_alone(store, write_csv):
+    """Replace clears the case, but not the tables a skipped source may be:
+    with two indistinguishable copies, either could hold the rows the
+    session meant, and wiping the tags both have would lose work without
+    putting the session's in their place."""
+    sid = _case(store, write_csv)
+    _tag(store, sid, [2], "TA")
+    store.save_session("one copy")
+    store.start_new_session()
+    dup = _case(store, write_csv)
+    _tag(store, sid, [1], "TB")
+    _tag(store, dup, [3], "TB")
+
+    res = store.load_session("one copy", merge=False)
+    assert (_tagged(store, sid), _tagged(store, dup)) == ([1], [3])
+    assert res["sources_restored"] == 0
+    assert any("as they were" in w for w in res["warnings"])

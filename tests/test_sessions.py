@@ -101,3 +101,61 @@ def test_case_session_export_covers_every_open_source(store, write_csv):
     case_session = store.export_case_session()
     assert case_session["format"] == "winnow-case-session/1"
     assert len(case_session["sources"]) == 2
+
+
+def test_two_tags_differing_only_in_case_survive_a_session_round_trip(store, write_csv):
+    """tag_defs.name is not unique by case, and an analyst can keep
+    "Malware" and "malware" apart on purpose. Session load matched by
+    name.lower(), so saving and reloading your OWN session moved every row
+    of one onto the other — while copy and diff matched exactly, and said
+    nothing had changed."""
+    sid = store.ingest_csv(write_csv([["a"], ["1"], ["2"], ["3"]]), name="ev.csv", build_fts=False)["id"]
+    upper = store.upsert_tag(None, "Malware", "#ff0000", None)["id"]
+    lower = store.upsert_tag(None, "malware", "#00ff00", None)["id"]
+    store.set_tags(sid, [1], upper, True)
+    store.set_tags(sid, [2], lower, True)
+    store.save_session("p")
+    store.start_new_session()
+    store.load_session("p", merge=False)
+    names = {t["id"]: t["name"] for t in store.list_tags()}
+    got = sorted((r, names[t]) for r, t in store.db.execute(
+        "SELECT rid, tag_id FROM row_tags WHERE source_id=?", (sid,)))
+    assert got == [(1, "Malware"), (2, "malware")]
+    assert store.diff_sessions("p", store.LIVE_SESSION)["counts"]["changed"] == 0
+
+
+def test_a_tag_differing_only_in_case_pairs_when_that_is_unambiguous(store, write_csv):
+    """The other half of the rule: one local tag that differs only in case
+    is the same tag (another analyst typed "malware"), so it merges rather
+    than duplicates — but not when the session itself carries both
+    spellings, which are then two tags on that side too."""
+    sid = store.ingest_csv(write_csv([["a"], ["1"], ["2"], ["3"]]), name="ev.csv", build_fts=False)["id"]
+    local = store.upsert_tag(None, "Malware", "#ff0000", None)["id"]
+    fh = store.get_source(sid)["file_hash"]
+    one = {"source": {"file_hash": fh}, "row_notes": [],
+           "tag_defs": [{"id": 50, "name": "MALWARE", "color": "#000000", "hotkey": None}],
+           "row_tags": [{"rid": 1, "tag_id": 50}]}
+    store.import_session(sid, one, merge=True)
+    assert [t["name"] for t in store.list_tags()].count("MALWARE") == 0
+    assert store.tag_counts(sid)["counts"] == {str(local): 1}
+
+    both = {"source": {"file_hash": fh}, "row_notes": [],
+            "tag_defs": [{"id": 60, "name": "malware", "color": "#000000", "hotkey": None},
+                         {"id": 61, "name": "MALWARE", "color": "#000000", "hotkey": None}],
+            "row_tags": [{"rid": 2, "tag_id": 60}, {"rid": 3, "tag_id": 61}]}
+    store.import_session(sid, both, merge=True)
+    names = {t["id"]: t["name"] for t in store.list_tags()}
+    got = sorted((r, names[t]) for r, t in store.db.execute(
+        "SELECT rid, tag_id FROM row_tags WHERE source_id=?", (sid,)))
+    assert got == [(1, "Malware"), (2, "malware"), (3, "MALWARE")]
+
+
+def test_pair_tag_names_is_exact_first_then_unique_case_insensitive():
+    from winnow.store import pair_tag_names
+
+    assert pair_tag_names(["Malware", "malware"], ["Malware", "malware"]) == {
+        "Malware": "Malware", "malware": "malware"}
+    assert pair_tag_names(["MALWARE"], ["Malware"]) == {"MALWARE": "Malware"}
+    assert pair_tag_names(["MALWARE"], ["Malware", "malware"]) == {}       # ambiguous locally
+    assert pair_tag_names(["MALWARE", "malware"], ["Malware"]) == {}       # ambiguous incoming
+    assert pair_tag_names(["Benign"], ["Malware"]) == {}
