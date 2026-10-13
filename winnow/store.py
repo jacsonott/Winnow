@@ -13,6 +13,7 @@ Design notes
 
 from __future__ import annotations
 
+import codecs
 import contextlib
 import csv
 import datetime
@@ -28,6 +29,7 @@ import re
 import shutil
 import socket
 import sqlite3
+import stat
 import tempfile
 import threading
 import time
@@ -51,6 +53,22 @@ from .paths import sqlite_ro_uri
 
 BATCH = 20_000
 SAMPLE_ROWS = 500
+# The csv module's own field limit is 131072 characters, and one field
+# past it stopped the import at that line — an EvtxECmd payload carrying a
+# PowerShell script block, or a base64 blob some tool put in a column, is
+# routinely bigger. Raised rather than removed, because the limit is also
+# what bounds a stray quote with no partner: csv folds the rest of the FILE
+# into that one field, built in memory at four bytes a character, and on a
+# multi-GB export "unlimited" means the analyst's machine runs out of
+# memory instead of the import stopping with a line number. 64 Mi
+# characters is far past any real field and caps that at a few hundred MB.
+# A number rather than sys.maxsize: field_size_limit takes a C long, which
+# is 32 bits on Windows, and sys.maxsize overflows it there. Set once, for
+# the process (it is module state in _csv), so the import preview and the
+# import itself read a file the same way. A swallow that stays under the
+# cap no longer errors at all — suspect_quote_rows is what flags it now.
+CSV_FIELD_LIMIT = 64 * 1024 * 1024
+csv.field_size_limit(CSV_FIELD_LIMIT)
 TRIGRAM_MIN_LEN = 3  # the trigram FTS5 tokenizer can't index anything shorter — see _fts_like_pattern
 SARGABLE_OPS = {"equals", "in"}  # ops a plain single-column B-tree index actually accelerates (see _ensure_column_index_building)
 # SQLite gained LIKE/GLOB pushdown onto fts5 trigram tables in 3.45.0 —
@@ -164,7 +182,7 @@ CREATE TABLE IF NOT EXISTS sources (
     has_fts     INTEGER NOT NULL DEFAULT 0,
     nickname    TEXT,                   -- analyst display name; `name` stays the imported file's identity
     origin      TEXT,                   -- NULL = an imported file; 'sql' = saved from the SQL pane; 'subset' = saved from a view/selection
-    origin_meta TEXT,                   -- json, per origin: {sql} / {parent_source_id, parent_name, spec, ...} — see save_view_as_source
+    origin_meta TEXT,                   -- json, per origin: {sql} / {parent_source_id, parent_name, spec, ...} — see save_view_as_source; an imported file not read as plain UTF-8: {encoding, cp1252_bytes?} — see _encoding_report
     ingest      TEXT                    -- json: how the file was read, {kind, ...options} — what a session re-imports with
 );
 CREATE TABLE IF NOT EXISTS tag_defs (
@@ -789,22 +807,154 @@ def looks_binary(path: str) -> bool:
     return b"\x00" in head
 
 
+def _text_line(line: str) -> str:
+    r"""One raw-text row from one line read with newline="\n": the \n
+    and ONE \r before it (a CRLF file's) come off, nothing else does.
+
+    Universal newlines — Python's default for text files, and what
+    str.splitlines() does — also end a line at a lone \r. A log line
+    carries attacker-chosen text (the username of a failed login), so a
+    \r in it forged a row of its own: "Failed password for x\rAccepted
+    password for root" imported as two lines, the second reading like a
+    real entry, and every row id after it stopped being the line number.
+    A \r that is not part of the line ending is the line's own text."""
+    if line.endswith("\n"):
+        line = line[:-1]
+    if line.endswith("\r"):
+        line = line[:-1]
+    return line
+
+
+# Bytes as Windows-1252 reads them, the five it leaves undefined (0x81,
+# 0x8D, 0x8F, 0x90, 0x9D) as the Latin-1 control characters of the same
+# value — so every byte maps to a character of its own and none is lost.
+def _cp1252_char(b: int) -> str:
+    try:
+        return bytes([b]).decode("cp1252")
+    except UnicodeDecodeError:
+        return chr(b)
+
+
+_CP1252_CHARS = "".join(_cp1252_char(b) for b in range(256))
+_decode_fallback = threading.local()
+
+
+def _cp1252_fallback(exc: UnicodeError) -> tuple[str, int]:
+    """The `errors=` every text evidence read uses instead of "replace".
+    Bytes that are not valid in the file's encoding are read as the
+    Windows-1252 characters they would be, rather than as U+FFFD: a UTF-8
+    log with one line pasted in from a cp1252 tool keeps that line's
+    accents, and the byte is still there to see. Counted per thread
+    (_cp1252_fallback_count), so an import can say how many it read this
+    way — decoding happens on the thread iterating the file. UTF-16 errors
+    (a truncated last code unit) are not cp1252 bytes and still read as
+    U+FFFD."""
+    if not isinstance(exc, UnicodeDecodeError):
+        raise exc
+    if exc.encoding.startswith("utf-16"):
+        return "\ufffd", exc.end
+    bad = exc.object[exc.start:exc.end]
+    _decode_fallback.n = getattr(_decode_fallback, "n", 0) + len(bad)
+    return "".join([_CP1252_CHARS[b] for b in bad]), exc.end
+
+
+TEXT_DECODE_ERRORS = "winnow-cp1252"
+codecs.register_error(TEXT_DECODE_ERRORS, _cp1252_fallback)
+
+
+def _cp1252_fallback_count() -> int:
+    return getattr(_decode_fallback, "n", 0)
+
+
+# How much of a file sniff_text_encoding looks at to tell UTF-8 from
+# Windows-1252. Cheap to read, and enough rows of an Excel export that
+# a name with an accent in it has turned up; past it, _cp1252_fallback
+# still reads a stray byte right and the count still reports it.
+ENCODING_PROBE_BYTES = 1 << 20
+# A well-formed multi-byte UTF-8 sequence. Windows-1252 text almost never
+# contains one by accident (an accented capital followed by a symbol from
+# 0x80-0xBF), so its presence is what says "UTF-8 with a few bad bytes".
+_UTF8_MULTIBYTE = re.compile(rb"[\xc2-\xdf][\x80-\xbf]|[\xe0-\xef][\x80-\xbf]{2}|[\xf0-\xf4][\x80-\xbf]{3}")
+# The names an import reports, per codec it opened the file with.
+ENCODING_LABELS = {"utf-8-sig": "utf-8", "utf-16": "utf-16", "cp1252": "cp1252"}
+
+
+def _encoding_for_head(head: bytes, complete: bool) -> str:
+    if head[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return "utf-16"   # codec reads the BOM itself and picks LE/BE
+    try:
+        # final=False unless the probe is the whole file: a multi-byte
+        # character cut in half at the probe's edge is not an error.
+        codecs.getincrementaldecoder("utf-8")().decode(head, final=complete)
+        return "utf-8-sig"
+    except UnicodeDecodeError:
+        pass
+    # Not valid UTF-8. A file that also holds real multi-byte UTF-8 is UTF-8
+    # with a few bad bytes (a corrupt line, a paste from elsewhere): reading
+    # it all as cp1252 would turn every genuine "é" in it into "Ã©", and the
+    # fallback handles the bad bytes one by one. Only text with no UTF-8 in
+    # it at all is a legacy 8-bit file.
+    if _UTF8_MULTIBYTE.search(head):
+        return "utf-8-sig"
+    return "cp1252"
+
+
 def sniff_text_encoding(path: str) -> str:
-    """The encoding to open a text evidence file with — utf-8-sig unless a
-    UTF-16 byte-order mark says otherwise. Windows PowerShell 5.1's
-    Out-File and `>` write UTF-16LE by default, so UTF-16 CSVs are routine
-    DFIR inputs; decoded as UTF-8-with-replacement they turn into headers
-    full of NULs (which used to kill CREATE TABLE with "the query contains
-    a null character") and unreadable cells. BOM-less UTF-16 is left
-    alone — guessing without a BOM mislabels legitimate binary-ish text."""
+    """The encoding to open a text evidence file with — open it with
+    errors=TEXT_DECODE_ERRORS. utf-8-sig unless a UTF-16 byte-order mark
+    says otherwise, or the start of the file is not UTF-8 and has no
+    UTF-8 in it at all, which is Windows-1252.
+
+    Windows PowerShell 5.1's Out-File and `>` write UTF-16LE by default,
+    so UTF-16 CSVs are routine DFIR inputs; decoded as UTF-8-with-
+    replacement they turn into headers full of NULs (which used to kill
+    CREATE TABLE with "the query contains a null character") and
+    unreadable cells. BOM-less UTF-16 is left alone — guessing without a
+    BOM mislabels legitimate binary-ish text. Excel on Windows saves
+    "CSV" in the ANSI code page, Windows-1252 in the west, and so do older
+    tools: read as UTF-8 every accented letter became U+FFFD with no
+    warning ("José" -> "Jos\ufffd"), and the byte was gone. Windows-1252
+    rather than Latin-1 because it is what those files are — the two
+    differ only in 0x80-0x9F, where cp1252 has the euro sign, dashes and
+    curly quotes and Latin-1 has control characters nobody writes."""
     try:
         with open(path, "rb") as f:
-            head = f.read(2)
+            head = f.read(ENCODING_PROBE_BYTES)
+            complete = len(head) < ENCODING_PROBE_BYTES or not f.read(1)
     except OSError:
         return "utf-8-sig"
-    if head in (b"\xff\xfe", b"\xfe\xff"):
-        return "utf-16"   # codec reads the BOM itself and picks LE/BE
-    return "utf-8-sig"
+    return _encoding_for_head(head, complete)
+
+
+def decode_text_sample(raw: bytes, complete: bool = False, encoding: str | None = None) -> tuple[str, str]:
+    """The first bytes of a text file -> (text, encoding label), decoded
+    exactly as an import of the whole file would decode them, because the
+    preview an analyst approves has to be the table they get. `complete`
+    is whether `raw` is the whole file (a character cut at the end of a
+    sample is not an error). Pass `encoding` (sniff_text_encoding's
+    answer) when the file itself is at hand: it probes more than a
+    preview's sample holds."""
+    enc = encoding or _encoding_for_head(raw[:ENCODING_PROBE_BYTES],
+                                         complete and len(raw) <= ENCODING_PROBE_BYTES)
+    text = codecs.getincrementaldecoder(enc)(errors=TEXT_DECODE_ERRORS).decode(raw, final=complete)
+    return text, ENCODING_LABELS[enc]
+
+
+def _encoding_report(enc: str, fallback_bytes: int) -> dict:
+    """What an import says about how it read its bytes: `encoding` is the
+    label for the codec, `cp1252_bytes` how many bytes of a UTF-8 file
+    were not UTF-8 and were read as Windows-1252 instead. `meta` is what
+    is kept on the source (sources.origin_meta, NULL for an import that
+    needs no note) — the toast is gone in seconds, and how evidence bytes
+    were interpreted belongs with the table they became."""
+    label = ENCODING_LABELS[enc]
+    n = fallback_bytes if label == "utf-8" else 0
+    meta = None
+    if label == "cp1252":
+        meta = {"encoding": "cp1252"}
+    elif n:
+        meta = {"encoding": "utf-8", "cp1252_bytes": n}
+    return {"encoding": label, "cp1252_bytes": n, "meta": meta}
 
 
 def sanitize_columns(raw: list[str]) -> list[str]:
@@ -823,8 +973,8 @@ def sanitize_columns(raw: list[str]) -> list[str]:
     for i, name in enumerate(raw):
         # Strip C0 control characters (NUL and friends): they reach here
         # from mis-decoded files, and a NUL in a header aborts CREATE TABLE
-        # with an error no analyst can act on. errors="replace" cells are
-        # data and stay as-is; a *name* must be printable and quotable.
+        # with an error no analyst can act on. Mis-decoded cells are data
+        # and stay as-is; a *name* must be printable and quotable.
         name = "".join(ch for ch in (name or "") if ch >= " " or ch in "\t")
         clean = name.strip().lstrip("\ufeff") or f"col_{i + 1}"
         if clean.lower() in RESERVED_COLUMN_NAMES:
@@ -910,6 +1060,136 @@ def infer_type(values: Iterable[str]) -> str:
     return "text"
 
 
+class _JsonNumber(str):
+    """A JSON number, kept as the literal text the file wrote it as.
+
+    json.loads turns numbers into floats, and the cell then said what
+    float() made of them rather than what the evidence said: 1.10 became
+    1.1, 1e5 became 100000.0, 1E400 became inf, and nineteen significant
+    digits became seventeen. An integer is no safer — past Python's
+    4,300-digit conversion limit json.loads raised, and the whole file
+    failed. Every cell is TEXT anyway (the CSV convention), so the number
+    is never converted at all: this is what parse_float/parse_int/
+    parse_constant build, and it is a str, so a cell is just the text.
+    The one place it must not act like one is inside a container written
+    back out as JSON text — _json_text writes it unquoted."""
+    __slots__ = ()
+
+
+class _JsonObjectWithDuplicates(dict):
+    """An object that names one key more than once. json.loads keeps the
+    last value and the first vanishes without a trace — an evidence
+    record that said user=alice and user=root showed only root. The dict
+    holds what json.loads would have (anything reading it as a dict sees
+    the usual thing); `pairs` keeps every (key, value) in document order,
+    which is what _flatten_json and _json_text read."""
+    __slots__ = ("pairs",)
+
+
+def _json_object(pairs: list) -> dict:
+    obj = dict(pairs)
+    if len(obj) != len(pairs):
+        obj = _JsonObjectWithDuplicates(obj)
+        obj.pairs = pairs
+    return obj
+
+
+# Every JSON evidence read goes through these two, never bare json.load(s).
+_JSON_READ = {"parse_float": _JsonNumber, "parse_int": _JsonNumber,
+              "parse_constant": _JsonNumber, "object_pairs_hook": _json_object}
+
+
+def _json_loads(text: str) -> Any:
+    return json.loads(text, **_JSON_READ)
+
+
+def _json_load(fh) -> Any:
+    return json.load(fh, **_JSON_READ)
+
+
+def _json_items(obj: dict):
+    return obj.pairs if isinstance(obj, _JsonObjectWithDuplicates) else obj.items()
+
+
+# What json.dumps(..., ensure_ascii=False) quotes a string with — the C
+# function itself, without building a JSONEncoder per call.
+_json_quote = json.encoder.encode_basestring
+_JSON_SCALAR = {None: "null", True: "true", False: "false"}
+# How deep _json_text recurses before handing the rest to the iterative
+# writer: two frames a level (the comprehension is its own frame before
+# 3.12), well inside the interpreter's limit from wherever ingest calls it.
+_JSON_TEXT_RECURSE = 200
+
+
+def _json_text(value: Any, depth: int = 0) -> str:
+    """json.dumps(value, ensure_ascii=False), character for character,
+    except that a _JsonNumber is written as its literal rather than quoted
+    as the str it is, and a duplicated key is written as many times as the
+    file had it. json.dumps has no hook for writing a value raw, hence a
+    writer of our own — recursive because that measured twice as fast as
+    an explicit stack (and faster than the json.dumps call it replaced,
+    which built a JSONEncoder every time), and _json_text_deep below the
+    first 200 levels, because what reaches here is whatever lies under
+    _flatten_json's depth cap, and a document json accepted can be
+    thousands of levels deep."""
+    t = type(value)
+    if t is str:
+        return _json_quote(value)
+    if t is _JsonNumber:
+        return str.__str__(value)
+    if depth >= _JSON_TEXT_RECURSE:
+        return _json_text_deep(value)
+    if t is list:
+        return "[" + ", ".join([_json_text(v, depth + 1) for v in value]) + "]"
+    if isinstance(value, dict):
+        return "{" + ", ".join([_json_quote(k if type(k) is str else str(k)) + ": " + _json_text(v, depth + 1)
+                               for k, v in _json_items(value)]) + "}"
+    if value is None or value is True or value is False:
+        return _JSON_SCALAR[value]
+    return json.dumps(value)   # a Python number handed in by a caller
+
+
+_JSON_END = object()
+
+
+def _json_text_deep(value: Any) -> str:
+    """_json_text's output for a value nested too deep to recurse into —
+    the same writer as an explicit stack."""
+    parts: list[str] = []
+    append = parts.append
+    stack: list[list] = []
+
+    def emit(v: Any) -> None:
+        if isinstance(v, (dict, list)):
+            if isinstance(v, dict):
+                append("{")
+                stack.append([iter(_json_items(v)), "}", True])
+            else:
+                append("[")
+                stack.append([iter(v), "]", True])
+        else:
+            append(_json_text(v))   # a scalar: no recursion
+
+    emit(value)
+    while stack:
+        frame = stack[-1]
+        item = next(frame[0], _JSON_END)
+        if item is _JSON_END:
+            append(frame[1])
+            stack.pop()
+            continue
+        if frame[2]:
+            frame[2] = False
+        else:
+            append(", ")
+        if frame[1] == "}":
+            key, item = item
+            append(_json_quote(key if type(key) is str else str(key)))
+            append(": ")
+        emit(item)
+    return "".join(parts)
+
+
 # JSON's "\udc80" (legal, and how Plaso's serializer writes an NTFS name
 # holding an unpaired surrogate) decodes to a lone surrogate, which has no
 # UTF-8 encoding: the batch insert raised "surrogates not allowed" and the
@@ -943,13 +1223,14 @@ def _json_leaf_text(value: Any) -> str:
     TEXT, same all-values-are-TEXT convention as CSV ingest. An object or
     array is JSON-stringified whole rather than dropped or half-flattened —
     evidence fidelity over tidiness, same reasoning CLAUDE.md gives for not
-    typing columns at ingest."""
+    typing columns at ingest. A number is the text the file wrote
+    (_JsonNumber)."""
     if value is None:
         return ""
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (dict, list)):
-        return _utf8_text(json.dumps(value, ensure_ascii=False))
+        return _utf8_text(_json_text(value))
     return _utf8_text(str(value))
 
 
@@ -965,7 +1246,7 @@ def _storable_cell(value: Any) -> Any:
     return _utf8_text(str(value))
 
 
-def _flatten_json(obj: dict, max_depth: int | None) -> dict[str, str]:
+def _flatten_json(obj: dict, max_depth: int | None, clashes: dict | None = None) -> dict[str, str]:
     """Flattens nested OBJECTS into dot-notation keys — {"user": {"name":
     "a"}} -> {"user.name": "a"} — but never arrays: a list value is always
     JSON-stringified as one column's text, at whatever depth it's found,
@@ -978,8 +1259,18 @@ def _flatten_json(obj: dict, max_depth: int | None) -> dict[str, str]:
     flattens without limit ("full"). Any other int is how many levels of
     *object* nesting to unfold before stringifying whatever's left ("depth
     N") — e.g. max_depth=1 unfolds `user.name` but leaves `user.address`
-    (a further-nested object) as one JSON-text column."""
+    (a further-nested object) as one JSON-text column.
+
+    Two values can want one column: {"process": {"name": "evil.exe"},
+    "process.name": "svchost.exe"} flattens both to `process.name`, and so
+    does a key the object names twice. The dict used to keep whichever came
+    last, so whoever wrote the record chose which one the analyst saw. The
+    first now keeps the name and each later one takes the next free
+    `_1`, `_2`… (sanitize_columns' suffix for a duplicated CSV header);
+    `clashes`, when given, counts the records it happened in."""
     out: dict[str, str] = {}
+    next_suffix: dict[str, int] = {}
+    clashed = False
 
     # 64: far past any real log format, far short of the interpreter's
     # recursion limit — a pathological 3,000-level document used to walk
@@ -987,21 +1278,36 @@ def _flatten_json(obj: dict, max_depth: int | None) -> dict[str, str]:
     # cap the remainder is stringified, same as "depth N" mode's leftovers.
     FULL_DEPTH_CAP = 64
 
+    def put(key: str, text: str) -> None:
+        nonlocal clashed
+        if key in out:
+            clashed = True
+            # Remembered per key, so a record naming one key 100,000 times
+            # costs 100,000 steps rather than a scan from _1 each time.
+            n = next_suffix.get(key, 1)
+            while f"{key}_{n}" in out:
+                n += 1
+            next_suffix[key] = n + 1
+            key = f"{key}_{n}"
+        out[key] = text
+
     def walk(value: Any, key_path: str, depth: int) -> None:
         if isinstance(value, dict) and (depth < max_depth if max_depth is not None
                                         else depth < FULL_DEPTH_CAP):
             if not value:
-                out[key_path] = "{}"
+                put(key_path, "{}")
                 return
             # _utf8_text on keys as _json_leaf_text does on values: a lone
             # surrogate in a key failed the import before the first row.
-            for k, v in value.items():
+            for k, v in _json_items(value):
                 walk(v, f"{key_path}.{_utf8_text(str(k))}" if key_path else _utf8_text(str(k)), depth + 1)
         else:
-            out[key_path] = _json_leaf_text(value)   # UTF-8-safe, as keys are above
+            put(key_path, _json_leaf_text(value))   # UTF-8-safe, as keys are above
 
-    for k, v in obj.items():
+    for k, v in _json_items(obj):
         walk(v, _utf8_text(str(k)), 0)
+    if clashed and clashes is not None:
+        clashes["count"] += 1
     return out
 
 
@@ -1019,13 +1325,13 @@ def _iter_json_records(path: str, bad: dict | None = None) -> Iterable[dict]:
     without extra tooling)."""
     ext = os.path.splitext(path)[1].lower()
     if ext in (".jsonl", ".ndjson"):
-        with open(path, "r", encoding=sniff_text_encoding(path), errors="replace") as f:
+        with open(path, "r", encoding=sniff_text_encoding(path), errors=TEXT_DECODE_ERRORS) as f:
             for lineno, line in enumerate(f, start=1):
                 line = line.strip()
                 if not line:
                     continue
                 try:
-                    obj = json.loads(line)
+                    obj = _json_loads(line)
                 except json.JSONDecodeError as e:
                     # Same philosophy as CSV's ragged rows: one broken line
                     # (a truncated write, a log rotation seam) must not cost
@@ -1042,8 +1348,8 @@ def _iter_json_records(path: str, bad: dict | None = None) -> Iterable[dict]:
                     continue
                 yield obj if isinstance(obj, dict) else {"value": obj}
         return
-    with open(path, "r", encoding=sniff_text_encoding(path), errors="replace") as f:
-        data = json.load(f)
+    with open(path, "r", encoding=sniff_text_encoding(path), errors=TEXT_DECODE_ERRORS) as f:
+        data = _json_load(f)
     if isinstance(data, list):
         for obj in data:
             yield obj if isinstance(obj, dict) else {"value": obj}
@@ -2934,10 +3240,12 @@ class Store:
 
         # 1 MB read buffer: the default 8 KB means a 20 GB file is ~2.5M
         # read() syscalls before the csv layer even sees a byte.
-        fh = open(path, "r", encoding=sniff_text_encoding(path), errors="replace",
+        encoding = sniff_text_encoding(path)
+        fh = open(path, "r", encoding=encoding, errors=TEXT_DECODE_ERRORS,
                   newline="", buffering=1 << 20)
         head = fh.read(64 * 1024)
         fh.seek(0)
+        fallback0 = _cp1252_fallback_count()   # after the seek: the head is read twice
         if delimiter is None:
             # `path`, not `name`: the display name is the caller's to
             # override and may carry no extension at all, and the
@@ -3004,7 +3312,7 @@ class Store:
                         row = (row + [""] * ncols)[:ncols]
                     # An unbalanced quote makes csv silently swallow every
                     # following line into one field until the next quote (or
-                    # a hard error at the 128KB field limit) — dozens of
+                    # a hard error at CSV_FIELD_LIMIT) — dozens of
                     # evidence lines vanish from the grid with the ragged
                     # counter reading zero. The reader's line_num counts
                     # PHYSICAL lines consumed, so a row that swallowed its
@@ -3077,8 +3385,8 @@ class Store:
             types = [(column_types[i] if i < len(column_types) and column_types[i] in ("text", "number", "datetime") else t)
                      for i, t in enumerate(types)]
         colmeta = [{"name": c, "type": t} for c, t in zip(cols, types)]
-        with self.lock, self.db:
-            self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
+        decoded = _encoding_report(encoding, _cp1252_fallback_count() - fallback0)
+        self._finish_source_columns(source_id, colmeta, decoded, name)
 
         if error is not None:
             if total == 0:
@@ -3101,11 +3409,12 @@ class Store:
         rec["rows_per_sec"] = int(total / elapsed) if elapsed > 0 else 0
         rec["ragged_rows"] = ragged
         rec["suspect_quote_rows"] = suspect_quotes
+        rec["encoding"], rec["cp1252_bytes"] = decoded["encoding"], decoded["cp1252_bytes"]
         return rec
 
     def ingest_text(self, path: str, name: str | None = None, build_fts: bool = True,
                     progress=None, cancel=None) -> dict:
-        """Import a file as raw text: one row per physical line, the whole
+        r"""Import a file as raw text: one row per physical line, the whole
         line in the one TEXT_COLUMN, nothing split, nothing treated as a
         header. For log files — syslog, hostd.log, auth.log.1, an
         extensionless dump — which the CSV path mangled: it sniffed a
@@ -3118,13 +3427,19 @@ class Store:
         (blank lines are kept as empty rows for exactly that reason — the
         grid has a hide-empty-rows option for the analyst who'd rather not
         see them). Same batching, progress, cancel and keep-what-committed
-        contract as ingest_csv; same encoding sniff."""
+        contract as ingest_csv; same encoding sniff.
+
+        A line ends at \n and nowhere else (_text_line has the why)."""
         name = name or os.path.basename(path)
         if looks_binary(path):
             raise ValueError(f"{name} looks like a binary file (NUL bytes in its first 8 KB) — not importable as text")
         size = os.path.getsize(path)
         file_hash = self._quick_hash(path)
-        fh = open(path, "r", encoding=sniff_text_encoding(path), errors="replace", buffering=1 << 20)
+        # newline="\n", not the default: universal newlines also end a line
+        # at a lone \r. See _text_line.
+        encoding = sniff_text_encoding(path)
+        fh = open(path, "r", encoding=encoding, errors=TEXT_DECODE_ERRORS,
+                  newline="\n", buffering=1 << 20)
         try:
             first = fh.readline()
         except Exception:
@@ -3134,6 +3449,7 @@ class Store:
             fh.close()
             raise ValueError("File is empty")
         fh.seek(0)
+        fallback0 = _cp1252_fallback_count()
 
         cols = [TEXT_COLUMN]
         with self.lock, self.db:
@@ -3158,9 +3474,7 @@ class Store:
         with self._ingest_synchronous_off():
             try:
                 for line in fh:
-                    # Universal newlines already folded \r\n to \n; the
-                    # final line may have no terminator at all.
-                    batch.append((line[:-1] if line.endswith("\n") else line,))
+                    batch.append((_text_line(line),))
                     if len(batch) >= BATCH:
                         if cancel is not None and cancel():
                             raise IngestCancelled(f"Import of {name} cancelled")
@@ -3190,8 +3504,8 @@ class Store:
                 fh.close()
 
         colmeta = [{"name": TEXT_COLUMN, "type": "text"}]
-        with self.lock, self.db:
-            self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
+        decoded = _encoding_report(encoding, _cp1252_fallback_count() - fallback0)
+        self._finish_source_columns(source_id, colmeta, decoded, name)
         if error is not None:
             if total == 0:
                 self.drop_source(source_id)
@@ -3204,18 +3518,42 @@ class Store:
         rec["rows_per_sec"] = int(total / elapsed) if elapsed > 0 else 0
         rec["ragged_rows"] = 0
         rec["suspect_quote_rows"] = 0
+        rec["encoding"], rec["cp1252_bytes"] = decoded["encoding"], decoded["cp1252_bytes"]
         return rec
 
     @staticmethod
     def preview_text_lines(text: str, max_rows: int = 50) -> dict:
-        """The raw-text importer's preview: the first lines, one per row, in
+        r"""The raw-text importer's preview: the first lines, one per row, in
         the shape preview_csv_text returns so the import preview renders
-        them with the same table."""
-        lines = text.splitlines()
-        if not lines and not text:
+        them with the same table. Split exactly as ingest_text splits —
+        str.splitlines() breaks on \r, \v, \f, \x85 and U+2028 too, so
+        the preview showed rows the import would not make."""
+        if not text:
             raise ValueError("File is empty")
+        lines = text.split("\n")
+        if lines[-1] == "":
+            lines.pop()   # the last line's terminator, not a blank line after it
+        lines = [_text_line(ln) for ln in lines[:max_rows]]
         return {"delimiter": None, "columns": [TEXT_COLUMN],
-                "sample_rows": [[ln] for ln in lines[:max_rows]], "inferred_types": ["text"]}
+                "sample_rows": [[ln] for ln in lines], "inferred_types": ["text"]}
+
+    def _finish_source_columns(self, source_id: int, colmeta: list[dict], decoded: dict,
+                               name: str) -> None:
+        """The last write of a text import: the typed columns, and — when
+        the bytes were not plain UTF-8 — how they were read
+        (_encoding_report), on the source where it outlives the toast.
+        The log gets the same line: it is the record of what happened."""
+        with self.lock, self.db:
+            if decoded["meta"] is None:
+                self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
+            else:
+                self.db.execute("UPDATE sources SET columns=?, origin_meta=? WHERE id=?",
+                                (json.dumps(colmeta), json.dumps(decoded["meta"]), source_id))
+        if decoded["encoding"] == "cp1252":
+            wlog.record("warn", f"{name} is not UTF-8 — read as Windows-1252")
+        elif decoded["cp1252_bytes"]:
+            wlog.record("warn", f"{name}: {decoded['cp1252_bytes']:,} byte(s) were not valid UTF-8 "
+                                "and were read as Windows-1252")
 
     def _commit_ingest_batch(self, insert_sql: str, batch: list[tuple], source_id: int, total: int,
                              also: tuple[str, list[tuple]] | None = None,
@@ -3676,10 +4014,12 @@ class Store:
         seen_cols: list[str] = []
         seen_set: set[str] = set()
         bad_prev = {"count": 0, "first_line": 0, "first_error": ""}
+        clashes = {"count": 0}
         sample_flat: list[dict[str, str]] = []
         record_count = 0
+        fallback0 = _cp1252_fallback_count()
         for rec in _iter_json_records(path, bad=bad_prev):
-            flat = _flatten_json(rec, max_depth)
+            flat = _flatten_json(rec, max_depth, clashes)
             for k in flat:
                 if k not in seen_set:
                     seen_set.add(k)
@@ -3699,7 +4039,10 @@ class Store:
         types = [infer_type([r[i] for r in sample_rows]) for i in range(len(cols))] if sample_rows else ["text"] * len(cols)
         return {"columns": cols, "sample_rows": sample_rows, "inferred_types": types,
                 "record_count": record_count, "bad_records": bad_prev["count"],
-                "first_bad_line": bad_prev["first_line"]}
+                "first_bad_line": bad_prev["first_line"], "key_collisions": clashes["count"],
+                **{k: v for k, v in _encoding_report(sniff_text_encoding(path),
+                                                     _cp1252_fallback_count() - fallback0).items()
+                   if k != "meta"}}
 
     def ingest_json(
         self,
@@ -3778,11 +4121,14 @@ class Store:
         # here (fresh collector) because THIS pass is the one that decides
         # what actually lands in the table.
         bad = {"count": 0, "first_line": 0, "first_error": ""}
+        clashes = {"count": 0}
         error: Exception | None = None
+        # Pass 2 only: pass 1 decoded the same bytes once already.
+        fallback0 = _cp1252_fallback_count()
         with self._ingest_synchronous_off():
             try:
                 for rec in _iter_json_records(path, bad=bad):
-                    flat = _flatten_json(rec, max_depth)
+                    flat = _flatten_json(rec, max_depth, clashes)
                     row = [flat.get(key_by_col[c], "") for c in cols]
                     batch.append(tuple(row))
                     if len(sample) < SAMPLE_ROWS:
@@ -3818,8 +4164,8 @@ class Store:
 
         types = [infer_type([r[i] for r in sample]) for i in range(ncols)] if sample else ["text"] * ncols
         colmeta = [{"name": c, "type": t} for c, t in zip(cols, types)]
-        with self.lock, self.db:
-            self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
+        decoded = _encoding_report(sniff_text_encoding(path), _cp1252_fallback_count() - fallback0)
+        self._finish_source_columns(source_id, colmeta, decoded, name)
 
         if error is not None:
             if total == 0:
@@ -3835,6 +4181,8 @@ class Store:
         rec["rows_per_sec"] = int(total / elapsed) if elapsed > 0 else 0
         rec["bad_records"] = bad["count"]
         rec["first_bad_line"] = bad["first_line"]
+        rec["key_collisions"] = clashes["count"]
+        rec["encoding"], rec["cp1252_bytes"] = decoded["encoding"], decoded["cp1252_bytes"]
         return rec
 
     def _create_source_shell(self, name: str, cols: list[str], *, path: str | None = None,
@@ -3989,11 +4337,13 @@ class Store:
         A file is excluded for exactly one of: its extension isn't
         recognized ("extension"), include_patterns is non-empty and nothing
         in it matched ("no include pattern matched"), a pattern in
-        exclude_patterns matched ("excluded by pattern: <pattern>"), or it
+        exclude_patterns matched ("excluded by pattern: <pattern>"), it
         couldn't be stat'd ("unreadable" — a broken symlink, a permission
-        error mid-walk). Surfacing the reason is the point: tuning a
-        profile's patterns is a visible feedback loop instead of guessing
-        whether "*Amcache*" actually matched anything.
+        error mid-walk), or it is a FIFO, socket or device node ("not a
+        regular file" — never opened, since opening a FIFO blocks).
+        Surfacing the reason is the point: tuning a profile's patterns is a
+        visible feedback loop instead of guessing whether "*Amcache*"
+        actually matched anything.
 
         `already_imported` flags a matched file whose absolute path already
         equals some source's stored path — same abspath-equality convention
@@ -4047,11 +4397,23 @@ class Store:
                 fpath = os.path.join(dirpath, fname)
                 rel = os.path.relpath(fpath, root_abs).replace(os.sep, "/")
                 try:
-                    size = os.path.getsize(fpath)
+                    st = os.stat(fpath)
                 except OSError:
                     excluded.append({"path": fpath, "rel_path": rel, "reason": "unreadable"})
                     continue
-                entry = {"path": fpath, "rel_path": rel, "size_bytes": size}
+                # Only a regular file is a candidate, decided from the stat
+                # already in hand and before anything opens it. os.walk lists
+                # FIFOs, sockets and device nodes as files, and a mounted
+                # *nix image is full of them (/run/systemd/initctl). open() on
+                # a FIFO blocks until a writer appears, which on an image is
+                # never: the binary probe hung the scan, and a FIFO named
+                # *.csv was matched and hung the import. os.stat follows
+                # symlinks, so a link to a real file still imports and one
+                # to a FIFO does not.
+                if not stat.S_ISREG(st.st_mode):
+                    excluded.append({"path": fpath, "rel_path": rel, "reason": "not a regular file"})
+                    continue
+                entry = {"path": fpath, "rel_path": rel, "size_bytes": st.st_size}
                 ext = os.path.splitext(fname)[1].lower()
                 by_filename_pattern = any(fnmatch.fnmatch(fname.lower(), p.lower()) for p in fname_pats)
                 by_ext = ext in exts
@@ -4321,7 +4683,8 @@ class Store:
                 job["result"] = [
                     {k: r.get(k) for k in ("id", "name", "row_count", "elapsed_sec", "rows_per_sec",
                                            "ragged_rows", "suspect_quote_rows", "bad_records",
-                                           "first_bad_line", "undecodable_values")}
+                                           "first_bad_line", "key_collisions", "encoding",
+                                           "cp1252_bytes", "undecodable_values")}
                     for r in results
                 ]
             wlog.record("info", f"Import finished: {job['name']} ({job['kind']}) — "
@@ -4833,6 +5196,15 @@ class Store:
                 if cur.rowcount == 0:
                     raise KeyError(f"No table {source_id}")
         return self.get_source(source_id)
+
+    def set_source_path(self, source_id: int, path: str | None) -> None:
+        """Where a table says it was imported from, when that is not the
+        file it was read from: an upload is parsed (and hashed) from a
+        spool deleted the moment the import returns, so the name the
+        browser sent is what gets recorded, not a temp path that points at
+        nothing — or, worse, at a leftover copy of the evidence."""
+        with self.lock, self.db:
+            self.db.execute("UPDATE sources SET path=? WHERE id=?", (path, source_id))
 
     def get_source(self, source_id: int) -> dict:
         """A merge is addressed as a negative source_id (merges.id=m ->

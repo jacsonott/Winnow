@@ -10,10 +10,13 @@ recovery contracts, which nothing else in the suite did:
   into NUL-riddled headers that abort CREATE TABLE;
 - one broken JSONL line is counted and skipped, never the whole file;
 - the quote-swallow signature (one field eating the lines after it) is
-  at least *flagged*, since the ragged counter reads zero for it."""
+  at least *flagged*, since the ragged counter reads zero for it;
+- a field past csv's own 128 KB limit is a real field, not a broken
+  file, and imports whole."""
 
 from __future__ import annotations
 
+import csv
 import os
 
 import pytest
@@ -23,15 +26,28 @@ from winnow.store import sanitize_columns
 
 HEADERS = {"X-Timeline-Lite-Client": "1"}
 
-# A field over csv's 131072-byte limit — the reliable way one pathological
-# line hard-stops the reader mid-file.
+# A field over csv's own 131072-character default limit. Store raises the
+# limit to CSV_FIELD_LIMIT, so this is an ordinary (big) field there; the
+# poison-line tests put the old limit back for their duration, which is
+# what keeps a poison line cheap to write — one over the real cap would be
+# a 64 MB fixture.
 BIG_FIELD = "x" * 200_000
+OLD_CSV_FIELD_LIMIT = 131_072
+
+
+@pytest.fixture
+def poison_field_limit():
+    """The reliable way to hard-stop the csv reader mid-file is a field
+    over the field limit; lower the limit so BIG_FIELD is one."""
+    before = csv.field_size_limit(OLD_CSV_FIELD_LIMIT)
+    yield
+    csv.field_size_limit(before)
 
 
 # ------------------------------------------------------------------ csv
 
 
-def test_mid_file_error_keeps_every_parsed_row(store, tmp_path):
+def test_mid_file_error_keeps_every_parsed_row(store, tmp_path, poison_field_limit):
     """25,000 good rows then a poison line: 20,000 had committed, 5,000
     sat in the pending batch. All 25,000 must survive — and the error has
     to say where it stopped and what was kept, because 'field larger than
@@ -51,7 +67,7 @@ def test_mid_file_error_keeps_every_parsed_row(store, tmp_path):
     assert "Line" in msg
 
 
-def test_error_on_the_first_data_line_leaves_no_husk(store, tmp_path):
+def test_error_on_the_first_data_line_leaves_no_husk(store, tmp_path, poison_field_limit):
     """Nothing parsed, nothing kept — and no 0-row source in the table
     list masquerading as a real (empty) import."""
     p = tmp_path / "instant.csv"
@@ -59,6 +75,48 @@ def test_error_on_the_first_data_line_leaves_no_husk(store, tmp_path):
     with pytest.raises(ValueError):
         store.ingest_csv(str(p), build_fts=False)
     assert store.list_sources() == []
+
+
+def test_a_field_over_the_csv_default_limit_imports_whole(store, tmp_path):
+    """csv's default limit is 131072 characters, and one field past it
+    stopped the import at that line ("field larger than field limit") —
+    an EvtxECmd payload with a PowerShell script block in it is routinely
+    bigger. The field lands whole, the rows after it land too, and the
+    preview reads the file the same way the import does."""
+    p = tmp_path / "payload.csv"
+    p.write_text(f"a,b\nbefore,x\nbig,{BIG_FIELD}\nafter,y\n", encoding="utf-8")
+    rec = store.ingest_csv(str(p), build_fts=False)
+    assert rec["row_count"] == 3
+    rows = store.db.execute(f"SELECT a, length(b) FROM src_{rec['id']} ORDER BY rid").fetchall()
+    assert [tuple(r) for r in rows] == [("before", 1), ("big", len(BIG_FIELD)), ("after", 1)]
+    prev = store.preview_csv_text(p.read_text(encoding="utf-8"), name=str(p))
+    assert [r[0] for r in prev["sample_rows"]] == ["before", "big", "after"]
+
+
+def test_csv_field_limit_fits_a_windows_c_long():
+    """field_size_limit takes a C long — 32 bits on Windows — so the
+    obvious sys.maxsize raises OverflowError there at import time."""
+    from winnow.store import CSV_FIELD_LIMIT
+    assert csv.field_size_limit() == CSV_FIELD_LIMIT
+    assert OLD_CSV_FIELD_LIMIT < CSV_FIELD_LIMIT <= 2**31 - 1
+
+
+def test_stray_quote_swallowing_past_the_old_limit_is_flagged(store, tmp_path):
+    """With the old limit a stray quote that swallowed more than 128 KB of
+    the lines after it hard-stopped the import. Now the swallow runs on to
+    the end of the file — and the many-lines-in-one-row heuristic is the
+    signal the analyst gets, so it has to fire for it."""
+    p = tmp_path / "swallow_big.csv"
+    with open(p, "w", encoding="utf-8") as f:
+        f.write("a,b\n")
+        for i in range(10):
+            f.write(f"r{i},x\n")
+        f.write('oops,"unclosed\n')
+        for i in range(3000):
+            f.write(f"swallowed{i},{'y' * 60}\n")   # ~200 KB swallowed
+    rec = store.ingest_csv(str(p), build_fts=False)
+    assert rec["row_count"] == 11
+    assert rec["suspect_quote_rows"] >= 1
 
 
 def test_utf16_csv_is_decoded_not_shredded(store, tmp_path):
@@ -203,3 +261,97 @@ def test_preview_path_decodes_utf16(client, store, monkeypatch, tmp_path):
                  headers=HEADERS)
     assert res.status_code == 200
     assert res.json()["columns"] == ["Host", "User"]
+
+
+# ------------------------------------------------ legacy 8-bit encodings
+#
+# Excel on Windows saves "CSV" in the ANSI code page (Windows-1252 in the
+# west), and so do plenty of older tools. Decoded as UTF-8-with-replacement
+# every accented letter became U+FFFD — "José" imported as "Jos�",
+# with no warning — and the original byte was gone for good.
+
+
+def _col(store, rec, col):
+    return [r[0] for r in store.db.execute(f"SELECT [{col}] FROM src_{rec['id']} ORDER BY rid")]
+
+
+def test_a_cp1252_csv_is_read_as_cp1252_and_says_so(store, tmp_path):
+    p = tmp_path / "excel.csv"
+    p.write_bytes("name,city\nJosé,Zürich\n€5 – naïve,".encode("cp1252") + b"x\x81y\n")
+    rec = store.ingest_csv(str(p), build_fts=False)
+    assert _col(store, rec, "name") == ["José", "€5 – naïve"]
+    # 0x81 is one of the five bytes cp1252 leaves undefined: kept as its
+    # Latin-1 control character rather than replaced, so no byte is lost.
+    assert _col(store, rec, "city") == ["Zürich", "x\x81y"]
+    assert rec["encoding"] == "cp1252"
+    # Recorded on the source, not only in a toast that is gone in seconds.
+    assert store.get_source(rec["id"])["origin_meta"] == {"encoding": "cp1252"}
+
+
+def test_utf8_with_a_few_bad_bytes_stays_utf8(store, tmp_path):
+    """A UTF-8 file with a stray Windows-1252 byte is still UTF-8: reading
+    it all as cp1252 would turn every real "é" into "Ã©". The stray bytes
+    — one in the probe, one far past it — are read as cp1252 characters
+    and counted."""
+    p = tmp_path / "mixed.csv"
+    filler = "".join(f"r{i},plain\n" for i in range(150_000)).encode()   # > the 1 MB probe
+    p.write_bytes("name,v\nJosé,1\n".encode("utf-8") + b"Caf\xe9,2\n" + filler + b"na\xefve,3\n")
+    rec = store.ingest_csv(str(p), build_fts=False)
+    names = _col(store, rec, "name")
+    assert names[:2] == ["José", "Café"] and names[-1] == "naïve"
+    assert rec["encoding"] == "utf-8" and rec["cp1252_bytes"] == 2
+    assert store.get_source(rec["id"])["origin_meta"] == {"encoding": "utf-8", "cp1252_bytes": 2}
+
+
+def test_clean_utf8_reports_nothing(store, tmp_path):
+    p = tmp_path / "clean.csv"
+    p.write_text("name\nJosé\n� literal replacement char\n", encoding="utf-8")
+    rec = store.ingest_csv(str(p), build_fts=False)
+    assert rec["encoding"] == "utf-8" and rec["cp1252_bytes"] == 0
+    assert store.get_source(rec["id"])["origin_meta"] is None
+
+
+def test_cp1252_text_and_jsonl_imports(store, tmp_path):
+    log = tmp_path / "app.log"
+    log.write_bytes("Benutzer Müller angemeldet\n".encode("cp1252"))
+    rec = store.ingest_text(str(log), build_fts=False)
+    assert _col(store, rec, "Message") == ["Benutzer Müller angemeldet"]
+    assert rec["encoding"] == "cp1252"
+    jl = tmp_path / "ev.jsonl"
+    jl.write_bytes('{"user": "Müller"}\n'.encode("cp1252"))
+    rec = store.ingest_json(str(jl), build_fts=False)
+    assert _col(store, rec, "user") == ["Müller"]
+    assert rec["encoding"] == "cp1252"
+
+
+def test_the_job_result_carries_the_encoding(store, tmp_path):
+    import time
+    p = tmp_path / "excel.csv"
+    p.write_bytes("name\nJosé\n".encode("cp1252"))
+    store.start_ingest_job("csv", str(p), options={"build_fts": False})
+    for _ in range(200):
+        j = store.list_ingest_jobs()[0]
+        if j["status"] in ("done", "error"):
+            break
+        time.sleep(0.05)
+    assert j["status"] == "done", j.get("error")
+    assert j["result"][0]["encoding"] == "cp1252"
+
+
+def test_previews_decode_cp1252_the_way_the_import_does(client, store, monkeypatch, tmp_path):
+    server, c = client
+    monkeypatch.setattr(server, "STORE", store)
+    p = tmp_path / "excel.csv"
+    p.write_bytes("name,city\nJosé,Zürich\n".encode("cp1252"))
+    res = c.post("/api/ingest/preview/path", json={"path": str(p), "kind": "csv"}, headers=HEADERS)
+    assert res.status_code == 200
+    assert res.json()["sample_rows"] == [["José", "Zürich"]] and res.json()["encoding"] == "cp1252"
+    with open(p, "rb") as fh:
+        res = c.post("/api/ingest/preview", files={"file": ("excel.csv", fh, "text/csv")},
+                     data={"kind": "text"}, headers=HEADERS)
+    assert res.status_code == 200
+    assert res.json()["sample_rows"][1] == ["José,Zürich"] and res.json()["encoding"] == "cp1252"
+    j = tmp_path / "ev.jsonl"
+    j.write_bytes('{"user": "Müller"}\n'.encode("cp1252"))
+    prev = store.preview_json_file(str(j))
+    assert prev["sample_rows"] == [["Müller"]] and prev["encoding"] == "cp1252"

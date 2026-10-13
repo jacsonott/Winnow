@@ -154,9 +154,10 @@ export function openImportPreview(src, opts = {}) {
 
     function renderTable() {
       tableWrap.replaceChildren();
-      status.textContent = isLines()
+      status.textContent = (isLines()
         ? `One line per row, nothing split · showing first ${preview.sample_rows.length} lines`
-        : `Detected delimiter: ${JSON.stringify(preview.delimiter)} · showing first ${preview.sample_rows.length} rows`;
+        : `Detected delimiter: ${JSON.stringify(preview.delimiter)} · showing first ${preview.sample_rows.length} rows`)
+        + (preview.encoding === 'cp1252' ? ' · not UTF-8 — read as Windows-1252' : '');
       const t = el('table', 'preview-tbl');
       const hr = el('tr');
       preview.columns.forEach((c, i) => {
@@ -302,8 +303,13 @@ export function openJsonImportPreview(src, opts = {}) {
 
     function renderTable() {
       tableWrap.replaceChildren();
+      const clashes = preview.key_collisions || 0;
       status.textContent = `${preview.record_count.toLocaleString()} record${preview.record_count === 1 ? '' : 's'} `
-        + `· showing first ${preview.sample_rows.length} · ${preview.columns.length} column${preview.columns.length === 1 ? '' : 's'}`;
+        + `· showing first ${preview.sample_rows.length} · ${preview.columns.length} column${preview.columns.length === 1 ? '' : 's'}`
+        // Two values for one column (a duplicated key, or a literal "a.b"
+        // beside a nested a.b): both are kept, the later one suffixed.
+        + (clashes ? ` · ${clashes.toLocaleString()} record${clashes === 1 ? ' has' : 's have'} two values for one key — the later kept as <key>_1` : '')
+        + (preview.encoding === 'cp1252' ? ' · not UTF-8 — read as Windows-1252' : '');
       const t = el('table', 'preview-tbl');
       const hr = el('tr');
       preview.columns.forEach((c, i) => {

@@ -45,7 +45,8 @@ from winnow import version
 from winnow import archive
 from winnow import workspace as WS
 from winnow.store import (CASE_SUFFIX, DEFAULT_IMPORT_EXTENSIONS, PLASO_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, MissingTable, OpCancelled, RecordGone, Store, ViewExpired,
-                   describe_case_lock, is_winnow_case_file, probe_case_lock, q, rows_to_xlsx, sweep_orphan_views)
+                   decode_text_sample, describe_case_lock, is_winnow_case_file, probe_case_lock, q,
+                   rows_to_xlsx, sniff_text_encoding, sweep_orphan_views)
 
 HERE = paths.INSTALL_ROOT  # static/, plugins/, examples/plugins/ all hang off the install root
 
@@ -1997,13 +1998,19 @@ async def api_ingest_upload(
             os.remove(tmp)
 
 
-def _decode_preview_bytes(raw: bytes) -> str:
-    # Same UTF-16 BOM handling as the real ingest (store.sniff_text_encoding)
-    # so the preview an analyst approves is the table they actually get —
-    # PowerShell's UTF-16LE exports were previewing as NUL-riddled noise.
-    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
-        return raw.decode("utf-16", errors="replace")
-    return raw.decode("utf-8-sig", errors="replace")
+PREVIEW_SAMPLE_BYTES = 512 * 1024
+
+
+def _decode_preview_bytes(raw: bytes, path: str | None = None) -> tuple[str, str]:
+    # Decided and decoded exactly as the real ingest will (store.
+    # decode_text_sample — UTF-16 by BOM, Windows-1252 when it isn't UTF-8)
+    # so the preview an analyst approves is the table they actually get:
+    # PowerShell's UTF-16LE exports previewed as NUL-riddled noise, and
+    # Excel's cp1252 CSVs as "Jos\ufffd". A sample shorter than the cap is
+    # the whole file. Returns (text, encoding label). `path`, when the file
+    # is on this disk, lets the decision see as much as the import will.
+    return decode_text_sample(raw, complete=len(raw) < PREVIEW_SAMPLE_BYTES,
+                              encoding=sniff_text_encoding(path) if path else None)
 
 
 @app.post("/api/ingest/preview")
@@ -2013,18 +2020,18 @@ async def api_ingest_preview(
     has_header: bool = Form(True),
     kind: str = Form("csv"),   # "text": the raw-text importer's line-per-row preview
 ):
-    raw = await file.read(512 * 1024)  # bounded sample — full parse happens at real ingest time
-    text = _decode_preview_bytes(raw)
+    raw = await file.read(PREVIEW_SAMPLE_BYTES)  # bounded sample — full parse happens at real ingest time
+    text, encoding = _decode_preview_bytes(raw)
     try:
         if kind == "text":
-            return await run_in_threadpool(store().preview_text_lines, text)
+            return {**await run_in_threadpool(store().preview_text_lines, text), "encoding": encoding}
         # The uploaded file's own name goes through: the delimiter is read
         # from the extension first (Store._sniff), and a preview that
         # sniffed without it would show a different table from the one the
         # import then builds.
-        return await run_in_threadpool(
+        return {**await run_in_threadpool(
             store().preview_csv_text, text, delimiter=delimiter or None,
-            has_header=has_header, name=file.filename)
+            has_header=has_header, name=file.filename), "encoding": encoding}
     except Exception as e:
         raise HTTPException(400, str(e))
 
@@ -2181,34 +2188,72 @@ def api_ingest_archive_expand(body: ArchiveExpandBody):
     if not os.path.isfile(body.path):
         raise HTTPException(400, f"No file at {body.path}")
     try:
-        return archive.expand_archive(body.path)
+        return _log_archive_report(os.path.basename(body.path), archive.expand_archive(body.path))
     except archive.ArchiveError as e:
         raise HTTPException(400, str(e))
 
 
+def _log_archive_report(name: str, rep: dict) -> dict:
+    # The toast that shows these is gone in seconds; members that were
+    # skipped (damaged, unwritable, refused) or renamed (their name was
+    # taken) are a fact about the evidence, so the log keeps them.
+    for sk in rep.get("skipped", []):
+        wlog.record("warn", f"Archive {name}: skipped {sk['path']} — {sk['reason']}")
+    for rn in rep.get("renamed", []):
+        wlog.record("warn", f"Archive {name}: {rn['path']} extracted as {rn['as']} (that name was taken)")
+    return rep
+
+
+def _upload_spool(filename: str | None, fallback: str) -> tuple[str, str]:
+    """(directory, path) to spool one upload to: a private directory
+    (mkdtemp — 0700, unique) holding the file under the name the browser
+    sent. Two things depend on the name being the real one — the archive
+    extraction is named after it, and a plugin parser can read meaning
+    from it (esxi_logs takes the log type from the file name; $MFT and $J
+    are recognised by name) — and the private directory is what makes
+    using it safe: the archive route used to rename its spool to
+    <tempdir>/<that name>, overwriting and then deleting whatever file of
+    that name was already in the shared temp folder. Undo it with
+    _remove_spool."""
+    base = os.path.basename((filename or "").replace("\\", "/")).strip()
+    if base in ("", ".", ".."):
+        base = fallback
+    spool_dir = tempfile.mkdtemp(prefix="winnow-upload-")
+    return spool_dir, os.path.join(spool_dir, base)
+
+
+def _remove_spool(spool_dir: str, path: str) -> None:
+    """Undo _upload_spool: the one file, then its private directory. Not
+    rmtree: the upload routes are async, and a tree walk is blocking work
+    the event loop must not do (tests/test_event_loop_blocking.py). Nothing
+    else is ever written into the directory, so an unlink, the same one the
+    routes always did, and an rmdir are the whole job."""
+    for remove, target in ((os.remove, path), (os.rmdir, spool_dir)):
+        try:
+            remove(target)
+        except OSError:
+            pass
+
+
 @app.post("/api/ingest/archive/upload")
 async def api_ingest_archive_upload(file: UploadFile = File(...)):
-    """Upload-then-expand: the archive spools to a tempfile, expands into a
-    directory beside the CASE file (the one durable, analyst-visible place
-    an upload has), and the spool is removed either way."""
-    suffix = Path(file.filename or "upload.zip").suffix or ".zip"
-    fd, tmp = tempfile.mkstemp(suffix=suffix)
+    """Upload-then-expand: the archive spools to a private tempdir,
+    expands into a directory beside the CASE file (the one durable,
+    analyst-visible place an upload has), and the spool is removed either
+    way."""
+    spool_dir, tmp = _upload_spool(file.filename, "archive.zip")
     try:
-        with os.fdopen(fd, "wb") as out:
+        with open(tmp, "wb") as out:
             while chunk := await file.read(4 << 20):
                 out.write(chunk)
         dest_root = os.path.dirname(os.path.abspath(store().path))
-        # Name the extraction after the UPLOADED file, not the tempfile.
-        named = os.path.join(os.path.dirname(tmp), os.path.basename(file.filename or "archive.zip"))
-        os.replace(tmp, named)
-        tmp = named
         try:
-            return await run_in_threadpool(archive.expand_archive, tmp, dest_root=dest_root)
+            return _log_archive_report(os.path.basename(tmp), await run_in_threadpool(
+                archive.expand_archive, tmp, dest_root=dest_root))
         except archive.ArchiveError as e:
             raise HTTPException(400, str(e))
     finally:
-        with contextlib.suppress(OSError):
-            os.remove(tmp)
+        _remove_spool(spool_dir, tmp)
 
 
 class PreviewPath(BaseModel):
@@ -2235,12 +2280,13 @@ def api_ingest_preview_path(body: PreviewPath):
         if kind in ("csv", "text"):
             # Same bounded sample the upload preview reads — never the file.
             with open(body.path, "rb") as f:
-                raw = f.read(512 * 1024)
-            text = _decode_preview_bytes(raw)
+                raw = f.read(PREVIEW_SAMPLE_BYTES)
+            text, encoding = _decode_preview_bytes(raw, body.path)
             if kind == "text":
-                return store().preview_text_lines(text)
-            return store().preview_csv_text(text, delimiter=body.delimiter or None,
-                                            has_header=body.has_header, name=body.path)
+                return {**store().preview_text_lines(text), "encoding": encoding}
+            return {**store().preview_csv_text(text, delimiter=body.delimiter or None,
+                                               has_header=body.has_header, name=body.path),
+                    "encoding": encoding}
         if kind == "json":
             return store().preview_json_file(body.path, flatten_mode=body.flatten_mode,
                                              flatten_depth=body.flatten_depth)
@@ -3010,24 +3056,33 @@ def _remove_plugin_dest(dest: Path) -> None:
 
 
 def _ingest_via_plugin(path: str, format_id: str, name: str | None,
-                       options: dict, build_fts: bool) -> dict:
+                       options: dict, build_fts: bool, recorded_path: str | None = None) -> dict:
     """Shared by the path and upload plugin-ingest routes: resolve the
     format, run its parse, feed the result through Store.ingest_rows. The
     parse call itself runs outside Store.lock (it's pure file reading —
     only the row batches inside ingest_rows ever hold the lock), so a slow
     multi-GB parse doesn't freeze other requests any more than a big CSV
-    import does."""
+    import does.
+
+    `recorded_path` is what the table says it came from, when that is not
+    `path`: an upload is parsed (and hashed) from a spool that is deleted
+    the moment this returns, and the name the browser sent is the only
+    honest answer to "which file was this"."""
     fmt = PLUGINS.get_format(format_id)  # KeyError -> 400 at the route
     opts = fmt.resolve_options(options)
     result = fmt.parse(path, opts)
     if not isinstance(result, dict) or "columns" not in result or "rows" not in result:
         raise ValueError(f"Plugin format {format_id} returned no columns/rows")
-    return store().ingest_rows(
+    rec = store().ingest_rows(
         result["columns"], result["rows"],
         name=name or result.get("name") or os.path.basename(path),
         path=path, build_fts=build_fts,
         column_types=result.get("column_types"),
     )
+    if recorded_path is not None:
+        store().set_source_path(rec["id"], recorded_path)
+        rec["path"] = recorded_path
+    return rec
 
 
 @app.post("/api/ingest/plugin/path")
@@ -3060,10 +3115,13 @@ async def api_ingest_plugin_upload(
     options: str | None = Form(None),  # JSON-encoded dict, since multipart forms are flat
     build_fts: bool = Form(True),
 ):
-    suffix = Path(file.filename or "upload.bin").suffix or ".bin"
-    fd, tmp = tempfile.mkstemp(suffix=suffix)
+    # Spooled under the upload's own name (see _upload_spool — a parser
+    # may read meaning from it) and removed whichever way the import ends:
+    # it used to stay, a full copy of every uploaded $MFT in the temp
+    # folder, with the table's path pointing at it.
+    spool_dir, tmp = _upload_spool(file.filename, "upload.bin")
     try:
-        with os.fdopen(fd, "wb") as out:
+        with open(tmp, "wb") as out:
             while chunk := await file.read(4 << 20):
                 out.write(chunk)
         opts = json.loads(options) if options else {}
@@ -3071,9 +3129,12 @@ async def api_ingest_plugin_upload(
         # walk — and ran on the loop until now, the same defect the plugin
         # ROUTE dispatcher had.
         return await run_in_threadpool(
-            _ingest_via_plugin, tmp, format_id, name or file.filename, opts, build_fts)
+            _ingest_via_plugin, tmp, format_id, name or file.filename, opts, build_fts,
+            os.path.basename(tmp))
     except Exception as e:
         raise HTTPException(400, str(e))
+    finally:
+        _remove_spool(spool_dir, tmp)
 
 
 @app.delete("/api/source/{source_id}")
@@ -5477,6 +5538,10 @@ def main() -> None:
             if rec.get("suspect_quote_rows"):
                 print(f"  {rec['suspect_quote_rows']:,} row(s) contain very long multi-line fields — "
                       "check for a stray quote if the row count looks low")
+            if rec.get("encoding") == "cp1252":
+                print("  not UTF-8 — read as Windows-1252")
+            elif rec.get("cp1252_bytes"):
+                print(f"  {rec['cp1252_bytes']:,} byte(s) not valid UTF-8 — read as Windows-1252")
         print(f"Winnow on {url}  (case: {os.path.abspath(case_path)})")
     else:
         _load_startup_plugins()
