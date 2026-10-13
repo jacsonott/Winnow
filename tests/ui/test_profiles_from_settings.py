@@ -20,7 +20,11 @@ def _open_settings_profiles(page):
       const h = heads.find((x) => x.querySelector('.settings-section-title').textContent.trim() === 'Profiles');
       if (h && h.getAttribute('aria-expanded') !== 'true') h.click();
     }""")
-    page.wait_for_selector("#modalBody .settings-line-text", state="attached")
+    # The section paints an empty line first and fills in the count when
+    # listBundles() resolves, so wait for the count itself: any
+    # .settings-line-text being attached says nothing about this one.
+    page.wait_for_function("""() => [...document.querySelectorAll('#modalBody .settings-line-text')]
+      .some((x) => /\\d+ profiles?\\b/.test(x.textContent))""")
 
 
 def _profiles_box(page):
