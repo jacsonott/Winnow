@@ -367,11 +367,40 @@ see [docs/notes/README.md](README.md) for the whole set.
   utf-8-sig-with-replacement, the header becomes NUL-riddled garbage and
   CREATE TABLE aborts with "the query contains a null character".
   `sniff_text_encoding` checks the two-byte BOM and opens UTF-16 files
-  properly (csv, jsonl, and both server preview paths via
+  properly (csv, text, jsonl, and both server preview paths via
   `_decode_preview_bytes`); `sanitize_columns` also strips C0 control
   characters from header NAMES as a backstop — cells keep whatever bytes
   they had, names must be quotable. BOM-less UTF-16 is deliberately left
   alone: guessing without a BOM mislabels legitimate files.
+
+- **So is Windows-1252, and a file that isn't UTF-8 says so.** Excel on
+  Windows saves "CSV" in the ANSI code page (cp1252 in the west), and so
+  do older tools; decoded as UTF-8-with-replacement, "José" imported as
+  "Jos\ufffd" with no warning and the byte was gone. Two parts, both in
+  store.py:
+  - `sniff_text_encoding` probes the first `ENCODING_PROBE_BYTES` (1 MB).
+    Valid UTF-8 is UTF-8; *invalid* UTF-8 that holds no well-formed
+    multi-byte sequence at all is cp1252, read with Python's own codec.
+    Invalid UTF-8 that *also* holds real multi-byte UTF-8 stays UTF-8 —
+    it is a UTF-8 file with a few bad bytes, and reading it all as cp1252
+    would turn every genuine "é" in it into "Ã©".
+  - Every text evidence read opens with `errors=TEXT_DECODE_ERRORS`, a
+    registered handler (`_cp1252_fallback`) that reads an undecodable
+    byte as its cp1252 character instead of U+FFFD — so a stray byte past
+    the probe, or in a mostly-UTF-8 file, keeps its meaning — and maps
+    the five bytes cp1252 leaves undefined to the Latin-1 controls of the
+    same value, so no byte is ever lost. It counts per THREAD
+    (decoding happens on the thread iterating the file), which is how an
+    import reports `cp1252_bytes`; take the snapshot after any
+    `seek(0)` re-read or the head counts twice (ingest_csv does; JSON
+    counts pass 2 only).
+  An import reports `encoding` (utf-8 / utf-16 / cp1252) and
+  `cp1252_bytes`, the jobs toast and the CLI say so, the previews decode
+  through `decode_text_sample` (the path preview with the file's own
+  sniff) and say so, and the source keeps it in `origin_meta`
+  (`{encoding}` — origin_meta is NULL for a clean import) where the
+  table's hover text reads it: how evidence bytes were interpreted
+  belongs with the table they became, not only in a toast.
 
 - **An unbalanced quote swallows lines silently, and ragged can't see
   it.** A stray `"` folds every following line into one field until the

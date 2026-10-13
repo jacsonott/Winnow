@@ -13,6 +13,7 @@ Design notes
 
 from __future__ import annotations
 
+import codecs
 import contextlib
 import csv
 import datetime
@@ -171,7 +172,7 @@ CREATE TABLE IF NOT EXISTS sources (
     has_fts     INTEGER NOT NULL DEFAULT 0,
     nickname    TEXT,                   -- analyst display name; `name` stays the imported file's identity
     origin      TEXT,                   -- NULL = an imported file; 'sql' = saved from the SQL pane; 'subset' = saved from a view/selection
-    origin_meta TEXT                    -- json, per origin: {sql} / {parent_source_id, parent_name, spec, ...} — see save_view_as_source
+    origin_meta TEXT                    -- json, per origin: {sql} / {parent_source_id, parent_name, spec, ...} — see save_view_as_source; an imported file not read as plain UTF-8: {encoding, cp1252_bytes?} — see _encoding_report
 );
 CREATE TABLE IF NOT EXISTS tag_defs (
     id     INTEGER PRIMARY KEY,
@@ -798,22 +799,136 @@ def _text_line(line: str) -> str:
     return line
 
 
+# Bytes as Windows-1252 reads them, the five it leaves undefined (0x81,
+# 0x8D, 0x8F, 0x90, 0x9D) as the Latin-1 control characters of the same
+# value — so every byte maps to a character of its own and none is lost.
+def _cp1252_char(b: int) -> str:
+    try:
+        return bytes([b]).decode("cp1252")
+    except UnicodeDecodeError:
+        return chr(b)
+
+
+_CP1252_CHARS = "".join(_cp1252_char(b) for b in range(256))
+_decode_fallback = threading.local()
+
+
+def _cp1252_fallback(exc: UnicodeError) -> tuple[str, int]:
+    """The `errors=` every text evidence read uses instead of "replace".
+    Bytes that are not valid in the file's encoding are read as the
+    Windows-1252 characters they would be, rather than as U+FFFD: a UTF-8
+    log with one line pasted in from a cp1252 tool keeps that line's
+    accents, and the byte is still there to see. Counted per thread
+    (_cp1252_fallback_count), so an import can say how many it read this
+    way — decoding happens on the thread iterating the file. UTF-16 errors
+    (a truncated last code unit) are not cp1252 bytes and still read as
+    U+FFFD."""
+    if not isinstance(exc, UnicodeDecodeError):
+        raise exc
+    if exc.encoding.startswith("utf-16"):
+        return "\ufffd", exc.end
+    bad = exc.object[exc.start:exc.end]
+    _decode_fallback.n = getattr(_decode_fallback, "n", 0) + len(bad)
+    return "".join([_CP1252_CHARS[b] for b in bad]), exc.end
+
+
+TEXT_DECODE_ERRORS = "winnow-cp1252"
+codecs.register_error(TEXT_DECODE_ERRORS, _cp1252_fallback)
+
+
+def _cp1252_fallback_count() -> int:
+    return getattr(_decode_fallback, "n", 0)
+
+
+# How much of a file sniff_text_encoding looks at to tell UTF-8 from
+# Windows-1252. Cheap to read, and enough rows of an Excel export that
+# a name with an accent in it has turned up; past it, _cp1252_fallback
+# still reads a stray byte right and the count still reports it.
+ENCODING_PROBE_BYTES = 1 << 20
+# A well-formed multi-byte UTF-8 sequence. Windows-1252 text almost never
+# contains one by accident (an accented capital followed by a symbol from
+# 0x80-0xBF), so its presence is what says "UTF-8 with a few bad bytes".
+_UTF8_MULTIBYTE = re.compile(rb"[\xc2-\xdf][\x80-\xbf]|[\xe0-\xef][\x80-\xbf]{2}|[\xf0-\xf4][\x80-\xbf]{3}")
+# The names an import reports, per codec it opened the file with.
+ENCODING_LABELS = {"utf-8-sig": "utf-8", "utf-16": "utf-16", "cp1252": "cp1252"}
+
+
+def _encoding_for_head(head: bytes, complete: bool) -> str:
+    if head[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return "utf-16"   # codec reads the BOM itself and picks LE/BE
+    try:
+        # final=False unless the probe is the whole file: a multi-byte
+        # character cut in half at the probe's edge is not an error.
+        codecs.getincrementaldecoder("utf-8")().decode(head, final=complete)
+        return "utf-8-sig"
+    except UnicodeDecodeError:
+        pass
+    # Not valid UTF-8. A file that also holds real multi-byte UTF-8 is UTF-8
+    # with a few bad bytes (a corrupt line, a paste from elsewhere): reading
+    # it all as cp1252 would turn every genuine "é" in it into "Ã©", and the
+    # fallback handles the bad bytes one by one. Only text with no UTF-8 in
+    # it at all is a legacy 8-bit file.
+    if _UTF8_MULTIBYTE.search(head):
+        return "utf-8-sig"
+    return "cp1252"
+
+
 def sniff_text_encoding(path: str) -> str:
-    """The encoding to open a text evidence file with — utf-8-sig unless a
-    UTF-16 byte-order mark says otherwise. Windows PowerShell 5.1's
-    Out-File and `>` write UTF-16LE by default, so UTF-16 CSVs are routine
-    DFIR inputs; decoded as UTF-8-with-replacement they turn into headers
-    full of NULs (which used to kill CREATE TABLE with "the query contains
-    a null character") and unreadable cells. BOM-less UTF-16 is left
-    alone — guessing without a BOM mislabels legitimate binary-ish text."""
+    """The encoding to open a text evidence file with — open it with
+    errors=TEXT_DECODE_ERRORS. utf-8-sig unless a UTF-16 byte-order mark
+    says otherwise, or the start of the file is not UTF-8 and has no
+    UTF-8 in it at all, which is Windows-1252.
+
+    Windows PowerShell 5.1's Out-File and `>` write UTF-16LE by default,
+    so UTF-16 CSVs are routine DFIR inputs; decoded as UTF-8-with-
+    replacement they turn into headers full of NULs (which used to kill
+    CREATE TABLE with "the query contains a null character") and
+    unreadable cells. BOM-less UTF-16 is left alone — guessing without a
+    BOM mislabels legitimate binary-ish text. Excel on Windows saves
+    "CSV" in the ANSI code page, Windows-1252 in the west, and so do older
+    tools: read as UTF-8 every accented letter became U+FFFD with no
+    warning ("José" -> "Jos\ufffd"), and the byte was gone. Windows-1252
+    rather than Latin-1 because it is what those files are — the two
+    differ only in 0x80-0x9F, where cp1252 has the euro sign, dashes and
+    curly quotes and Latin-1 has control characters nobody writes."""
     try:
         with open(path, "rb") as f:
-            head = f.read(2)
+            head = f.read(ENCODING_PROBE_BYTES)
+            complete = len(head) < ENCODING_PROBE_BYTES or not f.read(1)
     except OSError:
         return "utf-8-sig"
-    if head in (b"\xff\xfe", b"\xfe\xff"):
-        return "utf-16"   # codec reads the BOM itself and picks LE/BE
-    return "utf-8-sig"
+    return _encoding_for_head(head, complete)
+
+
+def decode_text_sample(raw: bytes, complete: bool = False, encoding: str | None = None) -> tuple[str, str]:
+    """The first bytes of a text file -> (text, encoding label), decoded
+    exactly as an import of the whole file would decode them, because the
+    preview an analyst approves has to be the table they get. `complete`
+    is whether `raw` is the whole file (a character cut at the end of a
+    sample is not an error). Pass `encoding` (sniff_text_encoding's
+    answer) when the file itself is at hand: it probes more than a
+    preview's sample holds."""
+    enc = encoding or _encoding_for_head(raw[:ENCODING_PROBE_BYTES],
+                                         complete and len(raw) <= ENCODING_PROBE_BYTES)
+    text = codecs.getincrementaldecoder(enc)(errors=TEXT_DECODE_ERRORS).decode(raw, final=complete)
+    return text, ENCODING_LABELS[enc]
+
+
+def _encoding_report(enc: str, fallback_bytes: int) -> dict:
+    """What an import says about how it read its bytes: `encoding` is the
+    label for the codec, `cp1252_bytes` how many bytes of a UTF-8 file
+    were not UTF-8 and were read as Windows-1252 instead. `meta` is what
+    is kept on the source (sources.origin_meta, NULL for an import that
+    needs no note) — the toast is gone in seconds, and how evidence bytes
+    were interpreted belongs with the table they became."""
+    label = ENCODING_LABELS[enc]
+    n = fallback_bytes if label == "utf-8" else 0
+    meta = None
+    if label == "cp1252":
+        meta = {"encoding": "cp1252"}
+    elif n:
+        meta = {"encoding": "utf-8", "cp1252_bytes": n}
+    return {"encoding": label, "cp1252_bytes": n, "meta": meta}
 
 
 def sanitize_columns(raw: list[str]) -> list[str]:
@@ -832,8 +947,8 @@ def sanitize_columns(raw: list[str]) -> list[str]:
     for i, name in enumerate(raw):
         # Strip C0 control characters (NUL and friends): they reach here
         # from mis-decoded files, and a NUL in a header aborts CREATE TABLE
-        # with an error no analyst can act on. errors="replace" cells are
-        # data and stay as-is; a *name* must be printable and quotable.
+        # with an error no analyst can act on. Mis-decoded cells are data
+        # and stay as-is; a *name* must be printable and quotable.
         name = "".join(ch for ch in (name or "") if ch >= " " or ch in "\t")
         clean = name.strip().lstrip("\ufeff") or f"col_{i + 1}"
         if clean.lower() in RESERVED_COLUMN_NAMES:
@@ -1087,7 +1202,7 @@ def _iter_json_records(path: str, bad: dict | None = None) -> Iterable[dict]:
     without extra tooling)."""
     ext = os.path.splitext(path)[1].lower()
     if ext in (".jsonl", ".ndjson"):
-        with open(path, "r", encoding=sniff_text_encoding(path), errors="replace") as f:
+        with open(path, "r", encoding=sniff_text_encoding(path), errors=TEXT_DECODE_ERRORS) as f:
             for lineno, line in enumerate(f, start=1):
                 line = line.strip()
                 if not line:
@@ -1110,7 +1225,7 @@ def _iter_json_records(path: str, bad: dict | None = None) -> Iterable[dict]:
                     continue
                 yield obj if isinstance(obj, dict) else {"value": obj}
         return
-    with open(path, "r", encoding=sniff_text_encoding(path), errors="replace") as f:
+    with open(path, "r", encoding=sniff_text_encoding(path), errors=TEXT_DECODE_ERRORS) as f:
         data = _json_load(f)
     if isinstance(data, list):
         for obj in data:
@@ -2815,10 +2930,12 @@ class Store:
 
         # 1 MB read buffer: the default 8 KB means a 20 GB file is ~2.5M
         # read() syscalls before the csv layer even sees a byte.
-        fh = open(path, "r", encoding=sniff_text_encoding(path), errors="replace",
+        encoding = sniff_text_encoding(path)
+        fh = open(path, "r", encoding=encoding, errors=TEXT_DECODE_ERRORS,
                   newline="", buffering=1 << 20)
         head = fh.read(64 * 1024)
         fh.seek(0)
+        fallback0 = _cp1252_fallback_count()   # after the seek: the head is read twice
         if delimiter is None:
             # `path`, not `name`: the display name is the caller's to
             # override and may carry no extension at all, and the
@@ -2954,8 +3071,8 @@ class Store:
             types = [(column_types[i] if i < len(column_types) and column_types[i] in ("text", "number", "datetime") else t)
                      for i, t in enumerate(types)]
         colmeta = [{"name": c, "type": t} for c, t in zip(cols, types)]
-        with self.lock, self.db:
-            self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
+        decoded = _encoding_report(encoding, _cp1252_fallback_count() - fallback0)
+        self._finish_source_columns(source_id, colmeta, decoded, name)
 
         if error is not None:
             if total == 0:
@@ -2978,6 +3095,7 @@ class Store:
         rec["rows_per_sec"] = int(total / elapsed) if elapsed > 0 else 0
         rec["ragged_rows"] = ragged
         rec["suspect_quote_rows"] = suspect_quotes
+        rec["encoding"], rec["cp1252_bytes"] = decoded["encoding"], decoded["cp1252_bytes"]
         return rec
 
     def ingest_text(self, path: str, name: str | None = None, build_fts: bool = True,
@@ -3005,7 +3123,8 @@ class Store:
         file_hash = self._quick_hash(path)
         # newline="\n", not the default: universal newlines also end a line
         # at a lone \r. See _text_line.
-        fh = open(path, "r", encoding=sniff_text_encoding(path), errors="replace",
+        encoding = sniff_text_encoding(path)
+        fh = open(path, "r", encoding=encoding, errors=TEXT_DECODE_ERRORS,
                   newline="\n", buffering=1 << 20)
         try:
             first = fh.readline()
@@ -3016,6 +3135,7 @@ class Store:
             fh.close()
             raise ValueError("File is empty")
         fh.seek(0)
+        fallback0 = _cp1252_fallback_count()
 
         cols = [TEXT_COLUMN]
         with self.lock, self.db:
@@ -3069,8 +3189,8 @@ class Store:
                 fh.close()
 
         colmeta = [{"name": TEXT_COLUMN, "type": "text"}]
-        with self.lock, self.db:
-            self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
+        decoded = _encoding_report(encoding, _cp1252_fallback_count() - fallback0)
+        self._finish_source_columns(source_id, colmeta, decoded, name)
         if error is not None:
             if total == 0:
                 self.drop_source(source_id)
@@ -3083,6 +3203,7 @@ class Store:
         rec["rows_per_sec"] = int(total / elapsed) if elapsed > 0 else 0
         rec["ragged_rows"] = 0
         rec["suspect_quote_rows"] = 0
+        rec["encoding"], rec["cp1252_bytes"] = decoded["encoding"], decoded["cp1252_bytes"]
         return rec
 
     @staticmethod
@@ -3100,6 +3221,24 @@ class Store:
         lines = [_text_line(ln) for ln in lines[:max_rows]]
         return {"delimiter": None, "columns": [TEXT_COLUMN],
                 "sample_rows": [[ln] for ln in lines], "inferred_types": ["text"]}
+
+    def _finish_source_columns(self, source_id: int, colmeta: list[dict], decoded: dict,
+                               name: str) -> None:
+        """The last write of a text import: the typed columns, and — when
+        the bytes were not plain UTF-8 — how they were read
+        (_encoding_report), on the source where it outlives the toast.
+        The log gets the same line: it is the record of what happened."""
+        with self.lock, self.db:
+            if decoded["meta"] is None:
+                self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
+            else:
+                self.db.execute("UPDATE sources SET columns=?, origin_meta=? WHERE id=?",
+                                (json.dumps(colmeta), json.dumps(decoded["meta"]), source_id))
+        if decoded["encoding"] == "cp1252":
+            wlog.record("warn", f"{name} is not UTF-8 — read as Windows-1252")
+        elif decoded["cp1252_bytes"]:
+            wlog.record("warn", f"{name}: {decoded['cp1252_bytes']:,} byte(s) were not valid UTF-8 "
+                                "and were read as Windows-1252")
 
     def _commit_ingest_batch(self, insert_sql: str, batch: list[tuple], source_id: int, total: int,
                              also: tuple[str, list[tuple]] | None = None,
@@ -3548,6 +3687,7 @@ class Store:
         clashes = {"count": 0}
         sample_flat: list[dict[str, str]] = []
         record_count = 0
+        fallback0 = _cp1252_fallback_count()
         for rec in _iter_json_records(path, bad=bad_prev):
             flat = _flatten_json(rec, max_depth, clashes)
             for k in flat:
@@ -3569,7 +3709,10 @@ class Store:
         types = [infer_type([r[i] for r in sample_rows]) for i in range(len(cols))] if sample_rows else ["text"] * len(cols)
         return {"columns": cols, "sample_rows": sample_rows, "inferred_types": types,
                 "record_count": record_count, "bad_records": bad_prev["count"],
-                "first_bad_line": bad_prev["first_line"], "key_collisions": clashes["count"]}
+                "first_bad_line": bad_prev["first_line"], "key_collisions": clashes["count"],
+                **{k: v for k, v in _encoding_report(sniff_text_encoding(path),
+                                                     _cp1252_fallback_count() - fallback0).items()
+                   if k != "meta"}}
 
     def ingest_json(
         self,
@@ -3649,6 +3792,8 @@ class Store:
         bad = {"count": 0, "first_line": 0, "first_error": ""}
         clashes = {"count": 0}
         error: Exception | None = None
+        # Pass 2 only: pass 1 decoded the same bytes once already.
+        fallback0 = _cp1252_fallback_count()
         with self._ingest_synchronous_off():
             try:
                 for rec in _iter_json_records(path, bad=bad):
@@ -3688,8 +3833,8 @@ class Store:
 
         types = [infer_type([r[i] for r in sample]) for i in range(ncols)] if sample else ["text"] * ncols
         colmeta = [{"name": c, "type": t} for c, t in zip(cols, types)]
-        with self.lock, self.db:
-            self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
+        decoded = _encoding_report(sniff_text_encoding(path), _cp1252_fallback_count() - fallback0)
+        self._finish_source_columns(source_id, colmeta, decoded, name)
 
         if error is not None:
             if total == 0:
@@ -3706,6 +3851,7 @@ class Store:
         rec["bad_records"] = bad["count"]
         rec["first_bad_line"] = bad["first_line"]
         rec["key_collisions"] = clashes["count"]
+        rec["encoding"], rec["cp1252_bytes"] = decoded["encoding"], decoded["cp1252_bytes"]
         return rec
 
     def _create_source_shell(self, name: str, cols: list[str], *, path: str | None = None,
@@ -4189,7 +4335,8 @@ class Store:
                 job["result"] = [
                     {k: r.get(k) for k in ("id", "name", "row_count", "elapsed_sec", "rows_per_sec",
                                            "ragged_rows", "suspect_quote_rows", "bad_records",
-                                           "first_bad_line", "key_collisions")}
+                                           "first_bad_line", "key_collisions", "encoding",
+                                           "cp1252_bytes")}
                     for r in results
                 ]
             wlog.record("info", f"Import finished: {job['name']} ({job['kind']}) — "

@@ -44,7 +44,8 @@ from winnow import version
 from winnow import archive
 from winnow import workspace as WS
 from winnow.store import (CASE_SUFFIX, DEFAULT_IMPORT_EXTENSIONS, PLASO_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, MissingTable, OpCancelled, Store, ViewExpired,
-                   describe_case_lock, probe_case_lock, q, rows_to_xlsx, sweep_orphan_views)
+                   decode_text_sample, describe_case_lock, probe_case_lock, q, rows_to_xlsx,
+                   sniff_text_encoding, sweep_orphan_views)
 
 HERE = paths.INSTALL_ROOT  # static/, plugins/, examples/plugins/ all hang off the install root
 
@@ -1927,13 +1928,19 @@ async def api_ingest_upload(
             os.remove(tmp)
 
 
-def _decode_preview_bytes(raw: bytes) -> str:
-    # Same UTF-16 BOM handling as the real ingest (store.sniff_text_encoding)
-    # so the preview an analyst approves is the table they actually get —
-    # PowerShell's UTF-16LE exports were previewing as NUL-riddled noise.
-    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
-        return raw.decode("utf-16", errors="replace")
-    return raw.decode("utf-8-sig", errors="replace")
+PREVIEW_SAMPLE_BYTES = 512 * 1024
+
+
+def _decode_preview_bytes(raw: bytes, path: str | None = None) -> tuple[str, str]:
+    # Decided and decoded exactly as the real ingest will (store.
+    # decode_text_sample — UTF-16 by BOM, Windows-1252 when it isn't UTF-8)
+    # so the preview an analyst approves is the table they actually get:
+    # PowerShell's UTF-16LE exports previewed as NUL-riddled noise, and
+    # Excel's cp1252 CSVs as "Jos\ufffd". A sample shorter than the cap is
+    # the whole file. Returns (text, encoding label). `path`, when the file
+    # is on this disk, lets the decision see as much as the import will.
+    return decode_text_sample(raw, complete=len(raw) < PREVIEW_SAMPLE_BYTES,
+                              encoding=sniff_text_encoding(path) if path else None)
 
 
 @app.post("/api/ingest/preview")
@@ -1943,18 +1950,18 @@ async def api_ingest_preview(
     has_header: bool = Form(True),
     kind: str = Form("csv"),   # "text": the raw-text importer's line-per-row preview
 ):
-    raw = await file.read(512 * 1024)  # bounded sample — full parse happens at real ingest time
-    text = _decode_preview_bytes(raw)
+    raw = await file.read(PREVIEW_SAMPLE_BYTES)  # bounded sample — full parse happens at real ingest time
+    text, encoding = _decode_preview_bytes(raw)
     try:
         if kind == "text":
-            return await run_in_threadpool(store().preview_text_lines, text)
+            return {**await run_in_threadpool(store().preview_text_lines, text), "encoding": encoding}
         # The uploaded file's own name goes through: the delimiter is read
         # from the extension first (Store._sniff), and a preview that
         # sniffed without it would show a different table from the one the
         # import then builds.
-        return await run_in_threadpool(
+        return {**await run_in_threadpool(
             store().preview_csv_text, text, delimiter=delimiter or None,
-            has_header=has_header, name=file.filename)
+            has_header=has_header, name=file.filename), "encoding": encoding}
     except Exception as e:
         raise HTTPException(400, str(e))
 
@@ -2165,12 +2172,13 @@ def api_ingest_preview_path(body: PreviewPath):
         if kind in ("csv", "text"):
             # Same bounded sample the upload preview reads — never the file.
             with open(body.path, "rb") as f:
-                raw = f.read(512 * 1024)
-            text = _decode_preview_bytes(raw)
+                raw = f.read(PREVIEW_SAMPLE_BYTES)
+            text, encoding = _decode_preview_bytes(raw, body.path)
             if kind == "text":
-                return store().preview_text_lines(text)
-            return store().preview_csv_text(text, delimiter=body.delimiter or None,
-                                            has_header=body.has_header, name=body.path)
+                return {**store().preview_text_lines(text), "encoding": encoding}
+            return {**store().preview_csv_text(text, delimiter=body.delimiter or None,
+                                               has_header=body.has_header, name=body.path),
+                    "encoding": encoding}
         if kind == "json":
             return store().preview_json_file(body.path, flatten_mode=body.flatten_mode,
                                              flatten_depth=body.flatten_depth)
@@ -5355,6 +5363,10 @@ def main() -> None:
             if rec.get("suspect_quote_rows"):
                 print(f"  {rec['suspect_quote_rows']:,} row(s) contain very long multi-line fields — "
                       "check for a stray quote if the row count looks low")
+            if rec.get("encoding") == "cp1252":
+                print("  not UTF-8 — read as Windows-1252")
+            elif rec.get("cp1252_bytes"):
+                print(f"  {rec['cp1252_bytes']:,} byte(s) not valid UTF-8 — read as Windows-1252")
         print(f"Winnow on {url}  (case: {os.path.abspath(case_path)})")
     else:
         print(f"Winnow on {url}  (home screen — no case open)")
