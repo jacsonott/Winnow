@@ -224,21 +224,42 @@ see [docs/notes/README.md](README.md) for the whole set.
   thread). Rejected alternatives: a timeout needs another regex engine (a
   dependency) or a process per match; truncating cells would turn a hit
   past the cut into a silent miss. The check walks the parsed pattern
-  (`re._parser`, `sre_parse` on 3.10) for the two exponential shapes: a
-  quantifier inside a repeated group when either is open-ended
-  (`(a+)+`, `(\w+\s?)*`, `(\d+\.){3}` — bounded-in-bounded like
-  `(\d{1,3}\.){3}` is fine), and an open-ended repeat of alternatives
-  that can start with the same character (`(a|aa)+`; `(?:ab|cd)+` is
-  fine, and `(\w|\d)+` never reaches it — `re` folds single-character
-  alternatives into a class). Possessive quantifiers and atomic groups
-  (3.11+) do not backtrack, so nesting under them passes. It is
-  deliberately conservative: a refused pattern can be rewritten (a class
-  instead of an alternation, the inner repeat spelled out, or Contains),
-  a hung case cannot be cancelled. **Not covered**: polynomial blow-ups
-  from adjacent repeats over the same characters (`.*a.*b` on a megabyte
-  cell) — slow rather than exponential, and refusing `.*x.*y` would refuse
-  ordinary searches. That is also why the cancel tests' slow build is now
-  `a*a*a*a*a*a*b` (tens of ms a row) rather than `(a+)+$`.
+  (`re._parser`, `sre_parse` on 3.10) for the two shapes that blow up.
+  **A repeated group whose repetitions can split the same text more than
+  one way**: open-ended over anything variable-length (`(a+)+`,
+  `(a{1,2})+`, `(\w+\s?)+`, `(.*a)+`), or a count of two or more over
+  something open-ended (`(a+){10}`; bounded-in-bounded like
+  `(\d{1,3}){3}` is a few dozen ways at most) — *unless* every
+  repetition must contain a character none of its variable parts can
+  match, with all of those parts on one side of it (`_rx_delimited`),
+  AND no two of its variable parts can share out the same text
+  (`_rx_ambiguous`). The delimiter pins where each repetition ends, so a
+  cell splits only one way, and it is what lets the IPv4 and domain
+  patterns analysts type every day through: `(\d+\.){3}\d+`,
+  `(\w+\.)+com`, `([a-z0-9-]+\.)+[a-z]{2,}`, `([^,]*,)+`. The first
+  version of this guard refused all of those; it was narrowed to this
+  rule because a guard that refuses ordinary searches gets worked around.
+  Both halves of the condition were found by fuzzing random patterns
+  against hostile cells, not by reasoning: `(\w*\.\w*)+` has a
+  delimiter but the word characters between two dots can go to either
+  repetition, and `(a?[ab]?\s){2,}` ends every repetition at a space but
+  reads each "a " two ways — 2^n either way.
+  An optional delimiter (`\s?`) is itself variable and pins nothing;
+  class against class (`\w` vs `\s`) is decided by matching one against
+  the BMP and searching the result with the other, a few ms, cached with
+  the compiled pattern. **An open-ended repeat of alternatives that can
+  match the same text** (`(a|a)*b`, `(a|aa)+`) — every repetition has two
+  ways through, so a delimiter does not save it; alternatives that start
+  differently (`(foo|bar)+`, `(a|bc)+`) are one choice the first
+  character makes, and pass. Possessive quantifiers and atomic groups
+  (3.11+) never give back what they matched, so they count as fixed. It
+  stays conservative: a refused pattern can be rewritten (end each
+  repetition with a delimiter, a class instead of an alternation, or
+  Contains), a hung case cannot be cancelled. **Not covered**: polynomial
+  blow-ups from adjacent repeats over the same characters (`.*a.*b` on a
+  megabyte cell) — slow rather than exponential, and refusing `.*x.*y`
+  would refuse ordinary searches. That is also why the cancel tests' slow
+  build is now `a*a*a*a*a*a*b` (tens of ms a row) rather than `(a+)+$`.
 - Column types are **inferred from a 500-row sample and stored as metadata only**;
   every value is stored TEXT. Don't "fix" this by typing the columns — mixed-type
   forensic CSVs then silently coerce, and evidence fidelity matters more than

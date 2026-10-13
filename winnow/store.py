@@ -572,18 +572,25 @@ def _regexp(pattern: str, value: Any) -> bool:
 # (it only polls for signals, and those reach the main thread alone). A
 # timeout needs another regex engine (a dependency) or another process per
 # match; truncating cells would make a hit past the cut a silent miss. So
-# the pattern is checked instead, and the two shapes that blow up
-# exponentially are refused with a reason: a quantifier inside another
-# repeated group when either is open-ended (`(a+)+`, `(\w+\s?)*`,
-# `(\d+\.){3}`), and an open-ended repeat of alternatives that can start
-# with the same character (`(a|aa)+`, `(\d|\w)+`). Conservative on
-# purpose — a refused pattern can be rewritten (a class instead of an
-# alternation, the inner repeat spelled out, or Contains), a hung case
-# cannot be cancelled. Possessive quantifiers and atomic groups (Python
-# 3.11+) never backtrack into what they matched, so nesting under them is
-# allowed. NOT covered: polynomial blow-ups from adjacent repeats over the
-# same characters (`.*a.*b` on a megabyte cell) — those are slow, not
-# exponential, and refusing `.*x.*y` would refuse ordinary searches.
+# the pattern is checked instead, and the two shapes that blow up are
+# refused with a reason. One: a repeated group whose repetitions can split
+# the same text more than one way — open-ended over anything variable
+# (`(a+)+`, `(a{1,2})+`, `(\w+\s?)+`, `(.*a)+`), or a count of two or more
+# over something open-ended (`(a+){10}`) — UNLESS every repetition must
+# contain a character none of its variable parts can match. That
+# delimiter pins each repetition's end, which is why the IPv4 and domain
+# shapes analysts type every day pass: `(\d+\.){3}\d+`, `(\w+\.)+com`,
+# `([a-z0-9-]+\.)+[a-z]{2,}`. An optional delimiter (`\s?`) is itself
+# variable and pins nothing. Two: an open-ended repeat of alternatives that
+# can match the same text (`(a|a)*b`, `(a|aa)+`) — every repetition has two
+# ways through, and a delimiter does not help. Conservative on purpose: a
+# refused pattern can be rewritten (end the repetition with a delimiter, a
+# class instead of an alternation, or Contains), a hung case cannot be
+# cancelled. Possessive quantifiers and atomic groups (Python 3.11+) never
+# give back what they matched, so they count as fixed. NOT covered:
+# polynomial blow-ups from adjacent repeats over the same characters
+# (`.*a.*b` on a megabyte cell) — those are slow, not exponential, and
+# refusing `.*x.*y` would refuse ordinary searches.
 try:   # Python 3.11+
     from re import _constants as _sre_c, _parser as _sre_parse
 except ImportError:   # Python 3.10
@@ -653,36 +660,246 @@ def _rx_alternatives_overlap(alts) -> bool:
     return False
 
 
-def _rx_hazard(items, outer: tuple | None) -> str | None:
-    """Why this parsed pattern can backtrack exponentially, or None.
-    `outer` is the nearest enclosing repeat that can be backtracked into,
-    as (min, max), when it repeats more than once."""
+# A `[...]` item's category back as the escape that wrote it, so an atom
+# can be rebuilt as a one-character pattern and asked about directly.
+_RX_CATEGORIES = {
+    _sre_c.CATEGORY_DIGIT: r"\d", _sre_c.CATEGORY_NOT_DIGIT: r"\D",
+    _sre_c.CATEGORY_SPACE: r"\s", _sre_c.CATEGORY_NOT_SPACE: r"\S",
+    _sre_c.CATEGORY_WORD: r"\w", _sre_c.CATEGORY_NOT_WORD: r"\W",
+}
+
+
+@functools.lru_cache(maxsize=1)
+def _rx_bmp() -> str:
+    """Every BMP character but the surrogates — the practical alphabet of
+    a log, for asking whether two classes share a character."""
+    return "".join(chr(o) for o in range(0x10000) if not 0xD800 <= o <= 0xDFFF)
+
+
+class _RxChar:
+    """One single-character atom, rebuilt as a one-character pattern
+    (`cls`, matched case-insensitively as REGEXP runs it) — plus, when it
+    is a short list of characters (a literal, `[.,;]`), that list, so a
+    check against it needs no scan."""
+
+    def __init__(self, cls: str, explicit: frozenset | None = None):
+        self.rx = re.compile(cls, re.IGNORECASE)
+        self.explicit = explicit
+
+    def overlaps(self, other: "_RxChar") -> bool:
+        if self.explicit is not None:
+            return any(other.rx.fullmatch(ch) for ch in self.explicit)
+        if other.explicit is not None:
+            return any(self.rx.fullmatch(ch) for ch in other.explicit)
+        # Two classes (\w against \s, [^,] against \d): what one matches
+        # across the BMP, searched with the other. A few ms, once per
+        # pattern — the verdict is cached with the compiled pattern.
+        return other.rx.search("".join(self.rx.findall(_rx_bmp()))) is not None
+
+
+_RX_ANYTHING = _RxChar(r"(?s:.)")
+
+
+def _rx_char(op, av) -> _RxChar | None:
+    """The _RxChar for a single-character atom, or None for anything that
+    is not one (a group, a repeat, a zero-width assertion)."""
+    if op == _sre_c.LITERAL:
+        c = chr(av)
+        return _RxChar(re.escape(c), frozenset({c, c.lower(), c.upper()}))
+    if op == _sre_c.NOT_LITERAL:
+        return _RxChar(f"[^\\U{av:08x}]")
+    if op == _sre_c.ANY:
+        return _RxChar(".")
+    if op != _sre_c.IN:
+        return None
+    negate = bool(av) and av[0][0] == _sre_c.NEGATE
+    parts = av[1:] if negate else av
+    body = []
+    for pop, pav in parts:
+        if pop == _sre_c.LITERAL:
+            body.append(f"\\U{pav:08x}")
+        elif pop == _sre_c.RANGE:
+            body.append(f"\\U{pav[0]:08x}-\\U{pav[1]:08x}")
+        elif pop == _sre_c.CATEGORY and pav in _RX_CATEGORIES:
+            body.append(_RX_CATEGORIES[pav])
+        else:
+            return _RX_ANYTHING
+    if not body:
+        return _RX_ANYTHING
+    explicit = None if negate else _rx_class(parts)
+    return _RxChar(("[^" if negate else "[") + "".join(body) + "]",
+                   frozenset(explicit) if explicit is not None else None)
+
+
+def _rx_variable_chars(items, variable: bool = False) -> tuple[list[_RxChar], bool]:
+    """(the atoms in `items` that can match a varying amount of text, and
+    whether there is any variable-length part at all). `variable` says
+    everything here is already inside one — a repeat whose count can vary,
+    or an ambiguous alternation. A possessive repeat or an atomic group
+    never gives back what it took, so nothing inside one counts."""
+    chars: list[_RxChar] = []
+    any_variable = variable
+    for op, av in items:
+        ch = _rx_char(op, av)
+        if ch is not None:
+            if variable:
+                chars.append(ch)
+            continue
+        if op in _RX_REPEATS:
+            sub, v = _rx_variable_chars(av[2], variable or av[0] != av[1])
+        elif op == _sre_c.SUBPATTERN:
+            sub, v = _rx_variable_chars(av[-1], variable)
+        elif op == _sre_c.BRANCH:
+            # Alternatives that each start differently are one choice the
+            # first character makes (`(foo|bar)+`, `(a|bc)+`): only what is
+            # variable inside them counts. Ones that can match the same
+            # text are a choice backtracking can revisit, so all of it does.
+            ambiguous = variable or _rx_alternatives_overlap(av[1])
+            sub, v = [], ambiguous
+            for alt in av[1]:
+                alt_chars, alt_v = _rx_variable_chars(alt, ambiguous)
+                chars += alt_chars
+                v = v or alt_v
+        elif op == _sre_c.GROUPREF_EXISTS:
+            sub, v = [], True
+            for alt in (av[1], av[2]):
+                if alt is not None:
+                    chars += _rx_variable_chars(alt, True)[0]
+        elif op == _sre_c.GROUPREF:
+            sub, v = [_RX_ANYTHING], True   # a backreference can be any text
+        else:
+            continue   # zero-width, possessive, atomic
+        chars += sub
+        any_variable = any_variable or v
+    return chars, any_variable
+
+
+def _rx_open_ended(items) -> bool:
+    """Whether `items` holds a quantifier with no upper bound that can
+    backtrack (so not a possessive one, nor one inside an atomic group)."""
+    for op, av in items:
+        if op in _RX_REPEATS and (av[1] == _sre_c.MAXREPEAT or _rx_open_ended(av[2])):
+            return True
+        if op == _sre_c.SUBPATTERN and _rx_open_ended(av[-1]):
+            return True
+        if op == _sre_c.BRANCH and any(_rx_open_ended(alt) for alt in av[1]):
+            return True
+    return False
+
+
+def _rx_sequence(items) -> list:
+    """`items` with plain groups opened up: the run of atoms one match of
+    them steps through, in order."""
+    out: list = []
+    for op, av in items:
+        if op == _sre_c.SUBPATTERN:
+            out += _rx_sequence(av[-1])
+        else:
+            out.append((op, av))
+    return out
+
+
+def _rx_delimited(body) -> bool:
+    """Whether every repetition of `body` ends (or starts) at a character
+    none of its variable-length parts can match: a mandatory single
+    character with all of the variable parts on ONE side of it — a `.`
+    after `\\w+`, a `,` after `[^,]*`, a `\\` before `[^\\\\]+`. Then the
+    repetitions cannot trade text, so a cell splits between them only one
+    way. Both sides fails: in `(\\w+\\.\\w+)+` the word characters
+    between two dots can go to either repetition, 2^n ways. An OPTIONAL
+    delimiter (`\\s?`) is itself a variable part and delimits nothing."""
+    seq = _rx_sequence(body)
+    variable_chars, _ = _rx_variable_chars(body)
+    varies = [_rx_variable_chars([item])[1] for item in seq]
+    for i, item in enumerate(seq):
+        d = _rx_fixed_char(item)
+        if d is None or any(d.overlaps(v) for v in variable_chars):
+            continue
+        if not any(varies[:i]) or not any(varies[i + 1:]):
+            return True
+    return False
+
+
+def _rx_fixed_char(item) -> _RxChar | None:
+    """The one character a fixed single-character atom matches (bare, or
+    `\\.{1}`), or None when `item` is not one."""
+    op, av = item
+    d = _rx_char(op, av)
+    if d is None and op in _RX_REPEATS and av[0] == av[1] >= 1 and len(av[2]) == 1:
+        d = _rx_char(*av[2][0])
+    return d
+
+
+def _rx_ambiguous(body) -> bool:
+    """Whether one repetition of `body` can match the same text more than
+    one way: two variable-length parts that can match the same character
+    with nothing fixed between them that the first cannot match
+    (`a?[ab]?`, `\\d+\\.?\\d*`, `\\w+x\\w+`). A delimiter does not
+    save that — two ways through each repetition is 2^n over n of them."""
+    seq = _rx_sequence(body)
+    parts = []   # (variable chars, or None for a fixed item; the item)
+    for item in seq:
+        op, av = item
+        if op == _sre_c.BRANCH and any(_rx_ambiguous(alt) for alt in av[1]):
+            return True
+        if op in _RX_REPEATS and len(_rx_sequence(av[2])) > 1 and _rx_ambiguous(av[2]):
+            return True
+        varies = _rx_variable_chars([item])[1]
+        parts.append((_rx_variable_chars([item], True)[0] if varies else None, item))
+    for i, (chars_i, _) in enumerate(parts):
+        if chars_i is None:
+            continue
+        for chars_j, item_j in parts[i + 1:]:
+            if chars_j is None:
+                sep = _rx_fixed_char(item_j)
+                if sep is not None and not any(sep.overlaps(c) for c in chars_i):
+                    break   # part i cannot run past this character
+                continue
+            if any(a.overlaps(b) for a in chars_i for b in chars_j):
+                return True
+    return False
+
+
+def _rx_hazard(items, open_outer: bool = False) -> str | None:
+    """Why this parsed pattern can backtrack catastrophically, or None.
+    `open_outer`: these items sit inside an open-ended repeat that can be
+    backtracked into."""
     unbounded = _sre_c.MAXREPEAT
     for op, av in items:
         found = None
         if op in _RX_REPEATS:
             lo, hi, body = av
             if hi > 1:
-                if outer is not None and unbounded in (outer[1], hi):
-                    return "a quantifier inside another repeated group"
-                found = _rx_hazard(body, (lo, hi))
-            else:
-                found = _rx_hazard(body, outer)
+                # A repeated group whose repetitions can split the same text
+                # more than one way. Open-ended, any variable-length part
+                # does it (`(a+)+`, `(a{1,2})+`); a bounded count of two or
+                # more needs an open-ended one (`(a+){10}`; `(\d{1,3}){3}`
+                # is a few dozen ways at most).
+                risky = _rx_variable_chars(body)[1] if hi == unbounded else _rx_open_ended(body)
+                if risky and not _rx_delimited(body):
+                    return "a repeated group with nothing marking where one repetition ends"
+                if risky and _rx_ambiguous(body):
+                    return "a repeated group whose parts can share out the same text more than one way"
+            found = _rx_hazard(body, open_outer or (hi > 1 and hi == unbounded))
         elif _RX_POSSESSIVE is not None and op == _RX_POSSESSIVE:
-            found = _rx_hazard(av[2], None)
+            found = _rx_hazard(av[2])
         elif _RX_ATOMIC is not None and op == _RX_ATOMIC:
-            found = _rx_hazard(av, None)
+            found = _rx_hazard(av)
         elif op == _sre_c.SUBPATTERN:
-            found = _rx_hazard(av[-1], outer)
+            found = _rx_hazard(av[-1], open_outer)
         elif op == _sre_c.BRANCH:
-            if outer is not None and outer[1] == unbounded and _rx_alternatives_overlap(av[1]):
+            # Alternatives that can match the same text give every
+            # repetition two ways through — `(a|a)*b` is 2^n even though a
+            # delimiter would pin the repetitions down, so this one holds
+            # regardless of _rx_delimited.
+            if open_outer and _rx_alternatives_overlap(av[1]):
                 return "alternatives that can match the same text inside an open-ended repeat"
             for alt in av[1]:
-                found = found or _rx_hazard(alt, outer)
+                found = found or _rx_hazard(alt, open_outer)
         elif op in (_sre_c.ASSERT, _sre_c.ASSERT_NOT):
-            found = _rx_hazard(av[1], None)
+            found = _rx_hazard(av[1])
         elif op == _sre_c.GROUPREF_EXISTS:
-            found = _rx_hazard(av[1], outer) or (av[2] is not None and _rx_hazard(av[2], outer)) or None
+            found = _rx_hazard(av[1], open_outer) or (av[2] is not None and _rx_hazard(av[2], open_outer)) or None
         if found:
             return found
     return None
@@ -710,13 +927,14 @@ def _compiled_regex(pattern: str) -> re.Pattern:
         rx = re.compile(pattern, re.IGNORECASE)
     except re.error as e:
         raise ValueError(f"Not a valid regular expression ({e}): {pattern}") from None
-    hazard = _rx_hazard(_sre_parse.parse(pattern, re.IGNORECASE), None)
+    hazard = _rx_hazard(_sre_parse.parse(pattern, re.IGNORECASE))
     if hazard:
         raise ValueError(
             f"Not a usable regular expression: {pattern} has {hazard}, which can backtrack "
             "catastrophically — one crafted cell would freeze Winnow until it finished, and "
-            "nothing can interrupt it. Rewrite it without the nesting (a class such as [ab] "
-            "rather than (a|b), or the inner repeat spelled out), or search with Contains.")
+            "nothing can interrupt it. End each repetition with something the repeated part "
+            r"cannot match ((\w+\.)+ rather than (\w+\.?)+), use a class such as [ab] rather "
+            "than (a|b), or search with Contains.")
     return rx
 
 

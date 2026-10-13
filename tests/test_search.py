@@ -675,18 +675,20 @@ def test_an_invalid_regex_is_a_400_at_the_route(client, store, write_csv):
 
 
 @pytest.mark.parametrize("pattern", [
-    r"(a+)+$", r"(a*)*b", r"(\w+\s?)*$", r"^(a|aa)+$", r"(.*a){3,}", r"(x+x+)+y", r"(?:\d|\d\d)+!",
+    r"(a+)+$", r"(.*a)+", r"(a|a)*b", r"(\w+\s?)+$", r"(a+){10}",
+    r"(a*)*b", r"(\w+\s?)*$", r"^(a|aa)+$", r"(.*a){3,}", r"(x+x+)+y", r"(?:\d|\d\d)+!",
+    r"(a{1,2})+$", r"(\d+\.?)+$", r"(\w+\.\w+)+$", r"(a?[ab]?\s){2,}$",
 ])
 def test_a_catastrophic_regex_is_refused_before_it_runs(store, write_csv, pattern):
     """Cells are attacker-controlled, and one backtracking blow-up inside
     the REGEXP callback holds the GIL for the whole match: every thread,
     the cancel request included, froze until that one cell finished —
     hours, for a cell a few dozen characters long. Nothing can interrupt
-    re.search from Python, so the shapes that blow up (a quantifier nested
-    in another unbounded one, an unbounded repeat of overlapping
-    alternatives) are refused up front, loudly. The cell here is short
-    enough that running the pattern costs a moment, so without the guard
-    this fails on the missing refusal rather than hanging."""
+    re.search from Python, so the shapes that blow up (a repeated group
+    with nothing marking where one repetition ends, an unbounded repeat of
+    overlapping alternatives) are refused up front, loudly. The cell here
+    is short enough that running the pattern costs a moment, so without
+    the guard this fails on the missing refusal rather than hanging."""
     sid = _regex_case(store, write_csv, ["a" * 16 + "!", "x" * 16])
     with pytest.raises(ValueError, match="catastrophic|backtrack"):
         store.build_view(sid, {"source_id": sid, "sort": [], "search": pattern, "search_mode": "regex"})
@@ -710,6 +712,28 @@ def test_ordinary_regexes_still_run(store, write_csv, pattern, expect):
     v = store.build_view(sid, {"source_id": sid, "sort": [], "search": pattern, "search_mode": "regex"})
     got = {r["cells"][0] for r in store.fetch_rows(v["view_id"], 0, 50)["rows"]}
     assert got == expect
+
+
+@pytest.mark.parametrize("pattern,expect", [
+    (r"(\d+\.){3}\d+", {"beacon 10.0.0.5", "dns 192.168.100.200"}),
+    (r"(\d{1,3}\.){3}\d{1,3}", {"beacon 10.0.0.5", "dns 192.168.100.200"}),
+    (r"(\w+\.)+com", {"evil.com", "cdn.evil.com/x"}),
+    (r"([a-z0-9-]+\.)+[a-z]{2,}", {"evil.com", "cdn.evil.com/x", "bad-host.example.org"}),
+])
+def test_ip_and_domain_patterns_are_not_refused(store, write_csv, pattern, expect):
+    """The first guard refused any open-ended quantifier inside a repeated
+    group, which took out the IPv4 and domain patterns analysts type every
+    day. A repetition that must end in a character its open-ended part
+    cannot match (`\\.` after `\\d+` or `\\w+`) can only split a cell one
+    way, so these run — and filter, through both regex entry points."""
+    cells = ["beacon 10.0.0.5", "dns 192.168.100.200", "evil.com", "cdn.evil.com/x",
+             "bad-host.example.org", "version 1.2", "nothing here"]
+    sid = _regex_case(store, write_csv, cells)
+    for spec in ({"search": pattern, "search_mode": "regex"},
+                 {"filters": [{"column": "Cmd", "op": "regex", "value": pattern}]}):
+        v = store.build_view(sid, {"source_id": sid, "sort": [], **spec})
+        got = {r["cells"][0] for r in store.fetch_rows(v["view_id"], 0, 50)["rows"]}
+        assert got == expect, spec
 
 
 def test_a_regex_reads_the_whole_cell(store, write_csv):
