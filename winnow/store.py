@@ -780,6 +780,24 @@ def looks_binary(path: str) -> bool:
     return b"\x00" in head
 
 
+def _text_line(line: str) -> str:
+    r"""One raw-text row from one line read with newline="\n": the \n
+    and ONE \r before it (a CRLF file's) come off, nothing else does.
+
+    Universal newlines — Python's default for text files, and what
+    str.splitlines() does — also end a line at a lone \r. A log line
+    carries attacker-chosen text (the username of a failed login), so a
+    \r in it forged a row of its own: "Failed password for x\rAccepted
+    password for root" imported as two lines, the second reading like a
+    real entry, and every row id after it stopped being the line number.
+    A \r that is not part of the line ending is the line's own text."""
+    if line.endswith("\n"):
+        line = line[:-1]
+    if line.endswith("\r"):
+        line = line[:-1]
+    return line
+
+
 def sniff_text_encoding(path: str) -> str:
     """The encoding to open a text evidence file with — utf-8-sig unless a
     UTF-16 byte-order mark says otherwise. Windows PowerShell 5.1's
@@ -2808,7 +2826,7 @@ class Store:
 
     def ingest_text(self, path: str, name: str | None = None, build_fts: bool = True,
                     progress=None, cancel=None) -> dict:
-        """Import a file as raw text: one row per physical line, the whole
+        r"""Import a file as raw text: one row per physical line, the whole
         line in the one TEXT_COLUMN, nothing split, nothing treated as a
         header. For log files — syslog, hostd.log, auth.log.1, an
         extensionless dump — which the CSV path mangled: it sniffed a
@@ -2821,13 +2839,18 @@ class Store:
         (blank lines are kept as empty rows for exactly that reason — the
         grid has a hide-empty-rows option for the analyst who'd rather not
         see them). Same batching, progress, cancel and keep-what-committed
-        contract as ingest_csv; same encoding sniff."""
+        contract as ingest_csv; same encoding sniff.
+
+        A line ends at \n and nowhere else (_text_line has the why)."""
         name = name or os.path.basename(path)
         if looks_binary(path):
             raise ValueError(f"{name} looks like a binary file (NUL bytes in its first 8 KB) — not importable as text")
         size = os.path.getsize(path)
         file_hash = self._quick_hash(path)
-        fh = open(path, "r", encoding=sniff_text_encoding(path), errors="replace", buffering=1 << 20)
+        # newline="\n", not the default: universal newlines also end a line
+        # at a lone \r. See _text_line.
+        fh = open(path, "r", encoding=sniff_text_encoding(path), errors="replace",
+                  newline="\n", buffering=1 << 20)
         try:
             first = fh.readline()
         except Exception:
@@ -2860,9 +2883,7 @@ class Store:
         with self._ingest_synchronous_off():
             try:
                 for line in fh:
-                    # Universal newlines already folded \r\n to \n; the
-                    # final line may have no terminator at all.
-                    batch.append((line[:-1] if line.endswith("\n") else line,))
+                    batch.append((_text_line(line),))
                     if len(batch) >= BATCH:
                         if cancel is not None and cancel():
                             raise IngestCancelled(f"Import of {name} cancelled")
@@ -2910,14 +2931,19 @@ class Store:
 
     @staticmethod
     def preview_text_lines(text: str, max_rows: int = 50) -> dict:
-        """The raw-text importer's preview: the first lines, one per row, in
+        r"""The raw-text importer's preview: the first lines, one per row, in
         the shape preview_csv_text returns so the import preview renders
-        them with the same table."""
-        lines = text.splitlines()
-        if not lines and not text:
+        them with the same table. Split exactly as ingest_text splits —
+        str.splitlines() breaks on \r, \v, \f, \x85 and U+2028 too, so
+        the preview showed rows the import would not make."""
+        if not text:
             raise ValueError("File is empty")
+        lines = text.split("\n")
+        if lines[-1] == "":
+            lines.pop()   # the last line's terminator, not a blank line after it
+        lines = [_text_line(ln) for ln in lines[:max_rows]]
         return {"delimiter": None, "columns": [TEXT_COLUMN],
-                "sample_rows": [[ln] for ln in lines[:max_rows]], "inferred_types": ["text"]}
+                "sample_rows": [[ln] for ln in lines], "inferred_types": ["text"]}
 
     def _commit_ingest_batch(self, insert_sql: str, batch: list[tuple], source_id: int, total: int,
                              also: tuple[str, list[tuple]] | None = None,

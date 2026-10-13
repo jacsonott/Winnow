@@ -128,7 +128,14 @@ see [docs/notes/README.md](README.md) for the whole set.
   line in the one `Message` column (`TEXT_COLUMN`), no header, nothing
   split — a line iterator, not the csv module, so there is no field
   limit and a stray quote swallows nothing. Blank lines are kept
-  as empty rows so `rid` is the line number. `_ingest_kind_for_path`
+  as empty rows so `rid` is the line number — and for the same reason a
+  line ends at `\n` and nowhere else (`_text_line`; the file is opened
+  with `newline="\n"`). Python's default universal newlines, and
+  `str.splitlines()` in the preview, also break at a lone `\r`, so a CR
+  inside a logged value (an attacker-chosen username) forged a row that
+  read like a real entry and shifted every rid after it. One `\r` before
+  the `\n` is a CRLF's and comes off; any other is the line's own text.
+  The preview splits the same way. `_ingest_kind_for_path`
   (server) and `importKindFor` (client) send any name no built-in claims
   here — `hostd.log`, `auth.log.1`, an extensionless dump — *after* plugin
   formats have had their say (`queueItem` / `_assoc_ingest` consult them

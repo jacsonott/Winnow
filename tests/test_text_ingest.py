@@ -55,6 +55,31 @@ def test_crlf_is_stripped_and_utf16_bom_is_read(store, tmp_path):
     assert [r[0] for r in store.db.execute(f"SELECT {TEXT_COLUMN} FROM src_{rec['id']} ORDER BY rid")] == ["eins", "zwei"]
 
 
+def test_a_bare_cr_inside_a_line_forges_no_row(store, tmp_path):
+    """Universal newlines end a line at a lone \\r too, so a CR inside a
+    logged value (a username in a failed-login line is attacker-chosen)
+    became a row of its own that read like a real log entry — "Accepted
+    password for root" — and every row id after it stopped being the
+    line number. A line ends at \\n only; one \\r before it is the CRLF's
+    and is dropped, any other \\r is the line's own text."""
+    p = _write(tmp_path, "auth.log",
+               b"line1 ok\nline2 Failed password for evil\rAccepted password for root\n"
+               b"line3 ok\r\nline4 \r\r\nline5 no newline\r", mode="wb")
+    rec = store.ingest_text(p, build_fts=False)
+    rows = [tuple(r) for r in store.db.execute(f"SELECT rid, {TEXT_COLUMN} FROM src_{rec['id']} ORDER BY rid")]
+    assert rows == [
+        (1, "line1 ok"),
+        (2, "line2 Failed password for evil\rAccepted password for root"),
+        (3, "line3 ok"),
+        (4, "line4 \r"),
+        (5, "line5 no newline"),
+    ]
+    # The preview is what the analyst agrees to, so it splits the same way —
+    # str.splitlines() also broke on \r, \v, \f, \x1c-\x1e, \x85, U+2028/9.
+    prev = store.preview_text_lines("a\rb\nc\r\nd\x0be f\x85g\n\nlast")
+    assert prev["sample_rows"] == [["a\rb"], ["c"], ["d\x0be f\x85g"], [""], ["last"]]
+
+
 def test_a_very_long_line_is_one_row(store, tmp_path):
     """The csv module's 128 KB field limit stopped an import; a line
     iterator has no such limit."""
