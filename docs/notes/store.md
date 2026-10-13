@@ -260,11 +260,19 @@ see [docs/notes/README.md](README.md) for the whole set.
   can match nothing at all (`(a*)*`) is an epsilon cycle and refused
   outright. Class against class (`\w` vs `\s`) is decided by matching
   one against the BMP and searching the result with the other, the scan
-  cached per class (`_rx_members`). **An open-ended repeat of
-  alternatives that can match the same text** (`(a|a)*b`, `(a|aa)+`) is
-  also refused by a rule of its own; alternatives that start differently
-  (`(foo|bar)+`, `(a|bc)+`) are one choice the first character makes,
-  and pass. It stays conservative: a refused pattern can be rewritten (end each
+  cached per class (`_rx_members`). Alternations are the automaton's
+  too: `(a|a)*b`, `(a|aa)+` and `(?:\d|\d\d)+!` fail it (two ways
+  through every repetition), while a repeated keyword list whose words
+  share a first letter (`((?:lsadump|logonpasswords|kerberos)\s+)+`) and
+  the CSV-field pattern (`(?:[^,"]*|"[^"]*")(?:,(?:[^,"]*|"[^"]*"))*`,
+  one alternative empty) pass, since neither can match a cell two ways.
+  The older **alternation rule** — refuse an open-ended repeat of
+  alternatives that can *start* alike — judges by first characters and
+  refused both of those; it now applies only under a repeat the
+  automaton could not model (`_rx_hazard`'s `open_outer`), where nothing
+  better is available. (`re` factors a prefix every alternative shares,
+  so `(word0|word1)+` was always `word(?:0|1)` and never refused.) It
+  stays conservative: a refused pattern can be rewritten (end each
   repetition with a delimiter, a class instead of an alternation, or
   Contains), a hung case cannot be cancelled. **Not covered**: polynomial
   blow-ups from adjacent repeats over the same characters (`.*a.*b` on a

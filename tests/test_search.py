@@ -722,7 +722,8 @@ def test_ordinary_regexes_still_run(store, write_csv, pattern, expect):
 
 
 _CMDLINE_CELLS = {"beacon 10.0.0.5", "dns 192.168.100.200", "version 1.2", "nothing here",
-                  "net user /add x"}
+                  "net user /add x", "mimikatz kerberos list", "word2word0 seen"}
+_ALL_CELLS = _CMDLINE_CELLS | {"evil.com", "cdn.evil.com/x", "bad-host.example.org", "padded "}
 
 
 @pytest.mark.parametrize("pattern,expect", [
@@ -730,10 +731,13 @@ _CMDLINE_CELLS = {"beacon 10.0.0.5", "dns 192.168.100.200", "version 1.2", "noth
     (r"(\d{1,3}\.){3}\d{1,3}", {"beacon 10.0.0.5", "dns 192.168.100.200"}),
     (r"(\w+\.)+com", {"evil.com", "cdn.evil.com/x"}),
     (r"([a-z0-9-]+\.)+[a-z]{2,}", {"evil.com", "cdn.evil.com/x", "bad-host.example.org"}),
-    (r"(\w+\s+){2}", {"net user /add x"}),
+    (r"(\w+\s+){2}", {"net user /add x", "mimikatz kerberos list"}),
     (r"(\S+\s+){3}x", {"net user /add x"}),
-    (r"^(\S+\s+)*\S+$", _CMDLINE_CELLS | {"evil.com", "cdn.evil.com/x", "bad-host.example.org"}),
+    (r"^(\S+\s+)*\S+$", _ALL_CELLS - {"padded "}),
     (r"(\w+\s+)+", _CMDLINE_CELLS | {"padded "}),
+    (r"((?:mimikatz|lsadump|logonpasswords|kerberos)\s+)+", {"mimikatz kerberos list"}),
+    (r"(word0|word1|word2)+", {"word2word0 seen"}),
+    (r'(?:[^,"]*|"[^"]*")(?:,(?:[^,"]*|"[^"]*"))*', _ALL_CELLS),
 ])
 def test_ip_and_domain_patterns_are_not_refused(store, write_csv, pattern, expect):
     """The first guard refused any open-ended quantifier inside a repeated
@@ -745,16 +749,30 @@ def test_ip_and_domain_patterns_are_not_refused(store, write_csv, pattern, expec
     The second wanted that character to be a fixed one, and so still
     refused the "field N of a command line" shapes: `\\S+\\s+` has no
     fixed delimiter, but `\\S` and `\\s` share no character, so every
-    boundary is where the text changes from one to the other."""
-    cells = ["beacon 10.0.0.5", "dns 192.168.100.200", "evil.com", "cdn.evil.com/x",
-             "bad-host.example.org", "version 1.2", "nothing here", "net user /add x",
-             "padded "]
+    boundary is where the text changes from one to the other.
+
+    And a rule about alternations refused a repeated keyword list whenever
+    two of its words began with the same letter (`lsadump|logonpasswords`),
+    and the CSV-field pattern because one alternative can be empty —
+    neither can match a cell two ways, which the automaton now decides."""
+    cells = sorted(_ALL_CELLS)
     sid = _regex_case(store, write_csv, cells)
     for spec in ({"search": pattern, "search_mode": "regex"},
                  {"filters": [{"column": "Cmd", "op": "regex", "value": pattern}]}):
         v = store.build_view(sid, {"source_id": sid, "sort": [], **spec})
         got = {r["cells"][0] for r in store.fetch_rows(v["view_id"], 0, 50)["rows"]}
         assert got == expect, spec
+
+
+@pytest.mark.parametrize("pattern", [r"(a|a)*b", r"^(a|aa)+$", r"(?:\d|\d\d)+!", r"(a|b|ab)*c"])
+def test_overlapping_alternatives_are_refused_by_the_exact_check(store, write_csv, pattern):
+    """The alternation rule now applies only where the automaton cannot
+    model a repeat. These have to fail the automaton itself — two ways
+    through every repetition — or narrowing that rule would have let them
+    run; the reason they are refused with says which check caught them."""
+    sid = _regex_case(store, write_csv, ["a" * 16 + "!"])
+    with pytest.raises(ValueError, match="can split the same text more than one way"):
+        store.build_view(sid, {"source_id": sid, "sort": [], "search": pattern, "search_mode": "regex"})
 
 
 def test_a_regex_reads_the_whole_cell(store, write_csv):

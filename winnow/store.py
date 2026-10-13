@@ -585,8 +585,11 @@ def _regexp(pattern: str, value: Any) -> bool:
 # can take the last `a` or the first space). What the automaton does not
 # model (backreferences, conditionals, possessive and atomic groups, very
 # large bodies) falls back to those shape rules, _rx_delimited and
-# _rx_ambiguous. Two: an open-ended repeat of alternatives that can match
-# the same text (`(a|a)*b`, `(a|aa)+`). Conservative on purpose: a refused
+# _rx_ambiguous. Two, in that fallback only: an open-ended repeat of
+# alternatives that can START the same way (`(a|a)*b`) — a cruder test the
+# automaton makes exactly everywhere else, which is what lets a keyword
+# list like `((?:lsadump|logonpasswords)\s+)+` through while `(a|a)*b` and
+# `(a|aa)+` still fail it. Conservative on purpose: a refused
 # pattern can be rewritten (end each part of the repetition at something
 # it cannot match, a class instead of an alternation, or Contains), a hung
 # case cannot be cancelled. NOT covered: polynomial blow-ups from adjacent
@@ -1091,12 +1094,14 @@ def _rx_splits(body) -> bool:
 def _rx_hazard(items, open_outer: bool = False) -> str | None:
     """Why this parsed pattern can backtrack catastrophically, or None.
     `open_outer`: these items sit inside an open-ended repeat that can be
-    backtracked into."""
+    backtracked into and that _rx_splits could not model — the one place
+    the alternation rule below still has to stand in for it."""
     unbounded = _sre_c.MAXREPEAT
     for op, av in items:
         found = None
         if op in _RX_REPEATS:
             lo, hi, body = av
+            exact = False
             if hi > 1:
                 # A repeated group whose repetitions can split the same text
                 # more than one way. Open-ended, any variable-length part
@@ -1107,12 +1112,17 @@ def _rx_hazard(items, open_outer: bool = False) -> str | None:
                 try:
                     if risky and _rx_splits(body):
                         return "a repeated group that can split the same text more than one way"
+                    exact = risky
                 except _RxUnsupported:
                     if risky and not _rx_delimited(body):
                         return "a repeated group with nothing marking where one repetition ends"
                     if risky and _rx_ambiguous(body):
                         return "a repeated group whose parts can share out the same text more than one way"
-            found = _rx_hazard(body, open_outer or (hi > 1 and hi == unbounded))
+            # A body the automaton passed has had its alternations weighed
+            # exactly — (a|a)*b and (a|aa)+ fail it, a keyword list whose
+            # words share a first letter does not — so the shape rule below
+            # only applies under a repeat it could not model.
+            found = _rx_hazard(body, open_outer or (hi > 1 and hi == unbounded and not exact))
         elif _RX_POSSESSIVE is not None and op == _RX_POSSESSIVE:
             found = _rx_hazard(av[2])
         elif _RX_ATOMIC is not None and op == _RX_ATOMIC:
@@ -1123,7 +1133,10 @@ def _rx_hazard(items, open_outer: bool = False) -> str | None:
             # Alternatives that can match the same text give every
             # repetition two ways through — `(a|a)*b` is 2^n even though a
             # delimiter would pin the repetitions down, so this one holds
-            # regardless of _rx_delimited.
+            # regardless of _rx_delimited. It judges by first characters,
+            # so it also refuses alternatives that only START alike
+            # (`lsadump|logonpasswords`); that is why it is the fallback's
+            # rule and not the automaton's.
             if open_outer and _rx_alternatives_overlap(av[1]):
                 return "alternatives that can match the same text inside an open-ended repeat"
             for alt in av[1]:
