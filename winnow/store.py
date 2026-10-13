@@ -10802,8 +10802,19 @@ class Store:
         it. Returns (derived columns added, their backfill job ids)."""
         if session.get("layout"):
             self.save_layout(source_id, session["layout"])
+        # A view the table already holds — same name, same spec — is not
+        # added again. saved_views has no unique name (two specs may share
+        # one), so every load used to append the session's views anew: one
+        # became sixteen after a few save/load cycles. Only an exact match
+        # is skipped; a same-named view with a different spec is someone's
+        # work and is kept beside the local one, not written over it.
+        have = {(v["name"], json.dumps(v["payload"], sort_keys=True))
+                for v in self.list_saved_views(source_id)}
         for sv in session.get("saved_views", []):
-            self.save_view(source_id, sv["name"], sv["payload"])
+            key = (sv["name"], json.dumps(sv["payload"], sort_keys=True))
+            if key not in have:
+                self.save_view(source_id, sv["name"], sv["payload"])
+                have.add(key)
 
         # Derived columns arrive as definitions and are recomputed here —
         # each starts its own backfill job. A name that's already taken

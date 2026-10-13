@@ -405,3 +405,36 @@ def test_merge_load_still_leaves_tables_the_snapshot_never_saw(store, write_csv)
     rows = {(r["source_id"], r["rid"]) for r in store.db.execute(
         "SELECT source_id, rid FROM row_tags")}
     assert rows == {(a, 1), (b, 2)}
+
+
+def test_loading_a_session_again_does_not_duplicate_its_saved_views(store, write_csv):
+    """Every load used to append the session's saved views again, so one
+    view became two after a save/load cycle and 16 after four — loading a
+    snapshot has to be idempotent for the parts of it that are not tags."""
+    sid = _case(store, write_csv)
+    store.save_view(sid, "my filter", {"filters": [{"col": "User", "op": "equals", "value": "bob"}]})
+    store.save_view(sid, "same name, other spec", {"filters": []})
+    for _ in range(3):
+        store.save_session("pass")
+        store.load_session("pass", merge=False)
+        store.load_session("pass", merge=True)
+
+    views = store.list_saved_views(sid)
+    assert sorted(v["name"] for v in views) == ["my filter", "same name, other spec"]
+
+
+def test_a_received_view_with_a_name_already_taken_is_kept_beside_it(store, write_csv):
+    """Skipping only exact duplicates: a session view that shares a name
+    with a local one but describes a different filter is someone's work,
+    and is added rather than dropped or written over the local one."""
+    sid = _case(store, write_csv)
+    store.save_view(sid, "suspects", {"filters": [{"col": "User", "op": "equals", "value": "bob"}]})
+    data = store.export_case_session()
+    data["sources"][0]["saved_views"] = [
+        {"name": "suspects", "payload": {"filters": [{"col": "User", "op": "equals", "value": "eve"}]}}]
+
+    store.import_case_session(data, merge=True)
+    store.import_case_session(data, merge=True)
+
+    values = sorted(v["payload"]["filters"][0]["value"] for v in store.list_saved_views(sid))
+    assert values == ["bob", "eve"]
