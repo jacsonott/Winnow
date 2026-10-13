@@ -25,7 +25,10 @@ see [docs/notes/README.md](README.md) for the whole set.
   table on its own: one this SQLite can't read (a virtual table whose
   module it lacks — Thunderbird's message index) comes back with an
   `error` and `row_count: null`, shown but not pickable, instead of
-  failing the preview of the whole file.
+  failing the preview of the whole file. Columns come from
+  `PRAGMA table_xinfo`, not `table_info` (`_sqlite_table_columns`):
+  `table_info` omits GENERATED columns, so those were silently missing
+  from every import; a virtual table's hidden columns stay out.
 - Excel ingest (`ingest_xlsx_sheet`/`preview_xlsx_sheets`, xlsxread.py) is
   the sheet-shaped sibling of the SQLite path — one workbook, N picked
   sheets, one background job, the same `{tables: [{table, name?}]}` option

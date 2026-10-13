@@ -152,3 +152,36 @@ def test_one_unreadable_virtual_table_does_not_hide_the_rest_of_the_file(store, 
     assert "mozvtab" in tables["messagesText"]["error"]
     rec = store.ingest_sqlite_table(path, "messages", build_fts=False)
     assert rec["row_count"] == 1
+
+
+def test_generated_columns_are_imported_too(store, tmp_path):
+    """`PRAGMA table_info` omits generated columns, so the import read the
+    table without them — a computed column the application shows its own
+    users simply wasn't in the case, with nothing saying so."""
+    path = str(tmp_path / "app.db")
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE visits (id INTEGER PRIMARY KEY, host TEXT, path TEXT, "
+                 "url TEXT GENERATED ALWAYS AS ('https://' || host || path) VIRTUAL, "
+                 "host_upper TEXT GENERATED ALWAYS AS (upper(host)) STORED)")
+    conn.execute("INSERT INTO visits(host, path) VALUES ('example.test', '/a')")
+    conn.commit()
+    conn.close()
+
+    prev = {t["name"]: t for t in store.preview_sqlite_tables(path)["tables"]}
+    assert [c["name"] for c in prev["visits"]["columns"]] == ["id", "host", "path", "url", "host_upper"]
+    rec = store.ingest_sqlite_table(path, "visits", build_fts=False)
+    assert [c["name"] for c in rec["columns"]] == ["id", "host", "path", "url", "host_upper"]
+    with store._reader() as ro:
+        row = ro.execute(f'SELECT url, host_upper FROM "{rec["table_name"]}"').fetchone()
+    assert tuple(row) == ("https://example.test/a", "EXAMPLE.TEST")
+
+
+def test_an_fts_tables_hidden_columns_stay_out(store, tmp_path):
+    path = str(tmp_path / "fts.db")
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE VIRTUAL TABLE docs USING fts5(body)")
+    conn.execute("INSERT INTO docs(body) VALUES ('hello')")
+    conn.commit()
+    conn.close()
+    prev = {t["name"]: t for t in store.preview_sqlite_tables(path)["tables"]}
+    assert [c["name"] for c in prev["docs"]["columns"]] == ["body"]

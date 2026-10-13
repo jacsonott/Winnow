@@ -848,6 +848,18 @@ def infer_type(values: Iterable[str]) -> str:
     return "text"
 
 
+def _sqlite_table_columns(conn: sqlite3.Connection, table: str) -> list:
+    """An external table's columns as `PRAGMA table_xinfo` sees them,
+    GENERATED columns included. `table_info` leaves those out, so an
+    import silently dropped every generated column (a computed `full_url`,
+    a decoded timestamp the application derives) — data the evidence
+    file shows its own users. Hidden columns of a virtual table (hidden
+    = 1, e.g. an FTS table's own name column) are not data and stay out;
+    2 and 3 are the virtual and stored generated kinds."""
+    return [c for c in conn.execute(f"PRAGMA table_xinfo({q(table)})").fetchall()
+            if c["hidden"] in (0, 2, 3)]
+
+
 def _json_leaf_text(value: Any) -> str:
     """A JSON value at a point flattening stops (see _flatten_json) ->
     TEXT, same all-values-are-TEXT convention as CSV ingest. An object or
@@ -3090,7 +3102,7 @@ class Store:
             tables = []
             for t in table_names:
                 try:
-                    cols = ro.execute(f"PRAGMA table_info({q(t)})").fetchall()
+                    cols = _sqlite_table_columns(ro, t)
                     row_count = ro.execute(f"SELECT COUNT(*) FROM {q(t)}").fetchone()[0]
                     likely_ts = []
                     for c in cols:
@@ -3152,7 +3164,7 @@ class Store:
         ro = sqlite3.connect(f"file:{path}?mode=ro", uri=True, check_same_thread=False)
         ro.row_factory = sqlite3.Row
         try:
-            src_cols_info = ro.execute(f"PRAGMA table_info({q(table_name)})").fetchall()
+            src_cols_info = _sqlite_table_columns(ro, table_name)
             if not src_cols_info:
                 raise ValueError(f"No such table: {table_name}")
             src_colnames = [c["name"] for c in src_cols_info]
