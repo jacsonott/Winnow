@@ -143,13 +143,24 @@ export function openSessionManager() {
     const fresh = el('button', 'btn ghost', 'Start a fresh pass…');
     fresh.title = 'Save what you have, then clear tags and notes to review the evidence again';
     fresh.onclick = async () => {
+      // Saving under a name that is taken REPLACES that session (by design
+      // — see Store.save_session), so the suggestion has to be a free one.
+      // "pass N+1" counted sessions rather than looking at their names: with
+      // pass 1 and pass 3 left after a delete it offered "pass 3", and
+      // accepting it put this pass over that one and then cleared the case.
+      const taken = new Set(sessions.map((x) => x.name));
+      let n = sessions.length + 1;
+      while (taken.has(`pass ${n}`)) n += 1;
       const name = await promptDialog(
-        'Save the current work as — then start with no tags or notes:',
-        `pass ${sessions.length + 1}`);
+        'Save the current work as — then start with no tags or notes:', `pass ${n}`);
       if (name === null) return;
       if (!name.trim() && !(await confirmDialog(
         'Clear all tags and notes WITHOUT saving them first?\n\nThis cannot be undone.',
         { danger: true, okLabel: 'Clear anyway' }))) return;
+      if (taken.has(name.trim()) && !(await confirmDialog(
+        `A session named "${name.trim()}" already exists. Replace it with the current work, `
+        + 'then clear the case?\n\nWhat it holds now is lost.',
+        { danger: true, okLabel: 'Replace' }))) return;
       setBusy(true);
       let res;
       try { res = await post('/api/case_sessions/new', { save_as: name.trim() || null }); }
