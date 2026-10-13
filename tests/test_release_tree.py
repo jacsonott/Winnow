@@ -16,6 +16,7 @@ analyst downloads it.
 from __future__ import annotations
 
 import io
+import re
 import subprocess
 import tarfile
 from pathlib import Path
@@ -64,7 +65,7 @@ def _export_ignore_patterns() -> set[str]:
         line = raw.strip()
         if not line or line.startswith("#") or "export-ignore" not in line:
             continue
-        out.add(line.split()[0].rstrip("/"))
+        out.add(line.split()[0].strip("/"))   # "/tests/" is the rule for tests
     return out
 
 
@@ -106,6 +107,34 @@ def test_the_built_archive_agrees_with_those_rules():
         assert want in entries, f"{want} is missing from the release archive"
     for unwanted in sorted(DEV_ONLY):
         assert unwanted not in entries, f"{unwanted} rides into the release archive"
+
+
+def test_the_docs_ship_whole():
+    """Everything under docs/, and everything README.md links to or shows,
+    is in the archive — the "deliberately NOT applied to docs/" promise in
+    .gitattributes, checked against what `git archive` actually writes.
+
+    An export-ignore rule without a leading "/" matches its name at any
+    depth: `screenshots/` (meant for the top-level folder) also dropped
+    docs/screenshots/, so every image on the README was a broken link in
+    the zip an analyst downloads, with the rule-reading tests above green.
+    """
+    if not _worktree_is_clean():
+        pytest.skip("uncommitted changes — HEAD is not what this tree would ship")
+    blob = subprocess.run(["git", "archive", "--format=tar", "HEAD"], cwd=ROOT,
+                          capture_output=True, check=True).stdout
+    with tarfile.open(fileobj=io.BytesIO(blob)) as tf:
+        shipped = {n for n in tf.getnames() if n}
+    docs = {p for p in _git("ls-files", "docs").splitlines() if p}
+    assert docs, "no tracked files under docs/ — the check below would pass vacuously"
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    linked = {
+        target.split("#", 1)[0].rstrip("/")
+        for target in re.findall(r"\]\(([^)\s]+)\)", readme)
+        if "://" not in target and not target.startswith(("#", "mailto:"))
+    } - {""}
+    missing = sorted(p for p in docs | linked if p not in shipped)
+    assert not missing, f"left out of the release archive: {missing}"
 
 
 def test_no_case_file_is_tracked():
