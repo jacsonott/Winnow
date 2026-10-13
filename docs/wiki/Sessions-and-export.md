@@ -103,7 +103,8 @@ session file is how one passes their tags and notes to the other.
 Save a session, then click **Download** on its row. You get a
 `.winnow_case.json` file named after the session. It holds the session
 described above: tags, notes, layouts and derived-column definitions, and
-the original path of each evidence file on your machine. It holds no
+the original path of each evidence file on your machine (for a file you
+uploaded through the browser, just its name). It holds no
 evidence rows.
 
 ### Receiving a session file

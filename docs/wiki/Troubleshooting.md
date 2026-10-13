@@ -43,7 +43,14 @@ that isn't a Winnow case, such as a browser's `History` database. Winnow
 refuses to open it as a case because doing so would write its own tables
 into the file. If it's evidence, import it into a case instead (**Case ▾ →
 Import…**, see [Cases and importing](Cases-and-importing.md)). To make a
-new case, give a path that doesn't exist yet.
+new case, use **+ New case** (or `--case` with a path that doesn't exist
+yet).
+
+### "No case file at …"
+
+**Open existing case file…** only opens a case that is already there. Check
+the path, and that the drive holding it is connected; to start a new case,
+use **+ New case**.
 
 ### No app window, or a browser tab instead
 

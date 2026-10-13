@@ -101,12 +101,13 @@ reduced motion) and asks two questions, once each:
 - whether you are working over RDP or another remote desktop. **Enable
   remote mode** switches the grid to whole-row scrolling and stops
   animations; you can change it later in **Settings → Appearance**.
-- where case files should live. **Use the default** puts them in a `cases`
-  folder; **Choose a folder…** lets you pick one.
+- where case files should live. **Use the default** puts them in the
+  `cases` folder inside the Winnow folder (the prompt shows its full path);
+  **Choose a folder…** lets you pick one.
 
-Start Winnow from its own folder, as the launchers do. The default `cases`
-folder chosen at first run is resolved against the folder you started in,
-and so is a case created by `--open` without `--case`.
+Start Winnow from its own folder, as the launchers do: a case created by
+`--open` without `--case` goes in the folder you started in. The default
+`cases` folder is always the one inside the Winnow folder.
 
 From the home screen you create or open a case; see
 [Cases and importing](Cases-and-importing.md).

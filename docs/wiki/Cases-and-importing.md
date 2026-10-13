@@ -37,7 +37,9 @@ any case variables it needs (required ones are marked `*`); see
 the case to this machine's list as it opens it — for a case someone handed
 you, or one you removed from the list. Older cases saved as `.db` open the
 same way. A file that is not a Winnow case, such as a browser `History`
-database, is refused; open a case and import it instead.
+database, is refused; open a case and import it instead. A path with no
+file at it is refused too (*No case file at …*) rather than creating an
+empty case there; **+ New case** makes new cases.
 
 | Row button | What it does |
 | --- | --- |
@@ -49,8 +51,9 @@ database, is refused; open a case and import it instead.
 ### The cases folder
 
 On first run Winnow asks where to keep case files. **Choose a folder…**
-picks one; **Use the default** uses a `cases` folder in the folder Winnow was
-started from (the Winnow folder, with the launchers). New cases are proposed
+picks one; **Use the default** uses the `cases` folder inside the Winnow
+folder, beside `server.py` and the launchers, wherever Winnow is started
+from; the prompt shows its full path. New cases are proposed
 there and quick looks go in its `quicklook` subfolder. No setting changes it
 later; the `WINNOW_CASES_DIR` environment variable overrides it. See
 [Installation](Installation.md) for where everything else lives.
@@ -292,8 +295,8 @@ field out of a JSON cell later, use [derived columns](Derived-columns.md).
 
 **Pick tables…** lists every table with its row count. Tick the ones you want
 (none are ticked at first) and **Use selected tables**; each becomes its own
-table — named `<file name>.<table>`, such as `History.urls`, when added from
-this machine — and all of them import as one job.
+table, named `<file name>.<table>` such as `History.urls`, and all of them
+import as one job.
 
 Chromium browsers store times as microseconds since 1601. A column whose
 name contains `time`, `utc` or `date` and whose values look like that gets a
@@ -312,7 +315,7 @@ with *can't be read: …* and can't be ticked; the others still import.
 
 **Pick sheets…** works like the table picker: tick sheets and
 **Use selected sheets**, and each becomes a table (named
-`<file name>.<sheet>` when added from this machine). Its row counts are
+`<file name>.<sheet>`). Its row counts are
 estimates from the sheet's declared size; the import reads every row there
 is. `.xlsm` imports the same way, and macros never run.
 
@@ -543,5 +546,7 @@ removing and merging tables are covered in
 Winnow records how each file was read — reader, delimiter, header, flatten
 mode, table or sheet — so loading a session file into a case that lacks a
 table can re-import it the same way, if the file is still at the path it was
-imported from. That works for files added from this machine, not uploads.
+imported from. That works for files added from this machine, not uploads:
+an upload records only the file's name, so the load says so and you import
+the file yourself.
 See [Sessions and export](Sessions-and-export.md).
