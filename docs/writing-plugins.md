@@ -983,6 +983,10 @@ res = req.store.run_sql("SELECT a, b FROM src_1 LIMIT 100", limit=5000)
 # -> {"columns": [...], "rows": [[...], ...], "truncated": bool, "elapsed_ms": int}
 ```
 
+`rows` holds at most `limit` rows; `truncated` is true only when the
+query had more than that (a result of exactly `limit` rows is not
+truncated).
+
 **Use `run_sql` for reads.** It opens its own read-only connection and
 never takes Winnow's writer lock, so a slow aggregation can't block
 ingests, tagging, or anyone else's queries — and it inherits the SQL
