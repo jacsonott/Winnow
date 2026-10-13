@@ -489,7 +489,9 @@ async def record_gone_handler(request: Request, exc: RecordGone):
 # that never expected its table to vanish mid-request let that out into
 # the catch-all — a 500 "Internal error" and an error badge for something
 # nobody did wrong. Only those two messages are matched: any other
-# KeyError is still a bug, and still a 500.
+# KeyError is still a bug, and is raised on to the catch-all — re-raised
+# rather than handed to it, because only the propagated exception keeps
+# its traceback in the terminal (and in the test client).
 _GONE_TABLE_RE = re.compile(r"No (?:table|merge) -?\d+")
 
 
@@ -498,7 +500,7 @@ async def gone_table_handler(request: Request, exc: KeyError):
     msg = exc.args[0] if exc.args and isinstance(exc.args[0], str) else ""
     if _GONE_TABLE_RE.fullmatch(msg):
         return JSONResponse({"detail": "That table is no longer in this case"}, status_code=404)
-    return await _unhandled_error_handler(request, exc)
+    raise exc
 
 
 @app.exception_handler(OpCancelled)
