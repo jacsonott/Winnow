@@ -1874,8 +1874,10 @@ def api_cases_delete(case_id: int, delete_file: bool = False):
             # checked what was at the end of it — so "forget this case, and
             # delete the file" was an unlink of anything the analyst's
             # account could reach. Deleting a case file requires it to be
-            # one; the registry entry goes either way.
+            # one; the registry entry goes either way — before the refusal,
+            # which says so.
             if not is_winnow_case_file(rec["path"]):
+                WS.cases.delete(case_id)
                 raise HTTPException(
                     400, f"{rec['path']} is not a Winnow case file — removed from the "
                          "list, but not deleted from disk")

@@ -765,6 +765,9 @@ export async function deleteCaseFile(c) {
     await api(`/api/cases/${c.id}?delete_file=true`, { method: 'DELETE' });
   } catch (e) {
     toast('Could not delete: ' + e.message, 6000);
+    // Not always a no-op: a path that is not a case file is still taken
+    // off the list (the message says so), so the list is re-read either way.
+    refreshCases();
     return;
   }
   refreshCases();
