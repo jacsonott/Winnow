@@ -478,15 +478,22 @@ def apply_update(archive: Path, root: Path | None = None, source: str = "release
         before = installed_version(root)
         backup = _backup(root, plan, before)
         try:
+            # Removals FIRST. A release that turns a shipped file into a
+            # directory (a single-file plugin becoming a package) can only
+            # create foo/ once the old foo is gone, and the reverse needs
+            # foo/'s files gone before foo can be written — with the writes
+            # first, both failed every time and rolled back. Everything
+            # removed here is already in the backup.
+            for m in plan["removed"]:
+                with contextlib.suppress(OSError):
+                    (root / m).unlink()
+            _prune_empty_dirs(root, plan["removed"])
             for m in incoming:
                 target = root / m
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with zf.open(prefix + m) as src, open(target, "wb") as out:
                     shutil.copyfileobj(src, out)
                 _apply_exec_bits(zf.getinfo(prefix + m), target)
-            for m in plan["removed"]:
-                with contextlib.suppress(OSError):
-                    (root / m).unlink()
             _sweep_moved_modules(root, incoming)
             _write_manifest(root, plan["version"], incoming, source)
         except Exception as e:  # noqa: BLE001 — a half-applied install is the one thing we can't leave behind
@@ -513,6 +520,22 @@ def _apply_exec_bits(info: zipfile.ZipInfo, target: Path) -> None:
     if exec_bits:
         with contextlib.suppress(OSError):
             os.chmod(target, target.stat().st_mode | exec_bits)
+
+
+def _prune_empty_dirs(root: Path, removed: list[str]) -> None:
+    """Remove the directories that removing `removed` left empty — only
+    those, deepest first, and never one with anything left in it (a
+    non-empty directory holds something an update doesn't own)."""
+    dirs = {(root / rel).parent for rel in removed}
+    for d in sorted(dirs, key=lambda p: len(p.parts), reverse=True):
+        while d != root and root in d.parents:
+            if _is_protected(d.relative_to(root).as_posix() + "/"):
+                break   # an empty plugins/ is still the analyst's folder
+            try:
+                d.rmdir()
+            except OSError:
+                break
+            d = d.parent
 
 
 def _sweep_moved_modules(root: Path, incoming: list[str]) -> list[str]:
@@ -591,6 +614,17 @@ def restore(backup: Path, root: Path | None = None) -> dict:
     if not meta_path.is_file():
         raise UpdateError(f"Not a Winnow backup: {backup}")
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    # Removes before restores, for the same reason apply removes before it
+    # writes: undoing a file-to-directory change means emptying foo/ before
+    # foo can be put back.
+    removed = []
+    for rel in meta.get("remove", []):
+        if _is_protected(rel):
+            continue
+        with contextlib.suppress(OSError):
+            (root / rel).unlink()
+            removed.append(rel)
+    _prune_empty_dirs(root, removed)
     for rel in meta.get("restore", []):
         if _is_protected(rel):
             continue
@@ -598,11 +632,6 @@ def restore(backup: Path, root: Path | None = None) -> dict:
         if src.is_file():
             (root / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, root / rel)
-    for rel in meta.get("remove", []):
-        if _is_protected(rel):
-            continue
-        with contextlib.suppress(OSError):
-            (root / rel).unlink()
     # A backup from before "manifest" was recorded says nothing either way;
     # leave the current one alone rather than guess.
     if meta.get("manifest") is True and (backup / MANIFEST).is_file():

@@ -445,6 +445,27 @@ def test_a_file_new_to_the_install_keeps_its_executable_bit(install, tmp_path):
     assert not os.access(install / "server.py", os.X_OK)
 
 
+def test_a_shipped_file_can_become_a_directory_and_back(install, tmp_path):
+    """Writes ran before removals, so a release turning a single-file
+    plugin into a package (examples/plugins/geoip -> geoip/__init__.py)
+    could never apply: creating geoip/ failed on the file still there, and
+    every attempt rolled back. The reverse is the same problem."""
+    as_file = {**SHIPPED, "examples/plugins/geoip": "single file\n"}
+    as_dir = {**SHIPPED, "examples/plugins/geoip/__init__.py": "package\n",
+              "version.py": 'VERSION = "1.2.0"\n'}
+    updater.apply_update(_make_release(tmp_path / "a.zip", "1.1.0", as_file), install)
+    updater.apply_update(_make_release(tmp_path / "b.zip", "1.2.0", as_dir), install)
+    assert (install / "examples/plugins/geoip/__init__.py").read_text() == "package\n"
+
+    updater.rollback(install)          # and undoing it turns it back into the file
+    assert (install / "examples/plugins/geoip").read_text() == "single file\n"
+
+    back = {**as_file, "version.py": 'VERSION = "1.3.0"\n'}
+    updater.apply_update(_make_release(tmp_path / "b2.zip", "1.2.0", as_dir), install)
+    updater.apply_update(_make_release(tmp_path / "c.zip", "1.3.0", back), install)
+    assert (install / "examples/plugins/geoip").read_text() == "single file\n"
+
+
 def test_rollback_without_a_backup_is_a_clear_message(install):
     with pytest.raises(UpdateError, match="No backup"):
         updater.rollback(install)
