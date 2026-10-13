@@ -25,7 +25,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form, Query
@@ -46,7 +46,7 @@ from winnow import version
 from winnow import archive
 from winnow import workspace as WS
 from winnow.store import (CASE_SUFFIX, DEFAULT_IMPORT_EXTENSIONS, PLASO_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, MissingTable, OpCancelled, RecordGone, Store, ViewExpired,
-                   decode_text_sample, describe_case_lock, is_winnow_case_file, probe_case_lock, q,
+                   case_lock_path, decode_text_sample, describe_case_lock, is_winnow_case_file, probe_case_lock, q,
                    rows_to_xlsx, sniff_text_encoding, sweep_orphan_views)
 from winnow.store import case_session_document_problem, pane_cell_json, session_document_problem
 
@@ -615,24 +615,6 @@ async def require_client_header(request: Request, call_next):
 
 @app.middleware("http")
 async def no_cache_static(request: Request, call_next):
-    # Piggybacked in-flight counting for idle shutdown — this middleware
-    # already wraps every request, so the marginal cost is two increments.
-    # /api/presence is excluded: its response streams for the LIFETIME of a
-    # page, so counting it would read as "busy" forever; it has its own
-    # stream counter. A download that outlives its tab (a multi-minute CSV
-    # export) counts here until the body finishes, which is the hold that
-    # keeps auto-exit from killing it.
-    counted = request.url.path != "/api/presence"
-    if counted:
-        PRESENCE.inflight += 1
-    try:
-        return await _no_cache_static_inner(request, call_next)
-    finally:
-        if counted:
-            PRESENCE.inflight -= 1
-
-
-async def _no_cache_static_inner(request: Request, call_next):
     """StaticFiles sends Last-Modified/ETag but no Cache-Control, which
     leaves the browser free to serve a stale index.html/app.js/style.css
     from its own disk cache for an unbounded time — even across a normal
@@ -652,6 +634,40 @@ async def _no_cache_static_inner(request: Request, call_next):
     if request.url.path.startswith(("/static/", "/plugin_assets/")) or request.url.path == "/":
         response.headers["Cache-Control"] = "no-cache"
     return response
+
+
+class _InflightCounter:
+    """In-flight request counting for idle shutdown, as plain ASGI.
+
+    It used to ride the no-cache middleware above, which is a
+    BaseHTTPMiddleware — and there `call_next` returns as soon as the
+    response HEADERS exist; the body streams after the middleware has
+    already returned. So a multi-minute CSV export, the very download this
+    hold exists to protect, stopped counting the moment it started, and
+    idle shutdown could begin under it. A raw ASGI wrapper's `await` only
+    returns once the app has sent its last body chunk, which is the
+    meaning the count needs.
+
+    /api/presence is excluded: its response streams for the LIFETIME of a
+    page, so counting it would read as "busy" forever; it has its own
+    stream counter. Added after every @app.middleware above, which makes
+    it the outermost layer — it sees the whole response, whatever the
+    others do to it."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope.get("path") == "/api/presence":
+            return await self.app(scope, receive, send)
+        PRESENCE.inflight += 1
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            PRESENCE.inflight -= 1
+
+
+app.add_middleware(_InflightCounter)
 
 
 def store() -> Store:
@@ -837,6 +853,25 @@ QUICKLOOK_DIRNAME = "quicklook"
 
 def _is_temp_case(path: str) -> bool:
     return os.path.basename(os.path.dirname(os.path.abspath(path))) == QUICKLOOK_DIRNAME
+
+
+def _same_case_path(a: str, b: str) -> bool:
+    """Whether two spellings name the same case file. realpath + normcase,
+    the same canonical form case_lock_path uses: a case reached through a
+    symlink (or, on Windows, in other letter case) is the case it points
+    at, and comparing abspaths called it a different one."""
+    return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+
+
+def _remove_case_file(path: str) -> None:
+    """Delete a case file and what lives beside it: SQLite's -wal/-shm
+    (left behind whenever the last connection to it didn't close cleanly)
+    and a stale .winnow-lock marker. Deleting only the .db-winnow left
+    those three in the cases folder for good, the lock marker under a name
+    no case would ever own again."""
+    for p in (path, path + "-wal", path + "-shm", case_lock_path(path)):
+        with contextlib.suppress(OSError):
+            os.remove(p)
 
 
 def _new_temp_case_path() -> str:
@@ -1247,7 +1282,7 @@ def _case_open(body: CaseOpen):
     # `not STORE.closed` matters: STORE outlives close() on both the case-
     # switch path and the legacy-preset migration, and reopening a case
     # whose Store has already been closed is a real reopen, not a no-op.
-    if STORE is not None and not STORE.closed and os.path.abspath(STORE.path) == os.path.abspath(body.path):
+    if STORE is not None and not STORE.closed and _same_case_path(STORE.path, body.path):
         rec = WS.cases.find_by_path(body.path) or WS.cases.create(
             body.path, name=os.path.splitext(os.path.basename(body.path))[0]
         )
@@ -1334,7 +1369,9 @@ def api_case_copy_sources(body: CopySourcesBody):
     except KeyError as e:
         raise HTTPException(404, str(e))
     except ValueError as e:
-        code = 409 if "another Winnow" in str(e) else 400
+        # Both refusals that clear up on their own (the other Winnow closes
+        # it, the running copy lands) are 409s; the rest are the request.
+        code = 409 if ("another Winnow" in str(e) or "Already copying" in str(e)) else 400
         raise HTTPException(code, str(e))
 
 
@@ -1707,9 +1744,7 @@ def _case_discard():
     old, STORE = STORE, None
     with contextlib.suppress(Exception):
         old.close()
-    for suffix in ("", "-wal", "-shm", ".winnow-lock"):
-        with contextlib.suppress(OSError):
-            os.remove(path + suffix)
+    _remove_case_file(path)
     with contextlib.suppress(Exception):
         instances.set_case(None)
     # No case is open now, so the machine defaults decide again: a plugin
@@ -1745,6 +1780,19 @@ def _is_loopback(request: Request) -> bool:
     peer."""
     host = request.client.host if request.client else ""
     return host in ("127.0.0.1", "::1", "testclient")
+
+
+def _refuse_remote_mkdir(request: Request, path: str) -> None:
+    """403 when a peer that isn't this machine would make `path` exist.
+
+    browse_dir/new's rule, applied to the two routes that create folders
+    as a side effect: a new case's parent (POST /api/cases) and the cases
+    folder setting (POST /api/prefs). Refusing only the route NAMED "new
+    folder" left a LAN peer free to makedirs anywhere the server user can
+    through either of the others. A folder that already exists is not a
+    write, so a peer can still file a case into one."""
+    if not os.path.isdir(path) and not _is_loopback(request):
+        raise HTTPException(403, "Creating folders is only allowed from this machine")
 
 
 # ---------------------------------------------------------------- user env
@@ -1954,9 +2002,10 @@ def api_prefs():
 
 
 @app.post("/api/prefs")
-def api_prefs_set(body: PrefsBody):
+def api_prefs_set(request: Request, body: PrefsBody):
     if body.cases_dir is not None:
         path = os.path.abspath(os.path.expanduser(body.cases_dir.strip()))
+        _refuse_remote_mkdir(request, path)
         try:
             os.makedirs(path, exist_ok=True)
         except OSError as e:
@@ -1986,7 +2035,7 @@ def api_cases_list():
 
 
 @app.post("/api/cases")
-def api_cases_create(body: CaseCreate):
+def api_cases_create(request: Request, body: CaseCreate):
     # Registering a path puts it in every case picker — the home screen,
     # "Copy into this case", multi-case — and each of those opens it.
     # An existing file has to be a case already; same check /api/case/open
@@ -1997,6 +2046,10 @@ def api_cases_create(body: CaseCreate):
                  "open a case and import it there")
     if not os.path.isfile(body.path):
         parent = os.path.dirname(os.path.abspath(body.path))
+        if parent:
+            # Outside the try below: its refusal is already the 403 it
+            # means, not a "could not create" 400.
+            _refuse_remote_mkdir(request, parent)
         try:
             # Inside the try with the open: a parent that is a FILE, or one
             # this account can't create, is the path's problem (a 400 that
@@ -2027,23 +2080,38 @@ def api_cases_delete(case_id: int, delete_file: bool = False, path: str | None =
     step here that cannot be taken back, so when the client says which file
     it means and the id now names another, nothing is touched at all."""
     rec = WS.cases.get(case_id)
-    if path is not None and rec is not None and os.path.abspath(path) != os.path.abspath(rec["path"]):
+    if path is not None and rec is not None and not _same_case_path(path, rec["path"]):
         raise HTTPException(409, "That case list is out of date — it has changed since this window "
                                  "showed it. Nothing was removed; reload the case list and try again.")
     if delete_file:
         if rec and os.path.isfile(rec["path"]):
-            if STORE is not None and os.path.abspath(STORE.path) == os.path.abspath(rec["path"]):
+            if STORE is not None and _same_case_path(STORE.path, rec["path"]):
                 raise HTTPException(400, "Close this case before deleting its file")
+            # Open in ANOTHER Winnow is the same refusal for the same reason —
+            # the check above only ever saw this process. Unlinking a case a
+            # live Winnow has open leaves it writing into an inode nobody can
+            # find again (or, on Windows, fails half way through), and the
+            # other analyst learns about it when their work is gone.
+            holder = probe_case_lock(rec["path"])
+            if holder:
+                raise HTTPException(409, {
+                    "error": "case_in_use",
+                    "message": (f"It is open in another Winnow ({describe_case_lock(holder)}) "
+                                "— close it there first"),
+                    "holder": holder,
+                })
             # Registering a case is just recording a path, and nothing
             # checked what was at the end of it — so "forget this case, and
             # delete the file" was an unlink of anything the analyst's
             # account could reach. Deleting a case file requires it to be
-            # one; the registry entry goes either way.
+            # one; the registry entry goes either way — before the refusal,
+            # which says so.
             if not is_winnow_case_file(rec["path"]):
+                WS.cases.delete(case_id)
                 raise HTTPException(
                     400, f"{rec['path']} is not a Winnow case file — removed from the "
                          "list, but not deleted from disk")
-            os.remove(rec["path"])
+            _remove_case_file(rec["path"])
     WS.cases.delete(case_id)
     return {"ok": True}
 
@@ -3152,10 +3220,15 @@ async def api_plugins_install(
         raise HTTPException(400, "paths and files must align")
 
     keep: list[tuple[Path, UploadFile]] = []  # (relative path, upload)
+    root = PLUGIN_DIRS[0].resolve()
     for rel, f in zip(rel_paths, files):
-        p = Path(str(rel).replace("\\", "/"))
-        if not rel or p.is_absolute() or ".." in p.parts or not p.parts:
+        parts = _plugin_upload_parts(rel)
+        # Belt and braces over the segment check, the way browse_dir/new
+        # does it: whatever the string did, the file has to land inside
+        # plugins/ (a symlink already in there pointing out included).
+        if parts is None or root not in (root / Path(*parts)).resolve().parents:
             raise HTTPException(400, f"Unsafe path in upload: {rel!r}")
+        p = Path(*parts)
         if "__pycache__" in p.parts or p.suffix == ".pyc":
             continue
         keep.append((p, f))
@@ -3175,13 +3248,27 @@ async def api_plugins_install(
         if not any(p.parts == (fs_name, "__init__.py") for p, _ in keep):
             raise HTTPException(400, f"Not a plugin package: no {fs_name}/__init__.py in the folder")
         dest = PLUGIN_DIRS[0] / fs_name
+    # What an overwrite would delete must itself be an entry directly in
+    # plugins/ — never the folder, never something a link points at.
+    if dest.resolve().parent != root:
+        raise HTTPException(400, f"Unsafe plugin name: {fs_name!r}")
 
-    if dest.exists() and not overwrite:
+    # Taken means the NAME, not the path: foo.py and foo/ are the same
+    # plugin to the loader, which loads whichever sorts first (the folder)
+    # and ignores the other. Checking only `dest` installed foo.py beside an
+    # existing foo/, reported "Installed foo", and the new file never ran.
+    other = (PLUGIN_DIRS[0] / fs_name) if dest.suffix == ".py" else (PLUGIN_DIRS[0] / f"{fs_name}.py")
+    other_is_plugin = (other.is_file() if other.suffix == ".py"
+                       else (other / "__init__.py").is_file())
+    taken = [d for d in (dest, other)
+             if (d.exists() and (d is dest or other_is_plugin))
+             and d.resolve().parent == root]
+    if taken and not overwrite:
         # 409, not 400: the request is fine, the name is simply taken —
         # the frontend confirms and retries with overwrite=true.
         raise HTTPException(409, f"A plugin named {fs_name} is already installed")
-    if overwrite and dest.exists():
-        await run_in_threadpool(_remove_plugin_dest, dest)
+    for d in taken if overwrite else ():
+        await run_in_threadpool(_remove_plugin_dest, d)
 
     PLUGIN_DIRS[0].mkdir(parents=True, exist_ok=True)
     for p, f in keep:
@@ -3201,6 +3288,32 @@ async def api_plugins_install(
     await run_in_threadpool(_reload_plugins)
     rec = next((p for p in PLUGINS.describe() if p["fs_name"] == fs_name), None)
     return {"installed": fs_name, "error": rec["error"] if rec else None, **api_plugins()}
+
+
+def _plugin_upload_parts(rel) -> tuple[str, ...] | None:
+    """The path segments of one uploaded plugin file, or None if it is not
+    a plain relative path on EVERY platform Winnow runs on.
+
+    The check used to be `Path(...).is_absolute()` plus "no '..'", which is
+    POSIX's idea of safe. On Windows a rooted-but-driveless path
+    (`\\Windows\\Tasks\\x.py`) and a drive-relative one (`C:__init__.py`) are
+    neither absolute nor dotted, so both passed, and `plugins / p` then
+    pointed outside plugins/ — with overwrite on, the destination was
+    rmtree'd first, and a drive-relative fs_name could make that a drive.
+    So every Windows form is refused wherever this runs: a drive, a root,
+    and a colon in any segment (drive-relative paths and NTFS alternate
+    streams — never part of a real plugin's file name)."""
+    if not isinstance(rel, str) or not rel:
+        return None
+    win = PureWindowsPath(rel)
+    if win.drive or win.root:
+        return None
+    parts = tuple(x for x in rel.replace("\\", "/").split("/") if x not in ("", "."))
+    if not parts or rel.replace("\\", "/").startswith("/"):
+        return None
+    if any(x == ".." or ":" in x for x in parts):
+        return None
+    return parts
 
 
 def _remove_plugin_dest(dest: Path) -> None:
@@ -5845,9 +5958,9 @@ def main() -> None:
 
     # Registered before uvicorn blocks, not in the lifespan: the lifespan
     # doesn't know the port (uvicorn owns it by then), and a launcher that
-    # probes an entry a moment before bind completes just gets a failed
-    # probe and moves on — running() treats the file as a hint, the port as
-    # the truth.
+    # probes an entry a moment before bind completes gets a failed probe and
+    # moves on — running() treats the file as a hint, the port as the truth,
+    # and leaves an entry this young in place (instances.STARTUP_GRACE_S).
     with contextlib.suppress(Exception):
         instances.register(args.port, case_path if case_path else None)
 

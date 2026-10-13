@@ -85,8 +85,16 @@ export function openSessionManager() {
         try {
           res = await api(`/api/case_sessions/${encodeURIComponent(s.name)}/load?merge=false`,
                           { method: 'POST' });
-          await loadSources();
+        } catch (e) {
+          // try/finally alone left a refusal (deleted from another window
+          // meanwhile, a write that failed) as an unhandled rejection: no
+          // toast, and a dialog that looked as if Load did nothing. It
+          // stays open, list refreshed, so the analyst can see why.
+          toast(`Could not load "${s.name}": ${e.message}`, 6000);
+          refresh();
+          return;
         } finally { setBusy(false); }
+        await loadSources();
         (res.warnings || []).forEach((w) => toast(w, 6000));
         $('modal').hidden = true;
         toast(`Loaded "${s.name}" · ${res.tags_applied.toLocaleString()} tag assignments`);
@@ -110,7 +118,9 @@ export function openSessionManager() {
       del.title = 'Delete this session from the case';
       del.onclick = async () => {
         if (!(await confirmDialog(`Delete session "${s.name}"?`, { danger: true, okLabel: 'Delete' }))) return;
-        await api(`/api/case_sessions/${encodeURIComponent(s.name)}`, { method: 'DELETE' });
+        try {
+          await api(`/api/case_sessions/${encodeURIComponent(s.name)}`, { method: 'DELETE' });
+        } catch (e) { toast(`Could not delete "${s.name}": ${e.message}`, 6000); return; }
         refresh();
       };
       row.append(load, dl, ren, del);
@@ -133,16 +143,28 @@ export function openSessionManager() {
     const fresh = el('button', 'btn ghost', 'Start a fresh pass…');
     fresh.title = 'Save what you have, then clear tags and notes to review the evidence again';
     fresh.onclick = async () => {
+      // Saving under a name that is taken REPLACES that session (by design
+      // — see Store.save_session), so the suggestion has to be a free one.
+      // "pass N+1" counted sessions rather than looking at their names: with
+      // pass 1 and pass 3 left after a delete it offered "pass 3", and
+      // accepting it put this pass over that one and then cleared the case.
+      const taken = new Set(sessions.map((x) => x.name));
+      let n = sessions.length + 1;
+      while (taken.has(`pass ${n}`)) n += 1;
       const name = await promptDialog(
-        'Save the current work as — then start with no tags or notes:',
-        `pass ${sessions.length + 1}`);
+        'Save the current work as — then start with no tags or notes:', `pass ${n}`);
       if (name === null) return;
       if (!name.trim() && !(await confirmDialog(
         'Clear all tags and notes WITHOUT saving them first?\n\nThis cannot be undone.',
         { danger: true, okLabel: 'Clear anyway' }))) return;
+      if (taken.has(name.trim()) && !(await confirmDialog(
+        `A session named "${name.trim()}" already exists. Replace it with the current work, `
+        + 'then clear the case?\n\nWhat it holds now is lost.',
+        { danger: true, okLabel: 'Replace' }))) return;
       setBusy(true);
       let res;
       try { res = await post('/api/case_sessions/new', { save_as: name.trim() || null }); }
+      catch (e) { toast('Could not start a fresh pass: ' + e.message, 6000); return; }
       finally { setBusy(false); }
       await loadSources();
       $('modal').hidden = true;

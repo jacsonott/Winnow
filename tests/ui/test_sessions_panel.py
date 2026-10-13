@@ -220,3 +220,111 @@ def test_a_fresh_pass_saves_then_clears(page):
     finally:
         _cleanup(page)
         page.evaluate("() => __winnow.loadSources()")
+
+
+def test_a_fresh_pass_suggests_a_name_no_session_has(page):
+    """The suggestion was "pass N+1" for N sessions. With pass 1 and pass 3
+    left after a delete it offered "pass 3" — and OK saved this pass over
+    that one, then cleared the case, so what pass 3 held was gone."""
+    _cleanup(page)
+    try:
+        _save(page, "pass 1")
+        _save(page, "pass 3")
+        _open(page)
+        page.locator(".btn", has_text="Start a fresh pass").click()
+        page.wait_for_selector(".confirm-overlay input")
+        suggested = page.locator(".confirm-overlay input").input_value()
+        assert suggested not in ("pass 1", "pass 3"), suggested
+        page.locator(".confirm-card .btn", has_text="Cancel").click()
+    finally:
+        _cleanup(page)
+        page.keyboard.press("Escape")
+
+
+def test_a_fresh_pass_over_a_taken_name_asks_first(page):
+    """Typing a name that is taken would replace that session (saving over
+    a name is how save_session works) and then clear the case — two
+    irreversible steps on one OK. It asks, and Cancel leaves both alone."""
+    _cleanup(page)
+    _tag_rows(page, [0, 1])
+    try:
+        _save(page, "triage")
+        before = page.evaluate("""() => fetch('/api/case_sessions',
+          { headers: { 'X-Timeline-Lite-Client': '1' } }).then((r) => r.json())""")["sessions"][0]
+        _tag_rows(page, [2])
+        _open(page)
+        page.locator(".btn", has_text="Start a fresh pass").click()
+        page.wait_for_selector(".confirm-overlay input")
+        page.locator(".confirm-overlay input").fill("triage")
+        page.locator(".confirm-card .btn", has_text="OK").first.click()
+        ask = page.locator(".confirm-card", has_text="already exists")
+        ask.wait_for(state="visible", timeout=5000)
+        ask.locator(".btn", has_text="Cancel").click()
+        page.wait_for_timeout(500)
+
+        after = page.evaluate("""() => fetch('/api/case_sessions',
+          { headers: { 'X-Timeline-Lite-Client': '1' } }).then((r) => r.json())""")["sessions"]
+        assert [s["name"] for s in after] == ["triage"]
+        assert after[0]["tagged_rows"] == before["tagged_rows"] == 2
+        counts = page.evaluate("""() => fetch('/api/tags?source_id=' + __winnow.S.sourceId,
+          { headers: { 'X-Timeline-Lite-Client': '1' } }).then((r) => r.json())""")
+        assert sum(counts.get("counts", {}).values()) == 3, "nothing was cleared"
+    finally:
+        _cleanup(page)
+        page.keyboard.press("Escape")
+
+
+def _toast(page, text):
+    page.wait_for_function(
+        "(t) => { const n = document.getElementById('toast'); return !n.hidden && n.textContent.includes(t); }",
+        arg=text, timeout=5000)
+
+
+def test_a_session_that_will_not_load_says_why(page):
+    """Load of a session another window deleted meanwhile is a 404. The
+    handler had try/finally and no catch: an unhandled rejection, no toast,
+    and a dialog that looked as if Load had done nothing."""
+    _cleanup(page)
+    try:
+        _save(page, "gone")
+        _open(page)
+        row = page.locator("#modalBody .session-row", has_text="gone")
+        row.wait_for()
+        page.evaluate("""() => fetch('/api/case_sessions/gone',
+          { method: 'DELETE', headers: { 'X-Timeline-Lite-Client': '1' } })""")
+        row.get_by_role("button", name="Load", exact=True).click()
+        page.locator(".confirm-card .btn", has_text="Load").click()
+        _toast(page, 'Could not load "gone"')
+        assert page.evaluate("() => document.getElementById('busyBar').hidden")
+    finally:
+        _cleanup(page)
+        page.keyboard.press("Escape")
+
+
+def test_a_fresh_pass_or_a_delete_the_server_refuses_says_why(page):
+    _cleanup(page)
+    try:
+        _save(page, "kept")
+        page.route("**/api/case_sessions/new", lambda r: r.fulfill(
+            status=500, content_type="application/json", body='{"detail": "disk full"}'))
+        page.route("**/api/case_sessions/kept", lambda r: r.fulfill(
+            status=500, content_type="application/json", body='{"detail": "database is locked"}')
+            if r.request.method == "DELETE" else r.continue_())
+        _open(page)
+        page.locator(".btn", has_text="Start a fresh pass").click()
+        page.wait_for_selector(".confirm-overlay input")
+        page.locator(".confirm-overlay input").fill("pass x")
+        page.locator(".confirm-card .btn", has_text="OK").first.click()
+        _toast(page, "disk full")
+        assert page.evaluate("() => !document.getElementById('modal').hidden"), \
+            "the dialog stays, so the analyst can try again"
+
+        row = page.locator("#modalBody .session-row", has_text="kept")
+        row.locator(".btn", has_text="✕").click()
+        page.locator(".confirm-card .btn", has_text="Delete").click()
+        _toast(page, "database is locked")
+    finally:
+        page.unroute("**/api/case_sessions/new")
+        page.unroute("**/api/case_sessions/kept")
+        _cleanup(page)
+        page.keyboard.press("Escape")

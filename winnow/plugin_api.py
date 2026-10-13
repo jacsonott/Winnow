@@ -185,6 +185,11 @@ A tab plus its backend route, the full custom-UI shape:
             raise ValueError("Open a case first")
         return req.store.run_sql("SELECT ...", limit=5000)
 
+A register() that raises (or module code that does) is a load error: the
+plugin is listed as failed, with the exception's message, and it is all
+or nothing — whatever that register() had already registered before it
+raised is taken back out (_Loaded._rollback).
+
 SECURITY: a plugin is arbitrary Python running with Winnow's own
 privileges — the same trust model as a Notepad++ plugin or an autopsy/
 Ghidra script. Winnow only ever loads from local plugin directories the
@@ -978,6 +983,22 @@ class _Loaded:
         self.page_panels: dict[str, dict] = {}          # namespaced panel id -> see register_page_panel
         self.dashboards: dict[str, dict] = {}           # namespaced board id -> see register_dashboard
 
+    # Every table a register_* call writes into. _snapshot/_rollback copy
+    # these (shallowly: the entries themselves are never mutated after
+    # they're added), so a new extension point needs its table named here
+    # or a failed register() keeps that kind of registration.
+    _TABLES = ("formats", "tabs", "apis", "row_actions", "panels",
+               "page_panels", "dashboards")
+
+    def _snapshot(self) -> dict:
+        return {name: dict(getattr(self, name)) for name in self._TABLES}
+
+    def _rollback(self, snapshot: dict) -> None:
+        for name, table in snapshot.items():
+            live = getattr(self, name)
+            live.clear()
+            live.update(table)
+
     # The PluginAPI a plugin's register() is handed writes through these.
 
     def _add_format(self, fmt: IngestFormat) -> None:
@@ -1211,7 +1232,18 @@ class PluginRegistry:
 
             before_formats = set(staged.formats)
             before_tabs = set(staged.tabs)
-            register(PluginAPI(staged, record["name"], record["fs_name"], root))
+            snapshot = staged._snapshot()
+            try:
+                register(PluginAPI(staged, record["name"], record["fs_name"], root))
+            except BaseException:
+                # A register() that raises partway has already put its
+                # first few formats, routes and row actions into the
+                # staged tables, and staged goes live. Left there they
+                # WORK — an ingest format offered, a route answering — for
+                # a plugin the panel lists as failed. All or nothing: roll
+                # back to before it ran.
+                staged._rollback(snapshot)
+                raise
             record["formats"] = sorted(set(staged.formats) - before_formats)
             record["tabs"] = sorted(set(staged.tabs) - before_tabs)
         except BaseException as e:  # noqa: BLE001 — see below

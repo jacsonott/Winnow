@@ -114,6 +114,91 @@ def test_linux_touches_nothing_it_does_not_own(lin, tmp_path):
     assert "libreoffice-calc.desktop" in apps
 
 
+FOREIGN_MIMEAPPS = (
+    "# managed by ansible - do not edit\n"
+    "[Default Applications]\n"
+    "# pdf viewer pinned for the SOC image\n"
+    "application/pdf=org.gnome.Evince.desktop\n"
+    "text/html=firefox.desktop\n"
+    "\n"
+    "[Added Associations]\n"
+    "text/csv=libreoffice-calc.desktop;\n"
+)
+
+
+def test_linux_register_keeps_the_rest_of_mimeapps_as_it_was(lin, tmp_path):
+    """The file is shared by every desktop app and often hand-kept or
+    managed. It was rewritten through ConfigParser, which dropped every
+    comment and blank line: the only change should be our own entry."""
+    cfg = tmp_path / "config"
+    cfg.mkdir(parents=True)
+    (cfg / "mimeapps.list").write_text(FOREIGN_MIMEAPPS)
+    picked, cat = _cat(".csv")
+    lin.register(picked, cat)
+    after = (cfg / "mimeapps.list").read_text()
+    assert after == FOREIGN_MIMEAPPS.replace(
+        "text/csv=libreoffice-calc.desktop;\n",
+        "text/csv=libreoffice-calc.desktop;winnow.desktop;\n")
+    lin.unregister(picked, cat)
+    assert (cfg / "mimeapps.list").read_text() == FOREIGN_MIMEAPPS
+
+
+def test_linux_a_failed_mimeapps_write_leaves_the_old_file(lin, tmp_path, monkeypatch):
+    """It was truncated in place and then written, so a disk filling up
+    (or a kill) part way through left every application's associations
+    gone, not just ours. A write that fails part way must leave the file
+    it was replacing."""
+    import errno
+    cfg = tmp_path / "config"
+    cfg.mkdir(parents=True)
+    (cfg / "mimeapps.list").write_text(FOREIGN_MIMEAPPS)
+
+    real_open = open
+
+    class Full:
+        def __init__(self, f):
+            self.f = f
+
+        def write(self, data):
+            self.f.write(data[:len(data) // 2])
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        def __getattr__(self, name):
+            return getattr(self.f, name)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.f.close()
+
+    def full_open(path, mode="r", *a, **kw):
+        f = real_open(path, mode, *a, **kw)
+        return Full(f) if "w" in mode and str(path).startswith(str(cfg)) else f
+
+    monkeypatch.setattr(assoc, "open", full_open, raising=False)
+    picked, cat = _cat(".csv")
+    with pytest.raises(OSError):
+        lin.register(picked, cat)
+    assert (cfg / "mimeapps.list").read_text() == FOREIGN_MIMEAPPS
+    assert sorted(p.name for p in cfg.iterdir()) == ["mimeapps.list"]
+
+
+def test_linux_a_symlinked_mimeapps_stays_a_symlink(lin, tmp_path):
+    """A dotfiles repo links ~/.config/mimeapps.list in. Replacing the
+    file must replace what the link points at, not the link."""
+    cfg = tmp_path / "config"
+    cfg.mkdir(parents=True)
+    dotfiles = tmp_path / "dotfiles"
+    dotfiles.mkdir()
+    (dotfiles / "mimeapps.list").write_text(FOREIGN_MIMEAPPS)
+    (cfg / "mimeapps.list").symlink_to(dotfiles / "mimeapps.list")
+    picked, cat = _cat(".csv")
+    lin.register(picked, cat)
+    assert (cfg / "mimeapps.list").is_symlink()
+    assert "winnow.desktop" in (dotfiles / "mimeapps.list").read_text()
+
+
 def test_linux_reregister_clears_a_past_manual_removal(lin, tmp_path):
     cfg = tmp_path / "config"
     cfg.mkdir(parents=True)
@@ -148,6 +233,103 @@ def test_linux_unregister_last_type_removes_the_desktop_file(lin, tmp_path):
 def test_desktop_exec_quoting_handles_spaces():
     assert assoc._desktop_quote("/opt/win now/python") == '"/opt/win now/python"'
     assert assoc._desktop_quote("plain") == "plain"
+
+
+# Spelled out here from the spec rather than imported, so the reader below
+# can't agree with the writer just by sharing its mistake.
+_SPEC_RESERVED = set(' \t\n"\'\\><~|&;$*?#()`')
+
+
+def _read_exec(value: str) -> list[str]:
+    """An Exec= value back to argv, the way the Desktop Entry spec says a
+    launcher reads it: the key-file `string` escapes first, then %-field
+    codes (%% is a literal %; %F stays as a marker here), then the
+    quoting rule. Strict where the spec is — an unquoted reserved
+    character or an unknown escape is an error, as it is to GLib."""
+    out, i = [], 0
+    while i < len(value):                            # 1. string escapes
+        if value[i] == "\\":
+            nxt = value[i + 1]
+            out.append({"s": " ", "n": "\n", "t": "\t", "r": "\r", "\\": "\\"}[nxt])
+            i += 2
+        else:
+            out.append(value[i])
+            i += 1
+    line, out, i = "".join(out), [], 0
+    while i < len(line):                             # 2. field codes
+        if line[i] == "%":
+            code = line[i + 1]
+            assert code in "%F", f"stray field code %{code} in {line!r}"
+            out.append("%" if code == "%" else "\0F")
+            i += 2
+        else:
+            out.append(line[i])
+            i += 1
+    line, args, i = "".join(out), [], 0
+    while i < len(line):                             # 3. quoting
+        if line[i] == " ":
+            i += 1
+            continue
+        if line[i] == '"':
+            buf, i = [], i + 1
+            while line[i] != '"':
+                if line[i] == "\\":
+                    assert line[i + 1] in '"`$\\', f"bad escape in {line!r}"
+                    i += 1
+                buf.append(line[i])
+                i += 1
+            args.append("".join(buf))
+            i += 1
+        else:
+            j = line.find(" ", i)
+            tok = line[i:] if j < 0 else line[i:j]
+            assert not set(tok) & _SPEC_RESERVED, f"unquoted reserved char in {tok!r}"
+            args.append(tok)
+            i += len(tok)
+    return ["%F" if a == "\0F" else a for a in args]
+
+
+AWKWARD_INSTALLS = ["with space", "o'brien", "100%done", "it's mine", 'say "hi"',
+                    "back\\slash dir", "dollar$HOME", "tab\there", "a&b (1)"]
+
+
+@pytest.mark.parametrize("name", AWKWARD_INSTALLS)
+def test_desktop_exec_reads_back_as_the_launch_command(lin, tmp_path, monkeypatch, name):
+    """Exec= quoting only ever handled a space, `"` and a single layer of
+    backslash: an install under o'brien/, 100%done/ or say "hi"/ wrote
+    an entry the desktop's launcher misread (an unterminated quote, an
+    eaten %d), and the double-click did nothing."""
+    from winnow import paths
+    monkeypatch.setattr(paths, "INSTALL_ROOT", tmp_path / name)
+    lin._write_desktop(["text/csv"])
+    entry = (tmp_path / "share/applications/winnow.desktop").read_text(encoding="utf-8")
+    exec_value = next(l for l in entry.splitlines() if l.startswith("Exec="))[len("Exec="):]
+    assert _read_exec(exec_value) == assoc.launch_command() + ["%F"]
+
+
+@pytest.mark.skipif(not __import__("shutil").which("gio"), reason="needs GLib's gio launcher")
+def test_gio_launches_the_entry_from_an_awkward_install(lin, tmp_path, monkeypatch):
+    """The same thing through a real desktop launcher, where there is one:
+    GLib's `gio launch`, which is what a GNOME file manager uses."""
+    import subprocess
+    import time
+    from winnow import paths
+
+    root = tmp_path / "it's 100% \"mine\" $x"
+    root.mkdir()
+    got = tmp_path / "argv.txt"
+    (root / "server.py").write_text(
+        f"import sys; open({str(got)!r}, 'w').write(repr(sys.argv[1:]))\n", encoding="utf-8")
+    monkeypatch.setattr(paths, "INSTALL_ROOT", root)
+    lin._write_desktop(["text/csv"])
+    target = tmp_path / "evidence file.csv"
+    target.write_text("a\n")
+    subprocess.run(["gio", "launch", str(tmp_path / "share/applications/winnow.desktop"),
+                    str(target)], capture_output=True, timeout=30)
+    deadline = time.monotonic() + 30
+    while not got.exists() and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert got.read_text() == repr(["--assoc", str(target)])
 
 
 # --------------------------------------------------------------- windows

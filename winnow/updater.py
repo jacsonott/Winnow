@@ -210,19 +210,32 @@ def installed_version(root: Path | None = None) -> str:
 
 
 def _version_key(v: str) -> tuple:
-    """Sortable form of a dotted version, so 1.10.0 > 1.9.0. Anything
-    non-numeric sorts as 0 rather than raising — a tag like '1.2.0-rc1'
-    should still compare sanely against 1.1.0."""
-    parts = []
-    for chunk in v.lstrip("vV").replace("-", ".").split("."):
-        digits = ""
-        for ch in chunk:
-            if ch.isdigit():
-                digits += ch
-            else:
-                break
-        parts.append(int(digits) if digits else 0)
-    return tuple(parts)
+    """Sortable form of a version, so 1.10.0 > 1.9.0. Never raises: an
+    unparseable string sorts as 0.
+
+    Two rules beyond "compare the numbers", both ones the old key got
+    backwards. Trailing zeros don't count, so 0.3 and 0.3.0 are the same
+    version rather than 0.3.0 reading as newer. And a pre-release suffix
+    (1.2.0-rc1, 1.2.0rc1, 1.2.0.dev1) sorts BEFORE the release it leads up
+    to, as semver and PEP 440 both have it — the old key read "-rc1" as a
+    fourth number, 0, and so offered 1.2.0-rc1 as an update FROM 1.2.0.
+    Within a suffix, numbers compare as numbers (rc10 > rc9) and words as
+    words (beta > alpha). Build metadata after "+" is ignored."""
+    import re
+
+    s = v.strip().lstrip("vV").split("+", 1)[0]
+    m = re.match(r"\d+(?:\.\d+)*", s)
+    if not m:
+        return ((0,), (1,))
+    nums = [int(x) for x in m.group(0).split(".")]
+    while len(nums) > 1 and nums[-1] == 0:
+        nums.pop()
+    suffix = s[m.end():].lstrip(".-_")
+    if not suffix:
+        return (tuple(nums), (1,))          # a release outranks its pre-releases
+    pre = tuple((0, int(t), "") if t.isdigit() else (1, 0, t.lower())
+                for t in re.findall(r"\d+|[A-Za-z]+", suffix))
+    return (tuple(nums), (0,) + pre)
 
 
 def is_newer(candidate: str, current: str) -> bool:
@@ -588,12 +601,20 @@ def apply_update(archive: Path, root: Path | None = None, source: str = "release
             raise UpdateInterrupted(
                 f"Update cancelled before anything was changed. Winnow is still on {before}.") from e
         try:
-            for m in incoming:
-                with zf.open(prefix + m) as src:
-                    _replace_from(root / m, lambda out: shutil.copyfileobj(src, out))
+            # Removals FIRST. A release that turns a shipped file into a
+            # directory (a single-file plugin becoming a package) can only
+            # create foo/ once the old foo is gone, and the reverse needs
+            # foo/'s files gone before foo can be written — with the writes
+            # first, both failed every time and rolled back. Everything
+            # removed here is already in the backup.
             for m in plan["removed"]:
                 with contextlib.suppress(OSError):
                     (root / m).unlink()
+            _prune_empty_dirs(root, plan["removed"])
+            for m in incoming:
+                with zf.open(prefix + m) as src:
+                    _replace_from(root / m, lambda out: shutil.copyfileobj(src, out))
+                _apply_exec_bits(zf.getinfo(prefix + m), root / m)
             _sweep_moved_modules(root, incoming)
             _write_manifest(root, plan["version"], incoming, source)
         except BaseException as e:  # noqa: BLE001 — a half-applied install is the one thing we can't leave behind
@@ -622,6 +643,40 @@ def apply_update(archive: Path, root: Path | None = None, source: str = "release
             f"Updated {before} -> {plan['version']}; interrupted while removing old "
             f"backups, which is harmless. Restart Winnow to run the new version.") from e
     return {**plan, "previous_version": before, "backup": str(backup)}
+
+
+def _apply_exec_bits(info: zipfile.ZipInfo, target: Path) -> None:
+    """Give `target` the executable bits its archive entry carries.
+
+    _replace_from carries over the mode of the file it replaces, but a file
+    NEW to this install has none to carry and lands at the umask default —
+    launch/winnow.sh the first time an update brings it arrived not
+    executable, and its double-click did nothing. git archive records the mode in the unix
+    half of external_attr; an entry with none (a zip made on Windows) is
+    left as written. Bits are only ever added, and only where they mean
+    something."""
+    if os.name == "nt" or info.create_system != 3:
+        return
+    exec_bits = (info.external_attr >> 16) & 0o111
+    if exec_bits:
+        with contextlib.suppress(OSError):
+            os.chmod(target, target.stat().st_mode | exec_bits)
+
+
+def _prune_empty_dirs(root: Path, removed: list[str]) -> None:
+    """Remove the directories that removing `removed` left empty — only
+    those, deepest first, and never one with anything left in it (a
+    non-empty directory holds something an update doesn't own)."""
+    dirs = {(root / rel).parent for rel in removed}
+    for d in sorted(dirs, key=lambda p: len(p.parts), reverse=True):
+        while d != root and root in d.parents:
+            if _is_protected(d.relative_to(root).as_posix() + "/"):
+                break   # an empty plugins/ is still the analyst's folder
+            try:
+                d.rmdir()
+            except OSError:
+                break
+            d = d.parent
 
 
 def _reason(e: BaseException) -> str:
@@ -674,6 +729,14 @@ def _backup(root: Path, plan: dict, version: str) -> Path:
             out.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, out)
             saved.append(rel)
+        # The manifest too: it is what the NEXT update decides removals
+        # from, and a rollback that left the newer one behind meant a file
+        # the old version shipped (restored here) was unknown to every
+        # later update, and installed_source() kept naming the version
+        # rolled away from.
+        had_manifest = (root / MANIFEST).is_file()
+        if had_manifest:
+            shutil.copy2(root / MANIFEST, dest / MANIFEST)
         # `added` files did not exist before, so restoring means removing
         # them. Written last, and whole or not at all: a backup only counts
         # once this exists, so one interrupted part-way is never what
@@ -683,6 +746,7 @@ def _backup(root: Path, plan: dict, version: str) -> Path:
             "taken_at": taken_at,
             "restore": sorted(saved),
             "remove": sorted(plan["added"]),
+            "manifest": had_manifest,
         }, indent=1))
     except BaseException:
         # ...and for the same reason list_backups never sees it, so pruning
@@ -761,6 +825,17 @@ def restore(backup: Path, root: Path | None = None) -> dict:
         raise UpdateError(
             f"That backup lists an unsafe path ({unsafe[0]!r}) and was not restored — "
             f"Winnow's updater did not write it: {backup}")
+    # Removes before restores, for the same reason apply removes before it
+    # writes: undoing a file-to-directory change means emptying foo/ before
+    # foo can be put back.
+    removed = []
+    for rel in to_remove:
+        if _is_protected(rel):
+            continue
+        with contextlib.suppress(OSError):
+            (root / rel).unlink()
+            removed.append(rel)
+    _prune_empty_dirs(root, removed)
     for rel in to_restore:
         if _is_protected(rel):
             continue
@@ -772,11 +847,14 @@ def restore(backup: Path, root: Path | None = None) -> dict:
                 with open(src, "rb") as f:
                     shutil.copyfileobj(f, out)
             _replace_from(root / rel, copy, stat_from=src)
-    for rel in to_remove:
-        if _is_protected(rel):
-            continue
+    # A backup from before "manifest" was recorded says nothing either way;
+    # leave the current one alone rather than guess.
+    if meta.get("manifest") is True and (backup / MANIFEST).is_file():
+        saved_manifest = (backup / MANIFEST).read_bytes()
+        _replace_from(root / MANIFEST, lambda out: out.write(saved_manifest))
+    elif meta.get("manifest") is False:
         with contextlib.suppress(OSError):
-            (root / rel).unlink()
+            (root / MANIFEST).unlink()
     return {"version": meta.get("version", "unknown"), "backup": str(backup)}
 
 

@@ -243,7 +243,22 @@ def test_version_comparison_orders_numerically():
     assert not updater.is_newer("1.0.0", "1.0.0")
     assert not updater.is_newer("0.9.0", "1.0.0")
     assert updater.is_newer("v1.2.0", "1.1.0")      # tag names carry a leading v
-    assert not updater.is_newer("1.2.0", "1.2.0-rc1")
+
+
+def test_a_pre_release_sorts_before_its_release():
+    """The key read "-rc1" as a fourth number, so 1.2.0-rc1 counted as NEWER
+    than 1.2.0 (this file used to assert exactly that), and 0.3.0 newer
+    than 0.3. Semver and PEP 440 agree on both."""
+    assert updater.is_newer("1.2.0", "1.2.0-rc1")
+    assert not updater.is_newer("1.2.0-rc1", "1.2.0")
+    assert updater.is_newer("1.2.0-rc1", "1.1.9")
+    assert updater.is_newer("1.2.0-rc10", "1.2.0-rc9")
+    assert updater.is_newer("1.2.0-beta1", "1.2.0-alpha3")
+    assert updater.is_newer("1.2.0", "1.2.0rc1")       # PEP 440 spelling
+    assert not updater.is_newer("0.3.0", "0.3")
+    assert not updater.is_newer("0.3", "0.3.0")
+    assert not updater.is_newer("1.2.0+build7", "1.2.0")
+    assert updater.is_newer("0.0.1", "unknown")
 
 
 def test_check_reports_availability_without_touching_the_network():
@@ -382,6 +397,73 @@ def test_backups_are_pruned_but_the_newest_survive(install, tmp_path):
     # The newest backup still rolls back one version.
     updater.rollback(install)
     assert updater.installed_version(install) == f"1.{updater.KEEP_BACKUPS + 1}.0"
+
+
+def test_rollback_puts_the_install_manifest_back(install, tmp_path):
+    """The manifest is what the next update decides removals from. Rollback
+    left the newer one in place, so a file the old version shipped — put
+    back by the rollback — was unknown to every later update, and
+    installed_source() still named the build rolled away from."""
+    updater.apply_update(_make_release(tmp_path / "v1.zip", "1.0.0", SHIPPED), install)
+    before = (install / updater.MANIFEST).read_text()
+    updater.apply_update(_make_release(tmp_path / "v2.zip", "1.1.0", _v2_files()), install,
+                         source="develop@abc1234")
+    assert updater.installed_source(install) == "develop@abc1234"
+
+    updater.rollback(install)
+
+    assert (install / updater.MANIFEST).read_text() == before
+    assert updater.installed_source(install) == "release"
+    # And the restored store.py is removable by a later update again.
+    plan = updater.plan_update(_make_release(tmp_path / "v3.zip", "1.2.0", _v2_files()), install)
+    assert "store.py" in plan["removed"]
+
+
+def test_rollback_of_a_first_update_removes_the_manifest_it_wrote(install, tmp_path):
+    updater.apply_update(_make_release(tmp_path / "v2.zip", "1.1.0", _v2_files()), install)
+    updater.rollback(install)
+    assert not (install / updater.MANIFEST).exists()
+
+
+@pytest.mark.skipif(__import__("os").name == "nt", reason="POSIX file modes")
+def test_a_file_new_to_the_install_keeps_its_executable_bit(install, tmp_path):
+    """open(..., "wb") creates a new file at the umask default, so the first
+    update that brought launch/winnow.sh left it not executable. git
+    archive records the mode; it has to survive the trip."""
+    import os
+    import stat
+    archive = tmp_path / "v2.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        for rel, text in _v2_files().items():
+            zf.writestr("Winnow-abc123/" + rel, text)
+        zi = zipfile.ZipInfo("Winnow-abc123/launch/winnow.sh")
+        zi.create_system = 3
+        zi.external_attr = (stat.S_IFREG | 0o755) << 16
+        zf.writestr(zi, "#!/bin/sh\n")
+    updater.apply_update(archive, install)
+    assert os.access(install / "launch/winnow.sh", os.X_OK)
+    assert not os.access(install / "server.py", os.X_OK)
+
+
+def test_a_shipped_file_can_become_a_directory_and_back(install, tmp_path):
+    """Writes ran before removals, so a release turning a single-file
+    plugin into a package (examples/plugins/geoip -> geoip/__init__.py)
+    could never apply: creating geoip/ failed on the file still there, and
+    every attempt rolled back. The reverse is the same problem."""
+    as_file = {**SHIPPED, "examples/plugins/geoip": "single file\n"}
+    as_dir = {**SHIPPED, "examples/plugins/geoip/__init__.py": "package\n",
+              "version.py": 'VERSION = "1.2.0"\n'}
+    updater.apply_update(_make_release(tmp_path / "a.zip", "1.1.0", as_file), install)
+    updater.apply_update(_make_release(tmp_path / "b.zip", "1.2.0", as_dir), install)
+    assert (install / "examples/plugins/geoip/__init__.py").read_text() == "package\n"
+
+    updater.rollback(install)          # and undoing it turns it back into the file
+    assert (install / "examples/plugins/geoip").read_text() == "single file\n"
+
+    back = {**as_file, "version.py": 'VERSION = "1.3.0"\n'}
+    updater.apply_update(_make_release(tmp_path / "b2.zip", "1.2.0", as_dir), install)
+    updater.apply_update(_make_release(tmp_path / "c.zip", "1.3.0", back), install)
+    assert (install / "examples/plugins/geoip").read_text() == "single file\n"
 
 
 def test_rollback_without_a_backup_is_a_clear_message(install):

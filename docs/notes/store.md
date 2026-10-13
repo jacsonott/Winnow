@@ -1140,7 +1140,11 @@ see [docs/notes/README.md](README.md) for the whole set.
   target rebuilds); merges are refused, their member ids being meaningless
   elsewhere. One trap: `create_merge` returns the SIGNED id (negative), so
   callers must not re-negate it — a double negation lands on a real
-  source id and copies the wrong table without an error.
+  source id and copies the wrong table without an error. A second copy
+  into a target this Store is already copying into is refused before the
+  lock probe (`_copying_into`): the first copy's own Store holds that
+  lock, so the probe called our own process "another Winnow" — a
+  double-clicked "Copy into this case" said exactly that, naming our pid.
 
 - **`save_view_as_source` copies a view — or a pick of its rows — into a
   new source batch by batch, never through a Python list.** It is the

@@ -1931,7 +1931,12 @@ def is_winnow_case_file(path: str) -> bool:
 
 
 def case_lock_path(case_path: str) -> str:
-    return os.path.abspath(case_path) + CASE_LOCK_SUFFIX
+    # realpath, not abspath: the marker has to be ONE file per case however
+    # the path to it was spelled. With abspath, a case opened through a
+    # symlink (a case folder linked onto a share, say) got a marker of its
+    # own beside the link, and a second Winnow opening the same file by its
+    # real path probed a marker nobody held and walked straight in.
+    return os.path.realpath(case_path) + CASE_LOCK_SUFFIX
 
 
 def _read_lock_record(path: str) -> dict:
@@ -2400,6 +2405,10 @@ class Store:
         self._search_job: dict | None = None
         self._search_job_thread: threading.Thread | None = None
         self._search_job_seq = 0
+        # Case files copy_sources_to is writing into right now. Its lock
+        # covers the set's add/discard only, never the copy itself.
+        self._copying_into: set[str] = set()
+        self._copying_lock = threading.Lock()
         # View builds run in the background (start_view_job): one live job
         # per source, each building a *held* view that evicts nothing until
         # the client adopts it — see build_view(hold=True) / adopt_view.
@@ -12692,17 +12701,30 @@ class Store:
         for sid in source_ids:
             if sid < 0:
                 raise ValueError("Merges can't be copied — their member tables can be, individually")
-        holder = probe_case_lock(target_path)
-        if holder:
-            raise ValueError(
-                f"That case is open in another Winnow — {describe_case_lock(holder)}. "
-                "Close it there first.")
-
-        t = Store(target_path)
+        # A copy already running into the same case holds that case's lock
+        # from THIS process, so the probe below reported it as "open in
+        # another Winnow", naming our own pid — what a double-clicked "Copy
+        # into this case" told the analyst. Two copies racing past the probe
+        # before either had opened the target would also both copy.
+        with self._copying_lock:
+            if target_path in self._copying_into:
+                raise ValueError("Already copying into that case — wait for that copy to finish")
+            self._copying_into.add(target_path)
         try:
-            return self._copy_sources_into(t, source_ids)
+            holder = probe_case_lock(target_path)
+            if holder:
+                raise ValueError(
+                    f"That case is open in another Winnow — {describe_case_lock(holder)}. "
+                    "Close it there first.")
+
+            t = Store(target_path)
+            try:
+                return self._copy_sources_into(t, source_ids)
+            finally:
+                t.close()
         finally:
-            t.close()
+            with self._copying_lock:
+                self._copying_into.discard(target_path)
 
     def _copy_sources_into(self, t: "Store", source_ids: list[int]) -> dict:
         src_rows = {}

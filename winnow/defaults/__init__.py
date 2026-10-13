@@ -23,8 +23,11 @@ version would only have failed if someone happened to mistype a Python
 identifier.
 
 Both files carry a `version`. Bump it when you add entries: workspace's
-`ensure_seeded` re-seeds only sets not already present, so an analyst's
-renamed or deleted copy is never re-added beside itself. Never edit an
+`ensure_seeded` records every entry it has handed a workspace (`seeded`
+in the workspace file) and on a bump adds only the ones it never has, so
+an analyst's deleted default stays deleted and a renamed one is never
+re-added beside itself. Renaming an entry HERE therefore reads as a new
+default to every workspace — which is what it is. Never edit an
 existing header set in place — files produced by an older release of the
 tool are still out there and still have to match.
 """
