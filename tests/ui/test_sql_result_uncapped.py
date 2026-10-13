@@ -1,18 +1,20 @@
 """The SQL result with no row cap, and its actions pinned above it.
 
 Two things were asked for together. The result was capped at 5,000 rows,
-and Copy / CSV / Excel export what the pane HOLDS (see
-test_sql_result_actions.py for why), so every export of a bigger answer
-was silently cut at 5,000 too. And the bar carrying those actions sat
-inside the result's scroller, so it scrolled away the moment the analyst
-went looking at the rows they wanted to export.
+and Copy / CSV / Excel exported what the pane held, so every export of a
+bigger answer was silently cut at 5,000 too. And the bar carrying those
+actions sat inside the result's scroller, so it scrolled away the moment
+the analyst went looking at the rows they wanted to export.
 
-Lifting the cap means a result can be a million rows, which the old
-render-every-<tr> table could not survive — so the table is virtualized
-like the grid, and a few of these tests pin the ways that goes wrong:
-rows past the browser's element-height ceiling unreachable (the grid's
-own MAX_SPACER_PX story), and columns that change width as you scroll
-because auto layout only ever sees the rows that happen to be painted.
+Lifting the cap means a result can be millions of rows. The server holds
+them (winnow/sqlresults.py) and the pane pages them in, so most rows of a
+big result were never in the browser at all — which is why the exports,
+the sort and the tags are asserted here on rows past the first page. The
+table is virtualized like the grid, and a few of these tests pin the ways
+that goes wrong: rows past the browser's element-height ceiling
+unreachable (the grid's own MAX_SPACER_PX story), and columns that change
+width as you scroll because auto layout only ever sees the rows that
+happen to be painted.
 
 Rows are generated with a recursive CTE, so the shared case needs no
 bigger table than the one every other module uses."""
@@ -178,28 +180,27 @@ def test_a_click_sort_orders_the_whole_result(page):
     assert first == "7000", "the sort must cover rows past the old cap"
 
 
-def test_tags_join_a_result_with_more_rids_than_fit_an_in_list(page):
-    """sqlTagsFor gave up past 5,000 rids — harmless when the result could
-    never be bigger, a silently missing Tags column now. Past TAGS_IN_MAX
-    it asks for the rid RANGE instead, and must keep only the rows the
-    result actually holds. Driven directly with a synthetic result, since
-    the shared case's table is 200 rows."""
-    tag_id = page.evaluate("() => __winnow.S.tags[0].id")
-    page.evaluate("(t) => __winnow.post('/api/row_tags', { pairs: [[1, 150]], tag_id: t, on: true })", tag_id)
+def test_a_tagged_row_past_the_first_page_shows_its_tag(page):
+    """The Tags column used to be joined in the browser over the rows it
+    held, so with rows held on the server it must come from the server —
+    and a row the pane only fetched while scrolling has to arrive with its
+    chip. 200 rids × 40 copies, ordered by rid, puts rid 200 in the last
+    40 rows: positions 7,960–7,999, far past the first page."""
+    tag = page.evaluate("() => __winnow.S.tags[0]")
+    page.evaluate("(t) => __winnow.post('/api/row_tags', { pairs: [[1, 200]], tag_id: t, on: true })", tag["id"])
     try:
-        got = page.evaluate("""async (n) => {
-            const m = await import('/static/js/sqlassist.js');
-            const rows = (skip) => Array.from({ length: n }, (_, k) => [k + 1]).filter(([r]) => r !== skip);
-            const run = async (skip) => {
-                const t = await m.sqlTagsFor({ columns: ['rid'], rows: rows(skip) }, 'SELECT rid FROM src_1');
-                return t && { has150: '1:150' in t.map, tags: t.map['1:150'] || null, keys: Object.keys(t.map) };
-            };
-            return { limit: m.TAGS_IN_MAX, held: await run(null), dropped: await run(150) };
-        }""", 6_000)
-        assert got["held"] is not None, "no Tags column at all past the old cap"
-        assert 6_000 > got["limit"], "the synthetic result must take the range path"
-        assert got["held"]["tags"] == [tag_id]
-        assert got["dropped"] is not None and not got["dropped"]["has150"], \
-            "a tagged row inside the range but not in the result must not be carried"
+        _run(page, "SELECT x.rid FROM src_1 x, (WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL "
+                   "SELECT i + 1 FROM n WHERE i < 40) SELECT i FROM n) ORDER BY x.rid, i")
+        assert "8,000 rows" in page.locator(".sql-result-bar .note-status").inner_text()
+        _scroll_result(page)
+        page.wait_for_function("() => document.querySelector('#sqlResult tbody tr:last-child td')"
+                               "?.textContent === '200'")
+        last = page.locator("#sqlResult tbody tr[data-i]").last
+        assert last.locator(".sql-tag-chip").all_inner_texts() == [tag["name"]]
+        # And a row with no tag has no chip: the join is per row, not "the
+        # table has tags".
+        page.evaluate("() => { document.querySelector('.sql-result-scroll').scrollTop = 0; }")
+        page.wait_for_function("() => document.querySelector('#sqlResult tbody tr[data-i=\"0\"]')")
+        assert page.locator('#sqlResult tbody tr[data-i="0"] .sql-tag-chip').count() == 0
     finally:
-        page.evaluate("(t) => __winnow.post('/api/row_tags', { pairs: [[1, 150]], tag_id: t, on: false })", tag_id)
+        page.evaluate("(t) => __winnow.post('/api/row_tags', { pairs: [[1, 200]], tag_id: t, on: false })", tag["id"])

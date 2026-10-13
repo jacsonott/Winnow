@@ -1570,11 +1570,18 @@ textarea:focus { border-color: var(--accent); outline: none; }
 /* A px line-height, so every row is exactly SQL_ROW_H (plugins.js):
    15 + 2×2 padding + 1 border. The virtualized window counts rows by
    height, and a row that grew would push everything under it off by that
-   much. */
+   much. A row that SHRANK does the same in the other direction: a cell
+   with nothing in it has no line box, so a row of NULLs or empty strings
+   (or one whose page hasn't landed yet) was 5px tall — padding and
+   border only — and the window, still counting 20px rows, ran out of
+   scroller before it ran out of result: the last rows of a mostly-blank
+   answer could not be scrolled to at all. So the row height is set too,
+   on every row but the spacers, which carry their own. */
 .sql-result th, .sql-result td {
   border-right: 1px solid var(--line); border-bottom: 1px solid var(--line);
   padding: 2px 8px; text-align: left; white-space: nowrap; line-height: 15px;
 }
+.sql-result tbody tr:not(.sql-spacer) { height: 20px; }
 .sql-result tr.sql-spacer td { padding: 0; border: 0; }
 .sql-result th { background: var(--panel-2); color: var(--dim); position: sticky; top: 0; z-index: 2; border-top: 1px solid var(--line); }
 .sql-result th:first-child, .sql-result td:first-child { border-left: 1px solid var(--line); }

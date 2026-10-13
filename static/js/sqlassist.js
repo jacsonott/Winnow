@@ -1,11 +1,13 @@
 /* SQL pane assists: autocomplete, the query-box resize bar, the Tables
-   insert menu, and the tags lookup that joins row_tags onto a result.
+   insert menu, the tags lookup that joins row_tags onto a result, and
+   the result's selection, Copy and exports.
 
-   All client-side — the /api/sql contract (read-only, no params) is
-   untouched; even the tags column is fetched through a second ordinary
-   query against row_tags. Dependency-free by CLAUDE.md's rule, so the
-   autocomplete dropdown and the caret measurement are hand-rolled. */
-import { toast, $, el, post } from './core.js';
+   A result is held server-side (winnow/sqlresults.py) and the pane only
+   ever has the rows on screen, so everything here that needs more than
+   that — tags, a copy, a file — asks the server for it by the result's
+   id. Dependency-free by CLAUDE.md's rule, so the autocomplete dropdown
+   and the caret measurement are hand-rolled. */
+import { toast, $, api, el, post } from './core.js';
 import { regroupIfGroupedByTag, writeClipboardText } from './grouping.js';
 import { sqlSchemaForLLM } from './plugins.js';
 import { paneTable, sourceLabel } from './sources.js';
@@ -298,7 +300,7 @@ export function wireSqlAssist() {
 export function sqlRowRef(r, sql) {
   const lower = r.columns.map((c) => String(c).toLowerCase());
   const ridIdx = lower.indexOf('rid');
-  if (ridIdx === -1 || !r.rows.length) return null;
+  if (ridIdx === -1 || !r.total) return null;
   const sidIdx = lower.indexOf('source_id');
   if (sidIdx !== -1) return { ridIdx, sidIdx, sid: null };
   const { ids, mids } = referencedTableIds(sql);
@@ -312,49 +314,49 @@ export function sqlRowKey(ref, row) {
   return Number.isInteger(sid) && Number.isInteger(rid) ? `${sid}:${rid}` : null;
 }
 
-/* Past this many rids from one table, sqlTagsFor asks for their range. */
-export const TAGS_IN_MAX = 5000;
+/* A row reference as the held-result routes take it. */
+export function sqlRefBody(ref) {
+  return ref.sidIdx === -1 ? { rid_col: ref.ridIdx, sid: ref.sid } : { rid_col: ref.ridIdx, sid_col: ref.sidIdx };
+}
 
-/* A Tags column for a resolvable result — fetched as a second ordinary
-   read-only query against row_tags, same trust as the query it decorates.
-   Returns {ref, map, sel}: tag ids keyed by "sid:rid", plus the
-   (initially empty) selection the pane's click handlers maintain.
+export const sqlRefQuery = (ref) => new URLSearchParams(
+  Object.entries(sqlRefBody(ref)).map(([k, v]) => [k, String(v)])).toString();
 
-   The result is no longer capped, so neither is this: a table's rids go
-   up as an IN list while that stays a sensible statement, and past
-   TAGS_IN_MAX as the rid range they span — that answer is bounded by how
-   many rows in the range are TAGGED, not by how many there are, and the
-   ones the result doesn't hold are dropped on the way in. */
+/* The result's click-sort as the held-result routes take it — the order
+   every page, copy and export comes back in. `pane` is absent until the
+   result has been painted once (a plugin's run() with the page hidden). */
+export function sqlSortBody(r) {
+  const sort = r.pane && r.pane.sort;
+  return sort && sort.idx != null ? { sort: sort.idx, order: sort.dir === 1 ? 'asc' : 'desc' } : {};
+}
+
+export function sqlSortQuery(r) {
+  const b = sqlSortBody(r);
+  return b.sort == null ? '' : `&sort=${b.sort}&order=${b.order}`;
+}
+
+export const sqlResultUrl = (r, tail) => `/api/sql/result/${encodeURIComponent(r.id)}/${tail}`;
+
+/* Forget results nobody will look at again (a re-run's last one goes up
+   with the run itself). Best effort: the server keeps a bounded number
+   and drops the oldest anyway. */
+export function releaseSqlResults(ids) {
+  const keep = (ids || []).filter(Boolean);
+  if (keep.length) post('/api/sql/result/release', { ids: keep }).catch(() => {});
+}
+
+/* A Tags column for a resolvable result: {ref, map, sids, sel} — tag ids
+   keyed by "sid:rid" for the rows the result holds that carry a tag, the
+   source ids its rows name, and the (initially empty) selection the
+   pane's click handlers maintain. Joined server-side against the held
+   result, so the answer is bounded by how many rows are TAGGED, however
+   many the result has. */
 export async function sqlTagsFor(r, sql) {
   const ref = sqlRowRef(r, sql);
   if (!ref) return null;
-  const bySid = new Map();
-  for (const row of r.rows) {
-    const key = sqlRowKey(ref, row);
-    if (!key) continue;
-    const [sid, rid] = key.split(':').map(Number);
-    if (!bySid.has(sid)) bySid.set(sid, new Set());
-    bySid.get(sid).add(rid);
-  }
-  if (!bySid.size) return null;
-  const clause = [...bySid.entries()]
-    .map(([sid, rids]) => {
-      if (rids.size <= TAGS_IN_MAX) return `(source_id=${sid} AND rid IN (${[...rids].join(',')}))`;
-      let lo = Infinity, hi = -Infinity;
-      for (const x of rids) { if (x < lo) lo = x; if (x > hi) hi = x; }
-      return `(source_id=${sid} AND rid BETWEEN ${lo} AND ${hi})`;
-    })
-    .join(' OR ');
   try {
-    const res = await post('/api/sql', {
-      sql: `SELECT source_id, rid, GROUP_CONCAT(tag_id) FROM row_tags WHERE ${clause} GROUP BY 1, 2`,
-    });
-    const map = {};
-    for (const [sid, rid, t] of res.rows) {
-      if (!bySid.get(sid)?.has(rid)) continue;
-      map[`${sid}:${rid}`] = String(t == null ? '' : t).split(',').filter(Boolean).map(Number);
-    }
-    return { ref, map, sel: new Set() };
+    const res = await api(sqlResultUrl(r, `tags?${sqlRefQuery(ref)}`));
+    return { ref, map: res.map, sids: res.sids, sel: new Set() };
   } catch {
     return null; // decoration only — the result itself already painted fine
   }
@@ -378,35 +380,33 @@ export function sqlClearSelection() {
   return true;
 }
 
+/* The selection as the pick route takes it. */
+function selectionBody(r) {
+  return { keys: [...r.tags.sel].map((k) => k.split(':').map(Number)), ref: sqlRefBody(r.tags.ref) };
+}
+
 /* Ctrl+C on the SQL tab: the selected result rows as TSV with a header —
-   same shape the grid's copy produces. */
+   same shape the grid's copy produces. Synchronous "handled" for the
+   keymap; the rows themselves come from the server, which has them all
+   (the pane holds only what is on screen). */
 export function sqlCopySelection() {
   const r = activeResult;
   if (!r || !r.tags || !r.tags.sel.size) return false;
-  const keep = [];
-  for (const row of r.rows) {
-    const key = sqlRowKey(r.tags.ref, row);
-    if (key && r.tags.sel.has(key)) keep.push(row);
-  }
-  const text = [r.columns.join('\t'), ...keep.map((row) => row.map((v) => v == null ? '' : String(v)).join('\t'))].join('\n');
-  navigator.clipboard.writeText(text).catch(() => {});
+  sqlCopyResult(r);
   return true;
 }
 
 /* The selected result rows, for a plugin (winnow.sqlPage.selectedRows):
-   {columns, rows}. Selection exists only when the result carries a rid
-   (sqlTagsFor resolved it) — otherwise rows is [] and that is the answer. */
-export function sqlSelectedRows() {
+   a promise of {columns, rows}, in displayed order. Selection exists only
+   when the result carries a rid (sqlTagsFor resolved it) — otherwise rows
+   is [] and that is the answer. Async because a shift-click can select
+   rows the pane never loaded. */
+export async function sqlSelectedRows() {
   const r = activeResult;
   if (!r) return { columns: [], rows: [] };
-  const rows = [];
-  if (r.tags && r.tags.sel.size) {
-    for (const row of r.rows) {
-      const key = sqlRowKey(r.tags.ref, row);
-      if (key && r.tags.sel.has(key)) rows.push(row);
-    }
-  }
-  return { columns: r.columns, rows };
+  if (!r.tags || !r.tags.sel.size) return { columns: r.columns, rows: [] };
+  const res = await post(sqlResultUrl(r, 'pick'), { ...sqlSortBody(r), ...selectionBody(r), format: 'rows' });
+  return { columns: res.columns, rows: res.rows };
 }
 
 /* Copy the result to the clipboard as TSV with a header row — the
@@ -415,93 +415,68 @@ export function sqlSelectedRows() {
    (and in the grid); the button adds the "all of it" case Ctrl+C has no
    way to ask for. TSV rather than CSV because the destination is nearly
    always a spreadsheet or a ticket, both of which take tabs cleanly and
-   neither of which needs quoting rules. */
-export function sqlCopyResult(columns, rows) {
-  const r = activeResult;
-  let out = rows;
-  let what = 'result';
-  if (r && r.tags && r.tags.sel.size) {
-    const keep = [];
-    for (const row of rows) {
-      const key = sqlRowKey(r.tags.ref, row);
-      if (key && r.tags.sel.has(key)) keep.push(row);
-    }
-    if (keep.length) { out = keep; what = 'selected rows'; }
-  }
-  const text = [columns.join('\t'),
-    ...out.map((row) => row.map((v) => (v == null ? '' : String(v))).join('\t'))].join('\n');
-  writeClipboardText(Promise.resolve(text),
-    `Copied ${out.length.toLocaleString()} ${what === 'result' ? 'rows' : 'selected rows'} with headers`);
+   neither of which needs quoting rules.
+
+   Built by the server from the held result, in displayed order. Past
+   what a clipboard can sensibly hold the server answers 413 and the toast
+   says to use CSV… — a string of hundreds of MB is how a tab falls over. */
+export function sqlCopyResult(r) {
+  const sel = r.tags && r.tags.sel.size ? selectionBody(r) : null;
+  const n = sel ? sel.keys.length : r.total;
+  const text = post(sqlResultUrl(r, 'pick'), { ...sqlSortBody(r), ...(sel || {}), format: 'tsv' })
+    .then((res) => res.text);
+  writeClipboardText(text,
+    `Copied ${n.toLocaleString()} ${sel ? 'selected rows' : 'rows'} with headers`);
 }
 
-/* "CSV…": ask for the file name first, defaulting to the query tab's own
-   name. Downloading straight to "query-results.csv" meant every export
-   from every tab collided in the downloads folder, and the tab name is
-   already the analyst's label for what this query IS. */
-export async function sqlDownloadCsv(columns, rows) {
+/* Ask for a file name, defaulting to the query tab's own name.
+   Downloading straight to "query-results.csv" meant every export from
+   every tab collided in the downloads folder, and the tab name is already
+   the analyst's label for what this query IS. */
+async function askFileName(r, kind, ext) {
   const tab = activeSqlTab();
   const suggested = ((tab && tab.name) || 'query-results').trim();
   const name = await promptDialog(
-    `Save ${rows.length.toLocaleString()} rows as CSV — file name:`,
-    suggested, { okLabel: 'Save' });
-  if (name == null) return;
+    `Save ${r.total.toLocaleString()} rows as ${kind} — file name:`, suggested, { okLabel: 'Save' });
+  if (name == null) return null;
   const clean = (name.trim() || suggested).replace(/[\\/:*?"<>|]/g, '_');
-  sqlResultCsv(columns, rows, clean.toLowerCase().endsWith('.csv') ? clean : clean + '.csv');
+  return { suggested, filename: clean.toLowerCase().endsWith(ext) ? clean : clean + ext };
 }
 
-/* "Excel…": the same rows the CSV button would write, as a .xlsx.
-
-   Built server-side. A worksheet is a zip of XML and openpyxl is already
-   a dependency for the tagged/all-tables exports, so the alternative was
-   hand-rolling a zip writer in the browser to avoid a round trip that
-   costs nothing on localhost. The rows go UP rather than the query: a
-   click-sort lives only here, and re-running server-side would quietly
-   hand back a differently ordered file. */
-export async function sqlDownloadXlsx(columns, rows) {
-  const tab = activeSqlTab();
-  const suggested = ((tab && tab.name) || 'query-results').trim();
-  const name = await promptDialog(
-    `Save ${rows.length.toLocaleString()} rows as Excel — file name:`,
-    suggested, { okLabel: 'Save' });
-  if (name == null) return;
-  const clean = (name.trim() || suggested).replace(/[\\/:*?"<>|]/g, '_');
-  const filename = clean.toLowerCase().endsWith('.xlsx') ? clean : clean + '.xlsx';
+/* A download of the held result, streamed by the server in displayed
+   order. Checked first, so a result the server no longer holds is a toast
+   rather than a page of JSON; then an <a download> click, which never
+   navigates the app away. */
+async function downloadSqlResult(r, ext, filename, extra = '') {
   try {
-    const r = await fetch('/api/sql/export_xlsx', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Timeline-Lite-Client': '1' },
-      body: JSON.stringify({ columns, rows, filename, sheet: suggested }),
-    });
-    if (!r.ok) {
-      // The route answers 400 with a reason worth showing (too many rows
-      // for one worksheet); anything else is a status the analyst can quote.
-      let msg = `HTTP ${r.status}`;
-      try { msg = (await r.json()).detail || msg; } catch { /* not JSON */ }
-      throw new Error(msg);
-    }
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(await r.blob());
-    a.download = filename;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    await api(sqlResultUrl(r, 'rows?start=0&count=0'));
   } catch (e) {
     toast('Could not export: ' + e.message, 6000);
+    return;
   }
-}
-
-/* The current result as a CSV download — rows in DISPLAYED order (the
-   caller passes them, so a click-sorted view exports as seen). */
-export function sqlResultCsv(columns, rows, filename = 'query-results.csv') {
-  const esc = (v) => {
-    const s2 = v == null ? '' : String(v);
-    return /[",\n]/.test(s2) ? '"' + s2.replace(/"/g, '""') + '"' : s2;
-  };
-  const text = [columns.map(esc).join(','), ...rows.map((row) => row.map(esc).join(','))].join('\n');
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([text], { type: 'text/csv' }));
+  a.href = sqlResultUrl(r, `export.${ext}?filename=${encodeURIComponent(filename)}${sqlSortQuery(r)}${extra}`);
   a.download = filename;
   a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+
+/* "CSV…": every row, in the displayed order. */
+export async function sqlDownloadCsv(r) {
+  const got = await askFileName(r, 'CSV', '.csv');
+  if (got) await downloadSqlResult(r, 'csv', got.filename);
+}
+
+/* "Excel…": the same rows the CSV button would write, as a .xlsx,
+   continuing onto "Query (2)"… past one worksheet. Built server-side from
+   the held result — it used to be the browser posting every row up, which
+   is what crashed the tab on a 2M-row answer. A workbook can't be streamed
+   until it is finished, so a big one says so rather than seeming to do
+   nothing. */
+export async function sqlDownloadXlsx(r) {
+  const got = await askFileName(r, 'Excel', '.xlsx');
+  if (!got) return;
+  if (r.total > 200000) toast('Building the workbook — the download starts when it is ready', 8000);
+  await downloadSqlResult(r, 'xlsx', got.filename, `&sheet=${encodeURIComponent(got.suggested)}`);
 }
 
 /* A tag hotkey pressed on the SQL tab: apply/remove `tag` on every

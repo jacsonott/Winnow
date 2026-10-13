@@ -10,7 +10,7 @@ import { showWatchlistTab } from './watchlist.js';
 import { setColumnFilter, valueFilterText } from './filters.js';
 import { rebuildView } from './view.js';
 import { activeSqlTab, flushSqlTabSave, hideMainViews, loadSqlTabs, newSqlTab, scheduleSqlTabSave, showGridTab, showSqlTab, showTimelineTab, syncTabChrome } from './sql.js';
-import { setActiveSqlResult, sqlCopyResult, sqlDownloadCsv, sqlDownloadXlsx, sqlRowKey, sqlSelectedRows, sqlTagsFor, tagChips, wireSqlAssist } from './sqlassist.js';
+import { releaseSqlResults, setActiveSqlResult, sqlCopyResult, sqlDownloadCsv, sqlDownloadXlsx, sqlRefQuery, sqlResultUrl, sqlRowKey, sqlSelectedRows, sqlSortQuery, sqlTagsFor, tagChips, wireSqlAssist } from './sqlassist.js';
 import { moveCursor, rowsPaintY, spacerPx, vScroll } from './grid.js';
 import { loadCaseVariables } from './savedfilters.js';
 import { S } from './state.js';
@@ -427,7 +427,7 @@ export async function showPage(name) {
 
 export function buildPluginTabContext(tab, kind = 'tab') {
   return {
-    apiVersion: 5,
+    apiVersion: 6,
     plugin: tab.plugin,
     base: `/api/plugin/${tab.plugin_fs}`,      // the plugin's own register_api routes
     assets: `/plugin_assets/${tab.plugin_fs}`, // the plugin's own files (css, workers, data)
@@ -604,12 +604,18 @@ function sqlPageApi(key) {
   };
 }
 
-/* The result shape a plugin gets: what /api/sql returned, minus the
-   pane's own tag decoration (a Map and a selection Set). */
+/* The result shape a plugin gets: the run's columns and first page of
+   rows, how many rows the result has in all (the server holds the rest —
+   the pane pages them in), and whether a Stop or a full disk cut it
+   short. Not the pane's own tag decoration (a Map and a selection Set),
+   nor the id of the held result, which is the pane's to release. */
 function publicSqlResult(r) {
   if (!r) return null;
   if (r.error) return { error: r.error };
-  return { columns: r.columns, rows: r.rows, elapsed_ms: r.elapsed_ms, truncated: r.truncated };
+  return {
+    columns: r.columns, rows: r.rows, total: r.total, elapsed_ms: r.elapsed_ms,
+    truncated: r.total > r.rows.length, stopped: r.stopped || null,
+  };
 }
 
 /* winnow.notesPage: the case notes. The body loads lazily with the page;
@@ -838,11 +844,12 @@ function annotationTagsIdx(r) {
   const t = lower.indexOf('tags');
   if (t === -1) return -1;
   // Every source the rows came from: the one src_N, or — for a merge, or
-  // any result carrying source_id — each id the rows actually name. If
-  // ANY of them has a file column called Tags, the bare "Tags" here is
-  // (at least sometimes) the file's text, and text it stays.
+  // any result carrying source_id — each id the rows actually name (the
+  // server reads those off the held result, sqlTagsFor's `sids`). If ANY
+  // of them has a file column called Tags, the bare "Tags" here is (at
+  // least sometimes) the file's text, and text it stays.
   const { sidIdx, sid } = r.tags.ref;
-  const sids = sidIdx === -1 ? [sid] : [...new Set(r.rows.map((row) => Number(row[sidIdx])))];
+  const sids = sidIdx === -1 ? [sid] : (r.tags.sids || []);
   const own = sids.some((id) => {
     const src = S.sources.find((s) => s.id === id);
     return src && src.columns.some((c) => String(c.name).toLowerCase() === 'tags');
@@ -850,65 +857,41 @@ function annotationTagsIdx(r) {
   return own ? -1 : t;
 }
 
-/* The result table is virtualized the way the grid is (invariant #6):
-   the pane no longer caps a result, so a million-row answer must not
-   become a million <tr>s. Only the rows in view, plus OVERSCAN either
-   side, are in the DOM; a spacer row above and one below stand in for the
-   rest and give the scroller its full height — capped and rescaled past
-   MAX_SPACER_PX through the grid's own spacerPx/vScroll/rowsPaintY. A
-   spacer with no height is left out, so a result that fits on screen is
-   the plain table it always was.
+/* The result table is virtualized the way the grid is (invariant #6),
+   over a result the SERVER holds (winnow/sqlresults.py): the pane has no
+   row cap, and an answer of millions of rows is neither one response nor
+   a million <tr>s. The run hands back the first page; the rest is fetched
+   by position as it scrolls into view, into a cache on the result keyed
+   by the sort it was fetched under. Only the rows in view, plus OVERSCAN
+   either side, are in the DOM; a spacer row above and one below stand in
+   for the rest and give the scroller its full height — capped and
+   rescaled past MAX_SPACER_PX through the grid's own
+   spacerPx/vScroll/rowsPaintY. A row not fetched yet paints as an empty
+   row of the same height until it lands. A spacer with no height is left
+   out, so a result that fits on screen is the plain table it always was.
 
-   Every row is the same height (`.sql-result td` sets a px line-height
-   and the tag chips fit inside it), because the window arithmetic counts
-   rows by height; a painted row is measured once the table is on screen,
-   and wins if a skin disagrees. Column widths come from the longest value in each
-   column across EVERY row, set on the header cell: auto table layout
-   would otherwise size the columns to whichever rows happen to be
-   painted, and they would jump as you scroll.
+   Every row is the same height (`.sql-result tbody tr` sets it, so a row
+   of empty cells can't collapse, and the tag chips fit inside it),
+   because the window arithmetic counts rows by height; a painted row is
+   measured once the table is on screen, and wins if a skin disagrees.
+   Column widths are the longest value in each column across EVERY row —
+   the server measures them as the run lands — set on the header cell:
+   auto table layout would otherwise size the columns to whichever rows
+   happen to be painted, and they would jump as you scroll.
 
-   Sort, scroll position and widths live on the result (`r.pane`), so the
-   repaint a tab switch or a return to the page does comes back where the
-   analyst left it, not unsorted at the top. */
+   Sort, scroll position, widths and the row cache live on the result
+   (`r.pane`), so the repaint a tab switch or a return to the page does
+   comes back where the analyst left it, not unsorted at the top. A click
+   sort is the server's (the result is there, not here); it reproduces the
+   order the pane used to sort in. */
 export const SQL_ROW_H = 20;
-
-const sqlCollator = new Intl.Collator();
-
-/* Client-side over the whole result — numeric when both sides read as
-   numbers, text otherwise, NULLs first. Keys are worked out once per row
-   rather than inside the comparator: n·log n conversions was the slow
-   part once a result could be a million rows. */
-export function sortSqlRows(rows, idx, dir) {
-  const keyed = rows.map((row) => {
-    const v = row[idx];
-    if (v == null) return { row, nul: true };
-    const s = String(v);
-    const n = Number(v);
-    return { row, s, n, num: Number.isFinite(n) && s.trim() !== '' };
-  });
-  keyed.sort((a, b) => {
-    if (a.nul && b.nul) return 0;
-    if (a.nul) return -dir;
-    if (b.nul) return dir;
-    if (a.num && b.num) return (a.n - b.n) * dir;
-    return sqlCollator.compare(a.s, b.s) * dir;
-  });
-  return keyed.map((k) => k.row);
-}
+const SQL_PAGE = 500;            // rows per fetch — about ten screens
+const SQL_CACHE_MAX = 30000;     // rows kept per result before the far ones are dropped
 
 /* Each column's widest value, in characters (the table is monospace),
    with room in the header for its sort arrow. */
 function sqlColumnChars(r) {
-  const ch = r.columns.map((c) => String(c).length + 2);
-  for (const row of r.rows) {
-    for (let i = 0; i < ch.length; i++) {
-      const v = row[i];
-      if (v == null) continue;
-      const n = typeof v === 'string' ? v.length : String(v).length;
-      if (n > ch[i]) ch[i] = n;
-    }
-  }
-  return ch;
+  return r.columns.map((c, i) => Math.max(String(c).length + 2, (r.widths && r.widths[i]) || 0));
 }
 
 /* The widest cell of chips in a Tags column, in the table's ch: a chip's
@@ -924,9 +907,20 @@ function sqlTagsChars(map) {
   return Math.ceil(best);
 }
 
+const sqlSortKey = (sort) => (sort.idx == null ? 'none' : `${sort.idx}:${sort.dir}`);
+
+/* A result's rows for one sort, by position. The run's own first page
+   seeds the unsorted one. */
+function sqlRowCache(r, sort) {
+  const rows = new Map();
+  if (sort.idx == null) (r.rows || []).forEach((row, i) => rows.set(i, row));
+  return { key: sqlSortKey(sort), rows, loading: false, failed: null };
+}
+
 export function sqlResultNodes(r) {
-  const pane = r.pane || (r.pane = { sort: { idx: null, dir: 1 }, rows: r.rows, top: 0, left: 0, ch: null });
+  const pane = r.pane || (r.pane = { sort: { idx: null, dir: 1 }, top: 0, left: 0, ch: null, cache: null });
   if (!pane.ch) pane.ch = sqlColumnChars(r);
+  if (!pane.cache) pane.cache = sqlRowCache(r, pane.sort);
   const { sort } = pane;
   const scroller = el('div', 'sql-result-scroll');
   const t = el('table');
@@ -934,12 +928,16 @@ export function sqlResultNodes(r) {
   const tbody = el('tbody');
   t.append(thead, tbody);
   scroller.append(t);
-  let lastClickedKey = null; // shift-range anchor — must survive repaints
+  // The shift-range anchor — must survive repaints. A position as well as
+  // a key, because the rows between it and the click may never have been
+  // fetched; only good for the sort it was clicked under.
+  let anchor = null;
   let rowH = SQL_ROW_H;
   let painted = '';          // the window last drawn — a scroll inside it is free
-  const sortedRows = () => pane.rows;
   const annIdx = r.tags ? annotationTagsIdx(r) : -1;
   const colW = (n) => `calc(${n}ch + 18px)`;  // + padding and borders (border-box)
+  const width = r.columns.length + (r.tags && annIdx === -1 ? 1 : 0);
+  const keyOf = (row) => (row && r.tags ? sqlRowKey(r.tags.ref, row) : null);
 
   const paintHead = () => {
     const hr = el('tr');
@@ -952,7 +950,9 @@ export function sqlResultNodes(r) {
       th.onclick = () => {
         sort.dir = sort.idx === i ? -sort.dir : 1;
         sort.idx = i;
-        pane.rows = sortSqlRows(r.rows, sort.idx, sort.dir);
+        // Positions mean something else now: a new cache, and no anchor.
+        pane.cache = sqlRowCache(r, sort);
+        anchor = null;
         paintHead();
         paintBody(true);
       };
@@ -969,11 +969,11 @@ export function sqlResultNodes(r) {
   const rowNode = (row, i) => {
     const tr = el('tr');
     tr.dataset.i = i;
-    const key = r.tags ? sqlRowKey(r.tags.ref, row) : null;
+    const key = keyOf(row);
     row.forEach((v, ci) => {
       const td = el('td');
-      // The view's Tags text is replaced by the live chips; sorting and
-      // the CSV still read the text from `row`, which is untouched.
+      // The view's Tags text is replaced by the live chips; a copy and
+      // the exports still read the text, which the server holds.
       if (ci === annIdx) td.append(tagChips(r.tags.map[key]));
       else td.textContent = v == null ? '' : String(v);
       tr.append(td);
@@ -993,42 +993,147 @@ export function sqlResultNodes(r) {
     return tr;
   };
 
+  // A row whose page hasn't landed: the same height, nothing in it.
+  const pendingRow = (i) => {
+    const tr = el('tr', 'sql-row-pending');
+    tr.dataset.i = i;
+    for (let k = 0; k < width; k++) tr.append(el('td'));
+    return tr;
+  };
+
   const spacerRow = (h) => {
     const tr = el('tr', 'sql-spacer');
     const td = el('td');
-    td.colSpan = r.columns.length + (r.tags && annIdx === -1 ? 1 : 0);
+    td.colSpan = width;
     td.style.height = h + 'px';
     tr.append(td);
     return tr;
   };
 
+  const status = el('span', 'note-status');
+  const statusText = () => {
+    const stopped = r.stopped === 'cancelled' ? ' · stopped — these are the rows it had returned'
+      : r.stopped === 'disk' ? ' · stopped — the disk Winnow keeps results on is nearly full'
+        : '';
+    const cache = pane.cache;
+    const loading = cache.failed ? ` · ${cache.failed}` : cache.loading ? ' · loading rows…' : '';
+    status.textContent = `${r.total.toLocaleString()} rows · ${r.elapsed_ms} ms${stopped}`
+      + (r.tags ? ' · tags joined via rid' : '') + loading;
+  };
+
+  /* Fetch the first stretch of [first, last) the cache doesn't have, a
+     page centred on it — one request in flight per result, and a page
+     that lands repaints whichever build of this table is current
+     (pane.repaint: a tab switch rebuilds the nodes while a fetch is out). */
+  const ensureRows = (first, last) => {
+    const cache = pane.cache;
+    if (cache.loading || cache.failed) return;
+    let a = first;
+    while (a < last && cache.rows.has(a)) a++;
+    if (a >= last) return;
+    let b = last;
+    while (b > a && cache.rows.has(b - 1)) b--;
+    const count = Math.min(5000, Math.max(SQL_PAGE, b - a));
+    const start = Math.max(0, Math.min(a - Math.floor((count - (b - a)) / 2), r.total - count));
+    cache.loading = true;
+    statusText();
+    api(sqlResultUrl(r, `rows?start=${start}&count=${count}${sqlSortQuery(r)}`))
+      .then((res) => {
+        if (pane.cache !== cache) return;   // re-sorted while it was out
+        res.rows.forEach((row, k) => cache.rows.set(res.start + k, row));
+        // A page that brought nothing would be asked for again on every
+        // paint — stop instead.
+        if (!res.rows.length) cache.failed = 'some rows could not be loaded';
+        if (cache.rows.size > SQL_CACHE_MAX) {
+          const mid = res.start + res.rows.length / 2;
+          for (const k of cache.rows.keys()) if (Math.abs(k - mid) > SQL_CACHE_MAX / 2) cache.rows.delete(k);
+        }
+      })
+      .catch((e) => {
+        if (pane.cache === cache) {
+          cache.failed = e.status === 404 ? 'this result is no longer held — run the query again'
+            : `rows could not be loaded: ${e.message}`;
+        }
+      })
+      .finally(() => {
+        cache.loading = false;
+        if (pane.repaint) pane.repaint();
+      });
+  };
+
   const paintBody = (force = false) => {
-    const rows = pane.rows;
-    const total = rows.length;
+    const total = r.total;
     const head = thead.offsetHeight;
     // Not laid out yet (built before it is attached, or on a hidden
     // page): paint a screenful, and the resize observer below repaints
     // with the real height the moment there is one.
     const viewH = scroller.clientHeight || 800;
     const virt = vScroll(scroller, total, head, rowH);
-    const anchor = Math.floor(virt / rowH);
-    const first = Math.max(0, Math.min(total, anchor - OVERSCAN));
-    const last = Math.min(total, anchor + Math.ceil(viewH / rowH) + OVERSCAN);
+    const anchorRow = Math.floor(virt / rowH);
+    const first = Math.max(0, Math.min(total, anchorRow - OVERSCAN));
+    const last = Math.min(total, anchorRow + Math.ceil(viewH / rowH) + OVERSCAN);
     const top = total ? rowsPaintY(scroller, virt, first, rowH) : 0;
-    const sig = `${first}:${last}:${top}`;
+    const cache = pane.cache;
+    const sig = `${first}:${last}:${top}:${cache.key}:${cache.rows.size}`;
     if (!force && sig === painted) return;
     painted = sig;
     const bottom = spacerPx(total, rowH) - top - (last - first) * rowH;
     const out = [];
     if (top > 0.5) out.push(spacerRow(top));
-    for (let i = first; i < last; i++) out.push(rowNode(rows[i], i));
+    for (let i = first; i < last; i++) {
+      const row = cache.rows.get(i);
+      out.push(row ? rowNode(row, i) : pendingRow(i));
+    }
     if (bottom > 0.5) out.push(spacerRow(bottom));
     tbody.replaceChildren(...out);
+    ensureRows(first, last);
+    statusText();
   };
 
-  const keyAt = (e) => {
+  const posAt = (e) => {
     const tr = e.target.closest('tr[data-i]');
-    return tr && r.tags ? sqlRowKey(r.tags.ref, pane.rows[Number(tr.dataset.i)]) : null;
+    return tr ? Number(tr.dataset.i) : null;
+  };
+  const keyAt = (e) => {
+    const i = posAt(e);
+    return i == null ? null : keyOf(pane.cache.rows.get(i));
+  };
+  const markSelection = () => {
+    // Marked in place, not repainted: a double-click's second click lands
+    // here too, and replacing the row under the pointer would hand the
+    // dblclick that follows to a detached node, which never bubbles back
+    // up to tbody's handler below.
+    for (const tr of tbody.querySelectorAll('tr[data-i]')) {
+      const k = keyOf(pane.cache.rows.get(Number(tr.dataset.i)));
+      tr.classList.toggle('sql-row-sel', !!k && r.tags.sel.has(k));
+    }
+  };
+  /* Shift+click: the anchor→here range in displayed order. From the cache
+     when every row of it is there, else from the server, which has them
+     all — a range can run through rows nobody scrolled past. */
+  const selectRange = async (lo, hi) => {
+    const cache = pane.cache;
+    let keys = [];
+    let complete = true;
+    for (let i = lo; i <= hi && complete; i++) {
+      const row = cache.rows.get(i);
+      if (!row) complete = false;
+      else keys.push(keyOf(row));
+    }
+    if (!complete) {
+      try {
+        const res = await api(sqlResultUrl(r,
+          `keys?start=${lo}&count=${hi - lo + 1}&${sqlRefQuery(r.tags.ref)}${sqlSortQuery(r)}`));
+        if (pane.cache !== cache) return;
+        keys = res.keys.map((k) => (k ? `${k[0]}:${k[1]}` : null));
+      } catch (e) {
+        toast('Could not select that range: ' + e.message, 5000);
+        return;
+      }
+    }
+    r.tags.sel.clear();
+    for (const k of keys) if (k) r.tags.sel.add(k);
+    markSelection();
   };
   // Shift+mousedown would EXTEND the browser's text selection, which then
   // trips the copy-gesture guard below — suppress the native behavior so
@@ -1037,36 +1142,26 @@ export function sqlResultNodes(r) {
   tbody.onclick = (e) => {
     const key = keyAt(e);
     if (!key) return;
+    const pos = posAt(e);
     // Grid parity: plain click selects THIS row alone, Ctrl/Cmd toggles
     // it in place, Shift replaces with the anchor→here range in displayed
     // order. (A click ending a text selection is a copy gesture — leave
     // it alone.)
     if (!e.shiftKey && !window.getSelection().isCollapsed) return;
-    if (e.shiftKey && lastClickedKey) {
-      const keys = pane.rows.map((rw) => sqlRowKey(r.tags.ref, rw)).filter(Boolean);
-      const a = keys.indexOf(lastClickedKey), b2 = keys.indexOf(key);
-      if (a !== -1 && b2 !== -1) {
-        r.tags.sel.clear();
-        for (let k = Math.min(a, b2); k <= Math.max(a, b2); k++) r.tags.sel.add(keys[k]);
-      }
-    } else if (e.ctrlKey || e.metaKey) {
+    if (e.shiftKey && anchor && anchor.cacheKey === pane.cache.key) {
+      selectRange(Math.min(anchor.pos, pos), Math.max(anchor.pos, pos));
+      return;
+    }
+    if (e.ctrlKey || e.metaKey) {
       if (r.tags.sel.has(key)) r.tags.sel.delete(key);
       else r.tags.sel.add(key);
-      lastClickedKey = key;
     } else {
       const only = r.tags.sel.size === 1 && r.tags.sel.has(key);
       r.tags.sel.clear();
       if (!only) r.tags.sel.add(key); // clicking the lone selected row deselects, like the grid's cursor toggle feel
-      lastClickedKey = key;
     }
-    // Marked in place, not repainted: a double-click's second click lands
-    // here too, and replacing the row under the pointer would hand the
-    // dblclick that follows to a detached node, which never bubbles back
-    // up to tbody's handler below.
-    for (const tr of tbody.querySelectorAll('tr[data-i]')) {
-      const k = sqlRowKey(r.tags.ref, pane.rows[Number(tr.dataset.i)]);
-      tr.classList.toggle('sql-row-sel', !!k && r.tags.sel.has(k));
-    }
+    anchor = { pos, cacheKey: pane.cache.key };
+    markSelection();
   };
   tbody.ondblclick = async (e) => {
     const key = keyAt(e);
@@ -1105,6 +1200,9 @@ export function sqlResultNodes(r) {
   });
   ro.observe(scroller);
 
+  // The latest build of this result's table is the one a landing page
+  // repaints; an older one (a tab switch rebuilt the nodes) is detached.
+  pane.repaint = () => { if (scroller.isConnected) paintBody(true); };
   paintHead();
   paintBody(true);
   if (r.tags) r.tags.repaint = () => { paintHead(); paintBody(true); };
@@ -1114,20 +1212,19 @@ export function sqlResultNodes(r) {
   // sits OUTSIDE the scroller, so the actions stay in view however far
   // down or across the result has been scrolled.
   const bar = el('div', 'sql-result-bar');
-  bar.append(el('span', 'note-status',
-    `${r.rows.length.toLocaleString()} rows · ${r.elapsed_ms} ms${r.truncated ? ' · truncated' : ''}`
-    + (r.tags ? ' · tags joined via rid' : '')));
+  statusText();
+  bar.append(status);
   const acts = el('div', 'sql-result-actions');
   const copyBtn = el('button', 'btn ghost', 'Copy');
   copyBtn.title = 'Copy to the clipboard with a header row — the selected rows, '
     + 'or the whole result when nothing is selected';
-  copyBtn.onclick = () => sqlCopyResult(r.columns, sortedRows());
+  copyBtn.onclick = () => sqlCopyResult(r);
   const csvBtn = el('button', 'btn ghost', 'CSV…');
   csvBtn.title = 'Save this result as a CSV file, in the displayed order';
-  csvBtn.onclick = () => sqlDownloadCsv(r.columns, sortedRows());
+  csvBtn.onclick = () => sqlDownloadCsv(r);
   const xlsxBtn = el('button', 'btn ghost', 'Excel…');
   xlsxBtn.title = 'Save this result as an .xlsx workbook, in the displayed order';
-  xlsxBtn.onclick = () => sqlDownloadXlsx(r.columns, sortedRows());
+  xlsxBtn.onclick = () => sqlDownloadXlsx(r);
   const saveBtn = el('button', 'btn ghost', 'Save as table…');
   saveBtn.title = 'Run the query again and land the result as a new table in the case';
   saveBtn.onclick = () => saveResultAsTable();
@@ -1162,37 +1259,106 @@ export async function saveResultAsTable() {
   openSource(res.source.id);
 }
 
+/* What a running query shows in place of its result: how many rows have
+   landed so far, and a Stop that keeps them. */
+export function sqlRunningNodes(token) {
+  const wrap = el('div', 'sql-running');
+  const text = el('span', 'note-status sql-running-count', 'Running…');
+  text.dataset.token = token;
+  const stop = el('button', 'btn ghost', 'Stop');
+  stop.title = 'Stop the query — the rows it has already returned are kept';
+  stop.onclick = async () => {
+    stop.disabled = true;
+    stop.textContent = 'Stopping…';
+    try { await post('/api/cancel_op', { token }); } catch { /* it finished first */ }
+  };
+  wrap.append(text, stop);
+  return [wrap];
+}
+
+/* Polls a run's landed-row count into its "Running…" line, wherever that
+   line is currently drawn (a tab switch draws a new one). Returns a stop. */
+function pollSqlProgress(token) {
+  let busy = false;
+  const id = setInterval(async () => {
+    if (busy) return;
+    busy = true;
+    try {
+      const p = await api(`/api/sql/run/progress?token=${encodeURIComponent(token)}`);
+      for (const n of document.querySelectorAll('.sql-running-count')) {
+        if (n.dataset.token === token && p.running) n.textContent = `Running… ${p.rows.toLocaleString()} rows so far`;
+      }
+    } catch { /* the run's own request reports anything that matters */ }
+    busy = false;
+  }, 400);
+  return () => clearInterval(id);
+}
+
+let sqlRunSeq = 0;
+
+/* Stop the run a tab is waiting on, if any — it is about to be replaced
+   or its tab closed, and nobody will read what it lands. */
+export function abandonSqlRun(tabId) {
+  const token = S.sqlRuns.get(tabId);
+  if (!token) return;
+  S.sqlRuns.delete(tabId);
+  post('/api/cancel_op', { token }).catch(() => {});
+}
+
 export async function runSql() {
-  const out = $('sqlResult');
-  // Captured up front: the run is awaited, and the analyst can switch tabs
-  // while it's in flight. The result belongs to the tab it was started
-  // from, and only paints if that tab is still the one showing.
   const tabId = S.sqlTabId;
-  out.replaceChildren(el('div', null, 'Running…'));
+  const sql = $('sqlText').value;
+  // One token per run, and a result paints — or is kept at all — only
+  // while its token is still the one its tab is waiting on. A run is
+  // awaited, and while it is out the analyst can re-run (a slow first run
+  // landing would overwrite the fast second one, and the exports would
+  // take the wrong rows), close the tab (sql_tabs ids are reused, so its
+  // result came back in the next new tab), or open another case
+  // (home.js clears S.sqlRuns — the result painted under the new case's
+  // "Query 1", and tagging it wrote into the wrong case). A superseded
+  // run's held rows are released rather than painted.
+  abandonSqlRun(tabId);
+  const token = `sqlrun_${Date.now().toString(36)}_${++sqlRunSeq}`;
+  S.sqlRuns.set(tabId, token);
+  const prev = S.sqlResults.get(tabId);
+  if (S.sqlTabId === tabId) {
+    // The last result is going (the run releases it), so nothing acts on it.
+    setActiveSqlResult(null);
+    $('sqlResult').replaceChildren(...sqlRunningNodes(token));
+  }
   setBusy(true);
+  const stopPolling = pollSqlProgress(token);
+  let r;
   try {
-    const sql = $('sqlText').value;
-    const r = await post('/api/sql', { sql });
+    r = await post('/api/sql/run', { sql, op_token: token, release: prev && prev.id ? [prev.id] : [] });
     // Decorate with a Tags column when the result can carry one (single
     // src_N + a rid column) — cached WITH the result so tab switches
     // repaint it without refetching.
     r.tags = await sqlTagsFor(r, sql);
-    S.sqlResults.set(tabId, r);
-    if (S.sqlTabId === tabId) {
+  } catch (e) {
+    r = { error: e.status === 499 ? 'Stopped before the query returned any rows.' : e.message };
+  } finally {
+    stopPolling();
+    setBusy(false);
+  }
+  if (S.sqlRuns.get(tabId) !== token) {
+    if (r.id) releaseSqlResults([r.id]);
+    return { error: 'Replaced by a newer run before it finished' };
+  }
+  S.sqlRuns.delete(tabId);
+  S.sqlResults.set(tabId, r);
+  if (S.sqlTabId === tabId) {
+    const out = $('sqlResult');
+    if (r.error) {
+      setActiveSqlResult(null);
+      out.replaceChildren(el('div', 'sql-error', r.error));
+    } else {
       setActiveSqlResult(r);
       out.replaceChildren(...sqlResultNodes(r));
     }
-    announceSqlRun(tabId, sql, r);
-    return r;
-  } catch (e) {
-    const r = { error: e.message };
-    S.sqlResults.set(tabId, r);
-    if (S.sqlTabId === tabId) out.replaceChildren(el('div', 'sql-error', e.message));
-    announceSqlRun(tabId, $('sqlText').value, r);
-    return r;
-  } finally {
-    setBusy(false);
   }
+  announceSqlRun(tabId, sql, r);
+  return r;
 }
 
 /* winnow.sqlPage.onRun — every run, success or error, with the public

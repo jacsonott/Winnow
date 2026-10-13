@@ -505,38 +505,58 @@ see [docs/notes/README.md](README.md) for the whole set.
   `code` colour — the global `code` rule is accent-on-panel, which on that
   bar is the bar's own colour. `tests/ui/test_sql_pane_welcome.py` pins
   all of it.
-- **The SQL result is uncapped and virtualized, with its actions pinned**
-  (`sqlResultNodes` in plugins.js). `/api/sql` used to stop at 5,000 rows,
-  and since Copy / CSV / Excel export the rows the pane HOLDS, every export
-  of a bigger answer was cut at 5,000 too, with only "· truncated" in the
-  status to say so. The route's `limit` now defaults to none (`run_sql`
-  keeps its 5000 default for Python callers, and `winnow.api.sql` still
-  sends one), and returns a `JSONResponse` directly — FastAPI's per-cell
-  `jsonable_encoder` walk was most of the time on a large result. A
-  result can now be millions of rows, so the table is built like the
-  grid: only the window in view plus `OVERSCAN` is in the DOM, between a
-  top and a bottom spacer row, through the grid's own
-  `spacerPx`/`vScroll`/`rowsPaintY` (which grew a `rowH` argument) so the
-  tail stays reachable past `MAX_SPACER_PX` — without that a 2M-row result
-  stops at row ~1.68M. Things that bite: **rows must be one height**
-  (`.sql-result td` has a px line-height, the tag chips fit inside it) or
-  the window drifts; **a zero-height spacer is left out**, so a short
-  result is the plain table the older UI tests address by `tr` index;
-  **column widths come from every row up front** (set as the header
-  cell's `width`, which auto layout treats as a minimum), or auto layout
-  sizes columns to whichever rows are painted and they jump as you
-  scroll; **a row click marks the selection in place** rather than
-  repainting, because a double-click's second click would otherwise
-  replace the row under the pointer and hand the `dblclick` to a detached
-  node that never bubbles to `tbody`'s handler. Sort and scroll position
-  live on the result (`r.pane`), since every return to the page rebuilds
-  the nodes (`showSqlTab` → `applySqlTabToEditor`). The result bar sits
+- **The SQL result is uncapped, server-held and virtualized, with its
+  actions pinned** (`sqlResultNodes` in plugins.js; the server side is in
+  server.md). `/api/sql` used to stop at 5,000 rows, and since Copy / CSV
+  / Excel exported the rows the pane HELD, every export of a bigger answer
+  was cut at 5,000 too. Lifting the cap by shipping every row to the
+  browser had no memory bound anywhere, so the server keeps the result
+  (`POST /api/sql/run`) and the pane holds a handle (`r.id`), the first
+  page, `r.total` and `r.widths`. The table is built like the grid: only
+  the window in view plus `OVERSCAN` is in the DOM, between a top and a
+  bottom spacer row, through the grid's own `spacerPx`/`vScroll`/
+  `rowsPaintY` so the tail stays reachable past `MAX_SPACER_PX` (without
+  that a 2M-row result stops at row ~1.68M). Rows not fetched yet paint
+  as empty rows of the same height and come in `SQL_PAGE` at a time into
+  a cache on the result, one request in flight, keyed by the sort; a
+  click-sort is the server's and starts a new cache. Copy, CSV…, Excel…
+  and `selectedRows` all ask the server, in the displayed sort, and a
+  shift-range that runs through rows nobody scrolled past gets its keys
+  from `/keys`. Things that bite: **rows must be one height**, and
+  `.sql-result tbody tr` sets it rather than leaving it to the cells'
+  line-height: a cell with nothing in it has no line box, so a row of
+  NULLs or empty strings was 5px, and on a mostly-blank result the last
+  rows could not be scrolled to at all (`test_sql_result_blank_rows.py`);
+  **a zero-height spacer is left out**, so a short result is the plain
+  table the older UI tests address by `tr` index; **column widths come
+  from the server's measure of every row** (set as the header cell's
+  `width`, which auto layout treats as a minimum), or columns size to
+  whichever rows are painted and jump as you scroll; **a row click marks
+  the selection in place** rather than repainting, because a
+  double-click's second click would otherwise replace the row under the
+  pointer and hand the `dblclick` to a detached node that never bubbles
+  to `tbody`'s handler. Sort, scroll position and the row cache live on
+  the result (`r.pane`), since every return to the page rebuilds the
+  nodes (`showSqlTab` → `applySqlTabToEditor`); a page that lands calls
+  `pane.repaint`, which the latest build owns. The result bar sits
   OUTSIDE `.sql-result-scroll`, which is the whole of "pin the export
-  options": it used to scroll away with the rows. `sqlTagsFor` asks for a
-  table's rid RANGE past `TAGS_IN_MAX` rids rather than giving up, and
-  drops the range's rows the result doesn't hold. Excel spills a result
-  past one worksheet onto "Query (2)"… (`rows_to_xlsx`, write-only).
+  options": it used to scroll away with the rows.
   `tests/ui/test_sql_result_uncapped.py`.
+- **A SQL run paints only while its token is still the one its tab is
+  waiting on** (`S.sqlRuns`, `runSql`). The run is awaited, and while it
+  is out the analyst can re-run (a slow first run landing after a fast
+  second one overwrote it, and the exports then took the wrong rows),
+  close the tab (`sql_tabs` ids are reused, so the result came back in the
+  next new tab), or open another case — the result painted under the new
+  case's "Query 1", and tagging rows in it wrote tags into the wrong case.
+  A re-run and a tab close cancel the run they replace (`abandonSqlRun`);
+  a case switch clears `S.sqlRuns` (the old Store's close has already
+  stopped the query); whatever lands late is released, never painted. The
+  same token is what **Stop** cancels (`/api/cancel_op`): the run keeps
+  the rows it had and says "stopped" in its status, and "Running… N rows
+  so far" polls `/api/sql/run/progress` with it. A tab whose run is out
+  shows that, not the result it is replacing.
+  `tests/ui/test_sql_run_tokens.py`.
 - **The 2026-08 navigation batch** — five smaller features, and the traps
   each one carries:
   - **"Open filter in SQL pane"** (`Store.spec_sql`, `POST /api/view/sql`,

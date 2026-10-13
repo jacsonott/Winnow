@@ -47,6 +47,7 @@ from . import timeparse
 from . import plasoread
 from . import xlsxread
 from . import log as wlog
+from .sqlresults import SqlResults, cell as _sql_cell, js_str as _sql_js_str
 
 BATCH = 20_000
 SAMPLE_ROWS = 500
@@ -1691,6 +1692,19 @@ class Store:
         # and would otherwise land one behind the snapshot.
         self._subset_copies: dict[int, dict] = {}
         self._closing = False
+        # SQL pane queries in flight — run_sql_result, and run_sql too (a
+        # plugin's winnow.api.sql can be a runaway CTE as easily as the
+        # pane can) — token → {"rows", "done"}, under the jobs lock and on
+        # the copies' terms: _sql_run refuses once `_closing` is set, and
+        # close() interrupts each one (cancel_op) and waits on `done`.
+        # cancel_sql_runs is the same stop for the UI's Shut down, which
+        # otherwise waits on the request forever while the query holds
+        # the case lock.
+        self._sql_runs: dict[str, dict] = {}
+        # The pane's results, held server-side and paged out
+        # (winnow/sqlresults.py). Its scratch file is made on the first
+        # run, not here — most sessions never open the pane.
+        self.sql_results = SqlResults()
 
         # Cancellable-op registry (see _interruptible/cancel_op): token →
         # the connection running that op, so a cancel can interrupt() it.
@@ -2253,6 +2267,17 @@ class Store:
                 t.join(15)
         for c in copies:
             c["done"].wait(15)
+        # SQL pane runs: interrupt each one's private read-only connection
+        # (a run mid-fetch stops at its next batch; one still in its first
+        # step raises OpCancelled), wait for it to come off the scratch
+        # writer, then delete the scratch file and every result in it.
+        with self._ingest_jobs_lock:
+            sql_runs = list(self._sql_runs.items())
+        for token, _ in sql_runs:
+            self.cancel_op(token)
+        for _, run in sql_runs:
+            run["done"].wait(15)
+        self.sql_results.close()
         # Immediately before the writer closes, and not before the cleanup
         # above: an idle reader still holding the case file open at that
         # moment stops SQLite checkpointing the -wal on the writer's close,
@@ -12905,14 +12930,14 @@ class Store:
                                                for v in t[1:])
         return out
 
-    def run_sql(self, sql: str, limit: int | None = 5000) -> dict:
-        """Read-only ad-hoc query against the case file.
-
-        `limit=None` returns every row — what the SQL pane asks for, since
-        its Copy/CSV/Excel exports are taken from the rows it holds and a
-        cap there silently cut every export short. Python callers (plugins,
-        dashboards) keep the 5000 default: they pass a limit sized to what
-        they draw.
+    def run_sql(self, sql: str, limit: int | None = 5000, op_token: str | None = None) -> dict:
+        """Read-only ad-hoc query against the case file, its rows inline:
+        the shape plugins (winnow.api.sql) and dashboards draw from, each
+        passing a limit sized to what it draws. The SQL pane does not come
+        through here — run_sql_result holds its rows server-side, because
+        the pane has no cap and an uncapped answer in one response is
+        gigabytes. `limit=None` still returns every row, for a Python
+        caller that knows its result is small.
 
         This intentionally allows arbitrary SELECT/EXPLAIN — that's the
         point of the pane — unlike validate_where_fragment's tight allowlist
@@ -12925,29 +12950,142 @@ class Store:
         SQLite-version-dependent guarantee this code shouldn't have to lean
         on). Stacked statements aren't a separate concern here: Python's
         sqlite3 already refuses to execute more than one statement per call.
+
+        Registered as a run (_sql_run), so it can be stopped like the
+        pane's: `op_token` through cancel_op, every run by
+        cancel_sql_runs and close().
         """
         structural = _blank_string_literals(_strip_sql_comments(sql))
         if self.SQL_PANE_FORBIDDEN_RE.search(structural):
             raise ValueError("ATTACH, DETACH, PRAGMA and VACUUM aren't allowed in the SQL pane")
-        ro = self._pane_connection()
-        try:
-            t0 = time.time()
-            # Plain tuples, not the connection's sqlite3.Row: on an uncapped
-            # result the per-cell Row indexing was the slow part.
-            cur = ro.cursor()
-            cur.row_factory = None
-            cur.execute(sql)
-            rows = cur.fetchall() if limit is None else cur.fetchmany(limit)
-            cols = [d[0] for d in cur.description] if cur.description else []
-            return {
-                "columns": cols,
-                "rows": [list(r) for r in rows],
-                "truncated": limit is not None and len(rows) == limit,
-                "elapsed_ms": int((time.time() - t0) * 1000),
-            }
-        finally:
-            ro.close()
+        token = op_token or f"sqlq_{time.time_ns():x}"
+        with self._sql_run(token):
+            ro = self._pane_connection()
+            try:
+                t0 = time.time()
+                with self._interruptible(token, ro):
+                    cur = ro.cursor()
+                    cur.row_factory = None
+                    cur.execute(sql)
+                    rows = cur.fetchall() if limit is None else cur.fetchmany(limit)
+                cols = [d[0] for d in cur.description] if cur.description else []
+                return {
+                    "columns": cols,
+                    "rows": [list(r) for r in rows],
+                    "truncated": limit is not None and len(rows) == limit,
+                    "elapsed_ms": int((time.time() - t0) * 1000),
+                }
+            finally:
+                ro.close()
 
+    def run_sql_result(self, sql: str, op_token: str | None = None, release=()) -> dict:
+        """The SQL pane's Run: every row of the answer, held server-side.
+
+        The query runs on the pane's read-only connection exactly as
+        run_sql's does (same forbidden-statement check, same authorizer);
+        its cursor is handed to SqlResults.materialise, which copies the
+        rows a batch at a time into the scratch database and returns the
+        result's id, count and column widths. The response carries the
+        first SqlResults.PREVIEW_ROWS rows; the pane pages the rest by id,
+        sorts through it, and exports from it — see winnow/sqlresults.py
+        for why nothing holds the whole answer in memory any more.
+
+        `op_token` makes the run stoppable (cancel_op): stopped mid-fetch,
+        the rows so far are kept and `stopped` says "cancelled"; stopped
+        before the first row, it is OpCancelled (499). `release` names the
+        result(s) this run replaces — the tab's last one — so a re-run
+        frees its scratch space before taking more."""
+        structural = _blank_string_literals(_strip_sql_comments(sql))
+        if self.SQL_PANE_FORBIDDEN_RE.search(structural):
+            raise ValueError("ATTACH, DETACH, PRAGMA and VACUUM aren't allowed in the SQL pane")
+        if release:
+            self.sql_results.release(release)
+        token = op_token or f"sqlr_{time.time_ns():x}"
+        with self._sql_run(token) as run:
+            ro = self._pane_connection()
+            try:
+                t0 = time.time()
+                with self._interruptible(token, ro):
+                    cur = ro.cursor()
+                    cur.row_factory = None
+                    cur.execute(sql)
+                    meta = self.sql_results.materialise(
+                        cur, cancelled=lambda: self._op_was_cancelled(token),
+                        progress=lambda n: run.__setitem__("rows", n))
+                elapsed = int((time.time() - t0) * 1000)
+            finally:
+                ro.close()
+        out = self.sql_results.summary(meta["id"])
+        out["elapsed_ms"] = elapsed
+        return out
+
+    @contextlib.contextmanager
+    def _sql_run(self, token: str) -> Iterator[dict]:
+        """Registers a pane query as in flight for the block — what
+        cancel_sql_runs and close() reach to stop it, and what
+        sql_run_progress reads. Refused once close() has begun."""
+        run = {"rows": 0, "done": threading.Event()}
+        with self._ingest_jobs_lock:
+            if self._closing:
+                raise OpCancelled("The case is closing")
+            self._sql_runs[token] = run
+        try:
+            yield run
+        finally:
+            with self._ingest_jobs_lock:
+                self._sql_runs.pop(token, None)
+            run["done"].set()
+
+    def _op_was_cancelled(self, token: str) -> bool:
+        with self._op_lock:
+            return token in self._op_cancelled
+
+    def sql_run_progress(self, token: str) -> dict:
+        """Rows landed so far by the run under `token` — the pane's
+        "Running… N rows" while it waits."""
+        with self._ingest_jobs_lock:
+            run = self._sql_runs.get(token)
+            return {"running": run is not None, "rows": run["rows"] if run else 0}
+
+    def cancel_sql_runs(self) -> int:
+        """Stop every SQL query in flight; how many there were. The UI's
+        Shut down calls this first: uvicorn's graceful shutdown waits for
+        open requests, and a runaway query is a request that never ends —
+        Winnow stayed up at full CPU, holding the case lock, until
+        killed."""
+        with self._ingest_jobs_lock:
+            tokens = list(self._sql_runs)
+        for token in tokens:
+            self.cancel_op(token)
+        return len(tokens)
+
+    def sql_result_csv(self, result_id: str, sort: int | None = None, order: str = "asc") -> Iterator[str]:
+        """A held result as CSV text chunks, in displayed order, streamed
+        off the scratch table. Values as the pane shows them (js_str),
+        through _csv_safe like every other export of case data."""
+        cols, rows = self.sql_results.iter_rows(result_id, sort, order)
+
+        def gen():
+            buf = io.StringIO()
+            w = csv.writer(buf, lineterminator="\n")
+            w.writerow(cols)
+            n = 0
+            for row in rows:
+                w.writerow([_csv_safe(_sql_js_str(v)) for v in row])
+                n += 1
+                if n % 2000 == 0:
+                    yield buf.getvalue()
+                    buf.seek(0), buf.truncate(0)
+            yield buf.getvalue()
+        return gen()
+
+    def sql_result_xlsx(self, result_id: str, path: str, sort: int | None = None, order: str = "asc",
+                        sheet: str = "Query") -> dict:
+        """A held result as a workbook written to `path`, in displayed
+        order, continuing past one worksheet the way rows_to_xlsx does.
+        Numbers stay numbers; text goes through _xlsx_safe."""
+        cols, rows = self.sql_results.iter_rows(result_id, sort, order)
+        return write_rows_xlsx(path, cols, rows, sheet)
 
 _CSV_FORMULA_LEAD = ("=", "+", "-", "@", "\t", "\r")
 
@@ -13007,40 +13145,48 @@ _XLSX_SHEET_INVALID = re.compile(r"[\\/?*\[\]:]")
 XLSX_MAX_ROWS = 1_048_576
 
 
-def rows_to_xlsx(columns: list, rows: list, sheet_name: str = "Query") -> io.BytesIO:
-    """A result set as a one-sheet workbook, in memory.
+def rows_to_xlsx(columns: list, rows: Iterable, sheet_name: str = "Query") -> io.BytesIO:
+    """A result set as a workbook, in memory — write_rows_xlsx into a
+    BytesIO. A module function rather than a Store method because it
+    touches no database, which is also what lets its tests run without a
+    case file."""
+    buf = io.BytesIO()
+    write_rows_xlsx(buf, columns, rows, sheet_name)
+    buf.seek(0)
+    return buf
 
-    A module function rather than a Store method because it touches no
-    database: the SQL pane has already run the query and holds the rows
-    the analyst is looking at, sorted the way they sorted them, so the
-    export is a pure formatting step over what is on screen. Keeping it
-    off Store is also what lets its tests run without a case file.
 
-    The pane no longer caps a result, so one can be past Excel's
-    per-sheet limit: it continues on "Query (2)", "Query (3)"…, header
-    re-emitted, the way export_all_xlsx does — every row lands rather
-    than the export being refused. Write-only for the same reason that
-    one is: a million rows as openpyxl cell objects is gigabytes.
+def write_rows_xlsx(target, columns: list, rows: Iterable, sheet_name: str = "Query") -> dict:
+    """Rows (any iterable — the SQL pane's export streams them off its
+    scratch table) as a workbook saved to `target`, a path or a file
+    object; returns {"rows", "sheets"}.
+
+    The pane has no row cap, so a result can be past Excel's per-sheet
+    limit: it continues on "Query (2)", "Query (3)"…, header re-emitted,
+    the way export_all_xlsx does — every row lands rather than the export
+    being refused. Write-only for the same reason that one is: a million
+    rows as openpyxl cell objects is gigabytes.
     """
     per = XLSX_MAX_ROWS - 1   # one row is the header
     header = [_xlsx_safe(c) for c in columns]
     used: set[str] = set()
     first = _xlsx_sheet_name(sheet_name, used)
     wb = Workbook(write_only=True)
-    for part, start in enumerate(range(0, max(len(rows), 1), per), 1):
-        if part == 1:
-            title = first
-        else:
-            suffix = f" ({part})"
-            title = _xlsx_sheet_name(first[: 31 - len(suffix)] + suffix, used)
-        ws = wb.create_sheet(title)
-        ws.append(header)
-        for row in rows[start:start + per]:
-            ws.append([_xlsx_safe(v) for v in row])
-    buf = io.BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-    return buf
+    ws = wb.create_sheet(first)
+    ws.append(header)
+    sheets, on_sheet, total = 1, 0, 0
+    for row in rows:
+        if on_sheet == per:
+            sheets += 1
+            suffix = f" ({sheets})"
+            ws = wb.create_sheet(_xlsx_sheet_name(first[: 31 - len(suffix)] + suffix, used))
+            ws.append(header)
+            on_sheet = 0
+        ws.append([_xlsx_safe(_sql_cell(v)) for v in row])
+        on_sheet += 1
+        total += 1
+    wb.save(target)
+    return {"rows": total, "sheets": sheets}
 
 
 def _xlsx_sheet_name(name: str, used: set[str]) -> str:

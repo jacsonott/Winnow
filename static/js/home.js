@@ -17,7 +17,7 @@ import { loadAppSettings, loadCaseSettings, loadHeaderNicknames, loadSavedFilter
 import { updateSearchAllButton } from './search.js';
 import { clearViewStateStash, applyPageTabsSize, loadSources } from './sources.js';
 import { clearTabHistory } from './tabhistory.js';
-import { showGridTab } from './sql.js';
+import { resetSqlPane, showGridTab } from './sql.js';
 import { openSettings, syncAppearanceFromServer } from './settings.js';
 import { drawWordmark } from './splash.js';
 import { S } from './state.js';
@@ -170,11 +170,8 @@ export async function openCase(path, opts = {}) {
   S.timeline = { view: null, pages: new Map(), pending: new Set(), reqId: S.timeline.reqId + 1,
                  tagFilter: null, raw: new Set() };
   // sql_tabs is a per-case table, so the previous case's tabs (and the
-  // in-memory results keyed by their ids) don't describe this one. Left
-  // empty rather than reloaded here — showSqlTab loads lazily.
-  S.sqlTabs = [];
-  S.sqlTabId = null;
-  S.sqlResults.clear();
+  // results and runs keyed by their ids) don't describe this one.
+  resetSqlPane();
   // A Search-all job belongs to the Store instance the server just closed;
   // its results reference source ids from the previous case.
   S.searchAll = null;

@@ -403,7 +403,7 @@ Prefer it to reaching into the app's globals — this is what's supported.
 
 | Field | What it is |
 | --- | --- |
-| `apiVersion` | Contract version of this object (currently `5`) |
+| `apiVersion` | Contract version of this object (currently `6`) |
 | `plugin` | Your plugin's display name |
 | `base` | `/api/plugin/<fs_name>` — prefix for your own routes |
 | `assets` | `/plugin_assets/<fs_name>` — prefix for your own files |
@@ -805,9 +805,9 @@ await winnow.sqlPage.show();                          // switch to the page; res
 const current = await winnow.sqlPage.text();          // the editor's text
 await winnow.sqlPage.setText(sql);                    // replace the active query tab's text (autosaves like typing)
 await winnow.sqlPage.setText(sql, { newTab: 'From copilot' });   // …or a new named tab, leaving the analyst's alone
-const r = await winnow.sqlPage.run();                 // the page's own Run: {columns, rows, elapsed_ms, truncated}; rejects on a SQL error
+const r = await winnow.sqlPage.run();                 // the page's own Run: {columns, rows, total, elapsed_ms, truncated, stopped}; rejects on a SQL error
 winnow.sqlPage.result();                              // the active tab's last result, or null
-winnow.sqlPage.selectedRows();                        // {columns, rows} the analyst selected — rows is [] when the result has no rid
+const sel = await winnow.sqlPage.selectedRows();      // {columns, rows} the analyst selected — rows is [] when the result has no rid
 const off = winnow.sqlPage.onRun(({ tabId, sql, result }) => …);   // after every run; result may be {error}
 
 // Notes
@@ -823,9 +823,16 @@ what "put this query in the editor" means, and the tab autosaves it as
 if typed. Use `newTab` when the analyst's own query should survive.
 `run()` paints the result in the pane whether or not the page is
 showing; call `show()` first if they should see it. The pane has no row
-cap, so `run()`/`result()` hold *every* row the query returned — count
-or slice them before shipping them anywhere (`winnow.api.sql` still
-takes a `limit`). Both `onRun` and
+cap, but the rows are not all in the browser: the server holds the
+result and the pane pages it in as the analyst scrolls. So a result's
+`rows` is its first 5,000 rows, `total` is how many it has in all, and
+`truncated` is `total > rows.length`. `stopped` is `null`, or
+`'cancelled'` when the analyst pressed Stop (or `'disk'` when the disk
+results are kept on ran low): the result is the rows that had come back
+by then, and still counts as a result. For more than the first page,
+query with `winnow.sql(sql, limit)` yourself. `selectedRows()` returns a
+promise (since API 12): a shift-click can select rows the pane never
+loaded, so they come from the server. Both `onRun` and
 `onChange` return an unsubscribe and are cut with your mount.
 
 The `claude_assistant/` example's **Copilot** is the worked example: a
@@ -1297,7 +1304,11 @@ python server.py --plugins-dir ~/src/my-winnow-plugins
 
 Installs from the UI always land in the first directory (`plugins/`).
 
-**Versioning:** the current plugin API version is **11** (the `signals`
+**Versioning:** the current plugin API version is **12** (in 12 the SQL
+pane started holding results on the server: `sqlPage` results gained
+`total` and `stopped`, their `rows` became the first 5,000, and
+`sqlPage.selectedRows()` became async, which took the context's own
+`apiVersion` to 6; the `signals`
 render kind and its `cells` source arrived in 11; two things arrived in
 10: a dashboard widget's `live` flag, and the tab context's `tabState`,
 which took the context's own `apiVersion` to 5;

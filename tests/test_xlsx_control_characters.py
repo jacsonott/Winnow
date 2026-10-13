@@ -145,21 +145,30 @@ def test_the_stored_value_is_never_touched(store, tmp_path):
 
 # ------------------------------------------------------------- the route
 
+def _held(client, sql):
+    """Run in the pane and return the held result's id — the SQL pane's
+    Excel… exports from there now, not from rows the browser posts up."""
+    r = client.post("/api/sql/run", json={"sql": sql})
+    assert r.status_code == 200, r.text
+    return r.json()["id"]
+
+
 def test_the_route_returns_a_workbook(client):
-    r = client.post("/api/sql/export_xlsx", json={
-        "columns": ["Computer", "EventId"],
-        "rows": [["DC01", 4624]],
-        "filename": "logons.xlsx", "sheet": "Logons"})
+    rid = _held(client, "SELECT 'DC01' AS Computer, 4624 AS EventId")
+    r = client.get(f"/api/sql/result/{rid}/export.xlsx?filename=logons.xlsx&sheet=Logons")
     assert r.status_code == 200
     assert r.headers["content-type"].startswith(
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     assert 'filename="logons.xlsx"' in r.headers["content-disposition"]
-    ws = load_workbook(io.BytesIO(r.content)).active
-    assert [c.value for c in ws[1]] == ["Computer", "EventId"]
+    wb = load_workbook(io.BytesIO(r.content))
+    assert wb.sheetnames == ["Logons"]
+    assert [c.value for c in wb.active[1]] == ["Computer", "EventId"]
+    assert [c.value for c in wb.active[2]] == ["DC01", 4624], "a number stays a number"
 
 
 def test_the_route_escapes_rather_than_500s(client):
-    r = client.post("/api/sql/export_xlsx", json={"columns": ["c"], "rows": [[NASTY]]})
+    rid = _held(client, "SELECT 'cmd.exe /c echo ' || char(7) || char(1) || ' done' AS c")
+    r = client.get(f"/api/sql/result/{rid}/export.xlsx")
     assert r.status_code == 200
     ws = load_workbook(io.BytesIO(r.content)).active
     assert "\\x07" in ws.cell(row=2, column=1).value
@@ -167,8 +176,14 @@ def test_the_route_escapes_rather_than_500s(client):
 
 def test_the_route_spills_an_oversized_result_onto_more_sheets(client, monkeypatch):
     monkeypatch.setattr("winnow.store.XLSX_MAX_ROWS", 3)
-    r = client.post("/api/sql/export_xlsx", json={"columns": ["a"], "rows": [[1], [2], [3]]})
+    rid = _held(client, "SELECT 1 AS a UNION ALL SELECT 2 UNION ALL SELECT 3")
+    r = client.get(f"/api/sql/result/{rid}/export.xlsx")
     assert r.status_code == 200
     wb = load_workbook(io.BytesIO(r.content))
     assert wb.sheetnames == ["Query", "Query (2)"]
     assert [c.value for c in wb["Query (2)"]["A"]] == ["a", 3]
+
+
+def test_the_route_404s_a_result_that_is_gone(client):
+    r = client.get("/api/sql/result/nope/export.xlsx")
+    assert r.status_code == 404

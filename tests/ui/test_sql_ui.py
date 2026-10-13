@@ -75,12 +75,13 @@ def test_results_sort_by_clicking_headers_and_show_tags(page):
     page.click("#btnRunSql")
     page.wait_for_function("() => document.querySelectorAll('#sqlResult tr').length === 21")
 
-    cell = lambda: page.locator("#sqlResult tr").nth(1).locator("td").nth(1).inner_text()  # noqa: E731
+    # The sort is the server's (the result is held there), so the sorted
+    # rows land a fetch after the click: wait for the first one.
+    first = "() => document.querySelectorAll('#sqlResult tr')[1]?.querySelectorAll('td')[1]?.textContent"
     page.locator("#sqlResult th", has_text="EventId").click()
-    asc = cell()
+    page.wait_for_function(f"({first})() === '1'")   # EventId cycles 4624/4625/4688/1
     page.locator("#sqlResult th", has_text="EventId").click()
-    desc = cell()
-    assert asc == "1" and desc == "4688"  # EventId cycles 4624/4625/4688/1
+    page.wait_for_function(f"({first})() === '4688'")
 
     # cleanup: untag
     page.evaluate("() => __winnow.showGridTab()")

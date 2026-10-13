@@ -380,19 +380,8 @@ _SEVEN_THOUSAND = ("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM
                    "SELECT i FROM n")
 
 
-def test_sql_route_returns_every_row_by_default(client, ingested):
-    """The pane sends no limit, and its Copy/CSV/Excel export the rows it
-    holds — a cap here was a cap on every export."""
-    r = client.post("/api/sql", json={"sql": _SEVEN_THOUSAND})
-    assert r.status_code == 200
-    body = r.json()
-    assert len(body["rows"]) == 7000
-    assert body["rows"][-1] == [7000]
-    assert body["truncated"] is False
-
-
-def test_sql_route_still_honours_an_explicit_limit(client, ingested):
-    """winnow.api.sql (plugins) sends one."""
+def test_sql_route_honours_an_explicit_limit(client, ingested):
+    """winnow.api.sql (plugins) sends one; the pane uses /api/sql/run."""
     r = client.post("/api/sql", json={"sql": _SEVEN_THOUSAND, "limit": 5000})
     assert len(r.json()["rows"]) == 5000
     assert r.json()["truncated"] is True

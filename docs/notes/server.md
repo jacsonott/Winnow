@@ -183,13 +183,34 @@ see [docs/notes/README.md](README.md) for the whole set.
   to take down the entire tagged export. They are escaped to `\x07` rather
   than dropped, because a silently shortened string in a hand-over artifact
   is worse than a visible escape.
-- **`POST /api/sql/export_xlsx`** takes the result the pane is SHOWING
-  (columns + rows, up from the client) rather than the query, so the
-  workbook matches the screen including a click-sort — which lives only in
-  the browser — and including the preview cap, so the file cannot disagree
-  with the row count printed above it. `Save as table` remains the one
-  action that re-runs the query in full. Refuses a result taller than one
-  worksheet (`XLSX_MAX_ROWS`) with a 400 rather than writing a bad file.
+- **The SQL pane's results are held server-side** (`winnow/sqlresults.py`,
+  `POST /api/sql/run` and the `/api/sql/result/{id}/…` routes). The pane
+  has no row cap, and "every row" as one JSON response was every row in
+  Python, then in the response, then in the browser: no memory bound at
+  all. A run now copies its rows in `BATCH`-sized `fetchmany`s into a
+  scratch SQLite file (`winnow-views-sqlres-*`, in the platform tempdir
+  rather than /dev/shm, since a result is every cell of every row; the
+  views prefix means `sweep_orphan_views` collects one a hard kill left
+  behind, and the same flock keeps a live one safe) and answers with the
+  first page, the total and each column's widest value. The rest is paged by position,
+  click-sorted by the server into a per-result order table (rows → rowid
+  → `pos`, never `LIMIT/OFFSET`), and exported by streaming: CSV through
+  a generator, XLSX from a temp file the response deletes after sending
+  (a workbook can't be streamed before it is finished), both in the
+  displayed sort, both spilling nothing into memory. Copy is `pick`, which
+  answers 413 past `COPY_MAX_BYTES` rather than build a clipboard string
+  of hundreds of MB. Things that bite: **the sort has to reproduce the
+  one the browser used to do** (NULLs first, numbers — including numeric
+  text — numerically, then text) or a click-sort and its export disagree
+  — `WINNOW_SORT_NUM` is a UDF for that reason; **a result is a handle
+  the client must let go of** (a re-run sends the old id in `release`,
+  closing a tab releases, and the store keeps at most `KEEP` anyway); a
+  run **stops on a nearly full disk** (`MIN_FREE_BYTES`) with the rows it
+  has, rather than filling `/dev/shm`; and a value that isn't JSON (a
+  non-UTF-8 blob, ±Inf) is converted per cell in `cell()`, since one used
+  to make the whole response a 500. `/api/sql` itself is unchanged for
+  Python callers and `winnow.api.sql`: `limit` defaults to 5,000, and an
+  explicit `null` still means every row.
 - **`POST /api/shutdown`** (the home screen's ⏻ button and Session → "Shut
   down Winnow…") stops the server from the UI — the server usually lives
   in a forgotten terminal, and closing the browser tab leaving it running
@@ -200,7 +221,13 @@ see [docs/notes/README.md](README.md) for the whole set.
   `Store.close()`, views scratch files are deleted. `_trigger_shutdown`
   is a separate function *so tests can monkeypatch it* — calling the real
   one under pytest kills pytest. The CSRF header gate is what stops a
-  hostile page in another tab from turning the server off.
+  hostile page in another tab from turning the server off. **It stops
+  every SQL query in flight first** (`Store.cancel_sql_runs`): graceful
+  shutdown waits for open requests, and a runaway query (a recursive CTE
+  with no stop condition) is a request that never ends — Shut down used
+  to leave Winnow at full CPU, still holding the case lock. Every SQL run
+  registers its op token for this (`Store._sql_run`), with or without the
+  pane's own Stop button.
 
 - **Idle shutdown rides the presence stream, not request traffic.** An
   analyst reading the grid makes no requests for hours, so "last request
