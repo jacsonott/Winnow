@@ -48,7 +48,7 @@ def test_parse_json_path(text, expect):
         assert sp.parse_json_path(text) == expect
 
 
-@pytest.mark.parametrize("text", ["$.a.b", "$.a[0].b", '$["a.b"].c', '$["a\\"q"]'])
+@pytest.mark.parametrize("text", ["$.a.b", "$.a[0].b", '$["a.b"].c', '$["a\\"q"]', '$[" padded "]', '$["tab\t"].x'])
 def test_json_path_round_trips(text):
     """Paths are written into column definitions and session files, so
     format(parse(x)) has to be re-parseable — including for keys dot
@@ -133,7 +133,8 @@ def test_xml_path_parsing_handles_brackets_and_slashes():
 
 
 def test_xml_path_round_trips():
-    for text in ["Event/System/EventID", "Data[2]", "Data[@Name='X']", "Provider@Name"]:
+    for text in ["Event/System/EventID", "Data[2]", "Data[@Name='X']", "Provider@Name",
+                 'Data[@Name="O\'Brien"]', "Data[@Name='it''s \"x\"']", "Data[@Name='a]@b/c']@Name"]:
         steps, attr = sp.parse_xml_path(text)
         assert sp.format_xml_path(steps, attr) == text
 
@@ -198,6 +199,29 @@ def test_discovered_paths_all_extract():
     doc = json.dumps(DOC)
     for row in sp.discover_paths([doc], "json"):
         assert sp._extract_json(doc, {"path": row["path"]}, {}) is not None, row["path"]
+
+
+def test_discovered_paths_round_trip_awkward_names_and_keys():
+    """Discovery spliced a predicate value into '…' bare, so a Data Name
+    holding an apostrophe gave a path the parser refused — offered,
+    pre-ticked at 100%, and failing the whole flatten batch with it. JSON
+    keys with edge whitespace went out in dot notation, which strips, and
+    extracted NULL. Every offered path must validate AND extract the value
+    it was offered with, under the name its predicate gives it."""
+    xml = ('<Event><EventData><Data Name="O\'Brien">x1</Data><Data Name="a]b">x2</Data>'
+           '<Data Name="q&quot;x">x3</Data><Data Name="c@d">x4</Data><Data Name="e/f">x5</Data>'
+           '<Data Name="both\'&quot;">x6</Data><Data Name="a]@b">x7</Data></EventData></Event>')
+    doc = json.dumps({" padded ": "v1", "tab\t": "v2", "ok": "v3", "a\nb": "v4"})
+    from winnow import timeparse
+
+    for kind, value, op, n in (("xml", xml, "xml_field", 7), ("json", doc, "json_field", 4)):
+        rows = sp.discover_paths([value], kind)
+        assert len(rows) == n
+        for row in rows:
+            params = timeparse.validate_params(op, {"path": row["path"]})
+            assert timeparse.OPERATIONS[op]["parse"](value, params, {}) == row["sample"], row["path"]
+    names = {r["sample"]: r["suggested_name"] for r in sp.discover_paths([xml], "xml")}
+    assert names["x1"] == "O'Brien" and names["x6"] == "both'\"" and names["x7"] == "a]@b"
 
 
 def test_registered_ops_are_hidden_from_timestamp_detection():

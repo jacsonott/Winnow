@@ -120,10 +120,15 @@ def parse_json_path(text: str) -> list:
             out.append(int(m.group("index")))
         else:
             key = m.group("dotkey") or m.group("barekey")
-            if key is None:
+            if key is not None:
+                key = key.strip()
+            else:
+                # A quoted key is taken exactly as written — the quotes are
+                # the escape hatch, and a key with edge whitespace (" id ",
+                # "name\t") is a real key format_json_path quotes for that.
                 raw = m.group("dq") if m.group("dq") is not None else m.group("sq")
                 key = re.sub(r"\\(.)", r"\1", raw)
-            out.append(key.strip())
+            out.append(key)
         pos = m.end()
     if not out:
         raise ValueError(f"Can't read the field path {text!r}")
@@ -138,7 +143,9 @@ def format_json_path(segments: list) -> str:
     for seg in segments:
         if isinstance(seg, int):
             out += f"[{seg}]"
-        elif re.fullmatch(r"[^.\[\]\"']+", str(seg)):
+        elif re.fullmatch(r"[^.\[\]\"']+", str(seg)) and str(seg) == str(seg).strip():
+            # Dot notation strips the key it reads, so a key with edge
+            # whitespace has to be quoted to survive the round trip.
             out += f".{seg}"
         else:
             out += '["' + str(seg).replace("\\", "\\\\").replace('"', '\\"') + '"]'
@@ -232,36 +239,47 @@ def _extract_json(value: Any, params: dict, state: dict) -> str | None:
 
 # -------------------------------------------------------------- XML paths
 
-def _split_steps(s: str) -> list[str]:
-    """`a/b[@N='x/y']/c` -> ['a', "b[@N='x/y']", 'c'] — a plain split would
-    cut the predicate in half, and predicate values are analyst data
-    (file paths, URLs) that routinely contain slashes."""
-    out, buf, depth = [], [], 0
-    for ch in s:
+def _structural(s: str):
+    """(index, char, bracket depth) for every character of a path that is
+    syntax rather than a predicate's quoted value. Predicate values are
+    analyst data — file paths, URLs, "a]b", "c@d" — so a `/`, `]` or `@`
+    inside the quotes must not split, close or select anything. A doubled
+    quote ('') simply closes and reopens, so it needs no case of its own."""
+    depth, quote = 0, None
+    for i, ch in enumerate(s):
+        if quote:
+            if ch == quote:
+                quote = None
+            continue
+        if ch in "'\"" and depth:
+            quote = ch
+            continue
         if ch == "[":
             depth += 1
         elif ch == "]":
             depth = max(0, depth - 1)
-        if ch == "/" and depth == 0:
-            out.append("".join(buf))
-            buf = []
-        else:
-            buf.append(ch)
-    out.append("".join(buf))
+        yield i, ch, depth
+
+
+def _split_steps(s: str) -> list[str]:
+    """`a/b[@N='x/y']/c` -> ['a', "b[@N='x/y']", 'c'] — a plain split would
+    cut the predicate in half, and predicate values are analyst data
+    (file paths, URLs) that routinely contain slashes."""
+    cuts = [i for i, ch, depth in _structural(s) if ch == "/" and depth == 0]
+    out, start = [], 0
+    for i in cuts:
+        out.append(s[start:i])
+        start = i + 1
+    out.append(s[start:])
     return out
 
 
 def _trailing_at(s: str) -> int | None:
     """Index of the `@` that selects an attribute — the last one at bracket
     depth zero — or None if the path selects an element's text."""
-    depth = 0
     found = None
-    for i, ch in enumerate(s):
-        if ch == "[":
-            depth += 1
-        elif ch == "]":
-            depth = max(0, depth - 1)
-        elif ch == "@" and depth == 0:
+    for i, ch, depth in _structural(s):
+        if ch == "@" and depth == 0:
             found = i
     return found
 
@@ -270,7 +288,7 @@ _XML_STEP_RE = re.compile(
     r"""^(?P<tag>[^\[\]@/]+)
     (?:\[
         (?: (?P<index>\d+)
-          | @(?P<pattr>[\w:.-]+)\s*=\s*(?P<quote>['"])(?P<pval>[^'"]*)(?P=quote)
+          | @(?P<pattr>[\w:.-]+)\s*=\s*(?:'(?P<sq>(?:[^']|'')*)'|"(?P<dq>(?:[^"]|"")*)")
         )
     \])?$""",
     re.VERBOSE,
@@ -319,7 +337,9 @@ def parse_xml_path(text: str) -> tuple[list[tuple[str, Any]], str | None]:
         if not m:
             raise ValueError(f"Can't read the element path at {raw!r}")
         if m.group("pattr"):
-            sel: Any = (m.group("pattr"), m.group("pval"))
+            pval = (m.group("sq").replace("''", "'") if m.group("sq") is not None
+                    else m.group("dq").replace('""', '"'))
+            sel: Any = (m.group("pattr"), pval)
         else:
             sel = int(m.group("index") or 0)
         steps.append((m.group("tag").strip(), sel))
@@ -330,7 +350,19 @@ def parse_xml_path(text: str) -> tuple[list[tuple[str, Any]], str | None]:
 
 def _format_step(tag: str, sel: Any) -> str:
     if isinstance(sel, tuple):
-        return f"{tag}[@{sel[0]}='{sel[1]}']"
+        # Single quotes as XPath writes them, double when the value holds
+        # an apostrophe (Name="O'Brien"), and a doubled quote when it holds
+        # both — XPath 2.0's escape; parse_xml_path reads all three. A
+        # value spliced in bare broke the parse, and discovery then offered
+        # (pre-ticked, at 100%) a path that failed the whole flatten batch.
+        v = str(sel[1])
+        if "'" not in v:
+            lit = f"'{v}'"
+        elif '"' not in v:
+            lit = f'"{v}"'
+        else:
+            lit = "'" + v.replace("'", "''") + "'"
+        return f"{tag}[@{sel[0]}={lit}]"
     return tag if sel == 0 else f"{tag}[{sel}]"
 
 
@@ -794,9 +826,14 @@ def suggest_name(path: str, kind: str) -> str:
         return out
     # `Data[@Name='TargetUserName']` names itself — that predicate value is
     # a better column name than anything its tag or position could give.
-    pred = re.search(r"\[@[\w:.-]+='([^']*)'\]$", s)
-    if pred and pred.group(1).strip():
-        return pred.group(1).strip()
+    # Read through parse_xml_path, so a value quoted "O'Brien" (or with a
+    # doubled quote) names its column the same way 'TargetUserName' does.
+    try:
+        steps, attr = parse_xml_path(s)
+    except ValueError:
+        steps, attr = [], None
+    if steps and attr is None and isinstance(steps[-1][1], tuple) and str(steps[-1][1][1]).strip():
+        return str(steps[-1][1][1]).strip()
     if "@" in s and not s.rstrip().endswith("]"):
         head, _, attr = s.rpartition("@")
         tail = head.rstrip("/").split("/")[-1] if head.strip("/") else ""

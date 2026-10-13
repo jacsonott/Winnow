@@ -81,6 +81,17 @@ see [docs/notes/README.md](README.md) for the whole set.
   columns are created through the existing batch route — one scan, N
   columns, all-or-nothing — which is the same machinery the JSON flatten
   picker uses.
+- **Every path the flatten picker offers has to survive `validate_params`
+  and extract the sample it was offered with.** Because the batch is
+  all-or-nothing, one offered path that fails to parse fails every column
+  the analyst ticked — and the picker pre-ticks anything at 100%. Two
+  shapes broke that: an EVTX `Data Name` holding an apostrophe was spliced
+  into `'…'` bare (now `"O'Brien"`, or `'it''s "x"'` when it holds both,
+  XPath 2.0's doubling — `parse_xml_path` reads all three, and its step
+  splitting skips `/ ] @` inside the quotes), and a JSON key with edge
+  whitespace went out in dot notation, which strips (now bracket-quoted,
+  and quoted keys are no longer stripped). `test_structparse.py` checks
+  the property itself on those shapes, not just the two fixes.
 
 - **Derived columns** (`timeparse.py`, `derived_columns`/`drv_<id>` tables,
   `/api/derived/*`, the column header's right-click menu's "Add datetime column from
