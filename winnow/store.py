@@ -1259,7 +1259,12 @@ CASE_LOCK_STALE_AFTER_SEC = 150
 
 
 def case_lock_path(case_path: str) -> str:
-    return os.path.abspath(case_path) + CASE_LOCK_SUFFIX
+    # realpath, not abspath: the marker has to be ONE file per case however
+    # the path to it was spelled. With abspath, a case opened through a
+    # symlink (a case folder linked onto a share, say) got a marker of its
+    # own beside the link, and a second Winnow opening the same file by its
+    # real path probed a marker nobody held and walked straight in.
+    return os.path.realpath(case_path) + CASE_LOCK_SUFFIX
 
 
 def _read_lock_record(path: str) -> dict:

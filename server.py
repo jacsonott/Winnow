@@ -44,7 +44,7 @@ from winnow import version
 from winnow import archive
 from winnow import workspace as WS
 from winnow.store import (CASE_SUFFIX, DEFAULT_IMPORT_EXTENSIONS, PLASO_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, MissingTable, OpCancelled, Store, ViewExpired,
-                   describe_case_lock, probe_case_lock, q, rows_to_xlsx, sweep_orphan_views)
+                   case_lock_path, describe_case_lock, probe_case_lock, q, rows_to_xlsx, sweep_orphan_views)
 
 HERE = paths.INSTALL_ROOT  # static/, plugins/, examples/plugins/ all hang off the install root
 
@@ -712,6 +712,25 @@ def _is_temp_case(path: str) -> bool:
     return os.path.basename(os.path.dirname(os.path.abspath(path))) == QUICKLOOK_DIRNAME
 
 
+def _same_case_path(a: str, b: str) -> bool:
+    """Whether two spellings name the same case file. realpath + normcase,
+    the same canonical form case_lock_path uses: a case reached through a
+    symlink (or, on Windows, in other letter case) is the case it points
+    at, and comparing abspaths called it a different one."""
+    return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+
+
+def _remove_case_file(path: str) -> None:
+    """Delete a case file and what lives beside it: SQLite's -wal/-shm
+    (left behind whenever the last connection to it didn't close cleanly)
+    and a stale .winnow-lock marker. Deleting only the .db-winnow left
+    those three in the cases folder for good, the lock marker under a name
+    no case would ever own again."""
+    for p in (path, path + "-wal", path + "-shm", case_lock_path(path)):
+        with contextlib.suppress(OSError):
+            os.remove(p)
+
+
 def _new_temp_case_path() -> str:
     d = os.path.join(_cases_dir(), QUICKLOOK_DIRNAME)
     os.makedirs(d, exist_ok=True)
@@ -1071,7 +1090,7 @@ def api_case_open(body: CaseOpen):
     # `not STORE.closed` matters: STORE outlives close() on both the case-
     # switch path and the legacy-preset migration, and reopening a case
     # whose Store has already been closed is a real reopen, not a no-op.
-    if STORE is not None and not STORE.closed and os.path.abspath(STORE.path) == os.path.abspath(body.path):
+    if STORE is not None and not STORE.closed and _same_case_path(STORE.path, body.path):
         rec = WS.cases.find_by_path(body.path) or WS.cases.create(
             body.path, name=os.path.splitext(os.path.basename(body.path))[0]
         )
@@ -1506,9 +1525,7 @@ def api_case_discard():
     old, STORE = STORE, None
     with contextlib.suppress(Exception):
         old.close()
-    for suffix in ("", "-wal", "-shm", ".winnow-lock"):
-        with contextlib.suppress(OSError):
-            os.remove(path + suffix)
+    _remove_case_file(path)
     with contextlib.suppress(Exception):
         instances.set_case(None)
     return {"ok": True}
@@ -1805,8 +1822,21 @@ def api_cases_delete(case_id: int, delete_file: bool = False):
     if delete_file:
         rec = WS.cases.get(case_id)
         if rec and os.path.isfile(rec["path"]):
-            if STORE is not None and os.path.abspath(STORE.path) == os.path.abspath(rec["path"]):
+            if STORE is not None and _same_case_path(STORE.path, rec["path"]):
                 raise HTTPException(400, "Close this case before deleting its file")
+            # Open in ANOTHER Winnow is the same refusal for the same reason —
+            # the check above only ever saw this process. Unlinking a case a
+            # live Winnow has open leaves it writing into an inode nobody can
+            # find again (or, on Windows, fails half way through), and the
+            # other analyst learns about it when their work is gone.
+            holder = probe_case_lock(rec["path"])
+            if holder:
+                raise HTTPException(409, {
+                    "error": "case_in_use",
+                    "message": (f"It is open in another Winnow ({describe_case_lock(holder)}) "
+                                "— close it there first"),
+                    "holder": holder,
+                })
             # Registering a case is just recording a path, and nothing
             # checked what was at the end of it — so "forget this case, and
             # delete the file" was an unlink of anything the analyst's
@@ -1816,7 +1846,7 @@ def api_cases_delete(case_id: int, delete_file: bool = False):
                 raise HTTPException(
                     400, f"{rec['path']} is not a Winnow case file — removed from the "
                          "list, but not deleted from disk")
-            os.remove(rec["path"])
+            _remove_case_file(rec["path"])
     WS.cases.delete(case_id)
     return {"ok": True}
 

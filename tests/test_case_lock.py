@@ -156,3 +156,94 @@ def test_reopening_a_closed_store_at_the_same_path_really_reopens(client, store,
     r = client.post("/api/case/open", json={"path": case_path})
     assert r.status_code == 200
     assert server.STORE is not store and not server.STORE.closed
+
+
+# ------------------------------------------------- deleting a case's file
+
+def _register(client, path, name="victim"):
+    r = client.post("/api/cases", json={"path": str(path), "name": name})
+    assert r.status_code == 200, r.text
+    return r.json()["id"]
+
+
+def test_deleting_the_file_of_a_case_another_winnow_has_open_is_refused(client, tmp_path):
+    """The delete route only ever checked whether THIS process had the case
+    open. A second Winnow holding it (here: a Store in this test standing in
+    for one — flock is per open file, so the probe sees it exactly as
+    another process would) lost its case file from under it, and the
+    registry entry with it."""
+    import server
+
+    other = str(tmp_path / "held.db-winnow")
+    held = Store(other, default_tags=DEFAULT_TAGS)
+    try:
+        cid = _register(client, other)
+        r = client.delete(f"/api/cases/{cid}?delete_file=true")
+        assert r.status_code == 409
+        detail = r.json()["detail"]
+        assert detail["error"] == "case_in_use"
+        assert "another Winnow" in detail["message"]
+        assert os.path.isfile(other)
+        assert any(c["id"] == cid for c in server.WS.cases.list())
+    finally:
+        held.close()
+
+
+def test_a_heartbeat_alone_also_refuses_the_delete(client, tmp_path):
+    """The share case: no flock to see, only the other machine's beat."""
+    other = str(tmp_path / "shared.db-winnow")
+    Store(other, default_tags=DEFAULT_TAGS).close()
+    _write_marker(other, heartbeat_at=time.time() - 3)
+    cid = _register(client, other)
+    r = client.delete(f"/api/cases/{cid}?delete_file=true")
+    assert r.status_code == 409
+    assert os.path.isfile(other)
+
+
+def test_deleting_a_case_file_takes_what_lives_beside_it(client, tmp_path):
+    """-wal/-shm stay behind whenever the last connection didn't close
+    cleanly, and a killed Winnow leaves its stale lock marker. Deleting only
+    the .db-winnow left all three in the cases folder for good."""
+    other = str(tmp_path / "gone.db-winnow")
+    Store(other, default_tags=DEFAULT_TAGS).close()
+    for suffix in ("-wal", "-shm"):
+        with open(other + suffix, "wb") as f:
+            f.write(b"\0" * 32)
+    _write_marker(other, heartbeat_at=time.time() - CASE_LOCK_STALE_AFTER_SEC - 60)
+    cid = _register(client, other)
+    r = client.delete(f"/api/cases/{cid}?delete_file=true")
+    assert r.status_code == 200, r.text
+    assert sorted(p.name for p in tmp_path.iterdir() if p.name.startswith("gone")) == []
+
+
+# ------------------------------------------------ one marker per case file
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="needs symlinks")
+def test_a_case_reached_through_a_symlink_shares_its_lock(case_path, tmp_path):
+    """case_lock_path used abspath, so a case opened through a link got a
+    marker of its own beside the link — and a second Winnow opening the
+    same file by its real path saw nothing holding it."""
+    alias = str(tmp_path / "alias.db")
+    os.symlink(case_path, alias)
+    s = Store(alias, default_tags=DEFAULT_TAGS)
+    try:
+        assert case_lock_path(alias) == case_lock_path(case_path)
+        holder = probe_case_lock(case_path)
+        assert holder is not None and holder["pid"] == os.getpid()
+    finally:
+        s.close()
+    assert probe_case_lock(case_path) is None
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="needs symlinks")
+def test_reopening_the_open_case_through_a_symlink_is_not_a_reopen(client, store, tmp_path):
+    """Now that the marker is shared, the same-path short circuit has to
+    compare the same canonical form, or this process would probe its own
+    lock through the link and refuse itself."""
+    import server
+
+    alias = str(tmp_path / "alias.db")
+    os.symlink(store.path, alias)
+    r = client.post("/api/case/open", json={"path": alias})
+    assert r.status_code == 200, r.text
+    assert server.STORE is store and not store.closed

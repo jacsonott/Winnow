@@ -78,6 +78,15 @@ see [docs/notes/README.md](README.md) for the whole set.
   and names the holder, `--force` overrides). Biased toward *reporting* a
   conflict, the opposite of `_views_file_is_orphaned`'s bias — there a
   wrong answer deletes a live process's file, here it costs one click.
+  The marker is named from the case's **realpath**, not its abspath: one
+  marker per file however the path was spelled, or a case opened through
+  a symlink holds a marker that nobody opening it by its real name ever
+  probes (`_same_case_path` is the matching comparison for "is this the
+  case that's already open"). **Deleting** a case file (`DELETE
+  /api/cases/{id}?delete_file=true`) is the one place the probe is a
+  refusal rather than a prompt — 409 `case_in_use`, no "anyway" — since
+  there is no version of deleting a case somebody has open that they
+  would want; it takes the -wal/-shm and a stale marker with it.
 - `/api/case/open` short-circuits when the requested path is **already the
   open case** — necessary, because the open-before-close ordering would
   otherwise make the process probe its own lock and refuse itself. Guarded
