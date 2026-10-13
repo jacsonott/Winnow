@@ -734,7 +734,12 @@ TAG_GROUP_COLUMN = "__tag__"
 # and its rows were already committed \u2014 a CSV with a plausible header like
 # "Rank" (a real column name in e.g. some log formats) failed the *entire*
 # import with a confusing error, even though the data itself was fine.
-RESERVED_COLUMN_NAMES = {"rid", "rank", "rowid", TAG_GROUP_COLUMN}
+#
+# "__line__" is the sort key the grid sends for file order (the gutter
+# header's toggle) — a real header of that name was shadowed by it, so
+# sorting that column returned the rows in file order.
+LINE_SORT_COLUMN = "__line__"
+RESERVED_COLUMN_NAMES = {"rid", "rank", "rowid", TAG_GROUP_COLUMN, LINE_SORT_COLUMN}
 
 # sources.origin values for tables that were not imported from a file.
 # NULL is an import; these two are derived from what is already in the case.
@@ -817,6 +822,19 @@ def column_signature(cols: list[str]) -> str:
     """Order/case-independent fingerprint of a column-name set — used to
     check two sources have "the same" columns for merge eligibility."""
     return hashlib.sha256("\x1f".join(sorted(c.strip().lower() for c in cols)).encode()).hexdigest()
+
+
+def _first_nonblank_row(reader: Iterable[list[str]]) -> list[str]:
+    """The first row with anything in it — the header, or (without one)
+    the row that fixes the table's width. Leading blank rows are skipped:
+    a blank line read as the header gave a table of ZERO columns, and
+    `CREATE TABLE ... (rid INTEGER PRIMARY KEY, )` failed the import with
+    a raw syntax error. Same rule as the Excel import's header (the first
+    non-empty row). ValueError when there is no such row."""
+    for row in reader:
+        if any(c.strip() for c in row):
+            return row
+    raise ValueError("File is empty")
 
 
 def infer_type(values: Iterable[str]) -> str:
@@ -2701,33 +2719,35 @@ class Store:
             delimiter = self._sniff(head, path)
         reader = csv.reader(fh, delimiter=delimiter)
 
+        # Everything up to the row loop's own try/finally closes the file
+        # on the way out too — a failure here used to leak the handle.
         try:
-            first_row = next(reader)
-        except StopIteration:
-            fh.close()
-            raise ValueError("File is empty")
-        if has_header:
-            cols = sanitize_columns(first_row)
-            ncols = len(cols)
-            leftover_row = None
-        else:
-            ncols = len(first_row)
-            cols = sanitize_columns([None] * ncols)
-            leftover_row = first_row  # not a header — it's the first data row
+            first_row = _first_nonblank_row(reader)
+            if has_header:
+                cols = sanitize_columns(first_row)
+                ncols = len(cols)
+                leftover_row = None
+            else:
+                ncols = len(first_row)
+                cols = sanitize_columns([None] * ncols)
+                leftover_row = first_row  # not a header — it's the first data row
 
-        with self.lock, self.db:
-            cur = self.db.execute(
-                "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at)"
-                " VALUES (?,?,?,?,?,?)",
-                (name, os.path.abspath(path), "", "[]", file_hash,
-                 time.strftime("%Y-%m-%dT%H:%M:%S")),
-            )
-            source_id = cur.lastrowid
-            self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
-            table = f"src_{source_id}"
-            coldefs = ", ".join(f"{q(c)} TEXT" for c in cols)
-            self.db.execute(f"CREATE TABLE {q(table)} (rid INTEGER PRIMARY KEY, {coldefs})")
-            self.db.execute("UPDATE sources SET table_name=? WHERE id=?", (table, source_id))
+            with self.lock, self.db:
+                cur = self.db.execute(
+                    "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at)"
+                    " VALUES (?,?,?,?,?,?)",
+                    (name, os.path.abspath(path), "", "[]", file_hash,
+                     time.strftime("%Y-%m-%dT%H:%M:%S")),
+                )
+                source_id = cur.lastrowid
+                self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
+                table = f"src_{source_id}"
+                coldefs = ", ".join(f"{q(c)} TEXT" for c in cols)
+                self.db.execute(f"CREATE TABLE {q(table)} (rid INTEGER PRIMARY KEY, {coldefs})")
+                self.db.execute("UPDATE sources SET table_name=? WHERE id=?", (table, source_id))
+        except BaseException:
+            fh.close()
+            raise
 
         placeholders = ",".join("?" * ncols)
         insert = f"INSERT INTO {q(table)} ({','.join(q(c) for c in cols)}) VALUES ({placeholders})"
@@ -3000,10 +3020,7 @@ class Store:
         if delimiter is None:
             delimiter = self._sniff(text[:8192], name)
         reader = csv.reader(io.StringIO(text), delimiter=delimiter)
-        try:
-            first_row = next(reader)
-        except StopIteration:
-            raise ValueError("File is empty")
+        first_row = _first_nonblank_row(reader)
         if has_header:
             cols = sanitize_columns(first_row)
             ncols = len(cols)

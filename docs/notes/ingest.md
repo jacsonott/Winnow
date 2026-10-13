@@ -101,6 +101,10 @@ see [docs/notes/README.md](README.md) for the whole set.
   (header, or first data row when `has_header=False`) happens to be short,
   every other row gets trimmed to match it; there's no whole-file pre-scan to
   pick a "correct" width, so this count is the only signal something's off.
+  "First row" means first NON-BLANK row (`_first_nonblank_row`, ingest and
+  preview alike): a leading blank line used to be read as a header of zero
+  columns, and the import died on `CREATE TABLE ... (rid ..., )`. Blank
+  rows after it are still kept as padded rows.
 - **Directory import** (`Store.scan_import_directory`, `POST
   /api/ingest/dir/scan`, the "Import a folder…" modal) is a preview-then-
   commit design, not a bulk-ingest endpoint — the scan step never touches
