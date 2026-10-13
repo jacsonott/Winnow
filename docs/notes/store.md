@@ -296,7 +296,16 @@ see [docs/notes/README.md](README.md) for the whole set.
   file for session matching; it is **not** an evidence integrity hash and must
   not be presented as one.
 - Session import remaps tag IDs **by name**, creating missing tags. Two analysts
-  with their own "Lateral movement" tag merge rather than duplicate.
+  with their own "Lateral movement" tag merge rather than duplicate. The
+  name rule is `pair_tag_names`, and session load, `copy_sources_to`
+  (`_map_tags_by_name`) and `diff_sessions` all use it: the exact name
+  first, then a name differing only in case **only when that is
+  unambiguous on both sides** (one local tag folds to it, no other
+  incoming tag does). `tag_defs.name` is not unique by case — "Malware" and
+  "malware" can be two tags kept apart on purpose — and load used to match
+  by `name.lower()` alone while copy and diff matched exactly, so reloading
+  your own session moved rows between the two and the diff said nothing
+  had changed.
 - `search_all_sources` runs each source's count on a `_reader()`
   connection — the sweep never touches `self.lock` at all now (it used to
   take it per source's count, which still stalled a concurrent request for

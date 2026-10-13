@@ -821,6 +821,39 @@ def sanitize_columns(raw: list[str]) -> list[str]:
     return out
 
 
+def pair_tag_names(incoming: Iterable[str], local: Iterable[str]) -> dict[str, str]:
+    """{incoming tag name -> the local tag name it is}, for every incoming
+    name that has one: the one rule session load, copying tables between
+    cases and the session diff all match tag names by.
+
+    The exact name first. Failing that, the local tag whose name differs
+    only in case — but only when that is unambiguous on BOTH sides: one
+    local tag folds to it, and no other incoming tag does. tag_defs.name
+    is not unique by case, so "Malware" and "malware" can be two tags an
+    analyst keeps apart on purpose; matching by name.lower() alone (what
+    session load did) collapsed them, so reloading your own session moved
+    rows from one to the other, while copy and diff matched exactly and
+    the three disagreed. An incoming name with no partner is absent from
+    the result — the caller creates it, or reports it as different."""
+    local = set(local)
+    incoming = list(dict.fromkeys(incoming))
+    in_folds: dict[str, int] = {}
+    for n in incoming:
+        in_folds[n.casefold()] = in_folds.get(n.casefold(), 0) + 1
+    by_fold: dict[str, list[str]] = {}
+    for n in local:
+        by_fold.setdefault(n.casefold(), []).append(n)
+    out = {}
+    for n in incoming:
+        if n in local:
+            out[n] = n
+            continue
+        fold = n.casefold()
+        if in_folds[fold] == 1 and len(by_fold.get(fold, ())) == 1:
+            out[n] = by_fold[fold][0]
+    return out
+
+
 def column_signature(cols: list[str]) -> str:
     """Order/case-independent fingerprint of a column-name set — used to
     check two sources have "the same" columns for merge eligibility."""
@@ -10969,15 +11002,21 @@ class Store:
             warnings.append(
                 "Session was recorded against a different file. Row numbers may not line up."
             )
-        # Map session tag ids onto local tag ids by name, creating what's missing.
-        local = {t["name"].lower(): t["id"] for t in self.list_tags()}
+        # Map session tag ids onto local tag ids by name (pair_tag_names —
+        # the rule copy and diff use too), creating what's missing.
+        local = {t["name"]: t["id"] for t in self.list_tags()}
+        defs = session.get("tag_defs", [])
+        paired = pair_tag_names([t["name"] for t in defs], local)
+        created: dict[str, int] = {}
         idmap = {}
-        for t in session.get("tag_defs", []):
-            key = t["name"].lower()
-            if key not in local:
-                new = self.upsert_tag(None, t["name"], t.get("color", "#888888"), t.get("hotkey"))
-                local[key] = new["id"]
-            idmap[t["id"]] = local[key]
+        for t in defs:
+            if t["name"] in paired:
+                idmap[t["id"]] = local[paired[t["name"]]]
+                continue
+            if t["name"] not in created:
+                created[t["name"]] = self.upsert_tag(
+                    None, t["name"], t.get("color", "#888888"), t.get("hotkey"))["id"]
+            idmap[t["id"]] = created[t["name"]]
 
         with self.lock, self.db:
             if not merge:
@@ -11279,13 +11318,18 @@ class Store:
 
     def _map_tags_by_name(self, incoming_defs: list[dict]) -> dict:
         """{incoming tag id -> this case's tag id}, creating what's missing.
-        Caller holds self.lock inside a transaction."""
+        Names pair by pair_tag_names, the rule session load uses. Caller
+        holds self.lock inside a transaction."""
         mine = {r["name"]: r["id"] for r in self.db.execute("SELECT id, name FROM tag_defs")}
+        paired = pair_tag_names([d["name"] for d in incoming_defs], mine)
         taken_keys = {r[0] for r in self.db.execute(
             "SELECT hotkey FROM tag_defs WHERE hotkey IS NOT NULL")}
         out = {}
         for d in incoming_defs:
-            if d["name"] in mine:
+            if d["name"] in paired:
+                out[d["id"]] = mine[paired[d["name"]]]
+                continue
+            if d["name"] in mine:          # created a moment ago for an earlier def of the same name
                 out[d["id"]] = mine[d["name"]]
                 continue
             hotkey = d.get("hotkey") if d.get("hotkey") not in taken_keys else None
@@ -11520,6 +11564,11 @@ class Store:
         lt, ln, llab = self._session_tag_map(_load(left))
         rt, rn, rlab = self._session_tag_map(_load(right))
         labels = {**rlab, **llab}
+        # The right side's names in the left side's spelling where
+        # pair_tag_names pairs them — the rule loading either session
+        # would apply — so the diff reports what a load would change.
+        paired = pair_tag_names({n for v in rt.values() for n in v}, {n for v in lt.values() for n in v})
+        rt = {k: {paired.get(n, n) for n in v} for k, v in rt.items()}
 
         added, removed, changed, note_changes = [], [], [], []
         for key in sorted(set(lt) | set(rt), key=lambda k: (str(k[0]), k[1])):
