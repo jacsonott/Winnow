@@ -216,9 +216,14 @@ see [docs/notes/README.md](README.md) for the whole set.
   time" would reap a live session; instead every page holds an EventSource
   open to `/api/presence` and the count of live streams is the signal.
   Three holds stop it destroying work: open streams, in-flight HTTP
-  (counted in the no-cache middleware, `/api/presence` itself excluded or
-  it would read busy forever — a CSV download outliving its tab is exactly
-  what this hold protects), and running/queued ingest jobs. A server
+  (counted by `_InflightCounter`, `/api/presence` itself excluded or it
+  would read busy forever — a CSV download outliving its tab is exactly
+  what this hold protects), and running/queued ingest jobs. The counter
+  is **raw ASGI on purpose**: it used to live in a `@app.middleware`
+  (BaseHTTPMiddleware), whose `call_next` returns when the headers exist
+  and streams the body afterwards, so a download stopped counting the
+  moment it started. Anything that has to span a whole response body
+  can't be a BaseHTTPMiddleware. A server
   nothing ever connected to gets a 15-minute fuse rather than the 2-minute
   one — `--no-browser` plus a slow manual visit is legitimate, but an
   association-spawned server whose window failed to open still gets

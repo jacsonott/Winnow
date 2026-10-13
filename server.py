@@ -500,24 +500,6 @@ async def require_client_header(request: Request, call_next):
 
 @app.middleware("http")
 async def no_cache_static(request: Request, call_next):
-    # Piggybacked in-flight counting for idle shutdown — this middleware
-    # already wraps every request, so the marginal cost is two increments.
-    # /api/presence is excluded: its response streams for the LIFETIME of a
-    # page, so counting it would read as "busy" forever; it has its own
-    # stream counter. A download that outlives its tab (a multi-minute CSV
-    # export) counts here until the body finishes, which is the hold that
-    # keeps auto-exit from killing it.
-    counted = request.url.path != "/api/presence"
-    if counted:
-        PRESENCE.inflight += 1
-    try:
-        return await _no_cache_static_inner(request, call_next)
-    finally:
-        if counted:
-            PRESENCE.inflight -= 1
-
-
-async def _no_cache_static_inner(request: Request, call_next):
     """StaticFiles sends Last-Modified/ETag but no Cache-Control, which
     leaves the browser free to serve a stale index.html/app.js/style.css
     from its own disk cache for an unbounded time — even across a normal
@@ -537,6 +519,40 @@ async def _no_cache_static_inner(request: Request, call_next):
     if request.url.path.startswith(("/static/", "/plugin_assets/")) or request.url.path == "/":
         response.headers["Cache-Control"] = "no-cache"
     return response
+
+
+class _InflightCounter:
+    """In-flight request counting for idle shutdown, as plain ASGI.
+
+    It used to ride the no-cache middleware above, which is a
+    BaseHTTPMiddleware — and there `call_next` returns as soon as the
+    response HEADERS exist; the body streams after the middleware has
+    already returned. So a multi-minute CSV export, the very download this
+    hold exists to protect, stopped counting the moment it started, and
+    idle shutdown could begin under it. A raw ASGI wrapper's `await` only
+    returns once the app has sent its last body chunk, which is the
+    meaning the count needs.
+
+    /api/presence is excluded: its response streams for the LIFETIME of a
+    page, so counting it would read as "busy" forever; it has its own
+    stream counter. Added after every @app.middleware above, which makes
+    it the outermost layer — it sees the whole response, whatever the
+    others do to it."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope.get("path") == "/api/presence":
+            return await self.app(scope, receive, send)
+        PRESENCE.inflight += 1
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            PRESENCE.inflight -= 1
+
+
+app.add_middleware(_InflightCounter)
 
 
 def store() -> Store:

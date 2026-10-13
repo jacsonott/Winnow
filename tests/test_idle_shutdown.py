@@ -212,3 +212,47 @@ def test_goodbye_needs_the_csrf_header():
     from fastapi.testclient import TestClient
     bare = TestClient(srv.app)
     assert bare.post("/api/goodbye").status_code == 403
+
+
+def test_a_streaming_download_counts_as_in_flight_until_its_body_ends(client, ingested):
+    """The in-flight hold is what keeps auto-exit from killing a CSV export
+    that outlives its tab. It was counted in a BaseHTTPMiddleware, whose
+    call_next returns when the HEADERS exist — so the count dropped back
+    the moment the download started and every body chunk went out with the
+    hold already released.
+
+    Driven as raw ASGI so each body chunk can be looked at as it is sent:
+    TestClient collects the whole response before handing it over, which
+    would hide exactly the window this is about."""
+    import asyncio
+
+    store, sid = ingested
+    vid = client.post("/api/view", json={"source_id": sid}).json()["view_id"]
+
+    async def run():
+        chunks: list[int] = []
+        request = [{"type": "http.request", "body": b"", "more_body": False}]
+
+        async def receive():
+            if request:
+                return request.pop()
+            await asyncio.sleep(3600)   # the client never goes away mid-test
+
+        async def send(message):
+            if message["type"] == "http.response.body":
+                chunks.append(srv.PRESENCE.inflight)
+
+        scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+                 "method": "GET", "scheme": "http", "path": "/api/export",
+                 "raw_path": b"/api/export", "root_path": "",
+                 "query_string": f"view_id={vid}".encode(),
+                 "headers": [(b"host", b"127.0.0.1")],
+                 "client": ("127.0.0.1", 50000), "server": ("127.0.0.1", 8000)}
+        before = srv.PRESENCE.inflight
+        await srv.app(scope, receive, send)
+        return before, chunks, srv.PRESENCE.inflight
+
+    before, chunks, after = asyncio.run(run())
+    assert len(chunks) >= 2, "expected the export to stream in more than one chunk"
+    assert all(n == before + 1 for n in chunks), (before, chunks)
+    assert after == before
