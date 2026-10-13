@@ -2170,6 +2170,15 @@ class Store:
         self._op_lock = threading.Lock()
         self._op_conns: dict[str, sqlite3.Connection] = {}
         self._op_cancelled: set[str] = set()
+        # The SQL pane's connections while each runs a query, and whether
+        # this Store has stopped taking them (see _pane_query). Same lock:
+        # stop_pane_queries interrupts under it, and a connection leaves
+        # the set and closes under it, so an interrupt never lands on a
+        # connection that is already closed. _pane_gone is how close()
+        # waits for the interrupted ones to let go of the case file.
+        self._pane_conns: set[sqlite3.Connection] = set()
+        self._pane_stopped = False
+        self._pane_gone = threading.Condition(self._op_lock)
         # Preemption (see _yield_the_writer): which build currently holds
         # the writer lock, which tokens were interrupted to make way for
         # another table rather than cancelled outright, and how many times
@@ -2815,6 +2824,11 @@ class Store:
                 conn.close()
 
     def close(self) -> None:
+        # SQL pane queries first: one can run for ever, and it has no job
+        # record or thread of its own to stop cooperatively, so it is
+        # interrupted outright — now, so it unwinds while the waits below
+        # run. Waited for further down.
+        self.stop_pane_queries()
         # Stop any running ingest job, and any view-as-table copy, before
         # the connection goes away — a worker mid-batch would otherwise die
         # on a closed database, and a copy would strand a half-filled
@@ -2868,6 +2882,13 @@ class Store:
                 t.join(15)
         for c in copies:
             c["done"].wait(15)
+        # The pane queries interrupted at the top. Each holds the case file
+        # open on a connection of its own, which is the trap the drain below
+        # exists for: open at the writer's close, it stops the -wal being
+        # checkpointed, and save_as then deletes the -wal. An interrupt
+        # lands at the query's next VM step, so this is milliseconds.
+        with self._pane_gone:
+            self._pane_gone.wait_for(lambda: not self._pane_conns, timeout=15)
         # Immediately before the writer closes, and not before the cleanup
         # above: an idle reader still holding the case file open at that
         # moment stops SQLite checkpointing the -wal on the writer's close,
@@ -12192,13 +12213,26 @@ class Store:
 
     # ------------------------------------------------- sessions in the case
 
+    @staticmethod
+    def _session_name(name: str | None) -> str:
+        """The name a session is stored under, or ValueError saying why it
+        can't be. Any text goes — the routes carry it as {name:path}, so a
+        "/" (a date: "before 12/05") round-trips — except "." and "..",
+        which no URL path can carry however they are escaped: a browser
+        resolves them, %2E spellings included, before the request leaves,
+        so a session saved under one could never be reached again."""
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("A session needs a name")
+        if name in (".", ".."):
+            raise ValueError(f"A session can't be called {name!r} — pick a name with a letter in it")
+        return name
+
     def save_session(self, name: str) -> dict:
         """Snapshot the current analysis layer under `name`, in the case
         file. Saving over an existing name replaces it — the alternative is
         a pile of "triage-2-final-v3" and no way to tell them apart."""
-        name = (name or "").strip()
-        if not name:
-            raise ValueError("A session needs a name")
+        name = self._session_name(name)
         data = self.export_case_session()
         return self._write_session(name, data, origin="saved")
 
@@ -12254,9 +12288,7 @@ class Store:
             self.db.execute("DELETE FROM sessions WHERE name=?", (name,))
 
     def rename_session(self, name: str, new_name: str) -> dict:
-        new_name = (new_name or "").strip()
-        if not new_name:
-            raise ValueError("A session needs a name")
+        new_name = self._session_name(new_name)
         with self.lock, self.db:
             if self.db.execute("SELECT 1 FROM sessions WHERE name=?", (new_name,)).fetchone():
                 raise ValueError(f"A session named {new_name!r} already exists")
@@ -12272,7 +12304,7 @@ class Store:
         different decisions."""
         if data.get("format") != "winnow-case-session/1":
             raise ValueError("That file isn't a Winnow case session")
-        return self._write_session(name, data, origin="imported")
+        return self._write_session(self._session_name(name), data, origin="imported")
 
     LIVE_SESSION = "__live__"
 
@@ -13767,9 +13799,67 @@ class Store:
         ro.set_authorizer(read_only_authorizer)
         return ro
 
+    @contextlib.contextmanager
+    def _pane_query(self, op_token: str | None = None):
+        """A _pane_connection to run one of the analyst's queries on, that
+        something can STOP: cancel_op(op_token) — the busy chip's Cancel,
+        or server.py noticing the request's client has gone — and
+        stop_pane_queries(), which close() and the server's shutdown call.
+
+        The pane runs whatever was typed, and some of it never ends: a
+        recursive CTE with no stop condition, a cross join of two 2M-row
+        tables. Nothing could stop one. It ran at 100% CPU through a closed
+        window, a case switch, Shut down and SIGTERM — the process cannot
+        exit while a worker thread is inside sqlite3_step — holding the
+        case lock until someone found the process and killed it.
+
+        No deadline (a progress handler could impose one): a GROUP BY over
+        a few million rows legitimately takes minutes, and the analyst is
+        better placed than a timer to say which query is runaway. Every way
+        they can say so is covered above.
+
+        An interrupt from stop_pane_queries surfaces as OpCancelled, as a
+        cancel does — a 499 nobody reads, since the case is going away."""
+        if self._pane_stopped:   # don't even open the file; re-checked below
+            raise OpCancelled("The case is closing")
+        ro = self._pane_connection()
+        with self._op_lock:
+            stopped = self._pane_stopped
+            if not stopped:
+                self._pane_conns.add(ro)
+        if stopped:
+            ro.close()
+            raise OpCancelled("The case is closing")
+        try:
+            with self._interruptible(op_token, ro):
+                yield ro
+        except sqlite3.OperationalError as e:
+            # _interruptible has already turned a cancel into OpCancelled;
+            # an interrupt it did not ask for came from stop_pane_queries.
+            if "interrupt" in str(e).lower() and self._pane_stopped:
+                raise OpCancelled("The case is closing") from e
+            raise
+        finally:
+            with self._pane_gone:
+                self._pane_conns.discard(ro)
+                ro.close()
+                self._pane_gone.notify_all()
+
+    def stop_pane_queries(self) -> int:
+        """Interrupt every running SQL pane query (_pane_query) and refuse
+        new ones from here on: close() and the server's shutdown both mean
+        this Store is finished. Returns how many were running. Safe from
+        any thread, never waits on a query."""
+        with self._op_lock:
+            self._pane_stopped = True
+            for conn in self._pane_conns:
+                conn.interrupt()
+            return len(self._pane_conns)
+
     SQL_TO_TABLE_SOFT_CAP = 500_000
 
-    def sql_to_table(self, sql: str, name: str, force: bool = False) -> dict:
+    def sql_to_table(self, sql: str, name: str, force: bool = False, *,
+                     op_token: str | None = None) -> dict:
         """Land a pane query's FULL result as a new source — an ordinary
         table (taggable, timeline-able, exportable), via the same ingest
         conventions everything else uses. Past SQL_TO_TABLE_SOFT_CAP rows
@@ -13781,8 +13871,7 @@ class Store:
         structural = _blank_string_literals(_strip_sql_comments(sql))
         if self.SQL_PANE_FORBIDDEN_RE.search(structural):
             raise ValueError("ATTACH, DETACH, PRAGMA and VACUUM aren't allowed in the SQL pane")
-        ro = self._pane_connection()
-        try:
+        with self._pane_query(op_token) as ro:
             if not force:
                 # Exact count when the query wraps cleanly; a query that
                 # defeats the wrap falls back to stream-and-stop below.
@@ -13791,8 +13880,11 @@ class Store:
                         f"SELECT COUNT(*) FROM ({sql.rstrip().rstrip(';')})").fetchone()[0]
                     if n > self.SQL_TO_TABLE_SOFT_CAP:
                         return {"needs_confirm": True, "rows": n}
-                except sqlite3.Error:
-                    pass
+                except sqlite3.Error as e:
+                    # Stopped, not a query that defeats the wrap: falling
+                    # through would start the same runaway again.
+                    if "interrupt" in str(e).lower():
+                        raise
             cur = ro.execute(sql)
             cols = [d[0] for d in cur.description] if cur.description else []
             if not cols:
@@ -13805,8 +13897,6 @@ class Store:
                 rows.extend([["" if v is None else str(v) for v in r] for r in chunk])
                 if not force and len(rows) > self.SQL_TO_TABLE_SOFT_CAP:
                     return {"needs_confirm": True, "rows": None}  # count unknowable cheaply
-        finally:
-            ro.close()
         # Provenance: the query that produced it, so the table reads as
         # derived (the SQL pane's own "Saved from…" badge) rather than as a
         # file nobody can find on disk.
@@ -14176,7 +14266,7 @@ class Store:
                                                for v in t[1:])
         return out
 
-    def run_sql(self, sql: str, limit: int = 5000) -> dict:
+    def run_sql(self, sql: str, limit: int = 5000, *, op_token: str | None = None) -> dict:
         """Read-only ad-hoc query against the case file.
 
         This intentionally allows arbitrary SELECT/EXPLAIN — that's the
@@ -14190,12 +14280,15 @@ class Store:
         SQLite-version-dependent guarantee this code shouldn't have to lean
         on). Stacked statements aren't a separate concern here: Python's
         sqlite3 already refuses to execute more than one statement per call.
+
+        Runs on a _pane_query connection, so a query that never ends can
+        still be stopped — `op_token` is the pane's own run, for the busy
+        chip's Cancel.
         """
         structural = _blank_string_literals(_strip_sql_comments(sql))
         if self.SQL_PANE_FORBIDDEN_RE.search(structural):
             raise ValueError("ATTACH, DETACH, PRAGMA and VACUUM aren't allowed in the SQL pane")
-        ro = self._pane_connection()
-        try:
+        with self._pane_query(op_token) as ro:
             t0 = time.time()
             cur = ro.execute(sql)
             rows = cur.fetchmany(limit)
@@ -14206,8 +14299,6 @@ class Store:
                 "truncated": len(rows) == limit,
                 "elapsed_ms": int((time.time() - t0) * 1000),
             }
-        finally:
-            ro.close()
 
 
 _CSV_FORMULA_LEAD = ("=", "+", "-", "@", "\t", "\r")

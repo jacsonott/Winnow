@@ -4,7 +4,7 @@
 import { recordTabVisit } from './tabhistory.js';
 import { $, MOD_ENTER, api, el, post, setBusy, toast } from './core.js';
 import { clearAllFilters, loadSources, openSource, pageTabs, renderPageTabs, renderSidebar, reopenPageTab, syncTabSelection } from './sources.js';
-import { closeNoticesOwnedBy, createNotice } from './jobs.js';
+import { armOpCancel, closeNoticesOwnedBy, createNotice, opToken } from './jobs.js';
 import { ensureNotesLoaded, insertAtCursor, showNotesTab } from './notes.js';
 import { showWatchlistTab } from './watchlist.js';
 import { setColumnFilter, valueFilterText } from './filters.js';
@@ -1040,9 +1040,15 @@ export async function runSql() {
   const superseded = { error: 'Superseded — the query was run again, its tab closed, or another case opened' };
   out.replaceChildren(el('div', null, 'Running…'));
   setBusy(true);
+  // The busy chip is this run's Stop button. The SQL is whatever was
+  // typed, and some of it never finishes — a recursive CTE with no stop
+  // condition is one typo away — so a run has to be stoppable, and what it
+  // stops is the query on the server, not just this wait.
+  const token = opToken();
+  const disarmCancel = armOpCancel(token);
   try {
     const sql = $('sqlText').value;
-    const r = await post('/api/sql', { sql }, { signal: run.controller.signal });
+    const r = await post('/api/sql', { sql, op_token: token }, { signal: run.controller.signal });
     if (!current()) return superseded;
     // Decorate with a Tags column when the result can carry one (single
     // src_N + a rid column) — cached WITH the result so tab switches
@@ -1058,12 +1064,13 @@ export async function runSql() {
     return r;
   } catch (e) {
     if (!current()) return superseded;
-    const r = { error: e.message };
+    const r = { error: e.status === 499 ? 'Query cancelled' : e.message };
     S.sqlResults.set(tabId, r);
-    if (S.sqlTabId === tabId) out.replaceChildren(el('div', 'sql-error', e.message));
+    if (S.sqlTabId === tabId) out.replaceChildren(el('div', 'sql-error', r.error));
     announceSqlRun(tabId, $('sqlText').value, r);
     return r;
   } finally {
+    disarmCancel();
     if (current()) sqlRuns.delete(tabId);
     setBusy(false);
   }

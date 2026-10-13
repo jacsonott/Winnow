@@ -99,11 +99,19 @@ class _Presence:
         self.streams = 0            # open /api/presence connections
         self.inflight = 0           # other HTTP requests mid-flight
         self.ever_connected = False
-        self.said_goodbye = False   # a page reported itself closing, so the
-                                    # stream ending means gone, not asleep
+        self.said_goodbye = False   # the LAST window reported itself closing,
+                                    # so its stream ending means gone, not asleep
         self.started = time.monotonic()
         self.last_zero = time.monotonic()
         self.enabled = True         # main() clears this for --no-idle-shutdown
+        # Per page (connection.js names each page load): open streams, the
+        # pages that said goodbye while their stream was still open, and
+        # the page whose stream took the count to zero. Only open pages are
+        # kept, so these are bounded by the windows actually there. See
+        # _presence_close for why a goodbye has to be matched to its page.
+        self.pages: dict[str, int] = {}
+        self.farewells: set[str] = set()
+        self.last_gone: str | None = None
 
 
 PRESENCE = _Presence()
@@ -240,6 +248,21 @@ async def _lifespan(_app: FastAPI):
 
 app = FastAPI(title="Winnow", lifespan=_lifespan)
 STORE: Store | None = None
+
+# Held by every route that replaces STORE (case open, the quick-look
+# save-as and discard, the association open) for the whole of the swap —
+# the routes are thin wrappers that take it around the real work. Each swap
+# is a read of STORE, a Store opened or closed, and a write of STORE, and
+# two of them interleaving is ordinary: a double-click on a case card is two
+# POSTs to /api/case/open, and sync routes run on parallel worker threads.
+# Unserialised, both read the same `old` and both open; the Store whose
+# assignment lost was never closed, its flock and heartbeat held for the
+# life of the process, so that case then read as "open in another Winnow" —
+# naming this one. On one path it was worse: both requests passed the
+# already-open check, and the case got two writer Stores. Serialised, the
+# second request sees what the first left, which for the same path is the
+# already-open no-op.
+_CASE_SWITCH = threading.Lock()
 
 # ---------------------------------------------------------------- plugins
 
@@ -663,6 +686,10 @@ class SavedViewWrite(BaseModel):
 class SqlQuery(BaseModel):
     sql: str
     limit: int = 5000
+    # The run's one-shot id (jobs.js opToken), so the busy chip's Cancel
+    # reaches it through /api/cancel_op. Optional: a run without one is
+    # still stopped by its client leaving, or by shutdown.
+    op_token: str | None = None
 
 
 class IngestPath(BaseModel):
@@ -877,45 +904,99 @@ class UpdateApply(BaseModel):
     confirm: bool = False
 
 
-def _presence_open() -> None:
+def _presence_open(page: str = "") -> None:
     """A window is here. Clearing said_goodbye matters when several are
     open: one closing must not put the survivors on the closed-window
     fuse."""
     PRESENCE.streams += 1
     PRESENCE.ever_connected = True
     PRESENCE.said_goodbye = False
+    if page:
+        PRESENCE.pages[page] = PRESENCE.pages.get(page, 0) + 1
 
 
-def _presence_close() -> None:
+def _presence_close(page: str = "") -> None:
+    """A stream ended. Whether that reads as a closed window (the short
+    fuse) or a suspended one (the long one) is decided HERE, at the moment
+    the count reaches zero, by whether the page that just went is one that
+    said goodbye.
+
+    It used to be one flag that only a NEW stream cleared, so with two
+    windows open, closing one left its goodbye standing; when the survivor
+    later went quiet — a suspended tab, a sleeping laptop — the server took
+    the two-minute fuse and exited under a window that was still there.
+    Clearing the flag whenever a stream ends with others still open fixes
+    the order in which the goodbye arrives first, but not the other one,
+    and the other one is likelier: this close runs on the event loop the
+    moment the socket drops, while the goodbye is a separate request. A
+    goodbye landing after its own stream has gone looks exactly like one
+    from the survivor — unless both name their page, which is what the
+    page id connection.js sends on each is for."""
     PRESENCE.streams -= 1
+    if page:
+        left = PRESENCE.pages.get(page, 0) - 1
+        if left > 0:
+            PRESENCE.pages[page] = left
+        else:
+            PRESENCE.pages.pop(page, None)
     if PRESENCE.streams == 0:
         PRESENCE.last_zero = time.monotonic()
+        if page:
+            PRESENCE.said_goodbye = page in PRESENCE.farewells
+            PRESENCE.last_gone = page
+    else:
+        # A window remains, so no goodbye heard so far was the last one's.
+        PRESENCE.said_goodbye = False
+    if page and page not in PRESENCE.pages:
+        PRESENCE.farewells.discard(page)
+
+
+def _presence_page(page: str) -> str:
+    # A label the client makes up per page load; only ever compared, so a
+    # long one is cut rather than refused.
+    return (page or "")[:64]
 
 
 @app.get("/api/presence")
-async def api_presence():
+async def api_presence(page: str = ""):
     """The connection every page holds open so the server knows a browser
     is attached. EventSource on the client, a comment-ping stream here —
     no data ever flows, the CONNECTION is the message. Disconnect is
-    noticed at the next ping (≤15s), which is well inside the idle grace."""
+    noticed at the next ping (≤15s), which is well inside the idle grace.
+    `page` names the page load, so its goodbye can be matched to it."""
+    page = _presence_page(page)
+
     async def stream():
-        _presence_open()
+        _presence_open(page)
         try:
             while True:
                 yield ": ping\n\n"
                 await asyncio.sleep(15)
         finally:
-            _presence_close()
+            _presence_close(page)
     return StreamingResponse(stream(), media_type="text/event-stream")
 
 
 @app.post("/api/goodbye")
-def api_goodbye():
+async def api_goodbye(page: str = ""):
     """A page reporting that it is closing (connection.js sends this on
     pagehide with keepalive, so it survives the unload). Without it the
     server cannot tell a closed window from a suspended one and has to
-    assume the analyst may come back — see SUSPENDED_EXIT_S."""
-    PRESENCE.said_goodbye = True
+    assume the analyst may come back — see SUSPENDED_EXIT_S.
+
+    `async` so it runs on the event loop with the stream hooks above: the
+    presence record is only ever touched from one thread. A goodbye whose
+    page is still streaming is remembered until that stream closes (which
+    decides); one whose page already went counts only if that page was the
+    last to go. One naming no page — a client that predates the page id —
+    is taken as the last window's, which is what this always assumed."""
+    page = _presence_page(page)
+    if not page:
+        PRESENCE.said_goodbye = True
+    elif page in PRESENCE.pages:
+        PRESENCE.farewells.add(page)
+    elif PRESENCE.streams == 0 and PRESENCE.last_gone == page:
+        PRESENCE.said_goodbye = True
     return {"ok": True}
 
 
@@ -1090,6 +1171,11 @@ def api_shutdown():
 
 @app.post("/api/case/open")
 def api_case_open(body: CaseOpen):
+    with _CASE_SWITCH:
+        return _case_open(body)
+
+
+def _case_open(body: CaseOpen):
     global STORE
     if not os.path.isfile(body.path):
         raise HTTPException(400, f"No case file at {body.path}")
@@ -1222,6 +1308,11 @@ class AssocOpenBody(BaseModel):
 
 @app.post("/api/assoc/open")
 def api_assoc_open(request: Request, body: AssocOpenBody):
+    with _CASE_SWITCH:
+        return _assoc_open(request, body)
+
+
+def _assoc_open(request: Request, body: AssocOpenBody):
     """A file-association launch landing on an already-running server.
 
     Loopback-only: it creates cases and ingests files by path, both
@@ -1491,6 +1582,11 @@ class CaseSaveAsBody(BaseModel):
 
 @app.post("/api/case/save_as")
 def api_case_save_as(body: CaseSaveAsBody):
+    with _CASE_SWITCH:
+        return _case_save_as(body)
+
+
+def _case_save_as(body: CaseSaveAsBody):
     """Promote the open quick-look case to a real one: move the file out of
     quicklook/, register it on the home screen under the given name.
 
@@ -1542,6 +1638,11 @@ def api_case_save_as(body: CaseSaveAsBody):
 
 @app.post("/api/case/discard")
 def api_case_discard():
+    with _CASE_SWITCH:
+        return _case_discard()
+
+
+def _case_discard():
     """Throw a quick-look case away. Refused for real cases — deleting
     those goes through the home screen, where it says what it is doing."""
     global STORE
@@ -3438,9 +3539,9 @@ class CancelOp(BaseModel):
 @app.post("/api/cancel_op")
 def api_cancel_op(body: CancelOp):
     """Interrupts the in-flight cancellable operation (view/timeline build,
-    group summary) started with this client-generated token. A miss — the
-    operation already finished, or never started — is a no-op, reported as
-    cancelled: false."""
+    group summary, SQL pane query) started with this client-generated
+    token. A miss — the operation already finished, or never started — is
+    a no-op, reported as cancelled: false."""
     return {"cancelled": store().cancel_op(body.token)}
 
 
@@ -4785,7 +4886,13 @@ def api_case_sessions_save(body: CaseSessionSave):
         raise HTTPException(400, str(e))
 
 
-@app.post("/api/case_sessions/{name}/load")
+# {name:path} on every route that names a session in the URL: the client
+# sends encodeURIComponent(name), but the path is percent-DECODED before
+# routing, so a "/" in the name ("before 12/05", "host1/day2") arrives as
+# two segments and a plain {name} never matched — the session saved and
+# then could not be loaded, renamed, downloaded or deleted. The converter
+# is greedy, so a name that itself ends in "/load" still resolves.
+@app.post("/api/case_sessions/{name:path}/load")
 def api_case_sessions_load(name: str, merge: bool = True):
     try:
         return store().load_session(name, merge=merge)
@@ -4801,7 +4908,7 @@ def api_case_sessions_adopt(body: CaseSessionAdopt):
         raise HTTPException(400, str(e))
 
 
-@app.post("/api/case_sessions/{name}/rename")
+@app.post("/api/case_sessions/{name:path}/rename")
 def api_case_sessions_rename(name: str, body: CaseSessionRename):
     try:
         return store().rename_session(name, body.name)
@@ -4811,13 +4918,13 @@ def api_case_sessions_rename(name: str, body: CaseSessionRename):
         raise HTTPException(400, str(e))
 
 
-@app.delete("/api/case_sessions/{name}")
+@app.delete("/api/case_sessions/{name:path}")
 def api_case_sessions_delete(name: str):
     store().delete_session(name)
     return {"ok": True}
 
 
-@app.get("/api/case_sessions/{name}/download")
+@app.get("/api/case_sessions/{name:path}/download")
 def api_case_sessions_download(name: str):
     """The hand-off: a stored session as a file, for sending to another
     analyst. The only reason a session file exists now."""
@@ -4886,13 +4993,50 @@ class SqlToTable(BaseModel):
     force: bool = False
 
 
+async def _client_gone(request: Request) -> None:
+    """Returns once the request's client has hung up. Only for a route that
+    has read its whole body (any route with a pydantic body has): from
+    then on the one message the ASGI receive channel can deliver is
+    http.disconnect — or, once the response is out, the same message."""
+    while (await request.receive())["type"] != "http.disconnect":
+        await asyncio.sleep(0.25)   # a server that says something else: don't spin
+
+
+async def _run_pane_query(request: Request, op_token: str | None, run, *args, **kwargs):
+    """Run a SQL pane query — `run` is a bound Store.run_sql/sql_to_table —
+    on a worker thread, and interrupt it if the client hangs up first.
+
+    The pane runs whatever the analyst typed, and some of it never ends. A
+    closed window, a reload or a curl --max-time left the query spinning
+    at 100% CPU for the life of the process — and, being an in-flight
+    request, holding the idle shutdown off too. A sync route never notices
+    its client leave (nothing it does reads the socket), so these routes
+    are async: they wait on the work and on the receive channel together,
+    and a hang-up becomes cancel_op on the run's token. A token is made up
+    when the client sent none, so a run nobody can cancel by hand can still
+    be stopped by its client going."""
+    token = op_token or f"pane-{os.urandom(8).hex()}"
+    work = asyncio.ensure_future(run_in_threadpool(run, *args, op_token=token, **kwargs))
+    gone = asyncio.ensure_future(_client_gone(request))
+    try:
+        await asyncio.wait({work, gone}, return_when=asyncio.FIRST_COMPLETED)
+        if not work.done():
+            # On the Store that is running it, not whatever store() is by now.
+            await run_in_threadpool(run.__self__.cancel_op, token)
+        return await work
+    finally:
+        gone.cancel()
+
+
 @app.post("/api/sql/to_table")
-def api_sql_to_table(body: SqlToTable):
+async def api_sql_to_table(body: SqlToTable, request: Request):
     """Land a pane query's result as a new source. Soft 500k cap: over it
     the response asks for confirmation ({needs_confirm, rows}); resend
-    with force=true to proceed."""
+    with force=true to proceed. Stopped if the client hangs up (see
+    _run_pane_query) — 499 rather than 400 when it is."""
     try:
-        res = store().sql_to_table(body.sql, body.name, force=body.force)
+        res = await _run_pane_query(request, None, store().sql_to_table,
+                                    body.sql, body.name, force=body.force)
     except ValueError as e:
         raise HTTPException(400, str(e))
     except sqlite3.Error as e:
@@ -5118,9 +5262,14 @@ def api_search_all_cancel(job_id: int | None = None):
 
 
 @app.post("/api/sql")
-def api_sql(body: SqlQuery):
+async def api_sql(body: SqlQuery, request: Request):
+    """The SQL pane's Run. Stoppable three ways, because the SQL is whatever
+    was typed: the busy chip's Cancel (op_token → 499), the client hanging
+    up (_run_pane_query), and shutdown (Store.stop_pane_queries)."""
     try:
-        return store().run_sql(body.sql, body.limit)
+        return await _run_pane_query(request, body.op_token, store().run_sql, body.sql, body.limit)
+    except OpCancelled:
+        raise
     except Exception as e:
         raise HTTPException(400, str(e))
 
@@ -5566,7 +5715,41 @@ def main() -> None:
         instances.register(args.port, case_path if case_path else None)
 
     import uvicorn
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+
+    class _Server(uvicorn.Server):
+        def handle_exit(self, sig, frame):
+            _stop_pane_queries()
+            super().handle_exit(sig, frame)
+
+    # uvicorn.run, less the reload/workers branches Winnow never takes, so
+    # that the signal handler above can be the one uvicorn installs.
+    server = _Server(uvicorn.Config(app, host=args.host, port=args.port, log_level="warning"))
+    with contextlib.suppress(KeyboardInterrupt):
+        server.run()
+    if not server.started:
+        sys.exit(3)   # uvicorn.run's STARTUP_FAILURE: the port was taken, or startup raised
+
+
+def _stop_pane_queries() -> None:
+    """Interrupt the open case's running SQL pane queries — from uvicorn's
+    signal handler, which is where Shut down (_trigger_shutdown), Ctrl+C and
+    SIGTERM all arrive.
+
+    Here rather than in the lifespan's Store.close(), which does the same
+    but never got the chance: uvicorn's graceful shutdown waits for every
+    in-flight request BEFORE it runs the lifespan's shutdown half, a pane
+    query that never ends is an in-flight request that never ends, and
+    the process cannot exit while a worker thread is inside sqlite3_step.
+    So Shut down answered {"ok": true} and the server ran on at 100% CPU,
+    case lock held, until someone killed it.
+
+    On a thread of its own: a signal handler runs on the main thread
+    between two bytecodes — possibly inside Store.close() (a second
+    Ctrl+C during shutdown) holding the lock stop_pane_queries takes."""
+    s = STORE
+    if s is not None:
+        threading.Thread(target=s.stop_pane_queries, name="winnow-stop-queries",
+                         daemon=True).start()
 
 
 if __name__ == "__main__":

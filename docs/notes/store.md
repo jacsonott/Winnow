@@ -750,6 +750,19 @@ see [docs/notes/README.md](README.md) for the whole set.
   server.py maps `OpCancelled` → HTTP 499 in one exception handler; the frontend
   arms a cancel chip (`armOpCancel`) only after ~1.2s in flight, so fast
   rebuilds never flash it.
+  **SQL pane queries register too, and are also stopped wholesale**
+  (`_pane_query`, used by `run_sql` and `sql_to_table` — so dashboards
+  and plugin reads through `run_sql` get it as well). The token half is
+  the usual `_interruptible`; the other half is a set of running pane
+  connections that `stop_pane_queries()` interrupts all at once and that
+  refuses new queries afterwards, for close() and shutdown (see
+  docs/notes/server.md for why shutdown cannot leave it to close()).
+  close() interrupts them first thing and then **waits for them to close
+  before the writer does** — a pane connection holds the case file open,
+  which is exactly the reader-at-writer-close trap `_drain_idle_readers`
+  exists for. `sql_to_table`'s exact-count wrap swallows `sqlite3.Error`
+  to fall back to streaming; it must re-raise an interrupt, or a stopped
+  count falls through and starts the same runaway again uninterrupted.
   **The frontend also cancels on supersede** (view.js `rebuildView`,
   module-level `inflight`): a rebuild that starts while another is in
   flight POSTs `cancel_op` for that one's token *and* aborts its fetch

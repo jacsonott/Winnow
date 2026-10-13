@@ -104,6 +104,18 @@ see [docs/notes/README.md](README.md) for the whole set.
   `Store.close()` on both the case-switch path and the legacy-preset
   migration, so "same path" alone is not "already open" and short-cutting
   there serves rows off a closed connection.
+- **Every route that replaces `STORE` holds `_CASE_SWITCH` for the whole
+  swap** — case open, the quick-look save-as and discard, the association
+  open (each is a thin wrapper around a private `_case_open` & co.). A
+  double-click on a case card is two `/api/case/open` POSTs on two worker
+  threads; unserialised, both read the same `old` and both opened, and the
+  Store whose assignment lost was never closed — its lock held for the
+  life of the process, so the case read as "open in another Winnow"
+  naming this one — and on one path both passed the already-open check
+  and the case got two writer Stores. A new route that swaps `STORE` takes
+  the lock too. The client has its own guard (`openCase` hands a second
+  call the in-flight one's promise), but the server cannot rely on it: two
+  windows, or a script, race just the same. `tests/test_case_lock.py`.
 - Static assets (`/`, `/static/*`) get an explicit `Cache-Control: no-cache`
   from a middleware in server.py — FastAPI's `StaticFiles` only sends
   `ETag`/`Last-Modified`, and without an explicit `Cache-Control` the
@@ -126,6 +138,17 @@ see [docs/notes/README.md](README.md) for the whole set.
   `post()` won't have it and will get 403'd. GET stays exempt on purpose (the
   Export/session/filters download links are plain navigations, which can't set
   custom headers at all).
+- **A name the analyst typed cannot be a plain `{name}` path segment.** The
+  ASGI path is percent-decoded before routing, so `encodeURIComponent`'s
+  `%2F` arrives as a real `/` and a one-segment parameter never matches:
+  a case session saved as "before 12/05" could never be loaded, renamed,
+  downloaded or deleted. The case-session routes take `{name:path}`
+  (greedy, so a name ending in "/load" still resolves); the plugin-state
+  key went the other way and travels as a parameter. Either works — what
+  does not is a segment. The one residue is "." and "..": a browser
+  resolves those (and their `%2E` spellings) out of the URL before it is
+  sent, so `Store._session_name` refuses them at save, rename and adopt
+  rather than storing a session nothing can reach.
 - `api_view` maps only `ValueError`/`KeyError` to 400; everything else is a
   500. It used to catch bare `Exception`, so an internal defect surfaced as
   "Filter error: …" — blaming the analyst's filter for something they can't
@@ -202,6 +225,43 @@ see [docs/notes/README.md](README.md) for the whole set.
   to take down the entire tagged export. They are escaped to `\x07` rather
   than dropped, because a silently shortened string in a hand-over artifact
   is worse than a visible escape.
+- **A pane query has to be stoppable, because some of what gets typed
+  never ends** — a recursive CTE with no stop condition, a cross join of
+  two 2M-row tables. One used to run at 100% CPU through everything: the
+  analyst had no Stop, a closed window or reload left it running, a case
+  switch left it running, and **Shut down, Ctrl+C and SIGTERM left the
+  process running** with the case lock held. That last is a uvicorn trap
+  worth knowing for anything else that can run unbounded: graceful
+  shutdown waits for every in-flight request *before* it runs the
+  lifespan's shutdown half, so `_lifespan`'s `Store.close()` never got
+  the chance, and the process cannot exit while a worker thread is inside
+  `sqlite3_step` anyway. Three ways in now, all ending in
+  `Connection.interrupt()` on the pane's own connection
+  (`Store._pane_query`):
+  - **the busy chip.** `runSql` arms `armOpCancel` with an `op_token` on
+    `/api/sql`, like a view build; the 499 paints as "Query cancelled".
+  - **the client hanging up.** `/api/sql` and `/api/sql/to_table` are
+    `async` for this alone (`_run_pane_query`): a sync route never reads
+    its socket again, so it cannot notice. They wait on the worker thread
+    and on the ASGI receive channel together — after the body, the only
+    message left is `http.disconnect` — and turn a hang-up into
+    `cancel_op`, with a made-up token when the client sent none. That
+    also keeps a closed window's query from holding the idle shutdown off
+    (it is an in-flight request).
+  - **shutdown.** `main()` runs a `uvicorn.Server` subclass whose
+    `handle_exit` — the signal handler, which is where Shut down's
+    SIGINT, Ctrl+C and SIGTERM all land — calls `stop_pane_queries()`
+    first, on a thread of its own (a handler can run inside
+    `Store.close()` holding the lock that takes). That is why `main()`
+    builds the server itself instead of calling `uvicorn.run`; it keeps
+    `run`'s KeyboardInterrupt suppression and its exit code 3 when the
+    server never started. **A test that drives `main()` up to the bind
+    stands in for `uvicorn.Server.run`, not `uvicorn.run`** — patching
+    the latter no longer stops anything, so the test starts a real server
+    and hangs (tests/test_no_console_launch.py, test_not_a_case_file.py).
+  No deadline: a GROUP BY over a few million rows legitimately takes
+  minutes, and the analyst is better placed than a timer to say which
+  query is runaway. `tests/test_sql_runaway.py` covers each way in.
 - **`POST /api/sql/export_xlsx`** takes the result the pane is SHOWING
   (columns + rows, up from the client) rather than the query, so the
   workbook matches the screen including a click-sort — which lives only in
@@ -278,8 +338,22 @@ see [docs/notes/README.md](README.md) for the whole set.
   outlives the unload; skipped when `persisted` says the page is only
   going into the bfcache), and the short fuse applies only when that
   arrived. A stream that merely stopped gets `SUSPENDED_EXIT_S` instead.
-  `_presence_open()` clears the flag, so closing one of two windows
-  cannot put the survivor on the short fuse.
+  **The goodbye has to be the LAST window's.** This note used to say a new
+  stream clearing the flag was enough to keep closing one of two windows
+  from putting the survivor on the short fuse; it was not — nothing new
+  connects, the closed window's goodbye stood, and when the survivor later
+  went quiet the server exited two minutes on. Clearing the flag whenever
+  a stream ends with others still open covers a goodbye that arrives
+  before its stream's end, but the two arrive in either order (the close
+  is noticed on the loop the moment the socket drops; the goodbye is a
+  separate request), and a goodbye landing after its own stream has gone
+  looks just like the survivor's. So both carry a per-page-load id
+  (`?page=` from `connection.js`), and `_presence_close` decides at the
+  moment the count reaches zero, by whether the page that just went said
+  goodbye; `api_goodbye` is `async` so the presence record is only touched
+  from the event loop. A goodbye with no page id (an older client, the
+  integration tests' raw requests) keeps the old meaning.
+  `tests/test_idle_shutdown.py`.
 
 - **Tests that spawn a real `server.py` must isolate it by env, not
   fixture.** The autouse `isolate_workspace` monkeypatch can't reach a
