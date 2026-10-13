@@ -30,6 +30,19 @@ def test_unix_epoch_auto_ranges_by_plausible_year():
     assert parse("unix_epoch", "1700000000000000000") == "2023-11-14 22:13:20.000000"
 
 
+def test_integer_epochs_convert_exactly():
+    """A float carries ~16 significant digits; a nanosecond epoch has 19
+    and a WebKit value 17. Dividing as floats put the result up to a
+    microsecond off either way, and a nanosecond value at the very end of
+    the window rounded into 2101 and was refused outright."""
+    assert parse("unix_epoch", "1700000000123456789") == "2023-11-14 22:13:20.123456"
+    assert parse("unix_epoch", "1700000000123456999", {"unit": "ns"}) == "2023-11-14 22:13:20.123456"
+    assert parse("unix_epoch", "4133980799999999999") == "2100-12-31 23:59:59.999999"
+    assert parse("webkit_epoch", "13348668000123457") == "2024-01-02 11:20:00.123457"
+    assert parse("unix_epoch", "1700000000.5") == "2023-11-14 22:13:20.500000"   # a fraction stays float
+    assert parse("unix_epoch", "9" * 40) is None                                # and so does anything absurd
+
+
 def test_unix_epoch_rejects_out_of_window_and_garbage():
     assert parse("unix_epoch", "620000000") is None  # 1989 — below the 1990 floor
     assert parse("unix_epoch", "-1700000000") is None

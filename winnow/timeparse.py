@@ -65,6 +65,7 @@ _UTC = timezone.utc
 _FILETIME_EPOCH = datetime(1601, 1, 1)
 _DOTNET_EPOCH = datetime(1, 1, 1)
 _MAC_EPOCH = datetime(2001, 1, 1, tzinfo=_UTC)
+_UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=_UTC)
 # Lotus 1-2-3 convention (day 1 = 1900-01-01, with the phantom 1900-02-29
 # Excel inherited) — 1899-12-30 as day zero makes modern serials come out
 # right without special-casing the 1900 leap bug for dates that predate
@@ -343,9 +344,25 @@ def _finite(value: Any) -> float | None:
     return f if math.isfinite(f) else None
 
 
+# A whole number short enough for int() to take without tripping Python's
+# digit limit — far longer than any timestamp, far shorter than that limit.
+_WHOLE_RE = re.compile(r"^[+-]?\d{1,30}$")
+
+
+def _exact_int(s: str) -> int | None:
+    """`s` as an int when it is written as one, else None. The integer
+    encodings below are converted with integer arithmetic for these: a
+    float holds ~16 significant digits, a nanosecond epoch has 19 and a
+    WebKit value 17, so `v / scale` was off by up to a microsecond either
+    way, and a value at the very end of the window rounded into 2101 and
+    was refused."""
+    return int(s) if _WHOLE_RE.match(s) else None
+
+
 def _parse_unix(value: Any, params: dict, state: dict) -> str | None:
     s = str(value).strip()
-    v = _finite(s)
+    exact = _exact_int(s)
+    v = exact if exact is not None else _finite(s)
     if v is None or v <= 0:
         return None
     unit = params.get("unit", "auto")
@@ -353,7 +370,11 @@ def _parse_unix(value: Any, params: dict, state: dict) -> str | None:
         if unit != "auto" and unit != name:
             continue
         try:
-            dt = datetime.fromtimestamp(v / scale, tz=_UTC)
+            if exact is not None:
+                # Truncated to the microsecond, as FILETIME's ticks // 10 is.
+                dt = _UNIX_EPOCH + timedelta(microseconds=exact * 1_000_000 // scale)
+            else:
+                dt = datetime.fromtimestamp(v / scale, tz=_UTC)
         except (OverflowError, OSError, ValueError):
             continue
         if not _plausible(dt):
@@ -422,15 +443,18 @@ _WEBKIT_OFFSET_US = 11_644_473_600_000_000
 
 def _parse_webkit(value: Any, params: dict, state: dict) -> str | None:
     s = str(value).strip()
-    f = _finite(s)
-    if f is None:
-        return None
-    v = int(f)
+    v = _exact_int(s)
+    if v is None:
+        f = _finite(s)
+        if f is None:
+            return None
+        v = int(f)
     unix_us = v - _WEBKIT_OFFSET_US
     if unix_us <= 0:
         return None
     try:
-        dt = datetime.fromtimestamp(unix_us / 1_000_000, tz=_UTC)
+        # Integer microseconds end to end (see _exact_int).
+        dt = _UNIX_EPOCH + timedelta(microseconds=unix_us)
     except (OverflowError, OSError, ValueError):
         return None
     if not _plausible(dt):
