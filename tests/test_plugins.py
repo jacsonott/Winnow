@@ -1408,6 +1408,50 @@ def test_claude_refusal_is_a_400_with_category(claude_client, monkeypatch):
     assert r.status_code == 400 and "cyber" in r.json()["detail"]
 
 
+def _fake_anthropic_raising(exc: Exception, at: str) -> types.ModuleType:
+    """The fake SDK, refusing with `exc` either when the client is built or
+    when the request is made."""
+    mod = _fake_anthropic({}, _claude_msg())
+    real = mod.Anthropic
+
+    def refuse(*a, **kw):
+        raise exc
+
+    def client(*a, **kw):
+        if at == "construct":
+            refuse()
+        c = real(*a, **kw)
+        c.beta.messages.stream = refuse
+        return c
+
+    mod.Anthropic = client
+    return mod
+
+
+@pytest.mark.parametrize("at", ["construct", "request"])
+def test_claude_with_no_credentials_at_all_says_where_to_put_a_key(claude_client, monkeypatch, at):
+    """No key anywhere is not a 401: the SDK refuses before sending, with a
+    TypeError from its header validation. That fell past the handler's
+    AuthenticationError mapping and reached the analyst as a 500 — the one
+    setup mistake the friendly message was written for."""
+    refusal = TypeError('"Could not resolve authentication method. Expected either api_key '
+                        'or auth_token to be set. Or for one of the `X-Api-Key` or '
+                        '`Authorization` headers to be explicitly omitted"')
+    monkeypatch.setitem(sys.modules, "anthropic", _fake_anthropic_raising(refusal, at))
+    monkeypatch.delenv("WINNOW_ANTHROPIC_API_KEY", raising=False)
+    r = claude_client.post("/api/plugin/claude_assistant/ask", json={"question": "q"})
+    assert r.status_code == 400 and "WINNOW_ANTHROPIC_API_KEY" in r.json()["detail"]
+
+
+def test_claude_an_unrelated_type_error_is_not_called_missing_credentials(claude_client, monkeypatch):
+    """The mapping above is keyed on what the SDK says, not on TypeError —
+    a bug in the plugin must still surface as one."""
+    bug = TypeError("stream() got an unexpected keyword argument 'fallbacks'")
+    monkeypatch.setitem(sys.modules, "anthropic", _fake_anthropic_raising(bug, "request"))
+    with pytest.raises(TypeError, match="fallbacks"):
+        claude_client.post("/api/plugin/claude_assistant/ask", json={"question": "q"})
+
+
 def test_claude_missing_sdk_is_actionable(claude_client, monkeypatch):
     monkeypatch.setitem(sys.modules, "anthropic", None)  # import anthropic -> ImportError
     r = claude_client.post("/api/plugin/claude_assistant/ask", json={"question": "q"})
