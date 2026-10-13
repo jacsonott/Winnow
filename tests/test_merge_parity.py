@@ -118,6 +118,90 @@ def test_a_merge_saved_under_the_old_rule_is_refused_not_read_wrong(store, write
 
 
 
+def _case_split_merge(store, write_csv):
+    """Two members whose datetime column differs only in ASCII case — one
+    column to SQLite, and to create_merge."""
+    a = store.ingest_csv(write_csv([["Time", "Msg"], ["2024-01-01 00:00:00", "a1"],
+                                    ["2024-01-02 00:00:00", "a2"]], "a.csv"), build_fts=False)["id"]
+    b = store.ingest_csv(write_csv([["TIME", "Msg"], ["2024-06-01 00:00:00", "b1"],
+                                    ["2024-06-02 00:00:00", "b2"]], "b.csv"), build_fts=False)["id"]
+    return a, b, store.create_merge("m", [a, b])["id"]
+
+
+def test_jump_to_timestamp_reaches_a_member_spelling_the_column_differently(store, write_csv):
+    """find_nearest_timestamp matched member columns case-sensitively, so
+    the second member's "TIME" was skipped: jumping to June landed on a
+    January row of the first member."""
+    a, b, mid = _case_split_merge(store, write_csv)
+    for spec in ({"sort": [{"column": "Time", "dir": "asc"}]}, {"sort": []}):
+        vid = store.build_view(mid, {"source_id": mid, **spec})["view_id"]
+        for column in ("Time", None):
+            near = store.find_nearest_timestamp(vid, "2024-06-01 12:00:00", column)
+            assert (near["source_id"], near["ts"][:10]) in ((b, "2024-06-01"), (b, "2024-06-02")), near
+
+
+def test_tag_time_bounds_of_a_merge_reach_a_member_spelling_the_column_differently(store, write_csv):
+    """"Set the timeframe from my findings" on a merge skipped the member
+    spelling the column "TIME", and answered no range at all."""
+    a, b, mid = _case_split_merge(store, write_csv)
+    tid = store.list_tags()[0]["id"]
+    store.set_tags(b, [1, 2], tid, True)
+    bounds = store.tag_time_bounds(mid)
+    assert bounds["start"][:10] == "2024-06-01" and bounds["end"][:10] == "2024-06-02"
+
+
+def _join_index_builds(store):
+    with store._threads_lock:
+        threads = list(store._index_threads.values())
+    for t in threads:
+        t.join(30)
+
+
+def test_a_merges_auto_index_is_listed_and_dropped_on_every_member(store, write_csv):
+    """A filter on a merge builds an index on each member, named from the
+    column's spelling. It used the merge's spelling ("Host") on a member
+    whose column is "HOST", so the Tables modal — which looks indexes up by
+    the member's own names — never listed it and could not drop it."""
+    a = store.ingest_csv(write_csv([["Host"], ["h1"], ["h2"]], "a.csv"), build_fts=False)["id"]
+    b = store.ingest_csv(write_csv([["HOST"], ["h1"], ["h3"]], "b.csv"), build_fts=False)["id"]
+    mid = store.create_merge("m", [a, b])["id"]
+    store.build_view(mid, {"source_id": mid, "sort": [{"column": "Host", "dir": "asc"}],
+                           "filters": [{"column": "Host", "op": "equals", "value": "h1"}]})
+    _join_index_builds(store)
+    table = store.get_source(b)["table_name"]
+
+    def indexes():
+        return {r[0] for r in store.db.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name=?", (table,))}
+
+    assert indexes(), "the merge filter should have indexed the member"
+    assert [ix["column"] for ix in store.list_column_indexes(b)] == ["HOST"]
+    store.drop_column_index(b, "HOST")
+    assert indexes() == set()
+
+
+def test_a_merge_sorts_on_a_data_column_named_source_id(store, write_csv):
+    """The merge's UNION projects each row's member id as `source_id`, and
+    ORDER BY "source_id" resolved to that rather than to the file's own
+    column of the same name: the merge sorted by member."""
+    a = store.ingest_csv(write_csv([["source_id", "Msg"], ["zzz", "a1"], ["aaa", "a2"]], "a.csv"),
+                         build_fts=False)["id"]
+    b = store.ingest_csv(write_csv([["source_id", "Msg"], ["mmm", "b1"], ["bbb", "b2"]], "b.csv"),
+                         build_fts=False)["id"]
+    mid = store.create_merge("m", [a, b])["id"]
+    for direction, expect in (("asc", ["aaa", "bbb", "mmm", "zzz"]), ("desc", ["zzz", "mmm", "bbb", "aaa"])):
+        spec = {"source_id": mid, "sort": [{"column": "source_id", "dir": direction}]}
+        vid = store.build_view(mid, spec)["view_id"]
+        rows = store.fetch_rows(vid, 0, 10)["rows"]
+        assert [r["cells"][0] for r in rows] == expect
+        # Every row still pages from its own member.
+        assert {(r["source_id"], r["cells"][1][0]) for r in rows} == {(a, "a"), (b, "b")}
+        # "Open as SQL" orders the same way.
+        sql_rows = store.run_sql(store.spec_sql(mid, spec))
+        col = sql_rows["columns"].index("source_id")
+        assert [r[col] for r in sql_rows["rows"]] == expect
+
+
 # ------------------------------------------------------ batch derived add
 
 def test_batch_derived_add_fans_out_to_every_member(store, write_csv):

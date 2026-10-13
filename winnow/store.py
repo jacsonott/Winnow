@@ -2123,14 +2123,31 @@ class Store:
         colnames[col] != 'number' before calling this."""
         self._ensure_purpose_index_building(source_id, column, "sort", table_name)
 
+    def _table_spelling(self, table_name: str, column: str) -> str:
+        """`column` as `table_name` itself spells it. A merge reads every
+        member through its first member's names, which SQLite resolves
+        case-insensitively (A-Z), so a member's "HOST" is asked for as
+        "Host". Anything named after the column has to use the member's
+        own spelling — the index name hashes it, and list_column_indexes/
+        drop_column_index look indexes up by the member's names."""
+        folded = _ascii_fold(column)
+        with self._reader() as ro:
+            for (name,) in ro.execute("SELECT name FROM pragma_table_info(?)", (table_name,)):
+                if name == column:
+                    return name
+                if _ascii_fold(name) == folded:
+                    return name
+        return column
+
     def _ensure_purpose_index_building(self, source_id: int, column: str, purpose: str,
                                         table_name: str | None = None) -> None:
+        table_name = table_name or self._source_lite(source_id)["table_name"]
+        column = self._table_spelling(table_name, column)
         key = (source_id, column, purpose)
         with self._threads_lock:
             existing = self._index_threads.get(key)
             if existing and existing.is_alive():
                 return
-        table_name = table_name or self._source_lite(source_id)["table_name"]
         if self._column_index_exists(table_name, column, purpose):
             return
         with self._threads_lock:
@@ -2156,12 +2173,14 @@ class Store:
         """Blocks until a background index build for (source_id, column,
         purpose) finishes (or `timeout` elapses). Used by tests. Returns
         whether the index exists by the time it returns."""
+        src = self.get_source(source_id)
+        table = self._index_table_for(src, column)
+        column = self._table_spelling(table, column)
         with self._threads_lock:
             t = self._index_threads.get((source_id, column, purpose))
         if t:
             t.join(timeout)
-        src = self.get_source(source_id)
-        return self._column_index_exists(src["table_name"], column, purpose)
+        return self._column_index_exists(table, column, purpose)
 
     def list_column_indexes(self, source_id: int) -> list[dict]:
         """Which of this source's columns currently have one of the
@@ -6134,6 +6153,7 @@ class Store:
 
         if src.get("is_merge"):
             collist = ", ".join(q(c) for c in colnames)
+            sid_col = q(self._member_id_alias(colnames))
             branches = []
             params: list[Any] = []
             for m in self._resolve_members(source_id):
@@ -6144,7 +6164,7 @@ class Store:
                         m["source_id"], col,
                         self._index_table_for(src, col, msrc["table_name"], m["source_id"]))
                 branches.append(
-                    f"SELECT {int(m['source_id'])} AS source_id, rid, {collist} FROM {self._member_from(src, m)}"
+                    f"SELECT {int(m['source_id'])} AS {sid_col}, rid, {collist} FROM {self._member_from(src, m)}"
                     + (f" WHERE {where}" if where else "")
                 )
                 params.extend(p)
@@ -6152,7 +6172,7 @@ class Store:
             vid = self._next_view_id()
             sql = (
                 f"INSERT INTO v.{q(vid)}(source_id, rid) "
-                f"SELECT source_id, rid FROM ({union_sql}) {order}"
+                f"SELECT {sid_col}, rid FROM ({union_sql}) {order}"
             )
         else:
             table = src["table_name"]
@@ -7577,6 +7597,20 @@ class Store:
         return " AND ".join(clauses), params
 
     @staticmethod
+    def _member_id_alias(colnames) -> str:
+        """What a merge's UNION calls the member id it projects beside the
+        data columns: `source_id`, unless the file has a column of that
+        name (any ASCII case) — then ORDER BY "source_id" resolved to the
+        first of the two, the member id, and sorting the merge on the
+        file's own column sorted it by member. Underscores are prepended
+        until the name is free, since any name a file could also use."""
+        taken = {_ascii_fold(c) for c in colnames}
+        alias = "source_id"
+        while alias in taken:
+            alias = "_" + alias
+        return alias
+
+    @staticmethod
     def _compile_order(spec, colnames) -> str:
         sort = spec.get("sort") or []
         parts = []
@@ -7661,13 +7695,14 @@ class Store:
         order = self._compile_order(spec, colnames)
         if src.get("is_merge"):
             collist = ", ".join(q(c) for c in colnames)
+            sid_col = q(self._member_id_alias(colnames))
             branches = []
             params: list[Any] = []
             for m in self._resolve_members(source_id):
                 msrc = self._source_lite(m["source_id"])
                 where, p = self._compile_where(m["source_id"], msrc, spec, colnames)
                 branches.append(
-                    f"SELECT {int(m['source_id'])} AS source_id, rid, {collist}\n"
+                    f"SELECT {int(m['source_id'])} AS {sid_col}, rid, {collist}\n"
                     f"FROM {q(m['table_name'])}"
                     + (f"\nWHERE {where}" if where else "")
                 )
@@ -8059,8 +8094,11 @@ class Store:
             members = self._resolve_members_on(ro, handle["source_id"])
             for m in members:
                 msrc = self._source_lite_on(ro, m["source_id"])
+                # Matched as SQLite resolves the name (ASCII case): a member
+                # spelling it "TIME" under a merge's "Time" has the column.
+                member_names = {_ascii_fold(cc["name"]) for cc in msrc["columns"]}
                 for c in ts_cols:
-                    if not any(cc["name"] == c for cc in msrc["columns"]):
+                    if _ascii_fold(c) not in member_names:
                         continue  # merge member without this column
                     if kind == "root_virtual":
                         ts_expr = f"TS_NORMALIZE({q(c)})"
@@ -8204,9 +8242,11 @@ class Store:
         with self._reader() as ro:
             for m in self._resolve_members_on(ro, source_id):
                 msrc = self._source_lite_on(ro, m["source_id"])
-                member_names = {c["name"] for c in msrc["columns"]}
+                # ASCII case-folded, as SQLite resolves the quoted name below
+                # — see find_nearest_timestamp.
+                member_names = {_ascii_fold(c["name"]) for c in msrc["columns"]}
                 for c in ts_cols:
-                    if c not in member_names:
+                    if _ascii_fold(c) not in member_names:
                         continue
                     row = ro.execute(
                         f"SELECT MIN(TS_NORMALIZE({q(c)})), MAX(TS_NORMALIZE({q(c)})) "

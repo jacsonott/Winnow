@@ -74,6 +74,22 @@ see [docs/notes/README.md](README.md) for the whole set.
   exist on 3.10/3.11. The SQL pane keeps the fallback on purpose:
   `WHERE Channel = "Security"` is an ordinary habit there, and the
   analyst sees what came back.
+- **A merge member may spell a column differently — compare names the
+  way SQLite does.** Members are read through the first member's names,
+  which works in SQL because SQLite folds ASCII case; Python code that
+  compares names with `==` doesn't fold, and silently skips a member
+  whose column is "TIME" under a merge's "Time". That skipped the member
+  in jump-to-timestamp and in the tag time bounds, and built each
+  member's auto index under the MERGE's spelling — the index name hashes
+  the column, and `list_column_indexes`/`drop_column_index` hash the
+  member's own names, so the Tables modal never saw it. Compare through
+  `_ascii_fold`, and name anything per-table after `_table_spelling`
+  (the table's own spelling). The hash itself stays case-sensitive:
+  folding it would rename every index already on disk. Related, in the
+  same UNION: a merge projects each row's member id beside the data
+  columns, and a file with its own `source_id` column made ORDER BY
+  "source_id" sort by member — `_member_id_alias` picks a name no data
+  column has.
 
 - **A Timeline row leads with what happened, not with the source row.**
   Beside `body` (still the pipe-joined columns, unchanged) each row
