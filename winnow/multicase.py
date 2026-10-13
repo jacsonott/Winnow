@@ -32,6 +32,7 @@ import re
 import sqlite3
 from typing import Any, Iterator
 
+from winnow.paths import sqlite_ro_uri
 from winnow.store import q, read_only_authorizer
 
 # `v` is already attached to the writable Store's connection; leave room.
@@ -62,7 +63,7 @@ class CaseReader:
         self.name = name or os.path.splitext(os.path.basename(self.path))[0]
         if not os.path.isfile(self.path):
             raise NotACaseFile(f"No case file at {self.path}")
-        self.db = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, check_same_thread=False)
+        self.db = sqlite3.connect(sqlite_ro_uri(self.path), uri=True, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         try:
             names = {r[0] for r in self.db.execute(
@@ -302,11 +303,17 @@ def query_across(paths: list[str], sql: str, *, limit: int = 5000,
 
     with open_cases(paths, names) as readers:      # validates each is a case first
         aliases = [f"c{i + 1}" for i in range(len(readers))]
-        conn = sqlite3.connect(":memory:")
+        # uri=True although the main database is no file at all: it is
+        # the connection's flag that makes SQLite read an ATTACHed name as
+        # a URI. Whether that is also on by default is a compile option
+        # (SQLITE_USE_URI) — the Linux SQLite CI runs on has it, the one a
+        # Windows Python bundles need not — and without it the ATTACH
+        # below looks for a file literally named "file:...?mode=ro".
+        conn = sqlite3.connect(":memory:", uri=True)
         try:
             conn.row_factory = sqlite3.Row
             for alias, r in zip(aliases, readers):
-                conn.execute(f"ATTACH DATABASE ? AS {alias}", (f"file:{r.path}?mode=ro",))
+                conn.execute(f"ATTACH DATABASE ? AS {alias}", (sqlite_ro_uri(r.path),))
             # After the attaches, so they are still allowed: from here the
             # connection can only read. The main database here is :memory:
             # and therefore writable, so the keyword scan above was the only
