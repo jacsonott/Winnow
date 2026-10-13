@@ -55,6 +55,31 @@ def test_crlf_is_stripped_and_utf16_bom_is_read(store, tmp_path):
     assert [r[0] for r in store.db.execute(f"SELECT {TEXT_COLUMN} FROM src_{rec['id']} ORDER BY rid")] == ["eins", "zwei"]
 
 
+def test_a_bare_cr_inside_a_line_forges_no_row(store, tmp_path):
+    """Universal newlines end a line at a lone \\r too, so a CR inside a
+    logged value (a username in a failed-login line is attacker-chosen)
+    became a row of its own that read like a real log entry — "Accepted
+    password for root" — and every row id after it stopped being the
+    line number. A line ends at \\n only; one \\r before it is the CRLF's
+    and is dropped, any other \\r is the line's own text."""
+    p = _write(tmp_path, "auth.log",
+               b"line1 ok\nline2 Failed password for evil\rAccepted password for root\n"
+               b"line3 ok\r\nline4 \r\r\nline5 no newline\r", mode="wb")
+    rec = store.ingest_text(p, build_fts=False)
+    rows = [tuple(r) for r in store.db.execute(f"SELECT rid, {TEXT_COLUMN} FROM src_{rec['id']} ORDER BY rid")]
+    assert rows == [
+        (1, "line1 ok"),
+        (2, "line2 Failed password for evil\rAccepted password for root"),
+        (3, "line3 ok"),
+        (4, "line4 \r"),
+        (5, "line5 no newline"),
+    ]
+    # The preview is what the analyst agrees to, so it splits the same way —
+    # str.splitlines() also broke on \r, \v, \f, \x1c-\x1e, \x85, U+2028/9.
+    prev = store.preview_text_lines("a\rb\nc\r\nd\x0be f\x85g\n\nlast")
+    assert prev["sample_rows"] == [["a\rb"], ["c"], ["d\x0be f\x85g"], [""], ["last"]]
+
+
 def test_a_very_long_line_is_one_row(store, tmp_path):
     """The csv module's 128 KB field limit stopped an import; a line
     iterator has no such limit."""
@@ -147,6 +172,55 @@ def test_scan_probes_for_binary_only_after_the_pattern_gates(store, tmp_path, mo
     # …and one nothing gates is still probed and refused
     r = store.scan_import_directory(root, extensions=["*"])
     assert ("tool.exe", "binary") in {(e["rel_path"], e["reason"]) for e in r["excluded"]}
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs FIFOs (POSIX)")
+def test_scan_never_opens_a_fifo(store, tmp_path):
+    """A mounted *nix image is full of FIFOs (/run/systemd/initctl), and
+    open() on one blocks until something writes to it, which on an image
+    is never. With "other text" on, the binary probe opened it and the scan
+    hung for good. A FIFO named like a CSV was matched and would have hung
+    the import instead. Only a regular file is a candidate, checked from
+    the stat the scan already makes: a symlink to a regular file still
+    imports, and one pointing at a FIFO does not."""
+    import threading
+
+    root = tmp_path / "mounted_image"
+    (root / "run" / "systemd").mkdir(parents=True)
+    (root / "run" / "notes").write_text("plain text\n")
+    (root / "run" / "a.csv").write_text("h\n1\n")
+    fifos = [root / "run" / "systemd" / "initctl", root / "run" / "pipe.csv"]
+    for f in fifos:
+        os.mkfifo(f)
+    os.symlink(root / "run" / "a.csv", root / "run" / "link.csv")
+    os.symlink(fifos[0], root / "run" / "link_to_fifo")
+
+    def scan(extensions):
+        out = {}
+        t = threading.Thread(target=lambda: out.setdefault(
+            "r", store.scan_import_directory(str(root), extensions=extensions)), daemon=True)
+        t.start()
+        t.join(20)
+        return out.get("r")
+
+    try:
+        for exts in ([".csv", "*"], [".csv"]):
+            r = scan(exts)
+            assert r is not None, f"scan with {exts} blocked opening a FIFO"
+            assert {m["rel_path"] for m in r["matched"]} >= {"run/a.csv", "run/link.csv"}
+            reasons = {e["rel_path"]: e["reason"] for e in r["excluded"]}
+            for rel in ("run/systemd/initctl", "run/pipe.csv", "run/link_to_fifo"):
+                assert reasons.get(rel) == "not a regular file", (exts, reasons)
+                assert rel not in {m["rel_path"] for m in r["matched"]}
+        assert "run/notes" in {m["rel_path"] for m in scan([".csv", "*"])["matched"]}
+    finally:
+        # Unblock a probe left stuck in open() by a broken scan, so the
+        # failure doesn't leave a thread blocked for the rest of the suite.
+        for f in fifos:
+            try:
+                os.close(os.open(f, os.O_WRONLY | os.O_NONBLOCK))
+            except OSError:
+                pass
 
 
 # ------------------------------------------------------------------ routes

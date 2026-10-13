@@ -43,8 +43,11 @@ def test_copilot_answers_insert_and_run(page, copilot):
     btn.click()
     panel = page.locator("#sqlPluginPanels:not([hidden]) .plugin-panel")
     panel.locator("textarea").wait_for(state="visible")
-    # The intro rendered from the (empty) copilot history, no network involved
-    assert "Ask for a query" in panel.inner_text()
+    # The intro is rendered from the (empty) copilot history — no Anthropic
+    # call, but a GET to the plugin's own route that resolves after the
+    # composer is up. Waited for, not looked at once: on a cold server (this
+    # module can lead its shard) the textarea wins that race.
+    panel.get_by_text("Ask for a query").first.wait_for()
 
     panel.locator("textarea").fill("first three rows")
     panel.locator("textarea").press("Enter")

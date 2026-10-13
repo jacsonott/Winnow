@@ -300,6 +300,14 @@ def parse(path, options) -> dict:
 - **`rows` should be a generator.** It's consumed lazily and committed in
   batches, so memory stays flat on a multi-GB input. Returning a list
   works, and materializes the whole file first.
+- **`path`'s file name is the file's real name — for an upload too.** A
+  file dropped into the browser is spooled under its own name in a
+  private temp directory, so `os.path.basename(path)` is `hostd.log` or
+  `$MFT` whichever way the analyst brought it in, and reading meaning
+  from it (a log type, a `$J`) works the same. The spool is deleted the
+  moment the import returns: read the file inside `parse` and the rows
+  it yields, never keep `path` for later. The table records the uploaded
+  file's name as its path, not the spool's.
 - **Cells may be `str`, `int`, `float`, or `None`.** Everything is
   stringified (`None` → `""`) because source columns are TEXT — the same
   evidence-fidelity rule the CSV path follows. Don't pre-format numbers
@@ -1280,7 +1288,10 @@ a scope dropdown like any other plugin, just defaulting to off.
 `workspace/plugins.json`) or *for this case only* (an override stored in
 the case file's `case_settings`, so it travels with the evidence). The
 registry reloads on every case switch — per-case disablement really
-unloads the code, same guarantee as the machine-level switch.
+unloads the code, same guarantee as the machine-level switch. A reload
+is built beside the running set and switched in whole, one reload at a
+time: while yours imports, your routes keep answering from the previous
+load, and there is no moment in between when they 404.
 
 **Distribute** a folder plugin as a zip or a git repo containing the
 plugin folder. Include a README saying what it does, what it needs
@@ -1422,6 +1433,9 @@ def lookup_handler(req):
 ### `register_ingest_format(*, id, label, parse, extensions=(), filename_patterns=(), description="", options=())`
 
 `parse(path: str, options: dict) -> {"columns": list[str], "rows": Iterable[Sequence], "column_types"?: list[str], "name"?: str}`
+
+`path` ends in the file's own name, uploads included, and an upload's
+spool is gone once the import returns (see *The `parse` contract*).
 
 Option spec: `{"name": str, "label"?: str, "type": "bool"|"text"|"choice", "default"?: Any, "choices"?: list[str]}`
 

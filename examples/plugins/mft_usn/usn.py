@@ -15,6 +15,7 @@ timestamp or name and are skipped via their declared length.
 
 from __future__ import annotations
 
+import re
 import struct
 
 from .common import decode_flags, extension_of, filetime_to_iso, split_file_reference
@@ -22,6 +23,20 @@ from .common import decode_flags, extension_of, filetime_to_iso, split_file_refe
 CHUNK = 8 << 20          # read granularity; also the upper bound on carry size
 MAX_RECORD_LEN = 0x1000  # real records are ≤ ~570 bytes (60 + 255 UTF-16 chars)
 MIN_RECORD_LEN = 60      # V2 header size
+# The fixed header each version's _record unpacks. A slot whose declared
+# length is shorter than its own version's header is not a record: V3's
+# 128-bit references make its header 76 bytes, so a "V3" claiming 64 passed
+# the MIN_RECORD_LEN gate and was unpacked past its own end — into the next
+# record, or past the end of the file, where struct.error escaped the
+# generator and failed the whole ingest over one torn slot.
+HEADER_LEN = {2: 60, 3: 76}
+# The first non-zero byte at or after a position. Searched in place: the
+# lstrip it replaces sliced off (copied) the rest of the 8 MiB chunk to
+# measure one zero run, once per 8-byte slot, so garbage whose slots start
+# with a zero u32 but aren't zero runs (0x0000000100000000, or the
+# SecurityId of a record carved at the wrong offset) scanned the chunk once
+# per slot — minutes per chunk.
+_NONZERO = re.compile(rb"[^\x00]")
 
 REASON_FLAGS = [
     (0x00000001, "DATA_OVERWRITE"), (0x00000002, "DATA_EXTEND"),
@@ -79,20 +94,25 @@ def _rows(path: str):
             while pos + MIN_RECORD_LEN <= n:
                 (length,) = struct.unpack_from("<I", data, pos)
                 if length == 0:
-                    # Sparse padding. lstrip runs at C speed, so a
-                    # gigabytes-long zero run costs one scan per chunk, not
-                    # a Python-level loop over every byte.
-                    nz = n - len(data[pos:].lstrip(b"\x00"))
-                    if nz >= n:
+                    # Sparse padding. The search runs at C speed and stops at
+                    # the run's end, so a gigabytes-long zero run costs one
+                    # scan, not a Python-level loop over every byte — and a
+                    # slot that merely starts with a zero u32 costs a few
+                    # bytes, not the rest of the chunk.
+                    m = _NONZERO.search(data, pos)
+                    if m is None:
                         pos = n
                         break
-                    pos = max(pos + 8, nz & ~7)  # records are 8-aligned; max() guarantees progress
+                    pos = max(pos + 8, m.start() & ~7)  # records are 8-aligned; max() guarantees progress
                     continue
                 if length < MIN_RECORD_LEN or length > MAX_RECORD_LEN or length % 8:
                     pos += 8  # doesn't look like a record — carve forward
                     continue
                 if pos + length > n:
                     break  # straddles the chunk boundary — finish in the next pass
+                if length < HEADER_LEN.get(data[pos + 4] | data[pos + 5] << 8, MIN_RECORD_LEN):
+                    pos += 8  # shorter than its own header — not a record, carve forward
+                    continue
                 row = _record(data, pos, length)
                 if row is not None:
                     yield row

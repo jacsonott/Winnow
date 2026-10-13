@@ -127,7 +127,13 @@ see [docs/notes/README.md](README.md) for the whole set.
     `columns` param carries two UI-only keys, `any_type` (offer every
     column, not just text) and `prefill: "all"` (start with every other
     column chosen); `validate_params` ignores both. `bool` is a param
-    type now (a checkbox; the state holds a real boolean).
+    type now (a checkbox; the state holds a real boolean). A cell goes
+    out as an unquoted JSON number only when the number json writes
+    back is the cell's own text — "1.10", "-0" and
+    "9999999999999999.99" stay strings, or the object would say 1.1, 0
+    and 1e+16 about evidence that didn't — and the patterns are
+    `fullmatch`ed, since `$` also matches before a trailing newline and
+    wrote the cell "42\n" as 42.
   - **`_from_clause(src)` is the one place the join is spelled** —
     `LEFT JOIN drv_<id> USING(rid)`, so an unqualified `rid` stays legal
     on both sides. `drv`'s rid is an INTEGER PRIMARY KEY, so the join
