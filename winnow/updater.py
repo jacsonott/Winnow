@@ -47,6 +47,13 @@ Design notes worth keeping:
   benign — a hostile or tampered archive passes `testzip()` fine. Any
   unsafe member refuses the whole archive rather than skipping the one
   entry, since a partially-applied traversal is worse than no update.
+- **Ctrl+C is the likeliest thing to stop an update part-way**, and it is
+  a KeyboardInterrupt, not an Exception. So the put-it-back guard in
+  `apply_update` catches BaseException, and every file goes in through a
+  temp name and `os.replace` (`_replace_from`) so that even when the
+  put-back cannot run, no file is left half-written. `except Exception`
+  there once left five modules new, one empty and four old, and the CLI
+  said "Cancelled.".
 """
 
 from __future__ import annotations
@@ -144,6 +151,18 @@ MOVED_INTO_PACKAGE = (
 class UpdateError(Exception):
     """Anything the analyst can act on — no network, a corrupt bundle, a
     backup that isn't there. Surfaces as a message, not a traceback."""
+
+
+class UpdateInterrupted(KeyboardInterrupt):
+    """Ctrl+C during apply_update, raised once the install is back in a
+    state this module can name — its message is that state, in a sentence.
+
+    Still a KeyboardInterrupt, so anything that treats Ctrl+C as "stop"
+    still stops. It exists because the CLI used to answer every Ctrl+C
+    with "Cancelled.", which reads as "nothing happened" — said about an
+    install that had been half replaced. Only apply_update knows whether
+    a Ctrl+C landed before the first write, mid-write (and was rolled
+    back), or after the update had finished."""
 
 
 def installed_version(root: Path | None = None) -> str:
@@ -289,9 +308,11 @@ def download(url: str, dest: Path, timeout: float = 120.0, _open=None) -> Path:
     try:
         with opener(url, timeout) as r, open(tmp, "wb") as out:
             shutil.copyfileobj(r, out)
-    except Exception as e:  # noqa: BLE001
+    except BaseException as e:  # noqa: BLE001 — Ctrl+C mid-download leaves no .part either
         with contextlib.suppress(OSError):
             tmp.unlink()
+        if not isinstance(e, Exception):
+            raise
         raise UpdateError(f"Download failed: {e}") from e
     tmp.replace(dest)
     return dest
@@ -369,12 +390,55 @@ def _read_manifest(root: Path) -> list[str]:
 
 
 def _write_manifest(root: Path, version: str, files: list[str], source: str = "release") -> None:
-    (root / MANIFEST).write_text(json.dumps({
+    _write_text_atomic(root / MANIFEST, json.dumps({
         "version": version,
         "source": source,   # "release", or "main@<sha>" for a dev sync
         "installed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "files": sorted(files),
-    }, indent=1), encoding="utf-8")
+    }, indent=1))
+
+
+# Every file this module writes into the install goes in under this suffix
+# and is renamed over its target, so an interrupt — Ctrl+C, a crash, a
+# power cut — leaves each file whole: the old version or the new one,
+# never the first half of either. Writing in place used to leave a
+# zero-byte module behind whenever Ctrl+C landed mid-copy, and nothing can
+# be rolled back over a file the process never got to finish.
+_TMP_SUFFIX = ".winnow-update-tmp"
+
+
+def _tmp_for(target: Path) -> Path:
+    return target.with_name(target.name + _TMP_SUFFIX)
+
+
+def _replace_from(target: Path, write, stat_from: Path | None = None) -> None:
+    """Create `target` (or replace it) with whatever `write(fileobj)`
+    writes, via a sibling temp file and os.replace. The temp file is gone
+    whether this returns or raises, KeyboardInterrupt included.
+
+    Permission bits come from `stat_from` (with its times — a restore
+    puts back what copy2 saved) or else from the target being replaced:
+    a replaced file is a new inode, and a script that was executable has
+    to stay so."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _tmp_for(target)
+    try:
+        with open(tmp, "wb") as out:
+            write(out)
+        with contextlib.suppress(OSError):
+            if stat_from is not None:
+                shutil.copystat(stat_from, tmp)
+            else:
+                shutil.copymode(target, tmp)
+        os.replace(tmp, target)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+
+
+def _write_text_atomic(target: Path, text: str) -> None:
+    _replace_from(target, lambda out: out.write(text.encode("utf-8")))
 
 
 def installed_source(root: Path | None = None) -> str:
@@ -438,49 +502,87 @@ def _version_from_archive(zf: zipfile.ZipFile, prefix: str) -> str:
 def apply_update(archive: Path, root: Path | None = None, source: str = "release") -> dict:
     """Install `archive` over the install at `root`, after backing up every
     shipped file it will touch. Returns the plan that was carried out plus
-    the backup path, so a caller can tell the analyst how to undo it."""
+    the backup path, so a caller can tell the analyst how to undo it.
+
+    Whatever stops it part-way — an error, or Ctrl+C — the files already
+    written are put back from that backup before it returns. Ctrl+C comes
+    out as UpdateInterrupted (a KeyboardInterrupt) saying which state the
+    install is in; anything else as an UpdateError saying the same."""
     root = Path(root or HERE)
     archive = Path(archive)
     if not archive.is_file():
         raise UpdateError(f"No such file: {archive}")
 
+    before = installed_version(root)
     try:
         zf = zipfile.ZipFile(archive)
     except _ZIP_ERRORS as e:
         raise _unusable(archive, e) from e
+    except KeyboardInterrupt as e:
+        raise UpdateInterrupted(
+            f"Update cancelled before anything was changed. Winnow is still on {before}.") from e
     with zf:
         try:
-            bad = zf.testzip()  # CRC check — catches a bundle damaged in transit
-        except _ZIP_ERRORS as e:
-            raise _unusable(archive, e) from e
-        if bad is not None:
-            raise UpdateError(f"That archive is damaged (bad entry: {bad}) — download it again")
-        prefix, members = _archive_members(zf)
-        incoming = [m for m in members if not _is_protected(m)]
-        if not any(m == "server.py" for m in incoming):
-            raise UpdateError(
-                "That doesn't look like a Winnow release (no server.py inside) — "
-                "check you downloaded the source archive")
-        plan = plan_update(archive, root)
-        before = installed_version(root)
-        backup = _backup(root, plan, before)
+            try:
+                bad = zf.testzip()  # CRC check — catches a bundle damaged in transit
+            except _ZIP_ERRORS as e:
+                raise _unusable(archive, e) from e
+            if bad is not None:
+                raise UpdateError(f"That archive is damaged (bad entry: {bad}) — download it again")
+            prefix, members = _archive_members(zf)
+            incoming = [m for m in members if not _is_protected(m)]
+            if not any(m == "server.py" for m in incoming):
+                raise UpdateError(
+                    "That doesn't look like a Winnow release (no server.py inside) — "
+                    "check you downloaded the source archive")
+            plan = plan_update(archive, root)
+            # A backup interrupted part-way has no restore.json yet (it is
+            # written last), so list_backups never offers it.
+            backup = _backup(root, plan, before)
+        except KeyboardInterrupt as e:
+            raise UpdateInterrupted(
+                f"Update cancelled before anything was changed. Winnow is still on {before}.") from e
         try:
             for m in incoming:
-                target = root / m
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with zf.open(prefix + m) as src, open(target, "wb") as out:
-                    shutil.copyfileobj(src, out)
+                with zf.open(prefix + m) as src:
+                    _replace_from(root / m, lambda out: shutil.copyfileobj(src, out))
             for m in plan["removed"]:
                 with contextlib.suppress(OSError):
                     (root / m).unlink()
             _sweep_moved_modules(root, incoming)
             _write_manifest(root, plan["version"], incoming, source)
-        except Exception as e:  # noqa: BLE001 — a half-applied install is the one thing we can't leave behind
-            restore(backup, root)
+        except BaseException as e:  # noqa: BLE001 — a half-applied install is the one thing we can't leave behind
+            # BaseException, not Exception: Ctrl+C is KeyboardInterrupt,
+            # and it is the likeliest thing to stop an update part-way.
+            try:
+                restore(backup, root)
+            except BaseException as again:  # noqa: BLE001 — a second Ctrl+C here included
+                raise UpdateError(
+                    f"Update stopped part-way ({_reason(e)}), and putting {before} back did "
+                    f"not finish either ({_reason(again)}). Winnow is now a mix of {before} "
+                    f"and {plan['version']} and may not start. Run `python update.py "
+                    f"--rollback` to finish restoring {before} from {backup}.") from e
+            if isinstance(e, KeyboardInterrupt):
+                raise UpdateInterrupted(
+                    f"Update interrupted part-way; the files it had already replaced were "
+                    f"rolled back. Winnow is still on {before}.") from e
+            if not isinstance(e, Exception):
+                raise
             raise UpdateError(
                 f"Update failed and was rolled back ({e}). Winnow is still on {before}.") from e
-    _prune_backups(root)
+    try:
+        _prune_backups(root)
+    except KeyboardInterrupt as e:
+        raise UpdateInterrupted(
+            f"Updated {before} -> {plan['version']}; interrupted while removing old "
+            f"backups, which is harmless. Restart Winnow to run the new version.") from e
     return {**plan, "previous_version": before, "backup": str(backup)}
+
+
+def _reason(e: BaseException) -> str:
+    if isinstance(e, KeyboardInterrupt):
+        return "interrupted"
+    return str(e) or type(e).__name__
 
 
 def _sweep_moved_modules(root: Path, incoming: list[str]) -> list[str]:
@@ -520,11 +622,13 @@ def _backup(root: Path, plan: dict, version: str) -> Path:
         shutil.copy2(src, out)
         saved.append(rel)
     # `added` files did not exist before, so restoring means removing them.
-    (dest / "restore.json").write_text(json.dumps({
+    # Written last, and whole or not at all: a backup only counts once this
+    # exists, so one interrupted part-way is never what --rollback picks.
+    _write_text_atomic(dest / "restore.json", json.dumps({
         "version": version,
         "restore": sorted(saved),
         "remove": sorted(plan["added"]),
-    }, indent=1), encoding="utf-8")
+    }, indent=1))
     return dest
 
 
@@ -556,8 +660,12 @@ def restore(backup: Path, root: Path | None = None) -> dict:
             continue
         src = backup / rel
         if src.is_file():
-            (root / rel).parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, root / rel)
+            # Through a temp file like apply's writes, so a rollback that
+            # is itself interrupted leaves whole files and can be re-run.
+            def copy(out, src=src):
+                with open(src, "rb") as f:
+                    shutil.copyfileobj(f, out)
+            _replace_from(root / rel, copy, stat_from=src)
     for rel in meta.get("remove", []):
         if _is_protected(rel):
             continue

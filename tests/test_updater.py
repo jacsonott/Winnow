@@ -389,6 +389,125 @@ def test_rollback_without_a_backup_is_a_clear_message(install):
         updater.rollback(install)
 
 
+# ----------------------------------------------------------- interrupted
+
+def _ten_module_install(root: Path) -> tuple[Path, dict[str, str]]:
+    files = dict(SHIPPED)
+    files.update({f"winnow/m{i}.py": f"old {i}\n" * 50 for i in range(10)})
+    return _make_install(root, files), files
+
+
+def _ten_module_release(path: Path) -> Path:
+    files = dict(SHIPPED)
+    files["version.py"] = 'VERSION = "1.1.0"\n'
+    files.update({f"winnow/m{i}.py": f"NEW {i}\n" * 50 for i in range(10)})
+    return _make_release(path, "1.1.0", files)
+
+
+def _interrupt_the_nth_copy(monkeypatch, n: int, partial: bool = False):
+    """Ctrl+C arriving while apply_update copies its n-th file. `partial`
+    writes some of the file first, the way a real interrupt mid-copy does."""
+    import shutil
+    real = shutil.copyfileobj
+    count = {"k": 0}
+
+    def flaky(src, dst, *a, **kw):
+        count["k"] += 1
+        if count["k"] == n:
+            if partial:
+                dst.write(src.read(7))
+            raise KeyboardInterrupt
+        return real(src, dst, *a, **kw)
+
+    monkeypatch.setattr(shutil, "copyfileobj", flaky)
+
+
+def test_ctrl_c_mid_update_puts_the_previous_version_back(tmp_path, monkeypatch):
+    """apply_update restored on `except Exception`, which KeyboardInterrupt
+    is not: Ctrl+C on the sixth file left five modules new, one EMPTY and
+    four old — an install that is neither version and won't start — and
+    no manifest saying so."""
+    install, files = _ten_module_install(tmp_path / "winnow")
+    archive = _ten_module_release(tmp_path / "v2.zip")
+    _interrupt_the_nth_copy(monkeypatch, 6)
+
+    with pytest.raises(KeyboardInterrupt):     # still means "stop" to a caller
+        updater.apply_update(archive, install)
+
+    for rel, text in files.items():
+        assert (install / rel).read_text(encoding="utf-8") == text, f"{rel} was left changed"
+    assert updater.installed_version(install) == "1.0.0"
+    assert not (install / updater.MANIFEST).exists()
+    leftovers = [p.name for p in install.rglob("*") if ".winnow-update" in p.name]
+    assert not leftovers, f"temporary files left in the install: {leftovers}"
+
+
+def test_a_file_interrupted_mid_write_is_never_left_half_written(tmp_path, monkeypatch):
+    """Even when putting the old version back fails too (a second Ctrl+C,
+    a full disk), no shipped file may be left truncated: each one is
+    either the old version or the new one, because a file is written
+    beside its target and renamed over it."""
+    install, files = _ten_module_install(tmp_path / "winnow")
+    archive = _ten_module_release(tmp_path / "v2.zip")
+
+    def restore_fails(*a, **k):
+        raise KeyboardInterrupt
+
+    with monkeypatch.context() as m:
+        _interrupt_the_nth_copy(m, 6, partial=True)
+        m.setattr(updater, "restore", restore_fails)
+        with pytest.raises(UpdateError) as info:
+            updater.apply_update(archive, install)
+    # The message says what state the install is in and how to fix it.
+    msg = str(info.value)
+    assert "--rollback" in msg and "1.0.0" in msg
+
+    new = {rel: text.replace("old", "NEW") for rel, text in files.items()}
+    for rel in files:
+        if rel.startswith("winnow/m"):
+            got = (install / rel).read_text(encoding="utf-8")
+            assert got in (files[rel], new[rel]), f"{rel} is half-written: {got[:30]!r}"
+    leftovers = [p.name for p in install.rglob("*") if ".winnow-update" in p.name]
+    assert not leftovers, f"temporary files left in the install: {leftovers}"
+    # And the backup that message points at really does put it back.
+    updater.rollback(install)
+    for rel, text in files.items():
+        assert (install / rel).read_text(encoding="utf-8") == text
+
+
+def test_the_cli_says_the_update_was_rolled_back_not_cancelled(tmp_path, monkeypatch, capsys):
+    """update.py printed "Cancelled." for a Ctrl+C mid-apply, which reads
+    as "nothing happened" about an install that had been half-replaced."""
+    import update as update_cli
+    install, _files = _ten_module_install(tmp_path / "winnow")
+    archive = _ten_module_release(tmp_path / "v2.zip")
+    monkeypatch.setattr(update_cli, "HERE", install)
+    _interrupt_the_nth_copy(monkeypatch, 6)
+
+    rc = update_cli.main(["--from", str(archive), "-y"])
+
+    assert rc == 130
+    err = capsys.readouterr().err
+    assert "rolled back" in err and "1.0.0" in err
+    assert "nothing was changed" not in err
+
+
+def test_the_cli_still_says_cancelled_when_nothing_was_touched(tmp_path, monkeypatch, capsys):
+    import update as update_cli
+    install, files = _ten_module_install(tmp_path / "winnow")
+    archive = _ten_module_release(tmp_path / "v2.zip")
+    monkeypatch.setattr(update_cli, "HERE", install)
+
+    def ctrl_c(*a, **k):
+        raise KeyboardInterrupt
+    monkeypatch.setattr("builtins.input", ctrl_c)      # Ctrl+C at "Apply it? [y/N]"
+
+    assert update_cli.main(["--from", str(archive)]) == 130
+    assert "nothing was changed" in capsys.readouterr().err
+    for rel, text in files.items():
+        assert (install / rel).read_text(encoding="utf-8") == text
+
+
 # --------------------------------------------------------------- HTTP layer
 
 def _client(store, monkeypatch):

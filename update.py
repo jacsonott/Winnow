@@ -74,8 +74,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("-y", "--yes", action="store_true", help="don't ask for confirmation")
     args = p.parse_args(argv)
 
+    # What a Ctrl+C that apply_update didn't report itself would leave
+    # behind. apply_update answers for everything between its first and
+    # last write (updater.UpdateInterrupted); this answers for the rest.
+    interrupted = "Cancelled — nothing was changed."
     try:
         if args.rollback:
+            interrupted = ("Interrupted part-way through the rollback. Run "
+                           "`python update.py --rollback` again to finish it.")
             res = updater.rollback(HERE)
             print(f"Rolled back to {res['version']} (from {res['backup']}).")
             print("Restart Winnow to run it.")
@@ -158,8 +164,11 @@ def main(argv: list[str] | None = None) -> int:
     except UpdateError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
+    except updater.UpdateInterrupted as e:
+        print(f"\n{e}", file=sys.stderr)
+        return 130
     except KeyboardInterrupt:
-        print("\nCancelled.", file=sys.stderr)
+        print(f"\n{interrupted}", file=sys.stderr)
         return 130
 
 
