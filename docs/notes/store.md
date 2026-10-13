@@ -236,6 +236,16 @@ see [docs/notes/README.md](README.md) for the whole set.
   already carries exactly. The lookup is a correlated `MIN` over
   row_tags' primary key, skipped entirely for a member with no tags at
   all — the same short-circuit `tag_counts_in_view` makes.
+- **Histogram buckets are floored, and 1601 is a real minimum.** A bucket
+  is `[b, b + bucket_seconds)` — the strip finds a row's bar that way —
+  but SQLite's `/` truncates toward zero, so `(e / w) * w` put every
+  pre-1970 row one bar late. `time_histogram` shifts the epoch by whole
+  buckets past the span's minimum before dividing (non-negative dividends
+  floor and truncate alike, and `EPOCH`, a strftime over TS_NORMALIZE, is
+  still evaluated once per row). The `start`/`end` labels come from
+  SQLite's `datetime(…, 'unixepoch')` rather than `time.gmtime`, which
+  raises OSError on Windows for any negative epoch — FILETIME zero is
+  exactly that. `tests/test_histogram.py`.
 
 - **`tag_counts_in_view`** is what the tag ribbon shows once a filter or
   search is on: the same shape `tag_counts` returns, counted over one view.

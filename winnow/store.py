@@ -6863,29 +6863,43 @@ class Store:
 
         span_union = " UNION ALL ".join(branch(m, "EPOCH AS e") for m in members)
         with self._reader() as ro, self._dropped_view_is_expired(), self._interruptible(op_token, ro):
-            lo, hi, n = ro.execute(
-                f"SELECT MIN(e), MAX(e), COUNT(*) FROM ({span_union}) WHERE e IS NOT NULL").fetchone()
+            # The labels come from SQLite too, not time.gmtime: on Windows
+            # that raises OSError for anything before 1970 (a 500 for a
+            # column holding FILETIME zero), and SQLite formats every year
+            # its own strftime('%s') could have produced.
+            lo, hi, n, lo_text, hi_text = ro.execute(
+                "SELECT MIN(e), MAX(e), COUNT(*), datetime(MIN(e), 'unixepoch'), "
+                f"datetime(MAX(e), 'unixepoch') FROM ({span_union}) WHERE e IS NOT NULL").fetchone()
         if not n:
             return {"column": column, "bucket_seconds": 0, "start": None, "end": None,
                     "total": 0, "buckets": []}
         span = max(0, int(hi) - int(lo))
         bucket = next((b for b in self.HISTOGRAM_BUCKETS if span / b <= max_buckets),
                       self.HISTOGRAM_BUCKETS[-1])
+        # A bucket starts at floor(e / bucket) * bucket, which is what the
+        # strip assumes when it finds a row's bar (b <= t < b + bucket).
+        # SQLite's integer division truncates toward zero instead, so a
+        # pre-1970 (negative) epoch landed in the bucket AFTER its own —
+        # and 1601, FILETIME zero, is a value real artefacts carry. Shifting
+        # by a whole number of buckets past the span's minimum makes every
+        # dividend non-negative, where the two agree, and keeps EPOCH (a
+        # strftime over TS_NORMALIZE) evaluated once per row.
+        shift = max(0, -(int(lo) // bucket)) * bucket
+        bucket_sql = f"((EPOCH + {shift}) / {bucket}) * {bucket} - {shift}"
         count_union = " UNION ALL ".join(
-            branch(m, f"(EPOCH / {bucket}) * {bucket} AS b, 1 AS one") for m in members)
+            branch(m, f"{bucket_sql} AS b, 1 AS one") for m in members)
         with self._reader() as ro, self._dropped_view_is_expired(), self._interruptible(op_token, ro):
             rows = ro.execute(
                 f"SELECT b, COUNT(*) AS n FROM ({count_union}) WHERE b IS NOT NULL GROUP BY b ORDER BY b"
             ).fetchall()
-        iso = lambda t: time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(int(t)))
         out = {"column": column, "bucket_seconds": bucket,
-               "start": iso(lo), "end": iso(hi), "total": int(n),
+               "start": lo_text, "end": hi_text, "total": int(n),
                "buckets": [[int(r[0]), int(r[1])] for r in rows]}
         if stack == "tags":
-            out["stack"] = self._histogram_tag_stack(branch, members, bucket, op_token)
+            out["stack"] = self._histogram_tag_stack(branch, members, bucket_sql, op_token)
         return out
 
-    def _histogram_tag_stack(self, branch, members: list[dict], bucket: int,
+    def _histogram_tag_stack(self, branch, members: list[dict], bucket_sql: str,
                              op_token: str | None) -> dict:
         """The same buckets split by tag, as {tags: [id…], buckets: [[epoch,
         [untagged, n_first_tag, …]], …]}.
@@ -6918,7 +6932,7 @@ class Store:
                            f"WHERE rt.source_id = {int(m['source_id'])} AND rt.rid = s.rid)")
                 else:
                     tag = "NULL"
-                parts.append(branch(m, f"(EPOCH / {bucket}) * {bucket} AS b, {tag} AS tag"))
+                parts.append(branch(m, f"{bucket_sql} AS b, {tag} AS tag"))
             union = " UNION ALL ".join(parts)
             rows = ro.execute(
                 f"SELECT b, tag, COUNT(*) AS n FROM ({union}) WHERE b IS NOT NULL "
