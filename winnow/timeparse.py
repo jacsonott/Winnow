@@ -96,9 +96,11 @@ def _fmt(dt: datetime, subsecond: bool) -> str:
     one is emitted exactly as its components stand (the no-TZ-math rule)."""
     if dt.tzinfo is not None:
         dt = dt.astimezone(_UTC).replace(tzinfo=None)
-    if subsecond:
-        return dt.strftime("%Y-%m-%d %H:%M:%S.%f")
-    return dt.strftime("%Y-%m-%d %H:%M:%S")
+    # isoformat, not strftime: glibc's %Y does not zero-pad a year below
+    # 1000, and "999-06-01" is neither matched by _TS_ISO_RE/TS_NORMALIZE
+    # nor sorted before "2024-…" as text — a pre-1000 date read from a
+    # string op sorted after every modern one on the Timeline.
+    return dt.isoformat(sep=" ", timespec="microseconds" if subsecond else "seconds")
 
 
 def _plausible(dt: datetime) -> bool:

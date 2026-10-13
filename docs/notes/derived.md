@@ -172,7 +172,10 @@ see [docs/notes/README.md](README.md) for the whole set.
     `save_view_as_source` refuse the whole table, and blocks anything
     chaining off it, with no way back except deleting the column.
   - **Canonical output is `YYYY-MM-DD HH:MM:SS[.ffffff]`**, sub-second only
-    when the source has that resolution. That exact shape is why there are
+    when the source has that resolution — four-digit year always, which is
+    why `_fmt` uses `isoformat` and not `strftime`: glibc's `%Y` writes
+    year 999 as `999`, a shape nothing recognises and that sorts after
+    2024 as text. That exact shape is why there are
     **no new regexes to hand-sync**: `_TS_ISO_RE`/`TS_NORMALIZE`/`DAY_BUCKET`
     and `tsformat.js`'s `parseTimestamp` already prefix-match it. Timezones:
     epoch-family values are UTC by definition, values carrying an explicit

@@ -287,6 +287,26 @@ def test_every_output_matches_the_shapes_store_already_recognizes():
         assert _day_bucket(out) == out[:10], out
 
 
+
+def test_a_year_below_1000_keeps_four_digits():
+    """strftime's %Y on glibc drops the zero padding below year 1000, so
+    a string op holding "0999-…" wrote "999-06-01 00:00:00": not a shape
+    the store recognises, and as text it sorted after every 2024 date."""
+    outs = [
+        parse("iso8601", "0999-06-01T00:00:00"),
+        parse("dd_mmm_yyyy", "05 Jan 0999 13:22:01"),
+        parse("apache_clf", "05/Jan/0999:13:22:01"),
+        parse("us_datetime", "1/5/0999 1:22 PM"),
+        parse("iso8601", "0001-01-01T00:00:00.5"),
+    ]
+    assert outs == ["0999-06-01 00:00:00", "0999-01-05 13:22:01", "0999-01-05 13:22:01",
+                    "0999-01-05 13:22:00", "0001-01-01 00:00:00.500000"]
+    for out in outs:
+        assert _TS_ISO_RE.match(out), out
+        assert _ts_normalize(out) == out[:19], out
+        assert out < "2024-01-01 00:00:00"
+
+
 # ------------------------------------------ month-name native recognition
 
 def test_month_name_timestamps_normalize_natively():
