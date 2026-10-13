@@ -57,13 +57,27 @@ def _check(store, params: dict) -> None:
             raise ValueError(f"The lookup table {src['name']!r} has no {label} column {col!r}")
 
 
-def _prepare(store, params: dict, state: dict) -> None:
-    from .store import q  # local import — store imports this module at load
+def _blank(value) -> bool:
+    """No key at all: NULL or empty — the same "nothing to read" rule the
+    parse-failure count applies to a one-column op's input cell
+    (Store._had_input_sql), so a blank is neither a match nor a failure.
+    A blank is the absence of a key, never a key, so it matches nothing on
+    either side: an empty Host used to pick up the lookup table's own
+    blank-key row, labelling every unattributed event with whatever that
+    row said."""
+    return value is None or str(value) == ""
 
+
+def _prepare(store, params: dict, state: dict) -> None:
     other, match_col, value_col, multi = _params_ok(params)
     src = store.get_source(other)
     mapping: dict[str, str] = {}
-    seen: dict[str, set] | None = {} if multi == "all" else None
+    # multi='all' collects each key's distinct values in a list and joins
+    # once at the end: re-joining the growing string on every match was
+    # quadratic in a key's match count (80k values under one key took 2s,
+    # a 2M-row table ~20 minutes).
+    found: dict[str, list[str]] = {}
+    seen: dict[str, set] = {}
     with store._reader() as ro:
         n = 0
         for row in ro.execute(
@@ -74,19 +88,22 @@ def _prepare(store, params: dict, state: dict) -> None:
             if n > MAX_LOOKUP_ROWS:
                 raise ValueError(
                     f"The lookup table has more than {MAX_LOOKUP_ROWS:,} rows — too big to load as a mapping")
-            k = "" if row["k"] is None else str(row["k"])
+            if _blank(row["k"]):
+                continue
+            k = str(row["k"])
             v = "" if row["v"] is None else str(row["v"])
             if multi == "first":
                 mapping.setdefault(k, v)
-            else:
-                if v not in seen.setdefault(k, set()):
-                    seen[k].add(v)
-                    mapping[k] = f"{mapping[k]}, {v}" if k in mapping else v
+            elif v not in seen.setdefault(k, set()):
+                seen[k].add(v)
+                found.setdefault(k, []).append(v)
+    if multi == "all":
+        mapping = {k: ", ".join(vs) for k, vs in found.items()}
     state["map"] = mapping
 
 
 def _lookup(value, params: dict, state: dict):
-    if value is None:
+    if _blank(value):
         return None
     return state.get("map", {}).get(str(value))
 

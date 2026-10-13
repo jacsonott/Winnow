@@ -5688,15 +5688,22 @@ class Store:
                 })
         return out
 
-    def _preview_rows(self, values: list, op_id: str, params: dict) -> list[dict]:
+    def _preview_state(self, op_id: str, params: dict) -> dict:
+        """The same hooks the real backfill runs: a lookup previewed without
+        its mapping loaded would show every value as a miss."""
         op = timeparse.OPERATIONS[op_id]
         state: dict = {}
-        # The same hooks the real backfill runs: a lookup previewed without
-        # its mapping loaded would show every value as a miss.
         if op.get("check"):
             op["check"](self, params)
         if op.get("prepare"):
             op["prepare"](self, params, state)
+        return state
+
+    def _preview_rows(self, values: list, op_id: str, params: dict,
+                      state: dict | None = None) -> list[dict]:
+        op = timeparse.OPERATIONS[op_id]
+        if state is None:
+            state = self._preview_state(op_id, params)
         return [{"input": v, "output": op["parse"](v, params, state)} for v in values]
 
     def preview_derived(self, source_id: int, column: str, op_id: str,
@@ -5778,10 +5785,10 @@ class Store:
         only one that knows which rows it came from, and the verdict the
         client writes is a claim about exactly that."""
         op = timeparse.OPERATIONS[op_id]
-        preview = self._preview_rows(samples[:limit], op_id, params)
-        state: dict = {}
-        if op.get("prepare"):
-            op["prepare"](self, params, state)
+        # One prepare for the pairs and the count both: a lookup's prepare
+        # loads its whole table (up to MAX_LOOKUP_ROWS) inside the request.
+        state = self._preview_state(op_id, params)
+        preview = self._preview_rows(samples[:limit], op_id, params, state)
         failures = sum(1 for v in samples if op["parse"](v, params, state) is None)
         return {"preview": preview, "sampled": len(samples), "failures": failures, "scope": scope}
 
@@ -10769,11 +10776,53 @@ class Store:
             # function of data the receiving case already has, so importing
             # re-runs the backfill rather than shipping a second copy of
             # every timestamp.
-            "derived_columns": [
-                {k: d[k] for k in ("name", "input_column", "op_id", "params")}
-                for d in self.list_derived_columns(source_id)
-            ],
+            "derived_columns": [self._session_derived_def(d)
+                                for d in self.list_derived_columns(source_id)],
         }
+
+    def _session_derived_def(self, d: dict) -> dict:
+        """One derived column's definition as a session carries it. A
+        lookup's params name its table by THIS case's source id, which means
+        nothing in another case — or in this one, once the table is dropped
+        and the id reused — so the table's identity travels beside it as
+        `lookup_table` (the evidence's fingerprint and name, the keys session
+        sources are matched by), and the receiving side resolves that
+        instead (_resolve_session_lookup)."""
+        out = {k: d[k] for k in ("name", "input_column", "op_id", "params")}
+        if d["op_id"] == "lookup":
+            try:
+                other = self._source_lite(int((d.get("params") or {}).get("other_source_id")))
+            except (KeyError, TypeError, ValueError):
+                other = None
+            if other is not None and other["id"] >= 0:
+                out["lookup_table"] = {"file_hash": other.get("file_hash"), "name": other.get("name")}
+        return out
+
+    def _resolve_session_lookup(self, d: dict) -> int:
+        """The live source a session's lookup column should read, from the
+        `lookup_table` identity _session_derived_def wrote: the table with
+        that fingerprint (a hashless one by name, as _session_source_resolver
+        does), narrowed by name when one file gave several tables. Raises
+        ValueError — a warning, the column not recreated — when there is no
+        such table or no way to tell which one. The session's id is never
+        used: binding by it filled a column from whichever table happened
+        to hold that number, with nothing to say so."""
+        ident = d.get("lookup_table")
+        if not isinstance(ident, dict):
+            raise ValueError("the session does not say which table it looks values up in "
+                             "(it was saved before that was recorded); recreate it from the column menu")
+        h, name = ident.get("file_hash"), ident.get("name")
+        real = [s for s in self.list_sources() if s["id"] >= 0]
+        found = ([s for s in real if s.get("file_hash") == h] if h
+                 else [s for s in real if not s.get("file_hash") and s["name"] == name])
+        if len(found) > 1:
+            found = [s for s in found if s["name"] == name] or found
+        if not found:
+            raise ValueError(f"its lookup table {name!r} is not in this case")
+        if len(found) > 1:
+            raise ValueError(f"{len(found)} tables here could be its lookup table {name!r}; "
+                             "recreate it from the column menu")
+        return found[0]["id"]
 
     def import_session(self, source_id: int, session: dict, merge: bool = True) -> dict:
         """Apply a one-table session to `source_id`. merge=False replaces
@@ -10868,15 +10917,18 @@ class Store:
         pending_jobs: dict[str, str] = {}  # column name -> its backfill job, for chains
         for d in session.get("derived_columns", []):
             try:
+                params = d.get("params")
+                if d["op_id"] == "lookup":
+                    params = dict(params or {}, other_source_id=self._resolve_session_lookup(d))
                 # A chained column's parent was created a moment ago and its
                 # backfill is an async job — wait for that link, or the
                 # "still building" guard (correctly) refuses the child.
-                for inp in timeparse.op_inputs(d["op_id"], d["input_column"], d.get("params")):
+                for inp in timeparse.op_inputs(d["op_id"], d["input_column"], params):
                     jid = pending_jobs.get(inp.lower())
                     if jid:
                         self.wait_for_ingest_job(jid, timeout=600)
                 res = self.add_derived_column(source_id, d["name"], d["input_column"],
-                                              d["op_id"], d.get("params"))
+                                              d["op_id"], params)
                 pending_jobs[d["name"].lower()] = res["job_id"]
                 derived_added += 1
             except (ValueError, KeyError) as e:
@@ -11117,6 +11169,15 @@ class Store:
                     copied.append({"id": new_id, "name": src["name"],
                                    "rows": src["row_count"], **stats})
 
+                # A lookup column's definition names its table by THIS
+                # case's id, which in the target is whatever table took that
+                # number there: a re-derive (or a cascade from its input)
+                # would fill the column from it without a word. It follows
+                # its table when that came along in this copy, else the
+                # target's table with the same fingerprint when there is
+                # exactly one, else it names none — the values stay as
+                # copied and a re-derive asks for the table.
+                self._repoint_copied_lookups(t, id_map)
                 # Subset provenance travels only as far as its parent does:
                 # parent_source_id is THIS case's numbering, and a later
                 # import into the target could land on that id. Map rows
@@ -11147,6 +11208,32 @@ class Store:
                 with contextlib.suppress(sqlite3.Error):
                     t.db.execute("DETACH srccase")
         return {"target": t.path, "copied": copied}
+
+    @staticmethod
+    def _repoint_copied_lookups(t: "Store", id_map: dict[int, int]) -> None:
+        """See the call in _copy_sources_into. Runs on the target's writer,
+        inside the copy's transaction, with this case attached as srccase."""
+        for d in t.db.execute(
+                "SELECT id, name, params FROM derived_columns WHERE op_id='lookup' AND source_id IN "
+                f"({','.join('?' * len(id_map))})", list(id_map.values())).fetchall():
+            params = json.loads(d["params"] or "{}")
+            try:
+                old = int(params.get("other_source_id"))
+            except (TypeError, ValueError):
+                continue
+            new = id_map.get(old)
+            if new is None:
+                was = t.db.execute("SELECT file_hash, name FROM srccase.sources WHERE id=?",
+                                   (old,)).fetchone()
+                found = t.db.execute(
+                    "SELECT id, name FROM sources WHERE file_hash=?",
+                    (was["file_hash"],)).fetchall() if was and was["file_hash"] else []
+                if len(found) > 1:
+                    found = [f for f in found if f["name"] == was["name"]]
+                new = found[0]["id"] if len(found) == 1 else None
+            params["other_source_id"] = new
+            t.db.execute("UPDATE derived_columns SET params=? WHERE id=?",
+                         (json.dumps(params), d["id"]))
 
     def _map_tags_by_name(self, incoming_defs: list[dict]) -> dict:
         """{incoming tag id -> this case's tag id}, creating what's missing.
