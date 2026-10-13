@@ -81,6 +81,20 @@ see [docs/notes/README.md](README.md) for the whole set.
   columns are created through the existing batch route — one scan, N
   columns, all-or-nothing — which is the same machinery the JSON flatten
   picker uses.
+- **A regex that can backtrack for minutes is refused, not run.** Python's
+  `re` has no timeout, a backfill polls its cancel flag only between
+  batches, and the preview and `/api/derived/regex_groups` run inside the
+  request — so `(\w+\s?)*` against one 30-character cell that almost
+  matches held a worker (or the whole backfill) for minutes with nothing
+  able to stop it. `structparse._compile_analyst_regex` is the one gate
+  every derive pattern passes, and it refuses a repeat that can run twice
+  or more around an unbounded one, unless each pass is pinned by a
+  delimiter the inner repeat can't consume (`(\.[a-z]+)*`,
+  `([a-z0-9-]+\.)+`, `(?:[^,]*,)*` — the dotted and CSV shapes people
+  write all the time). Bounding the outer repeat is NOT a way out:
+  `(\w+\s?){0,50}` took a minute on 29 characters. It is a heuristic over
+  the shape people actually write, judged on sampled characters, not a
+  proof — a bounded inner repeat isn't modelled.
 - **Every path the flatten picker offers has to survive `validate_params`
   and extract the sample it was offered with.** Because the batch is
   all-or-nothing, one offered path that fails to parse fails every column
