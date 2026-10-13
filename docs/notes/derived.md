@@ -256,7 +256,22 @@ see [docs/notes/README.md](README.md) for the whole set.
     nothing in the column to say so (that is what `+05`, a 10-digit
     fraction before the offset, `−05:00`, and every offset after a
     dd-Mmm or US time used to do). Trailing text that names no zone — a
-    log message after the timestamp — is left alone, as before. The
+    log message after the timestamp — is left alone, as before. RFC 2822
+    has a zone grammar of its own and keeps the same rule without
+    `_trailing_zone`: the zones the RFC defines (UT/UTC/GMT/Z, EST/EDT,
+    CST/CDT, MST/MDT, PST/PDT, ±HHMM within ±14:00) are applied, and
+    anything else in the zone slot — `CET`, `AST` (Atlantic or Arabia),
+    a military letter (RFC 822 wrote their signs backwards), an IANA
+    name — is a parse failure. `email.utils` dropped a zone it did not
+    know without a word, so `15:04:05 CET` came out as 15:04:05 UTC
+    while `15:04:05 EST` was converted. `-0000` is UTC by the RFC's own
+    definition (the time IS in UT; only the sender's zone is unknown),
+    so `utc_offset` does not shift it — `email.utils` returns it naive,
+    like a value with no zone at all, which is why it is named
+    explicitly. The zone token is found by mirroring email's own token
+    selection (`_rfc2822_zone_token`: `date`'s layout puts the zone
+    before the year) and cross-checked against what the stdlib parsed,
+    so a future divergence fails values rather than misplacing them. The
     12-hour marker is `timeparse.MERIDIEM` everywhere a US or month-name
     time is read (`_US_RE`, store.py's `_TS_US_RE`/`_TS_MONTH_RE` behind
     TS_NORMALIZE and DAY_BUCKET, tsformat.js's twins): `PM`, `Pm`,

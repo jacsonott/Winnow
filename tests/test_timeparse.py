@@ -235,6 +235,57 @@ def test_rfc2822_obsolete_years_follow_the_rfc():
     assert parse("rfc2822", "02 Jan 06 15:04 GMT") == "2006-01-02 15:04:00"
 
 
+def test_rfc2822_zones_the_rfc_defines_are_converted():
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 GMT") == "2006-01-02 15:04:05"
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 UT") == "2006-01-02 15:04:05"
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 UTC") == "2006-01-02 15:04:05"
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 Z") == "2006-01-02 15:04:05"
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 EST") == "2006-01-02 20:04:05"
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 EDT") == "2006-01-02 19:04:05"
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 CST") == "2006-01-02 21:04:05"
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 CDT") == "2006-01-02 20:04:05"
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 MST") == "2006-01-02 22:04:05"
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 MDT") == "2006-01-02 21:04:05"
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 PST") == "2006-01-02 23:04:05"
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 PDT") == "2006-01-02 22:04:05"
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 +0530") == "2006-01-02 09:34:05"
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 +0000") == "2006-01-02 15:04:05"
+    # A comment after the zone is a comment; the zone still counts.
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 -0800 (PST)") == "2006-01-02 23:04:05"
+    # A zone written with the offset as an explicit param beside it: the
+    # value's own zone wins, as everywhere else.
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 EST", {"utc_offset": "+02:00"}) == "2006-01-02 20:04:05"
+
+
+def test_rfc2822_zone_it_does_not_know_is_a_failure_not_utc():
+    """"15:04:05 CET" came out 15:04:05 — the wall-clock time read as UTC,
+    an hour off, counted as a success — while "15:04:05 EST" was
+    converted. A zone that cannot be applied is a value that does not
+    parse: NULL, and counted, so it shows under "unparsed rows"."""
+    for zone in ("CET", "CEST", "IST", "BST", "JST", "AEST", "cet", "Europe/Berlin",
+                 "AST", "ADT",          # Atlantic, or Arabia (+03:00) — can't tell
+                 "A", "M", "N", "Y",    # military letters: RFC 822 had their signs backwards
+                 "+01:00x", "+05", "+1500", "+0560", "(PDT)"):
+        assert parse("rfc2822", f"Mon, 02 Jan 2006 15:04:05 {zone}") is None, zone
+        assert parse("rfc2822", f"Mon, 02 Jan 2006 15:04:05 {zone}", {"utc_offset": "+01:00"}) is None, zone
+    # date(1)'s layout puts the zone before the year — same rule there.
+    assert parse("rfc2822", "Mon Jan  2 15:04:05 CET 2006") is None
+    assert parse("rfc2822", "Mon Jan  2 15:04:05 UTC 2006") == "2006-01-02 15:04:05"
+    assert parse("rfc2822", "Mon Jan  2 15:04:05 PST 2006") == "2006-01-02 23:04:05"
+
+
+def test_rfc2822_no_zone_is_local_time_and_minus_zero_is_utc():
+    """No zone at all is naive local time — kept as written, or shifted by
+    the analyst's fixed offset. "-0000" is not that: RFC 5322 §3.3 says
+    the time IS in UT and only the sender's own zone is unknown, so the
+    offset param (for values that carry no zone) must not move it."""
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05") == "2006-01-02 15:04:05"
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05", {"utc_offset": "+02:00"}) == "2006-01-02 13:04:05"
+    assert parse("rfc2822", "Mon Jan  2 15:04:05 2006", {"utc_offset": "-01:00"}) == "2006-01-02 16:04:05"
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 -0000") == "2006-01-02 15:04:05"
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 -0000", {"utc_offset": "+02:00"}) == "2006-01-02 15:04:05"
+
+
 def test_us_datetime_ampm_rules():
     assert parse("us_datetime", "1/5/2024 1:22:01 PM") == "2024-01-05 13:22:01"
     assert parse("us_datetime", "1/5/2024 12:00:00 AM") == "2024-01-05 00:00:00"
@@ -314,6 +365,8 @@ def test_every_output_matches_the_shapes_store_already_recognizes():
         parse("excel_serial", "45296.5"),
         parse("apache_clf", "10/Oct/2000:13:55:36 -0700"),
         parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 -0700"),
+        parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 EST"),
+        parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 -0000"),
         parse("us_datetime", "1/5/2024 1:22:01 PM"),
         parse("compact_ymd", "20240105132201"),
     ]
