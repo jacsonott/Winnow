@@ -114,6 +114,23 @@ see [docs/notes/README.md](README.md) for the whole set.
   callers can tell the two apart. Nothing that a user can actually type
   reaches the 500 path: `validate_where_fragment` converts SQL errors to
   `ValueError`, and `_regexp` swallows `re.error`.
+- **A 500 means Winnow is broken; input it can't act on is a 4xx.** A
+  route fuzz found ~50 routes answering 500 for the request's own fault,
+  and the fixes follow three rules. An int past SQLite's 64-bit range
+  (any path/query/body id) is ONE handler, `int_out_of_range_handler`,
+  keyed on sqlite3's own OverflowError message rather than a bound on
+  every int parameter — any other OverflowError is still the bug it
+  would be. A structured parameter is checked at the door: a typed
+  pydantic shape where one fits (`tag_view`'s `exclude` pairs → 422),
+  an explicit check where it arrives as text (`group_summary`'s JSON
+  `path`) or as a file (`session_document_problem` /
+  `case_session_document_problem` in store.py, `_filters_file_problem`
+  here) — and a whole case session is checked before its FIRST table is
+  applied, so a bad tenth table can't leave nine written. A missing
+  table is a 404, a table still importing is the 400
+  `Store._require_columns` raises, and no open case is a 400 — nothing
+  is broken, there's just no case yet. `tests/test_api_routes.py`'s
+  last section pins each one through a client that doesn't re-raise.
 - **The background-search routes** — `POST /api/view/start`, `GET
   /api/view/job`, `POST /api/view/job/cancel`, `POST /api/view/adopt`
   (the search box's build, run as a job that builds a *held* view; see

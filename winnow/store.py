@@ -1472,6 +1472,71 @@ def _current_user() -> str:
         return "unknown"
 
 
+def _is_int64(v: Any) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool) and -(1 << 63) <= v < (1 << 63)
+
+
+def _list_of_dicts_problem(doc: dict, key: str, fields: dict[str, Any]) -> str | None:
+    """`doc[key]`, when present, must be a list of objects whose `fields`
+    (name -> type check) hold the right kind of value."""
+    items = doc.get(key)
+    if items is None:
+        return None
+    if not isinstance(items, list):
+        return f"{key!r} should be a list"
+    for i, item in enumerate(items):
+        if not isinstance(item, dict):
+            return f"{key}[{i}] should be an object"
+        for name, ok in fields.items():
+            if not ok(item.get(name)):
+                return f"{key}[{i}].{name} is missing or the wrong type"
+    return None
+
+
+def session_document_problem(doc: Any) -> str | None:
+    """What is wrong with the SHAPE of one table's session (the
+    `winnow-session/1` export_session writes), or None if import_session
+    can read it. A session file is another analyst's — foreign input — and
+    a valid-JSON document of the wrong shape used to reach the importer
+    and die there as a 500 ("'list' object has no attribute 'get'"),
+    sometimes after writing part of itself. Checked before anything is
+    written instead; only the fields the importer reads, so a newer
+    exporter's extra keys still pass."""
+    if not isinstance(doc, dict):
+        return "a session should be a JSON object"
+    if doc.get("source") is not None and not isinstance(doc["source"], dict):
+        return "'source' should be an object"
+    if doc.get("layout") is not None and not isinstance(doc["layout"], dict):
+        return "'layout' should be an object"
+    is_str = lambda v: isinstance(v, str)  # noqa: E731
+    return (
+        _list_of_dicts_problem(doc, "tag_defs", {"id": _is_int64, "name": is_str})
+        or _list_of_dicts_problem(doc, "row_tags", {"rid": _is_int64, "tag_id": _is_int64})
+        or _list_of_dicts_problem(doc, "row_notes", {"rid": _is_int64, "note": is_str})
+        or _list_of_dicts_problem(doc, "saved_views", {"name": is_str})
+        # A derived column's own fields are checked as it is created — a
+        # bad one is a per-column warning there, never a failed import.
+        or _list_of_dicts_problem(doc, "derived_columns", {})
+    )
+
+
+def case_session_document_problem(doc: Any) -> str | None:
+    """The same check for a whole-case session (`winnow-case-session/1`):
+    every table's session in it, before the first one is applied."""
+    if not isinstance(doc, dict):
+        return "a case session should be a JSON object"
+    sources = doc.get("sources")
+    if sources is None:
+        return None
+    if not isinstance(sources, list):
+        return "'sources' should be a list"
+    for i, s in enumerate(sources):
+        problem = session_document_problem(s)
+        if problem:
+            return f"sources[{i}]: {problem}"
+    return None
+
+
 class Store:
     FTS_BUILD_CONCURRENCY = 2  # trigram builds are CPU/writer-bound; more just thrash
 
@@ -5078,6 +5143,13 @@ class Store:
         checkboxes against, and a full scan of a 1.2M-row column to
         populate a picker would cost more than building the columns."""
         src = self._source_lite(source_id)
+        if src.get("is_merge"):
+            # A merge has no table of its own to sample (_sample_column
+            # read `"None"` and died on it). The header menu never offers
+            # Flatten on one; this is the same answer for every other way
+            # of asking, the detail pane's "Flatten this document" included.
+            raise ValueError("Flatten works on one table at a time — open a "
+                             "member table of this merge to flatten its documents")
         if not self._find_column(src, column):
             raise KeyError(f"No column called {column!r}")
         values = self._sample_column(src, column, limit=self.STRUCT_SAMPLE)
@@ -5669,6 +5741,11 @@ class Store:
         are skipped: those already sort and filter correctly, so converting
         them would just duplicate data."""
         src = self._source_lite(source_id)
+        if src.get("is_merge"):
+            # The hint follows an import, and a merge is never imported —
+            # its members already had their turn. It also has no table of
+            # its own to sample.
+            return []
         # Nothing to suggest for a column the analyst has already converted.
         converted = {d["input_column"].lower() for d in self.list_derived_columns(source_id)}
         out = []
@@ -7199,6 +7276,11 @@ class Store:
 
         search_mode = spec.get("search_mode", "contains")
         search = (spec.get("search") or "").strip()
+        if search or (search_mode == "advanced" and spec.get("search_terms")):
+            # Every search mode reads all of the table's columns, and a
+            # table still importing has none yet: `_blob_expr([])` compiled
+            # `() LIKE ?`, a syntax error the route could only call a 500.
+            self._require_columns(src)
         if search_mode == "regex" and search:
             # Base columns only, matching build_fts's doc view exactly — the
             # indexed and fallback paths have to search the same text, and
@@ -10590,6 +10672,12 @@ class Store:
         its own source, query and drill, and this runs them all and
         answers with one label/value row per cell."""
         query = query or {}
+        if not isinstance(query, dict):
+            # A cell's query arrives unchecked inside `cells` (the route's
+            # model only types the top-level one), and `.get` on a string
+            # was a 500 — or, per cell, an AttributeError past the cell's
+            # own error catch.
+            raise ValueError("A widget's query must be an object")
         if source == "cells":
             return self._cells_preview(cells or [], limit)
         if source == "sql":

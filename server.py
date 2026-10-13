@@ -45,6 +45,7 @@ from winnow import archive
 from winnow import workspace as WS
 from winnow.store import (CASE_SUFFIX, DEFAULT_IMPORT_EXTENSIONS, PLASO_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, MissingTable, OpCancelled, Store, ViewExpired,
                    describe_case_lock, probe_case_lock, q, rows_to_xlsx, sweep_orphan_views)
+from winnow.store import case_session_document_problem, session_document_problem
 
 HERE = paths.INSTALL_ROOT  # static/, plugins/, examples/plugins/ all hang off the install root
 
@@ -465,6 +466,22 @@ async def closed_database_handler(request: Request, exc: sqlite3.ProgrammingErro
     return JSONResponse({"detail": f"Internal error: {exc}"}, status_code=500)
 
 
+# An id, count or rid past SQLite's 64-bit INTEGER can't be bound as a
+# parameter, and sqlite3 raises OverflowError for it — from any of the
+# forty-odd routes that take an int straight from the path, query or body
+# and hand it to a query. That is a request this server can't answer, not
+# a defect in it, so it is the client's 400 rather than a 500 that blames
+# the server; one handler instead of a bound on every int parameter, and
+# keyed on sqlite3's own message so an OverflowError from anywhere else
+# (date arithmetic, say) still surfaces as the bug it would be.
+@app.exception_handler(OverflowError)
+async def int_out_of_range_handler(request: Request, exc: OverflowError):
+    if "too large to convert to SQLite" in str(exc):
+        return JSONResponse({"detail": "A number in this request is out of range."},
+                            status_code=400)
+    return await _unhandled_error_handler(request, exc)
+
+
 @app.exception_handler(OpCancelled)
 async def op_cancelled_handler(request: Request, exc: OpCancelled):
     # 499 ("client closed request"): not an error and not the analyst's
@@ -540,8 +557,10 @@ async def _no_cache_static_inner(request: Request, call_next):
 
 
 def store() -> Store:
+    # 400, not 500: nothing is broken — the request needs a case and there
+    # isn't one open yet (the home screen, or a stale tab after a close).
     if STORE is None:
-        raise HTTPException(500, "No case file open")
+        raise HTTPException(400, "No case file open")
     return STORE
 
 
@@ -1630,7 +1649,7 @@ def api_browse_dir_new(request: Request, body: MakeDirBody):
         raise HTTPException(400, f"{name!r} already exists here")
     try:
         os.mkdir(target)
-    except OSError as e:
+    except (OSError, ValueError) as e:   # ValueError: an embedded NUL in the name
         raise HTTPException(400, f"Could not create it: {e}")
     return {"path": target, "name": name}
 
@@ -1783,9 +1802,12 @@ def api_cases_list():
 def api_cases_create(body: CaseCreate):
     if not os.path.isfile(body.path):
         parent = os.path.dirname(os.path.abspath(body.path))
-        if parent:
-            os.makedirs(parent, exist_ok=True)
         try:
+            # Inside the try with the open: a parent that is a FILE, or one
+            # this account can't create, is the path's problem (a 400 that
+            # says so), not a 500.
+            if parent:
+                os.makedirs(parent, exist_ok=True)
             _open_store(body.path).close()
         except Exception as e:
             raise HTTPException(400, f"Could not create case file: {e}")
@@ -3006,6 +3028,8 @@ async def api_ingest_plugin_upload(
 def api_drop_source(source_id: int):
     try:
         store().drop_source(source_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
     except ValueError as e:
         # 409, not 400: the request is well-formed and will succeed once
         # the merge above it is gone. The message names which one.
@@ -3313,12 +3337,21 @@ def api_cancel_op(body: CancelOp):
 def api_group_summary(view_id: str, column: str, order: str = "count", direction: str | None = None,
                        limit: int = 1000, path: str = "", op_token: str | None = None,
                        bucket_datetime: bool = True):
+    # `path` (the outer levels already fixed by nested grouping) is a
+    # JSON-encoded list — GET query params don't carry structured data,
+    # and this stays a GET (not POST) so it keeps the same cacheable,
+    # side-effect-free shape as every other view-summary read. Checked
+    # here, since a query string is anything anyone typed: one that isn't
+    # JSON, or isn't a list of levels, is the request's fault (it used to
+    # surface as a 500 from json.loads or from deep inside the store).
     try:
-        # `path` (the outer levels already fixed by nested grouping) is a
-        # JSON-encoded list — GET query params don't carry structured data,
-        # and this stays a GET (not POST) so it keeps the same cacheable,
-        # side-effect-free shape as every other view-summary read.
         path_list = json.loads(path) if path else None
+    except ValueError:
+        raise HTTPException(400, "path must be a JSON list of group levels")
+    if path_list is not None and not (
+            isinstance(path_list, list) and all(isinstance(p, dict) for p in path_list)):
+        raise HTTPException(400, "path must be a JSON list of group levels")
+    try:
         return JSONResponse(store().group_summary(view_id, column, order=order, direction=direction,
                                                   limit=min(limit, 5000), path=path_list,
                                                   op_token=op_token, bucket_datetime=bucket_datetime))
@@ -3388,6 +3421,9 @@ def api_filter_validate(body: WhereValidate):
         return {"ok": True}
     except ValueError as e:
         return {"ok": False, "error": str(e)}
+    except KeyError as e:
+        # The table, not the fragment: there is nothing to validate against.
+        raise HTTPException(404, str(e))
 
 
 @app.get("/api/rows")
@@ -3405,6 +3441,11 @@ def api_rows(view_id: str, start: int = 0, count: int = 200):
         # str/int/None — and go straight to json.dumps. This endpoint is
         # hit on every scroll, so the saving is felt continuously.
         return JSONResponse(store().fetch_rows(view_id, start, min(count, 10000)))
+    except ValueError as e:
+        # Store._require_columns: the table is still importing (or an
+        # import was killed mid-way). The analyst's tab says so rather
+        # than reporting a server fault.
+        raise HTTPException(400, str(e))
     except KeyError as e:
         raise HTTPException(409, str(e))
 
@@ -3485,6 +3526,8 @@ def api_column_index_drop(source_id: int, column: str):
 def api_column_maxlen(source_id: int):
     try:
         return store().column_max_lengths(source_id)
+    except ValueError as e:   # still importing (Store._require_columns)
+        raise HTTPException(400, str(e))
     except KeyError as e:
         raise HTTPException(404, str(e))
 
@@ -4088,6 +4131,14 @@ def api_dashboard_widget_preview(body: WidgetPreviewBody):
         raise HTTPException(400, {"message": str(e), "missing_table": e.table})
     except ValueError as e:
         raise HTTPException(400, str(e))
+    except sqlite3.Error as e:
+        # A widget's SQL is the analyst's (or a profile's) text — a typo or
+        # a column the table doesn't have is theirs to fix, which is the
+        # 400 /api/sql gives the same query. The closed-case error keeps
+        # its own 409 handler.
+        if isinstance(e, sqlite3.ProgrammingError) and "closed database" in str(e).lower():
+            raise
+        raise HTTPException(400, str(e))
     elapsed = int((time.time() - t0) * 1000)
     out["elapsed_ms"] = elapsed
     if body.dashboard_id is not None and body.widget_id:
@@ -4250,6 +4301,8 @@ def api_derived_paths(body: StructProbe):
     a sample — the picker behind "flatten this into columns"."""
     try:
         return store().detect_struct_paths(body.source_id, body.column)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     except KeyError as e:
         raise HTTPException(404, str(e))
 
@@ -4349,7 +4402,10 @@ class TagViewWrite(BaseModel):
     view_id: str
     tag_id: int
     on: bool = True
-    exclude: list[list[int]] = []  # [[source_id, rid], ...] — rows to leave alone (select-all minus a few)
+    # [[source_id, rid], ...] — rows to leave alone (select-all minus a
+    # few). Typed as PAIRS so a malformed entry is refused at the door with
+    # a 422, rather than unpacked deep in the store into a 500.
+    exclude: list[tuple[int, int]] = []
 
 
 @app.post("/api/row_tags/view")
@@ -4544,12 +4600,35 @@ def api_saved_filters_export():
     )
 
 
+def _filters_file_problem(data: Any) -> str | None:
+    """The shape import_all reads, checked first: a filters file is often
+    another analyst's, and valid JSON of the wrong shape used to die
+    inside the importer as a 500."""
+    if not isinstance(data, dict):
+        return "it should be a JSON object"
+    filters = data.get("filters", [])
+    if not isinstance(filters, list):
+        return "'filters' should be a list"
+    for i, f in enumerate(filters):
+        if not isinstance(f, dict):
+            return f"filters[{i}] should be an object"
+        cols = f.get("col_names", [])
+        if not isinstance(cols, list) or not all(isinstance(c, str) for c in cols):
+            return f"filters[{i}].col_names should be a list of column names"
+        if not isinstance(f.get("name", ""), str) or not isinstance(f.get("payload", {}), dict):
+            return f"filters[{i}] has a name or payload of the wrong type"
+    return None
+
+
 @app.post("/api/saved_filters/import")
 async def api_saved_filters_import(file: UploadFile = File(...), merge: bool = Form(True)):
     try:
         data = json.loads(await file.read())
     except Exception as e:
         raise HTTPException(400, f"Not a valid filters file: {e}")
+    problem = _filters_file_problem(data)
+    if problem:
+        raise HTTPException(400, f"Not a valid filters file: {problem}")
     added = WS.filters.import_all(data, merge=merge)
     return {"added": added}
 
@@ -4577,7 +4656,10 @@ def api_column_layout_save(body: ColumnLayoutSave):
 
 @app.get("/api/session/{source_id}")
 def api_session_export(source_id: int):
-    data = store().export_session(source_id)
+    try:
+        data = store().export_session(source_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
     name = os.path.splitext(data["source"]["name"])[0]
     return JSONResponse(
         data,
@@ -4591,7 +4673,13 @@ async def api_session_import(source_id: int, file: UploadFile = File(...), merge
         session = json.loads(await file.read())
     except Exception as e:
         raise HTTPException(400, f"Not a valid session file: {e}")
-    return await run_in_threadpool(store().import_session, source_id, session, merge=merge)
+    problem = session_document_problem(session)
+    if problem:
+        raise HTTPException(400, f"Not a valid session file: {problem}")
+    try:
+        return await run_in_threadpool(store().import_session, source_id, session, merge=merge)
+    except KeyError as e:   # no such table to import onto
+        raise HTTPException(404, str(e))
 
 
 @app.get("/api/case_session")
@@ -4609,6 +4697,9 @@ async def api_case_session_import(file: UploadFile = File(...), merge: bool = Fo
         session = json.loads(await file.read())
     except Exception as e:
         raise HTTPException(400, f"Not a valid session file: {e}")
+    problem = case_session_document_problem(session)
+    if problem:
+        raise HTTPException(400, f"Not a valid session file: {problem}")
     return await run_in_threadpool(store().import_case_session, session, merge=merge)
 
 
@@ -4657,6 +4748,11 @@ def api_case_sessions_load(name: str, merge: bool = True):
 
 @app.post("/api/case_sessions/adopt")
 def api_case_sessions_adopt(body: CaseSessionAdopt):
+    # Checked whole before it is recorded: a stored session that can never
+    # load is worse than one refused at the door.
+    problem = case_session_document_problem(body.session)
+    if problem:
+        raise HTTPException(400, f"Not a valid session file: {problem}")
     try:
         return store().adopt_session(body.name, body.session)
     except ValueError as e:

@@ -490,10 +490,14 @@ export function detailMenuItems(ctx) {
       });
     }
     items.push({ label: 'Copy path', onclick: () => writeClipboardText(Promise.resolve(path), 'Copied path') });
-    items.push({
-      label: 'Flatten this document into columns…',
-      onclick: () => openFlattenModal(column),
-    });
+    // Single tables only, like the header menu's Flatten: a merge has no
+    // table of its own to sample, and the server refuses one.
+    if (S.sourceId >= 0) {
+      items.push({
+        label: 'Flatten this document into columns…',
+        onclick: () => openFlattenModal(column),
+      });
+    }
   }
   return items;
 }

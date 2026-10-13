@@ -843,3 +843,166 @@ def test_error_log_route_records_and_returns(client):
     assert after["seq"] > before["seq"]
     last = after["entries"][-1]
     assert last["message"] == "unit-test boom" and last["level"] == "error" and last["ts"]
+
+
+# ------------------------------------------- the request's fault, not a 500
+#
+# Every one of these answered 500 ("Internal error: ...") for input the
+# server simply can't act on — found by fuzzing every route. A 500 tells the
+# analyst Winnow is broken and puts an error badge up; the request was the
+# problem, and the status has to say so. Asserted through a client that
+# does NOT re-raise server exceptions, so the status code itself is what
+# each test checks.
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture
+def lenient(store, monkeypatch):
+    import server
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(server, "STORE", store)
+    return TestClient(server.app, headers={"X-Timeline-Lite-Client": "1"},
+                      raise_server_exceptions=False)
+
+
+@pytest.mark.parametrize("method,url,body", [
+    ("DELETE", f"/api/source/{2 ** 63}", None),
+    ("POST", f"/api/source/{-2 ** 70}/nickname", {"nickname": "x"}),
+    ("GET", f"/api/layout?source_id={2 ** 70}", None),
+    ("GET", f"/api/dashboards/{2 ** 63}", None),
+    ("POST", "/api/note", {"source_id": 1, "rid": 2 ** 63, "note": "x"}),
+    ("POST", "/api/tag_time_bounds", {"source_id": 2 ** 64}),
+])
+def test_an_int_past_sqlites_range_is_a_400(lenient, ingested, method, url, body):
+    r = lenient.request(method, url, json=body)
+    assert r.status_code == 400, r.text
+    assert "out of range" in r.json()["detail"]
+
+
+def test_a_missing_table_is_a_404_on_drop_validate_and_session_export(lenient, ingested):
+    assert lenient.delete("/api/source/99").status_code == 404
+    assert lenient.post("/api/filter/validate",
+                        json={"source_id": 99, "fragment": "1=1"}).status_code == 404
+    assert lenient.get("/api/session/99").status_code == 404
+    up = lenient.post("/api/session/99", files={"file": ("s.json", io.BytesIO(b"{}"), "application/json")})
+    assert up.status_code == 404
+
+
+def test_no_case_open_is_the_400_server_md_promises(lenient, monkeypatch):
+    import server
+    monkeypatch.setattr(server, "STORE", None)
+    r = lenient.get("/api/sources")
+    assert r.status_code == 400 and r.json()["detail"] == "No case file open"
+
+
+def test_flatten_paths_on_a_merge_is_refused_not_crashed(lenient, store, write_csv):
+    a = store.ingest_csv(write_csv([["Doc"], ['{"a": 1}']], "a.csv"), name="a", build_fts=False)["id"]
+    b = store.ingest_csv(write_csv([["Doc"], ['{"a": 2}']], "b.csv"), name="b", build_fts=False)["id"]
+    mid = store.create_merge("m", [a, b])["id"]
+    r = lenient.post("/api/derived/paths", json={"source_id": mid, "column": "Doc"})
+    assert r.status_code == 400 and "one table at a time" in r.json()["detail"]
+    # ...the member itself still flattens
+    assert lenient.post("/api/derived/paths", json={"source_id": a, "column": "Doc"}).json()["kind"] == "json"
+    # the post-import hint has nothing to offer a merge, rather than a 500
+    r = lenient.get(f"/api/derived/suggestions?source_id={mid}")
+    assert r.status_code == 200 and r.json() == []
+
+
+@pytest.mark.parametrize("path", ["x", "{", "5", '{"column": "User"}', "[1, 2]"])
+def test_group_summary_with_a_malformed_path_is_a_400(lenient, ingested, path):
+    store, sid = ingested
+    vid = store.build_view(sid, {})["view_id"]
+    r = lenient.get("/api/group_summary", params={"view_id": vid, "column": "User", "path": path})
+    assert r.status_code == 400, r.text
+
+
+@pytest.mark.parametrize("exclude", [[[1]], [[]], [[1, 2, 3]], [["a", "b"]]])
+def test_tag_view_with_a_malformed_exclude_pair_is_refused(lenient, ingested, exclude):
+    store, sid = ingested
+    vid = store.build_view(sid, {})["view_id"]
+    tag_id = store.list_tags()[0]["id"]
+    r = lenient.post("/api/row_tags/view", json={"view_id": vid, "tag_id": tag_id, "exclude": exclude})
+    assert r.status_code == 422, r.text
+    assert store.tag_counts(sid)["counts"] == {}     # and nothing was tagged
+
+
+_WRONG_SHAPES = [[], "x", 5, None, {"filters": "x"}, {"filters": [1, "a", None]},
+                 {"filters": [{"col_names": [1]}]},
+                 {"format": "winnow-case-session/1", "sources": "x"},
+                 {"format": "winnow-case-session/1", "sources": [1]},
+                 {"format": "winnow-case-session/1", "sources": [{"row_tags": [{"rid": "x", "tag_id": 1}]}]},
+                 {"row_tags": "x"}, {"row_tags": [{"rid": 10 ** 30, "tag_id": 1}]},
+                 {"tag_defs": [{"id": 1, "name": None}]}, {"source": []}]
+
+
+@pytest.mark.parametrize("doc", _WRONG_SHAPES)
+def test_imports_of_a_wrong_shape_document_are_a_400(lenient, ingested, doc):
+    store, sid = ingested
+
+    def upload(url):
+        return lenient.post(url, files={"file": ("f.json", io.BytesIO(json.dumps(doc).encode()),
+                                                 "application/json")})
+
+    for r in (upload("/api/saved_filters/import"), upload(f"/api/session/{sid}"),
+              upload("/api/case_session"),
+              lenient.post("/api/case_sessions/adopt", json={"name": "z", "session": doc})):
+        assert r.status_code < 500, r.text
+
+
+def test_a_case_session_is_checked_whole_before_any_table_is_written(lenient, ingested):
+    store, sid = ingested
+    good = store.export_case_session()
+    tag = store.list_tags()[0]
+    good["sources"][0]["row_tags"] = [{"rid": 1, "tag_id": tag["id"]}]
+    good["sources"][0]["tag_defs"] = [tag]
+    bad = json.loads(json.dumps(good["sources"][0]))
+    bad["row_notes"] = [{"rid": "one", "note": "x"}]
+    good["sources"].append(bad)
+    r = lenient.post("/api/case_session", files={"file": ("s.json", io.BytesIO(json.dumps(good).encode()),
+                                                          "application/json")})
+    assert r.status_code == 400 and "sources[1]" in r.json()["detail"]
+    assert store.tag_counts(sid)["counts"] == {}      # the first, valid table was not applied either
+
+
+def test_creating_a_case_under_a_file_is_a_400(lenient, tmp_path):
+    blocker = tmp_path / "afile"
+    blocker.write_text("x")
+    r = lenient.post("/api/cases", json={"path": str(blocker / "case.db-winnow"), "name": "c"})
+    assert r.status_code == 400 and "Could not create case file" in r.json()["detail"]
+
+
+def test_new_folder_with_a_nul_in_its_name_is_a_400(lenient, tmp_path):
+    r = lenient.post("/api/browse_dir/new", json={"parent": str(tmp_path), "name": "a\x00b"})
+    assert r.status_code == 400, r.text
+
+
+def test_dashboard_widget_with_bad_sql_or_a_string_query_is_the_analysts_400(lenient, ingested):
+    r = lenient.post("/api/dashboard/widget/preview",
+                     json={"source": "sql", "query": {"sql": "SELECT nope FROM nowhere"}})
+    assert r.status_code == 400 and "nowhere" in r.json()["detail"]
+    # inside a signals grid a bad cell fails ALONE, in its own place
+    r = lenient.post("/api/dashboard/widget/preview", json={
+        "source": "cells", "query": {},
+        "cells": [{"label": "bad", "source": "sql", "query": "SELECT 1"},
+                  {"label": "good", "source": "sql", "query": {"sql": "SELECT 7"}}]})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["rows"] == [["bad", None], ["good", 7]]
+    assert out["cell_errors"][0] and out["cell_errors"][1] is None
+
+
+def test_a_table_still_importing_is_a_400_on_rows_maxlen_and_search(lenient, ingested):
+    store, sid = ingested
+    vid = store.build_view(sid, {})["view_id"]
+    with store.lock, store.db:   # what every ingest path looks like before its columns land
+        store.db.execute("UPDATE sources SET columns='[]' WHERE id=?", (sid,))
+    r = lenient.get("/api/rows", params={"view_id": vid, "start": 0, "count": 10})
+    assert r.status_code == 400 and "still importing" in r.json()["detail"]
+    r = lenient.get("/api/column_maxlen", params={"source_id": sid})
+    assert r.status_code == 400 and "still importing" in r.json()["detail"]
+    for spec in ({"search": "abc"}, {"search": "a.c", "search_mode": "regex"},
+                 {"search_mode": "advanced", "search_terms": [{"term": "abc"}]}):
+        r = lenient.post("/api/view", json={"source_id": sid, **spec})
+        assert r.status_code == 400 and "still importing" in r.json()["detail"], (spec, r.text)
