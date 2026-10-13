@@ -156,7 +156,7 @@ To merge tables:
 2. Tables are grouped by their column names. The names must match, but the order doesn't matter, and case is ignored for A–Z. Tick two or more tables from one group, or use **Select all**.
 3. Type a name, or keep the suggested one, and click **Create merge**. Each merge needs a different name.
 
-Derived columns count when the merge dialog groups tables, so a table you have added a derived column to is only offered beside tables that have the same one.
+Only the columns the tables were imported with are compared, so a derived column you have added to one of them doesn't stop it being offered.
 
 A merge shows ⛓ before its name and works like any other table: filtering, searching, sorting, tagging, notes, grouping, the value picker, derived columns and exports all work on it. The exceptions:
 

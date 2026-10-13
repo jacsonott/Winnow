@@ -110,7 +110,12 @@ exactly as written, unless you fill in **Source UTC offset** (`-05:00`,
 the value wins over the setting. Winnow never guesses daylight saving: in
 the ISO 8601, dd Mmm yyyy and US formats, a value ending in a zone it
 can't convert, such as `EST` or `Europe/Paris`, counts as unparsed rather
-than being read as if it were UTC.
+than being read as if it were UTC. RFC 2822 dates convert the zones that
+standard defines (`UT`, `GMT`, `Z`, `EST`/`EDT`, `CST`/`CDT`, `MST`/`MDT`,
+`PST`/`PDT` and `+hhmm` offsets, plus `UTC`); any other zone, such as `CET`,
+`AST` or a single military letter, counts as unparsed. `-0000` means the
+time is UTC and the sender's own zone is unknown, so it is kept as UTC and
+**Source UTC offset** doesn't shift it.
 
 | Operation | Accepts | Example input → output |
 | --- | --- | --- |
@@ -125,7 +130,7 @@ than being read as if it were UTC.
 | **Excel serial date** | Days since 1899-12-30, fraction = time of day, rounded to the second | `45296.5576` → `2024-01-05 13:22:57` |
 | **.NET ticks** | 100-ns ticks since 0001-01-01 (`DateTime.Ticks`), decimal | `638400581210000000` → `2024-01-05 13:28:41.000000` |
 | **Apache access log** | `dd/Mmm/yyyy:hh:mm:ss +zzzz`, brackets optional | `[05/Jan/2024:13:22:01 +0100]` → `2024-01-05 12:22:01` |
-| **RFC 2822 (email date)** | Email and HTTP dates; two-digit years 50–99 are 19xx, 00–49 are 20xx | `Fri, 05 Jan 2024 13:22:01 -0500` → `2024-01-05 18:22:01` |
+| **RFC 2822 (email date)** | Email and HTTP dates; two-digit years 50–99 are 19xx, 00–49 are 20xx; a zone RFC 2822 doesn't define (`CET`, `IST`…) counts as unparsed | `Fri, 05 Jan 2024 13:22:01 -0500` → `2024-01-05 18:22:01` |
 | **US MM/DD/YYYY hh:mm:ss** | US dates, seconds optional, optional AM/PM in any common spelling (`PM`, `pm`, `p.m.`) and optional zone | `1/5/2024 1:22:01 PM` → `2024-01-05 13:22:01` |
 
 The text formats, BSD syslog and Excel serial dates also take **Source UTC
@@ -307,8 +312,10 @@ All of these are on the derived column's header right-click menu.
 
 - **Re-derive…** reopens the dialog with the column and operation fixed
   and the settings editable: the wrong syslog year, a forgotten UTC
-  offset, another column to try. It is offered for timestamps, combined
-  columns and durations. The column keeps its name, position and width. Any
+  offset, another column to try. It is offered for every derived column
+  except a JSON or XML field: timestamps, combined columns, durations, a
+  **Regex capture**'s pattern and group, and a lookup's table and columns.
+  The column keeps its name, position and width. Any
   derived column built from this one is recomputed after it, and the
   notice names them.
 - **Change the field path…** takes the place of Re-derive for a JSON or
@@ -318,10 +325,7 @@ All of these are on the derived column's header right-click menu.
   first.
 
 There is no rename. To change a derived column's name, remove it and add
-it again under the new name. Do the same to change a **Regex capture**'s
-pattern or a lookup's tables and columns. The header menu shows **Change
-the field path…** on those columns as well, but it can't change a pattern
-or a lookup and refuses the change.
+it again under the new name.
 
 Cancelling a re-derive from the jobs panel keeps the column with whatever
 it had computed. Its ƒ tooltip then says *incomplete — re-derive to
@@ -335,14 +339,19 @@ open and Winnow adds it to each member table, checking all of them first,
 so a name clash on one member stops it everywhere. The preview samples the
 first member, or the merged view under **This view**.
 
-Three things work differently on a merge:
+Two things work differently on a merge:
 
 - **Flatten** isn't offered. Open a member table to flatten its documents.
 - A lookup's **Lookup table** must be a real table, never a merge.
-- **Re-derive…**, **Change the field path…** and **Remove derived
-  column…** on a merge act on the first member table's copy only. After a
-  remove, the merge stops showing the column but the other members keep
-  theirs. To change or remove it everywhere, do it on each member table.
+
+**Re-derive…**, **Change the field path…** and **Remove derived column…**
+on a merge change every member table's copy. Winnow checks all of them
+first: if another derived column on any member is built from it, or the
+members compute it with different operations, nothing changes. Each member
+is recomputed as its own job in the jobs panel; the merged column's ƒ
+tooltip says *building…* until all of them finish, and its **Show N unparsed rows**
+count covers every member. **Remove derived column…** says it removes the
+column from all the tables in the merge.
 
 ## Derived columns travel with the case
 
