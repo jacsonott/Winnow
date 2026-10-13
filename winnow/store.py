@@ -11852,7 +11852,6 @@ class Store:
             src = self._source_lite_on(ro, handle["source_id"])
             cols = self._export_columns(ro, src)
             sel = ", ".join(q(c) for c in cols)
-
             tagnames = {r["id"]: r["name"] for r in ro.execute("SELECT id, name FROM tag_defs")}
             buf = io.StringIO()
             w = csv.writer(buf, lineterminator="\n")
@@ -13249,8 +13248,14 @@ def _csv_safe(v):
 _XLSX_ILLEGAL = re.compile(r"[\000-\010\013\014\016-\037]")
 
 
+# Excel's per-cell text limit. openpyxl enforces it by cutting the string
+# at 32,767 characters and saying nothing.
+XLSX_CELL_MAX = 32_767
+
+
 def _xlsx_safe(v):
-    """_csv_safe, plus the characters a worksheet cannot hold at all.
+    """_csv_safe, plus the characters a worksheet cannot hold at all, and
+    a visible mark on a value too long for one cell.
 
     Winnow keeps control characters in cell VALUES on purpose — ingest
     strips them from column names only, because a name has to be
@@ -13264,17 +13269,33 @@ def _xlsx_safe(v):
     silently shortened string in an exported artifact is worse than a
     visible \\x07: the escape says what was there and is reversible,
     while a strip quietly rewrites evidence.
+
+    Length is the same argument. Past XLSX_CELL_MAX openpyxl truncates
+    without a word, and an encoded PowerShell payload or a long script
+    block is exactly the value that runs past it — the reader of the
+    workbook then has a cut-off command line that looks complete. Cut
+    here instead, with a marker that says it was cut and how long the
+    value is; the case file still holds all of it.
     """
+    full = len(v) if isinstance(v, str) else 0
     if isinstance(v, str) and _XLSX_ILLEGAL.search(v):
         v = _XLSX_ILLEGAL.sub(lambda m: "\\x%02x" % ord(m.group()), v)
-    return _csv_safe(v)
+    v = _csv_safe(v)
+    if isinstance(v, str) and len(v) > XLSX_CELL_MAX:
+        mark = f" …[cut: the value is {full:,} characters, a cell holds {XLSX_CELL_MAX:,} — all of it is in the case]"
+        v = v[: XLSX_CELL_MAX - len(mark)] + mark
+    return v
 
 
 def _esc_like(s: str) -> str:
     return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-_XLSX_SHEET_INVALID = re.compile(r"[\\/?*\[\]:]")
+# What a worksheet NAME cannot hold: Excel's own \ / ? * [ ] : plus every C0
+# control character and DEL — a name is XML text in workbook.xml, and
+# openpyxl writes a BEL there without complaint, producing a workbook
+# that neither Excel nor openpyxl will open again.
+_XLSX_SHEET_INVALID = re.compile(r"[\\/?*\[\]:\x00-\x1f\x7f]")
 
 
 # Excel's hard per-worksheet row limit (1,048,576 including the header).
@@ -13309,15 +13330,18 @@ def rows_to_xlsx(columns: list, rows: list, sheet_name: str = "Query") -> io.Byt
 
 
 def _xlsx_sheet_name(name: str, used: set[str]) -> str:
-    """Excel worksheet names: no \\/?*[]:, max 31 chars, can't be blank or
-    start/end with an apostrophe, and must be unique within the workbook.
+    """Excel worksheet names: no \\/?*[]: (nor control characters), max 31
+    chars, can't be blank or start/end with an apostrophe, can't be
+    "History" (Excel reserves it), and must be unique within the workbook.
     Dedup mirrors sanitize_columns' approach (store.py:137) — append a
-    numeric suffix, truncating the base to make room for it."""
+    numeric suffix, truncating the base to make room for it. The
+    apostrophe rule is applied AFTER the cut to 31: "AAAA…A's log" cut
+    there ends in the apostrophe the full name had in its middle."""
     clean = _XLSX_SHEET_INVALID.sub("_", (name or "Sheet").strip()).strip("'") or "Sheet"
-    clean = clean[:31]
+    clean = clean[:31].rstrip("'")
     base = clean
     n = 1
-    while clean.lower() in used:
+    while clean.lower() in used or clean.lower() == "history":
         suffix = f"_{n}"
         clean = base[: 31 - len(suffix)] + suffix
         n += 1

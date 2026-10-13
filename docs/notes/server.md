@@ -199,7 +199,12 @@ see [docs/notes/README.md](README.md) for the whole set.
   workbook rather than the one cell — so one BEL in one command line used
   to take down the entire tagged export. They are escaped to `\x07` rather
   than dropped, because a silently shortened string in a hand-over artifact
-  is worse than a visible escape.
+  is worse than a visible escape. Length is the same rule: openpyxl cuts a
+  value at Excel's 32,767-character cell limit without saying so, so
+  `_xlsx_safe` cuts first and ends the cell with a marker naming the full
+  length. Sheet names (`_xlsx_sheet_name`) are XML text too — a control
+  character in a source name wrote a workbook nothing would reopen — and
+  the apostrophe rule is applied after the 31-character cut, not before.
 - **`POST /api/sql/export_xlsx`** takes the result the pane is SHOWING
   (columns + rows, up from the client) rather than the query, so the
   workbook matches the screen including a click-sort — which lives only in
