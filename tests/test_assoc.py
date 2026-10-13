@@ -114,6 +114,91 @@ def test_linux_touches_nothing_it_does_not_own(lin, tmp_path):
     assert "libreoffice-calc.desktop" in apps
 
 
+FOREIGN_MIMEAPPS = (
+    "# managed by ansible - do not edit\n"
+    "[Default Applications]\n"
+    "# pdf viewer pinned for the SOC image\n"
+    "application/pdf=org.gnome.Evince.desktop\n"
+    "text/html=firefox.desktop\n"
+    "\n"
+    "[Added Associations]\n"
+    "text/csv=libreoffice-calc.desktop;\n"
+)
+
+
+def test_linux_register_keeps_the_rest_of_mimeapps_as_it_was(lin, tmp_path):
+    """The file is shared by every desktop app and often hand-kept or
+    managed. It was rewritten through ConfigParser, which dropped every
+    comment and blank line: the only change should be our own entry."""
+    cfg = tmp_path / "config"
+    cfg.mkdir(parents=True)
+    (cfg / "mimeapps.list").write_text(FOREIGN_MIMEAPPS)
+    picked, cat = _cat(".csv")
+    lin.register(picked, cat)
+    after = (cfg / "mimeapps.list").read_text()
+    assert after == FOREIGN_MIMEAPPS.replace(
+        "text/csv=libreoffice-calc.desktop;\n",
+        "text/csv=libreoffice-calc.desktop;winnow.desktop;\n")
+    lin.unregister(picked, cat)
+    assert (cfg / "mimeapps.list").read_text() == FOREIGN_MIMEAPPS
+
+
+def test_linux_a_failed_mimeapps_write_leaves_the_old_file(lin, tmp_path, monkeypatch):
+    """It was truncated in place and then written, so a disk filling up
+    (or a kill) part way through left every application's associations
+    gone, not just ours. A write that fails part way must leave the file
+    it was replacing."""
+    import errno
+    cfg = tmp_path / "config"
+    cfg.mkdir(parents=True)
+    (cfg / "mimeapps.list").write_text(FOREIGN_MIMEAPPS)
+
+    real_open = open
+
+    class Full:
+        def __init__(self, f):
+            self.f = f
+
+        def write(self, data):
+            self.f.write(data[:len(data) // 2])
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        def __getattr__(self, name):
+            return getattr(self.f, name)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.f.close()
+
+    def full_open(path, mode="r", *a, **kw):
+        f = real_open(path, mode, *a, **kw)
+        return Full(f) if "w" in mode and str(path).startswith(str(cfg)) else f
+
+    monkeypatch.setattr(assoc, "open", full_open, raising=False)
+    picked, cat = _cat(".csv")
+    with pytest.raises(OSError):
+        lin.register(picked, cat)
+    assert (cfg / "mimeapps.list").read_text() == FOREIGN_MIMEAPPS
+    assert sorted(p.name for p in cfg.iterdir()) == ["mimeapps.list"]
+
+
+def test_linux_a_symlinked_mimeapps_stays_a_symlink(lin, tmp_path):
+    """A dotfiles repo links ~/.config/mimeapps.list in. Replacing the
+    file must replace what the link points at, not the link."""
+    cfg = tmp_path / "config"
+    cfg.mkdir(parents=True)
+    dotfiles = tmp_path / "dotfiles"
+    dotfiles.mkdir()
+    (dotfiles / "mimeapps.list").write_text(FOREIGN_MIMEAPPS)
+    (cfg / "mimeapps.list").symlink_to(dotfiles / "mimeapps.list")
+    picked, cat = _cat(".csv")
+    lin.register(picked, cat)
+    assert (cfg / "mimeapps.list").is_symlink()
+    assert "winnow.desktop" in (dotfiles / "mimeapps.list").read_text()
+
+
 def test_linux_reregister_clears_a_past_manual_removal(lin, tmp_path):
     cfg = tmp_path / "config"
     cfg.mkdir(parents=True)
