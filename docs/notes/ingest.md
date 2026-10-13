@@ -126,8 +126,8 @@ see [docs/notes/README.md](README.md) for the whole set.
 - **Raw text is the catch-all importer, and it is a different reader.**
   `Store.ingest_text` (kind `text`): one row per physical line, the whole
   line in the one `Message` column (`TEXT_COLUMN`), no header, nothing
-  split — a line iterator, not the csv module, so there is no 128 KB
-  field limit and a stray quote swallows nothing. Blank lines are kept
+  split — a line iterator, not the csv module, so there is no field
+  limit and a stray quote swallows nothing. Blank lines are kept
   as empty rows so `rid` is the line number. `_ingest_kind_for_path`
   (server) and `importKindFor` (client) send any name no built-in claims
   here — `hostd.log`, `auth.log.1`, an extensionless dump — *after* plugin
@@ -347,8 +347,9 @@ see [docs/notes/README.md](README.md) for the whole set.
 
 - **An unbalanced quote swallows lines silently, and ragged can't see
   it.** A stray `"` folds every following line into one field until the
-  next quote (or the 128KB field-limit error). The rows vanish from the
-  grid, `ragged_rows` reads 0, and nothing errored. `suspect_quote_rows`
+  next quote (or the end of the file, or `CSV_FIELD_LIMIT` — see the next
+  entry). The rows vanish from the grid, `ragged_rows` reads 0, and
+  nothing errored. `suspect_quote_rows`
   counts rows that consumed ≥10 PHYSICAL file lines — `reader.line_num`
   minus the previous row's, one int compare per row, because a per-cell
   newline scan here benchmarked ingest 11% slower — which is the swallow's
@@ -359,6 +360,22 @@ see [docs/notes/README.md](README.md) for the whole set.
   (EVTX XML) sit under the threshold. It's a heuristic on purpose: csv's
   parse is *correct* for properly-quoted multi-line fields, so this can
   only ever be a warning.
+
+- **The csv field limit is raised, not removed** (`CSV_FIELD_LIMIT`,
+  set process-wide when store.py is imported). csv's own default is
+  131072 characters, and one field past it stopped the import at that
+  line with "field larger than field limit" — an EvtxECmd payload with a
+  PowerShell script block in it, or a base64 blob in a column, is bigger
+  than that. The cap (64 Mi characters) stays because it is also the
+  only bound on a stray quote with no partner: csv folds the rest of the
+  file into one field, built at four bytes a character, and on a 20 GB
+  export unlimited means running the machine out of memory. Two
+  consequences: a swallow under the cap no longer errors out, so
+  `suspect_quote_rows` above is now the signal for it rather than a
+  backstop; and the obvious `field_size_limit(sys.maxsize)` is wrong —
+  the limit is a C long, 32 bits on Windows, and that call raises
+  OverflowError there. tests/test_ingest_broken.py's poison-line tests
+  lower the limit for their duration rather than write a 64 MB line.
 
 - **One broken JSONL line costs one line, not the file.** ingest_json's
   two-pass shape used to make any malformed line an all-or-nothing

@@ -50,6 +50,22 @@ from . import log as wlog
 
 BATCH = 20_000
 SAMPLE_ROWS = 500
+# The csv module's own field limit is 131072 characters, and one field
+# past it stopped the import at that line — an EvtxECmd payload carrying a
+# PowerShell script block, or a base64 blob some tool put in a column, is
+# routinely bigger. Raised rather than removed, because the limit is also
+# what bounds a stray quote with no partner: csv folds the rest of the FILE
+# into that one field, built in memory at four bytes a character, and on a
+# multi-GB export "unlimited" means the analyst's machine runs out of
+# memory instead of the import stopping with a line number. 64 Mi
+# characters is far past any real field and caps that at a few hundred MB.
+# A number rather than sys.maxsize: field_size_limit takes a C long, which
+# is 32 bits on Windows, and sys.maxsize overflows it there. Set once, for
+# the process (it is module state in _csv), so the import preview and the
+# import itself read a file the same way. A swallow that stays under the
+# cap no longer errors at all — suspect_quote_rows is what flags it now.
+CSV_FIELD_LIMIT = 64 * 1024 * 1024
+csv.field_size_limit(CSV_FIELD_LIMIT)
 TRIGRAM_MIN_LEN = 3  # the trigram FTS5 tokenizer can't index anything shorter — see _fts_like_pattern
 SARGABLE_OPS = {"equals", "in"}  # ops a plain single-column B-tree index actually accelerates (see _ensure_column_index_building)
 # SQLite gained LIKE/GLOB pushdown onto fts5 trigram tables in 3.45.0 —
@@ -2691,7 +2707,7 @@ class Store:
                         row = (row + [""] * ncols)[:ncols]
                     # An unbalanced quote makes csv silently swallow every
                     # following line into one field until the next quote (or
-                    # a hard error at the 128KB field limit) — dozens of
+                    # a hard error at CSV_FIELD_LIMIT) — dozens of
                     # evidence lines vanish from the grid with the ragged
                     # counter reading zero. The reader's line_num counts
                     # PHYSICAL lines consumed, so a row that swallowed its

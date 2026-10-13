@@ -10,10 +10,13 @@ recovery contracts, which nothing else in the suite did:
   into NUL-riddled headers that abort CREATE TABLE;
 - one broken JSONL line is counted and skipped, never the whole file;
 - the quote-swallow signature (one field eating the lines after it) is
-  at least *flagged*, since the ragged counter reads zero for it."""
+  at least *flagged*, since the ragged counter reads zero for it;
+- a field past csv's own 128 KB limit is a real field, not a broken
+  file, and imports whole."""
 
 from __future__ import annotations
 
+import csv
 import os
 
 import pytest
@@ -23,15 +26,28 @@ from winnow.store import sanitize_columns
 
 HEADERS = {"X-Timeline-Lite-Client": "1"}
 
-# A field over csv's 131072-byte limit — the reliable way one pathological
-# line hard-stops the reader mid-file.
+# A field over csv's own 131072-character default limit. Store raises the
+# limit to CSV_FIELD_LIMIT, so this is an ordinary (big) field there; the
+# poison-line tests put the old limit back for their duration, which is
+# what keeps a poison line cheap to write — one over the real cap would be
+# a 64 MB fixture.
 BIG_FIELD = "x" * 200_000
+OLD_CSV_FIELD_LIMIT = 131_072
+
+
+@pytest.fixture
+def poison_field_limit():
+    """The reliable way to hard-stop the csv reader mid-file is a field
+    over the field limit; lower the limit so BIG_FIELD is one."""
+    before = csv.field_size_limit(OLD_CSV_FIELD_LIMIT)
+    yield
+    csv.field_size_limit(before)
 
 
 # ------------------------------------------------------------------ csv
 
 
-def test_mid_file_error_keeps_every_parsed_row(store, tmp_path):
+def test_mid_file_error_keeps_every_parsed_row(store, tmp_path, poison_field_limit):
     """25,000 good rows then a poison line: 20,000 had committed, 5,000
     sat in the pending batch. All 25,000 must survive — and the error has
     to say where it stopped and what was kept, because 'field larger than
@@ -51,7 +67,7 @@ def test_mid_file_error_keeps_every_parsed_row(store, tmp_path):
     assert "Line" in msg
 
 
-def test_error_on_the_first_data_line_leaves_no_husk(store, tmp_path):
+def test_error_on_the_first_data_line_leaves_no_husk(store, tmp_path, poison_field_limit):
     """Nothing parsed, nothing kept — and no 0-row source in the table
     list masquerading as a real (empty) import."""
     p = tmp_path / "instant.csv"
@@ -59,6 +75,48 @@ def test_error_on_the_first_data_line_leaves_no_husk(store, tmp_path):
     with pytest.raises(ValueError):
         store.ingest_csv(str(p), build_fts=False)
     assert store.list_sources() == []
+
+
+def test_a_field_over_the_csv_default_limit_imports_whole(store, tmp_path):
+    """csv's default limit is 131072 characters, and one field past it
+    stopped the import at that line ("field larger than field limit") —
+    an EvtxECmd payload with a PowerShell script block in it is routinely
+    bigger. The field lands whole, the rows after it land too, and the
+    preview reads the file the same way the import does."""
+    p = tmp_path / "payload.csv"
+    p.write_text(f"a,b\nbefore,x\nbig,{BIG_FIELD}\nafter,y\n", encoding="utf-8")
+    rec = store.ingest_csv(str(p), build_fts=False)
+    assert rec["row_count"] == 3
+    rows = store.db.execute(f"SELECT a, length(b) FROM src_{rec['id']} ORDER BY rid").fetchall()
+    assert [tuple(r) for r in rows] == [("before", 1), ("big", len(BIG_FIELD)), ("after", 1)]
+    prev = store.preview_csv_text(p.read_text(encoding="utf-8"), name=str(p))
+    assert [r[0] for r in prev["sample_rows"]] == ["before", "big", "after"]
+
+
+def test_csv_field_limit_fits_a_windows_c_long():
+    """field_size_limit takes a C long — 32 bits on Windows — so the
+    obvious sys.maxsize raises OverflowError there at import time."""
+    from winnow.store import CSV_FIELD_LIMIT
+    assert csv.field_size_limit() == CSV_FIELD_LIMIT
+    assert OLD_CSV_FIELD_LIMIT < CSV_FIELD_LIMIT <= 2**31 - 1
+
+
+def test_stray_quote_swallowing_past_the_old_limit_is_flagged(store, tmp_path):
+    """With the old limit a stray quote that swallowed more than 128 KB of
+    the lines after it hard-stopped the import. Now the swallow runs on to
+    the end of the file — and the many-lines-in-one-row heuristic is the
+    signal the analyst gets, so it has to fire for it."""
+    p = tmp_path / "swallow_big.csv"
+    with open(p, "w", encoding="utf-8") as f:
+        f.write("a,b\n")
+        for i in range(10):
+            f.write(f"r{i},x\n")
+        f.write('oops,"unclosed\n')
+        for i in range(3000):
+            f.write(f"swallowed{i},{'y' * 60}\n")   # ~200 KB swallowed
+    rec = store.ingest_csv(str(p), build_fts=False)
+    assert rec["row_count"] == 11
+    assert rec["suspect_quote_rows"] >= 1
 
 
 def test_utf16_csv_is_decoded_not_shredded(store, tmp_path):
