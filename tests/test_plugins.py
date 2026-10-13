@@ -7,8 +7,14 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import struct
+import subprocess
+import sys
 import textwrap
+import time
+import urllib.error
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 
@@ -1752,6 +1758,142 @@ def test_legacy_toggle_body_still_means_everywhere(scoped_client):
     states, _ = _states(scoped_client)
     assert states["demo"]["enabled"] is False and states["demo"]["machine_enabled"] is False
     assert scoped_client.post("/api/plugins/toggle", json={"fs_name": "demo"}).status_code == 400
+
+
+# A plugin that says so the moment any of its code runs: "off in this case"
+# promises the module is never imported at all, not merely unlisted after.
+MARKING_PLUGIN = """
+    import os, pathlib
+    pathlib.Path(os.environ["PLUGIN_MARK_DIR"], "NAME").touch()
+    PLUGIN = {"name": "NAME"}
+
+    def register(api):
+        api.register_api("ping", lambda req: {"alive": True}, methods=["GET"])
+"""
+
+
+def _serve(tmp_path, case_path, plug_dir):
+    """`python server.py --case` for real. What is under test is the state
+    main() leaves the registry in, and no in-process client goes through
+    main()."""
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    env = {**os.environ,
+           "WINNOW_WORKSPACE_DIR": str(tmp_path / "ws"),
+           "WINNOW_ENV_FILE": str(tmp_path / "userenv"),
+           "WINNOW_CASES_DIR": str(tmp_path / "cases"),
+           "WINNOW_PLUGINS_DIR": str(plug_dir),
+           "PLUGIN_MARK_DIR": str(tmp_path / "marks"),
+           "XDG_DATA_HOME": str(tmp_path / "xdg-data"),
+           "XDG_CONFIG_HOME": str(tmp_path / "xdg-config")}
+    proc = subprocess.Popen(
+        [sys.executable, str(REPO / "server.py"), "--case", case_path, "--port", str(port),
+         "--host", "127.0.0.1", "--no-browser", "--no-fts", "--no-idle-shutdown"],
+        cwd=str(tmp_path), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    base = f"http://127.0.0.1:{port}"
+
+    def get(route):
+        """(status, json body or None)"""
+        try:
+            with urllib.request.urlopen(base + route, timeout=15) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, None
+
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            pytest.fail("server exited during startup:\n" + proc.stdout.read().decode(errors="replace"))
+        try:
+            get("/api/version")
+            return proc, get
+        except OSError:
+            time.sleep(0.15)
+    proc.kill()
+    pytest.fail("server never came up")
+
+
+def test_a_case_opened_at_startup_gets_its_own_plugin_set(tmp_path, plug_dir):
+    """`--case` (and double-clicking a case file, which is the same
+    path) loaded plugins before any case was open and never again: a
+    plugin the case switched off ran and served its routes, and one it
+    switched on stayed off, until the analyst happened to open some other
+    case."""
+    from winnow.store import Store
+
+    (tmp_path / "marks").mkdir()
+    for name in ("probe", "wanted"):
+        _write_plugin(plug_dir, name, MARKING_PLUGIN.replace("NAME", name))
+    (tmp_path / "ws").mkdir()
+    # Machine default: probe on (installed), wanted off.
+    (tmp_path / "ws" / "plugins.json").write_text(json.dumps({"disabled": ["wanted"]}))
+    case = str(tmp_path / "case.db-winnow")
+    s = Store(case)
+    s.set_case_setting("plugin_overrides", json.dumps({"probe": False, "wanted": True}))
+    s.close()
+
+    proc, get = _serve(tmp_path, case, plug_dir)
+    try:
+        states = {p["fs_name"]: p for p in get("/api/plugins")[1]["plugins"]}
+        assert (states["probe"]["case_override"], states["probe"]["enabled"]) == (False, False)
+        assert (states["wanted"]["case_override"], states["wanted"]["enabled"]) == (True, True)
+        assert get("/api/plugin/probe/ping")[0] == 404
+        assert get("/api/plugin/wanted/ping") == (200, {"alive": True})
+        # Not imported and then unloaded: never imported.
+        assert sorted(os.listdir(tmp_path / "marks")) == ["wanted"]
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def test_reopening_the_open_case_reapplies_its_plugin_settings(scoped_client, store):
+    """Re-opening the case that is already open skips the store swap, and
+    it skipped the plugin reload along with it — so a registry that did not
+    match the case stayed that way however often the analyst re-opened it.
+    The client resets its plugin tabs on that request and refetches the
+    list on the strength of the server having reloaded."""
+    import server
+
+    # Written behind the registry's back, the way --case startup used to
+    # leave it: the case says off, the loaded set says on.
+    store.set_case_setting("plugin_overrides", json.dumps({"demo": False}))
+    assert _states(scoped_client)[0]["demo"]["enabled"] is True
+
+    r = scoped_client.post("/api/case/open", json={"path": store.path})
+    assert r.status_code == 200
+    assert server.STORE is store          # still the fast path, not a reopen
+    assert _states(scoped_client)[0]["demo"]["enabled"] is False
+
+
+def test_discarding_a_quicklook_drops_the_plugins_it_switched_on(scoped_client, tmp_path, monkeypatch):
+    """Discard leaves no case open, so the machine defaults apply again —
+    but the registry was not reloaded, and a plugin switched on only for
+    the quick look stayed imported, routed and listed as on."""
+    import server
+    from winnow.store import Store
+
+    _write_plugin(server.BUNDLED_PLUGIN_DIR, "looker", """
+        PLUGIN = {"name": "looker"}
+
+        def register(api):
+            api.register_api("ping", lambda req: {"alive": True}, methods=["GET"])
+    """)
+    qdir = tmp_path / server.QUICKLOOK_DIRNAME
+    qdir.mkdir()
+    monkeypatch.setattr(server, "STORE", Store(str(qdir / f"quicklook{server.CASE_SUFFIX}")))
+    server._reload_plugins()
+    scoped_client.post("/api/plugins/toggle", json={"fs_name": "looker", "scope": "on_case"})
+    assert scoped_client.get("/api/plugin/looker/ping").status_code == 200
+
+    assert scoped_client.post("/api/case/discard").status_code == 200
+    states, listing = _states(scoped_client)
+    assert listing["case_open"] is False
+    assert states["looker"]["enabled"] is False and states["looker"]["machine_enabled"] is False
+    assert scoped_client.get("/api/plugin/looker/ping").status_code == 404
 
 
 def test_pivot_aggregates_over_a_merge(pivot_client, store, write_csv):

@@ -232,10 +232,14 @@ export async function pollJobs() {
       // saves CSV that way): the whole file, or a few stray bytes in it.
       const cp1252 = (j.result || []).some((r) => r.encoding === 'cp1252');
       const recoded = (j.result || []).reduce((a, r) => a + (r.cp1252_bytes || 0), 0);
-      const warn = ragged || badRecs || suspect || clashes || cp1252 || recoded;
+      // SQLite TEXT that wasn't UTF-8: imported with U+FFFD in place of
+      // the bytes, and said so rather than shown as if it were the text.
+      const undecodable = (j.result || []).reduce((a, r) => a + (r.undecodable_values || 0), 0);
+      const warn = ragged || badRecs || suspect || clashes || cp1252 || recoded || undecodable;
       toast(`${j.name}: ${total.toLocaleString()} rows imported`
         + (ragged ? ` · ${ragged.toLocaleString()} ragged rows padded/trimmed` : '')
         + (badRecs ? ` · ${badRecs.toLocaleString()} unreadable record${badRecs === 1 ? '' : 's'} skipped` : '')
+        + (undecodable ? ` · ${undecodable.toLocaleString()} text value${undecodable === 1 ? ' was' : 's were'} not valid UTF-8 (shown with \ufffd)` : '')
         // Many-newline fields are the signature of an unbalanced quote
         // swallowing the lines after it — a warning, not a verdict.
         + (suspect ? ` · ${suspect.toLocaleString()} row${suspect === 1 ? '' : 's'} with very long multi-line fields — check for a stray quote if the row count looks low` : '')

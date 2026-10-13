@@ -226,3 +226,49 @@ def test_containers_past_the_recursion_depth_keep_the_same_text():
     assert _json_leaf_text(_json_loads(doc)) == json.dumps(json.loads(doc), ensure_ascii=False) == doc
     literal = "[" * 500 + '{"n": 1.10, "n": 1E400}' + "]" * 500
     assert _json_leaf_text(_json_loads(literal)) == literal
+
+
+def test_a_lone_surrogate_escape_costs_nothing(store, tmp_path):
+    """"\\udc80" is legal JSON that decodes to a string SQLite can't hold
+    as UTF-8: the batch's insert raised "surrogates not allowed" and the
+    import stopped — in a key, before a single row. The escape is kept as
+    text, the way the file wrote it, so nothing is lost."""
+    from winnow.store import BATCH
+
+    path = tmp_path / "ev.jsonl"
+    with open(path, "w", encoding="utf-8") as f:
+        for i in range(1, BATCH + 11):
+            if i == BATCH + 5:
+                f.write('{"id": %d, "msg": "evil \\udc80 here", "nested": {"k": "\\ud800"}}\n' % i)
+            else:
+                f.write(json.dumps({"id": i, "msg": f"m{i}"}) + "\n")
+    rec = store.ingest_json(str(path), build_fts=False)
+    assert rec["row_count"] == BATCH + 10
+    v = store.build_view(rec["id"], {"source_id": rec["id"]})
+    cells = store.fetch_rows(v["view_id"], BATCH + 4, 1)["rows"][0]["cells"]
+    assert cells[1] == "evil \\udc80 here"
+    assert json.loads(cells[2]) == {"k": "\ud800"}       # still the JSON it was
+
+    keyed = tmp_path / "k.jsonl"
+    keyed.write_text('{"a": 1, "\\ud800x": 2}\n{"a": 3}\n', encoding="utf-8")
+    rec = store.ingest_json(str(keyed), build_fts=False)
+    assert rec["row_count"] == 2
+    assert [c["name"] for c in rec["columns"]] == ["a", "\\ud800x"]
+
+
+def test_surrogate_escaping_and_literal_text_hold_together(store, tmp_path):
+    """Two fixes meet in _json_leaf_text and _flatten_json: a lone surrogate
+    is written back as its escape (utf8_text), and a container keeps its
+    numbers' literal text and every duplicated key. Neither undoes the
+    other. A key whose surrogate escapes to the same text as a key that
+    literally reads \\ud800 is a collision like any other: both values
+    kept, the record counted."""
+    p = tmp_path / "both.jsonl"
+    p.write_text('{"n": {"k": "\\ud800", "x": 1.10, "x": 2E3}, "\\ud800": 1, "\\\\ud800": 2}\n',
+                 encoding="utf-8")
+    rec = store.ingest_json(str(p), flatten_mode="none", build_fts=False)
+    cols, rows = _cells(store, rec)
+    assert cols == ["n", "\\ud800", "\\ud800_1"]
+    assert rows == [('{"k": "\\ud800", "x": 1.10, "x": 2E3}', "1", "2")]
+    assert json.loads(rows[0][0])["k"] == "\ud800"
+    assert rec["key_collisions"] == 1
