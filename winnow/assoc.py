@@ -247,7 +247,7 @@ class LinuxAssoc:
             f"Exec={exe} %F\n"
             "Terminal=false\n"
             "NoDisplay=true\n"          # a file handler, not a launcher-menu app
-            f"Icon={icon_file('png')}\n"  # absolute path: no install-into-theme step needed for the app icon
+            f"Icon={_desktop_string(icon_file('png'))}\n"  # absolute path: no install-into-theme step needed for the app icon
             f"MimeType={';'.join(sorted(mimes))};\n"
             "Categories=Utility;\n"
         )
@@ -427,12 +427,39 @@ class LinuxAssoc:
         return out
 
 
+# The Desktop Entry spec's reserved characters for an Exec= argument: one
+# containing any of them must be double-quoted.
+_DESKTOP_RESERVED = frozenset(' \t\n"\'\\><~|&;$*?#()`')
+
+
+def _desktop_string(value: str) -> str:
+    """A `string`-type .desktop value: backslash and the whitespace
+    controls escaped. The key-file reader undoes this BEFORE Exec's own
+    quoting rule runs, which is why a literal backslash in a quoted Exec
+    argument ends up as four of them."""
+    return (value.replace("\\", "\\\\").replace("\n", "\\n")
+            .replace("\t", "\\t").replace("\r", "\\r"))
+
+
 def _desktop_quote(arg: str) -> str:
-    # Desktop-entry Exec quoting: double quotes with backslash-escaping —
-    # NOT shell quoting. Paths with spaces are the norm on analyst boxes.
-    if not any(c in arg for c in ' "\\'):
-        return arg
-    return '"' + arg.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    """One Exec= argument, encoded the way the Desktop Entry spec says —
+    NOT shell quoting, and not just "quote it if it has a space", which
+    is what this used to be. Three layers, applied in this order and
+    undone by the launcher in the reverse one:
+
+    1. quoting: an argument with a reserved character is wrapped in
+       double quotes, with `"`, backtick, `$` and `\\` backslash-escaped
+       inside them. An install under /home/o'brien/ was left unquoted,
+       and GLib's argv parser read the apostrophe as an unterminated
+       quote — the entry did nothing on a double-click;
+    2. field codes: a literal `%` is `%%`, inside quotes too — the
+       launcher expands %-codes over the raw line first, so "100%done"
+       lost its `%d`;
+    3. the `string` escapes of the key-file format (_desktop_string),
+       which doubles every backslash the first layer wrote."""
+    if any(c in _DESKTOP_RESERVED for c in arg):
+        arg = '"' + "".join("\\" + c if c in '"`$\\' else c for c in arg) + '"'
+    return _desktop_string(arg.replace("%", "%%"))
 
 
 # ----------------------------------------------------------------- windows

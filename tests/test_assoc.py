@@ -150,6 +150,103 @@ def test_desktop_exec_quoting_handles_spaces():
     assert assoc._desktop_quote("plain") == "plain"
 
 
+# Spelled out here from the spec rather than imported, so the reader below
+# can't agree with the writer just by sharing its mistake.
+_SPEC_RESERVED = set(' \t\n"\'\\><~|&;$*?#()`')
+
+
+def _read_exec(value: str) -> list[str]:
+    """An Exec= value back to argv, the way the Desktop Entry spec says a
+    launcher reads it: the key-file `string` escapes first, then %-field
+    codes (%% is a literal %; %F stays as a marker here), then the
+    quoting rule. Strict where the spec is — an unquoted reserved
+    character or an unknown escape is an error, as it is to GLib."""
+    out, i = [], 0
+    while i < len(value):                            # 1. string escapes
+        if value[i] == "\\":
+            nxt = value[i + 1]
+            out.append({"s": " ", "n": "\n", "t": "\t", "r": "\r", "\\": "\\"}[nxt])
+            i += 2
+        else:
+            out.append(value[i])
+            i += 1
+    line, out, i = "".join(out), [], 0
+    while i < len(line):                             # 2. field codes
+        if line[i] == "%":
+            code = line[i + 1]
+            assert code in "%F", f"stray field code %{code} in {line!r}"
+            out.append("%" if code == "%" else "\0F")
+            i += 2
+        else:
+            out.append(line[i])
+            i += 1
+    line, args, i = "".join(out), [], 0
+    while i < len(line):                             # 3. quoting
+        if line[i] == " ":
+            i += 1
+            continue
+        if line[i] == '"':
+            buf, i = [], i + 1
+            while line[i] != '"':
+                if line[i] == "\\":
+                    assert line[i + 1] in '"`$\\', f"bad escape in {line!r}"
+                    i += 1
+                buf.append(line[i])
+                i += 1
+            args.append("".join(buf))
+            i += 1
+        else:
+            j = line.find(" ", i)
+            tok = line[i:] if j < 0 else line[i:j]
+            assert not set(tok) & _SPEC_RESERVED, f"unquoted reserved char in {tok!r}"
+            args.append(tok)
+            i += len(tok)
+    return ["%F" if a == "\0F" else a for a in args]
+
+
+AWKWARD_INSTALLS = ["with space", "o'brien", "100%done", "it's mine", 'say "hi"',
+                    "back\\slash dir", "dollar$HOME", "tab\there", "a&b (1)"]
+
+
+@pytest.mark.parametrize("name", AWKWARD_INSTALLS)
+def test_desktop_exec_reads_back_as_the_launch_command(lin, tmp_path, monkeypatch, name):
+    """Exec= quoting only ever handled a space, `"` and a single layer of
+    backslash: an install under o'brien/, 100%done/ or say "hi"/ wrote
+    an entry the desktop's launcher misread (an unterminated quote, an
+    eaten %d), and the double-click did nothing."""
+    from winnow import paths
+    monkeypatch.setattr(paths, "INSTALL_ROOT", tmp_path / name)
+    lin._write_desktop(["text/csv"])
+    entry = (tmp_path / "share/applications/winnow.desktop").read_text(encoding="utf-8")
+    exec_value = next(l for l in entry.splitlines() if l.startswith("Exec="))[len("Exec="):]
+    assert _read_exec(exec_value) == assoc.launch_command() + ["%F"]
+
+
+@pytest.mark.skipif(not __import__("shutil").which("gio"), reason="needs GLib's gio launcher")
+def test_gio_launches_the_entry_from_an_awkward_install(lin, tmp_path, monkeypatch):
+    """The same thing through a real desktop launcher, where there is one:
+    GLib's `gio launch`, which is what a GNOME file manager uses."""
+    import subprocess
+    import time
+    from winnow import paths
+
+    root = tmp_path / "it's 100% \"mine\" $x"
+    root.mkdir()
+    got = tmp_path / "argv.txt"
+    (root / "server.py").write_text(
+        f"import sys; open({str(got)!r}, 'w').write(repr(sys.argv[1:]))\n", encoding="utf-8")
+    monkeypatch.setattr(paths, "INSTALL_ROOT", root)
+    lin._write_desktop(["text/csv"])
+    target = tmp_path / "evidence file.csv"
+    target.write_text("a\n")
+    subprocess.run(["gio", "launch", str(tmp_path / "share/applications/winnow.desktop"),
+                    str(target)], capture_output=True, timeout=30)
+    deadline = time.monotonic() + 30
+    while not got.exists() and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert got.read_text() == repr(["--assoc", str(target)])
+
+
 # --------------------------------------------------------------- windows
 
 
