@@ -1544,6 +1544,10 @@ def api_case_discard():
     _remove_case_file(path)
     with contextlib.suppress(Exception):
         instances.set_case(None)
+    # No case is a policy change too, like a case switch: a plugin that was
+    # on only for this quick-look would otherwise stay imported, routed and
+    # listed as on at the home screen, under machine settings that say off.
+    _reload_plugins()
     return {"ok": True}
 
 

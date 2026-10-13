@@ -95,7 +95,11 @@ see [docs/notes/README.md](README.md) for the whole set.
   `uvicorn server:app` gets them, not just `python server.py`;
   `--plugins-dir` / `$WINNOW_PLUGINS_DIR` add directories) and reloaded
   live by `_reload_plugins()` whenever Settings → Plugins toggles or
-  installs one — `PluginRegistry.load` is written to be safely re-run on
+  installs one, and whenever the open case changes — a switch, and a
+  quick-look discard, which leaves NO case and so the machine defaults
+  (the per-case overrides make each of those a policy change; discard
+  once skipped it, and a plugin on only for that quick-look kept serving
+  routes at the home screen) — `PluginRegistry.load` is written to be safely re-run on
   a live server (registry rebuilt wholesale; superseded modules linger in
   sys.modules under unique per-load names because Python can't truly
   unload code, but nothing references them again). Enabled/disabled state
