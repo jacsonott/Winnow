@@ -35,8 +35,9 @@ evidence imported the same way. It also leaves out the Notes page, merges,
 dashboards, the watchlist and SQL tabs; those stay in the case file and are
 untouched by saving or loading.
 
-The Sessions panel lists each session with its counts, the number of
-tables it covers and when it was saved, newest first. A session you
+The Sessions panel lists each session with how many rows it has tagged (a
+row with two tags counts once) and how many notes, the number of tables it
+covers and when it was saved, newest first. A session you
 received from someone else is marked **received**.
 
 ### Saving a session
@@ -67,10 +68,13 @@ Two things to know:
   The session you saved before loading is your undo.
 - A table that was made inside Winnow, by the SQL pane's
   **Save as table…** or by a plugin tab such as first_last, has no source
-  file to fingerprint, so a load can't match it to its session entry. Its
-  tags are cleared by the load and not put back, and the warning says the
-  table "isn't open". Tables saved from the grid with **Save as table** are
-  not affected.
+  file to fingerprint, so Winnow gives it an identity of its own when it is
+  made. A load finds it by that identity, and so does a copy of it in
+  another case. A table another analyst made the same way, with the same
+  name and rows, is a different table and gets none of these tags. A
+  session saved by an older version of Winnow didn't record that identity,
+  so a load can't match its entries for such tables: it leaves those
+  tables' current tags and notes as they are, and says so.
 
 Any table the session couldn't place is reported in a message after the
 load; see [How a session finds its tables](#how-a-session-finds-its-tables).
@@ -125,7 +129,8 @@ rather than let that happen.
 
 Tables are matched by the evidence file's fingerprint, never by Winnow's
 internal numbering, so a session from another analyst's case lines up with
-yours. When several tables come from one file (every table of one SQLite
+yours. A table made inside Winnow is matched by the identity it was given
+when it was made. When several tables come from one file (every table of one SQLite
 database, every sheet of one workbook, or a file imported twice), the
 table's name, columns and row count pick the right one. The table name
 doesn't have to match: a reviewer can name their tables differently.
@@ -139,6 +144,8 @@ For each table in the session, loading does one of these:
 | The table matches but has a different row count or columns (imported with other options) | Skipped with a warning. The table keeps its own tags and notes. |
 | The file isn't in your case, but it is still at the path the session recorded | Winnow checks the file's fingerprint, re-imports it the way it was originally imported, then applies the tags. A table that came in through a plugin's importer can't be re-imported this way. |
 | The file isn't in your case and isn't at the recorded path, or has changed | Skipped with a warning. Import it yourself, then load again. |
+| The table was made inside Winnow, and your case has neither it nor a copy of it | Skipped with a warning: there is no file to re-import it from. A table of the same name that you made yourself is a different table and gets none of these tags. |
+| A session from an older Winnow, for a table made inside Winnow | Skipped with a warning. The table it could be keeps its own tags and notes. |
 
 A recorded path that isn't a local absolute path (a network share, for
 example) is never followed. Each warning appears as a message after the
@@ -165,8 +172,9 @@ other didn't, and where both tagged a row differently.
 
 1. Open **Case ▾ → Sessions…** and go to **Compare two sessions**.
 2. Pick **From** and **to**. Either side can be **Current work (live)**,
-   your case as it is now; both start there, so pick at least one session.
-   The usual review is the session that was handed over on the left and
+   your case as it is now. Once a session is saved, **From** starts on the
+   newest one and **to** on **Current work (live)**: what has changed since
+   you last saved. The usual review is the session that was handed over on the left and
    your current work on the right.
 3. Click **Compare**.
 
@@ -185,7 +193,8 @@ analysts' sessions from different cases compare correctly. If the two
 sessions cover different tables, the panel says so above the counts. A
 table that only one side has still gets a line, with every tagged row in
 it counted as a difference. A table that isn't in your case is listed as
-"not in this case" and its counts can't be opened.
+"not in this case" and its counts can't be opened, and so is a table made
+inside Winnow that an older session recorded, since it can't be matched.
 
 Click a count to open those rows in the table. The grid is filtered to
 exactly those rows, and each carries a mark in the gutter: **A** for left

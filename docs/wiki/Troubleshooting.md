@@ -246,13 +246,16 @@ or several tables could be it. Import the same file the same way, then
 load again. [Sessions and export](Sessions-and-export.md) lists every
 case.
 
-### Tags on a table made in Winnow vanished after loading a session
+### A session didn't restore tags on a table made in Winnow
 
 Tables saved from the SQL pane with **Save as table…**, or written by a
-plugin tab such as first_last, have no source file to match a session
-entry against. Loading a session clears their tags and can't put them
-back; the warning says the table "isn't open". Until that changes, export
-those tables' tagged rows before loading a session.
+plugin tab such as first_last, are matched by an identity Winnow gives them
+when they are made. A session saved by an older version of Winnow didn't
+record it, so loading that session can't tell which table it meant. Those
+tables keep the tags and notes they have, and the message after the load
+names them. Save a new session to record them. A session from another
+analyst's case never applies to a table you made yourself, even one with
+the same name; only a copy of their table matches.
 
 ## Plugins
 

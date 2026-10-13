@@ -361,7 +361,8 @@ another analyst opens with its derived columns built. A
 loading it rebuilds the columns from the receiving case's own data. A
 column whose name is already taken there is skipped with a warning. A
 lookup column is recreated only if the receiving case has a table that
-matches the lookup table it was built from.
+matches the lookup table it was built from; for a lookup table made inside
+Winnow, that means the same table or a copy of it.
 
 Saving a view as a new table copies a derived column's values into it as
 an ordinary column. Winnow refuses the copy while one of the table's
