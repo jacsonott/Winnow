@@ -527,6 +527,27 @@ def _numeric_expr(sql_expr: str) -> str:
     return f"(CASE WHEN {sql_expr} REGEXP '{NUM_RE.pattern}' THEN CAST({sql_expr} AS REAL) ELSE NULL END)"
 
 
+def _sqlite_has_json_each() -> bool:
+    """JSON1 is built in from SQLite 3.38 and compiled into Python's own
+    builds well before that, but a distro SQLite can still lack it."""
+    try:
+        with contextlib.closing(sqlite3.connect(":memory:")) as c:
+            c.execute("SELECT value FROM json_each('[1]')").fetchall()
+        return True
+    except sqlite3.Error:
+        return False
+
+
+# An `in` filter binds its whole list as ONE JSON parameter and reads it
+# back with json_each, rather than one `?` per item: a pasted list of a few
+# thousand IOCs on a merge (the WHERE compiles once per member) is past
+# stock SQLite's 32,766-variable limit, and a 999-line list already is on
+# SQLite before 3.32. `x IN (SELECT value FROM json_each(?))` still uses a
+# column index (EXPLAIN: SEARCH ... USING INDEX (x=?), LIST SUBQUERY), and
+# applies the column's affinity to the values exactly as the list did.
+_HAS_JSON_EACH = _sqlite_has_json_each()
+
+
 def _regexp(pattern: str, value: Any) -> bool:
     if value is None:
         return False
@@ -7040,6 +7061,8 @@ class Store:
                 # Row ids arrive as strings (the tree is JSON from a picker);
                 # bind them as the integers the column holds.
                 items = [int(s) if str(s).strip().lstrip("-").isdigit() else s for s in items]
+            if _HAS_JSON_EACH:   # one parameter however long the list — see _HAS_JSON_EACH
+                return f"{c} IN (SELECT value FROM json_each(?))", [json.dumps(items)]
             return f"{c} IN ({','.join('?' * len(items))})", items
         return "", []
 
@@ -11826,12 +11849,21 @@ class Store:
         "tagged or not"), so unlike _export_view_csv_rows this doesn't need
         v.view_N at all — just row_tags per source_id. Reads run on a
         _reader() connection checked out per source, so a big multi-sheet
-        export never touches self.lock; openpyxl's in-memory writes below
-        don't touch the db at all."""
+        export never touches self.lock.
+
+        The tagged rows are read in keyset pages, cells joined to the page
+        of row_tags they came from and tags/notes fetched by the page's rid
+        RANGE — never a list of rids. It used to bind every tagged rid of a
+        source into one `IN (...)`, which past 32,766 tagged rows is "too
+        many SQL variables" on a stock SQLite build (python.org's Windows
+        Python), so the export failed outright for exactly the cases with
+        the most work in them. A source with more tagged rows than one
+        worksheet holds continues on numbered sheets (_xlsx_write_sheets,
+        the all-tables rule); write-only, so no cell objects pile up."""
         tagnames = {t["id"]: t["name"] for t in self.list_tags()}
-        wb = Workbook()
-        wb.remove(wb.active)
+        wb = Workbook(write_only=True)
         used_names: set[str] = set()
+        sheets = 0
 
         for src in self.list_sources():
             if not src.get("tagged_row_count"):
@@ -11839,41 +11871,43 @@ class Store:
             source_id = src["id"]
             with self._reader() as ro, self._dropped_view_is_expired():
                 cols = self._export_columns(ro, src)
-                sel = ", ".join(q(c) for c in cols)
-                rids = [r[0] for r in ro.execute(
-                    "SELECT DISTINCT rid FROM row_tags WHERE source_id=? ORDER BY rid", (source_id,)
-                )]
-                cellmap: dict[int, tuple] = {}
-                tmap: dict[int, list[str]] = {}
-                nmap: dict[int, str] = {}
-                if rids:
-                    ph = ",".join("?" * len(rids))
-                    for row in ro.execute(
-                        f"SELECT rid, {sel} FROM {self._from_clause(src)} WHERE rid IN ({ph})", rids
-                    ):
-                        cellmap[row["rid"]] = tuple(row[c] for c in cols)
-                    for rid, tid in ro.execute(
-                        f"SELECT rid, tag_id FROM row_tags WHERE source_id=? AND rid IN ({ph})", [source_id, *rids]
-                    ):
-                        tmap.setdefault(rid, []).append(tagnames.get(tid, str(tid)))
-                    for rid, note in ro.execute(
-                        f"SELECT rid, note FROM row_notes WHERE source_id=? AND rid IN ({ph})", [source_id, *rids]
-                    ):
-                        nmap[rid] = note
+                sel = ", ".join(self._col_ref(src, c, "s") for c in cols)
 
-            ws = wb.create_sheet(_xlsx_sheet_name(src["name"], used_names))
-            ws.append(_export_header(cols, _xlsx_safe))
-            for rid in rids:
-                if rid not in cellmap:
-                    continue
-                ws.append([
-                    rid,
-                    _xlsx_safe("; ".join(tmap.get(rid, []))),
-                    _xlsx_safe(nmap.get(rid, "")),
-                    *[_xlsx_safe(v) for v in cellmap[rid]],
-                ])
+                def tagged_rows(ro=ro, sel=sel, source_id=source_id, src=src):
+                    last = 0
+                    while True:
+                        page = ro.execute(
+                            f"SELECT s.rid, {sel} FROM {self._from_clause(src, 's')} WHERE s.rid IN "
+                            f"(SELECT DISTINCT rid FROM row_tags WHERE source_id=? AND rid > ? "
+                            f"ORDER BY rid LIMIT {BATCH}) ORDER BY s.rid", (source_id, last),
+                        ).fetchall()
+                        if not page:
+                            return
+                        lo, hi = page[0][0], page[-1][0]
+                        tmap: dict[int, list[str]] = {}
+                        for rid, tid in ro.execute(
+                            "SELECT rid, tag_id FROM row_tags WHERE source_id=? AND rid BETWEEN ? AND ?",
+                            (source_id, lo, hi),
+                        ):
+                            tmap.setdefault(rid, []).append(tagnames.get(tid, str(tid)))
+                        nmap = {rid: note for rid, note in ro.execute(
+                            "SELECT rid, note FROM row_notes WHERE source_id=? AND rid BETWEEN ? AND ?",
+                            (source_id, lo, hi))}
+                        for row in page:
+                            rid = row[0]
+                            yield [
+                                rid,
+                                _xlsx_safe("; ".join(tmap.get(rid, []))),
+                                _xlsx_safe(nmap.get(rid, "")),
+                                *[_xlsx_safe(v) for v in row[1:]],
+                            ]
+                        last = hi
 
-        if not wb.sheetnames:
+                n_sheets, _ = _xlsx_write_sheets(wb, used_names, src["name"],
+                                                 _export_header(cols, _xlsx_safe), tagged_rows())
+                sheets += n_sheets
+
+        if not sheets:
             wb.create_sheet("No tagged rows").append(["No rows are tagged in this case yet."])
 
         buf = io.BytesIO()
@@ -11907,12 +11941,13 @@ class Store:
         that doesn't travel — recorded as an export exception under
         invariant #9). Same header convention as the tagged
         export (Line, Tags, Note, then the analyst's layout columns), same
-        formula guard. Differences from export_tagged_xlsx, each because
-        "all rows" is a different size of thing:
+        formula guard, same write-only workbook and the same continuation
+        sheets (_xlsx_write_sheets). Differences from export_tagged_xlsx,
+        each because "all rows" is a different size of thing:
 
-        - openpyxl's write-only workbook, saved to `path` (a temp file the
-          route hands to FileResponse) rather than an in-memory BytesIO —
-          a 2M-row table as Python cell objects is gigabytes.
+        - Saved to `path` (a temp file the route hands to FileResponse)
+          rather than an in-memory BytesIO — even compressed, every row of
+          the case is far more than its tagged subset.
         - Rows are read in keyset chunks (`WHERE rid > ? ORDER BY rid`)
           on one _reader() checkout per source; never self.lock
           (invariant #4). Tags and notes are preloaded per source with
@@ -11923,7 +11958,6 @@ class Store:
           how the analyst hears about it first.
 
         Returns {"sheets": n, "rows": n} for the log line."""
-        per = XLSX_MAX_ROWS - 1
         tagnames = {t["id"]: t["name"] for t in self.list_tags()}
         wb = Workbook(write_only=True)
         used_names: set[str] = set()
@@ -11944,44 +11978,29 @@ class Store:
                 nmap = {rid: note for rid, note in ro.execute(
                     "SELECT rid, note FROM row_notes WHERE source_id=?", (source_id,))}
 
-                header = _export_header(cols, _xlsx_safe)
-                # Continuations derive from the name the FIRST sheet actually
-                # got — two tables both called Security.evtx.csv become
-                # "Security.evtx.csv" and "Security.evtx.csv_1", and the
-                # second one's overflow must read "…_1 (2)", not "… (2)",
-                # which would look like the first table continuing.
-                first = _xlsx_sheet_name(src["name"], used_names)
-                part = 1
-                ws = wb.create_sheet(first)
-                ws.append(header)
-                sheets += 1
-                written = 0
-                last_rid = 0
-                while True:
-                    rows = ro.execute(
-                        f"SELECT rid, {sel} FROM {self._from_clause(src)} "
-                        f"WHERE rid > ? ORDER BY rid LIMIT {BATCH}", (last_rid,),
-                    ).fetchall()
-                    if not rows:
-                        break
-                    for row in rows:
-                        if written == per:
-                            part += 1
-                            suffix = f" ({part})"
-                            ws = wb.create_sheet(_xlsx_sheet_name(first[: 31 - len(suffix)] + suffix, used_names))
-                            ws.append(header)
-                            sheets += 1
-                            written = 0
-                        rid = row[0]
-                        ws.append([
-                            rid,
-                            _xlsx_safe("; ".join(tmap.get(rid, []))),
-                            _xlsx_safe(nmap.get(rid, "")),
-                            *[_xlsx_safe(v) for v in row[1:]],
-                        ])
-                        written += 1
-                        total_rows += 1
-                    last_rid = rows[-1][0]
+                def all_rows(ro=ro, sel=sel, src=src, tmap=tmap, nmap=nmap):
+                    last_rid = 0
+                    while True:
+                        rows = ro.execute(
+                            f"SELECT rid, {sel} FROM {self._from_clause(src)} "
+                            f"WHERE rid > ? ORDER BY rid LIMIT {BATCH}", (last_rid,),
+                        ).fetchall()
+                        if not rows:
+                            return
+                        for row in rows:
+                            rid = row[0]
+                            yield [
+                                rid,
+                                _xlsx_safe("; ".join(tmap.get(rid, []))),
+                                _xlsx_safe(nmap.get(rid, "")),
+                                *[_xlsx_safe(v) for v in row[1:]],
+                            ]
+                        last_rid = rows[-1][0]
+
+                n_sheets, n_rows = _xlsx_write_sheets(wb, used_names, src["name"],
+                                                      _export_header(cols, _xlsx_safe), all_rows())
+                sheets += n_sheets
+                total_rows += n_rows
 
         if not sheets:
             wb.create_sheet("No tables").append(["This case has no tables to export."])
@@ -13169,6 +13188,40 @@ def _xlsx_safe(v):
     if isinstance(v, str) and _XLSX_ILLEGAL.search(v):
         v = _XLSX_ILLEGAL.sub(lambda m: "\\x%02x" % ord(m.group()), v)
     return _csv_safe(v)
+
+
+def _xlsx_write_sheets(wb, used_names: set[str], name: str, header: list,
+                       rows: Iterable[list]) -> tuple[int, int]:
+    """Write one table's `rows` to a write-only workbook under its own
+    sheet name, continuing on "Name (2)", "Name (3)"… with the header
+    re-emitted once a sheet holds XLSX_MAX_ROWS - 1 rows, so every row
+    lands. Returns (sheets written, rows written). Both workbook exports
+    use it — the tagged-rows one had no continuation and wrote a sheet
+    Excel refuses to open.
+
+    Continuations derive from the name the FIRST sheet actually got — two
+    tables both called Security.evtx.csv become "Security.evtx.csv" and
+    "Security.evtx.csv_1", and the second one's overflow must read
+    "…_1 (2)", not "… (2)", which would look like the first table
+    continuing."""
+    per = XLSX_MAX_ROWS - 1   # one row is the header
+    first = _xlsx_sheet_name(name, used_names)
+    part = 1
+    ws = wb.create_sheet(first)
+    ws.append(header)
+    sheets, written, total = 1, 0, 0
+    for row in rows:
+        if written == per:
+            part += 1
+            suffix = f" ({part})"
+            ws = wb.create_sheet(_xlsx_sheet_name(first[: 31 - len(suffix)] + suffix, used_names))
+            ws.append(header)
+            sheets += 1
+            written = 0
+        ws.append(row)
+        written += 1
+        total += 1
+    return sheets, total
 
 
 def _export_header(cols: list[str], safe) -> list:

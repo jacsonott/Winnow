@@ -150,6 +150,23 @@ see [docs/notes/README.md](README.md) for the whole set.
   rather than the raw column name, since a column name is arbitrary CSV-
   header text and this sidesteps identifier-safety entirely rather than
   leaning on `q()` for a human-readable name nobody needs to read.
+- **Nothing binds one parameter per row or per list item.** Stock SQLite
+  stops at 32,766 variables per statement (999 before 3.32), and the box
+  the suite usually runs on raises that to 250,000 — so a statement that
+  scales its `?` count with the data passes every test here and fails on
+  an analyst's machine (python.org's Windows Python is stock).
+  `tests/conftest.py`'s `stock_sqlite_limits` puts the stock ceiling back
+  on a store's every connection; use it when testing anything that takes
+  a list. Two that did: an `in` filter (`_compile_cond`) now binds its
+  whole list as one JSON parameter read through `json_each` — a merge
+  compiles the WHERE once per member, so 3,000 pasted hashes on an
+  11-member merge was 33,000 parameters — and still gets the column index
+  (`SEARCH … USING INDEX (x=?)` with a `LIST SUBQUERY`); and
+  `export_tagged_xlsx`, which put every tagged rid in one `IN (...)` and
+  now pages them by keyset, reading cells through a `rid IN (SELECT …
+  LIMIT n)` subquery and tags/notes by the page's rid range. Its sheets
+  continue past Excel's row cap through `_xlsx_write_sheets`, the
+  all-tables export's continuation rule.
 - Column types are **inferred from a 500-row sample and stored as metadata only**;
   every value is stored TEXT. Don't "fix" this by typing the columns — mixed-type
   forensic CSVs then silently coerce, and evidence fidelity matters more than

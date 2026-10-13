@@ -103,3 +103,25 @@ def test_batch_add_is_all_or_nothing_across_members(store, write_csv):
             {"name": "Taken", "input_column": "Msg", "op_id": "regex_extract", "params": {"pattern": "(a)"}},
         ])
     assert "Fine" not in [c["name"] for c in store.get_source(a)["columns"]]
+
+
+def test_a_long_in_list_filters_a_merge_on_stock_sqlite(stock_sqlite_limits, write_csv):
+    """An `in` list (one per line in the filter builder; a pasted IOC list)
+    bound one parameter per item, and a merge compiles the WHERE once per
+    member — 3,000 hashes on an 11-member merge is 33,000 parameters, past
+    stock SQLite's 32,766, and the view was a 500. The list is bound once
+    per member now, whatever its length."""
+    store = stock_sqlite_limits
+    ids = [store.ingest_csv(write_csv([["Hash"]] + [[f"h{k}-{i}"] for i in range(5)], f"m{k}.csv"),
+                            name=f"m{k}", build_fts=False)["id"] for k in range(11)]
+    mid = store.create_merge("hashes", ids)["id"]
+    items = [f"h{k}-0" for k in range(11)] + [f"miss-{i}" for i in range(3000)]
+    for sid in (ids[0], mid):
+        v = store.build_view(sid, {"source_id": sid, "filters": [], "sort": [],
+                                   "filter_tree": {"type": "cond", "column": "Hash",
+                                                   "op": "in", "value": items}})
+        assert v["row_count"] == (1 if sid == ids[0] else 11)
+    # The quick filter row's `in` takes the same path.
+    v = store.build_view(mid, {"source_id": mid, "sort": [],
+                               "filters": [{"column": "Hash", "op": "in", "value": "\n".join(items)}]})
+    assert v["row_count"] == 11
