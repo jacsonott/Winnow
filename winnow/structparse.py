@@ -758,48 +758,81 @@ def _sub_items(op, av):
         yield from (x for x in av[1:] if x is not None)
 
 
-def _iterations_are_delimited(body, fold: bool) -> bool:
-    """Whether every pass of a repeated `body` has to contain something no
-    other part of the body can consume — so where one pass ends and the
-    next begins is fixed by the text, not something to backtrack over.
+_SINGLE = (_sre_parse.LITERAL, _sre_parse.NOT_LITERAL, _sre_parse.IN, _sre_parse.ANY)
 
-    That is what separates `(\\.[a-z]+)*`, `([a-z0-9-]+\\.)+` and
-    `(?:[^,]*,)*` — the dotted-name and CSV shapes analysts write all the
-    time, each iteration pinned by a '.' or ',' its repeat cannot eat —
-    from `(\\w+\\s?)*`, where the separator is optional and "aaaa" splits
-    into passes 2^n ways. The delimiter is one mandatory single-character
-    item (or a repeat of one), disjoint from every other item; if it is
-    itself unbounded (`(\\w+\\s+)*`) a second mandatory item must sit
-    between its runs, or `(a+)+` would pass as its own delimiter."""
-    items = [(op, av) for op, av in body if op not in _ZERO_WIDTH]
-    if len(items) < 2:
+
+def _flat(items) -> list:
+    """`items` with plain groups opened up and zero-width items dropped:
+    the run of things one pass of them steps through, in order."""
+    out: list = []
+    for op, av in items:
+        if op == _sre_parse.SUBPATTERN:
+            out += _flat(av[-1])
+        elif op not in _ZERO_WIDTH:
+            out.append((op, av))
+    return out
+
+
+def _fixed_char(item):
+    """The single-character item `item` always consumes exactly one of
+    (bare, or `\\.{1}`), else None."""
+    op, av = item
+    if op in _SINGLE:
+        return item
+    if op in _REPEATS and av[0] == av[1] >= 1 and len(av[2]) == 1 and av[2][0][0] in _SINGLE:
+        return av[2][0]
+    return None
+
+
+def _varies(item) -> bool:
+    """Whether `item` can consume differing amounts of text — the parts a
+    backtracking match can re-share between passes. Possessive repeats
+    and atomic groups never give back, so they don't."""
+    op, av = item
+    if op in _SINGLE:
         return False
+    if op in _REPEATS:
+        return av[0] != av[1] or any(_varies(x) for x in _flat(av[2]))
+    if op == _ATOMIC or op == getattr(_sre_parse, "POSSESSIVE_REPEAT", None):
+        return False
+    return True  # an alternation, a backreference: assume it can
 
-    def single_char_item(op, av):
-        if op in (_sre_parse.LITERAL, _sre_parse.NOT_LITERAL, _sre_parse.IN):
-            return (op, av), 1, 1
-        if op in _REPEATS and len(av[2]) == 1 and av[2][0][0] in (
-                _sre_parse.LITERAL, _sre_parse.NOT_LITERAL, _sre_parse.IN):
-            return av[2][0], av[0], av[1]
-        return None
 
-    mandatory = [i for i, (op, av) in enumerate(items)
-                 if (op in _REPEATS and av[0] >= 1) or op in (
-                     _sre_parse.LITERAL, _sre_parse.NOT_LITERAL, _sre_parse.IN)]
-    for i in mandatory:
-        single = single_char_item(*items[i])
-        if single is None:
-            continue
-        node, lo, hi = single
-        if lo < 1:
-            continue
-        mine = _chars_of([node], fold)
-        others = [it for j, it in enumerate(items) if j != i]
-        if any(mine & _chars_of([it], fold) for it in others):
-            continue
-        if hi == _sre_parse.MAXREPEAT and not any(j != i for j in mandatory):
-            continue
+def _repeat_body_is_pinned(body, fold: bool) -> bool:
+    """Whether a repeated `body` can split a value between its passes only
+    ONE way — the condition for nesting not to backtrack exponentially.
+
+    Two things have to hold. Within a pass, no two variable parts may be
+    able to trade characters (`\\d+\\d*` shares a run of digits k ways)
+    unless a fixed character the first cannot consume sits
+    between them. And some fixed single character, which no variable part
+    can consume, must have every variable part on one side of it: that
+    character is where each pass ends (or starts), so passes cannot trade
+    text either. That is what lets the dotted and CSV shapes analysts
+    write every day through — `(\\.[a-z]+)*`, `([a-z0-9-]+\\.)+`,
+    `(?:[^,]*,)*` — while `(\\w+\\s?)*` (an optional separator pins
+    nothing) and `(\\w+\\.\\w+)+` (word characters between two dots can
+    go to either pass) are refused. Conservative by design: a refused
+    pattern can be rewritten; a running one cannot be stopped. The
+    filter/search regex check (store.py) draws the same line."""
+    seq = _flat(body)
+    var_idx = [i for i, it in enumerate(seq) if _varies(it)]
+    if not var_idx:
         return True
+    chars = {i: _chars_of([seq[i]], fold) for i in var_idx}
+    for n, i in enumerate(var_idx):
+        for j in var_idx[n + 1:]:
+            pinned = any((fc := _fixed_char(x)) is not None and not (_chars_of([fc], fold) & chars[i])
+                         for x in seq[i + 1:j])
+            if not pinned and chars[i] & chars[j]:
+                return False
+    every_var = frozenset().union(*chars.values())
+    for k, item in enumerate(seq):
+        fc = _fixed_char(item)
+        if fc is None or _chars_of([fc], fold) & every_var:
+            continue
+        if all(i < k for i in var_idx) or all(i > k for i in var_idx):
+            return True
     return False
 
 
@@ -815,8 +848,8 @@ def _nested_unbounded_repeat(pattern: str) -> bool:
     does not help — `(\\w+\\s?){0,50}` took a minute on 29 characters,
     because 50 is more passes than the value has characters. Passes:
     possessive repeats and atomic groups (3.11+), and nesting whose
-    iterations are pinned by a delimiter (see _iterations_are_delimited) —
-    the common dotted/CSV shapes. A bounded INNER repeat ({1,100}) is not
+    passes are pinned by a delimiter (see _repeat_body_is_pinned) — the
+    common dotted/CSV shapes. A bounded INNER repeat ({1,100}) is not
     modelled; this catches the shape people actually write, not every
     slow pattern there is."""
     try:
@@ -836,7 +869,7 @@ def _nested_unbounded_repeat(pattern: str) -> bool:
                     body = sub[-1]
                 else:
                     inner_fold = fold
-                if not _iterations_are_delimited(body, inner_fold):
+                if not _repeat_body_is_pinned(body, inner_fold):
                     return True
             for child in _sub_items(op, av):
                 if nested(child, fold):

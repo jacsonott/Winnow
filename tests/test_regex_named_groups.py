@@ -163,10 +163,12 @@ def test_the_route_answers_400_for_a_pattern_that_will_not_compile(client, store
 # takes minutes on a ~30-character value that almost matches, inside one
 # re.search a backfill cannot cancel and a preview cannot time out.
 CATASTROPHIC = [r"^(\w+\s?)*$", r"(a+)+$", r"(\d+,?)+$", r"^(\w+\.?)*$", r'^(?:"[^"]*"|[^,])*$',
-                r"^(\w+\s?){0,50}$"]   # bounding the outer repeat does not help: 50 > the value's length
+                r"^(\w+\s?){0,50}$",   # bounding the outer repeat does not help: 50 > the value's length
+                r"^(\w+\.\w+)+$",      # a delimiter with variable parts on BOTH sides pins nothing
+                r"^(\d+\d*,)+$"]        # two variable parts that share digits: k ways through each pass
 # The everyday shapes that nest too, but whose passes are pinned by a
 # character the inner repeat cannot eat — these must keep working.
-FINE = [r"[a-z]+(\.[a-z]+)*", r"([a-z0-9-]+\.)+[a-z]{2,}", r"(?:[^,]*,)*", r"(\w+\s+)*$",
+FINE = [r"[a-z]+(\.[a-z]+)*", r"([a-z0-9-]+\.)+[a-z]{2,}", r"(?:[^,]*,)*", r"(\w+\s)*$",
         r"(\w+=\w+;)*$", r"(\w+\s){0,50}$", r"(\d{1,3}\.){3}\d{1,3}", IIS]
 
 
@@ -187,7 +189,8 @@ def test_a_pattern_that_can_backtrack_for_minutes_is_refused_up_front(pattern, c
 def test_the_nesting_analysts_write_every_day_still_passes_and_stays_fast(pattern):
     structparse._validate_regex_params({"pattern": pattern})
     rx = __import__("re").compile(pattern)
-    for probe in ["a" * 28 + "!", " " * 28 + "!", ".a" * 14 + "!", "a," * 14 + "!", "a=b;" * 7 + "!"]:
+    for probe in ["a" * 28 + "!", " " * 28 + "!", ".a" * 14 + "!", "a," * 14 + "!", "a=b;" * 7 + "!",
+                  "aaaa." * 14 + "aaaa!", "a " * 14 + "!"]:
         t0 = time.perf_counter()
         rx.search(probe)
         assert time.perf_counter() - t0 < 1.0, (pattern, probe)
