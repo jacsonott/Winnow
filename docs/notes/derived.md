@@ -311,11 +311,13 @@ see [docs/notes/README.md](README.md) for the whole set.
   carries the table's identity beside the definition (`lookup_table`:
   file hash, name, base columns and row count — what a session source
   records) and the import resolves it the way session sources are
-  matched (`_match_session_sources`, with a hashless table paired by
-  name); no such table, or more than one it cannot tell apart, is a
-  warning and the column is not recreated. A session saved before
-  the identity was recorded is refused the same way rather than trusted
-  by id. A copy re-points the definition to its table when that came
+  matched by a load (`_match_session_sources`; a SQL-saved or
+  plugin-made lookup table by its synthetic `made:` hash, so another
+  case's table of the same name is not it); no such table, or more than
+  one it cannot tell apart, is a warning and the column is not
+  recreated. A session saved before the identity was recorded is
+  refused the same way rather than trusted by id — and so is one that
+  recorded a made table with no hash, which used to pair by name. A copy re-points the definition to its table when that came
   along, else to the target's one table with the same fingerprint, else
   to none — the copied values stand and a re-derive asks for the table.
   Blank keys (NULL or `''`, the one-column "had input" rule) match

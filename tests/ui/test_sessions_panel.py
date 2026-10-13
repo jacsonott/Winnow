@@ -58,6 +58,71 @@ def test_saving_a_session_lists_it_with_its_tag_count(page):
         page.keyboard.press("Escape")
 
 
+def test_a_row_with_two_tags_is_one_tagged_row(page):
+    """"N tagged" sits beside the notes and table counts and reads as rows;
+    it summed tag assignments, so one row with two tags said "2 tagged"."""
+    _cleanup(page)
+    _tag_rows(page, [0])
+    _tag_rows(page, [0], "2")
+    try:
+        _save(page, "two tags")
+        _open(page)
+        counts = page.locator(".session-row", has_text="two tags").locator(".count")
+        counts.wait_for()
+        assert counts.inner_text().startswith("1 tagged ·"), counts.inner_text()
+        # and what a session covers: every table, not only the ones open in a tab
+        intro = page.locator("#modalBody p").first.inner_text()
+        assert "every open table" not in intro and "open or not" in intro, intro
+    finally:
+        _cleanup(page)
+        page.keyboard.press("Escape")
+
+
+def test_compare_starts_on_the_newest_session_against_current_work(page):
+    """Both dropdowns started on Current work: a comparison of the case with
+    itself, and Compare only said "Pick two different sessions". With a
+    session saved, the useful default is the newest one against the live
+    work — what changed since the last save."""
+    _cleanup(page)
+    try:
+        _save(page, "older")
+        _save(page, "newer")
+        _open(page)
+        page.wait_for_function("""() => [...document.querySelectorAll('.session-compare select')]
+          .every((s) => s.options.length === 3)""")
+        sels = page.locator(".session-compare select")
+        assert (sels.first.input_value(), sels.nth(1).input_value()) == ("newer", "__live__")
+        page.locator(".btn", has_text="Compare").click()
+        page.wait_for_selector("text=No differences")
+    finally:
+        _cleanup(page)
+        page.keyboard.press("Escape")
+
+
+def test_a_comparison_over_different_tables_counts_them_too(page):
+    """The note above the counts said they "cover what they share" — but a
+    table only one side has is counted, every tagged row of it a
+    difference, on the line right below the note."""
+    _cleanup(page)
+    foreign = {"format": "winnow-case-session/1", "sources": [{
+        "source": {"name": "elsewhere.csv", "file_hash": "nope", "columns": []},
+        "tag_defs": [{"id": 1, "name": "TA"}], "row_tags": [{"rid": 5, "tag_id": 1}], "row_notes": []}]}
+    try:
+        status = page.evaluate("""async (doc) => (await fetch('/api/case_sessions/adopt', { method: 'POST',
+          headers: { 'X-Timeline-Lite-Client': '1', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: 'theirs', session: doc }) })).status""", foreign)
+        assert status == 200, status
+        _compare(page, "theirs", "__live__")
+        note = page.locator(".session-diff > .note-status").first.inner_text()
+        assert "1 only on the left" in note and "what they share" not in note, note
+        assert "counted below too" in note, note
+        row = page.locator(".diff-stats tr", has_text="elsewhere.csv")
+        assert row.locator(".diff-n-removed").inner_text() == "1"
+    finally:
+        _cleanup(page)
+        page.keyboard.press("Escape")
+
+
 def _save(page, name):
     # evaluate awaits the returned promise: the save has landed when this returns
     status = page.evaluate("""async (name) => (await fetch('/api/case_sessions', { method: 'POST',

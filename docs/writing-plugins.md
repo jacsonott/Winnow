@@ -1016,7 +1016,9 @@ A source dict:
   "columns": [{"name": "Timestamp", "type": "datetime"}, ...],
   "row_count": 331_642,
   "path": "/evidence/…",             # absolute source path, may be None
-  "file_hash": "…", "imported_at": "2026-08-16T09:12:44",
+  "file_hash": "…",                  # the file's fingerprint; "made:…" / "subset:…" for a
+                                     # table made inside Winnow — an identity, not a digest
+  "imported_at": "2026-08-16T09:12:44",
   "has_fts": 1, "fts_building": False,
   "is_open": True,                    # has a visible tab
   "tagged_row_count": 118, "note_count": 4,
@@ -1136,7 +1138,11 @@ req.store.ingest_rows(
 
 It follows every ingest convention automatically (TEXT columns,
 contiguous row ids, batched commits, background search index), so the
-result is a completely normal source.
+result is a completely normal source. With no `path` there is no file to
+fingerprint, so the table gets an identity of its own (`file_hash`
+`"made:…"`): a saved session puts its tags and notes back, and a copy of
+it in another case matches, but a table another case made the same way —
+same name, same rows — does not.
 
 **Never write to a `src_` table.** Source tables are immutable by
 contract — that's what makes re-import non-destructive and sessions
