@@ -42,6 +42,16 @@ def test_a_saved_session_lives_in_the_case_file(store, write_csv, case_path):
     assert json.loads(row["payload"])["format"] == "winnow-case-session/1"
 
 
+def test_a_sessions_tagged_count_is_rows_not_tag_assignments(store, write_csv):
+    """The Sessions panel shows it as "N tagged" — rows, beside the notes
+    and table counts. It summed row_tags, so a row with two tags was two."""
+    sid = _case(store, write_csv)
+    _tag(store, sid, [1, 2], "TA")
+    _tag(store, sid, [2], "TB")
+    assert store.save_session("pass1")["tagged_rows"] == 2
+    assert store.list_sessions()[0]["tagged_rows"] == 2
+
+
 def test_saving_the_same_name_replaces_rather_than_accumulates(store, write_csv):
     sid = _case(store, write_csv)
     _tag(store, sid, [1], "TA")

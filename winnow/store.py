@@ -312,12 +312,13 @@ CREATE TABLE IF NOT EXISTS derived_columns (
 -- Named session snapshots, IN the case file rather than beside it.
 --
 -- A session is a point-in-time copy of the analysis layer — tags, notes,
--- layouts, saved views, derived-column definitions — for every open
--- source. Keeping them here means work an analyst saved (or received from
--- someone else and loaded) travels with the case instead of living in a
--- sessions/ directory that gets left behind the moment the .db is copied
--- anywhere. A JSON file is now only produced when handing work to another
--- analyst, which is the one case that genuinely needs a separate artifact.
+-- layouts, saved views, derived-column definitions — for every source,
+-- open in a tab or not. Keeping them here means work an analyst saved (or
+-- received from someone else and loaded) travels with the case instead of
+-- living in a sessions/ directory that gets left behind the moment the .db
+-- is copied anywhere. A JSON file is now only produced when handing work to
+-- another analyst, which is the one case that genuinely needs a separate
+-- artifact.
 --
 -- Deliberately a SNAPSHOT table, not a session dimension on row_tags. Tags
 -- stay single-valued per (source_id, rid, tag_id) — that is a WITHOUT
@@ -12452,8 +12453,10 @@ class Store:
     # ---------------------------------------------------------- case sessions
 
     def export_case_session(self) -> dict:
-        """Whole-case session: every open source's tags/notes/layout, in one
-        file. Builds directly on export_session — no new per-source shape."""
+        """Whole-case session: every source's tags/notes/layout — open in a
+        tab or not — in one file. Merges have no entry: their tags live on
+        their members. Builds directly on export_session — no new
+        per-source shape."""
         return {
             "format": "winnow-case-session/1",
             "exported_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -13074,7 +13077,11 @@ class Store:
         return {
             "id": row["id"], "name": row["name"], "saved_at": row["saved_at"],
             "origin": row["origin"], "source_count": len(srcs),
-            "tagged_rows": sum(len(s.get("row_tags") or []) for s in srcs),
+            # Rows, not tag assignments: a row carrying two tags is one
+            # tagged row — what the panel's "N tagged" says, and what the
+            # live table list counts (COUNT(DISTINCT rid)). Summing
+            # row_tags read a row with three tags as three.
+            "tagged_rows": sum(len({t.get("rid") for t in s.get("row_tags") or []}) for s in srcs),
             "notes": sum(len(s.get("row_notes") or []) for s in srcs),
         }
 

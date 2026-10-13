@@ -1,6 +1,7 @@
 /* Sessions: named snapshots of the analysis layer, stored IN the case file.
 
-   A session is every open source's tags and notes at a moment in time.
+   A session is every table's tags and notes at a moment in time — open in
+   a tab or not (Store.export_case_session walks every source).
    They live in the case's own `sessions` table, so work an analyst saved —
    or received from a colleague and adopted — travels with the .db instead
    of being left behind in a folder beside it. A FILE is produced only to
@@ -27,7 +28,8 @@ function fmtWhen(iso) {
 export function openSessionManager() {
   modal('Sessions', (b) => {
     b.append(el('p', null,
-      "A session is every open table's tags and notes at a point in time. They're stored "
+      "A session is the tags and notes on every table in the case, open or not, at a point "
+      + "in time. They're stored "
       + 'inside this case file, so they travel with it — save one before changing direction, '
       + 'start a fresh pass without losing what you had, or compare two to see what changed. '
       + 'Download one only when you need to hand your work to another analyst.'));
@@ -251,28 +253,38 @@ function diffPanel(getSessions) {
   const out = el('div', 'session-diff');
 
   function fill() {
+    const sessions = getSessions();
     for (const sel of [left, right]) {
       const keep = sel.value;
       sel.replaceChildren();
       const live = el('option', null, `${LIVE_LABEL} (live)`);
       live.value = LIVE;
       sel.append(live);
-      for (const s of getSessions()) {
+      for (const s of sessions) {
         const o = el('option', null, s.name);
         o.value = s.name;
         sel.append(o);
       }
       if (keep) sel.value = keep;
     }
+    const untouched = !left.dataset.touched && !right.dataset.touched;
     // A comparison already pivoted in preselects its two sides, so the
     // dropdowns agree with the status line above them.
     const dm = S.diffMarks;
-    if (dm && !left.dataset.touched && !right.dataset.touched) {
+    if (dm && untouched) {
       const toValue = (name) => (name === LIVE_LABEL ? LIVE : name);
       const l = toValue(dm.left), r = toValue(dm.right);
       if ([...left.options].some((o) => o.value === l)) left.value = l;
       if ([...right.options].some((o) => o.value === r)) right.value = r;
+    } else if (untouched && sessions.length) {
+      // Otherwise the comparison this is usually opened for: what changed
+      // since the last save — the newest session (the list comes newest
+      // first) against the live work. Both used to start on Current work,
+      // which compares the case with itself.
+      left.value = sessions[0].name;
+      right.value = LIVE;
     }
+    if (!left.value) left.value = LIVE;   // the kept pick was deleted or renamed meanwhile
     if (!right.value || right.value === left.value) right.value = LIVE;
   }
   left.onchange = () => { left.dataset.touched = '1'; };
@@ -322,11 +334,15 @@ function renderDiff(out, d) {
   if (d.only_left_sources.length || d.only_right_sources.length) {
     // Not a like-for-like comparison; say so first — it is a property of
     // the inputs, and "no differences" between sessions about different
-    // tables would read as agreement about rows nobody looked at.
+    // tables would read as agreement about rows nobody looked at. The
+    // counts are NOT limited to the shared tables (diff_sessions keys every
+    // tagged row and note of both sides), so a table only one side covers
+    // is in them, every tagged row and note of it a difference.
     out.append(el('div', 'note-status',
       'These sessions cover different tables — '
       + `${d.only_left_sources.length} only on the left, ${d.only_right_sources.length} only on the right. `
-      + 'Counts below cover what they share.'));
+      + 'Those are counted below too: every tagged row and note in a table only one side has '
+      + 'counts as a difference.'));
   }
   const c = d.counts;
   if (!c.added && !c.removed && !c.changed && !c.note_changes) {

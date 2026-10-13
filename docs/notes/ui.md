@@ -588,7 +588,15 @@ see [docs/notes/README.md](README.md) for the whole set.
   cleared by Done, by `clearAllFilters`, by opening another case and by
   removing the table; put the rows back in the panel, or leave any of
   those paths out, and the grid wears comparison chrome over a view that
-  isn't the comparison.
+  isn't the comparison. The two dropdowns start on the newest saved
+  session (From) against Current work (to) — both used to start on
+  Current work, the case compared with itself — unless a comparison is
+  pivoted in (they show its sides) or the analyst has picked one
+  (`dataset.touched`); `fill()` re-runs on every list refresh, so those
+  two rules are what keep a choice from being reset under the analyst.
+  The note over a comparison of sessions that cover different tables
+  says those tables ARE counted (diff_sessions keys every tagged row and
+  note of both sides); it said the counts covered "what they share".
 - **The right-click surfaces** (row menu, column-header menu, table menu,
   header value picker) all hang off one floating-menu implementation in `static/js/ui.js` —
   `showFloating`/`placeFloating` plus the single `openMenuEl`/`openMenuAnchor`
