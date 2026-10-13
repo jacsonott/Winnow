@@ -21,11 +21,17 @@ see [docs/notes/README.md](README.md) for the whole set.
   `preview_sqlite_tables`' heuristic when a column's name and sampled
   values look like one, via `_webkit_to_iso`) — never automatically, and
   never in place in the source file. A BLOB value becomes `<N bytes>`
-  rather than attempting to stringify binary data. The preview reads each
-  table on its own: one this SQLite can't read (a virtual table whose
-  module it lacks — Thunderbird's message index) comes back with an
-  `error` and `row_count: null`, shown but not pickable, instead of
-  failing the preview of the whole file. Columns come from
+  rather than attempting to stringify binary data. A TEXT value that is
+  not valid UTF-8 is decoded with U+FFFD (`_lenient_text_factory`) and
+  counted (`undecodable_values`, in the jobs toast and the log): sqlite3's
+  default factory raised "Could not decode to UTF-8" mid-read, and the
+  batch it was in plus every row after it were gone. And a table that
+  fails before its first batch commits is dropped rather than left with
+  0 rows, which is indistinguishable from a real empty import. The
+  preview reads each table on its own: one this SQLite can't read (a
+  virtual table whose module it lacks — Thunderbird's message index)
+  comes back with an `error` and `row_count: null`, shown but not
+  pickable, instead of failing the preview of the whole file. Columns come from
   `PRAGMA table_xinfo`, not `table_info` (`_sqlite_table_columns`):
   `table_info` omits GENERATED columns, so those were silently missing
   from every import; a virtual table's hidden columns stay out.
@@ -35,8 +41,8 @@ see [docs/notes/README.md](README.md) for the whole set.
   uploaded spool. `_open_evidence_sqlite` opens a WAL-mode file with no
   `-wal` as `immutable=1`, appended to the `sqlite_ro_uri` URI below
   (nothing to replay, and no live writer can be holding it), and one WITH
-  a `-wal` by copying the pair into a private
-  temp directory first — those un-checkpointed rows are evidence, so
+  a `-wal` by copying the pair into a private temp directory first —
+  those un-checkpointed rows are evidence, so
   `immutable` (which ignores the WAL) is not an option there. Plaso
   storage still opens plain `mode=ro`; plaso writes its files closed.
 - **Every read-only open is a URI, and the URI comes from
@@ -75,7 +81,13 @@ see [docs/notes/README.md](README.md) for the whole set.
   max(header, declared width) so extra data lands in `col_N` instead of
   being cut, and a formula cell in a workbook that was never opened in
   Excel imports as "" (data_only=True reads the cached result, and a
-  file written by a tool has no cache). Rows shorter than the header are
+  file written by a tool has no cache). And the sheet's declared
+  `<dimension>` is reset before reading (`reset_dimensions()`, in the
+  reader and the picker): read-only mode treats it as the edge of the
+  data, and a stale A1:B10 over 3 columns and 101 rows imported 2
+  columns and 9 rows with ragged 0. The declared size is still the
+  picker's row estimate and a floor on the width — so the picker can
+  under-count a sheet whose declaration is stale, but the import can't. Rows shorter than the header are
   normal Excel storage (trailing empties aren't stored) and pad silently;
   only wider rows count as ragged. `.xlsm` imports (same container,
   macros never executed); legacy binary `.xls` is deliberately out of
@@ -434,4 +446,17 @@ see [docs/notes/README.md](README.md) for the whole set.
   `first_bad_line`, surfaced in the jobs toast), and when a caller passes
   no collector the raise carries the real FILE line number. A truncated
   `.json` *document* is still a hard error — half of one JSON value is
-  not a partial table.
+  not a partial table. A lone surrogate escape (`"\udc80"`, legal JSON,
+  and how Plaso's serializer writes an NTFS name holding one) is not a
+  broken line either: it decodes to a string with no UTF-8 form, whose
+  batch insert raised "surrogates not allowed" and stopped the import —
+  in a key, before the first row. `structparse.utf8_text` (store's
+  `_utf8_text`, and a twin in plasoread, which imports nothing from the
+  app) writes it back as the six-character escape the file held, so the
+  value is recoverable and a JSON-text cell stays valid JSON. The same
+  escape in a JSON *column* reaches the flatten picker as a real
+  surrogate again (json.loads undoes it): discovery's samples and
+  suggested names go through `utf8_text`, and a key holding one is
+  spelled `["\uXXXX"]` in its path — `parse_json_path` reads that back
+  as the same key — because the path is stored in a column definition
+  and the picker's route could not encode its response at all.

@@ -61,6 +61,7 @@ export function searchAllState() {
       scanned: 0,
       total: 0,
       hits: [],
+      failed: [],      // tables the sweep could not count: {source_id, name, error}
       error: null,
       terms: [],       // the terms the current results were produced from
       scope: null,     // {mode: 'all'|'current'|'pick', ids, names} — normalised by searchAllScope
@@ -237,6 +238,7 @@ export function pollSearchAll() {
     st.scanned = job.scanned;
     st.total = job.total;
     st.hits = job.hits;
+    st.failed = job.failed || [];
     st.error = job.error;
     // The scope the server actually ran, merge expansion and all — it is
     // what these hits describe, so it is kept with them.
@@ -252,9 +254,12 @@ export function pollSearchAll() {
         const where = st.ranScope && st.ranScope.source_ids
           ? `Search of ${searchAllRanScopeLabel(st.ranScope)}`
           : 'Search all';
+        const nf = st.failed.length;
+        const unread = nf ? ` ${nf} table${nf === 1 ? '' : 's'} could not be searched.` : '';
         toast(job.hits.length
-          ? `${where} finished — ${job.hits.length} table${job.hits.length === 1 ? '' : 's'} matched. Reopen "Search all" to see them.`
-          : `${where} finished — no matches.`, 6000);
+          ? `${where} finished — ${job.hits.length} table${job.hits.length === 1 ? '' : 's'} matched.${unread} Reopen "Search all" to see them.`
+          : (nf ? `${where} finished — no matches, but${unread.toLowerCase()} Reopen "Search all" to see which.`
+                : `${where} finished — no matches.`), 6000);
       }
     }
     updateSearchAllButton();
@@ -307,7 +312,7 @@ export async function startSearchAll() {
     // nothing on screen that could stop it. Stopping a sweep is the Stop
     // button's job, and it is deliberate there.
     if (st.running) { toast('Enter a term, or use Stop to end the search that is running'); return; }
-    st.hits = []; st.terms = []; st.error = null; st.jobId = null; st.ranScope = null;
+    st.hits = []; st.failed = []; st.terms = []; st.error = null; st.jobId = null; st.ranScope = null;
     updateSearchAllButton();
     searchAllRepaint();
     return;
@@ -333,6 +338,7 @@ export async function startSearchAll() {
   // expanded to its members), and the poll keeps it current.
   st.ranScope = { requested: sourceIds, source_ids: sourceIds, merges: [] };
   st.hits = [];
+  st.failed = [];
   st.error = null;
   st.scanned = 0;
   st.total = 0;
@@ -702,9 +708,18 @@ export function openSearchAllModal() {
       if (st.error) { results.append(el('div', 'note-status', 'Search failed: ' + st.error)); return; }
       const scopeLine = st.terms.length ? ranScopeLine() : null;
       if (scopeLine) results.append(el('div', 'search-all-scope-ran', scopeLine));
+      // A table the sweep could not count is said by name, ahead of the
+      // results: it used to be counted as zero, and "No matches." about a
+      // table nobody read is the one answer an analyst moves on from.
+      for (const f of st.failed || []) {
+        const fSrc = S.sources.find((s) => s.id === f.source_id);
+        results.append(el('div', 'note-status search-all-failed',
+          `Could not search ${fSrc ? sourceLabel(fSrc) : f.name}: ${f.error}`));
+      }
       if (!st.hits.length) {
+        const none = (st.failed || []).length ? 'No matches in the tables that could be searched.' : 'No matches.';
         results.append(el('div', 'note-status',
-          st.running ? 'No matches yet…' : (st.terms.length ? 'No matches.' : '')));
+          st.running ? 'No matches yet…' : (st.terms.length ? none : '')));
         return;
       }
       // Partial results while running are worth showing (a hit on the table

@@ -245,3 +245,57 @@ def test_an_uploaded_wal_database_leaves_nothing_in_the_temp_folder(client, tmp_
     r = client.post("/api/ingest/sqlite/preview", files={"file": ("places.sqlite", raw)})
     assert r.status_code == 200 and r.json()["tables"][0]["row_count"] == 100
     assert sorted(p.name for p in spool.iterdir()) == []
+
+
+def _db_with_bad_text(path, n, bad_rowid):
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE t (id INTEGER, title TEXT)")
+    conn.executemany("INSERT INTO t VALUES (?,?)", [(i, f"row{i}") for i in range(1, n + 1)])
+    # Bytes that are not UTF-8, stored as TEXT — what a browser or app DB
+    # written by something careless holds.
+    conn.execute("UPDATE t SET title = CAST(X'41FF42' AS TEXT) WHERE id=?", (bad_rowid,))
+    conn.commit()
+    conn.close()
+
+
+def test_a_text_value_that_is_not_utf8_does_not_abort_the_table(store, tmp_path):
+    """sqlite3 raised "Could not decode to UTF-8" mid-read: the batch it
+    was in and every row after it were lost, with 20,000 of 30,000 kept."""
+    from winnow.store import BATCH
+
+    path = str(tmp_path / "ev.db")
+    n = BATCH + 500
+    _db_with_bad_text(path, n, BATCH + 10)
+    rec = store.ingest_sqlite_table(path, "t", build_fts=False)
+    assert rec["row_count"] == n
+    assert rec["undecodable_values"] == 1
+    v = store.build_view(rec["id"], {"source_id": rec["id"]})
+    assert store.fetch_rows(v["view_id"], BATCH + 9, 1)["rows"][0]["cells"] == [str(BATCH + 10), "A\ufffdB"]
+    assert store.preview_sqlite_tables(path)["tables"][0]["row_count"] == n
+
+
+def test_a_failed_sqlite_import_leaves_no_empty_table_behind(store, tmp_path, monkeypatch):
+    """A table whose first batch failed was left in the case with 0 rows,
+    indistinguishable from a real empty import."""
+    from winnow import store as store_mod
+
+    path = str(tmp_path / "ev.db")
+    _db_with_bad_text(path, 10, 5)
+
+    def boom(self, *a, **kw):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(store_mod.Store, "_commit_ingest_batch", boom)
+    with pytest.raises(sqlite3.OperationalError):
+        store.ingest_sqlite_table(path, "t", build_fts=False)
+    assert store.list_sources() == []
+
+
+def test_the_import_job_reports_the_undecodable_values(store, tmp_path):
+    path = str(tmp_path / "Cookies.db")
+    _db_with_bad_text(path, 50, 5)
+    store.start_ingest_job("sqlite", path, options={"tables": [{"table": "t"}]})
+    store.wait_for_ingest_job()
+    job = store.list_ingest_jobs()[0]
+    assert job["status"] == "done", job
+    assert [(r["row_count"], r["undecodable_values"]) for r in job["result"]] == [(50, 1)]

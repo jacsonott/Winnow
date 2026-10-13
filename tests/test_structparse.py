@@ -89,12 +89,14 @@ def test_half_a_character_in_json_comes_out_as_text_sqlite_can_store():
     """`"\\ud83d"` is legal JSON — an emoji cut in half by a logger that
     truncates at a byte count — and json.loads hands back a str holding a
     lone surrogate. Stored as is, SQLite refused the row and the whole
-    backfill failed on it. The broken half becomes U+FFFD, as any UTF-8
-    decoder makes it; the rest of the value is kept."""
+    backfill failed on it. The broken half is written back as the escape
+    the cell held (utf8_text, JSON import's rule too), so two different
+    halves stay two different values; the rest of the value is kept."""
     cell = '{"msg": "user typed \\ud83d", "nested": {"k\\udc00": "v"}}'
-    assert sp._extract_json(cell, {"path": "$.msg"}, {}) == "user typed \ufffd"
+    assert sp._extract_json(cell, {"path": "$.msg"}, {}) == "user typed \\ud83d"
     whole = sp._extract_json(cell, {"path": "$.nested"}, {})
-    assert whole == '{"k\ufffd": "v"}'
+    assert whole == '{"k\\udc00": "v"}'
+    assert json.loads(whole) == {"k\udc00": "v"}      # still the JSON it was
     for out in (sp._extract_json(cell, {"path": "$.msg"}, {}), whole):
         out.encode("utf-8")
     # A complete pair is one character and is left alone.
@@ -277,3 +279,23 @@ def test_present_but_always_empty_fields_are_distinguished():
     assert found["E/EventID"]["nonempty"] == 3
     # Fields with something in them sort first.
     assert sp.discover_paths(rows, "xml")[-1]["path"] == "E/TimeCreated"
+
+
+def test_a_key_holding_a_lone_surrogate_gets_a_path_that_survives_utf8():
+    """'"\\ud800x"' is a legal JSON key that decodes to a string with no
+    UTF-8 form. Discovery put it into the path, the sample and the
+    suggested name as-is, and none of the three can cross the route (its
+    JSON body is UTF-8) or be stored. The path spells it as a \\uXXXX
+    escape inside bracket quotes, which reads back as the same key."""
+    doc = '{"\\ud800x": {"v": "found"}, "plain": "\\udc80"}'
+    rows = sp.discover_paths([doc], "json")
+    for r in rows:
+        for k in ("path", "sample", "suggested_name"):
+            r[k].encode("utf-8")
+        assert sp._extract_json(doc, {"path": r["path"]}, {}) is not None, r["path"]
+    found = {r["path"]: r for r in rows}
+    assert found['$["\\ud800x"].v']["sample"] == "found"
+    assert sp.parse_json_path('$["\\ud800x"].v') == ["\ud800x", "v"]
+    # A literal backslash-u in a key is still a backslash and a u.
+    for segs in (["\ud800x", "v"], ["a\\ub"], ["a\\ud800"]):
+        assert sp.parse_json_path(sp.format_json_path(segs)) == segs

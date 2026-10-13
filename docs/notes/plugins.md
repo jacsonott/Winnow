@@ -239,7 +239,7 @@ see [docs/notes/README.md](README.md) for the whole set.
     showing" has to be handed the filter spec and recompile it, or do what
     the pivot does and own its filtering outright.
   - **Iterating on a plugin's Python needs a reload.** The module is
-    imported once at server import; editing the file and re-requesting a
+    imported once when the server loads plugins; editing the file and re-requesting a
     route runs the *old* code with the *new* line numbers, which makes
     tracebacks point at unrelated lines. Toggle the plugin off and on in
     Settings → Plugins (that's what `_reload_plugins` is for) or restart.
@@ -251,10 +251,21 @@ see [docs/notes/README.md](README.md) for the whole set.
   right for something the analyst placed and wrong for what we shipped.
   Case level (case_settings `plugin_overrides`, JSON {fs_name: bool}):
   wins where set, travels with the case file on purpose. Three rules keep
-  it honest: `_reload_plugins()` runs on every case open, because "a
-  disabled plugin's code never runs" is a per-case statement now; the
-  "everywhere" scopes clear the open case's override, so the dropdown
-  can't show a state a leftover override silently exempts; and
+  it honest: `_reload_plugins()` runs whenever which case is open changes,
+  because "a disabled plugin's code never runs" is a per-case statement
+  now — every case open including re-opening the open one (the client
+  resets its plugin tabs on that request either way), the quick-look
+  open, quick-look discard (no case: machine defaults again), and startup.
+  Startup is the one that went wrong: plugins loaded at import with no
+  case open and `main()` opened `--case` afterwards, so a double-clicked
+  case ran what it had switched off and lacked what it had switched on.
+  Under `python server.py` the import-time load is skipped and `main()`
+  loads once the case is open (`_load_startup_plugins`), since a load
+  under the machine set first would already have imported a plugin the
+  case turns off; `uvicorn server:app` opens no case and keeps the
+  import-time load. The "everywhere" scopes clear the open case's
+  override, so the dropdown can't show a state a leftover override
+  silently exempts; and
   `PluginRegistry.load` is first-directory-wins on fs_name, so an
   analyst's installed copy of an example shadows the bundled one instead
   of both loading and fighting over tab ids.
