@@ -1558,6 +1558,19 @@ def _is_loopback(request: Request) -> bool:
     return host in ("127.0.0.1", "::1", "testclient")
 
 
+def _refuse_remote_mkdir(request: Request, path: str) -> None:
+    """403 when a peer that isn't this machine would make `path` exist.
+
+    browse_dir/new's rule, applied to the two routes that create folders
+    as a side effect: a new case's parent (POST /api/cases) and the cases
+    folder setting (POST /api/prefs). Refusing only the route NAMED "new
+    folder" left a LAN peer free to makedirs anywhere the server user can
+    through either of the others. A folder that already exists is not a
+    write, so a peer can still file a case into one."""
+    if not os.path.isdir(path) and not _is_loopback(request):
+        raise HTTPException(403, "Creating folders is only allowed from this machine")
+
+
 # ---------------------------------------------------------------- user env
 # WINNOW_* environment variables — where a plugin's token lives, instead of
 # the case file or a Winnow setting. Names and where each came from are all
@@ -1765,9 +1778,10 @@ def api_prefs():
 
 
 @app.post("/api/prefs")
-def api_prefs_set(body: PrefsBody):
+def api_prefs_set(request: Request, body: PrefsBody):
     if body.cases_dir is not None:
         path = os.path.abspath(os.path.expanduser(body.cases_dir.strip()))
+        _refuse_remote_mkdir(request, path)
         try:
             os.makedirs(path, exist_ok=True)
         except OSError as e:
@@ -1797,10 +1811,11 @@ def api_cases_list():
 
 
 @app.post("/api/cases")
-def api_cases_create(body: CaseCreate):
+def api_cases_create(request: Request, body: CaseCreate):
     if not os.path.isfile(body.path):
         parent = os.path.dirname(os.path.abspath(body.path))
         if parent:
+            _refuse_remote_mkdir(request, parent)
             os.makedirs(parent, exist_ok=True)
         try:
             _open_store(body.path).close()
