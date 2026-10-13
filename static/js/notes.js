@@ -28,21 +28,52 @@ let previewStale = true;   // the preview body doesn't reflect the editor (typed
 /* Minimal Markdown → HTML. Escapes first, then a handful of inline/block
    rules — headings, bold, italic, inline code, fenced code, links, and
    unordered lists. Deliberately small: no library ships to an airgapped
-   box. Anything unrecognised renders as plain text. */
+   box. Anything unrecognised renders as plain text.
+
+   The output goes through innerHTML, and notes travel with the case file
+   to whoever reviews it, so the one rule is that no character the analyst
+   typed reaches the HTML unescaped — QUOTES INCLUDED. The escaper used to
+   stop at & < >, and a link's URL went straight into href="…":
+   [x](https://host"onmouseover="…) closed the attribute and added a
+   handler, which ran on hover with every local API in reach.
+
+   Inline text is cut into pieces before anything is escaped or marked up
+   — links first, then code spans in what is left (and in a link's label)
+   — and each piece is escaped once, on its own. The old shape ran each
+   rule as a regex over the HTML the previous rules had produced, so a
+   URL could swallow an <em> made from its own asterisks, and a code span
+   had its contents re-read as emphasis. Now an href is only ever an
+   escaped http(s) URL, a code span is literal, and nothing generated is
+   read again. */
 export function renderMarkdown(src) {
-  const esc = (t) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  const inline = (t) => esc(t)
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
+  const esc = (t) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  // Bold and italic over one escaped run of plain text: fixed tags around
+  // already-escaped text, no attributes.
+  const emphasis = (t) => esc(t)
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-    .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>')
-    // In-app links: [label](winnow:table/12), winnow:sql/3, winnow:dashboard/2.
-    // Rendered with a data attribute (no href navigation) — the preview's
-    // click handler resolves them; the target set stays a validated
-    // kind/id pair, so nothing user-typed reaches an executable sink.
-    .replace(/\[([^\]]+)\]\(winnow:(table|sql|dashboard)\/(\d+)\)/g,
-             '<a href="#" class="notes-link" data-winnow="$2/$3">$1</a>')
-    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g,
-             '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+    .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
+  // Code spans are literal: escaped, never re-read as emphasis. split()
+  // with a capture group puts every span at an odd index.
+  const spans = (t) => t.split(/(`[^`]+`)/)
+    .map((p, i) => (i % 2 ? `<code>${esc(p.slice(1, -1))}</code>` : emphasis(p))).join('');
+  // In-app links: [label](winnow:table/12), winnow:sql/3, winnow:dashboard/2.
+  // Rendered with a data attribute (no href navigation) — the preview's
+  // click handler resolves them; the target is a kind from a fixed set and
+  // a run of digits, so nothing user-typed reaches an executable sink.
+  // External links take http(s) only, so javascript: and friends stay text.
+  const LINK = /\[([^\]]+)\]\((?:winnow:(table|sql|dashboard)\/(\d+)|(https?:[^)\s]+))\)/g;
+  const inline = (t) => {
+    let out = '', at = 0;
+    for (const m of t.matchAll(LINK)) {
+      out += spans(t.slice(at, m.index));
+      out += m[2]
+        ? `<a href="#" class="notes-link" data-winnow="${m[2]}/${m[3]}">${spans(m[1])}</a>`
+        : `<a href="${esc(m[4])}" target="_blank" rel="noopener noreferrer">${spans(m[1])}</a>`;
+      at = m.index + m[0].length;
+    }
+    return out + spans(t.slice(at));
+  };
   const out = [];
   const lines = (src || '').split('\n');
   let inList = false, inCode = false, inQuote = false;

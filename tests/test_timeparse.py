@@ -403,3 +403,118 @@ def test_dd_mmm_and_us_apply_a_trailing_offset(op, value, want):
     assert parse(op, value) == want
     assert parse(op, value, {"utc_offset": "+09:00"}) == want
     assert _TS_ISO_RE.match(want) and _ts_normalize(want) == want[:19]
+
+
+# ----------------------------------------------------------- totality
+#
+# A parser that raises on one value used to fail the whole backfill of the
+# column it was building, leave it 'building' for good and, on a re-derive,
+# leave the batches before the bad row under the new params and the rest
+# under the old; detect() raising made the suggestion and detect routes
+# 500 for the whole table. Each of these came out of real evidence.
+
+@pytest.mark.parametrize("op_id,value,params", [
+    # An offset no clock has, inside the value: one cell's problem, not
+    # the analyst's param (validate_params still refuses THAT loudly).
+    ("iso8601", "2024-01-05T13:22:01+15:00", {}),
+    ("iso8601", "2024-01-05T13:22:01+99:99", {}),
+    ("apache_clf", "05/Jan/2024:13:22:01 +9999", {}),
+    ("apache_clf", "05/Jan/2024:13:22:01 +1500", {}),
+    # .NET's DateTime.MinValue / MaxValue, which exports write for "never",
+    # converted to UTC past either end of datetime's range.
+    ("iso8601", "0001-01-01T00:00:00+05:00", {}),
+    ("iso8601", "9999-12-31T23:59:59-05:00", {}),
+    ("iso8601", "0001-01-01T00:00:00", {"utc_offset": "+02:00"}),
+    ("apache_clf", "01/Jan/0001:00:00:00 +0100", {}),
+    ("us_datetime", "1/1/0001 12:00:00 AM", {"utc_offset": "+01:00"}),
+    ("us_datetime", "12/31/9999 23:59:59", {"utc_offset": "-01:00"}),
+    ("dd_mmm_yyyy", "01 Jan 0001 00:00:00", {"utc_offset": "+14:00"}),
+    # Digits that are not decimal digits, and decimal strings int() refuses.
+    ("windows_filetime", "²", {}),
+    ("windows_filetime", "¹²³", {}),
+    ("windows_filetime", "9" * 5000, {}),
+    ("windows_filetime", "0" * 5000, {}),
+    ("dotnet_ticks", "²", {}),
+    ("dotnet_ticks", "1" * 5000, {}),
+], ids=lambda v: f"{v[0]}x{len(v)}" if isinstance(v, str) and len(v) > 40 else None)
+def test_a_value_a_parser_cannot_read_is_none_not_an_exception(op_id, value, params):
+    assert parse(op_id, value, params) is None
+
+
+def test_the_offset_param_is_still_refused_loudly():
+    """The in-value offset became a quiet failure; the analyst's own
+    utc_offset must not — a typo there would shift nothing silently."""
+    with pytest.raises(ValueError):
+        timeparse.validate_params("iso8601", {"utc_offset": "+15:00"})
+
+
+def test_a_year_before_1000_is_still_canonical():
+    """strftime's %Y drops the zero padding below year 1000 on glibc
+    ("999-01-01", which sorts after "2024"); _fmt writes the fields out."""
+    out = parse("iso8601", "0999-01-01T00:00:00")
+    assert out == "0999-01-01 00:00:00"
+    assert _TS_ISO_RE.match(out)
+
+
+_HOSTILE = [
+    "", " ", "\x00", "-1", "nan", "inf", "1e400", "9" * 400, "0x" + "f" * 400, "²", "¹²³",
+    "١٧٠٠٠٠٠٠٠٠", "１７００００００００", "{" * 1000, "[1,2", '{"a": 1e999}',
+    '{"a":"trunc \\ud83d"}', '{"a":{"\\udc00k":"v"}}', "<a>", "<a></b>",
+    "2024-01-05T13:22:01+15:00", "0001-01-01T00:00:00+05:00", "9999-12-31T23:59:59-05:00",
+    "05/Jan/2024:13:22:01 +9999", "01/Jan/0001:00:00:00 +0100", "1/1/0001 0:00",
+    "12/31/9999 23:59:59", "Mon, 02 Jan 2006 15:04:05 +9999", "Jan 32 00:00:00",
+    "3155378976000000000", "-13300000000000000",
+]
+
+
+def _params_for(op):
+    params = timeparse.detect_defaults(op)
+    params.update({
+        "json_field": {"path": "$.a"}, "xml_field": {"path": "a"},
+        "regex_extract": {"pattern": r"(\d+)"}, "duration_delta": {"other_column": "b"},
+        "coalesce": {"extra_columns": ["b"]}, "row_json": {"extra_columns": ["b"]},
+    }.get(op["id"], {}))
+    out = [params]
+    if any(p["name"] == "utc_offset" for p in op["params"]):
+        out += [dict(params, utc_offset="+14:00"), dict(params, utc_offset="-14:00")]
+    return out
+
+
+@pytest.mark.parametrize("op_id", sorted(timeparse.OPERATIONS))
+def test_every_registered_operation_is_total_over_hostile_values(op_id):
+    """The class, not the instances above: every op the registry holds
+    returns text SQLite can store, or None, for every value — including
+    one under each extreme utc_offset."""
+    op = timeparse.OPERATIONS[op_id]
+    for params in _params_for(op):
+        for value in _HOSTILE:
+            state = {"map": {"1": "one"}} if op_id == "lookup" else {}
+            if op["multi_input"]:
+                state["inputs"] = ["a", "b"]
+                out = op["parse_multi"]([value, value], params, state)
+            else:
+                out = op["parse"](value, params, state)
+            assert out is None or isinstance(out, str), (params, value, out)
+            if out is not None:
+                out.encode("utf-8")   # a lone surrogate cannot be stored
+
+
+def test_detect_ranks_around_a_parser_that_raises(monkeypatch):
+    """Registered ops need not be ours (nothing stops a plugin registering
+    into the same table). One whose parse raises ranks as reading nothing;
+    one whose own detect raises is left out — neither takes the ranking
+    down."""
+    def boom(value, params, state):
+        raise RuntimeError("not today")
+
+    def bad_detect(samples, params):
+        raise RuntimeError("nor today")
+
+    for op in ({"id": "t_boom_parse", "label": "boom", "parse": boom},
+               {"id": "t_boom_detect", "label": "boom", "parse": boom, "detect": bad_detect}):
+        monkeypatch.setitem(timeparse.OPERATIONS, op["id"], op)
+        timeparse.register_op(op)
+    got = timeparse.detect(["1700000000", "1700000060"])
+    assert got[0]["op_id"] == "unix_epoch"
+    assert not {"t_boom_parse", "t_boom_detect"} & {r["op_id"] for r in got}
+    assert timeparse.parse_or_none(timeparse.OPERATIONS["t_boom_parse"], "x", {}, {}) is None

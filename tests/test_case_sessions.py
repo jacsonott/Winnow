@@ -362,3 +362,177 @@ def test_clearing_drops_undo_entries_that_would_resurrect_tags(store, write_csv)
     store.start_new_session(save_as="before")
     assert not store._undo
     assert store.db.execute("SELECT COUNT(*) FROM row_tags").fetchone()[0] == 0
+
+
+# ------------------------------------------- tables that share one file hash
+#
+# The hash is the file's, so every table imported out of one SQLite
+# database (a browser History: urls and visits), every sheet of one
+# workbook, and a file imported twice all carry the same one. Matching
+# on the hash alone mapped all of them onto one live table: "replace" lost
+# the first table's tags while reporting both restored, "merge" put them
+# on the other table's rows, and the diff collapsed the two tables into
+# one and reported nothing while different rows were tagged.
+
+def _history(tmp_path, name="History.db"):
+    import sqlite3
+    db = tmp_path / name
+    c = sqlite3.connect(db)
+    c.execute("CREATE TABLE urls (id INTEGER, url TEXT)")
+    c.executemany("INSERT INTO urls VALUES (?, ?)", [(i, f"http://u{i}.test") for i in range(5)])
+    c.execute("CREATE TABLE visits (id INTEGER, url_id INTEGER, at TEXT)")
+    c.executemany("INSERT INTO visits VALUES (?, ?, ?)", [(i, i, "t") for i in range(5)])
+    c.commit()
+    c.close()
+    return str(db)
+
+
+def _tagged(store, sid):
+    return sorted(r[0] for r in store.db.execute(
+        "SELECT rid FROM row_tags WHERE source_id=?", (sid,)))
+
+
+def _two_tables(store, tmp_path):
+    db = _history(tmp_path)
+    urls = store.ingest_sqlite_table(db, "urls", build_fts=False)["id"]
+    visits = store.ingest_sqlite_table(db, "visits", build_fts=False)["id"]
+    assert store.get_source(urls)["file_hash"] == store.get_source(visits)["file_hash"]
+    return urls, visits
+
+
+@pytest.mark.parametrize("merge", [False, True])
+def test_loading_puts_each_tables_tags_back_on_that_table(store, tmp_path, merge):
+    urls, visits = _two_tables(store, tmp_path)
+    _tag(store, urls, [1, 2], "TA")
+    _tag(store, visits, [5], "TA")
+    store.save_session("pass1")
+    store.start_new_session()
+
+    res = store.load_session("pass1", merge=merge)
+    assert (_tagged(store, urls), _tagged(store, visits)) == ([1, 2], [5])
+    assert res["sources_restored"] == 2 and res["warnings"] == []
+
+
+def test_the_diff_keeps_two_tables_from_one_file_apart(store, tmp_path):
+    urls, visits = _two_tables(store, tmp_path)
+    _tag(store, urls, [1, 2], "TA")
+    store.save_session("pass1")
+    assert store.diff_sessions("pass1", store.LIVE_SESSION)["counts"]["added"] == 0
+    # The same rids tagged, but on the OTHER table: a real difference.
+    store.start_new_session()
+    _tag(store, visits, [1, 2], "TA")
+
+    d = store.diff_sessions("pass1", store.LIVE_SESSION)
+    assert d["counts"] == {"added": 2, "removed": 2, "changed": 0, "note_changes": 0}
+    assert {(r["source_id"], r["rid"]) for r in d["removed"]} == {(urls, 1), (urls, 2)}
+    assert {(r["source_id"], r["rid"]) for r in d["added"]} == {(visits, 1), (visits, 2)}
+    assert not d["only_left_sources"] and not d["only_right_sources"]
+
+
+def test_sheets_of_one_workbook_get_their_own_tags(store, tmp_path):
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    a = wb.active
+    a.title = "Logons"
+    for r in ROWS:
+        a.append(r)
+    b = wb.create_sheet("Processes")
+    for r in [["Image"], ["a.exe"], ["b.exe"], ["c.exe"]]:
+        b.append(r)
+    path = str(tmp_path / "triage.xlsx")
+    wb.save(path)
+    logons = store.ingest_xlsx_sheet(path, "Logons", build_fts=False)["id"]
+    procs = store.ingest_xlsx_sheet(path, "Processes", build_fts=False)["id"]
+    _tag(store, logons, [1], "TA")
+    _tag(store, procs, [3], "TA")
+    store.save_session("pass1")
+    store.start_new_session()
+
+    store.load_session("pass1", merge=False)
+    assert (_tagged(store, logons), _tagged(store, procs)) == ([1], [3])
+    assert store.diff_sessions("pass1", store.LIVE_SESSION)["counts"] == {
+        "added": 0, "removed": 0, "changed": 0, "note_changes": 0}
+
+
+def test_a_file_imported_twice_keeps_each_copys_tags(store, write_csv):
+    """Two copies indistinguishable by anything a session records: the
+    session lists them in import order, and so does the case, so the
+    restore pairs them that way."""
+    first = _case(store, write_csv)
+    second = _case(store, write_csv)
+    _tag(store, first, [1], "TA")
+    _tag(store, second, [4], "TA")
+    store.save_session("pass1")
+    store.start_new_session()
+
+    res = store.load_session("pass1", merge=False)
+    assert (_tagged(store, first), _tagged(store, second)) == ([1], [4])
+    assert res["sources_restored"] == 2
+
+
+def test_a_qc_case_that_named_the_tables_differently_still_matches(store, tmp_path):
+    """Cross-case is the point of a session (invariant #10): the
+    reviewer imported the same History with their own table names, so
+    name cannot be required — the shape tells the two tables apart."""
+    from winnow.store import Store
+
+    urls, visits = _two_tables(store, tmp_path)
+    _tag(store, urls, [2], "TA")
+    _tag(store, visits, [3], "TA")
+    theirs = store.export_case_session()
+
+    other = Store(str(tmp_path / "reviewer.db"))
+    try:
+        db = _history(tmp_path, "copy-of-History.db")
+        ov = other.ingest_sqlite_table(db, "visits", name="visits (DC01)", build_fts=False)["id"]
+        ou = other.ingest_sqlite_table(db, "urls", name="urls (DC01)", build_fts=False)["id"]
+        other.adopt_session("analyst", theirs)
+        res = other.load_session("analyst", merge=True)
+        assert (_tagged(other, ou), _tagged(other, ov)) == ([2], [3])
+        assert res["warnings"] == []
+        d = other.diff_sessions("analyst", other.LIVE_SESSION)
+        assert d["counts"] == {"added": 0, "removed": 0, "changed": 0, "note_changes": 0}
+        assert len(d["shared_sources"]) == 2
+    finally:
+        other.close()
+
+
+def test_a_table_this_case_does_not_have_is_skipped_not_put_on_its_sibling(store, tmp_path):
+    """The case holds urls but not visits. visits' tags have nowhere to
+    go, and the only other table from that file is not a stand-in."""
+    from winnow.store import Store
+
+    urls, visits = _two_tables(store, tmp_path)
+    _tag(store, urls, [1], "TA")
+    _tag(store, visits, [4], "TA")
+    theirs = store.export_case_session()
+
+    other = Store(str(tmp_path / "partial.db"))
+    try:
+        ou = other.ingest_sqlite_table(_history(tmp_path, "h2.db"), "urls", build_fts=False)["id"]
+        other.adopt_session("analyst", theirs)
+        res = other.load_session("analyst", merge=False)
+        assert _tagged(other, ou) == [1]
+        assert res["sources_restored"] == 1 and res["sources_reimported"] == 0
+        assert any("visits" in w for w in res["warnings"]), res["warnings"]
+        assert [s["name"] for s in other.list_sources()] == ["h2.urls"], \
+            "nothing was re-imported to stand in for the missing table"
+    finally:
+        other.close()
+
+
+def test_two_identical_copies_against_one_entry_is_refused_not_guessed(store, write_csv):
+    """The session knew one copy of the file; this case has two that
+    nothing tells apart. Which one the tags belong on is a guess, and a
+    silent wrong guess is the failure this exists to prevent."""
+    sid = _case(store, write_csv)
+    _tag(store, sid, [2], "TA")
+    store.save_session("one copy")
+    store.start_new_session()
+    dup = _case(store, write_csv)
+
+    res = store.load_session("one copy", merge=True)
+    assert (_tagged(store, sid), _tagged(store, dup)) == ([], [])
+    assert res["sources_restored"] == 0
+    assert res["warnings"] and "evidence.csv" in res["warnings"][0]

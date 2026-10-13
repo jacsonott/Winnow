@@ -98,8 +98,19 @@ def _leaf_text(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (dict, list)):
-        return json.dumps(value, ensure_ascii=False)
-    return str(value)
+        text = json.dumps(value, ensure_ascii=False)
+    else:
+        text = str(value)
+    # JSON can spell half a character: `"\ud83d"` is legal JSON (a
+    # truncated emoji, routine in logs that cut a string at a byte count)
+    # and json.loads hands back a str holding a lone surrogate, which
+    # cannot be written as UTF-8 — so SQLite refused the row and the
+    # whole backfill failed on it. utf8_text writes it back as the escape
+    # the cell held, the rule JSON import follows too, so one value reads
+    # the same whichever way it came in. Not U+FFFD: that makes
+    # `evil\udc80.txt` and `evil\udc81.txt` one value, and two keys one
+    # column name.
+    return utf8_text(text)
 
 
 # ------------------------------------------------------------- JSON paths
@@ -394,15 +405,18 @@ def load_xml(value: Any) -> "ET.Element | None":
         return None
     if _DOCTYPE_RE.search(s):
         return None
+    # ValueError as well as ParseError: expat is fed UTF-8, so a str it
+    # cannot encode (one holding a lone surrogate) raises
+    # UnicodeEncodeError before parsing starts. Not XML either way.
     try:
         return ET.fromstring(s)
-    except ET.ParseError:
+    except (ET.ParseError, ValueError):
         pass
     try:
         # Wrapping re-parses the prolog as content, so drop it first.
         body = re.sub(r"^<\?xml[^>]*\?>", "", s).strip()
         return ET.fromstring(f"<winnow-fragment>{body}</winnow-fragment>")
-    except ET.ParseError:
+    except (ET.ParseError, ValueError):
         return None
 
 
@@ -766,9 +780,10 @@ def discover_paths(values: list, kind: str) -> list[dict]:
             doc = load_json(raw)
             if doc is None:
                 continue
-            # utf8_text: a lone surrogate in a value would fail the
-            # route's response; one in a key is escaped by the path itself.
-            found = [(format_json_path(p), utf8_text(_leaf_text(v))) for p, v in json_leaf_paths(doc)]
+            # _leaf_text's utf8_text: a lone surrogate in a value would
+            # fail the route's response; one in a key is escaped by the
+            # path itself.
+            found = [(format_json_path(p), _leaf_text(v)) for p, v in json_leaf_paths(doc)]
         else:
             root = load_xml(raw)
             if root is None:

@@ -91,14 +91,48 @@ def _parse_utc_offset(text: str) -> timedelta:
     return sign * timedelta(hours=hours, minutes=minutes)
 
 
-def _fmt(dt: datetime, subsecond: bool) -> str:
+def _value_offset(text: str) -> timezone | None:
+    """The offset a VALUE carries ("+05:30" in an ISO stamp, "-0700" in a
+    CLF line), or None when it is not one a clock can have.
+
+    Not `_parse_utc_offset`, whose ValueError is right for the analyst's
+    `utc_offset` param (a typo there should fail column creation loudly)
+    and wrong here: an offset inside the data is one cell's problem. It
+    used to escape the parser, and one `+15:00` among a million good
+    stamps failed the whole backfill and left the column stuck
+    'building'. A value whose offset is out of range is a value that does
+    not parse — NULL, counted with the other failures."""
+    try:
+        return timezone(_parse_utc_offset(text))
+    except ValueError:
+        return None
+
+
+def _fmt(dt: datetime | None, subsecond: bool) -> str | None:
     """Canonical output. An aware datetime is converted to UTC first; a naive
-    one is emitted exactly as its components stand (the no-TZ-math rule)."""
+    one is emitted exactly as its components stand (the no-TZ-math rule).
+
+    Total, like every parser built on it: None in is None out (so
+    `_fmt(_shift_naive(...))` needs no check between the two), and a
+    conversion that falls off either end of datetime's range — year 1 at
+    a positive offset is year 0 in UTC, `0001-01-01T00:00:00+05:00` —
+    is None rather than the OverflowError that used to fail a whole
+    backfill over one .NET MinValue sentinel.
+
+    Written out field by field rather than with strftime: `%Y` is not
+    zero-padded below year 1000 on glibc ("999-01-01", which sorts after
+    "2024" and which _TS_ISO_RE does not accept), and what it does there
+    is up to each platform's C library."""
+    if dt is None:
+        return None
     if dt.tzinfo is not None:
-        dt = dt.astimezone(_UTC).replace(tzinfo=None)
-    if subsecond:
-        return dt.strftime("%Y-%m-%d %H:%M:%S.%f")
-    return dt.strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            dt = dt.astimezone(_UTC).replace(tzinfo=None)
+        except (OverflowError, ValueError):
+            return None
+    out = (f"{dt.year:04d}-{dt.month:02d}-{dt.day:02d} "
+           f"{dt.hour:02d}:{dt.minute:02d}:{dt.second:02d}")
+    return f"{out}.{dt.microsecond:06d}" if subsecond else out
 
 
 # A 12-hour marker in any of the ways exporters write one — "PM", "pm",
@@ -189,12 +223,18 @@ def _plausible(dt: datetime) -> bool:
     return PLAUSIBLE_MIN_YEAR <= dt.year <= PLAUSIBLE_MAX_YEAR
 
 
-def _shift_naive(dt: datetime, params: dict) -> datetime:
+def _shift_naive(dt: datetime, params: dict) -> datetime | None:
     """Apply the optional fixed `utc_offset` param to a naive local-time
-    value: UTC = local - offset (a -05:00 log line moves 5 hours later)."""
+    value: UTC = local - offset (a -05:00 log line moves 5 hours later).
+    None when that moves it outside datetime's range (`1/1/0001 12:00:00
+    AM`, .NET's DateTime.MinValue, under any positive offset) — see
+    _fmt, which passes the None straight through."""
     off = params.get("utc_offset")
     if off:
-        return dt - _parse_utc_offset(off)
+        try:
+            return dt - _parse_utc_offset(off)
+        except OverflowError:
+            return None
     return dt
 
 
@@ -238,10 +278,35 @@ def _success_rate_detect(op: dict) -> Callable:
         state: dict = {}
         ok = 0
         for v in vals:
-            if op["parse"](v, params, state) is not None:
+            if parse_or_none(op, v, params, state) is not None:
                 ok += 1
         return ok / len(vals)
     return detect
+
+
+def parse_or_none(op: dict, value: Any, params: dict, state: dict) -> Any:
+    """`op["parse"]`, with a value that raises answered as a value that
+    does not parse.
+
+    The built-in parsers are meant to be total, but the registry is open
+    (structparse, combine and enrich register into it, and nothing stops
+    a plugin doing the same) and a sample is evidence: one cell nobody anticipated must cost that cell,
+    not the answer for every other one. Detection, the previews and the
+    post-import suggestions all run every parser over real values, and
+    they used to turn one such cell into a 500 for the whole table. The
+    backfill guards each value the same way inline (it also counts them)."""
+    try:
+        return op["parse"](value, params, state)
+    except Exception:  # noqa: BLE001 — see above: one value, not the column
+        return None
+
+
+def parse_multi_or_none(op: dict, values: list, params: dict, state: dict) -> Any:
+    """parse_or_none for an op that reads several columns of a row."""
+    try:
+        return op["parse_multi"](values, params, state)
+    except Exception:  # noqa: BLE001 — as parse_or_none
+        return None
 
 
 def detect_defaults(op: dict) -> dict:
@@ -270,7 +335,10 @@ def detect(samples: Iterable) -> list[dict]:
         if op["hidden_from_detect"]:
             continue
         params = detect_defaults(op)
-        conf = op["detect"](samples, params)
+        try:
+            conf = op["detect"](samples, params)
+        except Exception:  # noqa: BLE001 — a custom detector that breaks ranks nothing
+            continue
         if conf > 0:
             results.append({"op_id": op["id"], "label": op["label"], "confidence": conf, "params": params})
     results.sort(key=lambda r: -r["confidence"])
@@ -465,6 +533,19 @@ _FILETIME_MAX = int((datetime(9999, 12, 28) - _FILETIME_EPOCH).total_seconds() *
 _BARE_HEX_RE = re.compile(r"^[0-9A-Fa-f]+$")
 
 
+def _decimal_ticks(s: str) -> bool:
+    """Whether `int(s)` can read `s` as a tick count worth range-checking.
+
+    `isdecimal`, not `isdigit`: superscripts ("²", common in pasted
+    spreadsheet text) are digits but not decimal, so `isdigit` let them
+    through to an int() that raises. And a length cap, because int()
+    refuses a decimal string over 4,300 digits outright (CPython's
+    int_max_str_digits, leading zeros included) — a value that long is
+    not a timestamp. Both tick formats top out at 19 digits; the rest of
+    the allowance is for zero padding."""
+    return s.isdecimal() and len(s) <= 24
+
+
 def _parse_filetime(value: Any, params: dict, state: dict) -> str | None:
     s = str(value).strip()
     ticks: int | None = None
@@ -473,7 +554,7 @@ def _parse_filetime(value: Any, params: dict, state: dict) -> str | None:
             ticks = int(s, 16)
         except ValueError:
             return None
-    elif s.isdigit():
+    elif _decimal_ticks(s):
         ticks = int(s)
     elif _BARE_HEX_RE.match(s) and re.search(r"[A-Fa-f]", s):
         # Bare hex only when a letter proves it's hex — an all-digit string
@@ -727,7 +808,7 @@ register_op({
 
 def _parse_dotnet(value: Any, params: dict, state: dict) -> str | None:
     s = str(value).strip()
-    if not s.isdigit():
+    if not _decimal_ticks(s):
         return None
     ticks = int(s)
     dt_max_ticks = 3155378975999999999  # DateTime.MaxValue.Ticks
@@ -764,7 +845,10 @@ def _parse_clf(value: Any, params: dict, state: dict) -> str | None:
     except ValueError:
         return None
     if m.group(7):
-        dt = dt.replace(tzinfo=timezone(_parse_utc_offset(m.group(7))))
+        tz = _value_offset(m.group(7))
+        if tz is None:
+            return None
+        dt = dt.replace(tzinfo=tz)
     else:
         dt = _shift_naive(dt, params)
     return _fmt(dt, subsecond=False)
