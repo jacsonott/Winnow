@@ -803,6 +803,10 @@ class CaseCreate(BaseModel):
     name: str
     group: str = ""
     notes: str = ""
+    # Register a case file that is already there, and nothing else — the
+    # home screen's "Open existing case file…". Without it a missing path
+    # is a new case, created (+ New case).
+    must_exist: bool = False
 
 
 class CaseUpdate(BaseModel):
@@ -842,9 +846,16 @@ def api_case_current():
 # quicklook/ and registers), push its tables into an existing case
 # (copy_sources_to), or discard it.
 
+def _default_cases_dir() -> str:
+    """Where case files go until the analyst picks a folder: cases/ in the
+    install root, beside server.py — wherever the server was started
+    from. The first-run prompt shows and stores this exact path."""
+    return str(paths.INSTALL_ROOT / "cases")
+
+
 def _cases_dir() -> str:
     configured = os.environ.get("WINNOW_CASES_DIR") or WS.machine_prefs.get("cases_dir")
-    base = configured or str(paths.INSTALL_ROOT / "cases")
+    base = configured or _default_cases_dir()
     return os.path.abspath(os.path.expanduser(base))
 
 
@@ -1996,6 +2007,7 @@ def api_prefs():
     # until Save-as-a-case, or until they launch Winnow itself.
     quicklook = STORE is not None and _is_temp_case(STORE.path)
     return {"cases_dir": WS.machine_prefs.get("cases_dir"),
+            "default_cases_dir": _default_cases_dir(),
             # first run of this INSTANCE: nothing configured and no cases yet
             "first_run": (WS.machine_prefs.get("cases_dir") is None
                           and not WS.cases.list() and not quicklook)}
@@ -2004,7 +2016,12 @@ def api_prefs():
 @app.post("/api/prefs")
 def api_prefs_set(request: Request, body: PrefsBody):
     if body.cases_dir is not None:
-        path = os.path.abspath(os.path.expanduser(body.cases_dir.strip()))
+        # A relative folder is relative to the install, not to the
+        # directory the server happened to be started from: "Use the
+        # default" sent 'cases', and `python /opt/winnow/server.py` run
+        # from a home directory filed every case under ~/cases.
+        path = os.path.abspath(os.path.join(paths.INSTALL_ROOT,
+                                            os.path.expanduser(body.cases_dir.strip())))
         _refuse_remote_mkdir(request, path)
         try:
             os.makedirs(path, exist_ok=True)
@@ -2045,6 +2062,12 @@ def api_cases_create(request: Request, body: CaseCreate):
             400, f"{body.path} is not a Winnow case file — to import it as evidence, "
                  "open a case and import it there")
     if not os.path.isfile(body.path):
+        if body.must_exist:
+            # Opening a path that names nothing used to create an empty
+            # case there and open that, so a typo or a case on a share
+            # that wasn't mounted looked like a case with no tables.
+            raise HTTPException(400, f"No case file at {body.path} — to start a new case, "
+                                     "use + New case")
         parent = os.path.dirname(os.path.abspath(body.path))
         if parent:
             # Outside the try below: its refusal is already the 403 it

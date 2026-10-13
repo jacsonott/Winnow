@@ -115,3 +115,75 @@ def test_double_clicking_a_case_card_opens_it_once(page):
     page.wait_for_selector("#app:not([hidden])")
     page.wait_for_function("() => __winnow.S.view")
     page.wait_for_selector(".row")
+
+
+def test_open_existing_refuses_a_path_with_no_case_there(page, tmp_path):
+    """Given a typo, or a case on a share that wasn't mounted, "Open
+    existing case file…" created an empty case at that path and opened it:
+    the analyst's case looked like one with no tables. It says there is no
+    case file there and creates nothing — that is + New case's job."""
+    missing = tmp_path / "Shares" / "acme.db-winnow"
+    page.evaluate("() => __winnow.openExistingCasePrompt()")
+    page.wait_for_selector("#modal:not([hidden])")
+    page.locator("#modalBody input").first.fill(str(missing))
+    page.locator("#modalBody .btn", has_text="Open").click()
+    page.wait_for_function("() => /No case file at/.test(document.getElementById('toast').textContent)")
+    assert not (tmp_path / "Shares").exists()
+    cases = page.evaluate("() => fetch('/api/cases').then((r) => r.json())")
+    assert str(missing) not in [c["path"] for c in cases]
+    # Still asking, path and all, so the typo can be fixed in place.
+    page.wait_for_selector("#modal:not([hidden])")
+    assert page.locator("#modalBody input").first.input_value() == str(missing)
+    page.keyboard.press("Escape")
+    page.wait_for_selector("#modal[hidden]", state="attached")
+
+
+DEFAULT_CASES = "/srv/winnow/cases"
+
+
+def test_first_run_names_the_default_cases_folder_and_stores_that_one(page):
+    """"Use the default" posted 'cases', which the server resolved against
+    the directory it was started from rather than the install — and the
+    prompt only said "next to the server". It names the folder now, and
+    what it names is what it stores. /api/prefs is answered here, so the
+    shared server's own setting is never touched."""
+    posted = []
+
+    def prefs(route):
+        if route.request.method == "POST":
+            body = json.loads(route.request.post_data)
+            posted.append(body)
+            route.fulfill(json={"cases_dir": body.get("cases_dir"),
+                                "default_cases_dir": DEFAULT_CASES, "first_run": False})
+        else:
+            route.fulfill(json={"cases_dir": None, "default_cases_dir": DEFAULT_CASES,
+                                "first_run": True})
+
+    page.route("**/api/prefs", prefs)
+    try:
+        page.evaluate("() => { __winnow.maybeOfferStorageDir(); }")
+        page.wait_for_selector(".confirm-overlay")
+        assert DEFAULT_CASES in page.locator(".confirm-card").inner_text()
+        page.locator(".confirm-card .btn", has_text="Use the default").click()
+        page.wait_for_function("(d) => __winnow.S.casesDir === d", arg=DEFAULT_CASES)
+        assert posted == [{"cases_dir": DEFAULT_CASES}]
+    finally:
+        page.unroute("**/api/prefs")
+
+
+def test_a_new_case_goes_in_the_default_folder_when_none_was_chosen(page):
+    """An install with cases but no cases folder set (one from before the
+    setting) never sees the first-run prompt, and New case offered the
+    relative cases/<name> — created wherever the server was started."""
+    page.route("**/api/prefs", lambda route: route.fulfill(json={
+        "cases_dir": None, "default_cases_dir": DEFAULT_CASES, "first_run": False}))
+    try:
+        page.evaluate("() => __winnow.maybeOfferStorageDir()")
+    finally:
+        page.unroute("**/api/prefs")
+    page.evaluate("() => __winnow.openNewCaseModal({ name: 'Acme' })")
+    page.wait_for_selector("#modal:not([hidden])")
+    values = page.evaluate("() => [...document.querySelectorAll('#modalBody input')].map((i) => i.value)")
+    assert DEFAULT_CASES + "/acme.db-winnow" in values, values
+    page.keyboard.press("Escape")
+    page.wait_for_selector("#modal[hidden]", state="attached")

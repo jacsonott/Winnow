@@ -510,7 +510,7 @@ export function openNewCaseModal(state = {}) {
     groupRow.append(groupInput, groupOptionsDatalist('home-new-case-groups'));
     b.append(el('label', null, 'Group'), groupRow);
 
-    let chosenDir = state.chosenDir || S.casesDir || 'cases';
+    let chosenDir = state.chosenDir || S.casesDir || S.defaultCasesDir || 'cases';
     const pathInput = fieldInput(state.path || joinPath(chosenDir, slugify(state.name || '') + CASE_EXT));
     pathInput.style.fontFamily = 'var(--mono)';
     let pathTouched = state.pathTouched || false;
@@ -632,18 +632,23 @@ export function openNewCaseModal(state = {}) {
 
 /* First run of this Winnow instance (no cases_dir configured, no cases
    yet): ask where case files should live instead of silently defaulting
-   to ./cases. Asked once — either answer configures the instance. */
+   to cases/ beside server.py. Asked once — either answer configures the
+   instance. */
 export async function maybeOfferStorageDir() {
   let prefs;
   try {
     prefs = await api('/api/prefs');
   } catch { return; }
   S.casesDir = prefs.cases_dir || null;
+  // The server's own answer, absolute: cases/ beside server.py. What the
+  // dialog names is exactly what "Use the default" stores, and what a new
+  // case is filed under while nothing has been chosen.
+  S.defaultCasesDir = prefs.default_cases_dir || null;
   if (!prefs.first_run) return;
   const pick = await confirmDialog(
     'First run — where should Winnow keep its case files? '
-    + 'The default is a "cases" folder next to the server. You can pick any '
-    + 'folder on this machine instead.',
+    + `The default is a "cases" folder next to the server: ${prefs.default_cases_dir}. `
+    + 'You can pick any folder on this machine instead.',
     { okLabel: 'Choose a folder…', cancelLabel: 'Use the default' });
   if (pick) {
     openFolderBrowser(undefined, async (dir) => {
@@ -659,7 +664,7 @@ export async function maybeOfferStorageDir() {
   } else {
     // "Use the default" is still an answer — record it so we never nag.
     try {
-      const res = await post('/api/prefs', { cases_dir: 'cases' });
+      const res = await post('/api/prefs', { cases_dir: prefs.default_cases_dir });
       S.casesDir = res.cases_dir;
     } catch { /* next launch asks again — fine */ }
   }
@@ -705,9 +710,11 @@ export function openExistingCasePrompt(state = {}) {
       if (!trimmed) { toast('Enter or browse to a case file'); return; }
       const name = trimmed.split(/[\\/]/).pop().replace(/\.db-winnow$|\.db$/i, '');
       try {
-        await post('/api/cases', { path: trimmed, name, group: '', notes: '' });
+        // must_exist: a path with nothing at it is refused, not created —
+        // creating a case is + New case's job.
+        await post('/api/cases', { path: trimmed, name, group: '', notes: '', must_exist: true });
       } catch (e) {
-        toast('Could not register case: ' + e.message, 6000);
+        toast('Could not open case: ' + e.message, 6000);
         return;
       }
       $('modal').hidden = true;

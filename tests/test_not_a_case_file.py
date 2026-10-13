@@ -83,6 +83,20 @@ def test_registering_an_existing_case_still_works(client, tmp_path):
     Store(str(p), default_tags=DEFAULT_TAGS).close()
     r = client.post("/api/cases", json={"path": str(p), "name": "old"})
     assert r.status_code == 200, r.text
+    r = client.post("/api/cases", json={"path": str(p), "name": "old", "must_exist": True})
+    assert r.status_code == 200, r.text
+
+
+def test_opening_a_path_with_no_case_there_creates_nothing(client, tmp_path):
+    """"Open existing case file…" registers with must_exist. Given a typo,
+    or a case on a share that wasn't mounted, it created an empty case
+    there and opened it — a case with no tables, where the analyst
+    expected theirs. Creating one is + New case's job."""
+    p = tmp_path / "Shares" / "acme.db-winnow"
+    r = client.post("/api/cases", json={"path": str(p), "name": "acme", "must_exist": True})
+    assert r.status_code == 400 and "No case file at" in r.json()["detail"]
+    assert not (tmp_path / "Shares").exists()
+    assert WS.cases.find_by_path(str(p)) is None
 
 
 # -------------------------------------------------------- copy into a case

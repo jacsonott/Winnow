@@ -704,6 +704,33 @@ def test_prefs_round_trip_and_first_run_flag(client, tmp_path):
     assert (tmp_path / "mycases").is_dir()  # created eagerly so the browse works
 
 
+def test_the_default_cases_folder_is_the_install_s_not_the_working_directory(
+        client, tmp_path, monkeypatch):
+    """First run's "Use the default" stored abspath('cases') — the folder
+    the server happened to be started from, so `python /opt/winnow/
+    server.py` run from a home directory filed every case under ~/cases.
+    The default is cases/ in the install root, the prompt names it, and
+    'cases' from an older page lands there too."""
+    from winnow import paths
+
+    install = tmp_path / "install"
+    install.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.setattr(paths, "INSTALL_ROOT", install)
+    monkeypatch.chdir(elsewhere)
+
+    prefs = client.get("/api/prefs").json()
+    assert prefs["first_run"] is True
+    got = client.post("/api/prefs", json={"cases_dir": "cases"}).json()
+    assert got["cases_dir"] == str(install / "cases")
+    assert (install / "cases").is_dir() and not (elsewhere / "cases").exists()
+    # What the prompt shows is what it stores.
+    assert prefs["default_cases_dir"] == str(install / "cases")
+    got = client.post("/api/prefs", json={"cases_dir": prefs["default_cases_dir"]}).json()
+    assert got["cases_dir"] == str(install / "cases")
+
+
 def test_updates_rollback_route_maps_success_and_failure(client, monkeypatch):
     """The HTTP layer over updater.rollback — the module itself is tested
     in test_updater.py, but this route had no coverage at all, and it's
