@@ -125,6 +125,23 @@ see [docs/notes/README.md](README.md) for the whole set.
   background janitor thread (`wait_for_fts_maintenance` in tests) — freed
   pages go to the freelist for reuse; the file only shrinks under a VACUUM
   nothing runs automatically.
+- **Contains folds case for A–Z only; Regex folds every script.** Every
+  contains path — the search box, the `contains`/`starts`/`not_contains`
+  filters, Advanced, search-all — ends in SQLite's built-in `LIKE`, which
+  is case-insensitive for ASCII only, while `_regexp` is Python
+  `re.IGNORECASE`. So "администратор" finds "Администратор" under Regex and
+  not under Contains (same for "élodie"/"ÉLODIE"). Known and left as is,
+  deliberately: the trigram index itself already folds Unicode — its
+  candidates include both — and it is the per-candidate recheck that is
+  the built-in LIKE. Measured (SQLite 3.45, 300k rows): an app-defined
+  `like()` keeps the trigram pushdown (`VIRTUAL TABLE INDEX 0:L0`, rare-term
+  time unchanged) but makes every fallback scan ~2.6x slower (65ms →
+  167ms) — the not-yet-indexed source, terms under 3 chars or holding
+  `%`/`_`, every column filter — and would change `LIKE` in the SQL pane
+  too. Narrowing Regex to ASCII (`re.ASCII`) instead would make the mode an
+  analyst reaches for when Contains misses find less. Both are a trade for
+  the maintainer to make against `bench/`'s `search/contains.*` pairs; until
+  then the mode buttons' tooltips say which folds what.
 - A per-column filter with a **sargable op** (`equals`/`in` — see `SARGABLE_OPS`)
   lazily gets a plain B-tree index on that `(source_id, column)`, same
   fire-and-forget background pattern as FTS (`_ensure_column_index_building`
