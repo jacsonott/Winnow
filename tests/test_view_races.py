@@ -94,3 +94,123 @@ def test_a_source_still_importing_says_so_instead_of_500ing(store, write_csv):
     # try/except cannot catch what the response body raises later.
     with pytest.raises(ValueError, match="still importing"):
         store.export_view_csv(v["view_id"])
+
+
+# ------------------------------- a handle registered after the lock is gone
+#
+# build_view and expand_group used to put the new handle into `_views`
+# AFTER releasing the writer lock. A rebuild of the same source that took
+# the lock in that gap could not see the new view, so could not evict it:
+# two live root views for one source, a `v.view_N` nothing would ever drop,
+# a group whose parent was gone, and an older held search that adopt_view
+# would install over the newer build instead of answering 409. Driven
+# deterministically: the lock below runs the competing rebuild on another
+# thread at the exact moment the build under test lets go of the lock.
+
+
+class _RunOnRelease:
+    """Store.lock, plus: after `arm(fn)`, the next time the lock is fully
+    released, run `fn` on another thread and wait for it — a competing
+    build taking the writer lock in the gap after release."""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.fn = None
+
+    def arm(self, fn):
+        self.fn = fn
+
+    def acquire(self, *a, **k):
+        return self.inner.acquire(*a, **k)
+
+    def release(self):
+        self.inner.release()
+        if self.fn is not None and not self.inner._is_owned():
+            fn, self.fn = self.fn, None
+            t = threading.Thread(target=fn)
+            t.start()
+            t.join()
+
+    def __enter__(self):
+        self.inner.acquire()
+        return self
+
+    def __exit__(self, *exc):
+        self.release()
+
+    def _is_owned(self):
+        return self.inner._is_owned()
+
+
+def _v_tables(store):
+    with store._reader() as ro:
+        return {r[0] for r in ro.execute(
+            "SELECT name FROM v.sqlite_master WHERE type='table' AND name LIKE 'view_%'")}
+
+
+def _arm_after_next_mint(store, monkeypatch, fn):
+    """Arm the hook the moment the build under test mints its view id, so
+    it fires at the end of that build's locked block."""
+    mint = store._next_view_id
+
+    def minting():
+        vid = mint()
+        monkeypatch.setattr(store, "_next_view_id", mint)
+        store.lock.arm(fn)
+        return vid
+
+    monkeypatch.setattr(store, "_next_view_id", minting)
+
+
+def test_a_held_search_overtaken_by_a_rebuild_cannot_be_adopted(store, write_csv, monkeypatch):
+    sid = _case(store, write_csv, rows=8)
+    store.build_view(sid, {})
+    store.lock = _RunOnRelease(store.lock)
+    newer = {}
+    _arm_after_next_mint(store, monkeypatch, lambda: newer.setdefault(
+        "v", store.build_view(sid, {"filters": [{"column": "Host", "op": "equals", "value": "H1"}]})))
+
+    held = store.build_view(sid, {"search": "H0"}, hold=True)
+
+    assert newer["v"]["view_id"] in store._views
+    assert held["view_id"] not in store._views          # the newer intent evicted it
+    with pytest.raises(KeyError):                       # → the 409 "expired" the client re-runs on
+        store.adopt_view(held["view_id"])
+    assert _v_tables(store) == {newer["v"]["view_id"]}  # and its table is gone, not orphaned
+
+
+def test_a_materialised_group_is_dropped_with_a_parent_rebuilt_under_it(store, write_csv, monkeypatch):
+    sid = _case(store, write_csv, rows=8)
+    root = store.build_view(sid, {"sort": [{"column": "When", "dir": "desc"}]})
+    monkeypatch.setattr(store, "GROUP_MATERIALIZE_THRESHOLD", 1)
+    store.lock = _RunOnRelease(store.lock)
+    rebuilt = {}
+    _arm_after_next_mint(store, monkeypatch, lambda: rebuilt.setdefault(
+        "v", store.build_view(sid, {"sort": [{"column": "When", "dir": "asc"}]})))
+
+    group = store.expand_group(root["view_id"], "Host", "H0")
+
+    assert root["view_id"] not in store._views
+    assert group["view_id"] not in store._views         # cascaded with its parent
+    assert _v_tables(store) == {rebuilt["v"]["view_id"]}
+
+
+def test_a_virtual_group_is_not_registered_under_a_parent_already_gone(store, write_csv, monkeypatch):
+    sid = _case(store, write_csv, rows=8)
+    root = store.build_view(sid, {})                    # root_virtual: the virtual group path
+    assert root["kind"] == "root_virtual"
+    store.lock = _RunOnRelease(store.lock)
+    resolve = store._resolve_members
+
+    def resolving(source_id):
+        # armed at the top of expand_group: fires when its count block
+        # lets go of the lock, before the group is registered
+        store.lock.arm(lambda: store.build_view(sid, {"filters": [
+            {"column": "Host", "op": "equals", "value": "H1"}]}))
+        monkeypatch.setattr(store, "_resolve_members", resolve)
+        return resolve(source_id)
+
+    monkeypatch.setattr(store, "_resolve_members", resolving)
+    with pytest.raises(KeyError):
+        store.expand_group(root["view_id"], "Host", "H0")
+    assert not [h for h in store._views.values() if h.get("parent_view_id") == root["view_id"]]

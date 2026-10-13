@@ -6144,42 +6144,50 @@ class Store:
         # writer lock stands aside for it — asked while waiting for the
         # lock, not once before blocking on it (_writer_for_build).
         with self._writer_for_build(source_id, spec.get("op_token"), yield_others), \
-                self._running_build(source_id, spec.get("op_token")), \
-                self._interruptible(spec.get("op_token"), self.db), self.db:
-            # pos declared INTEGER PRIMARY KEY makes it *be* the rowid, so
-            # this alone gives the same unique/indexed-by-pos lookup the old
-            # CTAS + separate CREATE UNIQUE INDEX did, for one less full
-            # sort-and-write of every row (see CLAUDE.md's "Performance"
-            # section, change 3). pos is deliberately absent from the
-            # INSERT's column list: rowids are assigned 1..N in insertion
-            # order, and an INSERT..SELECT with ORDER BY inserts in sorted
-            # order — measured ~35% faster than numbering the same sort
-            # with ROW_NUMBER() OVER, for byte-identical view content.
-            # (The ORDER BY always ends in `rid ASC`, so the order — and
-            # therefore every pos — is fully determined, not sorter-
-            # dependent.) cursor.rowcount then gives the view's row count
-            # without re-scanning the table we just wrote.
-            self.db.execute(f"CREATE TABLE v.{q(vid)} (pos INTEGER PRIMARY KEY, source_id INTEGER, rid INTEGER)")
-            n = self.db.execute(sql, params).rowcount
-            # Evicted *after* the new view is built, not before (it used to
-            # be first): the whole block is one transaction, so a cancelled
-            # (interrupted) build rolls back to a world where the previous
-            # view still exists — the frontend keeps its rows instead of
-            # every open handle 409ing. The new view's handle isn't in
-            # self._views yet, so the eviction loop can't touch it. A held
-            # build evicts only an earlier pending view (see the docstring).
-            self._evict_root_views(source_id, pending_only=hold)
+                self._running_build(source_id, spec.get("op_token")):
+            with self._interruptible(spec.get("op_token"), self.db), self.db:
+                # pos declared INTEGER PRIMARY KEY makes it *be* the rowid, so
+                # this alone gives the same unique/indexed-by-pos lookup the old
+                # CTAS + separate CREATE UNIQUE INDEX did, for one less full
+                # sort-and-write of every row (see CLAUDE.md's "Performance"
+                # section, change 3). pos is deliberately absent from the
+                # INSERT's column list: rowids are assigned 1..N in insertion
+                # order, and an INSERT..SELECT with ORDER BY inserts in sorted
+                # order — measured ~35% faster than numbering the same sort
+                # with ROW_NUMBER() OVER, for byte-identical view content.
+                # (The ORDER BY always ends in `rid ASC`, so the order — and
+                # therefore every pos — is fully determined, not sorter-
+                # dependent.) cursor.rowcount then gives the view's row count
+                # without re-scanning the table we just wrote.
+                self.db.execute(f"CREATE TABLE v.{q(vid)} (pos INTEGER PRIMARY KEY, source_id INTEGER, rid INTEGER)")
+                n = self.db.execute(sql, params).rowcount
+                # Evicted *after* the new view is built, not before (it used to
+                # be first): the whole block is one transaction, so a cancelled
+                # (interrupted) build rolls back to a world where the previous
+                # view still exists — the frontend keeps its rows instead of
+                # every open handle 409ing. The new view's handle isn't in
+                # self._views yet, so the eviction loop can't touch it. A held
+                # build evicts only an earlier pending view (see the docstring).
+                self._evict_root_views(source_id, pending_only=hold)
 
-        handle = {
-            "view_id": vid,
-            "source_id": source_id,
-            "row_count": n,
-            "kind": "root",
-            "elapsed_ms": int((time.time() - t0) * 1000),
-        }
-        if hold:
-            handle["pending"] = True
-        self._views[vid] = handle
+            # Registered after the commit (a rolled-back build never gets a
+            # handle) but BEFORE the writer lock is released. Registering
+            # after it left a gap in which the next build for this source
+            # could take the lock, find no handle to evict, and register
+            # its own — leaving this one live beside it: two root views for
+            # one source, a table nothing would drop, and an older held
+            # view adopt_view would install over the newer build instead of
+            # answering 409.
+            handle = {
+                "view_id": vid,
+                "source_id": source_id,
+                "row_count": n,
+                "kind": "root",
+                "elapsed_ms": int((time.time() - t0) * 1000),
+            }
+            if hold:
+                handle["pending"] = True
+            self._views[vid] = handle
         return handle
 
     def _evict_root_views(self, source_id: int, *, keep: str | None = None,
@@ -7121,30 +7129,46 @@ class Store:
                     )
                     params.extend([m["source_id"], *where_params])
             union_sql = " UNION ALL ".join(branches)
-            with self.lock, self._dropped_view_is_expired(), self.db:
-                # Same ORDER BY-fed insert as build_view: pos auto-assigns
-                # 1..N in insertion (= sorted) order, rowcount replaces a
-                # count(*) re-scan. root_pos is unique across the union
-                # (vv.pos from one view, or s.rid from one member table),
-                # so the order is fully determined.
-                self.db.execute(f"CREATE TABLE v.{q(vid)} (pos INTEGER PRIMARY KEY, source_id INTEGER, rid INTEGER)")
-                n = self.db.execute(
-                    f"INSERT INTO v.{q(vid)}(source_id, rid) "
-                    f"SELECT source_id, rid FROM ({union_sql}) ORDER BY root_pos",
-                    params,
-                ).rowcount
-            self._views[vid] = {
-                "view_id": vid, "source_id": root["source_id"], "row_count": n,
-                "kind": "group", "parent_view_id": view_id,
-            }
+            with self.lock:
+                with self._dropped_view_is_expired(), self.db:
+                    # The parent can have been rebuilt away since its
+                    # handle was read; a root_virtual one has no table
+                    # whose absence would say so, so ask the registry.
+                    if view_id not in self._views:
+                        raise ViewExpired("View expired — rebuild it")
+                    # Same ORDER BY-fed insert as build_view: pos auto-assigns
+                    # 1..N in insertion (= sorted) order, rowcount replaces a
+                    # count(*) re-scan. root_pos is unique across the union
+                    # (vv.pos from one view, or s.rid from one member table),
+                    # so the order is fully determined.
+                    self.db.execute(f"CREATE TABLE v.{q(vid)} (pos INTEGER PRIMARY KEY, source_id INTEGER, rid INTEGER)")
+                    n = self.db.execute(
+                        f"INSERT INTO v.{q(vid)}(source_id, rid) "
+                        f"SELECT source_id, rid FROM ({union_sql}) ORDER BY root_pos",
+                        params,
+                    ).rowcount
+                # Registered before the lock goes, like build_view's handle:
+                # a rebuild of the parent that took the lock first would
+                # have cascaded over a child it couldn't see yet, leaving a
+                # group (and its table) under a parent that no longer exists.
+                self._views[vid] = {
+                    "view_id": vid, "source_id": root["source_id"], "row_count": n,
+                    "kind": "group", "parent_view_id": view_id,
+                }
             return {"view_id": vid, "row_count": n, "elapsed_ms": 0}
 
-        vid = self._next_view_id()
-        self._views[vid] = {
-            "view_id": vid, "source_id": root["source_id"], "row_count": total,
-            "kind": "group_virtual", "parent_view_id": view_id,
-            "column": column, "value": value, "members": members, "path": path,
-        }
+        # Same rule for the virtual group, which has no table but does have
+        # a parent: registered under the lock, and only while that parent
+        # is still the registered view it was counted against.
+        with self.lock:
+            if view_id not in self._views:
+                raise ViewExpired("View expired — rebuild it")
+            vid = self._next_view_id()
+            self._views[vid] = {
+                "view_id": vid, "source_id": root["source_id"], "row_count": total,
+                "kind": "group_virtual", "parent_view_id": view_id,
+                "column": column, "value": value, "members": members, "path": path,
+            }
         return {"view_id": vid, "row_count": total, "elapsed_ms": 0}
 
     def _virtual_group_where(self, handle: dict, conn: sqlite3.Connection | None = None) -> tuple[str, list]:
