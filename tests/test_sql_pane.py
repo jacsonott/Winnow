@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import pytest
 
+from winnow.store import Store
+
 
 def test_run_sql_allows_select(ingested):
     store, source_id = ingested
@@ -89,6 +91,37 @@ def test_spec_sql_inlines_quotes_safely(ingested):
     sql = store.spec_sql(sid, {"filters": [{"column": "User", "op": "equals", "value": "o'malley"}]})
     assert "'o''malley'" in sql
     assert store.run_sql(sql)["rows"] == []  # runs clean, matches nothing
+
+
+def test_spec_sql_leaves_a_question_mark_in_a_header_alone(store, write_csv):
+    """Every column reference is a double-quoted identifier from q(), and
+    a header can contain '?' ("In Use?"). The inliner treated that ? as a
+    placeholder: with no filter on the column it failed outright
+    ("placeholder mismatch"); with one, it shifted every later value one
+    slot along. A raw fragment's own quoted identifiers and comments are
+    the same case."""
+    sid = store.ingest_csv(write_csv([["User", "In Use?"], ["bob", "Y"], ["alice", "N"]], "q.csv"),
+                           name="q", build_fts=False)["id"]
+    specs = [
+        {"filters": [{"column": "User", "op": "equals", "value": "bob"}]},
+        {"filters": [{"column": "In Use?", "op": "equals", "value": "Y"},
+                     {"column": "User", "op": "equals", "value": "bob"}]},
+        {"filter_tree": {"type": "group", "op": "AND", "children": [
+            {"type": "raw", "sql": "\"In Use?\" = 'Y'"},
+            {"type": "cond", "column": "User", "op": "equals", "value": "bob"},
+        ]}},
+    ]
+    for spec in specs:
+        sql = store.spec_sql(sid, spec)
+        assert '"In Use?"' in sql
+        res = store.run_sql(sql)
+        assert [r[res["columns"].index("User")] for r in res["rows"]] == ["bob"], sql
+    # SQLite's other identifier quotings and its comments are skipped too
+    # (straight to the inliner: the raw-fragment check and run_sql each
+    # refuse some of them, but a ? in one is not a placeholder either way).
+    assert (Store._inline_sql_params("[a?] = ? AND `b?` = ? /* c? */ -- d?\nAND \"e\"\"?\" = ?",
+                                     [1, "x", None])
+            == "[a?] = 1 AND `b?` = 'x' /* c? */ -- d?\nAND \"e\"\"?\" = NULL")
 
 
 def test_sql_pane_connection_has_the_timestamp_functions(ingested):

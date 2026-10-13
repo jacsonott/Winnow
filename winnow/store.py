@@ -7591,28 +7591,46 @@ class Store:
     @staticmethod
     def _inline_sql_params(sql: str, params: list) -> str:
         """Substitute ? placeholders with safely-quoted literals, producing
-        SQL fit to hand the analyst in the SQL pane. Skips any ? that sits
-        inside a string literal — a raw filter fragment the analyst typed
-        can legitimately contain one — by walking the text with the same
-        ''-doubling rule SQLite itself uses."""
+        SQL fit to hand the analyst in the SQL pane. Skips any ? that is not
+        a placeholder, by walking the text the way SQLite's tokenizer does:
+        inside a string literal (a raw filter fragment the analyst typed can
+        legitimately contain one), inside a quoted identifier ("In Use?" is
+        a header q() quotes — and also `x` and [x], which a typed fragment
+        may use), or inside a comment. Quotes escape by doubling, as in
+        SQLite; brackets don't escape at all."""
         out: list[str] = []
         it = iter(params)
-        in_str = False
+        closers = {"'": "'", '"': '"', "`": "`", "[": "]"}
+        n = len(sql)
         i = 0
-        while i < len(sql):
+        while i < n:
             ch = sql[i]
-            if in_str:
-                if ch == "'":
-                    if i + 1 < len(sql) and sql[i + 1] == "'":
-                        out.append("''")
-                        i += 2
-                        continue
-                    in_str = False
-                out.append(ch)
-            elif ch == "'":
-                in_str = True
-                out.append(ch)
-            elif ch == "?":
+            if ch in closers:
+                close = closers[ch]
+                j = i + 1
+                while j < n:
+                    if sql[j] == close:
+                        if close != "]" and j + 1 < n and sql[j + 1] == close:
+                            j += 2
+                            continue
+                        break
+                    j += 1
+                out.append(sql[i:j + 1])
+                i = j + 1
+                continue
+            if sql.startswith("--", i):
+                j = sql.find("\n", i)
+                j = n if j < 0 else j
+                out.append(sql[i:j])
+                i = j
+                continue
+            if sql.startswith("/*", i):
+                j = sql.find("*/", i + 2)
+                j = n if j < 0 else j + 2
+                out.append(sql[i:j])
+                i = j
+                continue
+            if ch == "?":
                 try:
                     v = next(it)
                 except StopIteration:
