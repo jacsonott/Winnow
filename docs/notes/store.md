@@ -225,35 +225,46 @@ see [docs/notes/README.md](README.md) for the whole set.
   dependency) or a process per match; truncating cells would turn a hit
   past the cut into a silent miss. The check walks the parsed pattern
   (`re._parser`, `sre_parse` on 3.10) for the two shapes that blow up.
-  **A repeated group whose repetitions can split the same text more than
-  one way**: open-ended over anything variable-length (`(a+)+`,
-  `(a{1,2})+`, `(\w+\s?)+`, `(.*a)+`), or a count of two or more over
-  something open-ended (`(a+){10}`; bounded-in-bounded like
-  `(\d{1,3}){3}` is a few dozen ways at most) — *unless* every
-  repetition must contain a character none of its variable parts can
-  match, with all of those parts on one side of it (`_rx_delimited`),
-  AND no two of its variable parts can share out the same text
-  (`_rx_ambiguous`). The delimiter pins where each repetition ends, so a
-  cell splits only one way, and it is what lets the IPv4 and domain
-  patterns analysts type every day through: `(\d+\.){3}\d+`,
-  `(\w+\.)+com`, `([a-z0-9-]+\.)+[a-z]{2,}`, `([^,]*,)+`. The first
-  version of this guard refused all of those; it was narrowed to this
-  rule because a guard that refuses ordinary searches gets worked around.
-  Both halves of the condition were found by fuzzing random patterns
-  against hostile cells, not by reasoning: `(\w*\.\w*)+` has a
-  delimiter but the word characters between two dots can go to either
-  repetition, and `(a?[ab]?\s){2,}` ends every repetition at a space but
-  reads each "a " two ways — 2^n either way.
-  An optional delimiter (`\s?`) is itself variable and pins nothing;
-  class against class (`\w` vs `\s`) is decided by matching one against
-  the BMP and searching the result with the other, a few ms, cached with
-  the compiled pattern. **An open-ended repeat of alternatives that can
-  match the same text** (`(a|a)*b`, `(a|aa)+`) — every repetition has two
-  ways through, so a delimiter does not save it; alternatives that start
-  differently (`(foo|bar)+`, `(a|bc)+`) are one choice the first
-  character makes, and pass. Possessive quantifiers and atomic groups
-  (3.11+) never give back what they matched, so they count as fixed. It
-  stays conservative: a refused pattern can be rewritten (end each
+  **A repeated group whose repetitions can match the same text more than
+  one way** — open-ended over anything variable-length, or a count of two
+  or more over something open-ended (`(a+){10}`; bounded-in-bounded like
+  `(\d{1,3}){3}` is a few dozen ways at most) — is decided EXACTLY, not by
+  shape (`_rx_splits`): the body becomes a small Thompson automaton
+  (an epsilon edge for every choice `re` can backtrack into, a character
+  edge per atom, the loop closed back on itself), and a search over
+  pairs of states asks whether two different paths can leave one point
+  of the loop and come back to it over the same text. If they can, n
+  trips round are 2^n paths and a cell that fails at the end walks them
+  all; if not, every cell splits one way. Both directions mattered.
+  Two rounds of shape rules each refused patterns analysts type: the
+  first any open-ended quantifier in a repeated group (IPv4, domains),
+  the second anything without a fixed delimiter character, which still
+  refused `(\S+\s+){3}` and `^(\S+\s+)*\S+$` — "field N of a command
+  line" — though `\S` and `\s` share no character, so every boundary is
+  where the text changes from one to the other. And shape rules miss
+  shapes: `(,a+.\s+)+$` passed the delimiter rule (the `,` pins each
+  repetition) yet blows up, because the `.` can take the last `a` or the
+  first space — two ways per repetition, 1.8s at 22 of them and
+  doubling. Extending the rule to count `\s+` as a delimiter let
+  `(.\s+[ab]+)+$` through the same hole. Fuzzing random patterns against
+  hostile cells found both; the automaton refuses both with no list of
+  exceptions to keep. Counted repeats past 8 copies are modelled as `E+` (or `E*`): each count
+  still has its own path, so any two ways through the original are two
+  ways through the model and the answer only gets more cautious. A body
+  the automaton does not model — a backreference, a conditional, a
+  possessive repeat or atomic group (which never give back what they
+  took), or one past 160 atoms or 20,000 state pairs — falls back to the
+  shape rules (`_rx_delimited`: a character none of the variable parts
+  can match, with all of them on one side of it; `_rx_ambiguous`: no two
+  variable parts that can share out the same text). A repetition that
+  can match nothing at all (`(a*)*`) is an epsilon cycle and refused
+  outright. Class against class (`\w` vs `\s`) is decided by matching
+  one against the BMP and searching the result with the other, the scan
+  cached per class (`_rx_members`). **An open-ended repeat of
+  alternatives that can match the same text** (`(a|a)*b`, `(a|aa)+`) is
+  also refused by a rule of its own; alternatives that start differently
+  (`(foo|bar)+`, `(a|bc)+`) are one choice the first character makes,
+  and pass. It stays conservative: a refused pattern can be rewritten (end each
   repetition with a delimiter, a class instead of an alternation, or
   Contains), a hung case cannot be cancelled. **Not covered**: polynomial
   blow-ups from adjacent repeats over the same characters (`.*a.*b` on a

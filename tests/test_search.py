@@ -678,6 +678,7 @@ def test_an_invalid_regex_is_a_400_at_the_route(client, store, write_csv):
     r"(a+)+$", r"(.*a)+", r"(a|a)*b", r"(\w+\s?)+$", r"(a+){10}",
     r"(a*)*b", r"(\w+\s?)*$", r"^(a|aa)+$", r"(.*a){3,}", r"(x+x+)+y", r"(?:\d|\d\d)+!",
     r"(a{1,2})+$", r"(\d+\.?)+$", r"(\w+\.\w+)+$", r"(a?[ab]?\s){2,}$",
+    r"(\w+\s*)+$", r"(,a+.\s+)+$", r"(.\s+[ab]+)+$",
 ])
 def test_a_catastrophic_regex_is_refused_before_it_runs(store, write_csv, pattern):
     """Cells are attacker-controlled, and one backtracking blow-up inside
@@ -688,7 +689,13 @@ def test_a_catastrophic_regex_is_refused_before_it_runs(store, write_csv, patter
     with nothing marking where one repetition ends, an unbounded repeat of
     overlapping alternatives) are refused up front, loudly. The cell here
     is short enough that running the pattern costs a moment, so without
-    the guard this fails on the missing refusal rather than hanging."""
+    the guard this fails on the missing refusal rather than hanging.
+
+    `(,a+.\\s+)+$` was let through by the delimiter rule this replaced —
+    the `,` pins each repetition — and is exponential all the same: the
+    `.` can take the last `a` or the first space, two ways per repetition
+    (1.8s at 22 of them). `(.\\s+[ab]+)+$` is the same hole reached by
+    counting `\\s+` as a delimiter."""
     sid = _regex_case(store, write_csv, ["a" * 16 + "!", "x" * 16])
     with pytest.raises(ValueError, match="catastrophic|backtrack"):
         store.build_view(sid, {"source_id": sid, "sort": [], "search": pattern, "search_mode": "regex"})
@@ -714,20 +721,34 @@ def test_ordinary_regexes_still_run(store, write_csv, pattern, expect):
     assert got == expect
 
 
+_CMDLINE_CELLS = {"beacon 10.0.0.5", "dns 192.168.100.200", "version 1.2", "nothing here",
+                  "net user /add x"}
+
+
 @pytest.mark.parametrize("pattern,expect", [
     (r"(\d+\.){3}\d+", {"beacon 10.0.0.5", "dns 192.168.100.200"}),
     (r"(\d{1,3}\.){3}\d{1,3}", {"beacon 10.0.0.5", "dns 192.168.100.200"}),
     (r"(\w+\.)+com", {"evil.com", "cdn.evil.com/x"}),
     (r"([a-z0-9-]+\.)+[a-z]{2,}", {"evil.com", "cdn.evil.com/x", "bad-host.example.org"}),
+    (r"(\w+\s+){2}", {"net user /add x"}),
+    (r"(\S+\s+){3}x", {"net user /add x"}),
+    (r"^(\S+\s+)*\S+$", _CMDLINE_CELLS | {"evil.com", "cdn.evil.com/x", "bad-host.example.org"}),
+    (r"(\w+\s+)+", _CMDLINE_CELLS | {"padded "}),
 ])
 def test_ip_and_domain_patterns_are_not_refused(store, write_csv, pattern, expect):
     """The first guard refused any open-ended quantifier inside a repeated
     group, which took out the IPv4 and domain patterns analysts type every
     day. A repetition that must end in a character its open-ended part
     cannot match (`\\.` after `\\d+` or `\\w+`) can only split a cell one
-    way, so these run — and filter, through both regex entry points."""
+    way, so these run — and filter, through both regex entry points.
+
+    The second wanted that character to be a fixed one, and so still
+    refused the "field N of a command line" shapes: `\\S+\\s+` has no
+    fixed delimiter, but `\\S` and `\\s` share no character, so every
+    boundary is where the text changes from one to the other."""
     cells = ["beacon 10.0.0.5", "dns 192.168.100.200", "evil.com", "cdn.evil.com/x",
-             "bad-host.example.org", "version 1.2", "nothing here"]
+             "bad-host.example.org", "version 1.2", "nothing here", "net user /add x",
+             "padded "]
     sid = _regex_case(store, write_csv, cells)
     for spec in ({"search": pattern, "search_mode": "regex"},
                  {"filters": [{"column": "Cmd", "op": "regex", "value": pattern}]}):

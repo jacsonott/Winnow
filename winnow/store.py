@@ -574,24 +574,25 @@ def _regexp(pattern: str, value: Any) -> bool:
 # timeout needs another regex engine (a dependency) or another process per
 # match; truncating cells would make a hit past the cut a silent miss. So
 # the pattern is checked instead, and the two shapes that blow up are
-# refused with a reason. One: a repeated group whose repetitions can split
-# the same text more than one way — open-ended over anything variable
-# (`(a+)+`, `(a{1,2})+`, `(\w+\s?)+`, `(.*a)+`), or a count of two or more
-# over something open-ended (`(a+){10}`) — UNLESS every repetition must
-# contain a character none of its variable parts can match. That
-# delimiter pins each repetition's end, which is why the IPv4 and domain
-# shapes analysts type every day pass: `(\d+\.){3}\d+`, `(\w+\.)+com`,
-# `([a-z0-9-]+\.)+[a-z]{2,}`. An optional delimiter (`\s?`) is itself
-# variable and pins nothing. Two: an open-ended repeat of alternatives that
-# can match the same text (`(a|a)*b`, `(a|aa)+`) — every repetition has two
-# ways through, and a delimiter does not help. Conservative on purpose: a
-# refused pattern can be rewritten (end the repetition with a delimiter, a
-# class instead of an alternation, or Contains), a hung case cannot be
-# cancelled. Possessive quantifiers and atomic groups (Python 3.11+) never
-# give back what they matched, so they count as fixed. NOT covered:
-# polynomial blow-ups from adjacent repeats over the same characters
-# (`.*a.*b` on a megabyte cell) — those are slow, not exponential, and
-# refusing `.*x.*y` would refuse ordinary searches.
+# refused with a reason. One: a repeated group whose repetitions can match
+# the same text more than one way — open-ended over anything variable, or
+# a count of two or more over something open-ended (`(a+){10}`). That is
+# decided exactly (_rx_splits: a Thompson automaton of the body, and a
+# search for two paths that leave one point of the loop and come back to
+# it over the same text), not by shape — the shape rules it replaced both
+# refused patterns analysts type (`(\S+\s+){3}`, the field-N-of-a-command-
+# line shape) and passed ones that blow up (`(,a+.\s+)+$`, where the `.`
+# can take the last `a` or the first space). What the automaton does not
+# model (backreferences, conditionals, possessive and atomic groups, very
+# large bodies) falls back to those shape rules, _rx_delimited and
+# _rx_ambiguous. Two: an open-ended repeat of alternatives that can match
+# the same text (`(a|a)*b`, `(a|aa)+`). Conservative on purpose: a refused
+# pattern can be rewritten (end each part of the repetition at something
+# it cannot match, a class instead of an alternation, or Contains), a hung
+# case cannot be cancelled. NOT covered: polynomial blow-ups from adjacent
+# repeats over the same characters (`.*a.*b` on a megabyte cell) — those
+# are slow, not exponential, and refusing `.*x.*y` would refuse ordinary
+# searches.
 try:   # Python 3.11+
     from re import _constants as _sre_c, _parser as _sre_parse
 except ImportError:   # Python 3.10
@@ -693,9 +694,16 @@ class _RxChar:
         if other.explicit is not None:
             return any(self.rx.fullmatch(ch) for ch in other.explicit)
         # Two classes (\w against \s, [^,] against \d): what one matches
-        # across the BMP, searched with the other. A few ms, once per
-        # pattern — the verdict is cached with the compiled pattern.
-        return other.rx.search("".join(self.rx.findall(_rx_bmp()))) is not None
+        # across the BMP, searched with the other.
+        return other.rx.search(_rx_members(self.rx.pattern)) is not None
+
+
+@functools.lru_cache(maxsize=512)
+def _rx_members(cls: str) -> str:
+    """Every BMP character the one-character pattern `cls` matches. The
+    scan is the few ms an overlap check costs, and a pattern asks about
+    the same few classes many times over, so it is done once per class."""
+    return "".join(re.compile(cls, re.IGNORECASE).findall(_rx_bmp()))
 
 
 _RX_ANYTHING = _RxChar(r"(?s:.)")
@@ -861,6 +869,225 @@ def _rx_ambiguous(body) -> bool:
     return False
 
 
+class _RxUnsupported(Exception):
+    """A repeat body _rx_splits cannot model; the structural rules above
+    (_rx_delimited, _rx_ambiguous) judge it instead."""
+
+
+# Counted repeats past this many copies are modelled as E+ (or E* when
+# the count can be 0): every count still has exactly one path, so any two
+# ways through the original are two ways through the model, and the
+# check only gets more cautious. Past _RX_MAX_ATOMS character atoms, or
+# _RX_MAX_PAIRS product states, the structural rules decide instead.
+_RX_FOLD = 8
+_RX_MAX_ATOMS = 160
+_RX_MAX_PAIRS = 20000
+
+
+class _RxNfa:
+    """A Thompson automaton for one repeat body: one state per point
+    between atoms, an epsilon edge per choice the backtracking engine can
+    make (which alternative, one more repetition or stop), a character
+    edge per atom. Paths through it are exactly the ways `re` can match,
+    which is what makes counting them the right question."""
+
+    def __init__(self):
+        self.eps: list[list[int]] = []
+        self.chars: list[list[tuple[_RxChar, int]]] = []
+        self.atoms = 0
+
+    def state(self) -> int:
+        self.eps.append([])
+        self.chars.append([])
+        return len(self.eps) - 1
+
+    def seq(self, items) -> tuple[int, int]:
+        start = cur = self.state()
+        for op, av in items:
+            a, b = self.item(op, av)
+            self.eps[cur].append(a)
+            cur = b
+        return start, cur
+
+    def item(self, op, av) -> tuple[int, int]:
+        ch = _rx_char(op, av)
+        if ch is not None:
+            self.atoms += 1
+            if self.atoms > _RX_MAX_ATOMS:
+                raise _RxUnsupported
+            s, t = self.state(), self.state()
+            self.chars[s].append((ch, t))
+            return s, t
+        if op == _sre_c.SUBPATTERN:
+            return self.seq(av[-1])
+        if op in (_sre_c.AT, _sre_c.ASSERT, _sre_c.ASSERT_NOT):
+            s = self.state()   # zero-width; a lookaround's own body is _rx_hazard's
+            return s, s
+        if op == _sre_c.BRANCH:
+            s, t = self.state(), self.state()
+            for alt in av[1]:
+                a, b = self.seq(alt)
+                self.eps[s].append(a)
+                self.eps[b].append(t)
+            return s, t
+        if op in _RX_REPEATS:
+            lo, hi, body = av
+            if lo > _RX_FOLD or (hi != _sre_c.MAXREPEAT and hi > _RX_FOLD):
+                lo, hi = min(lo, 1), _sre_c.MAXREPEAT
+            s = cur = self.state()
+            for _ in range(lo):
+                a, b = self.seq(body)
+                self.eps[cur].append(a)
+                cur = b
+            t = self.state()
+            if hi == _sre_c.MAXREPEAT:
+                loop = self.state()
+                a, b = self.seq(body)
+                self.eps[cur].append(loop)
+                self.eps[loop] += [a, t]   # once more, or stop
+                self.eps[b].append(loop)
+            else:
+                for _ in range(hi - lo):
+                    a, b = self.seq(body)
+                    self.eps[cur] += [a, t]
+                    cur = b
+                self.eps[cur].append(t)
+            return s, t
+        # A backreference, a conditional, a possessive repeat or an atomic
+        # group: not something this models.
+        raise _RxUnsupported
+
+
+def _rx_splits(body) -> bool:
+    """Whether a repeat of `body` can match some text more than one way
+    in a way that compounds — two different paths from one point of the
+    loop back to that same point over the same text. That is exponential
+    ambiguity: n trips round the loop are 2^n paths, and on a cell that
+    fails at the end `re` walks every one of them. Exact, rather than a
+    rule about shapes, which matters in both directions:
+
+    - `(\\S+\\s+){3}` and `^(\\S+\\s+)*\\S+$`, the "field N of a command
+      line" shapes, pass: \\S and \\s share no character, so every
+      boundary is where the text changes from one to the other.
+    - `(\\w+\\s?)+` fails: the optional space lets a word end anywhere.
+    - `(,a+.\\s+)+` and `(.\\s+[ab]+)+` fail, though the `,` pins each
+      repetition of the first and `\\s+` and `[ab]+` share no character
+      in the second: the `.` can take the last letter or the first space,
+      two ways per repetition.
+
+    The search runs over pairs of states, two paths in step reading the
+    same character: a strongly connected set of pairs holding one where
+    the paths agree, (p, p), and one where they do not means a second
+    way round. Raises _RxUnsupported for what the automaton cannot model,
+    and for a body big enough that the pairs would cost more than the
+    check is worth."""
+    nfa = _RxNfa()
+    entry, end = nfa.seq(body)
+    nfa.eps[end].append(entry)   # the loop: the next repetition
+    n = len(nfa.eps)
+
+    # Epsilon closure with path counts: from each state, the character
+    # edges reachable without reading anything, and by how many distinct
+    # routes (capped at 2 — one or several is all that matters). A cycle
+    # of epsilon edges is a repetition that can match nothing at all,
+    # round and round: refused outright.
+    order: list[int] = []
+    colour = [0] * n
+    for root in range(n):
+        if colour[root]:
+            continue
+        stack = [(root, iter(nfa.eps[root]))]
+        colour[root] = 1
+        while stack:
+            node, it = stack[-1]
+            nxt = next(it, None)
+            if nxt is None:
+                colour[node] = 2
+                order.append(node)
+                stack.pop()
+            elif colour[nxt] == 1:
+                return True
+            elif colour[nxt] == 0:
+                colour[nxt] = 1
+                stack.append((nxt, iter(nfa.eps[nxt])))
+    closure: list[dict] = [{} for _ in range(n)]
+    for node in order:   # successors first
+        c = closure[node]
+        for k, _edge in enumerate(nfa.chars[node]):
+            c[(node, k)] = 1
+        for nxt in nfa.eps[node]:
+            for key, m in closure[nxt].items():
+                c[key] = min(2, c.get(key, 0) + m)
+
+    seen_overlap: dict = {}
+
+    def overlap(a: _RxChar, b: _RxChar) -> bool:
+        key = (a.rx.pattern, b.rx.pattern)
+        if key not in seen_overlap:
+            seen_overlap[key] = a.overlaps(b)
+        return seen_overlap[key]
+
+    def step(x: int, y: int):
+        """((x', y'), divergent) for the pairs one character on."""
+        for e1, m1 in closure[x].items():
+            c1, d1 = nfa.chars[e1[0]][e1[1]]
+            for e2, m2 in closure[y].items():
+                c2, d2 = nfa.chars[e2[0]][e2[1]]
+                if overlap(c1, c2):
+                    yield (d1, d2), (x == y and e1 == e2 and m1 > 1)
+
+    # Tarjan's strongly connected components over the pairs reachable from
+    # (entry, entry), iteratively.
+    index: dict = {}
+    low: dict = {}
+    on_stack: set = set()
+    comp_stack: list = []
+    divergent: list = []
+    counter = 0
+    start = (entry, entry)
+    work = [(start, None)]
+    edges_of: dict = {}
+    while work:
+        node, parent = work[-1]
+        if node not in index:
+            index[node] = low[node] = counter
+            counter += 1
+            if counter > _RX_MAX_PAIRS:
+                raise _RxUnsupported
+            comp_stack.append(node)
+            on_stack.add(node)
+            edges_of[node] = iter(list(step(*node)))
+        advanced = False
+        for target, div in edges_of[node]:
+            if div:
+                divergent.append((node, target))
+            if target not in index:
+                work.append((target, node))
+                advanced = True
+                break
+            if target in on_stack:
+                low[node] = min(low[node], index[target])
+        if advanced:
+            continue
+        work.pop()
+        if parent is not None:
+            low[parent] = min(low[parent], low[node])
+        if low[node] == index[node]:
+            comp = set()
+            while True:
+                w = comp_stack.pop()
+                on_stack.discard(w)
+                comp.add(w)
+                if w == node:
+                    break
+            if any(a == b for a, b in comp):
+                if any(a != b for a, b in comp):
+                    return True
+                if any(u in comp and v in comp for u, v in divergent):
+                    return True
+    return False
+
+
 def _rx_hazard(items, open_outer: bool = False) -> str | None:
     """Why this parsed pattern can backtrack catastrophically, or None.
     `open_outer`: these items sit inside an open-ended repeat that can be
@@ -877,10 +1104,14 @@ def _rx_hazard(items, open_outer: bool = False) -> str | None:
                 # more needs an open-ended one (`(a+){10}`; `(\d{1,3}){3}`
                 # is a few dozen ways at most).
                 risky = _rx_variable_chars(body)[1] if hi == unbounded else _rx_open_ended(body)
-                if risky and not _rx_delimited(body):
-                    return "a repeated group with nothing marking where one repetition ends"
-                if risky and _rx_ambiguous(body):
-                    return "a repeated group whose parts can share out the same text more than one way"
+                try:
+                    if risky and _rx_splits(body):
+                        return "a repeated group that can split the same text more than one way"
+                except _RxUnsupported:
+                    if risky and not _rx_delimited(body):
+                        return "a repeated group with nothing marking where one repetition ends"
+                    if risky and _rx_ambiguous(body):
+                        return "a repeated group whose parts can share out the same text more than one way"
             found = _rx_hazard(body, open_outer or (hi > 1 and hi == unbounded))
         elif _RX_POSSESSIVE is not None and op == _RX_POSSESSIVE:
             found = _rx_hazard(av[2])
@@ -933,9 +1164,9 @@ def _compiled_regex(pattern: str) -> re.Pattern:
         raise ValueError(
             f"Not a usable regular expression: {pattern} has {hazard}, which can backtrack "
             "catastrophically — one crafted cell would freeze Winnow until it finished, and "
-            "nothing can interrupt it. End each repetition with something the repeated part "
-            r"cannot match ((\w+\.)+ rather than (\w+\.?)+), use a class such as [ab] rather "
-            "than (a|b), or search with Contains.")
+            "nothing can interrupt it. End each part of the repetition at a character it cannot "
+            r"match ((\w+\.)+ or (\S+\s+)+ rather than (\w+\.?)+ or (\w+\s*)+), use a "
+            "class such as [ab] rather than (a|b), or search with Contains.")
     return rx
 
 
