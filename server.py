@@ -628,6 +628,10 @@ class SavedViewWrite(BaseModel):
 class SqlQuery(BaseModel):
     sql: str
     limit: int = 5000
+    # The run's one-shot id (jobs.js opToken), so the busy chip's Cancel
+    # reaches it through /api/cancel_op. Optional: a run without one is
+    # still stopped by its client leaving, or by shutdown.
+    op_token: str | None = None
 
 
 class IngestPath(BaseModel):
@@ -3401,9 +3405,9 @@ class CancelOp(BaseModel):
 @app.post("/api/cancel_op")
 def api_cancel_op(body: CancelOp):
     """Interrupts the in-flight cancellable operation (view/timeline build,
-    group summary) started with this client-generated token. A miss — the
-    operation already finished, or never started — is a no-op, reported as
-    cancelled: false."""
+    group summary, SQL pane query) started with this client-generated
+    token. A miss — the operation already finished, or never started — is
+    a no-op, reported as cancelled: false."""
     return {"cancelled": store().cancel_op(body.token)}
 
 
@@ -4852,13 +4856,50 @@ class SqlToTable(BaseModel):
     force: bool = False
 
 
+async def _client_gone(request: Request) -> None:
+    """Returns once the request's client has hung up. Only for a route that
+    has read its whole body (any route with a pydantic body has): from
+    then on the one message the ASGI receive channel can deliver is
+    http.disconnect — or, once the response is out, the same message."""
+    while (await request.receive())["type"] != "http.disconnect":
+        await asyncio.sleep(0.25)   # a server that says something else: don't spin
+
+
+async def _run_pane_query(request: Request, op_token: str | None, run, *args, **kwargs):
+    """Run a SQL pane query — `run` is a bound Store.run_sql/sql_to_table —
+    on a worker thread, and interrupt it if the client hangs up first.
+
+    The pane runs whatever the analyst typed, and some of it never ends. A
+    closed window, a reload or a curl --max-time left the query spinning
+    at 100% CPU for the life of the process — and, being an in-flight
+    request, holding the idle shutdown off too. A sync route never notices
+    its client leave (nothing it does reads the socket), so these routes
+    are async: they wait on the work and on the receive channel together,
+    and a hang-up becomes cancel_op on the run's token. A token is made up
+    when the client sent none, so a run nobody can cancel by hand can still
+    be stopped by its client going."""
+    token = op_token or f"pane-{os.urandom(8).hex()}"
+    work = asyncio.ensure_future(run_in_threadpool(run, *args, op_token=token, **kwargs))
+    gone = asyncio.ensure_future(_client_gone(request))
+    try:
+        await asyncio.wait({work, gone}, return_when=asyncio.FIRST_COMPLETED)
+        if not work.done():
+            # On the Store that is running it, not whatever store() is by now.
+            await run_in_threadpool(run.__self__.cancel_op, token)
+        return await work
+    finally:
+        gone.cancel()
+
+
 @app.post("/api/sql/to_table")
-def api_sql_to_table(body: SqlToTable):
+async def api_sql_to_table(body: SqlToTable, request: Request):
     """Land a pane query's result as a new source. Soft 500k cap: over it
     the response asks for confirmation ({needs_confirm, rows}); resend
-    with force=true to proceed."""
+    with force=true to proceed. Stopped if the client hangs up (see
+    _run_pane_query) — 499 rather than 400 when it is."""
     try:
-        res = store().sql_to_table(body.sql, body.name, force=body.force)
+        res = await _run_pane_query(request, None, store().sql_to_table,
+                                    body.sql, body.name, force=body.force)
     except ValueError as e:
         raise HTTPException(400, str(e))
     except sqlite3.Error as e:
@@ -5084,9 +5125,14 @@ def api_search_all_cancel(job_id: int | None = None):
 
 
 @app.post("/api/sql")
-def api_sql(body: SqlQuery):
+async def api_sql(body: SqlQuery, request: Request):
+    """The SQL pane's Run. Stoppable three ways, because the SQL is whatever
+    was typed: the busy chip's Cancel (op_token → 499), the client hanging
+    up (_run_pane_query), and shutdown (Store.stop_pane_queries)."""
     try:
-        return store().run_sql(body.sql, body.limit)
+        return await _run_pane_query(request, body.op_token, store().run_sql, body.sql, body.limit)
+    except OpCancelled:
+        raise
     except Exception as e:
         raise HTTPException(400, str(e))
 
@@ -5482,7 +5528,41 @@ def main() -> None:
         instances.register(args.port, case_path if case_path else None)
 
     import uvicorn
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+
+    class _Server(uvicorn.Server):
+        def handle_exit(self, sig, frame):
+            _stop_pane_queries()
+            super().handle_exit(sig, frame)
+
+    # uvicorn.run, less the reload/workers branches Winnow never takes, so
+    # that the signal handler above can be the one uvicorn installs.
+    server = _Server(uvicorn.Config(app, host=args.host, port=args.port, log_level="warning"))
+    with contextlib.suppress(KeyboardInterrupt):
+        server.run()
+    if not server.started:
+        sys.exit(3)   # uvicorn.run's STARTUP_FAILURE: the port was taken, or startup raised
+
+
+def _stop_pane_queries() -> None:
+    """Interrupt the open case's running SQL pane queries — from uvicorn's
+    signal handler, which is where Shut down (_trigger_shutdown), Ctrl+C and
+    SIGTERM all arrive.
+
+    Here rather than in the lifespan's Store.close(), which does the same
+    but never got the chance: uvicorn's graceful shutdown waits for every
+    in-flight request BEFORE it runs the lifespan's shutdown half, a pane
+    query that never ends is an in-flight request that never ends, and
+    the process cannot exit while a worker thread is inside sqlite3_step.
+    So Shut down answered {"ok": true} and the server ran on at 100% CPU,
+    case lock held, until someone killed it.
+
+    On a thread of its own: a signal handler runs on the main thread
+    between two bytecodes — possibly inside Store.close() (a second
+    Ctrl+C during shutdown) holding the lock stop_pane_queries takes."""
+    s = STORE
+    if s is not None:
+        threading.Thread(target=s.stop_pane_queries, name="winnow-stop-queries",
+                         daemon=True).start()
 
 
 if __name__ == "__main__":

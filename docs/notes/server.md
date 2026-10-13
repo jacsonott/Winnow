@@ -206,6 +206,40 @@ see [docs/notes/README.md](README.md) for the whole set.
   to take down the entire tagged export. They are escaped to `\x07` rather
   than dropped, because a silently shortened string in a hand-over artifact
   is worse than a visible escape.
+- **A pane query has to be stoppable, because some of what gets typed
+  never ends** — a recursive CTE with no stop condition, a cross join of
+  two 2M-row tables. One used to run at 100% CPU through everything: the
+  analyst had no Stop, a closed window or reload left it running, a case
+  switch left it running, and **Shut down, Ctrl+C and SIGTERM left the
+  process running** with the case lock held. That last is a uvicorn trap
+  worth knowing for anything else that can run unbounded: graceful
+  shutdown waits for every in-flight request *before* it runs the
+  lifespan's shutdown half, so `_lifespan`'s `Store.close()` never got
+  the chance, and the process cannot exit while a worker thread is inside
+  `sqlite3_step` anyway. Three ways in now, all ending in
+  `Connection.interrupt()` on the pane's own connection
+  (`Store._pane_query`):
+  - **the busy chip.** `runSql` arms `armOpCancel` with an `op_token` on
+    `/api/sql`, like a view build; the 499 paints as "Query cancelled".
+  - **the client hanging up.** `/api/sql` and `/api/sql/to_table` are
+    `async` for this alone (`_run_pane_query`): a sync route never reads
+    its socket again, so it cannot notice. They wait on the worker thread
+    and on the ASGI receive channel together — after the body, the only
+    message left is `http.disconnect` — and turn a hang-up into
+    `cancel_op`, with a made-up token when the client sent none. That
+    also keeps a closed window's query from holding the idle shutdown off
+    (it is an in-flight request).
+  - **shutdown.** `main()` runs a `uvicorn.Server` subclass whose
+    `handle_exit` — the signal handler, which is where Shut down's
+    SIGINT, Ctrl+C and SIGTERM all land — calls `stop_pane_queries()`
+    first, on a thread of its own (a handler can run inside
+    `Store.close()` holding the lock that takes). That is why `main()`
+    builds the server itself instead of calling `uvicorn.run`; it keeps
+    `run`'s KeyboardInterrupt suppression and its exit code 3 when the
+    server never started.
+  No deadline: a GROUP BY over a few million rows legitimately takes
+  minutes, and the analyst is better placed than a timer to say which
+  query is runaway. `tests/test_sql_runaway.py` covers each way in.
 - **`POST /api/sql/export_xlsx`** takes the result the pane is SHOWING
   (columns + rows, up from the client) rather than the query, so the
   workbook matches the screen including a click-sort — which lives only in
