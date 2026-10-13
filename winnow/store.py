@@ -11461,16 +11461,23 @@ class Store:
         means bypassing its state-generation bump too, so this does it
         itself — a dashboard whose tag counts were worked out during the
         last pass is wrong about this one, not merely old."""
-        saved = self.save_session(save_as) if save_as else None
-        with self.lock, self.db:
-            tags = self.db.execute("SELECT COUNT(*) FROM row_tags").fetchone()[0]
-            notes = self.db.execute("SELECT COUNT(*) FROM row_notes").fetchone()[0]
-            self.db.execute("DELETE FROM row_tags")
-            self.db.execute("DELETE FROM row_notes")
-            self._bump_state_generation()
-        # The undo entries reference rows that no longer carry those tags;
-        # replaying one would reinsert assignments this deliberately cleared.
-        self._discard_undo()
+        # One hold of the (re-entrant) writer lock from the snapshot to the
+        # clear. Saved and cleared under separate holds, a tag written in
+        # between — a watchlist scan's auto-tag, a second window — landed
+        # after the snapshot and before the DELETE, and so was in neither:
+        # gone, with the session reading as complete. The same hold keeps
+        # the undo discard from taking an entry recorded after the clear.
+        with self.lock:
+            saved = self.save_session(save_as) if save_as else None
+            with self.db:
+                tags = self.db.execute("SELECT COUNT(*) FROM row_tags").fetchone()[0]
+                notes = self.db.execute("SELECT COUNT(*) FROM row_notes").fetchone()[0]
+                self.db.execute("DELETE FROM row_tags")
+                self.db.execute("DELETE FROM row_notes")
+                self._bump_state_generation()
+            # The undo entries reference rows that no longer carry those tags;
+            # replaying one would reinsert assignments this deliberately cleared.
+            self._discard_undo()
         return {"saved": saved, "tags_cleared": tags, "notes_cleared": notes}
 
     def _drop_undo_for_source(self, source_id: int) -> None:
