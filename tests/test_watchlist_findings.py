@@ -322,6 +322,31 @@ def test_latest_hits_lists_the_member_not_the_merge(store, two_tables, write_csv
     assert rows[0]["source_name"] == "c.csv"
 
 
+def test_latest_hits_keeps_the_timeline_config_of_a_table_with_a_derived_column(client, store, write_csv):
+    """Latest hits reads "when" and "what the row is" from the table's
+    Timeline config, looked up by the table's OWN columns — the key
+    Configure tables… saves under. Matched on every column, the first
+    derived column changed the key and the pane fell back to the first
+    datetime column and every column joined. The config here also picks
+    the derived column as the timestamp, which the dialog offers."""
+    sid = store.ingest_csv(write_csv([
+        ["Logged", "Epoch", "Process", "User"],
+        ["2026-03-10 10:00:00", "1700000000", "mimikatz.exe", "u0"],
+    ], name="proc.csv"), name="proc.csv", build_fts=False)["id"]
+    job = store.add_derived_column(sid, "When", "Epoch", "unix_epoch", {})["job_id"]
+    store.wait_for_ingest_job(job, timeout=30)
+    base = [c["name"] for c in store.get_source(sid)["columns"] if not c.get("derived")]
+    assert client.post("/api/timeline_templates", json={
+        "col_names": base, "type_label": "Process log",
+        "timestamp_column": "When", "body_columns": ["Process"]}).status_code == 200
+    store.add_indicator("mimikatz.exe", "filename")
+    store.scan_all()
+
+    [row] = client.get("/api/watchlist/latest").json()["rows"]
+    assert row["ts"] == "2023-11-14 22:13:20"   # the derived column, not Logged
+    assert row["body"] == "mimikatz.exe"        # the configured body, not every column
+
+
 def test_latest_hits_is_empty_before_anything_is_scanned(store, two_tables):
     store.add_indicator("mimikatz.exe", "filename")
     assert store.latest_hits() == {"rows": [], "limit": store.LATEST_HITS}

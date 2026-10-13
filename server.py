@@ -4896,13 +4896,24 @@ def _resolve_timeline_configs() -> dict[int, dict]:
     timeline_templates by header set (order/case-independent, same
     convention every header-set-keyed workspace store uses), returning
     only the sources that actually matched — build_timeline already
-    supplies its own per-source defaults for anything missing here."""
+    supplies its own per-source defaults for anything missing here.
+
+    The header set is the file's OWN columns, derived ones left out —
+    the key Configure tables… saves under (timeline.js). Matching on every
+    column meant the first derived column added to a table changed its
+    key, and the Timeline and the Watchlist's latest hits silently fell
+    back to the defaults. A derived column can still BE the configured
+    timestamp: build_timeline/latest_hits resolve that name against all
+    of the source's columns. A template keyed on the full column list is
+    still honoured when nothing matches the base set, so nothing that
+    matched before stops matching."""
     templates = WS.timeline_templates.list()
     by_key = {tuple(t["col_names"]): t for t in templates}
     configs: dict[int, dict] = {}
     for src in store().list_sources():
-        key = tuple(sorted(c["name"].strip().lower() for c in src["columns"]))
-        tmpl = by_key.get(key)
+        base = tuple(sorted(c["name"].strip().lower() for c in src["columns"] if not c.get("derived")))
+        tmpl = by_key.get(base) or by_key.get(
+            tuple(sorted(c["name"].strip().lower() for c in src["columns"])))
         if tmpl:
             configs[src["id"]] = {
                 "timestamp_column": tmpl.get("timestamp_column"),

@@ -309,7 +309,10 @@ export function openTimelineSourceConfig() {
     for (const src of realSources) {
       // Header-set key: the file's own columns (see baseColumns). A derived
       // column can still be *picked* as the timestamp below — it just isn't
-      // part of what identifies this source type.
+      // part of what identifies this source type. server.py's
+      // _resolve_timeline_configs looks the config up by this same set;
+      // the two disagreeing is how adding a derived column used to drop a
+      // table's config without a word.
       const colNames = src.columns.filter((c) => !c.derived).map((c) => c.name);
       const dtCols = src.columns.filter((c) => c.type === 'datetime').map((c) => c.name);
       const existing = timelineTemplateFor(colNames);
