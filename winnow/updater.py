@@ -532,11 +532,19 @@ def _backup(root: Path, plan: dict, version: str) -> Path:
         out.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, out)
         saved.append(rel)
+    # The manifest too: it is what the NEXT update decides removals from,
+    # and a rollback that left the newer one behind meant a file the old
+    # version shipped (restored here) was unknown to every later update,
+    # and installed_source() kept naming the version rolled away from.
+    had_manifest = (root / MANIFEST).is_file()
+    if had_manifest:
+        shutil.copy2(root / MANIFEST, dest / MANIFEST)
     # `added` files did not exist before, so restoring means removing them.
     (dest / "restore.json").write_text(json.dumps({
         "version": version,
         "restore": sorted(saved),
         "remove": sorted(plan["added"]),
+        "manifest": had_manifest,
     }, indent=1), encoding="utf-8")
     return dest
 
@@ -576,6 +584,13 @@ def restore(backup: Path, root: Path | None = None) -> dict:
             continue
         with contextlib.suppress(OSError):
             (root / rel).unlink()
+    # A backup from before "manifest" was recorded says nothing either way;
+    # leave the current one alone rather than guess.
+    if meta.get("manifest") is True and (backup / MANIFEST).is_file():
+        shutil.copy2(backup / MANIFEST, root / MANIFEST)
+    elif meta.get("manifest") is False:
+        with contextlib.suppress(OSError):
+            (root / MANIFEST).unlink()
     return {"version": meta.get("version", "unknown"), "backup": str(backup)}
 
 

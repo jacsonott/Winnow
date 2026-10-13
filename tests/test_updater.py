@@ -399,6 +399,32 @@ def test_backups_are_pruned_but_the_newest_survive(install, tmp_path):
     assert updater.installed_version(install) == f"1.{updater.KEEP_BACKUPS + 1}.0"
 
 
+def test_rollback_puts_the_install_manifest_back(install, tmp_path):
+    """The manifest is what the next update decides removals from. Rollback
+    left the newer one in place, so a file the old version shipped — put
+    back by the rollback — was unknown to every later update, and
+    installed_source() still named the build rolled away from."""
+    updater.apply_update(_make_release(tmp_path / "v1.zip", "1.0.0", SHIPPED), install)
+    before = (install / updater.MANIFEST).read_text()
+    updater.apply_update(_make_release(tmp_path / "v2.zip", "1.1.0", _v2_files()), install,
+                         source="develop@abc1234")
+    assert updater.installed_source(install) == "develop@abc1234"
+
+    updater.rollback(install)
+
+    assert (install / updater.MANIFEST).read_text() == before
+    assert updater.installed_source(install) == "release"
+    # And the restored store.py is removable by a later update again.
+    plan = updater.plan_update(_make_release(tmp_path / "v3.zip", "1.2.0", _v2_files()), install)
+    assert "store.py" in plan["removed"]
+
+
+def test_rollback_of_a_first_update_removes_the_manifest_it_wrote(install, tmp_path):
+    updater.apply_update(_make_release(tmp_path / "v2.zip", "1.1.0", _v2_files()), install)
+    updater.rollback(install)
+    assert not (install / updater.MANIFEST).exists()
+
+
 def test_rollback_without_a_backup_is_a_clear_message(install):
     with pytest.raises(UpdateError, match="No backup"):
         updater.rollback(install)
