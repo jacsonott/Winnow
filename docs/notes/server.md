@@ -169,6 +169,17 @@ see [docs/notes/README.md](README.md) for the whole set.
   beside it; export sets `Content-Disposition` with the profile name
   slugged through a `[^A-Za-z0-9._-]` filter, since profile names are free
   text.
+- **Every download's `Content-Disposition` comes from `_attachment()`**,
+  never an f-string. Starlette encodes header values as Latin-1, so
+  `filename="{name}"` was a 500 — and no file — for one en dash or
+  Cyrillic letter, and the names that reach these headers are exactly the
+  text that carries them: a SQL tab's name, an evidence file's own name,
+  what the analyst typed in the save prompt. The helper writes the real
+  name as RFC 6266 `filename*=UTF-8''…` beside an ASCII `filename="…"`
+  fallback (non-ASCII, `"` and `\` replaced), and turns control
+  characters into `_` in both, since a CR/LF would end the header line.
+  `FileResponse` gets it through `headers=` rather than its own
+  `filename=`, so there is one rule.
 - `run_sql` (the SQL pane) allows arbitrary SELECT/EXPLAIN on purpose, but
   blacklists `ATTACH`/`DETACH`/`PRAGMA`/`VACUUM` as defense-in-depth — none of
   those serve a read-only ad-hoc query pane. CSV export runs every cell through

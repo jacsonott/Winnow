@@ -23,6 +23,7 @@ import sqlite3
 import sys
 import tempfile
 import time
+import urllib.parse
 from pathlib import Path
 from typing import Any
 
@@ -390,6 +391,26 @@ def _host_is_allowed(raw: str) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _attachment(filename: str) -> dict:
+    """The Content-Disposition header for a download named `filename`, as
+    a headers dict. Every download goes through here.
+
+    Starlette encodes header values as Latin-1, so an f-string
+    `filename="{name}"` was a 500 — and no file — for one en dash or one
+    Cyrillic letter, and download names are exactly the text that carries
+    them: a SQL tab's name, an evidence file's own name, whatever the
+    analyst typed. RFC 6266: the real name goes in `filename*` (UTF-8,
+    percent-encoded), which every current browser prefers, beside a plain
+    ASCII `filename` for anything that does not read it. Control
+    characters become `_` in both — a CR/LF would end the header line —
+    and the fallback also loses `"` and `\\`, which would end or escape
+    its quoted string."""
+    name = re.sub(r"[\x00-\x1f\x7f]", "_", filename or "") or "download"
+    fallback = re.sub(r'[^\x20-\x7e]|["\\]', "_", name)
+    encoded = urllib.parse.quote(name, safe="")
+    return {"Content-Disposition": f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{encoded}"}
 
 
 # ------------------------------------------------------------ log
@@ -2580,7 +2601,7 @@ def api_plugin_bundles_export(bundle_id: int):
     slug = re.sub(r"[^A-Za-z0-9._-]+", "-", data["profile"]["name"]).strip("-") or "profile"
     return JSONResponse(
         data,
-        headers={"Content-Disposition": f'attachment; filename="winnow-profile-{slug}.json"'},
+        headers=_attachment(f"winnow-profile-{slug}.json"),
     )
 
 
@@ -4540,7 +4561,7 @@ def api_saved_filters_export():
     data = WS.filters.export_all()
     return JSONResponse(
         data,
-        headers={"Content-Disposition": 'attachment; filename="winnow-filters.json"'},
+        headers=_attachment("winnow-filters.json"),
     )
 
 
@@ -4581,7 +4602,7 @@ def api_session_export(source_id: int):
     name = os.path.splitext(data["source"]["name"])[0]
     return JSONResponse(
         data,
-        headers={"Content-Disposition": f'attachment; filename="{name}.tls.json"'},
+        headers=_attachment(f"{name}.tls.json"),
     )
 
 
@@ -4599,7 +4620,7 @@ def api_case_session_export():
     data = store().export_case_session()
     return JSONResponse(
         data,
-        headers={"Content-Disposition": 'attachment; filename="case-session.winnow_case.json"'},
+        headers=_attachment("case-session.winnow_case.json"),
     )
 
 
@@ -4688,8 +4709,7 @@ def api_case_sessions_download(name: str):
     except KeyError as e:
         raise HTTPException(404, str(e))
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("_") or "session"
-    return JSONResponse(data, headers={
-        "Content-Disposition": f'attachment; filename="{safe}.winnow_case.json"'})
+    return JSONResponse(data, headers=_attachment(f"{safe}.winnow_case.json"))
 
 
 class NewSessionReq(BaseModel):
@@ -4792,7 +4812,7 @@ def api_sql_export_xlsx(body: SqlResultXlsx):
     return StreamingResponse(
         buf,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="{body.filename}"'},
+        headers=_attachment(body.filename),
     )
 
 
@@ -4866,7 +4886,7 @@ def api_export(view_id: str, tagged_only: bool = False, filename: str = "timelin
     return StreamingResponse(
         logged(),
         media_type="text/csv",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers=_attachment(filename),
     )
 
 
@@ -4880,7 +4900,7 @@ def api_export_tagged_xlsx(filename: str = "tagged-export.xlsx"):
     return StreamingResponse(
         buf,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers=_attachment(filename),
     )
 
 
@@ -4916,7 +4936,7 @@ def api_export_all_xlsx(filename: str = "all-tables.xlsx"):
     return FileResponse(
         path,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        filename=filename,
+        headers=_attachment(filename),
         background=BackgroundTask(os.unlink, path),
     )
 

@@ -843,3 +843,60 @@ def test_error_log_route_records_and_returns(client):
     assert after["seq"] > before["seq"]
     last = after["entries"][-1]
     assert last["message"] == "unit-test boom" and last["level"] == "error" and last["ts"]
+
+
+def _disposition_name(header: str) -> str:
+    """The filename a browser takes from a Content-Disposition: the RFC
+    6266 `filename*` (UTF-8, percent-encoded) when present, else the plain
+    quoted `filename`."""
+    import re
+    from urllib.parse import unquote
+    m = re.search(r"filename\*=UTF-8''([^;\s]+)", header, re.I)
+    if m:
+        return unquote(m.group(1))
+    return re.search(r'filename="([^"]*)"', header).group(1)
+
+
+def test_downloads_take_any_filename_rather_than_500(client, store, write_csv):
+    """A Content-Disposition built by f-string is encoded Latin-1 by the
+    server, so one en dash or Cyrillic letter in a download name — the SQL
+    tab's name, a source's file name, what the analyst typed — was a 500
+    and no file. Every download header now carries the name as RFC 6266
+    `filename*` with an ASCII fallback beside it."""
+    names = ["Подозрительные процессы", "lateral – summary", 'quote " and \\ back']
+    sid = store.ingest_csv(write_csv([["a"], ["1"]], "журнал_событий.csv"),
+                           name="журнал_событий.csv", build_fts=False)["id"]
+    store.set_tags(sid, [1], store.list_tags()[0]["id"], True)
+    view = store.build_view(sid, {"source_id": sid, "filters": [], "sort": []})["view_id"]
+
+    for base in names:
+        responses = {
+            "sql xlsx": client.post("/api/sql/export_xlsx", json={
+                "columns": ["a"], "rows": [[1]], "filename": base + ".xlsx", "sheet": "Query"}),
+            "view csv": client.get("/api/export", params={"view_id": view, "filename": base + ".csv"}),
+            "tagged xlsx": client.get("/api/export/tagged_xlsx", params={"filename": base + ".xlsx"}),
+            "all xlsx": client.get("/api/export/all_xlsx", params={"filename": base + ".xlsx"}),
+        }
+        for what, r in responses.items():
+            assert r.status_code == 200, (what, base, r.text[:200])
+            header = r.headers["content-disposition"]
+            assert header.startswith("attachment;")
+            assert _disposition_name(header) in (base + ".xlsx", base + ".csv"), (what, header)
+            # The fallback is plain ASCII with nothing that ends the quoted string early.
+            fallback = header.split('filename="', 1)[1].split('"', 1)[0]
+            assert fallback.isascii() and "\\" not in fallback
+
+    r = client.get(f"/api/session/{sid}")
+    assert r.status_code == 200
+    assert _disposition_name(r.headers["content-disposition"]) == "журнал_событий.tls.json"
+
+
+def test_a_download_name_cannot_split_the_header(client, store, write_csv):
+    """CR/LF in a typed name would end the header line (uvicorn refuses
+    the response outright); the name keeps its text, never its line break."""
+    r = client.post("/api/sql/export_xlsx", json={
+        "columns": ["a"], "rows": [[1]], "filename": "a\r\nSet-Cookie: x=1.xlsx", "sheet": "Q"})
+    assert r.status_code == 200
+    header = r.headers["content-disposition"]
+    assert "\r" not in header and "\n" not in header
+    assert "set-cookie" not in r.headers
