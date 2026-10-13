@@ -47,6 +47,7 @@ from . import timeparse
 from . import plasoread
 from . import xlsxread
 from . import log as wlog
+from .paths import sqlite_ro_uri
 
 BATCH = 20_000
 SAMPLE_ROWS = 500
@@ -1536,7 +1537,9 @@ class Store:
                 os.close(fd)
         else:  # pragma: no cover - Windows
             os.close(fd)
-        self.db.execute(f"ATTACH DATABASE '{self._views_path}' AS v")
+        # Bound, not pasted in: the tempdir is the analyst's profile on
+        # Windows, and C:\Users\O'Brien\... would end the string literal.
+        self.db.execute("ATTACH DATABASE ? AS v", (self._views_path,))
         # WAL on the views db is what lets _reader() connections read a
         # view concurrently with the writer materialising the next one.
         self.db.execute("PRAGMA v.journal_mode=WAL")
@@ -2296,7 +2299,7 @@ class Store:
         writer (a group_virtual WHERE can contain DAY_BUCKET(...); a raw
         filter fragment echoed into an export can contain REGEXP), so a
         query compiled against one connection never fails on the other."""
-        ro = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, check_same_thread=False)
+        ro = sqlite3.connect(sqlite_ro_uri(self.path), uri=True, check_same_thread=False)
         ro.row_factory = sqlite3.Row
         ro.create_function("REGEXP", 2, _regexp, deterministic=True)
         ro.create_function("DAY_BUCKET", 1, _day_bucket, deterministic=True)
@@ -2307,7 +2310,7 @@ class Store:
         # even a reader can see SQLITE_BUSY briefly.
         ro.execute("PRAGMA mmap_size=1073741824")
         ro.execute("PRAGMA busy_timeout=5000")
-        ro.execute(f"ATTACH DATABASE 'file:{self._views_path}?mode=ro' AS v")
+        ro.execute("ATTACH DATABASE ? AS v", (sqlite_ro_uri(self._views_path),))
         return ro
 
     @contextlib.contextmanager
@@ -2968,7 +2971,7 @@ class Store:
         the analyst needing to already know which columns are epoch-encoded.
         Never writes to the case db — a completely separate connection to
         a completely separate file."""
-        ro = sqlite3.connect(f"file:{path}?mode=ro", uri=True, check_same_thread=False)
+        ro = sqlite3.connect(sqlite_ro_uri(path), uri=True, check_same_thread=False)
         ro.row_factory = sqlite3.Row
         try:
             table_names = [
@@ -3027,7 +3030,7 @@ class Store:
         timestamp_columns = set(timestamp_columns or [])
         file_hash = self._quick_hash(path)
 
-        ro = sqlite3.connect(f"file:{path}?mode=ro", uri=True, check_same_thread=False)
+        ro = sqlite3.connect(sqlite_ro_uri(path), uri=True, check_same_thread=False)
         ro.row_factory = sqlite3.Row
         try:
             src_cols_info = ro.execute(f"PRAGMA table_info({q(table_name)})").fetchall()
@@ -7166,7 +7169,7 @@ class Store:
         froms = ([self._from_clause(self._source_lite(m["source_id"]))
                   for m in self._resolve_members(source_id)]
                  if source_id < 0 else [self._from_clause(src)])
-        ro = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, check_same_thread=False)
+        ro = sqlite3.connect(sqlite_ro_uri(self.path), uri=True, check_same_thread=False)
         ro.row_factory = sqlite3.Row
         ro.create_function("REGEXP", 2, _regexp, deterministic=True)
         try:
@@ -9248,7 +9251,7 @@ class Store:
         if os.path.abspath(path) == os.path.abspath(self.path):
             raise ValueError("That is the currently open case")
         try:
-            ro = sqlite3.connect(f"file:{os.path.abspath(path)}?mode=ro", uri=True)
+            ro = sqlite3.connect(sqlite_ro_uri(path), uri=True)
         except sqlite3.Error as e:
             raise ValueError(f"Could not open case file: {e}")
         ro.row_factory = sqlite3.Row
@@ -12468,7 +12471,7 @@ class Store:
         so derived columns resolve and Tags/Note are ordinary queryable
         columns. TEMP lives on this connection only: the case file is
         never written, and mode=ro stays honest. Callers own the close."""
-        ro = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, check_same_thread=False)
+        ro = sqlite3.connect(sqlite_ro_uri(self.path), uri=True, check_same_thread=False)
         ro.row_factory = sqlite3.Row
         ro.create_function("REGEXP", 2, _regexp, deterministic=True)
         ro.create_function("DAY_BUCKET", 1, _day_bucket, deterministic=True)

@@ -732,7 +732,7 @@ def is_winnow_case_file(path: str) -> bool:
         with open(path, "rb") as f:
             if f.read(16) != b"SQLite format 3\x00":
                 return False
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        conn = sqlite3.connect(paths.sqlite_ro_uri(path), uri=True)
         try:
             names = {r[0] for r in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'")}
@@ -799,7 +799,7 @@ def _sweep_quicklook(max_age_days: int = 7) -> int:
         try:
             if os.path.getmtime(path) > cutoff or probe_case_lock(path):
                 continue
-            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            conn = sqlite3.connect(paths.sqlite_ro_uri(path), uri=True)
             try:
                 busy = _case_holds_work(conn)
             finally:
@@ -1767,7 +1767,7 @@ def api_cases_list():
         if os.path.isfile(c["path"]):
             rec["exists"] = True
             try:
-                ro = sqlite3.connect(f"file:{c['path']}?mode=ro", uri=True)
+                ro = sqlite3.connect(paths.sqlite_ro_uri(c["path"]), uri=True)
                 row = ro.execute("SELECT count(*), COALESCE(sum(row_count),0) FROM sources").fetchone()
                 ro.close()
                 rec["source_count"], rec["row_count"] = row[0], row[1]
@@ -3800,7 +3800,7 @@ def api_watchlist_cases():
         if os.path.abspath(c["path"]) == current or not os.path.isfile(c["path"]):
             continue
         try:
-            ro = sqlite3.connect(f"file:{c['path']}?mode=ro", uri=True)
+            ro = sqlite3.connect(paths.sqlite_ro_uri(c["path"]), uri=True)
             row = ro.execute(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='watchlist'").fetchone()
             n = ro.execute("SELECT COUNT(*) FROM watchlist").fetchone()[0] if row[0] else 0

@@ -160,7 +160,11 @@ paths.py           INSTALL_ROOT — the one line that knows where the install
                     root is relative to this package. workspace/, the
                     updater's target and the server's static/ all resolve
                     from it, so a wrong answer here is silent and
-                    expensive; tests/test_paths.py pins it. Imports nothing.
+                    expensive; tests/test_paths.py pins it. Also
+                    sqlite_ro_uri(), the only way Winnow opens a SQLite
+                    file read-only — a path pasted into `file:...?mode=ro`
+                    opens a different file when it holds # ? or % (see
+                    docs/notes/ingest.md). Imports nothing from the app.
 version.py         The one place Winnow's version number lives. Nothing in
                     it but the string, because update.py reads it out of a
                     downloaded archive it must not execute. Bump it in the
