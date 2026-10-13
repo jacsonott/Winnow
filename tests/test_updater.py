@@ -425,6 +425,26 @@ def test_rollback_of_a_first_update_removes_the_manifest_it_wrote(install, tmp_p
     assert not (install / updater.MANIFEST).exists()
 
 
+@pytest.mark.skipif(__import__("os").name == "nt", reason="POSIX file modes")
+def test_a_file_new_to_the_install_keeps_its_executable_bit(install, tmp_path):
+    """open(..., "wb") creates a new file at the umask default, so the first
+    update that brought launch/winnow.sh left it not executable. git
+    archive records the mode; it has to survive the trip."""
+    import os
+    import stat
+    archive = tmp_path / "v2.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        for rel, text in _v2_files().items():
+            zf.writestr("Winnow-abc123/" + rel, text)
+        zi = zipfile.ZipInfo("Winnow-abc123/launch/winnow.sh")
+        zi.create_system = 3
+        zi.external_attr = (stat.S_IFREG | 0o755) << 16
+        zf.writestr(zi, "#!/bin/sh\n")
+    updater.apply_update(archive, install)
+    assert os.access(install / "launch/winnow.sh", os.X_OK)
+    assert not os.access(install / "server.py", os.X_OK)
+
+
 def test_rollback_without_a_backup_is_a_clear_message(install):
     with pytest.raises(UpdateError, match="No backup"):
         updater.rollback(install)

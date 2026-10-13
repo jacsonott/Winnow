@@ -483,6 +483,7 @@ def apply_update(archive: Path, root: Path | None = None, source: str = "release
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with zf.open(prefix + m) as src, open(target, "wb") as out:
                     shutil.copyfileobj(src, out)
+                _apply_exec_bits(zf.getinfo(prefix + m), target)
             for m in plan["removed"]:
                 with contextlib.suppress(OSError):
                     (root / m).unlink()
@@ -494,6 +495,24 @@ def apply_update(archive: Path, root: Path | None = None, source: str = "release
                 f"Update failed and was rolled back ({e}). Winnow is still on {before}.") from e
     _prune_backups(root)
     return {**plan, "previous_version": before, "backup": str(backup)}
+
+
+def _apply_exec_bits(info: zipfile.ZipInfo, target: Path) -> None:
+    """Give `target` the executable bits its archive entry carries.
+
+    open(..., "wb") keeps an existing file's mode but creates a new one at
+    the umask default, so a file NEW to this install — launch/winnow.sh the
+    first time an update brings it — arrived not executable, and its
+    double-click did nothing. git archive records the mode in the unix
+    half of external_attr; an entry with none (a zip made on Windows) is
+    left as written. Bits are only ever added, and only where they mean
+    something."""
+    if os.name == "nt" or info.create_system != 3:
+        return
+    exec_bits = (info.external_attr >> 16) & 0o111
+    if exec_bits:
+        with contextlib.suppress(OSError):
+            os.chmod(target, target.stat().st_mode | exec_bits)
 
 
 def _sweep_moved_modules(root: Path, incoming: list[str]) -> list[str]:
