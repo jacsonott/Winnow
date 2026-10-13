@@ -2188,6 +2188,22 @@ def api_import_profiles_delete(profile_id: int):
     return {"ok": True}
 
 
+def _ingest_spooled(ingest, tmp: str, *args, **kwargs) -> dict:
+    """One synchronous upload's import, for the threadpool: `ingest` (a
+    Store ingest_* reader) on the spool _upload_spool made, then the
+    uploaded file's name recorded as where the table came from instead of
+    the spool, which the route deletes on return — the rule the job
+    route's tables follow too (Store.record_upload_path). In `finally`, so
+    rows an import kept before an error say so as well."""
+    try:
+        rec = ingest(tmp, *args, **kwargs)
+    finally:
+        with contextlib.suppress(sqlite3.Error):
+            store().record_upload_path(tmp, os.path.basename(tmp))
+    rec["path"] = os.path.basename(tmp)
+    return rec
+
+
 @app.post("/api/ingest/upload")
 async def api_ingest_upload(
     file: UploadFile = File(...),
@@ -2196,10 +2212,9 @@ async def api_ingest_upload(
     has_header: bool = Form(True),
     column_types: str | None = Form(None),  # JSON-encoded list[str], since multipart forms are flat
 ):
-    suffix = Path(file.filename or "upload.csv").suffix or ".csv"
-    fd, tmp = tempfile.mkstemp(suffix=suffix)
+    spool_dir, tmp = _upload_spool(file.filename, "upload.csv")
     try:
-        with os.fdopen(fd, "wb") as out:
+        with open(tmp, "wb") as out:
             while chunk := await file.read(4 << 20):
                 out.write(chunk)
         types = json.loads(column_types) if column_types else None
@@ -2209,8 +2224,8 @@ async def api_ingest_upload(
         # get this from FastAPI for free; an `async def` route — which this
         # has to be, for `await file.read()` — must ask for it.
         return await run_in_threadpool(
-            store().ingest_csv,
-            tmp, name=file.filename, build_fts=build_fts, delimiter=delimiter or None,
+            _ingest_spooled, store().ingest_csv,
+            tmp, name=os.path.basename(tmp), build_fts=build_fts, delimiter=delimiter or None,
             has_header=has_header, column_types=types,
         )
     except Exception as e:
@@ -2218,8 +2233,7 @@ async def api_ingest_upload(
     finally:
         # The rows are in the case file the moment ingest returns; the spool
         # was leaking its full size in the OS tempdir on every upload.
-        with contextlib.suppress(OSError):
-            os.remove(tmp)
+        _remove_spool(spool_dir, tmp)
 
 
 PREVIEW_SAMPLE_BYTES = 512 * 1024
@@ -2289,23 +2303,20 @@ async def api_ingest_sqlite_upload(
     build_fts: bool = Form(True),
     timestamp_columns: str | None = Form(None),  # JSON-encoded list[str]
 ):
-    suffix = Path(file.filename or "upload.sqlite").suffix or ".sqlite"
-    fd, tmp = tempfile.mkstemp(suffix=suffix)
+    spool_dir, tmp = _upload_spool(file.filename, "upload.sqlite")
     try:
-        with os.fdopen(fd, "wb") as out:
+        with open(tmp, "wb") as out:
             while chunk := await file.read(4 << 20):
                 out.write(chunk)
         ts_cols = json.loads(timestamp_columns) if timestamp_columns else None
         return await run_in_threadpool(
-            store().ingest_sqlite_table,  # threadpool: see api_ingest_upload
-            tmp, table, name=name or f"{Path(file.filename or 'upload').stem}.{table}",
-            build_fts=build_fts, timestamp_columns=ts_cols,
+            _ingest_spooled, store().ingest_sqlite_table,  # threadpool: see api_ingest_upload
+            tmp, table, name=name, build_fts=build_fts, timestamp_columns=ts_cols,
         )
     except Exception as e:
         raise HTTPException(400, str(e))
     finally:
-        with contextlib.suppress(OSError):
-            os.remove(tmp)
+        _remove_spool(spool_dir, tmp)
 
 
 @app.post("/api/ingest/xlsx/preview")
@@ -2359,22 +2370,20 @@ async def api_ingest_json_upload(
     flatten_depth: int = Form(0),
     build_fts: bool = Form(True),
 ):
-    suffix = Path(file.filename or "upload.json").suffix or ".json"
-    fd, tmp = tempfile.mkstemp(suffix=suffix)
+    spool_dir, tmp = _upload_spool(file.filename, "upload.json")
     try:
-        with os.fdopen(fd, "wb") as out:
+        with open(tmp, "wb") as out:
             while chunk := await file.read(4 << 20):
                 out.write(chunk)
         return await run_in_threadpool(
-            store().ingest_json,  # threadpool: see api_ingest_upload
-            tmp, name=name or file.filename, flatten_mode=flatten_mode, flatten_depth=flatten_depth,
-            build_fts=build_fts,
+            _ingest_spooled, store().ingest_json,  # threadpool: see api_ingest_upload
+            tmp, name=name or os.path.basename(tmp), flatten_mode=flatten_mode,
+            flatten_depth=flatten_depth, build_fts=build_fts,
         )
     except Exception as e:
         raise HTTPException(400, str(e))
     finally:
-        with contextlib.suppress(OSError):
-            os.remove(tmp)
+        _remove_spool(spool_dir, tmp)
 
 
 _JSON_INGEST_EXTS = {".json", ".jsonl", ".ndjson"}
@@ -2604,18 +2613,25 @@ async def api_ingest_job_upload(
     gets transfer progress from its own XHR events), and the moment the
     spool completes a background ingest job takes over — the response
     carries the job record, not the finished source. delete_after cleans
-    the spooled tempfile whichever way the job ends."""
-    suffix = Path(file.filename or "upload").suffix or ".dat"
-    fd, tmp = tempfile.mkstemp(suffix=suffix)
+    the spool whichever way the job ends.
+
+    Spooled under the uploaded file's own name (_upload_spool), because
+    the name a SQLite table or a workbook sheet gets is built from it —
+    `History.urls`, `Book1.Sheet1`, as a path import names them; a
+    mkstemp spool made those `tmp3z2vauq7.urls`. And every table records
+    that name, not the spool's path, as where it came from
+    (recorded_path): the spool is deleted when the job ends."""
+    spool_dir, tmp = _upload_spool(file.filename, f"upload.{kind}")
     try:
-        with os.fdopen(fd, "wb") as out:
+        with open(tmp, "wb") as out:
             while chunk := await file.read(4 << 20):
                 out.write(chunk)
         table_list = json.loads(tables) if tables else None
         types = json.loads(column_types) if column_types else None
         return await run_in_threadpool(
             store().start_ingest_job,  # threadpool: see api_ingest_upload
-            kind, tmp, name=name or file.filename, delete_after=True,
+            kind, tmp, name=name or os.path.basename(tmp), delete_after=True,
+            spool_dir=spool_dir, recorded_path=os.path.basename(tmp),
             options=_ingest_job_options(
                 kind, build_fts=build_fts, delimiter=delimiter or None,
                 has_header=has_header, column_types=types,
@@ -2624,8 +2640,7 @@ async def api_ingest_job_upload(
             ),
         )
     except Exception as e:
-        with contextlib.suppress(OSError):
-            os.remove(tmp)
+        _remove_spool(spool_dir, tmp)
         raise HTTPException(400, str(e))
 
 

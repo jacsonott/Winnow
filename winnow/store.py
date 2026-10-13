@@ -4800,7 +4800,8 @@ class Store:
     INGEST_JOB_KEEP = 20        # finished jobs kept for the UI panel
 
     def start_ingest_job(self, kind: str, path: str, *, name: str | None = None,
-                         options: dict | None = None, delete_after: bool = False) -> dict:
+                         options: dict | None = None, delete_after: bool = False,
+                         spool_dir: str | None = None, recorded_path: str | None = None) -> dict:
         """Runs an ingest on a background daemon thread and returns its job
         record immediately — the exact reason start_search_all_job exists,
         applied to the operation that takes the longest of anything in the
@@ -4814,7 +4815,13 @@ class Store:
         read once rather than re-uploaded per table. `delete_after` removes
         `path` when the job ends (the upload route's tempfile — which the
         old synchronous upload endpoints leaked on disk, tens of GB at
-        this tool's file sizes).
+        this tool's file sizes), and `spool_dir` after it: the private
+        directory the upload was spooled into (server._upload_spool).
+
+        `recorded_path` is what the job's tables say they were imported
+        from when that is not `path` — an upload's spool is deleted when
+        the job ends, so the name the browser sent is recorded instead
+        (set_source_path's reason; record_upload_path does it).
 
         Progress lands in the job record from the per-BATCH `progress`
         callback the ingest paths already had (rows plus a unit/units_total
@@ -4876,6 +4883,8 @@ class Store:
                 "finished_at": None,
                 "options": options or {},
                 "delete_after": delete_after,
+                "spool_dir": spool_dir,
+                "recorded_path": recorded_path,
                 "thread": None,
             }
             self._ingest_jobs[job["job_id"]] = job
@@ -4996,6 +5005,10 @@ class Store:
                         ))
                     with self._ingest_jobs_lock:
                         job["tables_done"] = i + 1
+            # Before the job reads as done, so the source list the client
+            # fetches on that never shows the spool's path.
+            if job["recorded_path"] is not None:
+                self.record_upload_path(job["path"], job["recorded_path"])
             # Directory import: drop each new table into the folder that
             # mirrors its on-disk path (created once, shared across the
             # tree), and bring it in CLOSED — a folder import can be dozens
@@ -5025,11 +5038,15 @@ class Store:
                                 f" (table{'s' if len(job['source_ids']) != 1 else ''} "
                                 f"{', '.join(str(i) for i in job['source_ids'])})")
         except IngestCancelled:
+            # The tables a multi-table job finished before the cancel stay.
+            self._record_upload_path_quietly(job)
             with self._ingest_jobs_lock:
                 job["status"] = "cancelled"
             wlog.record("info", f"{self._job_noun(job)} cancelled: {job['name']} ({job['kind']}) "
                                 f"after {self._job_elapsed(job):.1f}s")
         except Exception as e:  # noqa: BLE001 — surfaced to the UI as job.error
+            # And so does what a failed one committed before the error.
+            self._record_upload_path_quietly(job)
             with self._ingest_jobs_lock:
                 job["status"] = "error"
                 job["error"] = str(e)
@@ -5044,6 +5061,33 @@ class Store:
             if job["delete_after"]:
                 with contextlib.suppress(OSError):
                     os.remove(job["path"])
+                if job["spool_dir"]:
+                    with contextlib.suppress(OSError):
+                        os.rmdir(job["spool_dir"])
+
+    def record_upload_path(self, spool_path: str, recorded_path: str) -> None:
+        """Every table read from the upload spool `spool_path` records
+        `recorded_path` — the name the browser sent — as where it came
+        from, rather than the spool, a temp file deleted as soon as the
+        import ends (set_source_path's reason). A session saved against
+        such a table looked for its file there and reported it missing.
+
+        Keyed on the spool's path rather than on ids because an upload's
+        spool is unique to it (a private directory, server._upload_spool),
+        and because the tables that need it include ones the caller never
+        got an id for: the rows a failed import committed before its
+        error, and the tables a multi-table job finished before one
+        failed."""
+        with self.lock, self.db:
+            self.db.execute("UPDATE sources SET path=? WHERE path=?",
+                            (recorded_path, os.path.abspath(spool_path)))
+
+    def _record_upload_path_quietly(self, job: dict) -> None:
+        # The job's own failure is the error worth reporting; one from
+        # this (the failure may have been the database itself) is not.
+        if job.get("recorded_path") is not None:
+            with contextlib.suppress(sqlite3.Error):
+                self.record_upload_path(job["path"], job["recorded_path"])
 
     def _ingest_job_snapshot(self, job: dict) -> dict:
         keys = ("job_id", "kind", "name", "status", "rows_done", "units_done",
