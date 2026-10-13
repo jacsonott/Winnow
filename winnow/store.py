@@ -49,6 +49,7 @@ from . import timeparse
 from . import plasoread
 from . import xlsxread
 from . import log as wlog
+from .paths import sqlite_ro_uri
 
 BATCH = 20_000
 SAMPLE_ROWS = 500
@@ -1279,6 +1280,20 @@ def _json_leaf_text(value: Any) -> str:
     return str(value)
 
 
+_LONE_SURROGATE_RE = re.compile("[\ud800-\udfff]")
+
+
+def _storable_cell(value: Any) -> Any:
+    """A derived value SQLite can bind: what it already takes as is, and
+    anything else as text with any lone surrogate (half a UTF-16 pair,
+    which UTF-8 cannot spell) replaced by U+FFFD. Only reached when a
+    batch's first write was refused — see backfill_derived_columns — so
+    the common path never pays for the scan."""
+    if value is None or isinstance(value, (int, float, bytes)):
+        return value
+    return _LONE_SURROGATE_RE.sub("\ufffd", str(value))
+
+
 def _flatten_json(obj: dict, max_depth: int | None) -> dict[str, str]:
     """Flattens nested OBJECTS into dot-notation keys — {"user": {"name":
     "a"}} -> {"user.name": "a"} — but never arrays: a list value is always
@@ -1692,6 +1707,31 @@ CASE_LOCK_HEARTBEAT_SEC = 30
 CASE_LOCK_STALE_AFTER_SEC = 150
 
 
+def is_winnow_case_file(path: str) -> bool:
+    """Distinguish a Winnow case from a generic SQLite file — double-
+    clicking a case should OPEN it, not ingest it as data. Read-only,
+    tolerant of anything unreadable.
+
+    Also the gate in front of every Store opened on a path that already
+    exists (server.py's _open_store, case registration, copy_sources_to):
+    Store.__init__ runs META_SCHEMA against whatever it is handed and
+    switches the file to WAL, so opening evidence AS a case writes into
+    it. Lives here rather than in server.py for copy_sources_to's sake."""
+    try:
+        with open(path, "rb") as f:
+            if f.read(16) != b"SQLite format 3\x00":
+                return False
+        conn = sqlite3.connect(sqlite_ro_uri(path), uri=True)
+        try:
+            names = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+        finally:
+            conn.close()
+        return {"sources", "tag_defs", "row_tags"} <= names
+    except Exception:  # noqa: BLE001 — unreadable means "not a case"
+        return False
+
+
 def case_lock_path(case_path: str) -> str:
     return os.path.abspath(case_path) + CASE_LOCK_SUFFIX
 
@@ -1970,7 +2010,9 @@ class Store:
                 os.close(fd)
         else:  # pragma: no cover - Windows
             os.close(fd)
-        self.db.execute(f"ATTACH DATABASE '{self._views_path}' AS v")
+        # Bound, not pasted in: the tempdir is the analyst's profile on
+        # Windows, and C:\Users\O'Brien\... would end the string literal.
+        self.db.execute("ATTACH DATABASE ? AS v", (self._views_path,))
         # WAL on the views db is what lets _reader() connections read a
         # view concurrently with the writer materialising the next one.
         self.db.execute("PRAGMA v.journal_mode=WAL")
@@ -2749,7 +2791,7 @@ class Store:
         writer (a group_virtual WHERE can contain DAY_BUCKET(...); a raw
         filter fragment echoed into an export can contain REGEXP), so a
         query compiled against one connection never fails on the other."""
-        ro = _no_dq_strings(sqlite3.connect(f"file:{self.path}?mode=ro", uri=True,
+        ro = _no_dq_strings(sqlite3.connect(sqlite_ro_uri(self.path), uri=True,
                                             check_same_thread=False))
         ro.row_factory = sqlite3.Row
         ro.create_function("REGEXP", 2, _regexp, deterministic=True)
@@ -2761,7 +2803,7 @@ class Store:
         # even a reader can see SQLITE_BUSY briefly.
         ro.execute("PRAGMA mmap_size=1073741824")
         ro.execute("PRAGMA busy_timeout=5000")
-        ro.execute(f"ATTACH DATABASE 'file:{self._views_path}?mode=ro' AS v")
+        ro.execute("ATTACH DATABASE ? AS v", (sqlite_ro_uri(self._views_path),))
         return ro
 
     @contextlib.contextmanager
@@ -3422,7 +3464,7 @@ class Store:
         the analyst needing to already know which columns are epoch-encoded.
         Never writes to the case db — a completely separate connection to
         a completely separate file."""
-        ro = sqlite3.connect(f"file:{path}?mode=ro", uri=True, check_same_thread=False)
+        ro = sqlite3.connect(sqlite_ro_uri(path), uri=True, check_same_thread=False)
         ro.row_factory = sqlite3.Row
         try:
             table_names = [
@@ -3481,7 +3523,7 @@ class Store:
         timestamp_columns = set(timestamp_columns or [])
         file_hash = self._quick_hash(path)
 
-        ro = sqlite3.connect(f"file:{path}?mode=ro", uri=True, check_same_thread=False)
+        ro = sqlite3.connect(sqlite_ro_uri(path), uri=True, check_same_thread=False)
         ro.row_factory = sqlite3.Row
         try:
             src_cols_info = ro.execute(f"PRAGMA table_info({q(table_name)})").fetchall()
@@ -4364,6 +4406,7 @@ class Store:
                 res = self.backfill_derived_columns(
                     opts.get("def_ids") or [opts["def_id"]], progress=progress, cancel=cancel,
                     drop_on_cancel=opts.get("drop_on_cancel", False),
+                    previous=opts.get("previous"),
                 )
                 with self._ingest_jobs_lock:
                     job["status"] = "done"
@@ -5795,6 +5838,13 @@ class Store:
         nothing computed."""
         d = self.get_derived_column(def_id)
         new_params = timeparse.validate_params(d["op_id"], params if params is not None else d["params"])
+        op = timeparse.OPERATIONS[d["op_id"]]
+        if op.get("check"):
+            # Same as add_derived_column: an op that references the case
+            # (lookup) is refused HERE, with nothing changed, when what it
+            # references has gone — not after the column was put in
+            # 'building' and the job got as far as loading it.
+            op["check"](self, new_params)
         with self.lock, self.db:
             self.db.execute(
                 "UPDATE derived_columns SET params=?, status='building', parse_failures=NULL WHERE id=?",
@@ -5802,9 +5852,12 @@ class Store:
             )
         src = self._source_lite(d["source_id"])
         try:
+            # `previous` lets a backfill that fails before writing a value
+            # put the definition back as it was (_fail_derive_backfill).
             job = self.start_ingest_job(
                 "derive", "", name=d["name"],
-                options={"def_id": def_id, "drop_on_cancel": False, "units_total": src["row_count"]},
+                options={"def_id": def_id, "drop_on_cancel": False, "units_total": src["row_count"],
+                         "previous": [d]},
             )
         except OpCancelled:
             # Refused because the case is closing. The row above now says
@@ -5832,7 +5885,8 @@ class Store:
         return out["columns"][0] | {"rows": out["rows"]}
 
     def backfill_derived_columns(self, def_ids: list[int], progress=None, cancel=None,
-                                 drop_on_cancel: bool = False) -> dict:
+                                 drop_on_cancel: bool = False,
+                                 previous: list[dict] | None = None) -> dict:
         """Compute every row's values for one or more derived columns of the
         same source, in a single pass.
 
@@ -5850,60 +5904,79 @@ class Store:
         Several columns at once is what flattening a JSON blob into its
         fields needs (see add_derived_columns) — one scan and one progress
         bar instead of N of each. The SELECT reads each distinct input
-        column once however many definitions want it."""
+        column once however many definitions want it.
+
+        One value is never the column's problem: a parser that raises on a
+        cell makes that cell NULL, which the failure count then includes
+        like any other value that did not parse (see _backfill_value_errors
+        for the record of it). Anything else that stops the pass — a
+        lookup table gone since the column was made, a full disk — leaves
+        every column in a state that says what it holds rather than
+        'building' (see _fail_derive_backfill); `previous` is the
+        definition as a re-derive found it, so a pass that fails before
+        writing anything can put it back. Then it raises, and the job
+        reports it."""
         if not def_ids:
             raise ValueError("Nothing to backfill")
         defs = [self.get_derived_column(d) for d in def_ids]
         source_id = defs[0]["source_id"]
         if any(d["source_id"] != source_id for d in defs):
             raise ValueError("All columns in one backfill must belong to the same table")
-        src = self._source_lite(source_id)
-        drv = self._derived_table(source_id)
-        frm = self._from_clause(src)
-
-        # One SELECT slot per distinct input column, shared by every
-        # definition reading it.
-        slots: dict[str, int] = {}
-
-        def slot(col: str) -> int:
-            key = col.lower()
-            if key not in slots:
-                slots[key] = len(slots)
-            return slots[key]
-
-        plans = []
-        for d in defs:
-            op = timeparse.OPERATIONS[d["op_id"]]
-            inputs = timeparse.op_inputs(d["op_id"], d["input_column"], d["params"])
-            # state["inputs"]: the ordered column names behind the values
-            # parse_multi receives — an op that needs them (row_json's keys)
-            # reads them here rather than growing a second calling shape.
-            # Multi-input ops only: a stateful single-input op (syslog's
-            # year rollover) takes an empty dict as "fresh" and seeds it.
-            state = {"inputs": list(inputs)} if op["multi_input"] else {}
-            plan = {"d": d, "op": op, "state": state, "slots": [slot(c) for c in inputs]}
-            if op.get("prepare"):
-                # e.g. lookup loading its whole mapping once — per
-                # definition, before the scan, so the scan stays dict hits
-                op["prepare"](self, d["params"], plan["state"])
-            plans.append(plan)
-        cols = list(slots.keys())
-        # slot() keys case-insensitively but _col_ref needs the real name.
-        real = {}
-        for d in defs:
-            for c in timeparse.op_inputs(d["op_id"], d["input_column"], d["params"]):
-                real[c.lower()] = c
-        sel = ", ".join(self._col_ref(src, real[c]) for c in cols)
-
-        names = [d["name"] for d in defs]
-        assigns = ", ".join(f"{q(n)}=excluded.{q(n)}" for n in names)
-        upsert = (f"INSERT INTO {q(drv)}(rid, {', '.join(q(n) for n in names)}) "
-                  f"VALUES({','.join('?' * (len(names) + 1))}) "
-                  f"ON CONFLICT(rid) DO UPDATE SET {assigns}")
-
         rows_done, last_rid = 0, 0
-        total = src["row_count"]
+        # Everything from here is inside the try, setup included: the
+        # definitions are already 'building', so whatever the setup raises
+        # (an op id the registry no longer has, say) must land like any
+        # other failure rather than leave them so.
         try:
+            src = self._source_lite(source_id)
+            drv = self._derived_table(source_id)
+            frm = self._from_clause(src)
+
+            # One SELECT slot per distinct input column, shared by every
+            # definition reading it.
+            slots: dict[str, int] = {}
+
+            def slot(col: str) -> int:
+                key = col.lower()
+                if key not in slots:
+                    slots[key] = len(slots)
+                return slots[key]
+
+            plans = []
+            for d in defs:
+                op = timeparse.OPERATIONS[d["op_id"]]
+                inputs = timeparse.op_inputs(d["op_id"], d["input_column"], d["params"])
+                # state["inputs"]: the ordered column names behind the values
+                # parse_multi receives — an op that needs them (row_json's keys)
+                # reads them here rather than growing a second calling shape.
+                # Multi-input ops only: a stateful single-input op (syslog's
+                # year rollover) takes an empty dict as "fresh" and seeds it.
+                state = {"inputs": list(inputs)} if op["multi_input"] else {}
+                plans.append({"d": d, "op": op, "state": state, "slots": [slot(c) for c in inputs],
+                              "raised": 0, "first_error": None})
+            cols = list(slots.keys())
+            # slot() keys case-insensitively but _col_ref needs the real name.
+            real = {}
+            for d in defs:
+                for c in timeparse.op_inputs(d["op_id"], d["input_column"], d["params"]):
+                    real[c.lower()] = c
+            sel = ", ".join(self._col_ref(src, real[c]) for c in cols)
+
+            names = [d["name"] for d in defs]
+            assigns = ", ".join(f"{q(n)}=excluded.{q(n)}" for n in names)
+            upsert = (f"INSERT INTO {q(drv)}(rid, {', '.join(q(n) for n in names)}) "
+                      f"VALUES({','.join('?' * (len(names) + 1))}) "
+                      f"ON CONFLICT(rid) DO UPDATE SET {assigns}")
+
+            total = src["row_count"]
+            for plan in plans:
+                if plan["op"].get("prepare"):
+                    # e.g. lookup loading its whole mapping once — per
+                    # definition, before the scan, so the scan stays dict
+                    # hits. Inside the try: a lookup table deleted since the
+                    # column was made fails HERE, and has to land the way
+                    # any other failure does.
+                    plan["op"]["prepare"](self, plan["d"]["params"], plan["state"])
             while True:
                 with self._reader() as ro:
                     rows = ro.execute(
@@ -5918,17 +5991,41 @@ class Store:
                     out = [t[0]]
                     for plan in plans:
                         op = plan["op"]
-                        if op["multi_input"]:
-                            out.append(op["parse_multi"]([t[1 + i] for i in plan["slots"]],
-                                                         plan["d"]["params"], plan["state"]))
-                        else:
-                            out.append(op["parse"](t[1 + plan["slots"][0]], plan["d"]["params"], plan["state"]))
+                        # Per value, not per column: a parser that raises
+                        # on one cell (an offset no clock has, a "²" where
+                        # a tick count should be) used to fail the whole
+                        # backfill — and, on a re-derive, leave the
+                        # batches before it under the new params and the
+                        # rest under the old. The cell is NULL instead,
+                        # which _count_parse_failures counts with the rest.
+                        try:
+                            if op["multi_input"]:
+                                v = op["parse_multi"]([t[1 + i] for i in plan["slots"]],
+                                                      plan["d"]["params"], plan["state"])
+                            else:
+                                v = op["parse"](t[1 + plan["slots"][0]], plan["d"]["params"], plan["state"])
+                        except Exception as e:  # noqa: BLE001 — one value, see above
+                            v = None
+                            plan["raised"] += 1
+                            if plan["first_error"] is None:
+                                plan["first_error"] = f"row {t[0]}: {type(e).__name__}: {e}"
+                        out.append(v)
                     vals.append(tuple(out))
                 last_rid = vals[-1][0]
                 with self.lock, self.db:
                     if cancel and cancel():
                         raise IngestCancelled("cancelled during derive")
-                    self.db.executemany(upsert, vals)
+                    try:
+                        self.db.executemany(upsert, vals)
+                    except (UnicodeEncodeError, sqlite3.InterfaceError, sqlite3.ProgrammingError):
+                        # A value SQLite cannot bind: a str holding a lone
+                        # surrogate, or something that is not a str at all
+                        # from a plugin's op. Same transaction, so the rows
+                        # the first attempt got through are simply written
+                        # again — the upsert is idempotent. A closed
+                        # connection raises again here and goes on up.
+                        self.db.executemany(upsert, [tuple(_storable_cell(c) for c in row)
+                                                     for row in vals])
                 rows_done += len(vals)
                 if progress:
                     progress(rows_done, rows_done, total)
@@ -5947,10 +6044,22 @@ class Store:
                         [(d["id"],) for d in defs],
                     )
             raise
+        except Exception:
+            self._fail_derive_backfill(defs, wrote=rows_done > 0, drop=drop_on_cancel,
+                                       previous=previous)
+            raise
 
+        self._backfill_value_errors(plans)
         out_cols = []
         for d in defs:
-            failures = self._count_parse_failures(src, d)
+            # Every value is written by now, so this column is finished
+            # whatever the count does: a count that fails (the case closing
+            # under it) is an unknown number of failures, not a reason to
+            # leave the column 'building'.
+            try:
+                failures = self._count_parse_failures(src, d)
+            except Exception:  # noqa: BLE001 — see above
+                failures = None
             with self.lock, self.db:
                 self.db.execute(
                     "UPDATE derived_columns SET status='ready', parse_failures=? WHERE id=?",
@@ -5959,6 +6068,103 @@ class Store:
             out_cols.append({"def_id": d["id"], "source_id": source_id, "name": d["name"],
                              "parse_failures": failures})
         return {"source_id": source_id, "rows": rows_done, "columns": out_cols}
+
+    def _backfill_value_errors(self, plans: list[dict]) -> None:
+        """Write down that a parser raised, once per column per pass. The
+        cells are already NULL and counted as failures, so the analyst's
+        number is right without this; the log is for whoever wonders WHY a
+        value that looks parseable came out empty — it names the first
+        row and the exception."""
+        for plan in plans:
+            if plan["raised"]:
+                n = plan["raised"]
+                wlog.record("warn", f"Derive {plan['d']['name']!r}: {plan['d']['op_id']} raised on "
+                                    f"{n:,} value{'s' if n != 1 else ''}, left empty and counted as "
+                                    f"unparsed (first: {plan['first_error']})")
+
+    def _fail_derive_backfill(self, defs: list[dict], *, wrote: bool, drop: bool,
+                              previous: list[dict] | None) -> None:
+        """Where a backfill that stopped on an error (not a cancel) leaves
+        its columns. The state being avoided is the one it used to leave:
+        'building' with no job left to finish it, which survives every
+        reopen, blocks anything chaining off the column and makes
+        save_view_as_source refuse the table — and, on a re-derive, values
+        computed under two different sets of params with nothing to say so.
+
+        - A create (`drop`): removed, as a cancel removes it. The column
+          never had values worth keeping, and the job's error says why it
+          is not there.
+        - A re-derive that failed before writing anything (the lookup
+          table it reads is gone): the definition goes back to exactly
+          what it was (`previous`). Its values were never touched, so it
+          IS still that column. A cascade has no `previous` — its params
+          did not change, its parent's data did — so it is marked
+          'partial', which is what a cascade that could not start leaves
+          (_cascade_dependent_derives).
+        - A re-derive that wrote some batches first: 'error', and the
+          values cleared. Half old params and half new is the one answer
+          that cannot be read correctly, so none is left to read; the
+          header says to re-derive. Status first, so that if the clearing
+          fails too (the disk that filled up), the column still says it is
+          not to be trusted. The columns computed FROM it held values from
+          before and are now 'partial' for the same reason a cascade
+          that could not start leaves them so.
+
+        Every step is best-effort: the error being raised is the answer
+        (the job records it, and the log line names it), and a second
+        failure here — the case closing under it — must not replace it."""
+        if drop:
+            self._rollback_derive_definitions([d["id"] for d in defs])
+            return
+        before = {b["id"]: b for b in (previous or [])}
+        if not wrote:
+            for d in defs:
+                if d["id"] in before:
+                    self._restore_derive_definition(before[d["id"]])
+                else:
+                    with contextlib.suppress(Exception):
+                        with self.lock, self.db:
+                            self.db.execute(
+                                "UPDATE derived_columns SET status='partial' WHERE id=? AND status='building'",
+                                (d["id"],),
+                            )
+            return
+        names = [d["name"] for d in defs]
+        wlog.record("warn", f"Derive stopped part-way: {', '.join(names)} — the values it had "
+                            f"written were cleared rather than left mixed with the old ones; "
+                            f"re-derive to retry")
+        with contextlib.suppress(Exception):
+            with self.lock, self.db:
+                self.db.executemany(
+                    "UPDATE derived_columns SET status='error', parse_failures=NULL WHERE id=?",
+                    [(d["id"],) for d in defs],
+                )
+        source_id = defs[0]["source_id"]
+        drv = self._derived_table(source_id)
+        cleared = ", ".join(f"{q(d['name'])}=NULL" for d in defs)
+        with contextlib.suppress(Exception):
+            last = 0
+            while True:
+                # By rid range, a BATCH at a time, for invariant #4's
+                # reason: one UPDATE over a multi-million-row column would
+                # hold the writer for as long as the backfill's whole pass.
+                with self.lock, self.db:
+                    hi = self.db.execute(
+                        f"SELECT MAX(rid) FROM (SELECT rid FROM {q(drv)} WHERE rid > ? "
+                        f"ORDER BY rid LIMIT {BATCH})", (last,),
+                    ).fetchone()[0]
+                    if hi is None:
+                        break
+                    self.db.execute(f"UPDATE {q(drv)} SET {cleared} WHERE rid > ? AND rid <= ?",
+                                    (last, hi))
+                last = hi
+        with contextlib.suppress(Exception):
+            stale = [c["id"] for c in self.dependent_derived_columns(source_id, names)]
+            with self.lock, self.db:
+                self.db.executemany(
+                    "UPDATE derived_columns SET status='partial' WHERE id=? AND status='ready'",
+                    [(i,) for i in stale],
+                )
 
     def _count_parse_failures(self, src: dict, d: dict) -> int:
         """Rows whose input had something in it but produced no datetime —
@@ -6171,7 +6377,9 @@ class Store:
         op = timeparse.OPERATIONS[op_id]
         if state is None:
             state = self._preview_state(op_id, params)
-        return [{"input": v, "output": op["parse"](v, params, state)} for v in values]
+        # parse_or_none: a value that raises previews as a failure, as it
+        # would backfill as one — not as a 500 for the whole modal.
+        return [{"input": v, "output": timeparse.parse_or_none(op, v, params, state)} for v in values]
 
     def preview_derived(self, source_id: int, column: str, op_id: str,
                         params: dict | None = None, limit: int = 10,
@@ -6232,7 +6440,8 @@ class Store:
                 rows = ro.execute(
                     f"SELECT {sel} FROM {self._from_clause(src)} LIMIT ?", (limit,),
                 ).fetchall()
-            preview = [{"input": r[0], "output": op["parse_multi"](list(r), params, state)} for r in rows]
+            preview = [{"input": r[0], "output": timeparse.parse_multi_or_none(op, list(r), params, state)}
+                       for r in rows]
             # A failure is a NULL from a row that HAD something to read —
             # the same rule _count_parse_failures applies after the
             # backfill, so the modal's verdict and the column's count agree.
@@ -6256,7 +6465,7 @@ class Store:
         # loads its whole table (up to MAX_LOOKUP_ROWS) inside the request.
         state = self._preview_state(op_id, params)
         preview = self._preview_rows(samples[:limit], op_id, params, state)
-        failures = sum(1 for v in samples if op["parse"](v, params, state) is None)
+        failures = sum(1 for v in samples if timeparse.parse_or_none(op, v, params, state) is None)
         return {"preview": preview, "sampled": len(samples), "failures": failures, "scope": scope}
 
     def preview_regex_groups(self, source_id: int, column: str, pattern: str,
@@ -7657,7 +7866,7 @@ class Store:
         froms = ([self._from_clause(self._source_lite(m["source_id"]))
                   for m in self._resolve_members(source_id)]
                  if source_id < 0 else [self._from_clause(src)])
-        ro = _no_dq_strings(sqlite3.connect(f"file:{self.path}?mode=ro", uri=True,
+        ro = _no_dq_strings(sqlite3.connect(sqlite_ro_uri(self.path), uri=True,
                                             check_same_thread=False))
         ro.row_factory = sqlite3.Row
         ro.create_function("REGEXP", 2, _regexp, deterministic=True)
@@ -9804,7 +10013,7 @@ class Store:
         if os.path.abspath(path) == os.path.abspath(self.path):
             raise ValueError("That is the currently open case")
         try:
-            ro = sqlite3.connect(f"file:{os.path.abspath(path)}?mode=ro", uri=True)
+            ro = sqlite3.connect(sqlite_ro_uri(path), uri=True)
         except sqlite3.Error as e:
             raise ValueError(f"Could not open case file: {e}")
         ro.row_factory = sqlite3.Row
@@ -11301,34 +11510,39 @@ class Store:
             except (KeyError, TypeError, ValueError):
                 other = None
             if other is not None and other["id"] >= 0:
-                out["lookup_table"] = {"file_hash": other.get("file_hash"), "name": other.get("name")}
+                out["lookup_table"] = {
+                    "file_hash": other.get("file_hash"), "name": other.get("name"),
+                    "columns": [c["name"] for c in self._base_cols(other)],
+                    "row_count": other.get("row_count")}
         return out
 
     def _resolve_session_lookup(self, d: dict) -> int:
         """The live source a session's lookup column should read, from the
-        `lookup_table` identity _session_derived_def wrote: the table with
-        that fingerprint (a hashless one by name, as _session_source_resolver
-        does), narrowed by name when one file gave several tables. Raises
-        ValueError — a warning, the column not recreated — when there is no
-        such table or no way to tell which one. The session's id is never
-        used: binding by it filled a column from whichever table happened
-        to hold that number, with nothing to say so."""
+        `lookup_table` identity _session_derived_def wrote, matched the way
+        session sources are (_match_session_sources: the file's hash, then
+        which table of that file). A table with no hash — a SQL-saved or
+        plugin-made lookup table, common here — pairs by name, as the diff
+        pairs one (`hashless`). Raises ValueError — a warning, the column
+        not recreated — when no table matches or several could. The
+        session's id is never used: binding by it filled a column from
+        whichever table happened to hold that number, with nothing to say
+        so."""
         ident = d.get("lookup_table")
         if not isinstance(ident, dict):
             raise ValueError("the session does not say which table it looks values up in "
                              "(it was saved before that was recorded); recreate it from the column menu")
-        h, name = ident.get("file_hash"), ident.get("name")
+        name = ident.get("name")
         real = [s for s in self.list_sources() if s["id"] >= 0]
-        found = ([s for s in real if s.get("file_hash") == h] if h
-                 else [s for s in real if not s.get("file_hash") and s["name"] == name])
-        if len(found) > 1:
-            found = [s for s in found if s["name"] == name] or found
-        if not found:
+        pairs = self._match_session_sources([ident], real, hashless=True)
+        if 0 in pairs:
+            return real[pairs[0]]["id"]
+        h = ident.get("file_hash")
+        same = [s for s in real if (s.get("file_hash") == h if h
+                                    else not s.get("file_hash") and s["name"] == name)]
+        if not same:
             raise ValueError(f"its lookup table {name!r} is not in this case")
-        if len(found) > 1:
-            raise ValueError(f"{len(found)} tables here could be its lookup table {name!r}; "
-                             "recreate it from the column menu")
-        return found[0]["id"]
+        raise ValueError(f"{len(same)} tables here could be its lookup table {name!r} and none "
+                         "of them is unambiguously it; recreate it from the column menu")
 
     def import_session(self, source_id: int, session: dict, merge: bool = True) -> dict:
         """Apply a one-table session to `source_id`. merge=False replaces
@@ -11459,21 +11673,42 @@ class Store:
         }
 
     def import_case_session(self, session: dict, merge: bool = True) -> dict:
-        """Reattaches each source session by file_hash to whatever's already
-        open; if a source isn't open but its original file still exists at
-        the recorded path, re-imports it first. Local single-user tool with
-        full filesystem access already (same trust level as --open), so this
-        is the one action that can fully reconstruct a case from a session."""
+        """Reattaches each source session to the live table it describes
+        (_match_session_sources: the file's hash, then which table of that
+        file); if a source's file isn't in the case at all but still exists
+        at the recorded path, re-imports it first. Local single-user tool
+        with full filesystem access already (same trust level as --open), so
+        this is the one action that can fully reconstruct a case from a
+        session.
+
+        A source whose FILE is in the case but which matches no single
+        table of it — the case lacks that table, or holds two copies
+        nothing tells apart — is skipped with a warning naming it. Never
+        re-imported (the file is here; another copy of it is not this
+        table) and never put on a sibling: that was the old hash-only
+        match, which moved one table's tags onto another's rows."""
         warnings: list[str] = []
         tags_applied = 0
         sources_restored = 0
         sources_reimported = 0
-        by_hash = self._live_sources_by_hash()
+        entries = session.get("sources", [])
+        live = self.list_sources()
+        metas = [e.get("source", {}) for e in entries]
+        pairs = self._match_session_sources(metas, live)
+        live_hashes = {s["file_hash"] for s in live if s.get("file_hash")}
         resolved: list[tuple[int, dict]] = []
 
-        for src_session in session.get("sources", []):
-            s_meta = src_session.get("source", {})
-            source_id = by_hash.get(s_meta.get("file_hash"))
+        for i, src_session in enumerate(entries):
+            s_meta = metas[i]
+            source_id = live[pairs[i]]["id"] if i in pairs else None
+            if source_id is None and s_meta.get("file_hash") in live_hashes:
+                same_file = sum(1 for s in live if s.get("file_hash") == s_meta["file_hash"])
+                warnings.append(
+                    f"'{s_meta.get('name', 'unknown')}' was not restored: this case has "
+                    f"{same_file} table(s) from the same file and none of them is "
+                    "unambiguously this one (matched on name, columns and row count) "
+                    "— skipped rather than guessed")
+                continue
             if source_id is None:
                 path = s_meta.get("path")
                 if path and os.path.isfile(path):
@@ -11575,6 +11810,14 @@ class Store:
             raise ValueError("That is this case — pick a different one to copy into")
         if not os.path.isfile(target_path):
             raise ValueError(f"No case file at {target_path}")
+        # Before Store(target_path), which would write its schema into
+        # whatever is there: the case registry can hold a path that is
+        # not a case (registered before registration checked, or a case
+        # file since replaced), and the one the analyst picks here may be
+        # a browser history database they meant to IMPORT.
+        if not is_winnow_case_file(target_path):
+            raise ValueError(
+                f"{target_path} is not a Winnow case file — copying into it would write into it")
         for sid in source_ids:
             if sid < 0:
                 raise ValueError("Merges can't be copied — their member tables can be, individually")
@@ -11906,20 +12149,21 @@ class Store:
                     self.db.execute(f"DROP TABLE IF EXISTS v.{q(entry['table'])}")
             self._undo.clear()
 
-    def _session_tag_map(self, data: dict) -> tuple[dict, dict, dict]:
+    def _session_tag_map(self, data: dict, keys: list[str]) -> tuple[dict, dict, dict]:
         """(tags_by_row, notes_by_row, source_labels) for a session document.
 
-        Keyed by (file_hash or name, rid) rather than source_id, because two
-        cases number their sources differently — a QC review is usually the
-        reviewer's case against the analyst's file, and matching on the
-        evidence's own fingerprint is what makes that work at all.
+        Keyed by (source key, rid) rather than source_id, because two cases
+        number their sources differently — a QC review is usually the
+        reviewer's case against the analyst's file. `keys` names each of the
+        document's sources, in order; diff_sessions derives them from the
+        evidence's own fingerprint (_diff_source_keys), which is what makes
+        that work at all.
         """
         tags: dict = {}
         notes: dict = {}
         labels: dict = {}
-        for src in data.get("sources", []):
+        for src, key in zip(data.get("sources", []), keys):
             meta = src.get("source") or {}
-            key = meta.get("file_hash") or meta.get("name") or ""
             labels[key] = meta.get("name") or key
             names = {t["id"]: t["name"] for t in (src.get("tag_defs") or [])}
             for rt in src.get("row_tags") or []:
@@ -11929,24 +12173,111 @@ class Store:
                 notes[(key, rn["rid"])] = rn.get("note") or ""
         return tags, notes, labels
 
-    def _live_sources_by_hash(self, sources: list[dict] | None = None) -> dict:
-        """{file_hash: source_id} for the open case — the one way a session
-        source is matched to a live table (import_case_session and the diff
-        both read it). Evidence is identified by its own fingerprint, never
-        by a filename two different exports can share."""
-        return {s["file_hash"]: s["id"] for s in (sources or self.list_sources()) if s.get("file_hash")}
+    @classmethod
+    def _session_identity(cls, meta: dict) -> tuple:
+        """Everything a session records about a source, as one comparable
+        value: (file_hash, name, base column names, row_count). A live
+        source (list_sources) reads the same way, minus its derived
+        columns — the session's column list is the evidence's own shape."""
+        cols = meta.get("columns") or []
+        if any(isinstance(c, dict) and c.get("derived") for c in cols):
+            cols = cls._base_cols(meta)
+        names = tuple(c.get("name") if isinstance(c, dict) else c for c in cols)
+        return (meta.get("file_hash") or None, meta.get("name") or "", names, meta.get("row_count"))
 
-    def _session_source_resolver(self):
-        """key -> live source id | None, for the keys _session_tag_map
-        builds (a file hash, or the name of a source that has none). A hash
-        matches by hash only; a hashless source matches a hashless live
-        source of the same name, since nothing better identifies it. A
-        same-named table with a different hash is a different file and
-        stays unresolved — a diff must never pivot into the wrong evidence."""
-        sources = self.list_sources()
-        by_hash = self._live_sources_by_hash(sources)
-        by_name_hashless = {s["name"]: s["id"] for s in sources if not s.get("file_hash")}
-        return lambda key: by_hash.get(key, by_name_hashless.get(key))
+    @classmethod
+    def _match_session_sources(cls, entries: list[dict], candidates: list[dict],
+                               *, hashless: bool = False) -> dict[int, int]:
+        """Pair session source records with the sources they describe:
+        {entry index: candidate index}, one-to-one. The candidates are the
+        live case's sources, or (for the diff) the other session's.
+
+        The file hash says which FILE; it cannot say which table of it.
+        Every table imported out of one SQLite database, every sheet of one
+        workbook and a file imported twice share it, and matching on it
+        alone (the old {hash: id} dict, last one wins) put one table's tags
+        on another's rows. So the hash is required and the rest of what a
+        session records picks the table, coarsest last:
+
+        1. hash, name, columns and row count all agree. Records equal in
+           all four are indistinguishable, so n of them pair with n
+           candidates in order — document order against id order, which is
+           import order on both sides of a session restored into its own
+           case (export_case_session lists by id).
+        2. hash and name — the same table with a different shape (imported
+           again with other options).
+        3. hash, columns and row count — the same table under another name,
+           which is the ordinary QC case: the reviewer named their tables.
+        4. hash alone, when it is the only record and the only candidate of
+           that file left — the single-table file, as it always matched.
+
+        Below tier 1 only one-to-one pairs: two records that agree on a
+        coarse key but not a finer one are different tables, and pairing
+        them in order would be a guess. Whatever is left unpaired is
+        reported by the caller, never placed. Never matched on ids: two
+        cases number their sources independently (invariant #10).
+
+        A source with no hash (a SQL-saved or plugin-made table) has no
+        fingerprint at all; `hashless` lets it pair by tiers 1 and 2 —
+        name required — which is what the diff has always done. Session
+        load leaves it unmatched, as before."""
+        ie = [cls._session_identity(m) for m in entries]
+        ic = [cls._session_identity(m) for m in candidates]
+        free_e = [i for i, x in enumerate(ie) if x[0] or hashless]
+        free_c = [j for j, x in enumerate(ic) if x[0] or hashless]
+        tiers = ((lambda x: x, True),
+                 (lambda x: x[:2], False),
+                 (lambda x: (x[0], x[2], x[3]), False),
+                 (lambda x: x[0], False))
+        pairs: dict[int, int] = {}
+        for tier, (key, n_to_n) in enumerate(tiers):
+            by_e: dict = {}
+            by_c: dict = {}
+            for i in free_e:
+                if tier < 2 or ie[i][0]:
+                    by_e.setdefault(key(ie[i]), []).append(i)
+            for j in free_c:
+                if tier < 2 or ic[j][0]:
+                    by_c.setdefault(key(ic[j]), []).append(j)
+            for k, es in by_e.items():
+                cs = by_c.get(k, [])
+                if not cs or len(es) != len(cs) or (len(es) > 1 and not n_to_n):
+                    continue
+                pairs.update(zip(es, cs))
+            free_e = [i for i in free_e if i not in pairs]
+            taken = set(pairs.values())
+            free_c = [j for j in free_c if j not in taken]
+        return pairs
+
+    @classmethod
+    def _diff_source_keys(cls, left: list[dict], right: list[dict]) -> tuple[list[str], list[str]]:
+        """One key per source on each side of a diff, equal exactly when
+        the two records describe the same table (_match_session_sources).
+        The file hash where that alone is unambiguous, which keeps the
+        common single-table shape what it always was; hash plus name, and
+        then a counter, where several tables share it."""
+        pairs = cls._match_session_sources(left, right, hashless=True)
+        units = [(i, pairs.get(i)) for i in range(len(left))]
+        paired_right = set(pairs.values())
+        units += [(None, j) for j in range(len(right)) if j not in paired_right]
+        metas = [left[i] if i is not None else right[j] for i, j in units]
+        bases = [m.get("file_hash") or m.get("name") or "" for m in metas]
+        counts: dict = {}
+        for b in bases:
+            counts[b] = counts.get(b, 0) + 1
+        keys, seen = [], {}
+        for b, m in zip(bases, metas):
+            k = b if counts[b] == 1 else f"{b}|{m.get('name') or ''}"
+            seen[k] = seen.get(k, 0) + 1
+            keys.append(k if seen[k] == 1 else f"{k}|{seen[k]}")
+        lk: list = [None] * len(left)
+        rk: list = [None] * len(right)
+        for (i, j), k in zip(units, keys):
+            if i is not None:
+                lk[i] = k
+            if j is not None:
+                rk[j] = k
+        return lk, rk
 
     def diff_sessions(self, left: str, right: str, limit: int = 2000) -> dict:
         """What changed between two sessions — the QC question: "what did
@@ -11964,8 +12295,12 @@ class Store:
         def _load(which):
             return self.export_case_session() if which == self.LIVE_SESSION else self.get_session(which)
 
-        lt, ln, llab = self._session_tag_map(_load(left))
-        rt, rn, rlab = self._session_tag_map(_load(right))
+        ldoc, rdoc = _load(left), _load(right)
+        lmeta = [s.get("source") or {} for s in ldoc.get("sources", [])]
+        rmeta = [s.get("source") or {} for s in rdoc.get("sources", [])]
+        lkeys, rkeys = self._diff_source_keys(lmeta, rmeta)
+        lt, ln, llab = self._session_tag_map(ldoc, lkeys)
+        rt, rn, rlab = self._session_tag_map(rdoc, rkeys)
         labels = {**rlab, **llab}
 
         added, removed, changed, note_changes = [], [], [], []
@@ -11992,7 +12327,15 @@ class Store:
         # Per table, uncapped: what the panel shows as its counts. The row
         # lists below are capped, so a table past the cap still reports
         # how many rows differ even when not all of them can be opened.
-        resolve = self._session_source_resolver()
+        # Each key resolves to the live table its record matches — by the
+        # same rule a load uses, so a diff never pivots into evidence a
+        # load would not have put those tags on.
+        live = self.list_sources()
+        live_id: dict = {}
+        for metas, keys in ((rmeta, rkeys), (lmeta, lkeys)):   # left wins
+            for i, j in self._match_session_sources(metas, live, hashless=True).items():
+                live_id[keys[i]] = live[j]["id"]
+        resolve = live_id.get
         per_source: dict = {}
         for kind, rows in groups.items():
             for r in rows:
@@ -13157,7 +13500,7 @@ class Store:
         so derived columns resolve and Tags/Note are ordinary queryable
         columns. TEMP lives on this connection only: the case file is
         never written, and mode=ro stays honest. Callers own the close."""
-        ro = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, check_same_thread=False)
+        ro = sqlite3.connect(sqlite_ro_uri(self.path), uri=True, check_same_thread=False)
         ro.row_factory = sqlite3.Row
         ro.create_function("REGEXP", 2, _regexp, deterministic=True)
         ro.create_function("DAY_BUCKET", 1, _day_bucket, deterministic=True)

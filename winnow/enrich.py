@@ -41,9 +41,9 @@ def _params_ok(params: dict) -> tuple[int, str, str, str]:
     return other, match_col, value_col, multi
 
 
-def _check(store, params: dict) -> None:
+def _check(store, params: dict) -> dict:
     """Create-time validation against the case — a bad reference should
-    fail the modal, not the backfill job."""
+    fail the modal, not the backfill job. Returns the lookup table."""
     other, match_col, value_col, _ = _params_ok(params)
     if other < 0:
         raise ValueError("Look up against a real table — merge the result instead of the source")
@@ -55,6 +55,7 @@ def _check(store, params: dict) -> None:
     for col, label in ((match_col, "key"), (value_col, "value")):
         if col not in names:
             raise ValueError(f"The lookup table {src['name']!r} has no {label} column {col!r}")
+    return src
 
 
 def _blank(value) -> bool:
@@ -69,8 +70,13 @@ def _blank(value) -> bool:
 
 
 def _prepare(store, params: dict, state: dict) -> None:
-    other, match_col, value_col, multi = _params_ok(params)
-    src = store.get_source(other)
+    _, match_col, value_col, multi = _params_ok(params)
+    # The same check as creation, again: the lookup table can be deleted
+    # after the column was made, and a re-derive (or the cascade from a
+    # re-derived parent) then reached a bare KeyError from get_source —
+    # "'No table 7'" as the job's error, after the column had been put in
+    # 'building'. This says which table and why.
+    src = _check(store, params)
     mapping: dict[str, str] = {}
     # multi='all' collects each key's distinct values in a list and joins
     # once at the end: re-joining the growing string on every match was

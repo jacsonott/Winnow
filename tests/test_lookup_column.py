@@ -153,6 +153,55 @@ def test_a_session_binds_a_lookup_to_the_same_evidence_not_the_same_id(tmp_path,
         b.close()
 
 
+def test_a_lookup_table_from_a_multi_table_file_is_matched_like_a_session_source(tmp_path, write_csv):
+    """Every table of one SQLite file shares its hash, so the hash cannot
+    say which one a lookup read. Telling them apart by name alone refused
+    the column the moment the receiving analyst named their tables their
+    own way; the session records the table's columns and row count too, and
+    the receiving side matches it the way it matches session sources."""
+    import sqlite3
+
+    from winnow.store import DEFAULT_TAGS, Store
+    db = str(tmp_path / "triage.db")
+    c = sqlite3.connect(db)
+    c.execute("CREATE TABLE hosts (Host TEXT, Owner TEXT)")
+    c.execute("INSERT INTO hosts VALUES ('web01', 'alice')")
+    c.execute("CREATE TABLE users (Sid TEXT, Name TEXT)")
+    c.executemany("INSERT INTO users VALUES (?, ?)", [("S-1", "x"), ("S-2", "y")])
+    c.commit()
+    c.close()
+    events = write_csv([["Host", "Msg"], ["web01", "logon"]], "events.csv")
+
+    def case(fname, names):
+        s = Store(str(tmp_path / fname), default_tags=DEFAULT_TAGS)
+        ids = {t: s.ingest_sqlite_table(db, t, name=names[t], build_fts=False)["id"]
+               for t in ("users", "hosts")}
+        ev = s.ingest_csv(events, name="events.csv", build_fts=False)["id"]
+        return s, ids, ev
+
+    a, ids_a, ev_a = case("a.db", {"hosts": "hosts", "users": "users"})
+    try:
+        r = a.add_derived_column(ev_a, "Owner", "Host", "lookup",
+                                 {"other_source_id": ids_a["hosts"], "match_column": "Host",
+                                  "value_column": "Owner"})
+        a.wait_for_ingest_job(r["job_id"], timeout=30)
+        sess = a.export_session(ev_a)
+    finally:
+        a.close()
+
+    b, ids_b, ev_b = case("b.db", {"hosts": "Hosts (triage.db)", "users": "Users (triage.db)"})
+    try:
+        res = b.import_session(ev_b, sess)
+        for j in res["derived_job_ids"]:
+            b.wait_for_ingest_job(j, timeout=30)
+        assert res["warnings"] == []
+        d = b.list_derived_columns(ev_b)[0]
+        assert int(d["params"]["other_source_id"]) == ids_b["hosts"]
+        assert [r[0] for r in b.db.execute(f'SELECT "Owner" FROM drv_{ev_b}')] == ["alice"]
+    finally:
+        b.close()
+
+
 def test_a_lookup_whose_table_is_not_in_the_case_is_not_recreated(tmp_path, write_csv):
     """No table with that fingerprint here: say so and leave the column out,
     rather than filling it from whichever table took the old id."""

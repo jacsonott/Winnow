@@ -568,6 +568,46 @@ def test_derived_rederive_and_suggestion_routes(client, store, write_csv):
     assert bad.status_code == 400
 
 
+def test_derived_detect_and_suggestions_survive_a_value_that_raises(client, store, write_csv, monkeypatch):
+    """Detect, suggestions and preview run every parser over real values;
+    one that raised used to make each of them a 500 for the whole table.
+    Here: an ISO stamp with an offset no clock has among epoch seconds,
+    and a registered op (as a plugin's could be) that raises on every
+    value. Both read as values that do not parse."""
+    from winnow import timeparse
+
+    def parse(value, params, state):
+        raise RuntimeError("not this one")
+
+    op = {"id": "t_always_raises", "label": "Always raises", "parse": parse}
+    monkeypatch.setitem(timeparse.OPERATIONS, op["id"], op)
+    timeparse.register_op(op)
+
+    rows = [["Epoch", "Note"]] + [[str(1700000000 + i), "x"] for i in range(50)]
+    rows.append(["2024-01-05T13:22:01+15:00", "x"])
+    sid = store.ingest_csv(write_csv(rows, name="hostile.csv"), name="hostile.csv", build_fts=False)["id"]
+
+    r = client.post("/api/derived/detect", json={"source_id": sid, "column": "Epoch"})
+    assert r.status_code == 200, r.text
+    assert r.json()[0]["op_id"] == "unix_epoch"
+    assert "t_always_raises" not in [x["op_id"] for x in r.json()]
+
+    r = client.get(f"/api/derived/suggestions?source_id={sid}")
+    assert r.status_code == 200, r.text
+    assert [x["column"] for x in r.json()] == ["Epoch"]
+
+    r = client.post("/api/derived/preview", json={
+        "source_id": sid, "column": "Epoch", "op_id": "iso8601", "params": {}})
+    assert r.status_code == 200, r.text
+    assert r.json()["failures"] == r.json()["sampled"] == 51
+
+    r = client.post("/api/derived/preview", json={
+        "source_id": sid, "column": "Epoch", "op_id": "t_always_raises", "params": {}})
+    assert r.status_code == 200, r.text
+    assert r.json()["failures"] == 51
+    assert {x["output"] for x in r.json()["preview"]} == {None}
+
+
 def test_timestamp_format_settings_routes(client):
     assert client.get("/api/settings/app").json()["default_ts_format"] == "iso"
     assert client.post("/api/settings/app", json={"default_ts_format": "us"}).status_code == 200

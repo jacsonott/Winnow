@@ -171,6 +171,32 @@ see [docs/notes/README.md](README.md) for the whole set.
     `(building…)` in the header after every reopen, makes
     `save_view_as_source` refuse the whole table, and blocks anything
     chaining off it, with no way back except deleting the column.
+  - **One value is never the column's problem, and a failed pass never
+    leaves `'building'`.** Parsers are meant to be total — return text or
+    None for any input — and `test_timeparse.py` holds every registered op
+    to that over a hostile corpus. The ones that weren't: an offset inside
+    a value beyond ±14:00 (`_value_offset`; the analyst's own `utc_offset`
+    param still fails loudly in `validate_params`), .NET's
+    `1/1/0001 12:00:00 AM` under any offset (`_shift_naive`/`_fmt` give
+    None at datetime's range ends), `"²"` and 5,000-digit strings as tick
+    counts (`isdecimal` + a length cap before `int()`), and a JSON
+    `"\ud83d"` whose lone surrogate SQLite cannot store (`_leaf_text`
+    writes U+FFFD). Because the registry is open, the callers don't trust
+    that either: the backfill wraps each value (a raise is NULL, counted
+    with the other failures, logged once per column with the first row),
+    retries a batch SQLite refused with `_storable_cell`, and detect /
+    preview / suggestions go through `timeparse.parse_or_none` — one bad
+    cell used to 500 those routes for the whole table. Anything else that
+    stops a pass lands in `_fail_derive_backfill`: a create is removed
+    (as on cancel); a re-derive that wrote nothing yet is put back exactly
+    as it was (`previous`, the snapshot `rederive_column` passes); a
+    cascade that wrote nothing is `partial`; and a re-derive that stopped
+    after committing some batches is `'error'` with its values cleared and
+    its own children `partial` — two runs' values side by side (the report
+    had 20,000 rows at 11:22:01 and 20,009 at 13:22:01 for identical
+    input) is the one result nobody can read correctly. `rederive_column`
+    also runs the op's `check` first, so a lookup whose table is gone is
+    refused with nothing changed.
   - **Canonical output is `YYYY-MM-DD HH:MM:SS[.ffffff]`**, sub-second only
     when the source has that resolution. That exact shape is why there are
     **no new regexes to hand-sync**: `_TS_ISO_RE`/`TS_NORMALIZE`/`DAY_BUCKET`
@@ -205,9 +231,11 @@ see [docs/notes/README.md](README.md) for the whole set.
   session import used to fill the column from it with no warning (the
   owner column said mallory where the analyst had alice). A session now
   carries the table's identity beside the definition (`lookup_table`:
-  file hash and name, the keys session sources match by) and the import
-  resolves that; no such table, or more than one it cannot tell apart,
-  is a warning and the column is not recreated. A session saved before
+  file hash, name, base columns and row count — what a session source
+  records) and the import resolves it the way session sources are
+  matched (`_match_session_sources`, with a hashless table paired by
+  name); no such table, or more than one it cannot tell apart, is a
+  warning and the column is not recreated. A session saved before
   the identity was recorded is refused the same way rather than trusted
   by id. A copy re-points the definition to its table when that came
   along, else to the target's one table with the same fingerprint, else
