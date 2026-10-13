@@ -25,7 +25,6 @@ import itertools
 import json
 import math
 import os
-import pathlib
 import re
 import shutil
 import socket
@@ -878,8 +877,10 @@ def _open_evidence_sqlite(path: str) -> tuple[sqlite3.Connection, Callable[[], N
       removes the directory. The evidence folder is never written to,
       read-only media included.
     A rollback-journal database creates nothing under `mode=ro` and opens
-    as it always did. The path goes in as a proper file URI, so a `#` or
-    `?` in it can't be read as URI syntax."""
+    as it always did — the same `file:<path>?mode=ro` spelling as every
+    other read-only open here. Not Path.as_uri(): that writes a Windows
+    share as file://server/share/…, an authority SQLite refuses, so
+    evidence on a share would stop opening."""
     tmpdir = None
     target, params = os.path.abspath(path), "mode=ro"
     if _sqlite_header_is_wal(path):
@@ -896,8 +897,7 @@ def _open_evidence_sqlite(path: str) -> tuple[sqlite3.Connection, Callable[[], N
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     try:
-        conn = sqlite3.connect(f"{pathlib.Path(target).as_uri()}?{params}", uri=True,
-                               check_same_thread=False)
+        conn = sqlite3.connect(f"file:{target}?{params}", uri=True, check_same_thread=False)
     except BaseException:
         cleanup()
         raise
