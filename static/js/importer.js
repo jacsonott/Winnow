@@ -194,9 +194,10 @@ export function queueFilesForFormat(fmt, files) {
 export function openImportModal() {
   modal('Import', (b) => {
     b.append(el('p', null,
-      'Queue CSV/TSV, JSON/JSONL, Excel, or SQLite files (a SQLite file needs its tables picked '
-      + 'first, an Excel workbook its sheets), '
-      + 'then import them all — imports run in the background, so you can keep working while the '
+      'Queue CSV/TSV, JSON/JSONL, SQLite, Excel (.xlsx/.xlsm), Plaso or archive (zip/tar/gz) '
+      + 'files — any other log imports as text, one line per row — then import them all, or '
+      + 'import a whole folder at once. A SQLite file needs its tables picked first, an Excel '
+      + 'workbook its sheets. Imports run in the background, so you can keep working while the '
       + 'corner panel tracks progress.'));
 
     const queueList = el('div', 'session-queue');
