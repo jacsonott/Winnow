@@ -23,7 +23,7 @@ import sqlite3
 import sys
 import tempfile
 import time
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form, Query
@@ -2937,10 +2937,15 @@ async def api_plugins_install(
         raise HTTPException(400, "paths and files must align")
 
     keep: list[tuple[Path, UploadFile]] = []  # (relative path, upload)
+    root = PLUGIN_DIRS[0].resolve()
     for rel, f in zip(rel_paths, files):
-        p = Path(str(rel).replace("\\", "/"))
-        if not rel or p.is_absolute() or ".." in p.parts or not p.parts:
+        parts = _plugin_upload_parts(rel)
+        # Belt and braces over the segment check, the way browse_dir/new
+        # does it: whatever the string did, the file has to land inside
+        # plugins/ (a symlink already in there pointing out included).
+        if parts is None or root not in (root / Path(*parts)).resolve().parents:
             raise HTTPException(400, f"Unsafe path in upload: {rel!r}")
+        p = Path(*parts)
         if "__pycache__" in p.parts or p.suffix == ".pyc":
             continue
         keep.append((p, f))
@@ -2960,6 +2965,10 @@ async def api_plugins_install(
         if not any(p.parts == (fs_name, "__init__.py") for p, _ in keep):
             raise HTTPException(400, f"Not a plugin package: no {fs_name}/__init__.py in the folder")
         dest = PLUGIN_DIRS[0] / fs_name
+    # What an overwrite would delete must itself be an entry directly in
+    # plugins/ — never the folder, never something a link points at.
+    if dest.resolve().parent != root:
+        raise HTTPException(400, f"Unsafe plugin name: {fs_name!r}")
 
     if dest.exists() and not overwrite:
         # 409, not 400: the request is fine, the name is simply taken —
@@ -2986,6 +2995,32 @@ async def api_plugins_install(
     await run_in_threadpool(_reload_plugins)
     rec = next((p for p in PLUGINS.describe() if p["fs_name"] == fs_name), None)
     return {"installed": fs_name, "error": rec["error"] if rec else None, **api_plugins()}
+
+
+def _plugin_upload_parts(rel) -> tuple[str, ...] | None:
+    """The path segments of one uploaded plugin file, or None if it is not
+    a plain relative path on EVERY platform Winnow runs on.
+
+    The check used to be `Path(...).is_absolute()` plus "no '..'", which is
+    POSIX's idea of safe. On Windows a rooted-but-driveless path
+    (`\\Windows\\Tasks\\x.py`) and a drive-relative one (`C:__init__.py`) are
+    neither absolute nor dotted, so both passed, and `plugins / p` then
+    pointed outside plugins/ — with overwrite on, the destination was
+    rmtree'd first, and a drive-relative fs_name could make that a drive.
+    So every Windows form is refused wherever this runs: a drive, a root,
+    and a colon in any segment (drive-relative paths and NTFS alternate
+    streams — never part of a real plugin's file name)."""
+    if not isinstance(rel, str) or not rel:
+        return None
+    win = PureWindowsPath(rel)
+    if win.drive or win.root:
+        return None
+    parts = tuple(x for x in rel.replace("\\", "/").split("/") if x not in ("", "."))
+    if not parts or rel.replace("\\", "/").startswith("/"):
+        return None
+    if any(x == ".." or ":" in x for x in parts):
+        return None
+    return parts
 
 
 def _remove_plugin_dest(dest: Path) -> None:

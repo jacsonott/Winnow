@@ -494,6 +494,60 @@ def test_install_rejects_traversal_and_absolute_paths(plugin_client, plug_dir):
     assert r.status_code == 400
 
 
+# What the check has to refuse on Windows, where `\\x` and `C:x` are not
+# absolute to pathlib and have no "..": a root, a drive, a drive-relative
+# name, a UNC path, an NTFS alternate stream. Checked on every platform,
+# so a Linux CI run proves what a Windows install relies on.
+WINDOWS_ESCAPES = [r"\Windows\Tasks\x.py", r"\__init__.py", "C:__init__.py",
+                   r"C:Users\Public\x.py", r"C:\evil.py", "c:/evil.py",
+                   r"\\server\share\x.py", "plug.py:hidden", "pkg/__init__.py:ads",
+                   "D:pkg/__init__.py"]
+
+
+@pytest.mark.parametrize("rel", WINDOWS_ESCAPES)
+def test_install_path_check_refuses_windows_escapes(rel):
+    import server
+    assert server._plugin_upload_parts(rel) is None
+
+
+@pytest.mark.parametrize("rel,parts", [("kplug.py", ("kplug.py",)),
+                                        ("pkg/__init__.py", ("pkg", "__init__.py")),
+                                        (r"pkg\sub\x.py", ("pkg", "sub", "x.py"))])
+def test_install_path_check_keeps_ordinary_paths(rel, parts):
+    import server
+    assert server._plugin_upload_parts(rel) == parts
+
+
+@pytest.mark.parametrize("name,paths", [
+    ("C:__init__.py", None),                          # single file: fs_name "C:__init__"
+    ("__init__.py", ["C:pkg/__init__.py"]),           # folder: fs_name "C:pkg"
+    ("x.py", ["plug.py:hidden"]),
+])
+def test_install_refuses_drive_relative_and_stream_names(plugin_client, plug_dir, name, paths):
+    """Through the route: these were ACCEPTED (on Linux too — a colon is an
+    ordinary character there), and on Windows each one writes somewhere
+    other than plugins/."""
+    before = sorted(p.name for p in plug_dir.iterdir())
+    data = {"paths": json.dumps(paths)} if paths else None
+    r = plugin_client.post("/api/plugins/install",
+                           files=[("files", (name, INSTALLABLE.encode()))], data=data)
+    assert r.status_code == 400, r.text
+    assert sorted(p.name for p in plug_dir.iterdir()) == before
+
+
+def test_install_refuses_a_symlink_out_of_plugins(plugin_client, plug_dir, tmp_path):
+    """The resolved destination must stay under plugins/ — a link already
+    in there pointing elsewhere is a way out that no string check sees."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (plug_dir / "linked").symlink_to(outside, target_is_directory=True)
+    r = plugin_client.post("/api/plugins/install",
+                           files=[("files", ("__init__.py", INSTALLABLE.encode()))],
+                           data={"paths": json.dumps(["linked/__init__.py"]), "overwrite": "true"})
+    assert r.status_code == 400
+    assert outside.is_dir() and list(outside.iterdir()) == []
+
+
 def test_install_folder_requires_init(plugin_client):
     r = plugin_client.post("/api/plugins/install",
                            files=[("files", ("helper.py", b"x = 1"))],
