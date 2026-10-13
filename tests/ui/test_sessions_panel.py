@@ -220,3 +220,59 @@ def test_a_fresh_pass_saves_then_clears(page):
     finally:
         _cleanup(page)
         page.evaluate("() => __winnow.loadSources()")
+
+
+def _toast(page, text):
+    page.wait_for_function(
+        "(t) => { const n = document.getElementById('toast'); return !n.hidden && n.textContent.includes(t); }",
+        arg=text, timeout=5000)
+
+
+def test_a_session_that_will_not_load_says_why(page):
+    """Load of a session another window deleted meanwhile is a 404. The
+    handler had try/finally and no catch: an unhandled rejection, no toast,
+    and a dialog that looked as if Load had done nothing."""
+    _cleanup(page)
+    try:
+        _save(page, "gone")
+        _open(page)
+        row = page.locator("#modalBody .session-row", has_text="gone")
+        row.wait_for()
+        page.evaluate("""() => fetch('/api/case_sessions/gone',
+          { method: 'DELETE', headers: { 'X-Timeline-Lite-Client': '1' } })""")
+        row.get_by_role("button", name="Load", exact=True).click()
+        page.locator(".confirm-card .btn", has_text="Load").click()
+        _toast(page, 'Could not load "gone"')
+        assert page.evaluate("() => document.getElementById('busyBar').hidden")
+    finally:
+        _cleanup(page)
+        page.keyboard.press("Escape")
+
+
+def test_a_fresh_pass_or_a_delete_the_server_refuses_says_why(page):
+    _cleanup(page)
+    try:
+        _save(page, "kept")
+        page.route("**/api/case_sessions/new", lambda r: r.fulfill(
+            status=500, content_type="application/json", body='{"detail": "disk full"}'))
+        page.route("**/api/case_sessions/kept", lambda r: r.fulfill(
+            status=500, content_type="application/json", body='{"detail": "database is locked"}')
+            if r.request.method == "DELETE" else r.continue_())
+        _open(page)
+        page.locator(".btn", has_text="Start a fresh pass").click()
+        page.wait_for_selector(".confirm-overlay input")
+        page.locator(".confirm-overlay input").fill("pass x")
+        page.locator(".confirm-card .btn", has_text="OK").first.click()
+        _toast(page, "disk full")
+        assert page.evaluate("() => !document.getElementById('modal').hidden"), \
+            "the dialog stays, so the analyst can try again"
+
+        row = page.locator("#modalBody .session-row", has_text="kept")
+        row.locator(".btn", has_text="✕").click()
+        page.locator(".confirm-card .btn", has_text="Delete").click()
+        _toast(page, "database is locked")
+    finally:
+        page.unroute("**/api/case_sessions/new")
+        page.unroute("**/api/case_sessions/kept")
+        _cleanup(page)
+        page.keyboard.press("Escape")

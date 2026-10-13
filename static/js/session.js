@@ -85,8 +85,16 @@ export function openSessionManager() {
         try {
           res = await api(`/api/case_sessions/${encodeURIComponent(s.name)}/load?merge=false`,
                           { method: 'POST' });
-          await loadSources();
+        } catch (e) {
+          // try/finally alone left a refusal (deleted from another window
+          // meanwhile, a write that failed) as an unhandled rejection: no
+          // toast, and a dialog that looked as if Load did nothing. It
+          // stays open, list refreshed, so the analyst can see why.
+          toast(`Could not load "${s.name}": ${e.message}`, 6000);
+          refresh();
+          return;
         } finally { setBusy(false); }
+        await loadSources();
         (res.warnings || []).forEach((w) => toast(w, 6000));
         $('modal').hidden = true;
         toast(`Loaded "${s.name}" · ${res.tags_applied.toLocaleString()} tag assignments`);
@@ -110,7 +118,9 @@ export function openSessionManager() {
       del.title = 'Delete this session from the case';
       del.onclick = async () => {
         if (!(await confirmDialog(`Delete session "${s.name}"?`, { danger: true, okLabel: 'Delete' }))) return;
-        await api(`/api/case_sessions/${encodeURIComponent(s.name)}`, { method: 'DELETE' });
+        try {
+          await api(`/api/case_sessions/${encodeURIComponent(s.name)}`, { method: 'DELETE' });
+        } catch (e) { toast(`Could not delete "${s.name}": ${e.message}`, 6000); return; }
         refresh();
       };
       row.append(load, dl, ren, del);
@@ -143,6 +153,7 @@ export function openSessionManager() {
       setBusy(true);
       let res;
       try { res = await post('/api/case_sessions/new', { save_as: name.trim() || null }); }
+      catch (e) { toast('Could not start a fresh pass: ' + e.message, 6000); return; }
       finally { setBusy(false); }
       await loadSources();
       $('modal').hidden = true;

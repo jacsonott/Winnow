@@ -1483,3 +1483,17 @@ see [docs/notes/README.md](README.md) for the whole set.
   importing `openSettings` back across the boundary it is called from.
   `tests/ui/test_plugins_from_settings.py`,
   `tests/ui/test_profiles_from_settings.py`.
+
+- **A click handler reports its own refusal.** `api()` throws on any
+  non-2xx with the server's `detail` as the message, and nothing above a
+  click handler catches it — so `try { await post(...) } finally {
+  setBusy(false) }`, or a bare `await api(...)`, turns a 409 with a
+  perfectly good reason into an unhandled rejection: no toast, the busy
+  bar gone, and a button that looks as if it did nothing. Session Load,
+  Start a fresh pass, the Tables manager's Close/Remove, a tab's ✕ and
+  five others shipped like that. Catch, toast `e.message`, and return
+  before the success path (closing the dialog, reloading, a "Saved"
+  toast) — a dialog the action failed in stays open so the analyst can
+  try again. `tests/ui/test_refusals_are_reported.py` fails each request
+  with `page.route` and looks for the server's words in the toast; the
+  page fixture's uncaught-error check catches the rejection itself.

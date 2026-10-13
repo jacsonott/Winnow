@@ -157,6 +157,7 @@ export function openTablesManager() {
         toggle.onclick = async () => {
           setBusy(true);
           try { await post(`/api/source/${s.id}/open`, { open: !s.is_open }); }
+          catch (e) { toast(`Could not ${s.is_open ? 'close' : 'open'} ${sourceLabel(s)}: ${e.message}`, 6000); return; }
           finally { setBusy(false); }
           if (s.is_open && S.sourceId === s.id) S.sourceId = null;
           await loadSources();
@@ -199,10 +200,16 @@ export function openTablesManager() {
           // waiting for Apply, is for a table that is about to not exist:
           // its row goes, and the server drops the build or the held view.
           cancelPendingView(s.id);
-          if (s.is_merge) {
-            await api(`/api/merges/${-s.id}`, { method: 'DELETE' });
-          } else {
-            await api(`/api/source/${s.id}`, { method: 'DELETE' });
+          try {
+            await api(s.is_merge ? `/api/merges/${-s.id}` : `/api/source/${s.id}`, { method: 'DELETE' });
+          } catch (e) {
+            // A refusal (the server's own "merged into" 409, for a merge
+            // another window just made) has a reason worth reading; without
+            // this it was an unhandled rejection and the button looked dead.
+            toast(`Could not remove ${sourceLabel(s)}: ${e.message}`, 6000);
+            return;
+          }
+          if (!s.is_merge) {
             S.viewCache.delete(s.id); // SQLite can reuse a deleted source's row id — don't let a stale cached view leak onto it
             dropViewStateFor(s.id);   // nor the filters/sort stashed for it
             if (S.diffMarks && S.diffMarks.sourceId === s.id) S.diffMarks = null; // nor a comparison's marks

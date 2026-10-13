@@ -747,7 +747,12 @@ export function openEditCaseModal(c) {
 
 export async function removeCaseFromList(c) {
   if (!(await confirmDialog(`Remove "${c.name}" from this list? The case file itself is left untouched on disk.`, { danger: true, okLabel: 'Remove' }))) return;
-  await api(`/api/cases/${c.id}`, { method: 'DELETE' });
+  try {
+    await api(`/api/cases/${c.id}`, { method: 'DELETE' });
+  } catch (e) {
+    toast('Could not remove: ' + e.message, 6000);
+    return;
+  }
   refreshCases();
 }
 

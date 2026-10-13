@@ -291,7 +291,9 @@ export function openPluginBundlesModal(opts = {}) {
         del.title = 'Delete this profile (cases it was applied to keep their plugins)';
         del.onclick = async () => {
           if (!(await confirmDialog(`Delete profile “${bd.name}”?`, { danger: true, okLabel: 'Delete' }))) return;
-          await api(`/api/plugin_bundles/${bd.id}`, { method: 'DELETE' });
+          try {
+            await api(`/api/plugin_bundles/${bd.id}`, { method: 'DELETE' });
+          } catch (e) { toast('Could not delete the profile: ' + e.message, 6000); return; }
           bundles = bundles.filter((x) => x.id !== bd.id);
           selected = (bundles[0] || {}).id;
           renderList();

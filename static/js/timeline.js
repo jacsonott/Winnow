@@ -343,12 +343,14 @@ export function openTimelineSourceConfig() {
       const saveBtn = el('button', 'btn', 'Save');
       saveBtn.style.marginTop = '6px';
       saveBtn.onclick = async () => {
-        await post('/api/timeline_templates', {
-          col_names: colNames,
-          type_label: typeInput.value.trim() || src.name,
-          timestamp_column: tsSel.value || null,
-          body_columns: bodyOrder,
-        });
+        try {
+          await post('/api/timeline_templates', {
+            col_names: colNames,
+            type_label: typeInput.value.trim() || src.name,
+            timestamp_column: tsSel.value || null,
+            body_columns: bodyOrder,
+          });
+        } catch (e) { toast(`Could not save the timeline config for ${src.name}: ${e.message}`, 6000); return; }
         await loadTimelineTemplates();
         toast(`Saved timeline config for ${src.name}`);
       };
