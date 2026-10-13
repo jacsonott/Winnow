@@ -21,6 +21,11 @@ the TEXT the grid stores, and the choices behind it are analyst-facing:
   reads back as 13:06:59.999999 otherwise); exact-midnight values and
   date-typed cells render as a bare "YYYY-MM-DD"; time-of-day cells as
   a bare "HH:MM:SS". All three shapes are ones TS_NORMALIZE accepts.
+  A date-styled serial no datetime can hold (year 10000 and on) keeps
+  its NUMBER: openpyxl's parser turns it into the string "#VALUE!" and
+  drops the value, so the reader takes date conversion over from it
+  (`_own_date_conversion`) wherever this openpyxl keeps the date styles
+  where 3.x does.
 - **Numbers render without float noise** — a cell holding 42 arrives as
   "42", not "42.0", since the string is what the analyst greps.
 - **Booleans render TRUE/FALSE**, matching what Excel shows.
@@ -40,6 +45,8 @@ import datetime
 from typing import Iterator
 
 import openpyxl
+from openpyxl.styles.numbers import is_timedelta_format
+from openpyxl.utils.datetime import from_excel
 
 
 def cell_text(v) -> str:
@@ -68,6 +75,38 @@ def cell_text(v) -> str:
             return str(int(v))
         return repr(v)
     return str(v)
+
+
+def _own_date_conversion(wb) -> bool:
+    """Take date conversion away from openpyxl's sheet parser, so a
+    date-styled number reaches the reader as the number it is.
+
+    The parser converts a date-styled serial itself and, when no datetime
+    can hold it, substitutes the string "#VALUE!" — the cell's value is
+    gone, and the import shows an error where the workbook stores a
+    number. With the workbook's date-style set emptied the parser leaves
+    the number alone, and `_cell_value` converts it with the same
+    `from_excel` (keeping the number when that fails). The set is a
+    private attribute, so where it isn't what openpyxl 3.x keeps there,
+    nothing changes and the parser's own conversion stands (False)."""
+    if not isinstance(getattr(wb, "_date_formats", None), (set, frozenset)):
+        return False
+    wb._date_formats = set()
+    return True
+
+
+def _cell_value(cell, epoch):
+    """A read-only cell's value, a date-styled number converted to its
+    datetime (timedelta for a duration format) unless the serial is past
+    what one can hold — then the number stays."""
+    v = cell.value
+    if cell.data_type == "n" and isinstance(v, (int, float)) and not isinstance(v, bool) \
+            and cell.is_date:
+        try:
+            return from_excel(v, epoch, timedelta=is_timedelta_format(cell.number_format))
+        except (OverflowError, ValueError):
+            return v
+    return v
 
 
 def workbook_sheets(path: str) -> list[dict]:
@@ -114,14 +153,22 @@ def sheet_reader(path: str, sheet_name: str):
             raise ValueError(f"{sheet_name!r} is a chart sheet, not a data sheet")
         rows_hint = ws.max_row or 0
         width_hint = ws.max_column or 0
+        own_dates = _own_date_conversion(wb)
     except BaseException:
         wb.close()
         raise
 
     def rows() -> Iterator[list[str]]:
         try:
-            for row in ws.iter_rows(values_only=True):
-                yield [cell_text(v) for v in row]
+            if own_dates:
+                # Cells, not values_only: the reader needs each one's style
+                # to do the date conversion the parser no longer does.
+                epoch = wb.epoch
+                for row in ws.iter_rows():
+                    yield [cell_text(_cell_value(c, epoch)) for c in row]
+            else:
+                for row in ws.iter_rows(values_only=True):
+                    yield [cell_text(v) for v in row]
         finally:
             wb.close()
 

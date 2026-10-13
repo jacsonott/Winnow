@@ -47,7 +47,10 @@ see [docs/notes/README.md](README.md) for the whole set.
   xlsxread.py owns is the typed-cell→TEXT conversion. Three traps worth
   knowing: date-styled cells convert to ISO text *unconditionally* (no
   per-column opt-in like SQLite's WebKit chips — a day-serial means
-  nothing in any downstream surface), the header is the first *non-empty*
+  nothing in any downstream surface) — except a serial past year 9999,
+  which keeps its number: openpyxl's parser would have replaced it with
+  the string "#VALUE!", so xlsxread takes the conversion over from it
+  (`_own_date_conversion`, reading cells rather than values_only), the header is the first *non-empty*
   row (hand-made workbooks put titles above it) with the table sized to
   max(header, declared width) so extra data lands in `col_N` instead of
   being cut, and a formula cell in a workbook that was never opened in
