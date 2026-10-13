@@ -135,6 +135,90 @@ def _fmt(dt: datetime | None, subsecond: bool) -> str | None:
     return f"{out}.{dt.microsecond:06d}" if subsecond else out
 
 
+# A 12-hour marker in any of the ways exporters write one — "PM", "pm",
+# "Pm", "p.m.", "P.M." — capturing just the letter. Not followed by
+# another letter, so "Amsterdam" is not "AM". Shared by _US_RE here and
+# mirrored in store.py's _TS_US_RE/_TS_MONTH_RE and tsformat.js's
+# TS_US_RE/TS_MONTH_RE: a fraction between the seconds and the marker,
+# or any spelling but the four the old `(AM|PM|am|pm)` named, left it
+# unmatched and the time read as morning — 12 hours early, silently.
+MERIDIEM = r"([AaPp])\.?[Mm]\.?(?![A-Za-z])"
+
+
+def hour24(h: int, meridiem: str | None) -> int:
+    """12-hour clock to 24 from MERIDIEM's captured letter."""
+    if meridiem:
+        if meridiem in "Pp" and h < 12:
+            return h + 12
+        if meridiem in "Aa" and h == 12:
+            return 0
+    return h
+
+
+# Zone abbreviations a value may end in that name an offset this module
+# cannot know (several are ambiguous, all of them shift with daylight
+# saving). Uppercase only, as zone abbreviations are written — a
+# lowercase word after a timestamp in a log line is the log line.
+_ZONE_ABBREVIATIONS = frozenset(
+    "EST EDT CST CDT MST MDT PST PDT AKST AKDT HST HDT AST ADT NST NDT "
+    "CET CEST EET EEST WET WEST BST IST MSK JST KST HKT SGT PHT ICT WIB "
+    "AEST AEDT ACST ACDT AWST NZST NZDT SAST WAT CAT EAT".split())
+_TRAIL_UTC_RE = re.compile(r"(?:Z|UTC|GMT)(?![A-Za-z])", re.IGNORECASE)
+_TRAIL_OFFSET_RE = re.compile(r"([+\-\u2212])(\d{1,2})(?::?(\d{2}))?(?![\d:])")
+_TRAIL_IANA_RE = re.compile(r"[A-Za-z_]+/[A-Za-z_]")
+_TRAIL_ABBR_RE = re.compile(r"[A-Z]{2,5}(?![A-Za-z])")
+
+
+def _trailing_zone(rest: str) -> tuple[bool, timedelta | None]:
+    """What the text after a parsed timestamp says about its zone:
+    (False, None) when it names none — trailing text that is not a zone is
+    left alone, as it always was; (True, offset) for one that can be
+    applied — Z/UTC/GMT, GMT+02:00, ±HH:MM, ±HHMM, ±HH, with U+2212 as a
+    minus; (True, None) for one that cannot — an abbreviation, an IANA
+    name, an offset out of range or malformed. The callers turn that last
+    one into a parse failure: dropping the zone reads the wall-clock time
+    as if it were already UTC (or the analyst's fixed offset), hours off,
+    and nothing in the column would say so."""
+    s = rest.lstrip()
+    if not s:
+        return False, None
+    m = _TRAIL_UTC_RE.match(s)
+    if m:
+        s = s[m.end():]
+        if not (s[:1] in ("+", "-", "\u2212") and s[1:2].isdigit()):
+            return True, timedelta(0)
+    if s[:1] in ("+", "-", "\u2212") and s[1:2].isdigit():
+        om = _TRAIL_OFFSET_RE.match(s)
+        if not om:
+            return True, None
+        try:
+            return True, _parse_utc_offset(
+                ("-" if om.group(1) != "+" else "+") + om.group(2) + ":" + (om.group(3) or "00"))
+        except ValueError:
+            return True, None
+    if m:
+        return True, timedelta(0)
+    if _TRAIL_IANA_RE.match(s):
+        return True, None
+    am = _TRAIL_ABBR_RE.match(s)
+    if am and am.group(0) in _ZONE_ABBREVIATIONS:
+        return True, None
+    return False, None
+
+
+def _zoned(dt: datetime, rest: str, params: dict) -> datetime | None:
+    """dt with the zone `rest` names applied (aware, so _fmt converts it
+    to UTC), or shifted by the analyst's fixed offset when it names none —
+    an explicit zone in the value wins over the parameter, as ISO 8601's
+    Z/±HH:MM always did. None when the zone named can't be applied."""
+    named, off = _trailing_zone(rest)
+    if not named:
+        return _shift_naive(dt, params)
+    if off is None:
+        return None
+    return dt.replace(tzinfo=timezone(off))
+
+
 def _plausible(dt: datetime) -> bool:
     return PLAUSIBLE_MIN_YEAR <= dt.year <= PLAUSIBLE_MAX_YEAR
 
@@ -578,49 +662,50 @@ register_op({
 })
 
 
+# Any number of fraction digits (truncated to microseconds): capping it
+# at nine left a tenth digit unmatched, and the offset after it unread.
+# The zone is read from what follows by _trailing_zone.
 _ISO_RE = re.compile(
     r"^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})"
-    r"(?::(\d{2})(?:[.,](\d{1,9}))?)?"
-    r"\s*(Z|[+-]\d{2}:?\d{2})?"
+    r"(?::(\d{2})(?:[.,](\d+))?)?"
 )
 
 
 def _parse_iso(value: Any, params: dict, state: dict) -> str | None:
-    m = _ISO_RE.match(str(value).strip())
+    s = str(value).strip()
+    m = _ISO_RE.match(s)
     if not m:
         return None
-    y, mo, d, h, mi, sec, frac, off = m.groups()
+    y, mo, d, h, mi, sec, frac = m.groups()
     try:
         dt = datetime(int(y), int(mo), int(d), int(h), int(mi), int(sec or 0),
                       int(frac[:6].ljust(6, "0")) if frac else 0)
     except ValueError:
         return None
-    if off:
-        # Explicit offset → convert to UTC. "+0530" and "+05:30" both allowed.
-        tz = _value_offset(off)
-        if tz is None:
-            return None
-        dt = dt.replace(tzinfo=tz)
-    else:
-        dt = _shift_naive(dt, params)
+    # An explicit zone → converted to UTC; "+0530", "+05:30" and "+05"
+    # all allowed (_trailing_zone).
+    dt = _zoned(dt, s[m.end():], params)
+    if dt is None:
+        return None
     return _fmt(dt, subsecond=bool(frac))
 
 
 register_op({
     "id": "iso8601",
     "label": "ISO 8601",
-    "description": "YYYY-MM-DDThh:mm:ss with optional fraction (. or ,) and offset. Z/±HH:MM values are converted to UTC; values without an offset are kept as written.",
+    "description": "YYYY-MM-DDThh:mm:ss with optional fraction (. or ,) and offset. Z/UTC/±HH:MM/±HH values are converted to UTC; values without an offset are kept as written; a zone that can't be converted (EST, Europe/Paris) doesn't parse.",
     "params": [_UTC_OFFSET_PARAM],
     "subsecond": True,
     "parse": _parse_iso,
 })
 
 
-_DD_MMM_RE = re.compile(r"^(\d{1,2})[ -]([A-Za-z]{3})[ -](\d{4})[ ,]+(\d{1,2}):(\d{2}):(\d{2})")
+_DD_MMM_RE = re.compile(r"^(\d{1,2})[ -]([A-Za-z]{3})[ -](\d{4})[ ,]+(\d{1,2}):(\d{2}):(\d{2})(?:[.,]\d+)?")
 
 
 def _parse_dd_mmm(value: Any, params: dict, state: dict) -> str | None:
-    m = _DD_MMM_RE.match(str(value).strip())
+    s = str(value).strip()
+    m = _DD_MMM_RE.match(s)
     if not m:
         return None
     month = MONTHS.get(m.group(2).lower())
@@ -631,13 +716,14 @@ def _parse_dd_mmm(value: Any, params: dict, state: dict) -> str | None:
                       int(m.group(4)), int(m.group(5)), int(m.group(6)))
     except ValueError:
         return None
-    return _fmt(_shift_naive(dt, params), subsecond=False)
+    dt = _zoned(dt, s[m.end():], params)
+    return None if dt is None else _fmt(dt, subsecond=False)
 
 
 register_op({
     "id": "dd_mmm_yyyy",
     "label": "dd Mmm yyyy hh:mm:ss",
-    "description": "e.g. \"05 Jan 2024 13:22:01\" (also 5-Jan-2024). English month abbreviations.",
+    "description": "e.g. \"05 Jan 2024 13:22:01\" (also 5-Jan-2024). English month abbreviations. A trailing offset (+0200, GMT) is converted to UTC.",
     "params": [_UTC_OFFSET_PARAM],
     "subsecond": False,
     "parse": _parse_dd_mmm,
@@ -800,32 +886,30 @@ register_op({
 })
 
 
-_US_RE = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4})[ ,]+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM|am|pm)?")
+_US_RE = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4})[ ,]+(\d{1,2}):(\d{2})(?::(\d{2})(?:[.,]\d+)?)?"
+                    r"\s*(?:" + MERIDIEM + r")?")
 
 
 def _parse_us(value: Any, params: dict, state: dict) -> str | None:
-    m = _US_RE.match(str(value).strip())
+    s = str(value).strip()
+    m = _US_RE.match(s)
     if not m:
         return None
     mo, d, y, h, mi, sec, ampm = m.groups()
-    hh = int(h)
-    if ampm:
-        # Same 12-hour rules as store.py's _ts_normalize US branch.
-        if ampm.lower() == "pm" and hh < 12:
-            hh += 12
-        if ampm.lower() == "am" and hh == 12:
-            hh = 0
+    # Same 12-hour rules as store.py's _ts_normalize US branch.
+    hh = hour24(int(h), ampm)
     try:
         dt = datetime(int(y), int(mo), int(d), hh, int(mi), int(sec or 0))
     except ValueError:
         return None
-    return _fmt(_shift_naive(dt, params), subsecond=False)
+    dt = _zoned(dt, s[m.end():], params)
+    return None if dt is None else _fmt(dt, subsecond=False)
 
 
 register_op({
     "id": "us_datetime",
     "label": "US MM/DD/YYYY hh:mm:ss",
-    "description": "US-style dates with optional AM/PM (Timeline Explorer / EZTools exports).",
+    "description": "US-style dates with optional AM/PM (Timeline Explorer / EZTools exports). A trailing offset (-0500, UTC) is converted to UTC.",
     "params": [_UTC_OFFSET_PARAM],
     "subsecond": False,
     "parse": _parse_us,
@@ -859,12 +943,7 @@ def parse_datetime_lenient(value: Any) -> datetime | None:
     m = _US_RE.match(s)
     if m:
         mo, d, y, h, mi, sec, ampm = m.groups()
-        hh = int(h)
-        if ampm:
-            if ampm.lower() == "pm" and hh < 12:
-                hh += 12
-            if ampm.lower() == "am" and hh == 12:
-                hh = 0
+        hh = hour24(int(h), ampm)
         try:
             return datetime(int(y), int(mo), int(d), hh, int(mi), int(sec or 0))
         except ValueError:

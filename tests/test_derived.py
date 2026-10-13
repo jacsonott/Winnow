@@ -370,8 +370,8 @@ def test_a_value_that_raises_is_one_failure_not_a_failed_column(store, write_csv
     d = store.get_derived_column(res["definition"]["id"])
     assert d["status"] == "ready"
     assert d["parse_failures"] == 1
-    # The half character is stored as U+FFFD rather than refusing the row.
-    assert [r["Out"] for r in _cells(store, sid)] == ["<a", "<b", "<c", None, "<d", "x\ufffd", "<e"]
+    # The half character is stored as its escape rather than refusing the row.
+    assert [r["Out"] for r in _cells(store, sid)] == ["<a", "<b", "<c", None, "<d", "x\\ud800", "<e"]
 
 
 def test_a_rederive_past_a_value_that_raises_is_all_new_values(store, write_csv, small_batches, raising_op):
@@ -382,7 +382,7 @@ def test_a_rederive_past_a_value_that_raises_is_all_new_values(store, write_csv,
 
     assert _job(store, res["job_id"])["status"] == "done"
     assert store.get_derived_column(def_id)["status"] == "ready"
-    assert [r["Out"] for r in _cells(store, sid)] == ["[a", "[b", "[c", None, "[d", "x\ufffd", "[e"]
+    assert [r["Out"] for r in _cells(store, sid)] == ["[a", "[b", "[c", None, "[d", "x\\ud800", "[e"]
 
 
 def test_the_reported_rederive_is_one_answer_not_two(store, write_csv, small_batches):
@@ -420,7 +420,7 @@ def test_a_flatten_with_half_a_character_builds_every_column(store, write_csv, s
     assert [d["status"] for d in store.list_derived_columns(sid)] == ["ready", "ready"]
     rows = _cells(store, sid)
     assert [r["User"] for r in rows] == ["alice", "bob", "carol"]
-    assert [r["Msg"] for r in rows] == ["hi", "cut \ufffd", "bye"]
+    assert [r["Msg"] for r in rows] == ["hi", "cut \\ud83d", "bye"]
 
 
 def _stop_after_first_batch():

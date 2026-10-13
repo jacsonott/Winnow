@@ -1005,21 +1005,50 @@ export async function saveResultAsTable() {
   openSource(res.source.id);
 }
 
+/* The run in flight per SQL tab, {controller} — one at most. The tab id
+   alone can't say whether a result still belongs where it was started:
+   a re-run in the same tab, closing the tab, or opening another case
+   (whose tabs are numbered from 1 too) all leave the old run's answer
+   pointing at a tab id that now means something else, and it used to
+   paint there — over a newer result, or under case B's "Query 1", where
+   tagging its rows wrote tags into the wrong case. So each run checks it
+   is still the entry here before it touches anything, and whatever ends
+   a run's claim aborts its request too. */
+const sqlRuns = new Map();
+
+/* Drop the run in flight for one tab, or for every tab (no argument —
+   a case switch). Its request is aborted; its result, if one arrives,
+   goes nowhere. */
+export function abandonSqlRuns(tabId) {
+  for (const [id, run] of [...sqlRuns]) {
+    if (tabId !== undefined && id !== tabId) continue;
+    sqlRuns.delete(id);
+    run.controller.abort();
+  }
+}
+
 export async function runSql() {
   const out = $('sqlResult');
   // Captured up front: the run is awaited, and the analyst can switch tabs
   // while it's in flight. The result belongs to the tab it was started
   // from, and only paints if that tab is still the one showing.
   const tabId = S.sqlTabId;
+  abandonSqlRuns(tabId);   // a re-run supersedes the run still going in this tab
+  const run = { controller: new AbortController() };
+  sqlRuns.set(tabId, run);
+  const current = () => sqlRuns.get(tabId) === run;
+  const superseded = { error: 'Superseded — the query was run again, its tab closed, or another case opened' };
   out.replaceChildren(el('div', null, 'Running…'));
   setBusy(true);
   try {
     const sql = $('sqlText').value;
-    const r = await post('/api/sql', { sql });
+    const r = await post('/api/sql', { sql }, { signal: run.controller.signal });
+    if (!current()) return superseded;
     // Decorate with a Tags column when the result can carry one (single
     // src_N + a rid column) — cached WITH the result so tab switches
     // repaint it without refetching.
     r.tags = await sqlTagsFor(r, sql);
+    if (!current()) return superseded;
     S.sqlResults.set(tabId, r);
     if (S.sqlTabId === tabId) {
       setActiveSqlResult(r);
@@ -1028,12 +1057,14 @@ export async function runSql() {
     announceSqlRun(tabId, sql, r);
     return r;
   } catch (e) {
+    if (!current()) return superseded;
     const r = { error: e.message };
     S.sqlResults.set(tabId, r);
     if (S.sqlTabId === tabId) out.replaceChildren(el('div', 'sql-error', e.message));
     announceSqlRun(tabId, $('sqlText').value, r);
     return r;
   } finally {
+    if (current()) sqlRuns.delete(tabId);
     setBusy(false);
   }
 }

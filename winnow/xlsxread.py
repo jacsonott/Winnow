@@ -29,6 +29,13 @@ the TEXT the grid stores, and the choices behind it are analyst-facing:
   (i.e. was written by a tool and never opened in Excel).
 - **Gaps are real**: skipped cells come back as "" in place rather than
   shifting values left under the wrong headers.
+- **The sheet's declared size is a hint, never a limit.** Read-only mode
+  takes a sheet's `<dimension ref>` as the edge of its data, and writers
+  get it wrong (stale after an edit, or a default like A1:A1): a sheet
+  declaring A1:B10 over 3 columns and 101 rows imported 2 columns and 9
+  rows, and said nothing. Every sheet is read with reset_dimensions(),
+  so rows and cells are read to wherever they really end; the declared
+  size survives only as the progress estimate and a floor on the width.
 
 The workbook is opened strictly read-only, so the evidence-file
 guarantee holds by construction.
@@ -81,6 +88,9 @@ def workbook_sheets(path: str) -> list[dict]:
         out = []
         for ws in wb.worksheets:
             rows_hint = ws.max_row
+            # After the estimate is taken: the header row is read to its
+            # real end, not to a column the declaration stopped at.
+            ws.reset_dimensions()
             if rows_hint is None:  # no <dimension> — count the rows
                 rows_hint = sum(1 for _ in ws.iter_rows(values_only=True))
             header: list[str] = []
@@ -102,7 +112,8 @@ def workbook_sheets(path: str) -> list[dict]:
 def sheet_reader(path: str, sheet_name: str):
     """(row_count_hint, width_hint, rows) for one sheet — the ingest entry
     point. The hints come from the sheet's declared dimension (0 when
-    absent); `rows` is a generator of per-row string lists that holds the
+    absent) and bound nothing — `rows` reads past them (see the module
+    docstring); `rows` is a generator of per-row string lists that holds the
     workbook open until exhausted or closed, so callers that stop early
     must close() it."""
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
@@ -114,6 +125,7 @@ def sheet_reader(path: str, sheet_name: str):
             raise ValueError(f"{sheet_name!r} is a chart sheet, not a data sheet")
         rows_hint = ws.max_row or 0
         width_hint = ws.max_column or 0
+        ws.reset_dimensions()   # the hints above are all the declaration is good for
     except BaseException:
         wb.close()
         raise

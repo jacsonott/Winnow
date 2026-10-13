@@ -237,3 +237,31 @@ def test_undo_survives_a_view_rebuild(ingested):
 
     store.undo_last_tag_change()
     assert tagged_rids(store, source_id, tag["id"]) == set()
+
+
+def test_dropping_a_merge_member_drops_the_merge_s_undo(store, write_csv):
+    """An entry made on a merge is filed under the merge's id but holds the
+    members' rows. Dropping a member (after deleting the merge, which it
+    must be) only looked at that filing id, so the entry survived — and
+    with source ids reused, Ctrl+Z then tagged the next file imported,
+    whose rows nobody had touched."""
+    a = store.ingest_csv(write_csv([["x"], ["a1"], ["a2"], ["a3"]], "a.csv"), build_fts=False)["id"]
+    b = store.ingest_csv(write_csv([["x"], ["b1"], ["b2"], ["b3"]], "b.csv"), build_fts=False)["id"]
+    mal = store.upsert_tag(None, "Malware", "#ff0000", None)["id"]
+    store.set_tags(a, [1, 2, 3], mal, True)
+    store.set_tags(b, [1, 2, 3], mal, True)
+    merge = store.create_merge("AB", [a, b])["id"]
+    view = store.build_view(merge, {"filters": []})
+    store.tag_view(view["view_id"], mal, False)     # untag the lot, across both members
+    assert store.undo_peek()["source_id"] == merge
+
+    store.delete_merge(-merge)
+    store.drop_source(b)
+    c = store.ingest_csv(write_csv([["x"], ["c1"], ["c2"], ["c3"]], "c.csv"), build_fts=False)["id"]
+
+    # Neither the merge's entry nor B's own is left to replay; A's is.
+    peek = store.undo_peek()
+    assert peek["depth"] == 1 and peek["source_id"] == a
+    store.undo_last_tag_change()
+    assert tagged_rids(store, c, mal) == set()
+    assert tagged_rids(store, a, mal) == set()   # A's own tag, undone

@@ -144,8 +144,16 @@ DEFAULT_TAGS = [
 PLUGIN_UI_STATE_MAX_BYTES = 64 * 1024
 
 META_SCHEMA = """
+-- sources, tag_defs, merges and sql_tabs are AUTOINCREMENT: an id they
+-- hand out is never handed out again. A plain INTEGER PRIMARY KEY gives
+-- the newest row's id to the next insert once that row is deleted, and
+-- every one of these ids is held somewhere that outlives the row — a view
+-- handle or a tag list in another window, an undo entry, an indicator's
+-- auto-tag, a widget's src_N — so a reused id turns "this no longer
+-- exists" into "this is now a different table". Case files from before
+-- this are rebuilt in place on open; see _migrate_ids_never_reused.
 CREATE TABLE IF NOT EXISTS sources (
-    id          INTEGER PRIMARY KEY,
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
     name        TEXT NOT NULL,
     path        TEXT,
     table_name  TEXT NOT NULL,
@@ -156,10 +164,11 @@ CREATE TABLE IF NOT EXISTS sources (
     has_fts     INTEGER NOT NULL DEFAULT 0,
     nickname    TEXT,                   -- analyst display name; `name` stays the imported file's identity
     origin      TEXT,                   -- NULL = an imported file; 'sql' = saved from the SQL pane; 'subset' = saved from a view/selection
-    origin_meta TEXT                    -- json, per origin: {sql} / {parent_source_id, parent_name, spec, ...} — see save_view_as_source
+    origin_meta TEXT,                   -- json, per origin: {sql} / {parent_source_id, parent_name, spec, ...} — see save_view_as_source
+    ingest      TEXT                    -- json: how the file was read, {kind, ...options} — what a session re-imports with
 );
 CREATE TABLE IF NOT EXISTS tag_defs (
-    id     INTEGER PRIMARY KEY,
+    id     INTEGER PRIMARY KEY AUTOINCREMENT,
     name   TEXT NOT NULL,
     color  TEXT NOT NULL,
     hotkey TEXT
@@ -212,7 +221,7 @@ CREATE TABLE IF NOT EXISTS filter_presets (
 );
 CREATE INDEX IF NOT EXISTS ix_filter_presets_sig ON filter_presets(col_sig);
 CREATE TABLE IF NOT EXISTS merges (
-    id         INTEGER PRIMARY KEY,
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
     name       TEXT NOT NULL,
     source_ids TEXT NOT NULL,          -- json array of real source ids, creation order
     created_at TEXT
@@ -228,7 +237,7 @@ CREATE TABLE IF NOT EXISTS open_tabs (
 -- only ever SELECTs the analyst typed, so this stays within invariant #1:
 -- no source table is touched.
 CREATE TABLE IF NOT EXISTS sql_tabs (
-    id   INTEGER PRIMARY KEY,
+    id   INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     sql  TEXT NOT NULL DEFAULT '',
     pos  INTEGER NOT NULL DEFAULT 0     -- left-to-right strip order; ties break by id
@@ -476,6 +485,27 @@ def q(ident: str) -> str:
     return '"' + ident.replace('"', '""') + '"'
 
 
+# Longest run of one operator _sql_chain writes flat. A flat `a OP b OP c`
+# parses into a left-deep tree one level per operator, and SQLite refuses
+# a statement deeper than SQLITE_MAX_EXPR_DEPTH (1000 by default) — which
+# a search over a 500-column table (flattened JSON gets there easily)
+# used to hit. 64 keeps every table short of that width on exactly the
+# SQL it always had.
+_SQL_CHAIN_FLAT = 64
+
+
+def _sql_chain(parts: list[str], op: str) -> str:
+    """`parts` joined by `op` — which must be associative (OR, AND, the
+    `|| ' ' ||` of _blob_expr) — as the flat chain it always was when it is
+    short, and as a balanced tree of parenthesised halves when it is not,
+    so depth grows with the log of the column count instead of linearly.
+    Same value either way: only the grouping changes."""
+    if len(parts) <= _SQL_CHAIN_FLAT:
+        return op.join(parts)
+    mid = len(parts) // 2
+    return f"({_sql_chain(parts[:mid], op)}){op}({_sql_chain(parts[mid:], op)})"
+
+
 def _blob_expr(cols: list[str]) -> str:
     """Every column concatenated into one search target — the same
     expression backs both sides of substring search: the src_<id>_doc view
@@ -484,8 +514,9 @@ def _blob_expr(cols: list[str]) -> str:
     Advanced mode's whole-query LIKE fallback, and a single Advanced-mode
     term _fts_like_pattern can't route through the index). Keeping them
     the same expression is what makes the indexed and fallback paths
-    return identical results."""
-    return " || ' ' || ".join(f"COALESCE({q(c)},'')" for c in cols)
+    return identical results. Built by _sql_chain, so a wide table's
+    search is not refused for depth."""
+    return _sql_chain([f"COALESCE({q(c)},'')" for c in cols], " || ' ' || ")
 
 
 def _fts_like_pattern(term: str) -> str | None:
@@ -539,14 +570,18 @@ def _regexp(pattern: str, value: Any) -> bool:
 
 # Same two shapes DATE_RE recognizes at ingest, capturing time-of-day too
 # (all optional groups — a bare date still matches). Kept in sync with
-# app.js's TS_ISO_RE/TS_US_RE (parseTimestamp) by hand — there's no shared
-# module between the two, just the same two format families.
+# tsformat.js's TS_ISO_RE/TS_US_RE/TS_MONTH_RE (parseTimestamp) by hand —
+# there's no shared module between the two, just the same format families.
+# The 12-hour marker is timeparse.MERIDIEM, after optional fraction digits
+# (not captured: TS_NORMALIZE is whole seconds) — see MERIDIEM for what
+# `\s*(AM|PM|am|pm)?` straight after the seconds got wrong.
 _TS_ISO_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?")
-_TS_US_RE = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4})(?:[ ,]+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM|am|pm)?)?")
+_TS_US_RE = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4})(?:[ ,]+(\d{1,2}):(\d{2})(?::(\d{2})(?:[.,]\d+)?)?"
+                       r"\s*(?:" + timeparse.MERIDIEM + r")?)?")
 _TS_MONTH_RE = re.compile(
     r"^(?:(" + _TS_MONTH_NAME + r")\s+(\d{1,2})|(\d{1,2})\s+(" + _TS_MONTH_NAME + r"))"
     r"\s*,?\s*(\d{4})"
-    r"(?:[ ,]+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM|am|pm)?)?",
+    r"(?:[ ,]+(\d{1,2}):(\d{2})(?::(\d{2})(?:[.,]\d+)?)?\s*(?:" + timeparse.MERIDIEM + r")?)?",
     re.IGNORECASE)
 
 
@@ -555,13 +590,7 @@ def _month_parts(m):
     identical to the US branch's."""
     mo = _TS_MONTHS[(m.group(1) or m.group(4)).lower()]
     d = int(m.group(2) or m.group(3))
-    hh = int(m.group(6) or 0)
-    ampm = m.group(9)
-    if ampm:
-        if ampm.lower() == "pm" and hh < 12:
-            hh += 12
-        if ampm.lower() == "am" and hh == 12:
-            hh = 0
+    hh = timeparse.hour24(int(m.group(6) or 0), m.group(9))
     return int(m.group(5)), mo, d, hh, int(m.group(7) or 0), int(m.group(8) or 0)
 
 
@@ -612,12 +641,7 @@ def _ts_normalize(raw: Any) -> str | None:
     m = _TS_US_RE.match(s)
     if m:
         mo, d, y, h, mi, sec, ampm = m.groups()
-        hh = int(h) if h else 0
-        if ampm:
-            if ampm.lower() == "pm" and hh < 12:
-                hh += 12
-            if ampm.lower() == "am" and hh == 12:
-                hh = 0
+        hh = timeparse.hour24(int(h) if h else 0, ampm)
         return f"{int(y):04d}-{int(mo):02d}-{int(d):02d} {hh:02d}:{int(mi or 0):02d}:{int(sec or 0):02d}"
     m = _TS_MONTH_RE.match(s)
     if m:
@@ -814,6 +838,61 @@ def sanitize_columns(raw: list[str]) -> list[str]:
     return out
 
 
+def _ingest_record(kind: str, **options) -> str:
+    """sources.ingest for a table read from a file: which reader, and every
+    option that decides which rows and columns it produced. It is what a
+    session load re-imports a missing table with (import_case_session) —
+    a session names rows by rid, so the re-import has to produce the same
+    rows in the same order, and the defaults do not (a headerless CSV
+    gains a header and every rid slides by one). `kind` names a Store
+    reader: csv, text, json, sqlite, xlsx, plaso — or rows, for a table
+    produced in-process (a plugin's parser, a SQL save), which nothing
+    here can re-run."""
+    return json.dumps({"kind": kind, **{k: v for k, v in options.items() if v is not None}})
+
+
+def _is_network_path(path: str) -> bool:
+    r"""A UNC or device path (\\host\share, //host/share, \\?\UNC\...).
+    On Windows, even asking whether one exists connects to the host and
+    offers it the analyst's credentials — so a path that came out of a
+    file someone else wrote is refused on its shape, before anything
+    touches the filesystem. Windows treats / and \ alike, hence either."""
+    return len(path) >= 2 and path[0] in "\\/" and path[1] in "\\/"
+
+
+def pair_tag_names(incoming: Iterable[str], local: Iterable[str]) -> dict[str, str]:
+    """{incoming tag name -> the local tag name it is}, for every incoming
+    name that has one: the one rule session load, copying tables between
+    cases and the session diff all match tag names by.
+
+    The exact name first. Failing that, the local tag whose name differs
+    only in case — but only when that is unambiguous on BOTH sides: one
+    local tag folds to it, and no other incoming tag does. tag_defs.name
+    is not unique by case, so "Malware" and "malware" can be two tags an
+    analyst keeps apart on purpose; matching by name.lower() alone (what
+    session load did) collapsed them, so reloading your own session moved
+    rows from one to the other, while copy and diff matched exactly and
+    the three disagreed. An incoming name with no partner is absent from
+    the result — the caller creates it, or reports it as different."""
+    local = set(local)
+    incoming = list(dict.fromkeys(incoming))
+    in_folds: dict[str, int] = {}
+    for n in incoming:
+        in_folds[n.casefold()] = in_folds.get(n.casefold(), 0) + 1
+    by_fold: dict[str, list[str]] = {}
+    for n in local:
+        by_fold.setdefault(n.casefold(), []).append(n)
+    out = {}
+    for n in incoming:
+        if n in local:
+            out[n] = n
+            continue
+        fold = n.casefold()
+        if in_folds[fold] == 1 and len(by_fold.get(fold, ())) == 1:
+            out[n] = by_fold[fold][0]
+    return out
+
+
 def column_signature(cols: list[str]) -> str:
     """Order/case-independent fingerprint of a column-name set — used to
     check two sources have "the same" columns for merge eligibility."""
@@ -831,6 +910,34 @@ def infer_type(values: Iterable[str]) -> str:
     return "text"
 
 
+# JSON's "\udc80" (legal, and how Plaso's serializer writes an NTFS name
+# holding an unpaired surrogate) decodes to a lone surrogate, which has no
+# UTF-8 encoding: the batch insert raised "surrogates not allowed" and the
+# import stopped there — in a key, before the first row. Written back as
+# the six characters of the escape the file had: exactly what was in the
+# evidence, and still valid inside JSON text. See structparse.utf8_text.
+_utf8_text = structparse.utf8_text
+
+
+def _lenient_text_factory(undecodable: list[int] | None = None):
+    """sqlite3 text_factory for an EXTERNAL database's TEXT values. The
+    default decodes strictly, and one stored value that isn't UTF-8 (a
+    careless writer, a truncated multi-byte character) raised "Could not
+    decode to UTF-8" mid-read: the batch it was in and every row after it
+    were lost. Decoded with U+FFFD instead, the same rule CSV ingest's
+    errors="replace" follows, and counted in `undecodable[0]` so the
+    import can say how many values that touched. BLOBs never come
+    through here — sqlite3 only calls a text_factory for TEXT."""
+    def decode(b: bytes) -> str:
+        try:
+            return b.decode("utf-8")
+        except UnicodeDecodeError:
+            if undecodable is not None:
+                undecodable[0] += 1
+            return b.decode("utf-8", "replace")
+    return decode
+
+
 def _json_leaf_text(value: Any) -> str:
     """A JSON value at a point flattening stops (see _flatten_json) ->
     TEXT, same all-values-are-TEXT convention as CSV ingest. An object or
@@ -842,22 +949,20 @@ def _json_leaf_text(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (dict, list)):
-        return json.dumps(value, ensure_ascii=False)
-    return str(value)
-
-
-_LONE_SURROGATE_RE = re.compile("[\ud800-\udfff]")
+        return _utf8_text(json.dumps(value, ensure_ascii=False))
+    return _utf8_text(str(value))
 
 
 def _storable_cell(value: Any) -> Any:
     """A derived value SQLite can bind: what it already takes as is, and
     anything else as text with any lone surrogate (half a UTF-16 pair,
-    which UTF-8 cannot spell) replaced by U+FFFD. Only reached when a
-    batch's first write was refused — see backfill_derived_columns — so
-    the common path never pays for the scan."""
+    which UTF-8 cannot spell) written as its escape (_utf8_text — the
+    same rule JSON import and structparse's extraction follow). Only
+    reached when a batch's first write was refused — see
+    backfill_derived_columns — so the common path never pays for it."""
     if value is None or isinstance(value, (int, float, bytes)):
         return value
-    return _LONE_SURROGATE_RE.sub("\ufffd", str(value))
+    return _utf8_text(str(value))
 
 
 def _flatten_json(obj: dict, max_depth: int | None) -> dict[str, str]:
@@ -888,13 +993,15 @@ def _flatten_json(obj: dict, max_depth: int | None) -> dict[str, str]:
             if not value:
                 out[key_path] = "{}"
                 return
+            # _utf8_text on keys as _json_leaf_text does on values: a lone
+            # surrogate in a key failed the import before the first row.
             for k, v in value.items():
-                walk(v, f"{key_path}.{k}" if key_path else str(k), depth + 1)
+                walk(v, f"{key_path}.{_utf8_text(str(k))}" if key_path else _utf8_text(str(k)), depth + 1)
         else:
-            out[key_path] = _json_leaf_text(value)
+            out[key_path] = _json_leaf_text(value)   # UTF-8-safe, as keys are above
 
     for k, v in obj.items():
-        walk(v, str(k), 0)
+        walk(v, _utf8_text(str(k)), 0)
     return out
 
 
@@ -1006,6 +1113,17 @@ class ViewExpired(KeyError):
     The type carries the distinction instead, where no import can spell
     it wrong.
     """
+
+
+class RecordGone(LookupError):
+    """A write named a table, tag or row that is not in this case (any
+    more) — almost always a second window acting on something the first
+    one deleted. server.py answers 404.
+
+    Raised from inside the write's own transaction, before anything is
+    written, so the request fails with nothing committed behind it. Not a
+    KeyError: the view routes map KeyError to 409 "rebuild and retry",
+    and no rebuild brings a deleted tag back."""
 
 
 class OpCancelled(Exception):
@@ -1623,8 +1741,11 @@ class Store:
             # ...and sources.origin / origin_meta (where a derived table came
             # from — a SQL-pane save, a saved view or selection). NULL reads
             # as "an imported file", which every pre-existing row is.
+            # ...and sources.ingest (how the file was parsed; NULL on a
+            # table from before it was recorded, which session re-import
+            # treats as "guess, then check the shape").
             have = {r[1] for r in self.db.execute("PRAGMA table_info(sources)")}
-            for col in ("origin", "origin_meta"):
+            for col in ("origin", "origin_meta", "ingest"):
                 if col not in have:
                     self.db.execute(f"ALTER TABLE sources ADD COLUMN {col} TEXT")
             # Same for dashboards.pinned (a board promoted into the page strip).
@@ -1652,6 +1773,8 @@ class Store:
                     self.db.executemany(
                         "INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", [(i,) for i in ids]
                     )
+        # Before _seed_tags, which is the first thing that can hand out an id.
+        self._migrate_ids_never_reused()
         self._seed_tags()
         self._view_seq = 0
         # Its own lock for the same reason _search_job_lock exists: handing
@@ -1672,6 +1795,7 @@ class Store:
         self._undo: list[dict] = []
         self._maxlen_cache: dict[int, tuple[int, dict[str, int]]] = {}
         self._fts_threads: dict[int, threading.Thread] = {}
+        self._fts_failures: set[tuple[int, str]] = set()   # logged once each (_build_fts_worker)
         self._index_threads: dict[tuple[int, str], threading.Thread] = {}
         # Caps how many trigram builds run at once. A broad action — a
         # search-all sweep over a case with many unindexed sources — calls
@@ -1855,8 +1979,21 @@ class Store:
         with self._fts_build_sem:
             try:
                 self.build_fts(source_id)
-            except Exception:
-                pass  # best-effort background upgrade — the next search attempt retries
+            except Exception as e:  # noqa: BLE001
+                # Best-effort background upgrade — the next search attempt
+                # retries, and searches scan the table meanwhile. But said
+                # once in the log: this used to be silent, which is how a
+                # build that could never succeed (a table too wide for the
+                # doc view's expression) went unnoticed.
+                # Not when the case is closing under the build — that is
+                # the build being stopped, not failing.
+                key = (source_id, str(e))
+                with self._threads_lock:
+                    first = key not in self._fts_failures
+                    self._fts_failures.add(key)
+                if first and not self._closing:
+                    wlog.record("warn", f"Search index for table {source_id} not built: {e} — "
+                                        "searches of it scan the table instead")
 
     def _is_fts_building(self, source_id: int) -> bool:
         with self._threads_lock:
@@ -2218,6 +2355,136 @@ class Store:
         # over millions of rows is one big external sort, and this is the
         # one knob that parallelises it (default is 0 = single-threaded).
         conn.execute("PRAGMA threads=4")
+
+    # The tables whose ids must never come round again (see the comment at
+    # the top of META_SCHEMA), each with every place in a case file that can
+    # still hold one of its ids after the row itself is gone. A case file
+    # from before AUTOINCREMENT only knows its CURRENT highest id, so the
+    # migration seeds the counter past every id still mentioned anywhere —
+    # an orphaned row_tags entry, a widget's `src_7`, a leftover drv_9 —
+    # rather than past MAX(id) alone, which would hand a deleted newest
+    # table's id straight back to the next import.
+    #
+    # Signed source ids (negative = merge) share open_tabs/layouts/
+    # saved_views/source_folder_map, so the positive half counts for
+    # sources and the negated negative half for merges.
+    _ID_HIGH_WATER_SQL = {
+        "sources": [
+            "SELECT MAX(id) FROM sources",
+            *(f"SELECT MAX(source_id) FROM {t}" for t in (
+                "row_tags", "row_notes", "layouts", "saved_views", "open_tabs",
+                "derived_columns", "subset_rids", "source_folder_map",
+                "watchlist_hits", "watchlist_scans")),
+            "SELECT MAX(parent_source_id) FROM subset_rids",
+        ],
+        "tag_defs": [
+            "SELECT MAX(id) FROM tag_defs",
+            "SELECT MAX(tag_id) FROM row_tags",
+            "SELECT MAX(auto_tag_id) FROM watchlist",
+        ],
+        "merges": [
+            "SELECT MAX(id) FROM merges",
+            *(f"SELECT -MIN(source_id) FROM {t}" for t in (
+                "layouts", "saved_views", "open_tabs", "source_folder_map")),
+        ],
+        "sql_tabs": ["SELECT MAX(id) FROM sql_tabs"],
+    }
+
+    def _id_high_water(self, table: str) -> int:
+        """The highest id `table` has ever been seen to hand out, as far as
+        this case file can still tell (see _ID_HIGH_WATER_SQL)."""
+        hw = 0
+        for sql in self._ID_HIGH_WATER_SQL[table]:
+            v = self.db.execute(sql).fetchone()[0]
+            if isinstance(v, int):
+                hw = max(hw, v)
+        if table == "sources":
+            # A source's own tables and views, and the text that names
+            # them by id: merge member lists, widget queries, saved SQL.
+            # A dropped table cleans up after itself, but a crash between
+            # its statements, or a dashboard written against src_7 that
+            # was deleted since, still names the id.
+            ids = [int(m.group(1)) for (name,) in self.db.execute("SELECT name FROM sqlite_master")
+                   if (m := re.match(r"(?:src|fts|drv)_(\d+)", name or ""))]
+            for sql in ("SELECT widgets FROM dashboards", "SELECT sql FROM sql_tabs"):
+                for (text,) in self.db.execute(sql):
+                    ids += [int(n) for n in re.findall(r"\bsrc_(\d+)\b", text or "")]
+            for (text,) in self.db.execute("SELECT source_ids FROM merges"):
+                with contextlib.suppress(TypeError, ValueError):
+                    ids += [n for n in json.loads(text) if isinstance(n, int)]
+            hw = max([hw, *ids])
+        return hw
+
+    def _migrate_ids_never_reused(self) -> None:
+        """Rebuild sources/tag_defs/merges/sql_tabs as AUTOINCREMENT in a
+        case file created before they were, once.
+
+        SQLite cannot add AUTOINCREMENT to an existing table, so each one
+        is copied out, recreated from META_SCHEMA's definition, and copied
+        back by column name with its ids intact. By name, and from the
+        canonical DDL rather than the file's own: Store.__init__ has just
+        ALTERed in any column an older file lacked, so the canonical
+        column set is the one every file now has, in whatever order the
+        ALTERs left it — and a column the canonical DDL does not know is
+        carried across rather than dropped. Its sqlite_sequence row is
+        then set to the high-water mark, never lower than what the
+        copy-back itself recorded.
+
+        The same pass clears what reuse already left behind in such a
+        file, because the next id is no longer coming to claim it: tag
+        assignments and notes for a table or tag that no longer exists
+        (a stale window's write, an auto-tag scan after its tag was
+        deleted), and an indicator's auto-tag naming a deleted tag. They
+        are unreachable from anywhere in the app, but row_tags rows still
+        count toward a table's tagged-row total.
+
+        One transaction for the lot: a crash between a DROP and its
+        copy-back would otherwise lose the case's table list."""
+        todo = []
+        for table in self._ID_HIGH_WATER_SQL:
+            row = self.db.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+            if row and not re.search(r"\bAUTOINCREMENT\b", row[0], re.I):
+                todo.append((table, row[0]))
+        if not todo:
+            return
+        with self.lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                marks = {table: self._id_high_water(table) for table, _ in todo}
+                for table, _ in todo:
+                    ddl = re.search(rf"CREATE TABLE IF NOT EXISTS {table} \(.*?\n\);", META_SCHEMA, re.S)
+                    old_cols = [(r[1], r[2]) for r in self.db.execute(f"PRAGMA main.table_info({q(table)})")]
+                    keep = f"_keep_{table}"
+                    self.db.execute(f"CREATE TEMP TABLE {q(keep)} AS SELECT * FROM main.{q(table)}")
+                    self.db.execute(f"DROP TABLE main.{q(table)}")
+                    self.db.execute(ddl.group(0))
+                    have = {r[1] for r in self.db.execute(f"PRAGMA main.table_info({q(table)})")}
+                    for name, decl in old_cols:
+                        if name not in have:
+                            self.db.execute(f"ALTER TABLE main.{q(table)} ADD COLUMN {q(name)} {decl}")
+                    cols = ", ".join(q(name) for name, _ in old_cols)
+                    self.db.execute(f"INSERT INTO main.{q(table)} ({cols}) SELECT {cols} FROM temp.{q(keep)}")
+                    self.db.execute(f"DROP TABLE temp.{q(keep)}")
+                    seq = self.db.execute(
+                        "SELECT seq FROM sqlite_sequence WHERE name=?", (table,)).fetchone()
+                    if seq is None:
+                        self.db.execute("INSERT INTO sqlite_sequence(name, seq) VALUES (?,?)",
+                                        (table, marks[table]))
+                    elif seq[0] < marks[table]:
+                        self.db.execute("UPDATE sqlite_sequence SET seq=? WHERE name=?",
+                                        (marks[table], table))
+                if "tag_defs" in marks:
+                    self.db.execute("DELETE FROM row_tags WHERE tag_id NOT IN (SELECT id FROM tag_defs)")
+                    self.db.execute("UPDATE watchlist SET auto_tag_id=NULL "
+                                    "WHERE auto_tag_id NOT IN (SELECT id FROM tag_defs)")
+                if "sources" in marks:
+                    for t in ("row_tags", "row_notes"):
+                        self.db.execute(f"DELETE FROM {t} WHERE source_id NOT IN (SELECT id FROM sources)")
+            except BaseException:
+                self.db.rollback()
+                raise
+            self.db.commit()
 
     def _seed_tags(self) -> None:
         with self.lock, self.db:
@@ -2694,10 +2961,14 @@ class Store:
 
         with self.lock, self.db:
             cur = self.db.execute(
-                "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at)"
-                " VALUES (?,?,?,?,?,?)",
+                "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at, ingest)"
+                " VALUES (?,?,?,?,?,?,?)",
                 (name, os.path.abspath(path), "", "[]", file_hash,
-                 time.strftime("%Y-%m-%dT%H:%M:%S")),
+                 time.strftime("%Y-%m-%dT%H:%M:%S"),
+                 # The delimiter actually used, not the None that asked for
+                 # a sniff: a re-import must split the same way.
+                 _ingest_record("csv", delimiter=delimiter, has_header=has_header,
+                                column_types=column_types)),
             )
             source_id = cur.lastrowid
             self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
@@ -2867,10 +3138,11 @@ class Store:
         cols = [TEXT_COLUMN]
         with self.lock, self.db:
             cur = self.db.execute(
-                "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at)"
-                " VALUES (?,?,?,?,?,?)",
+                "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at, ingest)"
+                " VALUES (?,?,?,?,?,?,?)",
                 (name, os.path.abspath(path), "", "[]", file_hash,
-                 time.strftime("%Y-%m-%dT%H:%M:%S")),
+                 time.strftime("%Y-%m-%dT%H:%M:%S"),
+                 _ingest_record("text")),
             )
             source_id = cur.lastrowid
             self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
@@ -3012,6 +3284,7 @@ class Store:
         a completely separate file."""
         ro = sqlite3.connect(sqlite_ro_uri(path), uri=True, check_same_thread=False)
         ro.row_factory = sqlite3.Row
+        ro.text_factory = _lenient_text_factory()   # the timestamp sniff reads values too
         try:
             table_names = [
                 r["name"] for r in ro.execute(
@@ -3071,6 +3344,8 @@ class Store:
 
         ro = sqlite3.connect(sqlite_ro_uri(path), uri=True, check_same_thread=False)
         ro.row_factory = sqlite3.Row
+        undecodable = [0]
+        ro.text_factory = _lenient_text_factory(undecodable)
         try:
             src_cols_info = ro.execute(f"PRAGMA table_info({q(table_name)})").fetchall()
             if not src_cols_info:
@@ -3083,9 +3358,10 @@ class Store:
 
             with self.lock, self.db:
                 cur = self.db.execute(
-                    "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at)"
-                    " VALUES (?,?,?,?,?,?)",
-                    (name, os.path.abspath(path), "", "[]", file_hash, time.strftime("%Y-%m-%dT%H:%M:%S")),
+                    "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at, ingest)"
+                    " VALUES (?,?,?,?,?,?,?)",
+                    (name, os.path.abspath(path), "", "[]", file_hash, time.strftime("%Y-%m-%dT%H:%M:%S"),
+                     _ingest_record("sqlite", table=table_name, timestamp_columns=sorted(timestamp_columns))),
                 )
                 source_id = cur.lastrowid
                 self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
@@ -3146,6 +3422,11 @@ class Store:
             self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
 
         if error is not None:
+            # Rows that committed before the failure stay, with an accurate
+            # row_count (ingest_csv's partial-import contract). None did:
+            # an empty table would look exactly like a real empty import.
+            if not total:
+                self.drop_source(source_id)
             raise error
 
         if build_fts and total:
@@ -3155,6 +3436,10 @@ class Store:
         rec = self.get_source(source_id)
         rec["elapsed_sec"] = round(elapsed, 2)
         rec["rows_per_sec"] = int(total / elapsed) if elapsed > 0 else 0
+        rec["undecodable_values"] = undecodable[0]
+        if undecodable[0]:
+            wlog.record("warn", f"{name}: {undecodable[0]:,} text value"
+                                f"{'s' if undecodable[0] != 1 else ''} not valid UTF-8 — imported with \ufffd")
         return rec
 
     def ingest_plaso(
@@ -3183,9 +3468,10 @@ class Store:
         ncols = len(cols)
         with self.lock, self.db:
             cur = self.db.execute(
-                "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at)"
-                " VALUES (?,?,?,?,?,?)",
-                (name, os.path.abspath(path), "", "[]", file_hash, time.strftime("%Y-%m-%dT%H:%M:%S")),
+                "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at, ingest)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (name, os.path.abspath(path), "", "[]", file_hash, time.strftime("%Y-%m-%dT%H:%M:%S"),
+                 _ingest_record("plaso")),
             )
             source_id = cur.lastrowid
             self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
@@ -3297,9 +3583,10 @@ class Store:
 
             with self.lock, self.db:
                 cur = self.db.execute(
-                    "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at)"
-                    " VALUES (?,?,?,?,?,?)",
-                    (name, os.path.abspath(path), "", "[]", file_hash, time.strftime("%Y-%m-%dT%H:%M:%S")),
+                    "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at, ingest)"
+                    " VALUES (?,?,?,?,?,?,?)",
+                    (name, os.path.abspath(path), "", "[]", file_hash, time.strftime("%Y-%m-%dT%H:%M:%S"),
+                     _ingest_record("xlsx", sheet=sheet_name)),
                 )
                 source_id = cur.lastrowid
                 self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
@@ -3468,9 +3755,10 @@ class Store:
 
         with self.lock, self.db:
             cur = self.db.execute(
-                "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at)"
-                " VALUES (?,?,?,?,?,?)",
-                (name, os.path.abspath(path), "", "[]", file_hash, time.strftime("%Y-%m-%dT%H:%M:%S")),
+                "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at, ingest)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (name, os.path.abspath(path), "", "[]", file_hash, time.strftime("%Y-%m-%dT%H:%M:%S"),
+                 _ingest_record("json", flatten_mode=flatten_mode, flatten_depth=flatten_depth)),
             )
             source_id = cur.lastrowid
             self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
@@ -3551,7 +3839,8 @@ class Store:
 
     def _create_source_shell(self, name: str, cols: list[str], *, path: str | None = None,
                              file_hash: str | None = None, origin: str | None = None,
-                             origin_meta: dict | None = None) -> tuple[int, str]:
+                             origin_meta: dict | None = None,
+                             ingest: str | None = None) -> tuple[int, str]:
         """The sources row, its open tab and an empty src_<id> for a table
         about to be filled — one short transaction, so the id and the table
         exist together or not at all. Shared by ingest_rows and
@@ -3561,11 +3850,11 @@ class Store:
         importing". Returns (source_id, table_name)."""
         with self.lock, self.db:
             cur = self.db.execute(
-                "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at, origin, origin_meta)"
-                " VALUES (?,?,?,?,?,?,?,?)",
+                "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at,"
+                " origin, origin_meta, ingest) VALUES (?,?,?,?,?,?,?,?,?)",
                 (name, os.path.abspath(path) if path else None, "", "[]", file_hash,
                  time.strftime("%Y-%m-%dT%H:%M:%S"), origin,
-                 json.dumps(origin_meta) if origin_meta is not None else None),
+                 json.dumps(origin_meta) if origin_meta is not None else None, ingest),
             )
             source_id = cur.lastrowid
             self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
@@ -3615,7 +3904,8 @@ class Store:
         file_hash = self._quick_hash(path) if path and os.path.isfile(path) else None
 
         source_id, table = self._create_source_shell(
-            name, cols, path=path, file_hash=file_hash, origin=origin, origin_meta=origin_meta)
+            name, cols, path=path, file_hash=file_hash, origin=origin, origin_meta=origin_meta,
+            ingest=_ingest_record("rows"))
 
         placeholders = ",".join("?" * ncols)
         insert = f"INSERT INTO {q(table)} ({','.join(q(c) for c in cols)}) VALUES ({placeholders})"
@@ -4031,7 +4321,7 @@ class Store:
                 job["result"] = [
                     {k: r.get(k) for k in ("id", "name", "row_count", "elapsed_sec", "rows_per_sec",
                                            "ragged_rows", "suspect_quote_rows", "bad_records",
-                                           "first_bad_line")}
+                                           "first_bad_line", "undecodable_values")}
                     for r in results
                 ]
             wlog.record("info", f"Import finished: {job['name']} ({job['kind']}) — "
@@ -4578,11 +4868,12 @@ class Store:
         # tab titles, copy_sources_to's remap) wants the object. Tolerant
         # of a row from a case whose migration somehow left it unparseable —
         # provenance is a label, never worth failing a source listing over.
-        raw = d.get("origin_meta")
-        try:
-            d["origin_meta"] = json.loads(raw) if raw else None
-        except (TypeError, ValueError):
-            d["origin_meta"] = None
+        for key in ("origin_meta", "ingest"):
+            raw = d.get(key)
+            try:
+                d[key] = json.loads(raw) if raw else None
+            except (TypeError, ValueError):
+                d[key] = None
         d.setdefault("origin", None)
         return d
 
@@ -4793,6 +5084,9 @@ class Store:
             # live on the member rows (invariant #9) and survive on purpose.
             for t in ("open_tabs", "layouts", "saved_views"):
                 self.db.execute(f"DELETE FROM {t} WHERE source_id=?", (-merge_id,))
+            # Its views too, for drop_source's reason: a window still
+            # holding one would otherwise page and tag a merge nobody has.
+            self._evict_views_of(-merge_id)
 
     def merges_using(self, source_id: int) -> list[dict]:
         """The merges this table is a member of, as {id, name}.
@@ -4822,12 +5116,13 @@ class Store:
     def drop_source(self, source_id: int) -> None:
         """Delete a table and every sidecar keyed by its id.
 
-        Refuses a table that a merge is built on. Source ids are REUSED by
-        the next import (see the id reset below), so dropping a member
-        does not merely break that merge — it arms it: the next file
-        imported takes the freed id and silently becomes part of a merge
-        nobody added it to. Deleting the merge first is one click, and it
-        is the only order in which neither outcome is possible.
+        Refuses a table that a merge is built on: the merge would be left
+        naming a member that is not there, and it is the analyst who should
+        decide what becomes of it. Deleting the merge first is one click,
+        and it keeps the other tables. (Source ids used to be REUSED by the
+        next import, which made this worse — the next file imported took
+        the freed id and silently became part of a merge nobody added it
+        to. Ids are AUTOINCREMENT now, and the refusal stands on its own.)
 
         The internal callers are all ingest cancels dropping a partial
         import created seconds earlier, which cannot be a member of
@@ -4842,13 +5137,18 @@ class Store:
                 + " first — a merge is only a view over its tables, so deleting it keeps them.")
         src = self.get_source(source_id)
         with self.lock, self.db:
+            # Its views go first. A view id outlives the table in whatever
+            # window built it, and paging or tagging through one after the
+            # drop reads rows of a table that is gone — or, back when ids
+            # were reused, of the next import. Evicted, it answers 409 and
+            # the window rebuilds against what is actually there.
+            self._evict_views_of(source_id)
             self.db.execute(f"DROP TABLE IF EXISTS {q(src['table_name'])}")
             self.db.execute(f"DROP TABLE IF EXISTS {q('fts_' + str(source_id))}")
             self.db.execute(f"DROP VIEW IF EXISTS {q(src['table_name'] + '_doc')}")
-            # The watchlist's two per-table sidecars too: the id is reused by
-            # the next import (below), so a hit left keyed by it would sit
-            # under that file's name, and a scan record left behind would
-            # claim a table nothing has ever read was scanned clean.
+            # The watchlist's two per-table sidecars too: a hit left keyed
+            # by the id would be listed under a table that is not there,
+            # and a scan record left behind would say it was scanned clean.
             for t in ("row_tags", "row_notes", "watchlist_hits", "watchlist_scans"):
                 self.db.execute(f"DELETE FROM {t} WHERE source_id=?", (source_id,))
             self.db.execute("DELETE FROM layouts WHERE source_id=?", (source_id,))
@@ -4858,15 +5158,25 @@ class Store:
             self.db.execute(f"DROP TABLE IF EXISTS {q(self._derived_table(source_id))}")
             self.db.execute("DELETE FROM derived_columns WHERE source_id=?", (source_id,))
             # The subset provenance map, in BOTH directions: this table's
-            # own rows, and every subset that named it as the parent. The
-            # id gets reused (below), and a map left behind would point a
-            # subset's rows at whatever file lands on it next.
+            # own rows, and every subset that named it as the parent — a
+            # map left behind would point a subset's rows at a table that
+            # is not there.
             self.db.execute("DELETE FROM subset_rids WHERE source_id=? OR parent_source_id=?",
                             (source_id, source_id))
-        # SQLite reuses this id on the next import, so anything still keyed
-        # by it would silently attach to a different file.
-        self._drop_undo_for_source(source_id)
+            # Undo entries with rows in it: replaying one would write tags
+            # for rows that no longer exist.
+            self._drop_undo_for_source(source_id)
         self._maxlen_cache.pop(source_id, None)
+
+    def _evict_views_of(self, source_id: int) -> None:
+        """Evict every view built over this (signed) source id — root and
+        virtual, held or adopted, with their group sub-views. Caller holds
+        self.lock inside a self.db transaction, as for
+        _evict_view_and_children."""
+        for vid in list(self._views):
+            handle = self._views.get(vid)
+            if handle and handle.get("source_id") == source_id:
+                self._evict_view_and_children(vid)
 
     # -------------------------------------------------------- derived columns
 
@@ -7513,7 +7823,7 @@ class Store:
                     else:
                         parts.append(f"{expr} <= ?")
                         params.append(end_norm)
-                clauses.append("(" + " OR ".join(parts) + ")")
+                clauses.append("(" + _sql_chain(parts, " OR ") + ")")
 
         # "Hide empty rows" (the table menu): drop a row whose EVERY column
         # is empty — NULL or '', the same "empty" the per-column filter op
@@ -7529,7 +7839,10 @@ class Store:
                 clause, p = self._compile_condition(c, "not_empty", "", colnames)
                 parts.append(clause)
                 params.extend(p)
-            clauses.append("(" + " OR ".join(parts) + ")")
+            # _sql_chain: one OR per column is past SQLite's expression
+            # depth limit on a table about 1,000 columns wide. Halves keep
+            # their order, so the params still line up.
+            clauses.append("(" + _sql_chain(parts, " OR ") + ")")
 
         return " AND ".join(clauses), params
 
@@ -8190,11 +8503,17 @@ class Store:
             # would be crying wolf.
             if tag_id:
                 was = self.db.execute("SELECT name FROM tag_defs WHERE id=?", (tag_id,)).fetchone()
+                if was is None:
+                    # Edited from a window that still lists a tag another
+                    # one deleted. Creating it again under the old id is
+                    # not an option (ids are never reused), and a new id
+                    # would be a tag nobody asked for.
+                    raise RecordGone(f"Tag {tag_id} no longer exists in this case")
                 self.db.execute(
                     "UPDATE tag_defs SET name=?, color=?, hotkey=? WHERE id=?",
                     (name, color, hotkey, tag_id),
                 )
-                if was is None or was["name"] != name:
+                if was["name"] != name:
                     self._bump_state_generation()
             else:
                 cur = self.db.execute(
@@ -8209,10 +8528,16 @@ class Store:
     def delete_tag(self, tag_id: int) -> None:
         """Drops every assignment of the tag with it — a direct row_tags
         write rather than a recorded delta (there is nothing to undo once
-        the tag itself is gone), so it bumps the state generation itself."""
+        the tag itself is gone), so it bumps the state generation itself.
+
+        An indicator that auto-tags with it stops auto-tagging rather than
+        keep the id: the next scan would otherwise write assignments for a
+        tag that does not exist, invisible in every list and still counted
+        in a table's tagged-row total."""
         with self.lock, self.db:
             self._drop_undo_for_tag(tag_id)
             self.db.execute("DELETE FROM row_tags WHERE tag_id=?", (tag_id,))
+            self.db.execute("UPDATE watchlist SET auto_tag_id=NULL WHERE auto_tag_id=?", (tag_id,))
             self.db.execute("DELETE FROM tag_defs WHERE id=?", (tag_id,))
             self._bump_state_generation()
 
@@ -8271,7 +8596,19 @@ class Store:
         CLAUDE.md invariant #7 — every tag write goes through here; nothing
         INSERTs or DELETEs row_tags directly.
 
-        Caller must hold self.lock and be inside a self.db transaction."""
+        Caller must hold self.lock and be inside a self.db transaction.
+
+        Both ends of the write are checked first, in that same transaction:
+        the tag, and every real table the rows belong to (the pairs' own
+        ids, or `count_ids` — the members — on the whole-view paths). A
+        window can still be showing a table or a tag another window has
+        deleted, and its write used to land anyway: committed rows for an
+        id nothing names any more, behind a request that then failed on
+        the way out. RecordGone here means nothing was written."""
+        if not self.db.execute("SELECT 1 FROM tag_defs WHERE id=?", (tag_id,)).fetchone():
+            raise RecordGone(f"Tag {tag_id} no longer exists in this case")
+        self._require_sources({int(sid) for sid, _ in pairs} if pairs is not None
+                              else {int(i) for i in (count_ids or ())})
         self._undo_seq += 1
         table = f"undo_{self._undo_seq}"
         if pairs is not None:
@@ -8323,6 +8660,19 @@ class Store:
             # undo" — so drop it rather than record it.
             self.db.execute(f"DROP TABLE IF EXISTS v.{q(table)}")
         return changed
+
+    def _require_sources(self, source_ids: Iterable[int]) -> None:
+        """RecordGone unless every id names a real table in this case. On
+        whichever connection the caller is writing with (self.db), so it
+        sees the same state the write that follows will."""
+        ids = sorted(set(source_ids))
+        if not ids:
+            return
+        have = {r[0] for r in self.db.execute(
+            f"SELECT id FROM sources WHERE id IN ({','.join('?' * len(ids))})", ids)}
+        missing = [i for i in ids if i not in have]
+        if missing:
+            raise RecordGone(f"Table {missing[0]} no longer exists in this case")
 
     def _write_tag_delta(self, table: str, tag_id: int, on: bool) -> None:
         """Apply (or re-apply) one delta table's rows in the given
@@ -8675,6 +9025,16 @@ class Store:
 
     def set_note(self, source_id: int, rid: int, note: str) -> None:
         with self.lock, self.db:
+            # The row has to be there, for the reason _apply_tag_change
+            # checks its targets: a note posted from a window still showing
+            # a deleted table was committed against an id nothing names.
+            # A merge's notes live on its member rows (invariant #9), so
+            # only a real table is a place a note can go.
+            src = self.db.execute("SELECT table_name FROM sources WHERE id=?", (source_id,)).fetchone()
+            if src is None:
+                raise RecordGone(f"Table {source_id} no longer exists in this case")
+            if not self.db.execute(f"SELECT 1 FROM {q(src['table_name'])} WHERE rid=?", (rid,)).fetchone():
+                raise RecordGone(f"Table {source_id} has no row {rid}")
             if note.strip():
                 self.db.execute(
                     "INSERT INTO row_notes(source_id, rid, note) VALUES (?,?,?) "
@@ -8899,6 +9259,13 @@ class Store:
             # the same hits, and nothing ever told the analyst.
             if self.db.execute("SELECT 1 FROM watchlist WHERE value=?", (value,)).fetchone():
                 raise ValueError(f"{value} is already on the watchlist")
+            # Checked under the same lock as the insert. An id from a tag
+            # list another case painted (or a tag deleted a moment ago) is
+            # otherwise stored as-is, and every scan writes assignments
+            # for it that no list shows.
+            if auto_tag_id is not None and not self.db.execute(
+                    "SELECT 1 FROM tag_defs WHERE id=?", (auto_tag_id,)).fetchone():
+                raise ValueError(f"Auto-tag {auto_tag_id} is not a tag in this case")
             cur = self.db.execute(
                 "INSERT INTO watchlist(value, kind, note, auto_tag_id, created_at)"
                 " VALUES (?,?,?,?,?)",
@@ -9019,12 +9386,17 @@ class Store:
                 return None
             with self.db:
                 # The source too can have gone between the match and here:
-                # drop_source deletes its hits, and its id is the next
-                # import's, so a write for it now would file this value's
-                # rows under whatever table takes the id.
+                # drop_source deletes its hits, so a write for it now would
+                # file this value's rows under a table that is not there.
                 if not self.db.execute("SELECT 1 FROM sources WHERE id=?", (source_id,)).fetchone():
                     return None
-                row = self.db.execute("SELECT value, auto_tag_id FROM watchlist WHERE id=?", (wid,)).fetchone()
+                # The auto-tag through a join, so an indicator still naming
+                # a tag that is gone (delete_tag clears it; this is the
+                # belt to that brace) scans without tagging rather than
+                # failing the unit.
+                row = self.db.execute(
+                    "SELECT w.value, t.id AS auto_tag_id FROM watchlist w "
+                    "LEFT JOIN tag_defs t ON t.id = w.auto_tag_id WHERE w.id=?", (wid,)).fetchone()
                 if row is None or row["value"] != value:
                     return None
                 # What this unit is replacing, for the state generation
@@ -10928,6 +11300,10 @@ class Store:
                 # exporting analyst happened to add isn't part of the
                 # evidence's shape.
                 "columns": self._base_cols(src),
+                # How it was read, so a case without it open can re-import
+                # it into the same rids (import_case_session). Absent from
+                # sessions saved before it was recorded.
+                "ingest": src.get("ingest"),
             },
             "tag_defs": tags,
             "row_tags": rt,
@@ -10952,15 +11328,21 @@ class Store:
             warnings.append(
                 "Session was recorded against a different file. Row numbers may not line up."
             )
-        # Map session tag ids onto local tag ids by name, creating what's missing.
-        local = {t["name"].lower(): t["id"] for t in self.list_tags()}
+        # Map session tag ids onto local tag ids by name (pair_tag_names —
+        # the rule copy and diff use too), creating what's missing.
+        local = {t["name"]: t["id"] for t in self.list_tags()}
+        defs = session.get("tag_defs", [])
+        paired = pair_tag_names([t["name"] for t in defs], local)
+        created: dict[str, int] = {}
         idmap = {}
-        for t in session.get("tag_defs", []):
-            key = t["name"].lower()
-            if key not in local:
-                new = self.upsert_tag(None, t["name"], t.get("color", "#888888"), t.get("hotkey"))
-                local[key] = new["id"]
-            idmap[t["id"]] = local[key]
+        for t in defs:
+            if t["name"] in paired:
+                idmap[t["id"]] = local[paired[t["name"]]]
+                continue
+            if t["name"] not in created:
+                created[t["name"]] = self.upsert_tag(
+                    None, t["name"], t.get("color", "#888888"), t.get("hotkey"))["id"]
+            idmap[t["id"]] = created[t["name"]]
 
         with self.lock, self.db:
             if not merge:
@@ -11039,17 +11421,25 @@ class Store:
         """Reattaches each source session to the live table it describes
         (_match_session_sources: the file's hash, then which table of that
         file); if a source's file isn't in the case at all but still exists
-        at the recorded path, re-imports it first. Local single-user tool
-        with full filesystem access already (same trust level as --open), so
-        this is the one action that can fully reconstruct a case from a
-        session.
+        at the recorded path, re-imports it first — the way it was imported
+        (_reimport_session_source). Local single-user tool with full
+        filesystem access already (same trust level as --open), so this is
+        the one action that can fully reconstruct a case from a session.
 
         A source whose FILE is in the case but which matches no single
         table of it — the case lacks that table, or holds two copies
         nothing tells apart — is skipped with a warning naming it. Never
         re-imported (the file is here; another copy of it is not this
         table) and never put on a sibling: that was the old hash-only
-        match, which moved one table's tags onto another's rows."""
+        match, which moved one table's tags onto another's rows.
+
+        And a session's tags name rows by rid, so even a matched table only
+        gets them if it holds the rows the session was recorded against:
+        the row count and columns the session recorded
+        (_session_shape_mismatch). Anything else is skipped with a warning
+        rather than tagged — the same file imported with other options has
+        every rid on a different row, and nothing about the tags would
+        show it."""
         warnings: list[str] = []
         tags_applied = 0
         sources_restored = 0
@@ -11062,7 +11452,9 @@ class Store:
 
         for i, src_session in enumerate(entries):
             s_meta = metas[i]
+            label = s_meta.get("name") or s_meta.get("path") or "unknown"
             source_id = live[pairs[i]]["id"] if i in pairs else None
+            reimported = False
             if source_id is None and s_meta.get("file_hash") in live_hashes:
                 same_file = sum(1 for s in live if s.get("file_hash") == s_meta["file_hash"])
                 warnings.append(
@@ -11072,21 +11464,30 @@ class Store:
                     "— skipped rather than guessed")
                 continue
             if source_id is None:
-                path = s_meta.get("path")
-                if path and os.path.isfile(path):
-                    try:
-                        rec = self.ingest_csv(path, name=s_meta.get("name"))
-                        source_id = rec["id"]
-                        sources_reimported += 1
-                    except Exception as e:
-                        warnings.append(f"Could not re-import {s_meta.get('name', path)}: {e}")
-                        continue
+                source_id, why = self._reimport_session_source(s_meta)
+                if source_id is None:
+                    warnings.append(why)
+                    continue
+                reimported = True
+            mismatch = self._session_shape_mismatch(self.get_source(source_id), s_meta)
+            if mismatch:
+                if reimported:
+                    # Read the right file the wrong way (a session from
+                    # before the reader was recorded, guessed from the
+                    # extension): the copy is no use to anyone.
+                    self.drop_source(source_id)
+                    warnings.append(
+                        f"'{label}' was re-imported from {s_meta.get('path')} but came out "
+                        f"different from the session's copy ({mismatch}) — removed again, "
+                        "its tags and notes not applied")
                 else:
                     warnings.append(
-                        f"'{s_meta.get('name', 'unknown')}' isn't open and its original file "
-                        f"wasn't found at {path or 'an unknown path'} — skipped"
-                    )
-                    continue
+                        f"'{label}' is open, but not as the session's copy was imported "
+                        f"({mismatch}) — its tags and notes would land on other rows, so "
+                        "they were not applied")
+                continue
+            if reimported:
+                sources_reimported += 1
             res = self.import_session(source_id, src_session, merge=merge)
             warnings.extend(res["warnings"])
             tags_applied += res["tags_applied"]
@@ -11098,6 +11499,109 @@ class Store:
             "sources_restored": sources_restored,
             "sources_reimported": sources_reimported,
         }
+
+    _SESSION_READERS = ("csv", "text", "json", "sqlite", "xlsx", "plaso")
+
+    def _reimport_session_source(self, s_meta: dict) -> tuple[int | None, str | None]:
+        """(source_id, None) after re-importing a session source from its
+        recorded path, or (None, why it was not).
+
+        The path came out of a session document, which is often a file
+        another analyst sent — so it is treated as a claim to check, not a
+        place to read from: a network path is refused before anything
+        touches it (_is_network_path), only a regular file at an absolute
+        path is considered, and the file is fingerprinted and compared with
+        the session's file_hash BEFORE it is ingested. Nothing but the
+        evidence the session was recorded against is ever read into the
+        case.
+
+        The reader and its options are the ones the table was imported
+        with (sources.ingest, carried in the session). A session saved
+        before that was recorded gets the reader the import queue would
+        pick for the extension — a guess, which the caller checks against
+        the shape the session did record."""
+        label = s_meta.get("name") or s_meta.get("path") or "unknown"
+        path = s_meta.get("path")
+        if not path:
+            return None, f"'{label}' isn't open and the session doesn't say which file it came from — skipped"
+        if _is_network_path(path) or not os.path.isabs(path):
+            return None, (f"'{label}' isn't open, and the session names {path} for it — not a local "
+                          "file path, so Winnow did not look at it. Open the file yourself, then load "
+                          "the session again.")
+        if not os.path.isfile(path):
+            return None, f"'{label}' isn't open and its original file wasn't found at {path} — skipped"
+        want = s_meta.get("file_hash")
+        how = s_meta.get("ingest") or self._guess_session_reader(path)
+        kind = how.get("kind") if isinstance(how, dict) else None
+        if kind not in self._SESSION_READERS:
+            why = ("was produced by a plugin or saved from another table"
+                   if kind == "rows" else "has no record of how it was read")
+            return None, (f"'{label}' isn't open, and it {why}, so Winnow can't re-import it from "
+                          f"{path}. Open it yourself, then load the session again.")
+        try:
+            have = self._quick_hash(path)
+        except OSError as e:
+            return None, f"Could not re-import '{label}': {e}"
+        if not want or have != want:
+            return None, (f"'{label}' isn't open, and {path} is not the file the session was "
+                          "recorded against (it has changed, or it is a different file) — not "
+                          "imported, its tags and notes not applied")
+        name = s_meta.get("name")
+        try:
+            if kind == "csv":
+                rec = self.ingest_csv(path, name=name, delimiter=how.get("delimiter"),
+                                      has_header=how.get("has_header", True),
+                                      column_types=how.get("column_types"))
+            elif kind == "text":
+                rec = self.ingest_text(path, name=name)
+            elif kind == "json":
+                rec = self.ingest_json(path, name=name, flatten_mode=how.get("flatten_mode", "none"),
+                                       flatten_depth=how.get("flatten_depth", 0))
+            elif kind == "sqlite":
+                rec = self.ingest_sqlite_table(path, how["table"], name=name,
+                                               timestamp_columns=how.get("timestamp_columns"))
+            elif kind == "xlsx":
+                rec = self.ingest_xlsx_sheet(path, how["sheet"], name=name)
+            else:
+                rec = self.ingest_plaso(path, name=name)
+        except Exception as e:
+            return None, f"Could not re-import '{label}': {e}"
+        if rec.get("file_hash") != want:
+            # Changed between the check and the read.
+            self.drop_source(rec["id"])
+            return None, f"'{label}' changed on disk while it was being re-imported — removed again"
+        return rec["id"], None
+
+    @staticmethod
+    def _guess_session_reader(path: str) -> dict:
+        """The reader the import queue would choose for this extension
+        (server._ingest_kind_for_path, minus plugins), for a session saved
+        before sources.ingest existed. A SQLite file or workbook holds
+        several tables and the old session didn't say which, so those get
+        no guess at all."""
+        ext = os.path.splitext(path)[1].lower()
+        if ext in SQLITE_IMPORT_EXTENSIONS or ext in XLSX_IMPORT_EXTENSIONS:
+            return {}
+        if ext in PLASO_IMPORT_EXTENSIONS:
+            return {"kind": "plaso"}
+        if ext in (".json", ".jsonl", ".ndjson"):
+            return {"kind": "json"}
+        return {"kind": "csv" if ext in DEFAULT_IMPORT_EXTENSIONS else "text"}
+
+    @classmethod
+    def _session_shape_mismatch(cls, src: dict, s_meta: dict) -> str | None:
+        """Why `src` does not hold the rows a session source was recorded
+        against, or None if it does — the same number of rows under the
+        same imported columns. A session from before either was recorded
+        can't be checked on that count and passes it."""
+        want_rows = s_meta.get("row_count")
+        if want_rows is not None and want_rows != src["row_count"]:
+            return f"{want_rows:,} rows in the session, {src['row_count']:,} here"
+        want_cols = [c.get("name") for c in s_meta.get("columns") or []]
+        have_cols = [c["name"] for c in cls._base_cols(src)]
+        if want_cols and want_cols != have_cols:
+            return "different columns"
+        return None
 
     _SESSION_NAME_RE = re.compile(r"[^A-Za-z0-9_ -]")
 
@@ -11192,7 +11696,7 @@ class Store:
                 tag_map = t._map_tags_by_name(tag_defs)
                 shared_cols = [c for c in ("name", "path", "table_name", "row_count",
                                            "columns", "file_hash", "imported_at", "nickname",
-                                           "origin", "origin_meta")]
+                                           "origin", "origin_meta", "ingest")]
                 for sid in source_ids:
                     src = src_rows[sid]
                     cur = t.db.execute(
@@ -11291,13 +11795,18 @@ class Store:
 
     def _map_tags_by_name(self, incoming_defs: list[dict]) -> dict:
         """{incoming tag id -> this case's tag id}, creating what's missing.
-        Caller holds self.lock inside a transaction."""
+        Names pair by pair_tag_names, the rule session load uses. Caller
+        holds self.lock inside a transaction."""
         mine = {r["name"]: r["id"] for r in self.db.execute("SELECT id, name FROM tag_defs")}
+        paired = pair_tag_names([d["name"] for d in incoming_defs], mine)
         taken_keys = {r[0] for r in self.db.execute(
             "SELECT hotkey FROM tag_defs WHERE hotkey IS NOT NULL")}
         out = {}
         for d in incoming_defs:
-            if d["name"] in mine:
+            if d["name"] in paired:
+                out[d["id"]] = mine[paired[d["name"]]]
+                continue
+            if d["name"] in mine:          # created a moment ago for an earlier def of the same name
                 out[d["id"]] = mine[d["name"]]
                 continue
             hotkey = d.get("hotkey") if d.get("hotkey") not in taken_keys else None
@@ -11425,14 +11934,31 @@ class Store:
         return {"saved": saved, "tags_cleared": tags, "notes_cleared": notes}
 
     def _drop_undo_for_source(self, source_id: int) -> None:
-        """Undo entries naming a source that no longer exists. SQLite reuses
-        a deleted row id, so the next import can land on the same source_id
-        and inherit them — replaying one then tags rows of an unrelated
-        file. Mirrors _drop_undo_for_tag."""
+        """Undo entries with any row in a source that no longer exists.
+        Mirrors _drop_undo_for_tag.
+
+        By the rows the entry recorded, not by the source it was made
+        from: an entry made on a merge (or from a Timeline selection) is
+        filed under the merge's id but holds member rows, so dropping a
+        member after deleting the merge used to leave it behind — and with
+        ids reused, Ctrl+Z then tagged rows of the next file imported.
+        `count_ids` (the real tables a change could touch) rules most
+        entries out without reading them."""
         with self.lock:
             keep = []
             for entry in self._undo:
-                if entry.get("source_id") == source_id:
+                ids = entry.get("count_ids")
+                if ids is None:
+                    ids = [entry.get("source_id")]
+                touches = entry.get("source_id") == source_id
+                if not touches and source_id in ids:
+                    try:
+                        touches = self.db.execute(
+                            f"SELECT 1 FROM v.{q(entry['table'])} WHERE source_id=? LIMIT 1",
+                            (source_id,)).fetchone() is not None
+                    except sqlite3.Error:
+                        touches = True   # can't tell: drop it rather than risk replaying it
+                if touches:
                     with contextlib.suppress(sqlite3.Error):
                         self.db.execute(f"DROP TABLE IF EXISTS v.{q(entry['table'])}")
                     continue
@@ -11607,6 +12133,11 @@ class Store:
         lt, ln, llab = self._session_tag_map(ldoc, lkeys)
         rt, rn, rlab = self._session_tag_map(rdoc, rkeys)
         labels = {**rlab, **llab}
+        # The right side's names in the left side's spelling where
+        # pair_tag_names pairs them — the rule loading either session
+        # would apply — so the diff reports what a load would change.
+        paired = pair_tag_names({n for v in rt.values() for n in v}, {n for v in lt.values() for n in v})
+        rt = {k: {paired.get(n, n) for n in v} for k, v in rt.items()}
 
         added, removed, changed, note_changes = [], [], [], []
         for key in sorted(set(lt) | set(rt), key=lambda k: (str(k[0]), k[1])):
@@ -12195,11 +12726,16 @@ class Store:
         its route turns into a 400 rather than an empty answer that reads
         like "no matches".
 
+        A table the sweep could not count is in the list too, as
+        `{source_id, name, error}` with no match_count — after the hits,
+        since it has none — rather than left out, which reads as "no
+        matches".
+
         start_search_all_job is the same sweep run on a background thread
         with incremental results, which is what the UI uses."""
         scope = self.resolve_search_all_scope(source_ids)["source_ids"]
         out = [hit for _, _, hit, _read in self._iter_search_all_sources(query, terms, scope) if hit]
-        out.sort(key=lambda d: -d["match_count"])
+        out.sort(key=lambda d: (bool(d.get("error")), -d.get("match_count", 0)))
         return out
 
     def _iter_search_all_sources(
@@ -12218,7 +12754,13 @@ class Store:
         source so a caller can report progress and surface partial results
         while the sweep is still running (start_search_all_job) — a source
         with no matches yields a None hit rather than being skipped
-        silently, so `scanned` always advances. Unsorted, in source order:
+        silently, so `scanned` always advances. A source whose count
+        raised yields `{source_id, name, error}` as its hit: it used to be
+        recorded as no match, so a table the sweep could not read at all
+        (one too wide for the search expression, before _sql_chain) was
+        reported as "No matches." — the one answer an analyst moves on
+        from. The exception is a table dropped since the sweep began,
+        which has nothing left to report and still yields None. Unsorted, in source order:
         sorting is the collecting caller's job, since a running sweep has
         nothing stable to sort yet.
 
@@ -12331,10 +12873,19 @@ class Store:
                                 "matched_terms": [] if not n
                                                  else [t["term"] for t in per_term] if breakdown
                                                  else None}
-                except sqlite3.Error:
-                    n = 0  # source dropped (or its index swapped) mid-sweep
+                except sqlite3.Error as e:
+                    n = 0
                     per_term = []
                     read = None
+                    with self._reader() as ro:
+                        still_here = ro.execute(
+                            "SELECT 1 FROM sources WHERE id=?", (source_id,)).fetchone() is not None
+                    if still_here:
+                        failed = {"source_id": source_id, "name": src["name"], "error": str(e)}
+                        scanned += 1
+                        yield scanned, total, failed, None
+                        time.sleep(0.02)
+                        continue
             hit = None
             if n:
                 hit = {
@@ -12475,6 +13026,10 @@ class Store:
                 "scanned": 0,
                 "total": 0,
                 "hits": [],
+                # Tables the sweep could not count ({source_id, name,
+                # error}), kept apart from `hits` so that list still means
+                # "tables that matched" to everything reading it.
+                "failed": [],
                 # What the sweep proved, per source it read end to end
                 # (_iter_search_all_sources' `read`), for
                 # seed_watchlist_from_search_all. Deliberately NOT in the
@@ -12503,7 +13058,9 @@ class Store:
                         break
                     job["scanned"] = scanned
                     job["total"] = total
-                    if hit:
+                    if hit and hit.get("error"):
+                        job["failed"].append(hit)
+                    elif hit:
                         job["hits"].append(hit)
                     if read:
                         job["read"][read["source_id"]] = read
@@ -12533,6 +13090,7 @@ class Store:
                 "scanned": job["scanned"],
                 "total": job["total"],
                 "hits": sorted(job["hits"], key=lambda d: -d["match_count"]),
+                "failed": list(job["failed"]),
                 "done": job["done"],
                 "error": job["error"],
                 "cancelled": job["cancelled"],
