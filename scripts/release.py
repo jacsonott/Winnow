@@ -20,14 +20,25 @@ permanent re-deletion chore.
 
 Nothing here pushes. It prints the commands, because force-pushing main
 should be a thing a person types.
+
+**Nothing here touches your checkout either.** The snapshot is built in a
+throwaway index (`git read-tree` / `git rm --cached` / `git write-tree` /
+`git commit-tree`) and the branch and tag are moved as refs, so your
+branch, index and working tree are exactly as they were — including what
+is gitignored in them. It used to check main out, rebuild the tree there
+and `rm -rf bench .claude` to keep them out of `git add -A`, which also
+deleted the maintainer's bench/baselines/, bench/.cache/ and
+.claude/settings.local.json: per-machine files no commit holds.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -75,8 +86,8 @@ class GitError(RuntimeError):
     pass
 
 
-def git(*args: str) -> str:
-    r = subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True)
+def git(*args: str, env: dict | None = None) -> str:
+    r = subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True, env=env)
     if r.returncode != 0:
         raise GitError(f"git {' '.join(args)}\n{(r.stderr or r.stdout).strip()}")
     return (r.stdout or "").strip()
@@ -117,20 +128,26 @@ def preflight(version: str, source: str) -> str:
     return sha
 
 
-def build_tree(source: str) -> list[str]:
-    """Replace the index and working tree with `source`'s, minus DEV_ONLY.
-    Returns the paths dropped, for the report."""
-    # -f because after `checkout --orphan` every path is staged-as-new
-    # against an empty tree, and git rm refuses those without it.
-    git("rm", "-rqf", "--ignore-unmatch", ".")
-    git("checkout", f"origin/{source}", "--", ".")
-    dropped = []
-    for rel in DEV_ONLY:
-        if (ROOT / rel).exists():
-            git("rm", "-rq", "--cached", "--ignore-unmatch", rel)
-            subprocess.run(["rm", "-rf", rel], cwd=ROOT, check=True)
-            dropped.append(rel)
-    return dropped
+def build_snapshot(source: str, parent: str | None, version: str) -> tuple[str, list[str]]:
+    """Commit `source`'s tree minus DEV_ONLY, on top of `parent` (None for
+    the orphan first release). Returns (commit sha, the DEV_ONLY paths
+    that were there to drop).
+
+    Built in a private index file, so neither the real index nor the
+    working tree is read or written: what lands is exactly `source`'s
+    blobs, and nothing in the checkout — tracked, untracked or ignored —
+    can be added to the snapshot or removed from the disk."""
+    with tempfile.TemporaryDirectory(prefix="winnow-release-") as tmp:
+        env = {**os.environ, "GIT_INDEX_FILE": str(Path(tmp) / "index")}
+        git("read-tree", f"origin/{source}", env=env)
+        dropped = [rel for rel in DEV_ONLY if git("ls-files", "--", rel, env=env)]
+        if dropped:
+            # -f: the private index matches neither HEAD nor the working
+            # tree by design, which plain `rm --cached` refuses.
+            git("rm", "-r", "-q", "-f", "--cached", "--ignore-unmatch", "--", *dropped, env=env)
+        tree = git("write-tree", env=env)
+    parents = ["-p", parent] if parent else []
+    return git("commit-tree", tree, *parents, "-m", f"Winnow {version}"), dropped
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -158,31 +175,61 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     started_on = git("rev-parse", "--abbrev-ref", "HEAD")
+    ref = f"refs/heads/{args.target}"
+    if started_on == args.target:
+        # Moving the branch under a checkout would leave its index and
+        # working tree describing the OLD release, as if every change in
+        # this one were staged in reverse.
+        _fail(f"you are on {args.target}, the branch this replaces — run it from "
+              f"{args.source} (or any other branch)")
     try:
-        if args.orphan:
-            git("checkout", "-q", "--orphan", f"release-{args.version}")
-        else:
-            git("checkout", "-q", args.target)
-        dropped = build_tree(args.source)
-        git("add", "-A")
-        git("commit", "-q", "-m", f"Winnow {args.version}")
-        git("tag", "-a", f"v{args.version}", "-m", f"Winnow {args.version}")
-        if args.orphan:
-            git("branch", "-M", args.target)
-    except GitError as e:
-        git("checkout", "-q", "--force", started_on)
-        _fail(f"release aborted, returned to {started_on}:\n{e}")
+        old = git("rev-parse", "--verify", "-q", ref)
+    except GitError:
+        old = None
+    parent = None
+    if not args.orphan:
+        # No local branch yet: build on origin's, as `git checkout main`
+        # would have by creating one from it.
+        try:
+            parent = old or git("rev-parse", "--verify", "-q", f"refs/remotes/origin/{args.target}")
+        except GitError:
+            _fail(f"no {args.target} branch here or on origin — pass --orphan for the "
+                  "very first release")
 
-    new = git("rev-parse", "HEAD")
-    # Back to where you were. The commit and tag are refs; you do not have
-    # to be standing on them to push. Staying on the release branch would
-    # leave you in a tree with no bench/, no CLAUDE.md and — since it is
-    # dropped too — no scripts/release.py, which is a confusing place to
-    # be handed back control.
-    git("checkout", "-q", started_on)
+    tag = f"v{args.version}"
+    tagged = False
+    try:
+        new, dropped = build_snapshot(args.source, parent, args.version)
+        git("tag", "-a", tag, "-m", f"Winnow {args.version}", new)
+        tagged = True
+        # Last, and compare-and-swap: if anything moved the branch since it
+        # was read (or made it, where there was none), this fails rather
+        # than drops that commit. --orphan replaces it outright, which is
+        # what the first release means.
+        if args.orphan:
+            git("update-ref", ref, new)
+        else:
+            git("update-ref", ref, new, old or "")
+    except BaseException as e:  # noqa: BLE001 — undone whatever it was, then reported
+        # Only refs move, so undoing is deleting the tag if it was made;
+        # the commit object is unreachable, and gc collects it.
+        if tagged:
+            try:
+                git("tag", "-d", tag)
+            except Exception:  # noqa: BLE001
+                print(f"warning: could not remove tag {tag}; delete it by hand", file=sys.stderr)
+        if not isinstance(e, Exception):
+            raise
+        what = str(e) if isinstance(e, GitError) else f"{type(e).__name__}: {e}"
+        _fail(f"release aborted; {args.target} and your checkout are as they were "
+              f"(you are on {started_on}):\n{what}")
+
+    # The commit and tag are refs; you do not have to be standing on them
+    # to push — and the release tree has no bench/, no CLAUDE.md and no
+    # scripts/release.py, which is a confusing place to be handed control.
     print(f"\nCreated {args.target} {new[:7]} and tag v{args.version} "
           f"(dropped: {', '.join(dropped) or 'nothing'}).")
-    print(f"You are back on {started_on}; the release is on {args.target}.")
+    print(f"You are still on {started_on}, untouched; the release is on {args.target}.")
     print("\nReview it, then ship (main takes releases via PR — its rulesets")
     print("require one, and CI then validates the snapshot itself):")
     print(f"  git push origin v{args.version}")

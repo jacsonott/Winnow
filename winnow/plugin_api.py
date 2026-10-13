@@ -200,6 +200,7 @@ import importlib.util
 import os
 import re
 import sys
+import threading
 import traceback
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -504,7 +505,7 @@ class PluginAPI:
     #: with the rest of the app.
     NUM_RE = _store_num_re
 
-    def __init__(self, registry: "PluginRegistry", plugin_name: str,
+    def __init__(self, registry: "PluginRegistry | _Loaded", plugin_name: str,
                  fs_name: str, root: Path):
         self._registry = registry
         self._plugin = plugin_name
@@ -960,6 +961,67 @@ def static_meta(entry: Path) -> dict:
     return out
 
 
+class _Loaded:
+    """Everything one `PluginRegistry.load` registers: the listing and
+    each extension point's index. A load fills a fresh one and the
+    registry swaps it in whole (see load), so this is also what a reader
+    holds for the length of one lookup — never half of one load and half
+    of another."""
+
+    def __init__(self):
+        self.plugins: list[dict] = []       # [{name, fs_name, path, version, description, error|None, enabled, gen, formats:[ids], tabs:[ids]}]
+        self.formats: dict[str, IngestFormat] = {}
+        self.tabs: dict[str, dict] = {}                 # namespaced tab id -> tab dict (see PluginAPI.register_tab)
+        self.apis: dict[tuple[str, str], dict] = {}     # (fs_name, route) -> {handler, methods}
+        self.row_actions: dict[str, dict] = {}          # namespaced action id -> see register_row_action
+        self.panels: dict[str, dict] = {}               # namespaced panel id -> see register_toolbar_panel
+        self.page_panels: dict[str, dict] = {}          # namespaced panel id -> see register_page_panel
+        self.dashboards: dict[str, dict] = {}           # namespaced board id -> see register_dashboard
+
+    # The PluginAPI a plugin's register() is handed writes through these.
+
+    def _add_format(self, fmt: IngestFormat) -> None:
+        if fmt.id in self.formats:
+            raise ValueError(f"Duplicate ingest format id: {fmt.id}")
+        self.formats[fmt.id] = fmt
+
+    # Tabs, toolbar panels and page panels share one `<plugin>.<id>`
+    # namespace: the frontend keys their mounts and everything a mount
+    # owns by that id, so a plugin naming a tab and a panel both
+    # "copilot" would have one teardown cut the other's state.
+    def _claim_ui_id(self, id: str, what: str) -> None:
+        for kind, table in (("tab", self.tabs), ("toolbar panel", self.panels), ("page panel", self.page_panels)):
+            if id in table:
+                raise ValueError(f"Duplicate {what} id: {id} (already a {kind} — tabs and panels share one id space)")
+
+    def _add_tab(self, tab: dict) -> None:
+        self._claim_ui_id(tab["id"], "tab")
+        self.tabs[tab["id"]] = tab
+
+    def _add_panel(self, panel: dict) -> None:
+        self._claim_ui_id(panel["id"], "toolbar panel")
+        self.panels[panel["id"]] = panel
+
+    def _add_page_panel(self, panel: dict) -> None:
+        self._claim_ui_id(panel["id"], "page panel")
+        self.page_panels[panel["id"]] = panel
+
+    def _add_dashboard(self, board: dict) -> None:
+        if board["id"] in self.dashboards:
+            raise ValueError(f"Duplicate dashboard id: {board['id']}")
+        self.dashboards[board["id"]] = board
+
+    def _add_row_action(self, action: dict) -> None:
+        if action["id"] in self.row_actions:
+            raise ValueError(f"Duplicate row action id: {action['id']}")
+        self.row_actions[action["id"]] = action
+
+    def _add_api(self, fs_name: str, route: str, handler: Callable, methods: set[str]) -> None:
+        if (fs_name, route) in self.apis:
+            raise ValueError(f"Duplicate API route: {route}")
+        self.apis[(fs_name, route)] = {"handler": handler, "methods": methods}
+
+
 class PluginRegistry:
     """Discovers, imports and indexes plugins. One module-level instance
     lives in server.py; tests build their own against tmp dirs.
@@ -971,15 +1033,44 @@ class PluginRegistry:
     plugin didn't load instead of it silently not existing."""
 
     def __init__(self):
-        self.plugins: list[dict] = []       # [{name, fs_name, path, version, description, error|None, enabled, gen, formats:[ids], tabs:[ids]}]
-        self._formats: dict[str, IngestFormat] = {}
-        self._tabs: dict[str, dict] = {}                 # namespaced tab id -> tab dict (see PluginAPI.register_tab)
-        self._apis: dict[tuple[str, str], dict] = {}     # (fs_name, route) -> {handler, methods}
-        self._row_actions: dict[str, dict] = {}          # namespaced action id -> see register_row_action
-        self._panels: dict[str, dict] = {}               # namespaced panel id -> see register_toolbar_panel
-        self._page_panels: dict[str, dict] = {}          # namespaced panel id -> see register_page_panel
-        self._dashboards: dict[str, dict] = {}           # namespaced board id -> see register_dashboard
+        # The live set — replaced whole by load(), never edited in place.
+        # Every lookup below reads it ONCE into a local, so a reload
+        # landing mid-lookup can't hand it the listing of one load and
+        # the routes of the next.
+        self._state = _Loaded()
+        # One load at a time: two overlapping ones used to clear and fill
+        # the same dicts, so each plugin's register() collided with its own
+        # registration from the other load ("Duplicate API route") and the
+        # listing came out with every plugin twice, half of them failed.
+        self._load_lock = threading.Lock()
         self._seq = 0  # unique module names across load() calls / same-named plugins in two dirs
+
+    @property
+    def plugins(self) -> list[dict]:
+        return self._state.plugins
+
+    # A PluginAPI built straight on a registry (rather than by load) — a
+    # test's, say — registers into the live set, as it always did.
+    def _add_format(self, fmt: IngestFormat) -> None:
+        self._state._add_format(fmt)
+
+    def _add_tab(self, tab: dict) -> None:
+        self._state._add_tab(tab)
+
+    def _add_panel(self, panel: dict) -> None:
+        self._state._add_panel(panel)
+
+    def _add_page_panel(self, panel: dict) -> None:
+        self._state._add_page_panel(panel)
+
+    def _add_dashboard(self, board: dict) -> None:
+        self._state._add_dashboard(board)
+
+    def _add_row_action(self, action: dict) -> None:
+        self._state._add_row_action(action)
+
+    def _add_api(self, fs_name: str, route: str, handler: Callable, methods: set[str]) -> None:
+        self._state._add_api(fs_name, route, handler, methods)
 
     # ------------------------------------------------------------- loading
 
@@ -1012,19 +1103,26 @@ class PluginRegistry:
 
         `bundled_dirs` entries mark their plugins `bundled: True` in the
         listing — presentation only ("ships with Winnow" in the panel);
-        enablement policy is entirely `enabled_for`'s business."""
+        enablement policy is entirely `enabled_for`'s business.
+
+        The new set is built off to the side and swapped in whole at the
+        end, and loads are serialised. Clearing the live dicts first (as
+        this did) meant every plugin route 404'd for as long as the
+        imports took — seconds, with an SDK to import — and two loads at
+        once (a toggle in one window while a case opens in another; both
+        routes run on worker threads) filled the same dicts and marked
+        healthy plugins failed. A load that raises leaves the previous
+        set in place."""
+        with self._load_lock:
+            staged = _Loaded()
+            self._load_into(staged, directories, disabled, enabled_for, bundled_dirs)
+            self._state = staged
+
+    def _load_into(self, staged: "_Loaded", directories, disabled, enabled_for, bundled_dirs) -> None:
         disabled = set(disabled)
         if enabled_for is None:
             enabled_for = lambda fs_name, directory: fs_name not in disabled  # noqa: E731
         bundled = {str(Path(b)) for b in bundled_dirs}
-        self.plugins = []
-        self._formats = {}
-        self._tabs = {}
-        self._apis = {}
-        self._row_actions = {}
-        self._panels = {}
-        self._page_panels = {}
-        self._dashboards = {}
         seen: set[str] = set()
         for directory in directories:
             d = Path(directory)
@@ -1047,7 +1145,7 @@ class PluginRegistry:
                     # Never imported — so everything below it knows about
                     # itself comes from reading the file. See static_meta.
                     meta = static_meta(entry)
-                    self.plugins.append({
+                    staged.plugins.append({
                         "name": meta["name"] or fs_name, "fs_name": fs_name,
                         "path": str(candidate),
                         "version": meta["version"], "description": meta["description"],
@@ -1058,9 +1156,10 @@ class PluginRegistry:
                         "api_wants": meta["api_wants"], "declares": meta["declares"],
                     })
                 else:
-                    self._load_one(fs_name, entry, candidate, bundled=is_bundled)
+                    self._load_one(staged, fs_name, entry, candidate, bundled=is_bundled)
 
-    def _load_one(self, default_name: str, entry: Path, root: Path, bundled: bool = False) -> None:
+    def _load_one(self, staged: "_Loaded", default_name: str, entry: Path, root: Path,
+                  bundled: bool = False) -> None:
         self._seq += 1
         # Unique, never-importable-by-accident module name; the seq keeps a
         # reload (or the same plugin name in two directories) from silently
@@ -1082,7 +1181,7 @@ class PluginRegistry:
             "enabled": True, "gen": self._seq, "formats": [], "tabs": [],
             "bundled": bundled,
         }
-        self.plugins.append(record)
+        staged.plugins.append(record)
         try:
             spec = importlib.util.spec_from_file_location(
                 mod_name, entry,
@@ -1110,11 +1209,11 @@ class PluginRegistry:
             if not callable(register):
                 raise RuntimeError("plugin has no register(api) function")
 
-            before_formats = set(self._formats)
-            before_tabs = set(self._tabs)
-            register(PluginAPI(self, record["name"], record["fs_name"], root))
-            record["formats"] = sorted(set(self._formats) - before_formats)
-            record["tabs"] = sorted(set(self._tabs) - before_tabs)
+            before_formats = set(staged.formats)
+            before_tabs = set(staged.tabs)
+            register(PluginAPI(staged, record["name"], record["fs_name"], root))
+            record["formats"] = sorted(set(staged.formats) - before_formats)
+            record["tabs"] = sorted(set(staged.tabs) - before_tabs)
         except BaseException as e:  # noqa: BLE001 — see below
             # BaseException, not Exception, and the difference is the whole
             # point. Importing a plugin runs arbitrary module-level Python,
@@ -1156,59 +1255,21 @@ class PluginRegistry:
             record["api_wants"] = record["api_wants"] or meta["api_wants"]
             record["declares"] = meta["declares"]
 
-    def _add_format(self, fmt: IngestFormat) -> None:
-        if fmt.id in self._formats:
-            raise ValueError(f"Duplicate ingest format id: {fmt.id}")
-        self._formats[fmt.id] = fmt
-
-    # Tabs, toolbar panels and page panels share one `<plugin>.<id>`
-    # namespace: the frontend keys their mounts and everything a mount
-    # owns by that id, so a plugin naming a tab and a panel both
-    # "copilot" would have one teardown cut the other's state.
-    def _claim_ui_id(self, id: str, what: str) -> None:
-        for kind, table in (("tab", self._tabs), ("toolbar panel", self._panels), ("page panel", self._page_panels)):
-            if id in table:
-                raise ValueError(f"Duplicate {what} id: {id} (already a {kind} — tabs and panels share one id space)")
-
-    def _add_tab(self, tab: dict) -> None:
-        self._claim_ui_id(tab["id"], "tab")
-        self._tabs[tab["id"]] = tab
-
-    def _add_panel(self, panel: dict) -> None:
-        self._claim_ui_id(panel["id"], "toolbar panel")
-        self._panels[panel["id"]] = panel
-
-    def _add_page_panel(self, panel: dict) -> None:
-        self._claim_ui_id(panel["id"], "page panel")
-        self._page_panels[panel["id"]] = panel
-
-    def _add_dashboard(self, board: dict) -> None:
-        if board["id"] in self._dashboards:
-            raise ValueError(f"Duplicate dashboard id: {board['id']}")
-        self._dashboards[board["id"]] = board
-
-    def _add_row_action(self, action: dict) -> None:
-        if action["id"] in self._row_actions:
-            raise ValueError(f"Duplicate row action id: {action['id']}")
-        self._row_actions[action["id"]] = action
-
-    def _add_api(self, fs_name: str, route: str, handler: Callable, methods: set[str]) -> None:
-        if (fs_name, route) in self._apis:
-            raise ValueError(f"Duplicate API route: {route}")
-        self._apis[(fs_name, route)] = {"handler": handler, "methods": methods}
-
     # -------------------------------------------------------------- lookup
+    #
+    # Each reads self._state once — see __init__.
 
     def get_format(self, format_id: str) -> IngestFormat:
-        if format_id not in self._formats:
+        formats = self._state.formats
+        if format_id not in formats:
             raise KeyError(f"No such ingest format: {format_id}")
-        return self._formats[format_id]
+        return formats[format_id]
 
     def format_for_filename(self, filename: str) -> IngestFormat | None:
         """First registered format claiming this filename, in plugin load
         order — used as the default routing for dropped/scanned files. The
         analyst can always pick a different format explicitly."""
-        for fmt in self._formats.values():
+        for fmt in self._state.formats.values():
             if fmt.matches(filename):
                 return fmt
         return None
@@ -1216,47 +1277,50 @@ class PluginRegistry:
     # ------------------------------------------------------------ describe
 
     def list_formats(self) -> list[dict]:
-        return [f.describe() for f in self._formats.values()]
+        return [f.describe() for f in self._state.formats.values()]
 
     def list_tabs(self) -> list[dict]:
         """Every registered tab, each carrying its plugin's gen so the
         frontend can cache-bust the entry module URL per load."""
-        gen_by_fs = {p["fs_name"]: p["gen"] for p in self.plugins}
-        return [{**t, "gen": gen_by_fs.get(t["plugin_fs"], 0)} for t in self._tabs.values()]
+        st = self._state
+        gen_by_fs = {p["fs_name"]: p["gen"] for p in st.plugins}
+        return [{**t, "gen": gen_by_fs.get(t["plugin_fs"], 0)} for t in st.tabs.values()]
 
     def get_api(self, fs_name: str, route: str) -> dict | None:
-        return self._apis.get((fs_name, route))
+        return self._state.apis.get((fs_name, route))
 
     def list_panels(self) -> list[dict]:
         """Every registered toolbar panel, with its plugin's gen for the
         entry module's cache-buster (same as list_tabs)."""
-        gen_by_fs = {p["fs_name"]: p["gen"] for p in self.plugins}
-        return [{**t, "gen": gen_by_fs.get(t["plugin_fs"], 0)} for t in self._panels.values()]
+        st = self._state
+        gen_by_fs = {p["fs_name"]: p["gen"] for p in st.plugins}
+        return [{**t, "gen": gen_by_fs.get(t["plugin_fs"], 0)} for t in st.panels.values()]
 
     def list_page_panels(self) -> list[dict]:
         """Every registered page panel (SQL / Notes side columns), with its
         plugin's gen for the entry module's cache-buster."""
-        gen_by_fs = {p["fs_name"]: p["gen"] for p in self.plugins}
-        return [{**t, "gen": gen_by_fs.get(t["plugin_fs"], 0)} for t in self._page_panels.values()]
+        st = self._state
+        gen_by_fs = {p["fs_name"]: p["gen"] for p in st.plugins}
+        return [{**t, "gen": gen_by_fs.get(t["plugin_fs"], 0)} for t in st.page_panels.values()]
 
     def list_dashboards(self) -> list[dict]:
         """Every registered dashboard, without its widgets — the sidebar
         lists them by name and count, and fetches the widgets only when
         the analyst adds one."""
         return [{k: v for k, v in b.items() if k != "widgets"} | {"widget_count": len(b["widgets"])}
-                for b in self._dashboards.values()]
+                for b in self._state.dashboards.values()]
 
     def get_dashboard(self, fs_name: str, local_id: str) -> dict | None:
-        return next((b for b in self._dashboards.values()
+        return next((b for b in self._state.dashboards.values()
                      if b["plugin_fs"] == fs_name and b["local_id"] == local_id), None)
 
     def list_row_actions(self) -> list[dict]:
         """Every registered row action, minus the handler (the UI only
         needs label/description/max_rows and where to POST)."""
-        return [{k: v for k, v in a.items() if k != "handler"} for a in self._row_actions.values()]
+        return [{k: v for k, v in a.items() if k != "handler"} for a in self._state.row_actions.values()]
 
     def get_row_action(self, fs_name: str, local_id: str) -> dict | None:
-        return next((a for a in self._row_actions.values()
+        return next((a for a in self._state.row_actions.values()
                      if a["plugin_fs"] == fs_name and a["local_id"] == local_id), None)
 
     def describe(self) -> list[dict]:
