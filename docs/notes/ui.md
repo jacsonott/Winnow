@@ -417,7 +417,12 @@ see [docs/notes/README.md](README.md) for the whole set.
   writes into whichever store is current, so a save that fired after the
   `/api/case/open` swap would attach the previous case's `{source_id, rid}`
   to an unrelated row of the new one — `openCase` blanks the rid before
-  the POST (and puts it back if the open fails). `openSource` hides the
+  the POST (and puts it back if the open fails). The tag list is the same
+  kind of per-case state: `openCase` (and `boot`) call `loadCaseTags`
+  before `loadSources`, because `loadTags` only ran by way of opening a
+  table — an empty case never did, and kept the previous case's
+  definitions in `S.tags`, which the Watchlist's auto-tag picker and the
+  Timeline's tag chips read (tests/ui/test_case_switch.py). `openSource` hides the
   pane only when it is actually **leaving** a table (`leaving = S.sourceId
   !== id`, decided before `S.sourceId` is overwritten): every refresh idiom
   — `loadSources()` with no select after a column add, a sidebar folder
@@ -448,6 +453,15 @@ see [docs/notes/README.md](README.md) for the whole set.
   large, and are a snapshot of the data rather than the analysis.
   `runSql` captures `S.sqlTabId` up front and only paints if that tab is
   still showing, since you can switch tabs while a query is in flight.
+  **The tab id is not enough to say a result still belongs there**, so
+  each run also holds its claim in `sqlRuns` (plugins.js) and checks it
+  after every await: running again in the same tab, closing the tab
+  (`closeSqlTab`) and opening another case (`openCase`, whose tabs are
+  numbered from 1 again) all end the claim through `abandonSqlRuns`,
+  which also aborts the request. Without it a slow run painted over the
+  quicker re-run after it (and Copy/CSV/tagging took its rows), and a run
+  started in case A landed under case B's "Query 1", where tagging one of
+  its rows wrote a tag into case B.
   `wireDragReorder` grew optional `currentIds`/`onReorder` callbacks
   (defaulting to the source-tab behaviour) so the sub-tab strip reuses the
   one DnD implementation; its `drop` handler now *returns* when the
