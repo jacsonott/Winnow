@@ -213,3 +213,38 @@ def test_a_stamp_that_is_no_real_time_never_stops_the_parse(esxi_format, tmp_pat
     assert _stamps(esxi_format, p) == ["2025-01-04 10:00:00", "Jan  5 99:00:00"]
     os.utime(p, (0, 2 ** 62))
     assert len(_stamps(esxi_format, p)) == 2
+
+
+def test_a_renamed_duplicate_keeps_its_log_type(esxi_format, tmp_path):
+    """Archive expansion never overwrites: a second file of one name lands
+    as `name (2).ext`. The classic case is `messages` beside the
+    `messages.gz` rotation it expands to. The plugin takes the log type
+    from the name's stem, so `messages (2)` was not `messages` and the
+    rotated log was filed as Log='other', out of every auth and syslog
+    widget. The disambiguator is stripped before the stem is matched."""
+    import gzip
+    import zipfile
+
+    from winnow import archive
+
+    log_type_for = _module(esxi_format).log_type_for
+    for original, renamed in (("messages", "messages (2)"), ("hostd.log", "hostd (2).log"),
+                              ("syslog.0", "syslog (2).0"), ("auth.log.1", "auth.log (2).1"),
+                              ("vmkernel.log", "vmkernel (13).log")):
+        assert log_type_for(renamed) == log_type_for(original) != "other", renamed
+    assert log_type_for("clomd (2).log") == "other"
+    assert log_type_for("messages(2)") == "other"      # not the form expansion writes
+
+    # End to end: the names expand_archive actually produces.
+    line = "Jan  5 10:00:01 h1 sshd[811]: Accepted password for bob from 10.9.9.8 port 22 ssh2\n"
+    z = tmp_path / "uac.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("var/log/messages", line)
+        zf.writestr("var/log/messages.gz", gzip.compress(line.encode()))
+    root = archive.expand_archive(str(z))["root"]
+    logs = {}
+    for name in ("messages", "messages (2)"):
+        out = esxi_format.parse(os.path.join(root, "var", "log", name), esxi_format.resolve_options({}))
+        (row,) = list(out["rows"])
+        logs[name] = dict(zip(out["columns"], row))["Log"]
+    assert logs == {"messages": "syslog", "messages (2)": "syslog"}

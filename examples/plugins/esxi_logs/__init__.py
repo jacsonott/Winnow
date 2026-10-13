@@ -99,8 +99,19 @@ _SUDO_USER = re.compile(r"\b(?:sudo|su)(?:\[\d+\])?:\s*(?P<user>[A-Za-z0-9._-]+)
 _SHELL_USER = re.compile(r"^\[(?P<user>[^\]]+)\]:\s*(?P<rest>.*)$")
 
 
+# The " (N)" Winnow's archive expansion puts before a name's last
+# extension when the name is taken (`messages` beside the `messages.gz`
+# rotation it expands to, or a tar naming one file twice): `messages (2)`,
+# `hostd (2).log`, `auth.log (2).1`.
+_COPY_MARK = re.compile(r" \(\d+\)$")
+
+
 def log_type_for(filename: str) -> str:
-    stem = os.path.basename(filename).lower().split(".")[0]
+    # The stem is the name up to its first dot. A renamed duplicate is still
+    # the log it was, so the copy mark comes off first; left on, it made
+    # `messages (2)` a stem nothing knows, filed as 'other'.
+    root, ext = os.path.splitext(os.path.basename(filename))
+    stem = (_COPY_MARK.sub("", root) + ext).lower().split(".")[0]
     return _LOG_TYPES.get(stem, "other")
 
 

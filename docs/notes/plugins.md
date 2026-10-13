@@ -300,7 +300,9 @@ see [docs/notes/README.md](README.md) for the whole set.
   `SELECT * FROM src_a UNION ALL SELECT * FROM src_b …` over every matching
   source (schemas identical by construction, so the union lines up by
   position), and the dashboard slices it back apart on the plugin's `Log`
-  column ('hostd'/'auth'/'shell'/…, set from the filename). A profile still
+  column ('hostd'/'auth'/'shell'/…, set from the filename's stem, with
+  the ` (N)` that archive expansion gives a clashing name taken off first,
+  so `messages (2)` is still syslog). A profile still
   can't create a merge, and this isn't one — it's a read-time union, so it
   needs no new object in the case file and picks up rotated logs imported
   later with no re-wiring. The plugin parses two line shapes per line, not
