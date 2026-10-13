@@ -11852,10 +11852,23 @@ class Store:
             src = self._source_lite_on(ro, handle["source_id"])
             cols = self._export_columns(ro, src)
             sel = ", ".join(q(c) for c in cols)
+            # A merge's rows come from several tables, and Line is the rid
+            # within ONE of them — so without saying which, two rows read
+            # "Line 1" and nothing in the file tells the reader where either
+            # is. A merge export carries the member's name (as the sidebar
+            # shows it) after Line; a single table's stays as it was.
+            member_names: dict[int, str] | None = None
+            if src.get("is_merge"):
+                ids = [int(i) for i in src["member_source_ids"]]
+                member_names = {
+                    r["id"]: r["nickname"] or r["name"] for r in ro.execute(
+                        f"SELECT id, name, nickname FROM sources WHERE id IN ({','.join('?' * len(ids))})",
+                        ids)}
+
             tagnames = {r["id"]: r["name"] for r in ro.execute("SELECT id, name FROM tag_defs")}
             buf = io.StringIO()
             w = csv.writer(buf, lineterminator="\n")
-            w.writerow(["Line", "Tags", "Note", *cols])
+            w.writerow(["Line", *(["Table"] if member_names is not None else []), "Tags", "Note", *cols])
             yield buf.getvalue()
             buf.seek(0), buf.truncate(0)
 
@@ -11909,6 +11922,8 @@ class Store:
                         continue  # tagged_only filtered this row out
                     w.writerow([
                         r["rid"],
+                        *([_csv_safe(member_names.get(r["source_id"], f"table {r['source_id']}"))]
+                          if member_names is not None else []),
                         "; ".join(tmap.get(key, [])),
                         _csv_safe(nmap.get(key, "")),
                         *[_csv_safe(v) for v in cellmap[key]],

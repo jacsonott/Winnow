@@ -133,3 +133,29 @@ def test_xlsx_cell_too_long_for_excel_is_marked_not_silently_cut(store, write_cs
     assert len(cell) <= 32767
     assert cell.startswith("A" * 30000) and "cut" in cell and "40,000" in cell
     assert ws["D3"].value == "short"
+
+
+def test_csv_export_of_a_merge_says_which_table_each_row_is_from(store, write_csv):
+    """Line is a rid within ONE member, so a merged export had two rows
+    reading "Line 1" and nothing saying which file either came from. A
+    merge's export names the member (as the sidebar does, nickname
+    first); a single table's export is unchanged."""
+    a = store.ingest_csv(write_csv([["user"], ["alice"], ["bob"]], name="hostA.csv"),
+                         name="hostA_Security.csv", build_fts=False)["id"]
+    b = store.ingest_csv(write_csv([["user"], ["carol"], ["dave"]], name="hostB.csv"),
+                         name="hostB_Security.csv", build_fts=False)["id"]
+    store.set_source_nickname(b, "Host B")
+    tag = store.upsert_tag(None, "Keep", "#ff0000", None)
+    store.set_tags(a, [1], tag["id"], True)
+    store.set_tags(b, [1], tag["id"], True)
+    mid = store.create_merge("M", [a, b])["id"]
+    view = store.build_view(mid, {"filters": [], "sort": [{"column": "user", "dir": "asc"}]})
+
+    rows = list(csv.reader(io.StringIO(_export_csv_text(store, view["view_id"], tagged_only=True))))
+    assert rows[0] == ["Line", "Table", "Tags", "Note", "user"]
+    assert rows[1:] == [["1", "hostA_Security.csv", "Keep", "", "alice"],
+                        ["1", "Host B", "Keep", "", "carol"]]
+
+    single = store.build_view(a, {"filters": [], "sort": [{"column": "user", "dir": "asc"}]})
+    assert next(csv.reader(io.StringIO(_export_csv_text(store, single["view_id"])))) == \
+        ["Line", "Tags", "Note", "user"]

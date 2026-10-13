@@ -205,6 +205,10 @@ see [docs/notes/README.md](README.md) for the whole set.
   length. Sheet names (`_xlsx_sheet_name`) are XML text too — a control
   character in a source name wrote a workbook nothing would reopen — and
   the apostrophe rule is applied after the 31-character cut, not before.
+  A merged view's CSV carries a `Table` column after `Line` (the member's
+  nickname or name): `Line` is a rid within one member, so without it two
+  rows of a merge both read "Line 1" with nothing saying where either is.
+  A single table's export keeps the old header.
 - **`POST /api/sql/export_xlsx`** takes the result the pane is SHOWING
   (columns + rows, up from the client) rather than the query, so the
   workbook matches the screen including a click-sort — which lives only in
