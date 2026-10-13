@@ -412,3 +412,44 @@ see [docs/notes/README.md](README.md) for the whole set.
   history the analyst had no reason to track. The fact is kept in the
   line's `title`, and the build time it shows there is the time that build
   really took.
+- **A paint builds the columns on screen, not every column**
+  (`paintedColumns` in grid.js). Invariant #6 used to hold for rows only:
+  every painted row carried a cell for every visible column, which is free
+  on a 20-column EVTX table and was the whole cost of a wide one — a
+  150-column table painted 8,550 cells per frame for the ~10 on screen
+  across, and a scroll step, an arrow key or a cell click each waited
+  ~470 ms on it (20 columns: ~75 ms; measured in headless Chromium, and
+  400 columns was proportionally worse). Now a row holds the columns
+  inside the horizontal viewport plus `COL_OVERSCAN_PX` either way, every
+  pinned column wherever it is, and one `.cell-gap` per run of skipped
+  columns between them, so the painted cells keep their x without the
+  others existing. Five things to keep:
+  - `dataset.col` is still the column's index in `visibleCols()`, so the
+    cell range, the cell cursor, the mousedown/drag handlers and copy are
+    untouched — but **a row's `.cell` nodes are no longer one per column**,
+    so `row.querySelectorAll('.cell')[ci]` stops meaning column `ci` the
+    moment the table is wider than the screen. Find a cell by
+    `[data-col="ci"]`. The narrow fixture table in tests/ui fits on screen,
+    which is the only reason `.cell` nth-indexing there still works.
+  - A pinned column stays in the row after the gap that stands for the
+    columns before it. It is `position: sticky`, and stickiness only holds
+    an element that is in flow somewhere left of the viewport; leave it out
+    and the pin disappears the moment its natural place scrolls away.
+  - No trailing gap: #rows already has the full width (`syncRowsWidth`)
+    and the row fills it, so the stripe still runs to the end.
+  - The header and the filter row are NOT windowed. They hold every
+    column, which is what gives the scroller its width, keeps an
+    off-screen filter box reachable (`openColumnFilter` scrolls to it) and
+    lets autofit measure any header.
+  - The grid repaints on any scroll, either axis, so a horizontal scroll
+    rebuilds the window like a vertical one. What does NOT scroll is a
+    viewport that grows — the detail pane closing, the sidebar folding or
+    being dragged narrower — so a ResizeObserver on #body repaints when the
+    viewport's right edge passes what the last paint built (`paintedRight`).
+    A grid painted while hidden (a page tab is up; clientWidth is 0) has
+    no viewport to window to and gets every column.
+  `tests/ui/test_wide_tables.py` asserts it on a 150-column table: a row
+  carries a fraction of the columns, and every header on screen has its
+  cell under it at its x and width, at either end and the middle, pinned,
+  after a grow, and after the arrow keys walk into columns that were never
+  built.
