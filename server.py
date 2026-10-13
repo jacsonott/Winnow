@@ -1269,9 +1269,11 @@ def _assoc_ingest(path: str) -> dict:
     kind = _ingest_kind_for_path(path)
     opts = {"build_fts": True}
     if kind == "sqlite":
-        tables = store().preview_sqlite_tables(path)["tables"]
+        # A table this SQLite can't read (preview marks it `error`) is not
+        # one to queue — the rest of the file still imports.
+        tables = [t for t in store().preview_sqlite_tables(path)["tables"] if not t.get("error")]
         if not tables:
-            raise ValueError("no tables in this SQLite file")
+            raise ValueError("no readable tables in this SQLite file")
         opts["tables"] = [{"table": t["name"],
                            "timestamp_columns": t["likely_timestamp_columns"]} for t in tables]
     elif kind == "xlsx":

@@ -126,3 +126,29 @@ def test_ingest_sqlite_table_source_table_never_mutated(store, chromium_like_db)
     store.ingest_sqlite_table(path, "urls", build_fts=False, timestamp_columns=["last_visit_time"])
     after = open(path, "rb").read()
     assert before == after
+
+
+def test_one_unreadable_virtual_table_does_not_hide_the_rest_of_the_file(store, tmp_path):
+    """Thunderbird's global-messages-db.sqlite carries an FTS table built
+    with its own tokenizer; a SQLite without that module raises "no such
+    module" for it — and the preview read every table in one go, so the
+    whole file was unimportable. The table is listed with why it can't be
+    read, and every other table previews and imports as usual."""
+    path = str(tmp_path / "global-messages-db.sqlite")
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE messages(id INTEGER PRIMARY KEY, subject TEXT)")
+    conn.execute("INSERT INTO messages VALUES (1, 'invoice')")
+    conn.commit()
+    conn.execute("PRAGMA writable_schema=ON")
+    conn.execute("INSERT INTO sqlite_master(type,name,tbl_name,rootpage,sql) VALUES "
+                 "('table','messagesText','messagesText',0,"
+                 "'CREATE VIRTUAL TABLE messagesText USING mozvtab(body)')")
+    conn.commit()
+    conn.close()
+
+    tables = {t["name"]: t for t in store.preview_sqlite_tables(path)["tables"]}
+    assert tables["messages"]["row_count"] == 1 and "error" not in tables["messages"]
+    assert tables["messagesText"]["row_count"] is None
+    assert "mozvtab" in tables["messagesText"]["error"]
+    rec = store.ingest_sqlite_table(path, "messages", build_fts=False)
+    assert rec["row_count"] == 1

@@ -3089,19 +3089,30 @@ class Store:
             ]
             tables = []
             for t in table_names:
-                cols = ro.execute(f"PRAGMA table_info({q(t)})").fetchall()
-                row_count = ro.execute(f"SELECT COUNT(*) FROM {q(t)}").fetchone()[0]
-                likely_ts = []
-                for c in cols:
-                    if not re.search(r"time|utc|date", c["name"], re.IGNORECASE):
-                        continue
-                    sample = [
-                        r[0] for r in ro.execute(
-                            f"SELECT {q(c['name'])} FROM {q(t)} WHERE {q(c['name'])} IS NOT NULL LIMIT 20"
-                        )
-                    ]
-                    if sample and sum(1 for v in sample if _webkit_to_iso(v)) >= max(1, int(len(sample) * 0.8)):
-                        likely_ts.append(c["name"])
+                try:
+                    cols = ro.execute(f"PRAGMA table_info({q(t)})").fetchall()
+                    row_count = ro.execute(f"SELECT COUNT(*) FROM {q(t)}").fetchone()[0]
+                    likely_ts = []
+                    for c in cols:
+                        if not re.search(r"time|utc|date", c["name"], re.IGNORECASE):
+                            continue
+                        sample = [
+                            r[0] for r in ro.execute(
+                                f"SELECT {q(c['name'])} FROM {q(t)} WHERE {q(c['name'])} IS NOT NULL LIMIT 20"
+                            )
+                        ]
+                        if sample and sum(1 for v in sample if _webkit_to_iso(v)) >= max(1, int(len(sample) * 0.8)):
+                            likely_ts.append(c["name"])
+                except sqlite3.Error as e:
+                    # One table this SQLite build can't read — a virtual
+                    # table whose module it lacks (Thunderbird's message
+                    # index uses its own FTS tokenizer) — used to fail the
+                    # preview of the whole FILE, so not one of its tables
+                    # could be imported. It is listed, marked unreadable
+                    # (`error`, row_count None), and the rest are offered.
+                    tables.append({"name": t, "row_count": None, "columns": [],
+                                   "likely_timestamp_columns": [], "error": str(e)})
+                    continue
                 tables.append({
                     "name": t,
                     "row_count": row_count,

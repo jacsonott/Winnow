@@ -21,7 +21,11 @@ see [docs/notes/README.md](README.md) for the whole set.
   `preview_sqlite_tables`' heuristic when a column's name and sampled
   values look like one, via `_webkit_to_iso`) — never automatically, and
   never in place in the source file. A BLOB value becomes `<N bytes>`
-  rather than attempting to stringify binary data.
+  rather than attempting to stringify binary data. The preview reads each
+  table on its own: one this SQLite can't read (a virtual table whose
+  module it lacks — Thunderbird's message index) comes back with an
+  `error` and `row_count: null`, shown but not pickable, instead of
+  failing the preview of the whole file.
 - Excel ingest (`ingest_xlsx_sheet`/`preview_xlsx_sheets`, xlsxread.py) is
   the sheet-shaped sibling of the SQLite path — one workbook, N picked
   sheets, one background job, the same `{tables: [{table, name?}]}` option
