@@ -128,6 +128,40 @@ def test_one_unreadable_case_does_not_sink_the_sweep(cases, tmp_path):
     assert out[1]["error"] and out[1]["hits"] == []
 
 
+def _case_with(tmp_path, name, tables):
+    """A closed case holding one table per {csv name: rows (header first)}."""
+    db = tmp_path / f"{name}.db"
+    st = Store(str(db), default_tags=DEFAULT_TAGS)
+    for table, rows in tables.items():
+        csv_path = tmp_path / table
+        with open(csv_path, "w", newline="") as fh:
+            csv.writer(fh).writerows(rows)
+        st.ingest_csv(str(csv_path), name=table, build_fts=False)
+    st.close()
+    return str(db)
+
+
+def test_the_sweep_takes_like_wildcards_literally(tmp_path):
+    """The values went into `LIKE '%value%'` unescaped, so `_` matched any
+    character and `%` any run: sweeping for the account `svc_backup`
+    reported a host whose only account was `svcXbackup` — a false hit on
+    the one question the sweep answers."""
+    path = _case_with(tmp_path, "h", {"users.csv": [
+        ["Timestamp", "User"],
+        ["2024-01-01 00:00:01", "svcXbackup"],
+        ["2024-01-01 00:00:02", "svc_backup"],
+        ["2024-01-01 00:00:03", "disk 500 full"],
+        ["2024-01-01 00:00:04", "disk 50% full"],
+        ["2024-01-01 00:00:05", "C:\\Temp\\x"],
+    ]})
+    def users(values):
+        (case,) = mc.sweep_values([path], values)
+        return sorted(h["cells"]["User"] for h in case["hits"])
+    assert users(["svc_backup"]) == ["svc_backup"]
+    assert users(["50%"]) == ["disk 50% full"]
+    assert users(["C:\\Temp"]) == ["C:\\Temp\\x"]     # the escape character itself
+
+
 def test_the_sweep_caps_per_case(cases):
     out = mc.sweep_values(cases, ["HOST-"], limit_per_case=1)
     assert all(len(c["hits"]) <= 1 for c in out)
@@ -216,6 +250,47 @@ def test_the_timeline_windows_by_time(cases):
 def test_the_timeline_says_when_it_truncated(cases):
     out = mc.timeline_across(cases, limit=2)
     assert len(out["rows"]) == 2 and out["truncated"] and out["total_seen"] == 4
+
+
+def test_the_timeline_limit_is_shared_by_every_source_in_time_order(tmp_path):
+    """Each source was read with `LIMIT limit - rows so far`, in table
+    order, so the first table could use the whole limit and the rest were
+    never read — and since no case returned more than `limit`, the result
+    said truncated: False. Here the earliest events are in the SECOND
+    table; the limit has to be spent on them, and say it ran out."""
+    path = _case_with(tmp_path, "h", {
+        "a_later.csv": [["Timestamp", "User"], ["2024-01-01 00:00:01", "a1"],
+                        ["2024-01-01 00:00:02", "a2"], ["2024-01-01 00:00:03", "a3"]],
+        "b_earlier.csv": [["Timestamp", "User"], ["2023-06-01 00:00:00", "b1"],
+                          ["2023-12-31 23:59:59", "b2"]],
+    })
+    out = mc.timeline_across([path], limit=3)
+    assert [r["when"] for r in out["rows"]] == [
+        "2023-06-01 00:00:00", "2023-12-31 23:59:59", "2024-01-01 00:00:01"]
+    assert out["truncated"] is True
+
+    exact = mc.timeline_across([path], limit=5)
+    assert len(exact["rows"]) == 5 and exact["truncated"] is False
+
+
+def test_the_timeline_orders_and_windows_by_time_not_by_text(tmp_path):
+    """The timestamps were sorted and range-compared as raw text, which is
+    chronological only for zero-padded ISO: `1/5/2024` sorted before
+    `12/31/2023`, and a window given in ISO compared against `M/D/YYYY`
+    text kept and dropped the wrong rows. TS_NORMALIZE, as the timeframe
+    filter and the Timeline use, puts both shapes on one clock."""
+    path = _case_with(tmp_path, "h", {
+        "us.csv": [["When", "User"], ["1/5/2024 1:22:01 PM", "jan5"],
+                   ["12/31/2023 11:00:00 PM", "dec31"], ["2/1/2024 9:00:00 AM", "feb1"]],
+        "iso.csv": [["When", "User"], ["2024-01-05 09:00:00", "jan5-iso"]],
+    })
+    out = mc.timeline_across([path])
+    assert [r["summary"] for r in out["rows"]] == ["dec31", "jan5-iso", "jan5", "feb1"]
+    # The raw value is still what is shown.
+    assert out["rows"][0]["when"] == "12/31/2023 11:00:00 PM"
+
+    window = mc.timeline_across([path], start="2024-01-01 00:00:00", end="2024-01-31 23:59:59")
+    assert [r["summary"] for r in window["rows"]] == ["jan5-iso", "jan5"]
 
 
 def test_a_source_with_no_timestamp_column_is_skipped(tmp_path, cases):

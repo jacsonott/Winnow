@@ -22,7 +22,9 @@ table is only ever read.
 tiebreak) plus COUNT() over the same partition — a single scan of the
 filtered source, no N+1 per group. `rid` tie-breaking makes the answer
 deterministic when timestamps collide, which EVTX at second resolution
-does constantly.
+does constantly. A number-typed sort column is ordered by value, like the
+grid's numeric sort, never as text ("10" < "9"); a cell that isn't a
+number wins neither end (`_order_keys`).
 
 **The description is rendered server-side, per row.** `{ColumnName}` takes
 that row's value (so the first row shows the first event's user),
@@ -169,8 +171,28 @@ def _is_number_column(src, col):
 
 
 def _numeric(src, col):
-    ident = _col(src, col)
+    return _numeric_of(_col(src, col))
+
+
+def _numeric_of(ident):
     return f"(CASE WHEN {ident} REGEXP '{NUM_RE_SQL}' THEN CAST({ident} AS REAL) ELSE NULL END)"
+
+
+def _order_keys(ident, number):
+    """(first-window key, last-window key) for the sort column, each with
+    its direction. A number column is ordered by value, as the grid's
+    numeric sort orders it: its cells are TEXT, so "10" < "9" < "100", and
+    a group of record ids came back First=10, Last=9. A cell that isn't a
+    number (blank, "-", "n/a") must not win either end, so it sorts LAST
+    both ways. SQLite sorts NULL first ascending and last descending, so
+    ascending-NULLs-last is spelled `-v DESC` (negation flips the order
+    exactly and leaves NULL NULL). That evaluates the REGEXP-guarded cast
+    once per row per window: a separate `v IS NULL` key would run it twice
+    and cost about twice as much, and `NULLS LAST` needs SQLite 3.30."""
+    if not number:
+        return f"{ident} ASC", f"{ident} DESC"
+    v = _numeric_of(ident)
+    return f"-{v} DESC", f"{v} DESC"
 
 
 def _where(src, filters):
@@ -417,10 +439,11 @@ def _bookend_rows(req, src, group_cols, sort_col, carry, where, params, limit,
     # "Last" would be its earliest row with the biggest rid. On a merge,
     # rid alone collides across members, so (source_id, rid) is the
     # deterministic tie-break.
-    sort_ref = _col(src, sort_col)
+    number = _is_number_column(src, sort_col)
+    first_key, last_key = _order_keys(_col(src, sort_col), number)
     tie_cols = ["s.source_id", "s.rid"] if src.get("is_merge") else ["s.rid"]
-    order_asc = ", ".join([f"{sort_ref} ASC"] + [f"{t} ASC" for t in tie_cols])
-    order_desc = ", ".join([f"{sort_ref} DESC"] + [f"{t} DESC" for t in tie_cols])
+    order_asc = ", ".join([first_key] + [f"{t} ASC" for t in tie_cols])
+    order_desc = ", ".join([last_key] + [f"{t} DESC" for t in tie_cols])
     sql = (
         f"SELECT {sel},"
         f" ROW_NUMBER() OVER (PARTITION BY {part} ORDER BY {order_asc}) AS rn_first,"
@@ -431,7 +454,7 @@ def _bookend_rows(req, src, group_cols, sort_col, carry, where, params, limit,
     )
     outer = (
         f"SELECT * FROM ({sql}) WHERE rn_first = 1 OR rn_last = 1"
-        f" ORDER BY {q(sort_col)}, rn_first"
+        f" ORDER BY {_order_keys(q(sort_col), number)[0]}, rn_first"
     )
     res = req.store.run_sql(_inline(outer, params), limit=limit)
     cols = res["columns"]

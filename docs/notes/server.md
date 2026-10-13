@@ -18,7 +18,14 @@ see [docs/notes/README.md](README.md) for the whole set.
   Two constraints worth knowing. SQLite attaches at most **10**
   databases (`MAX_ATTACHED`), and `v` already uses one — so the query
   path caps at 8 cases and everything else opens one reader at a time,
-  which is why the sweep and timeline have no case limit. And the routes
+  which is why the sweep and timeline have no case limit. Two more that
+  each produced a confident wrong answer: the timeline orders and
+  windows by `TS_NORMALIZE`, like the case's own timeframe filter (raw
+  text put `1/5/2024` before `12/31/2023`), and every SOURCE gets the
+  whole `limit + 1`, merged as they arrive — reading each with "the
+  limit minus rows so far" let the first table spend it all on its
+  latest rows while reporting `truncated: False`. The sweep's values are
+  LIKE-escaped: `svc_backup` matched `svcXbackup`. And the routes
   only read **registered** cases: a path arrives from the browser, and
   the case list is the analyst's own statement of what they work on.
   These views are read-only BY DESIGN, not pending work: tags and notes
