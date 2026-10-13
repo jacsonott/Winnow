@@ -166,8 +166,12 @@ export function openTabsSorted() {
    action — hides the tab (stays in the case, reopen from Tables or the
    dropdown's Closed section), doesn't delete anything. */
 export async function closeTab(s) {
+  // Every caller is a click handler that awaits this and nothing else, so
+  // a refusal has to be reported here — it was an unhandled rejection, and
+  // the tab simply stayed. The stash is only dropped once the tab is gone.
+  try { await post(`/api/source/${s.id}/open`, { open: false }); }
+  catch (e) { toast(`Could not close ${sourceLabel(s)}: ${e.message}`, 6000); return; }
   viewStateStash.delete(s.id);
-  await post(`/api/source/${s.id}/open`, { open: false });
   if (S.sourceId === s.id) S.sourceId = null;
   await loadSources();
 }

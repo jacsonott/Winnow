@@ -295,6 +295,75 @@ def test_header_nickname_seed_version_bump_adds_only_missing(monkeypatch):
 
 
 
+# What a release that ADDS defaults does: same entries plus one, version+1
+# (defaults/__init__.py's instruction). Both files go through it, because a
+# deleted or renamed default coming back on that bump was the bug, and
+# nothing before the bump can show it.
+
+def _bump_filters(monkeypatch, extra=()):
+    from winnow import defaults
+    shipped = defaults.filters()
+    monkeypatch.setattr(defaults, "filters", lambda: {
+        "version": shipped["version"] + 1,
+        "filters": list(shipped["filters"]) + list(extra)})
+
+
+def _bump_headers(monkeypatch, extra=()):
+    from winnow import defaults
+    shipped = defaults.headers()
+    monkeypatch.setattr(defaults, "headers", lambda: {
+        "version": shipped["version"] + 1,
+        "nicknames": list(shipped["nicknames"]) + list(extra)})
+
+
+def test_a_version_bump_brings_back_no_deleted_or_renamed_default_filter(monkeypatch):
+    """CLAUDE.md: analyst renames and deletes always win. Judged by what
+    was PRESENT, a bump re-added the deleted default and put the original
+    back beside the renamed one."""
+    before = WS.filters.list()
+    deleted, renamed = before[0], before[1]
+    WS.filters.delete(deleted["id"])
+    WS.filters.update(renamed["id"], name="MY triage")
+
+    _bump_filters(monkeypatch, extra=[("Brand new", ["ColA", "ColB"], {"search": "x"})])
+    names = [f["name"] for f in WS.filters.list()]
+    assert deleted["name"] not in names
+    assert renamed["name"] not in names and names.count("MY triage") == 1
+    assert names.count("Brand new") == 1          # a NEW default still arrives
+    assert len(names) == len(before) - 1 + 1
+
+
+def test_a_version_bump_brings_back_no_deleted_nickname(monkeypatch):
+    hn = WS.HeaderNicknames()
+    before = hn.list()
+    hn.delete(before[0]["id"])
+
+    _bump_headers(monkeypatch, extra=[("New tool", ["ColA", "ColB"])])
+    after = hn.list()
+    assert hn.find(before[0]["col_names"]) is None
+    assert hn.find(["ColA", "ColB"])["nickname"] == "New tool"
+    assert len(after) == len(before)
+
+
+def test_a_workspace_seeded_before_the_record_existed_is_recorded_at_its_version(monkeypatch):
+    """Files written by a release before `seeded` existed carry only
+    seeded_version. At the shipped version they must be recorded on the
+    next read — that is what lets the NEXT bump know what was deleted."""
+    import json
+
+    WS.filters.list()
+    path = WS.WORKSPACE_DIR / WS.SavedFilters.FILE
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data.pop("seeded")
+    victim = data["filters"].pop(0)
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    WS.filters.list()                        # records, adds nothing back
+    assert "seeded" in json.loads(path.read_text(encoding="utf-8"))
+    _bump_filters(monkeypatch)
+    assert victim["name"] not in [f["name"] for f in WS.filters.list()]
+
+
 def test_tag_template_seeds_ta_first_and_migrates_only_untouched_legacy():
     """DEFAULT_TAGS now leads with TA (hotkey 1 — triage reaches for "this
     is the adversary" far more than "this is fine"). A workspace whose

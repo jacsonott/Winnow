@@ -462,3 +462,33 @@ def test_a_plugin_format_file_ingests_via_the_plugin(client, tmp_path, monkeypat
     assert [col["name"] for col in src["columns"]] == ["EventId", "Msg"]
     assert src["row_count"] == 2
     server.STORE.close()
+
+
+def test_discarding_a_quicklook_unloads_a_plugin_only_it_turned_on(client, tmp_path, monkeypatch):
+    """The effective plugin set is per case, so every way a case goes away
+    has to reload it. Discard set STORE to None and stopped there: a plugin
+    switched on for just this quick-look stayed imported and kept answering
+    at the home screen, with the machine setting saying off."""
+    from winnow.plugin_api import PluginRegistry
+
+    server, c = client
+    plugs = tmp_path / "plugs"
+    plugs.mkdir()
+    (plugs / "caseonly.py").write_text(
+        'def register(api):\n    api.register_api("ping", lambda req: {"pong": True})\n')
+    monkeypatch.setattr(server, "PLUGIN_DIRS", [plugs])
+    monkeypatch.setattr(server, "PLUGINS", PluginRegistry())
+    WS.plugin_prefs.set_machine_enabled("caseonly", False, True)
+
+    body = c.post("/api/assoc/open", json={"files": [_csv(tmp_path)]}, headers=HEADERS).json()
+    server.STORE.wait_for_ingest_job(body["started"][0]["job_id"], timeout=30)
+    assert c.get("/api/plugin/caseonly/ping").status_code == 404      # off by machine
+    r = c.post("/api/plugins/toggle", json={"fs_name": "caseonly", "scope": "on_case"},
+               headers=HEADERS)
+    assert r.status_code == 200, r.text
+    assert c.get("/api/plugin/caseonly/ping").json() == {"pong": True}
+
+    assert c.post("/api/case/discard", json={}, headers=HEADERS).status_code == 200
+    assert c.get("/api/plugin/caseonly/ping").status_code == 404
+    rec = next(p for p in c.get("/api/plugins").json()["plugins"] if p["fs_name"] == "caseonly")
+    assert rec["enabled"] is False

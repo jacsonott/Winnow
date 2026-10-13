@@ -29,6 +29,11 @@ of surfacing a dead end to the analyst.
 MODEL = "claude-opus-5"
 MAX_HISTORY = 40         # turns kept per request — the tab is a scratchpad, not an archive
 MAX_TOKENS = 64000       # streamed, so a large ceiling is safe (no HTTP timeout risk)
+NO_CREDENTIALS = (
+    "No Anthropic credentials — save WINNOW_ANTHROPIC_API_KEY under "
+    "Settings → Environment (or set ANTHROPIC_API_KEY / run `ant auth login` "
+    "in the environment Winnow's server runs in, then restart it)"
+)
 
 from datetime import datetime, timezone
 
@@ -245,8 +250,8 @@ def ask(req):
     # has. req.env only reads WINNOW_* names, which is why the Winnow-side
     # one is spelled that way.
     key = req.env("WINNOW_ANTHROPIC_API_KEY")
-    client = anthropic.Anthropic(api_key=key) if key else anthropic.Anthropic()
     try:
+        client = anthropic.Anthropic(api_key=key) if key else anthropic.Anthropic()
         # Streamed with get_final_message(): the browser round trip stays a
         # plain JSON response, but the SDK connection can't hit its HTTP
         # timeout on a long answer. Thinking is deliberately not configured:
@@ -262,15 +267,23 @@ def ask(req):
         ) as stream:
             msg = stream.get_final_message()
     except anthropic.AuthenticationError:
-        raise ValueError(
-            "No Anthropic credentials — save WINNOW_ANTHROPIC_API_KEY under "
-            "Settings → Environment (or set ANTHROPIC_API_KEY / run `ant auth login` "
-            "in the environment Winnow's server runs in, then restart it)"
-        )
+        raise ValueError(NO_CREDENTIALS)
     except anthropic.APIConnectionError:
         raise ValueError("Could not reach the Anthropic API — this plugin needs network access")
     except anthropic.APIStatusError as e:
         raise ValueError(f"Anthropic API error ({e.status_code}): {getattr(e, 'message', e)}")
+    except (TypeError, getattr(anthropic, "AnthropicError", TypeError)) as e:
+        # A key that is wrong gets a 401 (above). No credentials at all
+        # never reaches the API: the SDK refuses before sending, saying it
+        # "could not resolve authentication method" — a TypeError from its
+        # header validation, so it fell past every mapping here and the
+        # analyst got a 500 for the commonest setup mistake. Matched on that
+        # wording, not the type, so a real bug in this handler still
+        # surfaces as one. (The SDK's own base class is included in case a
+        # later release raises that instead.)
+        if "authentication" not in str(e).lower():
+            raise
+        raise ValueError(NO_CREDENTIALS) from None
 
     if msg.stop_reason == "refusal":
         # The whole fallback chain declined. stop_details is informational

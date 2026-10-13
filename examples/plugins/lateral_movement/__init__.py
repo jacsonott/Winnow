@@ -206,6 +206,22 @@ def _pick_bucket(req, spans):
     return _BUCKETS[-1]
 
 
+def _normalized_bounds(req, start, end):
+    """The timeframe's bounds in the shape TS_NORMALIZE(col) compares
+    against — the core runs both through the same function before its
+    range check, and so must this. Compared verbatim, any bound the
+    Timeframe dialog accepts in another spelling (1/5/2024 8:00, a 'T'
+    separator) cut the graph to a different row set from the grid while
+    the status line said "timeframe applied". A bound that doesn't parse
+    is dropped, which is what the core does with it too."""
+    if not (start or end):
+        return None, None
+    row = req.store.run_sql(
+        f"SELECT TS_NORMALIZE({_lit(start or '')}), TS_NORMALIZE({_lit(end or '')})", limit=1)["rows"]
+    lo, hi = (row[0][0], row[0][1]) if row else (None, None)
+    return (lo if start else None), (hi if end else None)
+
+
 def edges(req):
     """POST /api/plugin/lateral_movement/edges
     body: {selections: [{source_id, src_col, dst_col, label_col?, time_col?,
@@ -224,7 +240,8 @@ def edges(req):
     if len(selections) > MAX_SELECTIONS:
         raise ValueError(f"At most {MAX_SELECTIONS} selections per build")
     time_range = b.get("time") or {}
-    start, end = time_range.get("start") or None, time_range.get("end") or None
+    start, end = _normalized_bounds(req, time_range.get("start") or None,
+                                    time_range.get("end") or None)
     limit = min(int(b.get("limit") or MAX_ROWS), MAX_ROWS)
 
     prepared = []

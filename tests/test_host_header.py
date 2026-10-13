@@ -103,6 +103,8 @@ def test_deleting_a_case_file_requires_it_to_be_one(client, tmp_path):
     r = client.delete(f"/api/cases/{cid}?delete_file=true")
     assert r.status_code == 400 and "not a Winnow case file" in r.text
     assert victim.read_text() == "PRIVATE KEY"
+    # The refusal says "removed from the list" — and it has to be true.
+    assert all(c["id"] != cid for c in client.get("/api/cases").json())
 
 
 def test_a_plugin_cannot_write_into_the_evidence(store, write_csv):

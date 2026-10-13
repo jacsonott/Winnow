@@ -1518,6 +1518,31 @@ see [docs/notes/README.md](README.md) for the whole set.
   `tests/ui/test_plugins_from_settings.py`,
   `tests/ui/test_profiles_from_settings.py`.
 
+- **A click handler reports its own refusal.** `api()` throws on any
+  non-2xx with the server's `detail` as the message, and nothing above a
+  click handler catches it — so `try { await post(...) } finally {
+  setBusy(false) }`, or a bare `await api(...)`, turns a 409 with a
+  perfectly good reason into an unhandled rejection: no toast, the busy
+  bar gone, and a button that looks as if it did nothing. Session Load,
+  Start a fresh pass, the Tables manager's Close/Remove, a tab's ✕ and
+  five others shipped like that. Catch, toast `e.message`, and return
+  before the success path (closing the dialog, reloading, a "Saved"
+  toast) — a dialog the action failed in stays open so the analyst can
+  try again. `tests/ui/test_refusals_are_reported.py` fails each request
+  with `page.route` and looks for the server's words in the toast; the
+  page fixture's uncaught-error check catches the rejection itself.
+
+- **html/body are `overflow: clip`, not just `hidden`.** Nothing at the
+  page level is meant to scroll — every scroller is a panel of its own —
+  but a `hidden` box is still a scroll container, and the browser will
+  scroll it programmatically to bring a focused element into view. Once
+  the window is narrower than the toolbar's min-content (~717px with a
+  few tables open), opening a dialog did exactly that: <body> slid
+  sideways and stayed there, widening included, until a reload. `clip`
+  can't be scrolled at all; `hidden` stays in the rule first as the
+  fallback. `tests/ui/test_narrow_window_dialog.py` finds the width at
+  which the suite's case starts to overflow rather than hard-coding one.
+
 - **One dialog at a time, but each gets a body of its own.** `modal()`
   replaces `#modalBody` with a fresh node (same id, same class) on every
   call instead of emptying it. Builders are often async — draw a frame,

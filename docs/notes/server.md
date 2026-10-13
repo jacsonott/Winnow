@@ -97,6 +97,15 @@ see [docs/notes/README.md](README.md) for the whole set.
   and names the holder, `--force` overrides). Biased toward *reporting* a
   conflict, the opposite of `_views_file_is_orphaned`'s bias — there a
   wrong answer deletes a live process's file, here it costs one click.
+  The marker is named from the case's **realpath**, not its abspath: one
+  marker per file however the path was spelled, or a case opened through
+  a symlink holds a marker that nobody opening it by its real name ever
+  probes (`_same_case_path` is the matching comparison for "is this the
+  case that's already open"). **Deleting** a case file (`DELETE
+  /api/cases/{id}?delete_file=true`) is the one place the probe is a
+  refusal rather than a prompt — 409 `case_in_use`, no "anyway" — since
+  there is no version of deleting a case somebody has open that they
+  would want; it takes the -wal/-shm and a stale marker with it.
 - `/api/case/open` short-circuits when the requested path is **already the
   open case** — necessary, because the open-before-close ordering would
   otherwise make the process probe its own lock and refuse itself. Guarded
@@ -306,9 +315,14 @@ see [docs/notes/README.md](README.md) for the whole set.
   time" would reap a live session; instead every page holds an EventSource
   open to `/api/presence` and the count of live streams is the signal.
   Three holds stop it destroying work: open streams, in-flight HTTP
-  (counted in the no-cache middleware, `/api/presence` itself excluded or
-  it would read busy forever — a CSV download outliving its tab is exactly
-  what this hold protects), and running/queued ingest jobs. A server
+  (counted by `_InflightCounter`, `/api/presence` itself excluded or it
+  would read busy forever — a CSV download outliving its tab is exactly
+  what this hold protects), and running/queued ingest jobs. The counter
+  is **raw ASGI on purpose**: it used to live in a `@app.middleware`
+  (BaseHTTPMiddleware), whose `call_next` returns when the headers exist
+  and streams the body afterwards, so a download stopped counting the
+  moment it started. Anything that has to span a whole response body
+  can't be a BaseHTTPMiddleware. A server
   nothing ever connected to gets a 15-minute fuse rather than the 2-minute
   one — `--no-browser` plus a slow manual visit is legitimate, but an
   association-spawned server whose window failed to open still gets

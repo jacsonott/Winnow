@@ -140,8 +140,46 @@ def test_duplicate_format_id_is_a_plugin_error(plug_dir):
     reg.load([plug_dir])
     (rec,) = reg.describe()
     assert "Duplicate" in rec["error"]
-    # The first registration survives; the plugin just can't add more.
-    assert reg.get_format("dupe.x").label == "X"
+    # Not even the first registration survives: a plugin listed as failed
+    # must not leave a working format behind (see the partial-register
+    # test below — this assertion used to pin the opposite).
+    with pytest.raises(KeyError):
+        reg.get_format("dupe.x")
+
+
+def test_a_register_that_raises_partway_keeps_nothing_it_registered(plug_dir):
+    """register() writes straight into the live tables, so a plugin that
+    failed on its fourth call kept the first three — a format offered in
+    the import dialog, a route answering, a row action in the menu — while
+    the panel listed it as failed. A plugin loaded after it is unaffected."""
+    _write_plugin(plug_dir, "aaa_half", """
+        def register(api):
+            api.register_ingest_format(id="half", label="Half", extensions=[".half"],
+                                       parse=lambda path, options: {"columns": ["A"], "rows": []})
+            api.register_api("ping", lambda req: {"pong": True})
+            api.register_row_action(id="look", label="Look", handler=lambda req: {})
+            raise RuntimeError("config file missing")
+    """)
+    _write_plugin(plug_dir, "demo", GOOD_PLUGIN)
+    reg = PluginRegistry()
+    reg.load([plug_dir])
+    by_name = {p["fs_name"]: p for p in reg.describe()}
+    assert "config file missing" in by_name["aaa_half"]["error"]
+    assert by_name["aaa_half"]["formats"] == []
+    with pytest.raises(KeyError):
+        reg.get_format("aaa_half.half")
+    assert reg.get_api("aaa_half", "ping") is None
+    assert not [a for a in reg.list_row_actions() if a["plugin_fs"] == "aaa_half"]
+    assert by_name["demo"]["error"] is None and reg.get_format("demo.lines")
+
+
+def test_rollback_covers_every_registration_table():
+    """_snapshot/_rollback work from a list of table names, so a new
+    register_* hook whose table isn't on it would keep its registrations
+    after a failed register() again. Every dict a load fills is on it."""
+    from winnow.plugin_api import _Loaded
+    tables = {k for k, v in vars(_Loaded()).items() if isinstance(v, dict)}
+    assert tables == set(_Loaded._TABLES)
 
 
 def test_underscore_and_hidden_entries_are_skipped(plug_dir):
@@ -572,6 +610,60 @@ def test_install_rejects_traversal_and_absolute_paths(plugin_client, plug_dir):
     assert r.status_code == 400
 
 
+# What the check has to refuse on Windows, where `\\x` and `C:x` are not
+# absolute to pathlib and have no "..": a root, a drive, a drive-relative
+# name, a UNC path, an NTFS alternate stream. Checked on every platform,
+# so a Linux CI run proves what a Windows install relies on.
+WINDOWS_ESCAPES = [r"\Windows\Tasks\x.py", r"\__init__.py", "C:__init__.py",
+                   r"C:Users\Public\x.py", r"C:\evil.py", "c:/evil.py",
+                   r"\\server\share\x.py", "plug.py:hidden", "pkg/__init__.py:ads",
+                   "D:pkg/__init__.py"]
+
+
+@pytest.mark.parametrize("rel", WINDOWS_ESCAPES)
+def test_install_path_check_refuses_windows_escapes(rel):
+    import server
+    assert server._plugin_upload_parts(rel) is None
+
+
+@pytest.mark.parametrize("rel,parts", [("kplug.py", ("kplug.py",)),
+                                        ("pkg/__init__.py", ("pkg", "__init__.py")),
+                                        (r"pkg\sub\x.py", ("pkg", "sub", "x.py"))])
+def test_install_path_check_keeps_ordinary_paths(rel, parts):
+    import server
+    assert server._plugin_upload_parts(rel) == parts
+
+
+@pytest.mark.parametrize("name,paths", [
+    ("C:__init__.py", None),                          # single file: fs_name "C:__init__"
+    ("__init__.py", ["C:pkg/__init__.py"]),           # folder: fs_name "C:pkg"
+    ("x.py", ["plug.py:hidden"]),
+])
+def test_install_refuses_drive_relative_and_stream_names(plugin_client, plug_dir, name, paths):
+    """Through the route: these were ACCEPTED (on Linux too — a colon is an
+    ordinary character there), and on Windows each one writes somewhere
+    other than plugins/."""
+    before = sorted(p.name for p in plug_dir.iterdir())
+    data = {"paths": json.dumps(paths)} if paths else None
+    r = plugin_client.post("/api/plugins/install",
+                           files=[("files", (name, INSTALLABLE.encode()))], data=data)
+    assert r.status_code == 400, r.text
+    assert sorted(p.name for p in plug_dir.iterdir()) == before
+
+
+def test_install_refuses_a_symlink_out_of_plugins(plugin_client, plug_dir, tmp_path):
+    """The resolved destination must stay under plugins/ — a link already
+    in there pointing elsewhere is a way out that no string check sees."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (plug_dir / "linked").symlink_to(outside, target_is_directory=True)
+    r = plugin_client.post("/api/plugins/install",
+                           files=[("files", ("__init__.py", INSTALLABLE.encode()))],
+                           data={"paths": json.dumps(["linked/__init__.py"]), "overwrite": "true"})
+    assert r.status_code == 400
+    assert outside.is_dir() and list(outside.iterdir()) == []
+
+
 def test_install_folder_requires_init(plugin_client):
     r = plugin_client.post("/api/plugins/install",
                            files=[("files", ("helper.py", b"x = 1"))],
@@ -594,6 +686,32 @@ def test_install_overwrite_flow(plugin_client, plug_dir):
     # The replacement registers nothing, so the format from the first
     # install must be gone after the reload.
     assert "kplug.k" not in {fm["id"] for fm in out["formats"]}
+
+
+@pytest.mark.parametrize("first,second", [("folder", "file"), ("file", "folder")])
+def test_install_over_the_other_form_of_the_same_plugin(plugin_client, plug_dir, first, second):
+    """foo.py and foo/ are one plugin to the loader (the folder sorts first
+    and wins). The collision check looked at the destination PATH, so
+    installing foo.py beside foo/ answered "Installed foo" and the new
+    file never ran. Same name is taken, whichever form; overwrite replaces
+    both, so what was installed is what loads."""
+    def install(form, version, **data):
+        body = (f'PLUGIN = {{"name": "foo", "version": "{version}"}}\n'
+                'def register(api):\n    pass\n').encode()
+        if form == "file":
+            return plugin_client.post("/api/plugins/install",
+                                      files=[("files", ("foo.py", body))], data=data or None)
+        return plugin_client.post("/api/plugins/install", files=[("files", ("__init__.py", body))],
+                                  data={"paths": json.dumps(["foo/__init__.py"]), **data})
+
+    assert install(first, "1.0").status_code == 200
+    assert install(second, "2.0").status_code == 409
+    r = install(second, "2.0", overwrite="true")
+    assert r.status_code == 200, r.text
+    rec = next(p for p in r.json()["plugins"] if p["fs_name"] == "foo")
+    assert rec["version"] == "2.0"
+    assert (plug_dir / "foo.py").exists() == (second == "file")
+    assert (plug_dir / "foo").exists() == (second == "folder")
 
 
 def test_install_broken_plugin_reports_load_error(plugin_client, plug_dir):
@@ -1237,6 +1355,30 @@ def test_lateral_movement_time_bucketing_and_filter(timed_client):
     assert {(e["src"], e["dst"]) for e in edges} == {("WS1", "SRV1")}
 
 
+@pytest.mark.parametrize("start,end", [
+    ("2026-03-14 00:00:00", "2026-03-14 23:59:59"),
+    ("2026-03-14T00:00:00", "2026-03-14T23:59:59"),
+    ("3/14/2026 0:00", "3/14/2026 23:59"),
+    ("2026-03-14", None),          # an open end, in the date-only spelling
+])
+def test_lateral_movement_timeframe_matches_the_grid_in_any_spelling(timed_client, start, end):
+    """The bounds were compared to TS_NORMALIZE(col) verbatim, while the
+    core normalises both sides — so any spelling the Timeframe dialog
+    accepts other than the canonical one cut the graph to a different row
+    set from the grid (US dates: nothing at all) under "timeframe
+    applied". The graph's rows must be the grid's rows."""
+    client, sid = timed_client
+    time = {"start": start, "end": end}
+    view = client.post("/api/view", json={"source_id": sid, "time_range": {
+        "enabled": True, "column": "When", **time}})
+    assert view.status_code == 200, view.text
+    r = client.post("/api/plugin/lateral_movement/edges", json={"selections": [
+        {"source_id": sid, "src_col": "SourceHost", "dst_col": "DestHost", "time_col": "When"}],
+        "time": time})
+    assert r.status_code == 200, r.text
+    assert sum(e["n"] for e in r.json()["edges"]) == view.json()["row_count"]
+
+
 def test_lateral_movement_defaults_ship_tied_to_a_header_set(lateral_client):
     """The shipped KAPE defaults are served, each tied to a header set
     (the app's own EvtxECmd nickname) so it only offers itself on a real
@@ -1430,6 +1572,50 @@ def test_claude_refusal_is_a_400_with_category(claude_client, monkeypatch):
     monkeypatch.setitem(sys.modules, "anthropic", _fake_anthropic(record, _claude_msg(stop_reason="refusal")))
     r = claude_client.post("/api/plugin/claude_assistant/ask", json={"question": "q"})
     assert r.status_code == 400 and "cyber" in r.json()["detail"]
+
+
+def _fake_anthropic_raising(exc: Exception, at: str) -> types.ModuleType:
+    """The fake SDK, refusing with `exc` either when the client is built or
+    when the request is made."""
+    mod = _fake_anthropic({}, _claude_msg())
+    real = mod.Anthropic
+
+    def refuse(*a, **kw):
+        raise exc
+
+    def client(*a, **kw):
+        if at == "construct":
+            refuse()
+        c = real(*a, **kw)
+        c.beta.messages.stream = refuse
+        return c
+
+    mod.Anthropic = client
+    return mod
+
+
+@pytest.mark.parametrize("at", ["construct", "request"])
+def test_claude_with_no_credentials_at_all_says_where_to_put_a_key(claude_client, monkeypatch, at):
+    """No key anywhere is not a 401: the SDK refuses before sending, with a
+    TypeError from its header validation. That fell past the handler's
+    AuthenticationError mapping and reached the analyst as a 500 — the one
+    setup mistake the friendly message was written for."""
+    refusal = TypeError('"Could not resolve authentication method. Expected either api_key '
+                        'or auth_token to be set. Or for one of the `X-Api-Key` or '
+                        '`Authorization` headers to be explicitly omitted"')
+    monkeypatch.setitem(sys.modules, "anthropic", _fake_anthropic_raising(refusal, at))
+    monkeypatch.delenv("WINNOW_ANTHROPIC_API_KEY", raising=False)
+    r = claude_client.post("/api/plugin/claude_assistant/ask", json={"question": "q"})
+    assert r.status_code == 400 and "WINNOW_ANTHROPIC_API_KEY" in r.json()["detail"]
+
+
+def test_claude_an_unrelated_type_error_is_not_called_missing_credentials(claude_client, monkeypatch):
+    """The mapping above is keyed on what the SDK says, not on TypeError —
+    a bug in the plugin must still surface as one."""
+    bug = TypeError("stream() got an unexpected keyword argument 'fallbacks'")
+    monkeypatch.setitem(sys.modules, "anthropic", _fake_anthropic_raising(bug, "request"))
+    with pytest.raises(TypeError, match="fallbacks"):
+        claude_client.post("/api/plugin/claude_assistant/ask", json={"question": "q"})
 
 
 def test_claude_missing_sdk_is_actionable(claude_client, monkeypatch):

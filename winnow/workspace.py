@@ -373,6 +373,49 @@ class CaseRegistry:
             self._save(items)
 
 
+def _freeze(key) -> tuple:
+    return tuple(tuple(k) if isinstance(k, list) else k for k in key)
+
+
+def _seed_record(data: dict, shipped_version: int, keys: list[list]) -> set | None:
+    """Which shipped defaults this store has already been given, as frozen
+    keys — or None when there is nothing to do at all.
+
+    `seeded` is written by every seed from this release on. A file from
+    before it has only `seeded_version`, and what that version contained
+    can't be recovered, so two cases:
+
+    - already at the shipped version: everything shipped now is what it
+      was given — record that and add nothing (a write, once);
+    - behind it: the old present-by-identity rule decides this one bump
+      (an empty record here), and the record starts from it.
+
+    Recording at the current version is the case that matters: it means
+    the NEXT version bump, the one that would have resurrected deletes,
+    already has the record to go by."""
+    record = data.get("seeded")
+    at = data.get("seeded_version", 0)
+    if isinstance(record, list):
+        done = {_freeze(k) for k in record if isinstance(k, list)}
+        if at >= shipped_version and {_freeze(k) for k in keys} <= done:
+            return None
+        return done
+    if at >= shipped_version:
+        return {_freeze(k) for k in keys}
+    return set()
+
+
+def _merge_seed_record(data: dict, keys: list[list]) -> list:
+    record = data.get("seeded") if isinstance(data.get("seeded"), list) else []
+    seen = {_freeze(k) for k in record if isinstance(k, list)}
+    out = [k for k in record if isinstance(k, list)]
+    for k in keys:
+        if _freeze(k) not in seen:
+            out.append(k)
+            seen.add(_freeze(k))
+    return out
+
+
 class SavedFilters:
     """Cyclable, named filters — [ and ] in the grid. Every filter carries
     the column-name set it was built for (col_names), which is also what
@@ -386,11 +429,14 @@ class SavedFilters:
     def _load(self) -> list[dict]:
         return _read(self.FILE, {"filters": []})["filters"]
 
-    def _save(self, items: list[dict], seeded_version: int | None = None) -> None:
+    def _save(self, items: list[dict], seeded_version: int | None = None,
+              seeded: list | None = None) -> None:
         data = _read(self.FILE, {"filters": []})
         data["filters"] = items
         if seeded_version is not None:
             data["seeded_version"] = seeded_version
+        if seeded is not None:
+            data["seeded"] = seeded
         _write(self.FILE, data)
 
     def ensure_seeded(self) -> None:
@@ -400,26 +446,35 @@ class SavedFilters:
         HeaderNicknames.ensure_seeded, for the same reasons: lazy (called
         from the read path so a test's WORKSPACE_DIR monkeypatch is
         honored), and seeded rows become ordinary records afterward —
-        rename, edit, reorder, delete all stick. Identity for "already
-        present" is name + column set, matching import_all's merge rule, so
-        an analyst's edited copy of a default is never re-added beside
-        itself on a version bump."""
+        rename, edit, reorder, delete all stick.
+
+        A version bump adds only the defaults that are NEW: the file
+        records every default it has ever been given (`seeded`, name +
+        column set), and one already given is never offered again. Judging
+        that by what is *present* instead — the old rule — put back every
+        default the analyst had deleted, and re-added every one they had
+        renamed beside the renamed copy, the first time a release bumped
+        the version. See _seed_record for the one-off migration."""
         from . import defaults
 
         with _LOCK:
             data = _read(self.FILE, {"filters": []})
             shipped = defaults.filters()
-            if data.get("seeded_version", 0) >= shipped["version"]:
+            keys = [[name, list(cols)] for name, cols, _ in shipped["filters"]]
+            done = _seed_record(data, shipped["version"], keys)
+            if done is None:
                 return
             items = data["filters"]
             present = {(r["name"], tuple(r["col_names"])) for r in items}
             for name, cols, payload in shipped["filters"]:
-                if (name, tuple(cols)) in present:
+                key = (name, tuple(cols))
+                if key in done or key in present:
                     continue
                 items.append({"id": _next_id(items), "name": name,
                               "col_names": list(cols), "payload": payload,
                               "created_at": _now()})
-            self._save(items, seeded_version=shipped["version"])
+            self._save(items, seeded_version=max(shipped["version"], data.get("seeded_version", 0)),
+                       seeded=_merge_seed_record(data, keys))
 
     @staticmethod
     def _normalize_payload(rec: dict) -> bool:
@@ -549,11 +604,14 @@ class HeaderNicknames:
     def _load(self) -> list[dict]:
         return _read(self.FILE, {"nicknames": []})["nicknames"]
 
-    def _save(self, items: list[dict], seeded_version: int | None = None) -> None:
+    def _save(self, items: list[dict], seeded_version: int | None = None,
+              seeded: list | None = None) -> None:
         data = _read(self.FILE, {"nicknames": []})
         data["nicknames"] = items
         if seeded_version is not None:
             data["seeded_version"] = seeded_version
+        if seeded is not None:
+            data["seeded"] = seeded
         _write(self.FILE, data)
 
     def ensure_seeded(self) -> None:
@@ -566,25 +624,29 @@ class HeaderNicknames:
 
         Seeded records become ordinary rows — rename and delete stick,
         because after seeding nothing distinguishes them from records the
-        analyst created. Only header sets not already present are added,
-        so an analyst's own name for the EvtxECmd shape survives every
-        version bump."""
+        analyst created. Only header sets never seeded before and not
+        already present are added, so an analyst's own name for the
+        EvtxECmd shape survives every version bump, and so does their
+        deleting it (`seeded` is the record, see SavedFilters)."""
         from . import defaults
 
         with _LOCK:
             data = _read(self.FILE, {"nicknames": []})
             shipped = defaults.headers()
-            if data.get("seeded_version", 0) >= shipped["version"]:
+            keys = [[self._key(cols)] for _, cols in shipped["nicknames"]]
+            done = _seed_record(data, shipped["version"], keys)
+            if done is None:
                 return
             items = data["nicknames"]
             present = {tuple(r["col_names"]) for r in items}
             for nickname, cols in shipped["nicknames"]:
                 key = self._key(cols)
-                if tuple(key) in present:
+                if (tuple(key),) in done or tuple(key) in present:
                     continue
                 items.append({"id": _next_id(items), "col_names": key, "nickname": nickname})
                 present.add(tuple(key))
-            self._save(items, seeded_version=shipped["version"])
+            self._save(items, seeded_version=max(shipped["version"], data.get("seeded_version", 0)),
+                       seeded=_merge_seed_record(data, keys))
 
     @staticmethod
     def _key(col_names: list[str]) -> list[str]:

@@ -172,7 +172,11 @@ def register(api):              # REQUIRED
 
 `register(api)` is called once at load. Raise anything inside it and the
 plugin is recorded as failed (with your exception's message) and skipped
-— it never takes the server or other plugins down. The same is true of
+— it never takes the server or other plugins down. Skipped means all of
+it: whatever your `register()` had already registered before it raised
+(formats, routes, tabs, row actions, panels, dashboards) is taken back
+out, so a half-registered plugin can't keep working while the manager
+lists it as failed. The same is true of
 your module-level code, and of `SystemExit`: `sys.exit("needs Winnow
 2.0")` at import is recorded as a load error rather than exiting Winnow,
 so it is a safe way to refuse to run. It is not a *good* one — the

@@ -852,7 +852,9 @@ export async function openDirectoryImportModal(state = {}) {
       delBtn.onclick = async () => {
         const name = S.importProfiles.find((p) => p.id === st.profileId)?.name || 'this profile';
         if (!(await confirmDialog(`Delete the "${name}" profile?`, { danger: true, okLabel: 'Delete' }))) return;
-        await api(`/api/import_profiles/${st.profileId}`, { method: 'DELETE' });
+        try {
+          await api(`/api/import_profiles/${st.profileId}`, { method: 'DELETE' });
+        } catch (e) { toast(`Could not delete the "${name}" profile: ${e.message}`, 6000); return; }
         openDirectoryImportModal({ ...st, profileId: null });
       };
       profileRow.append(delBtn);
