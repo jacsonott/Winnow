@@ -197,6 +197,10 @@ see [docs/notes/README.md](README.md) for the whole set.
   strict all-stamped check silently produced 0 rows). `_apply_fixups`
   therefore distinguishes all-stamped (un-stamp), none-stamped (parse
   as-is), and mixed (genuinely torn → skip the record).
+  Its timestamps are `ft // 10` microseconds, never `ft / 10`: a 2024
+  FILETIME is past a float's exact range and `timedelta` rounds the
+  fraction, which turned `.9999999` into the next second's `.000000` —
+  the zeroed-subsecond timestomping tell, manufactured by the parser.
 
 - **The pivot example is the one that exercises `run_sql`'s edges**, and
   three of them bit during its build — worth knowing before writing

@@ -22,7 +22,12 @@ def filetime_to_iso(ft: int) -> str:
         return ""
     if ft < 0 or ft > _FILETIME_MAX:
         return f"<invalid filetime 0x{ft & 0xFFFFFFFFFFFFFFFF:016x}>"
-    return (_FILETIME_EPOCH + timedelta(microseconds=ft / 10)).strftime("%Y-%m-%d %H:%M:%S.%f")
+    # ft // 10, never ft / 10: a 2024 FILETIME is ~1.3e17 ticks, past what a
+    # float holds exactly, and timedelta ROUNDS a fractional microsecond —
+    # so .9999999 became the next second's .000000, which is the very
+    # zeroed-subsecond tell this column is kept at full precision to show.
+    # Truncated, as Winnow's own windows_filetime derived op does.
+    return (_FILETIME_EPOCH + timedelta(microseconds=ft // 10)).strftime("%Y-%m-%d %H:%M:%S.%f")
 
 
 def split_file_reference(ref: int) -> tuple[int, int]:
