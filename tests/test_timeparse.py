@@ -187,6 +187,18 @@ def test_mac_absolute_overlaps_unix_seconds():
     assert parse("unix_epoch", "700000000") == "1992-03-07 20:26:40"
 
 
+def test_mac_absolute_reads_dates_before_2001():
+    """Negative Cocoa time is before 2001 and inside the 1990 floor — a
+    1990s date in a plist or Photos store. It was refused outright. Zero
+    (the unset default) still is, and detection still scores negatives as
+    misses, so a column of -1 sentinels is not offered as Mac time."""
+    assert parse("mac_absolute", "-100000000") == "1997-10-31 14:13:20"
+    assert parse("mac_absolute", "-1.5") == "2000-12-31 23:59:58.500000"
+    assert parse("mac_absolute", "0") is None
+    assert parse("mac_absolute", "-400000000") is None          # 1988 — below the window
+    assert not [r for r in timeparse.detect(["-1", "-1", "-5"]) if r["op_id"] == "mac_absolute"]
+
+
 def test_excel_serial():
     assert parse("excel_serial", "45296") == "2024-01-05 00:00:00"
     assert parse("excel_serial", "45296.5") == "2024-01-05 12:00:00"
@@ -209,6 +221,18 @@ def test_apache_clf():
 def test_rfc2822():
     assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 -0700") == "2006-01-02 22:04:05"
     assert parse("rfc2822", "garbage") is None
+
+
+def test_rfc2822_obsolete_years_follow_the_rfc():
+    """RFC 5322 §4.3: a two-digit year is 19xx from 50 up and 20xx below;
+    three digits are 1900 + n. email.utils splits at 68 and keeps three
+    digits as written, so "55" read as 2055 — plausible, and wrong — and
+    "124" as year 124, refused."""
+    assert parse("rfc2822", "Wed, 02 Jan 124 15:04:05 GMT") == "2024-01-02 15:04:05"
+    assert parse("rfc2822", "Mon, 02 Jan 55 15:04:05 +0000") is None    # 1955, below the window
+    assert parse("rfc2822", "Mon, 02 Jan 95 15:04:05 +0000") == "1995-01-02 15:04:05"
+    assert parse("rfc2822", "Mon, 02 Jan 06 15:04:05 -0700") == "2006-01-02 22:04:05"
+    assert parse("rfc2822", "02 Jan 06 15:04 GMT") == "2006-01-02 15:04:00"
 
 
 def test_us_datetime_ampm_rules():

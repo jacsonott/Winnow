@@ -615,7 +615,12 @@ register_op({
 def _parse_mac(value: Any, params: dict, state: dict) -> str | None:
     s = str(value).strip()
     v = _finite(s)
-    if v is None or v <= 0:
+    # Negative is before 2001 and still inside the plausible window back to
+    # 1990 — a 1990s file or photo date in a plist or Photos store is a
+    # real value, and refusing it left a NULL in a column the analyst asked
+    # for. Zero stays refused: it is the unset default far more often than
+    # midnight on 2001-01-01.
+    if v is None or v == 0:
         return None
     try:
         dt = _MAC_EPOCH + timedelta(seconds=v)
@@ -626,12 +631,22 @@ def _parse_mac(value: Any, params: dict, state: dict) -> str | None:
     return _fmt(dt, subsecond="." in s)
 
 
+def _parse_mac_for_detect(value: Any, params: dict, state: dict) -> str | None:
+    # Detection still scores negatives as misses: a column of small negative
+    # integers is a -1 sentinel far more often than 1990s Cocoa time, and a
+    # post-import "this looks like Mac time" hint for it would be noise.
+    if str(value).strip().startswith("-"):
+        return None
+    return _parse_mac(value, params, state)
+
+
 register_op({
     "id": "mac_absolute",
     "label": "Mac absolute (Cocoa) time",
-    "description": "Seconds since 2001-01-01 UTC (macOS/iOS plists, sqlite stores). Overlaps the unix-seconds range — check the preview to pick the right one.",
+    "description": "Seconds since 2001-01-01 UTC (macOS/iOS plists, sqlite stores); negative for dates before 2001. Overlaps the unix-seconds range — check the preview to pick the right one.",
     "subsecond": True,
     "parse": _parse_mac,
+    "detect": _success_rate_detect({"parse": _parse_mac_for_detect}),
 })
 
 
@@ -717,9 +732,24 @@ register_op({
 })
 
 
+# RFC 5322 §4.3's obsolete years: two digits mean 19xx from 50 up and 20xx
+# below, three digits mean 1900 + n. email.utils splits two-digit years at
+# 68 (the POSIX strptime rule, not the RFC's) and keeps three digits as
+# written, so "Jan 55" came out 2055 — a plausible, wrong date — and
+# "Jan 124" year 124. The year is widened here before it gets there.
+_RFC2822_YEAR_RE = re.compile(r"^((?:[A-Za-z]{3},\s*)?\d{1,2}\s+[A-Za-z]{3,}\s+)(\d{2,3})(?=\s)")
+
+
+def _widen_rfc2822_year(m: re.Match) -> str:
+    y = int(m.group(2))
+    y += 1900 if len(m.group(2)) == 3 or y >= 50 else 2000
+    return f"{m.group(1)}{y:04d}"
+
+
 def _parse_rfc2822(value: Any, params: dict, state: dict) -> str | None:
     try:
-        dt = parsedate_to_datetime(str(value).strip())
+        text = _RFC2822_YEAR_RE.sub(_widen_rfc2822_year, str(value).strip(), count=1)
+        dt = parsedate_to_datetime(text)
     except (TypeError, ValueError, IndexError):
         return None
     if dt is None or not _plausible(dt):
