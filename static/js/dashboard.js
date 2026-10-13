@@ -23,6 +23,14 @@ import { dropdownMenu, modal, promptDialog, confirmDialog } from './ui.js';
 import { rebuildView } from './view.js';
 
 let widgets = [];   // the CURRENT board's widgets (the one with S.dashboardId)
+/* The board `widgets` was loaded from. Usually S.dashboardId, but not
+   between a click on another board and its widgets arriving: S.dashboardId
+   moves at the click, and for that moment the cards on screen — the ones a
+   drag or an edit acts on — are still the previous board's. Everything that
+   WRITES `widgets` back writes it here, never to S.dashboardId: persisting
+   to the newly clicked board is how one drag wrote board A's cards over
+   board B's own. */
+let widgetsBoard = null;
 let loadError = null;   // why they aren't here, if they aren't — an empty
                         // board and an unreachable server look identical
                         // otherwise, and one of them is alarming
@@ -132,18 +140,27 @@ export async function loadDashboards() {
   renderPageTabs();
 }
 
+/* Whether this load is still the one the screen wants — false when another
+   board was opened while it was in flight, and the caller must not paint.
+   The generation was always bumped here and never compared after the
+   await, so board A answering late replaced board B's widgets: B's name
+   over A's cards, and the next save wrote them into B. */
 async function loadWidgets(id) {
-  boardGen++;
+  const gen = ++boardGen;
   try {
     const d = await api(`/api/dashboards/${id}`);
+    if (gen !== boardGen) return false;
     widgets = d.widgets || [];
+    widgetsBoard = id;
     cache = d.cache || {};
     failedRuns.clear();
     showEmpties = false;
     loadError = null;
   }
   catch (e) {
+    if (gen !== boardGen) return false;
     widgets = [];
+    widgetsBoard = id;
     cache = {};
     failedRuns.clear();
     showEmpties = false;
@@ -153,18 +170,24 @@ async function loadWidgets(id) {
     // stops offering it rather than leaving a row that can't open.
     if (e.status === 404) { try { await loadDashboards(); } catch { /* offline */ } }
   }
+  return gen === boardGen;
 }
 
 async function persist() {
-  if (S.dashboardId == null) return;
+  // To the board these widgets came from (see widgetsBoard), and the ids
+  // handed back go onto the same array even if another board has loaded
+  // by the time they arrive.
+  const id = widgetsBoard;
+  const mine = widgets;
+  if (id == null) return;
   let saved;
-  try { saved = await post(`/api/dashboards/${S.dashboardId}`, { widgets }); }
+  try { saved = await post(`/api/dashboards/${id}`, { widgets: mine }); }
   catch (e) { toast('Could not save dashboard: ' + e.message, 6000); return; }
   // A widget added here has no id until the store mints one, and its
   // cached result is filed under that id — so take the ids back, or the
   // new card re-runs its query on every open for the rest of its life.
   for (const [i, sw] of ((saved && saved.widgets) || []).entries()) {
-    if (widgets[i] && !widgets[i].id && sw && sw.id) widgets[i].id = sw.id;
+    if (mine[i] && !mine[i].id && sw && sw.id) mine[i].id = sw.id;
   }
   // The sidebar's per-board count comes from the list endpoint, so it
   // showed 0 after the first widget until something else reloaded it.
@@ -180,7 +203,9 @@ export async function showDashboard(id) {
   showMainView('dashboardview');
   syncTabSelection();
   syncTabChrome();
-  await loadWidgets(id);
+  // Superseded: another board was opened while this one loaded, and that
+  // open paints. Painting here too would put this board's cards under it.
+  if (!(await loadWidgets(id))) return;
   render();
   // The sidebar carries the "which board am I looking at" highlight, and
   // it only moves when the sidebar is redrawn. Without this the highlight
@@ -464,7 +489,7 @@ export async function quickAddWidget(w) {
 }
 
 async function addWidgetTo(id, w) {
-  if (id === S.dashboardId && S.activeTab === 'dashboard') {
+  if (id === S.dashboardId && id === widgetsBoard && S.activeTab === 'dashboard') {
     widgets.push(w);
     await persist();
     render();
@@ -710,7 +735,7 @@ async function deleteDashboard(d) {
     if (wasShowing) {
       const other = (S.dashboards || [])[0];
       if (other) await showDashboard(other.id);
-      else { S.dashboardId = null; widgets = []; showGridTab(); }   // nothing left to show
+      else { S.dashboardId = null; widgets = []; widgetsBoard = null; showGridTab(); }   // nothing left to show
     }
   } catch (e) { toast('Could not delete dashboard: ' + e.message, 6000); }
 }
@@ -903,7 +928,7 @@ function renderBar() {
 export async function refreshBoard() {
   const grid = $('dashGrid');
   const cards = [...grid.querySelectorAll('.dash-card:not(.dash-add)')];
-  const id = S.dashboardId;
+  const id = widgetsBoard;   // the board these cards are, which is what a result is filed under
   const jobs = [];
   widgets.forEach((w, i) => {
     const body = cards[i] && cards[i].querySelector('.dash-widget-body');
@@ -1204,7 +1229,7 @@ function card(w, i) {
   // it owns the body in that case, and its answer decides whether this
   // card is on the layout at all. Same order everywhere a card is painted.
   if (hit && !noteEmpty(w, c, hit.payload, null)) paintWidget(w, body, hit.payload);
-  if (!hit || w.live) runWidget(w, body, { boardId: S.dashboardId, quiet: !!hit });
+  if (!hit || w.live) runWidget(w, body, { boardId: widgetsBoard, quiet: !!hit });
   return c;
 }
 
@@ -1820,6 +1845,7 @@ export function wireDashboard() {
 // the old case landing in the new one's cache (see boardGen).
 export function resetDashboard() {
   widgets = [];
+  widgetsBoard = null;
   cache = {};
   boardGen++;
   S.dashboardId = null;
