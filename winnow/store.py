@@ -1807,7 +1807,7 @@ class Store:
         # changed. Scratch, not evidence — it lives in the views database
         # (invariant #3) and dies with the process, same as a view.
         self._undo: list[dict] = []
-        self._maxlen_cache: dict[int, tuple[int, dict[str, int]]] = {}
+        self._maxlen_cache: dict[int, tuple[tuple, dict[str, int]]] = {}
         self._fts_threads: dict[int, threading.Thread] = {}
         self._index_threads: dict[tuple[int, str], threading.Thread] = {}
         # Caps how many trigram builds run at once. A broad action — a
@@ -8161,15 +8161,22 @@ class Store:
         UI's autofit-column-width shortcut. One sequential scan per member
         table, every column computed in a single pass.
 
-        Cached per source, invalidated by row_count changing — a full scan
-        over every column of a 10M-row source isn't cheap, and autofit is a
-        button a user can click repeatedly (once per column double-click,
-        plus a "fit all" action) without the underlying data changing at
-        all between clicks."""
+        Cached per source — a full scan over every column of a 10M-row
+        source isn't cheap, and autofit is a button a user can click
+        repeatedly (once per column double-click, plus a "fit all" action)
+        without the underlying data changing at all between clicks. Keyed
+        on the row count AND the column list, derived columns' id and
+        status included: base columns never change after ingest
+        (invariant #1), but a derived column comes and goes, and fills in
+        behind a backfill, without the row count moving — keyed on rows
+        alone, the answer after one was added simply lacked it."""
         with self._reader() as ro, self._dropped_view_is_expired():
             src = self._source_lite_on(ro, source_id)
+            key = (src["row_count"],
+                   tuple((c["name"], c.get("derived_id"), c.get("derived_status"))
+                         for c in src["columns"]))
             cached = self._maxlen_cache.get(source_id)
-            if cached and cached[0] == src["row_count"]:
+            if cached and cached[0] == key:
                 return cached[1]
             self._require_columns(src)
             cols = [c["name"] for c in src["columns"]]
@@ -8182,7 +8189,7 @@ class Store:
                     if v and v > maxes[i]:
                         maxes[i] = v
         result = {c: maxes[i] for i, c in enumerate(cols)}
-        self._maxlen_cache[source_id] = (src["row_count"], result)
+        self._maxlen_cache[source_id] = (key, result)
         return result
 
     # -------------------------------------------------------------------- tags
