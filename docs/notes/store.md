@@ -306,6 +306,32 @@ see [docs/notes/README.md](README.md) for the whole set.
   by `name.lower()` alone while copy and diff matched exactly, so reloading
   your own session moved rows between the two and the diff said nothing
   had changed.
+- **A session re-imports a missing table the way it was imported, from
+  the file it was recorded against, or not at all.** Its tags name rows
+  by rid, so a re-import is only any use if it produces the same rows in
+  the same order. Every reader records itself and the options that shape
+  its rows in `sources.ingest` (`_ingest_record`: the CSV delimiter
+  actually used and `has_header`, the SQLite table and its converted
+  timestamp columns, the sheet, the JSON flatten settings; `rows` for
+  `ingest_rows`, which nothing can re-run), and `export_session` carries
+  it. `import_case_session` used to re-parse every missing table as a
+  default CSV — a headerless CSV gained a header and every tag slid a
+  row, a JSONL file came back as one column, and `warnings` was empty.
+  Then, for every table a session is applied to, re-imported or already
+  open: the row count and imported columns must be the session's
+  (`_session_shape_mismatch`), or nothing is applied — the same file
+  opened with a header the session's copy didn't have is the same hash
+  with every rid on another row. A session from before `ingest` existed
+  gets the extension's reader as a guess and that same check behind it;
+  a mis-guessed copy is dropped again. And the path is a claim from a
+  file somebody else may have written (`_reimport_session_source`): a
+  UNC/device path is refused on its shape before anything touches it
+  (on Windows, `isfile` alone would offer the host the analyst's
+  credentials), a relative one too, and the file is fingerprinted against
+  the session's `file_hash` *before* anything is ingested — a changed
+  file at the recorded path used to be imported and tagged with only a
+  toast. The single-table `import_session` keeps its warn-and-apply: an
+  analyst picked that table on purpose.
 - `search_all_sources` runs each source's count on a `_reader()`
   connection — the sweep never touches `self.lock` at all now (it used to
   take it per source's count, which still stalled a concurrent request for

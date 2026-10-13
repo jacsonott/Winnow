@@ -163,7 +163,8 @@ CREATE TABLE IF NOT EXISTS sources (
     has_fts     INTEGER NOT NULL DEFAULT 0,
     nickname    TEXT,                   -- analyst display name; `name` stays the imported file's identity
     origin      TEXT,                   -- NULL = an imported file; 'sql' = saved from the SQL pane; 'subset' = saved from a view/selection
-    origin_meta TEXT                    -- json, per origin: {sql} / {parent_source_id, parent_name, spec, ...} — see save_view_as_source
+    origin_meta TEXT,                   -- json, per origin: {sql} / {parent_source_id, parent_name, spec, ...} — see save_view_as_source
+    ingest      TEXT                    -- json: how the file was read, {kind, ...options} — what a session re-imports with
 );
 CREATE TABLE IF NOT EXISTS tag_defs (
     id     INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -819,6 +820,28 @@ def sanitize_columns(raw: list[str]) -> list[str]:
         used.add(clean.lower())
         out.append(clean)
     return out
+
+
+def _ingest_record(kind: str, **options) -> str:
+    """sources.ingest for a table read from a file: which reader, and every
+    option that decides which rows and columns it produced. It is what a
+    session load re-imports a missing table with (import_case_session) —
+    a session names rows by rid, so the re-import has to produce the same
+    rows in the same order, and the defaults do not (a headerless CSV
+    gains a header and every rid slides by one). `kind` names a Store
+    reader: csv, text, json, sqlite, xlsx, plaso — or rows, for a table
+    produced in-process (a plugin's parser, a SQL save), which nothing
+    here can re-run."""
+    return json.dumps({"kind": kind, **{k: v for k, v in options.items() if v is not None}})
+
+
+def _is_network_path(path: str) -> bool:
+    r"""A UNC or device path (\\host\share, //host/share, \\?\UNC\...).
+    On Windows, even asking whether one exists connects to the host and
+    offers it the analyst's credentials — so a path that came out of a
+    file someone else wrote is refused on its shape, before anything
+    touches the filesystem. Windows treats / and \ alike, hence either."""
+    return len(path) >= 2 and path[0] in "\\/" and path[1] in "\\/"
 
 
 def pair_tag_names(incoming: Iterable[str], local: Iterable[str]) -> dict[str, str]:
@@ -1633,8 +1656,11 @@ class Store:
             # ...and sources.origin / origin_meta (where a derived table came
             # from — a SQL-pane save, a saved view or selection). NULL reads
             # as "an imported file", which every pre-existing row is.
+            # ...and sources.ingest (how the file was parsed; NULL on a
+            # table from before it was recorded, which session re-import
+            # treats as "guess, then check the shape").
             have = {r[1] for r in self.db.execute("PRAGMA table_info(sources)")}
-            for col in ("origin", "origin_meta"):
+            for col in ("origin", "origin_meta", "ingest"):
                 if col not in have:
                     self.db.execute(f"ALTER TABLE sources ADD COLUMN {col} TEXT")
             # Same for dashboards.pinned (a board promoted into the page strip).
@@ -2836,10 +2862,14 @@ class Store:
 
         with self.lock, self.db:
             cur = self.db.execute(
-                "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at)"
-                " VALUES (?,?,?,?,?,?)",
+                "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at, ingest)"
+                " VALUES (?,?,?,?,?,?,?)",
                 (name, os.path.abspath(path), "", "[]", file_hash,
-                 time.strftime("%Y-%m-%dT%H:%M:%S")),
+                 time.strftime("%Y-%m-%dT%H:%M:%S"),
+                 # The delimiter actually used, not the None that asked for
+                 # a sniff: a re-import must split the same way.
+                 _ingest_record("csv", delimiter=delimiter, has_header=has_header,
+                                column_types=column_types)),
             )
             source_id = cur.lastrowid
             self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
@@ -3009,10 +3039,11 @@ class Store:
         cols = [TEXT_COLUMN]
         with self.lock, self.db:
             cur = self.db.execute(
-                "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at)"
-                " VALUES (?,?,?,?,?,?)",
+                "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at, ingest)"
+                " VALUES (?,?,?,?,?,?,?)",
                 (name, os.path.abspath(path), "", "[]", file_hash,
-                 time.strftime("%Y-%m-%dT%H:%M:%S")),
+                 time.strftime("%Y-%m-%dT%H:%M:%S"),
+                 _ingest_record("text")),
             )
             source_id = cur.lastrowid
             self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
@@ -3225,9 +3256,10 @@ class Store:
 
             with self.lock, self.db:
                 cur = self.db.execute(
-                    "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at)"
-                    " VALUES (?,?,?,?,?,?)",
-                    (name, os.path.abspath(path), "", "[]", file_hash, time.strftime("%Y-%m-%dT%H:%M:%S")),
+                    "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at, ingest)"
+                    " VALUES (?,?,?,?,?,?,?)",
+                    (name, os.path.abspath(path), "", "[]", file_hash, time.strftime("%Y-%m-%dT%H:%M:%S"),
+                     _ingest_record("sqlite", table=table_name, timestamp_columns=sorted(timestamp_columns))),
                 )
                 source_id = cur.lastrowid
                 self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
@@ -3325,9 +3357,10 @@ class Store:
         ncols = len(cols)
         with self.lock, self.db:
             cur = self.db.execute(
-                "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at)"
-                " VALUES (?,?,?,?,?,?)",
-                (name, os.path.abspath(path), "", "[]", file_hash, time.strftime("%Y-%m-%dT%H:%M:%S")),
+                "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at, ingest)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (name, os.path.abspath(path), "", "[]", file_hash, time.strftime("%Y-%m-%dT%H:%M:%S"),
+                 _ingest_record("plaso")),
             )
             source_id = cur.lastrowid
             self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
@@ -3439,9 +3472,10 @@ class Store:
 
             with self.lock, self.db:
                 cur = self.db.execute(
-                    "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at)"
-                    " VALUES (?,?,?,?,?,?)",
-                    (name, os.path.abspath(path), "", "[]", file_hash, time.strftime("%Y-%m-%dT%H:%M:%S")),
+                    "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at, ingest)"
+                    " VALUES (?,?,?,?,?,?,?)",
+                    (name, os.path.abspath(path), "", "[]", file_hash, time.strftime("%Y-%m-%dT%H:%M:%S"),
+                     _ingest_record("xlsx", sheet=sheet_name)),
                 )
                 source_id = cur.lastrowid
                 self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
@@ -3610,9 +3644,10 @@ class Store:
 
         with self.lock, self.db:
             cur = self.db.execute(
-                "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at)"
-                " VALUES (?,?,?,?,?,?)",
-                (name, os.path.abspath(path), "", "[]", file_hash, time.strftime("%Y-%m-%dT%H:%M:%S")),
+                "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at, ingest)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (name, os.path.abspath(path), "", "[]", file_hash, time.strftime("%Y-%m-%dT%H:%M:%S"),
+                 _ingest_record("json", flatten_mode=flatten_mode, flatten_depth=flatten_depth)),
             )
             source_id = cur.lastrowid
             self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
@@ -3693,7 +3728,8 @@ class Store:
 
     def _create_source_shell(self, name: str, cols: list[str], *, path: str | None = None,
                              file_hash: str | None = None, origin: str | None = None,
-                             origin_meta: dict | None = None) -> tuple[int, str]:
+                             origin_meta: dict | None = None,
+                             ingest: str | None = None) -> tuple[int, str]:
         """The sources row, its open tab and an empty src_<id> for a table
         about to be filled — one short transaction, so the id and the table
         exist together or not at all. Shared by ingest_rows and
@@ -3703,11 +3739,11 @@ class Store:
         importing". Returns (source_id, table_name)."""
         with self.lock, self.db:
             cur = self.db.execute(
-                "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at, origin, origin_meta)"
-                " VALUES (?,?,?,?,?,?,?,?)",
+                "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at,"
+                " origin, origin_meta, ingest) VALUES (?,?,?,?,?,?,?,?,?)",
                 (name, os.path.abspath(path) if path else None, "", "[]", file_hash,
                  time.strftime("%Y-%m-%dT%H:%M:%S"), origin,
-                 json.dumps(origin_meta) if origin_meta is not None else None),
+                 json.dumps(origin_meta) if origin_meta is not None else None, ingest),
             )
             source_id = cur.lastrowid
             self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
@@ -3757,7 +3793,8 @@ class Store:
         file_hash = self._quick_hash(path) if path and os.path.isfile(path) else None
 
         source_id, table = self._create_source_shell(
-            name, cols, path=path, file_hash=file_hash, origin=origin, origin_meta=origin_meta)
+            name, cols, path=path, file_hash=file_hash, origin=origin, origin_meta=origin_meta,
+            ingest=_ingest_record("rows"))
 
         placeholders = ",".join("?" * ncols)
         insert = f"INSERT INTO {q(table)} ({','.join(q(c) for c in cols)}) VALUES ({placeholders})"
@@ -4719,11 +4756,12 @@ class Store:
         # tab titles, copy_sources_to's remap) wants the object. Tolerant
         # of a row from a case whose migration somehow left it unparseable —
         # provenance is a label, never worth failing a source listing over.
-        raw = d.get("origin_meta")
-        try:
-            d["origin_meta"] = json.loads(raw) if raw else None
-        except (TypeError, ValueError):
-            d["origin_meta"] = None
+        for key in ("origin_meta", "ingest"):
+            raw = d.get(key)
+            try:
+                d[key] = json.loads(raw) if raw else None
+            except (TypeError, ValueError):
+                d[key] = None
         d.setdefault("origin", None)
         return d
 
@@ -10978,6 +11016,10 @@ class Store:
                 # exporting analyst happened to add isn't part of the
                 # evidence's shape.
                 "columns": self._base_cols(src),
+                # How it was read, so a case without it open can re-import
+                # it into the same rids (import_case_session). Absent from
+                # sessions saved before it was recorded.
+                "ingest": src.get("ingest"),
             },
             "tag_defs": tags,
             "row_tags": rt,
@@ -11094,9 +11136,18 @@ class Store:
     def import_case_session(self, session: dict, merge: bool = True) -> dict:
         """Reattaches each source session by file_hash to whatever's already
         open; if a source isn't open but its original file still exists at
-        the recorded path, re-imports it first. Local single-user tool with
-        full filesystem access already (same trust level as --open), so this
-        is the one action that can fully reconstruct a case from a session."""
+        the recorded path, re-imports it first — the way it was imported
+        (_reimport_session_source). Local single-user tool with full
+        filesystem access already (same trust level as --open), so this is
+        the one action that can fully reconstruct a case from a session.
+
+        A session's tags name rows by rid, so they are only applied to a
+        table holding the rows the session was recorded against: one with
+        the row count and columns the session recorded
+        (_session_shape_mismatch). Anything else is skipped with a warning
+        rather than tagged — the same file imported with other options has
+        every rid on a different row, and nothing about the tags would
+        show it."""
         warnings: list[str] = []
         tags_applied = 0
         sources_restored = 0
@@ -11105,23 +11156,34 @@ class Store:
 
         for src_session in session.get("sources", []):
             s_meta = src_session.get("source", {})
+            label = s_meta.get("name") or s_meta.get("path") or "unknown"
             source_id = by_hash.get(s_meta.get("file_hash"))
+            reimported = False
             if source_id is None:
-                path = s_meta.get("path")
-                if path and os.path.isfile(path):
-                    try:
-                        rec = self.ingest_csv(path, name=s_meta.get("name"))
-                        source_id = rec["id"]
-                        sources_reimported += 1
-                    except Exception as e:
-                        warnings.append(f"Could not re-import {s_meta.get('name', path)}: {e}")
-                        continue
+                source_id, why = self._reimport_session_source(s_meta)
+                if source_id is None:
+                    warnings.append(why)
+                    continue
+                reimported = True
+            mismatch = self._session_shape_mismatch(self.get_source(source_id), s_meta)
+            if mismatch:
+                if reimported:
+                    # Read the right file the wrong way (a session from
+                    # before the reader was recorded, guessed from the
+                    # extension): the copy is no use to anyone.
+                    self.drop_source(source_id)
+                    warnings.append(
+                        f"'{label}' was re-imported from {s_meta.get('path')} but came out "
+                        f"different from the session's copy ({mismatch}) — removed again, "
+                        "its tags and notes not applied")
                 else:
                     warnings.append(
-                        f"'{s_meta.get('name', 'unknown')}' isn't open and its original file "
-                        f"wasn't found at {path or 'an unknown path'} — skipped"
-                    )
-                    continue
+                        f"'{label}' is open, but not as the session's copy was imported "
+                        f"({mismatch}) — its tags and notes would land on other rows, so "
+                        "they were not applied")
+                continue
+            if reimported:
+                sources_reimported += 1
             res = self.import_session(source_id, src_session, merge=merge)
             warnings.extend(res["warnings"])
             tags_applied += res["tags_applied"]
@@ -11133,6 +11195,109 @@ class Store:
             "sources_restored": sources_restored,
             "sources_reimported": sources_reimported,
         }
+
+    _SESSION_READERS = ("csv", "text", "json", "sqlite", "xlsx", "plaso")
+
+    def _reimport_session_source(self, s_meta: dict) -> tuple[int | None, str | None]:
+        """(source_id, None) after re-importing a session source from its
+        recorded path, or (None, why it was not).
+
+        The path came out of a session document, which is often a file
+        another analyst sent — so it is treated as a claim to check, not a
+        place to read from: a network path is refused before anything
+        touches it (_is_network_path), only a regular file at an absolute
+        path is considered, and the file is fingerprinted and compared with
+        the session's file_hash BEFORE it is ingested. Nothing but the
+        evidence the session was recorded against is ever read into the
+        case.
+
+        The reader and its options are the ones the table was imported
+        with (sources.ingest, carried in the session). A session saved
+        before that was recorded gets the reader the import queue would
+        pick for the extension — a guess, which the caller checks against
+        the shape the session did record."""
+        label = s_meta.get("name") or s_meta.get("path") or "unknown"
+        path = s_meta.get("path")
+        if not path:
+            return None, f"'{label}' isn't open and the session doesn't say which file it came from — skipped"
+        if _is_network_path(path) or not os.path.isabs(path):
+            return None, (f"'{label}' isn't open, and the session names {path} for it — not a local "
+                          "file path, so Winnow did not look at it. Open the file yourself, then load "
+                          "the session again.")
+        if not os.path.isfile(path):
+            return None, f"'{label}' isn't open and its original file wasn't found at {path} — skipped"
+        want = s_meta.get("file_hash")
+        how = s_meta.get("ingest") or self._guess_session_reader(path)
+        kind = how.get("kind") if isinstance(how, dict) else None
+        if kind not in self._SESSION_READERS:
+            why = ("was produced by a plugin or saved from another table"
+                   if kind == "rows" else "has no record of how it was read")
+            return None, (f"'{label}' isn't open, and it {why}, so Winnow can't re-import it from "
+                          f"{path}. Open it yourself, then load the session again.")
+        try:
+            have = self._quick_hash(path)
+        except OSError as e:
+            return None, f"Could not re-import '{label}': {e}"
+        if not want or have != want:
+            return None, (f"'{label}' isn't open, and {path} is not the file the session was "
+                          "recorded against (it has changed, or it is a different file) — not "
+                          "imported, its tags and notes not applied")
+        name = s_meta.get("name")
+        try:
+            if kind == "csv":
+                rec = self.ingest_csv(path, name=name, delimiter=how.get("delimiter"),
+                                      has_header=how.get("has_header", True),
+                                      column_types=how.get("column_types"))
+            elif kind == "text":
+                rec = self.ingest_text(path, name=name)
+            elif kind == "json":
+                rec = self.ingest_json(path, name=name, flatten_mode=how.get("flatten_mode", "none"),
+                                       flatten_depth=how.get("flatten_depth", 0))
+            elif kind == "sqlite":
+                rec = self.ingest_sqlite_table(path, how["table"], name=name,
+                                               timestamp_columns=how.get("timestamp_columns"))
+            elif kind == "xlsx":
+                rec = self.ingest_xlsx_sheet(path, how["sheet"], name=name)
+            else:
+                rec = self.ingest_plaso(path, name=name)
+        except Exception as e:
+            return None, f"Could not re-import '{label}': {e}"
+        if rec.get("file_hash") != want:
+            # Changed between the check and the read.
+            self.drop_source(rec["id"])
+            return None, f"'{label}' changed on disk while it was being re-imported — removed again"
+        return rec["id"], None
+
+    @staticmethod
+    def _guess_session_reader(path: str) -> dict:
+        """The reader the import queue would choose for this extension
+        (server._ingest_kind_for_path, minus plugins), for a session saved
+        before sources.ingest existed. A SQLite file or workbook holds
+        several tables and the old session didn't say which, so those get
+        no guess at all."""
+        ext = os.path.splitext(path)[1].lower()
+        if ext in SQLITE_IMPORT_EXTENSIONS or ext in XLSX_IMPORT_EXTENSIONS:
+            return {}
+        if ext in PLASO_IMPORT_EXTENSIONS:
+            return {"kind": "plaso"}
+        if ext in (".json", ".jsonl", ".ndjson"):
+            return {"kind": "json"}
+        return {"kind": "csv" if ext in DEFAULT_IMPORT_EXTENSIONS else "text"}
+
+    @classmethod
+    def _session_shape_mismatch(cls, src: dict, s_meta: dict) -> str | None:
+        """Why `src` does not hold the rows a session source was recorded
+        against, or None if it does — the same number of rows under the
+        same imported columns. A session from before either was recorded
+        can't be checked on that count and passes it."""
+        want_rows = s_meta.get("row_count")
+        if want_rows is not None and want_rows != src["row_count"]:
+            return f"{want_rows:,} rows in the session, {src['row_count']:,} here"
+        want_cols = [c.get("name") for c in s_meta.get("columns") or []]
+        have_cols = [c["name"] for c in cls._base_cols(src)]
+        if want_cols and want_cols != have_cols:
+            return "different columns"
+        return None
 
     _SESSION_NAME_RE = re.compile(r"[^A-Za-z0-9_ -]")
 
@@ -11219,7 +11384,7 @@ class Store:
                 tag_map = t._map_tags_by_name(tag_defs)
                 shared_cols = [c for c in ("name", "path", "table_name", "row_count",
                                            "columns", "file_hash", "imported_at", "nickname",
-                                           "origin", "origin_meta")]
+                                           "origin", "origin_meta", "ingest")]
                 for sid in source_ids:
                     src = src_rows[sid]
                     cur = t.db.execute(
