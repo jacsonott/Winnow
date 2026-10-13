@@ -85,6 +85,18 @@ see [docs/notes/README.md](README.md) for the whole set.
   `Store.close()` on both the case-switch path and the legacy-preset
   migration, so "same path" alone is not "already open" and short-cutting
   there serves rows off a closed connection.
+- **Every route that replaces `STORE` holds `_CASE_SWITCH` for the whole
+  swap** — case open, the quick-look save-as and discard, the association
+  open (each is a thin wrapper around a private `_case_open` & co.). A
+  double-click on a case card is two `/api/case/open` POSTs on two worker
+  threads; unserialised, both read the same `old` and both opened, and the
+  Store whose assignment lost was never closed — its lock held for the
+  life of the process, so the case read as "open in another Winnow"
+  naming this one — and on one path both passed the already-open check
+  and the case got two writer Stores. A new route that swaps `STORE` takes
+  the lock too. The client has its own guard (`openCase` hands a second
+  call the in-flight one's promise), but the server cannot rely on it: two
+  windows, or a script, race just the same. `tests/test_case_lock.py`.
 - Static assets (`/`, `/static/*`) get an explicit `Cache-Control: no-cache`
   from a middleware in server.py — FastAPI's `StaticFiles` only sends
   `ETag`/`Last-Modified`, and without an explicit `Cache-Control` the

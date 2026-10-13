@@ -105,7 +105,21 @@ export function describeCaseHolder(holder) {
     + 'at all and the file can be corrupted.';
 }
 
-export async function openCase(path, opts = {}) {
+/* One case switch at a time from this page. A double-click on a case card
+   is two clicks, and each used to start its own open: two POSTs racing on
+   the server (which serialises them now — see _CASE_SWITCH in server.py),
+   then two state resets and two loadSources interleaving here. A second
+   call while one is in flight gets the first one's promise instead —
+   whichever case was asked for first is the one that opens. */
+let caseOpening = null;
+
+export function openCase(path, opts = {}) {
+  if (caseOpening) return caseOpening;
+  caseOpening = openCaseNow(path, opts).finally(() => { caseOpening = null; });
+  return caseOpening;
+}
+
+export async function openCaseNow(path, opts = {}) {
   // A note save still inside its 500 ms debounce fires after the server
   // has swapped stores, and /api/note writes into whichever store is
   // current — the previous case's {source_id, rid} landing on an unrelated
@@ -130,7 +144,9 @@ export async function openCase(path, opts = {}) {
         okLabel: 'Open anyway', cancelLabel: 'Don\u2019t open', danger: true,
       });
       if (!go) return;
-      return openCase(path, { force: true });
+      // Straight to the worker: this IS the in-flight open, still holding
+      // the guard above, so going through openCase would get itself back.
+      return openCaseNow(path, { force: true });
     }
     toast('Could not open case: ' + e.message, 6000);
     return;

@@ -22,6 +22,7 @@ import socket
 import sqlite3
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -238,6 +239,21 @@ async def _lifespan(_app: FastAPI):
 
 app = FastAPI(title="Winnow", lifespan=_lifespan)
 STORE: Store | None = None
+
+# Held by every route that replaces STORE (case open, the quick-look
+# save-as and discard, the association open) for the whole of the swap —
+# the routes are thin wrappers that take it around the real work. Each swap
+# is a read of STORE, a Store opened or closed, and a write of STORE, and
+# two of them interleaving is ordinary: a double-click on a case card is two
+# POSTs to /api/case/open, and sync routes run on parallel worker threads.
+# Unserialised, both read the same `old` and both open; the Store whose
+# assignment lost was never closed, its flock and heartbeat held for the
+# life of the process, so that case then read as "open in another Winnow" —
+# naming this one. On one path it was worse: both requests passed the
+# already-open check, and the case got two writer Stores. Serialised, the
+# second request sees what the first left, which for the same path is the
+# already-open no-op.
+_CASE_SWITCH = threading.Lock()
 
 # ---------------------------------------------------------------- plugins
 
@@ -1050,6 +1066,11 @@ def api_shutdown():
 
 @app.post("/api/case/open")
 def api_case_open(body: CaseOpen):
+    with _CASE_SWITCH:
+        return _case_open(body)
+
+
+def _case_open(body: CaseOpen):
     global STORE
     if not os.path.isfile(body.path):
         raise HTTPException(400, f"No case file at {body.path}")
@@ -1175,6 +1196,11 @@ class AssocOpenBody(BaseModel):
 
 @app.post("/api/assoc/open")
 def api_assoc_open(request: Request, body: AssocOpenBody):
+    with _CASE_SWITCH:
+        return _assoc_open(request, body)
+
+
+def _assoc_open(request: Request, body: AssocOpenBody):
     """A file-association launch landing on an already-running server.
 
     Loopback-only: it creates cases and ingests files by path, both
@@ -1443,6 +1469,11 @@ class CaseSaveAsBody(BaseModel):
 
 @app.post("/api/case/save_as")
 def api_case_save_as(body: CaseSaveAsBody):
+    with _CASE_SWITCH:
+        return _case_save_as(body)
+
+
+def _case_save_as(body: CaseSaveAsBody):
     """Promote the open quick-look case to a real one: move the file out of
     quicklook/, register it on the home screen under the given name.
 
@@ -1494,6 +1525,11 @@ def api_case_save_as(body: CaseSaveAsBody):
 
 @app.post("/api/case/discard")
 def api_case_discard():
+    with _CASE_SWITCH:
+        return _case_discard()
+
+
+def _case_discard():
     """Throw a quick-look case away. Refused for real cases — deleting
     those goes through the home screen, where it says what it is doing."""
     global STORE

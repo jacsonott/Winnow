@@ -80,3 +80,38 @@ def test_fresh_origin_adopts_the_machine_s_saved_look(browser, server):
         restore = before.get("appearance") or {"style": "harvest", "themeMode": "dark",
                                                 "accent": "#d9a441", "accentCustomized": False, "splash": False}
         _post(server, "/api/settings/app", {"appearance": restore})
+
+
+def test_double_clicking_a_case_card_opens_it_once(page):
+    """A double-click on a case card is two clicks, and each one used to
+    POST /api/case/open: two opens racing on the server (which left a
+    Store open behind the switch, and the case reading as "open in another
+    Winnow") and two state resets interleaving here. The open is held in
+    flight until the second click has landed, so the second click cannot
+    miss the first by being slower than the server."""
+    page.evaluate("() => { __winnow.showHome(); return __winnow.refreshCases(); }")
+    path = page.evaluate("() => fetch('/api/case/current').then((r) => r.json()).then((c) => c.path)")
+    card = page.locator("#home .home-case-row", has_text=path).locator(".home-case-main")
+    card.wait_for()
+    held = []
+    page.route("**/api/case/open", lambda route: held.append(route))
+    try:
+        card.dblclick()
+        deadline = 20
+        while not held and deadline:
+            page.wait_for_timeout(50)
+            deadline -= 1
+        assert len(held) == 1
+        # A second POST from the second click would arrive within moments;
+        # give it a generous window to show up rather than looking once.
+        page.wait_for_timeout(500)
+        assert len(held) == 1, f"{len(held)} opens for one double-click"
+    finally:
+        # Released before unrouting: unroute settles a still-held route
+        # itself, and continuing it afterwards is an error.
+        for r in held:
+            r.continue_()
+        page.unroute("**/api/case/open")
+    page.wait_for_selector("#app:not([hidden])")
+    page.wait_for_function("() => __winnow.S.view")
+    page.wait_for_selector(".row")
