@@ -389,6 +389,187 @@ def test_rollback_without_a_backup_is_a_clear_message(install):
         updater.rollback(install)
 
 
+# ------------------------------------------------- what PROTECTED covers
+
+ROOT = Path(__file__).resolve().parent.parent
+
+# One sample per user-state pattern in .gitignore, at the depth .gitignore
+# matches it: a pattern with no slash but a trailing one (`cases/`,
+# `__pycache__/`) matches a directory of that name ANYWHERE, so nested
+# samples are the ones that catch a root-only implementation.
+USER_STATE_SAMPLES = [
+    "case.db-winnow", "case.db-winnow-wal", "case.db-winnow-shm",
+    "cases/nested/x.db-winnow", "evidence/host1.db-winnow-wal",
+    "case.db", "case.db-wal", "case.db-shm", "case.db-winnow.winnow-lock",
+    "evidence.csv", "triage/out.tsv", "notes/x.winnow_case.json",
+    "winnow/__pycache__/store.cpython-313.pyc", "winnow/stray.pyc",
+    "examples/cases/x.json", "examples/sessions/s.json", "tools/workspace/prefs.json",
+    "venv/lib/x.py", ".venv/bin/python", "sub/.venv/x",
+    "workspace/cases.json", "plugins/my_parser.py", "plugins/pkg/__init__.py",
+    "sessions/a.json", "bench/.cache/fixture.csv", "bench/baselines/b.json",
+    ".winnow-backup/0.3.0-x/restore.json", ".winnow-install.json",
+]
+
+
+@pytest.mark.parametrize("rel", USER_STATE_SAMPLES)
+def test_protected_mirrors_gitignore(rel):
+    """CLAUDE.md: PROTECTED mirrors .gitignore's user-state section. It
+    didn't — case files are `.db-winnow`, which the `.db` suffix never
+    matched, so a malformed archive carrying `case.db-winnow` emptied the
+    analyst's case. Asked of git itself, so a sample that stops being user
+    state per .gitignore fails here rather than silently going unchecked."""
+    import subprocess
+    ignored = subprocess.run(["git", "check-ignore", "-q", "--no-index", rel],
+                             cwd=ROOT).returncode == 0
+    assert ignored, f"{rel} is not user state per .gitignore — fix the sample"
+    assert updater._is_protected(rel), f"{rel} is ignored by git but an update may write it"
+
+
+def test_no_shipped_file_is_protected_or_refused():
+    """The other direction: anything PROTECTED covers, an update never
+    delivers. A shipped file caught by a pattern would stay at whatever
+    version first installed it, forever, with no error anywhere — and one
+    _safe_member refuses (a `:` in its name) would refuse every release."""
+    import subprocess
+    tracked = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True,
+                             text=True, check=True).stdout.splitlines()
+    caught = [f for f in tracked if updater._is_protected(f)]
+    assert caught == [], f"shipped files an update could never write: {caught}"
+    refused = [f for f in tracked if not updater._safe_member(f)]
+    assert refused == [], f"files that would make every release archive refused: {refused}"
+
+
+@pytest.mark.parametrize("rel", [
+    "Workspace/cases.json", "PLUGINS/foo/__init__.py", "CASE.DB", "Case.DB-Winnow",
+    "Cases/x.json", "Evidence.CSV", ".Winnow-Backup/x/restore.json",
+])
+def test_protection_ignores_case(rel):
+    """Windows and macOS file systems are case-insensitive, so an archive's
+    `Workspace/cases.json` IS the analyst's workspace/cases.json there. The
+    file system decides that, not the OS (an exFAT stick on Linux folds
+    case too), so the check folds case everywhere."""
+    assert updater._is_protected(rel)
+
+
+@pytest.mark.parametrize("rel", ["./workspace/x.json", "./.winnow-backup/x/restore.json",
+                                 "winnow//../workspace/x", "./case.db-winnow"])
+def test_a_leading_dot_slash_does_not_slip_past_protection(rel):
+    """`.lstrip("./")` strips characters, not a prefix: it turned
+    `.winnow-backup/` into `winnow-backup/`, which no rule matched."""
+    assert updater._is_protected(rel)
+
+
+def test_an_archive_cannot_overwrite_a_case_file(install, tmp_path):
+    (install / "case.db-winnow").write_text("ANALYST CASE DATA")
+    (install / "case.db-winnow-wal").write_text("WAL")
+    files = dict(SHIPPED)
+    files["case.db-winnow"] = ""          # an empty placeholder shipped by mistake
+    files["case.db-winnow-wal"] = ""
+    archive = _make_release(tmp_path / "v2.zip", "1.1.0", files)
+    updater.apply_update(archive, install)
+    assert (install / "case.db-winnow").read_text() == "ANALYST CASE DATA"
+    assert (install / "case.db-winnow-wal").read_text() == "WAL"
+
+
+def test_an_archive_cannot_plant_a_backup_for_rollback_to_restore(tmp_path):
+    """The chain the reviewer built: an archive ships
+    `.winnow-backup/zzz/restore.json` (unprotected, because of the lstrip),
+    `zzz` sorts last so --rollback picks it, and restore() wrote its
+    `../../payload.txt` entry outside the install."""
+    install = _make_install(tmp_path / "a" / "winnow")
+    files = dict(SHIPPED)
+    files["payload.txt"] = "planted by the archive\n"
+    files[".winnow-backup/zzz/restore.json"] = json.dumps(
+        {"version": "1.0.0", "restore": ["../../payload.txt"], "remove": []})
+    archive = _make_release(tmp_path / "v2.zip", "1.1.0", files)
+    updater.apply_update(archive, install)
+
+    assert not (install / updater.BACKUP_DIR / "zzz").exists()
+    assert "zzz" not in [p.name for p in updater.list_backups(install)]
+    updater.rollback(install)
+    assert not (tmp_path / "payload.txt").exists()
+    assert updater.installed_version(install) == "1.0.0"
+
+
+@pytest.mark.parametrize("entry", ["../../escaped.txt", "/etc/escaped.txt", "D:escaped.txt",
+                                   "..\\..\\escaped.txt"])
+def test_rollback_refuses_a_backup_that_names_a_path_outside_the_install(tmp_path, entry):
+    """restore() trusted restore.json. It is written by this module, but it
+    sits in a directory anything can write to, and --rollback runs it
+    with the analyst's privileges — so it gets the archive's checks."""
+    install = _make_install(tmp_path / "a" / "winnow")
+    bk = install / updater.BACKUP_DIR / "1.0.0-20260101-000000"
+    bk.mkdir(parents=True)
+    (bk / "server.py").write_text("print('server v0')\n")
+    (bk / "restore.json").write_text(json.dumps(
+        {"version": "1.0.0", "restore": ["server.py", entry], "remove": [entry]}))
+    (tmp_path / "escaped.txt").write_text("not the updater's to touch")
+
+    with pytest.raises(UpdateError, match="unsafe path"):
+        updater.rollback(install)
+    assert (tmp_path / "escaped.txt").read_text() == "not the updater's to touch"
+    # Refused whole, like an archive: the safe entry was not applied either.
+    assert (install / "server.py").read_text() == SHIPPED["server.py"]
+
+
+@pytest.mark.parametrize("member", ["D:evil.py", "sub/D:evil.py", "server.py:stream", "C:x/y.py"])
+def test_drive_relative_and_stream_members_are_refused(install, tmp_path, member):
+    """On Windows `root / "D:evil.py"` discards the install root (a
+    drive-relative path), and `sub/x:y` writes an NTFS alternate data
+    stream. Only a two-character `X:` first component was refused."""
+    assert not updater._safe_member(member)
+    files = dict(SHIPPED)
+    files[member] = "print('pwned')\n"
+    with pytest.raises(UpdateError, match="unsafe path"):
+        updater.apply_update(_make_release(tmp_path / "bad.zip", "1.1.0", files), install)
+
+
+# ---------------------------------------------------- which backup is newest
+
+def _release_at(tmp_path: Path, version: str) -> Path:
+    files = dict(SHIPPED)
+    files["version.py"] = f'VERSION = "{version}"\n'
+    files["server.py"] = f"print('server {version}')\n"
+    return _make_release(tmp_path / f"{version}.zip", version, files)
+
+
+def test_rollback_restores_the_newest_backup_not_the_last_by_name(tmp_path):
+    """Backups were sorted by directory name, which starts with the
+    version: `0.10.0-…` sorts before `0.9.0-…`, so after 0.9 -> 0.10 ->
+    0.11 a rollback restored 0.9.0, skipping a version."""
+    install = _make_install(tmp_path / "winnow", {**SHIPPED, "version.py": 'VERSION = "0.9.0"\n'})
+    updater.apply_update(_release_at(tmp_path, "0.10.0"), install)
+    updater.apply_update(_release_at(tmp_path, "0.11.0"), install)
+
+    res = updater.rollback(install)
+    assert res["version"] == "0.10.0"
+    assert updater.installed_version(install) == "0.10.0"
+
+
+def test_pruning_keeps_the_newest_backups_not_the_last_by_name(tmp_path):
+    install = _make_install(tmp_path / "winnow", {**SHIPPED, "version.py": 'VERSION = "0.8.0"\n'})
+    for v in ("0.9.0", "0.10.0", "0.11.0", "0.12.0"):
+        updater.apply_update(_release_at(tmp_path, v), install)
+    kept = [json.loads((p / "restore.json").read_text())["version"]
+            for p in updater.list_backups(install)]
+    assert kept == ["0.9.0", "0.10.0", "0.11.0"]
+
+
+def test_backups_from_before_the_timestamp_still_sort_by_when_they_were_taken(install):
+    """Backups an older updater wrote carry no creation time in
+    restore.json; the stamp in their directory name is the fallback."""
+    for name, version in (("0.10.0-20260301-120000", "0.10.0"),
+                          ("0.9.0-20260201-120000", "0.9.0")):
+        d = install / updater.BACKUP_DIR / name
+        d.mkdir(parents=True)
+        (d / "restore.json").write_text(json.dumps({"version": version, "restore": [], "remove": []}))
+    assert [p.name for p in updater.list_backups(install)] == [
+        "0.9.0-20260201-120000", "0.10.0-20260301-120000"]
+    # ...and one this version writes is newer than both.
+    updater.apply_update(_release_at(install.parent, "1.1.0"), install)
+    assert json.loads((updater.list_backups(install)[-1] / "restore.json").read_text())["version"] == "1.0.0"
+
+
 # ----------------------------------------------------------- interrupted
 
 def _ten_module_install(root: Path) -> tuple[Path, dict[str, str]]:
