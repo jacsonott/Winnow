@@ -6,7 +6,7 @@ import { startJobsPoll, uploadWithProgress } from './jobs.js';
 import { loadSources, sourceLabel } from './sources.js';
 import { S } from './state.js';
 import { nicknameFor } from './savedfilters.js';
-import { modal } from './ui.js';
+import { modal, oneAtATime } from './ui.js';
 
 /* ---------------------------------------------------------- import preview */
 
@@ -98,7 +98,7 @@ export function openMergeBuilder() {
       nameHint.textContent = clash ? 'A merge with this name already exists — pick another.' : '';
       create.disabled = clash;
     };
-    create.onclick = async () => {
+    create.onclick = oneAtATime(create, async () => {
       if (selected.size < 2) { toast('Select at least 2 tables from the same group'); return; }
       const name = nameInput.value.trim() || defaultName;
       try {
@@ -109,7 +109,7 @@ export function openMergeBuilder() {
       } catch (e) {
         toast('Merge failed: ' + e.message, 6000);
       }
-    };
+    });
     acts.append(create);
     b.append(acts);
   }, { wide: true });
