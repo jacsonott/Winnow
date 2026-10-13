@@ -484,6 +484,27 @@ def q(ident: str) -> str:
     return '"' + ident.replace('"', '""') + '"'
 
 
+# Longest run of one operator _sql_chain writes flat. A flat `a OP b OP c`
+# parses into a left-deep tree one level per operator, and SQLite refuses
+# a statement deeper than SQLITE_MAX_EXPR_DEPTH (1000 by default) — which
+# a search over a 500-column table (flattened JSON gets there easily)
+# used to hit. 64 keeps every table short of that width on exactly the
+# SQL it always had.
+_SQL_CHAIN_FLAT = 64
+
+
+def _sql_chain(parts: list[str], op: str) -> str:
+    """`parts` joined by `op` — which must be associative (OR, AND, the
+    `|| ' ' ||` of _blob_expr) — as the flat chain it always was when it is
+    short, and as a balanced tree of parenthesised halves when it is not,
+    so depth grows with the log of the column count instead of linearly.
+    Same value either way: only the grouping changes."""
+    if len(parts) <= _SQL_CHAIN_FLAT:
+        return op.join(parts)
+    mid = len(parts) // 2
+    return f"({_sql_chain(parts[:mid], op)}){op}({_sql_chain(parts[mid:], op)})"
+
+
 def _blob_expr(cols: list[str]) -> str:
     """Every column concatenated into one search target — the same
     expression backs both sides of substring search: the src_<id>_doc view
@@ -492,8 +513,9 @@ def _blob_expr(cols: list[str]) -> str:
     Advanced mode's whole-query LIKE fallback, and a single Advanced-mode
     term _fts_like_pattern can't route through the index). Keeping them
     the same expression is what makes the indexed and fallback paths
-    return identical results."""
-    return " || ' ' || ".join(f"COALESCE({q(c)},'')" for c in cols)
+    return identical results. Built by _sql_chain, so a wide table's
+    search is not refused for depth."""
+    return _sql_chain([f"COALESCE({q(c)},'')" for c in cols], " || ' ' || ")
 
 
 def _fts_like_pattern(term: str) -> str | None:
@@ -1710,6 +1732,7 @@ class Store:
         self._undo: list[dict] = []
         self._maxlen_cache: dict[int, tuple[int, dict[str, int]]] = {}
         self._fts_threads: dict[int, threading.Thread] = {}
+        self._fts_failures: set[tuple[int, str]] = set()   # logged once each (_build_fts_worker)
         self._index_threads: dict[tuple[int, str], threading.Thread] = {}
         # Caps how many trigram builds run at once. A broad action — a
         # search-all sweep over a case with many unindexed sources — calls
@@ -1893,8 +1916,21 @@ class Store:
         with self._fts_build_sem:
             try:
                 self.build_fts(source_id)
-            except Exception:
-                pass  # best-effort background upgrade — the next search attempt retries
+            except Exception as e:  # noqa: BLE001
+                # Best-effort background upgrade — the next search attempt
+                # retries, and searches scan the table meanwhile. But said
+                # once in the log: this used to be silent, which is how a
+                # build that could never succeed (a table too wide for the
+                # doc view's expression) went unnoticed.
+                # Not when the case is closing under the build — that is
+                # the build being stopped, not failing.
+                key = (source_id, str(e))
+                with self._threads_lock:
+                    first = key not in self._fts_failures
+                    self._fts_failures.add(key)
+                if first and not self._closing:
+                    wlog.record("warn", f"Search index for table {source_id} not built: {e} — "
+                                        "searches of it scan the table instead")
 
     def _is_fts_building(self, source_id: int) -> bool:
         with self._threads_lock:
@@ -7542,7 +7578,7 @@ class Store:
                     else:
                         parts.append(f"{expr} <= ?")
                         params.append(end_norm)
-                clauses.append("(" + " OR ".join(parts) + ")")
+                clauses.append("(" + _sql_chain(parts, " OR ") + ")")
 
         # "Hide empty rows" (the table menu): drop a row whose EVERY column
         # is empty — NULL or '', the same "empty" the per-column filter op
@@ -7558,7 +7594,10 @@ class Store:
                 clause, p = self._compile_condition(c, "not_empty", "", colnames)
                 parts.append(clause)
                 params.extend(p)
-            clauses.append("(" + " OR ".join(parts) + ")")
+            # _sql_chain: one OR per column is past SQLite's expression
+            # depth limit on a table about 1,000 columns wide. Halves keep
+            # their order, so the params still line up.
+            clauses.append("(" + _sql_chain(parts, " OR ") + ")")
 
         return " AND ".join(clauses), params
 
@@ -12314,11 +12353,16 @@ class Store:
         its route turns into a 400 rather than an empty answer that reads
         like "no matches".
 
+        A table the sweep could not count is in the list too, as
+        `{source_id, name, error}` with no match_count — after the hits,
+        since it has none — rather than left out, which reads as "no
+        matches".
+
         start_search_all_job is the same sweep run on a background thread
         with incremental results, which is what the UI uses."""
         scope = self.resolve_search_all_scope(source_ids)["source_ids"]
         out = [hit for _, _, hit, _read in self._iter_search_all_sources(query, terms, scope) if hit]
-        out.sort(key=lambda d: -d["match_count"])
+        out.sort(key=lambda d: (bool(d.get("error")), -d.get("match_count", 0)))
         return out
 
     def _iter_search_all_sources(
@@ -12337,7 +12381,13 @@ class Store:
         source so a caller can report progress and surface partial results
         while the sweep is still running (start_search_all_job) — a source
         with no matches yields a None hit rather than being skipped
-        silently, so `scanned` always advances. Unsorted, in source order:
+        silently, so `scanned` always advances. A source whose count
+        raised yields `{source_id, name, error}` as its hit: it used to be
+        recorded as no match, so a table the sweep could not read at all
+        (one too wide for the search expression, before _sql_chain) was
+        reported as "No matches." — the one answer an analyst moves on
+        from. The exception is a table dropped since the sweep began,
+        which has nothing left to report and still yields None. Unsorted, in source order:
         sorting is the collecting caller's job, since a running sweep has
         nothing stable to sort yet.
 
@@ -12450,10 +12500,19 @@ class Store:
                                 "matched_terms": [] if not n
                                                  else [t["term"] for t in per_term] if breakdown
                                                  else None}
-                except sqlite3.Error:
-                    n = 0  # source dropped (or its index swapped) mid-sweep
+                except sqlite3.Error as e:
+                    n = 0
                     per_term = []
                     read = None
+                    with self._reader() as ro:
+                        still_here = ro.execute(
+                            "SELECT 1 FROM sources WHERE id=?", (source_id,)).fetchone() is not None
+                    if still_here:
+                        failed = {"source_id": source_id, "name": src["name"], "error": str(e)}
+                        scanned += 1
+                        yield scanned, total, failed, None
+                        time.sleep(0.02)
+                        continue
             hit = None
             if n:
                 hit = {
@@ -12594,6 +12653,10 @@ class Store:
                 "scanned": 0,
                 "total": 0,
                 "hits": [],
+                # Tables the sweep could not count ({source_id, name,
+                # error}), kept apart from `hits` so that list still means
+                # "tables that matched" to everything reading it.
+                "failed": [],
                 # What the sweep proved, per source it read end to end
                 # (_iter_search_all_sources' `read`), for
                 # seed_watchlist_from_search_all. Deliberately NOT in the
@@ -12622,7 +12685,9 @@ class Store:
                         break
                     job["scanned"] = scanned
                     job["total"] = total
-                    if hit:
+                    if hit and hit.get("error"):
+                        job["failed"].append(hit)
+                    elif hit:
                         job["hits"].append(hit)
                     if read:
                         job["read"][read["source_id"]] = read
@@ -12652,6 +12717,7 @@ class Store:
                 "scanned": job["scanned"],
                 "total": job["total"],
                 "hits": sorted(job["hits"], key=lambda d: -d["match_count"]),
+                "failed": list(job["failed"]),
                 "done": job["done"],
                 "error": job["error"],
                 "cancelled": job["cancelled"],

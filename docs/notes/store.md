@@ -115,6 +115,24 @@ see [docs/notes/README.md](README.md) for the whole set.
     the whole cell. The raw row stays reachable: it's the cell's `title`
     and the per-row "raw" toggle (`fillTimelineBody` in timeline.js), and
     clicking the row still opens it in its own table.
+- **A per-column chain of one operator is built by `_sql_chain`, never
+  `" OP ".join`.** The search blob (`COALESCE(a,'') || ' ' || …`) and
+  hide-empty-rows' OR of every column parse, written flat, into a
+  left-deep tree one level per operator, and SQLite refuses a statement
+  deeper than `SQLITE_MAX_EXPR_DEPTH` (1000). Flattened JSON gets a table
+  there easily: from ~500 columns every Contains/regex/Advanced search
+  was a 500, the trigram build failed in its thread with nothing said,
+  and the Search-all sweep — which recorded a count that raised as zero —
+  reported the table as "No matches." `_sql_chain` writes runs of up to
+  `_SQL_CHAIN_FLAT` as before (a narrow table's doc view keeps the exact
+  definition stored in its case file) and balanced parenthesised halves
+  beyond that; concatenation and OR are associative, so the value — the
+  `doc` text the index holds — is identical. Two things are kept from it
+  on purpose: the sweep now reports a table it could not count
+  (`{source_id, name, error}` — in `search_all_sources`' list, and in the
+  job's `failed`, apart from `hits` so that list still means "tables that
+  matched"), skipping only a table dropped mid-sweep; and
+  `_build_fts_worker` logs a build failure once per source and message.
 - The substring-search index (`fts_<id>`) is FTS5 `tokenize='trigram'` over a
   **single `doc` column** — every column concatenated via the `src_<id>_doc`
   view (same `_blob_expr` the LIKE fallback scans, so indexed and fallback
