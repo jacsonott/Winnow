@@ -55,11 +55,19 @@ html { scrollbar-color: var(--line-2) transparent; }
 html[data-theme="dark"] { color-scheme: dark; }
 html[data-theme="light"] { color-scheme: light; }
 
+/* `clip`, not just `hidden`: a `hidden` box is still a scroll container.
+   Once the window is narrower than the toolbar's min-content (~717px
+   with a few tables open), opening a dialog scrolled <body> sideways to
+   bring what it focused into view, and nothing ever scrolled it back —
+   the app sat off the left edge until a reload, even after the window
+   was widened again. `clip` cuts the overflow off the same way but can't
+   be scrolled at all. `hidden` stays first for a browser without it. */
 html, body {
   height: 100%; margin: 0;
   background: var(--ink); color: var(--text);
   font-family: var(--ui); font-size: 13px;
   overflow: hidden;
+  overflow: clip;
 }
 
 /* Themed <select> by default — THE rule for any new dropdown/menu, so one

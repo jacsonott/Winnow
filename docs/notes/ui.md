@@ -1497,3 +1497,14 @@ see [docs/notes/README.md](README.md) for the whole set.
   try again. `tests/ui/test_refusals_are_reported.py` fails each request
   with `page.route` and looks for the server's words in the toast; the
   page fixture's uncaught-error check catches the rejection itself.
+
+- **html/body are `overflow: clip`, not just `hidden`.** Nothing at the
+  page level is meant to scroll — every scroller is a panel of its own —
+  but a `hidden` box is still a scroll container, and the browser will
+  scroll it programmatically to bring a focused element into view. Once
+  the window is narrower than the toolbar's min-content (~717px with a
+  few tables open), opening a dialog did exactly that: <body> slid
+  sideways and stayed there, widening included, until a reload. `clip`
+  can't be scrolled at all; `hidden` stays in the rule first as the
+  fallback. `tests/ui/test_narrow_window_dialog.py` finds the width at
+  which the suite's case starts to overflow rather than hard-coding one.
