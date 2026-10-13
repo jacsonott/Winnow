@@ -177,6 +177,93 @@ def test_more_keys_than_a_table_can_hold_fold_into_one_json_column(store, tmp_pa
         assert wide[cols.index("headers.X-H0")] == "v0"
 
 
+# ------------------------------------------- what the file said, all of it
+
+def _cells(store, rec):
+    cols = [c["name"] for c in rec["columns"]]
+    rows = store.db.execute(
+        f"SELECT {', '.join(f'[{c}]' for c in cols)} FROM src_{rec['id']} ORDER BY rid").fetchall()
+    return cols, [tuple(r) for r in rows]
+
+
+def test_a_flattened_key_collision_keeps_both_values(store, tmp_path):
+    """A nested `process.name` and a literal "process.name" key flatten to
+    the same column, and the flatten's dict kept whichever came second —
+    so whoever wrote the record chose which process name the analyst saw
+    ("evil.exe" never reached the table). Both are kept, the second under
+    a suffixed column, and the record is counted so the import can say so."""
+    p = tmp_path / "ev.jsonl"
+    p.write_text('{"process": {"name": "evil.exe"}, "process.name": "svchost.exe"}\n'
+                 '{"process": {"name": "b.exe"}}\n', encoding="utf-8")
+    rec = store.ingest_json(str(p), flatten_mode="full", build_fts=False)
+    assert _cells(store, rec) == (["process.name", "process.name_1"],
+                                  [("evil.exe", "svchost.exe"), ("b.exe", "")])
+    assert rec["key_collisions"] == 1
+    prev = store.preview_json_file(str(p), flatten_mode="full")
+    assert prev["columns"] == ["process.name", "process.name_1"]
+    assert prev["key_collisions"] == 1
+
+
+def test_duplicate_keys_in_one_object_are_both_kept(store, tmp_path):
+    """json.loads keeps the LAST of two equal keys, so the first value of a
+    duplicated key never reached the table. Both land; a container that is
+    stored as JSON text keeps both keys verbatim."""
+    p = tmp_path / "dup.jsonl"
+    p.write_text('{"user": "alice", "user": "root", "n": {"a": 1, "a": 2}}\n', encoding="utf-8")
+    rec = store.ingest_json(str(p), flatten_mode="none", build_fts=False)
+    assert _cells(store, rec) == (["user", "user_1", "n"], [("alice", "root", '{"a": 1, "a": 2}')])
+    assert rec["key_collisions"] == 1
+    rec = store.ingest_json(str(p), flatten_mode="full", build_fts=False)
+    assert _cells(store, rec) == (["user", "user_1", "n.a", "n.a_1"], [("alice", "root", "1", "2")])
+
+
+def test_a_suffix_never_lands_on_a_key_the_record_already_has():
+    flat = _flatten_json(json.loads('{"a.b": "x", "a.b_1": "y"}') | {"a": {"b": "z"}}, max_depth=None)
+    assert flat == {"a.b": "x", "a.b_1": "y", "a.b_2": "z"}
+
+
+@pytest.mark.parametrize("ext", [".jsonl", ".json"])
+def test_numbers_keep_the_text_the_file_wrote(store, tmp_path, ext):
+    """Numbers went through float(): 1.10 became 1.1, 1e5 became 100000.0,
+    1E400 became inf and nineteen significant digits became seventeen —
+    the cell no longer said what the evidence said. And an integer past
+    Python's 4,300-digit conversion limit raised out of json.loads and
+    failed the whole file. A number is kept as the literal it was written
+    as, inside stringified containers too."""
+    huge = "9" * 5000
+    doc = ('{"n": 1.10, "e": 1e5, "big": 1E400, "f": 1700000000.123456789, "neg0": -0.0, "z": -0,'
+           ' "nan": NaN, "huge": ' + huge + ', "arr": [1.10, 2E3, {"x": 0.50}], "s": "1.10"}')
+    p = tmp_path / f"nums{ext}"
+    p.write_text(doc + "\n", encoding="utf-8")
+    rec = store.ingest_json(str(p), flatten_mode="none", build_fts=False)
+    cols, rows = _cells(store, rec)
+    assert dict(zip(cols, rows[0])) == {
+        "n": "1.10", "e": "1e5", "big": "1E400", "f": "1700000000.123456789", "neg0": "-0.0",
+        "z": "-0", "nan": "NaN", "huge": huge, "arr": '[1.10, 2E3, {"x": 0.50}]', "s": "1.10"}
+    assert json.loads(dict(zip(cols, rows[0]))["arr"]) == [1.1, 2000.0, {"x": 0.5}]
+
+
+def test_stringified_containers_still_match_json_dumps():
+    """The literal-preserving writer has to produce exactly what
+    json.dumps(ensure_ascii=False) did for everything that is not a
+    number — the stored text of every existing import is that shape."""
+    from winnow.store import _json_loads
+    for doc in ['{"a": [1, 2.5, "x", null, true, false, {}, []], "b": {"c": "é\\n\\"q\\""}}',
+                '[[[["deep"]]]]', '{}', '[]', '{"k": {"": ""}}']:
+        assert _json_leaf_text(_json_loads(doc)) == json.dumps(json.loads(doc), ensure_ascii=False)
+
+
+def test_containers_past_the_recursion_depth_keep_the_same_text():
+    """Below 200 levels the writer goes iterative; what it writes there
+    must be what it writes above, numbers and duplicate keys included."""
+    from winnow.store import _json_loads
+    inner = '{"a": [2.5, "x", null, {"k": 1}], "b": {}}'
+    doc = "[" * 500 + inner + "]" * 500
+    assert _json_leaf_text(_json_loads(doc)) == json.dumps(json.loads(doc), ensure_ascii=False) == doc
+    literal = "[" * 500 + '{"n": 1.10, "n": 1E400}' + "]" * 500
+    assert _json_leaf_text(_json_loads(literal)) == literal
+
+
 def test_a_lone_surrogate_escape_costs_nothing(store, tmp_path):
     """"\\udc80" is legal JSON that decodes to a string SQLite can't hold
     as UTF-8: the batch's insert raised "surrogates not allowed" and the
@@ -203,3 +290,21 @@ def test_a_lone_surrogate_escape_costs_nothing(store, tmp_path):
     rec = store.ingest_json(str(keyed), build_fts=False)
     assert rec["row_count"] == 2
     assert [c["name"] for c in rec["columns"]] == ["a", "\\ud800x"]
+
+
+def test_surrogate_escaping_and_literal_text_hold_together(store, tmp_path):
+    """Two fixes meet in _json_leaf_text and _flatten_json: a lone surrogate
+    is written back as its escape (utf8_text), and a container keeps its
+    numbers' literal text and every duplicated key. Neither undoes the
+    other. A key whose surrogate escapes to the same text as a key that
+    literally reads \\ud800 is a collision like any other: both values
+    kept, the record counted."""
+    p = tmp_path / "both.jsonl"
+    p.write_text('{"n": {"k": "\\ud800", "x": 1.10, "x": 2E3}, "\\ud800": 1, "\\\\ud800": 2}\n',
+                 encoding="utf-8")
+    rec = store.ingest_json(str(p), flatten_mode="none", build_fts=False)
+    cols, rows = _cells(store, rec)
+    assert cols == ["n", "\\ud800", "\\ud800_1"]
+    assert rows == [('{"k": "\\ud800", "x": 1.10, "x": 2E3}', "1", "2")]
+    assert json.loads(rows[0][0])["k"] == "\ud800"
+    assert rec["key_collisions"] == 1

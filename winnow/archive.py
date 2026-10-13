@@ -28,9 +28,16 @@ Untrusted-input rules, all enforced here rather than assumed:
   devices and FIFOs are skipped and reported (a hostile tarball's
   symlink-then-write dance never gets its first step).
 - **Encrypted zip members** are skipped and reported by name.
-- **One member's problem is one member's**: a name the filesystem
-  refuses (past NAME_MAX, or a file where a later member needs a
-  directory) is skipped and reported, never the end of the expansion.
+- **Damage is per member.** A member that cannot be read (corrupt or
+  truncated data, a compression method zipfile lacks — Deflate64, which
+  Windows Explorer writes) or written (a name too long, a file where a
+  directory must go) is skipped and reported, and the members after it
+  still extract; a partial member never stays in the tree. An archive
+  whose own structure ends early keeps what it held. Only an archive
+  that yields nothing at all is an error.
+- **Nothing is overwritten.** Two members with one name, or ``messages``
+  beside ``messages.gz``, would otherwise leave whichever came last; the
+  later one takes ``name (2).ext`` and is reported under ``renamed``.
 - **Names fit the OS they land on**: on Windows a ``:`` in a member name
   would write an NTFS alternate data stream of the file before it, and
   ``?*<>|"`` raise — so each path component is sanitised there
@@ -41,11 +48,15 @@ Stdlib only (zipfile/tarfile/gzip/shutil), per the airgap rule.
 
 from __future__ import annotations
 
+import contextlib
+import errno
 import gzip
+import lzma
 import os
 import shutil
 import tarfile
 import zipfile
+import zlib
 
 # Extensions the import UI routes here. ``.gz`` covers both ``.tar.gz``
 # (content-sniffed to tar below) and the bare gzipped rotated logs
@@ -64,9 +75,41 @@ class ArchiveError(ValueError):
     pass
 
 
-class _MemberUnwritable(Exception):
-    """The filesystem refused to CREATE one member's file — distinct from
-    a corrupt stream, which the callers already handle their own way."""
+# What reading a damaged or unusual archive raises — none of it a ValueError
+# or an OSError the route would turn into a 400, so each used to escape as a
+# 500 with half the tree on disk: a truncated stream (EOFError), corrupt
+# deflate data (zlib.error), a bad header or CRC (BadZipFile, TarError), an
+# .xz that isn't (LZMAError), a compression method zipfile cannot read
+# (NotImplementedError).
+_DAMAGE = (zipfile.BadZipFile, tarfile.TarError, EOFError, zlib.error, lzma.LZMAError,
+           NotImplementedError)
+# ...and what one member can raise, which adds failing to WRITE it.
+_MEMBER_ERRORS = _DAMAGE + (OSError,)
+_DISK_FULL = {errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)}
+# zipfile's number for Deflate64 — named in the skip reason, because the
+# way round it (extract with Explorer or 7-Zip, import the folder) is not
+# something an analyst would guess from "compression method not supported".
+_ZIP_DEFLATE64 = 9
+
+
+def _raise_if_disk_full(e: BaseException) -> None:
+    # Every later member would fail the same way; stop rather than list them.
+    if isinstance(e, OSError) and e.errno in _DISK_FULL:
+        raise e
+
+
+def _member_reason(e: BaseException, info: zipfile.ZipInfo | None = None) -> str:
+    if isinstance(e, NotImplementedError) and info is not None:
+        if info.compress_type == _ZIP_DEFLATE64:
+            return ("compressed with Deflate64, which Python cannot read (Windows Explorer writes it for "
+                    "large files) — extract the archive with Explorer or 7-Zip and import the folder")
+        return f"compression method {info.compress_type} is not supported"
+    if isinstance(e, OSError) and e.filename:
+        # Opening or creating a path: the write side. A decompressor's own
+        # OSError (bz2's "Invalid data stream") names no file — that is
+        # damage, below.
+        return f"could not be written: {e.strerror or e}"
+    return f"corrupt or truncated data: {e}"
 
 
 def looks_like_archive(name: str) -> bool:
@@ -80,8 +123,13 @@ def _kind(path: str) -> str | None:
     try:
         if zipfile.is_zipfile(path):
             return "zip"
-        if tarfile.is_tarfile(path):
-            return "tar"
+        try:
+            # is_tarfile only catches TarError; a corrupt gzip stream it
+            # reads into raises zlib.error or EOFError straight out of it.
+            if tarfile.is_tarfile(path):
+                return "tar"
+        except _DAMAGE:
+            pass
         with open(path, "rb") as f:
             if f.read(2) == b"\x1f\x8b":
                 return "gz"
@@ -112,16 +160,49 @@ def _fresh_dest(archive_path: str, dest_root: str | None) -> str:
 
 
 class _Budget:
-    def __init__(self):
+    def __init__(self, root: str):
+        self.root = root
         self.bytes = 0
         self.files = 0
         self.archives = 0
         self.skipped: list[dict] = []
+        self.renamed: list[dict] = []
         self.truncated = False
+        self.failure: str | None = None    # the first member/archive that could not be read
+        self._next_copy: dict[str, int] = {}
 
     def skip(self, path: str, reason: str):
         if len(self.skipped) < 200:
             self.skipped.append({"path": path, "reason": reason})
+
+    def fail(self, path: str, reason: str):
+        """A skip because something was damaged or unwritable, as opposed
+        to refused (zip-slip, a symlink): an archive where that is all that
+        happened produced nothing, and that is an error."""
+        self.failure = self.failure or f"{path}: {reason}"
+        self.skip(path, reason)
+
+    def label(self, path: str) -> str:
+        """How a path is reported: relative to the extraction root, as the
+        analyst will see it in the tree — or the archive's own name."""
+        rel = os.path.relpath(path, self.root)
+        if rel == os.pardir or rel.startswith(os.pardir + os.sep):
+            return os.path.basename(path)
+        return rel.replace(os.sep, "/")
+
+    def free_path(self, path: str) -> str:
+        """`path`, or `name (2).ext`, `name (3).ext`… if something already
+        has that name. The next number is remembered per path, so a
+        hostile archive repeating one name 200,000 times costs 200,000
+        steps, not a scan from (2) every time."""
+        if not os.path.lexists(path):
+            return path
+        root, ext = os.path.splitext(path)
+        n = self._next_copy.get(path, 2)
+        while os.path.lexists(f"{root} ({n}){ext}"):
+            n += 1
+        self._next_copy[path] = n + 1
+        return f"{root} ({n}){ext}"
 
 
 # Characters Windows refuses in a file name (and ':' which it doesn't
@@ -139,8 +220,10 @@ def _member_name_for_os(rel: str, windows: bool) -> str:
     these is a legal name. On Windows, each component: bad characters
     become '_'; a trailing dot or space (which Windows silently drops, so
     `a.` and `a` would collide) becomes '_'; a reserved device name gets a
-    '_' prefix. Taking the parameter rather than reading os.name is what
-    lets the POSIX suite check the Windows rules."""
+    '_' prefix. Two names that come out the same are kept apart by
+    _Budget.free_path, like any other clash. Taking the parameter rather
+    than reading os.name is what lets the POSIX suite check the Windows
+    rules."""
     if not windows:
         return rel
     out = []
@@ -166,26 +249,38 @@ def _safe_target(dest: str, member_name: str, budget: _Budget) -> str | None:
     return os.path.join(dest, _member_name_for_os(norm.replace(os.sep, "/"), windows=os.name == "nt"))
 
 
-def _copy_stream(src, dst_path: str, budget: _Budget) -> bool:
+def _copy_stream(src, dst_path: str, budget: _Budget, source: str) -> bool:
     """Copy with the byte budget enforced DURING the copy — a bomb's real
-    size is discovered as it decompresses, not read from its headers."""
+    size is discovered as it decompresses, not read from its headers.
+
+    Never over an existing file (see _Budget.free_path; `source` is how
+    the rename is reported), and never leaving part of one: a member whose
+    data turns out corrupt halfway is removed before the error goes on to
+    the caller, which skips it — a truncated file in the tree would import
+    as if it were whole."""
+    wanted = dst_path
+    dst_path = budget.free_path(dst_path)
+    os.makedirs(os.path.dirname(dst_path), exist_ok=True)
     try:
-        os.makedirs(os.path.dirname(dst_path), exist_ok=True)
-        out = open(dst_path, "wb")
-    except OSError as e:
-        raise _MemberUnwritable(e) from e
-    with out:
-        while True:
-            chunk = src.read(_COPY_CHUNK)
-            if not chunk:
-                return True
-            budget.bytes += len(chunk)
-            if budget.bytes > MAX_TOTAL_BYTES:
-                out.close()
-                os.unlink(dst_path)
-                budget.truncated = True
-                return False
-            out.write(chunk)
+        with open(dst_path, "wb") as out:
+            while True:
+                chunk = src.read(_COPY_CHUNK)
+                if not chunk:
+                    break
+                budget.bytes += len(chunk)
+                if budget.bytes > MAX_TOTAL_BYTES:
+                    out.close()
+                    os.unlink(dst_path)
+                    budget.truncated = True
+                    return False
+                out.write(chunk)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(dst_path)
+        raise
+    if dst_path != wanted and len(budget.renamed) < 200:
+        budget.renamed.append({"path": source, "as": budget.label(dst_path)})
+    return True
 
 
 def _expand_zip(path: str, dest: str, budget: _Budget) -> bool:
@@ -202,12 +297,14 @@ def _expand_zip(path: str, dest: str, budget: _Budget) -> bool:
             target = _safe_target(dest, info.filename, budget)
             if not target:
                 continue
+            label = budget.label(target)
             try:
                 with zf.open(info) as src:
-                    if not _copy_stream(src, target, budget):
+                    if not _copy_stream(src, target, budget, label):
                         return False
-            except _MemberUnwritable as e:
-                budget.skip(info.filename, f"could not be written here: {e}")
+            except _MEMBER_ERRORS as e:
+                _raise_if_disk_full(e)
+                budget.fail(label, _member_reason(e, info))
                 continue
             budget.files += 1
     return True
@@ -215,7 +312,19 @@ def _expand_zip(path: str, dest: str, budget: _Budget) -> bool:
 
 def _expand_tar(path: str, dest: str, budget: _Budget) -> bool:
     with tarfile.open(path, "r:*") as tf:
-        for member in tf:
+        members = iter(tf)
+        while True:
+            try:
+                member = next(members, None)
+            except _DAMAGE as e:
+                # The archive itself stops here (a cut-off download, a
+                # damaged block): nothing after this point can be found,
+                # and everything before it is whole and stays.
+                budget.fail(budget.label(path), f"archive ends early — truncated or corrupt ({e}); "
+                                                "what came before that point was extracted")
+                return True
+            if member is None:
+                return True
             if not member.isreg():
                 if not member.isdir():
                     budget.skip(member.name, f"tar member is not a regular file ({member.type!r})")
@@ -226,34 +335,41 @@ def _expand_tar(path: str, dest: str, budget: _Budget) -> bool:
             target = _safe_target(dest, member.name, budget)
             if not target:
                 continue
-            src = tf.extractfile(member)
-            if src is None:
-                budget.skip(member.name, "unreadable tar member")
-                continue
+            label = budget.label(target)
             try:
+                src = tf.extractfile(member)
+                if src is None:
+                    budget.skip(member.name, "unreadable tar member")
+                    continue
                 with src:
-                    if not _copy_stream(src, target, budget):
+                    if not _copy_stream(src, target, budget, label):
                         return False
-            except _MemberUnwritable as e:
-                budget.skip(member.name, f"could not be written here: {e}")
+            except _MEMBER_ERRORS as e:
+                _raise_if_disk_full(e)
+                budget.fail(label, _member_reason(e))
                 continue
             budget.files += 1
-    return True
 
 
 def _expand_gz(path: str, dest_file: str, budget: _Budget) -> bool:
-    with gzip.open(path, "rb") as src:
-        try:
-            ok = _copy_stream(src, dest_file, budget)
-        except (OSError, EOFError) as e:
-            budget.skip(path, f"corrupt gzip stream: {e}")
-            return True
-        except _MemberUnwritable as e:
-            budget.skip(path, f"could not be written here: {e}")
-            return True
-        if ok:
-            budget.files += 1
-        return ok
+    label = budget.label(path)
+    try:
+        with gzip.open(path, "rb") as src:
+            ok = _copy_stream(src, dest_file, budget, label)
+    except _MEMBER_ERRORS as e:   # zlib.error is not an OSError — it used to escape
+        _raise_if_disk_full(e)
+        budget.fail(label, f"corrupt gzip stream: {e}")
+        return True
+    if ok:
+        budget.files += 1
+    return ok
+
+
+def _is_tar(path: str) -> bool:
+    try:
+        return tarfile.is_tarfile(path)
+    except _DAMAGE:
+        return False
 
 
 def _expand_one(path: str, dest: str, budget: _Budget) -> bool:
@@ -282,7 +398,6 @@ def expand_archive(path: str, dest_root: str | None = None) -> dict:
     if _kind(path) is None:
         raise ArchiveError(f"{os.path.basename(path)} is not a zip, tar or gzip archive")
 
-    budget = _Budget()
     try:
         dest = _fresh_dest(path, dest_root)
     except OSError as e:
@@ -291,6 +406,7 @@ def expand_archive(path: str, dest_root: str | None = None) -> dict:
         # (this ran outside every handler, so it was a 500).
         raise ArchiveError(f"Could not create a folder to expand "
                            f"{os.path.basename(path)} into: {e}") from e
+    budget = _Budget(dest)
     budget.archives += 1
     try:
         cont = _expand_one(path, dest, budget)
@@ -299,34 +415,44 @@ def expand_archive(path: str, dest_root: str | None = None) -> dict:
         # sweep finds none (or the depth cap says a bundle this deep is
         # not a bundle). Inner archives expand into a directory named
         # after them and are then removed — the finished tree holds only
-        # real files.
+        # real files. One that cannot even be opened stays in the tree as
+        # it was (the only copy of those bytes outside the original), is
+        # reported, and is not tried again by later sweeps; the archives
+        # after it still expand.
         depth = 0
+        unopenable: set[str] = set()
         while cont and depth < MAX_DEPTH:
             found = []
             for dirpath, _dirs, files in os.walk(dest):
                 for f in files:
                     fp = os.path.join(dirpath, f)
-                    if looks_like_archive(f) and _kind(fp) is not None:
+                    if fp not in unopenable and looks_like_archive(f) and _kind(fp) is not None:
                         found.append(fp)
             if not found:
                 break
             depth += 1
             for fp in sorted(found):
                 inner_kind = _kind(fp)
-                if inner_kind == "gz" and not tarfile.is_tarfile(fp):
+                if inner_kind == "gz" and not _is_tar(fp):
                     inner_dest = os.path.dirname(fp)     # foo.log.gz -> foo.log beside it
                 else:
                     inner_dest = os.path.join(os.path.dirname(fp), _strip_archive_suffixes(fp))
                     if os.path.exists(inner_dest):
                         inner_dest += ".extracted"
                 budget.archives += 1
-                cont = _expand_one(fp, inner_dest, budget)
+                try:
+                    cont = _expand_one(fp, inner_dest, budget)
+                except _MEMBER_ERRORS as e:
+                    _raise_if_disk_full(e)
+                    budget.fail(budget.label(fp), f"could not be opened: {e}")
+                    unopenable.add(fp)
+                    continue
                 os.unlink(fp)
                 if not cont:
                     break
         if depth >= MAX_DEPTH:
             budget.truncated = True
-    except (zipfile.BadZipFile, tarfile.TarError, OSError) as e:
+    except _MEMBER_ERRORS as e:
         # A corrupt outer archive with nothing extracted is an error; a
         # corrupt inner piece just marks the result partial.
         if budget.files == 0:
@@ -335,6 +461,12 @@ def expand_archive(path: str, dest_root: str | None = None) -> dict:
         budget.skip(path, f"expansion stopped early: {e}")
         budget.truncated = True
 
+    if budget.files == 0 and budget.failure:
+        # Damage and nothing else: an empty tree would read as an empty
+        # archive. Say what was wrong instead.
+        shutil.rmtree(dest, ignore_errors=True)
+        raise ArchiveError(f"Could not expand {os.path.basename(path)}: {budget.failure}")
+
     return {"root": dest, "files": budget.files, "bytes": budget.bytes,
             "archives": budget.archives, "skipped": budget.skipped,
-            "truncated": budget.truncated}
+            "renamed": budget.renamed, "truncated": budget.truncated}

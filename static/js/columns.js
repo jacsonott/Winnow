@@ -1,7 +1,7 @@
 /* Column layout: header rendering, drag-to-reorder, widths and autofit.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { $, AUTOFIT_MAX_W_DEFAULT, GUTTER_W, api, debounce, el, post, toast } from './core.js';
+import { $, AUTOFIT_MAX_W_DEFAULT, GUTTER_W, api, debounce, el, nameMap, post, toast } from './core.js';
 import { columnMenuItems, opLabel } from './derived.js';
 import { columnFilterChips, openValuePicker, pickerTreeNode, removeColumnFilter, valueFilterEnabled } from './filters.js';
 import { render, setCellRange } from './grid.js';
@@ -52,7 +52,7 @@ export const isPinned = (name) => !!(S.layout[name] || {}).pinned;
    behaviour you want and costs nothing. Reordering would also have
    silently changed export column order, which follows the arrangement. */
 export function pinnedOffsets() {
-  const out = {};
+  const out = nameMap();   // keyed by column name — a `toString` column must not read as pinned
   let left = GUTTER_W;
   for (const name of visibleCols()) {
     if (!isPinned(name)) continue;
@@ -627,7 +627,7 @@ export async function saveDefaultLayout() {
 
 export async function fetchColumnMaxLens() {
   if (!S.sourceId) return null;
-  try { return await api(`/api/column_maxlen?source_id=${S.sourceId}`); }
+  try { return nameMap(await api(`/api/column_maxlen?source_id=${S.sourceId}`)); }
   catch (e) { toast('Could not measure column widths: ' + e.message); return null; }
 }
 

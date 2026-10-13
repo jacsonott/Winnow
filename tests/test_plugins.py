@@ -432,6 +432,115 @@ def test_one_plugin_exiting_does_not_take_the_others_with_it(plug_dir):
     assert reg.get_format("demo.lines") is not None
 
 
+# ------------------------------------------------------- reloads and races
+
+class _ImportGate:
+    """Lets a test hold a plugin's import open mid-reload, so "during a
+    reload" is a state the test is IN rather than a race it hopes to hit.
+    The plugin finds it in sys.modules — its source can't import the test."""
+    NAME = "_winnow_test_import_gate"
+
+    def __init__(self):
+        import threading
+        self.block = False
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.imports = 0
+
+
+GATED_PLUGIN = """
+    import sys
+    gate = sys.modules["_winnow_test_import_gate"]
+    gate.imports += 1
+    if gate.block:
+        gate.entered.set()
+        gate.release.wait(10)   # an import that takes a while: pandas, an SDK
+
+    def register(api):
+        api.register_api("ping", lambda req: "{name}", methods=["GET"])
+"""
+
+
+@pytest.fixture
+def gated(plug_dir, monkeypatch):
+    import sys
+    gate = _ImportGate()
+    monkeypatch.setitem(sys.modules, _ImportGate.NAME, gate)
+    # a_slow sorts first, so a reload held inside it has registered
+    # nothing new yet — the moment the old code had nothing at all.
+    for name in ("a_slow", "b_ok", "c_ok"):
+        _write_plugin(plug_dir, name, GATED_PLUGIN.replace("{name}", name))
+    reg = PluginRegistry()
+    reg.load([plug_dir])
+    yield gate, reg
+    gate.release.set()      # never leave a reload thread parked
+
+
+def test_plugin_routes_keep_answering_while_a_reload_runs(gated, plug_dir):
+    """load() cleared the live registry and refilled it as each plugin
+    imported, so every plugin route 404'd (and the listing was empty) for
+    as long as a reload took — and Settings toggles, installs and every
+    case open reload."""
+    import threading
+    gate, reg = gated
+    gate.block = True
+    t = threading.Thread(target=reg.load, args=([plug_dir],), daemon=True)
+    t.start()
+    assert gate.entered.wait(10)
+    try:
+        assert reg.get_api("c_ok", "ping") is not None
+        assert [p["fs_name"] for p in reg.describe()] == ["a_slow", "b_ok", "c_ok"]
+    finally:
+        gate.release.set()
+        t.join(10)
+    assert reg.get_api("c_ok", "ping") is not None
+
+
+def test_overlapping_reloads_are_serialised(gated, plug_dir):
+    """Two reloads at once (a toggle in one window while a case opens in
+    another; both are threadpooled routes) filled the same dicts: each
+    plugin's register() collided with its own registration from the
+    other load, so healthy plugins were listed twice and marked failed
+    with "Duplicate API route"."""
+    import threading
+    import time
+    gate, reg = gated
+    gate.block = True
+    imports_before = gate.imports
+    first = threading.Thread(target=reg.load, args=([plug_dir],), daemon=True)
+    first.start()
+    assert gate.entered.wait(10)
+    second = threading.Thread(target=reg.load, args=([plug_dir],), daemon=True)
+    second.start()
+    time.sleep(0.3)
+    # The second load is waiting its turn, not importing alongside.
+    assert gate.imports == imports_before + 1
+    gate.block = False
+    gate.release.set()
+    first.join(10)
+    second.join(10)
+    assert not first.is_alive() and not second.is_alive()
+
+    listing = reg.describe()
+    assert [p["fs_name"] for p in listing] == ["a_slow", "b_ok", "c_ok"]
+    assert [p["error"] for p in listing] == [None, None, None]
+    assert all(reg.get_api(fs, "ping") for fs in ("a_slow", "b_ok", "c_ok"))
+
+
+def test_a_reload_that_fails_leaves_the_previous_set_running(gated, plug_dir):
+    gate, reg = gated
+
+    def policy_that_breaks(fs_name, directory):
+        if fs_name == "b_ok":
+            raise OSError("plugins.json unreadable")
+        return True
+
+    with pytest.raises(OSError):
+        reg.load([plug_dir], enabled_for=policy_that_breaks)
+    assert [p["fs_name"] for p in reg.describe()] == ["a_slow", "b_ok", "c_ok"]
+    assert all(reg.get_api(fs, "ping") for fs in ("a_slow", "b_ok", "c_ok"))
+
+
 def test_installing_a_plugin_that_exits_answers_instead_of_hanging(plugin_client, plug_dir):
     """The reported symptom. The install route reloads the registry in a
     worker thread; a BaseException escaping that thread means the request
@@ -756,6 +865,56 @@ def test_usn_record_straddling_chunk_boundary(example_registry, tmp_path, monkey
     j.write_bytes(blob)
     rows = list(fmt.parse(str(j), {})["rows"])
     assert [r[1] for r in rows] == [f"file{i:02d}.txt" for i in range(20)]
+
+
+def test_usn_short_v3_slot_is_skipped_not_raised(example_registry, tmp_path, monkeypatch):
+    """A slot claiming V3 with a 64-byte length passed the 60-byte minimum,
+    but a V3 header is 76 bytes: _record unpacked past the slot's end, and
+    at the end of the file (or of a read chunk) struct.error escaped the
+    generator and failed the whole ingest over one torn slot. Mid-file it
+    read the next record's bytes as its own. A slot shorter than its own
+    version's header is carved past like any other non-record."""
+    import sys
+
+    fmt = example_registry.get_format("mft-usn.usn")
+    t = ft(datetime(2024, 6, 1, 12, 0, 0))
+    good = [usn_v2(t, f"f{i}.txt", entry=300 + i, usn=i) for i in range(3)]
+    short_v3 = struct.pack("<IHH", 64, 3, 0) + b"\x01" * 56
+
+    tail = tmp_path / "tail.usn"
+    tail.write_bytes(b"".join(good) + short_v3)
+    assert [r[1] for r in fmt.parse(str(tail), {})["rows"]] == ["f0.txt", "f1.txt", "f2.txt"]
+
+    mid = tmp_path / "mid.usn"
+    mid.write_bytes(good[0] + short_v3 + good[1] + short_v3 + good[2])
+    assert [r[1] for r in fmt.parse(str(mid), {})["rows"]] == ["f0.txt", "f1.txt", "f2.txt"]
+
+    # The same slot ending exactly on a read chunk's edge, mid-file.
+    usn_mod = sys.modules[fmt.parse.__module__]
+    monkeypatch.setattr(usn_mod, "CHUNK", len(good[0]) + len(short_v3))
+    assert [r[1] for r in fmt.parse(str(mid), {})["rows"]] == ["f0.txt", "f1.txt", "f2.txt"]
+
+
+def test_usn_garbage_is_scanned_in_linear_time(example_registry, tmp_path):
+    """Every 8-byte slot whose first u32 is zero was treated as the start
+    of a sparse run, and measuring the run sliced off the rest of the
+    chunk: garbage whose slots start with a zero u32 without being zero
+    runs scanned the chunk once per slot. 1 MiB took ~5 s, 2 MiB ~20 s,
+    and one 8 MiB chunk would take minutes. Linear, 2 MiB is ~0.1 s; the
+    bound leaves an order of magnitude for a slow runner on either side.
+    The record after the garbage proves the skip lands on it, not past it."""
+    import time
+
+    fmt = example_registry.get_format("mft-usn.usn")
+    t = ft(datetime(2024, 6, 1, 12, 0, 0))
+    j = tmp_path / "garbage.usn"
+    j.write_bytes(b"\x00\x00\x00\x00\x01\x00\x00\x00" * (2 * 1024 * 1024 // 8)
+                  + usn_v2(t, "after.txt"))
+    t0 = time.monotonic()
+    rows = list(fmt.parse(str(j), {})["rows"])
+    elapsed = time.monotonic() - t0
+    assert [r[1] for r in rows] == ["after.txt"]
+    assert elapsed < 4, f"2 MiB of garbage took {elapsed:.1f}s — the zero-run skip is quadratic again"
 
 
 # ----------------------------------------------------------- MFT fixtures
@@ -2209,6 +2368,40 @@ def test_first_last_row_json_lands_in_the_created_table(fl_client, store):
     assert "Row (JSON)" in [c["name"] for c in src["columns"]]
 
 
+def test_first_last_orders_a_number_column_by_value(fl_client, store):
+    """Cells are TEXT, so ordering a number column by its text put "10"
+    before "9": a group of record ids came back First=10, Last=9, while
+    the grid sorted the same column numerically. A number column orders by
+    value, and a cell that isn't a number (blank, "n/a") wins neither end.
+    The result's own row order follows the same rule. A merge orders the
+    same way (invariant #9)."""
+    client, _ = fl_client
+    rows = [["WS1", "9"], ["WS1", "10"], ["WS1", "100"], ["WS1", "55"], ["WS1", ""], ["WS1", "n/a"],
+            ["WS2", "n/a"], ["WS2", "-3"], ["WS2", "20"],
+            ["WS3", ""], ["WS3", "x"]]                  # nothing numeric: file order decides
+    sid = store.ingest_rows(["Host", "RecordId"], rows[:6], name="evts",
+                            column_types=["text", "number"], build_fts=False)["id"]
+    sid2 = store.ingest_rows(["Host", "RecordId"], rows[6:], name="evts2",
+                             column_types=["text", "number"], build_fts=False)["id"]
+    mid = store.create_merge("evtsm", [sid, sid2])["id"]
+
+    def bookends(source_id):
+        out = _fl(client, "preview", source_id=source_id, group_by=["Host"],
+                  sort_column="RecordId", columns=["Host"], template="{which}")
+        return [(r[1], r[2], r[0]) for r in out["rows"]]
+
+    assert bookends(sid) == [("WS1", "First", "9"), ("WS1", "Last", "100")]
+    assert bookends(mid) == [("WS2", "First", "-3"), ("WS1", "First", "9"), ("WS2", "Last", "20"),
+                             ("WS1", "Last", "100"), ("WS3", "First", ""), ("WS3", "Last", "x")]
+    # A text column is still ordered as text.
+    store.ingest_rows(["Host", "Label"], [["A", "10"], ["A", "9"]], name="txt",
+                      column_types=["text", "text"], build_fts=False)
+    tid = next(x["id"] for x in store.list_sources() if x["name"] == "txt")
+    out = _fl(client, "preview", source_id=tid, group_by=["Host"], sort_column="Label",
+              columns=[], template="{which}")
+    assert [(r[0], r[-1]) for r in out["rows"]] == [("10", "First"), ("9", "Last")]
+
+
 def test_first_last_works_on_a_merge(fl_client, store, write_csv):
     """Invariant #9: bookends over a merged table — one windowed pass over
     a UNION ALL of the members, ties broken by (source_id, rid)."""
@@ -2383,3 +2576,40 @@ def test_claude_prefers_the_winnow_named_key(claude_client, monkeypatch):
     monkeypatch.setenv("WINNOW_ANTHROPIC_API_KEY", "sk-from-settings")
     claude_client.post("/api/plugin/claude_assistant/ask", json={"question": "q"})
     assert record["api_key"] == "sk-from-settings"
+
+
+def test_plugin_upload_spool_is_removed_and_named_like_the_upload(plugin_client, store, registry,
+                                                                  tmp_path, monkeypatch):
+    """The upload route spooled to a mkstemp file and never deleted it:
+    every uploaded $MFT stayed in the temp folder, a full copy each time,
+    and the table's recorded path pointed at it. And a parser that reads
+    meaning from the file NAME (esxi_logs' log type, $MFT/$J matching)
+    was handed tmpk3j2_x.log. The spool now carries the upload's own name
+    inside a private directory that is gone when the route returns —
+    failed or not — and the table records the name the browser sent."""
+    import tempfile
+    systmp = tmp_path / "systmp"
+    systmp.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(systmp))
+    seen = []
+
+    def parse(path, options):
+        seen.append(os.path.basename(path))
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+        return {"columns": ["Line"], "rows": [[ln] for ln in lines]}
+
+    fmt = plugin_api.IngestFormat(plugin="demo", local_id="named", label="Named", parse=parse)
+    registry._add_format(fmt)
+    r = plugin_client.post("/api/ingest/plugin/upload", files={"file": ("hostd.log", b"a\nb\n")},
+                           data={"format_id": "demo.named", "build_fts": "false"})
+    assert r.status_code == 200, r.text
+    assert seen == ["hostd.log"]
+    assert os.listdir(systmp) == []
+    assert store.get_source(r.json()["id"])["path"] == "hostd.log"
+    assert store.get_source(r.json()["id"])["file_hash"]     # still hashed from the bytes
+    # A parse that fails leaves nothing behind either.
+    r = plugin_client.post("/api/ingest/plugin/upload", files={"file": ("x.boom", b"data")},
+                           data={"format_id": "demo.boom"})
+    assert r.status_code == 400
+    assert os.listdir(systmp) == []

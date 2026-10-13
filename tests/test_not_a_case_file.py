@@ -118,7 +118,8 @@ def test_copying_into_a_real_case_still_works(store, write_csv, tmp_path):
 # --------------------------------------------------------------------- CLI
 
 class _Served(Exception):
-    """Stands in for uvicorn.run: reaching it means main() opened the case."""
+    """Stands in for uvicorn.Server.run (what main() serves with — see
+    server._stop_pane_queries): reaching it means main() opened the case."""
 
 
 @pytest.fixture
@@ -129,7 +130,7 @@ def run_main(monkeypatch):
     def _serve(*a, **k):
         raise _Served()
 
-    monkeypatch.setattr(uvicorn, "run", _serve)
+    monkeypatch.setattr(uvicorn.Server, "run", _serve)
     monkeypatch.setattr(instances, "register", lambda *a, **k: None)
     monkeypatch.setattr(server, "STORE", None)
 

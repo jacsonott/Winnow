@@ -155,7 +155,13 @@ see [docs/notes/README.md](README.md) for the whole set.
     `columns` param carries two UI-only keys, `any_type` (offer every
     column, not just text) and `prefill: "all"` (start with every other
     column chosen); `validate_params` ignores both. `bool` is a param
-    type now (a checkbox; the state holds a real boolean).
+    type now (a checkbox; the state holds a real boolean). A cell goes
+    out as an unquoted JSON number only when the number json writes
+    back is the cell's own text — "1.10", "-0" and
+    "9999999999999999.99" stay strings, or the object would say 1.1, 0
+    and 1e+16 about evidence that didn't — and the patterns are
+    `fullmatch`ed, since `$` also matches before a trailing newline and
+    wrote the cell "42\n" as 42.
   - **`_from_clause(src)` is the one place the join is spelled** —
     `LEFT JOIN drv_<id> USING(rid)`, so an unqualified `rid` stays legal
     on both sides. `drv`'s rid is an INTEGER PRIMARY KEY, so the join
@@ -274,3 +280,23 @@ see [docs/notes/README.md](README.md) for the whole set.
     `derived_columns` deliberately has no index on `source_id` — it holds
     one row per derived column in the whole case, so a scan is one page
     either way and an index would cost more file than it could save.
+- **A lookup column names its table by a case-local id, so the id never
+  travels on its own** (`enrich.py`; `_session_derived_def` /
+  `_resolve_session_lookup` for sessions, `_repoint_copied_lookups` for
+  "Copy into case"). In another case — or in this one once the table is
+  dropped and its id reused — that number is some other table, and a
+  session import used to fill the column from it with no warning (the
+  owner column said mallory where the analyst had alice). A session now
+  carries the table's identity beside the definition (`lookup_table`:
+  file hash, name, base columns and row count — what a session source
+  records) and the import resolves it the way session sources are
+  matched (`_match_session_sources`, with a hashless table paired by
+  name); no such table, or more than one it cannot tell apart, is a
+  warning and the column is not recreated. A session saved before
+  the identity was recorded is refused the same way rather than trusted
+  by id. A copy re-points the definition to its table when that came
+  along, else to the target's one table with the same fingerprint, else
+  to none — the copied values stand and a re-derive asks for the table.
+  Blank keys (NULL or `''`, the one-column "had input" rule) match
+  nothing on either side, and so are neither a hit nor a parse failure:
+  an empty Host used to join the lookup table's own blank-key row.

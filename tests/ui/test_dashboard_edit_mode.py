@@ -99,3 +99,94 @@ def test_sql_query_becomes_a_widget(page):
     page.wait_for_function(
         "() => [...document.querySelectorAll('#dashGrid .dash-card h4')].some(h => h.textContent === 'Rows via SQL')")
     _delete_board(page, did)
+
+
+def _titles_on_server(page, did):
+    return page.evaluate("""(id) => fetch('/api/dashboards/' + id).then(r => r.json())
+      .then(d => d.widgets.map(w => w.title))""", did)
+
+
+def _titles_on_screen(page):
+    return page.evaluate("() => [...document.querySelectorAll('#dashGrid .dash-card h4')].map(h => h.textContent)")
+
+
+def _hold_board_get(page, did, held):
+    """Hold this board's GET (its widgets) until the test lets it go; let
+    anything else to the same URL — a save — straight through."""
+    page.route(f"**/api/dashboards/{did}",
+               lambda r: held.append(r) if r.request.method == "GET" else r.continue_())
+
+
+def _wait_held(page, held):
+    for _ in range(100):
+        if held:
+            return
+        page.wait_for_timeout(50)
+    raise AssertionError("the board's widgets were never asked for")
+
+
+def test_a_board_that_loads_late_does_not_land_on_the_one_switched_to(page):
+    """Click board A, then board B before A's widgets arrive. loadWidgets
+    bumped the board generation but never compared it after its await, so
+    A's late answer replaced B's widgets on screen — under B's name."""
+    a = _new_board(page, "Late board")
+    _seed_widgets(page, a, ["L1", "L2"])
+    b = _new_board(page, "Switched-to board")
+    _seed_widgets(page, b, ["S1", "S2", "S3"])
+    page.evaluate("() => __winnow.showGridTab()")
+    held = []
+    _hold_board_get(page, a, held)
+    try:
+        page.evaluate("([a, b]) => { window.__openA = __winnow.showDashboard(a);"
+                      " return __winnow.showDashboard(b); }", [a, b])
+        _wait_held(page, held)
+        assert _titles_on_screen(page) == ["S1", "S2", "S3"]
+        for r in held:
+            r.continue_()
+    finally:
+        page.unroute(f"**/api/dashboards/{a}")
+    page.evaluate("() => window.__openA")      # A's open has fully run its course
+    assert page.evaluate("() => __winnow.S.dashboardId") == b
+    assert _titles_on_screen(page) == ["S1", "S2", "S3"]
+    assert page.locator("#dashBar .dash-title").inner_text() == "Switched-to board"
+    _delete_board(page, a)
+    _delete_board(page, b)
+
+
+def test_a_drag_while_the_next_board_loads_saves_to_the_board_it_was_made_on(page):
+    """The other half of the same window: board B has been clicked, its
+    widgets are still on their way, and board A's cards are what is on
+    screen. persist() saved `widgets` to S.dashboardId — B — so one drag
+    of A's cards wrote them over B's own, and B's widgets were gone."""
+    a = _new_board(page, "Dragged board")
+    _seed_widgets(page, a, ["D1", "D2", "D3"])
+    b = _new_board(page, "Waiting board")
+    _seed_widgets(page, b, ["W1", "W2"])
+    page.evaluate("(a) => __winnow.showDashboard(a)", a)
+    page.wait_for_function("() => document.querySelectorAll('#dashGrid .dash-card:not(.dash-add)').length === 3")
+    held = []
+    _hold_board_get(page, b, held)
+    try:
+        page.evaluate("(b) => { window.__openB = __winnow.showDashboard(b); }", b)
+        _wait_held(page, held)
+        with page.expect_response(lambda r: r.request.method == "POST" and "/api/dashboards/" in r.url):
+            page.evaluate("""() => {
+              const cards = [...document.querySelectorAll('#dashGrid .dash-card:not(.dash-add)')];
+              const dt = new DataTransfer();
+              const grip = cards[0].querySelector('.dash-grip');
+              grip.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: dt }));
+              cards[2].dispatchEvent(new DragEvent('dragover', { bubbles: true, dataTransfer: dt }));
+              cards[2].dispatchEvent(new DragEvent('drop', { bubbles: true, dataTransfer: dt }));
+              grip.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: dt }));
+            }""")
+        for r in held:
+            r.continue_()
+    finally:
+        page.unroute(f"**/api/dashboards/{b}")
+    page.evaluate("() => window.__openB")
+    assert _titles_on_server(page, b) == ["W1", "W2"]
+    assert _titles_on_server(page, a) == ["D2", "D3", "D1"]
+    page.wait_for_function("() => [...document.querySelectorAll('#dashGrid .dash-card h4')]"
+                           ".map(h => h.textContent).join() === 'W1,W2'")
+    _delete_board(page, a)
+    _delete_board(page, b)

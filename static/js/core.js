@@ -196,3 +196,19 @@ export const debounce = (fn, ms) => {
   let t;
   return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
 };
+
+/* A map keyed by column name — or by any other name an analyst or a file
+   supplies. Column names are user data, and a CSV can have a `toString`,
+   `constructor` or `__proto__` column: a plain `{}` answers those with
+   Object.prototype's members (a filter box prefilled with
+   `function toString() { [native code] }`, a value picker that throws on
+   `.trim()` of it), and `map['__proto__'] = x` replaces the map's
+   prototype instead of adding a key — so the column can't be filtered,
+   and hiding it hid every column with no layout entry of its own. A
+   null-prototype object inherits nothing and keeps `__proto__` as an
+   ordinary key; JSON.stringify, Object.keys/entries and `in` treat it like
+   any other object. A spread (`{ ...m }`) gives back a PLAIN object, so a
+   copy that is going to be looked up by name goes through here again.
+   `src`'s own keys are copied in, `__proto__` included when JSON.parse
+   made it one. */
+export const nameMap = (src) => Object.assign(Object.create(null), src || {});

@@ -138,8 +138,10 @@ def _ansi_open(real_open):
 
 
 class _Served(Exception):
-    """Stands in for uvicorn.run: reaching it means startup got as far as
-    binding."""
+    """Stands in for uvicorn.Server.run: reaching it means startup got as
+    far as binding. (main() builds the Server itself rather than calling
+    uvicorn.run, so that it can hook the signal handler — see
+    server._stop_pane_queries.)"""
 
 
 def _start(monkeypatch):
@@ -152,7 +154,7 @@ def _start(monkeypatch):
     def _serve(*a, **k):
         raise _Served()
 
-    monkeypatch.setattr(uvicorn, "run", _serve)
+    monkeypatch.setattr(uvicorn.Server, "run", _serve)
     monkeypatch.setattr(instances, "register", lambda *a, **k: None)
     monkeypatch.setattr(sys, "argv", ["server.py", "--no-browser"])
     assert any(not p["enabled"] for p in server.PLUGINS.describe()), \

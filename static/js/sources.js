@@ -4,7 +4,7 @@ in the case.
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { recordTabVisit } from './tabhistory.js';
 import { renderHead, saveLayout } from './columns.js';
-import { $, ROW_H, api, el, post, toast } from './core.js';
+import { $, ROW_H, api, el, nameMap, post, toast } from './core.js';
 import { derivedOps } from './derived.js';
 import { hideDetailPane, syncRowOpenHint } from './detail.js';
 import { currentSpec, renderAdvancedChips, setSearchMode, updateSearchHint } from './filters.js';
@@ -115,6 +115,12 @@ export function sourceTitle(s, suffix) {
     // A derived table has no file on disk; say where it came from instead.
     if (s.origin === 'subset') parts.push(subsetDescription(s));
     else if (s.origin === 'sql') parts.push('Saved from a SQL pane query');
+    // An imported file's origin_meta, when it has one, says how its bytes
+    // were read — evidence that was not UTF-8 should say so where it is.
+    else if (!s.origin && s.origin_meta && s.origin_meta.encoding === 'cp1252') parts.push('Not UTF-8 — read as Windows-1252');
+    else if (!s.origin && s.origin_meta && s.origin_meta.cp1252_bytes) {
+      parts.push(`${Number(s.origin_meta.cp1252_bytes).toLocaleString()} bytes not valid UTF-8 — read as Windows-1252`);
+    }
     if (s.path) parts.push(s.path);
     if (s.imported_at) parts.push(`Imported ${s.imported_at.replace('T', ' ')}`);
   }
@@ -801,7 +807,7 @@ export async function openSource(id, { skipBuild = false } = {}) {
      anything can paint, rather than in each branch below (only one of which
      used to do it). */
   clearPageCache();
-  S.filters = {};
+  S.filters = nameMap();
   // Revealed filter boxes name columns of the table being left.
   S.filterOpen = [];
   S.search = '';
@@ -844,7 +850,7 @@ export async function openSource(id, { skipBuild = false } = {}) {
     const found = await api(`/api/column_layouts/find?${qp.toString()}`).catch(() => null);
     if (found && found.order) defaultLayout = found;
   }
-  S.layout = saved.columns || (defaultLayout && defaultLayout.columns) || {};
+  S.layout = nameMap(saved.columns || (defaultLayout && defaultLayout.columns));
   // Per-source, unlike the per-column overrides inside S.layout: this one is
   // a judgement about *this table's* size, and a cross-case default layout
   // (which is keyed by header set, not row count) has no business carrying it.
@@ -891,7 +897,7 @@ export async function openSource(id, { skipBuild = false } = {}) {
   // (the header filter boxes render from S.filters).
   const stash = viewStateStash.get(id);
   if (stash) {
-    S.filters = { ...stash.filters };
+    S.filters = nameMap(stash.filters);
     S.search = stash.search;
     S.searchMode = stash.searchMode;
     S.searchTerms = stash.searchTerms.map((t) => ({ ...t }));
@@ -1644,7 +1650,7 @@ export function clearViewNarrowing() {
   if ((S.filterTree.children || []).length) cleared.push('the filter builder');
   if (S.tagFilter.length) cleared.push('the tag filter');
   if (S.timeRange && S.timeRange.enabled && (S.timeRange.start || S.timeRange.end)) cleared.push('the timeframe');
-  S.filters = {};
+  S.filters = nameMap();
   S.filterOpen = [];
   S.filterTree = { type: 'group', op: 'AND', children: [] };
   S.tagFilter = [];
@@ -1700,7 +1706,7 @@ async function landOnFilters(filters, tree, { clearTimeframe = false } = {}) {
     S.lastGroupBy = { cols: [...S.groupByCols], sort: S.groupSort, dir: S.groupSortDir };
     await dropGrouping();
   }
-  S.filters = filters;
+  S.filters = nameMap(filters);
   // Whatever survives is stated by the bar's chips; a box left revealed
   // over a filter this just replaced is the empty row all over again.
   S.filterOpen = [];

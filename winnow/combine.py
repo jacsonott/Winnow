@@ -60,18 +60,26 @@ register_op({
 # lose precision in whatever reads the JSON next) and a plain decimal.
 # Leading zeros, exponents, hex and signs other than a leading '-' stay
 # strings — "007" is a string, and so is "1e5".
-_JSON_INT = re.compile(r"^-?(?:0|[1-9]\d{0,15})$")
-_JSON_DEC = re.compile(r"^-?(?:0|[1-9]\d{0,15})\.\d{1,12}$")
+_JSON_INT = re.compile(r"-?(?:0|[1-9]\d{0,15})")
+_JSON_DEC = re.compile(r"-?(?:0|[1-9]\d{0,15})\.\d{1,12}")
 
 
 def _json_value(v):
+    """A cell as the JSON value to write. A number is written unquoted only
+    when the number json.dumps writes back IS the cell's text: "1.10"
+    would come out 1.1, "9999999999999999.99" 1e+16 and "-0" 0, and the
+    object would then say something the evidence did not — so those stay
+    strings. fullmatch, not match with `$`: `$` also matches before a
+    trailing newline, which wrote the cell "42\\n" as 42."""
     if v is None:
         return None
     s = v if isinstance(v, str) else str(v)
-    if _JSON_INT.match(s):
-        return int(s)
-    if _JSON_DEC.match(s):
-        return float(s)
+    if _JSON_INT.fullmatch(s):
+        n = int(s)
+        return n if str(n) == s else s
+    if _JSON_DEC.fullmatch(s):
+        f = float(s)
+        return f if repr(f) == s else s
     return s
 
 

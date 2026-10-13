@@ -6,14 +6,17 @@ import { startJobsPoll, uploadWithProgress } from './jobs.js';
 import { loadSources, sourceLabel } from './sources.js';
 import { S } from './state.js';
 import { nicknameFor } from './savedfilters.js';
-import { modal } from './ui.js';
+import { modal, oneAtATime } from './ui.js';
 
 /* ---------------------------------------------------------- import preview */
 
 /* ------------------------------------------------------------------ merge */
 
+/* Folds A-Z only, as SQLite (and the server's column_signature) does:
+   toLowerCase() would group "Größe" with "GRÖßE", which SQLite reads as
+   two different columns, and the server refuses that merge. */
 export function columnGroupKey(columns) {
-  return columns.map((c) => c.name.trim().toLowerCase()).sort().join('|');
+  return columns.map((c) => c.name.trim().replace(/[A-Z]+/g, (m) => m.toLowerCase())).sort().join('|');
 }
 
 export function openMergeBuilder() {
@@ -95,7 +98,7 @@ export function openMergeBuilder() {
       nameHint.textContent = clash ? 'A merge with this name already exists — pick another.' : '';
       create.disabled = clash;
     };
-    create.onclick = async () => {
+    create.onclick = oneAtATime(create, async () => {
       if (selected.size < 2) { toast('Select at least 2 tables from the same group'); return; }
       const name = nameInput.value.trim() || defaultName;
       try {
@@ -106,7 +109,7 @@ export function openMergeBuilder() {
       } catch (e) {
         toast('Merge failed: ' + e.message, 6000);
       }
-    };
+    });
     acts.append(create);
     b.append(acts);
   }, { wide: true });
@@ -154,9 +157,10 @@ export function openImportPreview(src, opts = {}) {
 
     function renderTable() {
       tableWrap.replaceChildren();
-      status.textContent = isLines()
+      status.textContent = (isLines()
         ? `One line per row, nothing split · showing first ${preview.sample_rows.length} lines`
-        : `Detected delimiter: ${JSON.stringify(preview.delimiter)} · showing first ${preview.sample_rows.length} rows`;
+        : `Detected delimiter: ${JSON.stringify(preview.delimiter)} · showing first ${preview.sample_rows.length} rows`)
+        + (preview.encoding === 'cp1252' ? ' · not UTF-8 — read as Windows-1252' : '');
       const t = el('table', 'preview-tbl');
       const hr = el('tr');
       preview.columns.forEach((c, i) => {
@@ -302,8 +306,13 @@ export function openJsonImportPreview(src, opts = {}) {
 
     function renderTable() {
       tableWrap.replaceChildren();
+      const clashes = preview.key_collisions || 0;
       status.textContent = `${preview.record_count.toLocaleString()} record${preview.record_count === 1 ? '' : 's'} `
-        + `· showing first ${preview.sample_rows.length} · ${preview.columns.length} column${preview.columns.length === 1 ? '' : 's'}`;
+        + `· showing first ${preview.sample_rows.length} · ${preview.columns.length} column${preview.columns.length === 1 ? '' : 's'}`
+        // Two values for one column (a duplicated key, or a literal "a.b"
+        // beside a nested a.b): both are kept, the later one suffixed.
+        + (clashes ? ` · ${clashes.toLocaleString()} record${clashes === 1 ? ' has' : 's have'} two values for one key — the later kept as <key>_1` : '')
+        + (preview.encoding === 'cp1252' ? ' · not UTF-8 — read as Windows-1252' : '');
       const t = el('table', 'preview-tbl');
       const hr = el('tr');
       preview.columns.forEach((c, i) => {

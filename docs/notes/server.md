@@ -18,7 +18,14 @@ see [docs/notes/README.md](README.md) for the whole set.
   Two constraints worth knowing. SQLite attaches at most **10**
   databases (`MAX_ATTACHED`), and `v` already uses one — so the query
   path caps at 8 cases and everything else opens one reader at a time,
-  which is why the sweep and timeline have no case limit. And the routes
+  which is why the sweep and timeline have no case limit. Two more that
+  each produced a confident wrong answer: the timeline orders and
+  windows by `TS_NORMALIZE`, like the case's own timeframe filter (raw
+  text put `1/5/2024` before `12/31/2023`), and every SOURCE gets the
+  whole `limit + 1`, merged as they arrive — reading each with "the
+  limit minus rows so far" let the first table spend it all on its
+  latest rows while reporting `truncated: False`. The sweep's values are
+  LIKE-escaped: `svc_backup` matched `svcXbackup`. And the routes
   only read **registered** cases: a path arrives from the browser, and
   the case list is the analyst's own statement of what they work on.
   These views are read-only BY DESIGN, not pending work: tags and notes
@@ -97,6 +104,18 @@ see [docs/notes/README.md](README.md) for the whole set.
   `Store.close()` on both the case-switch path and the legacy-preset
   migration, so "same path" alone is not "already open" and short-cutting
   there serves rows off a closed connection.
+- **Every route that replaces `STORE` holds `_CASE_SWITCH` for the whole
+  swap** — case open, the quick-look save-as and discard, the association
+  open (each is a thin wrapper around a private `_case_open` & co.). A
+  double-click on a case card is two `/api/case/open` POSTs on two worker
+  threads; unserialised, both read the same `old` and both opened, and the
+  Store whose assignment lost was never closed — its lock held for the
+  life of the process, so the case read as "open in another Winnow"
+  naming this one — and on one path both passed the already-open check
+  and the case got two writer Stores. A new route that swaps `STORE` takes
+  the lock too. The client has its own guard (`openCase` hands a second
+  call the in-flight one's promise), but the server cannot rely on it: two
+  windows, or a script, race just the same. `tests/test_case_lock.py`.
 - Static assets (`/`, `/static/*`) get an explicit `Cache-Control: no-cache`
   from a middleware in server.py — FastAPI's `StaticFiles` only sends
   `ETag`/`Last-Modified`, and without an explicit `Cache-Control` the
@@ -119,6 +138,17 @@ see [docs/notes/README.md](README.md) for the whole set.
   `post()` won't have it and will get 403'd. GET stays exempt on purpose (the
   Export/session/filters download links are plain navigations, which can't set
   custom headers at all).
+- **A name the analyst typed cannot be a plain `{name}` path segment.** The
+  ASGI path is percent-decoded before routing, so `encodeURIComponent`'s
+  `%2F` arrives as a real `/` and a one-segment parameter never matches:
+  a case session saved as "before 12/05" could never be loaded, renamed,
+  downloaded or deleted. The case-session routes take `{name:path}`
+  (greedy, so a name ending in "/load" still resolves); the plugin-state
+  key went the other way and travels as a parameter. Either works — what
+  does not is a segment. The one residue is "." and "..": a browser
+  resolves those (and their `%2E` spellings) out of the URL before it is
+  sent, so `Store._session_name` refuses them at save, rename and adopt
+  rather than storing a session nothing can reach.
 - `api_view` maps only `ValueError`/`KeyError` to 400; everything else is a
   500. It used to catch bare `Exception`, so an internal defect surfaced as
   "Filter error: …" — blaming the analyst's filter for something they can't
@@ -198,13 +228,33 @@ see [docs/notes/README.md](README.md) for the whole set.
   beside it; export sets `Content-Disposition` with the profile name
   slugged through a `[^A-Za-z0-9._-]` filter, since profile names are free
   text.
+- **Every download's `Content-Disposition` comes from `_attachment()`**,
+  never an f-string. Starlette encodes header values as Latin-1, so
+  `filename="{name}"` was a 500 — and no file — for one en dash or
+  Cyrillic letter, and the names that reach these headers are exactly the
+  text that carries them: a SQL tab's name, an evidence file's own name,
+  what the analyst typed in the save prompt. The helper writes the real
+  name as RFC 6266 `filename*=UTF-8''…` beside an ASCII `filename="…"`
+  fallback (non-ASCII, `"` and `\` replaced), and turns control
+  characters into `_` in both, since a CR/LF would end the header line.
+  `FileResponse` gets it through `headers=` rather than its own
+  `filename=`, so there is one rule.
 - `run_sql` (the SQL pane) allows arbitrary SELECT/EXPLAIN on purpose, but
   blacklists `ATTACH`/`DETACH`/`PRAGMA`/`VACUUM` as defense-in-depth — none of
   those serve a read-only ad-hoc query pane. CSV export runs every cell through
   `_csv_safe()` (OWASP formula-injection prefixing for `=+-@`/tab/CR-leading
   values) since exports are explicitly meant to be opened in Excel and handed
   to other analysts; this only touches the exported copy, never the stored
-  case-file value. **Worksheet exports go through `_xlsx_safe()` instead**,
+  case-file value. **The header row and the Tags column go through it too**
+  (`_export_header`): column names are header text out of the evidence
+  file and tag names arrive in adopted sessions, and openpyxl writes any
+  string opening with `=` as a formula — a column called `=HYPERLINK(...)`
+  was a live link in the hand-over workbook while every cell under it was
+  neutralised. The SQL pane's CSV is built in the browser
+  (`sqlResultCsv`) and applies the same two rules by hand — the prefix,
+  and quoting a bare CR the way Python's csv module does — so its CSV and
+  Excel buttons cannot disagree about one result. **Worksheet exports go
+  through `_xlsx_safe()` instead**,
   which is `_csv_safe` plus the C0 control characters XML 1.0 cannot hold:
   ingest keeps those in cell values on purpose (names must be quotable,
   cells are evidence), openpyxl refuses them, and it refuses the whole
@@ -231,6 +281,43 @@ see [docs/notes/README.md](README.md) for the whole set.
   table" stores the same spellings (`pane_cell_text`) — it stored
   Python's `b'…'` repr — and re-runs the query that produced the result
   on screen (`r.sql`, kept by `runSql`), not the editor's text by then.
+- **A pane query has to be stoppable, because some of what gets typed
+  never ends** — a recursive CTE with no stop condition, a cross join of
+  two 2M-row tables. One used to run at 100% CPU through everything: the
+  analyst had no Stop, a closed window or reload left it running, a case
+  switch left it running, and **Shut down, Ctrl+C and SIGTERM left the
+  process running** with the case lock held. That last is a uvicorn trap
+  worth knowing for anything else that can run unbounded: graceful
+  shutdown waits for every in-flight request *before* it runs the
+  lifespan's shutdown half, so `_lifespan`'s `Store.close()` never got
+  the chance, and the process cannot exit while a worker thread is inside
+  `sqlite3_step` anyway. Three ways in now, all ending in
+  `Connection.interrupt()` on the pane's own connection
+  (`Store._pane_query`):
+  - **the busy chip.** `runSql` arms `armOpCancel` with an `op_token` on
+    `/api/sql`, like a view build; the 499 paints as "Query cancelled".
+  - **the client hanging up.** `/api/sql` and `/api/sql/to_table` are
+    `async` for this alone (`_run_pane_query`): a sync route never reads
+    its socket again, so it cannot notice. They wait on the worker thread
+    and on the ASGI receive channel together — after the body, the only
+    message left is `http.disconnect` — and turn a hang-up into
+    `cancel_op`, with a made-up token when the client sent none. That
+    also keeps a closed window's query from holding the idle shutdown off
+    (it is an in-flight request).
+  - **shutdown.** `main()` runs a `uvicorn.Server` subclass whose
+    `handle_exit` — the signal handler, which is where Shut down's
+    SIGINT, Ctrl+C and SIGTERM all land — calls `stop_pane_queries()`
+    first, on a thread of its own (a handler can run inside
+    `Store.close()` holding the lock that takes). That is why `main()`
+    builds the server itself instead of calling `uvicorn.run`; it keeps
+    `run`'s KeyboardInterrupt suppression and its exit code 3 when the
+    server never started. **A test that drives `main()` up to the bind
+    stands in for `uvicorn.Server.run`, not `uvicorn.run`** — patching
+    the latter no longer stops anything, so the test starts a real server
+    and hangs (tests/test_no_console_launch.py, test_not_a_case_file.py).
+  No deadline: a GROUP BY over a few million rows legitimately takes
+  minutes, and the analyst is better placed than a timer to say which
+  query is runaway. `tests/test_sql_runaway.py` covers each way in.
 - **`POST /api/sql/export_xlsx`** takes the result the pane is SHOWING
   (columns + rows, up from the client) rather than the query, so the
   workbook matches the screen including a click-sort — which lives only in
@@ -313,8 +400,22 @@ see [docs/notes/README.md](README.md) for the whole set.
   outlives the unload; skipped when `persisted` says the page is only
   going into the bfcache), and the short fuse applies only when that
   arrived. A stream that merely stopped gets `SUSPENDED_EXIT_S` instead.
-  `_presence_open()` clears the flag, so closing one of two windows
-  cannot put the survivor on the short fuse.
+  **The goodbye has to be the LAST window's.** This note used to say a new
+  stream clearing the flag was enough to keep closing one of two windows
+  from putting the survivor on the short fuse; it was not — nothing new
+  connects, the closed window's goodbye stood, and when the survivor later
+  went quiet the server exited two minutes on. Clearing the flag whenever
+  a stream ends with others still open covers a goodbye that arrives
+  before its stream's end, but the two arrive in either order (the close
+  is noticed on the loop the moment the socket drops; the goodbye is a
+  separate request), and a goodbye landing after its own stream has gone
+  looks just like the survivor's. So both carry a per-page-load id
+  (`?page=` from `connection.js`), and `_presence_close` decides at the
+  moment the count reaches zero, by whether the page that just went said
+  goodbye; `api_goodbye` is `async` so the presence record is only touched
+  from the event loop. A goodbye with no page id (an older client, the
+  integration tests' raw requests) keeps the old meaning.
+  `tests/test_idle_shutdown.py`.
 
 - **Tests that spawn a real `server.py` must isolate it by env, not
   fixture.** The autouse `isolate_workspace` monkeypatch can't reach a

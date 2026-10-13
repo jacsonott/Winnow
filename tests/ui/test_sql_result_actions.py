@@ -176,3 +176,25 @@ def test_save_as_table_saves_the_query_behind_the_result_not_the_editor(page):
     finally:
         page.unroute("**/api/sql/to_table", catch)
     assert sent and sent[0]["sql"] == ran
+
+
+def test_csv_neutralises_formulas_and_quotes_a_bare_cr_like_the_server(page):
+    """The pane's CSV is built in the browser, and it wrote a formula-
+    leading value (or column name) as-is — while the Excel button beside
+    it, built server-side, prefixed it. A bare CR was left unquoted, which
+    a spreadsheet reads as a row break. Same rules as store._csv_safe and
+    Python's csv module now: strings opening with = + - @ tab or CR get a
+    leading apostrophe; numbers are numbers; CR quotes like LF does."""
+    from pathlib import Path as _P
+
+    _run(page, """SELECT '=1+1' AS "=HYPERLINK(x)", 'a' || char(13) || 'b' AS cr, """
+               """-5 AS n, '-5' AS s, '@x' AS a FROM src_1 LIMIT 1""")
+    page.locator(".sql-result-actions .btn", has_text="CSV").click()
+    page.wait_for_selector(".confirm-overlay input")
+    page.locator(".confirm-overlay input").fill("formulas")
+    with page.expect_download() as dl:
+        page.locator(".confirm-card .btn", has_text="Save").first.click()
+    text = _P(dl.value.path()).read_bytes().decode("utf-8")
+    header, row = text.split("\n")
+    assert header == "'=HYPERLINK(x),cr,n,s,a"
+    assert row == "'=1+1,\"a\rb\",-5,'-5,'@x"

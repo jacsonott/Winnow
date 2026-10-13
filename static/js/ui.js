@@ -26,8 +26,19 @@ export function modal(title, build, opts = {}) {
   document.querySelector('.modal-card').classList.toggle('wide', !!opts.wide);
   document.querySelector('.modal-card').classList.toggle('xwide', opts.wide === 'x');
   document.querySelector('.modal-card').classList.toggle('tall', !!opts.tall);
-  const b = $('modalBody');
-  b.replaceChildren();
+  /* A fresh body per dialog, not the old one emptied. Builders are often
+     async — they draw a frame, await a fetch, then fill it — and they all
+     write into the `b` they were handed. With one shared #modalBody, a
+     builder whose fetch came back after the analyst had moved on wrote
+     into whatever dialog was open by then: a Profile Apply sheet, with a
+     working Apply button, turned up inside Settings. Replacing the node
+     leaves a stale builder holding a detached one, so its late writes go
+     nowhere, with no generation check for every builder to remember. It
+     also drops the previous dialog's data-* flags (pmReturn, sfReturn,
+     kind) and its scroll position, which emptying the old node kept. */
+  const b = el('div', 'modal-body');
+  b.id = 'modalBody';
+  $('modalBody').replaceWith(b);
   // Any modal opening supersedes the Search-all pane's repaint hook; the
   // search-all builder re-installs its own below. (The background job keeps
   // running either way — only the painting stops.)
@@ -776,6 +787,31 @@ export function anchoredPanel(anchorEl, cls, build) {
 export function closeModal() {
   $('modal').hidden = true;
   document.dispatchEvent(new CustomEvent('winnow:modalclose'));
+}
+
+/* An async click handler that runs one at a time: `btn.onclick =
+   oneAtATime(btn, async () => { ... })`. The button is disabled from the
+   first click until the handler settles, and a click that still gets
+   through is dropped. For any button whose handler awaits a POST before
+   its dialog closes — the second click of a double-click used to run the
+   whole handler again: every file of a folder import queued twice, two
+   cases created on one path, two merges, a second copy into a case the
+   first had locked. The disabled state is put back afterwards, so a
+   handler that failed and left its dialog open can be clicked again. */
+export function oneAtATime(btn, handler) {
+  let running = false;
+  return async (e) => {
+    if (running) return undefined;
+    running = true;
+    const was = btn.disabled;
+    btn.disabled = true;
+    try {
+      return await handler(e);
+    } finally {
+      running = false;
+      btn.disabled = was;
+    }
+  };
 }
 
 /* DOM wiring for this module, called once by main.js. Handlers can't

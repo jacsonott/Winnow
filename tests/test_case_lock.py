@@ -156,3 +156,90 @@ def test_reopening_a_closed_store_at_the_same_path_really_reopens(client, store,
     r = client.post("/api/case/open", json={"path": case_path})
     assert r.status_code == 200
     assert server.STORE is not store and not server.STORE.closed
+
+
+# ------------------------------------------------------ concurrent switches
+
+def _race_two_opens(client, monkeypatch, paths):
+    """POST /api/case/open for each path from its own thread, arranged so
+    that both requests are inside _open_store at the same moment if
+    nothing serialises them. Returns (statuses, every Store opened).
+
+    The barrier is what makes this deterministic rather than a race the
+    test usually wins: unserialised, both requests read `old = STORE` and
+    then meet here, so neither can swap STORE before the other has
+    committed to its own open. Serialised, the second request never
+    arrives while the first waits; the wait times out, the barrier
+    breaks, and each request runs alone — one second, not a hang."""
+    import threading
+
+    import server
+
+    meet = threading.Barrier(len(paths))
+    made = []
+    real = server._open_store
+
+    def open_store(path):
+        try:
+            meet.wait(timeout=1.0)
+        except threading.BrokenBarrierError:
+            pass
+        s = real(path)
+        made.append(s)
+        return s
+
+    monkeypatch.setattr(server, "_open_store", open_store)
+    statuses = {}
+
+    def go(i, p):
+        statuses[i] = client.post("/api/case/open", json={"path": p}).status_code
+
+    threads = [threading.Thread(target=go, args=(i, p)) for i, p in enumerate(paths)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    return [statuses.get(i) for i in range(len(paths))], made
+
+
+def test_two_case_opens_at_once_leave_no_store_open_behind(client, tmp_path, monkeypatch):
+    """Double-clicking a case card (or two windows switching at once) sent
+    two /api/case/open whose `old = STORE; STORE = new; old.close()` steps
+    interleaved: one freshly opened Store was never closed. Its flock and
+    heartbeat stayed held for the life of the process, so that case then
+    read as "already open in another Winnow" — naming this very server."""
+    import server
+
+    a, b = str(tmp_path / "a.db"), str(tmp_path / "b.db")
+    for p in (a, b):
+        Store(p, default_tags=DEFAULT_TAGS).close()
+    statuses, made = _race_two_opens(client, monkeypatch, [a, b])
+    leaked = [s for s in made if s is not server.STORE and not s.closed]
+    try:
+        assert statuses == [200, 200]
+        assert not leaked, f"left open behind the switch: {[s.path for s in leaked]}"
+        # The case that lost the race is free again, not held by a ghost.
+        loser = b if os.path.abspath(server.STORE.path) == os.path.abspath(a) else a
+        assert probe_case_lock(loser) is None
+    finally:
+        for s in leaked:
+            s.close()
+
+
+def test_two_opens_of_the_same_case_make_one_store(client, tmp_path, monkeypatch):
+    """The same double-click on one card: both requests passed the
+    already-open check before either had opened anything, so the case got
+    TWO writer Stores in one process — and the one not kept stayed open."""
+    import server
+
+    a = str(tmp_path / "a.db")
+    Store(a, default_tags=DEFAULT_TAGS).close()
+    statuses, made = _race_two_opens(client, monkeypatch, [a, a])
+    leaked = [s for s in made if s is not server.STORE and not s.closed]
+    try:
+        assert statuses == [200, 200]
+        assert len(made) == 1, "a second writer Store was opened on the same case file"
+        assert not leaked
+    finally:
+        for s in leaked:
+            s.close()

@@ -168,3 +168,35 @@ def test_a_table_a_plugin_parsed_is_not_re_read_as_text(store, case_b, tmp_path)
     res = case_b.import_case_session(session)
     assert res["sources_reimported"] == 0 and case_b.list_sources() == []
     assert len(res["warnings"]) == 1 and "plugin" in res["warnings"][0]
+
+
+def test_a_replace_load_leaves_a_table_it_could_not_apply_to_as_it_was(store, case_b, write_csv):
+    """A replace clears the whole case (a table outside the snapshot must
+    not keep its tags), but an open table the session refused to tag —
+    its rows are not the session's — keeps the tags it has. Clearing them
+    as well bought nothing: the session's tags for it were never going to
+    be applied."""
+    a_path = write_csv([["Image"], ["a.exe"], ["b.exe"]], "a.csv")
+    nh_path = write_csv([["evil.exe", "1"], ["benign.exe", "2"], ["calc.exe", "3"]], "noheader.csv")
+    a = store.ingest_csv(a_path, build_fts=False)["id"]
+    nh = store.ingest_csv(nh_path, has_header=False, build_fts=False)["id"]
+    tag = store.upsert_tag(None, "Malware", "#ff0000", None)["id"]
+    store.set_tags(a, [1], tag, True)
+    store.set_tags(nh, [1], tag, True)
+    session = store.export_case_session()
+
+    a_b = case_b.ingest_csv(a_path, build_fts=False)["id"]
+    nh_b = case_b.ingest_csv(nh_path, build_fts=False)["id"]           # with a header: other rows
+    later = case_b.ingest_csv(write_csv([["x"], ["1"]], "later.csv"), build_fts=False)["id"]
+    mine = case_b.upsert_tag(None, "Reviewed", "#00ff00", None)["id"]
+    case_b.set_tags(nh_b, [2], mine, True)
+    case_b.set_tags(later, [1], mine, True)
+    case_b.set_note(nh_b, 2, "checked by hand")
+
+    res = case_b.import_case_session(session, merge=False)
+    tagged = {(r[0], r[1]) for r in case_b.db.execute("SELECT source_id, rid FROM row_tags")}
+    assert tagged == {(a_b, 1), (nh_b, 2)}
+    assert [tuple(r) for r in case_b.db.execute("SELECT source_id, note FROM row_notes")] == [
+        (nh_b, "checked by hand")]
+    assert res["sources_restored"] == 1
+    assert any("noheader.csv" in w and "as they were" in w for w in res["warnings"])

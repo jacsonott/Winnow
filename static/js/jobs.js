@@ -130,6 +130,9 @@ export function inFlightWork() {
 }
 
 export function startJobsPoll() {
+  // A poll backing off after failures may not ask again for 15s; whoever
+  // calls this just started work, so ask now.
+  if (jobsPollTimer && pollFailures) { clearTimeout(jobsPollTimer); jobsPollTimer = null; }
   if (!jobsPollTimer) pollJobs();
 }
 
@@ -169,10 +172,16 @@ export async function followFtsBuild(sourceId) {
    own load time is the real boundary. */
 const PAGE_START = Date.now() / 1000;
 
+/* Failed polls in a row, for the back-off at the bottom of pollJobs. */
+let pollFailures = 0;
+const POLL_MS = 900;
+const POLL_BACKOFF_MAX_MS = 15000;
+
 export async function pollJobs() {
   jobsPollTimer = null;
   const firstPoll = seenJobStatus.size === 0;
   const finishedNow = [];
+  let pollFailed = false;
   try {
     const d = await api('/api/ingest/jobs');
     for (const j of d.jobs) {
@@ -197,11 +206,18 @@ export async function pollJobs() {
       seenJobStatus.set(j.job_id, j.status);
     }
     ingestJobs = d.jobs;
+    pollFailures = 0;
   } catch (e) {
-    // The panel empties and the progress bar with it. Say so where it can
-    // be found later — this is the trace behind "it stopped updating".
-    ingestJobs = [];
-    clientLog('warn', 'Job poll failed: ' + (e && e.message ? e.message : String(e)));
+    /* A failed poll knows nothing new, so it changes nothing: the panel
+       keeps what the last good one said. It used to empty ingestJobs —
+       the progress row vanished, nothing read as running, the reschedule
+       below stopped the poll for good, and a finished import never
+       announced itself or reached the tab strip until a reload. Logged
+       once per run of failures, where "it stopped updating" can be
+       traced. */
+    pollFailed = true;
+    pollFailures += 1;
+    if (pollFailures === 1) clientLog('warn', 'Job poll failed: ' + (e && e.message ? e.message : String(e)));
   }
 
   for (const j of finishedNow) {
@@ -227,17 +243,28 @@ export async function pollJobs() {
       const ragged = (j.result || []).reduce((a, r) => a + (r.ragged_rows || 0), 0);
       const badRecs = (j.result || []).reduce((a, r) => a + (r.bad_records || 0), 0);
       const suspect = (j.result || []).reduce((a, r) => a + (r.suspect_quote_rows || 0), 0);
+      const clashes = (j.result || []).reduce((a, r) => a + (r.key_collisions || 0), 0);
+      // Bytes that were not UTF-8, read as Windows-1252 (Excel on Windows
+      // saves CSV that way): the whole file, or a few stray bytes in it.
+      const cp1252 = (j.result || []).some((r) => r.encoding === 'cp1252');
+      const recoded = (j.result || []).reduce((a, r) => a + (r.cp1252_bytes || 0), 0);
       // SQLite TEXT that wasn't UTF-8: imported with U+FFFD in place of
       // the bytes, and said so rather than shown as if it were the text.
       const undecodable = (j.result || []).reduce((a, r) => a + (r.undecodable_values || 0), 0);
-      const warn = ragged || badRecs || suspect || undecodable;
+      const warn = ragged || badRecs || suspect || clashes || cp1252 || recoded || undecodable;
       toast(`${j.name}: ${total.toLocaleString()} rows imported`
         + (ragged ? ` · ${ragged.toLocaleString()} ragged rows padded/trimmed` : '')
         + (badRecs ? ` · ${badRecs.toLocaleString()} unreadable record${badRecs === 1 ? '' : 's'} skipped` : '')
         + (undecodable ? ` · ${undecodable.toLocaleString()} text value${undecodable === 1 ? ' was' : 's were'} not valid UTF-8 (shown with \ufffd)` : '')
         // Many-newline fields are the signature of an unbalanced quote
         // swallowing the lines after it — a warning, not a verdict.
-        + (suspect ? ` · ${suspect.toLocaleString()} row${suspect === 1 ? '' : 's'} with very long multi-line fields — check for a stray quote if the row count looks low` : ''),
+        + (suspect ? ` · ${suspect.toLocaleString()} row${suspect === 1 ? '' : 's'} with very long multi-line fields — check for a stray quote if the row count looks low` : '')
+        // JSON: a key named twice, or a literal "a.b" beside a nested a.b.
+        // Both values are in the table; the analyst needs to know the
+        // suffixed column exists to go and look at it.
+        + (clashes ? ` · ${clashes.toLocaleString()} record${clashes === 1 ? '' : 's'} with two values for one key — the later kept as <key>_1` : '')
+        + (cp1252 ? ' · not UTF-8 — read as Windows-1252' : '')
+        + (recoded ? ` · ${recoded.toLocaleString()} byte${recoded === 1 ? '' : 's'} not valid UTF-8, read as Windows-1252` : ''),
         warn ? 8000 : 3500);
       setTimeout(() => { dismissedJobs.add(j.job_id); renderJobsPanel(); }, 8000);
       for (const sid of j.source_ids || []) offerTimestampColumns(sid);
@@ -305,7 +332,18 @@ export async function pollJobs() {
   // import may open its first table. An FTS build still being watched
   // keeps the poll alive but is not part of the batch.
   if (!batchActive) batchNavigated = false;
-  if (batchActive || ftsWatch.size > 0) jobsPollTimer = setTimeout(pollJobs, 900);
+  if (pollFailed) {
+    /* Not knowing is not "nothing is running": whoever started this poll
+       had a reason, and the failed poll cannot say it is over. Try again,
+       backing off so a server that has gone away is asked every 15s
+       rather than every 900ms. On the case list there is no case to ask
+       about, and the next import starts its own poll. */
+    if (!$('app').hidden) {
+      jobsPollTimer = setTimeout(pollJobs, Math.min(POLL_MS * 2 ** pollFailures, POLL_BACKOFF_MAX_MS));
+    }
+    return;
+  }
+  if (batchActive || ftsWatch.size > 0) jobsPollTimer = setTimeout(pollJobs, POLL_MS);
 }
 
 /* `phase` is the badge text; `cls` is its class when the two differ (a
