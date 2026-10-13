@@ -664,24 +664,31 @@ def _backup(root: Path, plan: dict, version: str) -> Path:
         n += 1
         dest = root / BACKUP_DIR / f"{version}-{stamp}-{n}"
     dest.mkdir(parents=True)
-    saved = []
-    for rel in list(plan["changed"]) + list(plan["removed"]):
-        src = root / rel
-        if not src.is_file():
-            continue
-        out = dest / rel
-        out.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, out)
-        saved.append(rel)
-    # `added` files did not exist before, so restoring means removing them.
-    # Written last, and whole or not at all: a backup only counts once this
-    # exists, so one interrupted part-way is never what --rollback picks.
-    _write_text_atomic(dest / "restore.json", json.dumps({
-        "version": version,
-        "taken_at": taken_at,
-        "restore": sorted(saved),
-        "remove": sorted(plan["added"]),
-    }, indent=1))
+    try:
+        saved = []
+        for rel in list(plan["changed"]) + list(plan["removed"]):
+            src = root / rel
+            if not src.is_file():
+                continue
+            out = dest / rel
+            out.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, out)
+            saved.append(rel)
+        # `added` files did not exist before, so restoring means removing
+        # them. Written last, and whole or not at all: a backup only counts
+        # once this exists, so one interrupted part-way is never what
+        # --rollback picks.
+        _write_text_atomic(dest / "restore.json", json.dumps({
+            "version": version,
+            "taken_at": taken_at,
+            "restore": sorted(saved),
+            "remove": sorted(plan["added"]),
+        }, indent=1))
+    except BaseException:
+        # ...and for the same reason list_backups never sees it, so pruning
+        # never would either: a half-copied backup left here stays forever.
+        shutil.rmtree(dest, ignore_errors=True)
+        raise
     return dest
 
 

@@ -689,6 +689,34 @@ def test_the_cli_still_says_cancelled_when_nothing_was_touched(tmp_path, monkeyp
         assert (install / rel).read_text(encoding="utf-8") == text
 
 
+def test_ctrl_c_while_backing_up_leaves_no_half_backup_behind(tmp_path, monkeypatch):
+    """A backup with no restore.json is never listed, so it is never
+    restored (right) and never pruned either (wrong): one Ctrl+C during
+    the backup left a directory of copied modules in the install for
+    good, uncounted by KEEP_BACKUPS."""
+    import shutil
+    install, files = _ten_module_install(tmp_path / "winnow")
+    archive = _ten_module_release(tmp_path / "v2.zip")
+    real = shutil.copy2
+    count = {"k": 0}
+
+    def flaky(src, dst, *a, **kw):
+        count["k"] += 1
+        if count["k"] == 4:
+            raise KeyboardInterrupt
+        return real(src, dst, *a, **kw)
+    monkeypatch.setattr(shutil, "copy2", flaky)
+
+    with pytest.raises(updater.UpdateInterrupted, match="before anything was changed"):
+        updater.apply_update(archive, install)
+
+    for rel, text in files.items():
+        assert (install / rel).read_text(encoding="utf-8") == text
+    backups = install / updater.BACKUP_DIR
+    assert not backups.exists() or not any(backups.iterdir()), \
+        f"partial backup left behind: {[p.name for p in backups.iterdir()]}"
+
+
 # --------------------------------------------------------------- HTTP layer
 
 def _client(store, monkeypatch):
