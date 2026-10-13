@@ -279,8 +279,9 @@ export function rowMenuDashboardItems(ctx) {
   // for a reader of boards the entry was a submenu they never wanted.
   if (!dashboardCreatorMode()) return [];
   const merged = S.sourceId == null || S.sourceId < 0;
-  // A derived column's values live in the drv_<id> sidecar, and a widget
-  // queries src_<id> — counting one would produce "no such column".
+  // Boards don't offer derived columns anywhere (dashwidgets.js's
+  // widgetable), though a widget's own SQL can read one — run_sql's
+  // src_<id> view joins the drv_<id> sidecar.
   const derived = !!(S.columns || []).find((c) => c.name === ctx.colName && c.derived);
   const ok = !!ctx.colName && !merged && !derived;
   const shown = ok ? ellipsize(displayValue(ctx.value)) : '';
@@ -292,7 +293,7 @@ export function rowMenuDashboardItems(ctx) {
       disabled: !ok,
       title: !ctx.colName ? 'Right-click a cell to count its value'
         : merged ? 'A merged view is not one table a widget can count'
-        : derived ? 'A derived column is computed per row, not stored in the table a widget queries'
+        : derived ? 'Dashboard menus don’t offer derived columns — a widget’s own SQL can still use one'
         : 'A number on a dashboard that opens these rows when clicked',
       onclick: () => quickAddWidget(widgetFrom({
         template: 'countwhere', table: tableOf(S.sourceId), column: ctx.colName,

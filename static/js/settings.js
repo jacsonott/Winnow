@@ -1256,8 +1256,10 @@ export function openSettings() {
    Updating replaces the files Winnow ships and nothing else — workspace/,
    installed plugins, sessions and case files are never touched (see
    updater.PROTECTED) — and the previous version is backed up first, so a
-   bad update is one button (or `python update.py --rollback`) away from
-   undone. */
+   bad update is `python update.py --rollback` away from undone. That is
+   the way back: this panel has no rollback button (/api/updates/rollback
+   exists, but nothing in the UI calls it), and the CLI still works when
+   an update has broken the UI. */
 export function buildUpdatesPanel(b) {
   const status = el('div', 'fb-help');
   const notes = el('pre', 'update-notes');

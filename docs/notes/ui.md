@@ -1442,8 +1442,10 @@ see [docs/notes/README.md](README.md) for the whole set.
   `float`ed so the value wraps around it and reserved in the layout at all
   times so the hover costs no reflow); "Copy row" was the only copy the
   pane offered, so lifting one SID out of forty fields meant selecting it
-  by hand across a wrapped pretty-printed block. It copies the **raw**
-  cell, like "Copy row" and unlike the pane's rendering of it, and finds
+  by hand across a wrapped pretty-printed block. It copies the
+  **displayed** cell (`displayCell`: a datetime column's chosen format and
+  a duration's units, as the grid's copies do; "Copy row" copies the
+  stored text) but not the pane's pretty-printing of it, and finds
   that cell through `#detailFields`'s `dataset.pos` rather than a value
   stashed on the button — a multi-KB payload duplicated into an attribute
   would put the row in the DOM twice. The button is not a tab stop: forty

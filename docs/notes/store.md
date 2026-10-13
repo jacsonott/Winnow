@@ -588,8 +588,8 @@ see [docs/notes/README.md](README.md) for the whole set.
   matches-everything, miss) while the file grew ~7%, because FTS5 automerges
   during the build and `detail=none` makes candidate verification, not
   segment walking, the cost.
-- `compact()` (`POST /api/case/compact`, the Tables modal's "Compact case
-  file…") is the only thing that returns freed pages to the OS. Everything
+- `compact()` (`POST /api/case/compact`, "Compact case file…" under the
+  **Case ▾** menu) is the only thing that returns freed pages to the OS. Everything
   else — dropping a source, the startup stale-FTS janitor, dropping a column
   index — frees to SQLite's freelist, which is the right default but can
   park tens of GB. Explicit and confirmed because it rewrites the whole file
