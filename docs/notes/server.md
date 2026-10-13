@@ -175,7 +175,16 @@ see [docs/notes/README.md](README.md) for the whole set.
   `_csv_safe()` (OWASP formula-injection prefixing for `=+-@`/tab/CR-leading
   values) since exports are explicitly meant to be opened in Excel and handed
   to other analysts; this only touches the exported copy, never the stored
-  case-file value. **Worksheet exports go through `_xlsx_safe()` instead**,
+  case-file value. **The header row and the Tags column go through it too**
+  (`_export_header`): column names are header text out of the evidence
+  file and tag names arrive in adopted sessions, and openpyxl writes any
+  string opening with `=` as a formula — a column called `=HYPERLINK(...)`
+  was a live link in the hand-over workbook while every cell under it was
+  neutralised. The SQL pane's CSV is built in the browser
+  (`sqlResultCsv`) and applies the same two rules by hand — the prefix,
+  and quoting a bare CR the way Python's csv module does — so its CSV and
+  Excel buttons cannot disagree about one result. **Worksheet exports go
+  through `_xlsx_safe()` instead**,
   which is `_csv_safe` plus the C0 control characters XML 1.0 cannot hold:
   ingest keeps those in cell values on purpose (names must be quotable,
   cells are evidence), openpyxl refuses them, and it refuses the whole

@@ -11644,7 +11644,7 @@ class Store:
             tagnames = {r["id"]: r["name"] for r in ro.execute("SELECT id, name FROM tag_defs")}
             buf = io.StringIO()
             w = csv.writer(buf, lineterminator="\n")
-            w.writerow(["Line", "Tags", "Note", *cols])
+            w.writerow(_export_header(cols, _csv_safe))
             yield buf.getvalue()
             buf.seek(0), buf.truncate(0)
 
@@ -11669,7 +11669,7 @@ class Store:
         for r in rows:
             if tagged_only and r["rid"] not in tmap:
                 continue
-            w.writerow([r["rid"], "; ".join(tmap.get(r["rid"], [])), _csv_safe(nmap.get(r["rid"], "")), *[_csv_safe(r[c]) for c in cols]])
+            w.writerow([r["rid"], _csv_safe("; ".join(tmap.get(r["rid"], []))), _csv_safe(nmap.get(r["rid"], "")), *[_csv_safe(r[c]) for c in cols]])
             yield buf.getvalue()
             buf.seek(0), buf.truncate(0)
 
@@ -11693,7 +11693,7 @@ class Store:
             tagnames = {r["id"]: r["name"] for r in ro.execute("SELECT id, name FROM tag_defs")}
             buf = io.StringIO()
             w = csv.writer(buf, lineterminator="\n")
-            w.writerow(["Line", "Tags", "Note", *cols])
+            w.writerow(_export_header(cols, _csv_safe))
             yield buf.getvalue()
             buf.seek(0), buf.truncate(0)
 
@@ -11730,7 +11730,7 @@ class Store:
                 for r in chunk:
                     if tagged_only and r["rid"] not in tagged_set:
                         continue
-                    w.writerow([r["rid"], "; ".join(tmap.get(r["rid"], [])), _csv_safe(nmap.get(r["rid"], "")),
+                    w.writerow([r["rid"], _csv_safe("; ".join(tmap.get(r["rid"], []))), _csv_safe(nmap.get(r["rid"], "")),
                                *[_csv_safe(r[c]) for c in cols]])
                 yield buf.getvalue()
                 buf.seek(0), buf.truncate(0)
@@ -11757,7 +11757,7 @@ class Store:
             tagnames = {r["id"]: r["name"] for r in ro.execute("SELECT id, name FROM tag_defs")}
             buf = io.StringIO()
             w = csv.writer(buf, lineterminator="\n")
-            w.writerow(["Line", "Tags", "Note", *cols])
+            w.writerow(_export_header(cols, _csv_safe))
             yield buf.getvalue()
             buf.seek(0), buf.truncate(0)
 
@@ -11811,7 +11811,7 @@ class Store:
                         continue  # tagged_only filtered this row out
                     w.writerow([
                         r["rid"],
-                        "; ".join(tmap.get(key, [])),
+                        _csv_safe("; ".join(tmap.get(key, []))),
                         _csv_safe(nmap.get(key, "")),
                         *[_csv_safe(v) for v in cellmap[key]],
                     ])
@@ -11862,7 +11862,7 @@ class Store:
                         nmap[rid] = note
 
             ws = wb.create_sheet(_xlsx_sheet_name(src["name"], used_names))
-            ws.append(["Line", "Tags", "Note", *cols])
+            ws.append(_export_header(cols, _xlsx_safe))
             for rid in rids:
                 if rid not in cellmap:
                     continue
@@ -11944,7 +11944,7 @@ class Store:
                 nmap = {rid: note for rid, note in ro.execute(
                     "SELECT rid, note FROM row_notes WHERE source_id=?", (source_id,))}
 
-                header = ["Line", "Tags", "Note", *cols]
+                header = _export_header(cols, _xlsx_safe)
                 # Continuations derive from the name the FIRST sheet actually
                 # got — two tables both called Security.evtx.csv become
                 # "Security.evtx.csv" and "Security.evtx.csv_1", and the
@@ -13169,6 +13169,16 @@ def _xlsx_safe(v):
     if isinstance(v, str) and _XLSX_ILLEGAL.search(v):
         v = _XLSX_ILLEGAL.sub(lambda m: "\\x%02x" % ord(m.group()), v)
     return _csv_safe(v)
+
+
+def _export_header(cols: list[str], safe) -> list:
+    """An export's header row through the same formula guard as its cells
+    (`safe` is _csv_safe or _xlsx_safe). Column names are header text out
+    of the evidence file — attacker-influenced exactly as the cells are —
+    and openpyxl writes any string opening with '=' as a formula, so a
+    column called =HYPERLINK(...) was a live link in the hand-over
+    workbook's first row while every cell under it was neutralised."""
+    return ["Line", "Tags", "Note", *[safe(c) for c in cols]]
 
 
 def _esc_like(s: str) -> str:
