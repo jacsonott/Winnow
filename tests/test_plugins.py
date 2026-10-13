@@ -2100,6 +2100,40 @@ def test_first_last_row_json_lands_in_the_created_table(fl_client, store):
     assert "Row (JSON)" in [c["name"] for c in src["columns"]]
 
 
+def test_first_last_orders_a_number_column_by_value(fl_client, store):
+    """Cells are TEXT, so ordering a number column by its text put "10"
+    before "9": a group of record ids came back First=10, Last=9, while
+    the grid sorted the same column numerically. A number column orders by
+    value, and a cell that isn't a number (blank, "n/a") wins neither end.
+    The result's own row order follows the same rule. A merge orders the
+    same way (invariant #9)."""
+    client, _ = fl_client
+    rows = [["WS1", "9"], ["WS1", "10"], ["WS1", "100"], ["WS1", "55"], ["WS1", ""], ["WS1", "n/a"],
+            ["WS2", "n/a"], ["WS2", "-3"], ["WS2", "20"],
+            ["WS3", ""], ["WS3", "x"]]                  # nothing numeric: file order decides
+    sid = store.ingest_rows(["Host", "RecordId"], rows[:6], name="evts",
+                            column_types=["text", "number"], build_fts=False)["id"]
+    sid2 = store.ingest_rows(["Host", "RecordId"], rows[6:], name="evts2",
+                             column_types=["text", "number"], build_fts=False)["id"]
+    mid = store.create_merge("evtsm", [sid, sid2])["id"]
+
+    def bookends(source_id):
+        out = _fl(client, "preview", source_id=source_id, group_by=["Host"],
+                  sort_column="RecordId", columns=["Host"], template="{which}")
+        return [(r[1], r[2], r[0]) for r in out["rows"]]
+
+    assert bookends(sid) == [("WS1", "First", "9"), ("WS1", "Last", "100")]
+    assert bookends(mid) == [("WS2", "First", "-3"), ("WS1", "First", "9"), ("WS2", "Last", "20"),
+                             ("WS1", "Last", "100"), ("WS3", "First", ""), ("WS3", "Last", "x")]
+    # A text column is still ordered as text.
+    store.ingest_rows(["Host", "Label"], [["A", "10"], ["A", "9"]], name="txt",
+                      column_types=["text", "text"], build_fts=False)
+    tid = next(x["id"] for x in store.list_sources() if x["name"] == "txt")
+    out = _fl(client, "preview", source_id=tid, group_by=["Host"], sort_column="Label",
+              columns=[], template="{which}")
+    assert [(r[0], r[-1]) for r in out["rows"]] == [("10", "First"), ("9", "Last")]
+
+
 def test_first_last_works_on_a_merge(fl_client, store, write_csv):
     """Invariant #9: bookends over a merged table — one windowed pass over
     a UNION ALL of the members, ties broken by (source_id, rid)."""
