@@ -98,7 +98,19 @@ see [docs/notes/README.md](README.md) for the whole set.
   installs one — `PluginRegistry.load` is written to be safely re-run on
   a live server (registry rebuilt wholesale; superseded modules linger in
   sys.modules under unique per-load names because Python can't truly
-  unload code, but nothing references them again). Enabled/disabled state
+  unload code, but nothing references them again). **Rebuilt off to the
+  side, swapped in whole, one load at a time.** A load fills a fresh
+  `_Loaded` and assigns it to `self._state` at the end, under
+  `_load_lock`; every lookup reads `self._state` once. It used to clear
+  the live dicts first and refill them plugin by plugin, so every plugin
+  route 404'd for as long as the imports took, and two reloads at once
+  (a toggle in one window, a case opening in another — both threadpooled
+  routes) filled the same dicts, listing healthy plugins twice and
+  failing them with "Duplicate API route". server.py's `_reload_plugins`
+  holds `_PLUGIN_RELOAD_LOCK` around reading the policy AND loading, so
+  the reload that finishes last is also the one that read the open case
+  last. Anything new that `register()` writes into goes on `_Loaded`,
+  not on the registry, or it lands in the live set mid-load. Enabled/disabled state
   is `workspace/plugins.json` (`PluginPrefs`) — machine-level workflow
   state, stored as a *disabled* list so presence in plugins/ means on by
   default, keyed by filesystem name because that's the only identity that

@@ -1276,7 +1276,10 @@ a scope dropdown like any other plugin, just defaulting to off.
 `workspace/plugins.json`) or *for this case only* (an override stored in
 the case file's `case_settings`, so it travels with the evidence). The
 registry reloads on every case switch — per-case disablement really
-unloads the code, same guarantee as the machine-level switch.
+unloads the code, same guarantee as the machine-level switch. A reload
+is built beside the running set and switched in whole, one reload at a
+time: while yours imports, your routes keep answering from the previous
+load, and there is no moment in between when they 404.
 
 **Distribute** a folder plugin as a zip or a git repo containing the
 plugin folder. Include a README saying what it does, what it needs

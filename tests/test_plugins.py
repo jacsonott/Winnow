@@ -425,6 +425,115 @@ def test_one_plugin_exiting_does_not_take_the_others_with_it(plug_dir):
     assert reg.get_format("demo.lines") is not None
 
 
+# ------------------------------------------------------- reloads and races
+
+class _ImportGate:
+    """Lets a test hold a plugin's import open mid-reload, so "during a
+    reload" is a state the test is IN rather than a race it hopes to hit.
+    The plugin finds it in sys.modules — its source can't import the test."""
+    NAME = "_winnow_test_import_gate"
+
+    def __init__(self):
+        import threading
+        self.block = False
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.imports = 0
+
+
+GATED_PLUGIN = """
+    import sys
+    gate = sys.modules["_winnow_test_import_gate"]
+    gate.imports += 1
+    if gate.block:
+        gate.entered.set()
+        gate.release.wait(10)   # an import that takes a while: pandas, an SDK
+
+    def register(api):
+        api.register_api("ping", lambda req: "{name}", methods=["GET"])
+"""
+
+
+@pytest.fixture
+def gated(plug_dir, monkeypatch):
+    import sys
+    gate = _ImportGate()
+    monkeypatch.setitem(sys.modules, _ImportGate.NAME, gate)
+    # a_slow sorts first, so a reload held inside it has registered
+    # nothing new yet — the moment the old code had nothing at all.
+    for name in ("a_slow", "b_ok", "c_ok"):
+        _write_plugin(plug_dir, name, GATED_PLUGIN.replace("{name}", name))
+    reg = PluginRegistry()
+    reg.load([plug_dir])
+    yield gate, reg
+    gate.release.set()      # never leave a reload thread parked
+
+
+def test_plugin_routes_keep_answering_while_a_reload_runs(gated, plug_dir):
+    """load() cleared the live registry and refilled it as each plugin
+    imported, so every plugin route 404'd (and the listing was empty) for
+    as long as a reload took — and Settings toggles, installs and every
+    case open reload."""
+    import threading
+    gate, reg = gated
+    gate.block = True
+    t = threading.Thread(target=reg.load, args=([plug_dir],), daemon=True)
+    t.start()
+    assert gate.entered.wait(10)
+    try:
+        assert reg.get_api("c_ok", "ping") is not None
+        assert [p["fs_name"] for p in reg.describe()] == ["a_slow", "b_ok", "c_ok"]
+    finally:
+        gate.release.set()
+        t.join(10)
+    assert reg.get_api("c_ok", "ping") is not None
+
+
+def test_overlapping_reloads_are_serialised(gated, plug_dir):
+    """Two reloads at once (a toggle in one window while a case opens in
+    another; both are threadpooled routes) filled the same dicts: each
+    plugin's register() collided with its own registration from the
+    other load, so healthy plugins were listed twice and marked failed
+    with "Duplicate API route"."""
+    import threading
+    import time
+    gate, reg = gated
+    gate.block = True
+    imports_before = gate.imports
+    first = threading.Thread(target=reg.load, args=([plug_dir],), daemon=True)
+    first.start()
+    assert gate.entered.wait(10)
+    second = threading.Thread(target=reg.load, args=([plug_dir],), daemon=True)
+    second.start()
+    time.sleep(0.3)
+    # The second load is waiting its turn, not importing alongside.
+    assert gate.imports == imports_before + 1
+    gate.block = False
+    gate.release.set()
+    first.join(10)
+    second.join(10)
+    assert not first.is_alive() and not second.is_alive()
+
+    listing = reg.describe()
+    assert [p["fs_name"] for p in listing] == ["a_slow", "b_ok", "c_ok"]
+    assert [p["error"] for p in listing] == [None, None, None]
+    assert all(reg.get_api(fs, "ping") for fs in ("a_slow", "b_ok", "c_ok"))
+
+
+def test_a_reload_that_fails_leaves_the_previous_set_running(gated, plug_dir):
+    gate, reg = gated
+
+    def policy_that_breaks(fs_name, directory):
+        if fs_name == "b_ok":
+            raise OSError("plugins.json unreadable")
+        return True
+
+    with pytest.raises(OSError):
+        reg.load([plug_dir], enabled_for=policy_that_breaks)
+    assert [p["fs_name"] for p in reg.describe()] == ["a_slow", "b_ok", "c_ok"]
+    assert all(reg.get_api(fs, "ping") for fs in ("a_slow", "b_ok", "c_ok"))
+
+
 def test_installing_a_plugin_that_exits_answers_instead_of_hanging(plugin_client, plug_dir):
     """The reported symptom. The install route reloads the registry in a
     worker thread; a BaseException escaping that thread means the request
