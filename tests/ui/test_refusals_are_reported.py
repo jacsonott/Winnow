@@ -67,8 +67,11 @@ def test_the_tables_manager_reports_a_refused_close_and_remove(page):
 
 
 def test_removing_a_case_from_the_list_the_server_refuses(page):
-    _refuse(page, "**/api/cases/ui-refused", "workspace is read-only", "DELETE")
-    page.evaluate("() => { __winnow.removeCaseFromList({ id: 'ui-refused', name: 'Refused case' }); }")
+    # The DELETE carries ?path= (which case the list meant), so the
+    # pattern has to allow a query string after the id.
+    _refuse(page, "**/api/cases/ui-refused?*", "workspace is read-only", "DELETE")
+    page.evaluate("() => { __winnow.removeCaseFromList({ id: 'ui-refused', name: 'Refused case', "
+                  "path: '/nowhere/refused.db-winnow' }); }")
     _confirm(page, "Remove")
     _toast(page, "workspace is read-only")
 
