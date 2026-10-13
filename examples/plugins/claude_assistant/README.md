@@ -26,8 +26,8 @@ than a Winnow feature. Airgapped machines never load a line of it.
    case file, and never sent to the browser). `export ANTHROPIC_API_KEY=...`
    or `ant auth login` still work; the plugin prefers the Winnow-named one
    when it is set.
-3. **Settings → Plugins → "Install a plugin folder…"** and pick this
-   folder, or `cp -r examples/plugins/claude_assistant plugins/`.
+3. Turn it on in **Settings → Plugins → Manage plugins…**, where it is
+   listed, switched off, with the other bundled examples.
 
 ## What it does on the API
 

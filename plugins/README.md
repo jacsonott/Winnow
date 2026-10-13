@@ -22,7 +22,9 @@ have — a single `.py` file, or a folder with an `__init__.py` — and offers
 a picker for each, copying what you pick from anywhere on disk into here.
 Scope changes and installs take effect immediately — no server restart.
 Copying a plugin into this folder by hand still works exactly the same;
-the manager picks it up on next open.
+Winnow picks it up the next time it starts, a case is opened or switched,
+or any plugin is switched on or off. Just opening the manager doesn't
+rescan.
 
 Seven ready-made examples ship in [`examples/plugins/`](../examples/plugins/):
 `mft_usn` (raw NTFS `$MFT`/`$J` parsing — an ingest-format plugin),

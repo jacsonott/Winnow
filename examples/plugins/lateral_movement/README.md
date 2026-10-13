@@ -46,8 +46,10 @@ file's shared connection.
 
 ## Install
 
-**Settings → Plugins → "Install a plugin folder…"** and pick this folder,
-or `cp -r examples/plugins/lateral_movement plugins/`. No restart needed.
+It ships with Winnow, switched off: turn it on in **Settings → Plugins →
+Manage plugins…**. To run a modified copy instead, copy this folder into
+`plugins/` (or use **Install a plugin… → Pick a plugin folder…** there);
+a copy in `plugins/` replaces the bundled one. No restart needed.
 
 ## As a reference for writing your own UI plugin
 

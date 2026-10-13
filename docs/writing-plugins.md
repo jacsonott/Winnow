@@ -1403,9 +1403,10 @@ def lookup_handler(req):
   that needs a network call makes it through its own `register_api`
   route.
 - Tell the analyst the name in your README: "set `WINNOW_VT_API_KEY`
-  under Settings → Environment". (The bundled `claude_assistant` predates
-  this and reads the Anthropic SDK's own `ANTHROPIC_API_KEY` from the
-  shell — the pattern to copy is the README sentence, not the name.)
+  under Settings → Environment". The bundled `claude_assistant` does
+  exactly this with `WINNOW_ANTHROPIC_API_KEY`, falling back to the
+  Anthropic SDK's own `ANTHROPIC_API_KEY` from the shell when it isn't
+  set.
 - For everything that is *not* secret — the engagement, a base URL, a
   document link — use a [case variable](#case-variables) instead, so it
   travels with the case.
