@@ -448,7 +448,7 @@ see [docs/notes/README.md](README.md) for the whole set.
     viewport's right edge passes what the last paint built (`paintedRight`).
     A grid painted while hidden (a page tab is up; clientWidth is 0) has
     no viewport to window to and gets every column.
-  `tests/ui/test_wide_tables.py` asserts it on a 150-column table: a row
+  `tests/ui/test_wide_tables_ui.py` asserts it on a 150-column table: a row
   carries a fraction of the columns, and every header on screen has its
   cell under it at its x and width, at either end and the middle, pinned,
   after a grow, and after the arrow keys walk into columns that were never

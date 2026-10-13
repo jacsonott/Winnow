@@ -506,7 +506,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   - Copy, CSV…, Excel…, Save as table… and the tag hotkeys read the rows
     (`displayedRows`, `r.tags.sel`), never the DOM, so a Shift range or a
     copy reaches rows that were never built. Keep it that way.
-  `tests/ui/test_wide_tables.py` covers it: a bounded cell count, the row
+  `tests/ui/test_wide_tables_ui.py` covers it: a bounded cell count, the row
   under the middle of the pane holding the rid its position means at the
   top, middle and bottom, column widths unchanged by scrolling, and a
   click that leaves every built row in place.
