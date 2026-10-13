@@ -109,15 +109,20 @@ def test_a_source_still_importing_says_so_instead_of_500ing(store, write_csv):
 
 
 class _RunOnRelease:
-    """Store.lock, plus: after `arm(fn)`, the next time the lock is fully
-    released, run `fn` on another thread and wait for it — a competing
-    build taking the writer lock in the gap after release."""
+    """Store.lock, plus: after `arm(fn)`, the next time the thread that
+    armed it fully releases the lock, run `fn` on another thread and wait
+    for it — a competing build taking the writer lock in the gap after
+    release. Only that thread's release counts: a background index or FTS
+    build passes through this lock too, and firing on its release ran
+    `fn` concurrently with the assertions instead of before them."""
 
     def __init__(self, inner):
         self.inner = inner
         self.fn = None
+        self.owner = None
 
     def arm(self, fn):
+        self.owner = threading.get_ident()
         self.fn = fn
 
     def acquire(self, *a, **k):
@@ -125,7 +130,8 @@ class _RunOnRelease:
 
     def release(self):
         self.inner.release()
-        if self.fn is not None and not self.inner._is_owned():
+        if (self.fn is not None and threading.get_ident() == self.owner
+                and not self.inner._is_owned()):
             fn, self.fn = self.fn, None
             t = threading.Thread(target=fn)
             t.start()
