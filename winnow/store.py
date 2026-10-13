@@ -15182,12 +15182,12 @@ class Store:
         with self._pane_query(op_token) as ro:
             t0 = time.time()
             cur = ro.execute(sql)
-            rows = cur.fetchmany(limit)
+            rows = cur.fetchmany(limit + 1)   # one past the limit: exactly `limit` rows is not truncated
             cols = [d[0] for d in cur.description] if cur.description else []
             return {
                 "columns": cols,
-                "rows": [[r[i] for i in range(len(cols))] for r in rows],
-                "truncated": len(rows) == limit,
+                "rows": [[r[i] for i in range(len(cols))] for r in rows[:limit]],
+                "truncated": len(rows) > limit,
                 "elapsed_ms": int((time.time() - t0) * 1000),
             }
 

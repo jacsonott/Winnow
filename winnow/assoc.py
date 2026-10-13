@@ -14,8 +14,11 @@ catalogue rather than left to the UI:
   the double-click can't cost the analyst anything (`default_ok`).
   .txt/.json/.db/.xlsx have real owners — Notepad, editors, DB Browser,
   Excel — and a forensic tool that steals .xlsx from Excel is the kind
-  of thing that gets it deleted. Plugin extensions are handler-only
-  too: they aren't vetted, and a plugin is free to claim .zip.
+  of thing that gets it deleted. Plugin extensions are default-ELIGIBLE
+  but never default silently: one becomes the double-click default only
+  through an explicit analyst choice (the new-extension launch prompt,
+  or the panel's "Make default"), and a builtin type always wins a
+  clash, so a plugin can't re-label .csv or .xlsx (supported_types).
 
 - On Windows, "make default" writes the classic HKCU\\Software\\Classes
   association and then tells the truth: since Windows 8 Explorer's

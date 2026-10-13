@@ -316,6 +316,25 @@ def test_a_missing_dev_branch_says_so_rather_than_blaming_the_network(install):
         updater.check_branch(_fetch=not_found)
 
 
+@pytest.mark.parametrize("argv, branch", [(["--dev"], "develop"),
+                                          (["--dev", "--branch", "feat/x"], "feat/x")])
+def test_a_dev_sync_names_the_branch_it_downloads(install, tmp_path, monkeypatch, capsys, argv, branch):
+    """`update.py --dev` printed "Downloading main…" while it fetched
+    develop (or --branch NAME)."""
+    import update as update_cli
+    monkeypatch.setattr(update_cli, "HERE", install)
+    commit = {"sha": "abc1234def5678", "commit": {"message": "x", "committer": {"date": ""}}}
+    real = updater.check_branch
+    monkeypatch.setattr(updater, "check_branch", lambda b: real(b, _fetch=lambda u, t: commit))
+    monkeypatch.setattr(updater, "download",
+                        lambda url, dest: _make_release(tmp_path / "tip.zip", "1.1.0", _v2_files()))
+
+    assert update_cli.main(argv + ["--dry-run", "--dest", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert f"Downloading {branch}@abc1234" in out
+    assert "Downloading main" not in out
+
+
 def test_a_main_sync_is_recorded_as_such(install, tmp_path):
     """A box synced to main is running code no release was cut from —
     worth being able to tell after the fact."""

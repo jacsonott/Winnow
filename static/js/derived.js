@@ -125,8 +125,9 @@ export function columnMenuItems(name) {
   }
   // Straight onto a board, no editor: the column is the pick, the
   // widget writes its own query and knows how to open these rows.
-  // Not for a derived column itself: a widget queries src_<id>, where a
-  // derived column's values are not (they are in the drv_<id> sidecar).
+  // Not for a derived column itself: boards don't offer derived columns
+  // anywhere (dashwidgets.js's widgetable), though a widget's own SQL can
+  // read one — run_sql's src_<id> view joins the drv_<id> sidecar.
   if (dashboardCreatorMode() && S.sourceId != null && S.sourceId >= 0 && !c.derived) {
     const table = tableOf(S.sourceId);
     items.push('-', { header: 'Add to dashboard' });

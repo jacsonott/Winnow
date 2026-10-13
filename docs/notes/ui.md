@@ -686,7 +686,11 @@ see [docs/notes/README.md](README.md) for the whole set.
     scope that isn't visible is a lie. Building a *second* view with just
     this column's filter removed would be the truly Excel-exact answer and
     is not available: `Store._views` evicts any other view for the same
-    source (backlog item 2).
+    source (backlog item 2). Either list is capped at `VALUE_PICKER_LIMIT`
+    (1,000) most-common values, and the panel's Find filters only those
+    client-side (`pickerRows`) — neither route takes a search term — so
+    the capped-list warning sends the analyst to a text filter on the
+    column instead of promising Find reaches the rest.
   - **`bucket_datetime=False`.** `group_summary` day-buckets datetime
     columns, and a `2024-01-05` bucket matches no stored value, so an
     `=`/`in` filter built from one selects nothing. The flag turns the
@@ -1460,8 +1464,10 @@ see [docs/notes/README.md](README.md) for the whole set.
   `float`ed so the value wraps around it and reserved in the layout at all
   times so the hover costs no reflow); "Copy row" was the only copy the
   pane offered, so lifting one SID out of forty fields meant selecting it
-  by hand across a wrapped pretty-printed block. It copies the **raw**
-  cell, like "Copy row" and unlike the pane's rendering of it, and finds
+  by hand across a wrapped pretty-printed block. It copies the
+  **displayed** cell (`displayCell`: a datetime column's chosen format and
+  a duration's units, as the grid's copies do; "Copy row" copies the
+  stored text) but not the pane's pretty-printing of it, and finds
   that cell through `#detailFields`'s `dataset.pos` rather than a value
   stashed on the button — a multi-KB payload duplicated into an attribute
   would put the row in the DOM twice. The button is not a tab stop: forty

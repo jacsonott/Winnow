@@ -251,7 +251,7 @@ export function openTimeRangeModal() {
     }
     colSel.value = cols.includes(S.timeRange.column) ? S.timeRange.column : '';
     b.append(colSel);
-    if (!cols.length) b.append(el('p', 'fb-help', "This table has no datetime columns yet — the range below will simply match nothing here until it's opened on one that does."));
+    if (!cols.length) b.append(el('p', 'fb-help', "This table has no datetime columns yet, so the range below doesn't narrow it — the timeframe hides none of its rows, and applies on the tables that have one."));
 
     // Plain text, not <input type="datetime-local"> — that widget's native
     // picker renders in the browser's locale/12-hour format depending on

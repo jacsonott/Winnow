@@ -107,10 +107,13 @@ export const tableOf = (sourceId) => `src_${sourceId}`;
    by dashboard.js into S.headerSets). Types are known only for case
    tables; placeholder columns get a name-based guess so the time
    templates can offer something. */
-/* A widget's SQL is `FROM src_<id>`, and a derived column's values are not
-   there — they live in the drv_<id> sidecar, which run_sql does not join.
-   Offering one produces a card whose body reads "no such column", so it is
-   filtered out at the source of every column list a widget is built from. */
+/* Derived columns are left out of every column list a widget is built
+   from (and the "Add to dashboard" menu entries skip them too). Not
+   because a widget's SQL can't see one: run_sql's pane connection shadows
+   `src_<id>` with a TEMP view that joins the drv_<id> sidecar
+   (Store._pane_connection), so a hand-written widget query can name a
+   derived column and gets its values. The guided editor just doesn't
+   offer them. */
 const widgetable = (c) => !c.derived;
 
 export function columnsForTable(table) {

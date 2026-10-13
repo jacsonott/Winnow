@@ -60,6 +60,18 @@ def test_run_sql_limit_and_truncated(store, tmp_path):
     assert res_full["truncated"] is False
 
 
+@pytest.mark.parametrize("n, truncated", [(4999, False), (5000, False), (5001, True)])
+def test_run_sql_exactly_the_limit_is_not_truncated(store, n, truncated):
+    """A result of exactly the pane's 5,000 rows is the whole result, and
+    the pane said "· truncated" on it — the flag was `len(rows) == limit`,
+    which can't tell "all of them" from "the first 5,000 of more"."""
+    res = store.run_sql(
+        "WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM c WHERE i < %d) "
+        "SELECT i FROM c" % n)
+    assert len(res["rows"]) == min(n, 5000)
+    assert res["truncated"] is truncated
+
+
 def test_spec_sql_renders_the_live_filter_as_runnable_sql(ingested):
     """spec_sql is 'open this filter in the SQL pane': the compiled text
     must (a) run unchanged on run_sql's own connection and (b) return the
