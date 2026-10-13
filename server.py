@@ -2970,12 +2970,22 @@ async def api_plugins_install(
     if dest.resolve().parent != root:
         raise HTTPException(400, f"Unsafe plugin name: {fs_name!r}")
 
-    if dest.exists() and not overwrite:
+    # Taken means the NAME, not the path: foo.py and foo/ are the same
+    # plugin to the loader, which loads whichever sorts first (the folder)
+    # and ignores the other. Checking only `dest` installed foo.py beside an
+    # existing foo/, reported "Installed foo", and the new file never ran.
+    other = (PLUGIN_DIRS[0] / fs_name) if dest.suffix == ".py" else (PLUGIN_DIRS[0] / f"{fs_name}.py")
+    other_is_plugin = (other.is_file() if other.suffix == ".py"
+                       else (other / "__init__.py").is_file())
+    taken = [d for d in (dest, other)
+             if (d.exists() and (d is dest or other_is_plugin))
+             and d.resolve().parent == root]
+    if taken and not overwrite:
         # 409, not 400: the request is fine, the name is simply taken —
         # the frontend confirms and retries with overwrite=true.
         raise HTTPException(409, f"A plugin named {fs_name} is already installed")
-    if overwrite and dest.exists():
-        await run_in_threadpool(_remove_plugin_dest, dest)
+    for d in taken if overwrite else ():
+        await run_in_threadpool(_remove_plugin_dest, d)
 
     PLUGIN_DIRS[0].mkdir(parents=True, exist_ok=True)
     for p, f in keep:

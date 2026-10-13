@@ -572,6 +572,32 @@ def test_install_overwrite_flow(plugin_client, plug_dir):
     assert "kplug.k" not in {fm["id"] for fm in out["formats"]}
 
 
+@pytest.mark.parametrize("first,second", [("folder", "file"), ("file", "folder")])
+def test_install_over_the_other_form_of_the_same_plugin(plugin_client, plug_dir, first, second):
+    """foo.py and foo/ are one plugin to the loader (the folder sorts first
+    and wins). The collision check looked at the destination PATH, so
+    installing foo.py beside foo/ answered "Installed foo" and the new
+    file never ran. Same name is taken, whichever form; overwrite replaces
+    both, so what was installed is what loads."""
+    def install(form, version, **data):
+        body = (f'PLUGIN = {{"name": "foo", "version": "{version}"}}\n'
+                'def register(api):\n    pass\n').encode()
+        if form == "file":
+            return plugin_client.post("/api/plugins/install",
+                                      files=[("files", ("foo.py", body))], data=data or None)
+        return plugin_client.post("/api/plugins/install", files=[("files", ("__init__.py", body))],
+                                  data={"paths": json.dumps(["foo/__init__.py"]), **data})
+
+    assert install(first, "1.0").status_code == 200
+    assert install(second, "2.0").status_code == 409
+    r = install(second, "2.0", overwrite="true")
+    assert r.status_code == 200, r.text
+    rec = next(p for p in r.json()["plugins"] if p["fs_name"] == "foo")
+    assert rec["version"] == "2.0"
+    assert (plug_dir / "foo.py").exists() == (second == "file")
+    assert (plug_dir / "foo").exists() == (second == "folder")
+
+
 def test_install_broken_plugin_reports_load_error(plugin_client, plug_dir):
     r = plugin_client.post("/api/plugins/install",
                            files=[("files", ("busted.py", b"def register(api:\n"))])
