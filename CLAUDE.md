@@ -227,6 +227,11 @@ docs/              Long-form documentation. writing-plugins.md — the plugin
                     developer guide. notes/ — the per-subsystem working
                     notes ("things that bite"), one file per part of the
                     app; read the one covering what you're about to touch.
+                    wiki/ — the user manual, one page per area of the app
+                    (Home.md is the index, README.md links into it). A
+                    change an analyst would notice updates the page that
+                    describes it in the same PR; UI labels there are
+                    quoted exactly as the app shows them.
 plugins/           Analyst-installed plugins (gitignored except its README).
                     Managed from Settings → Plugins → Manage plugins…,
                     a two-pane manager (static/js/pluginmanager.js):

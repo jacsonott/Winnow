@@ -4,11 +4,10 @@ Excel's PivotTable, over any ingested Winnow table. Drag fields into
 **Rows**, **Columns**, **Values** and **Filters**; get a cross-tab with
 subtotals and grand totals; click a cell to see the rows behind it.
 
-Install from **Settings → Plugins → "Install a plugin folder…"**, or:
-
-```bash
-cp -r examples/plugins/pivot plugins/
-```
+It ships with Winnow, switched off: turn it on in **Settings → Plugins →
+Manage plugins…**. To run a modified copy instead, copy this folder into
+`plugins/` (or use **Install a plugin… → Pick a plugin folder…** there);
+a copy in `plugins/` replaces the bundled one.
 
 Then pick the **Pivot** page tab.
 
@@ -73,8 +72,8 @@ the column.
 | Column groups rendered | 60 |
 | Drill-down rows | 500 |
 
-Merged sources aren't supported — a merge has no single backing table to
-aggregate. Pivot the members individually.
+Merged tables work too: a merge is read as the union of its member
+tables.
 
 ## Files
 

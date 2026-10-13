@@ -1,0 +1,198 @@
+# Working with tables
+
+Every file you import becomes a table in the case, and the grid is where you read it. This page covers finding and organising tables, arranging columns, sorting, reading a row in full, selecting and copying rows, grouping, merging tables of the same shape, and saving the rows that matter as a table of their own. The imported data itself is never changed by any of it: hiding, reordering or sorting changes only how the table is shown.
+
+![The grid with an EvtxECmd table under a saved filter](../screenshots/grid.png)
+
+## Tabs and the tables sidebar
+
+Each open table has a tab showing its name and row count. Click a tab to switch to it, drag tabs to reorder them, and right-click one for the table menu. The ✕ on a tab closes it, but the table stays in the case and can be reopened at any time. Switching tabs keeps each table's filters, search, sort, grouping and scroll position as you left them.
+
+The sidebar lists every table in the case. It starts hidden: click ▶ at the left of the tab strip, or press `` ` ``, to show it. Drag its right edge to make it wider or narrower, and double-click the edge to reset it. The **Filter tables and pages…** box at the top narrows the list as you type.
+
+The sidebar has these sections:
+
+- **Open** lists the tables that have tabs, in tab order. Reorder them with ▲/▼ or by dragging, close one with ✕, or close them all with **close all**. Drag a table from further down onto this section to open it.
+- **All tables** lists every table, in folders if you use them. **open all** opens every closed table (it asks first when there are more than 12), and **tagged** opens the closed tables that have tagged rows.
+- **Pages** (SQL, Timeline, Notes, Watchlist) and **Dashboards** follow; see [SQL pane](SQL-pane.md), [Timeline, Search all and the Watchlist](Timeline-search-and-watchlist.md), [Tagging and notes](Tagging-and-notes.md) and [Dashboards](Dashboards.md).
+
+Hover over a table to see its nickname, the file it came from and when it was imported. Right-click it for the table menu. A ⛓ before a name marks a merge, and ⊂ marks a table saved from another table's rows.
+
+### Folders
+
+Folders are labels for keeping a large case tidy. Click 🗀+ at the top of the sidebar to create one, or ＋ on a folder to create a folder inside it. To put a table in a folder, drag it onto the folder, or click the 🗀 on its row and choose the folder (or **＋ New folder…**). **↥ Remove from folder** in the same menu, or dragging the table onto **drop here to remove from folder**, takes it back out.
+
+Click a folder's name to collapse or expand it, and double-click it to rename it. ▲/▼ reorder folders. ✕ deletes a folder: its tables and subfolders move up a level, and no table is deleted.
+
+### Renaming a table
+
+A table is named after its file. To give it a clearer name, choose **Nickname this table…** in the table menu, or **Nickname…** in the Tables manager. The nickname is shown in place of the file name everywhere. Leave it empty to go back to the file name. A merge has no file name, so the same command reads **Rename this merge…**.
+
+### The Tables manager
+
+Press `t`, or choose **Case ▾ → Tables…**, to see every table in the case with its row count, the number of tagged rows and notes, and whether its search index is ready (**✓ Ready**, **⏳ Building…** or **Not started**). Each row has **Settings…** (the table menu), **Open**/**Close**, **Nickname…** and **Remove…**.
+
+**Remove…** deletes the table from the case, along with its tags and notes. It asks first. A table that is part of a merge can't be removed until the merge is deleted. Deleting a merge leaves its tables untouched.
+
+Filtering, grouping or opening the value picker on a column builds a small index for that column in the background. The Tables manager lists them under each table as **Filter indexes:**, and ✕ drops one if they take up too much space. Dropping one costs nothing but a slower first filter on that column next time. **Open all tagged** opens every closed table with tagged rows, and **Copy table definitions** copies every table's columns as SQL, for help writing a query in the [SQL pane](SQL-pane.md).
+
+## The table menu
+
+Press `C`, right-click a tab, or right-click a table in the sidebar to open the table menu. Its top row has **Tables manager…**, **Reset view** (clears filters, search, tag filter and grouping and restores the default sort; the column layout and the timeframe stay) and **Close this tab**. Below that are three sections:
+
+- **Columns**: show, hide, pin and reorder columns (see below), plus **Add derived column…** (see [Derived columns](Derived-columns.md)).
+- **Value filter dropdowns**: when the ▾ value picker appears on this table's filter boxes (see [Filtering and searching](Filtering-and-searching.md#the-value-picker)).
+- **This table**: **Save layout as default for these columns**, **Name this header set…** and **Nickname this table…**.
+
+## Columns
+
+### Showing and hiding columns
+
+In the table menu's **Columns** list, untick a column to hide it and tick it to show it again. **Filter columns…** finds a column by name in a wide table. **Show all** brings every hidden column back. **Hide empty columns** hides every column that has no value in the first 2,000 rows of the current view, so a column whose values only appear further down can be hidden by it.
+
+**Hide empty rows** is a toggle in the same place. It drops rows in which every column is empty, such as blank lines in a raw text import. It counts as a filter: the row count follows it, and it is remembered for the table.
+
+Each column's type (text, number or datetime) is shown in the list, with "derived" after a derived column.
+
+### Reordering columns
+
+Drag a column header left or right in the grid. In the table menu you can also drag a column's row, or use ⤒ and ⤓ to send it straight to the start or end. Hidden columns can only be moved from the table menu.
+
+### Pinning columns
+
+A pinned column stays visible while you scroll sideways. Alt-click a header to pin or unpin it, or click **pin** beside the column in the table menu. Pinning doesn't move the column: it scrolls with the others until it reaches the left edge (after the gutter and any pinned columns before it) and then stays there.
+
+### Column widths
+
+Drag the right edge of a header to resize a column, and double-click the edge to fit the column to its contents. Press `=` to fit every column, and `0` to reset every width to its default.
+
+Fitting is capped so that a single long value, such as a base64 command line, can't make a column enormous. The cap is set in **Settings → Appearance → Autofit column width limit** (900 pixels by default, or no limit). A column whose header needs more room than the cap still gets room for its name. A table with only one column, such as a log imported one line per row, fills the grid's width.
+
+### Timestamp display
+
+Right-click a datetime column's header to choose how its values are shown, for example **As stored**, **YYYY-MM-DD HH:MM:SS** or **MM/DD/YYYY HH:MM:SS**. This is display only: filters and exports always use the text the file came with, although copying from the grid gives the value as displayed. A format picked on a column beats the case's default in **Case ▾ → Case settings…**, which beats the machine-wide one in **Settings → Timestamps**.
+
+The same right-click menu has **Stack values (rarest first)…** (see [Filtering and searching](Filtering-and-searching.md#stacking-a-column)) and **Derive a column from this…**.
+
+### Layouts
+
+Column order, visibility, widths, pins and timestamp formats are saved with the table in the case file. To reuse an arrangement for every table with the same column names, including in other cases, choose **Save layout as default for these columns** in the table menu or press `L`. A table with that set of columns and no layout of its own then opens with that arrangement.
+
+## Sorting
+
+Click a header to sort by that column, ascending; click again for descending. Shift-click another header to add it as a second sort key, or to flip its direction. With several sort keys, the ▲/▼ on each header carries its position in the order.
+
+A table opens sorted by its first datetime column, ascending, if it has one. Click **Line** above the row numbers to go back to the original file order, and click it again for reverse file order.
+
+How a column sorts depends on its type:
+
+- Number columns sort by value. Cells that aren't numbers sort before every number in ascending order.
+- Text columns sort alphabetically, ignoring case for A–Z only.
+- Datetime columns sort as text. That is chronological for timestamps like `2024-01-05 13:22:01`, but not for US-style dates, which sort character by character: `1/13/2024` comes before `1/2/2024`. Make a derived datetime column from such a column to get a chronological sort; see [Derived columns](Derived-columns.md).
+
+## The detail pane
+
+The detail pane shows one row in full. Double-click a row, press `d`, or click the ⤢ that appears in the row's gutter when you hover over it. The pane follows the cursor as you move through the grid. It is titled with the row's Line number, and it lists every non-empty field.
+
+JSON and XML values are pretty-printed as an indented tree. Right-click a node in the tree for:
+
+| Item | What it does |
+| --- | --- |
+| **Add as a column** | Adds a derived column holding that field from every row (see [Derived columns](Derived-columns.md)) |
+| **Filter *column* to this value** | Filters the column to rows whose document contains this value |
+| **Copy value** / **Copy path** | Copies the value, or the path to the node |
+| **Flatten this document into columns…** | Opens the flatten dialog for the column. Not available on a merge. |
+
+Select some text in a field and right-click it to **Copy** it, filter the column to rows containing it (**Filter *column* to *text***, or **… only** to drop every other filter), **Exclude** it, or **Search all columns for** it.
+
+Hover over a field to show its ⧉ button, which copies that field as displayed (in its chosen timestamp format, for example). **Copy row** at the top copies the whole row as `name: value` lines. ⬒ docks the pane to the right or the bottom, and you can drag the divider to resize it. The **Note** box at the bottom saves as you type; see [Tagging and notes](Tagging-and-notes.md).
+
+## Selecting rows
+
+Winnow has two kinds of selection. **Picked rows** are what tagging and saving act on. A **cell range** is a rectangle of cells for reading and copying.
+
+| Gesture | Effect |
+| --- | --- |
+| Click a cell | Moves the cell cursor. Picked rows stay picked. |
+| Shift+click a cell, or drag across cells | Selects a cell range |
+| Ctrl+click (⌘+click) a cell | Picks or unpicks that row |
+| Click anywhere in a row's gutter | Picks or unpicks that row |
+| Shift+click in the gutter | Picks every row from the last one clicked |
+| Ctrl+Shift+click in the gutter | Unpicks that run of rows |
+| Drag in the gutter | Picks the rows dragged over, scrolling at the edges |
+| Header checkbox, or `Ctrl+A` | Picks every row in the view |
+| Arrow keys | Move the cell cursor; Shift+Arrow extends a cell range |
+| `Space` | Picks or unpicks the rows the cell range covers, or the cursor row |
+| `Shift+Space` | Picks the rows the cell range covers |
+| `Escape` | Lets go of picked rows and the cell range |
+
+While rows are picked, a bar above the grid says how many, with a button per tag to tag them, **Invert**, **Undo** (takes back the last change to the selection) and **Clear selection**. If a filter hides some picked rows, the bar says how many are "filtered out"; they stay picked, but a tag applies only to the ones shown. With nothing picked, a cell range spanning several rows is what a tag key acts on, and the bar says so. Picking every row is not available while the grid is grouped.
+
+### Copying
+
+`Ctrl+C` copies the cell range if you made one, otherwise the picked rows, otherwise the cursor row. `Ctrl+Shift+C` does the same with a header line. The copy is tab-separated, uses the visible columns in their current order, and gives values as displayed. Up to 20,000 rows can be copied at once. The cell right-click menu has the same choices under **Copy**.
+
+## Grouping rows
+
+Grouping collapses a table into one heading per distinct value, with a row count on each, like a pivot you can open. Drag a column header into the **Group by** strip above the grid. The column leaves the grid while it is grouped. Click a heading to expand or collapse its rows.
+
+- Drag another header into the strip to group within each group. The levels read left to right, separated by ›. Drag them to change their order, and ✕ removes one.
+- **+ Tag** adds a level that groups by tag: one group per tag plus one for untagged rows. A row with two tags appears under both, so these counts can add up to more than the view.
+- **Sort:** orders the groups at every level: **Count — most first** (the default), **Count — fewest first**, **Value — low to high** or **Value — high to low**.
+- A datetime column groups by calendar day rather than by exact timestamp.
+- Each level shows at most 1,000 groups. When there are more, Winnow says it is showing the top ones.
+
+Right-click a group heading to expand or collapse it, **Select these *N* rows** (when it is expanded), tag or untag every row in the group, **Filter to** or **Exclude** its value (not offered for a datetime column's day groups), or **Copy group value**. Tagging a whole group asks first when it has 10,000 rows or more. See [Tagging and notes](Tagging-and-notes.md) for more on tagging.
+
+**Ungroup** in the strip, or `x`, removes the grouping and puts the columns back. `X` turns grouping off and on again, remembering the last grouping. A grouping can also be set in the filter builder and kept in a saved filter.
+
+## Merging tables
+
+A merge shows several tables with the same columns as one table: the same event log exported from five hosts, for example. Nothing is copied. Each row stays in its own table, and so do its tags and notes, so a tag added in the merge is also there when you open the original table, and the reverse.
+
+To merge tables:
+
+1. Choose **Case ▾ → Merge tables…**.
+2. Tables are grouped by their column names. The names must match, but the order doesn't matter, and case is ignored for A–Z. Tick two or more tables from one group, or use **Select all**.
+3. Type a name, or keep the suggested one, and click **Create merge**. Each merge needs a different name.
+
+Only the columns the tables were imported with are compared, so a derived column you have added to one of them doesn't stop it being offered.
+
+A merge shows ⛓ before its name and works like any other table: filtering, searching, sorting, tagging, notes, grouping, the value picker, derived columns and exports all work on it. The exceptions:
+
+- A merge can't be merged into another merge.
+- A merge can't be added to a dashboard.
+- Flattening a JSON or XML column isn't available on a merge.
+- The watchlist and **Search all** look at the member tables rather than the merge, so their hits name the original tables. See [Timeline, Search all and the Watchlist](Timeline-search-and-watchlist.md).
+
+To delete a merge, use **Remove…** in the Tables manager. Its tables are not affected.
+
+## Saving a view as a table
+
+When filtering has brought a big table down to the rows that matter, you can keep those rows as a table of their own. Choose **Filters ▾ → Save this view as a table…**, or right-click a row and use **Save as table**:
+
+- **Save this whole view as a table…** saves every row the current filters, search and timeframe show.
+- **Save *N* selected rows as new table…** (or **Save this row as new table…**) saves only the picked rows, up to 20,000. For more, filter the view down to them and save the view instead.
+
+Winnow asks for a name (the default is the table's name followed by "— subset"), copies the rows in the order shown, and opens the new table. It asks first when the copy would be more than 500,000 rows.
+
+The new table is ordinary and permanent. It is marked ⊂, and hovering over it names the table it came from. Derived columns are copied as plain values, and the original's column layout comes with it. It starts with no tags or notes: they stay on the original rows, and tags you add to the new table do not go back to the original. Saving is refused while a derived column is still being built. You can save a view of a merge; the result is a single ordinary table.
+
+Remove a saved table from the Tables manager like any other.
+
+## Keys
+
+| Key | Action |
+| --- | --- |
+| `` ` `` | Show or hide the sidebar |
+| `t` | Tables manager |
+| `C` | Table menu |
+| `d` | Open or close the detail pane |
+| `=` / `0` | Fit every column / reset every width |
+| `L` | Save this layout as the default for these columns |
+| `x` / `X` | Remove grouping / turn grouping off and on |
+| `Ctrl+A` | Pick every row in the view |
+| `Ctrl+C` / `Ctrl+Shift+C` | Copy / copy with headers |
+| `j`/`k` or arrows, `g`/`G`, `PageUp`/`PageDown`, `Ctrl+Arrow` | Move the cell cursor |
+
+Every key can be changed; see [Settings and shortcuts](Settings-and-shortcuts.md).
