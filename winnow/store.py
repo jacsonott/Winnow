@@ -864,22 +864,153 @@ def infer_type(values: Iterable[str]) -> str:
     return "text"
 
 
+class _JsonNumber(str):
+    """A JSON number, kept as the literal text the file wrote it as.
+
+    json.loads turns numbers into floats, and the cell then said what
+    float() made of them rather than what the evidence said: 1.10 became
+    1.1, 1e5 became 100000.0, 1E400 became inf, and nineteen significant
+    digits became seventeen. An integer is no safer — past Python's
+    4,300-digit conversion limit json.loads raised, and the whole file
+    failed. Every cell is TEXT anyway (the CSV convention), so the number
+    is never converted at all: this is what parse_float/parse_int/
+    parse_constant build, and it is a str, so a cell is just the text.
+    The one place it must not act like one is inside a container written
+    back out as JSON text — _json_text writes it unquoted."""
+    __slots__ = ()
+
+
+class _JsonObjectWithDuplicates(dict):
+    """An object that names one key more than once. json.loads keeps the
+    last value and the first vanishes without a trace — an evidence
+    record that said user=alice and user=root showed only root. The dict
+    holds what json.loads would have (anything reading it as a dict sees
+    the usual thing); `pairs` keeps every (key, value) in document order,
+    which is what _flatten_json and _json_text read."""
+    __slots__ = ("pairs",)
+
+
+def _json_object(pairs: list) -> dict:
+    obj = dict(pairs)
+    if len(obj) != len(pairs):
+        obj = _JsonObjectWithDuplicates(obj)
+        obj.pairs = pairs
+    return obj
+
+
+# Every JSON evidence read goes through these two, never bare json.load(s).
+_JSON_READ = {"parse_float": _JsonNumber, "parse_int": _JsonNumber,
+              "parse_constant": _JsonNumber, "object_pairs_hook": _json_object}
+
+
+def _json_loads(text: str) -> Any:
+    return json.loads(text, **_JSON_READ)
+
+
+def _json_load(fh) -> Any:
+    return json.load(fh, **_JSON_READ)
+
+
+def _json_items(obj: dict):
+    return obj.pairs if isinstance(obj, _JsonObjectWithDuplicates) else obj.items()
+
+
+# What json.dumps(..., ensure_ascii=False) quotes a string with — the C
+# function itself, without building a JSONEncoder per call.
+_json_quote = json.encoder.encode_basestring
+_JSON_SCALAR = {None: "null", True: "true", False: "false"}
+# How deep _json_text recurses before handing the rest to the iterative
+# writer: two frames a level (the comprehension is its own frame before
+# 3.12), well inside the interpreter's limit from wherever ingest calls it.
+_JSON_TEXT_RECURSE = 200
+
+
+def _json_text(value: Any, depth: int = 0) -> str:
+    """json.dumps(value, ensure_ascii=False), character for character,
+    except that a _JsonNumber is written as its literal rather than quoted
+    as the str it is, and a duplicated key is written as many times as the
+    file had it. json.dumps has no hook for writing a value raw, hence a
+    writer of our own — recursive because that measured twice as fast as
+    an explicit stack (and faster than the json.dumps call it replaced,
+    which built a JSONEncoder every time), and _json_text_deep below the
+    first 200 levels, because what reaches here is whatever lies under
+    _flatten_json's depth cap, and a document json accepted can be
+    thousands of levels deep."""
+    t = type(value)
+    if t is str:
+        return _json_quote(value)
+    if t is _JsonNumber:
+        return str.__str__(value)
+    if depth >= _JSON_TEXT_RECURSE:
+        return _json_text_deep(value)
+    if t is list:
+        return "[" + ", ".join([_json_text(v, depth + 1) for v in value]) + "]"
+    if isinstance(value, dict):
+        return "{" + ", ".join([_json_quote(k if type(k) is str else str(k)) + ": " + _json_text(v, depth + 1)
+                               for k, v in _json_items(value)]) + "}"
+    if value is None or value is True or value is False:
+        return _JSON_SCALAR[value]
+    return json.dumps(value)   # a Python number handed in by a caller
+
+
+_JSON_END = object()
+
+
+def _json_text_deep(value: Any) -> str:
+    """_json_text's output for a value nested too deep to recurse into —
+    the same writer as an explicit stack."""
+    parts: list[str] = []
+    append = parts.append
+    stack: list[list] = []
+
+    def emit(v: Any) -> None:
+        if isinstance(v, (dict, list)):
+            if isinstance(v, dict):
+                append("{")
+                stack.append([iter(_json_items(v)), "}", True])
+            else:
+                append("[")
+                stack.append([iter(v), "]", True])
+        else:
+            append(_json_text(v))   # a scalar: no recursion
+
+    emit(value)
+    while stack:
+        frame = stack[-1]
+        item = next(frame[0], _JSON_END)
+        if item is _JSON_END:
+            append(frame[1])
+            stack.pop()
+            continue
+        if frame[2]:
+            frame[2] = False
+        else:
+            append(", ")
+        if frame[1] == "}":
+            key, item = item
+            append(_json_quote(key if type(key) is str else str(key)))
+            append(": ")
+        emit(item)
+    return "".join(parts)
+
+
 def _json_leaf_text(value: Any) -> str:
     """A JSON value at a point flattening stops (see _flatten_json) ->
     TEXT, same all-values-are-TEXT convention as CSV ingest. An object or
     array is JSON-stringified whole rather than dropped or half-flattened —
     evidence fidelity over tidiness, same reasoning CLAUDE.md gives for not
-    typing columns at ingest."""
+    typing columns at ingest. A number is the text the file wrote
+    (_JsonNumber)."""
     if value is None:
         return ""
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (dict, list)):
-        return json.dumps(value, ensure_ascii=False)
+        return _json_text(value)
     return str(value)
 
 
-def _flatten_json(obj: dict, max_depth: int | None) -> dict[str, str]:
+def _flatten_json(obj: dict, max_depth: int | None, clashes: dict | None = None) -> dict[str, str]:
     """Flattens nested OBJECTS into dot-notation keys — {"user": {"name":
     "a"}} -> {"user.name": "a"} — but never arrays: a list value is always
     JSON-stringified as one column's text, at whatever depth it's found,
@@ -892,8 +1023,18 @@ def _flatten_json(obj: dict, max_depth: int | None) -> dict[str, str]:
     flattens without limit ("full"). Any other int is how many levels of
     *object* nesting to unfold before stringifying whatever's left ("depth
     N") — e.g. max_depth=1 unfolds `user.name` but leaves `user.address`
-    (a further-nested object) as one JSON-text column."""
+    (a further-nested object) as one JSON-text column.
+
+    Two values can want one column: {"process": {"name": "evil.exe"},
+    "process.name": "svchost.exe"} flattens both to `process.name`, and so
+    does a key the object names twice. The dict used to keep whichever came
+    last, so whoever wrote the record chose which one the analyst saw. The
+    first now keeps the name and each later one takes the next free
+    `_1`, `_2`… (sanitize_columns' suffix for a duplicated CSV header);
+    `clashes`, when given, counts the records it happened in."""
     out: dict[str, str] = {}
+    next_suffix: dict[str, int] = {}
+    clashed = False
 
     # 64: far past any real log format, far short of the interpreter's
     # recursion limit — a pathological 3,000-level document used to walk
@@ -901,19 +1042,34 @@ def _flatten_json(obj: dict, max_depth: int | None) -> dict[str, str]:
     # cap the remainder is stringified, same as "depth N" mode's leftovers.
     FULL_DEPTH_CAP = 64
 
+    def put(key: str, text: str) -> None:
+        nonlocal clashed
+        if key in out:
+            clashed = True
+            # Remembered per key, so a record naming one key 100,000 times
+            # costs 100,000 steps rather than a scan from _1 each time.
+            n = next_suffix.get(key, 1)
+            while f"{key}_{n}" in out:
+                n += 1
+            next_suffix[key] = n + 1
+            key = f"{key}_{n}"
+        out[key] = text
+
     def walk(value: Any, key_path: str, depth: int) -> None:
         if isinstance(value, dict) and (depth < max_depth if max_depth is not None
                                         else depth < FULL_DEPTH_CAP):
             if not value:
-                out[key_path] = "{}"
+                put(key_path, "{}")
                 return
-            for k, v in value.items():
+            for k, v in _json_items(value):
                 walk(v, f"{key_path}.{k}" if key_path else str(k), depth + 1)
         else:
-            out[key_path] = _json_leaf_text(value)
+            put(key_path, _json_leaf_text(value))
 
-    for k, v in obj.items():
+    for k, v in _json_items(obj):
         walk(v, str(k), 0)
+    if clashed and clashes is not None:
+        clashes["count"] += 1
     return out
 
 
@@ -937,7 +1093,7 @@ def _iter_json_records(path: str, bad: dict | None = None) -> Iterable[dict]:
                 if not line:
                     continue
                 try:
-                    obj = json.loads(line)
+                    obj = _json_loads(line)
                 except json.JSONDecodeError as e:
                     # Same philosophy as CSV's ragged rows: one broken line
                     # (a truncated write, a log rotation seam) must not cost
@@ -955,7 +1111,7 @@ def _iter_json_records(path: str, bad: dict | None = None) -> Iterable[dict]:
                 yield obj if isinstance(obj, dict) else {"value": obj}
         return
     with open(path, "r", encoding=sniff_text_encoding(path), errors="replace") as f:
-        data = json.load(f)
+        data = _json_load(f)
     if isinstance(data, list):
         for obj in data:
             yield obj if isinstance(obj, dict) else {"value": obj}
@@ -3389,10 +3545,11 @@ class Store:
         seen_cols: list[str] = []
         seen_set: set[str] = set()
         bad_prev = {"count": 0, "first_line": 0, "first_error": ""}
+        clashes = {"count": 0}
         sample_flat: list[dict[str, str]] = []
         record_count = 0
         for rec in _iter_json_records(path, bad=bad_prev):
-            flat = _flatten_json(rec, max_depth)
+            flat = _flatten_json(rec, max_depth, clashes)
             for k in flat:
                 if k not in seen_set:
                     seen_set.add(k)
@@ -3412,7 +3569,7 @@ class Store:
         types = [infer_type([r[i] for r in sample_rows]) for i in range(len(cols))] if sample_rows else ["text"] * len(cols)
         return {"columns": cols, "sample_rows": sample_rows, "inferred_types": types,
                 "record_count": record_count, "bad_records": bad_prev["count"],
-                "first_bad_line": bad_prev["first_line"]}
+                "first_bad_line": bad_prev["first_line"], "key_collisions": clashes["count"]}
 
     def ingest_json(
         self,
@@ -3490,11 +3647,12 @@ class Store:
         # here (fresh collector) because THIS pass is the one that decides
         # what actually lands in the table.
         bad = {"count": 0, "first_line": 0, "first_error": ""}
+        clashes = {"count": 0}
         error: Exception | None = None
         with self._ingest_synchronous_off():
             try:
                 for rec in _iter_json_records(path, bad=bad):
-                    flat = _flatten_json(rec, max_depth)
+                    flat = _flatten_json(rec, max_depth, clashes)
                     row = [flat.get(key_by_col[c], "") for c in cols]
                     batch.append(tuple(row))
                     if len(sample) < SAMPLE_ROWS:
@@ -3547,6 +3705,7 @@ class Store:
         rec["rows_per_sec"] = int(total / elapsed) if elapsed > 0 else 0
         rec["bad_records"] = bad["count"]
         rec["first_bad_line"] = bad["first_line"]
+        rec["key_collisions"] = clashes["count"]
         return rec
 
     def _create_source_shell(self, name: str, cols: list[str], *, path: str | None = None,
@@ -4030,7 +4189,7 @@ class Store:
                 job["result"] = [
                     {k: r.get(k) for k in ("id", "name", "row_count", "elapsed_sec", "rows_per_sec",
                                            "ragged_rows", "suspect_quote_rows", "bad_records",
-                                           "first_bad_line")}
+                                           "first_bad_line", "key_collisions")}
                     for r in results
                 ]
             wlog.record("info", f"Import finished: {job['name']} ({job['kind']}) — "

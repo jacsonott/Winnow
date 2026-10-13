@@ -302,8 +302,12 @@ export function openJsonImportPreview(src, opts = {}) {
 
     function renderTable() {
       tableWrap.replaceChildren();
+      const clashes = preview.key_collisions || 0;
       status.textContent = `${preview.record_count.toLocaleString()} record${preview.record_count === 1 ? '' : 's'} `
-        + `· showing first ${preview.sample_rows.length} · ${preview.columns.length} column${preview.columns.length === 1 ? '' : 's'}`;
+        + `· showing first ${preview.sample_rows.length} · ${preview.columns.length} column${preview.columns.length === 1 ? '' : 's'}`
+        // Two values for one column (a duplicated key, or a literal "a.b"
+        // beside a nested a.b): both are kept, the later one suffixed.
+        + (clashes ? ` · ${clashes.toLocaleString()} record${clashes === 1 ? ' has' : 's have'} two values for one key — the later kept as <key>_1` : '');
       const t = el('table', 'preview-tbl');
       const hr = el('tr');
       preview.columns.forEach((c, i) => {

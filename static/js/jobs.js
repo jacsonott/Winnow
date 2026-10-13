@@ -227,13 +227,18 @@ export async function pollJobs() {
       const ragged = (j.result || []).reduce((a, r) => a + (r.ragged_rows || 0), 0);
       const badRecs = (j.result || []).reduce((a, r) => a + (r.bad_records || 0), 0);
       const suspect = (j.result || []).reduce((a, r) => a + (r.suspect_quote_rows || 0), 0);
-      const warn = ragged || badRecs || suspect;
+      const clashes = (j.result || []).reduce((a, r) => a + (r.key_collisions || 0), 0);
+      const warn = ragged || badRecs || suspect || clashes;
       toast(`${j.name}: ${total.toLocaleString()} rows imported`
         + (ragged ? ` · ${ragged.toLocaleString()} ragged rows padded/trimmed` : '')
         + (badRecs ? ` · ${badRecs.toLocaleString()} unreadable record${badRecs === 1 ? '' : 's'} skipped` : '')
         // Many-newline fields are the signature of an unbalanced quote
         // swallowing the lines after it — a warning, not a verdict.
-        + (suspect ? ` · ${suspect.toLocaleString()} row${suspect === 1 ? '' : 's'} with very long multi-line fields — check for a stray quote if the row count looks low` : ''),
+        + (suspect ? ` · ${suspect.toLocaleString()} row${suspect === 1 ? '' : 's'} with very long multi-line fields — check for a stray quote if the row count looks low` : '')
+        // JSON: a key named twice, or a literal "a.b" beside a nested a.b.
+        // Both values are in the table; the analyst needs to know the
+        // suffixed column exists to go and look at it.
+        + (clashes ? ` · ${clashes.toLocaleString()} record${clashes === 1 ? '' : 's'} with two values for one key — the later kept as <key>_1` : ''),
         warn ? 8000 : 3500);
       setTimeout(() => { dismissedJobs.add(j.job_id); renderJobsPanel(); }, 8000);
       for (const sid of j.source_ids || []) offerTimestampColumns(sid);

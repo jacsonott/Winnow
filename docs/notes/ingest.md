@@ -86,6 +86,27 @@ see [docs/notes/README.md](README.md) for the whole set.
   line (each pass); a single `.json` document has to be `json.load()`ed
   whole (no generic streaming parser in the standard library) — memory use
   scales with file size for that shape specifically.
+- **A JSON cell holds what the file said, all of it.** Every evidence
+  read goes through `_json_loads`/`_json_load`, never a bare
+  `json.loads`, for two reasons. *Numbers* are parsed to `_JsonNumber`,
+  a str holding the literal: through float() 1.10 became 1.1, 1e5
+  became 100000.0, 1E400 became inf, and an integer past Python's
+  4,300-digit limit raised and failed the file. Inside a container that
+  is stored as JSON text a number must still be written unquoted, and
+  json.dumps cannot write a value raw, so `_json_text` is a writer of
+  our own — byte-for-byte json.dumps(ensure_ascii=False) otherwise,
+  pinned by a test, because every existing import's cells have that
+  shape. It recurses (measured twice as fast as an explicit stack, and
+  faster than the per-call json.dumps it replaced) for 200 levels, then
+  hands off to an iterative copy, since json accepts documents thousands
+  of levels deep. *Two values for one column* — a key named twice in one
+  object (json.loads keeps the last), or a literal `"process.name"` key
+  beside a nested `process.name` — used to keep whichever came last, so
+  whoever wrote the record chose what the analyst saw. The first keeps
+  the name, the next takes `_1`, `_2`… (sanitize_columns' suffix), and
+  `key_collisions` counts the records it happened in (preview status
+  line, jobs toast). A duplicated key inside a container stored as text
+  is written twice, as the file had it.
 - Ragged rows are padded/trimmed to the header width, never dropped, and
   counted — `ingest_csv`'s return dict has a `ragged_rows` count surfaced to
   the analyst (toast in the UI, printed in the CLI path). If that first row
