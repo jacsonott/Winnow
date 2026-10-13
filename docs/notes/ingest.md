@@ -85,7 +85,11 @@ see [docs/notes/README.md](README.md) for the whole set.
   the root_virtual fast path. Unlike SQLite files and workbooks there is
   no picker — one file is one table — so `.plaso` participates in
   directory import (kind "plaso") and drag-drop directly. A malformed
-  event_data row degrades to an error note in its Attributes cell; cancel
+  event_data row degrades to an error note in its Attributes cell, and so
+  does a malformed (or NULL) EVENT row — it lands as a row with the event
+  table's own timestamp and an `_winnow_error` note, so the table always
+  holds every event in the file (it used to be skipped uncounted, and a
+  NULL `_data` failed the whole import with a TypeError); cancel
   drops the partial source like every other ingest.
 - JSON/JSONL ingest (`ingest_json`/`preview_json_file`/`_flatten_json`) has
   no fixed header row the way CSV's first line is one, so it can't type

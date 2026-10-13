@@ -115,6 +115,10 @@ def _loads(blob: Any, compression: str) -> dict:
         if compression == "zlib":
             blob = zlib.decompress(bytes(blob))
         blob = blob.decode("utf-8", "replace")
+    if not isinstance(blob, str):
+        # A NULL (or numeric) _data: json.loads raised TypeError, which no
+        # caller catches, and one such row failed the whole import.
+        raise ValueError(f"container holds {type(blob).__name__}, not serialized data")
     doc = json.loads(blob)
     if not isinstance(doc, dict):
         raise ValueError("serialized container is not an object")
@@ -241,7 +245,8 @@ def iter_plaso_rows(path: str) -> Iterator[list[str]]:
             return None
 
         if serialized_events:
-            cursor = ro.execute(f"SELECT _data FROM event ORDER BY {order_col}")
+            ts_sel = f", {order_col} AS _order_ts" if order_col in event_cols else ""
+            cursor = ro.execute(f"SELECT _data{ts_sel} FROM event ORDER BY {order_col}")
         else:
             sel = [c for c in ("timestamp", "timestamp_desc", "_event_data_identifier") if c in event_cols]
             cursor = ro.execute(f"SELECT {', '.join(sel)} FROM event ORDER BY {order_col}")
@@ -254,7 +259,16 @@ def iter_plaso_rows(path: str) -> Iterator[list[str]]:
                 if serialized_events:
                     try:
                         ev = _loads(r["_data"], compression)
-                    except (ValueError, zlib.error):
+                    except (ValueError, zlib.error) as e:
+                        # Kept as a row, not skipped: a bare `continue`
+                        # here left the table short with nothing saying
+                        # so. The event table's own timestamp column still
+                        # places it on the timeline; the Attributes cell
+                        # says why the rest is blank — the same note an
+                        # unreadable event_data row degrades to.
+                        yield ([_ts_iso(r["_order_ts"] if "_order_ts" in r.keys() else None)]
+                               + [""] * (len(PLASO_COLUMNS) - 2)
+                               + [json.dumps({"_winnow_error": f"unreadable event row: {e}"})])
                         continue
                     timestamp = ev.get("timestamp")
                     ts_desc = ev.get("timestamp_desc", "")
