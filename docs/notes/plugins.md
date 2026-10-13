@@ -197,6 +197,15 @@ see [docs/notes/README.md](README.md) for the whole set.
   strict all-stamped check silently produced 0 rows). `_apply_fixups`
   therefore distinguishes all-stamped (un-stamp), none-stamped (parse
   as-is), and mixed (genuinely torn → skip the record).
+  Its $J carver has two traps of its own. First, measuring a zero run
+  by slicing `data[pos:]` copies the rest of the 8 MiB chunk every time.
+  Garbage whose 8-byte slots start with a zero u32 without being zero
+  runs did that once per slot, which is minutes per chunk. `_NONZERO.search`
+  scans in place instead. Second, the length gate is not a header gate.
+  A V3 header is 76 bytes, so a "V3" slot claiming 64 bytes passed the
+  60-byte minimum and was unpacked past its own end; at end of file that
+  raised `struct.error` and failed the ingest. `HEADER_LEN` is per
+  version, and a slot shorter than its own header is carved past.
 
 - **The pivot example is the one that exercises `run_sql`'s edges**, and
   three of them bit during its build — worth knowing before writing

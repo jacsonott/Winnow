@@ -735,6 +735,56 @@ def test_usn_record_straddling_chunk_boundary(example_registry, tmp_path, monkey
     assert [r[1] for r in rows] == [f"file{i:02d}.txt" for i in range(20)]
 
 
+def test_usn_short_v3_slot_is_skipped_not_raised(example_registry, tmp_path, monkeypatch):
+    """A slot claiming V3 with a 64-byte length passed the 60-byte minimum,
+    but a V3 header is 76 bytes: _record unpacked past the slot's end, and
+    at the end of the file (or of a read chunk) struct.error escaped the
+    generator and failed the whole ingest over one torn slot. Mid-file it
+    read the next record's bytes as its own. A slot shorter than its own
+    version's header is carved past like any other non-record."""
+    import sys
+
+    fmt = example_registry.get_format("mft-usn.usn")
+    t = ft(datetime(2024, 6, 1, 12, 0, 0))
+    good = [usn_v2(t, f"f{i}.txt", entry=300 + i, usn=i) for i in range(3)]
+    short_v3 = struct.pack("<IHH", 64, 3, 0) + b"\x01" * 56
+
+    tail = tmp_path / "tail.usn"
+    tail.write_bytes(b"".join(good) + short_v3)
+    assert [r[1] for r in fmt.parse(str(tail), {})["rows"]] == ["f0.txt", "f1.txt", "f2.txt"]
+
+    mid = tmp_path / "mid.usn"
+    mid.write_bytes(good[0] + short_v3 + good[1] + short_v3 + good[2])
+    assert [r[1] for r in fmt.parse(str(mid), {})["rows"]] == ["f0.txt", "f1.txt", "f2.txt"]
+
+    # The same slot ending exactly on a read chunk's edge, mid-file.
+    usn_mod = sys.modules[fmt.parse.__module__]
+    monkeypatch.setattr(usn_mod, "CHUNK", len(good[0]) + len(short_v3))
+    assert [r[1] for r in fmt.parse(str(mid), {})["rows"]] == ["f0.txt", "f1.txt", "f2.txt"]
+
+
+def test_usn_garbage_is_scanned_in_linear_time(example_registry, tmp_path):
+    """Every 8-byte slot whose first u32 is zero was treated as the start
+    of a sparse run, and measuring the run sliced off the rest of the
+    chunk: garbage whose slots start with a zero u32 without being zero
+    runs scanned the chunk once per slot. 1 MiB took ~5 s, 2 MiB ~20 s,
+    and one 8 MiB chunk would take minutes. Linear, 2 MiB is ~0.1 s; the
+    bound leaves an order of magnitude for a slow runner on either side.
+    The record after the garbage proves the skip lands on it, not past it."""
+    import time
+
+    fmt = example_registry.get_format("mft-usn.usn")
+    t = ft(datetime(2024, 6, 1, 12, 0, 0))
+    j = tmp_path / "garbage.usn"
+    j.write_bytes(b"\x00\x00\x00\x00\x01\x00\x00\x00" * (2 * 1024 * 1024 // 8)
+                  + usn_v2(t, "after.txt"))
+    t0 = time.monotonic()
+    rows = list(fmt.parse(str(j), {})["rows"])
+    elapsed = time.monotonic() - t0
+    assert [r[1] for r in rows] == ["after.txt"]
+    assert elapsed < 4, f"2 MiB of garbage took {elapsed:.1f}s — the zero-run skip is quadratic again"
+
+
 # ----------------------------------------------------------- MFT fixtures
 
 def _attr(atype: int, content: bytes) -> bytes:
