@@ -1483,3 +1483,20 @@ see [docs/notes/README.md](README.md) for the whole set.
   importing `openSettings` back across the boundary it is called from.
   `tests/ui/test_plugins_from_settings.py`,
   `tests/ui/test_profiles_from_settings.py`.
+
+- **One dialog at a time, but each gets a body of its own.** `modal()`
+  replaces `#modalBody` with a fresh node (same id, same class) on every
+  call instead of emptying it. Builders are often async — draw a frame,
+  await a fetch, fill it in — and every one writes into the `b` it was
+  handed; with the one shared node, a builder whose answer arrived after
+  the analyst had moved on wrote into whatever was open by then (a
+  Profile Apply sheet's checkboxes and working Apply button turned up
+  inside Settings). A stale builder now writes into a detached node and
+  nothing sees it, which is the only version of the guard that does not
+  depend on each of a dozen builders remembering a generation check. Two
+  consequences: never hold on to the `#modalBody` element across a
+  `modal()` call (look it up, or use the `b` you were given), and a flag
+  set on `b.dataset` lasts exactly as long as its dialog — the old node
+  carried the Tables manager's `kind='tables'` into the next dialog, so
+  that poll's "is Tables still open?" check never said no.
+  `tests/ui/test_modal_body_per_dialog.py`.

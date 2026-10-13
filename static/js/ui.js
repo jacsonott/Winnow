@@ -26,8 +26,19 @@ export function modal(title, build, opts = {}) {
   document.querySelector('.modal-card').classList.toggle('wide', !!opts.wide);
   document.querySelector('.modal-card').classList.toggle('xwide', opts.wide === 'x');
   document.querySelector('.modal-card').classList.toggle('tall', !!opts.tall);
-  const b = $('modalBody');
-  b.replaceChildren();
+  /* A fresh body per dialog, not the old one emptied. Builders are often
+     async — they draw a frame, await a fetch, then fill it — and they all
+     write into the `b` they were handed. With one shared #modalBody, a
+     builder whose fetch came back after the analyst had moved on wrote
+     into whatever dialog was open by then: a Profile Apply sheet, with a
+     working Apply button, turned up inside Settings. Replacing the node
+     leaves a stale builder holding a detached one, so its late writes go
+     nowhere, with no generation check for every builder to remember. It
+     also drops the previous dialog's data-* flags (pmReturn, sfReturn,
+     kind) and its scroll position, which emptying the old node kept. */
+  const b = el('div', 'modal-body');
+  b.id = 'modalBody';
+  $('modalBody').replaceWith(b);
   // Any modal opening supersedes the Search-all pane's repaint hook; the
   // search-all builder re-installs its own below. (The background job keeps
   // running either way — only the painting stops.)
