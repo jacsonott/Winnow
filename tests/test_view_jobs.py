@@ -17,7 +17,9 @@ import pytest
 
 from winnow.store import Store
 
-SLOW_REGEX = "(a+)+$"
+# The reliably-slow build test_cancel_op.py uses (polynomial backtracking
+# the regex guard allows; see there).
+SLOW_REGEX = "a*a*a*a*a*a*b"
 
 
 @pytest.fixture

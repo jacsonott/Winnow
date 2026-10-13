@@ -5,6 +5,8 @@ search_all_sources."""
 
 from __future__ import annotations
 
+import pytest
+
 from winnow.store import _fts_like_pattern, _blob_expr, TRIGRAM_MIN_LEN, q
 
 
@@ -637,3 +639,111 @@ def test_search_all_breakdown_gives_up_on_an_absurd_term_list(store, write_csv, 
         for t in ("evil.exe", "cmd.exe", "notepad.exe")
     ]
     assert store.search_all_sources(terms=terms)[0]["terms"] == []
+
+
+# ------------------------------------------------------------- regex safety
+
+def _regex_case(store, write_csv, cells):
+    sid = store.ingest_csv(write_csv([["Cmd"]] + [[c] for c in cells], "rx.csv"),
+                           name="rx.csv", build_fts=False)["id"]
+    return sid
+
+
+@pytest.mark.parametrize("pattern", [r"C:\Users\bob", r"evil(", r"[a-"])
+def test_an_invalid_regex_is_refused_not_a_silent_zero(store, write_csv, pattern):
+    """re.error was swallowed per row, so `C:\\Users` typed in regex mode
+    (\\U is a bad escape in Python re) showed 0 rows — "not in this
+    table" — instead of saying the pattern was broken. Every regex entry
+    point compiles the pattern before the build and refuses it by name."""
+    sid = _regex_case(store, write_csv, [r"C:\Users\bob\evil.exe", r"C:\Windows\x.dll"])
+    specs = [
+        {"search": pattern, "search_mode": "regex"},
+        {"filters": [{"column": "Cmd", "op": "regex", "value": pattern}]},
+        {"filter_tree": {"type": "group", "op": "AND", "children": [
+            {"type": "cond", "column": "Cmd", "op": "regex", "value": pattern}]}},
+    ]
+    for spec in specs:
+        with pytest.raises(ValueError, match="regular expression"):
+            store.build_view(sid, {"source_id": sid, "sort": [], **spec})
+
+
+def test_an_invalid_regex_is_a_400_at_the_route(client, store, write_csv):
+    sid = _regex_case(store, write_csv, [r"C:\Users\bob\evil.exe"])
+    r = client.post("/api/view", json={"source_id": sid, "search": r"C:\Users", "search_mode": "regex"})
+    assert r.status_code == 400
+    assert "regular expression" in r.json()["detail"]
+
+
+@pytest.mark.parametrize("pattern", [
+    r"(a+)+$", r"(a*)*b", r"(\w+\s?)*$", r"^(a|aa)+$", r"(.*a){3,}", r"(x+x+)+y", r"(?:\d|\d\d)+!",
+])
+def test_a_catastrophic_regex_is_refused_before_it_runs(store, write_csv, pattern):
+    """Cells are attacker-controlled, and one backtracking blow-up inside
+    the REGEXP callback holds the GIL for the whole match: every thread,
+    the cancel request included, froze until that one cell finished —
+    hours, for a cell a few dozen characters long. Nothing can interrupt
+    re.search from Python, so the shapes that blow up (a quantifier nested
+    in another unbounded one, an unbounded repeat of overlapping
+    alternatives) are refused up front, loudly. The cell here is short
+    enough that running the pattern costs a moment, so without the guard
+    this fails on the missing refusal rather than hanging."""
+    sid = _regex_case(store, write_csv, ["a" * 16 + "!", "x" * 16])
+    with pytest.raises(ValueError, match="catastrophic|backtrack"):
+        store.build_view(sid, {"source_id": sid, "sort": [], "search": pattern, "search_mode": "regex"})
+    with pytest.raises(ValueError, match="catastrophic|backtrack"):
+        store.build_view(sid, {"source_id": sid, "sort": [],
+                               "filters": [{"column": "Cmd", "op": "regex", "value": pattern}]})
+
+
+@pytest.mark.parametrize("pattern,expect", [
+    (r"46(24|88)", {"4624 logon", "4688 cmd"}),
+    (r"^(GET|POST) /", {"GET /admin", "POST /login"}),
+    (r"(\d{1,3}\.){3}\d{1,3}", {"10.0.0.5 beacon"}),
+    (r"(?:cmd|powershell)\.exe", {"cmd.exe /c whoami"}),
+    (r"(?:ab|cd)+!", {"abcdab!"}),
+    (r"\w+@\w+\.com", {"mail bob@evil.com"}),
+])
+def test_ordinary_regexes_still_run(store, write_csv, pattern, expect):
+    cells = ["4624 logon", "4688 cmd", "GET /admin", "POST /login", "10.0.0.5 beacon",
+             "cmd.exe /c whoami", "abcdab!", "mail bob@evil.com", "nothing here"]
+    sid = _regex_case(store, write_csv, cells)
+    v = store.build_view(sid, {"source_id": sid, "sort": [], "search": pattern, "search_mode": "regex"})
+    got = {r["cells"][0] for r in store.fetch_rows(v["view_id"], 0, 50)["rows"]}
+    assert got == expect
+
+
+def test_a_regex_reads_the_whole_cell(store, write_csv):
+    """The guard is on the pattern, never on the cell: truncating cells to
+    bound the match would turn a hit past the cut into a silent miss."""
+    sid = _regex_case(store, write_csv, ["x" * 100_000 + "mimikatz"])
+    v = store.build_view(sid, {"source_id": sid, "sort": [], "search": r"mimi\w+z$",
+                               "search_mode": "regex"})
+    assert v["row_count"] == 1
+
+
+def test_a_raw_fragments_regexp_is_checked_too(store, write_csv):
+    """A raw SQL fragment calls REGEXP with a literal: an invalid or
+    catastrophic one is refused, not run (or silently matched to nothing)."""
+    sid = _regex_case(store, write_csv, [r"C:\Users\bob"])
+    for frag in ("\"Cmd\" REGEXP 'C:\\Users'", "\"Cmd\" REGEXP '(a+)+$'"):
+        with pytest.raises(ValueError, match="regular expression"):
+            store.build_view(sid, {"source_id": sid, "sort": [],
+                                   "filter_tree": {"type": "raw", "sql": frag}})
+
+
+def test_the_sql_pane_names_a_bad_regex(store, write_csv):
+    """The SQL pane reaches _regexp directly. Its literal patterns get the
+    same check, so the analyst is told which pattern is wrong rather than
+    SQLite's "user-defined function raised exception" — and a catastrophic
+    one never runs against a crafted cell."""
+    sid = _regex_case(store, write_csv, [r"C:\Users\bob"])
+    table = store.get_source(sid)["table_name"]
+    for pat in ("C:\\Users", "(a+)+$"):
+        with pytest.raises(ValueError, match="regular expression"):
+            store.run_sql(f"SELECT * FROM {table} WHERE \"Cmd\" REGEXP '{pat}'")
+        with pytest.raises(ValueError, match="regular expression"):
+            store.sql_to_table(f"SELECT * FROM {table} WHERE regexp('{pat}', \"Cmd\")", "out")
+    # A pattern only known at run time still fails rather than matching nothing.
+    with pytest.raises(Exception):
+        store.run_sql(f"SELECT * FROM {table} WHERE \"Cmd\" REGEXP 'C:' || char(92) || 'Users'")
+    assert store.run_sql(f"SELECT * FROM {table} WHERE \"Cmd\" REGEXP 'users'")["rows"]

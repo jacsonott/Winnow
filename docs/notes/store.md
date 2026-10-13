@@ -167,6 +167,39 @@ see [docs/notes/README.md](README.md) for the whole set.
   LIMIT n)` subquery and tags/notes by the page's rid range. Its sheets
   continue past Excel's row cap through `_xlsx_write_sheets`, the
   all-tables export's continuation rule.
+- **A regex is checked before it runs, and some are refused**
+  (`_compiled_regex`, called by the regex filter op, regex search mode,
+  any `REGEXP '…'` literal in a raw fragment or the SQL pane
+  (`_check_regexp_literals`), and `_regexp` itself as the backstop for a
+  pattern only known at run time). An invalid pattern is a ValueError →
+  400 naming it: `_regexp` used to swallow `re.error` per row, so `C:\Users`
+  typed in regex mode (`\U` is a bad escape in Python) answered "0 rows"
+  — a false negative, the worst answer an evidence tool can give.
+  A pattern that can **backtrack exponentially** is refused the same
+  way, because cells are attacker-controlled and there is no other
+  defence: the REGEXP callback holds the GIL for one cell's whole match,
+  so `(a+)+$` against forty a's froze every thread — paging, the event
+  loop, the cancel request itself — for hours (measured 1.6s at 24
+  characters, doubling per character), and nothing in Python can
+  interrupt `re.search` (it polls for signals, which only reach the main
+  thread). Rejected alternatives: a timeout needs another regex engine (a
+  dependency) or a process per match; truncating cells would turn a hit
+  past the cut into a silent miss. The check walks the parsed pattern
+  (`re._parser`, `sre_parse` on 3.10) for the two exponential shapes: a
+  quantifier inside a repeated group when either is open-ended
+  (`(a+)+`, `(\w+\s?)*`, `(\d+\.){3}` — bounded-in-bounded like
+  `(\d{1,3}\.){3}` is fine), and an open-ended repeat of alternatives
+  that can start with the same character (`(a|aa)+`; `(?:ab|cd)+` is
+  fine, and `(\w|\d)+` never reaches it — `re` folds single-character
+  alternatives into a class). Possessive quantifiers and atomic groups
+  (3.11+) do not backtrack, so nesting under them passes. It is
+  deliberately conservative: a refused pattern can be rewritten (a class
+  instead of an alternation, the inner repeat spelled out, or Contains),
+  a hung case cannot be cancelled. **Not covered**: polynomial blow-ups
+  from adjacent repeats over the same characters (`.*a.*b` on a megabyte
+  cell) — slow rather than exponential, and refusing `.*x.*y` would refuse
+  ordinary searches. That is also why the cancel tests' slow build is now
+  `a*a*a*a*a*a*b` (tens of ms a row) rather than `(a+)+$`.
 - Column types are **inferred from a 500-row sample and stored as metadata only**;
   every value is stored TEXT. Don't "fix" this by typing the columns — mixed-type
   forensic CSVs then silently coerce, and evidence fidelity matters more than

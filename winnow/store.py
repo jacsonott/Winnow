@@ -18,6 +18,7 @@ import csv
 import datetime
 import errno
 import fnmatch
+import functools
 import getpass
 import hashlib
 import io
@@ -549,12 +550,173 @@ _HAS_JSON_EACH = _sqlite_has_json_each()
 
 
 def _regexp(pattern: str, value: Any) -> bool:
+    """SQLite's REGEXP. An unusable pattern RAISES (SQLite reports it as a
+    failed statement): it used to swallow re.error per row, so `C:\\Users`
+    in regex mode (\\U is a bad escape in Python re) answered 0 rows — "not
+    in this table" — instead of saying the pattern was broken. The filter,
+    search and raw-fragment paths check the pattern before the build
+    (_compiled_regex) for a readable 400; this is the backstop for SQL the
+    analyst typed into the SQL pane."""
     if value is None:
         return False
+    return _compiled_regex(pattern).search(str(value)) is not None
+
+
+# Catastrophic backtracking, and why it is refused rather than bounded.
+# Cells are attacker-controlled evidence, and `re` backtracks: `(a+)+$`
+# against forty a's and a "!" is 2^40 steps. That runs inside the REGEXP
+# callback, which holds the GIL for the whole of one cell's match — every
+# thread in the server (paging, the event loop, the cancel request itself)
+# stops until it finishes, and nothing in Python can interrupt re.search
+# (it only polls for signals, and those reach the main thread alone). A
+# timeout needs another regex engine (a dependency) or another process per
+# match; truncating cells would make a hit past the cut a silent miss. So
+# the pattern is checked instead, and the two shapes that blow up
+# exponentially are refused with a reason: a quantifier inside another
+# repeated group when either is open-ended (`(a+)+`, `(\w+\s?)*`,
+# `(\d+\.){3}`), and an open-ended repeat of alternatives that can start
+# with the same character (`(a|aa)+`, `(\d|\w)+`). Conservative on
+# purpose — a refused pattern can be rewritten (a class instead of an
+# alternation, the inner repeat spelled out, or Contains), a hung case
+# cannot be cancelled. Possessive quantifiers and atomic groups (Python
+# 3.11+) never backtrack into what they matched, so nesting under them is
+# allowed. NOT covered: polynomial blow-ups from adjacent repeats over the
+# same characters (`.*a.*b` on a megabyte cell) — those are slow, not
+# exponential, and refusing `.*x.*y` would refuse ordinary searches.
+try:   # Python 3.11+
+    from re import _constants as _sre_c, _parser as _sre_parse
+except ImportError:   # Python 3.10
+    import sre_constants as _sre_c  # type: ignore[no-redef]
+    import sre_parse as _sre_parse  # type: ignore[no-redef]
+
+_RX_REPEATS = (_sre_c.MAX_REPEAT, _sre_c.MIN_REPEAT)
+_RX_POSSESSIVE = getattr(_sre_c, "POSSESSIVE_REPEAT", None)
+_RX_ATOMIC = getattr(_sre_c, "ATOMIC_GROUP", None)
+
+
+def _rx_union(a: set | None, b: set | None) -> set | None:
+    return None if a is None or b is None else a | b
+
+
+def _rx_class(items) -> set | None:
+    """The characters a `[...]` (or `\\d`-style) item can match, both cases,
+    or None for "too many to say" — a category, a negation, a wide range."""
+    out: set = set()
+    for op, av in items:
+        if op == _sre_c.LITERAL:
+            out |= {chr(av), chr(av).lower(), chr(av).upper()}
+        elif op == _sre_c.RANGE and av[1] - av[0] < 256:
+            for o in range(av[0], av[1] + 1):
+                out |= {chr(o), chr(o).lower(), chr(o).upper()}
+        else:
+            return None
+    return out
+
+
+def _rx_first(items) -> tuple[set | None, bool]:
+    """(the characters a match of `items` can start with — None for could
+    be anything — and whether it can match the empty string). Errs towards
+    None, which only ever makes the overlap check more cautious."""
+    first: set | None = set()
+    for op, av in items:
+        if op == _sre_c.LITERAL:
+            return _rx_union(first, {chr(av), chr(av).lower(), chr(av).upper()}), False
+        if op == _sre_c.IN:
+            return _rx_union(first, _rx_class(av)), False
+        if op in (_sre_c.AT, _sre_c.ASSERT, _sre_c.ASSERT_NOT):
+            continue   # zero-width
+        if op == _sre_c.SUBPATTERN or (_RX_ATOMIC is not None and op == _RX_ATOMIC):
+            sub, nullable = _rx_first(av[-1] if op == _sre_c.SUBPATTERN else av)
+        elif op == _sre_c.BRANCH:
+            sub, nullable = set(), False
+            for alt in av[1]:
+                f, n = _rx_first(alt)
+                sub, nullable = _rx_union(sub, f), nullable or n
+        elif op in _RX_REPEATS or (_RX_POSSESSIVE is not None and op == _RX_POSSESSIVE):
+            sub, nullable = _rx_first(av[2])
+            nullable = nullable or av[0] == 0
+        else:
+            return None, False   # ANY, NOT_LITERAL, a backreference: anything
+        first = _rx_union(first, sub)
+        if first is None or not nullable:
+            return first, False
+    return first, True
+
+
+def _rx_alternatives_overlap(alts) -> bool:
+    firsts = [_rx_first(a) for a in alts]
+    for i, (fa, na) in enumerate(firsts):
+        for fb, nb in firsts[i + 1:]:
+            if na or nb or fa is None or fb is None or fa & fb:
+                return True
+    return False
+
+
+def _rx_hazard(items, outer: tuple | None) -> str | None:
+    """Why this parsed pattern can backtrack exponentially, or None.
+    `outer` is the nearest enclosing repeat that can be backtracked into,
+    as (min, max), when it repeats more than once."""
+    unbounded = _sre_c.MAXREPEAT
+    for op, av in items:
+        found = None
+        if op in _RX_REPEATS:
+            lo, hi, body = av
+            if hi > 1:
+                if outer is not None and unbounded in (outer[1], hi):
+                    return "a quantifier inside another repeated group"
+                found = _rx_hazard(body, (lo, hi))
+            else:
+                found = _rx_hazard(body, outer)
+        elif _RX_POSSESSIVE is not None and op == _RX_POSSESSIVE:
+            found = _rx_hazard(av[2], None)
+        elif _RX_ATOMIC is not None and op == _RX_ATOMIC:
+            found = _rx_hazard(av, None)
+        elif op == _sre_c.SUBPATTERN:
+            found = _rx_hazard(av[-1], outer)
+        elif op == _sre_c.BRANCH:
+            if outer is not None and outer[1] == unbounded and _rx_alternatives_overlap(av[1]):
+                return "alternatives that can match the same text inside an open-ended repeat"
+            for alt in av[1]:
+                found = found or _rx_hazard(alt, outer)
+        elif op in (_sre_c.ASSERT, _sre_c.ASSERT_NOT):
+            found = _rx_hazard(av[1], None)
+        elif op == _sre_c.GROUPREF_EXISTS:
+            found = _rx_hazard(av[1], outer) or (av[2] is not None and _rx_hazard(av[2], outer)) or None
+        if found:
+            return found
+    return None
+
+
+def _check_regexp_literals(sql: str) -> None:
+    """A REGEXP against a literal pattern — `"Cmd" REGEXP '…'` or
+    regexp('…', "Cmd") — gets the check the regex filter and search get
+    (_compiled_regex) before the statement runs: a broken pattern is a
+    ValueError naming it rather than SQLite's bare "user-defined function
+    raised exception", and a catastrophic one is refused before a crafted
+    cell can freeze the process. A pattern that only exists at run time
+    (a column, a concatenation) still meets _regexp's own check."""
+    for m in re.finditer(r"\bREGEXP\s*\(?\s*'((?:[^']|'')*)'", sql, re.IGNORECASE):
+        _compiled_regex(m.group(1).replace("''", "'"))
+
+
+@functools.lru_cache(maxsize=256)
+def _compiled_regex(pattern: str) -> re.Pattern:
+    """`pattern` compiled the way REGEXP runs it (case-insensitive), or a
+    ValueError saying why it will not be run: it does not compile, or it
+    has a shape that can backtrack catastrophically (see above). Cached —
+    REGEXP asks once per row."""
     try:
-        return re.search(pattern, str(value), re.IGNORECASE) is not None
-    except re.error:
-        return False
+        rx = re.compile(pattern, re.IGNORECASE)
+    except re.error as e:
+        raise ValueError(f"Not a valid regular expression ({e}): {pattern}") from None
+    hazard = _rx_hazard(_sre_parse.parse(pattern, re.IGNORECASE), None)
+    if hazard:
+        raise ValueError(
+            f"Not a usable regular expression: {pattern} has {hazard}, which can backtrack "
+            "catastrophically — one crafted cell would freeze Winnow until it finished, and "
+            "nothing can interrupt it. Rewrite it without the nesting (a class such as [ab] "
+            "rather than (a|b), or the inner repeat spelled out), or search with Contains.")
+    return rx
 
 
 # Same two shapes DATE_RE recognizes at ingest, capturing time-of-day too
@@ -7043,6 +7205,7 @@ class Store:
         if op == "regex":
             if val == "":
                 return "", []
+            _compiled_regex(val)   # refuse an unusable pattern here, by name — see _regexp
             return f"{c} REGEXP ?", [val]
         if op in (">", ">=", "<", "<="):
             if val == "":
@@ -7188,6 +7351,8 @@ class Store:
             if ident.upper() in self.ALLOWED_SQL_WORDS or ident in colnames or NUM_RE.match(ident):
                 continue
             raise ValueError(f"Unknown identifier: {ident}")
+        # EXPLAIN below never calls REGEXP, so it can't catch a bad pattern.
+        _check_regexp_literals(frag)
 
         # A merge has no table of its own: the fragment is later spliced
         # into each member's branch, so the dry-run below must pass against
@@ -7233,6 +7398,7 @@ class Store:
             # Base columns only, matching build_fts's doc view exactly — the
             # indexed and fallback paths have to search the same text, and
             # derived values are computed from data that's already in it.
+            _compiled_regex(search)   # refuse an unusable pattern here, by name — see _regexp
             blob = _blob_expr([c["name"] for c in self._base_cols(src)])
             clauses.append(f"({blob}) REGEXP ?")
             params.append(search)
@@ -12716,6 +12882,7 @@ class Store:
         structural = _blank_string_literals(_strip_sql_comments(sql))
         if self.SQL_PANE_FORBIDDEN_RE.search(structural):
             raise ValueError("ATTACH, DETACH, PRAGMA and VACUUM aren't allowed in the SQL pane")
+        _check_regexp_literals(sql)
         ro = self._pane_connection()
         try:
             if not force:
@@ -13129,6 +13296,7 @@ class Store:
         structural = _blank_string_literals(_strip_sql_comments(sql))
         if self.SQL_PANE_FORBIDDEN_RE.search(structural):
             raise ValueError("ATTACH, DETACH, PRAGMA and VACUUM aren't allowed in the SQL pane")
+        _check_regexp_literals(sql)
         ro = self._pane_connection()
         try:
             t0 = time.time()
