@@ -2,7 +2,7 @@
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { renderHead } from './columns.js';
-import { $, OVERSCAN, PAGE, ROW_H, api, debounce, post, setBusy, toast, toastAction } from './core.js';
+import { $, OVERSCAN, PAGE, ROW_H, api, debounce, nameMap, post, setBusy, toast, toastAction } from './core.js';
 import { syncRowOpenHint } from './detail.js';
 import { currentSpec, renderAdvancedChips, updateSearchHint } from './filters.js';
 import { clearPageCache, headH, rScroll, render, rowAt, spacerPx, vScroll } from './grid.js';
@@ -337,7 +337,7 @@ function viewStateSnapshot() {
 }
 
 function restoreViewState(st) {
-  S.filters = { ...st.filters };
+  S.filters = nameMap(st.filters);
   S.search = st.search;
   S.searchMode = st.searchMode;
   S.searchTerms = st.searchTerms.map((t) => ({ ...t }));

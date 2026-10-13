@@ -723,6 +723,25 @@ see [docs/notes/README.md](README.md) for the whole set.
   copied the polluted defaults back and looked like it did nothing.
   `defaultKeymap()` (a per-action `[...keys]`) is what `loadKeymap` and
   the reset button both go through now.
+- **A map keyed by column name is a `nameMap()`, never a `{}`** (core.js).
+  Column names are user data in the frontend too (invariant #5 is the
+  backend half), and a CSV can carry a `toString`, `constructor` or
+  `__proto__` column. A plain object answers those with Object.prototype's
+  members: under the filter bar the grid never rendered and said nothing
+  (`parseFilter` called `.trim()` on the inherited function), under the
+  row the `toString` box opened prefilled with
+  `function toString() { [native code] }` and its value picker threw, an
+  unpinned `toString` column drew sticky (`pinnedOffsets`), and
+  `S.layout['__proto__'] = …` replaced the map's PROTOTYPE — the
+  `__proto__` column could not be filtered, and hiding it hid every column
+  without a layout entry of its own. `S.filters`, `S.layout`, the pinned
+  offsets, the autofit lengths and the profile `appliedAt` map are
+  null-prototype now. The trap is the copy: `{ ...map }` is a PLAIN object
+  again, so every assignment back onto `S` goes through `nameMap(…)`
+  (snapshots made with a spread are fine as long as they are restored that
+  way). JSON round-trips are unaffected. The `Object.fromEntries` maps in
+  `rowPaintContext` are safe as they are — built from every column, so
+  each lookup hits an own key. tests/ui/test_prototype_column_names.py.
 - **There are two filter surfaces, and the always-on row is the one that
   ships.** The filter bar was built because the row was measured on a
   seven-table review case: **27 filter boxes on screen, 0 in use** — the

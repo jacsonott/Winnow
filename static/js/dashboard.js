@@ -9,7 +9,7 @@
 
 import { drawBars, drawHistogram, pickBar } from './charts.js';
 import { renderHead } from './columns.js';
-import { $, api, el, post, toast } from './core.js';
+import { $, api, el, nameMap, post, toast } from './core.js';
 import { WIDGET_TEMPLATES, bucketRange, columnsForTable, recipeSql, tableOf, templateById, widgetFrom } from './dashwidgets.js';
 import { currentSpec, renderAdvancedChips, updateSearchHint } from './filters.js';
 import { openImportModal } from './importer.js';
@@ -548,7 +548,7 @@ export async function addViewCountWidget() {
    and any of those ANDed onto the widget's condition would show fewer
    rows than the widget counted. */
 function resetGridState() {
-  S.filters = {};
+  S.filters = nameMap();
   S.filterTree = { type: 'group', op: 'AND', children: [] };
   S.search = '';
   S.searchMode = 'contains';
@@ -629,7 +629,7 @@ export async function drillInto(w, extra = {}) {
   resetGridState();
   if (drill.spec) {
     const sp = drill.spec;
-    S.filters = { ...(sp.filters || {}) };
+    S.filters = nameMap(sp.filters);
     S.filterTree = sp.filter_tree ? deepCopy(sp.filter_tree) : { type: 'group', op: 'AND', children: [] };
     S.search = sp.search || '';
     S.searchMode = sp.search_mode || 'contains';
