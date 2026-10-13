@@ -61,6 +61,28 @@ MAX_PATHS = 400
 _DOCTYPE_RE = re.compile(r"<!DOCTYPE", re.IGNORECASE)
 
 
+def utf8_text(s: str) -> str:
+    """`s` as text that has a UTF-8 form — what SQLite stores and what a
+    route's JSON body can carry. JSON's "\\udc80" decodes to a lone
+    surrogate, which has none: anything holding one fails wherever it is
+    next encoded (a batch insert, a response). It is written back as the
+    six characters of the escape the document had. store.py uses this one
+    for JSON import; plasoread.py, which imports nothing from the app,
+    keeps a twin. The ASCII check is the fast path almost every value
+    takes."""
+    if s.isascii():
+        return s
+    try:
+        s.encode("utf-8")
+        return s
+    except UnicodeEncodeError:
+        return s.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
+def _has_lone_surrogate(s: str) -> bool:
+    return not s.isascii() and any("\ud800" <= ch <= "\udfff" for ch in s)
+
+
 def _leaf_text(value: Any) -> str:
     """A JSON value at the point extraction stops -> TEXT.
 
@@ -122,7 +144,13 @@ def parse_json_path(text: str) -> list:
             key = m.group("dotkey") or m.group("barekey")
             if key is None:
                 raw = m.group("dq") if m.group("dq") is not None else m.group("sq")
-                key = re.sub(r"\\(.)", r"\1", raw)
+                # `\uXXXX` is how format_json_path spells a lone surrogate
+                # in a key (one with no UTF-8 form, so it can't be stored
+                # or sent as itself); any other backslash escapes the next
+                # character, as it always has.
+                key = re.sub(r"\\(u[0-9a-fA-F]{4}|.)",
+                             lambda e: chr(int(e.group(1)[1:], 16)) if len(e.group(1)) == 5
+                             else e.group(1), raw)
             out.append(key.strip())
         pos = m.end()
     if not out:
@@ -133,15 +161,22 @@ def parse_json_path(text: str) -> list:
 def format_json_path(segments: list) -> str:
     """The inverse of parse_json_path, and the form shown in the UI. Keys
     that dot notation can't express unambiguously come back bracket-quoted,
-    so format(parse(x)) is always re-parseable."""
+    so format(parse(x)) is always re-parseable. A lone surrogate in a key
+    is spelled `\\uXXXX` inside the quotes: the path is stored in a column
+    definition and sent through the UI, and neither can hold the
+    character itself."""
     out = "$"
     for seg in segments:
         if isinstance(seg, int):
             out += f"[{seg}]"
-        elif re.fullmatch(r"[^.\[\]\"']+", str(seg)):
+        elif re.fullmatch(r"[^.\[\]\"']+", str(seg)) and not _has_lone_surrogate(str(seg)):
             out += f".{seg}"
         else:
-            out += '["' + str(seg).replace("\\", "\\\\").replace('"', '\\"') + '"]'
+            quoted = str(seg).replace("\\", "\\\\").replace('"', '\\"')
+            if _has_lone_surrogate(quoted):
+                quoted = "".join(f"\\u{ord(ch):04x}" if "\ud800" <= ch <= "\udfff" else ch
+                                 for ch in quoted)
+            out += '["' + quoted + '"]'
     return out
 
 
@@ -731,7 +766,9 @@ def discover_paths(values: list, kind: str) -> list[dict]:
             doc = load_json(raw)
             if doc is None:
                 continue
-            found = [(format_json_path(p), _leaf_text(v)) for p, v in json_leaf_paths(doc)]
+            # utf8_text: a lone surrogate in a value would fail the
+            # route's response; one in a key is escaped by the path itself.
+            found = [(format_json_path(p), utf8_text(_leaf_text(v))) for p, v in json_leaf_paths(doc)]
         else:
             root = load_xml(raw)
             if root is None:
@@ -774,7 +811,12 @@ def suggest_name(path: str, kind: str) -> str:
     (`Data[@Name='TargetUserName']` names itself) and a full element path
     would be unreadable. Collisions with existing columns are the caller's
     problem (store.add_derived_column already refuses them and the batch
-    path disambiguates)."""
+    path disambiguates). Always text with a UTF-8 form (utf8_text): a key
+    holding a lone surrogate names its column with the escape."""
+    return utf8_text(_suggest_name(path, kind))
+
+
+def _suggest_name(path: str, kind: str) -> str:
     s = str(path)
     # JSON is decided first: the "@" rules below are XML's, and an
     # EvtxECmd payload is full of keys that merely start with "@" — the

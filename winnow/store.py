@@ -909,6 +909,34 @@ def infer_type(values: Iterable[str]) -> str:
     return "text"
 
 
+# JSON's "\udc80" (legal, and how Plaso's serializer writes an NTFS name
+# holding an unpaired surrogate) decodes to a lone surrogate, which has no
+# UTF-8 encoding: the batch insert raised "surrogates not allowed" and the
+# import stopped there — in a key, before the first row. Written back as
+# the six characters of the escape the file had: exactly what was in the
+# evidence, and still valid inside JSON text. See structparse.utf8_text.
+_utf8_text = structparse.utf8_text
+
+
+def _lenient_text_factory(undecodable: list[int] | None = None):
+    """sqlite3 text_factory for an EXTERNAL database's TEXT values. The
+    default decodes strictly, and one stored value that isn't UTF-8 (a
+    careless writer, a truncated multi-byte character) raised "Could not
+    decode to UTF-8" mid-read: the batch it was in and every row after it
+    were lost. Decoded with U+FFFD instead, the same rule CSV ingest's
+    errors="replace" follows, and counted in `undecodable[0]` so the
+    import can say how many values that touched. BLOBs never come
+    through here — sqlite3 only calls a text_factory for TEXT."""
+    def decode(b: bytes) -> str:
+        try:
+            return b.decode("utf-8")
+        except UnicodeDecodeError:
+            if undecodable is not None:
+                undecodable[0] += 1
+            return b.decode("utf-8", "replace")
+    return decode
+
+
 def _json_leaf_text(value: Any) -> str:
     """A JSON value at a point flattening stops (see _flatten_json) ->
     TEXT, same all-values-are-TEXT convention as CSV ingest. An object or
@@ -920,8 +948,8 @@ def _json_leaf_text(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (dict, list)):
-        return json.dumps(value, ensure_ascii=False)
-    return str(value)
+        return _utf8_text(json.dumps(value, ensure_ascii=False))
+    return _utf8_text(str(value))
 
 
 def _flatten_json(obj: dict, max_depth: int | None) -> dict[str, str]:
@@ -952,13 +980,15 @@ def _flatten_json(obj: dict, max_depth: int | None) -> dict[str, str]:
             if not value:
                 out[key_path] = "{}"
                 return
+            # _utf8_text on keys as _json_leaf_text does on values: a lone
+            # surrogate in a key failed the import before the first row.
             for k, v in value.items():
-                walk(v, f"{key_path}.{k}" if key_path else str(k), depth + 1)
+                walk(v, f"{key_path}.{_utf8_text(str(k))}" if key_path else _utf8_text(str(k)), depth + 1)
         else:
-            out[key_path] = _json_leaf_text(value)
+            out[key_path] = _json_leaf_text(value)   # UTF-8-safe, as keys are above
 
     for k, v in obj.items():
-        walk(v, str(k), 0)
+        walk(v, _utf8_text(str(k)), 0)
     return out
 
 
@@ -3214,6 +3244,7 @@ class Store:
         a completely separate file."""
         ro = sqlite3.connect(f"file:{path}?mode=ro", uri=True, check_same_thread=False)
         ro.row_factory = sqlite3.Row
+        ro.text_factory = _lenient_text_factory()   # the timestamp sniff reads values too
         try:
             table_names = [
                 r["name"] for r in ro.execute(
@@ -3273,6 +3304,8 @@ class Store:
 
         ro = sqlite3.connect(f"file:{path}?mode=ro", uri=True, check_same_thread=False)
         ro.row_factory = sqlite3.Row
+        undecodable = [0]
+        ro.text_factory = _lenient_text_factory(undecodable)
         try:
             src_cols_info = ro.execute(f"PRAGMA table_info({q(table_name)})").fetchall()
             if not src_cols_info:
@@ -3349,6 +3382,11 @@ class Store:
             self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
 
         if error is not None:
+            # Rows that committed before the failure stay, with an accurate
+            # row_count (ingest_csv's partial-import contract). None did:
+            # an empty table would look exactly like a real empty import.
+            if not total:
+                self.drop_source(source_id)
             raise error
 
         if build_fts and total:
@@ -3358,6 +3396,10 @@ class Store:
         rec = self.get_source(source_id)
         rec["elapsed_sec"] = round(elapsed, 2)
         rec["rows_per_sec"] = int(total / elapsed) if elapsed > 0 else 0
+        rec["undecodable_values"] = undecodable[0]
+        if undecodable[0]:
+            wlog.record("warn", f"{name}: {undecodable[0]:,} text value"
+                                f"{'s' if undecodable[0] != 1 else ''} not valid UTF-8 — imported with \ufffd")
         return rec
 
     def ingest_plaso(
@@ -4238,7 +4280,7 @@ class Store:
                 job["result"] = [
                     {k: r.get(k) for k in ("id", "name", "row_count", "elapsed_sec", "rows_per_sec",
                                            "ragged_rows", "suspect_quote_rows", "bad_records",
-                                           "first_bad_line")}
+                                           "first_bad_line", "undecodable_values")}
                     for r in results
                 ]
             wlog.record("info", f"Import finished: {job['name']} ({job['kind']}) — "
