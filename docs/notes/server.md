@@ -119,6 +119,17 @@ see [docs/notes/README.md](README.md) for the whole set.
   `post()` won't have it and will get 403'd. GET stays exempt on purpose (the
   Export/session/filters download links are plain navigations, which can't set
   custom headers at all).
+- **A name the analyst typed cannot be a plain `{name}` path segment.** The
+  ASGI path is percent-decoded before routing, so `encodeURIComponent`'s
+  `%2F` arrives as a real `/` and a one-segment parameter never matches:
+  a case session saved as "before 12/05" could never be loaded, renamed,
+  downloaded or deleted. The case-session routes take `{name:path}`
+  (greedy, so a name ending in "/load" still resolves); the plugin-state
+  key went the other way and travels as a parameter. Either works — what
+  does not is a segment. The one residue is "." and "..": a browser
+  resolves those (and their `%2E` spellings) out of the URL before it is
+  sent, so `Store._session_name` refuses them at save, rename and adopt
+  rather than storing a session nothing can reach.
 - `api_view` maps only `ValueError`/`KeyError` to 400; everything else is a
   500. It used to catch bare `Exception`, so an internal defect surfaced as
   "Filter error: …" — blaming the analyst's filter for something they can't

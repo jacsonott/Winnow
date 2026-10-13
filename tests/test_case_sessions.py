@@ -321,6 +321,59 @@ def test_an_unnamed_session_is_a_400_not_a_500(store, monkeypatch):
                        headers=HEADERS).status_code == 400
 
 
+# Names an analyst actually types — a date is the commonest way to tell
+# passes apart — plus the shapes that would confuse a router that splits
+# the name back into segments.
+ROUND_TRIP_NAMES = ["before 12/05", "host1/day2", "/leading", "trailing/", "a/../b",
+                    "x/load", "x/rename", "50% done", "q?x#y", "back\\slash"]
+
+
+@pytest.mark.parametrize("name", ROUND_TRIP_NAMES)
+def test_every_name_the_save_route_takes_round_trips(store, write_csv, monkeypatch, name):
+    """A session saved under a name with "/" in it could never be loaded,
+    renamed, downloaded or deleted: the client sends the name
+    encodeURIComponent'd (%2F), the server decodes the path before routing,
+    and a one-segment {name} cannot match two segments — every one of those
+    calls 404'd and the session sat in the list for good."""
+    from urllib.parse import quote
+
+    sid = _case(store, write_csv)
+    _tag(store, sid, [1, 2], "TA")
+    client = _client(store, monkeypatch)
+    enc = lambda n: quote(n, safe="")   # what encodeURIComponent sends
+
+    assert client.post("/api/case_sessions", json={"name": name}, headers=HEADERS).status_code == 200
+    r = client.post(f"/api/case_sessions/{enc(name)}/load", params={"merge": "false"}, headers=HEADERS)
+    assert r.status_code == 200, r.text
+    r = client.get(f"/api/case_sessions/{enc(name)}/download", headers=HEADERS)
+    assert r.status_code == 200 and r.json()["format"] == "winnow-case-session/1"
+    renamed = name + " (2)"
+    r = client.post(f"/api/case_sessions/{enc(name)}/rename", json={"name": renamed}, headers=HEADERS)
+    assert r.status_code == 200 and r.json()["name"] == renamed
+    r = client.request("DELETE", f"/api/case_sessions/{enc(renamed)}", headers=HEADERS)
+    assert r.status_code == 200
+    assert store.list_sessions() == []
+
+
+@pytest.mark.parametrize("name", [".", ".."])
+def test_a_name_no_link_can_carry_is_refused_when_it_is_given(store, write_csv, name):
+    """"." and ".." are the two names that cannot travel as a path segment
+    however they are escaped — a browser resolves them (and their %2E
+    spellings) away before the request leaves. Refused at the door, with a
+    reason, rather than saved and then unreachable."""
+    _case(store, write_csv)
+    with pytest.raises(ValueError, match="can.t be called"):
+        store.save_session(name)
+    store.save_session("ok")
+    with pytest.raises(ValueError, match="can.t be called"):
+        store.rename_session("ok", name)
+    with pytest.raises(ValueError, match="can.t be called"):
+        store.adopt_session(name, store.export_case_session())
+    with pytest.raises(ValueError, match="can.t be called"):
+        store.start_new_session(save_as=name)
+    assert [s["name"] for s in store.list_sessions()] == ["ok"]
+
+
 def test_starting_a_new_session_saves_then_clears(store, write_csv):
     sid = _case(store, write_csv)
     _tag(store, sid, [1, 2, 3], "TA")

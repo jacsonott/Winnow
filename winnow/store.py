@@ -11070,13 +11070,26 @@ class Store:
 
     # ------------------------------------------------- sessions in the case
 
+    @staticmethod
+    def _session_name(name: str | None) -> str:
+        """The name a session is stored under, or ValueError saying why it
+        can't be. Any text goes — the routes carry it as {name:path}, so a
+        "/" (a date: "before 12/05") round-trips — except "." and "..",
+        which no URL path can carry however they are escaped: a browser
+        resolves them, %2E spellings included, before the request leaves,
+        so a session saved under one could never be reached again."""
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("A session needs a name")
+        if name in (".", ".."):
+            raise ValueError(f"A session can't be called {name!r} — pick a name with a letter in it")
+        return name
+
     def save_session(self, name: str) -> dict:
         """Snapshot the current analysis layer under `name`, in the case
         file. Saving over an existing name replaces it — the alternative is
         a pile of "triage-2-final-v3" and no way to tell them apart."""
-        name = (name or "").strip()
-        if not name:
-            raise ValueError("A session needs a name")
+        name = self._session_name(name)
         data = self.export_case_session()
         return self._write_session(name, data, origin="saved")
 
@@ -11132,9 +11145,7 @@ class Store:
             self.db.execute("DELETE FROM sessions WHERE name=?", (name,))
 
     def rename_session(self, name: str, new_name: str) -> dict:
-        new_name = (new_name or "").strip()
-        if not new_name:
-            raise ValueError("A session needs a name")
+        new_name = self._session_name(new_name)
         with self.lock, self.db:
             if self.db.execute("SELECT 1 FROM sessions WHERE name=?", (new_name,)).fetchone():
                 raise ValueError(f"A session named {new_name!r} already exists")
@@ -11150,7 +11161,7 @@ class Store:
         different decisions."""
         if data.get("format") != "winnow-case-session/1":
             raise ValueError("That file isn't a Winnow case session")
-        return self._write_session(name, data, origin="imported")
+        return self._write_session(self._session_name(name), data, origin="imported")
 
     LIVE_SESSION = "__live__"
 

@@ -4745,7 +4745,13 @@ def api_case_sessions_save(body: CaseSessionSave):
         raise HTTPException(400, str(e))
 
 
-@app.post("/api/case_sessions/{name}/load")
+# {name:path} on every route that names a session in the URL: the client
+# sends encodeURIComponent(name), but the path is percent-DECODED before
+# routing, so a "/" in the name ("before 12/05", "host1/day2") arrives as
+# two segments and a plain {name} never matched — the session saved and
+# then could not be loaded, renamed, downloaded or deleted. The converter
+# is greedy, so a name that itself ends in "/load" still resolves.
+@app.post("/api/case_sessions/{name:path}/load")
 def api_case_sessions_load(name: str, merge: bool = True):
     try:
         return store().load_session(name, merge=merge)
@@ -4761,7 +4767,7 @@ def api_case_sessions_adopt(body: CaseSessionAdopt):
         raise HTTPException(400, str(e))
 
 
-@app.post("/api/case_sessions/{name}/rename")
+@app.post("/api/case_sessions/{name:path}/rename")
 def api_case_sessions_rename(name: str, body: CaseSessionRename):
     try:
         return store().rename_session(name, body.name)
@@ -4771,13 +4777,13 @@ def api_case_sessions_rename(name: str, body: CaseSessionRename):
         raise HTTPException(400, str(e))
 
 
-@app.delete("/api/case_sessions/{name}")
+@app.delete("/api/case_sessions/{name:path}")
 def api_case_sessions_delete(name: str):
     store().delete_session(name)
     return {"ok": True}
 
 
-@app.get("/api/case_sessions/{name}/download")
+@app.get("/api/case_sessions/{name:path}/download")
 def api_case_sessions_download(name: str):
     """The hand-off: a stored session as a file, for sending to another
     analyst. The only reason a session file exists now."""
