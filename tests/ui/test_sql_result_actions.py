@@ -146,3 +146,33 @@ def test_excel_follows_a_click_sort(page):
     ws = load_workbook(_workbook(dl.value)).active
     in_file = [ws.cell(row=i, column=1).value for i in range(2, ws.max_row + 1)]
     assert in_file == on_screen, "the workbook must match the screen's order"
+
+
+def test_save_as_table_saves_the_query_behind_the_result_not_the_editor(page):
+    """The button sits on a result, but it re-ran whatever the editor held
+    by then: run a query, start editing the next one, click Save on the
+    result still on screen — and the table landed was the half-edited
+    query's, matching neither what was shown nor what was checked. The
+    request is caught and aborted here, so the shared case gains no table."""
+    import json as _json
+
+    ran = "SELECT rid FROM src_1 ORDER BY rid LIMIT 3"
+    _run(page, ran)
+    page.locator("#sqlText").fill("SELECT rid FROM src_1 WHERE half-edited")
+    sent = []
+
+    def catch(route):
+        sent.append(_json.loads(route.request.post_data or "{}"))
+        route.abort()
+
+    page.route("**/api/sql/to_table", catch)
+    try:
+        page.locator(".sql-result-actions .btn", has_text="Save as table").click()
+        page.wait_for_selector(".confirm-overlay input")
+        page.locator(".confirm-overlay input").fill("from the result")
+        page.locator(".confirm-overlay input").press("Enter")
+        page.wait_for_function("() => document.querySelector('.confirm-overlay') === null")
+        page.wait_for_timeout(300)
+    finally:
+        page.unroute("**/api/sql/to_table", catch)
+    assert sent and sent[0]["sql"] == ran

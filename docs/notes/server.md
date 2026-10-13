@@ -209,6 +209,16 @@ see [docs/notes/README.md](README.md) for the whole set.
   nickname or name): `Line` is a rid within one member, so without it two
   rows of a merge both read "Line 1" with nothing saying where either is.
   A single table's export keeps the old header.
+- **`/api/sql` encodes three kinds of cell at the JSON boundary**
+  (`pane_cell_json`), not in `Store.run_sql`, whose raw values plugins
+  are owed: a non-UTF-8 BLOB becomes SQLite's `X'00FF'` (a UTF-8 one
+  its text, as before), a non-finite REAL `Inf`/`-Inf`/`NaN`, and an
+  integer past ±2^53 its decimal string. The first two were a 500 (JSON
+  has neither); the third arrived rounded, so grid, Copy, CSV and Excel
+  all disagreed with the case for a FILETIME-sized number. "Save as
+  table" stores the same spellings (`pane_cell_text`) — it stored
+  Python's `b'…'` repr — and re-runs the query that produced the result
+  on screen (`r.sql`, kept by `runSql`), not the editor's text by then.
 - **`POST /api/sql/export_xlsx`** takes the result the pane is SHOWING
   (columns + rows, up from the client) rather than the query, so the
   workbook matches the screen including a click-sort — which lives only in

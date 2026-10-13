@@ -45,7 +45,7 @@ from winnow import archive
 from winnow import workspace as WS
 from winnow.store import (CASE_SUFFIX, DEFAULT_IMPORT_EXTENSIONS, PLASO_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, MissingTable, OpCancelled, Store, ViewExpired,
                    describe_case_lock, probe_case_lock, q, rows_to_xlsx, sweep_orphan_views)
-from winnow.store import case_session_document_problem, session_document_problem
+from winnow.store import case_session_document_problem, pane_cell_json, session_document_problem
 
 HERE = paths.INSTALL_ROOT  # static/, plugins/, examples/plugins/ all hang off the install root
 
@@ -5094,9 +5094,13 @@ def api_search_all_cancel(job_id: int | None = None):
 @app.post("/api/sql")
 def api_sql(body: SqlQuery):
     try:
-        return store().run_sql(body.sql, body.limit)
+        res = store().run_sql(body.sql, body.limit)
     except Exception as e:
         raise HTTPException(400, str(e))
+    # Encoded here, at the JSON boundary, not in Store.run_sql: plugins
+    # call run_sql server-side and are owed the values SQLite returned.
+    res["rows"] = [[pane_cell_json(v) for v in row] for row in res["rows"]]
+    return res
 
 
 class SqlTabCreate(BaseModel):

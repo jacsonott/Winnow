@@ -160,3 +160,27 @@ def test_sql_to_table_rejects_writes_and_empty(store, write_csv):
         store.sql_to_table("PRAGMA page_size", "nope")
     with _pytest.raises(ValueError):
         store.sql_to_table("SELECT 1", "  ")
+
+
+# What JSON can't carry, or carries wrong: a non-UTF-8 BLOB, a non-finite
+# REAL, an integer past 2^53 (a FILETIME, a 64-bit id). And a UTF-8 BLOB,
+# which the pane always showed as its text.
+AWKWARD = ("SELECT x'00ff' AS raw, 1e999 AS big, -1e999 AS small, 9007199254740993 AS ft, "
+           "42 AS n, 1.5 AS r, CAST('abc' AS BLOB) AS t, NULL AS z")
+
+
+def test_sql_route_carries_blobs_infinities_and_big_integers(client):
+    """/api/sql answered 500 for the first two (JSON has no bytes and no
+    Infinity) and rounded the third, so the grid, Copy, CSV and Excel all
+    showed a different number from the one in the case."""
+    r = client.post("/api/sql", json={"sql": AWKWARD})
+    assert r.status_code == 200, r.text
+    assert r.json()["rows"] == [["X'00FF'", "Inf", "-Inf", "9007199254740993", 42, 1.5, "abc", None]]
+
+
+def test_save_as_table_stores_what_the_pane_showed(store):
+    """sql_to_table stored str(v): a BLOB landed as Python's "b'\\x00\\xff'"
+    repr, and CAST('abc' AS BLOB) as "b'abc'" next to a grid showing abc."""
+    sid = store.sql_to_table(AWKWARD, "awkward")["source"]["id"]
+    res = store.run_sql(f"SELECT raw, big, small, ft, n, r, t, z FROM src_{sid}")
+    assert res["rows"] == [["X'00FF'", "Inf", "-Inf", "9007199254740993", "42", "1.5", "abc", ""]]
