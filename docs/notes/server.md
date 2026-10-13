@@ -388,6 +388,17 @@ see [docs/notes/README.md](README.md) for the whole set.
   case — a fresh install's first double-click must not stack the
   cases-dir setup prompt on top of the file the analyst opened.
 
+- **The default cases folder is the install's, never the working
+  directory's.** `_default_cases_dir()` is `INSTALL_ROOT/cases` — what
+  `_cases_dir()` falls back to, what `GET /api/prefs` reports as
+  `default_cases_dir`, what the first-run prompt names and what its "Use
+  the default" stores. It used to post `'cases'`, which `POST /api/prefs`
+  made absolute against the server's cwd, so `python /opt/winnow/
+  server.py` run from a home directory filed every case under ~/cases.
+  A relative `cases_dir` is now resolved against `INSTALL_ROOT`, and New
+  case falls back to `default_cases_dir` (not a relative `cases/`) on an
+  install that has cases but never set a folder.
+
 - **The quick-look sweep must recognise every kind of work.** It deletes
   abandoned temp cases after 7 days, and judged "no analysis" from tags,
   notes and sessions alone — so a quick-look whose content was a
@@ -500,7 +511,12 @@ see [docs/notes/README.md](README.md) for the whole set.
   a Chrome `History` registered as a case and then picked in "Copy into
   this case" gained Winnow's tables and changed hash. A path that does
   not exist is a new case and is created as before
-  (tests/test_not_a_case_file.py). In the association catalogue `.db-winnow` is
+  (tests/test_not_a_case_file.py) — except from "Open existing case
+  file…", which registers with `must_exist` and is refused ("No case
+  file at …") instead: it used to create an empty case at a mistyped
+  path and open it, which looks exactly like the analyst's case with
+  its tables gone. Creating is + New case's job; `--case FILE` still
+  creates a missing case, as documented. In the association catalogue `.db-winnow` is
   `default_ok`, alongside the formats nothing else contests — `.csv`,
   `.tsv`, `.jsonl`, `.ndjson`. What is particular about it is the
   ownership: nothing on the system claims `.db-winnow` at all, so Winnow

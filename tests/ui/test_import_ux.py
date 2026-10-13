@@ -101,3 +101,36 @@ def test_the_file_picker_filters_and_sorts(page, tmp_path):
     page.locator("#modalBody .btn", has_text="Cancel").click()
     page.wait_for_selector("#modal", state="hidden")
     page.evaluate("() => localStorage.removeItem('winnow.browse.sort')")
+
+
+# One file name per kind the import queue routes to, and the word an
+# analyst holding that file would look for on the screen.
+IMPORT_KINDS = {"logons.csv": "CSV", "events.jsonl": "JSON", "History.db": "SQLite",
+                "Book1.xlsx": "Excel", "run.plaso": "Plaso", "bundle.tgz": "archive",
+                "auth.log.1": "text"}
+
+
+def test_the_drop_overlay_and_import_intro_name_everything_that_imports(page):
+    """The drop overlay said "CSV/TSV/JSON, or a single SQLite file" and
+    the Import window left out Plaso, archives and raw text, so an
+    analyst holding a .plaso or a support bundle was told it would not
+    take one. Both list every kind the queue routes a file to."""
+    kinds = page.evaluate("(names) => names.map((n) => __winnow.importKindFor(n))", list(IMPORT_KINDS))
+    assert kinds == ["csv", "json", "sqlite", "xlsx", "plaso", "archive", "text"]
+    drag = """(type) => {
+      const dt = new DataTransfer();
+      dt.items.add(new File(['x'], 'run.plaso'));
+      window.dispatchEvent(new DragEvent(type, { dataTransfer: dt }));
+    }"""
+    page.evaluate(drag, "dragenter")
+    page.wait_for_selector("#dropOverlay:not([hidden])")
+    overlay = page.locator("#dropOverlay").inner_text().lower()
+    page.evaluate(drag, "dragleave")
+    page.wait_for_selector("#dropOverlay", state="hidden")
+    page.evaluate("() => { __winnow.S.importQueue = []; __winnow.openImportModal(); }")
+    page.wait_for_selector("#modal:not([hidden])")
+    intro = page.locator("#modalBody p").first.inner_text().lower()
+    page.keyboard.press("Escape")
+    for word in IMPORT_KINDS.values():
+        assert word.lower() in overlay, (word, overlay)
+        assert word.lower() in intro, (word, intro)

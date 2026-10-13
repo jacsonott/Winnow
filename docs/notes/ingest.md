@@ -425,14 +425,30 @@ see [docs/notes/README.md](README.md) for the whole set.
   opposite problem: it renamed its spool to `<tempdir>/<client
   filename>`, so two uploads of `bundle.tgz` at once shared one file,
   and a same-named file already in the tempdir was overwritten and then
-  deleted. Both now go through `server._upload_spool`: a private
+  deleted. Every upload that imports now goes through `server._upload_spool`: a private
   `mkdtemp` per upload holding the file under its uploaded basename,
-  removed in `finally` by `_remove_spool`. That is an unlink and an
+  removed in `finally` by `_remove_spool` (the job route hands both to
+  the job — `delete_after` + `spool_dir` — which removes them when it
+  ends). That is an unlink and an
   rmdir, not `rmtree`, because the routes are async and a tree walk is
   blocking work (test_event_loop_blocking). That basename is load-bearing for plugins,
   whose parsers read meaning from the file name (esxi_logs' `Log` column
-  came out `other` for every uploaded file). The name the source records
-  is the uploaded one, never the spool's. Frontend: `uploadWithProgress` (XHR — fetch
+  came out `other` for every uploaded file) — and for the built-in
+  readers too: a SQLite table's and a workbook sheet's default name is
+  `<file stem>.<table>`, built from the path, so while `jobs/upload`
+  still spooled through `mkstemp` an uploaded History's `urls` came in
+  as `tmp3z2vauq7.urls` beside the `History.urls` a path import makes.
+  The path the source records is the uploaded name, never the spool's:
+  `_ingest_via_plugin`'s `recorded_path` for plugin uploads, and
+  `Store.record_upload_path` for the built-in ones (the job's
+  `recorded_path`, and `_ingest_spooled` for the sync routes). It used to
+  be the spool's `tmpXXXX` path for every kind, so a session saved
+  against an uploaded table sent its re-import looking for a temp file
+  that was gone; now it names the file, which the re-import refuses as
+  not a local path and asks the analyst to open. `record_upload_path`
+  updates by the spool's path rather than by id so it also reaches the
+  rows a failed upload kept and the tables a multi-table job finished
+  before one failed (tests/test_upload_names.py). Frontend: `uploadWithProgress` (XHR — fetch
   can't report upload progress) plus `pollJobs`/`renderJobsPanel`, the
   bottom-right panel that also surfaces `fts_building` — background index
   builds used to be invisible, and a server restart kills one silently

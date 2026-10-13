@@ -803,6 +803,10 @@ class CaseCreate(BaseModel):
     name: str
     group: str = ""
     notes: str = ""
+    # Register a case file that is already there, and nothing else — the
+    # home screen's "Open existing case file…". Without it a missing path
+    # is a new case, created (+ New case).
+    must_exist: bool = False
 
 
 class CaseUpdate(BaseModel):
@@ -842,9 +846,16 @@ def api_case_current():
 # quicklook/ and registers), push its tables into an existing case
 # (copy_sources_to), or discard it.
 
+def _default_cases_dir() -> str:
+    """Where case files go until the analyst picks a folder: cases/ in the
+    install root, beside server.py — wherever the server was started
+    from. The first-run prompt shows and stores this exact path."""
+    return str(paths.INSTALL_ROOT / "cases")
+
+
 def _cases_dir() -> str:
     configured = os.environ.get("WINNOW_CASES_DIR") or WS.machine_prefs.get("cases_dir")
-    base = configured or str(paths.INSTALL_ROOT / "cases")
+    base = configured or _default_cases_dir()
     return os.path.abspath(os.path.expanduser(base))
 
 
@@ -1996,6 +2007,7 @@ def api_prefs():
     # until Save-as-a-case, or until they launch Winnow itself.
     quicklook = STORE is not None and _is_temp_case(STORE.path)
     return {"cases_dir": WS.machine_prefs.get("cases_dir"),
+            "default_cases_dir": _default_cases_dir(),
             # first run of this INSTANCE: nothing configured and no cases yet
             "first_run": (WS.machine_prefs.get("cases_dir") is None
                           and not WS.cases.list() and not quicklook)}
@@ -2004,7 +2016,12 @@ def api_prefs():
 @app.post("/api/prefs")
 def api_prefs_set(request: Request, body: PrefsBody):
     if body.cases_dir is not None:
-        path = os.path.abspath(os.path.expanduser(body.cases_dir.strip()))
+        # A relative folder is relative to the install, not to the
+        # directory the server happened to be started from: "Use the
+        # default" sent 'cases', and `python /opt/winnow/server.py` run
+        # from a home directory filed every case under ~/cases.
+        path = os.path.abspath(os.path.join(paths.INSTALL_ROOT,
+                                            os.path.expanduser(body.cases_dir.strip())))
         _refuse_remote_mkdir(request, path)
         try:
             os.makedirs(path, exist_ok=True)
@@ -2045,6 +2062,12 @@ def api_cases_create(request: Request, body: CaseCreate):
             400, f"{body.path} is not a Winnow case file — to import it as evidence, "
                  "open a case and import it there")
     if not os.path.isfile(body.path):
+        if body.must_exist:
+            # Opening a path that names nothing used to create an empty
+            # case there and open that, so a typo or a case on a share
+            # that wasn't mounted looked like a case with no tables.
+            raise HTTPException(400, f"No case file at {body.path} — to start a new case, "
+                                     "use + New case")
         parent = os.path.dirname(os.path.abspath(body.path))
         if parent:
             # Outside the try below: its refusal is already the 403 it
@@ -2188,6 +2211,22 @@ def api_import_profiles_delete(profile_id: int):
     return {"ok": True}
 
 
+def _ingest_spooled(ingest, tmp: str, *args, **kwargs) -> dict:
+    """One synchronous upload's import, for the threadpool: `ingest` (a
+    Store ingest_* reader) on the spool _upload_spool made, then the
+    uploaded file's name recorded as where the table came from instead of
+    the spool, which the route deletes on return — the rule the job
+    route's tables follow too (Store.record_upload_path). In `finally`, so
+    rows an import kept before an error say so as well."""
+    try:
+        rec = ingest(tmp, *args, **kwargs)
+    finally:
+        with contextlib.suppress(sqlite3.Error):
+            store().record_upload_path(tmp, os.path.basename(tmp))
+    rec["path"] = os.path.basename(tmp)
+    return rec
+
+
 @app.post("/api/ingest/upload")
 async def api_ingest_upload(
     file: UploadFile = File(...),
@@ -2196,10 +2235,9 @@ async def api_ingest_upload(
     has_header: bool = Form(True),
     column_types: str | None = Form(None),  # JSON-encoded list[str], since multipart forms are flat
 ):
-    suffix = Path(file.filename or "upload.csv").suffix or ".csv"
-    fd, tmp = tempfile.mkstemp(suffix=suffix)
+    spool_dir, tmp = _upload_spool(file.filename, "upload.csv")
     try:
-        with os.fdopen(fd, "wb") as out:
+        with open(tmp, "wb") as out:
             while chunk := await file.read(4 << 20):
                 out.write(chunk)
         types = json.loads(column_types) if column_types else None
@@ -2209,8 +2247,8 @@ async def api_ingest_upload(
         # get this from FastAPI for free; an `async def` route — which this
         # has to be, for `await file.read()` — must ask for it.
         return await run_in_threadpool(
-            store().ingest_csv,
-            tmp, name=file.filename, build_fts=build_fts, delimiter=delimiter or None,
+            _ingest_spooled, store().ingest_csv,
+            tmp, name=os.path.basename(tmp), build_fts=build_fts, delimiter=delimiter or None,
             has_header=has_header, column_types=types,
         )
     except Exception as e:
@@ -2218,8 +2256,7 @@ async def api_ingest_upload(
     finally:
         # The rows are in the case file the moment ingest returns; the spool
         # was leaking its full size in the OS tempdir on every upload.
-        with contextlib.suppress(OSError):
-            os.remove(tmp)
+        _remove_spool(spool_dir, tmp)
 
 
 PREVIEW_SAMPLE_BYTES = 512 * 1024
@@ -2289,23 +2326,20 @@ async def api_ingest_sqlite_upload(
     build_fts: bool = Form(True),
     timestamp_columns: str | None = Form(None),  # JSON-encoded list[str]
 ):
-    suffix = Path(file.filename or "upload.sqlite").suffix or ".sqlite"
-    fd, tmp = tempfile.mkstemp(suffix=suffix)
+    spool_dir, tmp = _upload_spool(file.filename, "upload.sqlite")
     try:
-        with os.fdopen(fd, "wb") as out:
+        with open(tmp, "wb") as out:
             while chunk := await file.read(4 << 20):
                 out.write(chunk)
         ts_cols = json.loads(timestamp_columns) if timestamp_columns else None
         return await run_in_threadpool(
-            store().ingest_sqlite_table,  # threadpool: see api_ingest_upload
-            tmp, table, name=name or f"{Path(file.filename or 'upload').stem}.{table}",
-            build_fts=build_fts, timestamp_columns=ts_cols,
+            _ingest_spooled, store().ingest_sqlite_table,  # threadpool: see api_ingest_upload
+            tmp, table, name=name, build_fts=build_fts, timestamp_columns=ts_cols,
         )
     except Exception as e:
         raise HTTPException(400, str(e))
     finally:
-        with contextlib.suppress(OSError):
-            os.remove(tmp)
+        _remove_spool(spool_dir, tmp)
 
 
 @app.post("/api/ingest/xlsx/preview")
@@ -2359,22 +2393,20 @@ async def api_ingest_json_upload(
     flatten_depth: int = Form(0),
     build_fts: bool = Form(True),
 ):
-    suffix = Path(file.filename or "upload.json").suffix or ".json"
-    fd, tmp = tempfile.mkstemp(suffix=suffix)
+    spool_dir, tmp = _upload_spool(file.filename, "upload.json")
     try:
-        with os.fdopen(fd, "wb") as out:
+        with open(tmp, "wb") as out:
             while chunk := await file.read(4 << 20):
                 out.write(chunk)
         return await run_in_threadpool(
-            store().ingest_json,  # threadpool: see api_ingest_upload
-            tmp, name=name or file.filename, flatten_mode=flatten_mode, flatten_depth=flatten_depth,
-            build_fts=build_fts,
+            _ingest_spooled, store().ingest_json,  # threadpool: see api_ingest_upload
+            tmp, name=name or os.path.basename(tmp), flatten_mode=flatten_mode,
+            flatten_depth=flatten_depth, build_fts=build_fts,
         )
     except Exception as e:
         raise HTTPException(400, str(e))
     finally:
-        with contextlib.suppress(OSError):
-            os.remove(tmp)
+        _remove_spool(spool_dir, tmp)
 
 
 _JSON_INGEST_EXTS = {".json", ".jsonl", ".ndjson"}
@@ -2604,18 +2636,25 @@ async def api_ingest_job_upload(
     gets transfer progress from its own XHR events), and the moment the
     spool completes a background ingest job takes over — the response
     carries the job record, not the finished source. delete_after cleans
-    the spooled tempfile whichever way the job ends."""
-    suffix = Path(file.filename or "upload").suffix or ".dat"
-    fd, tmp = tempfile.mkstemp(suffix=suffix)
+    the spool whichever way the job ends.
+
+    Spooled under the uploaded file's own name (_upload_spool), because
+    the name a SQLite table or a workbook sheet gets is built from it —
+    `History.urls`, `Book1.Sheet1`, as a path import names them; a
+    mkstemp spool made those `tmp3z2vauq7.urls`. And every table records
+    that name, not the spool's path, as where it came from
+    (recorded_path): the spool is deleted when the job ends."""
+    spool_dir, tmp = _upload_spool(file.filename, f"upload.{kind}")
     try:
-        with os.fdopen(fd, "wb") as out:
+        with open(tmp, "wb") as out:
             while chunk := await file.read(4 << 20):
                 out.write(chunk)
         table_list = json.loads(tables) if tables else None
         types = json.loads(column_types) if column_types else None
         return await run_in_threadpool(
             store().start_ingest_job,  # threadpool: see api_ingest_upload
-            kind, tmp, name=name or file.filename, delete_after=True,
+            kind, tmp, name=name or os.path.basename(tmp), delete_after=True,
+            spool_dir=spool_dir, recorded_path=os.path.basename(tmp),
             options=_ingest_job_options(
                 kind, build_fts=build_fts, delimiter=delimiter or None,
                 has_header=has_header, column_types=types,
@@ -2624,8 +2663,7 @@ async def api_ingest_job_upload(
             ),
         )
     except Exception as e:
-        with contextlib.suppress(OSError):
-            os.remove(tmp)
+        _remove_spool(spool_dir, tmp)
         raise HTTPException(400, str(e))
 
 
