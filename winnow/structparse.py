@@ -17,7 +17,8 @@ comes out, so these ops carry `derived_kind: "text"` and
 datetime column" picker, which is a different question the analyst is
 asking.
 
-Stdlib only, and imports nothing from the app except the registry itself.
+Stdlib only, and imports nothing from the app except the registry itself
+and rxguard, the catastrophic-backtracking check it shares with store.py.
 
 **Paths are the analyst's addressing scheme, so they have to survive being
 written down.** They go into a column definition, a session file and the
@@ -44,12 +45,7 @@ import re
 import xml.etree.ElementTree as ET
 from typing import Any, Iterator
 
-from . import timeparse
-
-try:  # the parser `re` itself uses; public as sre_parse until 3.11
-    from re import _parser as _sre_parse
-except ImportError:  # pragma: no cover - Python 3.10
-    import sre_parse as _sre_parse
+from . import rxguard, timeparse
 
 # A cell big enough to be a denial-of-service against the backfill rather
 # than a log field. 8 MB is far past any real EventData blob and still
@@ -727,223 +723,29 @@ def _extract_regex(value, params: dict, state: dict) -> str | None:
         return None
 
 
-_REPEATS = {_sre_parse.MAX_REPEAT, _sre_parse.MIN_REPEAT}
-_ATOMIC = getattr(_sre_parse, "ATOMIC_GROUP", None)  # (?>…), 3.11+
-_ZERO_WIDTH = {_sre_parse.AT, _sre_parse.ASSERT, _sre_parse.ASSERT_NOT}
-# The characters a set is judged on: ASCII and Latin-1/Extended-A/B whole,
-# plus a few from scripts and classes past them. Enough to tell \w from
-# \s from a literal '.', which is all the disjointness test below needs.
-_PROBE = [chr(c) for c in range(0x250)] + list("\u0416\u0436\u4e2d\u0663\u2003\u2028\u3000")
-_CATEGORY_RX = {
-    "CATEGORY_DIGIT": re.compile(r"\d"), "CATEGORY_NOT_DIGIT": re.compile(r"\D"),
-    "CATEGORY_SPACE": re.compile(r"\s"), "CATEGORY_NOT_SPACE": re.compile(r"\S"),
-    "CATEGORY_WORD": re.compile(r"\w"), "CATEGORY_NOT_WORD": re.compile(r"\W"),
-}
-
-
-def _chars_of(items, fold: bool) -> frozenset:
-    """Over-approximately, which probe characters a run of parsed regex
-    items can consume. Anything not modelled (a backreference) is
-    everything, which only ever makes the check below stricter."""
-    out: set = set()
-    for op, av in items:
-        if op in _ZERO_WIDTH:
-            continue
-        if op == _sre_parse.LITERAL:
-            out.update(ch for ch in _PROBE if ord(ch) == av)
-        elif op == _sre_parse.NOT_LITERAL:
-            out.update(ch for ch in _PROBE if ord(ch) != av)
-        elif op == _sre_parse.IN:
-            negate = any(o == _sre_parse.NEGATE for o, _ in av)
-            hit = set()
-            for o, a in av:
-                if o == _sre_parse.LITERAL:
-                    hit.update(ch for ch in _PROBE if ord(ch) == a)
-                elif o == _sre_parse.RANGE:
-                    hit.update(ch for ch in _PROBE if a[0] <= ord(ch) <= a[1])
-                elif o == _sre_parse.CATEGORY:
-                    rx = _CATEGORY_RX.get(str(a))
-                    hit.update(ch for ch in _PROBE if rx is None or rx.match(ch))
-            out.update(set(_PROBE) - hit if negate else hit)
-        elif op in _REPEATS or op == getattr(_sre_parse, "POSSESSIVE_REPEAT", None):
-            out |= _chars_of(av[2], fold)
-        elif op == _sre_parse.SUBPATTERN:
-            out |= _chars_of(av[-1], fold)
-        elif op == _sre_parse.BRANCH:
-            for alt in av[1]:
-                out |= _chars_of(alt, fold)
-        elif op == _ATOMIC:
-            out |= _chars_of(av, fold)
-        else:  # ANY, GROUPREF, anything newer: assume it can take anything
-            return frozenset(_PROBE)
-    if fold:
-        out |= {c for ch in out for c in (ch.lower(), ch.upper(), ch.swapcase()) if len(c) == 1}
-    return frozenset(out)
-
-
-def _unbounded_inside(items) -> bool:
-    for op, av in items:
-        if op == _ATOMIC:
-            continue  # an atomic group never gives anything back
-        if op in _REPEATS and av[1] == _sre_parse.MAXREPEAT:
-            return True
-        for child in _sub_items(op, av):
-            if _unbounded_inside(child):
-                return True
-    return False
-
-
-def _sub_items(op, av):
-    if op in _REPEATS or op == getattr(_sre_parse, "POSSESSIVE_REPEAT", None):
-        yield av[2]
-    elif op == _sre_parse.SUBPATTERN:
-        yield av[-1]
-    elif op == _sre_parse.BRANCH:
-        yield from av[1]
-    elif op in (_sre_parse.ASSERT, _sre_parse.ASSERT_NOT):
-        yield av[1]
-    elif op == _ATOMIC:
-        yield av
-    elif op == getattr(_sre_parse, "GROUPREF_EXISTS", None):
-        yield from (x for x in av[1:] if x is not None)
-
-
-_SINGLE = (_sre_parse.LITERAL, _sre_parse.NOT_LITERAL, _sre_parse.IN, _sre_parse.ANY)
-
-
-def _flat(items) -> list:
-    """`items` with plain groups opened up and zero-width items dropped:
-    the run of things one pass of them steps through, in order."""
-    out: list = []
-    for op, av in items:
-        if op == _sre_parse.SUBPATTERN:
-            out += _flat(av[-1])
-        elif op not in _ZERO_WIDTH:
-            out.append((op, av))
-    return out
-
-
-def _fixed_char(item):
-    """The single-character item `item` always consumes exactly one of
-    (bare, or `\\.{1}`), else None."""
-    op, av = item
-    if op in _SINGLE:
-        return item
-    if op in _REPEATS and av[0] == av[1] >= 1 and len(av[2]) == 1 and av[2][0][0] in _SINGLE:
-        return av[2][0]
-    return None
-
-
-def _varies(item) -> bool:
-    """Whether `item` can consume differing amounts of text — the parts a
-    backtracking match can re-share between passes. Possessive repeats
-    and atomic groups never give back, so they don't."""
-    op, av = item
-    if op in _SINGLE:
-        return False
-    if op in _REPEATS:
-        return av[0] != av[1] or any(_varies(x) for x in _flat(av[2]))
-    if op == _ATOMIC or op == getattr(_sre_parse, "POSSESSIVE_REPEAT", None):
-        return False
-    return True  # an alternation, a backreference: assume it can
-
-
-def _repeat_body_is_pinned(body, fold: bool) -> bool:
-    """Whether a repeated `body` can split a value between its passes only
-    ONE way — the condition for nesting not to backtrack exponentially.
-
-    Two things have to hold. Within a pass, no two variable parts may be
-    able to trade characters (`\\d+\\d*` shares a run of digits k ways)
-    unless a fixed character the first cannot consume sits
-    between them. And some fixed single character, which no variable part
-    can consume, must have every variable part on one side of it: that
-    character is where each pass ends (or starts), so passes cannot trade
-    text either. That is what lets the dotted and CSV shapes analysts
-    write every day through — `(\\.[a-z]+)*`, `([a-z0-9-]+\\.)+`,
-    `(?:[^,]*,)*` — while `(\\w+\\s?)*` (an optional separator pins
-    nothing) and `(\\w+\\.\\w+)+` (word characters between two dots can
-    go to either pass) are refused. Conservative by design: a refused
-    pattern can be rewritten; a running one cannot be stopped. The
-    filter/search regex check (store.py) draws the same line."""
-    seq = _flat(body)
-    var_idx = [i for i, it in enumerate(seq) if _varies(it)]
-    if not var_idx:
-        return True
-    chars = {i: _chars_of([seq[i]], fold) for i in var_idx}
-    for n, i in enumerate(var_idx):
-        for j in var_idx[n + 1:]:
-            pinned = any((fc := _fixed_char(x)) is not None and not (_chars_of([fc], fold) & chars[i])
-                         for x in seq[i + 1:j])
-            if not pinned and chars[i] & chars[j]:
-                return False
-    every_var = frozenset().union(*chars.values())
-    for k, item in enumerate(seq):
-        fc = _fixed_char(item)
-        if fc is None or _chars_of([fc], fold) & every_var:
-            continue
-        if all(i < k for i in var_idx) or all(i > k for i in var_idx):
-            return True
-    return False
-
-
-def _nested_unbounded_repeat(pattern: str) -> bool:
-    """True when a repeat contains an unbounded one (*, +, {n,}) in a way
-    that backtracks exponentially — `(\\w+\\s?)*`, `(a+)+`. One ordinary
-    analyst pattern, one 30-character cell that almost matches, and a
-    single re.search runs for minutes. Nothing can interrupt that: a
-    backfill polls its cancel flag between batches, and the preview and
-    named-group probe run inside the request. So it is refused up front.
-
-    The outer repeat counts whenever it can run twice or more: bounding it
-    does not help — `(\\w+\\s?){0,50}` took a minute on 29 characters,
-    because 50 is more passes than the value has characters. Passes:
-    possessive repeats and atomic groups (3.11+), and nesting whose
-    passes are pinned by a delimiter (see _repeat_body_is_pinned) — the
-    common dotted/CSV shapes. A bounded INNER repeat ({1,100}) is not
-    modelled; this catches the shape people actually write, not every
-    slow pattern there is."""
-    try:
-        tree = _sre_parse.parse(pattern)
-    except re.error:
-        return False  # re.compile reports it, with its own message
-    fold_all = bool(tree.state.flags & re.IGNORECASE)
-
-    def nested(items, fold) -> bool:
-        for op, av in items:
-            if op in _REPEATS and av[1] >= 2 and _unbounded_inside(av[2]):
-                body = av[2]
-                # A repeated group is one SUBPATTERN item; judge its contents.
-                if len(body) == 1 and body[0][0] == _sre_parse.SUBPATTERN:
-                    sub = body[0][1]
-                    inner_fold = fold or bool(sub[1] & re.IGNORECASE)
-                    body = sub[-1]
-                else:
-                    inner_fold = fold
-                if not _repeat_body_is_pinned(body, inner_fold):
-                    return True
-            for child in _sub_items(op, av):
-                if nested(child, fold):
-                    return True
-        return False
-
-    return nested(tree, fold_all)
-
-
 def _compile_analyst_regex(pattern: str) -> "re.Pattern":
     """The one gate a derive pattern passes before it runs on anything:
-    length, syntax, and no nested unbounded repetition."""
+    length, syntax, and rxguard's catastrophic-backtracking check — the
+    same one the regex filter and search meet. The check is what makes a
+    preview or a backfill safe to start: one `(\\w+\\s?)*` against one
+    30-character cell that almost matches runs for minutes inside a
+    single re.search, and nothing can interrupt it — the backfill polls
+    its cancel flag between batches, and the preview and the named-group
+    probe run inside the request."""
     if len(pattern) > _MAX_REGEX_LEN:
         raise ValueError(f"Regex too long ({len(pattern)} > {_MAX_REGEX_LEN} characters)")
     try:
         rx = re.compile(pattern)
     except re.error as e:
         raise ValueError(f"Invalid regex: {e}")
-    if _nested_unbounded_repeat(pattern):
+    hazard = rxguard.regex_hazard(pattern)
+    if hazard:
         raise ValueError(
-            "This pattern repeats something that itself repeats — like (\\w+\\s?)* — and on "
-            "one unlucky value that can run for minutes with no way to stop it. Make the part "
-            "between repeats required — (\\w+\\s)* — or use one character class instead of "
-            "the nesting — [\\w\\s]* for (\\w+\\s?)*.")
+            f"This pattern has {hazard}, which can backtrack catastrophically: on one unlucky "
+            "value it runs for minutes with no way to stop it. End each part of the repetition "
+            r"at a character it cannot match — (\w+\s)* rather than (\w+\s?)*, (\w+\.)+ "
+            r"rather than (\w+\.?)+ — or use one class instead of the nesting, [\w\s]* for "
+            r"(\w+\s?)*.")
     return rx
 
 

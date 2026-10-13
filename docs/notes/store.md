@@ -291,7 +291,9 @@ see [docs/notes/README.md](README.md) for the whole set.
   interrupt `re.search` (it polls for signals, which only reach the main
   thread). Rejected alternatives: a timeout needs another regex engine (a
   dependency) or a process per match; truncating cells would turn a hit
-  past the cut into a silent miss. The check walks the parsed pattern
+  past the cut into a silent miss. The check (`winnow/rxguard.py`, its
+  own module so the regex_extract derived column meets the same one —
+  structparse cannot import store) walks the parsed pattern
   (`re._parser`, `sre_parse` on 3.10) for the two shapes that blow up.
   **A repeated group whose repetitions can match the same text more than
   one way** — open-ended over anything variable-length, or a count of two

@@ -87,17 +87,18 @@ see [docs/notes/README.md](README.md) for the whole set.
   request — so `(\w+\s?)*` against one 30-character cell that almost
   matches held a worker (or the whole backfill) for minutes with nothing
   able to stop it. `structparse._compile_analyst_regex` is the one gate
-  every derive pattern passes, and it refuses a repeat that can run twice
-  or more around an unbounded one, unless each pass is pinned: a fixed
-  delimiter no variable part can consume, with every variable part on
-  one side of it, and no two variable parts able to trade characters
-  within a pass (`(\.[a-z]+)*`, `([a-z0-9-]+\.)+`, `(?:[^,]*,)*` — the
-  dotted and CSV shapes people write all the time — pass;
-  `(\w+\.\w+)+`, with word characters on both sides of the dot, does
-  not). Bounding the outer repeat is NOT a way out:
-  `(\w+\s?){0,50}` took a minute on 29 characters. It is a heuristic over
-  the shape people actually write, judged on sampled characters, not a
-  proof — a bounded inner repeat isn't modelled.
+  every derive pattern passes, and its check is `rxguard.regex_hazard`:
+  the same automaton the regex filter, search and SQL-pane REGEXP use
+  (docs/notes/store.md has how it decides). There used to be a second,
+  shape-only check here, because structparse cannot import store; two
+  checks drew the line in two places, so the guard moved to a module
+  both import. The dotted and CSV shapes people write all the time —
+  `(\.[a-z]+)*`, `([a-z0-9-]+\.)+`, `(?:[^,]*,)*`, `(\S+\s+){3}` — pass;
+  `(\w+\s?)*`, `(\w+\.\w+)+` and `(\d+\d*,)+` do not. Bounding the
+  outer repeat is NOT a way out: `(\w+\s?){0,50}` took a minute on 29
+  characters. Overlaps are judged case-insensitively, as REGEXP runs, so
+  for a derive pattern (case-sensitive unless it says `(?i)`) the check
+  can only be stricter than it needs to be, never looser.
 - **Every path the flatten picker offers has to survive `validate_params`
   and extract the sample it was offered with.** Because the batch is
   all-or-nothing, one offered path that fails to parse fails every column
