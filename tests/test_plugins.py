@@ -133,8 +133,46 @@ def test_duplicate_format_id_is_a_plugin_error(plug_dir):
     reg.load([plug_dir])
     (rec,) = reg.describe()
     assert "Duplicate" in rec["error"]
-    # The first registration survives; the plugin just can't add more.
-    assert reg.get_format("dupe.x").label == "X"
+    # Not even the first registration survives: a plugin listed as failed
+    # must not leave a working format behind (see the partial-register
+    # test below — this assertion used to pin the opposite).
+    with pytest.raises(KeyError):
+        reg.get_format("dupe.x")
+
+
+def test_a_register_that_raises_partway_keeps_nothing_it_registered(plug_dir):
+    """register() writes straight into the live tables, so a plugin that
+    failed on its fourth call kept the first three — a format offered in
+    the import dialog, a route answering, a row action in the menu — while
+    the panel listed it as failed. A plugin loaded after it is unaffected."""
+    _write_plugin(plug_dir, "aaa_half", """
+        def register(api):
+            api.register_ingest_format(id="half", label="Half", extensions=[".half"],
+                                       parse=lambda path, options: {"columns": ["A"], "rows": []})
+            api.register_api("ping", lambda req: {"pong": True})
+            api.register_row_action(id="look", label="Look", handler=lambda req: {})
+            raise RuntimeError("config file missing")
+    """)
+    _write_plugin(plug_dir, "demo", GOOD_PLUGIN)
+    reg = PluginRegistry()
+    reg.load([plug_dir])
+    by_name = {p["fs_name"]: p for p in reg.describe()}
+    assert "config file missing" in by_name["aaa_half"]["error"]
+    assert by_name["aaa_half"]["formats"] == []
+    with pytest.raises(KeyError):
+        reg.get_format("aaa_half.half")
+    assert reg.get_api("aaa_half", "ping") is None
+    assert not [a for a in reg.list_row_actions() if a["plugin_fs"] == "aaa_half"]
+    assert by_name["demo"]["error"] is None and reg.get_format("demo.lines")
+
+
+def test_rollback_covers_every_registration_table():
+    """_snapshot/_rollback work from a list of table names, so a new
+    register_* hook whose table isn't on it would keep its registrations
+    after a failed register() again. Every dict the registry owns is on it."""
+    reg = PluginRegistry()
+    tables = {k for k, v in vars(reg).items() if isinstance(v, dict)}
+    assert tables == set(PluginRegistry._TABLES)
 
 
 def test_underscore_and_hidden_entries_are_skipped(plug_dir):

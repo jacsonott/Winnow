@@ -182,6 +182,11 @@ A tab plus its backend route, the full custom-UI shape:
             raise ValueError("Open a case first")
         return req.store.run_sql("SELECT ...", limit=5000)
 
+A register() that raises (or module code that does) is a load error: the
+plugin is listed as failed, with the exception's message, and it is all
+or nothing — whatever that register() had already registered before it
+raised is taken back out (PluginRegistry._rollback).
+
 SECURITY: a plugin is arbitrary Python running with Winnow's own
 privileges — the same trust model as a Notepad++ plugin or an autopsy/
 Ghidra script. Winnow only ever loads from local plugin directories the
@@ -1109,7 +1114,17 @@ class PluginRegistry:
 
             before_formats = set(self._formats)
             before_tabs = set(self._tabs)
-            register(PluginAPI(self, record["name"], record["fs_name"], root))
+            snapshot = self._snapshot()
+            try:
+                register(PluginAPI(self, record["name"], record["fs_name"], root))
+            except BaseException:
+                # A register() that raises partway has already put its
+                # first few formats, routes and row actions into the live
+                # tables. Left there they WORK — an ingest format offered,
+                # a route answering — for a plugin the panel lists as
+                # failed. All or nothing: roll back to before it ran.
+                self._rollback(snapshot)
+                raise
             record["formats"] = sorted(set(self._formats) - before_formats)
             record["tabs"] = sorted(set(self._tabs) - before_tabs)
         except BaseException as e:  # noqa: BLE001 — see below
@@ -1152,6 +1167,22 @@ class PluginRegistry:
             record["description"] = record["description"] or meta["description"]
             record["api_wants"] = record["api_wants"] or meta["api_wants"]
             record["declares"] = meta["declares"]
+
+    # Every table a register_* call writes into. _snapshot/_rollback copy
+    # these (shallowly: the entries themselves are never mutated after
+    # they're added), so a new extension point needs its table named here
+    # or a failed register() keeps that kind of registration.
+    _TABLES = ("_formats", "_tabs", "_apis", "_row_actions", "_panels",
+               "_page_panels", "_dashboards")
+
+    def _snapshot(self) -> dict:
+        return {name: dict(getattr(self, name)) for name in self._TABLES}
+
+    def _rollback(self, snapshot: dict) -> None:
+        for name, table in snapshot.items():
+            live = getattr(self, name)
+            live.clear()
+            live.update(table)
 
     def _add_format(self, fmt: IngestFormat) -> None:
         if fmt.id in self._formats:
