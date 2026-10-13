@@ -27,9 +27,11 @@ Things to know before you rely on one:
   include it. A derived datetime column can be chosen in the timeframe
   filter, the histogram and the [Timeline](Timeline-search-and-watchlist.md)
   like any other datetime column.
-- **It doesn't change what the table is.** Saved filters and merging are
-  matched on the file's own columns, so adding a derived column never
-  stops a table matching its saved filters or merging with its siblings.
+- **It doesn't change what the table is.** Saved filters,
+  [Timeline configurations](Timeline-search-and-watchlist.md#choosing-the-timestamp-type-and-body)
+  and merging are matched on the file's own columns, so adding a derived
+  column never stops a table matching its saved filters or its Timeline
+  configuration, or merging with its siblings.
 - **It can feed another one.** Once a derived column has finished
   building it appears in the **Parse column** list as `name · derived`,
   so you can chain steps, for example a JSON field that itself holds XML.

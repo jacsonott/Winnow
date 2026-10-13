@@ -20,7 +20,7 @@ Each line has three columns:
 
 The chips beside **Tags** in the header choose which tags are on the Timeline. Every tag starts switched on; click a chip to take that tag's rows off, and again to put them back. A row with several tags stays while any of its tags is on.
 
-A tag created after the case was opened starts switched off on the Timeline, so its rows are missing until you click its chip (or reopen the case).
+A tag created while the case is open starts switched on as well. A tag you switch off stays off until you click its chip again; reopening the case switches every tag back on.
 
 ### Summary lines
 
@@ -81,7 +81,7 @@ Press **Save** on that table's entry. Picking body columns replaces the shipped 
 A configuration is saved for the table's set of columns, on this machine, and is reused by every table with the same columns in this case and in later cases — configure EvtxECmd output once and every future Security log lands the same way. Three things to know:
 
 - Saving does not redraw the Timeline behind the dialog. It applies the next time the Timeline is built: open the tab again, or click a tag chip.
-- A saved configuration is matched against all of a table's columns, derived columns included, but the dialog saves it under the file's own columns. Once a table has a derived column, its saved configuration no longer applies and the Timeline uses the defaults for that table.
+- A configuration is matched on the file's own columns, so adding a [derived column](Derived-columns.md) to a table doesn't stop its configuration applying, and a derived datetime column can be the table's **Timestamp**.
 - The same configuration decides the time and text of each row in the Watchlist's [Latest hits](#latest-hits-and-each-indicators-hits) list.
 
 ## Search all
@@ -139,7 +139,7 @@ The Watchlist is the case's standing list of indicators: hashes, IPs, domains, f
 ### Adding indicators
 
 - **One at a time**: type the value in *Add an indicator — hash, IP, domain, filename…*, pick a type (**other**, **hash**, **ip**, **domain** or **filename**) and optionally a tag under **no auto-tag**, then press **Add**. A value already on the list is refused.
-- **From a file**: **Import…** reads a `.txt`, `.csv`, `.ioc` or `.list` file. The **Import indicators** dialog shows how many it found and the first few, and asks for a **Type** and an **Auto-tag** for the batch. A line of the form `value,kind` (for example `10.1.2.3,ip`) carries its own type. Blank lines, lines starting with `#` and values already on the list are skipped.
+- **From a file**: **Import…** reads a `.txt`, `.csv`, `.ioc` or `.list` file. The **Import indicators** dialog shows how many it found and the first few, and asks for a **Type** and an **Auto-tag** for the batch. A line of the form `value,kind` (for example `10.1.2.3,ip`) carries its own type. A `watchlist.csv` saved by **Export…** is recognised by its header row: each indicator keeps the type and note it was exported with, and **Type** only fills in one that has none. Blank lines, lines starting with `#` and values already on the list are skipped.
 - **From another case**: **From a case…** lists the other cases on this machine's home screen that have indicators. **Import** copies them in, skipping duplicates; types and notes come across, auto-tags do not (they name the other case's tags).
 - **From Search all**: **Add to watchlist** in the Search all dialog (above).
 - **From a profile**: a profile can bring a starter watchlist with it (see [Profiles](Dashboards.md#profiles)).
@@ -196,6 +196,6 @@ When hits arrive that you have not looked at, the **Watchlist** tab, and its row
 
 ### Exporting and removing
 
-**Export…** downloads `watchlist.csv` with the columns `value`, `kind`, `note` and `hits`. It is a record, not an import file: **Import…** reads `value` or `value,kind` per line, so the export's header line would come in as an indicator called `value` and its extra columns would end up in the type. To copy a watchlist to another case, use **From a case…** there.
+**Export…** downloads `watchlist.csv` with the columns `value`, `kind`, `note` and `hits`. **Import…** reads it back: the header row is recognised, and each indicator keeps its type and note (`hits` is recounted by the next scan, and auto-tags aren't exported). That is one way to copy a watchlist to another case; **From a case…** there does the same without a file.
 
 **✕** on an indicator removes it and its hits. Tags it applied stay on the rows.
