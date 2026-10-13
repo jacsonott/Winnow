@@ -6,6 +6,7 @@ fixtures built byte-by-byte here (no real evidence files in the repo)."""
 from __future__ import annotations
 
 import json
+import os
 import struct
 import textwrap
 from datetime import datetime
@@ -2223,3 +2224,40 @@ def test_claude_prefers_the_winnow_named_key(claude_client, monkeypatch):
     monkeypatch.setenv("WINNOW_ANTHROPIC_API_KEY", "sk-from-settings")
     claude_client.post("/api/plugin/claude_assistant/ask", json={"question": "q"})
     assert record["api_key"] == "sk-from-settings"
+
+
+def test_plugin_upload_spool_is_removed_and_named_like_the_upload(plugin_client, store, registry,
+                                                                  tmp_path, monkeypatch):
+    """The upload route spooled to a mkstemp file and never deleted it:
+    every uploaded $MFT stayed in the temp folder, a full copy each time,
+    and the table's recorded path pointed at it. And a parser that reads
+    meaning from the file NAME (esxi_logs' log type, $MFT/$J matching)
+    was handed tmpk3j2_x.log. The spool now carries the upload's own name
+    inside a private directory that is gone when the route returns —
+    failed or not — and the table records the name the browser sent."""
+    import tempfile
+    systmp = tmp_path / "systmp"
+    systmp.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(systmp))
+    seen = []
+
+    def parse(path, options):
+        seen.append(os.path.basename(path))
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+        return {"columns": ["Line"], "rows": [[ln] for ln in lines]}
+
+    fmt = plugin_api.IngestFormat(plugin="demo", local_id="named", label="Named", parse=parse)
+    registry._formats[fmt.id] = fmt
+    r = plugin_client.post("/api/ingest/plugin/upload", files={"file": ("hostd.log", b"a\nb\n")},
+                           data={"format_id": "demo.named", "build_fts": "false"})
+    assert r.status_code == 200, r.text
+    assert seen == ["hostd.log"]
+    assert os.listdir(systmp) == []
+    assert store.get_source(r.json()["id"])["path"] == "hostd.log"
+    assert store.get_source(r.json()["id"])["file_hash"]     # still hashed from the bytes
+    # A parse that fails leaves nothing behind either.
+    r = plugin_client.post("/api/ingest/plugin/upload", files={"file": ("x.boom", b"data")},
+                           data={"format_id": "demo.boom"})
+    assert r.status_code == 400
+    assert os.listdir(systmp) == []

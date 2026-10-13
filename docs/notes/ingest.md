@@ -335,7 +335,20 @@ see [docs/notes/README.md](README.md) for the whole set.
   the file per table. Upload spools are deleted when the job ends —
   the old sync upload endpoints (kept for compat, same `finally` added)
   leaked the full file size in the OS tempdir on every upload, found as
-  a stray 50 GB tempfile. Frontend: `uploadWithProgress` (XHR — fetch
+  a stray 50 GB tempfile. `/api/ingest/plugin/upload` was the one that
+  still leaked (no `finally` at all), and it recorded the spool's
+  `tmpXXXX` path as the source's path. The archive upload had the
+  opposite problem: it renamed its spool to `<tempdir>/<client
+  filename>`, so two uploads of `bundle.tgz` at once shared one file,
+  and a same-named file already in the tempdir was overwritten and then
+  deleted. Both now go through `server._upload_spool`: a private
+  `mkdtemp` per upload holding the file under its uploaded basename,
+  removed in `finally` by `_remove_spool`. That is an unlink and an
+  rmdir, not `rmtree`, because the routes are async and a tree walk is
+  blocking work (test_event_loop_blocking). That basename is load-bearing for plugins,
+  whose parsers read meaning from the file name (esxi_logs' `Log` column
+  came out `other` for every uploaded file). The name the source records
+  is the uploaded one, never the spool's. Frontend: `uploadWithProgress` (XHR — fetch
   can't report upload progress) plus `pollJobs`/`renderJobsPanel`, the
   bottom-right panel that also surfaces `fts_building` — background index
   builds used to be invisible, and a server restart kills one silently

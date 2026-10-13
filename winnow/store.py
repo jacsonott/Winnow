@@ -4849,6 +4849,15 @@ class Store:
                     raise KeyError(f"No table {source_id}")
         return self.get_source(source_id)
 
+    def set_source_path(self, source_id: int, path: str | None) -> None:
+        """Where a table says it was imported from, when that is not the
+        file it was read from: an upload is parsed (and hashed) from a
+        spool deleted the moment the import returns, so the name the
+        browser sent is what gets recorded, not a temp path that points at
+        nothing — or, worse, at a leftover copy of the evidence."""
+        with self.lock, self.db:
+            self.db.execute("UPDATE sources SET path=? WHERE id=?", (path, source_id))
+
     def get_source(self, source_id: int) -> dict:
         """A merge is addressed as a negative source_id (merges.id=m ->
         source_id=-m) so it can flow through every existing source_id: int

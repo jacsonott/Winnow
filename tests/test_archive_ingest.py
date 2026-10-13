@@ -287,3 +287,27 @@ def test_expand_route_answers_400_not_500_for_a_damaged_archive(client, tmp_path
     t.write_bytes(b"\x1f\x8b\x08\x00" + os.urandom(64))
     r = client.post("/api/ingest/archive/expand", json={"path": str(t)})
     assert r.status_code == 400, r.text
+
+
+def test_upload_spools_privately_and_never_touches_a_same_named_temp_file(client, store, tmp_path,
+                                                                        monkeypatch):
+    """The upload was renamed to <tempdir>/<the browser's file name> so the
+    extraction would be named after it — overwriting, and then deleting,
+    whatever file of that name already sat in the shared temp folder (and
+    two same-named uploads raced on one path). It now spools under its own
+    name inside a private directory of its own."""
+    import tempfile
+    systmp = tmp_path / "systmp"
+    systmp.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(systmp))
+    victim = systmp / "bundle.zip"
+    victim.write_text("someone else's file in the temp folder")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("a.log", "hello\n")
+    r = client.post("/api/ingest/archive/upload",
+                    files={"file": ("bundle.zip", buf.getvalue(), "application/zip")})
+    assert r.status_code == 200, r.text
+    assert victim.read_text() == "someone else's file in the temp folder"
+    assert sorted(os.listdir(systmp)) == ["bundle.zip"]      # the private spool dir is gone
+    assert os.path.basename(r.json()["root"]).startswith("bundle-extracted")

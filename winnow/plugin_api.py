@@ -74,6 +74,9 @@ the description is what an analyst decides on.
         # padded/trimmed and counted, same as a ragged CSV line. Cells may
         # be str/int/None — Store.ingest_rows stringifies (TEXT columns,
         # same evidence-fidelity convention as every other ingest path).
+        # basename(path) is the file's real name even for a browser
+        # upload (spooled under its own name in a private temp dir, and
+        # deleted once the import returns — don't keep `path`).
         return {
             "columns": ["Timestamp", "FileName"],
             "rows": iter_rows(path),
