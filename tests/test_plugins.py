@@ -1189,6 +1189,30 @@ def test_lateral_movement_time_bucketing_and_filter(timed_client):
     assert {(e["src"], e["dst"]) for e in edges} == {("WS1", "SRV1")}
 
 
+@pytest.mark.parametrize("start,end", [
+    ("2026-03-14 00:00:00", "2026-03-14 23:59:59"),
+    ("2026-03-14T00:00:00", "2026-03-14T23:59:59"),
+    ("3/14/2026 0:00", "3/14/2026 23:59"),
+    ("2026-03-14", None),          # an open end, in the date-only spelling
+])
+def test_lateral_movement_timeframe_matches_the_grid_in_any_spelling(timed_client, start, end):
+    """The bounds were compared to TS_NORMALIZE(col) verbatim, while the
+    core normalises both sides — so any spelling the Timeframe dialog
+    accepts other than the canonical one cut the graph to a different row
+    set from the grid (US dates: nothing at all) under "timeframe
+    applied". The graph's rows must be the grid's rows."""
+    client, sid = timed_client
+    time = {"start": start, "end": end}
+    view = client.post("/api/view", json={"source_id": sid, "time_range": {
+        "enabled": True, "column": "When", **time}})
+    assert view.status_code == 200, view.text
+    r = client.post("/api/plugin/lateral_movement/edges", json={"selections": [
+        {"source_id": sid, "src_col": "SourceHost", "dst_col": "DestHost", "time_col": "When"}],
+        "time": time})
+    assert r.status_code == 200, r.text
+    assert sum(e["n"] for e in r.json()["edges"]) == view.json()["row_count"]
+
+
 def test_lateral_movement_defaults_ship_tied_to_a_header_set(lateral_client):
     """The shipped KAPE defaults are served, each tied to a header set
     (the app's own EvtxECmd nickname) so it only offers itself on a real
