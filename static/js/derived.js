@@ -116,7 +116,7 @@ export function columnMenuItems(name) {
         onclick: () => showUnparsedRows(c),
       });
     }
-    if (c.derived_kind === 'text') {
+    if (hasFieldPath(c)) {
       items.push({ label: 'Change the field path…', onclick: () => editExtractedPath(c) });
     } else {
       items.push({ label: 'Re-derive…', onclick: () => openDerivedColumnModal(c.derived_from, c) });
@@ -155,17 +155,39 @@ export async function showUnparsedRows(c) {
   }
 }
 
+/* Does this column's operation have a field path to change? Only the JSON
+   and XML field ops do — their path is the whole definition. A regex or a
+   lookup column is derived_kind 'text' too, and was offered "Change the
+   field path…" on that alone: the rederive it sent ({path}) is not a
+   param either op has, so it failed every time and their settings could
+   not be edited at all. They take Re-derive…, the derive modal prefilled
+   with what the column has now. Read from the op registry (loaded with
+   any table that has a derived column, sources.js); the column's own
+   params answer the same question if it isn't here yet. */
+export function hasFieldPath(c) {
+  const op = (DERIVED_OPS || []).find((o) => o.id === c.derived_op);
+  if (op) return op.params.some((p) => p.name === 'path');
+  return Object.prototype.hasOwnProperty.call(c.derived_params || {}, 'path');
+}
+
 /* An extracted column's whole definition is its path, so "re-derive" here
    is "edit the path" — the timestamp modal's format-and-parameters shape
    has nothing to offer it. Recomputes in place via the same rederive
-   endpoint, so the column keeps its name, position and width. */
+   endpoint, so the column keeps its name, position and width.
+
+   Every edit to a derived column (this, Re-derive…, Remove) sends the
+   table it was made FROM. On a merge the column is one definition per
+   member, and the merge's id is what makes the server act on all of them
+   (Store._derived_scope) — `derived_id` alone is the first member's, and
+   used to be all that changed. */
 export async function editExtractedPath(c) {
   const current = (c.derived_params || {}).path || '';
   const next = await promptDialog(
     `Field path for "${c.name}" (read from "${c.derived_from}"):`, current, { okLabel: 'Recompute' });
   if (next === null || next.trim() === current) return;
   try {
-    const res = await post(`/api/derived/${c.derived_id}/rederive`, { params: { path: next.trim() } });
+    const res = await post(`/api/derived/${c.derived_id}/rederive`,
+      { params: { path: next.trim() }, source_id: S.sourceId });
     await showDerivedColumnsSoon();
     const chain = res.cascades_to || [];
     toast(`Recomputing "${c.name}"…`
@@ -176,12 +198,15 @@ export async function editExtractedPath(c) {
 }
 
 export async function removeDerivedColumn(c) {
+  const src = S.sources.find((x) => x.id === S.sourceId);
+  const members = src && src.is_merge ? (src.member_source_ids || []).length : 0;
   const ok = await confirmDialog(
-    `Remove the derived column "${c.name}"? Its values are recomputed from "${c.derived_from}", so it can be added back at any time.`,
+    `Remove the derived column "${c.name}"${members ? ` from all ${members} tables in this merge` : ''}? `
+    + `Its values are recomputed from "${c.derived_from}", so it can be added back at any time.`,
     { okLabel: 'Remove', danger: true });
   if (!ok) return;
   try {
-    await api(`/api/derived/${c.derived_id}`, { method: 'DELETE' });
+    await api(`/api/derived/${c.derived_id}?source_id=${encodeURIComponent(S.sourceId)}`, { method: 'DELETE' });
     delete S.layout[c.name];
     S.order = S.order.filter((n) => n !== c.name);
     await loadSources();
@@ -704,6 +729,14 @@ export async function openDerivedColumnModal(prefill, editing) {
     }
 
     async function refreshGroups() {
+      // Not while re-deriving: that edits one existing column, and Re-derive
+      // never sends a batch (syncGo), so offering "a column for each"
+      // would be a set of checkboxes that do nothing. Returning before
+      // renderGroups matters as well: the editing branch below calls this
+      // before the Re-derive button exists, and renderGroups' syncGo reads
+      // it — every Re-derive used to throw "Cannot access 'go' before
+      // initialization" into the console that way.
+      if (editing) return;
       const seq = ++groupsSeq;
       if (opSelect.value !== 'regex_extract' || !(state.params.pattern || '').trim()) {
         groups = [];
@@ -974,7 +1007,8 @@ export async function openDerivedColumnModal(prefill, editing) {
           return;
         }
         if (editing) {
-          res = await post(`/api/derived/${editing.derived_id}/rederive`, { params: state.params });
+          res = await post(`/api/derived/${editing.derived_id}/rederive`,
+            { params: state.params, source_id: S.sourceId });
         } else {
           res = await post('/api/derived', {
             source_id: S.sourceId, name: state.name, input_column: state.column,

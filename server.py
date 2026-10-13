@@ -4606,6 +4606,10 @@ class DerivedProbe(BaseModel):
 
 class RederiveWrite(BaseModel):
     params: dict = {}
+    # The table the column was re-derived FROM. A merge's id here means
+    # every member's definition of the column (Store._derived_scope);
+    # absent is the definition alone, as before.
+    source_id: int | None = None
 
 
 class DerivedBatchItem(BaseModel):
@@ -4648,9 +4652,11 @@ def api_derived_create(body: DerivedCreate):
 
 
 @app.delete("/api/derived/{def_id}")
-def api_derived_delete(def_id: int):
+def api_derived_delete(def_id: int, source_id: int | None = None):
+    """`source_id` is the table it was removed from, as on rederive: a
+    merge's id removes the column from every member that carries it."""
     try:
-        store().remove_derived_column(def_id)
+        store().remove_derived_column(def_id, source_id)
     except ValueError as e:
         raise HTTPException(400, str(e))
     except KeyError as e:
@@ -4661,7 +4667,7 @@ def api_derived_delete(def_id: int):
 @app.post("/api/derived/{def_id}/rederive")
 def api_derived_rederive(def_id: int, body: RederiveWrite):
     try:
-        return store().rederive_column(def_id, body.params)
+        return store().rederive_column(def_id, body.params, body.source_id)
     except ValueError as e:
         raise HTTPException(400, str(e))
     except KeyError as e:

@@ -134,10 +134,16 @@ see [docs/notes/README.md](README.md) for the whole set.
     (identical by construction, so a derived value is **not** searchable —
     it's computed from text that already is), `column_signature` (adding a
     derived column must not change merge eligibility), `_iter_search_all_sources`,
-    and the session file's column list. Merges get base columns only: each
-    member has its own `drv_` table and its own definitions, and a UNION
-    ALL across mismatched sets would need per-member NULL padding nothing
-    does yet.
+    and the session file's column list. Merge *eligibility* is base
+    columns only, on the server (`create_merge`) and in the Merge tables
+    dialog's grouping alike (`merge.js`'s `columnGroupKey`) — the dialog
+    used to group by every column, so a table with a derived column sat
+    in a group of its own and the dialog said no two tables matched for
+    a merge the server accepts. Each member has its own `drv_` table and
+    its own definitions; a merge exposes a derived column only where
+    every member has one of that name (`_merge_columns`), since a UNION
+    ALL across mismatched sets would need per-member NULL padding
+    nothing does yet. Editing one is its own entry below.
   - **An op that reads several columns declares them as params and the
     store asks `timeparse.op_inputs(op_id, input_column, params)`** for
     the full ordered list — never `params["other_column"]` by name. The
@@ -147,8 +153,7 @@ see [docs/notes/README.md](README.md) for the whole set.
     dependency checks and the session round-trip all go through that one
     helper, so a new `column`/`columns`-typed param is read everywhere
     the moment it's declared. `combine.py`'s coalesce (`family:
-    "combine"`, `derived_kind: "combine"` — not `"text"`, which the
-    header menu treats as "has a field path to edit") is the model.
+    "combine"`, `derived_kind: "combine"`) is the model.
     `row_json` (same family) is the second: the store puts the ordered
     input names in `state["inputs"]` before any `parse_multi` call —
     backfill and preview both — so an op whose output names its columns
@@ -256,7 +261,22 @@ see [docs/notes/README.md](README.md) for the whole set.
     nothing in the column to say so (that is what `+05`, a 10-digit
     fraction before the offset, `−05:00`, and every offset after a
     dd-Mmm or US time used to do). Trailing text that names no zone — a
-    log message after the timestamp — is left alone, as before. The
+    log message after the timestamp — is left alone, as before. RFC 2822
+    has a zone grammar of its own and keeps the same rule without
+    `_trailing_zone`: the zones the RFC defines (UT/UTC/GMT/Z, EST/EDT,
+    CST/CDT, MST/MDT, PST/PDT, ±HHMM within ±14:00) are applied, and
+    anything else in the zone slot — `CET`, `AST` (Atlantic or Arabia),
+    a military letter (RFC 822 wrote their signs backwards), an IANA
+    name — is a parse failure. `email.utils` dropped a zone it did not
+    know without a word, so `15:04:05 CET` came out as 15:04:05 UTC
+    while `15:04:05 EST` was converted. `-0000` is UTC by the RFC's own
+    definition (the time IS in UT; only the sender's zone is unknown),
+    so `utc_offset` does not shift it — `email.utils` returns it naive,
+    like a value with no zone at all, which is why it is named
+    explicitly. The zone token is found by mirroring email's own token
+    selection (`_rfc2822_zone_token`: `date`'s layout puts the zone
+    before the year) and cross-checked against what the stdlib parsed,
+    so a future divergence fails values rather than misplacing them. The
     12-hour marker is `timeparse.MERIDIEM` everywhere a US or month-name
     time is read (`_US_RE`, store.py's `_TS_US_RE`/`_TS_MONTH_RE` behind
     TS_NORMALIZE and DAY_BUCKET, tsformat.js's twins): `PM`, `Pm`,
@@ -301,3 +321,37 @@ see [docs/notes/README.md](README.md) for the whole set.
   Blank keys (NULL or `''`, the one-column "had input" rule) match
   nothing on either side, and so are neither a hit nor a parse failure:
   an empty Host used to join the lookup table's own blank-key row.
+- **A derived column on a merge is one definition per member, and an
+  edit made on the merge goes to every one of them** (invariant #9).
+  Creating on a merge fans out (`add_derived_column(s)` with a negative
+  id: checked against every member, then made on each), but the merge's
+  column list carries only the FIRST member's `derived_id` — so Remove,
+  Re-derive and "Change the field path…", sent with that id alone,
+  acted on the first member: a remove left every other member's copy
+  behind, a re-derive recomputed one member of four. The client now
+  sends the table the edit was made from (`source_id` on
+  `DELETE /api/derived/{id}` and on `/rederive`), and `_derived_scope`
+  turns a merge's id into each member's definition of that name
+  (ASCII-folded, as `_merge_columns` matches them); no `source_id`, or a
+  member's own, is the one definition, as before. All-or-nothing up
+  front, the way create is: a remove checks every member for a column
+  computed from it before removing any, and a re-derive validates the
+  params against every member's definition before rewriting any —
+  refusing outright when the members compute the column with different
+  operations (made per table before the merge), since one set of params
+  cannot mean the same to both. One job per member, as create starts,
+  so each cancels on its own and a cancelled member is left 'partial'.
+  The merge's column therefore reports all of them: the least finished
+  status (`_DERIVED_STATUS_RANK` — building, error, partial, ready) and
+  the failures SUMMED, because the "Show N unparsed rows" filter it
+  offers matches rows in every member; it used to count the first.
+- **"Change the field path…" is offered only for an op that has a
+  `path` param** (`derived.js`'s `hasFieldPath` — JSON field and XML
+  field), not for every `derived_kind: "text"` column. Regex capture
+  and lookup are `"text"` too, and the prompt's `{path}` rederive is not
+  a param either op takes, so it failed every time and their settings
+  could not be changed at all. They take Re-derive…, which is the
+  derive modal with the operation fixed and the column's current params
+  filled in — pattern and group, or the lookup table and its columns —
+  with the named-group "a column for each" offer suppressed, because a
+  re-derive edits one column and never sends a batch.

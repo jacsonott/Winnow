@@ -917,6 +917,89 @@ def _widen_rfc2822_year(m: re.Match) -> str:
     return f"{m.group(1)}{y:04d}"
 
 
+# The zones RFC 2822 §3.3/§4.3 defines, as the fixed offsets it gives
+# them, plus UTC (unambiguous, and what most software writes). Not
+# email.utils' own table: that adds AST/ADT — Atlantic time to it, Arabia
+# Standard Time (+03:00) to a Gulf mail server, and an abbreviation cannot
+# say which — and, worse, drops any zone it does not know without a word,
+# so "15:04:05 CET" came back as 15:04:05 in UTC, an hour off, while
+# "15:04:05 EST" was converted. The RFC's single-letter military zones
+# (other than Z) are not here either: §4.3 says RFC 822 defined their
+# signs backwards, so "A" is +01:00 or -01:00 depending on the sender.
+_RFC2822_ZONES = {
+    "UT": 0, "UTC": 0, "GMT": 0, "Z": 0,
+    "EST": -5, "EDT": -4, "CST": -6, "CDT": -5,
+    "MST": -7, "MDT": -6, "PST": -8, "PDT": -7,
+}
+_RFC2822_NUMERIC_ZONE_RE = re.compile(r"[+-]\d{4}")
+_RFC2822_DAYNAMES = frozenset(("mon", "tue", "wed", "thu", "fri", "sat", "sun"))
+
+
+def _rfc2822_zone_token(text: str) -> str:
+    """The token email.utils reads as the zone ('' when there is none).
+
+    Mirrors the token selection in email._parseaddr._parsedate_tz, which
+    is lenient about layout — `date`'s "Mon Jan  2 15:04:05 CET 2006"
+    puts the zone before the year — so "whatever follows the time" is not
+    the same token. Only the selection is mirrored: the date and time
+    still come from the stdlib, and _parse_rfc2822 refuses a value whose
+    zone this reads differently from the stdlib, so a future Python that
+    changed the rules would fail values rather than misplace them."""
+    data = text.split()
+    if not data:
+        return ""
+    if data[0].endswith(",") or data[0].lower() in _RFC2822_DAYNAMES:
+        del data[0]
+    else:
+        i = data[0].rfind(",")
+        if i >= 0:
+            data[0] = data[0][i + 1:]
+    if len(data) == 3:
+        parts = data[0].split("-")
+        if len(parts) == 3:
+            data = parts + data[1:]
+    if len(data) == 4:
+        s = data[3]
+        i = s.find("+")
+        if i == -1:
+            i = s.find("-")
+        if i > 0:
+            data[3:] = [s[:i], s[i:]]
+        else:
+            data.append("")
+    if len(data) < 5:
+        return ""
+    _dd, _mm, yy, tm, tz = data[:5]
+    if yy.find(":") > 0:
+        yy = tm
+    if yy.endswith(","):
+        yy = yy[:-1]
+    if yy and not yy[0].isdigit():
+        tz = yy
+    return tz
+
+
+def _rfc2822_offset(zone: str) -> timedelta | None:
+    """The offset a non-empty RFC 2822 zone token stands for, or None
+    when it is not one the RFC defines — which the caller turns into a
+    parse failure, never into the wall-clock time read as UTC.
+
+    "-0000" is the RFC's own spelling for "this time IS in UT, and the
+    sender's local zone is unknown" (RFC 5322 §3.3) — so it is UTC, and
+    the analyst's `utc_offset` (which is for values that carry no zone at
+    all) must not shift it. email.utils returns it as a naive datetime,
+    exactly like a value with no zone, which is why it is named here."""
+    z = zone.upper()
+    if z in _RFC2822_ZONES:
+        return timedelta(hours=_RFC2822_ZONES[z])
+    if z == "-0000":
+        return timedelta(0)
+    if _RFC2822_NUMERIC_ZONE_RE.fullmatch(z):
+        tz = _value_offset(z)   # ±14:00 and 59 minutes at most, as everywhere else
+        return tz.utcoffset(None) if tz is not None else None
+    return None
+
+
 def _parse_rfc2822(value: Any, params: dict, state: dict) -> str | None:
     try:
         text = _RFC2822_YEAR_RE.sub(_widen_rfc2822_year, str(value).strip(), count=1)
@@ -925,15 +1008,24 @@ def _parse_rfc2822(value: Any, params: dict, state: dict) -> str | None:
         return None
     if dt is None or not _plausible(dt):
         return None
-    if dt.tzinfo is None:
-        dt = _shift_naive(dt, params)
-    return _fmt(dt, subsecond=False)
+    zone = _rfc2822_zone_token(text)
+    if not zone:
+        # No zone at all: local time as written, or the analyst's offset.
+        # (A stdlib that saw one where the mirror saw none is refused.)
+        return _fmt(_shift_naive(dt, params), subsecond=False) if dt.tzinfo is None else None
+    off = _rfc2822_offset(zone)
+    if off is None:
+        return None
+    if (dt.tzinfo is None) != (zone == "-0000") or (dt.tzinfo is not None and dt.utcoffset() != off):
+        return None   # the stdlib read this zone differently from the mirror above
+    return _fmt(dt.replace(tzinfo=timezone(off)), subsecond=False)
 
 
 register_op({
     "id": "rfc2822",
     "label": "RFC 2822 (email date)",
-    "description": "Mon, 02 Jan 2006 15:04:05 -0700 (email headers, HTTP dates). Offset-bearing values are converted to UTC.",
+    "description": "Mon, 02 Jan 2006 15:04:05 -0700 (email headers, HTTP dates). Offset-bearing values are converted to UTC; "
+                   "a zone abbreviation RFC 2822 does not define (CET, IST, …) is a parse failure, not a guess.",
     "params": [_UTC_OFFSET_PARAM],
     "subsecond": False,
     "parse": _parse_rfc2822,

@@ -327,6 +327,19 @@ def test_unparsed_rows_can_be_filtered_back_out(store, write_csv):
     assert [r["Msg"] for r in rows] == ["delta"]
 
 
+def test_rfc2822_unknown_zone_counts_as_a_parse_failure_in_a_column(store, write_csv):
+    """The symptom where the analyst meets it: the column's failure count
+    (what "Show N unparsed rows" reads), not just the pure function."""
+    sid = _ingest(store, write_csv, [["Date"],
+                                     ["Mon, 02 Jan 2006 15:04:05 EST"],
+                                     ["Mon, 02 Jan 2006 15:04:05 CET"],
+                                     ["Mon, 02 Jan 2006 15:04:05 -0000"]])
+    def_id = _add(store, sid, "When", "Date", "rfc2822")
+    assert store.get_derived_column(def_id)["parse_failures"] == 1
+    assert [r["When"] for r in _cells(store, sid)] == [
+        "2006-01-02 20:04:05", None, "2006-01-02 15:04:05"]
+
+
 # ------------------------------------------------------ a value that raises
 #
 # A parser that raised on one cell used to fail the whole backfill and leave
