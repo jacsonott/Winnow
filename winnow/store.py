@@ -8034,7 +8034,8 @@ class Store:
     def _apply_tag_change(self, *, tag_id: int, on: bool, source_id: int, scope: str,
                           target_sql: str | None = None, target_params: Sequence = (),
                           pairs: Sequence[Sequence[int]] | None = None,
-                          count_ids: Sequence[int] | None = None) -> int:
+                          count_ids: Sequence[int] | None = None,
+                          record: bool = True) -> int:
         """The single write path behind every tag apply/remove.
 
         The target — the rows the analyst asked to change — arrives either
@@ -8059,7 +8060,22 @@ class Store:
         CLAUDE.md invariant #7 — every tag write goes through here; nothing
         INSERTs or DELETEs row_tags directly.
 
+        `record=False` is for writes the analyst did not make — a watchlist
+        scan's auto-tags (`_scan_unit`). Those still move exactly the delta,
+        but leave the analyst's Ctrl+Z stack alone: one entry per scanned
+        (indicator, table) unit evicted the analyst's whole history the
+        moment a scan had UNDO_LIMIT of them, and Ctrl+Z then stripped
+        auto-tags off rows whose hits were still listed. An unrecorded
+        write also CLAIMS its target rows out of any recorded entry that
+        moved them the same way (`_claim_from_undo`): rows an analyst
+        tagged that a scan then matched are the scan's as well, and undoing
+        the analyst's change must not untag them — invariant #7's overlap
+        rule, with the scan as the other writer. Pairs only; nothing
+        unrecorded writes a whole view.
+
         Caller must hold self.lock and be inside a self.db transaction."""
+        if not record and pairs is None:
+            raise ValueError("an unrecorded tag change takes explicit pairs")
         self._undo_seq += 1
         table = f"undo_{self._undo_seq}"
         if pairs is not None:
@@ -8076,6 +8092,8 @@ class Store:
                 f"INSERT OR IGNORE INTO v.{q(table)}(source_id, rid) VALUES (?,?)",
                 [(int(sid), int(rid)) for sid, rid in pairs],
             )
+            if not record:
+                self._claim_from_undo(table, tag_id, on)
             # Delete the rows this change *wouldn't* move: already tagged on
             # the way in, not tagged on the way out.
             self.db.execute(
@@ -8096,7 +8114,9 @@ class Store:
             )
         changed = self.db.execute(f"SELECT count(*) FROM v.{q(table)}").fetchone()[0]
         self._write_tag_delta(table, tag_id, on)
-        if changed:
+        if not record:
+            self.db.execute(f"DROP TABLE IF EXISTS v.{q(table)}")
+        elif changed:
             self._undo.append({
                 "undo_id": self._undo_seq, "table": table, "tag_id": tag_id,
                 "on": on, "count": changed, "source_id": source_id, "scope": scope,
@@ -8169,6 +8189,26 @@ class Store:
             dead = self._undo.pop(0)
             total -= dead["count"]
             self.db.execute(f"DROP TABLE IF EXISTS v.{q(dead['table'])}")
+
+    def _claim_from_undo(self, target: str, tag_id: int, on: bool) -> None:
+        """Take the rows in `target` (a v. table of (source_id, rid)) out of
+        every recorded entry that moved `tag_id` in the same direction, for
+        an unrecorded write that is putting those rows into that state too
+        (see _apply_tag_change's `record`). An entry left with no rows is
+        dropped — a Ctrl+Z that changes nothing reads as a broken undo.
+        Caller holds self.lock, inside a transaction."""
+        keep = []
+        for e in self._undo:
+            if e["tag_id"] == tag_id and e["on"] == on:
+                self.db.execute(
+                    f"DELETE FROM v.{q(e['table'])} WHERE (source_id, rid) IN "
+                    f"(SELECT source_id, rid FROM v.{q(target)})")
+                e["count"] = self.db.execute(f"SELECT count(*) FROM v.{q(e['table'])}").fetchone()[0]
+                if not e["count"]:
+                    self.db.execute(f"DROP TABLE IF EXISTS v.{q(e['table'])}")
+                    continue
+            keep.append(e)
+        self._undo = keep
 
     def _drop_undo_for_tag(self, tag_id: int) -> None:
         """Deleting a tag definition takes its assignments with it, so every
@@ -8839,8 +8879,11 @@ class Store:
                         "INSERT OR IGNORE INTO watchlist_hits(watchlist_id, source_id, rid) VALUES (?,?,?)",
                         [(wid, source_id, rid) for rid in rids])
                     if row["auto_tag_id"]:
+                        # Unrecorded: the scan is not the analyst, and its
+                        # tags stand while its hits do — see `record`.
                         self._apply_tag_change(tag_id=int(row["auto_tag_id"]), on=True, source_id=source_id,
-                                               scope="rows", pairs=[(source_id, rid) for rid in rids])
+                                               scope="rows", pairs=[(source_id, rid) for rid in rids],
+                                               record=False)
                         tagged = True
                 # A watchlist widget's number is the sum of the hit counts,
                 # so a scan that finds different hits moves it with nothing

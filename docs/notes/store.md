@@ -439,7 +439,15 @@ see [docs/notes/README.md](README.md) for the whole set.
   would have inherited the old value's hits — and re-reads the source
   the same way, since `drop_source` deletes a table's hits and its id
   is the next import's. The auto-tag goes through `_apply_tag_change`
-  in that same transaction, so hits and tags land together. A unit
+  in that same transaction, so hits and tags land together — with
+  `record=False`, so it is **not on the analyst's undo stack**: one entry
+  per auto-tagging unit meant a scan behind a 25-entry watchlist evicted
+  the analyst's whole history (`UNDO_LIMIT`), and Ctrl+Z then stripped
+  auto-tags off rows whose hits were still listed. An unrecorded write
+  also takes its rows out of any recorded entry that tagged them the same
+  way (`_claim_from_undo`), so undoing "tag rows 1-3" after a scan matched
+  2-4 leaves 2 and 3 tagged — the invariant #7 overlap rule with the scan
+  as the other writer. A unit
   absorbs exactly one error from its match, "no such table": the
   source's own table means it was dropped mid-scan (the unit is
   skipped, there is nothing to record it against); its trigram table
