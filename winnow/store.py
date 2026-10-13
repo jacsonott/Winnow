@@ -569,14 +569,18 @@ def _regexp(pattern: str, value: Any) -> bool:
 
 # Same two shapes DATE_RE recognizes at ingest, capturing time-of-day too
 # (all optional groups — a bare date still matches). Kept in sync with
-# app.js's TS_ISO_RE/TS_US_RE (parseTimestamp) by hand — there's no shared
-# module between the two, just the same two format families.
+# tsformat.js's TS_ISO_RE/TS_US_RE/TS_MONTH_RE (parseTimestamp) by hand —
+# there's no shared module between the two, just the same format families.
+# The 12-hour marker is timeparse.MERIDIEM, after optional fraction digits
+# (not captured: TS_NORMALIZE is whole seconds) — see MERIDIEM for what
+# `\s*(AM|PM|am|pm)?` straight after the seconds got wrong.
 _TS_ISO_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?")
-_TS_US_RE = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4})(?:[ ,]+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM|am|pm)?)?")
+_TS_US_RE = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4})(?:[ ,]+(\d{1,2}):(\d{2})(?::(\d{2})(?:[.,]\d+)?)?"
+                       r"\s*(?:" + timeparse.MERIDIEM + r")?)?")
 _TS_MONTH_RE = re.compile(
     r"^(?:(" + _TS_MONTH_NAME + r")\s+(\d{1,2})|(\d{1,2})\s+(" + _TS_MONTH_NAME + r"))"
     r"\s*,?\s*(\d{4})"
-    r"(?:[ ,]+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM|am|pm)?)?",
+    r"(?:[ ,]+(\d{1,2}):(\d{2})(?::(\d{2})(?:[.,]\d+)?)?\s*(?:" + timeparse.MERIDIEM + r")?)?",
     re.IGNORECASE)
 
 
@@ -585,13 +589,7 @@ def _month_parts(m):
     identical to the US branch's."""
     mo = _TS_MONTHS[(m.group(1) or m.group(4)).lower()]
     d = int(m.group(2) or m.group(3))
-    hh = int(m.group(6) or 0)
-    ampm = m.group(9)
-    if ampm:
-        if ampm.lower() == "pm" and hh < 12:
-            hh += 12
-        if ampm.lower() == "am" and hh == 12:
-            hh = 0
+    hh = timeparse.hour24(int(m.group(6) or 0), m.group(9))
     return int(m.group(5)), mo, d, hh, int(m.group(7) or 0), int(m.group(8) or 0)
 
 
@@ -642,12 +640,7 @@ def _ts_normalize(raw: Any) -> str | None:
     m = _TS_US_RE.match(s)
     if m:
         mo, d, y, h, mi, sec, ampm = m.groups()
-        hh = int(h) if h else 0
-        if ampm:
-            if ampm.lower() == "pm" and hh < 12:
-                hh += 12
-            if ampm.lower() == "am" and hh == 12:
-                hh = 0
+        hh = timeparse.hour24(int(h) if h else 0, ampm)
         return f"{int(y):04d}-{int(mo):02d}-{int(d):02d} {hh:02d}:{int(mi or 0):02d}:{int(sec or 0):02d}"
     m = _TS_MONTH_RE.match(s)
     if m:

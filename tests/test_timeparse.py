@@ -332,3 +332,74 @@ def test_detecting_a_column_of_infinities_suggests_nothing_rather_than_raising()
     over the samples, so one unguarded conversion took the whole request
     down with an OverflowError."""
     assert timeparse.detect(["inf", "nan", "1e400", "inf"]) == []
+
+
+# ------------------------------------------- 12-hour times and trailing zones
+
+@pytest.mark.parametrize("value", [
+    "1/5/2024 1:22:01.123 PM", "1/5/2024 1:22:01.1234567 PM", "1/5/2024 1:22:01 Pm",
+    "1/5/2024 1:22:01 p.m.", "1/5/2024 1:22:01 P.M.", "1/5/2024 1:22:01pm",
+])
+def test_an_afternoon_is_an_afternoon_however_it_is_written(value):
+    """The AM/PM group followed the seconds directly, so a fraction in
+    between — or "Pm", or "p.m." — left it unmatched and the time read as
+    morning: 12 hours early, in the derived column and in the Timeline's
+    and timeframe filter's TS_NORMALIZE alike."""
+    assert parse("us_datetime", value) == "2024-01-05 13:22:01"
+    assert _ts_normalize(value) == "2024-01-05 13:22:01"
+    assert _day_bucket(value) == "2024-01-05"
+    assert timeparse.parse_datetime_lenient(value).hour == 13
+
+
+def test_twelve_hour_edges_and_words_that_only_start_like_one():
+    assert parse("us_datetime", "1/5/2024 12:30:00 a.m.") == "2024-01-05 00:30:00"
+    assert parse("us_datetime", "1/5/2024 12:30:00.5 PM") == "2024-01-05 12:30:00"
+    assert _ts_normalize("June 23, 2026 5:11:00.250 p.m.") == "2026-06-23 17:11:00"
+    # "Am…" is a word, not a meridiem.
+    assert _ts_normalize("1/5/2024 1:22:01 Amsterdam") == "2024-01-05 01:22:01"
+
+
+@pytest.mark.parametrize("value, want", [
+    ("2024-01-05 13:22:01+05", "2024-01-05 08:22:01"),                  # PostgreSQL text
+    ("2024-01-05 13:22:01.123+05", "2024-01-05 08:22:01.123000"),
+    ("2024-01-05T13:22:01.1234567890+05:00", "2024-01-05 08:22:01.123456"),
+    ("2024-01-05T13:22:01−05:00", "2024-01-05 18:22:01"),         # U+2212 minus
+    ("2024-01-05T13:22:01 UTC", "2024-01-05 13:22:01"),
+    ("2024-01-05 13:22:01 GMT+02:00", "2024-01-05 11:22:01"),
+    ("2024-01-05T13:22:01+01:00[Europe/Paris]", "2024-01-05 12:22:01"),
+    ("2024-01-05 13:22:01 INFO service started", "2024-01-05 13:22:01"),  # not a zone: kept
+])
+def test_iso_offsets_it_can_apply(value, want):
+    assert parse("iso8601", value) == want
+    # An explicit zone beats the analyst's fixed offset, as Z/±HH:MM always did.
+    if "INFO" not in value:
+        assert parse("iso8601", value, {"utc_offset": "+09:00"}) == want
+
+
+@pytest.mark.parametrize("op, value", [
+    ("iso8601", "2024-01-05T13:22:01 EST"),
+    ("iso8601", "2024-01-05T13:22:01 America/New_York"),
+    ("iso8601", "2024-01-05T13:22:01+25:00"),
+    ("iso8601", "2024-01-05T13:22:01+5:3"),
+    ("dd_mmm_yyyy", "05 Jan 2024 13:22:01 PST"),
+    ("us_datetime", "1/5/2024 1:22:01 PM CEST"),
+])
+def test_a_zone_it_cannot_apply_is_refused_not_dropped(op, value):
+    """Dropping it read the wall-clock time as if it were already UTC (or
+    whatever the analyst's fixed offset says) — hours off, and nothing in
+    the column says so. A parse failure is counted and shown."""
+    assert parse(op, value) is None
+
+
+@pytest.mark.parametrize("op, value, want", [
+    ("dd_mmm_yyyy", "05 Jan 2024 13:22:01 +0200", "2024-01-05 11:22:01"),
+    ("dd_mmm_yyyy", "05 Jan 2024 13:22:01.123 -05:00", "2024-01-05 18:22:01"),
+    ("dd_mmm_yyyy", "05 Jan 2024 13:22:01 GMT", "2024-01-05 13:22:01"),
+    ("us_datetime", "1/5/2024 1:22:01 PM +02:00", "2024-01-05 11:22:01"),
+    ("us_datetime", "1/5/2024 13:22:01 -0500", "2024-01-05 18:22:01"),
+    ("us_datetime", "1/5/2024 1:22:01 PM UTC", "2024-01-05 13:22:01"),
+])
+def test_dd_mmm_and_us_apply_a_trailing_offset(op, value, want):
+    assert parse(op, value) == want
+    assert parse(op, value, {"utc_offset": "+09:00"}) == want
+    assert _TS_ISO_RE.match(want) and _ts_normalize(want) == want[:19]

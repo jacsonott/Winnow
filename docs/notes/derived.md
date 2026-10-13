@@ -179,7 +179,24 @@ see [docs/notes/README.md](README.md) for the whole set.
     offset (ISO `Z`/`±HH:MM`, CLF, RFC 2822) are converted to UTC, and
     naive text is kept exactly as written unless the analyst sets the
     op's optional fixed `utc_offset` — never a TZ database, never DST
-    inference. Unparseable input is NULL, not `''`: it drops out of
+    inference. The ISO, `dd_mmm_yyyy` and US ops read whatever follows the
+    time through one function, `timeparse._trailing_zone`: Z/UTC/GMT,
+    `GMT+02:00`, `±HH:MM`/`±HHMM`/`±HH` (U+2212 as a minus too) are
+    applied and win over `utc_offset`; a zone it *cannot* apply — an
+    abbreviation like `EST`, an IANA name, an offset past ±14:00 — makes
+    the value a parse failure rather than being dropped, because dropping
+    it reads the wall-clock time as if it were UTC, hours off with
+    nothing in the column to say so (that is what `+05`, a 10-digit
+    fraction before the offset, `−05:00`, and every offset after a
+    dd-Mmm or US time used to do). Trailing text that names no zone — a
+    log message after the timestamp — is left alone, as before. The
+    12-hour marker is `timeparse.MERIDIEM` everywhere a US or month-name
+    time is read (`_US_RE`, store.py's `_TS_US_RE`/`_TS_MONTH_RE` behind
+    TS_NORMALIZE and DAY_BUCKET, tsformat.js's twins): `PM`, `Pm`,
+    `p.m.`, after an optional fraction. `\s*(AM|PM|am|pm)?` straight after
+    the seconds read `1:22:01.123 PM` as 01:22 — twelve hours early in
+    the derived column, the Timeline and the timeframe filter at once.
+    Unparseable input is NULL, not `''`: it drops out of
     comparisons and the timeframe filter instead of pretending to be data,
     and the count of non-empty inputs that produced NULL is surfaced per
     column ("Show N unparsed rows" builds a raw-filter fragment
