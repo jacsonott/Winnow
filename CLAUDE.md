@@ -547,7 +547,12 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
    analysts' cases number sources and tags independently, and a QC review
    is precisely the case where the two sides came from different cases —
    comparing ids reports every row as differing even when they agree
-   completely. There is a test for exactly that.
+   completely. There is a test for exactly that. The hash names the FILE,
+   not the table — every table of one SQLite file and every sheet of one
+   workbook share it — so load and diff both pick the table within it by
+   what the session records (name, columns, row count;
+   `_match_session_sources`), and refuse rather than guess when that
+   still leaves two candidates (docs/notes/store.md).
 
 
 ## Things that bite

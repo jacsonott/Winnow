@@ -264,6 +264,26 @@ see [docs/notes/README.md](README.md) for the whole set.
   not be presented as one.
 - Session import remaps tag IDs **by name**, creating missing tags. Two analysts
   with their own "Lateral movement" tag merge rather than duplicate.
+- **A session source is matched to a table by hash AND by which table of
+  that file it is** (`_match_session_sources`, used by load and diff
+  alike). The hash is the FILE's: every table imported from one SQLite
+  database, every sheet of one workbook, and a file imported twice share
+  it. The old `{file_hash: id}` dict kept the last table per hash, so
+  loading a History session put `urls`' tags on `visits` ("replace" lost
+  them while reporting both restored) and the diff folded both tables
+  into one key and reported nothing while different rows were tagged.
+  Now the hash is required and the rest of what a session already
+  records — name, base columns, row count — picks the table, in tiers
+  from "all four agree" down to "hash alone, one of each" (the
+  single-table file, matched as it always was). Name is not required,
+  because a QC reviewer names their own tables; ids never enter it
+  (invariant #10). Below "all four agree" only one-to-one pairs count,
+  and anything left over is a warning naming the table — never put on a
+  sibling, and never re-imported, since its file IS in the case. The
+  diff gives each matched pair one key (the bare hash where that alone
+  is unambiguous, so `shared_sources`/`only_*_sources` read as before).
+  Nothing was added to the session document: old ones carry all four
+  fields already. tests/test_case_sessions.py, the shared-hash section.
 - `search_all_sources` runs each source's count on a `_reader()`
   connection — the sweep never touches `self.lock` at all now (it used to
   take it per source's count, which still stalled a concurrent request for
@@ -863,12 +883,12 @@ see [docs/notes/README.md](README.md) for the whole set.
   table" is deleting it. Either way, tagging the subset later does not
   write back to the parent (the map is stored so that could come). And a
   subset gets a synthetic `file_hash = 'subset:' + sha256(parent hash |
-  spec | created_at | id)`: `import_case_session` matches sources by hash
-  only and skips a hashless one, so without it a saved session would
-  never give a subset its tags back — the gap SQL-saved tables still
-  have. `_session_source_resolver` and `diff_sessions` key on the same
-  hash and need nothing else; nothing treats `file_hash` as "a file on
-  disk" (that is `path`, which stays NULL). Failure of any kind mid-copy
+  spec | created_at | id)`: `import_case_session` requires a hash to
+  match a source and skips a hashless one, so without it a saved session
+  would never give a subset its tags back — the gap SQL-saved tables
+  still have. `diff_sessions` keys on the same hash through the same
+  matcher (`_match_session_sources`, below); nothing treats `file_hash`
+  as "a file on disk" (that is `path`, which stays NULL). Failure of any kind mid-copy
   — `op_token` cancel via `_interruptible` (registered per statement:
   innermost on the reader, and by `_commit_ingest_batch` while it holds
   the lock, the writer discipline), the view evicted under the reader

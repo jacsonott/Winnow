@@ -10852,20 +10852,41 @@ class Store:
         }
 
     def import_case_session(self, session: dict, merge: bool = True) -> dict:
-        """Reattaches each source session by file_hash to whatever's already
-        open; if a source isn't open but its original file still exists at
-        the recorded path, re-imports it first. Local single-user tool with
-        full filesystem access already (same trust level as --open), so this
-        is the one action that can fully reconstruct a case from a session."""
+        """Reattaches each source session to the live table it describes
+        (_match_session_sources: the file's hash, then which table of that
+        file); if a source's file isn't in the case at all but still exists
+        at the recorded path, re-imports it first. Local single-user tool
+        with full filesystem access already (same trust level as --open), so
+        this is the one action that can fully reconstruct a case from a
+        session.
+
+        A source whose FILE is in the case but which matches no single
+        table of it — the case lacks that table, or holds two copies
+        nothing tells apart — is skipped with a warning naming it. Never
+        re-imported (the file is here; another copy of it is not this
+        table) and never put on a sibling: that was the old hash-only
+        match, which moved one table's tags onto another's rows."""
         warnings: list[str] = []
         tags_applied = 0
         sources_restored = 0
         sources_reimported = 0
-        by_hash = self._live_sources_by_hash()
+        entries = session.get("sources", [])
+        live = self.list_sources()
+        metas = [e.get("source", {}) for e in entries]
+        pairs = self._match_session_sources(metas, live)
+        live_hashes = {s["file_hash"] for s in live if s.get("file_hash")}
 
-        for src_session in session.get("sources", []):
-            s_meta = src_session.get("source", {})
-            source_id = by_hash.get(s_meta.get("file_hash"))
+        for i, src_session in enumerate(entries):
+            s_meta = metas[i]
+            source_id = live[pairs[i]]["id"] if i in pairs else None
+            if source_id is None and s_meta.get("file_hash") in live_hashes:
+                same_file = sum(1 for s in live if s.get("file_hash") == s_meta["file_hash"])
+                warnings.append(
+                    f"'{s_meta.get('name', 'unknown')}' was not restored: this case has "
+                    f"{same_file} table(s) from the same file and none of them is "
+                    "unambiguously this one (matched on name, columns and row count) "
+                    "— skipped rather than guessed")
+                continue
             if source_id is None:
                 path = s_meta.get("path")
                 if path and os.path.isfile(path):
@@ -11249,20 +11270,21 @@ class Store:
                     self.db.execute(f"DROP TABLE IF EXISTS v.{q(entry['table'])}")
             self._undo.clear()
 
-    def _session_tag_map(self, data: dict) -> tuple[dict, dict, dict]:
+    def _session_tag_map(self, data: dict, keys: list[str]) -> tuple[dict, dict, dict]:
         """(tags_by_row, notes_by_row, source_labels) for a session document.
 
-        Keyed by (file_hash or name, rid) rather than source_id, because two
-        cases number their sources differently — a QC review is usually the
-        reviewer's case against the analyst's file, and matching on the
-        evidence's own fingerprint is what makes that work at all.
+        Keyed by (source key, rid) rather than source_id, because two cases
+        number their sources differently — a QC review is usually the
+        reviewer's case against the analyst's file. `keys` names each of the
+        document's sources, in order; diff_sessions derives them from the
+        evidence's own fingerprint (_diff_source_keys), which is what makes
+        that work at all.
         """
         tags: dict = {}
         notes: dict = {}
         labels: dict = {}
-        for src in data.get("sources", []):
+        for src, key in zip(data.get("sources", []), keys):
             meta = src.get("source") or {}
-            key = meta.get("file_hash") or meta.get("name") or ""
             labels[key] = meta.get("name") or key
             names = {t["id"]: t["name"] for t in (src.get("tag_defs") or [])}
             for rt in src.get("row_tags") or []:
@@ -11272,24 +11294,111 @@ class Store:
                 notes[(key, rn["rid"])] = rn.get("note") or ""
         return tags, notes, labels
 
-    def _live_sources_by_hash(self, sources: list[dict] | None = None) -> dict:
-        """{file_hash: source_id} for the open case — the one way a session
-        source is matched to a live table (import_case_session and the diff
-        both read it). Evidence is identified by its own fingerprint, never
-        by a filename two different exports can share."""
-        return {s["file_hash"]: s["id"] for s in (sources or self.list_sources()) if s.get("file_hash")}
+    @classmethod
+    def _session_identity(cls, meta: dict) -> tuple:
+        """Everything a session records about a source, as one comparable
+        value: (file_hash, name, base column names, row_count). A live
+        source (list_sources) reads the same way, minus its derived
+        columns — the session's column list is the evidence's own shape."""
+        cols = meta.get("columns") or []
+        if any(isinstance(c, dict) and c.get("derived") for c in cols):
+            cols = cls._base_cols(meta)
+        names = tuple(c.get("name") if isinstance(c, dict) else c for c in cols)
+        return (meta.get("file_hash") or None, meta.get("name") or "", names, meta.get("row_count"))
 
-    def _session_source_resolver(self):
-        """key -> live source id | None, for the keys _session_tag_map
-        builds (a file hash, or the name of a source that has none). A hash
-        matches by hash only; a hashless source matches a hashless live
-        source of the same name, since nothing better identifies it. A
-        same-named table with a different hash is a different file and
-        stays unresolved — a diff must never pivot into the wrong evidence."""
-        sources = self.list_sources()
-        by_hash = self._live_sources_by_hash(sources)
-        by_name_hashless = {s["name"]: s["id"] for s in sources if not s.get("file_hash")}
-        return lambda key: by_hash.get(key, by_name_hashless.get(key))
+    @classmethod
+    def _match_session_sources(cls, entries: list[dict], candidates: list[dict],
+                               *, hashless: bool = False) -> dict[int, int]:
+        """Pair session source records with the sources they describe:
+        {entry index: candidate index}, one-to-one. The candidates are the
+        live case's sources, or (for the diff) the other session's.
+
+        The file hash says which FILE; it cannot say which table of it.
+        Every table imported out of one SQLite database, every sheet of one
+        workbook and a file imported twice share it, and matching on it
+        alone (the old {hash: id} dict, last one wins) put one table's tags
+        on another's rows. So the hash is required and the rest of what a
+        session records picks the table, coarsest last:
+
+        1. hash, name, columns and row count all agree. Records equal in
+           all four are indistinguishable, so n of them pair with n
+           candidates in order — document order against id order, which is
+           import order on both sides of a session restored into its own
+           case (export_case_session lists by id).
+        2. hash and name — the same table with a different shape (imported
+           again with other options).
+        3. hash, columns and row count — the same table under another name,
+           which is the ordinary QC case: the reviewer named their tables.
+        4. hash alone, when it is the only record and the only candidate of
+           that file left — the single-table file, as it always matched.
+
+        Below tier 1 only one-to-one pairs: two records that agree on a
+        coarse key but not a finer one are different tables, and pairing
+        them in order would be a guess. Whatever is left unpaired is
+        reported by the caller, never placed. Never matched on ids: two
+        cases number their sources independently (invariant #10).
+
+        A source with no hash (a SQL-saved or plugin-made table) has no
+        fingerprint at all; `hashless` lets it pair by tiers 1 and 2 —
+        name required — which is what the diff has always done. Session
+        load leaves it unmatched, as before."""
+        ie = [cls._session_identity(m) for m in entries]
+        ic = [cls._session_identity(m) for m in candidates]
+        free_e = [i for i, x in enumerate(ie) if x[0] or hashless]
+        free_c = [j for j, x in enumerate(ic) if x[0] or hashless]
+        tiers = ((lambda x: x, True),
+                 (lambda x: x[:2], False),
+                 (lambda x: (x[0], x[2], x[3]), False),
+                 (lambda x: x[0], False))
+        pairs: dict[int, int] = {}
+        for tier, (key, n_to_n) in enumerate(tiers):
+            by_e: dict = {}
+            by_c: dict = {}
+            for i in free_e:
+                if tier < 2 or ie[i][0]:
+                    by_e.setdefault(key(ie[i]), []).append(i)
+            for j in free_c:
+                if tier < 2 or ic[j][0]:
+                    by_c.setdefault(key(ic[j]), []).append(j)
+            for k, es in by_e.items():
+                cs = by_c.get(k, [])
+                if not cs or len(es) != len(cs) or (len(es) > 1 and not n_to_n):
+                    continue
+                pairs.update(zip(es, cs))
+            free_e = [i for i in free_e if i not in pairs]
+            taken = set(pairs.values())
+            free_c = [j for j in free_c if j not in taken]
+        return pairs
+
+    @classmethod
+    def _diff_source_keys(cls, left: list[dict], right: list[dict]) -> tuple[list[str], list[str]]:
+        """One key per source on each side of a diff, equal exactly when
+        the two records describe the same table (_match_session_sources).
+        The file hash where that alone is unambiguous, which keeps the
+        common single-table shape what it always was; hash plus name, and
+        then a counter, where several tables share it."""
+        pairs = cls._match_session_sources(left, right, hashless=True)
+        units = [(i, pairs.get(i)) for i in range(len(left))]
+        paired_right = set(pairs.values())
+        units += [(None, j) for j in range(len(right)) if j not in paired_right]
+        metas = [left[i] if i is not None else right[j] for i, j in units]
+        bases = [m.get("file_hash") or m.get("name") or "" for m in metas]
+        counts: dict = {}
+        for b in bases:
+            counts[b] = counts.get(b, 0) + 1
+        keys, seen = [], {}
+        for b, m in zip(bases, metas):
+            k = b if counts[b] == 1 else f"{b}|{m.get('name') or ''}"
+            seen[k] = seen.get(k, 0) + 1
+            keys.append(k if seen[k] == 1 else f"{k}|{seen[k]}")
+        lk: list = [None] * len(left)
+        rk: list = [None] * len(right)
+        for (i, j), k in zip(units, keys):
+            if i is not None:
+                lk[i] = k
+            if j is not None:
+                rk[j] = k
+        return lk, rk
 
     def diff_sessions(self, left: str, right: str, limit: int = 2000) -> dict:
         """What changed between two sessions — the QC question: "what did
@@ -11307,8 +11416,12 @@ class Store:
         def _load(which):
             return self.export_case_session() if which == self.LIVE_SESSION else self.get_session(which)
 
-        lt, ln, llab = self._session_tag_map(_load(left))
-        rt, rn, rlab = self._session_tag_map(_load(right))
+        ldoc, rdoc = _load(left), _load(right)
+        lmeta = [s.get("source") or {} for s in ldoc.get("sources", [])]
+        rmeta = [s.get("source") or {} for s in rdoc.get("sources", [])]
+        lkeys, rkeys = self._diff_source_keys(lmeta, rmeta)
+        lt, ln, llab = self._session_tag_map(ldoc, lkeys)
+        rt, rn, rlab = self._session_tag_map(rdoc, rkeys)
         labels = {**rlab, **llab}
 
         added, removed, changed, note_changes = [], [], [], []
@@ -11335,7 +11448,15 @@ class Store:
         # Per table, uncapped: what the panel shows as its counts. The row
         # lists below are capped, so a table past the cap still reports
         # how many rows differ even when not all of them can be opened.
-        resolve = self._session_source_resolver()
+        # Each key resolves to the live table its record matches — by the
+        # same rule a load uses, so a diff never pivots into evidence a
+        # load would not have put those tags on.
+        live = self.list_sources()
+        live_id: dict = {}
+        for metas, keys in ((rmeta, rkeys), (lmeta, lkeys)):   # left wins
+            for i, j in self._match_session_sources(metas, live, hashless=True).items():
+                live_id[keys[i]] = live[j]["id"]
+        resolve = live_id.get
         per_source: dict = {}
         for kind, rows in groups.items():
             for r in rows:
