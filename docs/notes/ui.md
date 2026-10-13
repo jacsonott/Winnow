@@ -1329,9 +1329,15 @@ see [docs/notes/README.md](README.md) for the whole set.
   with a form: a checkbox plus a bare swatch, with none of the chip's
   pressed state, hover or per-skin treatment. Pressed means "on the
   timeline" and every tag starts pressed, since a timeline is every tagged
-  row until it is narrowed; the chip's state is an attribute the function
-  writes, so clicking one repaints the strip before it rebuilds (a
-  checkbox kept its own state, this does not). Two parts of the ribbon's
+  row until it is narrowed — **including a tag created after the case
+  opened**. What is kept is the set switched OFF (`S.timeline.tagsOff`;
+  `timelineTagIds()` is S.tags minus it), not a list of the ones on: that
+  list was snapshotted when the case opened, so every later tag started
+  off and its rows were missing until its chip was clicked or the case
+  reopened. A tag the analyst switched off stays off through any number
+  of new ones. The chip's state is an attribute the function writes, so
+  clicking one repaints the strip before it rebuilds (a checkbox kept its
+  own state, this does not). Two parts of the ribbon's
   chip are deliberately absent: the COUNT, because the ribbon's is scoped
   to the open table's view while this list is case-wide, and the open
   table's number under a case-wide chip is a wrong answer rather than a

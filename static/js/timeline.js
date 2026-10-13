@@ -53,13 +53,21 @@ export function timelineTemplateFor(colNames) {
    here.
 
    Pressed means "on the timeline", and every tag starts pressed: a
-   timeline is every tagged row until it is narrowed. */
+   timeline is every tagged row until it is narrowed. That includes a tag
+   created after the case was opened, which is why what is remembered is
+   the tags switched OFF (S.timeline.tagsOff) rather than the ones on: a
+   list of the tags that were on, snapshotted when the case opened, left
+   every later tag off — its rows missing from the timeline, with nothing
+   to say why, until its chip was clicked or the case reopened. */
+export function timelineTagIds() {
+  return S.tags.filter((t) => !S.timeline.tagsOff.has(t.id)).map((t) => t.id);
+}
+
 export function renderTimelineTagFilter() {
   const wrap = $('timelineTagFilter');
   wrap.replaceChildren();
-  if (S.timeline.tagFilter === null) S.timeline.tagFilter = S.tags.map((t) => t.id);
   for (const t of S.tags) {
-    const on = S.timeline.tagFilter.includes(t.id);
+    const on = !S.timeline.tagsOff.has(t.id);
     const chip = el('button', 'tag-chip');
     chip.setAttribute('aria-pressed', String(on));
     // Inline, over the stylesheet's pressed colour, exactly as the ribbon
@@ -72,9 +80,7 @@ export function renderTimelineTagFilter() {
       ? `On the timeline. Click to take ${t.name} off it.`
       : `Off the timeline. Click to put ${t.name} back on it.`;
     chip.onclick = () => {
-      S.timeline.tagFilter = on
-        ? S.timeline.tagFilter.filter((id) => id !== t.id)
-        : [...S.timeline.tagFilter, t.id];
+      if (on) S.timeline.tagsOff.add(t.id); else S.timeline.tagsOff.delete(t.id);
       // Repainted here, not by the DOM: a chip's state is an attribute
       // this function writes, where a checkbox kept its own.
       renderTimelineTagFilter();
@@ -85,7 +91,7 @@ export function renderTimelineTagFilter() {
 }
 
 export async function buildTimeline() {
-  if (S.timeline.tagFilter === null) S.timeline.tagFilter = S.tags.map((t) => t.id);
+  const tagIds = timelineTagIds();
   S.timeline.pages.clear();
   S.timeline.pending.clear();
   // Which rows are showing their raw text is per-build state: the rows a
@@ -93,7 +99,7 @@ export async function buildTimeline() {
   // build would grow for the life of the tab.
   S.timeline.raw.clear();
   const reqId = ++S.timeline.reqId;
-  if (!S.timeline.tagFilter.length) {
+  if (!tagIds.length) {
     // Every tag unchecked -> nothing can match; skip the round trip and
     // show the empty state directly rather than asking the server for
     // "no tag filter," which would mean the opposite (every tagged row).
@@ -107,7 +113,7 @@ export async function buildTimeline() {
     const token = opToken();
     const disarmCancel = armOpCancel(token);
     try {
-      v = await post('/api/timeline', { tag_ids: S.timeline.tagFilter, op_token: token });
+      v = await post('/api/timeline', { tag_ids: tagIds, op_token: token });
     } finally {
       disarmCancel();
     }
@@ -152,7 +158,7 @@ export function timelineRowAt(pos) {
    already done. Said in terms of the control above, since that is where
    the answer is. */
 function emptyReason() {
-  const on = (S.timeline.tagFilter || []).length;
+  const on = timelineTagIds().length;
   if (S.tags.length && !on) return 'Every tag is switched off — turn one back on above to see its rows.';
   if (on && on < S.tags.length) return 'No rows carry the tags switched on above.';
   return 'No tagged rows yet — tag some rows in any table, then come back here.';

@@ -182,10 +182,10 @@ export async function openCaseNow(path, opts = {}) {
   S.timeRange = { enabled: false, column: null, start: '', end: '' };
   updateTimeRangeButton();
   // Same reasoning for the timeline: its view_id belongs to the Store
-  // instance that just closed, and its tag-id checkboxes belong to the
+  // instance that just closed, and its switched-off tag ids belong to the
   // previous case's tag_defs — neither means anything here.
   S.timeline = { view: null, pages: new Map(), pending: new Set(), reqId: S.timeline.reqId + 1,
-                 tagFilter: null, raw: new Set() };
+                 tagsOff: new Set(), raw: new Set() };
   // sql_tabs is a per-case table, so the previous case's tabs (and the
   // in-memory results keyed by their ids) don't describe this one. Left
   // empty rather than reloaded here — showSqlTab loads lazily.
