@@ -29,6 +29,7 @@ import re
 import shutil
 import socket
 import sqlite3
+import stat
 import tempfile
 import threading
 import time
@@ -4004,11 +4005,13 @@ class Store:
         A file is excluded for exactly one of: its extension isn't
         recognized ("extension"), include_patterns is non-empty and nothing
         in it matched ("no include pattern matched"), a pattern in
-        exclude_patterns matched ("excluded by pattern: <pattern>"), or it
+        exclude_patterns matched ("excluded by pattern: <pattern>"), it
         couldn't be stat'd ("unreadable" — a broken symlink, a permission
-        error mid-walk). Surfacing the reason is the point: tuning a
-        profile's patterns is a visible feedback loop instead of guessing
-        whether "*Amcache*" actually matched anything.
+        error mid-walk), or it is a FIFO, socket or device node ("not a
+        regular file" — never opened, since opening a FIFO blocks).
+        Surfacing the reason is the point: tuning a profile's patterns is a
+        visible feedback loop instead of guessing whether "*Amcache*"
+        actually matched anything.
 
         `already_imported` flags a matched file whose absolute path already
         equals some source's stored path — same abspath-equality convention
@@ -4062,11 +4065,23 @@ class Store:
                 fpath = os.path.join(dirpath, fname)
                 rel = os.path.relpath(fpath, root_abs).replace(os.sep, "/")
                 try:
-                    size = os.path.getsize(fpath)
+                    st = os.stat(fpath)
                 except OSError:
                     excluded.append({"path": fpath, "rel_path": rel, "reason": "unreadable"})
                     continue
-                entry = {"path": fpath, "rel_path": rel, "size_bytes": size}
+                # Only a regular file is a candidate, decided from the stat
+                # already in hand and before anything opens it. os.walk lists
+                # FIFOs, sockets and device nodes as files, and a mounted
+                # *nix image is full of them (/run/systemd/initctl). open() on
+                # a FIFO blocks until a writer appears, which on an image is
+                # never: the binary probe hung the scan, and a FIFO named
+                # *.csv was matched and hung the import. os.stat follows
+                # symlinks, so a link to a real file still imports and one
+                # to a FIFO does not.
+                if not stat.S_ISREG(st.st_mode):
+                    excluded.append({"path": fpath, "rel_path": rel, "reason": "not a regular file"})
+                    continue
+                entry = {"path": fpath, "rel_path": rel, "size_bytes": st.st_size}
                 ext = os.path.splitext(fname)[1].lower()
                 by_filename_pattern = any(fnmatch.fnmatch(fname.lower(), p.lower()) for p in fname_pats)
                 by_ext = ext in exts

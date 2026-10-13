@@ -197,6 +197,15 @@ see [docs/notes/README.md](README.md) for the whole set.
   default) admits everything non-binary as kind `text`, with binaries
   excluded under their own reason; profiles carry `*` in their extension
   list.
+- **The folder scan never opens anything that isn't a regular file.**
+  `os.walk` lists FIFOs, sockets and device nodes among the files, and a
+  mounted *nix image is full of them. `open()` on a FIFO blocks until a
+  writer appears, which on an image is never: with `*` on, the binary
+  probe hung the scan for good, and a FIFO named `*.csv` was matched and
+  hung the import instead. The scan checks `S_ISREG` on the stat it
+  already makes, before any gate that reads the file, and excludes the
+  rest as "not a regular file". It uses `os.stat`, not `lstat`, so a
+  symlink to a real file still imports and one to a FIFO does not.
 - **Include patterns narrow; they never widen.** The folder scan's
   extension gate runs first, and a file it drops is gone before
   `include_patterns` are consulted — so `*.log` in the include box cannot

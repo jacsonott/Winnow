@@ -174,6 +174,55 @@ def test_scan_probes_for_binary_only_after_the_pattern_gates(store, tmp_path, mo
     assert ("tool.exe", "binary") in {(e["rel_path"], e["reason"]) for e in r["excluded"]}
 
 
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs FIFOs (POSIX)")
+def test_scan_never_opens_a_fifo(store, tmp_path):
+    """A mounted *nix image is full of FIFOs (/run/systemd/initctl), and
+    open() on one blocks until something writes to it, which on an image
+    is never. With "other text" on, the binary probe opened it and the scan
+    hung for good. A FIFO named like a CSV was matched and would have hung
+    the import instead. Only a regular file is a candidate, checked from
+    the stat the scan already makes: a symlink to a regular file still
+    imports, and one pointing at a FIFO does not."""
+    import threading
+
+    root = tmp_path / "mounted_image"
+    (root / "run" / "systemd").mkdir(parents=True)
+    (root / "run" / "notes").write_text("plain text\n")
+    (root / "run" / "a.csv").write_text("h\n1\n")
+    fifos = [root / "run" / "systemd" / "initctl", root / "run" / "pipe.csv"]
+    for f in fifos:
+        os.mkfifo(f)
+    os.symlink(root / "run" / "a.csv", root / "run" / "link.csv")
+    os.symlink(fifos[0], root / "run" / "link_to_fifo")
+
+    def scan(extensions):
+        out = {}
+        t = threading.Thread(target=lambda: out.setdefault(
+            "r", store.scan_import_directory(str(root), extensions=extensions)), daemon=True)
+        t.start()
+        t.join(20)
+        return out.get("r")
+
+    try:
+        for exts in ([".csv", "*"], [".csv"]):
+            r = scan(exts)
+            assert r is not None, f"scan with {exts} blocked opening a FIFO"
+            assert {m["rel_path"] for m in r["matched"]} >= {"run/a.csv", "run/link.csv"}
+            reasons = {e["rel_path"]: e["reason"] for e in r["excluded"]}
+            for rel in ("run/systemd/initctl", "run/pipe.csv", "run/link_to_fifo"):
+                assert reasons.get(rel) == "not a regular file", (exts, reasons)
+                assert rel not in {m["rel_path"] for m in r["matched"]}
+        assert "run/notes" in {m["rel_path"] for m in scan([".csv", "*"])["matched"]}
+    finally:
+        # Unblock a probe left stuck in open() by a broken scan, so the
+        # failure doesn't leave a thread blocked for the rest of the suite.
+        for f in fifos:
+            try:
+                os.close(os.open(f, os.O_WRONLY | os.O_NONBLOCK))
+            except OSError:
+                pass
+
+
 # ------------------------------------------------------------------ routes
 
 def test_unknown_extension_routes_to_text(client, tmp_path):
