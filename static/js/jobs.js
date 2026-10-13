@@ -273,7 +273,12 @@ export async function pollJobs() {
     if (landed.length && S.appearance && S.appearance.openNewTables && !batchNavigated) {
       batchNavigated = true;
       try { await loadSources(landed[0].source_ids[0]); } catch {}
-    } else if (finishedNow.some((j) => j.status === 'done')) {
+    } else if (finishedNow.some((j) => j.status === 'done'
+        // A derive that failed has changed the table too: its column was
+        // removed, put back as it was, or marked failed with its values
+        // cleared (Store._fail_derive_backfill). Without this the header
+        // went on saying "(building…)" over whatever the server now holds.
+        || (j.kind === 'derive' && j.status === 'error'))) {
       // navigate:false — a finished import refreshes the tab strip, the
       // sidebar and the dashboards, but never takes the analyst somewhere
       // they didn't ask to go (see loadSources). The setting above is the
