@@ -243,7 +243,22 @@ def test_version_comparison_orders_numerically():
     assert not updater.is_newer("1.0.0", "1.0.0")
     assert not updater.is_newer("0.9.0", "1.0.0")
     assert updater.is_newer("v1.2.0", "1.1.0")      # tag names carry a leading v
-    assert not updater.is_newer("1.2.0", "1.2.0-rc1")
+
+
+def test_a_pre_release_sorts_before_its_release():
+    """The key read "-rc1" as a fourth number, so 1.2.0-rc1 counted as NEWER
+    than 1.2.0 (this file used to assert exactly that), and 0.3.0 newer
+    than 0.3. Semver and PEP 440 agree on both."""
+    assert updater.is_newer("1.2.0", "1.2.0-rc1")
+    assert not updater.is_newer("1.2.0-rc1", "1.2.0")
+    assert updater.is_newer("1.2.0-rc1", "1.1.9")
+    assert updater.is_newer("1.2.0-rc10", "1.2.0-rc9")
+    assert updater.is_newer("1.2.0-beta1", "1.2.0-alpha3")
+    assert updater.is_newer("1.2.0", "1.2.0rc1")       # PEP 440 spelling
+    assert not updater.is_newer("0.3.0", "0.3")
+    assert not updater.is_newer("0.3", "0.3.0")
+    assert not updater.is_newer("1.2.0+build7", "1.2.0")
+    assert updater.is_newer("0.0.1", "unknown")
 
 
 def test_check_reports_availability_without_touching_the_network():

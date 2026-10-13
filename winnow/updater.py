@@ -169,19 +169,32 @@ def installed_version(root: Path | None = None) -> str:
 
 
 def _version_key(v: str) -> tuple:
-    """Sortable form of a dotted version, so 1.10.0 > 1.9.0. Anything
-    non-numeric sorts as 0 rather than raising — a tag like '1.2.0-rc1'
-    should still compare sanely against 1.1.0."""
-    parts = []
-    for chunk in v.lstrip("vV").replace("-", ".").split("."):
-        digits = ""
-        for ch in chunk:
-            if ch.isdigit():
-                digits += ch
-            else:
-                break
-        parts.append(int(digits) if digits else 0)
-    return tuple(parts)
+    """Sortable form of a version, so 1.10.0 > 1.9.0. Never raises: an
+    unparseable string sorts as 0.
+
+    Two rules beyond "compare the numbers", both ones the old key got
+    backwards. Trailing zeros don't count, so 0.3 and 0.3.0 are the same
+    version rather than 0.3.0 reading as newer. And a pre-release suffix
+    (1.2.0-rc1, 1.2.0rc1, 1.2.0.dev1) sorts BEFORE the release it leads up
+    to, as semver and PEP 440 both have it — the old key read "-rc1" as a
+    fourth number, 0, and so offered 1.2.0-rc1 as an update FROM 1.2.0.
+    Within a suffix, numbers compare as numbers (rc10 > rc9) and words as
+    words (beta > alpha). Build metadata after "+" is ignored."""
+    import re
+
+    s = v.strip().lstrip("vV").split("+", 1)[0]
+    m = re.match(r"\d+(?:\.\d+)*", s)
+    if not m:
+        return ((0,), (1,))
+    nums = [int(x) for x in m.group(0).split(".")]
+    while len(nums) > 1 and nums[-1] == 0:
+        nums.pop()
+    suffix = s[m.end():].lstrip(".-_")
+    if not suffix:
+        return (tuple(nums), (1,))          # a release outranks its pre-releases
+    pre = tuple((0, int(t), "") if t.isdigit() else (1, 0, t.lower())
+                for t in re.findall(r"\d+|[A-Za-z]+", suffix))
+    return (tuple(nums), (0,) + pre)
 
 
 def is_newer(candidate: str, current: str) -> bool:
