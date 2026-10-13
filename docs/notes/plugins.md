@@ -306,7 +306,24 @@ see [docs/notes/README.md](README.md) for the whole set.
   later with no re-wiring. The plugin parses two line shapes per line, not
   per file (ESXi ISO and year-less Linux syslog both appear in one
   syslog.log), and folds timestamp-less continuation lines onto the
-  previous row rather than emitting orphans.
+  previous row rather than emitting orphans. Folding collects the lines
+  and joins once, and stops at `FOLD_MAX_CHARS` (64 Ki). The format
+  claims every .log, so a dated header over a 100k-line dump is a real
+  input, and repeated `message + " " + line` took minutes over it to build
+  one 9 MB cell. Past the cap, lines are rows of their own, as they are
+  in a file with no timestamps.
+  **A year-less syslog stamp is not a datetime**, and Timestamp is
+  declared one: TS_NORMALIZE reads "Jan  5 10:00:01" as NULL, so every
+  UAC/Linux line fell out of the timeframe filter and the board's own
+  "Activity over time" chart. `_SyslogYears` resolves the year the way
+  timeparse's `syslog_bsd` op does (a year added at each Dec→Jan wrap,
+  in file order), but anchors at the other end, because a parser can't
+  ask for the first line's year. The last stamp belongs to the year of
+  the file's mtime, or the year before if that day is still to come. That
+  costs one extra read, only for a file that has a year-less stamp. The
+  output is naive ISO, since syslog doesn't say its zone. An upload's
+  spool carries the upload time as its mtime (browsers don't send it),
+  so only an import by path gets the file's real one.
 
 - **A plugin's dashboard is offered, not applied** (`register_dashboard`,
   API 8). It appears under Dashboards ▸ Library beside the machine-wide
