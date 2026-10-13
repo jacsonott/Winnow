@@ -33,3 +33,40 @@ def test_a_failing_import_job_toasts_its_error(page, tmp_path):
     page.evaluate("() => __winnow.loadSources()")
     page.wait_for_timeout(300)
     assert page.evaluate("() => __winnow.S.sources.length") == before
+
+
+def test_one_failed_poll_does_not_stop_the_import_being_followed(page, tmp_path):
+    """A single failed /api/ingest/jobs (a 500 while the server was busy, a
+    blink in the connection) emptied the jobs list and, with nothing left
+    "running", stopped the poll for good: the progress row vanished, the
+    finished import was never announced, and its table never reached the
+    tab strip or the sidebar until the page was reloaded. The FIRST poll
+    after starting the import is the one that fails here, so the import
+    cannot have been seen running before the failure."""
+    csv = tmp_path / "after_a_blink.csv"
+    csv.write_text("Host,User\nh1,alice\nh2,bob\n", encoding="utf-8")
+    failed = []
+
+    def one_failure(route):
+        if not failed:
+            failed.append(route.request.url)
+            route.fulfill(status=500, content_type="application/json", body='{"detail": "boom"}')
+        else:
+            route.continue_()
+
+    page.route("**/api/ingest/jobs", one_failure)
+    try:
+        page.evaluate(
+            """(path) => __winnow.post('/api/ingest/jobs/path',
+                 { path, name: 'after_a_blink.csv', kind: 'csv' })
+               .then(() => __winnow.startJobsPoll())""",
+            str(csv))
+        page.wait_for_function(
+            "() => __winnow.S.sources.some((s) => s.name === 'after_a_blink.csv')", timeout=20_000)
+        assert failed, "the injected failure never happened, so this proved nothing"
+    finally:
+        page.unroute("**/api/ingest/jobs")
+        # The session's case is shared — leave it as it was found.
+        page.evaluate("""() => fetch('/api/sources').then((r) => r.json()).then((ss) => Promise.all(
+            ss.filter((s) => s.name === 'after_a_blink.csv').map((s) => fetch('/api/source/' + s.id,
+              { method: 'DELETE', headers: { 'X-Timeline-Lite-Client': '1' } }))))""")

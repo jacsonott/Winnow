@@ -130,6 +130,9 @@ export function inFlightWork() {
 }
 
 export function startJobsPoll() {
+  // A poll backing off after failures may not ask again for 15s; whoever
+  // calls this just started work, so ask now.
+  if (jobsPollTimer && pollFailures) { clearTimeout(jobsPollTimer); jobsPollTimer = null; }
   if (!jobsPollTimer) pollJobs();
 }
 
@@ -169,10 +172,16 @@ export async function followFtsBuild(sourceId) {
    own load time is the real boundary. */
 const PAGE_START = Date.now() / 1000;
 
+/* Failed polls in a row, for the back-off at the bottom of pollJobs. */
+let pollFailures = 0;
+const POLL_MS = 900;
+const POLL_BACKOFF_MAX_MS = 15000;
+
 export async function pollJobs() {
   jobsPollTimer = null;
   const firstPoll = seenJobStatus.size === 0;
   const finishedNow = [];
+  let pollFailed = false;
   try {
     const d = await api('/api/ingest/jobs');
     for (const j of d.jobs) {
@@ -197,11 +206,18 @@ export async function pollJobs() {
       seenJobStatus.set(j.job_id, j.status);
     }
     ingestJobs = d.jobs;
+    pollFailures = 0;
   } catch (e) {
-    // The panel empties and the progress bar with it. Say so where it can
-    // be found later — this is the trace behind "it stopped updating".
-    ingestJobs = [];
-    clientLog('warn', 'Job poll failed: ' + (e && e.message ? e.message : String(e)));
+    /* A failed poll knows nothing new, so it changes nothing: the panel
+       keeps what the last good one said. It used to empty ingestJobs —
+       the progress row vanished, nothing read as running, the reschedule
+       below stopped the poll for good, and a finished import never
+       announced itself or reached the tab strip until a reload. Logged
+       once per run of failures, where "it stopped updating" can be
+       traced. */
+    pollFailed = true;
+    pollFailures += 1;
+    if (pollFailures === 1) clientLog('warn', 'Job poll failed: ' + (e && e.message ? e.message : String(e)));
   }
 
   for (const j of finishedNow) {
@@ -296,7 +312,18 @@ export async function pollJobs() {
   // import may open its first table. An FTS build still being watched
   // keeps the poll alive but is not part of the batch.
   if (!batchActive) batchNavigated = false;
-  if (batchActive || ftsWatch.size > 0) jobsPollTimer = setTimeout(pollJobs, 900);
+  if (pollFailed) {
+    /* Not knowing is not "nothing is running": whoever started this poll
+       had a reason, and the failed poll cannot say it is over. Try again,
+       backing off so a server that has gone away is asked every 15s
+       rather than every 900ms. On the case list there is no case to ask
+       about, and the next import starts its own poll. */
+    if (!$('app').hidden) {
+      jobsPollTimer = setTimeout(pollJobs, Math.min(POLL_MS * 2 ** pollFailures, POLL_BACKOFF_MAX_MS));
+    }
+    return;
+  }
+  if (batchActive || ftsWatch.size > 0) jobsPollTimer = setTimeout(pollJobs, POLL_MS);
 }
 
 /* `phase` is the badge text; `cls` is its class when the two differ (a
