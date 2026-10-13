@@ -21,7 +21,13 @@ see [docs/notes/README.md](README.md) for the whole set.
   `preview_sqlite_tables`' heuristic when a column's name and sampled
   values look like one, via `_webkit_to_iso`) — never automatically, and
   never in place in the source file. A BLOB value becomes `<N bytes>`
-  rather than attempting to stringify binary data.
+  rather than attempting to stringify binary data. A TEXT value that is
+  not valid UTF-8 is decoded with U+FFFD (`_lenient_text_factory`) and
+  counted (`undecodable_values`, in the jobs toast and the log): sqlite3's
+  default factory raised "Could not decode to UTF-8" mid-read, and the
+  batch it was in plus every row after it were gone. And a table that
+  fails before its first batch commits is dropped rather than left with
+  0 rows, which is indistinguishable from a real empty import.
 - **Every read-only open is a URI, and the URI comes from
   `paths.sqlite_ro_uri` — never `f"file:{path}?mode=ro"`.** `mode=ro`
   only exists in URI form, and in a URI `#` starts a fragment, `?` the
@@ -55,7 +61,13 @@ see [docs/notes/README.md](README.md) for the whole set.
   max(header, declared width) so extra data lands in `col_N` instead of
   being cut, and a formula cell in a workbook that was never opened in
   Excel imports as "" (data_only=True reads the cached result, and a
-  file written by a tool has no cache). Rows shorter than the header are
+  file written by a tool has no cache). And the sheet's declared
+  `<dimension>` is reset before reading (`reset_dimensions()`, in the
+  reader and the picker): read-only mode treats it as the edge of the
+  data, and a stale A1:B10 over 3 columns and 101 rows imported 2
+  columns and 9 rows with ragged 0. The declared size is still the
+  picker's row estimate and a floor on the width — so the picker can
+  under-count a sheet whose declaration is stale, but the import can't. Rows shorter than the header are
   normal Excel storage (trailing empties aren't stored) and pad silently;
   only wider rows count as ragged. `.xlsm` imports (same container,
   macros never executed); legacy binary `.xls` is deliberately out of
@@ -74,6 +86,26 @@ see [docs/notes/README.md](README.md) for the whole set.
   file-count and nesting-depth caps → `truncated: true` with a valid
   partial tree. Inner archives are deleted after expanding — the tree
   holds only real files; the original archive is never touched.
+  **Damage is per member, never the whole expansion.** What a damaged
+  archive raises — EOFError (a cut-off .tgz), zlib.error (a corrupt
+  inner .gz; it is not an OSError), BadZipFile/TarError, LZMAError,
+  NotImplementedError (Deflate64, which Windows Explorer writes for big
+  members) — is none of it an ArchiveError, so each used to escape as a
+  500 with half the tree on disk and every later member unextracted.
+  Now a member that cannot be read or written (name too long, a file
+  where a directory must go) is skipped with a reason and the rest go
+  on; a partial member is deleted (a truncated file would import as if
+  whole); a tar whose stream ends early keeps every member before the
+  cut; an inner archive that cannot even be opened stays in the tree
+  unexpanded and is not retried; only an archive that yields NOTHING is
+  an ArchiveError (400). Disk-full stops the expansion rather than
+  failing every later member. **And nothing is overwritten**: two
+  members with one name, or `messages` beside `messages.gz`, used to
+  leave whichever came last — the attacker-activity copy gone without a
+  trace. The later one takes `name (2).ext` (`_Budget.free_path`,
+  numbered per path so 200,000 repeats of one name stay linear) and is
+  listed under `renamed`. The import toast names the first skipped and
+  renamed member and the server log keeps them all.
 - Plaso ingest (`ingest_plaso`, plasoread.py) reads a `.plaso` storage
   file — a SQLite db of serialized attribute containers — as ONE flat
   timeline table, no plaso install involved. Both on-disk generations are
@@ -105,6 +137,27 @@ see [docs/notes/README.md](README.md) for the whole set.
   line (each pass); a single `.json` document has to be `json.load()`ed
   whole (no generic streaming parser in the standard library) — memory use
   scales with file size for that shape specifically.
+- **A JSON cell holds what the file said, all of it.** Every evidence
+  read goes through `_json_loads`/`_json_load`, never a bare
+  `json.loads`, for two reasons. *Numbers* are parsed to `_JsonNumber`,
+  a str holding the literal: through float() 1.10 became 1.1, 1e5
+  became 100000.0, 1E400 became inf, and an integer past Python's
+  4,300-digit limit raised and failed the file. Inside a container that
+  is stored as JSON text a number must still be written unquoted, and
+  json.dumps cannot write a value raw, so `_json_text` is a writer of
+  our own — byte-for-byte json.dumps(ensure_ascii=False) otherwise,
+  pinned by a test, because every existing import's cells have that
+  shape. It recurses (measured twice as fast as an explicit stack, and
+  faster than the per-call json.dumps it replaced) for 200 levels, then
+  hands off to an iterative copy, since json accepts documents thousands
+  of levels deep. *Two values for one column* — a key named twice in one
+  object (json.loads keeps the last), or a literal `"process.name"` key
+  beside a nested `process.name` — used to keep whichever came last, so
+  whoever wrote the record chose what the analyst saw. The first keeps
+  the name, the next takes `_1`, `_2`… (sanitize_columns' suffix), and
+  `key_collisions` counts the records it happened in (preview status
+  line, jobs toast). A duplicated key inside a container stored as text
+  is written twice, as the file had it.
 - Ragged rows are padded/trimmed to the header width, never dropped, and
   counted — `ingest_csv`'s return dict has a `ragged_rows` count surfaced to
   the analyst (toast in the UI, printed in the CLI path). If that first row
@@ -145,9 +198,16 @@ see [docs/notes/README.md](README.md) for the whole set.
 - **Raw text is the catch-all importer, and it is a different reader.**
   `Store.ingest_text` (kind `text`): one row per physical line, the whole
   line in the one `Message` column (`TEXT_COLUMN`), no header, nothing
-  split — a line iterator, not the csv module, so there is no 128 KB
-  field limit and a stray quote swallows nothing. Blank lines are kept
-  as empty rows so `rid` is the line number. `_ingest_kind_for_path`
+  split — a line iterator, not the csv module, so there is no field
+  limit and a stray quote swallows nothing. Blank lines are kept
+  as empty rows so `rid` is the line number — and for the same reason a
+  line ends at `\n` and nowhere else (`_text_line`; the file is opened
+  with `newline="\n"`). Python's default universal newlines, and
+  `str.splitlines()` in the preview, also break at a lone `\r`, so a CR
+  inside a logged value (an attacker-chosen username) forged a row that
+  read like a real entry and shifted every rid after it. One `\r` before
+  the `\n` is a CRLF's and comes off; any other is the line's own text.
+  The preview splits the same way. `_ingest_kind_for_path`
   (server) and `importKindFor` (client) send any name no built-in claims
   here — `hostd.log`, `auth.log.1`, an extensionless dump — *after* plugin
   formats have had their say (`queueItem` / `_assoc_ingest` consult them
@@ -168,6 +228,15 @@ see [docs/notes/README.md](README.md) for the whole set.
   default) admits everything non-binary as kind `text`, with binaries
   excluded under their own reason; profiles carry `*` in their extension
   list.
+- **The folder scan never opens anything that isn't a regular file.**
+  `os.walk` lists FIFOs, sockets and device nodes among the files, and a
+  mounted *nix image is full of them. `open()` on a FIFO blocks until a
+  writer appears, which on an image is never: with `*` on, the binary
+  probe hung the scan for good, and a FIFO named `*.csv` was matched and
+  hung the import instead. The scan checks `S_ISREG` on the stat it
+  already makes, before any gate that reads the file, and excludes the
+  rest as "not a regular file". It uses `os.stat`, not `lstat`, so a
+  symlink to a real file still imports and one to a FIFO does not.
 - **Include patterns narrow; they never widen.** The folder scan's
   extension gate runs first, and a file it drops is gone before
   `include_patterns` are consulted — so `*.log` in the include box cannot
@@ -306,7 +375,20 @@ see [docs/notes/README.md](README.md) for the whole set.
   the file per table. Upload spools are deleted when the job ends —
   the old sync upload endpoints (kept for compat, same `finally` added)
   leaked the full file size in the OS tempdir on every upload, found as
-  a stray 50 GB tempfile. Frontend: `uploadWithProgress` (XHR — fetch
+  a stray 50 GB tempfile. `/api/ingest/plugin/upload` was the one that
+  still leaked (no `finally` at all), and it recorded the spool's
+  `tmpXXXX` path as the source's path. The archive upload had the
+  opposite problem: it renamed its spool to `<tempdir>/<client
+  filename>`, so two uploads of `bundle.tgz` at once shared one file,
+  and a same-named file already in the tempdir was overwritten and then
+  deleted. Both now go through `server._upload_spool`: a private
+  `mkdtemp` per upload holding the file under its uploaded basename,
+  removed in `finally` by `_remove_spool`. That is an unlink and an
+  rmdir, not `rmtree`, because the routes are async and a tree walk is
+  blocking work (test_event_loop_blocking). That basename is load-bearing for plugins,
+  whose parsers read meaning from the file name (esxi_logs' `Log` column
+  came out `other` for every uploaded file). The name the source records
+  is the uploaded one, never the spool's. Frontend: `uploadWithProgress` (XHR — fetch
   can't report upload progress) plus `pollJobs`/`renderJobsPanel`, the
   bottom-right panel that also surfaces `fts_building` — background index
   builds used to be invisible, and a server restart kills one silently
@@ -358,16 +440,46 @@ see [docs/notes/README.md](README.md) for the whole set.
   utf-8-sig-with-replacement, the header becomes NUL-riddled garbage and
   CREATE TABLE aborts with "the query contains a null character".
   `sniff_text_encoding` checks the two-byte BOM and opens UTF-16 files
-  properly (csv, jsonl, and both server preview paths via
+  properly (csv, text, jsonl, and both server preview paths via
   `_decode_preview_bytes`); `sanitize_columns` also strips C0 control
   characters from header NAMES as a backstop — cells keep whatever bytes
   they had, names must be quotable. BOM-less UTF-16 is deliberately left
   alone: guessing without a BOM mislabels legitimate files.
 
+- **So is Windows-1252, and a file that isn't UTF-8 says so.** Excel on
+  Windows saves "CSV" in the ANSI code page (cp1252 in the west), and so
+  do older tools; decoded as UTF-8-with-replacement, "José" imported as
+  "Jos\ufffd" with no warning and the byte was gone. Two parts, both in
+  store.py:
+  - `sniff_text_encoding` probes the first `ENCODING_PROBE_BYTES` (1 MB).
+    Valid UTF-8 is UTF-8; *invalid* UTF-8 that holds no well-formed
+    multi-byte sequence at all is cp1252, read with Python's own codec.
+    Invalid UTF-8 that *also* holds real multi-byte UTF-8 stays UTF-8 —
+    it is a UTF-8 file with a few bad bytes, and reading it all as cp1252
+    would turn every genuine "é" in it into "Ã©".
+  - Every text evidence read opens with `errors=TEXT_DECODE_ERRORS`, a
+    registered handler (`_cp1252_fallback`) that reads an undecodable
+    byte as its cp1252 character instead of U+FFFD — so a stray byte past
+    the probe, or in a mostly-UTF-8 file, keeps its meaning — and maps
+    the five bytes cp1252 leaves undefined to the Latin-1 controls of the
+    same value, so no byte is ever lost. It counts per THREAD
+    (decoding happens on the thread iterating the file), which is how an
+    import reports `cp1252_bytes`; take the snapshot after any
+    `seek(0)` re-read or the head counts twice (ingest_csv does; JSON
+    counts pass 2 only).
+  An import reports `encoding` (utf-8 / utf-16 / cp1252) and
+  `cp1252_bytes`, the jobs toast and the CLI say so, the previews decode
+  through `decode_text_sample` (the path preview with the file's own
+  sniff) and say so, and the source keeps it in `origin_meta`
+  (`{encoding}` — origin_meta is NULL for a clean import) where the
+  table's hover text reads it: how evidence bytes were interpreted
+  belongs with the table they became, not only in a toast.
+
 - **An unbalanced quote swallows lines silently, and ragged can't see
   it.** A stray `"` folds every following line into one field until the
-  next quote (or the 128KB field-limit error). The rows vanish from the
-  grid, `ragged_rows` reads 0, and nothing errored. `suspect_quote_rows`
+  next quote (or the end of the file, or `CSV_FIELD_LIMIT` — see the next
+  entry). The rows vanish from the grid, `ragged_rows` reads 0, and
+  nothing errored. `suspect_quote_rows`
   counts rows that consumed ≥10 PHYSICAL file lines — `reader.line_num`
   minus the previous row's, one int compare per row, because a per-cell
   newline scan here benchmarked ingest 11% slower — which is the swallow's
@@ -379,6 +491,22 @@ see [docs/notes/README.md](README.md) for the whole set.
   parse is *correct* for properly-quoted multi-line fields, so this can
   only ever be a warning.
 
+- **The csv field limit is raised, not removed** (`CSV_FIELD_LIMIT`,
+  set process-wide when store.py is imported). csv's own default is
+  131072 characters, and one field past it stopped the import at that
+  line with "field larger than field limit" — an EvtxECmd payload with a
+  PowerShell script block in it, or a base64 blob in a column, is bigger
+  than that. The cap (64 Mi characters) stays because it is also the
+  only bound on a stray quote with no partner: csv folds the rest of the
+  file into one field, built at four bytes a character, and on a 20 GB
+  export unlimited means running the machine out of memory. Two
+  consequences: a swallow under the cap no longer errors out, so
+  `suspect_quote_rows` above is now the signal for it rather than a
+  backstop; and the obvious `field_size_limit(sys.maxsize)` is wrong —
+  the limit is a C long, 32 bits on Windows, and that call raises
+  OverflowError there. tests/test_ingest_broken.py's poison-line tests
+  lower the limit for their duration rather than write a 64 MB line.
+
 - **One broken JSONL line costs one line, not the file.** ingest_json's
   two-pass shape used to make any malformed line an all-or-nothing
   failure — a million good lines refused because line 1,000,001 was cut
@@ -388,4 +516,17 @@ see [docs/notes/README.md](README.md) for the whole set.
   `first_bad_line`, surfaced in the jobs toast), and when a caller passes
   no collector the raise carries the real FILE line number. A truncated
   `.json` *document* is still a hard error — half of one JSON value is
-  not a partial table.
+  not a partial table. A lone surrogate escape (`"\udc80"`, legal JSON,
+  and how Plaso's serializer writes an NTFS name holding one) is not a
+  broken line either: it decodes to a string with no UTF-8 form, whose
+  batch insert raised "surrogates not allowed" and stopped the import —
+  in a key, before the first row. `structparse.utf8_text` (store's
+  `_utf8_text`, and a twin in plasoread, which imports nothing from the
+  app) writes it back as the six-character escape the file held, so the
+  value is recoverable and a JSON-text cell stays valid JSON. The same
+  escape in a JSON *column* reaches the flatten picker as a real
+  surrogate again (json.loads undoes it): discovery's samples and
+  suggested names go through `utf8_text`, and a key holding one is
+  spelled `["\uXXXX"]` in its path — `parse_json_path` reads that back
+  as the same key — because the path is stored in a column definition
+  and the picker's route could not encode its response at all.

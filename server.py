@@ -22,6 +22,7 @@ import socket
 import sqlite3
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path, PureWindowsPath
 from typing import Any
@@ -43,8 +44,9 @@ from winnow import userenv
 from winnow import version
 from winnow import archive
 from winnow import workspace as WS
-from winnow.store import (CASE_SUFFIX, DEFAULT_IMPORT_EXTENSIONS, PLASO_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, MissingTable, OpCancelled, Store, ViewExpired,
-                   case_lock_path, describe_case_lock, is_winnow_case_file, probe_case_lock, q, rows_to_xlsx, sweep_orphan_views)
+from winnow.store import (CASE_SUFFIX, DEFAULT_IMPORT_EXTENSIONS, PLASO_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, MissingTable, OpCancelled, RecordGone, Store, ViewExpired,
+                   case_lock_path, decode_text_sample, describe_case_lock, is_winnow_case_file, probe_case_lock, q,
+                   rows_to_xlsx, sniff_text_encoding, sweep_orphan_views)
 
 HERE = paths.INSTALL_ROOT  # static/, plugins/, examples/plugins/ all hang off the install root
 
@@ -241,9 +243,10 @@ STORE: Store | None = None
 
 # ---------------------------------------------------------------- plugins
 
-# Loaded once at import (so `uvicorn server:app` gets them too, not just
-# `python server.py`) from plugins/ next to server.py plus an optional
-# WINNOW_PLUGINS_DIR env var; main() adds any --plugins-dir flags on top.
+# Loaded from plugins/ next to server.py plus an optional WINNOW_PLUGINS_DIR
+# env var (main() adds any --plugins-dir flags on top): at import for
+# `uvicorn server:app`, and by main() for `python server.py`, once it knows
+# which case it is opening — see the load at the bottom of this section.
 # A plugin that fails to load is recorded with its error and skipped — it
 # shows up in GET /api/plugins with the reason, and never takes the server
 # down. See plugin_api.py for the whole model (and its security note: a
@@ -310,7 +313,20 @@ def _reload_plugins() -> None:
     via the enabled list). Cheap enough (a directory listing plus importing
     whatever's enabled) that toggles, installs and case switches just call
     it — no server restart involved. Case switches MUST call it: "a
-    disabled plugin's code never runs" is a per-case statement now."""
+    disabled plugin's code never runs" is a per-case statement now.
+
+    Serialised as a whole, not just the load inside it: the policy is
+    read from whatever case is open NOW, so a toggle's reload that read
+    case A, then lost the race to a case switch's reload that read case
+    B, would finish last and leave B running A's plugin set."""
+    with _PLUGIN_RELOAD_LOCK:
+        _reload_plugins_locked()
+
+
+_PLUGIN_RELOAD_LOCK = threading.Lock()
+
+
+def _reload_plugins_locked() -> None:
     overrides = _case_plugin_overrides()
 
     def enabled_for(fs_name: str, directory: str) -> bool:
@@ -335,7 +351,14 @@ def _reload_plugins() -> None:
             p["error"] = RETIRED_BUNDLED_EXAMPLES[p["fs_name"]]
 
 
-_reload_plugins()
+# Not under `python server.py`: main() loads them itself once the case
+# named by --case (or a double-clicked case file) is open. The effective set
+# is that case's call, and loading the machine set here first would import —
+# run — a plugin the case has switched off, which unloading it a moment later
+# cannot take back. `uvicorn server:app` opens no case at startup, so the
+# machine set is the right one there.
+if __name__ != "__main__":
+    _reload_plugins()
 
 # ---------------------------------------------------------------------- csrf
 
@@ -465,11 +488,21 @@ async def closed_database_handler(request: Request, exc: sqlite3.ProgrammingErro
     return JSONResponse({"detail": f"Internal error: {exc}"}, status_code=500)
 
 
-# A request still in flight for a table another window (or this one, a
-# moment earlier) just deleted. The Store's lookups say so as
-# KeyError("No table N") / ("No merge N"), and a route that never
-# expected its table to vanish mid-request let that out into the
-# catch-all — a 500 "Internal error" and an error badge for something
+# A write that names a table, tag or row this case no longer has — a
+# second window acting on something the first deleted. The Store raises it
+# before writing anything, so this is a clean refusal, not an error after
+# the fact; 404 rather than 409 because no rebuild brings the thing back,
+# and worded without "expired" for the reason the handler above gives.
+@app.exception_handler(RecordGone)
+async def record_gone_handler(request: Request, exc: RecordGone):
+    return JSONResponse({"detail": str(exc)}, status_code=404)
+
+
+# The read side of the same race: a request still in flight for a table
+# another window (or this one, a moment earlier) just deleted. The Store's
+# lookups say so as KeyError("No table N") / ("No merge N"), and a route
+# that never expected its table to vanish mid-request let that out into
+# the catch-all — a 500 "Internal error" and an error badge for something
 # nobody did wrong. Only those two messages are matched: any other
 # KeyError is still a bug, and is raised on to the catch-all — re-raised
 # rather than handed to it, because only the propagated exception keeps
@@ -1118,6 +1151,13 @@ def api_case_open(body: CaseOpen):
             body.path, name=os.path.splitext(os.path.basename(body.path))[0]
         )
         WS.cases.touch_opened(rec["id"])
+        # The store swap is what this skips, not the plugin reload: the
+        # client tears its plugin tabs down on this request and refetches
+        # the list on the understanding that the server reloaded for the
+        # case it just opened (openCase in home.js). Skipping it here left
+        # a registry that disagreed with the case disagreeing however often
+        # the analyst re-opened it.
+        _reload_plugins()
         return {"sources": STORE.list_sources(), "name": rec["name"], "temp": _is_temp_case(STORE.path)}
     if not body.force:
         holder = probe_case_lock(body.path)
@@ -1554,9 +1594,10 @@ def api_case_discard():
     _remove_case_file(path)
     with contextlib.suppress(Exception):
         instances.set_case(None)
-    # No case is a policy change too, like a case switch: a plugin that was
-    # on only for this quick-look would otherwise stay imported, routed and
-    # listed as on at the home screen, under machine settings that say off.
+    # No case is open now, so the machine defaults decide again: a plugin
+    # switched on only for the quick look must not stay imported and routed
+    # on the home screen (the case switch in api_case_open, for the same
+    # reason).
     _reload_plugins()
     return {"ok": True}
 
@@ -1871,9 +1912,19 @@ def api_cases_update(case_id: int, body: CaseUpdate):
 
 
 @app.delete("/api/cases/{case_id}")
-def api_cases_delete(case_id: int, delete_file: bool = False):
+def api_cases_delete(case_id: int, delete_file: bool = False, path: str | None = None):
+    """`path` is the file the client means — the one its list showed under
+    this id. An id is only a pointer into the registry as it was when that
+    list was painted; registry ids are never reused now, but a home screen
+    painted before this server started can still hold one that meant
+    something else. Deleting a FILE on the strength of a bare id is the one
+    step here that cannot be taken back, so when the client says which file
+    it means and the id now names another, nothing is touched at all."""
+    rec = WS.cases.get(case_id)
+    if path is not None and rec is not None and not _same_case_path(path, rec["path"]):
+        raise HTTPException(409, "That case list is out of date — it has changed since this window "
+                                 "showed it. Nothing was removed; reload the case list and try again.")
     if delete_file:
-        rec = WS.cases.get(case_id)
         if rec and os.path.isfile(rec["path"]):
             if STORE is not None and _same_case_path(STORE.path, rec["path"]):
                 raise HTTPException(400, "Close this case before deleting its file")
@@ -2012,13 +2063,19 @@ async def api_ingest_upload(
             os.remove(tmp)
 
 
-def _decode_preview_bytes(raw: bytes) -> str:
-    # Same UTF-16 BOM handling as the real ingest (store.sniff_text_encoding)
-    # so the preview an analyst approves is the table they actually get —
-    # PowerShell's UTF-16LE exports were previewing as NUL-riddled noise.
-    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
-        return raw.decode("utf-16", errors="replace")
-    return raw.decode("utf-8-sig", errors="replace")
+PREVIEW_SAMPLE_BYTES = 512 * 1024
+
+
+def _decode_preview_bytes(raw: bytes, path: str | None = None) -> tuple[str, str]:
+    # Decided and decoded exactly as the real ingest will (store.
+    # decode_text_sample — UTF-16 by BOM, Windows-1252 when it isn't UTF-8)
+    # so the preview an analyst approves is the table they actually get:
+    # PowerShell's UTF-16LE exports previewed as NUL-riddled noise, and
+    # Excel's cp1252 CSVs as "Jos\ufffd". A sample shorter than the cap is
+    # the whole file. Returns (text, encoding label). `path`, when the file
+    # is on this disk, lets the decision see as much as the import will.
+    return decode_text_sample(raw, complete=len(raw) < PREVIEW_SAMPLE_BYTES,
+                              encoding=sniff_text_encoding(path) if path else None)
 
 
 @app.post("/api/ingest/preview")
@@ -2028,18 +2085,18 @@ async def api_ingest_preview(
     has_header: bool = Form(True),
     kind: str = Form("csv"),   # "text": the raw-text importer's line-per-row preview
 ):
-    raw = await file.read(512 * 1024)  # bounded sample — full parse happens at real ingest time
-    text = _decode_preview_bytes(raw)
+    raw = await file.read(PREVIEW_SAMPLE_BYTES)  # bounded sample — full parse happens at real ingest time
+    text, encoding = _decode_preview_bytes(raw)
     try:
         if kind == "text":
-            return await run_in_threadpool(store().preview_text_lines, text)
+            return {**await run_in_threadpool(store().preview_text_lines, text), "encoding": encoding}
         # The uploaded file's own name goes through: the delimiter is read
         # from the extension first (Store._sniff), and a preview that
         # sniffed without it would show a different table from the one the
         # import then builds.
-        return await run_in_threadpool(
+        return {**await run_in_threadpool(
             store().preview_csv_text, text, delimiter=delimiter or None,
-            has_header=has_header, name=file.filename)
+            has_header=has_header, name=file.filename), "encoding": encoding}
     except Exception as e:
         raise HTTPException(400, str(e))
 
@@ -2196,34 +2253,72 @@ def api_ingest_archive_expand(body: ArchiveExpandBody):
     if not os.path.isfile(body.path):
         raise HTTPException(400, f"No file at {body.path}")
     try:
-        return archive.expand_archive(body.path)
+        return _log_archive_report(os.path.basename(body.path), archive.expand_archive(body.path))
     except archive.ArchiveError as e:
         raise HTTPException(400, str(e))
 
 
+def _log_archive_report(name: str, rep: dict) -> dict:
+    # The toast that shows these is gone in seconds; members that were
+    # skipped (damaged, unwritable, refused) or renamed (their name was
+    # taken) are a fact about the evidence, so the log keeps them.
+    for sk in rep.get("skipped", []):
+        wlog.record("warn", f"Archive {name}: skipped {sk['path']} — {sk['reason']}")
+    for rn in rep.get("renamed", []):
+        wlog.record("warn", f"Archive {name}: {rn['path']} extracted as {rn['as']} (that name was taken)")
+    return rep
+
+
+def _upload_spool(filename: str | None, fallback: str) -> tuple[str, str]:
+    """(directory, path) to spool one upload to: a private directory
+    (mkdtemp — 0700, unique) holding the file under the name the browser
+    sent. Two things depend on the name being the real one — the archive
+    extraction is named after it, and a plugin parser can read meaning
+    from it (esxi_logs takes the log type from the file name; $MFT and $J
+    are recognised by name) — and the private directory is what makes
+    using it safe: the archive route used to rename its spool to
+    <tempdir>/<that name>, overwriting and then deleting whatever file of
+    that name was already in the shared temp folder. Undo it with
+    _remove_spool."""
+    base = os.path.basename((filename or "").replace("\\", "/")).strip()
+    if base in ("", ".", ".."):
+        base = fallback
+    spool_dir = tempfile.mkdtemp(prefix="winnow-upload-")
+    return spool_dir, os.path.join(spool_dir, base)
+
+
+def _remove_spool(spool_dir: str, path: str) -> None:
+    """Undo _upload_spool: the one file, then its private directory. Not
+    rmtree: the upload routes are async, and a tree walk is blocking work
+    the event loop must not do (tests/test_event_loop_blocking.py). Nothing
+    else is ever written into the directory, so an unlink, the same one the
+    routes always did, and an rmdir are the whole job."""
+    for remove, target in ((os.remove, path), (os.rmdir, spool_dir)):
+        try:
+            remove(target)
+        except OSError:
+            pass
+
+
 @app.post("/api/ingest/archive/upload")
 async def api_ingest_archive_upload(file: UploadFile = File(...)):
-    """Upload-then-expand: the archive spools to a tempfile, expands into a
-    directory beside the CASE file (the one durable, analyst-visible place
-    an upload has), and the spool is removed either way."""
-    suffix = Path(file.filename or "upload.zip").suffix or ".zip"
-    fd, tmp = tempfile.mkstemp(suffix=suffix)
+    """Upload-then-expand: the archive spools to a private tempdir,
+    expands into a directory beside the CASE file (the one durable,
+    analyst-visible place an upload has), and the spool is removed either
+    way."""
+    spool_dir, tmp = _upload_spool(file.filename, "archive.zip")
     try:
-        with os.fdopen(fd, "wb") as out:
+        with open(tmp, "wb") as out:
             while chunk := await file.read(4 << 20):
                 out.write(chunk)
         dest_root = os.path.dirname(os.path.abspath(store().path))
-        # Name the extraction after the UPLOADED file, not the tempfile.
-        named = os.path.join(os.path.dirname(tmp), os.path.basename(file.filename or "archive.zip"))
-        os.replace(tmp, named)
-        tmp = named
         try:
-            return await run_in_threadpool(archive.expand_archive, tmp, dest_root=dest_root)
+            return _log_archive_report(os.path.basename(tmp), await run_in_threadpool(
+                archive.expand_archive, tmp, dest_root=dest_root))
         except archive.ArchiveError as e:
             raise HTTPException(400, str(e))
     finally:
-        with contextlib.suppress(OSError):
-            os.remove(tmp)
+        _remove_spool(spool_dir, tmp)
 
 
 class PreviewPath(BaseModel):
@@ -2250,12 +2345,13 @@ def api_ingest_preview_path(body: PreviewPath):
         if kind in ("csv", "text"):
             # Same bounded sample the upload preview reads — never the file.
             with open(body.path, "rb") as f:
-                raw = f.read(512 * 1024)
-            text = _decode_preview_bytes(raw)
+                raw = f.read(PREVIEW_SAMPLE_BYTES)
+            text, encoding = _decode_preview_bytes(raw, body.path)
             if kind == "text":
-                return store().preview_text_lines(text)
-            return store().preview_csv_text(text, delimiter=body.delimiter or None,
-                                            has_header=body.has_header, name=body.path)
+                return {**store().preview_text_lines(text), "encoding": encoding}
+            return {**store().preview_csv_text(text, delimiter=body.delimiter or None,
+                                               has_header=body.has_header, name=body.path),
+                    "encoding": encoding}
         if kind == "json":
             return store().preview_json_file(body.path, flatten_mode=body.flatten_mode,
                                              flatten_depth=body.flatten_depth)
@@ -2888,7 +2984,11 @@ def api_plugin_bundles_apply(bundle_id: int, body: BundleApplyBody | None = None
         for ind in bundle["watchlist"]:
             val = (ind.get("value") or "").strip()
             if val and val not in have:
-                STORE.add_indicator(val, ind.get("kind", "other"), ind.get("note"), ind.get("auto_tag_id"))
+                # No auto-tag, whatever the profile says: a profile is a
+                # cross-case template, and a tag id means something only
+                # in the case that numbered it — the rule
+                # import_watchlist_from_case follows for the same reason.
+                STORE.add_indicator(val, ind.get("kind", "other"), ind.get("note"))
                 have.add(val)
                 seeded += 1
         if seeded:
@@ -3066,24 +3166,33 @@ def _remove_plugin_dest(dest: Path) -> None:
 
 
 def _ingest_via_plugin(path: str, format_id: str, name: str | None,
-                       options: dict, build_fts: bool) -> dict:
+                       options: dict, build_fts: bool, recorded_path: str | None = None) -> dict:
     """Shared by the path and upload plugin-ingest routes: resolve the
     format, run its parse, feed the result through Store.ingest_rows. The
     parse call itself runs outside Store.lock (it's pure file reading —
     only the row batches inside ingest_rows ever hold the lock), so a slow
     multi-GB parse doesn't freeze other requests any more than a big CSV
-    import does."""
+    import does.
+
+    `recorded_path` is what the table says it came from, when that is not
+    `path`: an upload is parsed (and hashed) from a spool that is deleted
+    the moment this returns, and the name the browser sent is the only
+    honest answer to "which file was this"."""
     fmt = PLUGINS.get_format(format_id)  # KeyError -> 400 at the route
     opts = fmt.resolve_options(options)
     result = fmt.parse(path, opts)
     if not isinstance(result, dict) or "columns" not in result or "rows" not in result:
         raise ValueError(f"Plugin format {format_id} returned no columns/rows")
-    return store().ingest_rows(
+    rec = store().ingest_rows(
         result["columns"], result["rows"],
         name=name or result.get("name") or os.path.basename(path),
         path=path, build_fts=build_fts,
         column_types=result.get("column_types"),
     )
+    if recorded_path is not None:
+        store().set_source_path(rec["id"], recorded_path)
+        rec["path"] = recorded_path
+    return rec
 
 
 @app.post("/api/ingest/plugin/path")
@@ -3116,10 +3225,13 @@ async def api_ingest_plugin_upload(
     options: str | None = Form(None),  # JSON-encoded dict, since multipart forms are flat
     build_fts: bool = Form(True),
 ):
-    suffix = Path(file.filename or "upload.bin").suffix or ".bin"
-    fd, tmp = tempfile.mkstemp(suffix=suffix)
+    # Spooled under the upload's own name (see _upload_spool — a parser
+    # may read meaning from it) and removed whichever way the import ends:
+    # it used to stay, a full copy of every uploaded $MFT in the temp
+    # folder, with the table's path pointing at it.
+    spool_dir, tmp = _upload_spool(file.filename, "upload.bin")
     try:
-        with os.fdopen(fd, "wb") as out:
+        with open(tmp, "wb") as out:
             while chunk := await file.read(4 << 20):
                 out.write(chunk)
         opts = json.loads(options) if options else {}
@@ -3127,9 +3239,12 @@ async def api_ingest_plugin_upload(
         # walk — and ran on the loop until now, the same defect the plugin
         # ROUTE dispatcher had.
         return await run_in_threadpool(
-            _ingest_via_plugin, tmp, format_id, name or file.filename, opts, build_fts)
+            _ingest_via_plugin, tmp, format_id, name or file.filename, opts, build_fts,
+            os.path.basename(tmp))
     except Exception as e:
         raise HTTPException(400, str(e))
+    finally:
+        _remove_spool(spool_dir, tmp)
 
 
 @app.delete("/api/source/{source_id}")
@@ -3807,7 +3922,10 @@ def api_watchlist_import(body: WatchlistImportBody):
         value = value.strip()
         if not value or value in have:
             continue
-        added_ids.append(store().add_indicator(value, (kind.strip() or body.kind), None, body.auto_tag_id)["id"])
+        try:
+            added_ids.append(store().add_indicator(value, (kind.strip() or body.kind), None, body.auto_tag_id)["id"])
+        except ValueError as e:   # an auto-tag that isn't a tag here fails the first line, before any write
+            raise HTTPException(400, str(e))
         have.add(value)
     # `added_ids` is what the client scans for — the new entries only,
     # not the whole list again.
@@ -5372,6 +5490,27 @@ def _ensure_console_streams() -> None:
         setattr(sys, name, devnull)
 
 
+def _load_startup_plugins() -> None:
+    """main()'s one plugin load (the import-time load is skipped under
+    `python server.py`), and the console summary of what it loaded — after
+    the startup case is open, so the summary describes what this server
+    will actually run rather than the machine defaults."""
+    _reload_plugins()
+    for p in PLUGINS.describe():
+        if p["bundled"] and p["fs_name"] in RETIRED_BUNDLED_EXAMPLES:
+            # Stamped with its reason by _reload_plugins; not a failure.
+            print(f"Plugin retired: {p['name']} ({p['path']}): {p['error']}")
+        elif p["error"]:
+            record_log("error", f"Plugin FAILED: {p['name']} ({p['path']}): {p['error']}")
+        elif not p["enabled"]:
+            print(f"Plugin disabled: {p['name']} (toggle in Settings → Plugins)")
+        else:
+            # Formats *and* tabs — a tab-only plugin reporting "no formats"
+            # reads like a failed load when it's a perfectly good plugin.
+            what = ", ".join(p["formats"] + p["tabs"]) or "registered nothing"
+            print(f"Plugin loaded: {p['name']}" + (f" v{p['version']}" if p["version"] else "") + f" ({what})")
+
+
 def main() -> None:
     global STORE
     # Before anything that might log or print: with no console there is
@@ -5418,20 +5557,6 @@ def main() -> None:
     if args.plugins_dir:
         global PLUGIN_DIRS
         PLUGIN_DIRS = _plugin_dirs(args.plugins_dir)
-        _reload_plugins()
-    for p in PLUGINS.describe():
-        if p["bundled"] and p["fs_name"] in RETIRED_BUNDLED_EXAMPLES:
-            # Stamped with its reason by _reload_plugins; not a failure.
-            print(f"Plugin retired: {p['name']} ({p['path']}): {p['error']}")
-        elif p["error"]:
-            record_log("error", f"Plugin FAILED: {p['name']} ({p['path']}): {p['error']}")
-        elif not p["enabled"]:
-            print(f"Plugin disabled: {p['name']} (toggle in Settings → Plugins)")
-        else:
-            # Formats *and* tabs — a tab-only plugin reporting "no formats"
-            # reads like a failed load when it's a perfectly good plugin.
-            what = ", ".join(p["formats"] + p["tabs"]) or "registered nothing"
-            print(f"Plugin loaded: {p['name']}" + (f" v{p['version']}" if p["version"] else "") + f" ({what})")
 
     # The bound address is by definition one this server answers to, as is
     # anything the operator named explicitly.
@@ -5502,6 +5627,10 @@ def main() -> None:
             # saves them — an unregistered temp case is the whole point.
             WS.cases.create(case_path, name=os.path.splitext(os.path.basename(case_path))[0])
             WS.cases.touch_opened(WS.cases.find_by_path(case_path)["id"])
+        # After the open, so the case's own plugin settings apply from the
+        # first request; before the quick-look imports below, which route a
+        # file to a plugin's parser when one claims it.
+        _load_startup_plugins()
         for f in getattr(args, "assoc_ingest", []):
             try:
                 job = _assoc_ingest(f)
@@ -5519,8 +5648,13 @@ def main() -> None:
             if rec.get("suspect_quote_rows"):
                 print(f"  {rec['suspect_quote_rows']:,} row(s) contain very long multi-line fields — "
                       "check for a stray quote if the row count looks low")
+            if rec.get("encoding") == "cp1252":
+                print("  not UTF-8 — read as Windows-1252")
+            elif rec.get("cp1252_bytes"):
+                print(f"  {rec['cp1252_bytes']:,} byte(s) not valid UTF-8 — read as Windows-1252")
         print(f"Winnow on {url}  (case: {os.path.abspath(case_path)})")
     else:
+        _load_startup_plugins()
         print(f"Winnow on {url}  (home screen — no case open)")
     if not args.no_browser:
         # Opened from a thread that waits for the port, rather than before

@@ -911,3 +911,33 @@ def test_error_log_route_records_and_returns(client):
     assert after["seq"] > before["seq"]
     last = after["entries"][-1]
     assert last["message"] == "unit-test boom" and last["level"] == "error" and last["ts"]
+
+
+def test_a_stale_delete_with_file_never_deletes_another_case(client, tmp_path):
+    """A home screen's list can be older than the registry: another window
+    forgot case B and registered a new one. With registry ids reused, the
+    new case took B's id, and the stale window's "Delete with file" on B
+    deleted the new case's file. The client now says which file it means,
+    and a mismatch touches nothing."""
+    from winnow.store import Store
+
+    paths = {}
+    for name in ("A", "B", "NewHost"):
+        paths[name] = str(tmp_path / f"{name}.db-winnow")
+    a = client.post("/api/cases", json={"path": paths["A"], "name": "A"}).json()
+    b = client.post("/api/cases", json={"path": paths["B"], "name": "B"}).json()
+    assert client.delete(f"/api/cases/{b['id']}").status_code == 200       # window 2 forgets B
+    new = client.post("/api/cases", json={"path": paths["NewHost"], "name": "NewHost"}).json()
+    Store(paths["NewHost"]).close()                                          # a real case file on disk
+    assert new["id"] != b["id"]
+
+    # Window 1, still listing B under its old id, asks to delete B's file.
+    r = client.delete(f"/api/cases/{b['id']}", params={"delete_file": "true", "path": paths["B"]})
+    assert r.status_code == 200
+    assert (tmp_path / "NewHost.db-winnow").exists()
+
+    # And when an id does name another case than the one meant, nothing happens.
+    r = client.delete(f"/api/cases/{new['id']}", params={"delete_file": "true", "path": paths["A"]})
+    assert r.status_code == 409
+    assert (tmp_path / "NewHost.db-winnow").exists()
+    assert {c["id"] for c in client.get("/api/cases").json()} >= {a["id"], new["id"]}

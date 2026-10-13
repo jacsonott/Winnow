@@ -175,13 +175,12 @@ export function openTablesManager() {
         };
         const del = el('button', 'btn ghost', 'Remove…');
         del.onclick = async () => {
-          /* A table a merge is built on is refused, not warned about. Its
-             id is REUSED by the next import, so dropping it does not just
-             break the merge — the next file imported takes the freed id
-             and silently joins a merge nobody added it to. The server
-             refuses this too (409); asking here as well is so the analyst
-             gets the reason and the merge's name without a round trip,
-             and so the button never looks like it did nothing. */
+          /* A table a merge is built on is refused, not warned about:
+             dropping it would leave the merge naming a member that is not
+             there (see Store.drop_source). The server refuses this too
+             (409); asking here as well is so the analyst gets the reason
+             and the merge's name without a round trip, and so the button
+             never looks like it did nothing. */
           const usedBy = s.is_merge ? []
             : (S.sources || []).filter((m) => m.is_merge && (m.member_source_ids || []).includes(s.id));
           if (usedBy.length) {

@@ -169,13 +169,27 @@ def _ts_iso(ts: Any) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S.%f")
 
 
+def _utf8_text(s: str) -> str:
+    """store._utf8_text's twin (this module imports nothing from the app):
+    a lone surrogate — the serializer's "\\udc80" for an NTFS name holding
+    one — has no UTF-8 encoding, and the insert of its batch stopped the
+    whole import. Written back as the escape the storage held."""
+    if s.isascii():
+        return s
+    try:
+        s.encode("utf-8")
+        return s
+    except UnicodeEncodeError:
+        return s.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
 def _cell(value: Any) -> str:
     if value is None:
         return ""
     if isinstance(value, str):
-        return value
+        return _utf8_text(value)
     if isinstance(value, (dict, list)):
-        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+        return _utf8_text(json.dumps(value, ensure_ascii=False, sort_keys=True))
     return str(value)
 
 
@@ -284,7 +298,7 @@ def iter_plaso_rows(path: str) -> Iterator[list[str]]:
                 if "_winnow_error" in data:
                     extras["_winnow_error"] = data["_winnow_error"]
                 source_file = _cell(merged.get("display_name") or "") \
-                    or stream_location(stream_ref) or _cell(merged.get("filename") or "")
+                    or _utf8_text(stream_location(stream_ref)) or _cell(merged.get("filename") or "")
                 yield [
                     _ts_iso(timestamp),
                     _cell(ts_desc),
@@ -293,7 +307,7 @@ def iter_plaso_rows(path: str) -> Iterator[list[str]]:
                     source_file,
                     _cell(merged.get("hostname")),
                     _cell(merged.get("username")),
-                    json.dumps(extras, ensure_ascii=False, sort_keys=True) if extras else "",
+                    _utf8_text(json.dumps(extras, ensure_ascii=False, sort_keys=True)) if extras else "",
                 ]
     finally:
         ro.close()

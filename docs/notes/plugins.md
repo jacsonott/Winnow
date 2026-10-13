@@ -102,7 +102,19 @@ see [docs/notes/README.md](README.md) for the whole set.
   routes at the home screen) — `PluginRegistry.load` is written to be safely re-run on
   a live server (registry rebuilt wholesale; superseded modules linger in
   sys.modules under unique per-load names because Python can't truly
-  unload code, but nothing references them again). Enabled/disabled state
+  unload code, but nothing references them again). **Rebuilt off to the
+  side, swapped in whole, one load at a time.** A load fills a fresh
+  `_Loaded` and assigns it to `self._state` at the end, under
+  `_load_lock`; every lookup reads `self._state` once. It used to clear
+  the live dicts first and refill them plugin by plugin, so every plugin
+  route 404'd for as long as the imports took, and two reloads at once
+  (a toggle in one window, a case opening in another — both threadpooled
+  routes) filled the same dicts, listing healthy plugins twice and
+  failing them with "Duplicate API route". server.py's `_reload_plugins`
+  holds `_PLUGIN_RELOAD_LOCK` around reading the policy AND loading, so
+  the reload that finishes last is also the one that read the open case
+  last. Anything new that `register()` writes into goes on `_Loaded`,
+  not on the registry, or it lands in the live set mid-load. Enabled/disabled state
   is `workspace/plugins.json` (`PluginPrefs`) — machine-level workflow
   state, stored as a *disabled* list so presence in plugins/ means on by
   default, keyed by filesystem name because that's the only identity that
@@ -201,6 +213,15 @@ see [docs/notes/README.md](README.md) for the whole set.
   strict all-stamped check silently produced 0 rows). `_apply_fixups`
   therefore distinguishes all-stamped (un-stamp), none-stamped (parse
   as-is), and mixed (genuinely torn → skip the record).
+  Its $J carver has two traps of its own. First, measuring a zero run
+  by slicing `data[pos:]` copies the rest of the 8 MiB chunk every time.
+  Garbage whose 8-byte slots start with a zero u32 without being zero
+  runs did that once per slot, which is minutes per chunk. `_NONZERO.search`
+  scans in place instead. Second, the length gate is not a header gate.
+  A V3 header is 76 bytes, so a "V3" slot claiming 64 bytes passed the
+  60-byte minimum and was unpacked past its own end; at end of file that
+  raised `struct.error` and failed the ingest. `HEADER_LEN` is per
+  version, and a slot shorter than its own header is carved past.
 
 - **The pivot example is the one that exercises `run_sql`'s edges**, and
   three of them bit during its build — worth knowing before writing
@@ -239,7 +260,7 @@ see [docs/notes/README.md](README.md) for the whole set.
     showing" has to be handed the filter spec and recompile it, or do what
     the pivot does and own its filtering outright.
   - **Iterating on a plugin's Python needs a reload.** The module is
-    imported once at server import; editing the file and re-requesting a
+    imported once when the server loads plugins; editing the file and re-requesting a
     route runs the *old* code with the *new* line numbers, which makes
     tracebacks point at unrelated lines. Toggle the plugin off and on in
     Settings → Plugins (that's what `_reload_plugins` is for) or restart.
@@ -251,10 +272,21 @@ see [docs/notes/README.md](README.md) for the whole set.
   right for something the analyst placed and wrong for what we shipped.
   Case level (case_settings `plugin_overrides`, JSON {fs_name: bool}):
   wins where set, travels with the case file on purpose. Three rules keep
-  it honest: `_reload_plugins()` runs on every case open, because "a
-  disabled plugin's code never runs" is a per-case statement now; the
-  "everywhere" scopes clear the open case's override, so the dropdown
-  can't show a state a leftover override silently exempts; and
+  it honest: `_reload_plugins()` runs whenever which case is open changes,
+  because "a disabled plugin's code never runs" is a per-case statement
+  now — every case open including re-opening the open one (the client
+  resets its plugin tabs on that request either way), the quick-look
+  open, quick-look discard (no case: machine defaults again), and startup.
+  Startup is the one that went wrong: plugins loaded at import with no
+  case open and `main()` opened `--case` afterwards, so a double-clicked
+  case ran what it had switched off and lacked what it had switched on.
+  Under `python server.py` the import-time load is skipped and `main()`
+  loads once the case is open (`_load_startup_plugins`), since a load
+  under the machine set first would already have imported a plugin the
+  case turns off; `uvicorn server:app` opens no case and keeps the
+  import-time load. The "everywhere" scopes clear the open case's
+  override, so the dropdown can't show a state a leftover override
+  silently exempts; and
   `PluginRegistry.load` is first-directory-wins on fs_name, so an
   analyst's installed copy of an example shadows the bundled one instead
   of both loading and fighting over tab ids.
@@ -295,13 +327,32 @@ see [docs/notes/README.md](README.md) for the whole set.
   `SELECT * FROM src_a UNION ALL SELECT * FROM src_b …` over every matching
   source (schemas identical by construction, so the union lines up by
   position), and the dashboard slices it back apart on the plugin's `Log`
-  column ('hostd'/'auth'/'shell'/…, set from the filename). A profile still
+  column ('hostd'/'auth'/'shell'/…, set from the filename's stem, with
+  the ` (N)` that archive expansion gives a clashing name taken off first,
+  so `messages (2)` is still syslog). A profile still
   can't create a merge, and this isn't one — it's a read-time union, so it
   needs no new object in the case file and picks up rotated logs imported
   later with no re-wiring. The plugin parses two line shapes per line, not
   per file (ESXi ISO and year-less Linux syslog both appear in one
   syslog.log), and folds timestamp-less continuation lines onto the
-  previous row rather than emitting orphans.
+  previous row rather than emitting orphans. Folding collects the lines
+  and joins once, and stops at `FOLD_MAX_CHARS` (64 Ki). The format
+  claims every .log, so a dated header over a 100k-line dump is a real
+  input, and repeated `message + " " + line` took minutes over it to build
+  one 9 MB cell. Past the cap, lines are rows of their own, as they are
+  in a file with no timestamps.
+  **A year-less syslog stamp is not a datetime**, and Timestamp is
+  declared one: TS_NORMALIZE reads "Jan  5 10:00:01" as NULL, so every
+  UAC/Linux line fell out of the timeframe filter and the board's own
+  "Activity over time" chart. `_SyslogYears` resolves the year the way
+  timeparse's `syslog_bsd` op does (a year added at each Dec→Jan wrap,
+  in file order), but anchors at the other end, because a parser can't
+  ask for the first line's year. The last stamp belongs to the year of
+  the file's mtime, or the year before if that day is still to come. That
+  costs one extra read, only for a file that has a year-less stamp. The
+  output is naive ISO, since syslog doesn't say its zone. An upload's
+  spool carries the upload time as its mtime (browsers don't send it),
+  so only an import by path gets the file's real one.
 
 - **A plugin's dashboard is offered, not applied** (`register_dashboard`,
   API 8). It appears under Dashboards ▸ Library beside the machine-wide

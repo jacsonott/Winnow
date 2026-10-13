@@ -7,6 +7,8 @@ gate, which no include pattern can reach; the plugin's parser had an
 "other" type for exactly those files all along. Now the format claims
 .log too, and the scan sees the whole bundle.
 """
+import os
+import re
 from pathlib import Path
 
 import pytest
@@ -104,3 +106,145 @@ def test_a_log_with_no_esxi_timestamps_is_one_row_per_line(esxi_format, tmp_path
     out = esxi_format.parse(str(p2), esxi_format.resolve_options({}))
     rows = list(out["rows"])
     assert len(rows) == 2 and rows[0][-1].endswith("at Foo.bar (foo.py:1)")
+
+
+def _module(fmt):
+    import sys
+    return sys.modules[fmt.parse.__module__]
+
+
+def test_continuation_folding_is_linear_and_capped(esxi_format, tmp_path):
+    """The format claims every .log, so a dated header followed by a
+    100k-line dump folded into one row by repeated `message + " " + line`.
+    That is quadratic: 25k lines took 15 s, 100k took 157 s, and the cell
+    came out 9 MB. Folding now collects the lines and joins once, and
+    stops at FOLD_MAX_CHARS. What doesn't fit becomes rows of its own (the
+    shape a timestamp-less file always had), so nothing is lost."""
+    import time
+
+    cap = _module(esxi_format).FOLD_MAX_CHARS
+    frame = "    at com.vmware.vim.vmomi.core.impl.SomeFrame.invoke(SomeFrame.java:{}) payload=AAAA\n"
+    n = 40_000
+    p = tmp_path / "app.log"
+    with open(p, "w") as f:
+        f.write("2024-01-05T10:00:00Z hostd[1]: Exception in thread main\n")
+        f.writelines(frame.format(i) for i in range(n))
+        f.write(LINE)
+    t0 = time.monotonic()
+    out = esxi_format.parse(str(p), esxi_format.resolve_options({}))
+    rows = list(out["rows"])
+    elapsed = time.monotonic() - t0
+    assert elapsed < 10, f"{n} continuation lines took {elapsed:.1f}s — folding is quadratic again"
+
+    first = rows[0][-1]
+    assert first.startswith("Exception in thread main at com.vmware") and len(first) <= cap
+    assert rows[-1][0] == "2026-03-14T08:00:00.123Z" and rows[-1][-1] == "hello from clomd"
+    # Every frame exactly once, in order, across the folded row and the overflow rows.
+    seen = [int(x) for r in rows[:-1] for x in re.findall(r"SomeFrame\.java:(\d+)\)", r[-1])]
+    assert seen == list(range(n))
+    assert all(not r[0] for r in rows[1:-1])     # overflow rows don't borrow a timestamp
+
+
+def _write_syslog(tmp_path, name, lines, mtime_utc):
+    import calendar
+    p = tmp_path / name
+    p.write_text("".join(line + "\n" for line in lines))
+    ts = calendar.timegm(mtime_utc.timetuple())
+    os.utime(p, (ts, ts))
+    return p
+
+
+def _stamps(esxi_format, p):
+    out = esxi_format.parse(str(p), esxi_format.resolve_options({}))
+    return [r[0] for r in out["rows"]]
+
+
+def test_yearless_syslog_stamps_get_their_year_from_the_file(esxi_format, tmp_path, store):
+    """Linux syslog stamps carry no year, and the plugin put "Jan  5
+    10:00:01" in a column it declares datetime. TS_NORMALIZE can't read a
+    year-less stamp, so every Linux line dropped out of the timeframe
+    filter and the board's own "Activity over time" chart. The year comes
+    from the file instead: its last line belongs to the year of the file's
+    modified time (the year before, if that day hasn't come yet), and each
+    Dec→Jan wrap is counted back from there."""
+    from datetime import datetime
+
+    # Over New Year, written on Jan 3.
+    p = _write_syslog(tmp_path, "secure", [
+        "Dec 30 23:59:58 host1 sshd[811]: Failed password for root from 10.9.9.9 port 4022 ssh2",
+        "Dec 31 10:00:00 host1 sshd[811]: Accepted password for bob from 10.9.9.8 port 4022 ssh2",
+        "Jan  1 00:00:01 host1 CRON[900]: (root) CMD (run-parts /etc/cron.hourly)",
+        "Jan  2 08:15:00 host1 sudo[901]: bob : TTY=pts/0 ; USER=root ; COMMAND=/bin/sh",
+    ], datetime(2025, 1, 3, 12, 0, 0))
+    stamps = _stamps(esxi_format, p)
+    assert stamps == ["2024-12-30 23:59:58", "2024-12-31 10:00:00", "2025-01-01 00:00:01", "2025-01-02 08:15:00"]
+    for s in stamps:
+        assert store.db.execute("SELECT TS_NORMALIZE(?)", (s,)).fetchone()[0] is not None, s
+
+    # Two wraps: the first line is two years before the last.
+    p = _write_syslog(tmp_path, "messages", [
+        "Mar  1 00:00:00 h k: a", "Dec  1 00:00:00 h k: b", "Jan  1 00:00:00 h k: c",
+        "Dec  1 00:00:00 h k: d", "Jan  1 00:00:00 h k: e",
+    ], datetime(2025, 1, 2))
+    assert [s[:7] for s in _stamps(esxi_format, p)] == ["2023-03", "2023-12", "2024-01", "2024-12", "2025-01"]
+
+    # A last line later in the year than the file's mtime is last year's.
+    p = _write_syslog(tmp_path, "auth.log", ["Nov  5 09:00:00 h sshd[1]: x"], datetime(2025, 3, 1))
+    assert _stamps(esxi_format, p) == ["2024-11-05 09:00:00"]
+
+    # ISO lines are left exactly as written; a stamp that is no date in the
+    # resolved year (Feb 29 of 2025) keeps its own text rather than a guess.
+    p = _write_syslog(tmp_path, "syslog.log", [
+        "2025-02-27T10:00:00Z hostd[1]: iso line",
+        "Feb 28 10:00:00 h k: ok",
+        "Feb 29 10:00:00 h k: no such day",
+    ], datetime(2025, 3, 1))
+    assert _stamps(esxi_format, p) == ["2025-02-27T10:00:00Z", "2025-02-28 10:00:00", "Feb 29 10:00:00"]
+
+
+def test_a_stamp_that_is_no_real_time_never_stops_the_parse(esxi_format, tmp_path):
+    """The year pre-pass orders the last stamp against the file's mtime. A
+    last line reading hour 99, or a file whose mtime is nonsense, must
+    still parse; the stamp that is no time keeps its own text."""
+    from datetime import datetime
+
+    p = _write_syslog(tmp_path, "messages", ["Jan  4 10:00:00 h k: a", "Jan  5 99:00:00 h k: b"],
+                      datetime(2025, 1, 6))
+    assert _stamps(esxi_format, p) == ["2025-01-04 10:00:00", "Jan  5 99:00:00"]
+    os.utime(p, (0, 2 ** 62))
+    assert len(_stamps(esxi_format, p)) == 2
+
+
+def test_a_renamed_duplicate_keeps_its_log_type(esxi_format, tmp_path):
+    """Archive expansion never overwrites: a second file of one name lands
+    as `name (2).ext`. The classic case is `messages` beside the
+    `messages.gz` rotation it expands to. The plugin takes the log type
+    from the name's stem, so `messages (2)` was not `messages` and the
+    rotated log was filed as Log='other', out of every auth and syslog
+    widget. The disambiguator is stripped before the stem is matched."""
+    import gzip
+    import zipfile
+
+    from winnow import archive
+
+    log_type_for = _module(esxi_format).log_type_for
+    for original, renamed in (("messages", "messages (2)"), ("hostd.log", "hostd (2).log"),
+                              ("syslog.0", "syslog (2).0"), ("auth.log.1", "auth.log (2).1"),
+                              ("vmkernel.log", "vmkernel (13).log")):
+        assert log_type_for(renamed) == log_type_for(original) != "other", renamed
+    assert log_type_for("clomd (2).log") == "other"
+    assert log_type_for("messages(2)") == "other"      # not the form expansion writes
+
+    # End to end: the names expand_archive actually produces.
+    line = "Jan  5 10:00:01 h1 sshd[811]: Accepted password for bob from 10.9.9.8 port 22 ssh2\n"
+    z = tmp_path / "uac.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("var/log/messages", line)
+        zf.writestr("var/log/messages.gz", gzip.compress(line.encode()))
+    root = archive.expand_archive(str(z))["root"]
+    logs = {}
+    for name in ("messages", "messages (2)"):
+        out = esxi_format.parse(os.path.join(root, "var", "log", name), esxi_format.resolve_options({}))
+        (row,) = list(out["rows"])
+        logs[name] = dict(zip(out["columns"], row))["Log"]
+    assert logs == {"messages": "syslog", "messages (2)": "syslog"}

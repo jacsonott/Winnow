@@ -48,6 +48,24 @@ def test_object_keys_order_and_number_rules():
     assert _row_json(["-12", "-0.25", "-", "12."], {}, {"inputs": ["a", "b", "c", "d"]}) == '{"a":-12,"b":-0.25,"c":"-","d":"12."}'
 
 
+def test_a_number_is_unquoted_only_when_it_round_trips():
+    """The cell text went through int()/float() and back out through
+    json.dumps, so the JSON said something the evidence didn't: "1.10"
+    became 1.1, "9999999999999999.99" became 1e+16, "-0" became 0 — and
+    "42\\n" became 42, because `$` also matches before a trailing newline.
+    A cell is written unquoted only if the number json writes back is the
+    cell's own text; anything else stays the string it was."""
+    names = ["a", "b", "c", "d", "e", "f", "g", "h"]
+    cells = ["1.10", "9999999999999999.99", "42\n", "-0", "100.0", "0.1", "-0.0", "-7"]
+    out = _row_json(cells, {}, {"inputs": names})
+    assert out == ('{"a":"1.10","b":"9999999999999999.99","c":"42\\n","d":"-0",'
+                   '"e":100.0,"f":0.1,"g":-0.0,"h":-7}')
+    # Whatever is unquoted reads back as exactly the cell's text.
+    for name, cell in zip(names, cells):
+        v = json.loads(out)[name]
+        assert (v if isinstance(v, str) else json.dumps(v)) == cell
+
+
 def test_skip_empty_leaves_out_null_and_blank_cells():
     st = {"inputs": ["A", "B", "C", "D"]}
     assert _row_json(["x", None, "", "  "], {"skip_empty": True}, st) == '{"A":"x"}'

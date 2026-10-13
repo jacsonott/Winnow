@@ -2115,6 +2115,9 @@ textarea:focus { border-color: var(--accent); outline: none; }
    below them naming the count cap. Quiet — they explain the numbers, they
    are not numbers themselves. */
 .search-all-scope-ran { font-size: 11px; color: var(--dim); padding: 2px 0; }
+/* A table the sweep could not count. Not quiet: it is a gap in the
+   answer, and reads as one. */
+.search-all-failed { color: var(--danger); padding: 2px 0; }
 
 .search-all-paste {
   width: 100%; resize: vertical; min-height: 120px; margin-bottom: 12px;

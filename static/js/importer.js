@@ -352,9 +352,18 @@ export function openImportModal() {
                   return uploadWithProgress('/api/ingest/archive/upload', fd, item.name);
                 })();
               expanded.push({ name: item.name, ...rep });
+              // Skipped members (damaged, unwritable, refused as unsafe) and
+              // renamed ones (two wanted one name) are things the analyst
+              // needs to know before trusting the tree; the first of each is
+              // named, the full list is in the log.
+              const skipped = rep.skipped || [];
+              const renamed = rep.renamed || [];
               toast(`Expanded ${item.name}: ${rep.files.toLocaleString()} file${rep.files === 1 ? '' : 's'}`
                 + (rep.archives > 1 ? ` from ${rep.archives} nested archives` : '')
-                + (rep.truncated ? ' (stopped at a safety cap — partial)' : ''), 6000);
+                + (renamed.length ? ` · ${renamed.length} renamed, the name was taken (${renamed[0].path} → ${renamed[0].as})` : '')
+                + (skipped.length ? ` · ${skipped.length} skipped (${skipped[0].path}: ${skipped[0].reason})` : '')
+                + (rep.truncated ? ' (stopped at a safety cap — partial)' : ''),
+              skipped.length || renamed.length ? 12000 : 6000);
             } catch (e) {
               if (!e.cancelled) toast(`Could not expand ${item.name}: ` + e.message, 8000);
             }

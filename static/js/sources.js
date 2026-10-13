@@ -115,6 +115,12 @@ export function sourceTitle(s, suffix) {
     // A derived table has no file on disk; say where it came from instead.
     if (s.origin === 'subset') parts.push(subsetDescription(s));
     else if (s.origin === 'sql') parts.push('Saved from a SQL pane query');
+    // An imported file's origin_meta, when it has one, says how its bytes
+    // were read — evidence that was not UTF-8 should say so where it is.
+    else if (!s.origin && s.origin_meta && s.origin_meta.encoding === 'cp1252') parts.push('Not UTF-8 — read as Windows-1252');
+    else if (!s.origin && s.origin_meta && s.origin_meta.cp1252_bytes) {
+      parts.push(`${Number(s.origin_meta.cp1252_bytes).toLocaleString()} bytes not valid UTF-8 — read as Windows-1252`);
+    }
     if (s.path) parts.push(s.path);
     if (s.imported_at) parts.push(`Imported ${s.imported_at.replace('T', ' ')}`);
   }

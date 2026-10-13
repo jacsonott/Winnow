@@ -57,6 +57,14 @@ stores longer than it was true:
 Never holds evidence data — only UI/workflow bookkeeping. Analyst work
 (tags, notes, layouts, saved views) lives in the case file instead, so it
 travels with the evidence; that split is deliberate.
+
+Human-readable means hand-editable, so a damaged file is expected, not
+exotic: one that won't parse or has the wrong shape is renamed to
+`<name>.corrupt-<time>`, logged, and the store starts from its defaults
+(see `_read`). Never read one of these files with a bare json.load that
+falls back to "empty" — the store's next write then replaces the
+analyst's file with that empty state, which is how three custom filters
+became the shipped defaults on a plain list().
 """
 
 from __future__ import annotations
@@ -110,8 +118,18 @@ class _WorkspaceLock:
         self._rlock.acquire()
         depth = getattr(self._depth, "n", 0)
         if depth == 0:
-            lock_path = _ensure_dir() / ".lock"
-            fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+            # Anything that raises between taking the RLock and returning
+            # never reaches __exit__, so it has to give the RLock back
+            # itself. It didn't: one failed open of .lock (EMFILE, a
+            # read-only install) left the RLock owned by that worker
+            # thread forever, and every other thread's next workspace call
+            # — nearly every route — blocked for the life of the process.
+            try:
+                lock_path = _ensure_dir() / ".lock"
+                fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+            except BaseException:
+                self._rlock.release()
+                raise
             try:
                 if os.name == "posix":
                     import fcntl
@@ -123,6 +141,10 @@ class _WorkspaceLock:
                 # A filesystem without advisory locks degrades to the old
                 # single-process behaviour rather than failing every save.
                 pass
+            except BaseException:
+                os.close(fd)
+                self._rlock.release()
+                raise
             self._fd.fd = fd
         self._depth.n = depth + 1
         return self
@@ -156,14 +178,90 @@ def _ensure_dir() -> Path:
 
 
 def _read(name: str, default: Any) -> Any:
+    """One store's document, or `default` when there is none to read.
+
+    These files are human-readable on purpose, so a hand edit is an
+    ordinary event and every way one goes wrong has to end somewhere
+    better than it used to. A file that can't be parsed (a trailing comma,
+    an ANSI save of an accented name, a power cut mid-write) or that
+    parses to the wrong shape (`null`, `[]`, `{}` where the store keeps
+    `{"cases": [...]}`) used to read as EMPTY, and the store's next write —
+    a plain filters list() re-seeds — replaced it, so the analyst's records
+    went without a word; or it raised out of every route touching the
+    store, and out of server.py's import for plugins.json. Now it is moved
+    aside to `<name>.corrupt-<time>` and logged, and the store starts from
+    its defaults: the analyst's file still exists, and nothing writes over
+    it. `utf-8-sig` because Notepad's "UTF-8 with BOM" is a valid save of
+    a valid file, not damage.
+
+    The shape check is `default`'s own: the same top-level type, and every
+    key the default names present with a value of the default's type for
+    it. Keys the default doesn't name are not checked, so a store that
+    grew a key since (plugins.json's enabled_bundled) still reads files
+    written before it — that store checks its own."""
     path = _ensure_dir() / name
-    if not path.exists():
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return default
+    except OSError:
+        # Unreadable is not damaged (a sharing violation, permissions):
+        # nothing here can tell, so it is left exactly where it is.
         return default
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, json.JSONDecodeError):
+        data = json.loads(raw.decode("utf-8-sig"))
+    except (ValueError, RecursionError) as e:   # UnicodeDecodeError and JSONDecodeError are ValueErrors
+        _set_aside(path, name, f"is not valid UTF-8 JSON ({type(e).__name__}: {e})")
         return default
+    problem = _shape_problem(data, default)
+    if problem:
+        _set_aside(path, name, problem)
+        return default
+    return data
+
+
+_TYPE_WORDS = {dict: "an object", list: "a list", str: "a string", int: "a number",
+               bool: "true/false", float: "a number", type(None): "null"}
+
+
+def _shape_problem(data: Any, default: Any) -> str | None:
+    def word(v):
+        return _TYPE_WORDS.get(type(v), type(v).__name__)
+
+    if type(data) is not type(default):
+        return f"holds {word(data)} where {word(default)} belongs"
+    if isinstance(default, dict):
+        for key, want in default.items():
+            if key not in data:
+                return f'has no "{key}"'
+            if type(data[key]) is not type(want):
+                return f'has {word(data[key])} for "{key}" where {word(want)} belongs'
+    return None
+
+
+def _set_aside(path: Path, name: str, why: str) -> None:
+    """Rename a damaged workspace file out of the way, so the store's next
+    write lands in a fresh file instead of replacing it. Called with the
+    workspace lock held (every _read is), so a second process can't be
+    reading the same file mid-rename."""
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    dest = path.with_name(f"{path.name}.corrupt-{stamp}")
+    n = 1
+    while dest.exists():
+        n += 1
+        dest = path.with_name(f"{path.name}.corrupt-{stamp}-{n}")
+    try:
+        os.rename(path, dest)
+        what = f"moved aside to workspace/{dest.relative_to(WORKSPACE_DIR).as_posix()}"
+    except OSError as e:
+        # Can't rename, so the next write most likely can't land either;
+        # say so rather than claim the file is safe.
+        what = f"could not be moved aside ({e}); fix or delete it by hand"
+    try:
+        from . import log as wlog
+        wlog.record("error", f"workspace/{name} {why} - {what}; starting from defaults")
+    except Exception:  # noqa: BLE001 — a log line must never fail the read it reports
+        pass
 
 
 def _write(name: str, data: Any) -> None:
@@ -172,6 +270,12 @@ def _write(name: str, data: Any) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
+        # Without this, a power cut shortly after os.replace can leave the
+        # NEW name pointing at a zero-length file on ext4/NTFS: the rename
+        # is journalled before the data is. These files are small, and
+        # written on an analyst's action, not per row.
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, path)
 
 
@@ -185,15 +289,29 @@ def _now() -> str:
 
 class CaseRegistry:
     """The home screen's list of known case.db files — name/group/notes are
-    display metadata only, never mutate the underlying case file."""
+    display metadata only, never mutate the underlying case file.
+
+    A case's id is never handed out twice. The file keeps `next_id` beside
+    the list, because max+1 gives a forgotten newest case's id to the next
+    one registered — and a home screen still listing the forgotten one then
+    acts on the newcomer: "Delete with file" from a stale window deleted a
+    different case's file. A registry from before this field has no record
+    of what it gave out, so it starts from max+1 of what is still listed;
+    every id after that is new."""
 
     FILE = "cases.json"
 
     def _load(self) -> list[dict]:
         return _read(self.FILE, {"cases": []})["cases"]
 
-    def _save(self, items: list[dict]) -> None:
-        _write(self.FILE, {"cases": items})
+    def _save(self, items: list[dict], next_id: int | None = None) -> None:
+        data = _read(self.FILE, {"cases": []})
+        floor = max(_next_id(items), int(data.get("next_id") or 0), next_id or 0)
+        _write(self.FILE, {"cases": items, "next_id": floor})
+
+    def _allocate_id(self, items: list[dict]) -> int:
+        data = _read(self.FILE, {"cases": []})
+        return max(_next_id(items), int(data.get("next_id") or 0))
 
     def list(self) -> list[dict]:
         with _LOCK:
@@ -217,7 +335,7 @@ class CaseRegistry:
             if existing:
                 return existing
             rec = {
-                "id": _next_id(items),
+                "id": self._allocate_id(items),
                 "path": os.path.abspath(path),
                 "name": name,
                 "group": group,
@@ -226,7 +344,7 @@ class CaseRegistry:
                 "last_opened": None,
             }
             items.append(rec)
-            self._save(items)
+            self._save(items, next_id=rec["id"] + 1)
             return rec
 
     def update(self, case_id: int, **fields) -> dict:
@@ -696,12 +814,15 @@ class TagTemplate:
 
     def get(self) -> list[dict]:
         with _LOCK:
+            # Read BEFORE the existence check: a damaged tags.json is moved
+            # aside by _read, and this then re-seeds the defaults rather
+            # than handing every new case an empty tag set.
+            current = _read(self.FILE, [])
             path = _ensure_dir() / self.FILE
             if not path.exists():
                 initial = [{"name": n, "color": c, "hotkey": h} for n, c, h in DEFAULT_TAGS]
                 self._save(initial)
                 return initial
-            current = _read(self.FILE, [])
             if current == self._LEGACY_SEED:
                 migrated = [{"name": n, "color": c, "hotkey": h} for n, c, h in DEFAULT_TAGS]
                 self._save(migrated)
@@ -789,8 +910,14 @@ class PluginPrefs:
 
     def _data(self) -> dict:
         d = _read(self.FILE, {"disabled": []})
-        d.setdefault("disabled", [])
-        d.setdefault("enabled_bundled", [])
+        # enabled_bundled is younger than the file, so _read's shape check
+        # (which only knows "disabled") can't require it — but a hand-edited
+        # null or bare string there would raise from set(), or become one
+        # plugin per letter, in the module-level _reload_plugins() that
+        # runs while server.py imports. Nothing to set aside for one key;
+        # it reads as empty and the next toggle rewrites it.
+        if not isinstance(d.get("enabled_bundled"), list):
+            d["enabled_bundled"] = []
         return d
 
     def disabled(self) -> set[str]:

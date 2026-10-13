@@ -18,7 +18,14 @@ see [docs/notes/README.md](README.md) for the whole set.
   Two constraints worth knowing. SQLite attaches at most **10**
   databases (`MAX_ATTACHED`), and `v` already uses one — so the query
   path caps at 8 cases and everything else opens one reader at a time,
-  which is why the sweep and timeline have no case limit. And the routes
+  which is why the sweep and timeline have no case limit. Two more that
+  each produced a confident wrong answer: the timeline orders and
+  windows by `TS_NORMALIZE`, like the case's own timeframe filter (raw
+  text put `1/5/2024` before `12/31/2023`), and every SOURCE gets the
+  whole `limit + 1`, merged as they arrive — reading each with "the
+  limit minus rows so far" let the first table spend it all on its
+  latest rows while reporting `truncated: False`. The sweep's values are
+  LIKE-escaped: `svc_backup` matched `svcXbackup`. And the routes
   only read **registered** cases: a path arrives from the browser, and
   the case list is the analyst's own statement of what they work on.
   These views are read-only BY DESIGN, not pending work: tags and notes
@@ -56,6 +63,18 @@ see [docs/notes/README.md](README.md) for the whole set.
   write still serialises other writes, which is invariant #4's job, not
   this one's.
 
+- **A stale id must not act on something else.** Two windows on one
+  server see the same store, and either can delete what the other is
+  showing. Two rules keep the slower window honest. Case-file writes that
+  name a table, tag or row this case no longer has raise `RecordGone`
+  inside their transaction, before writing, and the global handler answers
+  **404** (store.md has the store side; ids are never reused there either).
+  And the case REGISTRY never reuses an id (`CaseRegistry` keeps `next_id`
+  in cases.json), while `DELETE /api/cases/{id}` takes the `path` the
+  client's list showed and refuses with **409**, touching nothing, when the
+  id now names another file — a home screen painted before the server
+  restarted can hold an id from the old numbering, and "delete with file"
+  on a bare id is the one step here that cannot be undone.
 - **One case file, one Winnow.** SQLite's WAL keeps the *file* consistent
   across processes, but nothing in this app invalidates a second process's
   caches or its frontend's row counts, `compact()` holds the writer for

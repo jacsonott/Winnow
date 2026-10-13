@@ -204,3 +204,30 @@ def test_cancel_drops_the_partial_source(store, tmp_path):
     with pytest.raises(IngestCancelled):
         store.ingest_plaso(str(plaso), build_fts=False, cancel=lambda: True)
     assert {s["id"] for s in store.list_sources()} == before
+
+
+def test_a_lone_surrogate_in_an_event_does_not_stop_the_import(store, tmp_path):
+    """Plaso's serializer escapes an unpaired-surrogate NTFS name as
+    "\\udc80"; the decoded string couldn't be stored as UTF-8 and the
+    whole import stopped at that event's batch."""
+    path = str(tmp_path / "s.plaso")
+    make_old_plaso(path)
+    db = sqlite3.connect(path)
+    doc = json.dumps({"__container_type__": "event_data", "__type__": "AttributeContainer",
+                      "data_type": "fs:stat", "parser": "filestat",
+                      "display_name": "OS:/tmp/evil.txt", "filename": "/tmp/evil.txt",
+                      "note": "x"}).replace("evil.txt", "evil\\udc80.txt").replace('"x"', '"\\udc81"')
+    db.execute("INSERT INTO event_data(_data) VALUES (?)", (zlib.compress(doc.encode()),))
+    db.execute("INSERT INTO event(_timestamp, _data) VALUES (?,?)", (1_700_000_180_000_000, _zc({
+        "__container_type__": "event", "__type__": "AttributeContainer",
+        "timestamp": 1_700_000_180_000_000, "timestamp_desc": "Creation Time",
+        "_event_data_row_identifier": 3})))
+    db.commit()
+    db.close()
+
+    rec = store.ingest_plaso(path, build_fts=False)
+    assert rec["row_count"] == 3
+    v = store.build_view(rec["id"], {"source_id": rec["id"]})
+    row = store.fetch_rows(v["view_id"], 2, 1)["rows"][0]["cells"]
+    assert "OS:/tmp/evil\\udc80.txt" in row
+    assert json.loads(row[-1])["note"] == "\udc81"        # Attributes stays valid JSON
