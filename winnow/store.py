@@ -846,6 +846,20 @@ def _json_leaf_text(value: Any) -> str:
     return str(value)
 
 
+_LONE_SURROGATE_RE = re.compile("[\ud800-\udfff]")
+
+
+def _storable_cell(value: Any) -> Any:
+    """A derived value SQLite can bind: what it already takes as is, and
+    anything else as text with any lone surrogate (half a UTF-16 pair,
+    which UTF-8 cannot spell) replaced by U+FFFD. Only reached when a
+    batch's first write was refused — see backfill_derived_columns — so
+    the common path never pays for the scan."""
+    if value is None or isinstance(value, (int, float, bytes)):
+        return value
+    return _LONE_SURROGATE_RE.sub("\ufffd", str(value))
+
+
 def _flatten_json(obj: dict, max_depth: int | None) -> dict[str, str]:
     """Flattens nested OBJECTS into dot-notation keys — {"user": {"name":
     "a"}} -> {"user.name": "a"} — but never arrays: a list value is always
@@ -3938,6 +3952,7 @@ class Store:
                 res = self.backfill_derived_columns(
                     opts.get("def_ids") or [opts["def_id"]], progress=progress, cancel=cancel,
                     drop_on_cancel=opts.get("drop_on_cancel", False),
+                    previous=opts.get("previous"),
                 )
                 with self._ingest_jobs_lock:
                     job["status"] = "done"
@@ -5356,6 +5371,13 @@ class Store:
         nothing computed."""
         d = self.get_derived_column(def_id)
         new_params = timeparse.validate_params(d["op_id"], params if params is not None else d["params"])
+        op = timeparse.OPERATIONS[d["op_id"]]
+        if op.get("check"):
+            # Same as add_derived_column: an op that references the case
+            # (lookup) is refused HERE, with nothing changed, when what it
+            # references has gone — not after the column was put in
+            # 'building' and the job got as far as loading it.
+            op["check"](self, new_params)
         with self.lock, self.db:
             self.db.execute(
                 "UPDATE derived_columns SET params=?, status='building', parse_failures=NULL WHERE id=?",
@@ -5363,9 +5385,12 @@ class Store:
             )
         src = self._source_lite(d["source_id"])
         try:
+            # `previous` lets a backfill that fails before writing a value
+            # put the definition back as it was (_fail_derive_backfill).
             job = self.start_ingest_job(
                 "derive", "", name=d["name"],
-                options={"def_id": def_id, "drop_on_cancel": False, "units_total": src["row_count"]},
+                options={"def_id": def_id, "drop_on_cancel": False, "units_total": src["row_count"],
+                         "previous": [d]},
             )
         except OpCancelled:
             # Refused because the case is closing. The row above now says
@@ -5393,7 +5418,8 @@ class Store:
         return out["columns"][0] | {"rows": out["rows"]}
 
     def backfill_derived_columns(self, def_ids: list[int], progress=None, cancel=None,
-                                 drop_on_cancel: bool = False) -> dict:
+                                 drop_on_cancel: bool = False,
+                                 previous: list[dict] | None = None) -> dict:
         """Compute every row's values for one or more derived columns of the
         same source, in a single pass.
 
@@ -5411,60 +5437,79 @@ class Store:
         Several columns at once is what flattening a JSON blob into its
         fields needs (see add_derived_columns) — one scan and one progress
         bar instead of N of each. The SELECT reads each distinct input
-        column once however many definitions want it."""
+        column once however many definitions want it.
+
+        One value is never the column's problem: a parser that raises on a
+        cell makes that cell NULL, which the failure count then includes
+        like any other value that did not parse (see _backfill_value_errors
+        for the record of it). Anything else that stops the pass — a
+        lookup table gone since the column was made, a full disk — leaves
+        every column in a state that says what it holds rather than
+        'building' (see _fail_derive_backfill); `previous` is the
+        definition as a re-derive found it, so a pass that fails before
+        writing anything can put it back. Then it raises, and the job
+        reports it."""
         if not def_ids:
             raise ValueError("Nothing to backfill")
         defs = [self.get_derived_column(d) for d in def_ids]
         source_id = defs[0]["source_id"]
         if any(d["source_id"] != source_id for d in defs):
             raise ValueError("All columns in one backfill must belong to the same table")
-        src = self._source_lite(source_id)
-        drv = self._derived_table(source_id)
-        frm = self._from_clause(src)
-
-        # One SELECT slot per distinct input column, shared by every
-        # definition reading it.
-        slots: dict[str, int] = {}
-
-        def slot(col: str) -> int:
-            key = col.lower()
-            if key not in slots:
-                slots[key] = len(slots)
-            return slots[key]
-
-        plans = []
-        for d in defs:
-            op = timeparse.OPERATIONS[d["op_id"]]
-            inputs = timeparse.op_inputs(d["op_id"], d["input_column"], d["params"])
-            # state["inputs"]: the ordered column names behind the values
-            # parse_multi receives — an op that needs them (row_json's keys)
-            # reads them here rather than growing a second calling shape.
-            # Multi-input ops only: a stateful single-input op (syslog's
-            # year rollover) takes an empty dict as "fresh" and seeds it.
-            state = {"inputs": list(inputs)} if op["multi_input"] else {}
-            plan = {"d": d, "op": op, "state": state, "slots": [slot(c) for c in inputs]}
-            if op.get("prepare"):
-                # e.g. lookup loading its whole mapping once — per
-                # definition, before the scan, so the scan stays dict hits
-                op["prepare"](self, d["params"], plan["state"])
-            plans.append(plan)
-        cols = list(slots.keys())
-        # slot() keys case-insensitively but _col_ref needs the real name.
-        real = {}
-        for d in defs:
-            for c in timeparse.op_inputs(d["op_id"], d["input_column"], d["params"]):
-                real[c.lower()] = c
-        sel = ", ".join(self._col_ref(src, real[c]) for c in cols)
-
-        names = [d["name"] for d in defs]
-        assigns = ", ".join(f"{q(n)}=excluded.{q(n)}" for n in names)
-        upsert = (f"INSERT INTO {q(drv)}(rid, {', '.join(q(n) for n in names)}) "
-                  f"VALUES({','.join('?' * (len(names) + 1))}) "
-                  f"ON CONFLICT(rid) DO UPDATE SET {assigns}")
-
         rows_done, last_rid = 0, 0
-        total = src["row_count"]
+        # Everything from here is inside the try, setup included: the
+        # definitions are already 'building', so whatever the setup raises
+        # (an op id the registry no longer has, say) must land like any
+        # other failure rather than leave them so.
         try:
+            src = self._source_lite(source_id)
+            drv = self._derived_table(source_id)
+            frm = self._from_clause(src)
+
+            # One SELECT slot per distinct input column, shared by every
+            # definition reading it.
+            slots: dict[str, int] = {}
+
+            def slot(col: str) -> int:
+                key = col.lower()
+                if key not in slots:
+                    slots[key] = len(slots)
+                return slots[key]
+
+            plans = []
+            for d in defs:
+                op = timeparse.OPERATIONS[d["op_id"]]
+                inputs = timeparse.op_inputs(d["op_id"], d["input_column"], d["params"])
+                # state["inputs"]: the ordered column names behind the values
+                # parse_multi receives — an op that needs them (row_json's keys)
+                # reads them here rather than growing a second calling shape.
+                # Multi-input ops only: a stateful single-input op (syslog's
+                # year rollover) takes an empty dict as "fresh" and seeds it.
+                state = {"inputs": list(inputs)} if op["multi_input"] else {}
+                plans.append({"d": d, "op": op, "state": state, "slots": [slot(c) for c in inputs],
+                              "raised": 0, "first_error": None})
+            cols = list(slots.keys())
+            # slot() keys case-insensitively but _col_ref needs the real name.
+            real = {}
+            for d in defs:
+                for c in timeparse.op_inputs(d["op_id"], d["input_column"], d["params"]):
+                    real[c.lower()] = c
+            sel = ", ".join(self._col_ref(src, real[c]) for c in cols)
+
+            names = [d["name"] for d in defs]
+            assigns = ", ".join(f"{q(n)}=excluded.{q(n)}" for n in names)
+            upsert = (f"INSERT INTO {q(drv)}(rid, {', '.join(q(n) for n in names)}) "
+                      f"VALUES({','.join('?' * (len(names) + 1))}) "
+                      f"ON CONFLICT(rid) DO UPDATE SET {assigns}")
+
+            total = src["row_count"]
+            for plan in plans:
+                if plan["op"].get("prepare"):
+                    # e.g. lookup loading its whole mapping once — per
+                    # definition, before the scan, so the scan stays dict
+                    # hits. Inside the try: a lookup table deleted since the
+                    # column was made fails HERE, and has to land the way
+                    # any other failure does.
+                    plan["op"]["prepare"](self, plan["d"]["params"], plan["state"])
             while True:
                 with self._reader() as ro:
                     rows = ro.execute(
@@ -5479,17 +5524,41 @@ class Store:
                     out = [t[0]]
                     for plan in plans:
                         op = plan["op"]
-                        if op["multi_input"]:
-                            out.append(op["parse_multi"]([t[1 + i] for i in plan["slots"]],
-                                                         plan["d"]["params"], plan["state"]))
-                        else:
-                            out.append(op["parse"](t[1 + plan["slots"][0]], plan["d"]["params"], plan["state"]))
+                        # Per value, not per column: a parser that raises
+                        # on one cell (an offset no clock has, a "²" where
+                        # a tick count should be) used to fail the whole
+                        # backfill — and, on a re-derive, leave the
+                        # batches before it under the new params and the
+                        # rest under the old. The cell is NULL instead,
+                        # which _count_parse_failures counts with the rest.
+                        try:
+                            if op["multi_input"]:
+                                v = op["parse_multi"]([t[1 + i] for i in plan["slots"]],
+                                                      plan["d"]["params"], plan["state"])
+                            else:
+                                v = op["parse"](t[1 + plan["slots"][0]], plan["d"]["params"], plan["state"])
+                        except Exception as e:  # noqa: BLE001 — one value, see above
+                            v = None
+                            plan["raised"] += 1
+                            if plan["first_error"] is None:
+                                plan["first_error"] = f"row {t[0]}: {type(e).__name__}: {e}"
+                        out.append(v)
                     vals.append(tuple(out))
                 last_rid = vals[-1][0]
                 with self.lock, self.db:
                     if cancel and cancel():
                         raise IngestCancelled("cancelled during derive")
-                    self.db.executemany(upsert, vals)
+                    try:
+                        self.db.executemany(upsert, vals)
+                    except (UnicodeEncodeError, sqlite3.InterfaceError, sqlite3.ProgrammingError):
+                        # A value SQLite cannot bind: a str holding a lone
+                        # surrogate, or something that is not a str at all
+                        # from a plugin's op. Same transaction, so the rows
+                        # the first attempt got through are simply written
+                        # again — the upsert is idempotent. A closed
+                        # connection raises again here and goes on up.
+                        self.db.executemany(upsert, [tuple(_storable_cell(c) for c in row)
+                                                     for row in vals])
                 rows_done += len(vals)
                 if progress:
                     progress(rows_done, rows_done, total)
@@ -5508,10 +5577,22 @@ class Store:
                         [(d["id"],) for d in defs],
                     )
             raise
+        except Exception:
+            self._fail_derive_backfill(defs, wrote=rows_done > 0, drop=drop_on_cancel,
+                                       previous=previous)
+            raise
 
+        self._backfill_value_errors(plans)
         out_cols = []
         for d in defs:
-            failures = self._count_parse_failures(src, d)
+            # Every value is written by now, so this column is finished
+            # whatever the count does: a count that fails (the case closing
+            # under it) is an unknown number of failures, not a reason to
+            # leave the column 'building'.
+            try:
+                failures = self._count_parse_failures(src, d)
+            except Exception:  # noqa: BLE001 — see above
+                failures = None
             with self.lock, self.db:
                 self.db.execute(
                     "UPDATE derived_columns SET status='ready', parse_failures=? WHERE id=?",
@@ -5520,6 +5601,103 @@ class Store:
             out_cols.append({"def_id": d["id"], "source_id": source_id, "name": d["name"],
                              "parse_failures": failures})
         return {"source_id": source_id, "rows": rows_done, "columns": out_cols}
+
+    def _backfill_value_errors(self, plans: list[dict]) -> None:
+        """Write down that a parser raised, once per column per pass. The
+        cells are already NULL and counted as failures, so the analyst's
+        number is right without this; the log is for whoever wonders WHY a
+        value that looks parseable came out empty — it names the first
+        row and the exception."""
+        for plan in plans:
+            if plan["raised"]:
+                n = plan["raised"]
+                wlog.record("warn", f"Derive {plan['d']['name']!r}: {plan['d']['op_id']} raised on "
+                                    f"{n:,} value{'s' if n != 1 else ''}, left empty and counted as "
+                                    f"unparsed (first: {plan['first_error']})")
+
+    def _fail_derive_backfill(self, defs: list[dict], *, wrote: bool, drop: bool,
+                              previous: list[dict] | None) -> None:
+        """Where a backfill that stopped on an error (not a cancel) leaves
+        its columns. The state being avoided is the one it used to leave:
+        'building' with no job left to finish it, which survives every
+        reopen, blocks anything chaining off the column and makes
+        save_view_as_source refuse the table — and, on a re-derive, values
+        computed under two different sets of params with nothing to say so.
+
+        - A create (`drop`): removed, as a cancel removes it. The column
+          never had values worth keeping, and the job's error says why it
+          is not there.
+        - A re-derive that failed before writing anything (the lookup
+          table it reads is gone): the definition goes back to exactly
+          what it was (`previous`). Its values were never touched, so it
+          IS still that column. A cascade has no `previous` — its params
+          did not change, its parent's data did — so it is marked
+          'partial', which is what a cascade that could not start leaves
+          (_cascade_dependent_derives).
+        - A re-derive that wrote some batches first: 'error', and the
+          values cleared. Half old params and half new is the one answer
+          that cannot be read correctly, so none is left to read; the
+          header says to re-derive. Status first, so that if the clearing
+          fails too (the disk that filled up), the column still says it is
+          not to be trusted. The columns computed FROM it held values from
+          before and are now 'partial' for the same reason a cascade
+          that could not start leaves them so.
+
+        Every step is best-effort: the error being raised is the answer
+        (the job records it, and the log line names it), and a second
+        failure here — the case closing under it — must not replace it."""
+        if drop:
+            self._rollback_derive_definitions([d["id"] for d in defs])
+            return
+        before = {b["id"]: b for b in (previous or [])}
+        if not wrote:
+            for d in defs:
+                if d["id"] in before:
+                    self._restore_derive_definition(before[d["id"]])
+                else:
+                    with contextlib.suppress(Exception):
+                        with self.lock, self.db:
+                            self.db.execute(
+                                "UPDATE derived_columns SET status='partial' WHERE id=? AND status='building'",
+                                (d["id"],),
+                            )
+            return
+        names = [d["name"] for d in defs]
+        wlog.record("warn", f"Derive stopped part-way: {', '.join(names)} — the values it had "
+                            f"written were cleared rather than left mixed with the old ones; "
+                            f"re-derive to retry")
+        with contextlib.suppress(Exception):
+            with self.lock, self.db:
+                self.db.executemany(
+                    "UPDATE derived_columns SET status='error', parse_failures=NULL WHERE id=?",
+                    [(d["id"],) for d in defs],
+                )
+        source_id = defs[0]["source_id"]
+        drv = self._derived_table(source_id)
+        cleared = ", ".join(f"{q(d['name'])}=NULL" for d in defs)
+        with contextlib.suppress(Exception):
+            last = 0
+            while True:
+                # By rid range, a BATCH at a time, for invariant #4's
+                # reason: one UPDATE over a multi-million-row column would
+                # hold the writer for as long as the backfill's whole pass.
+                with self.lock, self.db:
+                    hi = self.db.execute(
+                        f"SELECT MAX(rid) FROM (SELECT rid FROM {q(drv)} WHERE rid > ? "
+                        f"ORDER BY rid LIMIT {BATCH})", (last,),
+                    ).fetchone()[0]
+                    if hi is None:
+                        break
+                    self.db.execute(f"UPDATE {q(drv)} SET {cleared} WHERE rid > ? AND rid <= ?",
+                                    (last, hi))
+                last = hi
+        with contextlib.suppress(Exception):
+            stale = [c["id"] for c in self.dependent_derived_columns(source_id, names)]
+            with self.lock, self.db:
+                self.db.executemany(
+                    "UPDATE derived_columns SET status='partial' WHERE id=? AND status='ready'",
+                    [(i,) for i in stale],
+                )
 
     def _count_parse_failures(self, src: dict, d: dict) -> int:
         """Rows whose input had something in it but produced no datetime —
@@ -5725,7 +5903,9 @@ class Store:
             op["check"](self, params)
         if op.get("prepare"):
             op["prepare"](self, params, state)
-        return [{"input": v, "output": op["parse"](v, params, state)} for v in values]
+        # parse_or_none: a value that raises previews as a failure, as it
+        # would backfill as one — not as a 500 for the whole modal.
+        return [{"input": v, "output": timeparse.parse_or_none(op, v, params, state)} for v in values]
 
     def preview_derived(self, source_id: int, column: str, op_id: str,
                         params: dict | None = None, limit: int = 10,
@@ -5786,7 +5966,8 @@ class Store:
                 rows = ro.execute(
                     f"SELECT {sel} FROM {self._from_clause(src)} LIMIT ?", (limit,),
                 ).fetchall()
-            preview = [{"input": r[0], "output": op["parse_multi"](list(r), params, state)} for r in rows]
+            preview = [{"input": r[0], "output": timeparse.parse_multi_or_none(op, list(r), params, state)}
+                       for r in rows]
             # A failure is a NULL from a row that HAD something to read —
             # the same rule _count_parse_failures applies after the
             # backfill, so the modal's verdict and the column's count agree.
@@ -5810,7 +5991,7 @@ class Store:
         state: dict = {}
         if op.get("prepare"):
             op["prepare"](self, params, state)
-        failures = sum(1 for v in samples if op["parse"](v, params, state) is None)
+        failures = sum(1 for v in samples if timeparse.parse_or_none(op, v, params, state) is None)
         return {"preview": preview, "sampled": len(samples), "failures": failures, "scope": scope}
 
     def preview_regex_groups(self, source_id: int, column: str, pattern: str,
