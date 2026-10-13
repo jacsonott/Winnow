@@ -1268,9 +1268,10 @@ def _mark_prompted(exts: list[str]) -> None:
     WS.machine_prefs.set(_ASSOC_PROMPTED_KEY, sorted(done))
 # Start the association-launched server with the console-less interpreter
 # (pythonw.exe) so double-clicking a file doesn't also open a terminal
-# window. Off by default: the hidden flavour hides the server log too,
-# which matters the day an association won't open. Windows-only in effect;
-# Linux .desktop entries already run with Terminal=false.
+# window. On by default (see _assoc_background); the hidden flavour hides
+# the server log too, which matters the day an association won't open,
+# so the Appearance toggle turns it off. Windows-only in effect; Linux
+# .desktop entries already run with Terminal=false.
 _ASSOC_BACKGROUND_KEY = "assoc_background"
 
 
@@ -5202,16 +5203,38 @@ def _ensure_console_streams() -> None:
     alternative — handing uvicorn a log config that does not touch stdout
     — would leave every other stdout consumer (this module's own prints,
     any plugin's) one None-dereference away from the same silent death.
+
+    The second half is the same death by a different route: a stream
+    that cannot spell what startup prints. The null stream was opened in
+    the locale encoding — cp1252 on a typical Windows box — and startup
+    prints "Plugin disabled: … (toggle in Settings → Plugins)" for each
+    bundled example, all off by default; `→` is not in cp1252, so a
+    double-click died before binding again, just as silently. The null
+    stream is UTF-8 with errors="replace" now (it discards everything;
+    only "never raise" matters). A REAL stream in the locale encoding —
+    `python server.py > winnow.log`, or PYTHONIOENCODING=cp1252 — keeps
+    its encoding, since whatever reads it expects that, but stops being
+    strict: what it cannot spell comes out as a backslash escape, which
+    is what Python's own stderr already does. log.record writes to
+    stderr, so it is covered by both halves.
     """
     devnull = None
     for name in ("stdout", "stderr"):
-        if getattr(sys, name, None) is not None:
+        stream = getattr(sys, name, None)
+        if stream is not None:
+            if getattr(stream, "errors", None) == "strict":
+                # Not every stream has reconfigure (a test's StringIO, a
+                # host's own wrapper); one that can't be told is left as
+                # it was rather than replaced.
+                with contextlib.suppress(AttributeError, ValueError, OSError):
+                    stream.reconfigure(errors="backslashreplace")
             continue
         if devnull is None:
             # Line-buffered text, like a console would be. Never closed:
             # it has to outlive main() — uvicorn logs through it until the
             # process exits, and the OS reclaims it then.
-            devnull = open(os.devnull, "w", buffering=1)  # noqa: SIM115
+            devnull = open(os.devnull, "w", encoding="utf-8",  # noqa: SIM115
+                           errors="replace", buffering=1)
         setattr(sys, name, devnull)
 
 

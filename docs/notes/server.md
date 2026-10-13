@@ -404,3 +404,17 @@ see [docs/notes/README.md](README.md) for the whole set.
   `tests/test_no_console_launch.py` pins it, and carries a test that the
   unfixed call really does raise, so a future uvicorn that stops asking
   cannot quietly turn the rest of the file into a tautology.
+
+  **The stream also has to be able to spell what startup prints.** The
+  first version opened the null device in the locale encoding — cp1252
+  on a typical Windows box — and startup prints "Plugin disabled: …
+  (toggle in Settings → Plugins)" for every bundled example, which all
+  ship off. `→` is not in cp1252, so the same double-click died the same
+  silent death one line later. The null stream is opened UTF-8 with
+  `errors="replace"`, and a real stream that is strict in the locale
+  encoding (`python server.py > winnow.log`, `PYTHONIOENCODING=cp1252`)
+  is reconfigured to `errors="backslashreplace"` — encoding kept, since
+  whatever reads it expects that one. That is what Python's own stderr
+  does already, which is why log.record (stderr) only broke through the
+  null stream. Anything new that opens a text stream to print through
+  needs an explicit encoding for the same reason.
