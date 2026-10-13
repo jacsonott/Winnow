@@ -8517,25 +8517,29 @@ class Store:
             )
         return self.tag_counts(source_id)
 
-    def set_tags_pairs(self, pairs: list[list[int]], tag_id: int, on: bool) -> dict:
+    def set_tags_pairs(self, pairs: list[list[int]], tag_id: int, on: bool,
+                       source_id: int | None = None) -> dict:
         """Same as set_tags, but for a merged view where selected rows can
         belong to different real source_ids — each pair is that row's own
-        (source_id, rid), never the merge's synthetic negative id."""
+        (source_id, rid), never the merge's synthetic negative id.
+
+        `source_id` is the merge the selection was made in, when there is
+        one, and it decides what the returned counts cover: the client
+        stores them as that merge's whole-table counts (S.tagCountsAll),
+        so they have to count EVERY member — counting only the members the
+        selection happened to touch made a ribbon of 3 read 1. The same
+        member list goes to undo, which recounts against it."""
         if not pairs:
             return {"counts": {}}
+        count_ids = sorted({int(sid) for sid, _ in pairs})
+        if source_id is not None and int(source_id) < 0:
+            count_ids = [m["source_id"] for m in self._resolve_members(int(source_id))]
         with self.lock, self.db:
             self._apply_tag_change(
                 tag_id=tag_id, on=on, source_id=int(pairs[0][0]), scope="rows",
-                pairs=pairs, count_ids=sorted({int(sid) for sid, _ in pairs}),
+                pairs=pairs, count_ids=count_ids,
             )
-        member_ids = sorted({sid for sid, _ in pairs})
-        ph = ",".join("?" * len(member_ids))
-        with self.lock:
-            rows = self.db.execute(
-                f"SELECT tag_id, count(*) n FROM row_tags WHERE source_id IN ({ph}) GROUP BY 1",
-                member_ids,
-            ).fetchall()
-        return {"counts": {str(r["tag_id"]): r["n"] for r in rows}}
+            return self._tag_counts_for_ids(count_ids)
 
     def tag_view(self, view_id: str, tag_id: int, on: bool, exclude: list[Iterable[int]] | None = None) -> dict:
         """Tag every row in a materialised view — the 'filter to it, then mark

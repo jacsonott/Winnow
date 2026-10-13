@@ -4405,7 +4405,12 @@ def api_row_tags_undo():
 @app.post("/api/row_tags")
 def api_row_tags(body: TagWrite):
     if body.pairs:
-        return store().set_tags_pairs(body.pairs, body.tag_id, body.on)
+        # source_id, when sent, is the merge the selection was made in: the
+        # counts that come back are that merge's, every member of it.
+        try:
+            return store().set_tags_pairs(body.pairs, body.tag_id, body.on, body.source_id or None)
+        except KeyError as e:
+            raise HTTPException(404, f"No such table: {e}")
     return store().set_tags(body.source_id, body.rids, body.tag_id, body.on)
 
 
