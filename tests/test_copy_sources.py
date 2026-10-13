@@ -205,7 +205,12 @@ def test_merges_are_refused_with_a_pointer(store, write_csv, target):
 
 def test_an_old_schema_target_is_migrated_before_the_write(store, write_csv, tmp_path):
     """A case created by an older Winnow may lack newer tables; opening the
-    target as a full Store is what runs its migrations first."""
+    target as a full Store is what runs its migrations first.
+
+    The three tables every case has had since the first schema are here
+    (row_tags among them): without them the file is not recognisably a
+    case, and copying into it is refused before anything writes
+    (tests/test_not_a_case_file.py). Everything newer is missing."""
     import sqlite3
     old = tmp_path / "old.db"
     conn = sqlite3.connect(old)
@@ -216,6 +221,8 @@ def test_an_old_schema_target_is_migrated_before_the_write(store, write_csv, tmp
         has_fts INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE tag_defs (id INTEGER PRIMARY KEY, name TEXT NOT NULL,
         color TEXT NOT NULL, hotkey TEXT);
+      CREATE TABLE row_tags (source_id INTEGER NOT NULL, rid INTEGER NOT NULL,
+        tag_id INTEGER NOT NULL, PRIMARY KEY (source_id, rid, tag_id)) WITHOUT ROWID;
     """)
     conn.commit()
     conn.close()

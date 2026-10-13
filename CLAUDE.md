@@ -160,7 +160,11 @@ paths.py           INSTALL_ROOT — the one line that knows where the install
                     root is relative to this package. workspace/, the
                     updater's target and the server's static/ all resolve
                     from it, so a wrong answer here is silent and
-                    expensive; tests/test_paths.py pins it. Imports nothing.
+                    expensive; tests/test_paths.py pins it. Also
+                    sqlite_ro_uri(), the only way Winnow opens a SQLite
+                    file read-only — a path pasted into `file:...?mode=ro`
+                    opens a different file when it holds # ? or % (see
+                    docs/notes/ingest.md). Imports nothing from the app.
 version.py         The one place Winnow's version number lives. Nothing in
                     it but the string, because update.py reads it out of a
                     downloaded archive it must not execute. Bump it in the
@@ -543,7 +547,12 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
    analysts' cases number sources and tags independently, and a QC review
    is precisely the case where the two sides came from different cases —
    comparing ids reports every row as differing even when they agree
-   completely. There is a test for exactly that.
+   completely. There is a test for exactly that. The hash names the FILE,
+   not the table — every table of one SQLite file and every sheet of one
+   workbook share it — so load and diff both pick the table within it by
+   what the session records (name, columns, row count;
+   `_match_session_sources`), and refuse rather than guess when that
+   still leaves two candidates (docs/notes/store.md).
 
 
 ## Things that bite

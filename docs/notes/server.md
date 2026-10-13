@@ -337,7 +337,15 @@ see [docs/notes/README.md](README.md) for the whole set.
   unchanged, because `is_winnow_case_file` and the open path sniff
   CONTENT (SQLite header + the sources/tag_defs/row_tags tables), never
   the extension — only NEW cases take the new suffix, nothing is
-  migrated. In the association catalogue `.db-winnow` is
+  migrated. The same sniff is the gate on every door that names an
+  EXISTING path as a case — `/api/case/open`, `POST /api/cases`
+  registration, `/api/case/copy_sources`' target, `--case` on the
+  command line, and `_open_store` behind all of them — because opening a
+  Store is a write (META_SCHEMA, WAL): before the gate covered all four,
+  a Chrome `History` registered as a case and then picked in "Copy into
+  this case" gained Winnow's tables and changed hash. A path that does
+  not exist is a new case and is created as before
+  (tests/test_not_a_case_file.py). In the association catalogue `.db-winnow` is
   `default_ok`, alongside the formats nothing else contests — `.csv`,
   `.tsv`, `.jsonl`, `.ndjson`. What is particular about it is the
   ownership: nothing on the system claims `.db-winnow` at all, so Winnow
@@ -410,3 +418,17 @@ see [docs/notes/README.md](README.md) for the whole set.
   `tests/test_no_console_launch.py` pins it, and carries a test that the
   unfixed call really does raise, so a future uvicorn that stops asking
   cannot quietly turn the rest of the file into a tautology.
+
+  **The stream also has to be able to spell what startup prints.** The
+  first version opened the null device in the locale encoding — cp1252
+  on a typical Windows box — and startup prints "Plugin disabled: …
+  (toggle in Settings → Plugins)" for every bundled example, which all
+  ship off. `→` is not in cp1252, so the same double-click died the same
+  silent death one line later. The null stream is opened UTF-8 with
+  `errors="replace"`, and a real stream that is strict in the locale
+  encoding (`python server.py > winnow.log`, `PYTHONIOENCODING=cp1252`)
+  is reconfigured to `errors="backslashreplace"` — encoding kept, since
+  whatever reads it expects that one. That is what Python's own stderr
+  does already, which is why log.record (stderr) only broke through the
+  null stream. Anything new that opens a text stream to print through
+  needs an explicit encoding for the same reason.
