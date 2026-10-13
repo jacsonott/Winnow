@@ -5432,9 +5432,9 @@ def main() -> None:
 
     # Registered before uvicorn blocks, not in the lifespan: the lifespan
     # doesn't know the port (uvicorn owns it by then), and a launcher that
-    # probes an entry a moment before bind completes just gets a failed
-    # probe and moves on — running() treats the file as a hint, the port as
-    # the truth.
+    # probes an entry a moment before bind completes gets a failed probe and
+    # moves on — running() treats the file as a hint, the port as the truth,
+    # and leaves an entry this young in place (instances.STARTUP_GRACE_S).
     with contextlib.suppress(Exception):
         instances.register(args.port, case_path if case_path else None)
 
