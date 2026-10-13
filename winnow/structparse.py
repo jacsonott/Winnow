@@ -81,8 +81,19 @@ def _leaf_text(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (dict, list)):
-        return json.dumps(value, ensure_ascii=False)
-    return str(value)
+        text = json.dumps(value, ensure_ascii=False)
+    else:
+        text = str(value)
+    # JSON can spell half a character: `"\ud83d"` is legal JSON (a
+    # truncated emoji, routine in logs that cut a string at a byte count)
+    # and json.loads hands back a str holding a lone surrogate, which
+    # cannot be written as UTF-8 — so SQLite refused the row and the
+    # whole backfill failed on it. U+FFFD is what every UTF-8 decoder
+    # makes of a broken sequence; the rest of the value survives.
+    return _LONE_SURROGATE_RE.sub("\ufffd", text)
+
+
+_LONE_SURROGATE_RE = re.compile("[\ud800-\udfff]")
 
 
 # ------------------------------------------------------------- JSON paths
@@ -396,15 +407,18 @@ def load_xml(value: Any) -> "ET.Element | None":
         return None
     if _DOCTYPE_RE.search(s):
         return None
+    # ValueError as well as ParseError: expat is fed UTF-8, so a str it
+    # cannot encode (one holding a lone surrogate) raises
+    # UnicodeEncodeError before parsing starts. Not XML either way.
     try:
         return ET.fromstring(s)
-    except ET.ParseError:
+    except (ET.ParseError, ValueError):
         pass
     try:
         # Wrapping re-parses the prolog as content, so drop it first.
         body = re.sub(r"^<\?xml[^>]*\?>", "", s).strip()
         return ET.fromstring(f"<winnow-fragment>{body}</winnow-fragment>")
-    except ET.ParseError:
+    except (ET.ParseError, ValueError):
         return None
 
 

@@ -418,7 +418,10 @@ export function renderHead() {
       const dstatus = colMetaEntry.derived_status;
       mark.title = `Derived from "${colMetaEntry.derived_from}" — ${opLabel(colMetaEntry.derived_op)}`
         + (dstatus === 'building' ? ' (building…)' : '')
-        + (dstatus === 'partial' ? ' (incomplete — re-derive to finish)' : '');
+        + (dstatus === 'partial' ? ' (incomplete — re-derive to finish)' : '')
+        // A re-derive that stopped part-way clears what it wrote rather
+        // than leave two runs' values mixed (Store._fail_derive_backfill).
+        + (dstatus === 'error' ? ' (failed — values cleared; re-derive to retry)' : '');
       if (dstatus !== 'ready') mark.classList.add('pending');
       h.append(mark);
     }

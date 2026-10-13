@@ -44,7 +44,7 @@ from winnow import version
 from winnow import archive
 from winnow import workspace as WS
 from winnow.store import (CASE_SUFFIX, DEFAULT_IMPORT_EXTENSIONS, PLASO_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, MissingTable, OpCancelled, Store, ViewExpired,
-                   describe_case_lock, probe_case_lock, q, rows_to_xlsx, sweep_orphan_views)
+                   describe_case_lock, is_winnow_case_file, probe_case_lock, q, rows_to_xlsx, sweep_orphan_views)
 from winnow.store import case_session_document_problem, pane_cell_json, session_document_problem
 
 HERE = paths.INSTALL_ROOT  # static/, plugins/, examples/plugins/ all hang off the install root
@@ -569,6 +569,12 @@ def _default_tags_tuples() -> list[tuple]:
 
 
 def _open_store(path: str) -> Store:
+    # Every Store this server opens comes through here, so this is the
+    # backstop for any door that forgets: an EXISTING file must already
+    # be a case (is_winnow_case_file says why). A path that does not
+    # exist yet is a new case, which is the only thing Store may create.
+    if os.path.exists(path) and not is_winnow_case_file(path):
+        raise ValueError(f"{path} is not a Winnow case file — opening it would write into it")
     return Store(path, default_tags=_default_tags_tuples())
 
 
@@ -743,25 +749,6 @@ def _new_temp_case_path() -> str:
     return path
 
 
-def is_winnow_case_file(path: str) -> bool:
-    """Distinguish a Winnow case from a generic SQLite file — double-
-    clicking a case should OPEN it, not ingest it as data. Read-only,
-    tolerant of anything unreadable."""
-    try:
-        with open(path, "rb") as f:
-            if f.read(16) != b"SQLite format 3\x00":
-                return False
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-        try:
-            names = {r[0] for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'")}
-        finally:
-            conn.close()
-        return {"sources", "tag_defs", "row_tags"} <= names
-    except Exception:  # noqa: BLE001 — unreadable means "not a case"
-        return False
-
-
 # Every table whose contents can only exist because someone did something.
 # The sweep keeps a quick-look case forever if ANY of them has a row.
 #
@@ -824,7 +811,7 @@ def _sweep_quicklook(max_age_days: int = 7) -> int:
             # and the janitor has no business deleting those at all.
             if not is_winnow_case_file(path):
                 continue
-            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            conn = sqlite3.connect(paths.sqlite_ro_uri(path), uri=True)
             try:
                 busy = _case_holds_work(conn)
             finally:
@@ -1311,9 +1298,10 @@ def _mark_prompted(exts: list[str]) -> None:
     WS.machine_prefs.set(_ASSOC_PROMPTED_KEY, sorted(done))
 # Start the association-launched server with the console-less interpreter
 # (pythonw.exe) so double-clicking a file doesn't also open a terminal
-# window. Off by default: the hidden flavour hides the server log too,
-# which matters the day an association won't open. Windows-only in effect;
-# Linux .desktop entries already run with Terminal=false.
+# window. On by default (see _assoc_background); the hidden flavour hides
+# the server log too, which matters the day an association won't open,
+# so the Appearance toggle turns it off. Windows-only in effect; Linux
+# .desktop entries already run with Terminal=false.
 _ASSOC_BACKGROUND_KEY = "assoc_background"
 
 
@@ -1797,7 +1785,7 @@ def api_cases_list():
         if os.path.isfile(c["path"]):
             rec["exists"] = True
             try:
-                ro = sqlite3.connect(f"file:{c['path']}?mode=ro", uri=True)
+                ro = sqlite3.connect(paths.sqlite_ro_uri(c["path"]), uri=True)
                 row = ro.execute("SELECT count(*), COALESCE(sum(row_count),0) FROM sources").fetchone()
                 ro.close()
                 rec["source_count"], rec["row_count"] = row[0], row[1]
@@ -1811,6 +1799,14 @@ def api_cases_list():
 
 @app.post("/api/cases")
 def api_cases_create(body: CaseCreate):
+    # Registering a path puts it in every case picker — the home screen,
+    # "Copy into this case", multi-case — and each of those opens it.
+    # An existing file has to be a case already; same check /api/case/open
+    # makes, for the same reason.
+    if os.path.exists(body.path) and not is_winnow_case_file(body.path):
+        raise HTTPException(
+            400, f"{body.path} is not a Winnow case file — to import it as evidence, "
+                 "open a case and import it there")
     if not os.path.isfile(body.path):
         parent = os.path.dirname(os.path.abspath(body.path))
         try:
@@ -3854,7 +3850,7 @@ def api_watchlist_cases():
         if os.path.abspath(c["path"]) == current or not os.path.isfile(c["path"]):
             continue
         try:
-            ro = sqlite3.connect(f"file:{c['path']}?mode=ro", uri=True)
+            ro = sqlite3.connect(paths.sqlite_ro_uri(c["path"]), uri=True)
             row = ro.execute(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='watchlist'").fetchone()
             n = ro.execute("SELECT COUNT(*) FROM watchlist").fetchone()[0] if row[0] else 0
@@ -5323,16 +5319,38 @@ def _ensure_console_streams() -> None:
     alternative — handing uvicorn a log config that does not touch stdout
     — would leave every other stdout consumer (this module's own prints,
     any plugin's) one None-dereference away from the same silent death.
+
+    The second half is the same death by a different route: a stream
+    that cannot spell what startup prints. The null stream was opened in
+    the locale encoding — cp1252 on a typical Windows box — and startup
+    prints "Plugin disabled: … (toggle in Settings → Plugins)" for each
+    bundled example, all off by default; `→` is not in cp1252, so a
+    double-click died before binding again, just as silently. The null
+    stream is UTF-8 with errors="replace" now (it discards everything;
+    only "never raise" matters). A REAL stream in the locale encoding —
+    `python server.py > winnow.log`, or PYTHONIOENCODING=cp1252 — keeps
+    its encoding, since whatever reads it expects that, but stops being
+    strict: what it cannot spell comes out as a backslash escape, which
+    is what Python's own stderr already does. log.record writes to
+    stderr, so it is covered by both halves.
     """
     devnull = None
     for name in ("stdout", "stderr"):
-        if getattr(sys, name, None) is not None:
+        stream = getattr(sys, name, None)
+        if stream is not None:
+            if getattr(stream, "errors", None) == "strict":
+                # Not every stream has reconfigure (a test's StringIO, a
+                # host's own wrapper); one that can't be told is left as
+                # it was rather than replaced.
+                with contextlib.suppress(AttributeError, ValueError, OSError):
+                    stream.reconfigure(errors="backslashreplace")
             continue
         if devnull is None:
             # Line-buffered text, like a console would be. Never closed:
             # it has to outlive main() — uvicorn logs through it until the
             # process exits, and the OS reclaims it then.
-            devnull = open(os.devnull, "w", buffering=1)  # noqa: SIM115
+            devnull = open(os.devnull, "w", encoding="utf-8",  # noqa: SIM115
+                           errors="replace", buffering=1)
         setattr(sys, name, devnull)
 
 
@@ -5430,6 +5448,18 @@ def main() -> None:
     case_path = args.case or (f"case{CASE_SUFFIX}" if args.open_files else None)
     url = f"http://{args.host}:{args.port}"
     if case_path:
+        # Same rule as /api/case/open, said here rather than as
+        # _open_store's traceback: an existing file that is not a case is
+        # not created over — the schema would land in it.
+        if os.path.exists(case_path) and not is_winnow_case_file(case_path):
+            print(
+                f"ERROR: {os.path.abspath(case_path)} is not a Winnow case file — opening it "
+                "as one would write Winnow's tables into it.\n"
+                "  To import it as evidence, open a case and import it; "
+                "for a new case, give a path that does not exist yet.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         # Refuse rather than warn: this entrypoint is scriptable, a warning
         # scrolls past, and opening a case twice is the failure the lock
         # exists to catch. --force is the deliberate way through, and a

@@ -44,6 +44,8 @@ import sqlite3
 import zlib
 from typing import Any, Iterator
 
+from .paths import sqlite_ro_uri
+
 PLASO_COLUMNS = [
     "Datetime", "Timestamp desc", "Data type", "Parser",
     "Source file", "Host", "User", "Attributes (JSON)",
@@ -63,7 +65,7 @@ _DATA_CACHE = 4096
 
 
 def _connect(path: str) -> sqlite3.Connection:
-    ro = sqlite3.connect(f"file:{path}?mode=ro", uri=True, check_same_thread=False)
+    ro = sqlite3.connect(sqlite_ro_uri(path), uri=True, check_same_thread=False)
     ro.row_factory = sqlite3.Row
     return ro
 

@@ -11,6 +11,8 @@ them."""
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from winnow.store import Store
@@ -323,6 +325,253 @@ def test_unparsed_rows_can_be_filtered_back_out(store, write_csv):
     frag = store.unparsed_where_fragment(def_id)
     rows = _cells(store, sid, {"filter_tree": {"type": "raw", "sql": frag}})
     assert [r["Msg"] for r in rows] == ["delta"]
+
+
+# ------------------------------------------------------ a value that raises
+#
+# A parser that raised on one cell used to fail the whole backfill and leave
+# the column 'building' with no job left to finish it — which the case file
+# keeps across every reopen — and on a re-derive it left the batches before
+# the bad row under the new params and the rest under the old (one
+# 40,010-row column came out 20,000 rows at 11:22:01 and 20,009 at 13:22:01
+# for identical input). These assert those symptoms.
+
+@pytest.fixture
+def small_batches(monkeypatch):
+    """Several batches out of a handful of rows, so "the batches before the
+    bad row" exist without a 40,000-row fixture."""
+    from winnow import store as store_mod
+
+    monkeypatch.setattr(store_mod, "BATCH", 2)
+
+
+@pytest.fixture
+def raising_op(monkeypatch):
+    """An op that raises on one value and returns half a character for
+    another — what a parser nobody made total does, and any plugin's op
+    can be one. Its output depends on its `mark` param, so a re-derive
+    that mixed two runs would show it."""
+    from winnow import timeparse
+
+    def parse(value, params, state):
+        if value == "boom":
+            raise RuntimeError("cannot read this one")
+        if value == "half":
+            return "x\ud800"          # a lone surrogate: UTF-8 cannot spell it
+        return f"{params.get('mark', '<')}{value}"
+
+    op = {"id": "t_raises", "label": "Raises", "parse": parse, "family": "extract",
+          "value_type": "text",
+          "params": [{"name": "mark", "label": "Mark", "type": "text", "default": "<"}]}
+    monkeypatch.setitem(timeparse.OPERATIONS, op["id"], op)
+    timeparse.register_op(op)
+    return op["id"]
+
+
+RAISING_ROWS = [["V"], ["a"], ["b"], ["c"], ["boom"], ["d"], ["half"], ["e"]]
+
+
+def _job(store, job_id):
+    return next(j for j in store.list_ingest_jobs() if j["job_id"] == job_id)
+
+
+def test_a_value_that_raises_is_one_failure_not_a_failed_column(store, write_csv, small_batches, raising_op):
+    sid = _ingest(store, write_csv, RAISING_ROWS)
+    res = store.add_derived_column(sid, "Out", "V", raising_op, {})
+    store.wait_for_ingest_job(res["job_id"], timeout=30)
+
+    assert _job(store, res["job_id"])["status"] == "done"
+    d = store.get_derived_column(res["definition"]["id"])
+    assert d["status"] == "ready"
+    assert d["parse_failures"] == 1
+    # The half character is stored as U+FFFD rather than refusing the row.
+    assert [r["Out"] for r in _cells(store, sid)] == ["<a", "<b", "<c", None, "<d", "x\ufffd", "<e"]
+
+
+def test_a_rederive_past_a_value_that_raises_is_all_new_values(store, write_csv, small_batches, raising_op):
+    sid = _ingest(store, write_csv, RAISING_ROWS)
+    def_id = _add(store, sid, "Out", "V", raising_op)
+    res = store.rederive_column(def_id, {"mark": "["})
+    store.wait_for_ingest_job(res["job_id"], timeout=30)
+
+    assert _job(store, res["job_id"])["status"] == "done"
+    assert store.get_derived_column(def_id)["status"] == "ready"
+    assert [r["Out"] for r in _cells(store, sid)] == ["[a", "[b", "[c", None, "[d", "x\ufffd", "[e"]
+
+
+def test_the_reported_rederive_is_one_answer_not_two(store, write_csv, small_batches):
+    """The reported shape with the real parser: local-time ISO stamps with
+    .NET's DateTime.MinValue deep in the file, re-derived as UTC+02:00.
+    MinValue minus two hours is before year 1."""
+    rows = [["When"]] + [["2024-01-05T13:22:01"]] * 5 + [["0001-01-01T00:00:00"]] + \
+        [["2024-01-05T13:22:01"]] * 5
+    sid = _ingest(store, write_csv, rows)
+    def_id = _add(store, sid, "UTC", "When", "iso8601")
+    res = store.rederive_column(def_id, {"utc_offset": "+02:00"})
+    store.wait_for_ingest_job(res["job_id"], timeout=30)
+
+    d = store.get_derived_column(def_id)
+    assert (d["status"], d["parse_failures"]) == ("ready", 1)
+    values = [r["UTC"] for r in _cells(store, sid)]
+    assert values == ["2024-01-05 11:22:01"] * 5 + [None] + ["2024-01-05 11:22:01"] * 5
+
+
+def test_a_flatten_with_half_a_character_builds_every_column(store, write_csv, small_batches):
+    """A batch flatten is one job for N columns, so one value it could not
+    store used to strand every column in the batch at 'building'."""
+    sid = _ingest(store, write_csv, [
+        ["Payload"],
+        ['{"user": "alice", "msg": "hi"}'],
+        ['{"user": "bob", "msg": "cut \\ud83d"}'],
+        ['{"user": "carol", "msg": "bye"}'],
+    ])
+    res = store.add_derived_columns(sid, [
+        {"name": "User", "input_column": "Payload", "op_id": "json_field", "params": {"path": "$.user"}},
+        {"name": "Msg", "input_column": "Payload", "op_id": "json_field", "params": {"path": "$.msg"}},
+    ])
+    store.wait_for_ingest_job(res["job_id"], timeout=30)
+
+    assert [d["status"] for d in store.list_derived_columns(sid)] == ["ready", "ready"]
+    rows = _cells(store, sid)
+    assert [r["User"] for r in rows] == ["alice", "bob", "carol"]
+    assert [r["Msg"] for r in rows] == ["hi", "cut \ufffd", "bye"]
+
+
+def _stop_after_first_batch():
+    def progress(rows, units, total):
+        raise RuntimeError("disk full")      # called once a batch is committed
+    return progress
+
+
+def test_a_create_that_fails_part_way_is_removed_not_left_building(store, write_csv, small_batches):
+    """Same landing as a cancelled create: a half-filled column looks
+    exactly like a finished one in the grid. The error is what's raised
+    (and becomes the job's error)."""
+    sid = _ingest(store, write_csv, EPOCH_ROWS)
+    def_id = _add(store, sid, "Timestamp", "Epoch", "unix_epoch")
+    with pytest.raises(RuntimeError, match="disk full"):
+        store.backfill_derived_column(def_id, progress=_stop_after_first_batch(), drop_on_cancel=True)
+    assert store.list_derived_columns(sid) == []
+    assert all(c["name"] != "Timestamp" for c in store.get_source(sid)["columns"])
+
+
+def test_a_rederive_that_fails_part_way_says_so_and_holds_no_mixed_values(store, write_csv, small_batches):
+    """Not 'building' (nothing will finish it) and not two runs' values
+    side by side: 'error', every value cleared, and the column computed
+    from it marked 'partial' — its values came from the ones now gone."""
+    sid = _ingest(store, write_csv, EPOCH_ROWS)
+    def_id = _add(store, sid, "Timestamp", "Epoch", "unix_epoch")
+    child = _add(store, sid, "Day", "Timestamp", "regex_extract", {"pattern": r"^(\d{4}-\d{2}-\d{2})"})
+    with pytest.raises(RuntimeError, match="disk full"):
+        store.backfill_derived_column(def_id, progress=_stop_after_first_batch(), drop_on_cancel=False)
+
+    d = store.get_derived_column(def_id)
+    assert d["status"] == "error"
+    assert [r["Timestamp"] for r in _cells(store, sid)] == [None] * 5
+    assert store.get_derived_column(child)["status"] == "partial"
+    # Re-deriving is the way back, and it works.
+    res = store.rederive_column(def_id)
+    store.wait_for_ingest_job(res["job_id"], timeout=30)
+    assert store.get_derived_column(def_id)["status"] == "ready"
+    assert _cells(store, sid)[0]["Timestamp"] == "2023-11-14 22:13:20"
+
+
+@pytest.fixture
+def lookup_case(store, write_csv):
+    hosts = store.ingest_csv(write_csv([["IP", "Host"], ["10.0.0.5", "DC01"], ["10.0.0.5", "DC01-B"]],
+                                       "hosts.csv"), name="hosts", build_fts=False)["id"]
+    ev = store.ingest_csv(write_csv([["Src"], ["10.0.0.5"], ["10.0.0.9"]], "ev.csv"),
+                          name="ev", build_fts=False)["id"]
+    def_id = _add(store, ev, "Host", "Src", "lookup",
+                  {"other_source_id": hosts, "match_column": "IP", "value_column": "Host"})
+    return hosts, ev, def_id
+
+
+def test_a_rederive_of_a_lookup_whose_table_is_gone_changes_nothing(store, lookup_case):
+    hosts, ev, def_id = lookup_case
+    store.drop_source(hosts)
+    with pytest.raises(ValueError, match="No table"):
+        store.rederive_column(def_id, {"other_source_id": hosts, "match_column": "IP",
+                                       "value_column": "Host", "multi": "all"})
+    d = store.get_derived_column(def_id)
+    assert (d["status"], d["params"]["multi"]) == ("ready", "first")
+    assert [r["Host"] for r in _cells(store, ev)] == ["DC01", None]
+
+
+def test_a_rederive_whose_job_fails_before_writing_puts_the_column_back(store, lookup_case, monkeypatch):
+    """Past the up-front check, the job's own load of the lookup table can
+    still refuse (too big). Nothing was written, so the column is exactly
+    what it was — params and status included — and the job says why."""
+    from winnow import enrich
+
+    hosts, ev, def_id = lookup_case
+    monkeypatch.setattr(enrich, "MAX_LOOKUP_ROWS", 1)
+    res = store.rederive_column(def_id, {"other_source_id": hosts, "match_column": "IP",
+                                         "value_column": "Host", "multi": "all"})
+    store.wait_for_ingest_job(res["job_id"], timeout=30)
+
+    job = _job(store, res["job_id"])
+    assert job["status"] == "error" and "too big" in job["error"]
+    d = store.get_derived_column(def_id)
+    assert (d["status"], d["params"]["multi"]) == ("ready", "first")
+    assert [r["Host"] for r in _cells(store, ev)] == ["DC01", None]
+
+
+def test_a_create_whose_job_fails_before_writing_is_removed(store, write_csv, monkeypatch):
+    from winnow import enrich
+
+    hosts = store.ingest_csv(write_csv([["IP", "Host"], ["a", "1"], ["b", "2"]], "h.csv"),
+                             name="h", build_fts=False)["id"]
+    ev = store.ingest_csv(write_csv([["Src"], ["a"]], "e.csv"), name="e", build_fts=False)["id"]
+    monkeypatch.setattr(enrich, "MAX_LOOKUP_ROWS", 1)
+    res = store.add_derived_column(ev, "Host", "Src", "lookup",
+                                   {"other_source_id": hosts, "match_column": "IP", "value_column": "Host"})
+    store.wait_for_ingest_job(res["job_id"], timeout=30)
+
+    job = _job(store, res["job_id"])
+    assert job["status"] == "error" and "too big" in job["error"]
+    assert store.list_derived_columns(ev) == []
+
+
+def test_a_cascade_that_cannot_load_its_lookup_is_partial_not_building(store, write_csv):
+    """A cascade re-derive has no earlier definition to put back — its
+    params never changed, its input's values did — so it lands where a
+    cascade that could not start lands: 'partial'."""
+    hosts = store.ingest_csv(write_csv([["IP", "Host"], ["10.0.0.5", "DC01"]], "h.csv"),
+                             name="h", build_fts=False)["id"]
+    ev = store.ingest_csv(write_csv([["Raw"], ["src=10.0.0.5"]], "e.csv"), name="e", build_fts=False)["id"]
+    parent = _add(store, ev, "Src", "Raw", "regex_extract", {"pattern": r"src=(\S+)"})
+    child = _add(store, ev, "Host", "Src", "lookup",
+                 {"other_source_id": hosts, "match_column": "IP", "value_column": "Host"})
+    store.drop_source(hosts)
+
+    res = store.rederive_column(parent, {"pattern": r"src=(\S+)$"})
+    store.wait_for_ingest_job(res["job_id"], timeout=30)
+    # The cascade is its own job, started as the parent's finishes.
+    deadline = time.time() + 30
+    while store.get_derived_column(child)["status"] != "partial" and time.time() < deadline:
+        time.sleep(0.05)
+    assert store.get_derived_column(child)["status"] == "partial"
+    assert [r["Host"] for r in _cells(store, ev)] == ["DC01"]   # its values, untouched
+
+
+def test_a_cascade_whose_op_is_gone_is_partial_not_building(store, write_csv, raising_op, monkeypatch):
+    """The failure can come before the first row is read — here the op id
+    the child was made with is no longer in the registry when its
+    cascade runs."""
+    from winnow import timeparse
+
+    sid = _ingest(store, write_csv, [["Raw"], ["v=a"], ["v=b"]])
+    parent = _add(store, sid, "V", "Raw", "regex_extract", {"pattern": r"v=(\w)"})
+    child = _add(store, sid, "Out", "V", raising_op)
+    monkeypatch.delitem(timeparse.OPERATIONS, raising_op)
+
+    res = store.rederive_column(parent, {"pattern": r"v=(\w)$"})
+    store.wait_for_ingest_job(res["job_id"], timeout=30)
+    deadline = time.time() + 30
+    while store.get_derived_column(child)["status"] != "partial" and time.time() < deadline:
+        time.sleep(0.05)
+    assert store.get_derived_column(child)["status"] == "partial"
 
 
 # --------------------------------------------------------------- cancellation

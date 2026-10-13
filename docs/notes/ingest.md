@@ -33,11 +33,31 @@ see [docs/notes/README.md](README.md) for the whole set.
   `-wal` when the copy came without one — which put files in the
   analyst's evidence folder and littered the temp folder beside every
   uploaded spool. `_open_evidence_sqlite` opens a WAL-mode file with no
-  `-wal` as `immutable=1` (nothing to replay, and no live writer can be
-  holding it), and one WITH a `-wal` by copying the pair into a private
+  `-wal` as `immutable=1`, appended to the `sqlite_ro_uri` URI below
+  (nothing to replay, and no live writer can be holding it), and one WITH
+  a `-wal` by copying the pair into a private
   temp directory first — those un-checkpointed rows are evidence, so
   `immutable` (which ignores the WAL) is not an option there. Plaso
   storage still opens plain `mode=ro`; plaso writes its files closed.
+- **Every read-only open is a URI, and the URI comes from
+  `paths.sqlite_ro_uri` — never `f"file:{path}?mode=ro"`.** `mode=ro`
+  only exists in URI form, and in a URI `#` starts a fragment, `?` the
+  query and `%` an escape, so a pasted-in path does not fail on those
+  characters, it opens a different file: `History#1.db` was opened as
+  `History`, read-WRITE (the `?mode=ro` went with the fragment), which
+  created an empty file of that name in the evidence folder and listed
+  no tables; `a%41.db` opened a real neighbour called `aA.db`. Same for
+  the case itself (a case under `Case #5/` read every table as missing),
+  the Plaso reader, the multi-case readers and server.py's peeks at
+  case files. The helper percent-encodes the path and spells Windows
+  drive and UNC paths the way SQLite reads them (`file:///C:/...`,
+  `file:////server/share/...` — not `Path.as_uri()`, whose
+  `file://server/` SQLite refuses). An ATTACH of a URI also needs the
+  ATTACHing connection opened with `uri=True` (multicase's `:memory:`
+  one included): whether SQLite reads ATTACH names as URIs otherwise is
+  a compile option the Linux CI build has and a Windows Python's need
+  not. `tests/test_path_characters.py`, which also fails on any new
+  pasted-in `file:{` in the tree.
 - Excel ingest (`ingest_xlsx_sheet`/`preview_xlsx_sheets`, xlsxread.py) is
   the sheet-shaped sibling of the SQLite path — one workbook, N picked
   sheets, one background job, the same `{tables: [{table, name?}]}` option

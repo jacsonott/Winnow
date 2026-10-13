@@ -85,6 +85,26 @@ def test_non_json_input_is_none():
     assert sp._extract_json("{broken", {"path": "$.a"}, {}) is None
 
 
+def test_half_a_character_in_json_comes_out_as_text_sqlite_can_store():
+    """`"\\ud83d"` is legal JSON — an emoji cut in half by a logger that
+    truncates at a byte count — and json.loads hands back a str holding a
+    lone surrogate. Stored as is, SQLite refused the row and the whole
+    backfill failed on it. The broken half becomes U+FFFD, as any UTF-8
+    decoder makes it; the rest of the value is kept."""
+    cell = '{"msg": "user typed \\ud83d", "nested": {"k\\udc00": "v"}}'
+    assert sp._extract_json(cell, {"path": "$.msg"}, {}) == "user typed \ufffd"
+    whole = sp._extract_json(cell, {"path": "$.nested"}, {})
+    assert whole == '{"k\ufffd": "v"}'
+    for out in (sp._extract_json(cell, {"path": "$.msg"}, {}), whole):
+        out.encode("utf-8")
+    # A complete pair is one character and is left alone.
+    assert sp._extract_json('{"e": "\\ud83d\\ude00"}', {"path": "$.e"}, {}) == "\U0001F600"
+
+
+def test_xml_that_cannot_be_encoded_is_not_xml():
+    assert sp._extract_xml("<a>\ud800</a>", {"path": "a"}, {}) is None
+
+
 def test_wrong_shape_at_a_step_is_none():
     assert x("$.user[0]") is None       # indexing an object
     assert x("$.tags.name") is None     # keying an array
