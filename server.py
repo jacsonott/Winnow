@@ -4090,20 +4090,22 @@ def api_watchlist_add(body: IndicatorBody):
 @app.post("/api/watchlist/import")
 def api_watchlist_import(body: WatchlistImportBody):
     """One indicator per line; blanks and #-comments dropped; optional
-    'value,kind' per line overrides the body default. Deduped against
+    'value,kind' per line overrides the body default. The Watchlist's own
+    Export… CSV is recognised by its header row and read back with each
+    row's kind and note (Store.parse_indicator_list). Deduped against
     what's already in the list."""
     have = {i["value"] for i in store().list_indicators()}
     added_ids: list[int] = []
-    for line in (body.text or "").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        value, _, kind = line.partition(",")
-        value = value.strip()
-        if not value or value in have:
+    try:
+        entries = Store.parse_indicator_list(body.text, body.kind)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    for ind in entries:
+        value = ind["value"]
+        if value in have:
             continue
         try:
-            added_ids.append(store().add_indicator(value, (kind.strip() or body.kind), None, body.auto_tag_id)["id"])
+            added_ids.append(store().add_indicator(value, ind["kind"], ind["note"], body.auto_tag_id)["id"])
         except ValueError as e:   # an auto-tag that isn't a tag here fails the first line, before any write
             raise HTTPException(400, str(e))
         have.add(value)
@@ -4896,13 +4898,24 @@ def _resolve_timeline_configs() -> dict[int, dict]:
     timeline_templates by header set (order/case-independent, same
     convention every header-set-keyed workspace store uses), returning
     only the sources that actually matched — build_timeline already
-    supplies its own per-source defaults for anything missing here."""
+    supplies its own per-source defaults for anything missing here.
+
+    The header set is the file's OWN columns, derived ones left out —
+    the key Configure tables… saves under (timeline.js). Matching on every
+    column meant the first derived column added to a table changed its
+    key, and the Timeline and the Watchlist's latest hits silently fell
+    back to the defaults. A derived column can still BE the configured
+    timestamp: build_timeline/latest_hits resolve that name against all
+    of the source's columns. A template keyed on the full column list is
+    still honoured when nothing matches the base set, so nothing that
+    matched before stops matching."""
     templates = WS.timeline_templates.list()
     by_key = {tuple(t["col_names"]): t for t in templates}
     configs: dict[int, dict] = {}
     for src in store().list_sources():
-        key = tuple(sorted(c["name"].strip().lower() for c in src["columns"]))
-        tmpl = by_key.get(key)
+        base = tuple(sorted(c["name"].strip().lower() for c in src["columns"] if not c.get("derived")))
+        tmpl = by_key.get(base) or by_key.get(
+            tuple(sorted(c["name"].strip().lower() for c in src["columns"])))
         if tmpl:
             configs[src["id"]] = {
                 "timestamp_column": tmpl.get("timestamp_column"),

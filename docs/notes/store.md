@@ -28,9 +28,20 @@ see [docs/notes/README.md](README.md) for the whole set.
   store.py can't resolve these itself (can't import workspace.py — see
   `pop_legacy_presets`), so server.py's `_resolve_timeline_configs` does
   the header-set matching and hands `build_timeline` a plain `{source_id:
-  {...}}` dict; a source with no matching template still works, falling
-  back to its first datetime column, its own file name, and the summary
-  for its artefact shape (next entry) or every column joined.
+  {...}}` dict. **The header set is the table's own columns, derived ones
+  left out**, on both sides: Configure tables… saves under that set and
+  the server looks it up under that set. The lookup used to take every
+  column, so the first derived column added to a table changed its key
+  and the config silently stopped applying — on the Timeline and in the
+  Watchlist's latest hits, which resolve the same configs. A derived
+  column can still be the configured timestamp (the dialog lists derived
+  datetime columns; `build_timeline`/`latest_hits` resolve the name
+  against every column), and a template keyed on the full column list
+  is still honoured when nothing matches the base set
+  (`tests/test_timeline.py`, `tests/test_watchlist_findings.py`). A
+  source with no matching template still works, falling back to its
+  first datetime column, its own file name, and the summary for its
+  artefact shape (next entry) or every column joined.
   Same materialize-into-`v.`-then-page-by-pos pattern as `build_view`
   (invariant #2) — only one timeline view is ever alive at a time, rebuilt
   (and the old one evicted) on every tag-filter change.

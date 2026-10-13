@@ -114,7 +114,7 @@ export const S = {
   collapsedFolders: new Set(), // folder ids collapsed in the sidebar — a per-browser view pref (localStorage)
   timeline: {
     view: null, pages: new Map(), pending: new Set(), reqId: 0,
-    tagFilter: null, // tag ids currently checked; null = not yet initialized (defaults to "every known tag" on first load)
+    tagsOff: new Set(), // tag ids the analyst switched OFF the timeline; every other tag is on (timelineTagIds), including one created after the case opened
     raw: new Set(),  // "<source_id>:<rid>" for rows showing the raw source row instead of their summary — see fillTimelineBody
   },
   savedFilterCursor: -1,   // index into filtersForCurrentSource(), for [ and ] cycling
